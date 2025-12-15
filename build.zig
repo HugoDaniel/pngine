@@ -57,6 +57,22 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(cli_tests).step);
 
+    // Benchmark executable
+    const bench_module = b.createModule(.{
+        .root_source_file = b.path("src/benchmark.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const bench = b.addExecutable(.{
+        .name = "pngine-bench",
+        .root_module = bench_module,
+    });
+
+    const run_bench = b.addRunArtifact(bench);
+    const bench_step = b.step("bench", "Run performance benchmarks");
+    bench_step.dependOn(&run_bench.step);
+
     // WASM build target
     const wasm_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
@@ -81,6 +97,27 @@ pub fn build(b: *std.Build) void {
 
     const wasm_step = b.step("wasm", "Build WASM for browser");
     wasm_step.dependOn(&b.addInstallArtifact(wasm, .{}).step);
+
+    // Web build: WASM + JS files for browser deployment
+    const web_step = b.step("web", "Build complete web bundle (WASM + JS)");
+
+    // Install WASM to web directory
+    const install_wasm = b.addInstallArtifact(wasm, .{
+        .dest_dir = .{ .override = .{ .custom = "web" } },
+    });
+    web_step.dependOn(&install_wasm.step);
+
+    // Copy JS files to web output
+    const web_files = [_][]const u8{
+        "web/index.html",
+        "web/pngine-gpu.js",
+        "web/pngine-loader.js",
+    };
+
+    for (web_files) |file| {
+        const install_file = b.addInstallFile(b.path(file), b.fmt("web/{s}", .{std.fs.path.basename(file)}));
+        web_step.dependOn(&install_file.step);
+    }
 }
 
 // Version check at comptime

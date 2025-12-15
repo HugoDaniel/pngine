@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PNGine - WebGPU Bytecode Demo</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            padding: 1rem;
+            background: #16213e;
+            border-bottom: 1px solid #0f3460;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 500;
+        }
+
+        main {
+            flex: 1;
+            display: flex;
+            gap: 1rem;
+            padding: 1rem;
+        }
+
+        .editor-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .canvas-panel {
+            width: 512px;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        label {
+            font-size: 0.875rem;
+            color: #888;
+        }
+
+        textarea {
+            flex: 1;
+            background: #0f0f23;
+            color: #ccc;
+            border: 1px solid #333;
+            border-radius: 4px;
+            padding: 1rem;
+            font-family: 'SF Mono', 'Consolas', monospace;
+            font-size: 0.875rem;
+            resize: none;
+            line-height: 1.5;
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: #0f3460;
+        }
+
+        canvas {
+            background: #000;
+            border: 1px solid #333;
+            border-radius: 4px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        button {
+            padding: 0.5rem 1rem;
+            background: #0f3460;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.875rem;
+        }
+
+        button:hover {
+            background: #1a4a7a;
+        }
+
+        button:disabled {
+            background: #333;
+            cursor: not-allowed;
+        }
+
+        .status {
+            padding: 0.5rem;
+            font-size: 0.75rem;
+            color: #888;
+            background: #0f0f23;
+            border-radius: 4px;
+            font-family: monospace;
+        }
+
+        .status.error {
+            color: #e94560;
+        }
+
+        .status.success {
+            color: #4ade80;
+        }
+
+        #error-banner {
+            display: none;
+            padding: 1rem;
+            background: #2d1f1f;
+            border-bottom: 1px solid #e94560;
+            color: #e94560;
+        }
+    </style>
+</head>
+<body>
+    <div id="error-banner"></div>
+    <header>
+        <h1>PNGine WebGPU Demo</h1>
+    </header>
+    <main>
+        <div class="editor-panel">
+            <label for="source">PBSF Source</label>
+            <textarea id="source" spellcheck="false">; Simple Triangle Demo
+; Renders a colored triangle using WebGPU
+
+(shader 0 "
+@vertex fn vertexMain(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+    var pos = array<vec2f, 3>(
+        vec2f( 0.0,  0.5),
+        vec2f(-0.5, -0.5),
+        vec2f( 0.5, -0.5)
+    );
+    return vec4f(pos[i], 0.0, 1.0);
+}
+
+@fragment fn fragmentMain() -> @location(0) vec4f {
+    return vec4f(1.0, 0.5, 0.2, 1.0);
+}
+")
+
+(pipeline 0 (json "{\"vertex\":{\"shader\":0,\"entryPoint\":\"vertexMain\"},\"fragment\":{\"shader\":0,\"entryPoint\":\"fragmentMain\"}}"))
+
+(frame "main"
+    (begin-render-pass :texture 0 :load clear :store store)
+    (set-pipeline 0)
+    (draw 3 1)
+    (end-pass)
+    (submit)
+)</textarea>
+            <div class="controls">
+                <button id="run-btn" disabled>Run</button>
+                <button id="clear-btn">Clear</button>
+            </div>
+        </div>
+        <div class="canvas-panel">
+            <label>Output (512x512)</label>
+            <canvas id="canvas" width="512" height="512"></canvas>
+            <div id="status" class="status">Initializing WebGPU...</div>
+        </div>
+    </main>
+
+    <script type="module">
+        import { initPNGine } from './pngine-loader.js';
+
+        const canvas = document.getElementById('canvas');
+        const source = document.getElementById('source');
+        const runBtn = document.getElementById('run-btn');
+        const clearBtn = document.getElementById('clear-btn');
+        const status = document.getElementById('status');
+        const errorBanner = document.getElementById('error-banner');
+
+        let pngine = null;
+
+        function setStatus(message, type = '') {
+            status.textContent = message;
+            status.className = 'status ' + type;
+        }
+
+        function showError(message) {
+            errorBanner.textContent = message;
+            errorBanner.style.display = 'block';
+        }
+
+        async function init() {
+            try {
+                setStatus('Loading WASM...');
+                pngine = await initPNGine(canvas, 'pngine.wasm');
+                setStatus('Ready', 'success');
+                runBtn.disabled = false;
+            } catch (err) {
+                setStatus('Initialization failed', 'error');
+                showError(err.message);
+                console.error('Init error:', err);
+            }
+        }
+
+        function run() {
+            if (!pngine) return;
+
+            try {
+                setStatus('Compiling...');
+                const start = performance.now();
+
+                pngine.run(source.value);
+
+                const elapsed = (performance.now() - start).toFixed(2);
+                setStatus(`Done in ${elapsed}ms`, 'success');
+            } catch (err) {
+                setStatus('Error: ' + err.message, 'error');
+                console.error('Run error:', err);
+            }
+        }
+
+        function clear() {
+            if (!pngine) return;
+
+            // Clear canvas by running empty bytecode
+            const ctx = canvas.getContext('webgpu');
+            // Just reset the GPU state
+            pngine.freeModule();
+            setStatus('Cleared', '');
+        }
+
+        runBtn.addEventListener('click', run);
+        clearBtn.addEventListener('click', clear);
+
+        // Ctrl+Enter to run
+        source.addEventListener('keydown', (e) => {
+            if (e.ctrlKey && e.key === 'Enter') {
+                e.preventDefault();
+                run();
+            }
+        });
+
+        init();
+    </script>
+</body>
+</html>

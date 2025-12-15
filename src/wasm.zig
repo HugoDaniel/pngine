@@ -5,12 +5,24 @@
 //!
 //! Exported API:
 //! - onInit(): Initialize the allocator
-//! - compile(src_ptr, src_len, out_ptr): Compile PBSF to PNGB
-//! - getOutputLen(): Get length of last compilation output
-//! - free(ptr, len): Free allocated memory
+//! - compile(src_ptr, src_len): Compile PBSF to PNGB
+//! - loadModule(ptr, len): Load PNGB bytecode for execution
+//! - executeAll(): Execute all bytecode
+//! - getOutputPtr/Len(): Get compilation output
+//! - freeOutput(): Free compilation output
+//! - alloc/free(): Memory management for JS
+//!
+//! Invariants:
+//! - onInit() must be called before any other function
+//! - loadModule() must be called before executeAll()
+//! - Module data must remain valid while executing
 
 const std = @import("std");
 const pngine = @import("main.zig");
+const format = @import("bytecode/format.zig");
+const Module = format.Module;
+const WasmGPU = @import("executor/wasm_gpu.zig").WasmGPU;
+const Dispatcher = @import("executor/dispatcher.zig").Dispatcher;
 
 // ============================================================================
 // Global State (WASM has no TLS)
@@ -28,6 +40,11 @@ var initialized: bool = false;
 var last_output: ?[]u8 = null;
 var last_error: u32 = 0;
 
+// Execution state
+var gpu: WasmGPU = .empty;
+var current_module: ?Module = null;
+var module_data: ?[]u8 = null; // Owned copy of PNGB data
+
 // ============================================================================
 // Exported Functions
 // ============================================================================
@@ -39,6 +56,9 @@ export fn onInit() void {
     initialized = true;
     last_output = null;
     last_error = 0;
+    gpu = .empty;
+    current_module = null;
+    module_data = null;
 }
 
 /// Compile PBSF source to PNGB bytecode.
@@ -95,6 +115,72 @@ export fn freeOutput() void {
         allocator.free(output);
         last_output = null;
     }
+}
+
+// ============================================================================
+// Execution Exports
+// ============================================================================
+
+/// Load PNGB bytecode for execution.
+/// Returns: 0 on success, error code on failure.
+///   1 = Not initialized
+///   2 = Out of memory
+///   4 = Invalid format
+export fn loadModule(pngb_ptr: [*]const u8, pngb_len: usize) u32 {
+    if (!initialized) return 1;
+
+    // Free previous module if any
+    freeModule();
+
+    // Make owned copy of PNGB data (must outlive module)
+    const data = allocator.alloc(u8, pngb_len) catch return 2;
+    @memcpy(data, pngb_ptr[0..pngb_len]);
+    module_data = data;
+
+    // Deserialize module
+    current_module = format.deserialize(allocator, data) catch |err| {
+        allocator.free(data);
+        module_data = null;
+        return switch (err) {
+            error.InvalidMagic, error.UnsupportedVersion, error.InvalidFormat, error.InvalidOffset => 4,
+            error.OutOfMemory => 2,
+            else => 99,
+        };
+    };
+
+    // Set module reference for GPU backend
+    gpu.setModule(&current_module.?);
+
+    return 0;
+}
+
+/// Execute all bytecode in the loaded module.
+/// Returns: 0 on success, error code on failure.
+///   1 = Not initialized
+///   5 = No module loaded
+///   6 = Execution error
+export fn executeAll() u32 {
+    if (!initialized) return 1;
+
+    const module = &(current_module orelse return 5);
+
+    var dispatcher = Dispatcher(WasmGPU).init(&gpu, module);
+    dispatcher.executeAll(allocator) catch return 6;
+
+    return 0;
+}
+
+/// Free the loaded module.
+export fn freeModule() void {
+    if (current_module) |*module| {
+        module.deinit(allocator);
+        current_module = null;
+    }
+    if (module_data) |data| {
+        allocator.free(data);
+        module_data = null;
+    }
+    gpu = .empty;
 }
 
 /// Allocate memory (for JS to pass data).

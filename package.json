@@ -1,0 +1,14 @@
+{
+  "name": "pngine-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:debug": "playwright test --debug",
+    "serve": "python3 -m http.server 8765 -d zig-out/web"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.40.0"
+  }
+}
