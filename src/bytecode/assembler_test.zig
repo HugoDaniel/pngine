@@ -217,3 +217,234 @@ test "bytecode size efficiency" {
     // Total: 3 + 1 + 2 + 1 = 7 bytes for both draws
     try testing.expectEqual(@as(usize, 7), emitter.len());
 }
+
+// ============================================================================
+// Shorthand PBSF Format Tests
+// ============================================================================
+
+const assembler = @import("assembler.zig");
+
+test "shorthand shader format: (shader N \"code\")" {
+    const source: [:0]const u8 =
+        \\(shader 0 "@vertex fn main() {}")
+    ;
+
+    var ast = try parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), ast.errors.len);
+
+    const pngb = try assembler.assemble(testing.allocator, &ast);
+    defer testing.allocator.free(pngb);
+
+    // Verify it produced valid PNGB
+    try testing.expect(pngb.len > format.HEADER_SIZE);
+    try testing.expectEqualStrings("PNGB", pngb[0..4]);
+
+    // Deserialize and verify shader was created
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Should have shader code in data section
+    try testing.expectEqual(@as(u16, 1), module.data.count());
+    try testing.expectEqualStrings("@vertex fn main() {}", module.data.get(@enumFromInt(0)));
+
+    // Bytecode should start with create_shader_module
+    try testing.expectEqual(
+        @as(u8, @intFromEnum(opcodes.OpCode.create_shader_module)),
+        module.bytecode[0],
+    );
+}
+
+test "shorthand pipeline format: (pipeline N (json \"...\"))" {
+    const source: [:0]const u8 =
+        \\(pipeline 0 (json "{\"vertex\":{\"shader\":0}}"))
+    ;
+
+    var ast = try parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), ast.errors.len);
+
+    const pngb = try assembler.assemble(testing.allocator, &ast);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Should have JSON descriptor in data section (unescaped)
+    try testing.expectEqual(@as(u16, 1), module.data.count());
+    try testing.expectEqualStrings("{\"vertex\":{\"shader\":0}}", module.data.get(@enumFromInt(0)));
+
+    // Bytecode should have create_render_pipeline
+    try testing.expectEqual(
+        @as(u8, @intFromEnum(opcodes.OpCode.create_render_pipeline)),
+        module.bytecode[0],
+    );
+}
+
+test "shorthand frame format with inline commands" {
+    const source: [:0]const u8 =
+        \\(frame "main"
+        \\    (begin-render-pass :texture 0 :load clear :store store)
+        \\    (set-pipeline 0)
+        \\    (draw 3 1)
+        \\    (end-pass)
+        \\    (submit))
+    ;
+
+    var ast = try parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), ast.errors.len);
+
+    const pngb = try assembler.assemble(testing.allocator, &ast);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Should have frame name in strings
+    try testing.expectEqual(@as(u16, 1), module.strings.count());
+    try testing.expectEqualStrings("main", module.strings.get(@enumFromInt(0)));
+
+    // Verify bytecode sequence contains expected opcodes
+    var found_define_frame = false;
+    var found_begin_render_pass = false;
+    var found_set_pipeline = false;
+    var found_draw = false;
+    var found_end_pass = false;
+    var found_submit = false;
+
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.define_frame)) found_define_frame = true;
+        if (byte == @intFromEnum(opcodes.OpCode.begin_render_pass)) found_begin_render_pass = true;
+        if (byte == @intFromEnum(opcodes.OpCode.set_pipeline)) found_set_pipeline = true;
+        if (byte == @intFromEnum(opcodes.OpCode.draw)) found_draw = true;
+        if (byte == @intFromEnum(opcodes.OpCode.end_pass)) found_end_pass = true;
+        if (byte == @intFromEnum(opcodes.OpCode.submit)) found_submit = true;
+    }
+
+    try testing.expect(found_define_frame);
+    try testing.expect(found_begin_render_pass);
+    try testing.expect(found_set_pipeline);
+    try testing.expect(found_draw);
+    try testing.expect(found_end_pass);
+    try testing.expect(found_submit);
+}
+
+test "complete shorthand PBSF (web demo format)" {
+    // This is the format used by the web demo
+    const source: [:0]const u8 =
+        \\(shader 0 "@vertex fn v() {} @fragment fn f() {}")
+        \\(pipeline 0 (json "{\"vertex\":{\"shader\":0},\"fragment\":{\"shader\":0}}"))
+        \\(frame "main"
+        \\    (begin-render-pass :texture 0 :load clear :store store)
+        \\    (set-pipeline 0)
+        \\    (draw 3 1)
+        \\    (end-pass)
+        \\    (submit))
+    ;
+
+    var ast = try parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), ast.errors.len);
+
+    const pngb = try assembler.assemble(testing.allocator, &ast);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Verify complete structure
+    try testing.expectEqual(@as(u16, 1), module.strings.count()); // "main"
+    try testing.expectEqual(@as(u16, 2), module.data.count()); // shader code + pipeline JSON
+
+    // Verify opcodes in order
+    try testing.expectEqual(
+        @as(u8, @intFromEnum(opcodes.OpCode.create_shader_module)),
+        module.bytecode[0],
+    );
+}
+
+// ============================================================================
+// String Escape Sequence Tests
+// ============================================================================
+
+test "escape sequences: backslash-quote in strings" {
+    // Test that \" is unescaped to " in the output
+    const source: [:0]const u8 =
+        \\(pipeline 0 (json "{\"key\":\"value\"}"))
+    ;
+
+    var ast = try parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    const pngb = try assembler.assemble(testing.allocator, &ast);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // The JSON should have real quotes, not escaped ones
+    const json = module.data.get(@enumFromInt(0));
+    try testing.expectEqualStrings("{\"key\":\"value\"}", json);
+
+    // Verify it's valid JSON by checking structure
+    try testing.expect(json[0] == '{');
+    try testing.expect(json[json.len - 1] == '}');
+    try testing.expect(std.mem.indexOf(u8, json, "\"key\"") != null);
+}
+
+test "escape sequences: backslash-n for newlines" {
+    const source: [:0]const u8 =
+        \\(shader 0 "line1\nline2")
+    ;
+
+    var ast = try parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    const pngb = try assembler.assemble(testing.allocator, &ast);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    const code = module.data.get(@enumFromInt(0));
+    // Should contain actual newline character
+    try testing.expect(std.mem.indexOf(u8, code, "\n") != null);
+    try testing.expectEqualStrings("line1\nline2", code);
+}
+
+test "escape sequences: backslash-backslash" {
+    const source: [:0]const u8 =
+        \\(shader 0 "path\\to\\file")
+    ;
+
+    var ast = try parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    const pngb = try assembler.assemble(testing.allocator, &ast);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    const code = module.data.get(@enumFromInt(0));
+    // Should have single backslashes
+    try testing.expectEqualStrings("path\\to\\file", code);
+}
+
+test "no escape sequences: string without backslashes unchanged" {
+    const source: [:0]const u8 =
+        \\(shader 0 "simple string")
+    ;
+
+    var ast = try parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    const pngb = try assembler.assemble(testing.allocator, &ast);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("simple string", module.data.get(@enumFromInt(0)));
+}
