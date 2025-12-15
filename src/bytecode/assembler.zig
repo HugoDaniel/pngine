@@ -116,6 +116,7 @@ const FormType = enum {
     sampler,
     render_pipeline,
     compute_pipeline,
+    pipeline, // Shorthand: (pipeline N (json "..."))
     bind_group,
     pass,
     frame,
@@ -128,6 +129,10 @@ const FormType = enum {
     dispatch,
     exec_pass,
     submit,
+    // Frame-level commands (shorthand format)
+    begin_render_pass,
+    begin_compute_pass,
+    end_pass,
     // Unknown/other
     unknown,
 
@@ -142,6 +147,7 @@ const FormType = enum {
             .{ "sampler", .sampler },
             .{ "render-pipeline", .render_pipeline },
             .{ "compute-pipeline", .compute_pipeline },
+            .{ "pipeline", .pipeline },
             .{ "bind-group", .bind_group },
             .{ "pass", .pass },
             .{ "frame", .frame },
@@ -153,6 +159,9 @@ const FormType = enum {
             .{ "dispatch", .dispatch },
             .{ "exec-pass", .exec_pass },
             .{ "submit", .submit },
+            .{ "begin-render-pass", .begin_render_pass },
+            .{ "begin-compute-pass", .begin_compute_pass },
+            .{ "end-pass", .end_pass },
         });
         return map.get(keyword) orelse .unknown;
     }
@@ -240,7 +249,10 @@ pub const Assembler = struct {
         return result;
     }
 
-    /// Process a top-level form (should be a module).
+    /// Process a top-level form.
+    /// Supports two modes:
+    /// - Semantic: (module "name" ...forms...)
+    /// - Shorthand: top-level (shader ...) (pipeline ...) (frame ...) without module wrapper
     fn processTopLevel(self: *Self, node: NodeIndex) AssembleError!void {
         const tag = self.ast.nodeTag(node);
         if (tag != .list) return error.ExpectedList;
@@ -257,6 +269,13 @@ pub const Assembler = struct {
 
         switch (form_type) {
             .module => try self.processModule(children),
+            // Shorthand top-level forms (no module wrapper)
+            .shader, .pipeline, .frame => {
+                // First do collect pass for this form
+                try self.collectPass(node);
+                // Then emit pass
+                try self.emitPass(node);
+            },
             else => return error.UnknownForm,
         }
     }
@@ -353,12 +372,23 @@ pub const Assembler = struct {
         }
     }
 
-    /// Collect (frame $frm:N "name" ...).
+    /// Collect frame name string.
+    /// Supports two formats:
+    /// - Semantic: (frame $frm:N "name" ...) - name at children[2]
+    /// - Shorthand: (frame "name" ...) - name at children[1]
     fn collectFrame(self: *Self, children: []const NodeIndex) AssembleError!void {
-        if (children.len < 3) return error.InvalidFormStructure;
+        if (children.len < 2) return error.InvalidFormStructure;
 
-        // children[2] is the name string
-        if (self.ast.nodeTag(children[2]) == .string) {
+        // Shorthand format: (frame "name" ...)
+        if (self.ast.nodeTag(children[1]) == .string) {
+            const name_raw = self.ast.tokenSlice(self.ast.nodeMainToken(children[1]));
+            const name = self.stripQuotes(name_raw);
+            _ = try self.internString(name);
+            return;
+        }
+
+        // Semantic format: (frame $frm:N "name" ...)
+        if (children.len >= 3 and self.ast.nodeTag(children[2]) == .string) {
             const name_raw = self.ast.tokenSlice(self.ast.nodeMainToken(children[2]));
             const name = self.stripQuotes(name_raw);
             _ = try self.internString(name);
@@ -387,6 +417,7 @@ pub const Assembler = struct {
             .buffer => try self.emitBuffer(children),
             .render_pipeline => try self.emitRenderPipeline(children),
             .compute_pipeline => try self.emitComputePipeline(children),
+            .pipeline => try self.emitPipelineShorthand(children),
             .bind_group => try self.emitBindGroup(children),
             .pass => try self.emitPassDef(children),
             .frame => try self.emitFrame(children),
@@ -395,37 +426,66 @@ pub const Assembler = struct {
         }
     }
 
-    /// Emit (shader $shd:N (code $d:N)).
+    /// Emit shader definition.
+    /// Supports two formats:
+    /// - Semantic: (shader $shd:N (code $d:N))
+    /// - Shorthand: (shader N "code")
     fn emitShader(self: *Self, children: []const NodeIndex) AssembleError!void {
         if (children.len < 3) return error.InvalidFormStructure;
 
-        // Get shader ID
-        const shader_id = try self.parseResourceIndex(children[1], .shader);
-        if (self.defined_shaders.isSet(shader_id)) return error.DuplicateResource;
-        self.defined_shaders.set(shader_id);
+        // Check for shorthand format: (shader N "code")
+        // where N is a numeric atom (not $shd:N)
+        const id_node = children[1];
+        const id_tag = self.ast.nodeTag(id_node);
 
-        // Find (code $d:N) form
-        var code_data_id: ?u16 = null;
-        for (children[2..]) |child| {
-            if (self.ast.nodeTag(child) == .list) {
-                const sub_children = self.ast.children(child);
-                if (sub_children.len >= 2) {
-                    const sub_kw = self.ast.tokenSlice(self.ast.nodeMainToken(sub_children[0]));
-                    if (std.mem.eql(u8, sub_kw, "code")) {
-                        const data_idx = try self.parseResourceIndex(sub_children[1], .data);
-                        const data_id = self.data_ids[data_idx] orelse return error.UndefinedResource;
-                        code_data_id = data_id.toInt();
-                        break;
+        if (id_tag == .atom) {
+            const id_str = self.ast.tokenSlice(self.ast.nodeMainToken(id_node));
+
+            // Shorthand format: numeric ID directly
+            if (id_str.len > 0 and id_str[0] != '$') {
+                const shader_id = std.fmt.parseInt(u16, id_str, 10) catch return error.InvalidResourceId;
+                if (self.defined_shaders.isSet(shader_id)) return error.DuplicateResource;
+                self.defined_shaders.set(shader_id);
+
+                // children[2] should be inline code string
+                if (self.ast.nodeTag(children[2]) != .string) return error.ExpectedString;
+                const code_raw = self.ast.tokenSlice(self.ast.nodeMainToken(children[2]));
+                const code = self.stripQuotes(code_raw);
+
+                // Store code in data section and emit
+                const data_id = self.builder.addData(self.gpa, code) catch return error.OutOfMemory;
+                const emitter = self.builder.getEmitter();
+                emitter.createShaderModule(self.gpa, shader_id, data_id.toInt()) catch return error.OutOfMemory;
+                return;
+            }
+
+            // Semantic format: $shd:N resource ID
+            const shader_id = try self.parseResourceIndex(children[1], .shader);
+            if (self.defined_shaders.isSet(shader_id)) return error.DuplicateResource;
+            self.defined_shaders.set(shader_id);
+
+            // Find (code $d:N) form
+            var code_data_id: ?u16 = null;
+            for (children[2..]) |child| {
+                if (self.ast.nodeTag(child) == .list) {
+                    const sub_children = self.ast.children(child);
+                    if (sub_children.len >= 2) {
+                        const sub_kw = self.ast.tokenSlice(self.ast.nodeMainToken(sub_children[0]));
+                        if (std.mem.eql(u8, sub_kw, "code")) {
+                            const data_idx = try self.parseResourceIndex(sub_children[1], .data);
+                            const data_id = self.data_ids[data_idx] orelse return error.UndefinedResource;
+                            code_data_id = data_id.toInt();
+                            break;
+                        }
                     }
                 }
             }
+
+            if (code_data_id == null) return error.InvalidFormStructure;
+
+            const emitter = self.builder.getEmitter();
+            emitter.createShaderModule(self.gpa, shader_id, code_data_id.?) catch return error.OutOfMemory;
         }
-
-        if (code_data_id == null) return error.InvalidFormStructure;
-
-        // Emit create_shader_module
-        const emitter = self.builder.getEmitter();
-        emitter.createShaderModule(self.gpa, shader_id, code_data_id.?) catch return error.OutOfMemory;
     }
 
     /// Emit (buffer $buf:N ...).
@@ -486,6 +546,40 @@ pub const Assembler = struct {
 
         const emitter = self.builder.getEmitter();
         emitter.createComputePipeline(self.gpa, pipeline_id, desc_id.toInt()) catch return error.OutOfMemory;
+    }
+
+    /// Emit (pipeline N (json "...")) shorthand format.
+    /// Creates render pipeline with explicit JSON descriptor.
+    fn emitPipelineShorthand(self: *Self, children: []const NodeIndex) AssembleError!void {
+        if (children.len < 3) return error.InvalidFormStructure;
+
+        // children[1] is numeric pipeline ID
+        if (self.ast.nodeTag(children[1]) != .atom) return error.ExpectedAtom;
+        const id_str = self.ast.tokenSlice(self.ast.nodeMainToken(children[1]));
+        const pipeline_id = std.fmt.parseInt(u16, id_str, 10) catch return error.InvalidResourceId;
+
+        if (self.defined_pipelines.isSet(pipeline_id)) return error.DuplicateResource;
+        self.defined_pipelines.set(pipeline_id);
+
+        // children[2] should be (json "...")
+        if (self.ast.nodeTag(children[2]) != .list) return error.ExpectedList;
+        const json_children = self.ast.children(children[2]);
+        if (json_children.len < 2) return error.InvalidFormStructure;
+
+        // First child should be "json" keyword
+        if (self.ast.nodeTag(json_children[0]) != .atom) return error.ExpectedAtom;
+        const kw = self.ast.tokenSlice(self.ast.nodeMainToken(json_children[0]));
+        if (!std.mem.eql(u8, kw, "json")) return error.InvalidFormStructure;
+
+        // Second child is the JSON string
+        if (self.ast.nodeTag(json_children[1]) != .string) return error.ExpectedString;
+        const json_raw = self.ast.tokenSlice(self.ast.nodeMainToken(json_children[1]));
+        const json_str = self.stripQuotes(json_raw);
+
+        // Store JSON in data section and emit
+        const desc_id = self.builder.addData(self.gpa, json_str) catch return error.OutOfMemory;
+        const emitter = self.builder.getEmitter();
+        emitter.createRenderPipeline(self.gpa, pipeline_id, desc_id.toInt()) catch return error.OutOfMemory;
     }
 
     /// Emit (bind-group $bg:N ...).
@@ -641,29 +735,56 @@ pub const Assembler = struct {
         }
     }
 
-    /// Emit (frame $frm:N "name" ...).
+    /// Emit frame definition.
+    /// Supports two formats:
+    /// - Semantic: (frame $frm:N "name" (exec-pass $pass:N) (submit))
+    /// - Shorthand: (frame "name" (begin-render-pass ...) (set-pipeline N) (draw ...) (end-pass) (submit))
     fn emitFrame(self: *Self, children: []const NodeIndex) AssembleError!void {
-        if (children.len < 3) return error.InvalidFormStructure;
+        if (children.len < 2) return error.InvalidFormStructure;
 
-        const frame_id = try self.parseResourceIndex(children[1], .frame);
-        if (self.defined_frames.isSet(frame_id)) return error.DuplicateResource;
-        self.defined_frames.set(frame_id);
+        const emitter = self.builder.getEmitter();
 
-        // Get frame name
+        // Detect format: if children[1] is a string, it's shorthand format
+        const is_shorthand = self.ast.nodeTag(children[1]) == .string;
+
+        var frame_id: u16 = 0;
         var name_id: u16 = 0;
-        if (self.ast.nodeTag(children[2]) == .string) {
-            const name_raw = self.ast.tokenSlice(self.ast.nodeMainToken(children[2]));
+        var cmd_start_idx: usize = 2;
+
+        if (is_shorthand) {
+            // Shorthand format: (frame "name" ...commands...)
+            // Auto-assign frame ID 0 (or next available)
+            while (self.defined_frames.isSet(frame_id) and frame_id < MAX_RESOURCES) {
+                frame_id += 1;
+            }
+            if (frame_id >= MAX_RESOURCES) return error.TooManyResources;
+            self.defined_frames.set(frame_id);
+
+            const name_raw = self.ast.tokenSlice(self.ast.nodeMainToken(children[1]));
             const name = self.stripQuotes(name_raw);
             const str_id = try self.internString(name);
             name_id = str_id.toInt();
+            cmd_start_idx = 2;
+        } else {
+            // Semantic format: (frame $frm:N "name" ...)
+            if (children.len < 3) return error.InvalidFormStructure;
+            frame_id = try self.parseResourceIndex(children[1], .frame);
+            if (self.defined_frames.isSet(frame_id)) return error.DuplicateResource;
+            self.defined_frames.set(frame_id);
+
+            if (self.ast.nodeTag(children[2]) == .string) {
+                const name_raw = self.ast.tokenSlice(self.ast.nodeMainToken(children[2]));
+                const name = self.stripQuotes(name_raw);
+                const str_id = try self.internString(name);
+                name_id = str_id.toInt();
+                cmd_start_idx = 3;
+            }
         }
 
-        const emitter = self.builder.getEmitter();
         emitter.defineFrame(self.gpa, frame_id, name_id) catch return error.OutOfMemory;
 
         // Process frame commands
-        const start_idx: usize = if (self.ast.nodeTag(children[2]) == .string) 3 else 2;
-        for (children[start_idx..]) |child| {
+        for (children[cmd_start_idx..]) |child| {
             if (self.ast.nodeTag(child) != .list) continue;
 
             const cmd_children = self.ast.children(child);
@@ -681,6 +802,76 @@ pub const Assembler = struct {
                 },
                 .submit => {
                     emitter.submit(self.gpa) catch return error.OutOfMemory;
+                },
+                // Shorthand frame-level commands
+                .begin_render_pass => {
+                    // Parse (begin-render-pass :texture N :load clear :store store)
+                    var texture_id: u16 = 0;
+                    var load_op: opcodes.LoadOp = .clear;
+                    var store_op: opcodes.StoreOp = .store;
+
+                    var i: usize = 1;
+                    while (i < cmd_children.len) : (i += 1) {
+                        if (self.ast.nodeTag(cmd_children[i]) != .atom) continue;
+                        const arg = self.ast.tokenSlice(self.ast.nodeMainToken(cmd_children[i]));
+
+                        if (std.mem.eql(u8, arg, ":texture")) {
+                            i += 1;
+                            if (i < cmd_children.len) {
+                                texture_id = @intCast(try self.parseNumber(cmd_children[i]));
+                            }
+                        } else if (std.mem.eql(u8, arg, ":load")) {
+                            i += 1;
+                            if (i < cmd_children.len and self.ast.nodeTag(cmd_children[i]) == .atom) {
+                                const val = self.ast.tokenSlice(self.ast.nodeMainToken(cmd_children[i]));
+                                load_op = if (std.mem.eql(u8, val, "load")) .load else .clear;
+                            }
+                        } else if (std.mem.eql(u8, arg, ":store")) {
+                            i += 1;
+                            if (i < cmd_children.len and self.ast.nodeTag(cmd_children[i]) == .atom) {
+                                const val = self.ast.tokenSlice(self.ast.nodeMainToken(cmd_children[i]));
+                                store_op = if (std.mem.eql(u8, val, "discard")) .discard else .store;
+                            }
+                        }
+                    }
+                    emitter.beginRenderPass(self.gpa, texture_id, load_op, store_op) catch return error.OutOfMemory;
+                },
+                .begin_compute_pass => {
+                    emitter.beginComputePass(self.gpa) catch return error.OutOfMemory;
+                },
+                .end_pass => {
+                    emitter.endPass(self.gpa) catch return error.OutOfMemory;
+                },
+                .set_pipeline => {
+                    // Shorthand: (set-pipeline N) where N is numeric
+                    if (cmd_children.len < 2) continue;
+                    if (self.ast.nodeTag(cmd_children[1]) == .atom) {
+                        const id_str = self.ast.tokenSlice(self.ast.nodeMainToken(cmd_children[1]));
+                        // Try numeric first, then resource ID
+                        const pipe_id = std.fmt.parseInt(u16, id_str, 10) catch
+                            try self.parseResourceIndex(cmd_children[1], .pipeline);
+                        emitter.setPipeline(self.gpa, pipe_id) catch return error.OutOfMemory;
+                    }
+                },
+                .draw => {
+                    // (draw N M) where N=vertex_count, M=instance_count
+                    if (cmd_children.len < 3) continue;
+                    const vertex_count = try self.parseNumber(cmd_children[1]);
+                    const instance_count = try self.parseNumber(cmd_children[2]);
+                    emitter.draw(self.gpa, vertex_count, instance_count) catch return error.OutOfMemory;
+                },
+                .draw_indexed => {
+                    if (cmd_children.len < 3) continue;
+                    const index_count = try self.parseNumber(cmd_children[1]);
+                    const instance_count = try self.parseNumber(cmd_children[2]);
+                    emitter.drawIndexed(self.gpa, index_count, instance_count) catch return error.OutOfMemory;
+                },
+                .dispatch => {
+                    if (cmd_children.len < 4) continue;
+                    const x = try self.parseNumber(cmd_children[1]);
+                    const y = try self.parseNumber(cmd_children[2]);
+                    const z = try self.parseNumber(cmd_children[3]);
+                    emitter.dispatch(self.gpa, x, y, z) catch return error.OutOfMemory;
                 },
                 else => {},
             }
