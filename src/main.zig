@@ -30,6 +30,21 @@ pub const mock_gpu = @import("executor/mock_gpu.zig");
 pub const dispatcher = @import("executor/dispatcher.zig");
 pub const executor_test = @import("executor/executor_test.zig");
 
+// DSL compiler (new macro-based syntax)
+pub const dsl = struct {
+    pub const Token = @import("dsl/Token.zig").Token;
+    pub const Lexer = @import("dsl/Lexer.zig").Lexer;
+    pub const Ast = @import("dsl/Ast.zig").Ast;
+    pub const Node = @import("dsl/Ast.zig").Node;
+    pub const Parser = @import("dsl/Parser.zig").Parser;
+    pub const Analyzer = @import("dsl/Analyzer.zig").Analyzer;
+    pub const Emitter = @import("dsl/Emitter.zig").Emitter;
+    pub const Compiler = @import("dsl/Compiler.zig").Compiler;
+    /// High-level compile function
+    pub const compile = Compiler.compile;
+    pub const compileSlice = Compiler.compileSlice;
+};
+
 // Re-export main types
 pub const Tokenizer = tokenizer.Tokenizer;
 pub const Token = tokenizer.Token;
@@ -98,6 +113,14 @@ test {
     _ = fixtures.simple_triangle;
     // Run executor tests
     _ = executor_test;
+    // Run DSL compiler tests
+    _ = @import("dsl/Token.zig");
+    _ = @import("dsl/Lexer.zig");
+    _ = @import("dsl/Ast.zig");
+    _ = @import("dsl/Parser.zig");
+    _ = @import("dsl/Analyzer.zig");
+    _ = @import("dsl/Emitter.zig");
+    _ = @import("dsl/Compiler.zig");
 }
 
 test "compile PBSF to PNGB" {
