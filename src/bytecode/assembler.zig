@@ -433,33 +433,30 @@ pub const Assembler = struct {
     fn emitShader(self: *Self, children: []const NodeIndex) AssembleError!void {
         if (children.len < 3) return error.InvalidFormStructure;
 
-        // Check for shorthand format: (shader N "code")
-        // where N is a numeric atom (not $shd:N)
         const id_node = children[1];
         const id_tag = self.ast.nodeTag(id_node);
 
-        if (id_tag == .atom) {
+        // Shorthand format: (shader N "code") where N is a number
+        if (id_tag == .number) {
             const id_str = self.ast.tokenSlice(self.ast.nodeMainToken(id_node));
+            const shader_id = std.fmt.parseInt(u16, id_str, 10) catch return error.InvalidResourceId;
+            if (self.defined_shaders.isSet(shader_id)) return error.DuplicateResource;
+            self.defined_shaders.set(shader_id);
 
-            // Shorthand format: numeric ID directly
-            if (id_str.len > 0 and id_str[0] != '$') {
-                const shader_id = std.fmt.parseInt(u16, id_str, 10) catch return error.InvalidResourceId;
-                if (self.defined_shaders.isSet(shader_id)) return error.DuplicateResource;
-                self.defined_shaders.set(shader_id);
+            // children[2] should be inline code string
+            if (self.ast.nodeTag(children[2]) != .string) return error.ExpectedString;
+            const code_raw = self.ast.tokenSlice(self.ast.nodeMainToken(children[2]));
+            const code = self.stripQuotes(code_raw);
 
-                // children[2] should be inline code string
-                if (self.ast.nodeTag(children[2]) != .string) return error.ExpectedString;
-                const code_raw = self.ast.tokenSlice(self.ast.nodeMainToken(children[2]));
-                const code = self.stripQuotes(code_raw);
+            // Store code in data section and emit
+            const data_id = self.builder.addData(self.gpa, code) catch return error.OutOfMemory;
+            const emitter = self.builder.getEmitter();
+            emitter.createShaderModule(self.gpa, shader_id, data_id.toInt()) catch return error.OutOfMemory;
+            return;
+        }
 
-                // Store code in data section and emit
-                const data_id = self.builder.addData(self.gpa, code) catch return error.OutOfMemory;
-                const emitter = self.builder.getEmitter();
-                emitter.createShaderModule(self.gpa, shader_id, data_id.toInt()) catch return error.OutOfMemory;
-                return;
-            }
-
-            // Semantic format: $shd:N resource ID
+        // Semantic format: (shader $shd:N (code $d:N))
+        if (id_tag == .atom) {
             const shader_id = try self.parseResourceIndex(children[1], .shader);
             if (self.defined_shaders.isSet(shader_id)) return error.DuplicateResource;
             self.defined_shaders.set(shader_id);
@@ -485,7 +482,10 @@ pub const Assembler = struct {
 
             const emitter = self.builder.getEmitter();
             emitter.createShaderModule(self.gpa, shader_id, code_data_id.?) catch return error.OutOfMemory;
+            return;
         }
+
+        return error.ExpectedAtom;
     }
 
     /// Emit (buffer $buf:N ...).
@@ -553,8 +553,9 @@ pub const Assembler = struct {
     fn emitPipelineShorthand(self: *Self, children: []const NodeIndex) AssembleError!void {
         if (children.len < 3) return error.InvalidFormStructure;
 
-        // children[1] is numeric pipeline ID
-        if (self.ast.nodeTag(children[1]) != .atom) return error.ExpectedAtom;
+        // children[1] is numeric pipeline ID (can be .number or .atom)
+        const id_tag = self.ast.nodeTag(children[1]);
+        if (id_tag != .number and id_tag != .atom) return error.ExpectedAtom;
         const id_str = self.ast.tokenSlice(self.ast.nodeMainToken(children[1]));
         const pipeline_id = std.fmt.parseInt(u16, id_str, 10) catch return error.InvalidResourceId;
 
@@ -812,12 +813,14 @@ pub const Assembler = struct {
 
                     var i: usize = 1;
                     while (i < cmd_children.len) : (i += 1) {
-                        if (self.ast.nodeTag(cmd_children[i]) != .atom) continue;
+                        const tag = self.ast.nodeTag(cmd_children[i]);
+                        // Keywords like :texture, :load, :store are atoms
+                        if (tag != .atom) continue;
                         const arg = self.ast.tokenSlice(self.ast.nodeMainToken(cmd_children[i]));
 
                         if (std.mem.eql(u8, arg, ":texture")) {
                             i += 1;
-                            if (i < cmd_children.len) {
+                            if (i < cmd_children.len and self.ast.nodeTag(cmd_children[i]) == .number) {
                                 texture_id = @intCast(try self.parseNumber(cmd_children[i]));
                             }
                         } else if (std.mem.eql(u8, arg, ":load")) {
@@ -845,11 +848,15 @@ pub const Assembler = struct {
                 .set_pipeline => {
                     // Shorthand: (set-pipeline N) where N is numeric
                     if (cmd_children.len < 2) continue;
-                    if (self.ast.nodeTag(cmd_children[1]) == .atom) {
+                    const pipe_tag = self.ast.nodeTag(cmd_children[1]);
+                    if (pipe_tag == .number) {
+                        // Numeric ID
                         const id_str = self.ast.tokenSlice(self.ast.nodeMainToken(cmd_children[1]));
-                        // Try numeric first, then resource ID
-                        const pipe_id = std.fmt.parseInt(u16, id_str, 10) catch
-                            try self.parseResourceIndex(cmd_children[1], .pipeline);
+                        const pipe_id = std.fmt.parseInt(u16, id_str, 10) catch continue;
+                        emitter.setPipeline(self.gpa, pipe_id) catch return error.OutOfMemory;
+                    } else if (pipe_tag == .atom) {
+                        // Resource ID like $pipe:0
+                        const pipe_id = try self.parseResourceIndex(cmd_children[1], .pipeline);
                         emitter.setPipeline(self.gpa, pipe_id) catch return error.OutOfMemory;
                     }
                 },
