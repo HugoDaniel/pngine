@@ -193,6 +193,9 @@ pub const Assembler = struct {
     defined_frames: std.StaticBitSet(MAX_RESOURCES),
     defined_buffers: std.StaticBitSet(MAX_RESOURCES),
 
+    /// Allocated escape buffers (freed in deinit).
+    escape_buffers: std.ArrayListUnmanaged([]u8),
+
     pub fn init(gpa: Allocator, ast: *const Ast) Self {
         return .{
             .gpa = gpa,
@@ -205,6 +208,7 @@ pub const Assembler = struct {
             .defined_passes = std.StaticBitSet(MAX_RESOURCES).initEmpty(),
             .defined_frames = std.StaticBitSet(MAX_RESOURCES).initEmpty(),
             .defined_buffers = std.StaticBitSet(MAX_RESOURCES).initEmpty(),
+            .escape_buffers = .{},
         };
     }
 
@@ -216,6 +220,11 @@ pub const Assembler = struct {
             self.gpa.free(entry.key_ptr.*);
         }
         self.string_ids.deinit(self.gpa);
+        // Free escape buffers
+        for (self.escape_buffers.items) |buf| {
+            self.gpa.free(buf);
+        }
+        self.escape_buffers.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -928,6 +937,11 @@ pub const Assembler = struct {
 
         // Need to unescape - allocate buffer
         const unescaped = self.gpa.alloc(u8, content.len) catch return content;
+        // Track allocation for cleanup in deinit
+        self.escape_buffers.append(self.gpa, unescaped) catch {
+            self.gpa.free(unescaped);
+            return content;
+        };
         var out_idx: usize = 0;
         var i: usize = 0;
 
