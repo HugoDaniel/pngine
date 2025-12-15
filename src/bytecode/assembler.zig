@@ -912,15 +912,62 @@ pub const Assembler = struct {
         return std.fmt.parseInt(u32, num_str, 10) catch return error.ExpectedNumber;
     }
 
-    /// Strip surrounding quotes from a string literal token.
-    /// The tokenizer preserves quotes in string tokens, but for data content
-    /// we need the actual string value without the delimiters.
+    /// Strip surrounding quotes and process escape sequences.
+    /// Handles: \" -> ", \\ -> \, \n -> newline, \t -> tab
+    /// Returns unescaped string (allocates if escapes present).
     fn stripQuotes(self: *Self, raw: []const u8) []const u8 {
-        _ = self;
-        if (raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"') {
-            return raw[1 .. raw.len - 1];
+        if (raw.len < 2 or raw[0] != '"' or raw[raw.len - 1] != '"') {
+            return raw;
         }
-        return raw;
+        const content = raw[1 .. raw.len - 1];
+
+        // Quick check: if no backslashes, return as-is
+        if (std.mem.indexOfScalar(u8, content, '\\') == null) {
+            return content;
+        }
+
+        // Need to unescape - allocate buffer
+        const unescaped = self.gpa.alloc(u8, content.len) catch return content;
+        var out_idx: usize = 0;
+        var i: usize = 0;
+
+        while (i < content.len) : (i += 1) {
+            if (content[i] == '\\' and i + 1 < content.len) {
+                const next = content[i + 1];
+                switch (next) {
+                    '"' => {
+                        unescaped[out_idx] = '"';
+                        out_idx += 1;
+                        i += 1;
+                    },
+                    '\\' => {
+                        unescaped[out_idx] = '\\';
+                        out_idx += 1;
+                        i += 1;
+                    },
+                    'n' => {
+                        unescaped[out_idx] = '\n';
+                        out_idx += 1;
+                        i += 1;
+                    },
+                    't' => {
+                        unescaped[out_idx] = '\t';
+                        out_idx += 1;
+                        i += 1;
+                    },
+                    else => {
+                        // Unknown escape, keep as-is
+                        unescaped[out_idx] = content[i];
+                        out_idx += 1;
+                    },
+                }
+            } else {
+                unescaped[out_idx] = content[i];
+                out_idx += 1;
+            }
+        }
+
+        return unescaped[0..out_idx];
     }
 
     /// Intern a string, returning existing ID if already interned.
