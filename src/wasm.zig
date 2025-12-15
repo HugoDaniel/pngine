@@ -83,6 +83,17 @@ export fn compile(src_ptr: [*]const u8, src_len: usize) u32 {
         last_error = switch (err) {
             error.ParseError => 3,
             error.OutOfMemory => 2,
+            // Assembler errors (10-29)
+            error.UnknownForm => 10,
+            error.InvalidFormStructure => 11,
+            error.UndefinedResource => 12,
+            error.DuplicateResource => 13,
+            error.TooManyResources => 14,
+            error.ExpectedAtom => 15,
+            error.ExpectedString => 16,
+            error.ExpectedNumber => 17,
+            error.ExpectedList => 18,
+            error.InvalidResourceId => 19,
             else => 99,
         };
         return last_error;

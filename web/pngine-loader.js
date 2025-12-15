@@ -18,6 +18,17 @@ export const ErrorCode = {
     INVALID_FORMAT: 4,
     NO_MODULE: 5,
     EXECUTION_ERROR: 6,
+    // Assembler errors (10-29)
+    UNKNOWN_FORM: 10,
+    INVALID_FORM_STRUCTURE: 11,
+    UNDEFINED_RESOURCE: 12,
+    DUPLICATE_RESOURCE: 13,
+    TOO_MANY_RESOURCES: 14,
+    EXPECTED_ATOM: 15,
+    EXPECTED_STRING: 16,
+    EXPECTED_NUMBER: 17,
+    EXPECTED_LIST: 18,
+    INVALID_RESOURCE_ID: 19,
     UNKNOWN: 99,
 };
 
@@ -215,6 +226,17 @@ export class PNGine {
             case ErrorCode.INVALID_FORMAT: return 'Invalid bytecode format';
             case ErrorCode.NO_MODULE: return 'No module loaded';
             case ErrorCode.EXECUTION_ERROR: return 'Execution error';
+            // Assembler errors
+            case ErrorCode.UNKNOWN_FORM: return 'Unknown PBSF form (use shader, pipeline, frame)';
+            case ErrorCode.INVALID_FORM_STRUCTURE: return 'Invalid form structure';
+            case ErrorCode.UNDEFINED_RESOURCE: return 'Undefined resource reference';
+            case ErrorCode.DUPLICATE_RESOURCE: return 'Duplicate resource ID';
+            case ErrorCode.TOO_MANY_RESOURCES: return 'Too many resources';
+            case ErrorCode.EXPECTED_ATOM: return 'Expected atom (identifier or number)';
+            case ErrorCode.EXPECTED_STRING: return 'Expected string';
+            case ErrorCode.EXPECTED_NUMBER: return 'Expected number';
+            case ErrorCode.EXPECTED_LIST: return 'Expected list';
+            case ErrorCode.INVALID_RESOURCE_ID: return 'Invalid resource ID format';
             default: return `Unknown error (${code})`;
         }
     }
