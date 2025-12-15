@@ -1,0 +1,36 @@
+---
+.title = "PNGine",
+.description = "A register-based bytecode interpreter for WebGPU",
+.author = "PNGine Team",
+.date = @date("2024-12-15"),
+.layout = "index.shtml",
+---
+
+## What is PNGine?
+
+PNGine is a compact bytecode interpreter designed for WebGPU graphics programming. It compiles PBSF (a Lisp-like S-expression format) into PNGB binary bytecode that can be executed in the browser.
+
+## Features
+
+- **Tiny WASM binary** - Under 30KB for the complete compiler
+- **S-expression syntax** - Human-readable PBSF source format
+- **Compact bytecode** - PNGB binary format with 2-3x compression
+- **WebGPU ready** - Designed for modern GPU programming
+- **Written in Zig** - Fast, safe, and portable
+
+## Quick Example
+
+```lisp
+(module "triangle"
+  (data $d:0 "@vertex fn main() -> @builtin(position) vec4f { ... }")
+  (shader $shd:0 (code $d:0))
+  (render-pipeline $pipe:0 (shader $shd:0))
+  (frame $frm:0 "main"
+    (set-pipeline $pipe:0)
+    (draw 3 1)
+    (submit)))
+```
+
+## Getting Started
+
+Check out the [documentation](/docs/) to learn how to use PNGine in your projects.

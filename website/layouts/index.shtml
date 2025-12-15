@@ -1,0 +1,16 @@
+<extend template="base.shtml">
+<head id="head">
+</head>
+<main id="main">
+  <div class="hero">
+    <h1 :text="$page.title"></h1>
+    <p class="tagline" :text="$page.description"></p>
+    <div class="cta">
+      <a href="/docs/" class="btn primary">Get Started</a>
+      <a href="https://github.com/pngine/pngine" class="btn secondary">View Source</a>
+    </div>
+  </div>
+  <div class="content">
+    <div :html="$page.content()"></div>
+  </div>
+</main>

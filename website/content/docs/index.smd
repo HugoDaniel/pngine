@@ -1,0 +1,57 @@
+---
+.title = "Documentation",
+.description = "Learn how to use PNGine",
+.author = "PNGine Team",
+.date = @date("2024-12-15"),
+.layout = "docs.shtml",
+---
+
+Welcome to the PNGine documentation. Here you'll learn how to use PNGine to create WebGPU graphics programs using a compact bytecode format.
+
+## Overview
+
+PNGine consists of three main components:
+
+1. **PBSF** - PNGine Bytecode Source Format, a human-readable S-expression syntax
+2. **PNGB** - PNGine Binary, the compiled bytecode format
+3. **Runtime** - The WebGPU interpreter that executes PNGB bytecode
+
+## Sections
+
+- [WASM API](/docs/wasm-api/) - Using PNGine from JavaScript
+- [PBSF Syntax](/docs/pbsf-syntax/) - The source language reference
+- [Bytecode Format](/docs/bytecode/) - PNGB binary specification
+
+## Quick Start
+
+```javascript
+// Load the WASM module
+const response = await fetch('pngine.wasm');
+const wasmModule = await WebAssembly.instantiate(await response.arrayBuffer());
+const pngine = wasmModule.instance.exports;
+
+// Initialize
+pngine.onInit();
+
+// Compile PBSF source
+const source = `(module "hello" (nop))`;
+const encoder = new TextEncoder();
+const sourceBytes = encoder.encode(source);
+
+// Allocate and copy source
+const srcPtr = pngine.alloc(sourceBytes.length);
+new Uint8Array(pngine.memory.buffer, srcPtr, sourceBytes.length).set(sourceBytes);
+
+// Compile
+const result = pngine.compile(srcPtr, sourceBytes.length);
+if (result === 0) {
+    const outputPtr = pngine.getOutputPtr();
+    const outputLen = pngine.getOutputLen();
+    const bytecode = new Uint8Array(pngine.memory.buffer, outputPtr, outputLen);
+    console.log('Compiled', bytecode.length, 'bytes');
+}
+
+// Cleanup
+pngine.free(srcPtr, sourceBytes.length);
+pngine.freeOutput();
+```

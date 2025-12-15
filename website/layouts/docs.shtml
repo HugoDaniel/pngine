@@ -1,0 +1,19 @@
+<extend template="base.shtml">
+<head id="head">
+</head>
+<main id="main">
+  <div class="docs-layout">
+    <aside class="sidebar">
+      <h3>Documentation</h3>
+      <nav>
+        <ul :loop="$page.subpages()">
+          <li><a href="$loop.it.link()" :text="$loop.it.title"></a></li>
+        </ul>
+      </nav>
+    </aside>
+    <article class="docs-content">
+      <h1 :text="$page.title"></h1>
+      <div :html="$page.content()"></div>
+    </article>
+  </div>
+</main>

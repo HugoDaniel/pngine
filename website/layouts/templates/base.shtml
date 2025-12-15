@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head id="head">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title :text="$page.title"></title>
+    <link rel="stylesheet" href="$site.asset('style.css').link()">
+    <super>
+  </head>
+  <body id="body">
+    <header>
+      <nav>
+        <a href="$site.link()" class="logo">PNGine</a>
+        <div class="nav-links">
+          <a href="/docs/">Docs</a>
+          <a href="https://github.com/pngine/pngine">GitHub</a>
+        </div>
+      </nav>
+    </header>
+    <main id="main">
+      <super>
+    </main>
+    <footer>
+      <p>PNGine - A register-based bytecode interpreter for WebGPU</p>
+      <p>Built with Zig and Zine</p>
+    </footer>
+  </body>
+</html>
