@@ -12,6 +12,31 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // CLI executable
+    const cli_module = b.createModule(.{
+        .root_source_file = b.path("src/cli.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cli_module.addImport("pngine", lib_module);
+
+    const cli = b.addExecutable(.{
+        .name = "pngine",
+        .root_module = cli_module,
+    });
+
+    b.installArtifact(cli);
+
+    // Run step for CLI
+    const run_cmd = b.addRunArtifact(cli);
+    run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_cmd.addArgs(args);
+    }
+
+    const run_step = b.step("run", "Run the CLI");
+    run_step.dependOn(&run_cmd.step);
+
     // Native tests
     const tests = b.addTest(.{
         .root_module = lib_module,
@@ -20,15 +45,27 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // CLI tests
+    const cli_test_module = b.createModule(.{
+        .root_source_file = b.path("src/cli.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cli_test_module.addImport("pngine", lib_module);
+    const cli_tests = b.addTest(.{
+        .root_module = cli_test_module,
+    });
+    test_step.dependOn(&b.addRunArtifact(cli_tests).step);
+
     // WASM build target
     const wasm_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
         .os_tag = .freestanding,
     });
 
-    // Create a separate module for WASM
+    // Create WASM entry module (separate from main library)
     const wasm_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("src/wasm.zig"),
         .target = wasm_target,
         .optimize = .ReleaseSmall,
     });
@@ -37,7 +74,9 @@ pub fn build(b: *std.Build) void {
         .name = "pngine",
         .root_module = wasm_module,
     });
+    // Export symbols for JS access
     wasm.rdynamic = true;
+    // No main() - use exported functions
     wasm.entry = .disabled;
 
     const wasm_step = b.step("wasm", "Build WASM for browser");
