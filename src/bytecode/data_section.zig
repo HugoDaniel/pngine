@@ -265,3 +265,65 @@ test "large data blob" {
 
     try testing.expectEqualStrings(large_shader, section.get(id));
 }
+
+test "add makes owned copy - caller can free immediately" {
+    // Regression test: DataSection must own copies of data.
+    // Caller should be able to free their buffer right after add().
+    // If DataSection only stored slices, this would cause use-after-free.
+    //
+    // testing.allocator detects:
+    // - Memory leaks (if we don't free properly)
+    // - Use-after-free (if we access freed memory)
+
+    var section: DataSection = .empty;
+    defer section.deinit(testing.allocator);
+
+    // Allocate a buffer, add to section, then FREE IT
+    const temp_data = try testing.allocator.dupe(u8, "temporary descriptor JSON");
+    const id = try section.add(testing.allocator, temp_data);
+
+    // Free caller's buffer immediately - this is the key part of the test
+    testing.allocator.free(temp_data);
+
+    // DataSection must still have valid data (its own copy)
+    try testing.expectEqualStrings("temporary descriptor JSON", section.get(id));
+
+    // Serialize should also work with valid data
+    const serialized = try section.serialize(testing.allocator);
+    defer testing.allocator.free(serialized);
+
+    // Deserialize and verify
+    var loaded = try deserialize(testing.allocator, serialized);
+    defer loaded.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("temporary descriptor JSON", loaded.get(@enumFromInt(0)));
+}
+
+test "multiple adds with caller frees - no leaks" {
+    // Verify no memory leaks when adding multiple blobs and freeing caller buffers.
+    // testing.allocator will fail the test if any memory leaks.
+
+    var section: DataSection = .empty;
+    defer section.deinit(testing.allocator);
+
+    // Simulate what Emitter does: allocate, add, free
+    for (0..10) |i| {
+        const temp = try std.fmt.allocPrint(
+            testing.allocator,
+            "{{\"shader\":{d},\"entryPoint\":\"main\"}}",
+            .{i},
+        );
+        _ = try section.add(testing.allocator, temp);
+        testing.allocator.free(temp); // Caller frees immediately
+    }
+
+    // All 10 entries should be valid
+    try testing.expectEqual(@as(u16, 10), section.count());
+
+    // Verify data integrity
+    const first = section.get(@enumFromInt(0));
+    try testing.expect(std.mem.indexOf(u8, first, "\"shader\":0") != null);
+
+    const last = section.get(@enumFromInt(9));
+    try testing.expect(std.mem.indexOf(u8, last, "\"shader\":9") != null);
+}
