@@ -40,10 +40,14 @@ pub const dsl = struct {
     pub const Analyzer = @import("dsl/Analyzer.zig").Analyzer;
     pub const Emitter = @import("dsl/Emitter.zig").Emitter;
     pub const Compiler = @import("dsl/Compiler.zig").Compiler;
+    pub const DescriptorEncoder = @import("dsl/DescriptorEncoder.zig").DescriptorEncoder;
     /// High-level compile function
     pub const compile = Compiler.compile;
     pub const compileSlice = Compiler.compileSlice;
 };
+
+// Re-export DescriptorEncoder at top level for convenience
+pub const DescriptorEncoder = dsl.DescriptorEncoder;
 
 // Re-export main types
 pub const Tokenizer = tokenizer.Tokenizer;

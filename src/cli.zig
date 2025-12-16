@@ -23,8 +23,11 @@
 const std = @import("std");
 const pngine = @import("pngine");
 const format = pngine.format;
-const MockGPU = pngine.MockGPU;
+const mock_gpu = pngine.mock_gpu;
+const MockGPU = mock_gpu.MockGPU;
+const Call = mock_gpu.Call;
 const Dispatcher = pngine.Dispatcher;
+const DescriptorEncoder = pngine.DescriptorEncoder;
 
 /// Maximum input file size (16 MiB).
 /// Prevents DoS via memory exhaustion from malicious inputs.
@@ -230,6 +233,8 @@ fn runCheck(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     var pipeline_count: u32 = 0;
     var draw_count: u32 = 0;
     var dispatch_count: u32 = 0;
+    var texture_count: u32 = 0;
+    var sampler_count: u32 = 0;
 
     for (calls) |call| {
         switch (call.call_type) {
@@ -237,16 +242,166 @@ fn runCheck(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
             .create_render_pipeline, .create_compute_pipeline => pipeline_count += 1,
             .draw, .draw_indexed => draw_count += 1,
             .dispatch => dispatch_count += 1,
+            .create_texture => texture_count += 1,
+            .create_sampler => sampler_count += 1,
             else => {},
         }
     }
 
     if (shader_count > 0) std.debug.print("  Shaders:   {d}\n", .{shader_count});
     if (pipeline_count > 0) std.debug.print("  Pipelines: {d}\n", .{pipeline_count});
+    if (texture_count > 0) std.debug.print("  Textures:  {d}\n", .{texture_count});
+    if (sampler_count > 0) std.debug.print("  Samplers:  {d}\n", .{sampler_count});
     if (draw_count > 0) std.debug.print("  Draw calls: {d}\n", .{draw_count});
     if (dispatch_count > 0) std.debug.print("  Dispatches: {d}\n", .{dispatch_count});
 
+    // Validate descriptor formats (catches issues before web runtime)
+    const desc_errors = validateDescriptors(calls, &module);
+    if (desc_errors > 0) {
+        std.debug.print("\nWarning: {d} invalid descriptor(s) detected\n", .{desc_errors});
+        std.debug.print("  These may cause errors in the web runtime\n", .{});
+        return 6;
+    }
+
+    // Report entry points for user verification
+    reportEntryPoints(calls, &module);
+
     return 0;
+}
+
+/// Report shader entry points for user verification.
+/// Extracts entry point names from pipeline descriptors and displays them.
+/// Users can verify these match their shader function names.
+fn reportEntryPoints(calls: []const Call, module: *const format.Module) void {
+    var reported_any = false;
+
+    for (calls) |call| {
+        switch (call.call_type) {
+            .create_render_pipeline => {
+                const data_id = call.params.create_render_pipeline.descriptor_data_id;
+                const data = module.data.get(@enumFromInt(data_id));
+
+                // Parse JSON to find entry points
+                if (findJsonString(data, "\"vertex\"") != null) {
+                    if (!reported_any) {
+                        std.debug.print("\nEntry points (verify these match shader functions):\n", .{});
+                        reported_any = true;
+                    }
+
+                    // Extract vertex entry point
+                    if (findEntryPointVertex(data)) |ep| {
+                        std.debug.print("  Pipeline {d} vertex: {s}\n", .{ call.params.create_render_pipeline.pipeline_id, ep });
+                    }
+                    // Extract fragment entry point
+                    if (findEntryPointFragment(data)) |ep| {
+                        std.debug.print("  Pipeline {d} fragment: {s}\n", .{ call.params.create_render_pipeline.pipeline_id, ep });
+                    }
+                }
+            },
+            .create_compute_pipeline => {
+                const data_id = call.params.create_compute_pipeline.descriptor_data_id;
+                const data = module.data.get(@enumFromInt(data_id));
+
+                if (findJsonString(data, "\"compute\"") != null) {
+                    if (!reported_any) {
+                        std.debug.print("\nEntry points (verify these match shader functions):\n", .{});
+                        reported_any = true;
+                    }
+
+                    if (findEntryPointCompute(data)) |ep| {
+                        std.debug.print("  Pipeline {d} compute: {s}\n", .{ call.params.create_compute_pipeline.pipeline_id, ep });
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+}
+
+/// Find a string in JSON data.
+fn findJsonString(data: []const u8, needle: []const u8) ?usize {
+    return std.mem.indexOf(u8, data, needle);
+}
+
+/// Extract entry point from JSON for a given stage.
+/// Returns the entry point name or null if not found.
+fn findEntryPointVertex(data: []const u8) ?[]const u8 {
+    return findEntryPointForStage(data, "\"vertex\"");
+}
+
+fn findEntryPointFragment(data: []const u8) ?[]const u8 {
+    return findEntryPointForStage(data, "\"fragment\"");
+}
+
+fn findEntryPointCompute(data: []const u8) ?[]const u8 {
+    return findEntryPointForStage(data, "\"compute\"");
+}
+
+fn findEntryPointForStage(data: []const u8, stage_pattern: []const u8) ?[]const u8 {
+    const stage_start = std.mem.indexOf(u8, data, stage_pattern) orelse return null;
+
+    // Find entryPoint within this stage block
+    const entry_pattern = "\"entryPoint\":\"";
+    const ep_start = std.mem.indexOfPos(u8, data, stage_start, entry_pattern) orelse return null;
+
+    const name_start = ep_start + entry_pattern.len;
+    if (name_start >= data.len) return null;
+
+    // Find closing quote
+    const name_end = std.mem.indexOfPos(u8, data, name_start, "\"") orelse return null;
+
+    return data[name_start..name_end];
+}
+
+/// Validate descriptor binary formats in GPU calls.
+/// Returns count of invalid descriptors found.
+///
+/// Pre-condition: calls and module must be valid.
+/// Post-condition: returns 0 if all descriptors valid.
+fn validateDescriptors(calls: []const Call, module: *const format.Module) u32 {
+    var error_count: u32 = 0;
+
+    for (calls) |call| {
+        switch (call.call_type) {
+            .create_texture => {
+                const data_id = call.params.create_texture.descriptor_data_id;
+                const data = module.data.get(@enumFromInt(data_id));
+
+                if (data.len < 2) {
+                    std.debug.print("  Error: texture descriptor too short ({d} bytes)\n", .{data.len});
+                    error_count += 1;
+                    continue;
+                }
+
+                // Validate type tag
+                const type_tag = data[0];
+                if (type_tag != @intFromEnum(DescriptorEncoder.DescriptorType.texture)) {
+                    std.debug.print("  Error: texture descriptor has invalid type tag 0x{X:0>2} (expected 0x01)\n", .{type_tag});
+                    error_count += 1;
+                }
+            },
+            .create_sampler => {
+                const data_id = call.params.create_sampler.descriptor_data_id;
+                const data = module.data.get(@enumFromInt(data_id));
+
+                if (data.len < 2) {
+                    std.debug.print("  Error: sampler descriptor too short ({d} bytes)\n", .{data.len});
+                    error_count += 1;
+                    continue;
+                }
+
+                // Validate type tag
+                const type_tag = data[0];
+                if (type_tag != @intFromEnum(DescriptorEncoder.DescriptorType.sampler)) {
+                    std.debug.print("  Error: sampler descriptor has invalid type tag 0x{X:0>2} (expected 0x02)\n", .{type_tag});
+                    error_count += 1;
+                }
+            },
+            else => {},
+        }
+    }
+
+    return error_count;
 }
 
 /// Read binary file into buffer.
