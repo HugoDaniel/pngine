@@ -272,6 +272,10 @@ pub const Parser = struct {
 
         // Bounded iteration
         for (0..MAX_PROPERTIES) |_| {
+            // Skip comments inside macro bodies
+            while (self.currentTag() == .line_comment) {
+                self.tok_i += 1;
+            }
             if (self.currentTag() != .identifier) break;
             const prop = try self.parseProperty();
             try self.scratch.append(self.gpa, prop.toInt());
@@ -516,8 +520,8 @@ pub const Parser = struct {
             return true;
         }
 
-        // Skip commas
-        if (current == .comma) {
+        // Skip commas and comments
+        if (current == .comma or current == .line_comment) {
             self.tok_i += 1;
             return false;
         }
@@ -602,6 +606,13 @@ pub const Parser = struct {
         }
 
         if (current == .eof) return error.ParseError;
+
+        // Skip comments inside objects
+        if (current == .line_comment) {
+            self.tok_i += 1;
+            return false;
+        }
+
         if (current != .identifier) return true; // End of properties
 
         // Parse property: key=value
@@ -1479,4 +1490,51 @@ test "Parser: expression OOM handling" {
 
     const result = Parser.parse(failing.allocator(), source);
     try testing.expectError(error.OutOfMemory, result);
+}
+
+test "Parser: comments inside arrays" {
+    // Regression test: comments inside arrays should be skipped
+    const source: [:0]const u8 =
+        \\#data vertices {
+        \\  float32Array=[
+        \\    // vertex 1
+        \\    1 2 3
+        \\    // vertex 2
+        \\    4 5 6
+        \\  ]
+        \\}
+    ;
+
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    // Should successfully parse the array with 6 elements
+    var found_array = false;
+    for (ast.nodes.items(.tag)) |tag| {
+        if (tag == .array) found_array = true;
+    }
+    try testing.expect(found_array);
+}
+
+test "Parser: comments inside objects" {
+    // Regression test: comments inside objects should be skipped
+    const source: [:0]const u8 =
+        \\#buffer buf {
+        \\  // size in bytes
+        \\  size=100
+        \\  // usage flags
+        \\  usage=[VERTEX]
+        \\}
+    ;
+
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    // Should have both size and usage properties
+    var prop_count: usize = 0;
+    for (ast.nodes.items(.tag)) |tag| {
+        if (tag == .property) prop_count += 1;
+    }
+    // size, usage = 2 properties
+    try testing.expect(prop_count >= 2);
 }
