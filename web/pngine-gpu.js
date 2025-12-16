@@ -79,43 +79,30 @@ export class PNGineGPU {
     /**
      * Create a GPU texture.
      * @param {number} id - Texture ID
-     * @param {number} descPtr - Pointer to descriptor JSON
+     * @param {number} descPtr - Pointer to binary descriptor
      * @param {number} descLen - Descriptor length
      */
     createTexture(id, descPtr, descLen) {
-        const descJson = this.readString(descPtr, descLen);
-        console.log(`[GPU] createTexture(${id}), desc: ${descJson}`);
-        const desc = JSON.parse(descJson);
+        const bytes = this.readBytes(descPtr, descLen);
+        const desc = this.decodeTextureDescriptor(bytes);
+        console.log(`[GPU] createTexture(${id}), decoded:`, desc);
 
-        // Build texture descriptor from parsed JSON
-        const textureDesc = {
-            size: desc.size || [this.context.canvas.width, this.context.canvas.height],
-            format: desc.format || navigator.gpu.getPreferredCanvasFormat(),
-            usage: GPUTextureUsage.RENDER_ATTACHMENT,
-            sampleCount: desc.sampleCount || 1,
-        };
-
-        const texture = this.device.createTexture(textureDesc);
+        const texture = this.device.createTexture(desc);
         this.textures.set(id, texture);
     }
 
     /**
      * Create a texture sampler.
      * @param {number} id - Sampler ID
-     * @param {number} descPtr - Pointer to descriptor JSON
+     * @param {number} descPtr - Pointer to binary descriptor
      * @param {number} descLen - Descriptor length
      */
     createSampler(id, descPtr, descLen) {
-        const descJson = this.readString(descPtr, descLen);
-        console.log(`[GPU] createSampler(${id}), desc: ${descJson}`);
-        const desc = JSON.parse(descJson);
+        const bytes = this.readBytes(descPtr, descLen);
+        const desc = this.decodeSamplerDescriptor(bytes);
+        console.log(`[GPU] createSampler(${id}), decoded:`, desc);
 
-        const sampler = this.device.createSampler({
-            magFilter: desc.magFilter || 'linear',
-            minFilter: desc.minFilter || 'linear',
-            addressModeU: desc.addressModeU || 'clamp-to-edge',
-            addressModeV: desc.addressModeV || 'clamp-to-edge',
-        });
+        const sampler = this.device.createSampler(desc);
         this.samplers.set(id, sampler);
     }
 
@@ -401,6 +388,178 @@ export class PNGineGPU {
         if (usage & COPY_DST) gpuUsage |= GPUBufferUsage.COPY_DST;
 
         return gpuUsage;
+    }
+
+    // ========================================================================
+    // Binary Descriptor Decoders
+    // ========================================================================
+
+    /**
+     * Decode a binary texture descriptor.
+     * Format: type_tag(u8) + field_count(u8) + fields...
+     * @param {Uint8Array} bytes - Binary descriptor data
+     * @returns {GPUTextureDescriptor}
+     */
+    decodeTextureDescriptor(bytes) {
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        let offset = 0;
+
+        // Validate type tag
+        const typeTag = bytes[offset++];
+        if (typeTag !== 0x01) { // DescriptorType.texture
+            throw new Error(`Invalid texture descriptor type tag: ${typeTag}`);
+        }
+
+        const fieldCount = bytes[offset++];
+        const desc = {
+            size: [this.context.canvas.width, this.context.canvas.height],
+            format: navigator.gpu.getPreferredCanvasFormat(),
+            usage: GPUTextureUsage.RENDER_ATTACHMENT,
+            sampleCount: 1,
+        };
+
+        // Field IDs (from DescriptorEncoder.TextureField)
+        const FIELD_WIDTH = 0x01;
+        const FIELD_HEIGHT = 0x02;
+        const FIELD_SAMPLE_COUNT = 0x05;
+        const FIELD_FORMAT = 0x07;
+        const FIELD_USAGE = 0x08;
+
+        // Value types
+        const VALUE_U32 = 0x00;
+        const VALUE_ENUM = 0x07;
+
+        for (let i = 0; i < fieldCount; i++) {
+            const fieldId = bytes[offset++];
+            const valueType = bytes[offset++];
+
+            if (valueType === VALUE_U32) {
+                const value = view.getUint32(offset, true); // little endian
+                offset += 4;
+
+                if (fieldId === FIELD_WIDTH) desc.size[0] = value;
+                else if (fieldId === FIELD_HEIGHT) desc.size[1] = value;
+                else if (fieldId === FIELD_SAMPLE_COUNT) desc.sampleCount = value;
+            } else if (valueType === VALUE_ENUM) {
+                const value = bytes[offset++];
+
+                if (fieldId === FIELD_FORMAT) {
+                    desc.format = this.decodeTextureFormat(value);
+                } else if (fieldId === FIELD_USAGE) {
+                    desc.usage = this.decodeTextureUsage(value);
+                }
+            }
+        }
+
+        return desc;
+    }
+
+    /**
+     * Decode a binary sampler descriptor.
+     * @param {Uint8Array} bytes - Binary descriptor data
+     * @returns {GPUSamplerDescriptor}
+     */
+    decodeSamplerDescriptor(bytes) {
+        let offset = 0;
+
+        // Validate type tag
+        const typeTag = bytes[offset++];
+        if (typeTag !== 0x02) { // DescriptorType.sampler
+            throw new Error(`Invalid sampler descriptor type tag: ${typeTag}`);
+        }
+
+        const fieldCount = bytes[offset++];
+        const desc = {
+            magFilter: 'linear',
+            minFilter: 'linear',
+            addressModeU: 'clamp-to-edge',
+            addressModeV: 'clamp-to-edge',
+        };
+
+        // Field IDs (from DescriptorEncoder.SamplerField)
+        const FIELD_ADDRESS_MODE_U = 0x01;
+        const FIELD_ADDRESS_MODE_V = 0x02;
+        const FIELD_MAG_FILTER = 0x04;
+        const FIELD_MIN_FILTER = 0x05;
+
+        // Value type for enum
+        const VALUE_ENUM = 0x07;
+
+        for (let i = 0; i < fieldCount; i++) {
+            const fieldId = bytes[offset++];
+            const valueType = bytes[offset++];
+
+            if (valueType === VALUE_ENUM) {
+                const value = bytes[offset++];
+
+                if (fieldId === FIELD_MAG_FILTER) {
+                    desc.magFilter = this.decodeFilterMode(value);
+                } else if (fieldId === FIELD_MIN_FILTER) {
+                    desc.minFilter = this.decodeFilterMode(value);
+                } else if (fieldId === FIELD_ADDRESS_MODE_U) {
+                    desc.addressModeU = this.decodeAddressMode(value);
+                } else if (fieldId === FIELD_ADDRESS_MODE_V) {
+                    desc.addressModeV = this.decodeAddressMode(value);
+                }
+            }
+        }
+
+        return desc;
+    }
+
+    /**
+     * Decode texture format enum.
+     * @param {number} value - Format enum value
+     * @returns {string} WebGPU format string
+     */
+    decodeTextureFormat(value) {
+        const formats = {
+            0x00: 'rgba8unorm',
+            0x01: 'rgba8snorm',
+            0x02: 'rgba8uint',
+            0x03: 'rgba8sint',
+            0x04: 'bgra8unorm',
+            0x05: 'rgba16float',
+            0x06: 'rgba32float',
+            0x10: 'depth24plus',
+            0x11: 'depth24plus-stencil8',
+            0x12: 'depth32float',
+        };
+        return formats[value] || navigator.gpu.getPreferredCanvasFormat();
+    }
+
+    /**
+     * Decode texture usage flags.
+     * @param {number} value - Usage flags packed as u8
+     * @returns {number} WebGPU usage flags
+     */
+    decodeTextureUsage(value) {
+        let usage = 0;
+        if (value & 0x01) usage |= GPUTextureUsage.COPY_SRC;
+        if (value & 0x02) usage |= GPUTextureUsage.COPY_DST;
+        if (value & 0x04) usage |= GPUTextureUsage.TEXTURE_BINDING;
+        if (value & 0x08) usage |= GPUTextureUsage.STORAGE_BINDING;
+        if (value & 0x10) usage |= GPUTextureUsage.RENDER_ATTACHMENT;
+        return usage || GPUTextureUsage.RENDER_ATTACHMENT; // Default
+    }
+
+    /**
+     * Decode filter mode enum.
+     * @param {number} value - Filter mode value
+     * @returns {string} WebGPU filter mode
+     */
+    decodeFilterMode(value) {
+        return value === 0 ? 'nearest' : 'linear';
+    }
+
+    /**
+     * Decode address mode enum.
+     * @param {number} value - Address mode value
+     * @returns {string} WebGPU address mode
+     */
+    decodeAddressMode(value) {
+        const modes = ['clamp-to-edge', 'repeat', 'mirror-repeat'];
+        return modes[value] || 'clamp-to-edge';
     }
 
     /**
