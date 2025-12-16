@@ -22,6 +22,9 @@
 
 const std = @import("std");
 const pngine = @import("pngine");
+const format = pngine.format;
+const MockGPU = pngine.MockGPU;
+const Dispatcher = pngine.Dispatcher;
 
 /// Maximum input file size (16 MiB).
 /// Prevents DoS via memory exhaustion from malicious inputs.
@@ -59,6 +62,8 @@ fn run(allocator: std.mem.Allocator) !u8 {
 
     if (std.mem.eql(u8, command, "compile")) {
         return runCompile(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "check")) {
+        return runCheck(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
         printUsage();
         return 0;
@@ -147,6 +152,129 @@ fn runCompile(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     std.debug.print("Compiled {s} -> {s} ({d} bytes)\n", .{ input, output, bytecode.len });
 
     return 0;
+}
+
+/// Execute the check command.
+/// Compiles source (or loads PNGB) and validates by running through MockGPU.
+/// Returns exit code.
+fn runCheck(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
+    if (args.len == 0) {
+        std.debug.print("Error: no input file specified\n\n", .{});
+        printUsage();
+        return 1;
+    }
+
+    const input = args[0];
+    const extension = std.fs.path.extension(input);
+
+    // Get PNGB bytecode - either load directly or compile first
+    const bytecode = if (std.mem.eql(u8, extension, ".pngb"))
+        readBinaryFile(allocator, input) catch |err| {
+            std.debug.print("Error: failed to read '{s}': {}\n", .{ input, err });
+            return 2;
+        }
+    else blk: {
+        // Compile source file first
+        const source = readSourceFile(allocator, input) catch |err| {
+            std.debug.print("Error: failed to read '{s}': {}\n", .{ input, err });
+            return 2;
+        };
+        defer allocator.free(source);
+
+        break :blk compileSource(allocator, input, source) catch |err| {
+            std.debug.print("Error: compilation failed: {}\n", .{err});
+            return 3;
+        };
+    };
+    defer allocator.free(bytecode);
+
+    // Validate PNGB header
+    if (bytecode.len < format.HEADER_SIZE) {
+        std.debug.print("Error: file too small to be valid PNGB\n", .{});
+        return 4;
+    }
+    if (!std.mem.eql(u8, bytecode[0..4], format.MAGIC)) {
+        std.debug.print("Error: invalid PNGB magic bytes\n", .{});
+        return 4;
+    }
+
+    // Deserialize module
+    var module = format.deserialize(allocator, bytecode) catch |err| {
+        std.debug.print("Error: failed to deserialize PNGB: {}\n", .{err});
+        return 4;
+    };
+    defer module.deinit(allocator);
+
+    // Print module info
+    std.debug.print("PNGB: {s}\n", .{input});
+    std.debug.print("  Bytecode:     {d} bytes\n", .{module.bytecode.len});
+    std.debug.print("  Strings:      {d} entries\n", .{module.strings.count()});
+    std.debug.print("  Data section: {d} entries\n", .{module.data.count()});
+
+    // Execute with MockGPU to validate bytecode
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(allocator);
+
+    var dispatcher = Dispatcher(MockGPU).init(&gpu, &module);
+    dispatcher.executeAll(allocator) catch |err| {
+        std.debug.print("\nExecution error: {}\n", .{err});
+        return 5;
+    };
+
+    // Print execution summary
+    const calls = gpu.getCalls();
+    std.debug.print("\nExecution OK: {d} GPU calls\n", .{calls.len});
+
+    // Count call types
+    var shader_count: u32 = 0;
+    var pipeline_count: u32 = 0;
+    var draw_count: u32 = 0;
+    var dispatch_count: u32 = 0;
+
+    for (calls) |call| {
+        switch (call.call_type) {
+            .create_shader_module => shader_count += 1,
+            .create_render_pipeline, .create_compute_pipeline => pipeline_count += 1,
+            .draw, .draw_indexed => draw_count += 1,
+            .dispatch => dispatch_count += 1,
+            else => {},
+        }
+    }
+
+    if (shader_count > 0) std.debug.print("  Shaders:   {d}\n", .{shader_count});
+    if (pipeline_count > 0) std.debug.print("  Pipelines: {d}\n", .{pipeline_count});
+    if (draw_count > 0) std.debug.print("  Draw calls: {d}\n", .{draw_count});
+    if (dispatch_count > 0) std.debug.print("  Dispatches: {d}\n", .{dispatch_count});
+
+    return 0;
+}
+
+/// Read binary file into buffer.
+/// Caller owns returned memory.
+fn readBinaryFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    std.debug.assert(path.len > 0);
+
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+
+    const stat = try file.stat();
+    const size: u32 = if (stat.size > max_file_size)
+        return error.FileTooLarge
+    else
+        @intCast(stat.size);
+
+    const buffer = try allocator.alloc(u8, size);
+    errdefer allocator.free(buffer);
+
+    var bytes_read: u32 = 0;
+    for (0..size + 1) |_| {
+        if (bytes_read >= size) break;
+        const n: u32 = @intCast(try file.read(buffer[bytes_read..]));
+        if (n == 0) break;
+        bytes_read += n;
+    }
+
+    return buffer;
 }
 
 /// Compile source using appropriate compiler based on file extension.
@@ -264,11 +392,13 @@ fn printUsage() void {
         \\
         \\Usage:
         \\  pngine compile <input> [-o <output.pngb>]
+        \\  pngine check <input>
         \\  pngine help
         \\  pngine version
         \\
         \\Commands:
         \\  compile     Compile source to PNGB bytecode
+        \\  check       Compile and validate bytecode execution
         \\  help        Show this help message
         \\  version     Show version information
         \\
@@ -278,11 +408,13 @@ fn printUsage() void {
         \\Supported formats:
         \\  .pngine     DSL format (macro-based syntax)
         \\  .pbsf       Legacy PBSF format (S-expressions)
+        \\  .pngb       Compiled bytecode (check only)
         \\
         \\Examples:
         \\  pngine compile triangle.pngine -o triangle.pngb
         \\  pngine compile examples/simple_triangle.pngine
-        \\  pngine compile legacy.pbsf
+        \\  pngine check examples/simple_triangle.pngine
+        \\  pngine check output.pngb
         \\
     , .{});
 }
