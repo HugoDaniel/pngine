@@ -253,6 +253,8 @@ pub const Emitter = struct {
             const usage = self.parseTextureUsage(info.node);
 
             // Encode descriptor
+            // NOTE: desc must NOT be freed before serialization since DataSection
+            // stores slices, not copies.
             const desc = DescriptorEncoder.encodeTexture(
                 self.gpa,
                 width,
@@ -261,7 +263,6 @@ pub const Emitter = struct {
                 usage,
                 sample_count,
             ) catch return error.OutOfMemory;
-            defer self.gpa.free(desc);
 
             const desc_id = try self.builder.addData(self.gpa, desc);
 
@@ -290,13 +291,14 @@ pub const Emitter = struct {
             const address_mode = self.parseSamplerAddressMode(info.node);
 
             // Encode descriptor
+            // NOTE: desc must NOT be freed before serialization since DataSection
+            // stores slices, not copies.
             const desc = DescriptorEncoder.encodeSampler(
                 self.gpa,
                 mag_filter,
                 min_filter,
                 address_mode,
             ) catch return error.OutOfMemory;
-            defer self.gpa.free(desc);
 
             const desc_id = try self.builder.addData(self.gpa, desc);
 
@@ -321,11 +323,12 @@ pub const Emitter = struct {
             try self.pipeline_ids.put(self.gpa, name, pipeline_id);
 
             // Build pipeline descriptor JSON for runtime
+            // NOTE: desc must NOT be freed before serialization since DataSection
+            // stores slices, not copies. Memory is freed when Builder is deinitialized.
             const desc = self.buildRenderPipelineDescriptor(info.node) catch |err| {
                 std.debug.print("Failed to build render pipeline descriptor: {}\n", .{err});
                 continue;
             };
-            defer self.gpa.free(desc);
 
             const desc_id = try self.builder.addData(self.gpa, desc);
 
@@ -347,11 +350,11 @@ pub const Emitter = struct {
             try self.pipeline_ids.put(self.gpa, name, pipeline_id);
 
             // Build compute pipeline descriptor JSON
+            // NOTE: Same as above - must not free before serialization
             const desc = self.buildComputePipelineDescriptor(info.node) catch |err| {
                 std.debug.print("Failed to build compute pipeline descriptor: {}\n", .{err});
                 continue;
             };
-            defer self.gpa.free(desc);
 
             const desc_id = try self.builder.addData(self.gpa, desc);
 
@@ -522,11 +525,12 @@ pub const Emitter = struct {
             }
 
             // Encode entries
+            // NOTE: desc must NOT be freed before serialization since DataSection
+            // stores slices, not copies.
             const desc = DescriptorEncoder.encodeBindGroupEntries(
                 self.gpa,
                 entries_list.items,
             ) catch return error.OutOfMemory;
-            defer self.gpa.free(desc);
 
             const desc_id = try self.builder.addData(self.gpa, desc);
 
