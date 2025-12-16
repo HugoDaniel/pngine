@@ -6,6 +6,10 @@
  */
 
 import { PNGineGPU } from './pngine-gpu.js';
+import { extractPngb, fetchAndExtract, hasPngb, getPngbInfo } from './pngine-png.js';
+
+// Re-export PNG utilities
+export { extractPngb, fetchAndExtract, hasPngb, getPngbInfo };
 
 /**
  * Error codes returned by WASM functions.
@@ -87,6 +91,37 @@ export async function initPNGine(canvas, wasmUrl = 'pngine.wasm') {
     instance.exports.onInit();
 
     return new PNGine(instance, gpu, device);
+}
+
+/**
+ * Initialize PNGine from a PNG image with embedded bytecode.
+ *
+ * This is the simplest way to run a PNGine program - just point to a PNG
+ * image that contains embedded PNGB bytecode.
+ *
+ * @param {HTMLCanvasElement} canvas - Canvas element for rendering
+ * @param {string} pngUrl - URL to PNG image with embedded bytecode
+ * @param {string} wasmUrl - URL to pngine.wasm file
+ * @returns {Promise<PNGine>} Initialized PNGine instance with loaded module
+ *
+ * @example
+ * const pngine = await initFromPng(canvas, 'artwork.png');
+ * pngine.executeAll();
+ */
+export async function initFromPng(canvas, pngUrl, wasmUrl = 'pngine.wasm') {
+    // 1. Fetch and extract bytecode from PNG (can happen in parallel with WASM init)
+    const bytecodePromise = fetchAndExtract(pngUrl);
+
+    // 2. Initialize PNGine with WebGPU
+    const pngine = await initPNGine(canvas, wasmUrl);
+
+    // 3. Wait for bytecode extraction
+    const bytecode = await bytecodePromise;
+
+    // 4. Load the extracted bytecode
+    pngine.loadModule(bytecode);
+
+    return pngine;
 }
 
 /**
@@ -214,19 +249,60 @@ export class PNGine {
     }
 
     /**
-     * Write a time value to a uniform buffer.
-     * Writes an f32 value at offset 0 of the specified buffer.
+     * Load module from a PNG with embedded bytecode.
+     *
+     * @param {string} url - URL of PNG file with embedded bytecode
+     * @throws {Error} On load failure
+     */
+    async loadFromPng(url) {
+        const bytecode = await fetchAndExtract(url);
+        this.loadModule(bytecode);
+    }
+
+    /**
+     * Load module from PNG ArrayBuffer/Uint8Array.
+     *
+     * @param {ArrayBuffer|Uint8Array} pngData - PNG file data
+     * @throws {Error} On extraction or load failure
+     */
+    loadFromPngData(pngData) {
+        const bytecode = extractPngb(pngData);
+        this.loadModule(bytecode);
+    }
+
+    /**
+     * Write uniforms to a buffer (time + canvas dimensions).
+     * Writes: f32 time, u32 canvasW, u32 canvasH (12 bytes total)
      *
      * @param {number} bufferId - Buffer ID to write to
      * @param {number} time - Time value in seconds (f32)
      */
     writeTimeUniform(bufferId, time) {
-        // Create f32 array with the time value
-        const data = new Float32Array([time]);
-        const bytes = new Uint8Array(data.buffer);
+        // Get canvas dimensions
+        const canvas = this.gpu.context.canvas;
+        const width = canvas.width;
+        const height = canvas.height;
 
-        // Write directly to the GPU buffer
-        this.gpu.writeTimeToBuffer(bufferId, bytes);
+        // Create buffer: f32 time + u32 width + u32 height = 12 bytes
+        const buffer = new ArrayBuffer(12);
+        const floatView = new Float32Array(buffer, 0, 1);
+        const uintView = new Uint32Array(buffer, 4, 2);
+
+        floatView[0] = time;
+        uintView[0] = width;
+        uintView[1] = height;
+
+        // Write to GPU buffer
+        this.gpu.writeTimeToBuffer(bufferId, new Uint8Array(buffer));
+    }
+
+    /**
+     * Find the first buffer with UNIFORM usage.
+     * Useful for auto-detecting which buffer to write time uniforms to.
+     * @returns {number|null} Buffer ID or null if not found
+     */
+    findUniformBuffer() {
+        return this.gpu.findUniformBuffer();
     }
 
     /**
