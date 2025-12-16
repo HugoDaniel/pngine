@@ -197,17 +197,20 @@ pub const Emitter = struct {
     // ========================================================================
 
     /// Emit begin_render_pass instruction.
+    /// depth_texture_id: use 0xFFFF for no depth attachment.
     pub fn beginRenderPass(
         self: *Self,
         allocator: Allocator,
         color_texture_id: u16,
         load_op: LoadOp,
         store_op: StoreOp,
+        depth_texture_id: u16,
     ) !void {
         try self.emitOpcode(allocator, .begin_render_pass);
         try self.emitVarint(allocator, color_texture_id);
         try self.emitByte(allocator, @intFromEnum(load_op));
         try self.emitByte(allocator, @intFromEnum(store_op));
+        try self.emitVarint(allocator, depth_texture_id);
     }
 
     /// Emit begin_compute_pass instruction.

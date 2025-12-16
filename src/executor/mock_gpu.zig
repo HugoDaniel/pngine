@@ -83,6 +83,7 @@ pub const Call = struct {
             color_texture_id: u16,
             load_op: u8,
             store_op: u8,
+            depth_texture_id: u16,
         },
         set_pipeline: struct {
             pipeline_id: u16,
@@ -358,7 +359,7 @@ pub const MockGPU = struct {
     // Pass Operations
     // ========================================================================
 
-    pub fn beginRenderPass(self: *Self, allocator: Allocator, color_texture_id: u16, load_op: u8, store_op: u8) !void {
+    pub fn beginRenderPass(self: *Self, allocator: Allocator, color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16) !void {
         // Pre-condition: not already in a pass
         assert(!self.in_render_pass and !self.in_compute_pass);
 
@@ -371,6 +372,7 @@ pub const MockGPU = struct {
                 .color_texture_id = color_texture_id,
                 .load_op = load_op,
                 .store_op = store_op,
+                .depth_texture_id = depth_texture_id,
             } },
         });
     }
@@ -596,7 +598,7 @@ test "mock gpu render pass sequence" {
 
     try gpu.createShaderModule(testing.allocator, 0, 0);
     try gpu.createRenderPipeline(testing.allocator, 0, 1);
-    try gpu.beginRenderPass(testing.allocator, 0, 1, 0);
+    try gpu.beginRenderPass(testing.allocator, 0, 1, 0, 0xFFFF);
     try gpu.setPipeline(testing.allocator, 0);
     try gpu.draw(testing.allocator, 3, 1);
     try gpu.endPass(testing.allocator);
@@ -632,7 +634,7 @@ test "mock gpu call formatting" {
     defer gpu.deinit(testing.allocator);
 
     // load_op=1 (clear), store_op=0 (store)
-    try gpu.beginRenderPass(testing.allocator, 0, 1, 0);
+    try gpu.beginRenderPass(testing.allocator, 0, 1, 0, 0xFFFF);
     try gpu.draw(testing.allocator, 3, 1);
     try gpu.endPass(testing.allocator);
 

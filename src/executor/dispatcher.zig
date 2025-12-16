@@ -180,7 +180,8 @@ pub fn Dispatcher(comptime BackendType: type) type {
                     const color_texture_id = try self.readVarint();
                     const load_op = try self.readByte();
                     const store_op = try self.readByte();
-                    try self.backend.beginRenderPass(allocator, @intCast(color_texture_id), load_op, store_op);
+                    const depth_texture_id = try self.readVarint();
+                    try self.backend.beginRenderPass(allocator, @intCast(color_texture_id), load_op, store_op, @intCast(depth_texture_id));
                 },
 
                 .begin_compute_pass => {
@@ -456,7 +457,7 @@ test "dispatcher draw sequence" {
 
     const emitter = builder.getEmitter();
     // Must wrap draw commands in a render pass
-    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store);
+    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store, 0xFFFF);
     try emitter.setPipeline(testing.allocator, 0);
     try emitter.draw(testing.allocator, 3, 1);
     try emitter.endPass(testing.allocator);
@@ -500,7 +501,7 @@ test "dispatcher frame control" {
     try emitter.defineFrame(testing.allocator, 0, name_id.toInt());
 
     // Actual render pass inside the frame
-    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store);
+    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store, 0xFFFF);
     try emitter.setPipeline(testing.allocator, 0);
     try emitter.draw(testing.allocator, 3, 1);
     try emitter.endPass(testing.allocator);

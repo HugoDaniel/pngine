@@ -47,7 +47,7 @@ test "simpleTriangle full pipeline" {
     try emitter.createRenderPipeline(testing.allocator, 0, pipeline_desc_id.toInt());
 
     // 2. Render pass
-    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store);
+    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store, 0xFFFF);
     try emitter.setPipeline(testing.allocator, 0);
     try emitter.draw(testing.allocator, 3, 1);
     try emitter.endPass(testing.allocator);
@@ -172,13 +172,13 @@ test "multi-pass rendering" {
     try emitter.createRenderPipeline(testing.allocator, 1, desc_id.toInt());
 
     // Pass 1: shadow map
-    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store); // clear, store
+    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store, 0xFFFF); // clear, store
     try emitter.setPipeline(testing.allocator, 0);
     try emitter.draw(testing.allocator, 36, 100); // 100 instances
     try emitter.endPass(testing.allocator);
 
     // Pass 2: main scene
-    try emitter.beginRenderPass(testing.allocator, 1, .clear, .store); // clear, store
+    try emitter.beginRenderPass(testing.allocator, 1, .clear, .store, 0xFFFF); // clear, store
     try emitter.setPipeline(testing.allocator, 1);
     try emitter.draw(testing.allocator, 36, 100);
     try emitter.endPass(testing.allocator);
@@ -225,7 +225,7 @@ test "buffer write and use" {
     try emitter.writeBuffer(testing.allocator, 0, 0, uniform_data.toInt());
 
     // Use buffer in render (must be in a render pass)
-    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store);
+    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store, 0xFFFF);
     try emitter.setPipeline(testing.allocator, 0);
     try emitter.setVertexBuffer(testing.allocator, 0, 0);
     try emitter.draw(testing.allocator, 3, 1);
@@ -274,7 +274,7 @@ test "bind group setup" {
 
     // Create bind group and use it
     try emitter.createBindGroup(testing.allocator, 0, 0, entries_data.toInt());
-    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store);
+    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store, 0xFFFF);
     try emitter.setPipeline(testing.allocator, 0);
     try emitter.setBindGroup(testing.allocator, 0, 0);
     try emitter.draw(testing.allocator, 3, 1);
@@ -318,7 +318,7 @@ test "large vertex count varint encoding" {
     const emitter = builder.getEmitter();
 
     // Draw with large vertex count (tests 2-byte varint)
-    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store);
+    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store, 0xFFFF);
     try emitter.draw(testing.allocator, 10000, 1);
 
     // Draw with very large count (tests 4-byte varint)
@@ -357,7 +357,7 @@ test "indexed draw" {
 
     const emitter = builder.getEmitter();
 
-    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store);
+    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store, 0xFFFF);
     try emitter.setPipeline(testing.allocator, 0);
     try emitter.drawIndexed(testing.allocator, 36, 10);
     try emitter.endPass(testing.allocator);
@@ -421,7 +421,7 @@ test "texture-based render pass (MSAA pattern)" {
     try emitter.createRenderPipeline(testing.allocator, 0, pipeline_desc_id.toInt());
 
     // Render pass using texture as render target
-    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store);
+    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store, 0xFFFF);
     try emitter.setPipeline(testing.allocator, 0);
     try emitter.draw(testing.allocator, 3, 1);
     try emitter.endPass(testing.allocator);

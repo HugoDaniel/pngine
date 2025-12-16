@@ -33,7 +33,7 @@ extern "env" fn gpuCreateShaderModule(shader_id: u16, code_ptr: [*]const u8, cod
 extern "env" fn gpuCreateRenderPipeline(pipeline_id: u16, desc_ptr: [*]const u8, desc_len: u32) void;
 extern "env" fn gpuCreateComputePipeline(pipeline_id: u16, desc_ptr: [*]const u8, desc_len: u32) void;
 extern "env" fn gpuCreateBindGroup(group_id: u16, layout_id: u16, entries_ptr: [*]const u8, entries_len: u32) void;
-extern "env" fn gpuBeginRenderPass(color_texture_id: u16, load_op: u8, store_op: u8) void;
+extern "env" fn gpuBeginRenderPass(color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16) void;
 extern "env" fn gpuBeginComputePass() void;
 extern "env" fn gpuSetPipeline(pipeline_id: u16) void;
 extern "env" fn gpuSetBindGroup(slot: u8, group_id: u16) void;
@@ -139,10 +139,10 @@ pub const WasmGPU = struct {
     // ========================================================================
 
     /// Begin a render pass.
-    pub fn beginRenderPass(self: *Self, allocator: Allocator, color_texture_id: u16, load_op: u8, store_op: u8) !void {
+    pub fn beginRenderPass(self: *Self, allocator: Allocator, color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16) !void {
         _ = self;
         _ = allocator;
-        gpuBeginRenderPass(color_texture_id, load_op, store_op);
+        gpuBeginRenderPass(color_texture_id, load_op, store_op, depth_texture_id);
     }
 
     /// Begin a compute pass.

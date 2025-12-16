@@ -73,7 +73,7 @@ pub const OpCode = enum(u8) {
     // ========================================================================
 
     /// Begin render pass.
-    /// Params: color_texture_id, load_op, store_op
+    /// Params: color_texture_id, load_op, store_op, depth_texture_id (0xFFFF = none)
     begin_render_pass = 0x10,
 
     /// Begin compute pass.

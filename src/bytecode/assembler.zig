@@ -666,7 +666,7 @@ pub const Assembler = struct {
 
         // GPU requires explicit pass begin before any draw/dispatch commands
         switch (pass_type) {
-            .render => emitter.beginRenderPass(self.gpa, 0, .clear, .store) catch return error.OutOfMemory,
+            .render => emitter.beginRenderPass(self.gpa, 0, .clear, .store, 0xFFFF) catch return error.OutOfMemory,
             .compute => emitter.beginComputePass(self.gpa) catch return error.OutOfMemory,
         }
 
@@ -846,7 +846,7 @@ pub const Assembler = struct {
                             }
                         }
                     }
-                    emitter.beginRenderPass(self.gpa, texture_id, load_op, store_op) catch return error.OutOfMemory;
+                    emitter.beginRenderPass(self.gpa, texture_id, load_op, store_op, 0xFFFF) catch return error.OutOfMemory;
                 },
                 .begin_compute_pass => {
                     emitter.beginComputePass(self.gpa) catch return error.OutOfMemory;
