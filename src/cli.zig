@@ -7,12 +7,15 @@
 //!   pngine compile input.pngine -o output.pngb   (DSL format)
 //!   pngine compile input.pbsf -o output.pngb     (legacy PBSF)
 //!   pngine compile input.pngine                  (outputs to input.pngb)
+//!   pngine embed image.png bytecode.pngb -o output.png
+//!   pngine extract input.png -o output.pngb
 //!
 //! Exit codes:
 //!   0 - Success
 //!   1 - Invalid arguments
 //!   2 - File I/O error
 //!   3 - Compilation error
+//!   4 - PNG error
 //!
 //! Invariants:
 //!   - All file reads are bounded by max_file_size (16 MiB)
@@ -67,6 +70,10 @@ fn run(allocator: std.mem.Allocator) !u8 {
         return runCompile(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "check")) {
         return runCheck(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "embed")) {
+        return runEmbed(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "extract")) {
+        return runExtract(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
         printUsage();
         return 0;
@@ -283,6 +290,215 @@ fn runCheck(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     }
 
     return 0;
+}
+
+/// Execute the embed command.
+/// Embeds PNGB bytecode into a PNG file.
+/// Returns exit code.
+fn runEmbed(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
+    var png_path: ?[]const u8 = null;
+    var pngb_path: ?[]const u8 = null;
+    var output_path: ?[]const u8 = null;
+
+    // Parse arguments
+    var i: u32 = 0;
+    const args_len: u32 = @intCast(args.len);
+    while (i < args_len) : (i += 1) {
+        const arg = args[i];
+
+        if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
+            if (i + 1 >= args_len) {
+                std.debug.print("Error: -o requires an output path\n", .{});
+                return 1;
+            }
+            i += 1;
+            output_path = args[i];
+        } else if (arg.len > 0 and arg[0] == '-') {
+            std.debug.print("Unknown option: {s}\n", .{arg});
+            return 1;
+        } else {
+            // First positional arg is PNG, second is PNGB
+            if (png_path == null) {
+                png_path = arg;
+            } else if (pngb_path == null) {
+                pngb_path = arg;
+            } else {
+                std.debug.print("Error: too many arguments\n", .{});
+                return 1;
+            }
+        }
+    }
+
+    if (png_path == null or pngb_path == null) {
+        std.debug.print("Error: embed requires PNG file and PNGB bytecode file\n\n", .{});
+        std.debug.print("Usage: pngine embed <image.png> <bytecode.pngb> [-o output.png]\n", .{});
+        return 1;
+    }
+
+    const png_input = png_path.?;
+    const pngb_input = pngb_path.?;
+
+    // Derive output path if not specified: input.png -> input_embedded.png
+    const output = output_path orelse deriveEmbedOutputPath(allocator, png_input) catch |err| {
+        std.debug.print("Error: failed to derive output path: {}\n", .{err});
+        return 2;
+    };
+    defer if (output_path == null) allocator.free(output);
+
+    // Read PNG file
+    const png_data = readBinaryFile(allocator, png_input) catch |err| {
+        std.debug.print("Error: failed to read PNG '{s}': {}\n", .{ png_input, err });
+        return 2;
+    };
+    defer allocator.free(png_data);
+
+    // Read PNGB bytecode
+    const bytecode = readBinaryFile(allocator, pngb_input) catch |err| {
+        std.debug.print("Error: failed to read PNGB '{s}': {}\n", .{ pngb_input, err });
+        return 2;
+    };
+    defer allocator.free(bytecode);
+
+    // Validate PNGB
+    if (bytecode.len < format.HEADER_SIZE or !std.mem.eql(u8, bytecode[0..4], format.MAGIC)) {
+        std.debug.print("Error: '{s}' is not a valid PNGB file\n", .{pngb_input});
+        return 4;
+    }
+
+    // Embed bytecode into PNG
+    const embedded = pngine.png.embedBytecode(allocator, png_data, bytecode) catch |err| {
+        std.debug.print("Error: failed to embed bytecode: {}\n", .{err});
+        return 4;
+    };
+    defer allocator.free(embedded);
+
+    // Write output file
+    writeOutputFile(output, embedded) catch |err| {
+        std.debug.print("Error: failed to write '{s}': {}\n", .{ output, err });
+        return 2;
+    };
+
+    // Success message
+    std.debug.print("Embedded {s} ({d} bytes) into {s} -> {s} ({d} bytes)\n", .{
+        pngb_input, bytecode.len, png_input, output, embedded.len,
+    });
+
+    return 0;
+}
+
+/// Execute the extract command.
+/// Extracts PNGB bytecode from a PNG file.
+/// Returns exit code.
+fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
+    var input_path: ?[]const u8 = null;
+    var output_path: ?[]const u8 = null;
+
+    // Parse arguments
+    var i: u32 = 0;
+    const args_len: u32 = @intCast(args.len);
+    while (i < args_len) : (i += 1) {
+        const arg = args[i];
+
+        if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
+            if (i + 1 >= args_len) {
+                std.debug.print("Error: -o requires an output path\n", .{});
+                return 1;
+            }
+            i += 1;
+            output_path = args[i];
+        } else if (arg.len > 0 and arg[0] == '-') {
+            std.debug.print("Unknown option: {s}\n", .{arg});
+            return 1;
+        } else {
+            if (input_path != null) {
+                std.debug.print("Error: multiple input files specified\n", .{});
+                return 1;
+            }
+            input_path = arg;
+        }
+    }
+
+    if (input_path == null) {
+        std.debug.print("Error: no input file specified\n\n", .{});
+        std.debug.print("Usage: pngine extract <image.png> [-o output.pngb]\n", .{});
+        return 1;
+    }
+
+    const input = input_path.?;
+
+    // Derive output path if not specified: input.png -> input.pngb
+    const output = output_path orelse deriveExtractOutputPath(allocator, input) catch |err| {
+        std.debug.print("Error: failed to derive output path: {}\n", .{err});
+        return 2;
+    };
+    defer if (output_path == null) allocator.free(output);
+
+    // Read PNG file
+    const png_data = readBinaryFile(allocator, input) catch |err| {
+        std.debug.print("Error: failed to read '{s}': {}\n", .{ input, err });
+        return 2;
+    };
+    defer allocator.free(png_data);
+
+    // Check if PNG contains bytecode
+    if (!pngine.png.hasPngb(png_data)) {
+        std.debug.print("Error: '{s}' does not contain embedded bytecode (no pNGb chunk)\n", .{input});
+        return 4;
+    }
+
+    // Extract bytecode
+    const bytecode = pngine.png.extractBytecode(allocator, png_data) catch |err| {
+        std.debug.print("Error: failed to extract bytecode: {}\n", .{err});
+        return 4;
+    };
+    defer allocator.free(bytecode);
+
+    // Validate extracted PNGB
+    if (bytecode.len < format.HEADER_SIZE or !std.mem.eql(u8, bytecode[0..4], format.MAGIC)) {
+        std.debug.print("Error: extracted data is not valid PNGB\n", .{});
+        return 4;
+    }
+
+    // Write output file
+    writeOutputFile(output, bytecode) catch |err| {
+        std.debug.print("Error: failed to write '{s}': {}\n", .{ output, err });
+        return 2;
+    };
+
+    // Success message
+    std.debug.print("Extracted {s} -> {s} ({d} bytes)\n", .{ input, output, bytecode.len });
+
+    return 0;
+}
+
+/// Derive output path for embed: input.png -> input_embedded.png
+fn deriveEmbedOutputPath(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
+    std.debug.assert(input.len > 0);
+
+    const stem = std.fs.path.stem(input);
+    const dir = std.fs.path.dirname(input);
+
+    const result = if (dir) |d|
+        try std.fmt.allocPrint(allocator, "{s}/{s}_embedded.png", .{ d, stem })
+    else
+        try std.fmt.allocPrint(allocator, "{s}_embedded.png", .{stem});
+
+    return result;
+}
+
+/// Derive output path for extract: input.png -> input.pngb
+fn deriveExtractOutputPath(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
+    std.debug.assert(input.len > 0);
+
+    const stem = std.fs.path.stem(input);
+    const dir = std.fs.path.dirname(input);
+
+    const result = if (dir) |d|
+        try std.fmt.allocPrint(allocator, "{s}/{s}.pngb", .{ d, stem })
+    else
+        try std.fmt.allocPrint(allocator, "{s}.pngb", .{stem});
+
+    return result;
 }
 
 /// Report shader entry points for user verification.
@@ -706,28 +922,33 @@ fn printUsage() void {
         \\Usage:
         \\  pngine compile <input> [-o <output.pngb>]
         \\  pngine check <input>
+        \\  pngine embed <image.png> <bytecode.pngb> [-o <output.png>]
+        \\  pngine extract <image.png> [-o <output.pngb>]
         \\  pngine help
         \\  pngine version
         \\
         \\Commands:
         \\  compile     Compile source to PNGB bytecode
         \\  check       Compile and validate bytecode execution
+        \\  embed       Embed PNGB bytecode into a PNG image
+        \\  extract     Extract PNGB bytecode from a PNG image
         \\  help        Show this help message
         \\  version     Show version information
         \\
         \\Options:
-        \\  -o, --output <path>   Output file path (default: input with .pngb extension)
+        \\  -o, --output <path>   Output file path
         \\
         \\Supported formats:
         \\  .pngine     DSL format (macro-based syntax)
         \\  .pbsf       Legacy PBSF format (S-expressions)
-        \\  .pngb       Compiled bytecode (check only)
+        \\  .pngb       Compiled bytecode
+        \\  .png        PNG images (embed/extract)
         \\
         \\Examples:
         \\  pngine compile triangle.pngine -o triangle.pngb
-        \\  pngine compile examples/simple_triangle.pngine
-        \\  pngine check examples/simple_triangle.pngine
         \\  pngine check output.pngb
+        \\  pngine embed cover.png triangle.pngb -o artwork.png
+        \\  pngine extract artwork.png -o extracted.pngb
         \\
     , .{});
 }
