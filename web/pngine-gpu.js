@@ -64,11 +64,16 @@ export class PNGineGPU {
 
     /**
      * Create a GPU buffer.
+     * Skips creation if buffer already exists (for animation loop support).
      * @param {number} id - Buffer ID
      * @param {number} size - Buffer size in bytes
      * @param {number} usage - Usage flags
      */
     createBuffer(id, size, usage) {
+        // Skip if already exists (allows executeAll in animation loop)
+        if (this.buffers.has(id)) {
+            return;
+        }
         const buffer = this.device.createBuffer({
             size,
             usage: this.mapBufferUsage(usage),
@@ -78,11 +83,16 @@ export class PNGineGPU {
 
     /**
      * Create a GPU texture.
+     * Skips creation if texture already exists (for animation loop support).
      * @param {number} id - Texture ID
      * @param {number} descPtr - Pointer to binary descriptor
      * @param {number} descLen - Descriptor length
      */
     createTexture(id, descPtr, descLen) {
+        // Skip if already exists (allows executeAll in animation loop)
+        if (this.textures.has(id)) {
+            return;
+        }
         const bytes = this.readBytes(descPtr, descLen);
         const desc = this.decodeTextureDescriptor(bytes);
         console.log(`[GPU] createTexture(${id}), decoded:`, desc);
@@ -93,11 +103,16 @@ export class PNGineGPU {
 
     /**
      * Create a texture sampler.
+     * Skips creation if sampler already exists (for animation loop support).
      * @param {number} id - Sampler ID
      * @param {number} descPtr - Pointer to binary descriptor
      * @param {number} descLen - Descriptor length
      */
     createSampler(id, descPtr, descLen) {
+        // Skip if already exists (allows executeAll in animation loop)
+        if (this.samplers.has(id)) {
+            return;
+        }
         const bytes = this.readBytes(descPtr, descLen);
         const desc = this.decodeSamplerDescriptor(bytes);
         console.log(`[GPU] createSampler(${id}), decoded:`, desc);
@@ -108,11 +123,16 @@ export class PNGineGPU {
 
     /**
      * Create a shader module from WGSL code.
+     * Skips creation if shader already exists (for animation loop support).
      * @param {number} id - Shader ID
      * @param {number} codePtr - Pointer to WGSL code
      * @param {number} codeLen - Code length
      */
     createShaderModule(id, codePtr, codeLen) {
+        // Skip if already exists (allows executeAll in animation loop)
+        if (this.shaders.has(id)) {
+            return;
+        }
         const code = this.readString(codePtr, codeLen);
         console.log(`[GPU] createShaderModule(${id}), code length: ${code.length}`);
         const module = this.device.createShaderModule({ code });
@@ -121,11 +141,16 @@ export class PNGineGPU {
 
     /**
      * Create a render pipeline.
+     * Skips creation if pipeline already exists (for animation loop support).
      * @param {number} id - Pipeline ID
      * @param {number} descPtr - Pointer to descriptor JSON
      * @param {number} descLen - Descriptor length
      */
     createRenderPipeline(id, descPtr, descLen) {
+        // Skip if already exists (allows executeAll in animation loop)
+        if (this.pipelines.has(id)) {
+            return;
+        }
         const descJson = this.readString(descPtr, descLen);
         console.log(`[GPU] createRenderPipeline(${id}), desc: ${descJson}`);
         const desc = JSON.parse(descJson);
@@ -166,11 +191,16 @@ export class PNGineGPU {
 
     /**
      * Create a compute pipeline.
+     * Skips creation if pipeline already exists (for animation loop support).
      * @param {number} id - Pipeline ID
      * @param {number} descPtr - Pointer to descriptor JSON
      * @param {number} descLen - Descriptor length
      */
     createComputePipeline(id, descPtr, descLen) {
+        // Skip if already exists (allows executeAll in animation loop)
+        if (this.pipelines.has(id)) {
+            return;
+        }
         const descJson = this.readString(descPtr, descLen);
         const desc = JSON.parse(descJson);
 
@@ -186,28 +216,43 @@ export class PNGineGPU {
 
     /**
      * Create a bind group.
+     * Skips creation if bind group already exists (for animation loop support).
      * @param {number} id - Bind group ID
-     * @param {number} layoutId - Layout ID (unused with 'auto' layout)
-     * @param {number} entriesPtr - Pointer to entries JSON
-     * @param {number} entriesLen - Entries length
+     * @param {number} pipelineId - Pipeline ID to get layout from
+     * @param {number} entriesPtr - Pointer to binary descriptor
+     * @param {number} entriesLen - Descriptor length
      */
-    createBindGroup(id, layoutId, entriesPtr, entriesLen) {
-        const entriesJson = this.readString(entriesPtr, entriesLen);
-        const desc = JSON.parse(entriesJson);
+    createBindGroup(id, pipelineId, entriesPtr, entriesLen) {
+        // Skip if already exists (allows executeAll in animation loop)
+        if (this.bindGroups.has(id)) {
+            return;
+        }
+        const bytes = this.readBytes(entriesPtr, entriesLen);
+        const desc = this.decodeBindGroupDescriptor(bytes);
+        console.log(`[GPU] createBindGroup(${id}), pipeline=${pipelineId}, group=${desc.groupIndex}, entries=${desc.entries.length}`);
 
         // Resolve resource references in entries
         const entries = desc.entries.map(entry => {
             const resolved = { binding: entry.binding };
-            if (entry.buffer !== undefined) {
-                resolved.resource = { buffer: this.buffers.get(entry.buffer) };
+            if (entry.resourceType === 0) { // buffer
+                resolved.resource = { buffer: this.buffers.get(entry.resourceId) };
+            } else if (entry.resourceType === 1) { // texture_view
+                const texture = this.textures.get(entry.resourceId);
+                resolved.resource = texture.createView();
+            } else if (entry.resourceType === 2) { // sampler
+                resolved.resource = this.samplers.get(entry.resourceId);
             }
             return resolved;
         });
 
         // Get layout from pipeline
-        const pipeline = this.pipelines.get(desc.pipeline);
+        const pipeline = this.pipelines.get(pipelineId);
+        if (!pipeline) {
+            console.error(`[GPU] Pipeline ${pipelineId} not found for bind group ${id}`);
+            return;
+        }
         const bindGroup = this.device.createBindGroup({
-            layout: pipeline.getBindGroupLayout(desc.group || 0),
+            layout: pipeline.getBindGroupLayout(desc.groupIndex),
             entries,
         });
         this.bindGroups.set(id, bindGroup);
@@ -349,6 +394,21 @@ export class PNGineGPU {
     }
 
     /**
+     * Write time data directly to a buffer (called from JS, not WASM).
+     * Used by the Play feature to update uniform buffers each frame.
+     * @param {number} bufferId - Buffer ID
+     * @param {Uint8Array} data - Data to write (f32 as bytes)
+     */
+    writeTimeToBuffer(bufferId, data) {
+        const buffer = this.buffers.get(bufferId);
+        if (!buffer) {
+            console.warn(`[GPU] writeTimeToBuffer: buffer ${bufferId} not found`);
+            return;
+        }
+        this.device.queue.writeBuffer(buffer, 0, data);
+    }
+
+    /**
      * Submit command buffer to queue.
      */
     submit() {
@@ -366,26 +426,40 @@ export class PNGineGPU {
 
     /**
      * Map PNGine buffer usage flags to WebGPU usage flags.
-     * @param {number} usage - PNGine usage flags
+     * @param {number} usage - PNGine usage flags (packed struct from Zig)
      * @returns {number} WebGPU usage flags
+     *
+     * Zig BufferUsage packed struct bit layout (LSB first):
+     *   bit 0: map_read
+     *   bit 1: map_write
+     *   bit 2: copy_src
+     *   bit 3: copy_dst
+     *   bit 4: index
+     *   bit 5: vertex
+     *   bit 6: uniform
+     *   bit 7: storage
      */
     mapBufferUsage(usage) {
         let gpuUsage = 0;
 
-        // PNGine usage flags (matching bytecode format)
-        const VERTEX = 0x01;
-        const INDEX = 0x02;
-        const UNIFORM = 0x04;
-        const STORAGE = 0x08;
-        const COPY_SRC = 0x10;
-        const COPY_DST = 0x20;
+        // PNGine usage flags (matching Zig BufferUsage packed struct)
+        const MAP_READ  = 0x01;  // bit 0
+        const MAP_WRITE = 0x02;  // bit 1
+        const COPY_SRC  = 0x04;  // bit 2
+        const COPY_DST  = 0x08;  // bit 3
+        const INDEX     = 0x10;  // bit 4
+        const VERTEX    = 0x20;  // bit 5
+        const UNIFORM   = 0x40;  // bit 6
+        const STORAGE   = 0x80;  // bit 7
 
-        if (usage & VERTEX) gpuUsage |= GPUBufferUsage.VERTEX;
-        if (usage & INDEX) gpuUsage |= GPUBufferUsage.INDEX;
-        if (usage & UNIFORM) gpuUsage |= GPUBufferUsage.UNIFORM;
-        if (usage & STORAGE) gpuUsage |= GPUBufferUsage.STORAGE;
+        if (usage & MAP_READ) gpuUsage |= GPUBufferUsage.MAP_READ;
+        if (usage & MAP_WRITE) gpuUsage |= GPUBufferUsage.MAP_WRITE;
         if (usage & COPY_SRC) gpuUsage |= GPUBufferUsage.COPY_SRC;
         if (usage & COPY_DST) gpuUsage |= GPUBufferUsage.COPY_DST;
+        if (usage & INDEX) gpuUsage |= GPUBufferUsage.INDEX;
+        if (usage & VERTEX) gpuUsage |= GPUBufferUsage.VERTEX;
+        if (usage & UNIFORM) gpuUsage |= GPUBufferUsage.UNIFORM;
+        if (usage & STORAGE) gpuUsage |= GPUBufferUsage.STORAGE;
 
         return gpuUsage;
     }
@@ -560,6 +634,67 @@ export class PNGineGPU {
     decodeAddressMode(value) {
         const modes = ['clamp-to-edge', 'repeat', 'mirror-repeat'];
         return modes[value] || 'clamp-to-edge';
+    }
+
+    /**
+     * Decode a binary bind group descriptor.
+     * Format: type_tag(u8) + field_count(u8) + fields...
+     * @param {Uint8Array} bytes - Binary descriptor data
+     * @returns {{groupIndex: number, entries: Array}}
+     */
+    decodeBindGroupDescriptor(bytes) {
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        let offset = 0;
+
+        // Validate type tag
+        const typeTag = bytes[offset++];
+        if (typeTag !== 0x03) { // DescriptorType.bind_group
+            throw new Error(`Invalid bind group descriptor type tag: ${typeTag}`);
+        }
+
+        const fieldCount = bytes[offset++];
+        let groupIndex = 0;
+        const entries = [];
+
+        // Field IDs (from DescriptorEncoder.BindGroupField)
+        const FIELD_LAYOUT = 0x01;
+        const FIELD_ENTRIES = 0x02;
+
+        // Value types
+        const VALUE_ARRAY = 0x03;
+        const VALUE_ENUM = 0x07;
+
+        for (let i = 0; i < fieldCount; i++) {
+            const fieldId = bytes[offset++];
+            const valueType = bytes[offset++];
+
+            if (fieldId === FIELD_LAYOUT && valueType === VALUE_ENUM) {
+                groupIndex = bytes[offset++];
+            } else if (fieldId === FIELD_ENTRIES && valueType === VALUE_ARRAY) {
+                const entryCount = bytes[offset++];
+
+                for (let j = 0; j < entryCount; j++) {
+                    const binding = bytes[offset++];
+                    const resourceType = bytes[offset++];
+                    const resourceId = view.getUint16(offset, true); // little endian
+                    offset += 2;
+
+                    const entry = { binding, resourceType, resourceId };
+
+                    // Buffer bindings have additional offset/size fields
+                    if (resourceType === 0) { // buffer
+                        entry.offset = view.getUint32(offset, true);
+                        offset += 4;
+                        entry.size = view.getUint32(offset, true);
+                        offset += 4;
+                    }
+
+                    entries.push(entry);
+                }
+            }
+        }
+
+        return { groupIndex, entries };
     }
 
     /**
