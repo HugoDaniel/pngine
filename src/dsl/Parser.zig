@@ -349,7 +349,28 @@ pub const Parser = struct {
         // Fast path: simple values (no nesting)
         switch (self.currentTag()) {
             .string_literal => return try self.parseSimpleValue(.string_value),
-            .number_literal => return try self.parseSimpleValue(.number_value),
+            .number_literal => {
+                // Check if this is part of an expression (e.g., 1 + 2)
+                if (try self.parseExpression()) |expr| {
+                    return expr;
+                }
+                return try self.parseSimpleValue(.number_value);
+            },
+            .l_paren => {
+                // Grouped expression: (1 + 2)
+                if (try self.parseExpression()) |expr| {
+                    return expr;
+                }
+                return null;
+            },
+            .minus => {
+                // Unary negation at start of value: -10, -(1+2)
+                if (try self.parseExpression()) |expr| {
+                    return expr;
+                }
+                return null;
+            },
+            .boolean_literal => return try self.parseSimpleValue(.boolean_value),
             .identifier => return try self.parseSimpleValue(.identifier_value),
             .dollar => return try self.parseReference(),
             .l_bracket, .l_brace => {}, // Fall through to iterative parsing
@@ -411,15 +432,31 @@ pub const Parser = struct {
         // Pre-condition: valid token
         std.debug.assert(self.tok_i < self.tokens.len);
 
+        // Check if string contains runtime interpolation ($...)
+        var actual_tag = node_tag;
+        if (node_tag == .string_value) {
+            const token_start = self.tokens.items(.start)[self.tok_i];
+            const token_end = if (self.tok_i + 1 < self.tokens.len)
+                self.tokens.items(.start)[self.tok_i + 1]
+            else
+                @as(u32, @intCast(self.source.len));
+
+            const content = self.source[token_start..token_end];
+            // Check if string contains $ (runtime interpolation marker)
+            if (std.mem.indexOfScalar(u8, content, '$') != null) {
+                actual_tag = .runtime_interpolation;
+            }
+        }
+
         const idx = try self.addNode(.{
-            .tag = node_tag,
+            .tag = actual_tag,
             .main_token = self.tok_i,
             .data = .{ .none = {} },
         });
         self.tok_i += 1;
 
-        // Post-condition: node created with correct tag
-        std.debug.assert(self.nodes.items(.tag)[idx.toInt()] == node_tag);
+        // Post-condition: node created
+        std.debug.assert(self.nodes.items(.tag)[idx.toInt()] == actual_tag);
         return idx;
     }
 
@@ -494,7 +531,32 @@ pub const Parser = struct {
                 try self.scratch.append(self.gpa, elem.toInt());
             },
             .number_literal => {
-                const elem = try self.parseSimpleValue(.number_value);
+                // Try to parse as expression first (e.g., 1 + 2 in array)
+                if (try self.parseExpression()) |expr| {
+                    try self.scratch.append(self.gpa, expr.toInt());
+                } else {
+                    const elem = try self.parseSimpleValue(.number_value);
+                    try self.scratch.append(self.gpa, elem.toInt());
+                }
+            },
+            .l_paren => {
+                // Grouped expression in array: [(1 + 2), 3]
+                if (try self.parseExpression()) |expr| {
+                    try self.scratch.append(self.gpa, expr.toInt());
+                } else {
+                    return error.ParseError;
+                }
+            },
+            .minus => {
+                // Unary negation in array: [-1, -2]
+                if (try self.parseExpression()) |expr| {
+                    try self.scratch.append(self.gpa, expr.toInt());
+                } else {
+                    return error.ParseError;
+                }
+            },
+            .boolean_literal => {
+                const elem = try self.parseSimpleValue(.boolean_value);
                 try self.scratch.append(self.gpa, elem.toInt());
             },
             .identifier => {
@@ -562,7 +624,40 @@ pub const Parser = struct {
                 try self.scratch.append(self.gpa, prop.toInt());
             },
             .number_literal => {
-                const value = try self.parseSimpleValue(.number_value);
+                // Try to parse as expression first (e.g., size=1+2)
+                const value = if (try self.parseExpression()) |expr|
+                    expr
+                else
+                    try self.parseSimpleValue(.number_value);
+                const prop = try self.addNode(.{
+                    .tag = .property,
+                    .main_token = key_token,
+                    .data = .{ .node = value },
+                });
+                try self.scratch.append(self.gpa, prop.toInt());
+            },
+            .l_paren => {
+                // Grouped expression: size=(1+2)
+                const value = try self.parseExpression() orelse return error.ParseError;
+                const prop = try self.addNode(.{
+                    .tag = .property,
+                    .main_token = key_token,
+                    .data = .{ .node = value },
+                });
+                try self.scratch.append(self.gpa, prop.toInt());
+            },
+            .minus => {
+                // Unary negation: offset=-10
+                const value = try self.parseExpression() orelse return error.ParseError;
+                const prop = try self.addNode(.{
+                    .tag = .property,
+                    .main_token = key_token,
+                    .data = .{ .node = value },
+                });
+                try self.scratch.append(self.gpa, prop.toInt());
+            },
+            .boolean_literal => {
+                const value = try self.parseSimpleValue(.boolean_value);
                 const prop = try self.addNode(.{
                     .tag = .property,
                     .main_token = key_token,
@@ -639,6 +734,198 @@ pub const Parser = struct {
     }
 
     // ========================================================================
+    // Expression Parsing (compile-time arithmetic)
+    // ========================================================================
+
+    /// Check if current token can start an expression.
+    fn canStartExpression(self: *Self) bool {
+        return switch (self.currentTag()) {
+            .number_literal, .l_paren => true,
+            .minus => blk: {
+                // Check if this is unary minus (followed by number or paren)
+                if (self.tok_i + 1 >= self.tokens.len) break :blk false;
+                const next = self.tokens.items(.tag)[self.tok_i + 1];
+                break :blk next == .number_literal or next == .l_paren;
+            },
+            else => false,
+        };
+    }
+
+    /// Check if current token is an operator that continues an expression.
+    fn isExpressionOperator(self: *Self) bool {
+        return switch (self.currentTag()) {
+            .plus, .minus, .star, .slash => true,
+            else => false,
+        };
+    }
+
+    /// Parse an expression with operator precedence.
+    ///
+    /// Grammar: expr = term (('+' | '-') term)*
+    /// Handles addition/subtraction (lowest precedence).
+    ///
+    /// Returns null if current token can't start an expression.
+    fn parseExpression(self: *Self) Error!?Node.Index {
+        // Pre-conditions
+        std.debug.assert(self.tok_i < self.tokens.len);
+        const start_tok = self.tok_i;
+
+        // Parse left operand (term handles higher precedence: *, /)
+        var left = try self.parseTerm() orelse return null;
+
+        // Consume additional terms separated by + or -
+        const MAX_EXPR_TERMS: u32 = 256;
+        for (0..MAX_EXPR_TERMS) |_| {
+            const op_tag = self.currentTag();
+            if (op_tag != .plus and op_tag != .minus) break;
+
+            const op_token = self.tok_i;
+            self.tok_i += 1; // advance past operator to parse right-hand side
+
+            const right = try self.parseTerm() orelse return error.ParseError;
+
+            // Build left-associative tree: a + b + c = (a + b) + c
+            const node_tag: Node.Tag = if (op_tag == .plus) .expr_add else .expr_sub;
+            left = try self.addNode(.{
+                .tag = node_tag,
+                .main_token = op_token,
+                .data = .{ .node_and_node = .{ left.toInt(), right.toInt() } },
+            });
+        } else {
+            return error.ParseError; // Bounded loop guard - expression too complex
+        }
+
+        // Post-condition: consumed at least one token
+        std.debug.assert(self.tok_i > start_tok);
+
+        return left;
+    }
+
+    /// Parse a term (handles * and /).
+    ///
+    /// Grammar: term = factor (('*' | '/') factor)*
+    /// Handles multiplication/division (higher precedence than +/-).
+    ///
+    /// Returns null if current token can't start a factor.
+    fn parseTerm(self: *Self) Error!?Node.Index {
+        // Pre-conditions
+        std.debug.assert(self.tok_i < self.tokens.len);
+        const start_tok = self.tok_i;
+
+        // Parse left operand (factor)
+        var left = try self.parseFactor() orelse return null;
+
+        // Parse right operands with * or /
+        const MAX_TERM_FACTORS: u32 = 256;
+        for (0..MAX_TERM_FACTORS) |_| {
+            const op_tag = self.currentTag();
+            if (op_tag != .star and op_tag != .slash) break;
+
+            const op_token = self.tok_i;
+            self.tok_i += 1; // consume operator
+
+            const right = try self.parseFactor() orelse return error.ParseError;
+
+            // Build left-associative tree: a * b * c = (a * b) * c
+            const node_tag: Node.Tag = if (op_tag == .star) .expr_mul else .expr_div;
+            left = try self.addNode(.{
+                .tag = node_tag,
+                .main_token = op_token,
+                .data = .{ .node_and_node = .{ left.toInt(), right.toInt() } },
+            });
+        } else {
+            return error.ParseError; // Too many factors
+        }
+
+        // Post-condition: consumed at least one token
+        std.debug.assert(self.tok_i > start_tok);
+
+        return left;
+    }
+
+    /// Parse a factor (atomic expression).
+    ///
+    /// Grammar: factor = number | '(' expr ')' | '-' factor
+    /// Handles atomic values and grouping (highest precedence).
+    ///
+    /// Returns null if current token can't start a factor.
+    fn parseFactor(self: *Self) Error!?Node.Index {
+        // Pre-conditions
+        std.debug.assert(self.tok_i < self.tokens.len);
+        const start_tok = self.tok_i;
+
+        const result: ?Node.Index = switch (self.currentTag()) {
+            .number_literal => {
+                // Simple number
+                return try self.parseSimpleValue(.number_value);
+            },
+            .l_paren => {
+                // Grouped expression: ( expr )
+                self.tok_i += 1; // consume (
+                const inner = try self.parseExpression() orelse return error.ParseError;
+                if (self.currentTag() != .r_paren) return error.ParseError;
+                self.tok_i += 1; // consume )
+                return inner;
+            },
+            .minus => {
+                // Unary negation: -factor
+                const minus_token = self.tok_i;
+                self.tok_i += 1; // consume -
+
+                // Parse the operand (handles --x, -(expr), etc.)
+                const operand = try self.parseFactor() orelse return error.ParseError;
+                return try self.addNode(.{
+                    .tag = .expr_negate,
+                    .main_token = minus_token,
+                    .data = .{ .node = operand },
+                });
+            },
+            else => null,
+        };
+
+        // Post-condition: if successful, consumed at least one token
+        if (result != null) {
+            std.debug.assert(self.tok_i > start_tok);
+        }
+
+        return result;
+    }
+
+    /// Try to parse a value that might be an expression.
+    /// Returns expression if operators follow a number, otherwise simple value.
+    fn parseValueOrExpression(self: *Self) Error!?Node.Index {
+        // Pre-condition
+        std.debug.assert(self.tok_i < self.tokens.len);
+
+        // Check if this could be an expression
+        if (self.canStartExpression()) {
+            // Save position to check if we got more than just a number
+            const start_tok = self.tok_i;
+
+            const result = try self.parseExpression();
+
+            // If we consumed operators, it's an expression
+            // If we just consumed one number, it's already a number_value node
+            if (result) |node| {
+                const tag = self.nodes.items(.tag)[node.toInt()];
+                // If it's an expression node, return it
+                if (tag == .expr_add or tag == .expr_sub or
+                    tag == .expr_mul or tag == .expr_div or tag == .expr_negate)
+                {
+                    return node;
+                }
+                // Otherwise it's a simple number value
+                return node;
+            }
+
+            // Couldn't parse expression, restore position
+            self.tok_i = start_tok;
+        }
+
+        return null;
+    }
+
+    // ========================================================================
     // Helpers
     // ========================================================================
 
@@ -647,8 +934,8 @@ pub const Parser = struct {
     }
 
     fn addNode(self: *Self, node: Node) Error!Node.Index {
-        // Pre-condition: valid node tag
-        std.debug.assert(@intFromEnum(node.tag) <= @intFromEnum(Node.Tag.property));
+        // Pre-condition: valid node tag (all tags are valid)
+        std.debug.assert(@intFromEnum(node.tag) < std.meta.fields(Node.Tag).len);
 
         const idx: u32 = @intCast(self.nodes.len);
         try self.nodes.append(self.gpa, node);
@@ -853,19 +1140,19 @@ test "Parser: string values" {
     try testing.expect(found_string);
 }
 
-test "Parser: negative numbers" {
+test "Parser: negative numbers as unary negation" {
     const source: [:0]const u8 = "#buffer buf { offset=-10 }";
     var ast = try parseSource(source);
     defer ast.deinit(testing.allocator);
 
-    // Find number value node
+    // Negative numbers are now parsed as expr_negate with number_value operand
+    var found_negate = false;
     var found_number = false;
     for (ast.nodes.items(.tag)) |tag| {
-        if (tag == .number_value) {
-            found_number = true;
-            break;
-        }
+        if (tag == .expr_negate) found_negate = true;
+        if (tag == .number_value) found_number = true;
     }
+    try testing.expect(found_negate);
     try testing.expect(found_number);
 }
 
@@ -957,6 +1244,47 @@ test "Parser: memory cleanup on error" {
     try testing.expectError(error.ParseError, result);
 }
 
+test "Parser: runtime interpolation strings" {
+    const source: [:0]const u8 =
+        \\#texture tex {
+        \\  size=["$canvas.width", "$canvas.height"]
+        \\}
+    ;
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    // Find runtime_interpolation nodes
+    var interpolation_count: usize = 0;
+    for (ast.nodes.items(.tag)) |tag| {
+        if (tag == .runtime_interpolation) {
+            interpolation_count += 1;
+        }
+    }
+    // Should find 2 runtime interpolation strings
+    try testing.expectEqual(@as(usize, 2), interpolation_count);
+}
+
+test "Parser: regular string vs interpolation" {
+    const source: [:0]const u8 =
+        \\#wgsl code {
+        \\  code="fn main() {}"
+        \\}
+    ;
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    // Find string nodes
+    var string_count: usize = 0;
+    var interpolation_count: usize = 0;
+    for (ast.nodes.items(.tag)) |tag| {
+        if (tag == .string_value) string_count += 1;
+        if (tag == .runtime_interpolation) interpolation_count += 1;
+    }
+    // Should have 1 regular string, 0 interpolation
+    try testing.expectEqual(@as(usize, 1), string_count);
+    try testing.expectEqual(@as(usize, 0), interpolation_count);
+}
+
 test "Parser: OOM handling" {
     // Test that OOM on first allocation returns error properly
     var failing = std.testing.FailingAllocator.init(testing.allocator, .{
@@ -1004,5 +1332,182 @@ fn fuzzParserProperties(_: void, input: []const u8) !void {
     } else |err| {
         // Property 3: Only expected errors
         try testing.expect(err == error.ParseError or err == error.OutOfMemory);
+    }
+}
+
+// ============================================================================
+// Expression Parsing Tests
+// ============================================================================
+
+test "Parser: simple addition expression" {
+    const source: [:0]const u8 = "#buffer buf { size=1+2 }";
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    // Should have an expr_add node
+    var has_expr_add = false;
+    for (ast.nodes.items(.tag)) |tag| {
+        if (tag == .expr_add) has_expr_add = true;
+    }
+    try testing.expect(has_expr_add);
+}
+
+test "Parser: subtraction expression" {
+    const source: [:0]const u8 = "#buffer buf { size=10-5 }";
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    var has_expr_sub = false;
+    for (ast.nodes.items(.tag)) |tag| {
+        if (tag == .expr_sub) has_expr_sub = true;
+    }
+    try testing.expect(has_expr_sub);
+}
+
+test "Parser: multiplication expression" {
+    const source: [:0]const u8 = "#buffer buf { size=3*4 }";
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    var has_expr_mul = false;
+    for (ast.nodes.items(.tag)) |tag| {
+        if (tag == .expr_mul) has_expr_mul = true;
+    }
+    try testing.expect(has_expr_mul);
+}
+
+test "Parser: division expression" {
+    const source: [:0]const u8 = "#buffer buf { size=8/2 }";
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    var has_expr_div = false;
+    for (ast.nodes.items(.tag)) |tag| {
+        if (tag == .expr_div) has_expr_div = true;
+    }
+    try testing.expect(has_expr_div);
+}
+
+test "Parser: parenthesized expression" {
+    const source: [:0]const u8 = "#buffer buf { size=(1+2)*3 }";
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    // Should have both add and mul nodes
+    var has_expr_add = false;
+    var has_expr_mul = false;
+    for (ast.nodes.items(.tag)) |tag| {
+        if (tag == .expr_add) has_expr_add = true;
+        if (tag == .expr_mul) has_expr_mul = true;
+    }
+    try testing.expect(has_expr_add);
+    try testing.expect(has_expr_mul);
+}
+
+test "Parser: operator precedence (* before +)" {
+    // 1 + 2 * 3 should parse as 1 + (2 * 3), not (1 + 2) * 3
+    const source: [:0]const u8 = "#buffer buf { size=1+2*3 }";
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    // Find the expr_add node - its second child should be expr_mul
+    for (ast.nodes.items(.tag), 0..) |tag, i| {
+        if (tag == .expr_add) {
+            const data = ast.nodes.items(.data)[i];
+            const rhs_idx = data.node_and_node[1];
+            const rhs_tag = ast.nodes.items(.tag)[rhs_idx];
+            try testing.expectEqual(Node.Tag.expr_mul, rhs_tag);
+            break;
+        }
+    }
+}
+
+test "Parser: hex in expression" {
+    const source: [:0]const u8 = "#buffer buf { size=0xFF+0x10 }";
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    var has_expr_add = false;
+    for (ast.nodes.items(.tag)) |tag| {
+        if (tag == .expr_add) has_expr_add = true;
+    }
+    try testing.expect(has_expr_add);
+}
+
+test "Parser: expression in array" {
+    const source: [:0]const u8 = "#buffer buf { values=[1+2 3*4] }";
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    var expr_count: usize = 0;
+    for (ast.nodes.items(.tag)) |tag| {
+        if (tag == .expr_add or tag == .expr_mul) expr_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), expr_count);
+}
+
+test "Parser: simple number (no expression)" {
+    const source: [:0]const u8 = "#buffer buf { size=100 }";
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    // Should have a number_value node, not an expression
+    var has_number_value = false;
+    var has_expr = false;
+    for (ast.nodes.items(.tag)) |tag| {
+        if (tag == .number_value) has_number_value = true;
+        if (tag == .expr_add or tag == .expr_sub or tag == .expr_mul or tag == .expr_div) {
+            has_expr = true;
+        }
+    }
+    try testing.expect(has_number_value);
+    try testing.expect(!has_expr);
+}
+
+/// OOM test for expression parsing.
+///
+/// Properties tested:
+/// - Parser handles OOM gracefully at every allocation point
+/// - No memory leaks when OOM occurs mid-expression
+/// - Eventually succeeds when allocator doesn't fail
+test "Parser: expression OOM handling" {
+    const source: [:0]const u8 = "#buffer buf { size=(1+2)*(3+4)/5-6 }";
+
+    // Iterate through all possible failure points
+    var fail_index: usize = 0;
+    const MAX_ITERATIONS: usize = 256;
+
+    for (0..MAX_ITERATIONS) |_| {
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{
+            .fail_index = fail_index,
+        });
+
+        const result = Parser.parse(failing.allocator(), source);
+
+        if (failing.has_induced_failure) {
+            // OOM occurred - verify we got the expected error
+            try testing.expectError(error.OutOfMemory, result);
+            fail_index += 1;
+        } else {
+            // No failure induced - parsing should succeed
+            var ast = try result;
+            defer ast.deinit(failing.allocator());
+
+            // Verify we got a valid AST with expression nodes
+            var has_expr = false;
+            for (ast.nodes.items(.tag)) |tag| {
+                if (tag == .expr_add or tag == .expr_sub or
+                    tag == .expr_mul or tag == .expr_div)
+                {
+                    has_expr = true;
+                    break;
+                }
+            }
+            try testing.expect(has_expr);
+            break; // Test complete
+        }
+    } else {
+        // Should have succeeded within MAX_ITERATIONS
+        return error.TestFailed;
     }
 }
