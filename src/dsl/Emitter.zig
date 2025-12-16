@@ -466,7 +466,9 @@ pub const Emitter = struct {
                 if (self.findPropertyReference(inner_prop)) |ref| {
                     result.shader_id = self.shader_ids.get(ref.name);
                 }
-            } else if (std.mem.eql(u8, inner_name, "entryPoint")) {
+            } else if (std.mem.eql(u8, inner_name, "entryPoint") or
+                std.mem.eql(u8, inner_name, "entrypoint"))
+            {
                 const inner_data = self.ast.nodes.items(.data)[inner_prop.toInt()];
                 const value_node = inner_data.node;
                 const value_tag = self.ast.nodes.items(.tag)[value_node.toInt()];
@@ -1345,6 +1347,83 @@ test "Emitter: compute pipeline" {
         }
     }
     try testing.expect(found_compute);
+}
+
+test "Emitter: entrypoint case insensitivity" {
+    // Tests that both 'entrypoint' (lowercase) and 'entryPoint' (camelCase) work
+    // This is a regression test for the case sensitivity bug
+    const source: [:0]const u8 =
+        \\#wgsl triangleShader { value="@vertex fn vs() { } @fragment fn fs() { }" }
+        \\#renderPipeline pipeline {
+        \\  layout=auto
+        \\  vertex={ entrypoint=vs module=$wgsl.triangleShader }
+        \\  fragment={ entrypoint=fs module=$wgsl.triangleShader }
+        \\}
+        \\#renderPass drawPass {
+        \\  pipeline=$renderPipeline.pipeline
+        \\  draw=3
+        \\}
+        \\#frame main {
+        \\  perform=[$renderPass.drawPass]
+        \\}
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Find the pipeline descriptor in data section
+    // It should contain "vs" and "fs" as entry points, not the defaults
+    var found_custom_entry = false;
+    var count: u16 = 0;
+    while (count < module.data.count()) : (count += 1) {
+        const data = module.data.get(@enumFromInt(count));
+        // Pipeline descriptor JSON should contain "vs" entry point
+        if (std.mem.indexOf(u8, data, "\"entryPoint\":\"vs\"") != null) {
+            found_custom_entry = true;
+            break;
+        }
+    }
+    try testing.expect(found_custom_entry);
+}
+
+test "Emitter: entryPoint camelCase also works" {
+    // Verify camelCase still works (backwards compatibility)
+    const source: [:0]const u8 =
+        \\#wgsl triangleShader { value="@vertex fn vs() { } @fragment fn fs() { }" }
+        \\#renderPipeline pipeline {
+        \\  layout=auto
+        \\  vertex={ entryPoint=myVertex module=$wgsl.triangleShader }
+        \\  fragment={ entryPoint=myFragment module=$wgsl.triangleShader }
+        \\}
+        \\#renderPass drawPass {
+        \\  pipeline=$renderPipeline.pipeline
+        \\  draw=3
+        \\}
+        \\#frame main {
+        \\  perform=[$renderPass.drawPass]
+        \\}
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Find the pipeline descriptor in data section
+    var found_custom_entry = false;
+    var count: u16 = 0;
+    while (count < module.data.count()) : (count += 1) {
+        const data = module.data.get(@enumFromInt(count));
+        if (std.mem.indexOf(u8, data, "\"entryPoint\":\"myVertex\"") != null) {
+            found_custom_entry = true;
+            break;
+        }
+    }
+    try testing.expect(found_custom_entry);
 }
 
 // ----------------------------------------------------------------------------
