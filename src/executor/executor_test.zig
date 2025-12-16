@@ -531,3 +531,160 @@ test "texture descriptor with MSAA includes sample count" {
     // Property: MSAA descriptor is larger due to extra field
     try testing.expect(desc_with_msaa.len > desc_no_msaa.len);
 }
+
+test "binary bind group descriptor format validation" {
+    // Verifies that bind group descriptors use correct binary format
+    // that the JS decoder expects
+
+    // Create entries with different resource types
+    const entries = [_]DescriptorEncoder.BindGroupEntry{
+        // Buffer binding (includes offset/size)
+        .{ .binding = 0, .resource_type = .buffer, .resource_id = 0, .offset = 0, .size = 64 },
+        // Sampler binding (no offset/size)
+        .{ .binding = 1, .resource_type = .sampler, .resource_id = 0 },
+        // Texture view binding (no offset/size)
+        .{ .binding = 2, .resource_type = .texture_view, .resource_id = 1 },
+    };
+
+    const desc = try DescriptorEncoder.encodeBindGroupDescriptor(
+        testing.allocator,
+        0, // group index
+        &entries,
+    );
+    defer testing.allocator.free(desc);
+
+    // Property: first byte is bind_group type tag (0x03)
+    try testing.expectEqual(@as(u8, 0x03), desc[0]);
+
+    // Property: second byte is field count (2 fields: layout, entries)
+    try testing.expectEqual(@as(u8, 2), desc[1]);
+
+    // Property: descriptor has minimum expected size
+    // Header (2) + layout field (3) + entries header (3) + entries data
+    try testing.expect(desc.len >= 10);
+}
+
+test "bind group descriptor with group index" {
+    // Verifies that bind group index is correctly encoded
+    const entries = [_]DescriptorEncoder.BindGroupEntry{
+        .{ .binding = 0, .resource_type = .buffer, .resource_id = 0, .offset = 0, .size = 16 },
+    };
+
+    const desc_group0 = try DescriptorEncoder.encodeBindGroupDescriptor(
+        testing.allocator,
+        0, // group index 0
+        &entries,
+    );
+    defer testing.allocator.free(desc_group0);
+
+    const desc_group1 = try DescriptorEncoder.encodeBindGroupDescriptor(
+        testing.allocator,
+        1, // group index 1
+        &entries,
+    );
+    defer testing.allocator.free(desc_group1);
+
+    // Property: both have correct type tag
+    try testing.expectEqual(@as(u8, 0x03), desc_group0[0]);
+    try testing.expectEqual(@as(u8, 0x03), desc_group1[0]);
+
+    // Property: group index is encoded in the layout field
+    // Format: type_tag(1) + field_count(1) + field_id(1) + value_type(1) + group_index(1)
+    // The group index is at byte 4 (0-indexed)
+    try testing.expectEqual(@as(u8, 0), desc_group0[4]); // group index 0
+    try testing.expectEqual(@as(u8, 1), desc_group1[4]); // group index 1
+}
+
+test "bind group with buffer binding includes offset and size" {
+    // Buffer bindings require offset and size fields
+    const entries_buffer = [_]DescriptorEncoder.BindGroupEntry{
+        .{ .binding = 0, .resource_type = .buffer, .resource_id = 5, .offset = 128, .size = 256 },
+    };
+
+    const entries_sampler = [_]DescriptorEncoder.BindGroupEntry{
+        .{ .binding = 0, .resource_type = .sampler, .resource_id = 5 },
+    };
+
+    const desc_buffer = try DescriptorEncoder.encodeBindGroupDescriptor(
+        testing.allocator,
+        0,
+        &entries_buffer,
+    );
+    defer testing.allocator.free(desc_buffer);
+
+    const desc_sampler = try DescriptorEncoder.encodeBindGroupDescriptor(
+        testing.allocator,
+        0,
+        &entries_sampler,
+    );
+    defer testing.allocator.free(desc_sampler);
+
+    // Property: buffer binding descriptor is larger due to offset/size fields
+    // Buffer entry: binding(1) + type(1) + id(2) + offset(4) + size(4) = 12 bytes
+    // Sampler entry: binding(1) + type(1) + id(2) = 4 bytes
+    try testing.expect(desc_buffer.len > desc_sampler.len);
+}
+
+// ============================================================================
+// Buffer Usage Tests
+// ============================================================================
+
+test "buffer usage encoding matches JS decoder" {
+    // Verifies that BufferUsage packed struct has correct bit positions
+    // that the JS mapBufferUsage decoder expects.
+    //
+    // JS expects (Zig packed struct, LSB first):
+    //   bit 0: map_read   (0x01)
+    //   bit 1: map_write  (0x02)
+    //   bit 2: copy_src   (0x04)
+    //   bit 3: copy_dst   (0x08)
+    //   bit 4: index      (0x10)
+    //   bit 5: vertex     (0x20)
+    //   bit 6: uniform    (0x40)
+    //   bit 7: storage    (0x80)
+
+    // Property: individual flags have correct bit positions
+    const map_read: u8 = @bitCast(opcodes.BufferUsage{ .map_read = true });
+    try testing.expectEqual(@as(u8, 0x01), map_read);
+
+    const map_write: u8 = @bitCast(opcodes.BufferUsage{ .map_write = true });
+    try testing.expectEqual(@as(u8, 0x02), map_write);
+
+    const copy_src: u8 = @bitCast(opcodes.BufferUsage{ .copy_src = true });
+    try testing.expectEqual(@as(u8, 0x04), copy_src);
+
+    const copy_dst: u8 = @bitCast(opcodes.BufferUsage{ .copy_dst = true });
+    try testing.expectEqual(@as(u8, 0x08), copy_dst);
+
+    const index: u8 = @bitCast(opcodes.BufferUsage{ .index = true });
+    try testing.expectEqual(@as(u8, 0x10), index);
+
+    const vertex: u8 = @bitCast(opcodes.BufferUsage{ .vertex = true });
+    try testing.expectEqual(@as(u8, 0x20), vertex);
+
+    const uniform: u8 = @bitCast(opcodes.BufferUsage{ .uniform = true });
+    try testing.expectEqual(@as(u8, 0x40), uniform);
+
+    const storage: u8 = @bitCast(opcodes.BufferUsage{ .storage = true });
+    try testing.expectEqual(@as(u8, 0x80), storage);
+}
+
+test "buffer usage combinations encode correctly" {
+    // Common buffer usage patterns should encode to expected values
+
+    // UNIFORM | COPY_DST (common for uniforms written by CPU)
+    const uniform_copy_dst: u8 = @bitCast(opcodes.BufferUsage{ .uniform = true, .copy_dst = true });
+    try testing.expectEqual(@as(u8, 0x48), uniform_copy_dst); // 0x40 | 0x08
+
+    // VERTEX | COPY_DST (common for vertex buffers)
+    const vertex_copy_dst: u8 = @bitCast(opcodes.BufferUsage{ .vertex = true, .copy_dst = true });
+    try testing.expectEqual(@as(u8, 0x28), vertex_copy_dst); // 0x20 | 0x08
+
+    // STORAGE | COPY_SRC | COPY_DST (common for compute buffers)
+    const storage_copy: u8 = @bitCast(opcodes.BufferUsage{ .storage = true, .copy_src = true, .copy_dst = true });
+    try testing.expectEqual(@as(u8, 0x8C), storage_copy); // 0x80 | 0x04 | 0x08
+
+    // INDEX | COPY_DST (common for index buffers)
+    const index_copy_dst: u8 = @bitCast(opcodes.BufferUsage{ .index = true, .copy_dst = true });
+    try testing.expectEqual(@as(u8, 0x18), index_copy_dst); // 0x10 | 0x08
+}
