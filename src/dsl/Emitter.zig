@@ -640,10 +640,22 @@ pub const Emitter = struct {
             const prop_name = self.getTokenSlice(prop_token);
 
             if (std.mem.eql(u8, prop_name, "pipeline")) {
-                // Set pipeline
+                // Set pipeline - handle both reference ($renderPipeline.x) and identifier (pipelineName)
                 if (self.findPropertyReference(prop_node)) |ref| {
                     if (self.pipeline_ids.get(ref.name)) |pipeline_id| {
                         try self.builder.getEmitter().setPipeline(self.gpa, pipeline_id);
+                    }
+                } else {
+                    // Try identifier value (e.g., pipeline=myPipeline)
+                    const prop_data = self.ast.nodes.items(.data)[prop_node.toInt()];
+                    const value_node = prop_data.node;
+                    const value_tag = self.ast.nodes.items(.tag)[value_node.toInt()];
+
+                    if (value_tag == .identifier_value) {
+                        const name = self.getNodeText(value_node);
+                        if (self.pipeline_ids.get(name)) |pipeline_id| {
+                            try self.builder.getEmitter().setPipeline(self.gpa, pipeline_id);
+                        }
                     }
                 }
             } else if (std.mem.eql(u8, prop_name, "bindGroups")) {

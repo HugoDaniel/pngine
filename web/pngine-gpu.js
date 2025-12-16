@@ -82,6 +82,7 @@ export class PNGineGPU {
      */
     createShaderModule(id, codePtr, codeLen) {
         const code = this.readString(codePtr, codeLen);
+        console.log(`[GPU] createShaderModule(${id}), code length: ${code.length}`);
         const module = this.device.createShaderModule({ code });
         this.shaders.set(id, module);
     }
@@ -94,13 +95,21 @@ export class PNGineGPU {
      */
     createRenderPipeline(id, descPtr, descLen) {
         const descJson = this.readString(descPtr, descLen);
+        console.log(`[GPU] createRenderPipeline(${id}), desc: ${descJson}`);
         const desc = JSON.parse(descJson);
 
         // Resolve shader module references
+        const vertexShader = this.shaders.get(desc.vertex.shader);
+        const fragmentShader = desc.fragment ? this.shaders.get(desc.fragment.shader) : null;
+        console.log(`[GPU]   vertex shader ${desc.vertex.shader}: ${vertexShader ? 'found' : 'NOT FOUND'}`);
+        if (desc.fragment) {
+            console.log(`[GPU]   fragment shader ${desc.fragment.shader}: ${fragmentShader ? 'found' : 'NOT FOUND'}`);
+        }
+
         const pipelineDesc = {
             layout: 'auto',
             vertex: {
-                module: this.shaders.get(desc.vertex.shader),
+                module: vertexShader,
                 entryPoint: desc.vertex.entryPoint || 'vertexMain',
             },
             primitive: {
@@ -110,7 +119,7 @@ export class PNGineGPU {
 
         if (desc.fragment) {
             pipelineDesc.fragment = {
-                module: this.shaders.get(desc.fragment.shader),
+                module: fragmentShader,
                 entryPoint: desc.fragment.entryPoint || 'fragmentMain',
                 targets: [{
                     format: navigator.gpu.getPreferredCanvasFormat(),
@@ -120,6 +129,7 @@ export class PNGineGPU {
 
         const pipeline = this.device.createRenderPipeline(pipelineDesc);
         this.pipelines.set(id, pipeline);
+        console.log(`[GPU]   pipeline ${id} created: ${pipeline ? 'yes' : 'no'}`);
     }
 
     /**
@@ -182,6 +192,7 @@ export class PNGineGPU {
      * @param {number} storeOp - Store operation (0=store, 1=discard)
      */
     beginRenderPass(textureId, loadOp, storeOp) {
+        console.log(`[GPU] beginRenderPass(texture=${textureId}, load=${loadOp}, store=${storeOp})`);
         this.commandEncoder = this.device.createCommandEncoder();
 
         // Get render target (0 = current canvas texture)
@@ -219,6 +230,13 @@ export class PNGineGPU {
      */
     setPipeline(id) {
         const pipeline = this.pipelines.get(id);
+        console.log(`[GPU] setPipeline(${id}): ${pipeline ? 'found' : 'NOT FOUND'}, currentPass: ${this.currentPass ? 'active' : 'null'}`);
+        if (!pipeline) {
+            console.error(`[GPU] Pipeline ${id} not found! Available: ${[...this.pipelines.keys()].join(', ')}`);
+        }
+        if (!this.currentPass) {
+            console.error(`[GPU] No active pass for setPipeline!`);
+        }
         this.currentPass.setPipeline(pipeline);
     }
 
@@ -248,6 +266,7 @@ export class PNGineGPU {
      * @param {number} instanceCount - Number of instances
      */
     draw(vertexCount, instanceCount) {
+        console.log(`[GPU] draw(${vertexCount}, ${instanceCount})`);
         this.currentPass.draw(vertexCount, instanceCount);
     }
 
@@ -274,6 +293,7 @@ export class PNGineGPU {
      * End the current pass.
      */
     endPass() {
+        console.log(`[GPU] endPass()`);
         this.currentPass.end();
         this.currentPass = null;
         this.passType = null;
@@ -300,8 +320,10 @@ export class PNGineGPU {
      * Submit command buffer to queue.
      */
     submit() {
+        console.log(`[GPU] submit() - commandEncoder: ${this.commandEncoder ? 'present' : 'null'}`);
         if (this.commandEncoder) {
-            this.device.queue.submit([this.commandEncoder.finish()]);
+            const commandBuffer = this.commandEncoder.finish();
+            this.device.queue.submit([commandBuffer]);
             this.commandEncoder = null;
         }
     }
