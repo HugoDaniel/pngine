@@ -9,6 +9,7 @@ const format = @import("../bytecode/format.zig");
 const opcodes = @import("../bytecode/opcodes.zig");
 const mock_gpu = @import("mock_gpu.zig");
 const dispatcher = @import("dispatcher.zig");
+const DescriptorEncoder = @import("../dsl/DescriptorEncoder.zig").DescriptorEncoder;
 
 const Builder = format.Builder;
 const MockGPU = mock_gpu.MockGPU;
@@ -398,7 +399,18 @@ test "texture-based render pass (MSAA pattern)" {
         \\}
     ;
     const shader_data_id = try builder.addData(testing.allocator, shader_code);
-    const texture_desc_id = try builder.addData(testing.allocator, "{}");
+
+    // Create proper binary texture descriptor (required for JS decoder)
+    const texture_desc = try DescriptorEncoder.encodeTexture(
+        testing.allocator,
+        512,
+        512,
+        .bgra8unorm,
+        .{ .render_attachment = true },
+        4, // 4x MSAA
+    );
+    defer testing.allocator.free(texture_desc);
+    const texture_desc_id = try builder.addData(testing.allocator, texture_desc);
     const pipeline_desc_id = try builder.addData(testing.allocator, "{}");
 
     const emitter = builder.getEmitter();
@@ -447,4 +459,75 @@ test "texture-based render pass (MSAA pattern)" {
     // Verify texture parameters
     const tex_call = gpu.getCall(0);
     try testing.expectEqual(@as(u16, 0), tex_call.params.create_texture.texture_id);
+}
+
+test "binary texture descriptor format validation" {
+    // Verifies that texture descriptors use correct binary format
+    // that the JS decoder expects
+    const desc = try DescriptorEncoder.encodeTexture(
+        testing.allocator,
+        800,
+        600,
+        .rgba8unorm,
+        .{ .render_attachment = true, .texture_binding = true },
+        1,
+    );
+    defer testing.allocator.free(desc);
+
+    // Property: first byte is texture type tag (0x01)
+    try testing.expectEqual(@as(u8, 0x01), desc[0]);
+
+    // Property: second byte is field count (4 fields: width, height, format, usage)
+    try testing.expectEqual(@as(u8, 4), desc[1]);
+
+    // Property: descriptor has minimum expected size
+    // Header (2) + 4 fields * (field_id + value_type + value)
+    try testing.expect(desc.len >= 10);
+}
+
+test "binary sampler descriptor format validation" {
+    // Verifies that sampler descriptors use correct binary format
+    const desc = try DescriptorEncoder.encodeSampler(
+        testing.allocator,
+        .linear, // mag filter
+        .nearest, // min filter
+        .repeat, // address mode
+    );
+    defer testing.allocator.free(desc);
+
+    // Property: first byte is sampler type tag (0x02)
+    try testing.expectEqual(@as(u8, 0x02), desc[0]);
+
+    // Property: second byte is field count (4 fields: mag, min, addr_u, addr_v)
+    try testing.expectEqual(@as(u8, 4), desc[1]);
+}
+
+test "texture descriptor with MSAA includes sample count" {
+    // MSAA textures should include the sample_count field
+    const desc_no_msaa = try DescriptorEncoder.encodeTexture(
+        testing.allocator,
+        256,
+        256,
+        .rgba8unorm,
+        .{ .render_attachment = true },
+        1, // No MSAA
+    );
+    defer testing.allocator.free(desc_no_msaa);
+
+    const desc_with_msaa = try DescriptorEncoder.encodeTexture(
+        testing.allocator,
+        256,
+        256,
+        .rgba8unorm,
+        .{ .render_attachment = true },
+        4, // 4x MSAA
+    );
+    defer testing.allocator.free(desc_with_msaa);
+
+    // Property: non-MSAA has 4 fields, MSAA has 5 fields (extra sample_count)
+    try testing.expectEqual(@as(u8, 4), desc_no_msaa[1]);
+    try testing.expectEqual(@as(u8, 5), desc_with_msaa[1]);
+
+    // Property: MSAA descriptor is larger due to extra field
+    try testing.expect(desc_with_msaa.len > desc_no_msaa.len);
 }
