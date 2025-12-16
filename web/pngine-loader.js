@@ -214,6 +214,22 @@ export class PNGine {
     }
 
     /**
+     * Write a time value to a uniform buffer.
+     * Writes an f32 value at offset 0 of the specified buffer.
+     *
+     * @param {number} bufferId - Buffer ID to write to
+     * @param {number} time - Time value in seconds (f32)
+     */
+    writeTimeUniform(bufferId, time) {
+        // Create f32 array with the time value
+        const data = new Float32Array([time]);
+        const bytes = new Uint8Array(data.buffer);
+
+        // Write directly to the GPU buffer
+        this.gpu.writeTimeToBuffer(bufferId, bytes);
+    }
+
+    /**
      * Get human-readable error message.
      * @param {number} code - Error code
      * @returns {string} Error message
