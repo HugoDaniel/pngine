@@ -329,3 +329,78 @@ test "multiple adds with caller frees - no leaks" {
     const last = section.get(@enumFromInt(9));
     try testing.expect(std.mem.indexOf(u8, last, "\"shader\":9") != null);
 }
+
+test "deserialize makes owned copies - input buffer can be freed" {
+    // Regression test: deserialize() must make owned copies of blobs.
+    // If it stored slices into the input buffer, freeing the input would
+    // cause use-after-free when accessing deserialized data.
+    //
+    // testing.allocator detects:
+    // - Invalid free (if we try to free non-owned memory)
+    // - Use-after-free (if we access freed memory)
+
+    // First, create and serialize a section
+    var original: DataSection = .empty;
+    _ = try original.add(testing.allocator, "shader code here");
+    _ = try original.add(testing.allocator, "more data");
+
+    const serialized = try original.serialize(testing.allocator);
+    original.deinit(testing.allocator);
+
+    // Deserialize into a new section
+    var loaded = try deserialize(testing.allocator, serialized);
+
+    // FREE the serialized buffer - this is the key part of the test
+    testing.allocator.free(serialized);
+
+    // Loaded section must still have valid data (its own copies)
+    try testing.expectEqualStrings("shader code here", loaded.get(@enumFromInt(0)));
+    try testing.expectEqualStrings("more data", loaded.get(@enumFromInt(1)));
+
+    // Re-serialize should work (proves data is still valid)
+    const reserialized = try loaded.serialize(testing.allocator);
+    defer testing.allocator.free(reserialized);
+
+    // Clean up - deinit must not crash (no double-free or invalid free)
+    loaded.deinit(testing.allocator);
+}
+
+test "roundtrip with immediate buffer frees - full ownership test" {
+    // End-to-end regression test combining all ownership scenarios:
+    // 1. add() with caller free
+    // 2. serialize() produces owned buffer
+    // 3. deserialize() makes owned copies
+    // 4. All deinit() calls succeed without invalid frees
+    //
+    // This simulates the full Emitter → serialize → load → execute flow.
+
+    // Step 1: Build section, freeing caller buffers immediately
+    var section: DataSection = .empty;
+    for (0..5) |i| {
+        const temp = try std.fmt.allocPrint(testing.allocator, "blob_{d}", .{i});
+        _ = try section.add(testing.allocator, temp);
+        testing.allocator.free(temp);
+    }
+
+    // Step 2: Serialize and free original section
+    const serialized = try section.serialize(testing.allocator);
+    section.deinit(testing.allocator);
+
+    // Step 3: Deserialize and free serialized buffer
+    var loaded = try deserialize(testing.allocator, serialized);
+    testing.allocator.free(serialized);
+
+    // Step 4: Verify all data intact
+    try testing.expectEqual(@as(u16, 5), loaded.count());
+    try testing.expectEqualStrings("blob_0", loaded.get(@enumFromInt(0)));
+    try testing.expectEqualStrings("blob_4", loaded.get(@enumFromInt(4)));
+
+    // Step 5: Re-serialize from loaded (proves data ownership)
+    const final = try loaded.serialize(testing.allocator);
+    defer testing.allocator.free(final);
+
+    // Step 6: Clean up loaded section
+    loaded.deinit(testing.allocator);
+
+    // If we reach here without crashes or leaks, ownership is correct
+}
