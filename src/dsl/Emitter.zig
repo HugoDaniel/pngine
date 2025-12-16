@@ -166,6 +166,90 @@ pub const Emitter = struct {
     // Resource Emission
     // ========================================================================
 
+    /// Substitute #define values into shader code.
+    /// Replaces occurrences of define names with their values.
+    /// Memory: Caller owns returned slice if different from input.
+    fn substituteDefines(self: *Self, code: []const u8) Error![]const u8 {
+        // Pre-conditions
+        std.debug.assert(code.len > 0);
+
+        // If no defines, return original code
+        if (self.analysis.symbols.define.count() == 0) {
+            return code;
+        }
+
+        // Build substituted code
+        var result = std.ArrayListUnmanaged(u8){};
+        errdefer result.deinit(self.gpa);
+
+        var pos: usize = 0;
+        while (pos < code.len) {
+            var found_match = false;
+
+            // Check each define for a match at current position
+            var def_it = self.analysis.symbols.define.iterator();
+            while (def_it.next()) |def_entry| {
+                const def_name = def_entry.key_ptr.*;
+                const def_info = def_entry.value_ptr.*;
+
+                // Check if define name matches at current position
+                if (pos + def_name.len <= code.len and
+                    std.mem.eql(u8, code[pos..][0..def_name.len], def_name))
+                {
+                    // Ensure it's a whole word (not part of larger identifier)
+                    const before_ok = pos == 0 or !isIdentChar(code[pos - 1]);
+                    const after_ok = pos + def_name.len >= code.len or
+                        !isIdentChar(code[pos + def_name.len]);
+
+                    if (before_ok and after_ok) {
+                        // Get define value
+                        const value_str = self.getDefineValue(def_info.node);
+                        try result.appendSlice(self.gpa, value_str);
+                        pos += def_name.len;
+                        found_match = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!found_match) {
+                try result.append(self.gpa, code[pos]);
+                pos += 1;
+            }
+        }
+
+        // Post-condition: result has content
+        std.debug.assert(result.items.len > 0);
+
+        return try result.toOwnedSlice(self.gpa);
+    }
+
+    fn isIdentChar(c: u8) bool {
+        return (c >= 'a' and c <= 'z') or
+            (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or
+            c == '_';
+    }
+
+    /// Get the string value of a #define.
+    /// For string values, returns the content without quotes.
+    /// For other values (numbers, expressions), returns the source text.
+    fn getDefineValue(self: *Self, define_node: Node.Index) []const u8 {
+        // Pre-condition
+        std.debug.assert(define_node.toInt() < self.ast.nodes.len);
+
+        // Define node's data.node is the value node
+        const value_node = self.ast.nodes.items(.data)[define_node.toInt()].node;
+        const value_tag = self.ast.nodes.items(.tag)[value_node.toInt()];
+
+        // For strings, return the content (without quotes)
+        // For everything else (numbers, expressions), return source text as-is
+        return if (value_tag == .string_value)
+            self.getStringContent(value_node)
+        else
+            self.getNodeText(value_node);
+    }
+
     fn emitShaders(self: *Self) Error!void {
         // Emit #wgsl and #shaderModule declarations
         var it = self.analysis.symbols.wgsl.iterator();
@@ -177,9 +261,12 @@ pub const Emitter = struct {
             self.next_shader_id += 1;
             try self.shader_ids.put(self.gpa, name, shader_id);
 
-            // Get shader value and add to data section
+            // Get shader value, substitute defines, and add to data section
             const value = self.findPropertyValue(info.node, "value") orelse continue;
-            const code = self.getStringContent(value);
+            const raw_code = self.getStringContent(value);
+            const code = try self.substituteDefines(raw_code);
+            defer if (code.ptr != raw_code.ptr) self.gpa.free(code);
+
             const data_id = try self.builder.addData(self.gpa, code);
 
             // Emit create_shader_module opcode
@@ -200,9 +287,12 @@ pub const Emitter = struct {
             self.next_shader_id += 1;
             try self.shader_ids.put(self.gpa, name, shader_id);
 
-            // Find code property (data reference)
+            // Find code property, substitute defines, and add to data section
             const code_value = self.findPropertyValue(info.node, "code") orelse continue;
-            const code = self.getStringContent(code_value);
+            const raw_code = self.getStringContent(code_value);
+            const code = try self.substituteDefines(raw_code);
+            defer if (code.ptr != raw_code.ptr) self.gpa.free(code);
+
             const data_id = try self.builder.addData(self.gpa, code);
 
             try self.builder.getEmitter().createShaderModule(
@@ -2076,4 +2166,33 @@ test "Emitter: multiple queues in perform array" {
         }
     }
     try testing.expectEqual(@as(u32, 2), write_buffer_count);
+}
+
+test "Emitter: define substitution in shader code" {
+    // Test that #define values are substituted into shader code
+    const source: [:0]const u8 =
+        \\#define PI="3.14159"
+        \\#define FOV="(2.0 * PI) / 5.0"
+        \\#shaderModule code {
+        \\  code="fn test() { let x = FOV; let y = PI; }"
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Property: shader code in data section should have substituted values
+    var found_substituted = false;
+    for (module.data.blobs.items) |data| {
+        // Should contain "(2.0 * PI)" from FOV substitution
+        if (std.mem.indexOf(u8, data, "(2.0 * PI)")) |_| {
+            found_substituted = true;
+            break;
+        }
+    }
+    try testing.expect(found_substituted);
 }
