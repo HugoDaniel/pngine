@@ -1,11 +1,12 @@
-//! PNGine CLI - Compile PBSF source to PNGB bytecode.
+//! PNGine CLI - Compile DSL/PBSF source to PNGB bytecode.
 //!
-//! A simple command-line interface for compiling PBSF (PNGine Bytecode Source Format)
-//! files into PNGB (PNGine Binary) bytecode.
+//! A command-line interface for compiling PNGine source files into PNGB bytecode.
+//! Supports both the new DSL format (.pngine) and legacy PBSF format (.pbsf).
 //!
 //! Usage:
-//!   pngine compile input.pbsf -o output.pngb
-//!   pngine compile input.pbsf              (outputs to input.pngb)
+//!   pngine compile input.pngine -o output.pngb   (DSL format)
+//!   pngine compile input.pbsf -o output.pngb     (legacy PBSF)
+//!   pngine compile input.pngine                  (outputs to input.pngb)
 //!
 //! Exit codes:
 //!   0 - Success
@@ -17,6 +18,7 @@
 //!   - All file reads are bounded by max_file_size (16 MiB)
 //!   - Output files always contain valid PNGB with correct magic bytes
 //!   - All allocations are freed on both success and error paths
+//!   - File extension determines compiler: .pngine → DSL, .pbsf → PBSF
 
 const std = @import("std");
 const pngine = @import("pngine");
@@ -124,8 +126,8 @@ fn runCompile(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     };
     defer allocator.free(source);
 
-    // Compile
-    const bytecode = pngine.compile(allocator, source) catch |err| {
+    // Compile using appropriate compiler based on file extension
+    const bytecode = compileSource(allocator, input, source) catch |err| {
         std.debug.print("Error: compilation failed: {}\n", .{err});
         return 3;
     };
@@ -145,6 +147,25 @@ fn runCompile(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     std.debug.print("Compiled {s} -> {s} ({d} bytes)\n", .{ input, output, bytecode.len });
 
     return 0;
+}
+
+/// Compile source using appropriate compiler based on file extension.
+///
+/// - `.pngine` files use the new DSL compiler (macro-based syntax)
+/// - `.pbsf` files use the legacy PBSF compiler (S-expression syntax)
+/// - Other extensions default to DSL compiler
+///
+/// Returns owned PNGB bytecode that caller must free.
+fn compileSource(allocator: std.mem.Allocator, path: []const u8, source: [:0]const u8) ![]u8 {
+    const extension = std.fs.path.extension(path);
+
+    if (std.mem.eql(u8, extension, ".pbsf")) {
+        // Legacy PBSF format (S-expressions)
+        return pngine.compile(allocator, source);
+    } else {
+        // DSL format (.pngine or unknown)
+        return pngine.dsl.compile(allocator, source);
+    }
 }
 
 /// Read entire file into sentinel-terminated buffer.
@@ -239,24 +260,29 @@ fn handleError(err: anyerror) u8 {
 /// Print usage information to stderr.
 fn printUsage() void {
     std.debug.print(
-        \\PNGine - PBSF to PNGB compiler
+        \\PNGine - DSL/PBSF to PNGB compiler
         \\
         \\Usage:
-        \\  pngine compile <input.pbsf> [-o <output.pngb>]
+        \\  pngine compile <input> [-o <output.pngb>]
         \\  pngine help
         \\  pngine version
         \\
         \\Commands:
-        \\  compile     Compile PBSF source to PNGB bytecode
+        \\  compile     Compile source to PNGB bytecode
         \\  help        Show this help message
         \\  version     Show version information
         \\
         \\Options:
         \\  -o, --output <path>   Output file path (default: input with .pngb extension)
         \\
+        \\Supported formats:
+        \\  .pngine     DSL format (macro-based syntax)
+        \\  .pbsf       Legacy PBSF format (S-expressions)
+        \\
         \\Examples:
-        \\  pngine compile triangle.pbsf -o triangle.pngb
-        \\  pngine compile shader.pbsf
+        \\  pngine compile triangle.pngine -o triangle.pngb
+        \\  pngine compile examples/simple_triangle.pngine
+        \\  pngine compile legacy.pbsf
         \\
     , .{});
 }
@@ -265,7 +291,7 @@ fn printUsage() void {
 fn printVersion() void {
     std.debug.print(
         \\pngine 0.1.0
-        \\PBSF to PNGB compiler for WebGPU bytecode
+        \\DSL/PBSF to PNGB compiler for WebGPU bytecode
         \\
     , .{});
 }

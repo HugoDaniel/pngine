@@ -693,3 +693,105 @@ test "E2E: bind group layout with multiple entry types" {
     }
     try testing.expectEqual(@as(usize, 3), entry_count);
 }
+
+// ============================================================================
+// Full PNGB Compilation Tests
+// ============================================================================
+
+test "E2E: compile simple_triangle to PNGB" {
+    // Full compilation test - parse, analyze, emit PNGB.
+    const source: [:0]const u8 =
+        \\#shaderModule code {
+        \\  code="@vertex fn vertexMain() {} @fragment fn fragMain() {}"
+        \\}
+        \\
+        \\#renderPipeline pipeline {
+        \\  layout=auto
+        \\  vertex={ entryPoint=vertexMain module=$shaderModule.code }
+        \\  fragment={ entryPoint=fragMain module=$shaderModule.code }
+        \\}
+        \\
+        \\#renderPass render {
+        \\  pipeline=$renderPipeline.pipeline
+        \\  draw=3
+        \\}
+        \\
+        \\#frame main {
+        \\  perform=[$renderPass.render]
+        \\}
+    ;
+
+    const pngb = try Compiler.compile(testing.allocator, source);
+    defer testing.allocator.free(pngb);
+
+    // Property: valid PNGB header.
+    try testing.expectEqualStrings("PNGB", pngb[0..4]);
+
+    // Property: bytecode section exists and contains expected opcodes.
+    const format = @import("../bytecode/format.zig");
+    const opcodes = @import("../bytecode/opcodes.zig");
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Verify expected opcodes are present.
+    var has_shader = false;
+    var has_pipeline = false;
+    var has_draw = false;
+    var has_frame = false;
+
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.create_shader_module)) has_shader = true;
+        if (byte == @intFromEnum(opcodes.OpCode.create_render_pipeline)) has_pipeline = true;
+        if (byte == @intFromEnum(opcodes.OpCode.draw)) has_draw = true;
+        if (byte == @intFromEnum(opcodes.OpCode.define_frame)) has_frame = true;
+    }
+
+    try testing.expect(has_shader);
+    try testing.expect(has_pipeline);
+    try testing.expect(has_draw);
+    try testing.expect(has_frame);
+}
+
+test "E2E: compile with texture and sampler" {
+    // Test texture/sampler emission.
+    const source: [:0]const u8 =
+        \\#texture msaaTexture {
+        \\  width=512
+        \\  height=512
+        \\  format=bgra8unorm
+        \\  usage=[RENDER_ATTACHMENT]
+        \\  sampleCount=4
+        \\}
+        \\
+        \\#sampler linearSampler {
+        \\  magFilter=linear
+        \\  minFilter=linear
+        \\}
+        \\
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try Compiler.compile(testing.allocator, source);
+    defer testing.allocator.free(pngb);
+
+    try testing.expectEqualStrings("PNGB", pngb[0..4]);
+
+    const format = @import("../bytecode/format.zig");
+    const opcodes = @import("../bytecode/opcodes.zig");
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Verify texture and sampler opcodes are present.
+    var has_texture = false;
+    var has_sampler = false;
+
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.create_texture)) has_texture = true;
+        if (byte == @intFromEnum(opcodes.OpCode.create_sampler)) has_sampler = true;
+    }
+
+    try testing.expect(has_texture);
+    try testing.expect(has_sampler);
+}
