@@ -30,6 +30,25 @@ pub const mock_gpu = @import("executor/mock_gpu.zig");
 pub const dispatcher = @import("executor/dispatcher.zig");
 pub const executor_test = @import("executor/executor_test.zig");
 
+// PNG embedding/extraction
+pub const png = struct {
+    pub const crc32 = @import("png/crc32.zig");
+    pub const chunk = @import("png/chunk.zig");
+    pub const embed = @import("png/embed.zig");
+    pub const extract = @import("png/extract.zig");
+
+    // Re-export main types
+    pub const Chunk = chunk.Chunk;
+    pub const ChunkType = chunk.ChunkType;
+    pub const PNG_SIGNATURE = chunk.PNG_SIGNATURE;
+
+    // Re-export functions
+    pub const embedBytecode = embed.embed;
+    pub const extractBytecode = extract.extract;
+    pub const hasPngb = extract.hasPngb;
+    pub const getPngbInfo = extract.getPngbInfo;
+};
+
 // DSL compiler (new macro-based syntax)
 pub const dsl = struct {
     pub const Token = @import("dsl/Token.zig").Token;
@@ -124,7 +143,13 @@ test {
     _ = @import("dsl/Parser.zig");
     _ = @import("dsl/Analyzer.zig");
     _ = @import("dsl/Emitter.zig");
+    _ = @import("dsl/emitter/test.zig");
     _ = @import("dsl/Compiler.zig");
+    // Run PNG embedding tests
+    _ = @import("png/crc32.zig");
+    _ = @import("png/chunk.zig");
+    _ = @import("png/embed.zig");
+    _ = @import("png/extract.zig");
 }
 
 test "compile PBSF to PNGB" {
