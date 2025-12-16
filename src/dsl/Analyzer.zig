@@ -1103,7 +1103,14 @@ pub const Analyzer = struct {
         // Post-condition check variable
         var result: ?f64 = null;
 
-        if (slice.len == 0) {
+        // Check for math constants: PI, E, TAU
+        if (std.mem.eql(u8, slice, "PI")) {
+            result = std.math.pi;
+        } else if (std.mem.eql(u8, slice, "E")) {
+            result = std.math.e;
+        } else if (std.mem.eql(u8, slice, "TAU")) {
+            result = std.math.tau;
+        } else if (slice.len == 0) {
             // Empty slice is invalid
         } else if (slice.len > 2 and slice[0] == '0' and (slice[1] == 'x' or slice[1] == 'X')) {
             // Hex format: 0xDEADBEEF (WebGPU usage flags, color values)
@@ -1959,6 +1966,90 @@ test "Analyzer: division by zero returns null" {
         if (tag == .expr_div) {
             const result = analyzer.evaluateExpression(@enumFromInt(@as(u32, @intCast(i))));
             try testing.expect(result == null);
+            return;
+        }
+    }
+    try testing.expect(false);
+}
+
+// ----------------------------------------------------------------------------
+// Math Constant Tests
+// ----------------------------------------------------------------------------
+
+// Property: Math constants evaluate to their known values.
+// Input: PI, E, TAU (also expressions using them)
+// Expected: PI → 3.14159..., E → 2.71828..., TAU → 6.28318...
+// Verifies: parseNumberLiteral recognizes math constants
+test "Analyzer: evaluate PI constant" {
+    const source: [:0]const u8 = "#buffer buf { size=PI usage=[UNIFORM] }";
+
+    var ast = try Parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    var analyzer = Analyzer.init(testing.allocator, &ast);
+    defer analyzer.deinit();
+
+    for (ast.nodes.items(.tag), 0..) |tag, i| {
+        if (tag == .number_value) {
+            const result = analyzer.evaluateExpression(@enumFromInt(@as(u32, @intCast(i))));
+            try testing.expectApproxEqAbs(std.math.pi, result.?, 0.00001);
+            return;
+        }
+    }
+    try testing.expect(false);
+}
+
+test "Analyzer: evaluate E constant" {
+    const source: [:0]const u8 = "#buffer buf { size=E usage=[UNIFORM] }";
+
+    var ast = try Parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    var analyzer = Analyzer.init(testing.allocator, &ast);
+    defer analyzer.deinit();
+
+    for (ast.nodes.items(.tag), 0..) |tag, i| {
+        if (tag == .number_value) {
+            const result = analyzer.evaluateExpression(@enumFromInt(@as(u32, @intCast(i))));
+            try testing.expectApproxEqAbs(std.math.e, result.?, 0.00001);
+            return;
+        }
+    }
+    try testing.expect(false);
+}
+
+test "Analyzer: evaluate TAU constant" {
+    const source: [:0]const u8 = "#buffer buf { size=TAU usage=[UNIFORM] }";
+
+    var ast = try Parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    var analyzer = Analyzer.init(testing.allocator, &ast);
+    defer analyzer.deinit();
+
+    for (ast.nodes.items(.tag), 0..) |tag, i| {
+        if (tag == .number_value) {
+            const result = analyzer.evaluateExpression(@enumFromInt(@as(u32, @intCast(i))));
+            try testing.expectApproxEqAbs(std.math.tau, result.?, 0.00001);
+            return;
+        }
+    }
+    try testing.expect(false);
+}
+
+test "Analyzer: evaluate expression with PI (2*PI)" {
+    const source: [:0]const u8 = "#buffer buf { size=2*PI usage=[UNIFORM] }";
+
+    var ast = try Parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    var analyzer = Analyzer.init(testing.allocator, &ast);
+    defer analyzer.deinit();
+
+    for (ast.nodes.items(.tag), 0..) |tag, i| {
+        if (tag == .expr_mul) {
+            const result = analyzer.evaluateExpression(@enumFromInt(@as(u32, @intCast(i))));
+            try testing.expectApproxEqAbs(2.0 * std.math.pi, result.?, 0.00001);
             return;
         }
     }

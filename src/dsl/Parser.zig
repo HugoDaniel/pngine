@@ -375,7 +375,19 @@ pub const Parser = struct {
                 return null;
             },
             .boolean_literal => return try self.parseSimpleValue(.boolean_value),
-            .identifier => return try self.parseSimpleValue(.identifier_value),
+            .identifier => {
+                // Check if identifier is a math constant (PI, E, TAU)
+                const token_start = self.tokens.items(.start)[self.tok_i];
+                const token_end = if (self.tok_i + 1 < self.tokens.len)
+                    self.tokens.items(.start)[self.tok_i + 1]
+                else
+                    @as(u32, @intCast(self.source.len));
+                const text = std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r");
+                if (isMathConstant(text)) {
+                    return try self.parseSimpleValue(.number_value);
+                }
+                return try self.parseSimpleValue(.identifier_value);
+            },
             .dollar => return try self.parseReference(),
             .l_bracket, .l_brace => {}, // Fall through to iterative parsing
             else => return null,
@@ -564,7 +576,15 @@ pub const Parser = struct {
                 try self.scratch.append(self.gpa, elem.toInt());
             },
             .identifier => {
-                const elem = try self.parseSimpleValue(.identifier_value);
+                // Check if identifier is a math constant (PI, E, TAU)
+                const token_start = self.tokens.items(.start)[self.tok_i];
+                const token_end = if (self.tok_i + 1 < self.tokens.len)
+                    self.tokens.items(.start)[self.tok_i + 1]
+                else
+                    @as(u32, @intCast(self.source.len));
+                const text = std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r");
+                const node_tag: Node.Tag = if (isMathConstant(text)) .number_value else .identifier_value;
+                const elem = try self.parseSimpleValue(node_tag);
                 try self.scratch.append(self.gpa, elem.toInt());
             },
             .dollar => {
@@ -677,7 +697,15 @@ pub const Parser = struct {
                 try self.scratch.append(self.gpa, prop.toInt());
             },
             .identifier => {
-                const value = try self.parseSimpleValue(.identifier_value);
+                // Check if identifier is a math constant (PI, E, TAU)
+                const token_start = self.tokens.items(.start)[self.tok_i];
+                const token_end = if (self.tok_i + 1 < self.tokens.len)
+                    self.tokens.items(.start)[self.tok_i + 1]
+                else
+                    @as(u32, @intCast(self.source.len));
+                const text = std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r");
+                const node_tag: Node.Tag = if (isMathConstant(text)) .number_value else .identifier_value;
+                const value = try self.parseSimpleValue(node_tag);
                 const prop = try self.addNode(.{
                     .tag = .property,
                     .main_token = key_token,
@@ -757,6 +785,16 @@ pub const Parser = struct {
                 if (self.tok_i + 1 >= self.tokens.len) break :blk false;
                 const next = self.tokens.items(.tag)[self.tok_i + 1];
                 break :blk next == .number_literal or next == .l_paren;
+            },
+            .identifier => blk: {
+                // Check if identifier is a math constant (PI, E, TAU)
+                const token_start = self.tokens.items(.start)[self.tok_i];
+                const token_end = if (self.tok_i + 1 < self.tokens.len)
+                    self.tokens.items(.start)[self.tok_i + 1]
+                else
+                    @as(u32, @intCast(self.source.len));
+                const text = std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r");
+                break :blk isMathConstant(text);
             },
             else => false,
         };
@@ -891,6 +929,19 @@ pub const Parser = struct {
                     .data = .{ .node = operand },
                 });
             },
+            .identifier => {
+                // Check for math constants: PI, E, TAU
+                const token_start = self.tokens.items(.start)[self.tok_i];
+                const token_end = if (self.tok_i + 1 < self.tokens.len)
+                    self.tokens.items(.start)[self.tok_i + 1]
+                else
+                    @as(u32, @intCast(self.source.len));
+                const text = std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r");
+                if (isMathConstant(text)) {
+                    return try self.parseSimpleValue(.number_value);
+                }
+                return null;
+            },
             else => null,
         };
 
@@ -974,6 +1025,14 @@ pub const Parser = struct {
 };
 
 // ============================================================================
+/// Check if text is a recognized math constant.
+/// Supports: PI, E, TAU (case-sensitive)
+fn isMathConstant(text: []const u8) bool {
+    return std.mem.eql(u8, text, "PI") or
+        std.mem.eql(u8, text, "E") or
+        std.mem.eql(u8, text, "TAU");
+}
+
 // Tests
 // ============================================================================
 
@@ -1537,4 +1596,41 @@ test "Parser: comments inside objects" {
     }
     // size, usage = 2 properties
     try testing.expect(prop_count >= 2);
+}
+
+test "Parser: PI constant creates number_value" {
+    const source: [:0]const u8 = "#buffer buf { size=PI }";
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    // Should have a number_value node for PI
+    var has_number_value = false;
+    for (ast.nodes.items(.tag)) |tag| {
+        if (tag == .number_value) has_number_value = true;
+    }
+    try testing.expect(has_number_value);
+}
+
+test "Parser: E constant creates number_value" {
+    const source: [:0]const u8 = "#buffer buf { size=E }";
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    var has_number_value = false;
+    for (ast.nodes.items(.tag)) |tag| {
+        if (tag == .number_value) has_number_value = true;
+    }
+    try testing.expect(has_number_value);
+}
+
+test "Parser: TAU constant creates number_value" {
+    const source: [:0]const u8 = "#buffer buf { size=TAU }";
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    var has_number_value = false;
+    for (ast.nodes.items(.tag)) |tag| {
+        if (tag == .number_value) has_number_value = true;
+    }
+    try testing.expect(has_number_value);
 }
