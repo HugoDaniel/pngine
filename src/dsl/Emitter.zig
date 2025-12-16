@@ -168,6 +168,7 @@ pub const Emitter = struct {
 
     /// Substitute #define values into shader code.
     /// Replaces occurrences of define names with their values.
+    /// Does NOT substitute inside string literals (WGSL uses "...").
     /// Memory: Caller owns returned slice if different from input.
     fn substituteDefines(self: *Self, code: []const u8) Error![]const u8 {
         // Pre-conditions
@@ -183,7 +184,38 @@ pub const Emitter = struct {
         errdefer result.deinit(self.gpa);
 
         var pos: usize = 0;
+        var in_string = false;
+
         while (pos < code.len) {
+            const c = code[pos];
+
+            // Handle escaped quote sequence \" (DSL escape for WGSL string delimiter)
+            // In DSL: code="let s = \"hello\";" means WGSL: let s = "hello";
+            // The \" is a WGSL string delimiter, toggle string state
+            if (c == '\\' and pos + 1 < code.len and code[pos + 1] == '"') {
+                in_string = !in_string;
+                try result.append(self.gpa, c); // copy backslash
+                pos += 1;
+                try result.append(self.gpa, code[pos]); // copy quote
+                pos += 1;
+                continue;
+            }
+
+            // Regular quote (unescaped) also toggles string state
+            if (c == '"') {
+                in_string = !in_string;
+                try result.append(self.gpa, c);
+                pos += 1;
+                continue;
+            }
+
+            // Don't substitute inside string literals
+            if (in_string) {
+                try result.append(self.gpa, c);
+                pos += 1;
+                continue;
+            }
+
             var found_match = false;
 
             // Check each define for a match at current position
@@ -213,7 +245,7 @@ pub const Emitter = struct {
             }
 
             if (!found_match) {
-                try result.append(self.gpa, code[pos]);
+                try result.append(self.gpa, c);
                 pos += 1;
             }
         }
@@ -2195,4 +2227,35 @@ test "Emitter: define substitution in shader code" {
         }
     }
     try testing.expect(found_substituted);
+}
+
+test "Emitter: define NOT substituted inside string literals" {
+    // Test from old_pngine: defines should NOT be expanded inside strings
+    // The FOV inside \"...\" should remain as "FOV", not be replaced
+    const source: [:0]const u8 =
+        \\#define FOV="(2 * PI) / 5"
+        \\#shaderModule code {
+        \\  code="let msg = \"The FOV value\"; let x = FOV;"
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Property: FOV should be preserved inside the string, substituted outside
+    for (module.data.blobs.items) |data| {
+        // Should have "FOV" preserved inside the string literal
+        if (std.mem.indexOf(u8, data, "The FOV value")) |_| {
+            // Also verify FOV was substituted outside the string
+            if (std.mem.indexOf(u8, data, "(2 * PI)")) |_| {
+                return; // Both conditions met - test passes
+            }
+        }
+    }
+    // If we get here, test failed
+    return error.TestUnexpectedResult;
 }
