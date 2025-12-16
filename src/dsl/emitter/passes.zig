@@ -1,0 +1,447 @@
+//! Pass Emission Module
+//!
+//! Handles emission of pass declarations:
+//! - #renderPass (render pass definition + commands)
+//! - #computePass (compute pass definition + commands)
+//!
+//! Emits pass commands: pipeline, bind groups, vertex/index buffers, draw/dispatch.
+//!
+//! ## Invariants
+//!
+//! * Pass IDs are assigned sequentially starting from next_pass_id.
+//! * Render passes have begin_render_pass + end_pass bracketing.
+//! * Compute passes have begin_compute_pass + end_pass bracketing.
+//! * All iteration is bounded by MAX_PASSES or MAX_COMMANDS.
+//! * Depth texture ID is 0xFFFF when no depth attachment is specified.
+
+const std = @import("std");
+const Emitter = @import("../Emitter.zig").Emitter;
+const Node = @import("../Ast.zig").Node;
+const opcodes = @import("../../bytecode/opcodes.zig");
+const utils = @import("utils.zig");
+
+/// Maximum passes to emit (prevents runaway iteration).
+const MAX_PASSES: u32 = 128;
+
+/// Maximum commands per pass.
+const MAX_COMMANDS: u32 = 256;
+
+/// Maximum array elements to process.
+const MAX_ARRAY_ELEMENTS: u32 = 64;
+
+/// Emit #renderPass and #computePass declarations.
+pub fn emitPasses(e: *Emitter) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(e.ast.nodes.len > 0);
+
+    const initial_pass_id = e.next_pass_id;
+
+    // Render passes
+    var rp_it = e.analysis.symbols.render_pass.iterator();
+    for (0..MAX_PASSES) |_| {
+        const entry = rp_it.next() orelse break;
+        const name = entry.key_ptr.*;
+        const info = entry.value_ptr.*;
+
+        const pass_id = e.next_pass_id;
+        e.next_pass_id += 1;
+        try e.pass_ids.put(e.gpa, name, pass_id);
+
+        try emitRenderPassDefinition(e, pass_id, info.node);
+    }
+
+    // Compute passes
+    var cp_it = e.analysis.symbols.compute_pass.iterator();
+    for (0..MAX_PASSES) |_| {
+        const entry = cp_it.next() orelse break;
+        const name = entry.key_ptr.*;
+        const info = entry.value_ptr.*;
+
+        const pass_id = e.next_pass_id;
+        e.next_pass_id += 1;
+        try e.pass_ids.put(e.gpa, name, pass_id);
+
+        try emitComputePassDefinition(e, pass_id, info.node);
+    }
+
+    // Post-condition: pass IDs were assigned sequentially
+    std.debug.assert(e.next_pass_id >= initial_pass_id);
+}
+
+fn emitRenderPassDefinition(e: *Emitter, pass_id: u16, node: Node.Index) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(node.toInt() < e.ast.nodes.len);
+
+    // Create pass descriptor
+    const desc = "{}";
+    const desc_id = try e.builder.addData(e.gpa, desc);
+
+    // Define pass
+    try e.builder.getEmitter().definePass(
+        e.gpa,
+        pass_id,
+        .render,
+        desc_id.toInt(),
+    );
+
+    // Parse depth texture from depthStencilAttachment if present
+    const depth_texture_id = getDepthTextureId(e, node);
+
+    // Begin render pass (texture 0 = canvas, clear, store)
+    try e.builder.getEmitter().beginRenderPass(
+        e.gpa,
+        0, // color texture ID (0 = canvas/surface)
+        opcodes.LoadOp.clear,
+        opcodes.StoreOp.store,
+        depth_texture_id,
+    );
+
+    // Emit pass body commands
+    try emitPassCommands(e, node);
+
+    // End the render pass
+    try e.builder.getEmitter().endPass(e.gpa);
+
+    // End pass definition
+    try e.builder.getEmitter().endPassDef(e.gpa);
+}
+
+/// Get depth texture ID from depthStencilAttachment property.
+/// Returns 0xFFFF if no depth attachment is specified.
+pub fn getDepthTextureId(e: *Emitter, node: Node.Index) u16 {
+    // Pre-condition
+    std.debug.assert(node.toInt() < e.ast.nodes.len);
+
+    const depth_attachment = utils.findPropertyValue(e, node, "depthStencilAttachment") orelse return 0xFFFF;
+    const depth_tag = e.ast.nodes.items(.tag)[depth_attachment.toInt()];
+
+    if (depth_tag != .object) return 0xFFFF;
+
+    // Look for view property in the depth attachment object
+    const view_value = utils.findPropertyValueInObject(e, depth_attachment, "view") orelse return 0xFFFF;
+
+    // view can be an identifier (depthTexture) or a reference ($texture.depthTexture)
+    const view_tag = e.ast.nodes.items(.tag)[view_value.toInt()];
+
+    if (view_tag == .identifier_value) {
+        const token = e.ast.nodes.items(.main_token)[view_value.toInt()];
+        const texture_name = utils.getTokenSlice(e, token);
+        if (e.texture_ids.get(texture_name)) |id| {
+            return id;
+        }
+    } else if (view_tag == .reference) {
+        if (utils.getReference(e, view_value)) |ref| {
+            if (e.texture_ids.get(ref.name)) |id| {
+                return id;
+            }
+        }
+    }
+
+    return 0xFFFF;
+}
+
+fn emitComputePassDefinition(e: *Emitter, pass_id: u16, node: Node.Index) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(node.toInt() < e.ast.nodes.len);
+
+    const desc = "{}";
+    const desc_id = try e.builder.addData(e.gpa, desc);
+
+    try e.builder.getEmitter().definePass(
+        e.gpa,
+        pass_id,
+        .compute,
+        desc_id.toInt(),
+    );
+
+    // Begin compute pass
+    try e.builder.getEmitter().beginComputePass(e.gpa);
+
+    // Emit pass body commands
+    try emitPassCommands(e, node);
+
+    // End the compute pass
+    try e.builder.getEmitter().endPass(e.gpa);
+
+    // End pass definition
+    try e.builder.getEmitter().endPassDef(e.gpa);
+}
+
+fn emitPassCommands(e: *Emitter, node: Node.Index) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(node.toInt() < e.ast.nodes.len);
+
+    const data = e.ast.nodes.items(.data)[node.toInt()];
+    const props = e.ast.extraData(data.extra_range);
+
+    // Bounded iteration over properties
+    const max_props = @min(props.len, MAX_COMMANDS);
+    for (0..max_props) |i| {
+        const prop_idx = props[i];
+        const prop_node: Node.Index = @enumFromInt(prop_idx);
+        const prop_token = e.ast.nodes.items(.main_token)[prop_node.toInt()];
+        const prop_name = utils.getTokenSlice(e, prop_token);
+
+        if (std.mem.eql(u8, prop_name, "pipeline")) {
+            try emitPipelineCommand(e, prop_node);
+        } else if (std.mem.eql(u8, prop_name, "bindGroups")) {
+            try emitBindGroupCommands(e, prop_node);
+        } else if (std.mem.eql(u8, prop_name, "vertexBuffers")) {
+            try emitVertexBufferCommands(e, prop_node);
+        } else if (std.mem.eql(u8, prop_name, "indexBuffer")) {
+            try emitIndexBufferCommand(e, prop_node);
+        } else if (std.mem.eql(u8, prop_name, "draw")) {
+            try emitDrawCommand(e, prop_node);
+        } else if (std.mem.eql(u8, prop_name, "drawIndexed")) {
+            try emitDrawIndexedCommand(e, prop_node);
+        } else if (std.mem.eql(u8, prop_name, "dispatch")) {
+            try emitDispatchCommand(e, prop_node);
+        }
+    }
+}
+
+/// Emit set_pipeline command.
+/// Handles both reference ($renderPipeline.x) and identifier (pipelineName) syntax.
+fn emitPipelineCommand(e: *Emitter, prop_node: Node.Index) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(prop_node.toInt() < e.ast.nodes.len);
+
+    if (utils.findPropertyReference(e, prop_node)) |ref| {
+        if (e.pipeline_ids.get(ref.name)) |pipeline_id| {
+            try e.builder.getEmitter().setPipeline(e.gpa, pipeline_id);
+        }
+    } else {
+        // Fallback: identifier value (e.g., pipeline=myPipeline)
+        const prop_data = e.ast.nodes.items(.data)[prop_node.toInt()];
+        const value_node = prop_data.node;
+        const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
+
+        if (value_tag == .identifier_value) {
+            const name = utils.getNodeText(e, value_node);
+            if (e.pipeline_ids.get(name)) |pipeline_id| {
+                try e.builder.getEmitter().setPipeline(e.gpa, pipeline_id);
+            }
+        }
+    }
+}
+
+/// Emit draw command with vertex/instance counts.
+/// Handles number literals, identifiers (#define references), and arrays.
+fn emitDrawCommand(e: *Emitter, prop_node: Node.Index) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(prop_node.toInt() < e.ast.nodes.len);
+
+    const prop_data = e.ast.nodes.items(.data)[prop_node.toInt()];
+    const value_node = prop_data.node;
+    const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
+
+    if (value_tag == .array) {
+        const counts = parseCountPair(e, value_node, 3, 1);
+        try e.builder.getEmitter().draw(e.gpa, counts[0], counts[1]);
+    } else {
+        // Handle number_value, identifier_value (#define refs), and expressions
+        const count = utils.resolveNumericValue(e, value_node) orelse 3;
+        try e.builder.getEmitter().draw(e.gpa, count, 1);
+    }
+}
+
+/// Emit draw_indexed command with index/instance counts.
+/// Handles number literals, identifiers (#define references), and arrays.
+fn emitDrawIndexedCommand(e: *Emitter, prop_node: Node.Index) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(prop_node.toInt() < e.ast.nodes.len);
+
+    const prop_data = e.ast.nodes.items(.data)[prop_node.toInt()];
+    const value_node = prop_data.node;
+    const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
+
+    if (value_tag == .array) {
+        const counts = parseCountPair(e, value_node, 3, 1);
+        try e.builder.getEmitter().drawIndexed(e.gpa, counts[0], counts[1]);
+    } else {
+        // Handle number_value, identifier_value (#define refs), and expressions
+        const count = utils.resolveNumericValue(e, value_node) orelse 3;
+        try e.builder.getEmitter().drawIndexed(e.gpa, count, 1);
+    }
+}
+
+/// Emit dispatch command for compute passes.
+fn emitDispatchCommand(e: *Emitter, prop_node: Node.Index) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(prop_node.toInt() < e.ast.nodes.len);
+
+    const prop_data = e.ast.nodes.items(.data)[prop_node.toInt()];
+    const value_node = prop_data.node;
+    const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
+
+    if (value_tag == .array) {
+        const array_data = e.ast.nodes.items(.data)[value_node.toInt()];
+        const elements = e.ast.extraData(array_data.extra_range);
+        var xyz: [3]u32 = .{ 1, 1, 1 };
+
+        // Bounded iteration
+        const max_elements = @min(elements.len, 3);
+        for (0..max_elements) |i| {
+            const elem_idx = elements[i];
+            const elem: Node.Index = @enumFromInt(elem_idx);
+            xyz[i] = utils.parseNumber(e, elem) orelse 1;
+        }
+        try e.builder.getEmitter().dispatch(e.gpa, xyz[0], xyz[1], xyz[2]);
+    }
+
+    // Post-condition: dispatch was emitted (if array) or skipped (otherwise)
+}
+
+/// Parse array of 2 numbers (e.g., [vertex_count instance_count]).
+fn parseCountPair(e: *Emitter, array_node: Node.Index, default0: u32, default1: u32) [2]u32 {
+    // Pre-condition
+    std.debug.assert(array_node.toInt() < e.ast.nodes.len);
+
+    const array_data = e.ast.nodes.items(.data)[array_node.toInt()];
+    const elements = e.ast.extraData(array_data.extra_range);
+    var counts: [2]u32 = .{ default0, default1 };
+
+    // Bounded iteration
+    const max_elements = @min(elements.len, 2);
+    for (0..max_elements) |i| {
+        const elem_idx = elements[i];
+        const elem: Node.Index = @enumFromInt(elem_idx);
+        counts[i] = utils.parseNumber(e, elem) orelse if (i == 0) default0 else default1;
+    }
+
+    // Post-condition: counts has valid values
+    std.debug.assert(counts[0] >= 0 and counts[1] >= 0);
+
+    return counts;
+}
+
+fn emitBindGroupCommands(e: *Emitter, prop_node: Node.Index) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(prop_node.toInt() < e.ast.nodes.len);
+
+    const prop_data = e.ast.nodes.items(.data)[prop_node.toInt()];
+    const value_node = prop_data.node;
+    const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
+
+    if (value_tag == .array) {
+        const array_data = e.ast.nodes.items(.data)[value_node.toInt()];
+        const elements = e.ast.extraData(array_data.extra_range);
+
+        // Bounded iteration
+        const max_elements = @min(elements.len, MAX_ARRAY_ELEMENTS);
+        for (0..max_elements) |slot| {
+            const elem_idx = elements[slot];
+            const elem: Node.Index = @enumFromInt(elem_idx);
+            const group_id = resolveBindGroupId(e, elem);
+
+            if (group_id) |id| {
+                try e.builder.getEmitter().setBindGroup(
+                    e.gpa,
+                    @intCast(slot),
+                    id,
+                );
+            }
+        }
+    } else {
+        // Single bind group at slot 0
+        const group_id = resolveBindGroupId(e, value_node);
+        if (group_id) |id| {
+            try e.builder.getEmitter().setBindGroup(e.gpa, 0, id);
+        }
+    }
+}
+
+/// Resolve a bind group reference to its ID.
+/// Handles both bare identifiers (inputsBinding) and references ($bindGroup.name).
+pub fn resolveBindGroupId(e: *Emitter, node: Node.Index) ?u16 {
+    // Pre-condition
+    std.debug.assert(node.toInt() < e.ast.nodes.len);
+
+    const tag = e.ast.nodes.items(.tag)[node.toInt()];
+
+    if (tag == .reference) {
+        if (utils.getReference(e, node)) |ref| {
+            return e.bind_group_ids.get(ref.name);
+        }
+    } else if (tag == .identifier_value) {
+        const name = utils.getNodeText(e, node);
+        return e.bind_group_ids.get(name);
+    }
+
+    return null;
+}
+
+/// Resolve a buffer reference to its ID.
+/// Handles both bare identifiers (myBuffer) and references ($buffer.name).
+pub fn resolveBufferId(e: *Emitter, node: Node.Index) ?u16 {
+    // Pre-conditions: valid node index
+    std.debug.assert(node.toInt() < e.ast.nodes.len);
+    std.debug.assert(e.ast.nodes.len > 0);
+
+    const tag = e.ast.nodes.items(.tag)[node.toInt()];
+
+    if (tag == .reference) {
+        if (utils.getReference(e, node)) |ref| {
+            return e.buffer_ids.get(ref.name);
+        }
+    } else if (tag == .identifier_value) {
+        const name = utils.getNodeText(e, node);
+        return e.buffer_ids.get(name);
+    }
+
+    return null;
+}
+
+/// Emit set_vertex_buffer commands for vertex buffer bindings.
+/// Handles arrays of references/identifiers and single values.
+fn emitVertexBufferCommands(e: *Emitter, prop_node: Node.Index) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(prop_node.toInt() < e.ast.nodes.len);
+
+    const prop_data = e.ast.nodes.items(.data)[prop_node.toInt()];
+    const value_node = prop_data.node;
+    const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
+
+    if (value_tag == .array) {
+        const array_data = e.ast.nodes.items(.data)[value_node.toInt()];
+        const elements = e.ast.extraData(array_data.extra_range);
+
+        // Bounded iteration
+        const max_elements = @min(elements.len, MAX_ARRAY_ELEMENTS);
+        for (0..max_elements) |slot| {
+            const elem_idx = elements[slot];
+            const elem: Node.Index = @enumFromInt(elem_idx);
+
+            if (resolveBufferId(e, elem)) |buffer_id| {
+                try e.builder.getEmitter().setVertexBuffer(
+                    e.gpa,
+                    @intCast(slot),
+                    buffer_id,
+                );
+            }
+        }
+    } else {
+        // Single vertex buffer at slot 0
+        if (resolveBufferId(e, value_node)) |buffer_id| {
+            try e.builder.getEmitter().setVertexBuffer(e.gpa, 0, buffer_id);
+        }
+    }
+}
+
+fn emitIndexBufferCommand(e: *Emitter, prop_node: Node.Index) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(prop_node.toInt() < e.ast.nodes.len);
+
+    const prop_data = e.ast.nodes.items(.data)[prop_node.toInt()];
+    const value_node = prop_data.node;
+    const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
+
+    if (value_tag == .reference) {
+        if (utils.getReference(e, value_node)) |ref| {
+            if (e.buffer_ids.get(ref.name)) |buffer_id| {
+                // Format 0 = uint16, 1 = uint32 (default to uint16)
+                try e.builder.getEmitter().setIndexBuffer(e.gpa, buffer_id, 0);
+            }
+        }
+    }
+}
