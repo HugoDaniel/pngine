@@ -41,6 +41,7 @@ const Node = @import("Ast.zig").Node;
 const Analyzer = @import("Analyzer.zig").Analyzer;
 const format = @import("../bytecode/format.zig");
 const opcodes = @import("../bytecode/opcodes.zig");
+const DescriptorEncoder = @import("DescriptorEncoder.zig").DescriptorEncoder;
 
 pub const Emitter = struct {
     gpa: Allocator,
@@ -231,28 +232,80 @@ pub const Emitter = struct {
     }
 
     fn emitTextures(self: *Self) Error!void {
-        // TODO: Add create_texture opcode to bytecode emitter
-        // For now, just track texture IDs
         var it = self.analysis.symbols.texture.iterator();
         while (it.next()) |entry| {
             const name = entry.key_ptr.*;
+            const info = entry.value_ptr.*;
 
             const texture_id = self.next_texture_id;
             self.next_texture_id += 1;
             try self.texture_ids.put(self.gpa, name, texture_id);
+
+            // Parse texture properties
+            const width = self.parsePropertyNumber(info.node, "width") orelse 256;
+            const height = self.parsePropertyNumber(info.node, "height") orelse 256;
+            const sample_count = self.parsePropertyNumber(info.node, "sampleCount") orelse 1;
+
+            // Parse format
+            const format_enum = self.parseTextureFormat(info.node);
+
+            // Parse usage flags
+            const usage = self.parseTextureUsage(info.node);
+
+            // Encode descriptor
+            const desc = DescriptorEncoder.encodeTexture(
+                self.gpa,
+                width,
+                height,
+                format_enum,
+                usage,
+                sample_count,
+            ) catch return error.OutOfMemory;
+            defer self.gpa.free(desc);
+
+            const desc_id = try self.builder.addData(self.gpa, desc);
+
+            // Emit create_texture opcode
+            try self.builder.getEmitter().createTexture(
+                self.gpa,
+                texture_id,
+                desc_id.toInt(),
+            );
         }
     }
 
     fn emitSamplers(self: *Self) Error!void {
-        // TODO: Add create_sampler opcode to bytecode emitter
-        // For now, just track sampler IDs
         var it = self.analysis.symbols.sampler.iterator();
         while (it.next()) |entry| {
             const name = entry.key_ptr.*;
+            const info = entry.value_ptr.*;
 
             const sampler_id = self.next_sampler_id;
             self.next_sampler_id += 1;
             try self.sampler_ids.put(self.gpa, name, sampler_id);
+
+            // Parse sampler properties
+            const mag_filter = self.parseSamplerFilter(info.node, "magFilter");
+            const min_filter = self.parseSamplerFilter(info.node, "minFilter");
+            const address_mode = self.parseSamplerAddressMode(info.node);
+
+            // Encode descriptor
+            const desc = DescriptorEncoder.encodeSampler(
+                self.gpa,
+                mag_filter,
+                min_filter,
+                address_mode,
+            ) catch return error.OutOfMemory;
+            defer self.gpa.free(desc);
+
+            const desc_id = try self.builder.addData(self.gpa, desc);
+
+            // Emit create_sampler opcode
+            try self.builder.getEmitter().createSampler(
+                self.gpa,
+                sampler_id,
+                desc_id.toInt(),
+            );
         }
     }
 
@@ -301,18 +354,53 @@ pub const Emitter = struct {
         var it = self.analysis.symbols.bind_group.iterator();
         while (it.next()) |entry| {
             const name = entry.key_ptr.*;
-            _ = entry.value_ptr;
+            const info = entry.value_ptr.*;
 
             const group_id = self.next_bind_group_id;
             self.next_bind_group_id += 1;
             try self.bind_group_ids.put(self.gpa, name, group_id);
 
-            // For now, emit a simple bind group with no entries
+            // Parse entries array
+            var entries_list: std.ArrayListUnmanaged(DescriptorEncoder.BindGroupEntry) = .{};
+            defer entries_list.deinit(self.gpa);
+
+            const entries_value = self.findPropertyValue(info.node, "entries");
+            if (entries_value) |ev| {
+                const ev_tag = self.ast.nodes.items(.tag)[ev.toInt()];
+                if (ev_tag == .array) {
+                    const array_data = self.ast.nodes.items(.data)[ev.toInt()];
+                    const elements = self.ast.extraData(array_data.extra_range);
+
+                    for (elements) |elem_idx| {
+                        const elem: Node.Index = @enumFromInt(elem_idx);
+                        const elem_tag = self.ast.nodes.items(.tag)[elem.toInt()];
+
+                        if (elem_tag == .object) {
+                            if (self.parseBindGroupEntry(elem)) |bg_entry| {
+                                entries_list.append(self.gpa, bg_entry) catch continue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Encode entries
+            const desc = DescriptorEncoder.encodeBindGroupEntries(
+                self.gpa,
+                entries_list.items,
+            ) catch return error.OutOfMemory;
+            defer self.gpa.free(desc);
+
+            const desc_id = try self.builder.addData(self.gpa, desc);
+
+            // Resolve layout reference
+            const layout_id = self.resolveBindGroupLayoutId(info.node);
+
             try self.builder.getEmitter().createBindGroup(
                 self.gpa,
                 group_id,
-                0, // layout_id
-                0, // entry_count
+                layout_id,
+                desc_id.toInt(),
             );
         }
     }
@@ -401,6 +489,15 @@ pub const Emitter = struct {
                         try self.builder.getEmitter().setPipeline(self.gpa, pipeline_id);
                     }
                 }
+            } else if (std.mem.eql(u8, prop_name, "bindGroups")) {
+                // Set bind groups: bindGroups=[$bindGroup.group0 $bindGroup.group1]
+                try self.emitBindGroupCommands(prop_node);
+            } else if (std.mem.eql(u8, prop_name, "vertexBuffers")) {
+                // Set vertex buffers: vertexBuffers=[$buffer.verts]
+                try self.emitVertexBufferCommands(prop_node);
+            } else if (std.mem.eql(u8, prop_name, "indexBuffer")) {
+                // Set index buffer: indexBuffer=$buffer.indices
+                try self.emitIndexBufferCommand(prop_node);
             } else if (std.mem.eql(u8, prop_name, "draw")) {
                 // Draw command
                 const prop_data = self.ast.nodes.items(.data)[prop_node.toInt()];
@@ -410,6 +507,37 @@ pub const Emitter = struct {
                 if (value_tag == .number_value) {
                     const count = self.parseNumber(value_node) orelse 3;
                     try self.builder.getEmitter().draw(self.gpa, count, 1);
+                } else if (value_tag == .array) {
+                    // draw=[vertex_count instance_count]
+                    const array_data = self.ast.nodes.items(.data)[value_node.toInt()];
+                    const elements = self.ast.extraData(array_data.extra_range);
+                    var counts: [2]u32 = .{ 3, 1 };
+                    for (elements, 0..) |elem_idx, i| {
+                        if (i >= 2) break;
+                        const elem: Node.Index = @enumFromInt(elem_idx);
+                        counts[i] = self.parseNumber(elem) orelse if (i == 0) 3 else 1;
+                    }
+                    try self.builder.getEmitter().draw(self.gpa, counts[0], counts[1]);
+                }
+            } else if (std.mem.eql(u8, prop_name, "drawIndexed")) {
+                // Draw indexed command
+                const prop_data = self.ast.nodes.items(.data)[prop_node.toInt()];
+                const value_node = prop_data.node;
+                const value_tag = self.ast.nodes.items(.tag)[value_node.toInt()];
+
+                if (value_tag == .number_value) {
+                    const count = self.parseNumber(value_node) orelse 3;
+                    try self.builder.getEmitter().drawIndexed(self.gpa, count, 1);
+                } else if (value_tag == .array) {
+                    const array_data = self.ast.nodes.items(.data)[value_node.toInt()];
+                    const elements = self.ast.extraData(array_data.extra_range);
+                    var counts: [2]u32 = .{ 3, 1 };
+                    for (elements, 0..) |elem_idx, i| {
+                        if (i >= 2) break;
+                        const elem: Node.Index = @enumFromInt(elem_idx);
+                        counts[i] = self.parseNumber(elem) orelse if (i == 0) 3 else 1;
+                    }
+                    try self.builder.getEmitter().drawIndexed(self.gpa, counts[0], counts[1]);
                 }
             } else if (std.mem.eql(u8, prop_name, "dispatch")) {
                 // Dispatch command for compute
@@ -428,6 +556,91 @@ pub const Emitter = struct {
                         xyz[i] = self.parseNumber(elem) orelse 1;
                     }
                     try self.builder.getEmitter().dispatch(self.gpa, xyz[0], xyz[1], xyz[2]);
+                }
+            }
+        }
+    }
+
+    fn emitBindGroupCommands(self: *Self, prop_node: Node.Index) Error!void {
+        const prop_data = self.ast.nodes.items(.data)[prop_node.toInt()];
+        const value_node = prop_data.node;
+        const value_tag = self.ast.nodes.items(.tag)[value_node.toInt()];
+
+        if (value_tag == .array) {
+            const array_data = self.ast.nodes.items(.data)[value_node.toInt()];
+            const elements = self.ast.extraData(array_data.extra_range);
+
+            for (elements, 0..) |elem_idx, slot| {
+                const elem: Node.Index = @enumFromInt(elem_idx);
+                const elem_tag = self.ast.nodes.items(.tag)[elem.toInt()];
+
+                if (elem_tag == .reference) {
+                    if (self.getReference(elem)) |ref| {
+                        if (self.bind_group_ids.get(ref.name)) |group_id| {
+                            try self.builder.getEmitter().setBindGroup(
+                                self.gpa,
+                                @intCast(slot),
+                                group_id,
+                            );
+                        }
+                    }
+                }
+            }
+        } else if (value_tag == .reference) {
+            // Single bind group at slot 0
+            if (self.getReference(value_node)) |ref| {
+                if (self.bind_group_ids.get(ref.name)) |group_id| {
+                    try self.builder.getEmitter().setBindGroup(self.gpa, 0, group_id);
+                }
+            }
+        }
+    }
+
+    fn emitVertexBufferCommands(self: *Self, prop_node: Node.Index) Error!void {
+        const prop_data = self.ast.nodes.items(.data)[prop_node.toInt()];
+        const value_node = prop_data.node;
+        const value_tag = self.ast.nodes.items(.tag)[value_node.toInt()];
+
+        if (value_tag == .array) {
+            const array_data = self.ast.nodes.items(.data)[value_node.toInt()];
+            const elements = self.ast.extraData(array_data.extra_range);
+
+            for (elements, 0..) |elem_idx, slot| {
+                const elem: Node.Index = @enumFromInt(elem_idx);
+                const elem_tag = self.ast.nodes.items(.tag)[elem.toInt()];
+
+                if (elem_tag == .reference) {
+                    if (self.getReference(elem)) |ref| {
+                        if (self.buffer_ids.get(ref.name)) |buffer_id| {
+                            try self.builder.getEmitter().setVertexBuffer(
+                                self.gpa,
+                                @intCast(slot),
+                                buffer_id,
+                            );
+                        }
+                    }
+                }
+            }
+        } else if (value_tag == .reference) {
+            // Single vertex buffer at slot 0
+            if (self.getReference(value_node)) |ref| {
+                if (self.buffer_ids.get(ref.name)) |buffer_id| {
+                    try self.builder.getEmitter().setVertexBuffer(self.gpa, 0, buffer_id);
+                }
+            }
+        }
+    }
+
+    fn emitIndexBufferCommand(self: *Self, prop_node: Node.Index) Error!void {
+        const prop_data = self.ast.nodes.items(.data)[prop_node.toInt()];
+        const value_node = prop_data.node;
+        const value_tag = self.ast.nodes.items(.tag)[value_node.toInt()];
+
+        if (value_tag == .reference) {
+            if (self.getReference(value_node)) |ref| {
+                if (self.buffer_ids.get(ref.name)) |buffer_id| {
+                    // Format 0 = uint16, 1 = uint32 (default to uint16)
+                    try self.builder.getEmitter().setIndexBuffer(self.gpa, buffer_id, 0);
                 }
             }
         }
@@ -633,6 +846,173 @@ pub const Emitter = struct {
         }
 
         return 0; // Default shader ID
+    }
+
+    // ========================================================================
+    // Property Parsing Helpers
+    // ========================================================================
+
+    fn parsePropertyNumber(self: *Self, node: Node.Index, prop_name: []const u8) ?u32 {
+        const value = self.findPropertyValue(node, prop_name) orelse return null;
+        return self.parseNumber(value);
+    }
+
+    fn parseTextureFormat(self: *Self, node: Node.Index) DescriptorEncoder.TextureFormat {
+        const value = self.findPropertyValue(node, "format") orelse return .rgba8unorm;
+        const value_tag = self.ast.nodes.items(.tag)[value.toInt()];
+
+        if (value_tag == .identifier_value or value_tag == .string_value) {
+            var text = self.getNodeText(value);
+            // Strip quotes if present
+            if (text.len >= 2 and text[0] == '"' and text[text.len - 1] == '"') {
+                text = text[1 .. text.len - 1];
+            }
+            return DescriptorEncoder.TextureFormat.fromString(text);
+        }
+        return .rgba8unorm;
+    }
+
+    fn parseTextureUsage(self: *Self, node: Node.Index) DescriptorEncoder.TextureUsage {
+        var usage = DescriptorEncoder.TextureUsage{};
+
+        const usage_value = self.findPropertyValue(node, "usage") orelse return usage;
+        const value_tag = self.ast.nodes.items(.tag)[usage_value.toInt()];
+
+        if (value_tag == .array) {
+            const array_data = self.ast.nodes.items(.data)[usage_value.toInt()];
+            const elements = self.ast.extraData(array_data.extra_range);
+
+            for (elements) |elem_idx| {
+                const elem: Node.Index = @enumFromInt(elem_idx);
+                const elem_tag = self.ast.nodes.items(.tag)[elem.toInt()];
+
+                if (elem_tag == .identifier_value) {
+                    const flag_name = self.getNodeText(elem);
+
+                    if (std.mem.eql(u8, flag_name, "COPY_SRC")) usage.copy_src = true;
+                    if (std.mem.eql(u8, flag_name, "COPY_DST")) usage.copy_dst = true;
+                    if (std.mem.eql(u8, flag_name, "TEXTURE_BINDING")) usage.texture_binding = true;
+                    if (std.mem.eql(u8, flag_name, "STORAGE_BINDING")) usage.storage_binding = true;
+                    if (std.mem.eql(u8, flag_name, "RENDER_ATTACHMENT")) usage.render_attachment = true;
+                }
+            }
+        }
+
+        return usage;
+    }
+
+    fn parseSamplerFilter(self: *Self, node: Node.Index, prop_name: []const u8) DescriptorEncoder.FilterMode {
+        const value = self.findPropertyValue(node, prop_name) orelse return .linear;
+        const value_tag = self.ast.nodes.items(.tag)[value.toInt()];
+
+        if (value_tag == .identifier_value or value_tag == .string_value) {
+            var text = self.getNodeText(value);
+            if (text.len >= 2 and text[0] == '"' and text[text.len - 1] == '"') {
+                text = text[1 .. text.len - 1];
+            }
+            if (std.mem.eql(u8, text, "nearest")) return .nearest;
+        }
+        return .linear;
+    }
+
+    fn parseSamplerAddressMode(self: *Self, node: Node.Index) DescriptorEncoder.AddressMode {
+        const value = self.findPropertyValue(node, "addressModeU") orelse
+            self.findPropertyValue(node, "addressMode") orelse return .clamp_to_edge;
+        const value_tag = self.ast.nodes.items(.tag)[value.toInt()];
+
+        if (value_tag == .identifier_value or value_tag == .string_value) {
+            var text = self.getNodeText(value);
+            if (text.len >= 2 and text[0] == '"' and text[text.len - 1] == '"') {
+                text = text[1 .. text.len - 1];
+            }
+            if (std.mem.eql(u8, text, "repeat")) return .repeat;
+            if (std.mem.eql(u8, text, "mirror-repeat")) return .mirror_repeat;
+        }
+        return .clamp_to_edge;
+    }
+
+    fn parseBindGroupEntry(self: *Self, entry_node: Node.Index) ?DescriptorEncoder.BindGroupEntry {
+        const entry_data = self.ast.nodes.items(.data)[entry_node.toInt()];
+        const entry_props = self.ast.extraData(entry_data.extra_range);
+
+        var bg_entry = DescriptorEncoder.BindGroupEntry{
+            .binding = 0,
+            .resource_type = .buffer,
+            .resource_id = 0,
+        };
+
+        for (entry_props) |prop_idx| {
+            const prop: Node.Index = @enumFromInt(prop_idx);
+            const prop_token = self.ast.nodes.items(.main_token)[prop.toInt()];
+            const prop_name = self.getTokenSlice(prop_token);
+            const prop_data = self.ast.nodes.items(.data)[prop.toInt()];
+            const value_node = prop_data.node;
+
+            if (std.mem.eql(u8, prop_name, "binding")) {
+                bg_entry.binding = @intCast(self.parseNumber(value_node) orelse 0);
+            } else if (std.mem.eql(u8, prop_name, "buffer")) {
+                bg_entry.resource_type = .buffer;
+                if (self.resolveResourceId(value_node, "buffer")) |id| {
+                    bg_entry.resource_id = id;
+                }
+            } else if (std.mem.eql(u8, prop_name, "texture")) {
+                bg_entry.resource_type = .texture_view;
+                if (self.resolveResourceId(value_node, "texture")) |id| {
+                    bg_entry.resource_id = id;
+                }
+            } else if (std.mem.eql(u8, prop_name, "sampler")) {
+                bg_entry.resource_type = .sampler;
+                if (self.resolveResourceId(value_node, "sampler")) |id| {
+                    bg_entry.resource_id = id;
+                }
+            } else if (std.mem.eql(u8, prop_name, "offset")) {
+                bg_entry.offset = self.parseNumber(value_node) orelse 0;
+            } else if (std.mem.eql(u8, prop_name, "size")) {
+                bg_entry.size = self.parseNumber(value_node) orelse 0;
+            }
+        }
+
+        return bg_entry;
+    }
+
+    fn resolveResourceId(self: *Self, value_node: Node.Index, resource_type: []const u8) ?u16 {
+        const value_tag = self.ast.nodes.items(.tag)[value_node.toInt()];
+
+        if (value_tag == .reference) {
+            if (self.getReference(value_node)) |ref| {
+                if (std.mem.eql(u8, resource_type, "buffer")) {
+                    return self.buffer_ids.get(ref.name);
+                } else if (std.mem.eql(u8, resource_type, "texture")) {
+                    return self.texture_ids.get(ref.name);
+                } else if (std.mem.eql(u8, resource_type, "sampler")) {
+                    return self.sampler_ids.get(ref.name);
+                }
+            }
+        }
+        return null;
+    }
+
+    fn resolveBindGroupLayoutId(self: *Self, node: Node.Index) u16 {
+        const value = self.findPropertyValue(node, "layout") orelse return 0;
+        const value_tag = self.ast.nodes.items(.tag)[value.toInt()];
+
+        if (value_tag == .reference) {
+            if (self.getReference(value)) |ref| {
+                // TODO: Add bind_group_layout_ids tracking
+                _ = ref;
+            }
+        } else if (value_tag == .identifier_value) {
+            const text = self.getNodeText(value);
+            if (std.mem.eql(u8, text, "auto")) {
+                return 0; // Auto layout
+            }
+        }
+        return 0;
+    }
+
+    fn getNodeText(self: *Self, node: Node.Index) []const u8 {
+        const token = self.ast.nodes.items(.main_token)[node.toInt()];
+        return self.getTokenSlice(token);
     }
 
     fn getTokenSlice(self: *Self, token_index: u32) []const u8 {
