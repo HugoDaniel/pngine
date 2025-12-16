@@ -1366,3 +1366,111 @@ test "Emitter: multiple frames" {
     // Should have 3 frame names in strings
     try testing.expectEqual(@as(u16, 3), module.strings.count());
 }
+
+// ----------------------------------------------------------------------------
+// Regression Tests - setPipeline emission
+// ----------------------------------------------------------------------------
+
+test "Emitter: setPipeline with identifier value" {
+    // Regression test: pipeline=pipelineName should emit set_pipeline
+    // Previously only $renderPipeline.name references worked.
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@vertex fn vs() {}" }
+        \\#renderPipeline myPipeline { vertex={ module=$wgsl.shader } }
+        \\#renderPass pass { pipeline=myPipeline draw=3 }
+        \\#frame main { perform=[$renderPass.pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Must find set_pipeline opcode in bytecode
+    var found_set_pipeline = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.set_pipeline)) {
+            found_set_pipeline = true;
+            break;
+        }
+    }
+    try testing.expect(found_set_pipeline);
+}
+
+test "Emitter: setPipeline with reference syntax" {
+    // Verify that $renderPipeline.name syntax still works
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@vertex fn vs() {}" }
+        \\#renderPipeline myPipeline { vertex={ module=$wgsl.shader } }
+        \\#renderPass pass { pipeline=$renderPipeline.myPipeline draw=3 }
+        \\#frame main { perform=[$renderPass.pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Must find set_pipeline opcode in bytecode
+    var found_set_pipeline = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.set_pipeline)) {
+            found_set_pipeline = true;
+            break;
+        }
+    }
+    try testing.expect(found_set_pipeline);
+}
+
+test "Emitter: render pass emits begin/setPipeline/draw/end sequence" {
+    // Regression test: Full render pass must emit correct opcode sequence.
+    // This catches missing begin_render_pass or end_pass.
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@vertex fn vs() {}" }
+        \\#renderPipeline pipe { vertex={ module=$wgsl.shader } }
+        \\#renderPass pass { pipeline=pipe draw=3 }
+        \\#frame main { perform=[$renderPass.pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Find the sequence: begin_render_pass, set_pipeline, draw, end_pass
+    var found_begin = false;
+    var found_set_pipeline = false;
+    var found_draw = false;
+    var found_end = false;
+
+    for (module.bytecode) |byte| {
+        const op: opcodes.OpCode = @enumFromInt(byte);
+        switch (op) {
+            .begin_render_pass => found_begin = true,
+            .set_pipeline => {
+                // set_pipeline must come after begin_render_pass
+                try testing.expect(found_begin);
+                found_set_pipeline = true;
+            },
+            .draw => {
+                // draw must come after set_pipeline
+                try testing.expect(found_set_pipeline);
+                found_draw = true;
+            },
+            .end_pass => {
+                // end_pass must come after draw
+                try testing.expect(found_draw);
+                found_end = true;
+            },
+            else => {},
+        }
+    }
+
+    try testing.expect(found_begin);
+    try testing.expect(found_set_pipeline);
+    try testing.expect(found_draw);
+    try testing.expect(found_end);
+}
