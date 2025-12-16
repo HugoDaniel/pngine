@@ -6,17 +6,27 @@ PNGine is a WebGPU bytecode engine that compiles high-level DSL into compact byt
 
 **Goal**: Shader art that fits in a PNG file, executable in any browser.
 
+## Environment
+
+```bash
+# Zig binary location (use this path for all zig commands)
+ZIG=/Users/hugo/.zvm/bin/zig
+```
+
 ## Quick Commands
 
 ```bash
-# Run all tests (183 tests, 6 fuzz tests)
-zig build test
+# Run all tests (289 tests)
+/Users/hugo/.zvm/bin/zig build test
 
-# Run tests directly (more verbose output)
-zig test src/main.zig
+# Run tests with summary
+/Users/hugo/.zvm/bin/zig build test --summary all
 
 # Build CLI
-zig build
+/Users/hugo/.zvm/bin/zig build
+
+# Build WASM for web
+/Users/hugo/.zvm/bin/zig build web
 
 # Run CLI
 ./zig-out/bin/pngine compile input.pbsf -o output.pngb
@@ -223,13 +233,13 @@ pub fn example() void {}
 
 ```bash
 # Run specific test
-zig test src/main.zig --test-filter "Parser: fuzz"
+/Users/hugo/.zvm/bin/zig test src/main.zig --test-filter "Parser: fuzz"
 
 # Run with specific seed (for fuzz reproducibility)
-zig test src/main.zig --seed 12345
+/Users/hugo/.zvm/bin/zig test src/main.zig --seed 12345
 
 # Verbose output
-zig test src/main.zig 2>&1 | less
+/Users/hugo/.zvm/bin/zig test src/main.zig 2>&1 | less
 ```
 
 ## Key Invariants
