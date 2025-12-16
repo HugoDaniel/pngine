@@ -113,6 +113,7 @@ pub const Analyzer = struct {
         shader_module: std.StringHashMapUnmanaged(SymbolInfo),
         data: std.StringHashMapUnmanaged(SymbolInfo),
         define: std.StringHashMapUnmanaged(SymbolInfo),
+        queue: std.StringHashMapUnmanaged(SymbolInfo),
 
         pub fn init() SymbolTable {
             return .{
@@ -131,6 +132,7 @@ pub const Analyzer = struct {
                 .shader_module = .{},
                 .data = .{},
                 .define = .{},
+                .queue = .{},
             };
         }
 
@@ -150,6 +152,7 @@ pub const Analyzer = struct {
             self.shader_module.deinit(gpa);
             self.data.deinit(gpa);
             self.define.deinit(gpa);
+            self.queue.deinit(gpa);
         }
 
         pub fn getNamespace(self: *SymbolTable, ns: Namespace) *std.StringHashMapUnmanaged(SymbolInfo) {
@@ -169,6 +172,7 @@ pub const Analyzer = struct {
                 .shader_module => &self.shader_module,
                 .data => &self.data,
                 .define => &self.define,
+                .queue => &self.queue,
             };
         }
     };
@@ -201,6 +205,7 @@ pub const Analyzer = struct {
         shader_module,
         data,
         define,
+        queue,
 
         pub fn fromString(s: []const u8) ?Namespace {
             const map = std.StaticStringMap(Namespace).initComptime(.{
@@ -218,6 +223,7 @@ pub const Analyzer = struct {
                 .{ "frame", .frame },
                 .{ "shaderModule", .shader_module },
                 .{ "data", .data },
+                .{ "queue", .queue },
                 .{ "pipeline", .render_pipeline }, // Alias
                 .{ "pass", .render_pass }, // Alias
             });
@@ -425,6 +431,7 @@ pub const Analyzer = struct {
             .macro_shader_module => .shader_module,
             .macro_data => .data,
             .macro_define => .define,
+            .macro_queue => .queue,
             else => return, // Skip non-declaration nodes
         };
 
@@ -2062,4 +2069,37 @@ fn fuzzExpressionEvaluation(_: void, input: []const u8) !void {
     } else |_| {
         // Parse error is acceptable for random input
     }
+}
+
+// ----------------------------------------------------------------------------
+// Queue Tests
+// ----------------------------------------------------------------------------
+
+test "Analyzer: queue symbol table population" {
+    const source: [:0]const u8 =
+        \\#buffer buf { size=4 usage=[UNIFORM] }
+        \\#queue writeData { writeBuffer={ buffer=$buffer.buf data=[0.0] } }
+        \\#frame main { perform=[writeData] }
+    ;
+
+    var result = try parseAndAnalyze(source);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 0), result.errors.len);
+    try testing.expectEqual(@as(u32, 1), result.symbols.queue.count());
+    try testing.expect(result.symbols.queue.get("writeData") != null);
+}
+
+test "Analyzer: queue reference validation" {
+    const source: [:0]const u8 =
+        \\#buffer buf { size=4 usage=[UNIFORM] }
+        \\#queue writeData { writeBuffer={ buffer=$buffer.buf data=[0.0] } }
+        \\#frame main { perform=[$queue.writeData] }
+    ;
+
+    var result = try parseAndAnalyze(source);
+    defer result.deinit(testing.allocator);
+
+    // $queue.writeData should resolve without errors
+    try testing.expectEqual(@as(usize, 0), result.errors.len);
 }
