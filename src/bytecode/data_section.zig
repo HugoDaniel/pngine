@@ -47,13 +47,18 @@ pub const DataSection = struct {
     };
 
     pub fn deinit(self: *Self, allocator: Allocator) void {
+        // Free all owned blob copies
+        for (self.blobs.items) |blob| {
+            allocator.free(blob);
+        }
         self.blobs.deinit(allocator);
         self.* = undefined;
     }
 
     /// Add a data blob, returning its ID.
+    /// Makes a copy of the data - caller can free their buffer after this returns.
     /// Note: Does NOT deduplicate - caller should handle deduplication if needed.
-    /// Complexity: O(1) amortized.
+    /// Complexity: O(n) where n is data.len (for copy).
     pub fn add(self: *Self, allocator: Allocator, data: []const u8) !DataId {
         // Pre-condition: data fits in u32 range
         if (self.total_size + data.len > std.math.maxInt(u32)) {
@@ -65,7 +70,11 @@ pub const DataSection = struct {
 
         const id: DataId = @enumFromInt(@as(u16, @intCast(self.blobs.items.len)));
 
-        try self.blobs.append(allocator, data);
+        // Make owned copy of data
+        const owned = try allocator.dupe(u8, data);
+        errdefer allocator.free(owned);
+
+        try self.blobs.append(allocator, owned);
         self.total_size += data.len;
 
         // Post-condition: ID is valid
