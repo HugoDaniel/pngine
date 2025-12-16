@@ -415,12 +415,13 @@ pub const DescriptorEncoder = struct {
         return result;
     }
 
-    /// Encode bind group entries.
-    /// Each entry is: binding, resource_type, resource_id
+    /// Encode bind group descriptor with group index and entries.
+    /// Format: type_tag + field_count + group_index + entries_array
     ///
     /// Memory: Caller owns returned slice.
-    pub fn encodeBindGroupEntries(
+    pub fn encodeBindGroupDescriptor(
         allocator: Allocator,
+        group_index: u8,
         entries: []const BindGroupEntry,
     ) ![]u8 {
         // Pre-condition: entries count fits in u8 for compact encoding.
@@ -430,11 +431,17 @@ pub const DescriptorEncoder = struct {
         errdefer encoder.deinit(allocator);
 
         const field_count_pos = try encoder.beginDescriptor(allocator, .bind_group);
+        var field_count: u8 = 0;
+
+        // Write group index (which slot in the pipeline layout)
+        try encoder.writeEnumField(allocator, @intFromEnum(BindGroupField.layout), group_index);
+        field_count += 1;
 
         // Write entries array header
         try encoder.writeByte(allocator, @intFromEnum(BindGroupField.entries));
         try encoder.writeByte(allocator, @intFromEnum(ValueType.array));
         try encoder.writeByte(allocator, @intCast(entries.len));
+        field_count += 1;
 
         // Write each entry
         for (entries) |entry| {
@@ -447,7 +454,7 @@ pub const DescriptorEncoder = struct {
             }
         }
 
-        encoder.endDescriptor(field_count_pos, 1); // 1 field: entries
+        encoder.endDescriptor(field_count_pos, field_count);
 
         const result = try encoder.toOwnedSlice(allocator);
 
@@ -455,6 +462,15 @@ pub const DescriptorEncoder = struct {
         assert(result[0] == @intFromEnum(DescriptorType.bind_group));
 
         return result;
+    }
+
+    /// Legacy: Encode bind group entries without group index.
+    /// Deprecated: Use encodeBindGroupDescriptor instead.
+    pub fn encodeBindGroupEntries(
+        allocator: Allocator,
+        entries: []const BindGroupEntry,
+    ) ![]u8 {
+        return encodeBindGroupDescriptor(allocator, 0, entries);
     }
 
     /// Encode render pass descriptor.
