@@ -27,6 +27,7 @@
 const std = @import("std");
 const Token = @import("Token.zig").Token;
 const macro_keywords = @import("Token.zig").macro_keywords;
+const literal_keywords = @import("Token.zig").literal_keywords;
 
 pub const Lexer = struct {
     /// Sentinel-terminated input buffer.
@@ -93,22 +94,26 @@ pub const Lexer = struct {
                             self.index += 2;
                             continue :state .line_comment;
                         } else {
-                            result.tag = .invalid;
+                            // Division operator for arithmetic expressions
+                            result.tag = .slash;
                             self.index += 1;
                         }
                     },
                     'a'...'z', 'A'...'Z', '_' => continue :state .identifier,
                     '0'...'9' => continue :state .number,
                     '-' => {
-                        // Could be negative number or just minus
-                        const next_c = self.buffer[self.index + 1];
-                        if (next_c >= '0' and next_c <= '9') {
-                            continue :state .number;
-                        } else {
-                            // Just a minus sign, treat as identifier char or invalid
-                            result.tag = .invalid;
-                            self.index += 1;
-                        }
+                        // Always emit minus as separate token
+                        // Parser handles unary negation vs binary subtraction
+                        result.tag = .minus;
+                        self.index += 1;
+                    },
+                    '+' => {
+                        result.tag = .plus;
+                        self.index += 1;
+                    },
+                    '*' => {
+                        result.tag = .star;
+                        self.index += 1;
                     },
                     '{' => {
                         result.tag = .l_brace;
@@ -176,15 +181,31 @@ pub const Lexer = struct {
                         'a'...'z', 'A'...'Z', '_', '0'...'9', '-' => self.index += 1,
                         else => break,
                     }
-                } else unreachable; // Token exceeds MAX_TOKEN_LEN
-                result.tag = .identifier;
+                } else unreachable;
+                // WebGPU properties often use boolean flags (e.g., writeMask, depthTest)
+                // Distinguish true/false from regular identifiers for type safety
+                const ident = self.buffer[result.loc.start..self.index];
+                result.tag = literal_keywords.get(ident) orelse .identifier;
             },
             .number => {
-                // Handle optional leading minus
-                if (self.buffer[self.index] == '-') {
-                    self.index += 1;
+                // WebGPU uses hex for usage flags (e.g., 0x00000010 for COPY_DST)
+                // and color values (0xRRGGBBAA format)
+                if (self.buffer[self.index] == '0') {
+                    const next_char = self.buffer[self.index + 1];
+                    if (next_char == 'x' or next_char == 'X') {
+                        self.index += 2;
+                        for (0..MAX_TOKEN_LEN) |_| {
+                            const c = self.buffer[self.index];
+                            switch (c) {
+                                '0'...'9', 'a'...'f', 'A'...'F' => self.index += 1,
+                                else => break,
+                            }
+                        } else unreachable;
+                        result.tag = .number_literal;
+                        break :state;
+                    }
                 }
-                // Integer part
+                // Integer part (decimal)
                 for (0..MAX_TOKEN_LEN) |_| {
                     const c = self.buffer[self.index];
                     switch (c) {
@@ -355,11 +376,15 @@ test "Lexer: numbers" {
     });
 }
 
-test "Lexer: negative numbers" {
+test "Lexer: negative numbers as minus and number" {
+    // Minus is always a separate token; parser handles unary negation
     try expectTokensWithSlices("-1 -0.5 -123", &.{
-        .{ .tag = .number_literal, .slice = "-1" },
-        .{ .tag = .number_literal, .slice = "-0.5" },
-        .{ .tag = .number_literal, .slice = "-123" },
+        .{ .tag = .minus, .slice = "-" },
+        .{ .tag = .number_literal, .slice = "1" },
+        .{ .tag = .minus, .slice = "-" },
+        .{ .tag = .number_literal, .slice = "0.5" },
+        .{ .tag = .minus, .slice = "-" },
+        .{ .tag = .number_literal, .slice = "123" },
         .{ .tag = .eof, .slice = "" },
     });
 }
@@ -404,6 +429,111 @@ test "Lexer: punctuation" {
         .comma,
         .dot,
         .dollar,
+        .eof,
+    });
+}
+
+test "Lexer: arithmetic operators" {
+    try expectTokens("+ - * /", &.{
+        .plus,
+        .minus,
+        .star,
+        .slash,
+        .eof,
+    });
+}
+
+test "Lexer: arithmetic expression" {
+    try expectTokens("1 + 2", &.{
+        .number_literal,
+        .plus,
+        .number_literal,
+        .eof,
+    });
+    try expectTokens("10 - 5", &.{
+        .number_literal,
+        .minus,
+        .number_literal,
+        .eof,
+    });
+    try expectTokens("3 * 4", &.{
+        .number_literal,
+        .star,
+        .number_literal,
+        .eof,
+    });
+    try expectTokens("8 / 2", &.{
+        .number_literal,
+        .slash,
+        .number_literal,
+        .eof,
+    });
+}
+
+test "Lexer: complex arithmetic expression" {
+    // (1 + 2) * 3
+    try expectTokens("(1 + 2) * 3", &.{
+        .l_paren,
+        .number_literal,
+        .plus,
+        .number_literal,
+        .r_paren,
+        .star,
+        .number_literal,
+        .eof,
+    });
+    // 0xDEADBEEF + 0x123
+    try expectTokens("0xDEADBEEF + 0x123", &.{
+        .number_literal,
+        .plus,
+        .number_literal,
+        .eof,
+    });
+}
+
+test "Lexer: minus as operator" {
+    // Minus operator with space
+    try expectTokens("5 - 3", &.{
+        .number_literal,
+        .minus,
+        .number_literal,
+        .eof,
+    });
+    // Minus without space - still separate tokens
+    try expectTokens("5-3", &.{
+        .number_literal,
+        .minus,
+        .number_literal,
+        .eof,
+    });
+    // Unary minus (parser interprets as negation)
+    try expectTokens("-3", &.{
+        .minus,
+        .number_literal,
+        .eof,
+    });
+    // Double unary minus
+    try expectTokens("5 - -3", &.{
+        .number_literal,
+        .minus,
+        .minus,
+        .number_literal,
+        .eof,
+    });
+}
+
+test "Lexer: slash vs comment" {
+    // Division
+    try expectTokens("10 / 2", &.{
+        .number_literal,
+        .slash,
+        .number_literal,
+        .eof,
+    });
+    // Comment (double slash)
+    try expectTokens("10 // comment", &.{
+        .number_literal,
+        .line_comment,
         .eof,
     });
 }
@@ -635,7 +765,106 @@ test "Lexer: fuzz properties" {
     }
 }
 
+// Fuzz test edge cases for hex number parsing
+test "Lexer: hex number edge cases" {
+    const hex_edge_cases = [_][:0]const u8{
+        "0x",
+        "0X",
+        "0x0",
+        "0xG",
+        "0xFFFFFFFF",
+        "0x",
+        "-0x1",
+        "0x0x0",
+        "0xABCDEFabcdef0123456789",
+        "0x ",
+        "0x\n",
+    };
+
+    for (hex_edge_cases) |source| {
+        var lexer = Lexer.init(source);
+        for (0..100) |_| {
+            const tok = lexer.next();
+            // Property: valid token range
+            try testing.expect(tok.loc.end >= tok.loc.start);
+            try testing.expect(tok.loc.end <= source.len);
+            if (tok.tag == .eof) break;
+        }
+    }
+}
+
+// Fuzz test edge cases for boolean literal parsing
+test "Lexer: boolean literal edge cases" {
+    const bool_edge_cases = [_][:0]const u8{
+        "true",
+        "false",
+        "truefalse",
+        "falsetrue",
+        "true123",
+        "false_",
+        "TRUE",
+        "FALSE",
+        "True",
+        "False",
+        "truetruetrue",
+        "true=false",
+        "t",
+        "f",
+        "tr",
+        "fa",
+    };
+
+    for (bool_edge_cases) |source| {
+        var lexer = Lexer.init(source);
+        for (0..100) |_| {
+            const tok = lexer.next();
+            // Property: valid token range
+            try testing.expect(tok.loc.end >= tok.loc.start);
+            try testing.expect(tok.loc.end <= source.len);
+            if (tok.tag == .eof) break;
+        }
+    }
+}
+
 // Property-based fuzz test for lexer using std.testing.fuzz API
+test "Lexer: hex numbers" {
+    try expectTokensWithSlices("0x123ABC", &.{
+        .{ .tag = .number_literal, .slice = "0x123ABC" },
+        .{ .tag = .eof, .slice = "" },
+    });
+    try expectTokensWithSlices("0xFF", &.{
+        .{ .tag = .number_literal, .slice = "0xFF" },
+        .{ .tag = .eof, .slice = "" },
+    });
+    try expectTokensWithSlices("0x0", &.{
+        .{ .tag = .number_literal, .slice = "0x0" },
+        .{ .tag = .eof, .slice = "" },
+    });
+    // Uppercase X
+    try expectTokensWithSlices("0XFFEE", &.{
+        .{ .tag = .number_literal, .slice = "0XFFEE" },
+        .{ .tag = .eof, .slice = "" },
+    });
+}
+
+test "Lexer: boolean literals" {
+    try expectTokensWithSlices("true", &.{
+        .{ .tag = .boolean_literal, .slice = "true" },
+        .{ .tag = .eof, .slice = "" },
+    });
+    try expectTokensWithSlices("false", &.{
+        .{ .tag = .boolean_literal, .slice = "false" },
+        .{ .tag = .eof, .slice = "" },
+    });
+    // Booleans in property context
+    try expectTokens("enabled=true", &.{
+        .identifier,
+        .equals,
+        .boolean_literal,
+        .eof,
+    });
+}
+
 test "Lexer: fuzz with random input" {
     try std.testing.fuzz({}, fuzzLexerProperties, .{});
 }
