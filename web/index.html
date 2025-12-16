@@ -122,6 +122,120 @@
             color: #4ade80;
         }
 
+        .file-upload {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .file-upload input[type="file"] {
+            display: none;
+        }
+
+        .file-upload label {
+            padding: 0.5rem 1rem;
+            background: #1a4a7a;
+            color: #fff;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.875rem;
+        }
+
+        .file-upload label:hover {
+            background: #2a5a8a;
+        }
+
+        .file-name {
+            font-size: 0.75rem;
+            color: #888;
+            max-width: 150px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .drop-zone {
+            border: 2px dashed #333;
+            border-radius: 4px;
+            padding: 1rem;
+            text-align: center;
+            font-size: 0.75rem;
+            color: #666;
+            transition: border-color 0.2s, background 0.2s;
+        }
+
+        .drop-zone.dragover {
+            border-color: #0f3460;
+            background: rgba(15, 52, 96, 0.2);
+        }
+
+        .tabs {
+            display: flex;
+            gap: 0;
+            margin-bottom: 0.5rem;
+        }
+
+        .tab {
+            padding: 0.5rem 1rem;
+            background: #0f0f23;
+            color: #888;
+            border: 1px solid #333;
+            border-bottom: none;
+            cursor: pointer;
+            font-size: 0.875rem;
+        }
+
+        .tab:first-child {
+            border-radius: 4px 0 0 0;
+        }
+
+        .tab:last-child {
+            border-radius: 0 4px 0 0;
+        }
+
+        .tab.active {
+            background: #1a1a2e;
+            color: #fff;
+            border-color: #0f3460;
+        }
+
+        .tab-content {
+            display: none;
+            flex: 1;
+            flex-direction: column;
+        }
+
+        .tab-content.active {
+            display: flex;
+        }
+
+        .pngb-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            padding: 1rem;
+            background: #0f0f23;
+            border: 1px solid #333;
+            border-radius: 0 4px 4px 4px;
+        }
+
+        .bytecode-info {
+            font-family: 'SF Mono', 'Consolas', monospace;
+            font-size: 0.75rem;
+            color: #888;
+            background: #1a1a2e;
+            padding: 0.5rem;
+            border-radius: 4px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .bytecode-info pre {
+            margin: 0;
+            white-space: pre-wrap;
+        }
+
         #error-banner {
             display: none;
             padding: 1rem;
@@ -138,8 +252,14 @@
     </header>
     <main>
         <div class="editor-panel">
-            <label for="source">PBSF Source</label>
-            <textarea id="source" spellcheck="false">; Simple Triangle Demo
+            <div class="tabs">
+                <button class="tab active" data-tab="source">Source</button>
+                <button class="tab" data-tab="pngb">PNGB Upload</button>
+            </div>
+
+            <div id="source-tab" class="tab-content active">
+                <label for="source">PBSF Source</label>
+                <textarea id="source" spellcheck="false">; Simple Triangle Demo
 ; Renders a colored triangle using WebGPU
 
 (shader 0 "
@@ -166,9 +286,30 @@
     (end-pass)
     (submit)
 )</textarea>
-            <div class="controls">
-                <button id="run-btn" disabled>Run</button>
-                <button id="clear-btn">Clear</button>
+                <div class="controls">
+                    <button id="run-btn" disabled>Run</button>
+                    <button id="clear-btn">Clear</button>
+                </div>
+            </div>
+
+            <div id="pngb-tab" class="tab-content">
+                <div class="pngb-panel">
+                    <div id="drop-zone" class="drop-zone">
+                        Drop .pngb file here or click to browse
+                    </div>
+                    <div class="file-upload">
+                        <input type="file" id="pngb-file" accept=".pngb">
+                        <label for="pngb-file">Choose File</label>
+                        <span id="file-name" class="file-name"></span>
+                    </div>
+                    <div class="controls">
+                        <button id="run-pngb-btn" disabled>Run PNGB</button>
+                        <button id="clear-btn-2">Clear</button>
+                    </div>
+                    <div id="bytecode-info" class="bytecode-info">
+                        <pre>No file loaded</pre>
+                    </div>
+                </div>
             </div>
         </div>
         <div class="canvas-panel">
@@ -181,14 +322,49 @@
     <script type="module">
         import { initPNGine } from './pngine-loader.js';
 
+        // DOM elements
         const canvas = document.getElementById('canvas');
         const source = document.getElementById('source');
         const runBtn = document.getElementById('run-btn');
         const clearBtn = document.getElementById('clear-btn');
+        const clearBtn2 = document.getElementById('clear-btn-2');
         const status = document.getElementById('status');
         const errorBanner = document.getElementById('error-banner');
 
+        // PNGB upload elements
+        const tabs = document.querySelectorAll('.tab');
+        const tabContents = document.querySelectorAll('.tab-content');
+        const dropZone = document.getElementById('drop-zone');
+        const pngbFileInput = document.getElementById('pngb-file');
+        const fileName = document.getElementById('file-name');
+        const runPngbBtn = document.getElementById('run-pngb-btn');
+        const bytecodeInfo = document.getElementById('bytecode-info');
+
         let pngine = null;
+        let loadedBytecode = null;
+
+        // ====================================================================
+        // Tab switching
+        // ====================================================================
+
+        tabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                const tabId = tab.dataset.tab;
+
+                // Update tab buttons
+                tabs.forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+
+                // Update tab content
+                tabContents.forEach(content => {
+                    content.classList.toggle('active', content.id === `${tabId}-tab`);
+                });
+            });
+        });
+
+        // ====================================================================
+        // Status and error handling
+        // ====================================================================
 
         function setStatus(message, type = '') {
             status.textContent = message;
@@ -199,6 +375,14 @@
             errorBanner.textContent = message;
             errorBanner.style.display = 'block';
         }
+
+        function hideError() {
+            errorBanner.style.display = 'none';
+        }
+
+        // ====================================================================
+        // Initialization
+        // ====================================================================
 
         async function init() {
             try {
@@ -213,8 +397,13 @@
             }
         }
 
+        // ====================================================================
+        // Source compilation and execution
+        // ====================================================================
+
         function run() {
             if (!pngine) return;
+            hideError();
 
             try {
                 setStatus('Compiling...');
@@ -232,18 +421,126 @@
 
         function clear() {
             if (!pngine) return;
-
-            // Clear canvas by running empty bytecode
-            const ctx = canvas.getContext('webgpu');
-            // Just reset the GPU state
+            hideError();
             pngine.freeModule();
             setStatus('Cleared', '');
         }
 
+        // ====================================================================
+        // PNGB file handling
+        // ====================================================================
+
+        function formatBytes(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+        }
+
+        function parsePngbHeader(data) {
+            if (data.length < 16) {
+                return { error: 'File too small (< 16 bytes)' };
+            }
+
+            const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+            const magic = String.fromCharCode(data[0], data[1], data[2], data[3]);
+
+            if (magic !== 'PNGB') {
+                return { error: `Invalid magic: "${magic}" (expected "PNGB")` };
+            }
+
+            const version = view.getUint16(4, true);
+            const flags = view.getUint16(6, true);
+            const stringTableOffset = view.getUint32(8, true);
+            const dataSectionOffset = view.getUint32(12, true);
+
+            const bytecodeSize = stringTableOffset - 16;
+            const stringTableSize = dataSectionOffset - stringTableOffset;
+            const dataSectionSize = data.length - dataSectionOffset;
+
+            return {
+                magic,
+                version,
+                flags,
+                stringTableOffset,
+                dataSectionOffset,
+                bytecodeSize,
+                stringTableSize,
+                dataSectionSize,
+                totalSize: data.length,
+            };
+        }
+
+        function displayBytecodeInfo(data, filename) {
+            const info = parsePngbHeader(data);
+
+            if (info.error) {
+                bytecodeInfo.innerHTML = `<pre style="color: #e94560;">Error: ${info.error}</pre>`;
+                loadedBytecode = null;
+                runPngbBtn.disabled = true;
+                return;
+            }
+
+            bytecodeInfo.innerHTML = `<pre>File: ${filename}
+Size: ${formatBytes(info.totalSize)}
+
+Header:
+  Magic: ${info.magic}
+  Version: ${info.version}
+  Flags: 0x${info.flags.toString(16).padStart(4, '0')}
+
+Sections:
+  Bytecode:     ${formatBytes(info.bytecodeSize)} (offset 16)
+  String Table: ${formatBytes(info.stringTableSize)} (offset ${info.stringTableOffset})
+  Data Section: ${formatBytes(info.dataSectionSize)} (offset ${info.dataSectionOffset})</pre>`;
+
+            loadedBytecode = data;
+            runPngbBtn.disabled = !pngine;
+        }
+
+        async function handleFile(file) {
+            if (!file) return;
+
+            fileName.textContent = file.name;
+
+            try {
+                const buffer = await file.arrayBuffer();
+                const data = new Uint8Array(buffer);
+                displayBytecodeInfo(data, file.name);
+            } catch (err) {
+                bytecodeInfo.innerHTML = `<pre style="color: #e94560;">Error reading file: ${err.message}</pre>`;
+                loadedBytecode = null;
+                runPngbBtn.disabled = true;
+            }
+        }
+
+        function runPngb() {
+            if (!pngine || !loadedBytecode) return;
+            hideError();
+
+            try {
+                setStatus('Loading PNGB...');
+                const start = performance.now();
+
+                pngine.loadModule(loadedBytecode);
+                pngine.executeAll();
+
+                const elapsed = (performance.now() - start).toFixed(2);
+                setStatus(`Executed in ${elapsed}ms`, 'success');
+            } catch (err) {
+                setStatus('Error: ' + err.message, 'error');
+                console.error('PNGB execution error:', err);
+            }
+        }
+
+        // ====================================================================
+        // Event listeners
+        // ====================================================================
+
+        // Source tab
         runBtn.addEventListener('click', run);
         clearBtn.addEventListener('click', clear);
+        clearBtn2.addEventListener('click', clear);
 
-        // Ctrl+Enter to run
         source.addEventListener('keydown', (e) => {
             if (e.ctrlKey && e.key === 'Enter') {
                 e.preventDefault();
@@ -251,6 +548,38 @@
             }
         });
 
+        // PNGB tab - file input
+        pngbFileInput.addEventListener('change', (e) => {
+            handleFile(e.target.files[0]);
+        });
+
+        runPngbBtn.addEventListener('click', runPngb);
+
+        // PNGB tab - drag and drop
+        dropZone.addEventListener('click', () => pngbFileInput.click());
+
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragover');
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+
+            const file = e.dataTransfer.files[0];
+            if (file && file.name.endsWith('.pngb')) {
+                handleFile(file);
+            } else if (file) {
+                bytecodeInfo.innerHTML = `<pre style="color: #e94560;">Error: Expected .pngb file, got "${file.name}"</pre>`;
+            }
+        });
+
+        // Initialize
         init();
     </script>
 </body>
