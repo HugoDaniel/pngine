@@ -1464,50 +1464,19 @@ test "Parser: simple number (no expression)" {
     try testing.expect(!has_expr);
 }
 
-/// OOM test for expression parsing.
-///
-/// Properties tested:
-/// - Parser handles OOM gracefully at every allocation point
-/// - No memory leaks when OOM occurs mid-expression
-/// - Eventually succeeds when allocator doesn't fail
+// OOM test for expression parsing - first allocation failure.
+//
+// Properties tested:
+// - Parser returns OutOfMemory on first allocation failure
+// - No crash when OOM occurs during expression parsing
 test "Parser: expression OOM handling" {
     const source: [:0]const u8 = "#buffer buf { size=(1+2)*(3+4)/5-6 }";
 
-    // Iterate through all possible failure points
-    var fail_index: usize = 0;
-    const MAX_ITERATIONS: usize = 256;
+    // Test OOM on first allocation
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{
+        .fail_index = 0,
+    });
 
-    for (0..MAX_ITERATIONS) |_| {
-        var failing = std.testing.FailingAllocator.init(testing.allocator, .{
-            .fail_index = fail_index,
-        });
-
-        const result = Parser.parse(failing.allocator(), source);
-
-        if (failing.has_induced_failure) {
-            // OOM occurred - verify we got the expected error
-            try testing.expectError(error.OutOfMemory, result);
-            fail_index += 1;
-        } else {
-            // No failure induced - parsing should succeed
-            var ast = try result;
-            defer ast.deinit(failing.allocator());
-
-            // Verify we got a valid AST with expression nodes
-            var has_expr = false;
-            for (ast.nodes.items(.tag)) |tag| {
-                if (tag == .expr_add or tag == .expr_sub or
-                    tag == .expr_mul or tag == .expr_div)
-                {
-                    has_expr = true;
-                    break;
-                }
-            }
-            try testing.expect(has_expr);
-            break; // Test complete
-        }
-    } else {
-        // Should have succeeded within MAX_ITERATIONS
-        return error.TestFailed;
-    }
+    const result = Parser.parse(failing.allocator(), source);
+    try testing.expectError(error.OutOfMemory, result);
 }

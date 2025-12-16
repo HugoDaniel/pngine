@@ -1752,9 +1752,9 @@ test "Analyzer: empty texture throws error" {
 // 6. Division by zero: returns null (graceful handling)
 // 7. Unary negation: -x correctly negates operand
 
-/// Property: Addition produces correct f64 sum.
-/// Input: 1 + 2
-/// Expected: 3.0
+// Property: Addition produces correct f64 sum.
+// Input: 1 + 2
+// Expected: 3.0
 test "Analyzer: evaluate simple addition" {
     const source: [:0]const u8 = "#buffer buf { size=1+2 usage=[UNIFORM] }";
 
@@ -1776,9 +1776,9 @@ test "Analyzer: evaluate simple addition" {
     try testing.expect(false); // Should have found expr_add
 }
 
-/// Property: Subtraction produces correct f64 difference.
-/// Input: 10 - 5
-/// Expected: 5.0
+// Property: Subtraction produces correct f64 difference.
+// Input: 10 - 5
+// Expected: 5.0
 test "Analyzer: evaluate subtraction" {
     const source: [:0]const u8 = "#buffer buf { size=10-5 usage=[UNIFORM] }";
 
@@ -1798,9 +1798,9 @@ test "Analyzer: evaluate subtraction" {
     try testing.expect(false);
 }
 
-/// Property: Multiplication produces correct f64 product.
-/// Input: 3 * 4
-/// Expected: 12.0
+// Property: Multiplication produces correct f64 product.
+// Input: 3 * 4
+// Expected: 12.0
 test "Analyzer: evaluate multiplication" {
     const source: [:0]const u8 = "#buffer buf { size=3*4 usage=[UNIFORM] }";
 
@@ -1820,9 +1820,9 @@ test "Analyzer: evaluate multiplication" {
     try testing.expect(false);
 }
 
-/// Property: Division produces correct f64 quotient.
-/// Input: 8 / 2
-/// Expected: 4.0
+// Property: Division produces correct f64 quotient.
+// Input: 8 / 2
+// Expected: 4.0
 test "Analyzer: evaluate division" {
     const source: [:0]const u8 = "#buffer buf { size=8/2 usage=[UNIFORM] }";
 
@@ -1842,10 +1842,10 @@ test "Analyzer: evaluate division" {
     try testing.expect(false);
 }
 
-/// Property: Operator precedence - multiplication binds tighter than addition.
-/// Input: 1 + 2 * 3
-/// Expected: 7.0 (not 9.0 - precedence matters)
-/// Verifies: * evaluated before + per standard math rules
+// Property: Operator precedence - multiplication binds tighter than addition.
+// Input: 1 + 2 * 3
+// Expected: 7.0 (not 9.0 - precedence matters)
+// Verifies: * evaluated before + per standard math rules
 test "Analyzer: evaluate complex expression with precedence" {
     const source: [:0]const u8 = "#buffer buf { size=1+2*3 usage=[UNIFORM] }";
 
@@ -1865,10 +1865,10 @@ test "Analyzer: evaluate complex expression with precedence" {
     try testing.expect(false);
 }
 
-/// Property: Parentheses override operator precedence.
-/// Input: (1 + 2) * 3
-/// Expected: 9.0 (not 7.0 - parentheses force addition first)
-/// Verifies: Grouped expressions evaluated before surrounding operators
+// Property: Parentheses override operator precedence.
+// Input: (1 + 2) * 3
+// Expected: 9.0 (not 7.0 - parentheses force addition first)
+// Verifies: Grouped expressions evaluated before surrounding operators
 test "Analyzer: evaluate parenthesized expression" {
     const source: [:0]const u8 = "#buffer buf { size=(1+2)*3 usage=[UNIFORM] }";
 
@@ -1888,10 +1888,10 @@ test "Analyzer: evaluate parenthesized expression" {
     try testing.expect(false);
 }
 
-/// Property: Hex literals (0xFF) parsed correctly for WebGPU usage flags.
-/// Input: 0xFF + 0x10
-/// Expected: 271.0 (255 + 16)
-/// Verifies: Hex parsing works in expressions (common for usage flags)
+// Property: Hex literals (0xFF) parsed correctly for WebGPU usage flags.
+// Input: 0xFF + 0x10
+// Expected: 271.0 (255 + 16)
+// Verifies: Hex parsing works in expressions (common for usage flags)
 test "Analyzer: evaluate hex expression" {
     const source: [:0]const u8 = "#buffer buf { size=0xFF+0x10 usage=[UNIFORM] }";
 
@@ -1911,10 +1911,10 @@ test "Analyzer: evaluate hex expression" {
     try testing.expect(false);
 }
 
-/// Property: Plain number literals evaluate to their value.
-/// Input: 100
-/// Expected: 100.0
-/// Verifies: evaluateExpression handles leaf number_value nodes
+// Property: Plain number literals evaluate to their value.
+// Input: 100
+// Expected: 100.0
+// Verifies: evaluateExpression handles leaf number_value nodes
 test "Analyzer: evaluate number literal (no expression)" {
     const source: [:0]const u8 = "#buffer buf { size=100 usage=[UNIFORM] }";
 
@@ -1934,10 +1934,10 @@ test "Analyzer: evaluate number literal (no expression)" {
     try testing.expect(false);
 }
 
-/// Property: Division by zero returns null (graceful error handling).
-/// Input: 10 / 0
-/// Expected: null
-/// Verifies: No crash or Inf on div-by-zero, caller must check
+// Property: Division by zero returns null (graceful error handling).
+// Input: 10 / 0
+// Expected: null
+// Verifies: No crash or Inf on div-by-zero, caller must check
 test "Analyzer: division by zero returns null" {
     const source: [:0]const u8 = "#buffer buf { size=10/0 usage=[UNIFORM] }";
 
@@ -1961,13 +1961,13 @@ test "Analyzer: division by zero returns null" {
 // Fuzz Tests
 // ----------------------------------------------------------------------------
 
-/// Fuzz test for expression evaluation.
-///
-/// Properties tested:
-/// - Never crashes on any parseable expression
-/// - Returns either valid f64 or null (never NaN)
-/// - Same input produces same output (deterministic)
-/// - Evaluation bounded by MAX_EXPR_DEPTH (no stack overflow)
+// Fuzz test for expression evaluation.
+//
+// Properties tested:
+// - Never crashes on any parseable expression
+// - Returns either valid f64 or null (never NaN)
+// - Same input produces same output (deterministic)
+// - Evaluation bounded by MAX_EXPR_DEPTH (no stack overflow)
 test "Analyzer: fuzz expression evaluation" {
     try std.testing.fuzz({}, fuzzExpressionEvaluation, .{});
 }

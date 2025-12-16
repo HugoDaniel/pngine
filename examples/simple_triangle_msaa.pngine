@@ -1,0 +1,59 @@
+#define SAMPLE_COUNT=4
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={ entrypoint=vertexMain module=code }
+  fragment={
+    entrypoint=fragMain
+    module=code
+    targets=[{ format=preferredCanvasFormat }]
+  }
+  primitive={ topology=triangle-list }
+  multisample=SAMPLE_COUNT
+}
+
+#texture tex {
+  size=["$canvas.width", "$canvas.height"]
+  sampleCount=SAMPLE_COUNT
+  format=preferredCanvasFormat
+  usage=[RENDER_ATTACHMENT]
+}
+
+#renderPass renderIt {
+  colorAttachments=[{
+    view=tex
+    resolveTarget=contextCurrentTexture
+    clearValue=[0, 0, 0, 0]
+    loadOp=clear
+    storeOp=discard
+  }]
+  pipeline=pipeline
+  draw=3
+}
+
+#frame msaaTriangle {
+  perform=[renderIt]
+}
+
+#shaderModule code {
+  code="
+    @vertex
+    fn vertexMain(
+      @builtin(vertex_index) VertexIndex : u32
+    ) -> @builtin(position) vec4f {
+      var pos = array<vec2f, 3>(
+        vec2(0.0, 0.5),
+        vec2(-0.5, -0.5),
+        vec2(0.5, -0.5)
+      );
+
+      return vec4f(pos[VertexIndex], 0.0, 1.0);
+    }
+
+    @fragment
+    fn fragMain() -> @location(0) vec4f {
+      return vec4(1.0, 0.0, 0.0, 1.0);
+    }
+  "
+}
+
