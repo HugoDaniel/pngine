@@ -550,6 +550,37 @@ test "mock gpu create buffer" {
     try testing.expect(gpu.buffers_created.isSet(0));
 }
 
+test "mock gpu create texture" {
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    try gpu.createTexture(testing.allocator, 0, 42);
+
+    try testing.expectEqual(@as(usize, 1), gpu.callCount());
+    try testing.expectEqual(CallType.create_texture, gpu.getCall(0).call_type);
+    try testing.expect(gpu.textures_created.isSet(0));
+
+    // Verify parameters
+    const call = gpu.getCall(0);
+    try testing.expectEqual(@as(u16, 0), call.params.create_texture.texture_id);
+    try testing.expectEqual(@as(u16, 42), call.params.create_texture.descriptor_data_id);
+}
+
+test "mock gpu create sampler" {
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    try gpu.createSampler(testing.allocator, 5, 99);
+
+    try testing.expectEqual(@as(usize, 1), gpu.callCount());
+    try testing.expectEqual(CallType.create_sampler, gpu.getCall(0).call_type);
+
+    // Verify parameters
+    const call = gpu.getCall(0);
+    try testing.expectEqual(@as(u16, 5), call.params.create_sampler.sampler_id);
+    try testing.expectEqual(@as(u16, 99), call.params.create_sampler.descriptor_data_id);
+}
+
 test "mock gpu render pass sequence" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -600,4 +631,20 @@ test "mock gpu call formatting" {
     // calls[0] = begin_render_pass, calls[1] = draw
     const str = gpu.getCall(1).describe(&buf);
     try testing.expectEqualStrings("draw(vertices=3, instances=1)", str);
+}
+
+test "mock gpu texture and sampler formatting" {
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    try gpu.createTexture(testing.allocator, 1, 42);
+    try gpu.createSampler(testing.allocator, 2, 99);
+
+    var buf: [256]u8 = undefined;
+
+    const tex_str = gpu.getCall(0).describe(&buf);
+    try testing.expectEqualStrings("create_texture(id=1, desc=42)", tex_str);
+
+    const sampler_str = gpu.getCall(1).describe(&buf);
+    try testing.expectEqualStrings("create_sampler(id=2, desc=99)", sampler_str);
 }

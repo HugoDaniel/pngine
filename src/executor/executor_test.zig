@@ -380,3 +380,71 @@ test "indexed draw" {
     try testing.expectEqual(@as(u32, 36), draw_call.params.draw_indexed.index_count);
     try testing.expectEqual(@as(u32, 10), draw_call.params.draw_indexed.instance_count);
 }
+
+test "texture-based render pass (MSAA pattern)" {
+    // Tests the pattern used by MSAA examples:
+    // 1. Create texture (for MSAA resolve target)
+    // 2. Create shader and pipeline
+    // 3. Render pass with texture
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    const shader_code =
+        \\@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+        \\  return vec4f(0.0, 0.0, 0.0, 1.0);
+        \\}
+        \\@fragment fn fs() -> @location(0) vec4f {
+        \\  return vec4f(1.0, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const shader_data_id = try builder.addData(testing.allocator, shader_code);
+    const texture_desc_id = try builder.addData(testing.allocator, "{}");
+    const pipeline_desc_id = try builder.addData(testing.allocator, "{}");
+
+    const emitter = builder.getEmitter();
+
+    // Create resources
+    try emitter.createTexture(testing.allocator, 0, texture_desc_id.toInt());
+    try emitter.createShaderModule(testing.allocator, 0, shader_data_id.toInt());
+    try emitter.createRenderPipeline(testing.allocator, 0, pipeline_desc_id.toInt());
+
+    // Render pass using texture as render target
+    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store);
+    try emitter.setPipeline(testing.allocator, 0);
+    try emitter.draw(testing.allocator, 3, 1);
+    try emitter.endPass(testing.allocator);
+    try emitter.submit(testing.allocator);
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var exec = MockDispatcher.init(&gpu, &module);
+    try exec.executeAll(testing.allocator);
+
+    // Verify call sequence
+    const expected = [_]CallType{
+        .create_texture,
+        .create_shader_module,
+        .create_render_pipeline,
+        .begin_render_pass,
+        .set_pipeline,
+        .draw,
+        .end_pass,
+        .submit,
+    };
+
+    try testing.expect(gpu.expectCallTypes(&expected));
+
+    // Verify texture was created
+    try testing.expect(gpu.textures_created.isSet(0));
+
+    // Verify texture parameters
+    const tex_call = gpu.getCall(0);
+    try testing.expectEqual(@as(u16, 0), tex_call.params.create_texture.texture_id);
+}

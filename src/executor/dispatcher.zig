@@ -392,6 +392,64 @@ test "dispatcher create shader module" {
     try testing.expectEqual(@import("mock_gpu.zig").CallType.create_shader_module, gpu.getCall(0).call_type);
 }
 
+test "dispatcher create texture" {
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    const desc_data = try builder.addData(testing.allocator, "{}");
+    const emitter = builder.getEmitter();
+    try emitter.createTexture(testing.allocator, 0, desc_data.toInt());
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = MockDispatcher.init(&gpu, &module);
+    try dispatcher.executeAll(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), gpu.callCount());
+    try testing.expectEqual(@import("mock_gpu.zig").CallType.create_texture, gpu.getCall(0).call_type);
+
+    // Verify parameters were passed correctly
+    const call = gpu.getCall(0);
+    try testing.expectEqual(@as(u16, 0), call.params.create_texture.texture_id);
+    try testing.expectEqual(@as(u16, 0), call.params.create_texture.descriptor_data_id);
+}
+
+test "dispatcher create sampler" {
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    const desc_data = try builder.addData(testing.allocator, "{}");
+    const emitter = builder.getEmitter();
+    try emitter.createSampler(testing.allocator, 3, desc_data.toInt());
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = MockDispatcher.init(&gpu, &module);
+    try dispatcher.executeAll(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), gpu.callCount());
+    try testing.expectEqual(@import("mock_gpu.zig").CallType.create_sampler, gpu.getCall(0).call_type);
+
+    // Verify parameters were passed correctly
+    const call = gpu.getCall(0);
+    try testing.expectEqual(@as(u16, 3), call.params.create_sampler.sampler_id);
+    try testing.expectEqual(@as(u16, 0), call.params.create_sampler.descriptor_data_id);
+}
+
 test "dispatcher draw sequence" {
     var builder = Builder.init();
     defer builder.deinit(testing.allocator);
