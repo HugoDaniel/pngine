@@ -223,10 +223,12 @@ test "buffer write and use" {
     try emitter.createBuffer(testing.allocator, 0, 64, BufferUsage.uniform_copy_dst); // uniform + copy_dst
     try emitter.writeBuffer(testing.allocator, 0, 0, uniform_data.toInt());
 
-    // Use buffer in render
+    // Use buffer in render (must be in a render pass)
+    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store);
     try emitter.setPipeline(testing.allocator, 0);
     try emitter.setVertexBuffer(testing.allocator, 0, 0);
     try emitter.draw(testing.allocator, 3, 1);
+    try emitter.endPass(testing.allocator);
     try emitter.submit(testing.allocator);
 
     const pngb = try builder.finalize(testing.allocator);
@@ -244,9 +246,11 @@ test "buffer write and use" {
     const expected = [_]CallType{
         .create_buffer,
         .write_buffer,
+        .begin_render_pass,
         .set_pipeline,
         .set_vertex_buffer,
         .draw,
+        .end_pass,
         .submit,
     };
 
@@ -269,9 +273,11 @@ test "bind group setup" {
 
     // Create bind group and use it
     try emitter.createBindGroup(testing.allocator, 0, 0, entries_data.toInt());
+    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store);
     try emitter.setPipeline(testing.allocator, 0);
     try emitter.setBindGroup(testing.allocator, 0, 0);
     try emitter.draw(testing.allocator, 3, 1);
+    try emitter.endPass(testing.allocator);
     try emitter.submit(testing.allocator);
 
     const pngb = try builder.finalize(testing.allocator);
@@ -288,16 +294,18 @@ test "bind group setup" {
 
     const expected = [_]CallType{
         .create_bind_group,
+        .begin_render_pass,
         .set_pipeline,
         .set_bind_group,
         .draw,
+        .end_pass,
         .submit,
     };
 
     try testing.expect(gpu.expectCallTypes(&expected));
 
     // Verify bind group parameters
-    const set_bg_call = gpu.getCall(2);
+    const set_bg_call = gpu.getCall(3);
     try testing.expectEqual(@as(u8, 0), set_bg_call.params.set_bind_group.slot);
     try testing.expectEqual(@as(u16, 0), set_bg_call.params.set_bind_group.group_id);
 }
@@ -309,10 +317,12 @@ test "large vertex count varint encoding" {
     const emitter = builder.getEmitter();
 
     // Draw with large vertex count (tests 2-byte varint)
+    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store);
     try emitter.draw(testing.allocator, 10000, 1);
 
     // Draw with very large count (tests 4-byte varint)
     try emitter.draw(testing.allocator, 100000, 500);
+    try emitter.endPass(testing.allocator);
 
     try emitter.submit(testing.allocator);
 
@@ -330,13 +340,14 @@ test "large vertex count varint encoding" {
 
     const calls = gpu.getCalls();
 
+    // calls[0] = begin_render_pass
     // First draw: 10000 vertices
-    try testing.expectEqual(@as(u32, 10000), calls[0].params.draw.vertex_count);
-    try testing.expectEqual(@as(u32, 1), calls[0].params.draw.instance_count);
+    try testing.expectEqual(@as(u32, 10000), calls[1].params.draw.vertex_count);
+    try testing.expectEqual(@as(u32, 1), calls[1].params.draw.instance_count);
 
     // Second draw: 100000 vertices, 500 instances
-    try testing.expectEqual(@as(u32, 100000), calls[1].params.draw.vertex_count);
-    try testing.expectEqual(@as(u32, 500), calls[1].params.draw.instance_count);
+    try testing.expectEqual(@as(u32, 100000), calls[2].params.draw.vertex_count);
+    try testing.expectEqual(@as(u32, 500), calls[2].params.draw.instance_count);
 }
 
 test "indexed draw" {
@@ -345,8 +356,10 @@ test "indexed draw" {
 
     const emitter = builder.getEmitter();
 
+    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store);
     try emitter.setPipeline(testing.allocator, 0);
     try emitter.drawIndexed(testing.allocator, 36, 10);
+    try emitter.endPass(testing.allocator);
     try emitter.submit(testing.allocator);
 
     const pngb = try builder.finalize(testing.allocator);
@@ -361,7 +374,8 @@ test "indexed draw" {
     var exec = MockDispatcher.init(&gpu, &module);
     try exec.executeAll(testing.allocator);
 
-    const draw_call = gpu.getCall(1);
+    // calls[0] = begin_render_pass, calls[1] = set_pipeline, calls[2] = draw_indexed
+    const draw_call = gpu.getCall(2);
     try testing.expectEqual(CallType.draw_indexed, draw_call.call_type);
     try testing.expectEqual(@as(u32, 36), draw_call.params.draw_indexed.index_count);
     try testing.expectEqual(@as(u32, 10), draw_call.params.draw_indexed.instance_count);

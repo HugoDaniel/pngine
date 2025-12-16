@@ -385,8 +385,11 @@ test "dispatcher draw sequence" {
     defer builder.deinit(testing.allocator);
 
     const emitter = builder.getEmitter();
+    // Must wrap draw commands in a render pass
+    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store);
     try emitter.setPipeline(testing.allocator, 0);
     try emitter.draw(testing.allocator, 3, 1);
+    try emitter.endPass(testing.allocator);
 
     const pngb = try builder.finalize(testing.allocator);
     defer testing.allocator.free(pngb);
@@ -400,15 +403,17 @@ test "dispatcher draw sequence" {
     var dispatcher = MockDispatcher.init(&gpu, &module);
     try dispatcher.executeAll(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 2), gpu.callCount());
+    try testing.expectEqual(@as(usize, 4), gpu.callCount());
 
     const calls = gpu.getCalls();
-    try testing.expectEqual(@import("mock_gpu.zig").CallType.set_pipeline, calls[0].call_type);
-    try testing.expectEqual(@import("mock_gpu.zig").CallType.draw, calls[1].call_type);
+    try testing.expectEqual(@import("mock_gpu.zig").CallType.begin_render_pass, calls[0].call_type);
+    try testing.expectEqual(@import("mock_gpu.zig").CallType.set_pipeline, calls[1].call_type);
+    try testing.expectEqual(@import("mock_gpu.zig").CallType.draw, calls[2].call_type);
+    try testing.expectEqual(@import("mock_gpu.zig").CallType.end_pass, calls[3].call_type);
 
     // Verify draw parameters
-    try testing.expectEqual(@as(u32, 3), calls[1].params.draw.vertex_count);
-    try testing.expectEqual(@as(u32, 1), calls[1].params.draw.instance_count);
+    try testing.expectEqual(@as(u32, 3), calls[2].params.draw.vertex_count);
+    try testing.expectEqual(@as(u32, 1), calls[2].params.draw.instance_count);
 }
 
 test "dispatcher frame control" {

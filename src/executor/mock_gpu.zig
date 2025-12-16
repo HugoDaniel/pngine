@@ -337,8 +337,8 @@ pub const MockGPU = struct {
     }
 
     pub fn setPipeline(self: *Self, allocator: Allocator, pipeline_id: u16) !void {
-        // Note: Pipeline must be created, but we allow setting it
-        // before pass for simpleTriangle pattern
+        // Must be in a pass to set pipeline
+        assert(self.in_render_pass or self.in_compute_pass);
 
         self.current_pipeline = pipeline_id;
 
@@ -351,6 +351,8 @@ pub const MockGPU = struct {
     }
 
     pub fn setBindGroup(self: *Self, allocator: Allocator, slot: u8, group_id: u16) !void {
+        assert(self.in_render_pass or self.in_compute_pass);
+
         try self.calls.append(allocator, .{
             .call_type = .set_bind_group,
             .params = .{ .set_bind_group = .{
@@ -361,6 +363,8 @@ pub const MockGPU = struct {
     }
 
     pub fn setVertexBuffer(self: *Self, allocator: Allocator, slot: u8, buffer_id: u16) !void {
+        assert(self.in_render_pass);
+
         try self.calls.append(allocator, .{
             .call_type = .set_vertex_buffer,
             .params = .{ .set_vertex_buffer = .{
@@ -371,6 +375,8 @@ pub const MockGPU = struct {
     }
 
     pub fn draw(self: *Self, allocator: Allocator, vertex_count: u32, instance_count: u32) !void {
+        assert(self.in_render_pass);
+
         try self.calls.append(allocator, .{
             .call_type = .draw,
             .params = .{ .draw = .{
@@ -381,6 +387,8 @@ pub const MockGPU = struct {
     }
 
     pub fn drawIndexed(self: *Self, allocator: Allocator, index_count: u32, instance_count: u32) !void {
+        assert(self.in_render_pass);
+
         try self.calls.append(allocator, .{
             .call_type = .draw_indexed,
             .params = .{ .draw_indexed = .{
@@ -541,9 +549,13 @@ test "mock gpu call formatting" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
+    // load_op=1 (clear), store_op=0 (store)
+    try gpu.beginRenderPass(testing.allocator, 0, 1, 0);
     try gpu.draw(testing.allocator, 3, 1);
+    try gpu.endPass(testing.allocator);
 
     var buf: [256]u8 = undefined;
-    const str = gpu.getCall(0).describe(&buf);
+    // calls[0] = begin_render_pass, calls[1] = draw
+    const str = gpu.getCall(1).describe(&buf);
     try testing.expectEqualStrings("draw(vertices=3, instances=1)", str);
 }

@@ -587,8 +587,19 @@ pub const Emitter = struct {
             desc_id.toInt(),
         );
 
+        // Begin render pass (texture 0 = canvas, clear, store)
+        try self.builder.getEmitter().beginRenderPass(
+            self.gpa,
+            0, // color texture ID (0 = canvas/surface)
+            opcodes.LoadOp.clear,
+            opcodes.StoreOp.store,
+        );
+
         // Emit pass body commands
         try self.emitPassCommands(node);
+
+        // End the render pass
+        try self.builder.getEmitter().endPass(self.gpa);
 
         // End pass definition
         try self.builder.getEmitter().endPassDef(self.gpa);
@@ -605,7 +616,16 @@ pub const Emitter = struct {
             desc_id.toInt(),
         );
 
+        // Begin compute pass
+        try self.builder.getEmitter().beginComputePass(self.gpa);
+
+        // Emit pass body commands
         try self.emitPassCommands(node);
+
+        // End the compute pass
+        try self.builder.getEmitter().endPass(self.gpa);
+
+        // End pass definition
         try self.builder.getEmitter().endPassDef(self.gpa);
     }
 
