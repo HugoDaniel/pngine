@@ -27,6 +27,8 @@ const DataId = @import("../bytecode/data_section.zig").DataId;
 // ============================================================================
 
 extern "env" fn gpuCreateBuffer(buffer_id: u16, size: u32, usage: u8) void;
+extern "env" fn gpuCreateTexture(texture_id: u16, desc_ptr: [*]const u8, desc_len: u32) void;
+extern "env" fn gpuCreateSampler(sampler_id: u16, desc_ptr: [*]const u8, desc_len: u32) void;
 extern "env" fn gpuCreateShaderModule(shader_id: u16, code_ptr: [*]const u8, code_len: u32) void;
 extern "env" fn gpuCreateRenderPipeline(pipeline_id: u16, desc_ptr: [*]const u8, desc_len: u32) void;
 extern "env" fn gpuCreateComputePipeline(pipeline_id: u16, desc_ptr: [*]const u8, desc_len: u32) void;
@@ -74,6 +76,24 @@ pub const WasmGPU = struct {
         _ = self;
         _ = allocator;
         gpuCreateBuffer(buffer_id, size, usage);
+    }
+
+    /// Create a GPU texture from descriptor in the data section.
+    pub fn createTexture(self: *Self, allocator: Allocator, texture_id: u16, descriptor_data_id: u16) !void {
+        _ = allocator;
+        assert(self.module != null);
+
+        const data = self.getDataOrPanic(descriptor_data_id);
+        gpuCreateTexture(texture_id, data.ptr, @intCast(data.len));
+    }
+
+    /// Create a texture sampler from descriptor in the data section.
+    pub fn createSampler(self: *Self, allocator: Allocator, sampler_id: u16, descriptor_data_id: u16) !void {
+        _ = allocator;
+        assert(self.module != null);
+
+        const data = self.getDataOrPanic(descriptor_data_id);
+        gpuCreateSampler(sampler_id, data.ptr, @intCast(data.len));
     }
 
     /// Create a shader module from code in the data section.

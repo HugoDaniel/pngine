@@ -17,6 +17,8 @@ export class PNGineGPU {
 
         // Resource maps (ID -> GPU resource)
         this.buffers = new Map();
+        this.textures = new Map();
+        this.samplers = new Map();
         this.shaders = new Map();
         this.pipelines = new Map();
         this.bindGroups = new Map();
@@ -72,6 +74,49 @@ export class PNGineGPU {
             usage: this.mapBufferUsage(usage),
         });
         this.buffers.set(id, buffer);
+    }
+
+    /**
+     * Create a GPU texture.
+     * @param {number} id - Texture ID
+     * @param {number} descPtr - Pointer to descriptor JSON
+     * @param {number} descLen - Descriptor length
+     */
+    createTexture(id, descPtr, descLen) {
+        const descJson = this.readString(descPtr, descLen);
+        console.log(`[GPU] createTexture(${id}), desc: ${descJson}`);
+        const desc = JSON.parse(descJson);
+
+        // Build texture descriptor from parsed JSON
+        const textureDesc = {
+            size: desc.size || [this.context.canvas.width, this.context.canvas.height],
+            format: desc.format || navigator.gpu.getPreferredCanvasFormat(),
+            usage: GPUTextureUsage.RENDER_ATTACHMENT,
+            sampleCount: desc.sampleCount || 1,
+        };
+
+        const texture = this.device.createTexture(textureDesc);
+        this.textures.set(id, texture);
+    }
+
+    /**
+     * Create a texture sampler.
+     * @param {number} id - Sampler ID
+     * @param {number} descPtr - Pointer to descriptor JSON
+     * @param {number} descLen - Descriptor length
+     */
+    createSampler(id, descPtr, descLen) {
+        const descJson = this.readString(descPtr, descLen);
+        console.log(`[GPU] createSampler(${id}), desc: ${descJson}`);
+        const desc = JSON.parse(descJson);
+
+        const sampler = this.device.createSampler({
+            magFilter: desc.magFilter || 'linear',
+            minFilter: desc.minFilter || 'linear',
+            addressModeU: desc.addressModeU || 'clamp-to-edge',
+            addressModeV: desc.addressModeV || 'clamp-to-edge',
+        });
+        this.samplers.set(id, sampler);
     }
 
     /**
@@ -366,6 +411,8 @@ export class PNGineGPU {
         return {
             env: {
                 gpuCreateBuffer: (id, size, usage) => this.createBuffer(id, size, usage),
+                gpuCreateTexture: (id, ptr, len) => this.createTexture(id, ptr, len),
+                gpuCreateSampler: (id, ptr, len) => this.createSampler(id, ptr, len),
                 gpuCreateShaderModule: (id, ptr, len) => this.createShaderModule(id, ptr, len),
                 gpuCreateRenderPipeline: (id, ptr, len) => this.createRenderPipeline(id, ptr, len),
                 gpuCreateComputePipeline: (id, ptr, len) => this.createComputePipeline(id, ptr, len),
@@ -393,8 +440,13 @@ export class PNGineGPU {
         for (const buffer of this.buffers.values()) {
             buffer.destroy();
         }
+        for (const texture of this.textures.values()) {
+            texture.destroy();
+        }
 
         this.buffers.clear();
+        this.textures.clear();
+        this.samplers.clear();
         this.shaders.clear();
         this.pipelines.clear();
         this.bindGroups.clear();
