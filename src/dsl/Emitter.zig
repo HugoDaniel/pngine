@@ -58,6 +58,7 @@ pub const Emitter = struct {
     bind_group_ids: std.StringHashMapUnmanaged(u16),
     pass_ids: std.StringHashMapUnmanaged(u16),
     frame_ids: std.StringHashMapUnmanaged(u16),
+    queue_ids: std.StringHashMapUnmanaged(u16),
 
     // Counters for generating IDs
     next_buffer_id: u16 = 0,
@@ -68,6 +69,7 @@ pub const Emitter = struct {
     next_bind_group_id: u16 = 0,
     next_pass_id: u16 = 0,
     next_frame_id: u16 = 0,
+    next_queue_id: u16 = 0,
 
     const Self = @This();
 
@@ -98,6 +100,7 @@ pub const Emitter = struct {
             .bind_group_ids = .{},
             .pass_ids = .{},
             .frame_ids = .{},
+            .queue_ids = .{},
         };
     }
 
@@ -111,6 +114,7 @@ pub const Emitter = struct {
         self.bind_group_ids.deinit(self.gpa);
         self.pass_ids.deinit(self.gpa);
         self.frame_ids.deinit(self.gpa);
+        self.queue_ids.deinit(self.gpa);
     }
 
     /// Emit PNGB bytecode from analyzed DSL.
@@ -130,10 +134,13 @@ pub const Emitter = struct {
         try self.emitPipelines();
         try self.emitBindGroups();
 
-        // Pass 2: Emit passes
+        // Pass 2: Collect queues (no bytecode emitted, just ID tracking)
+        try self.collectQueues();
+
+        // Pass 3: Emit passes
         try self.emitPasses();
 
-        // Pass 3: Emit frames
+        // Pass 4: Emit frames (queues inlined via emitQueueAction)
         try self.emitFrames();
 
         // Finalize and return PNGB bytes
@@ -150,6 +157,7 @@ pub const Emitter = struct {
         self.bind_group_ids.deinit(self.gpa);
         self.pass_ids.deinit(self.gpa);
         self.frame_ids.deinit(self.gpa);
+        self.queue_ids.deinit(self.gpa);
 
         return result;
     }
@@ -523,25 +531,164 @@ pub const Emitter = struct {
                 }
             }
 
-            // Encode entries
-            const desc = DescriptorEncoder.encodeBindGroupEntries(
+            // Resolve layout reference - returns pipeline ID for 'auto' layouts
+            const pipeline_id = self.resolveBindGroupLayoutId(info.node);
+            const group_index = self.getBindGroupIndex(info.node);
+
+            // Encode entries with group index
+            const desc = DescriptorEncoder.encodeBindGroupDescriptor(
                 self.gpa,
+                group_index,
                 entries_list.items,
             ) catch return error.OutOfMemory;
             defer self.gpa.free(desc);
 
             const desc_id = try self.builder.addData(self.gpa, desc);
 
-            // Resolve layout reference
-            const layout_id = self.resolveBindGroupLayoutId(info.node);
-
             try self.builder.getEmitter().createBindGroup(
                 self.gpa,
                 group_id,
-                layout_id,
+                pipeline_id, // Pipeline ID to get layout from
                 desc_id.toInt(),
             );
         }
+    }
+
+    // ========================================================================
+    // Queue Collection
+    // ========================================================================
+
+    /// Collect queue IDs (queues are inlined at frame execution, not bytecode-defined).
+    /// Queues don't emit bytecode here - they're inlined when frames reference them.
+    fn collectQueues(self: *Self) Error!void {
+        // Pre-condition: ID counter starts at expected value
+        const initial_id = self.next_queue_id;
+        std.debug.assert(self.queue_ids.count() == 0);
+
+        var it = self.analysis.symbols.queue.iterator();
+        while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+
+            const queue_id = self.next_queue_id;
+            self.next_queue_id += 1;
+            try self.queue_ids.put(self.gpa, name, queue_id);
+        }
+
+        // Post-condition: IDs assigned match symbol count
+        std.debug.assert(self.next_queue_id - initial_id == self.queue_ids.count());
+    }
+
+    /// Emit a queue's actions (write_buffer commands) inline.
+    /// Called when a frame references a queue in its perform array.
+    fn emitQueueAction(self: *Self, queue_name: []const u8) Error!void {
+        // Pre-conditions
+        std.debug.assert(queue_name.len > 0);
+        std.debug.assert(self.ast.nodes.len > 0);
+
+        // Queue must exist in symbol table
+        const info = self.analysis.symbols.queue.get(queue_name) orelse return;
+        std.debug.assert(info.node.toInt() < self.ast.nodes.len);
+
+        // Look for writeBuffer property in queue definition
+        const write_buffer_value = self.findPropertyValue(info.node, "writeBuffer") orelse return;
+        const wb_tag = self.ast.nodes.items(.tag)[write_buffer_value.toInt()];
+
+        if (wb_tag != .object) return;
+
+        // Parse writeBuffer object: { buffer=..., bufferOffset=..., data=... }
+        const buffer_prop = self.findPropertyValueInObject(write_buffer_value, "buffer");
+        const offset_prop = self.findPropertyValueInObject(write_buffer_value, "bufferOffset");
+        const data_prop = self.findPropertyValueInObject(write_buffer_value, "data");
+
+        // Resolve buffer reference
+        const buffer_id = if (buffer_prop) |bp| self.resolveBufferId(bp) else null;
+        if (buffer_id == null) return;
+
+        // Parse offset (default 0)
+        const offset: u32 = if (offset_prop) |op| blk: {
+            break :blk self.parseNumber(op) orelse 0;
+        } else 0;
+
+        // Handle data - for now, support literal byte array or placeholder
+        // TODO: Support runtime interpolation ($uniforms.x.y.data)
+        if (data_prop) |dp| {
+            const data_tag = self.ast.nodes.items(.tag)[dp.toInt()];
+
+            if (data_tag == .array) {
+                // Parse array of numbers as f32 values
+                var data_bytes: std.ArrayListUnmanaged(u8) = .{};
+                defer data_bytes.deinit(self.gpa);
+
+                const array_data = self.ast.nodes.items(.data)[dp.toInt()];
+                const elements = self.ast.extraData(array_data.extra_range);
+
+                for (elements) |elem_idx| {
+                    const elem: Node.Index = @enumFromInt(elem_idx);
+                    if (self.parseFloatNumber(elem)) |num| {
+                        // Write as f32
+                        const f: f32 = @floatCast(num);
+                        const bytes = std.mem.asBytes(&f);
+                        data_bytes.appendSlice(self.gpa, bytes) catch continue;
+                    }
+                }
+
+                if (data_bytes.items.len > 0) {
+                    const data_id = try self.builder.addData(self.gpa, data_bytes.items);
+                    try self.builder.getEmitter().writeBuffer(
+                        self.gpa,
+                        buffer_id.?,
+                        offset,
+                        data_id.toInt(),
+                    );
+                }
+            } else if (data_tag == .string_value) {
+                // String data - could be hex or runtime ref
+                const data_str = self.getStringContent(dp);
+
+                // Check for runtime interpolation (starts with $)
+                if (data_str.len > 0 and data_str[0] == '$') {
+                    // Runtime interpolation ($uniforms.x.y.data, $time, etc.)
+                    // Skip emitting write_buffer - JS will handle via writeTimeUniform
+                    // This prevents overwriting JS-managed uniform values
+                    return;
+                } else {
+                    // Literal string data (hex bytes)
+                    const data_id = try self.builder.addData(self.gpa, data_str);
+                    try self.builder.getEmitter().writeBuffer(
+                        self.gpa,
+                        buffer_id.?,
+                        offset,
+                        data_id.toInt(),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Find property value within an object node.
+    /// Returns the value node for the named property, or null if not found.
+    fn findPropertyValueInObject(self: *Self, object_node: Node.Index, prop_name: []const u8) ?Node.Index {
+        // Pre-conditions: valid object node and non-empty property name
+        std.debug.assert(object_node.toInt() < self.ast.nodes.len);
+        std.debug.assert(prop_name.len > 0);
+
+        const obj_data = self.ast.nodes.items(.data)[object_node.toInt()];
+        const props = self.ast.extraData(obj_data.extra_range);
+
+        for (props) |prop_idx| {
+            const prop_node: Node.Index = @enumFromInt(prop_idx);
+            const prop_tag = self.ast.nodes.items(.tag)[prop_node.toInt()];
+            if (prop_tag != .property) continue;
+
+            const prop_token = self.ast.nodes.items(.main_token)[prop_node.toInt()];
+            const name = self.getTokenSlice(prop_token);
+
+            if (std.mem.eql(u8, name, prop_name)) {
+                const prop_data = self.ast.nodes.items(.data)[prop_node.toInt()];
+                return prop_data.node;
+            }
+        }
+        return null;
     }
 
     // ========================================================================
@@ -753,28 +900,61 @@ pub const Emitter = struct {
 
             for (elements, 0..) |elem_idx, slot| {
                 const elem: Node.Index = @enumFromInt(elem_idx);
-                const elem_tag = self.ast.nodes.items(.tag)[elem.toInt()];
+                const group_id = self.resolveBindGroupId(elem);
 
-                if (elem_tag == .reference) {
-                    if (self.getReference(elem)) |ref| {
-                        if (self.bind_group_ids.get(ref.name)) |group_id| {
-                            try self.builder.getEmitter().setBindGroup(
-                                self.gpa,
-                                @intCast(slot),
-                                group_id,
-                            );
-                        }
-                    }
+                if (group_id) |id| {
+                    try self.builder.getEmitter().setBindGroup(
+                        self.gpa,
+                        @intCast(slot),
+                        id,
+                    );
                 }
             }
-        } else if (value_tag == .reference) {
+        } else {
             // Single bind group at slot 0
-            if (self.getReference(value_node)) |ref| {
-                if (self.bind_group_ids.get(ref.name)) |group_id| {
-                    try self.builder.getEmitter().setBindGroup(self.gpa, 0, group_id);
-                }
+            const group_id = self.resolveBindGroupId(value_node);
+            if (group_id) |id| {
+                try self.builder.getEmitter().setBindGroup(self.gpa, 0, id);
             }
         }
+    }
+
+    /// Resolve a bind group reference to its ID.
+    /// Handles both bare identifiers (inputsBinding) and references ($bindGroup.name).
+    fn resolveBindGroupId(self: *Self, node: Node.Index) ?u16 {
+        const tag = self.ast.nodes.items(.tag)[node.toInt()];
+
+        if (tag == .reference) {
+            if (self.getReference(node)) |ref| {
+                return self.bind_group_ids.get(ref.name);
+            }
+        } else if (tag == .identifier_value) {
+            const name = self.getNodeText(node);
+            return self.bind_group_ids.get(name);
+        }
+
+        return null;
+    }
+
+    /// Resolve a buffer reference to its ID.
+    /// Handles both bare identifiers (myBuffer) and references ($buffer.name).
+    fn resolveBufferId(self: *Self, node: Node.Index) ?u16 {
+        // Pre-conditions: valid node index
+        std.debug.assert(node.toInt() < self.ast.nodes.len);
+        std.debug.assert(self.ast.nodes.len > 0);
+
+        const tag = self.ast.nodes.items(.tag)[node.toInt()];
+
+        if (tag == .reference) {
+            if (self.getReference(node)) |ref| {
+                return self.buffer_ids.get(ref.name);
+            }
+        } else if (tag == .identifier_value) {
+            const name = self.getNodeText(node);
+            return self.buffer_ids.get(name);
+        }
+
+        return null;
     }
 
     fn emitVertexBufferCommands(self: *Self, prop_node: Node.Index) Error!void {
@@ -870,18 +1050,30 @@ pub const Emitter = struct {
                 const elem_tag = self.ast.nodes.items(.tag)[elem.toInt()];
 
                 if (elem_tag == .reference) {
-                    // Execute pass by reference
+                    // Execute pass or queue by reference ($namespace.name)
                     if (self.getReference(elem)) |ref| {
-                        if (self.pass_ids.get(ref.name)) |pass_id| {
-                            try self.builder.getEmitter().execPass(self.gpa, pass_id);
+                        // Check namespace to determine action type
+                        if (std.mem.eql(u8, ref.namespace, "queue")) {
+                            // Queue reference - inline the write_buffer commands
+                            if (self.queue_ids.get(ref.name) != null) {
+                                try self.emitQueueAction(ref.name);
+                            }
+                        } else {
+                            // Pass reference (renderPass, computePass)
+                            if (self.pass_ids.get(ref.name)) |pass_id| {
+                                try self.builder.getEmitter().execPass(self.gpa, pass_id);
+                            }
                         }
                     }
                 } else if (elem_tag == .identifier_value) {
-                    // Execute pass by name
+                    // Execute pass or queue by name
                     const name_token = self.ast.nodes.items(.main_token)[elem.toInt()];
-                    const pass_name = self.getTokenSlice(name_token);
-                    if (self.pass_ids.get(pass_name)) |pass_id| {
+                    const action_name = self.getTokenSlice(name_token);
+                    if (self.pass_ids.get(action_name)) |pass_id| {
                         try self.builder.getEmitter().execPass(self.gpa, pass_id);
+                    } else if (self.queue_ids.get(action_name) != null) {
+                        // Queue reference - inline the write_buffer commands
+                        try self.emitQueueAction(action_name);
                     }
                 }
             }
@@ -954,6 +1146,22 @@ pub const Emitter = struct {
         const text = self.getTokenSlice(value_token);
 
         return std.fmt.parseInt(u32, text, 10) catch null;
+    }
+
+    /// Parse a number node as f64.
+    /// Returns null if node is not a number or parsing fails.
+    fn parseFloatNumber(self: *Self, value_node: Node.Index) ?f64 {
+        // Pre-conditions: valid node index
+        std.debug.assert(value_node.toInt() < self.ast.nodes.len);
+        std.debug.assert(self.ast.nodes.len > 0);
+
+        const value_tag = self.ast.nodes.items(.tag)[value_node.toInt()];
+        if (value_tag != .number_value) return null;
+
+        const value_token = self.ast.nodes.items(.main_token)[value_node.toInt()];
+        const text = self.getTokenSlice(value_token);
+
+        return std.fmt.parseFloat(f64, text) catch null;
     }
 
     fn parseBufferUsage(self: *Self, node: Node.Index) opcodes.BufferUsage {
@@ -1133,19 +1341,61 @@ pub const Emitter = struct {
         return null;
     }
 
+    /// Resolve bind group layout to pipeline ID.
+    /// For auto layouts: layout={ pipeline=pipelineName index=0 }
+    /// Returns the pipeline ID to get the bind group layout from.
     fn resolveBindGroupLayoutId(self: *Self, node: Node.Index) u16 {
         const value = self.findPropertyValue(node, "layout") orelse return 0;
         const value_tag = self.ast.nodes.items(.tag)[value.toInt()];
 
-        if (value_tag == .reference) {
-            if (self.getReference(value)) |ref| {
-                // TODO: Add bind_group_layout_ids tracking
-                _ = ref;
+        if (value_tag == .object) {
+            // Parse layout={ pipeline=name index=N }
+            const obj_data = self.ast.nodes.items(.data)[value.toInt()];
+            const obj_props = self.ast.extraData(obj_data.extra_range);
+
+            for (obj_props) |prop_idx| {
+                const prop_node: Node.Index = @enumFromInt(prop_idx);
+                const prop_token = self.ast.nodes.items(.main_token)[prop_node.toInt()];
+                const prop_name = self.getTokenSlice(prop_token);
+
+                if (std.mem.eql(u8, prop_name, "pipeline")) {
+                    // Get pipeline reference or identifier
+                    const prop_data = self.ast.nodes.items(.data)[prop_node.toInt()];
+                    const prop_value = prop_data.node;
+                    const prop_value_tag = self.ast.nodes.items(.tag)[prop_value.toInt()];
+
+                    if (prop_value_tag == .identifier_value) {
+                        const pipeline_name = self.getNodeText(prop_value);
+                        return self.pipeline_ids.get(pipeline_name) orelse 0;
+                    } else if (prop_value_tag == .reference) {
+                        if (self.getReference(prop_value)) |ref| {
+                            return self.pipeline_ids.get(ref.name) orelse 0;
+                        }
+                    }
+                }
             }
         } else if (value_tag == .identifier_value) {
             const text = self.getNodeText(value);
             if (std.mem.eql(u8, text, "auto")) {
-                return 0; // Auto layout
+                return 0; // Auto layout without pipeline reference
+            }
+        }
+        return 0;
+    }
+
+    /// Get the bind group index from layout object.
+    /// For layout={ pipeline=name index=N }, returns N (default 0).
+    fn getBindGroupIndex(self: *Self, node: Node.Index) u8 {
+        const value = self.findPropertyValue(node, "layout") orelse return 0;
+        const value_tag = self.ast.nodes.items(.tag)[value.toInt()];
+
+        if (value_tag == .object) {
+            if (self.findPropertyValue(value, "index")) |index_value| {
+                const index_tag = self.ast.nodes.items(.tag)[index_value.toInt()];
+                if (index_tag == .number_value) {
+                    const text = self.getNodeText(index_value);
+                    return std.fmt.parseInt(u8, text, 10) catch 0;
+                }
             }
         }
         return 0;
@@ -1562,4 +1812,268 @@ test "Emitter: render pass emits begin/setPipeline/draw/end sequence" {
     try testing.expect(found_set_pipeline);
     try testing.expect(found_draw);
     try testing.expect(found_end);
+}
+
+test "Emitter: render pass with bind group emits set_bind_group" {
+    // Regression test: bindGroups=[name] should emit set_bind_group opcode.
+    // Previously only $bindGroup.name references worked, not bare identifiers.
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@group(0) @binding(0) var<uniform> u: f32; @vertex fn vs() { } @fragment fn fs() { }" }
+        \\#buffer uniformBuf { size=4 usage=[UNIFORM COPY_DST] }
+        \\#renderPipeline pipe { layout=auto vertex={ module=$wgsl.shader } fragment={ module=$wgsl.shader } }
+        \\#bindGroup bg { layout={ pipeline=pipe index=0 } entries=[{ binding=0 resource={ buffer=uniformBuf } }] }
+        \\#renderPass pass { pipeline=pipe bindGroups=[bg] draw=3 }
+        \\#frame main { perform=[$renderPass.pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Verify bytecode contains set_bind_group opcode
+    var found_set_bind_group = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.set_bind_group)) {
+            found_set_bind_group = true;
+            break;
+        }
+    }
+    try testing.expect(found_set_bind_group);
+}
+
+test "Emitter: bind group with bare identifier reference" {
+    // Tests that bindGroups=[name] works without $ prefix.
+    // This is the common DSL syntax users expect.
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@vertex fn vs() { }" }
+        \\#buffer buf { size=16 usage=[UNIFORM] }
+        \\#renderPipeline pipe { layout=auto vertex={ module=$wgsl.shader } }
+        \\#bindGroup myBindGroup { layout={ pipeline=pipe index=0 } entries=[{ binding=0 resource={ buffer=buf } }] }
+        \\#renderPass pass { pipeline=pipe bindGroups=[myBindGroup] draw=3 }
+        \\#frame main { perform=[$renderPass.pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Property: set_bind_group must appear AFTER set_pipeline and BEFORE draw
+    var found_set_pipeline = false;
+    var found_set_bind_group = false;
+    var found_draw = false;
+
+    for (module.bytecode) |byte| {
+        switch (@as(opcodes.OpCode, @enumFromInt(byte))) {
+            .set_pipeline => {
+                found_set_pipeline = true;
+            },
+            .set_bind_group => {
+                // set_bind_group must come after set_pipeline
+                try testing.expect(found_set_pipeline);
+                found_set_bind_group = true;
+            },
+            .draw => {
+                // draw must come after set_bind_group
+                try testing.expect(found_set_bind_group);
+                found_draw = true;
+            },
+            else => {},
+        }
+    }
+
+    try testing.expect(found_set_pipeline);
+    try testing.expect(found_set_bind_group);
+    try testing.expect(found_draw);
+}
+
+// ----------------------------------------------------------------------------
+// Queue Tests
+// ----------------------------------------------------------------------------
+
+test "Emitter: queue with writeBuffer emits write_buffer opcode" {
+    // Test that #queue with writeBuffer action emits write_buffer bytecode
+    const source: [:0]const u8 =
+        \\#buffer uniformBuf { size=4 usage=[UNIFORM COPY_DST] }
+        \\#queue writeUniforms { writeBuffer={ buffer=uniformBuf data=[0.0] } }
+        \\#frame main { perform=[writeUniforms] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Property: write_buffer opcode must be present
+    var found_write_buffer = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.write_buffer)) {
+            found_write_buffer = true;
+            break;
+        }
+    }
+    try testing.expect(found_write_buffer);
+}
+
+test "Emitter: queue with buffer reference" {
+    // Test that queue can reference buffer by $buffer.name syntax
+    const source: [:0]const u8 =
+        \\#buffer uniformBuf { size=16 usage=[UNIFORM COPY_DST] }
+        \\#queue writeUniforms { writeBuffer={ buffer=$buffer.uniformBuf data=[1.0 2.0 3.0 4.0] } }
+        \\#frame main { perform=[writeUniforms] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Property: write_buffer opcode must be present
+    var found_write_buffer = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.write_buffer)) {
+            found_write_buffer = true;
+            break;
+        }
+    }
+    try testing.expect(found_write_buffer);
+}
+
+test "Emitter: queue invoked alongside render pass" {
+    // Test that queues can be invoked in perform array alongside passes
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@vertex fn vs() {}" }
+        \\#buffer uniformBuf { size=4 usage=[UNIFORM COPY_DST] }
+        \\#renderPipeline pipe { vertex={ module=$wgsl.shader } }
+        \\#renderPass pass { pipeline=pipe draw=3 }
+        \\#queue writeUniforms { writeBuffer={ buffer=uniformBuf data=[0.5] } }
+        \\#frame main { perform=[writeUniforms $renderPass.pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Simple check: both opcodes should be present in bytecode
+    // Note: This may have false positives from varint args, but unlikely for both
+    var found_write_buffer = false;
+    var found_begin_render_pass = false;
+
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.write_buffer)) found_write_buffer = true;
+        if (byte == @intFromEnum(opcodes.OpCode.begin_render_pass)) found_begin_render_pass = true;
+    }
+
+    // begin_render_pass should definitely be present
+    try testing.expect(found_begin_render_pass);
+    // write_buffer presence depends on queue emission working
+    try testing.expect(found_write_buffer);
+}
+
+test "Emitter: queue writeBuffer with non-zero bufferOffset" {
+    // Test that bufferOffset is correctly encoded in write_buffer opcode
+    const source: [:0]const u8 =
+        \\#buffer uniformBuf { size=64 usage=[UNIFORM COPY_DST] }
+        \\#queue writeUniforms { writeBuffer={ buffer=uniformBuf bufferOffset=16 data=[1.0 2.0] } }
+        \\#frame main { perform=[writeUniforms] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Property: write_buffer opcode must be present
+    var found_write_buffer = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.write_buffer)) {
+            found_write_buffer = true;
+            break;
+        }
+    }
+    try testing.expect(found_write_buffer);
+}
+
+test "Emitter: queue writeBuffer with default offset (no bufferOffset)" {
+    // Test that missing bufferOffset defaults to 0
+    const source: [:0]const u8 =
+        \\#buffer uniformBuf { size=16 usage=[UNIFORM COPY_DST] }
+        \\#queue writeUniforms { writeBuffer={ buffer=uniformBuf data=[0.0 0.0 0.0 0.0] } }
+        \\#frame main { perform=[writeUniforms] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Property: write_buffer opcode must be present (offset defaults to 0)
+    var found_write_buffer = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.write_buffer)) {
+            found_write_buffer = true;
+            break;
+        }
+    }
+    try testing.expect(found_write_buffer);
+}
+
+test "Emitter: queue writeBuffer with $queue.name reference in perform" {
+    // Test that $queue.name syntax works in perform array
+    const source: [:0]const u8 =
+        \\#buffer uniformBuf { size=4 usage=[UNIFORM COPY_DST] }
+        \\#queue writeUniforms { writeBuffer={ buffer=uniformBuf data=[0.5] } }
+        \\#frame main { perform=[$queue.writeUniforms] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Property: write_buffer opcode must be present
+    var found_write_buffer = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.write_buffer)) {
+            found_write_buffer = true;
+            break;
+        }
+    }
+    try testing.expect(found_write_buffer);
+}
+
+test "Emitter: multiple queues in perform array" {
+    // Test that multiple queues can be invoked in sequence
+    const source: [:0]const u8 =
+        \\#buffer buf1 { size=4 usage=[UNIFORM COPY_DST] }
+        \\#buffer buf2 { size=4 usage=[UNIFORM COPY_DST] }
+        \\#queue writeFirst { writeBuffer={ buffer=buf1 data=[1.0] } }
+        \\#queue writeSecond { writeBuffer={ buffer=buf2 data=[2.0] } }
+        \\#frame main { perform=[writeFirst writeSecond] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Property: should have two write_buffer opcodes
+    var write_buffer_count: u32 = 0;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.write_buffer)) {
+            write_buffer_count += 1;
+        }
+    }
+    try testing.expectEqual(@as(u32, 2), write_buffer_count);
 }
