@@ -105,6 +105,21 @@
             cursor: not-allowed;
         }
 
+        button.playing {
+            background: #e94560;
+        }
+
+        button.playing:hover {
+            background: #ff6b8a;
+        }
+
+        .time-display {
+            font-family: 'SF Mono', 'Consolas', monospace;
+            font-size: 0.75rem;
+            color: #888;
+            margin-left: auto;
+        }
+
         .status {
             padding: 0.5rem;
             font-size: 0.75rem;
@@ -288,7 +303,9 @@
 )</textarea>
                 <div class="controls">
                     <button id="run-btn" disabled>Run</button>
+                    <button id="play-btn" disabled>Play</button>
                     <button id="clear-btn">Clear</button>
+                    <span id="time-display" class="time-display"></span>
                 </div>
             </div>
 
@@ -304,7 +321,9 @@
                     </div>
                     <div class="controls">
                         <button id="run-pngb-btn" disabled>Run PNGB</button>
+                        <button id="play-pngb-btn" disabled>Play</button>
                         <button id="clear-btn-2">Clear</button>
+                        <span id="time-display-2" class="time-display"></span>
                     </div>
                     <div id="bytecode-info" class="bytecode-info">
                         <pre>No file loaded</pre>
@@ -326,10 +345,12 @@
         const canvas = document.getElementById('canvas');
         const source = document.getElementById('source');
         const runBtn = document.getElementById('run-btn');
+        const playBtn = document.getElementById('play-btn');
         const clearBtn = document.getElementById('clear-btn');
         const clearBtn2 = document.getElementById('clear-btn-2');
         const status = document.getElementById('status');
         const errorBanner = document.getElementById('error-banner');
+        const timeDisplay = document.getElementById('time-display');
 
         // PNGB upload elements
         const tabs = document.querySelectorAll('.tab');
@@ -338,10 +359,17 @@
         const pngbFileInput = document.getElementById('pngb-file');
         const fileName = document.getElementById('file-name');
         const runPngbBtn = document.getElementById('run-pngb-btn');
+        const playPngbBtn = document.getElementById('play-pngb-btn');
         const bytecodeInfo = document.getElementById('bytecode-info');
+        const timeDisplay2 = document.getElementById('time-display-2');
 
         let pngine = null;
         let loadedBytecode = null;
+
+        // Animation state
+        let isPlaying = false;
+        let animationId = null;
+        let startTime = null;
 
         // ====================================================================
         // Tab switching
@@ -390,6 +418,7 @@
                 pngine = await initPNGine(canvas, 'pngine.wasm');
                 setStatus('Ready', 'success');
                 runBtn.disabled = false;
+                playBtn.disabled = false;
             } catch (err) {
                 setStatus('Initialization failed', 'error');
                 showError(err.message);
@@ -421,9 +450,108 @@
 
         function clear() {
             if (!pngine) return;
+            stopAnimation();
             hideError();
             pngine.freeModule();
             setStatus('Cleared', '');
+        }
+
+        // ====================================================================
+        // Animation loop (Play feature)
+        // ====================================================================
+
+        function startAnimation(useSourceTab = true) {
+            if (isPlaying) return;
+
+            hideError();
+
+            // First compile/load if needed
+            try {
+                if (useSourceTab) {
+                    setStatus('Compiling...');
+                    pngine.run(source.value);
+                } else if (loadedBytecode) {
+                    setStatus('Loading PNGB...');
+                    pngine.loadModule(loadedBytecode);
+                    pngine.executeAll();
+                } else {
+                    setStatus('No bytecode loaded', 'error');
+                    return;
+                }
+            } catch (err) {
+                setStatus('Error: ' + err.message, 'error');
+                console.error('Compile/load error:', err);
+                return;
+            }
+
+            isPlaying = true;
+            startTime = performance.now();
+
+            // Update button states
+            if (useSourceTab) {
+                playBtn.textContent = 'Stop';
+                playBtn.classList.add('playing');
+            } else {
+                playPngbBtn.textContent = 'Stop';
+                playPngbBtn.classList.add('playing');
+            }
+
+            setStatus('Playing...', 'success');
+
+            // Start animation loop
+            function animate(timestamp) {
+                if (!isPlaying) return;
+
+                const time = (timestamp - startTime) / 1000.0; // seconds as f32
+
+                try {
+                    // Write time to uniform buffer (buffer 0, offset 0, 4 bytes for f32)
+                    pngine.writeTimeUniform(0, time);
+
+                    // Re-execute all frames
+                    pngine.executeAll();
+
+                    // Update time display
+                    const display = useSourceTab ? timeDisplay : timeDisplay2;
+                    display.textContent = `t = ${time.toFixed(2)}s`;
+
+                } catch (err) {
+                    stopAnimation();
+                    setStatus('Animation error: ' + err.message, 'error');
+                    console.error('Animation error:', err);
+                    return;
+                }
+
+                animationId = requestAnimationFrame(animate);
+            }
+
+            animationId = requestAnimationFrame(animate);
+        }
+
+        function stopAnimation() {
+            if (!isPlaying) return;
+
+            isPlaying = false;
+            if (animationId) {
+                cancelAnimationFrame(animationId);
+                animationId = null;
+            }
+
+            // Reset button states
+            playBtn.textContent = 'Play';
+            playBtn.classList.remove('playing');
+            playPngbBtn.textContent = 'Play';
+            playPngbBtn.classList.remove('playing');
+
+            setStatus('Stopped', '');
+        }
+
+        function togglePlay(useSourceTab = true) {
+            if (isPlaying) {
+                stopAnimation();
+            } else {
+                startAnimation(useSourceTab);
+            }
         }
 
         // ====================================================================
@@ -495,6 +623,7 @@ Sections:
 
             loadedBytecode = data;
             runPngbBtn.disabled = !pngine;
+            playPngbBtn.disabled = !pngine;
         }
 
         async function handleFile(file) {
@@ -538,6 +667,7 @@ Sections:
 
         // Source tab
         runBtn.addEventListener('click', run);
+        playBtn.addEventListener('click', () => togglePlay(true));
         clearBtn.addEventListener('click', clear);
         clearBtn2.addEventListener('click', clear);
 
@@ -554,6 +684,7 @@ Sections:
         });
 
         runPngbBtn.addEventListener('click', runPngb);
+        playPngbBtn.addEventListener('click', () => togglePlay(false));
 
         // PNGB tab - drag and drop
         dropZone.addEventListener('click', () => pngbFileInput.click());
