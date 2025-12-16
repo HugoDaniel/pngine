@@ -174,8 +174,14 @@ pub const Emitter = struct {
         // Pre-conditions
         std.debug.assert(code.len > 0);
 
-        // If no defines, return original code
-        if (self.analysis.symbols.define.count() == 0) {
+        // Check if we need to do any substitution
+        const has_defines = self.analysis.symbols.define.count() > 0;
+        const has_math_constants = std.mem.indexOf(u8, code, "PI") != null or
+            std.mem.indexOf(u8, code, "TAU") != null or
+            hasMathConstantE(code);
+
+        // If nothing to substitute, return original code
+        if (!has_defines and !has_math_constants) {
             return code;
         }
 
@@ -234,12 +240,42 @@ pub const Emitter = struct {
                         !isIdentChar(code[pos + def_name.len]);
 
                     if (before_ok and after_ok) {
-                        // Get define value
+                        // Get define value and recursively substitute defines/constants within it
                         const value_str = self.getDefineValue(def_info.node);
-                        try result.appendSlice(self.gpa, value_str);
+                        try self.appendWithSubstitutions(&result, value_str);
                         pos += def_name.len;
                         found_match = true;
                         break;
+                    }
+                }
+            }
+
+            // If no user define matched, check for math constants (PI, E, TAU)
+            // Only substitute if user hasn't defined their own value for that name
+            if (!found_match) {
+                const math_constants = [_]struct { name: []const u8, value: []const u8 }{
+                    .{ .name = "TAU", .value = "6.283185307179586" }, // Check TAU before PI (longer match first)
+                    .{ .name = "PI", .value = "3.141592653589793" },
+                    .{ .name = "E", .value = "2.718281828459045" },
+                };
+
+                for (math_constants) |constant| {
+                    // Skip if user has a define with this name (user defines take precedence)
+                    if (self.analysis.symbols.define.get(constant.name) != null) continue;
+
+                    if (pos + constant.name.len <= code.len and
+                        std.mem.eql(u8, code[pos..][0..constant.name.len], constant.name))
+                    {
+                        const before_ok = pos == 0 or !isIdentChar(code[pos - 1]);
+                        const after_ok = pos + constant.name.len >= code.len or
+                            !isIdentChar(code[pos + constant.name.len]);
+
+                        if (before_ok and after_ok) {
+                            try result.appendSlice(self.gpa, constant.value);
+                            pos += constant.name.len;
+                            found_match = true;
+                            break;
+                        }
                     }
                 }
             }
@@ -261,6 +297,88 @@ pub const Emitter = struct {
             (c >= 'A' and c <= 'Z') or
             (c >= '0' and c <= '9') or
             c == '_';
+    }
+
+    /// Append a string to result, substituting user defines and math constants.
+    /// User defines take precedence over built-in math constants.
+    /// Used when expanding define values that may contain other defines/constants.
+    fn appendWithSubstitutions(self: *Self, result: *std.ArrayListUnmanaged(u8), str: []const u8) Error!void {
+        const math_constants = [_]struct { name: []const u8, value: []const u8 }{
+            .{ .name = "TAU", .value = "6.283185307179586" },
+            .{ .name = "PI", .value = "3.141592653589793" },
+            .{ .name = "E", .value = "2.718281828459045" },
+        };
+
+        var pos: usize = 0;
+        while (pos < str.len) {
+            var found = false;
+
+            // First check user defines (they take precedence)
+            var def_it = self.analysis.symbols.define.iterator();
+            while (def_it.next()) |def_entry| {
+                const def_name = def_entry.key_ptr.*;
+                const def_info = def_entry.value_ptr.*;
+
+                if (pos + def_name.len <= str.len and
+                    std.mem.eql(u8, str[pos..][0..def_name.len], def_name))
+                {
+                    const before_ok = pos == 0 or !isIdentChar(str[pos - 1]);
+                    const after_ok = pos + def_name.len >= str.len or
+                        !isIdentChar(str[pos + def_name.len]);
+
+                    if (before_ok and after_ok) {
+                        // Recursively substitute the define value
+                        const value_str = self.getDefineValue(def_info.node);
+                        try self.appendWithSubstitutions(result, value_str);
+                        pos += def_name.len;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+
+            // Then check math constants (if no user define matched)
+            if (!found) {
+                for (math_constants) |constant| {
+                    // Skip if user has a define with this name
+                    if (self.analysis.symbols.define.get(constant.name) != null) continue;
+
+                    if (pos + constant.name.len <= str.len and
+                        std.mem.eql(u8, str[pos..][0..constant.name.len], constant.name))
+                    {
+                        const before_ok = pos == 0 or !isIdentChar(str[pos - 1]);
+                        const after_ok = pos + constant.name.len >= str.len or
+                            !isIdentChar(str[pos + constant.name.len]);
+
+                        if (before_ok and after_ok) {
+                            try result.appendSlice(self.gpa, constant.value);
+                            pos += constant.name.len;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (!found) {
+                try result.append(self.gpa, str[pos]);
+                pos += 1;
+            }
+        }
+    }
+
+    /// Check if code contains the math constant E (as a whole word).
+    /// Can't just use indexOf("E") because E appears in many identifiers.
+    fn hasMathConstantE(code: []const u8) bool {
+        var pos: usize = 0;
+        while (pos < code.len) : (pos += 1) {
+            if (code[pos] == 'E') {
+                const before_ok = pos == 0 or !isIdentChar(code[pos - 1]);
+                const after_ok = pos + 1 >= code.len or !isIdentChar(code[pos + 1]);
+                if (before_ok and after_ok) return true;
+            }
+        }
+        return false;
     }
 
     /// Get the string value of a #define.
@@ -2202,6 +2320,7 @@ test "Emitter: multiple queues in perform array" {
 
 test "Emitter: define substitution in shader code" {
     // Test that #define values are substituted into shader code
+    // Defines referencing other defines are recursively expanded
     const source: [:0]const u8 =
         \\#define PI="3.14159"
         \\#define FOV="(2.0 * PI) / 5.0"
@@ -2217,11 +2336,12 @@ test "Emitter: define substitution in shader code" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    // Property: shader code in data section should have substituted values
+    // Property: shader code should have fully substituted values
+    // FOV -> (2.0 * PI) / 5.0 -> (2.0 * 3.14159) / 5.0
     var found_substituted = false;
     for (module.data.blobs.items) |data| {
-        // Should contain "(2.0 * PI)" from FOV substitution
-        if (std.mem.indexOf(u8, data, "(2.0 * PI)")) |_| {
+        // Should contain "(2.0 * 3.14159)" - PI recursively expanded
+        if (std.mem.indexOf(u8, data, "(2.0 * 3.14159)")) |_| {
             found_substituted = true;
             break;
         }
@@ -2247,15 +2367,43 @@ test "Emitter: define NOT substituted inside string literals" {
     defer module.deinit(testing.allocator);
 
     // Property: FOV should be preserved inside the string, substituted outside
+    // PI should also be substituted to its numeric value
     for (module.data.blobs.items) |data| {
         // Should have "FOV" preserved inside the string literal
         if (std.mem.indexOf(u8, data, "The FOV value")) |_| {
             // Also verify FOV was substituted outside the string
-            if (std.mem.indexOf(u8, data, "(2 * PI)")) |_| {
+            // PI should be replaced with its numeric value
+            if (std.mem.indexOf(u8, data, "3.141592653589793")) |_| {
                 return; // Both conditions met - test passes
             }
         }
     }
     // If we get here, test failed
+    return error.TestUnexpectedResult;
+}
+
+test "Emitter: math constants PI E TAU substituted in shader code" {
+    // Test that math constants are substituted even without user defines
+    const source: [:0]const u8 =
+        \\#shaderModule code {
+        \\  code="let pi = PI; let tau = TAU;"
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Property: PI and TAU should be substituted with numeric values
+    for (module.data.blobs.items) |data| {
+        const has_pi = std.mem.indexOf(u8, data, "3.141592653589793") != null;
+        const has_tau = std.mem.indexOf(u8, data, "6.283185307179586") != null;
+        if (has_pi and has_tau) {
+            return; // Both constants substituted - test passes
+        }
+    }
     return error.TestUnexpectedResult;
 }
