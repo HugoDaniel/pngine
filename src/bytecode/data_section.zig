@@ -88,6 +88,7 @@ pub const DataSection = struct {
     pub fn get(self: *const Self, id: DataId) []const u8 {
         // Pre-condition: ID is valid
         assert(id.toInt() < self.blobs.items.len);
+
         return self.blobs.items[id.toInt()];
     }
 
@@ -177,6 +178,9 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !DataSection {
         section.blobs.appendAssumeCapacity(owned);
         section.total_size += owned.len;
     }
+
+    // Post-condition: loaded correct number of entries
+    assert(section.blobs.items.len == data_count);
 
     return section;
 }
