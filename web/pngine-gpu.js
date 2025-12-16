@@ -3,7 +3,11 @@
  *
  * Implements the GPU operations called by the WASM module.
  * Manages WebGPU resources and translates WASM calls to actual GPU operations.
+ *
+ * Version: 2024-12-16-v2 (force cache refresh)
  */
+
+console.log('[PNGineGPU] Module loaded - version 2024-12-16-v2');
 
 export class PNGineGPU {
     /**
@@ -17,6 +21,7 @@ export class PNGineGPU {
 
         // Resource maps (ID -> GPU resource)
         this.buffers = new Map();
+        this.bufferMeta = new Map();  // Buffer ID → { size, usage }
         this.textures = new Map();
         this.samplers = new Map();
         this.shaders = new Map();
@@ -70,15 +75,34 @@ export class PNGineGPU {
      * @param {number} usage - Usage flags
      */
     createBuffer(id, size, usage) {
+        console.log(`[GPU] createBuffer(${id}), size=${size}, usage=${usage}`);
         // Skip if already exists (allows executeAll in animation loop)
         if (this.buffers.has(id)) {
+            console.log(`[GPU]   buffer ${id} already exists, skipping`);
             return;
         }
+        const gpuUsage = this.mapBufferUsage(usage);
         const buffer = this.device.createBuffer({
             size,
-            usage: this.mapBufferUsage(usage),
+            usage: gpuUsage,
         });
         this.buffers.set(id, buffer);
+        this.bufferMeta.set(id, { size, usage: gpuUsage });
+        console.log(`[GPU]   buffer ${id} created: ${buffer ? 'yes' : 'no'}`);
+    }
+
+    /**
+     * Find the first buffer with UNIFORM usage.
+     * @returns {number|null} Buffer ID or null if not found
+     */
+    findUniformBuffer() {
+        for (const [id, meta] of this.bufferMeta) {
+            // GPUBufferUsage.UNIFORM = 0x0040 = 64
+            if (meta.usage & GPUBufferUsage.UNIFORM) {
+                return id;
+            }
+        }
+        return null;
     }
 
     /**
@@ -169,10 +193,28 @@ export class PNGineGPU {
                 module: vertexShader,
                 entryPoint: desc.vertex.entryPoint || 'vertexMain',
             },
-            primitive: {
-                topology: desc.primitive?.topology || 'triangle-list',
-            },
         };
+
+        // Add primitive state
+        if (desc.primitive) {
+            pipelineDesc.primitive = {
+                topology: desc.primitive.topology || 'triangle-list',
+            };
+            if (desc.primitive.cullMode) {
+                pipelineDesc.primitive.cullMode = desc.primitive.cullMode;
+            }
+            if (desc.primitive.frontFace) {
+                pipelineDesc.primitive.frontFace = desc.primitive.frontFace;
+            }
+        } else {
+            pipelineDesc.primitive = { topology: 'triangle-list' };
+        }
+
+        // Add vertex buffer layouts if present
+        if (desc.vertex.buffers && desc.vertex.buffers.length > 0) {
+            pipelineDesc.vertex.buffers = desc.vertex.buffers;
+            console.log(`[GPU]   vertex buffers: ${JSON.stringify(desc.vertex.buffers)}`);
+        }
 
         if (desc.fragment) {
             pipelineDesc.fragment = {
@@ -182,6 +224,21 @@ export class PNGineGPU {
                     format: navigator.gpu.getPreferredCanvasFormat(),
                 }],
             };
+        }
+
+        // Add depth/stencil state if present
+        if (desc.depthStencil) {
+            pipelineDesc.depthStencil = {
+                format: desc.depthStencil.format || 'depth24plus',
+                depthWriteEnabled: desc.depthStencil.depthWriteEnabled !== false,
+                depthCompare: desc.depthStencil.depthCompare || 'less',
+            };
+            console.log(`[GPU]   depthStencil: ${JSON.stringify(pipelineDesc.depthStencil)}`);
+        }
+
+        // Add multisample state if present
+        if (desc.multisample) {
+            pipelineDesc.multisample = desc.multisample;
         }
 
         const pipeline = this.device.createRenderPipeline(pipelineDesc);
@@ -267,9 +324,10 @@ export class PNGineGPU {
      * @param {number} textureId - Color attachment texture (0 = canvas)
      * @param {number} loadOp - Load operation (0=load, 1=clear)
      * @param {number} storeOp - Store operation (0=store, 1=discard)
+     * @param {number} depthTextureId - Depth attachment texture (0xFFFF = none)
      */
-    beginRenderPass(textureId, loadOp, storeOp) {
-        console.log(`[GPU] beginRenderPass(texture=${textureId}, load=${loadOp}, store=${storeOp})`);
+    beginRenderPass(textureId, loadOp, storeOp, depthTextureId) {
+        console.log(`[GPU] beginRenderPass(texture=${textureId}, load=${loadOp}, store=${storeOp}, depth=${depthTextureId})`);
         this.commandEncoder = this.device.createCommandEncoder();
 
         // Get render target (0 = current canvas texture)
@@ -281,14 +339,32 @@ export class PNGineGPU {
             view = this.context.getCurrentTexture().createView();
         }
 
-        this.currentPass = this.commandEncoder.beginRenderPass({
+        const passDesc = {
             colorAttachments: [{
                 view,
                 loadOp: loadOp === 1 ? 'clear' : 'load',
                 storeOp: storeOp === 0 ? 'store' : 'discard',
-                clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                clearValue: { r: 0.5, g: 0.5, b: 0.5, a: 1 },  // Gray background
             }],
-        });
+        };
+
+        // Add depth attachment if specified (0xFFFF = no depth)
+        if (depthTextureId !== 0xFFFF && depthTextureId !== 65535) {
+            const depthTexture = this.textures.get(depthTextureId);
+            if (depthTexture) {
+                passDesc.depthStencilAttachment = {
+                    view: depthTexture.createView(),
+                    depthClearValue: 1.0,
+                    depthLoadOp: 'clear',
+                    depthStoreOp: 'store',
+                };
+                console.log(`[GPU]   depth attachment: texture ${depthTextureId}`);
+            } else {
+                console.warn(`[GPU] Depth texture ${depthTextureId} not found`);
+            }
+        }
+
+        this.currentPass = this.commandEncoder.beginRenderPass(passDesc);
         this.passType = 'render';
     }
 
@@ -323,6 +399,7 @@ export class PNGineGPU {
      * @param {number} id - Bind group ID
      */
     setBindGroup(slot, id) {
+        console.log(`[GPU] setBindGroup(slot=${slot}, id=${id})`);
         const bindGroup = this.bindGroups.get(id);
         this.currentPass.setBindGroup(slot, bindGroup);
     }
@@ -333,6 +410,7 @@ export class PNGineGPU {
      * @param {number} id - Buffer ID
      */
     setVertexBuffer(slot, id) {
+        console.log(`[GPU] setVertexBuffer(slot=${slot}, id=${id})`);
         const buffer = this.buffers.get(id);
         this.currentPass.setVertexBuffer(slot, buffer);
     }
@@ -394,16 +472,25 @@ export class PNGineGPU {
     }
 
     /**
-     * Write time data directly to a buffer (called from JS, not WASM).
+     * Write uniform data directly to a buffer (called from JS, not WASM).
      * Used by the Play feature to update uniform buffers each frame.
      * @param {number} bufferId - Buffer ID
-     * @param {Uint8Array} data - Data to write (f32 as bytes)
+     * @param {Uint8Array} data - Data to write (12 bytes: f32 time + u32 width + u32 height)
      */
     writeTimeToBuffer(bufferId, data) {
         const buffer = this.buffers.get(bufferId);
         if (!buffer) {
             console.warn(`[GPU] writeTimeToBuffer: buffer ${bufferId} not found`);
             return;
+        }
+        // Log first frame only to avoid spam
+        if (!this._uniformLogged) {
+            const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+            const time = view.getFloat32(0, true);
+            const width = view.getUint32(4, true);
+            const height = view.getUint32(8, true);
+            console.log(`[GPU] writeTimeToBuffer(${bufferId}): time=${time.toFixed(3)}, width=${width}, height=${height}`);
+            this._uniformLogged = true;
         }
         this.device.queue.writeBuffer(buffer, 0, data);
     }
@@ -702,26 +789,40 @@ export class PNGineGPU {
      * @returns {Object} Imports object
      */
     getImports() {
+        console.log('[PNGineGPU] Creating WASM imports object');
+        const self = this;
         return {
             env: {
-                gpuCreateBuffer: (id, size, usage) => this.createBuffer(id, size, usage),
-                gpuCreateTexture: (id, ptr, len) => this.createTexture(id, ptr, len),
-                gpuCreateSampler: (id, ptr, len) => this.createSampler(id, ptr, len),
-                gpuCreateShaderModule: (id, ptr, len) => this.createShaderModule(id, ptr, len),
-                gpuCreateRenderPipeline: (id, ptr, len) => this.createRenderPipeline(id, ptr, len),
-                gpuCreateComputePipeline: (id, ptr, len) => this.createComputePipeline(id, ptr, len),
-                gpuCreateBindGroup: (id, layout, ptr, len) => this.createBindGroup(id, layout, ptr, len),
-                gpuBeginRenderPass: (tex, load, store) => this.beginRenderPass(tex, load, store),
-                gpuBeginComputePass: () => this.beginComputePass(),
-                gpuSetPipeline: (id) => this.setPipeline(id),
-                gpuSetBindGroup: (slot, id) => this.setBindGroup(slot, id),
-                gpuSetVertexBuffer: (slot, id) => this.setVertexBuffer(slot, id),
-                gpuDraw: (v, i) => this.draw(v, i),
-                gpuDrawIndexed: (idx, i) => this.drawIndexed(idx, i),
-                gpuDispatch: (x, y, z) => this.dispatch(x, y, z),
-                gpuEndPass: () => this.endPass(),
-                gpuWriteBuffer: (id, off, ptr, len) => this.writeBuffer(id, off, ptr, len),
-                gpuSubmit: () => this.submit(),
+                gpuCreateBuffer: (id, size, usage) => self.createBuffer(id, size, usage),
+                gpuCreateTexture: (id, ptr, len) => self.createTexture(id, ptr, len),
+                gpuCreateSampler: (id, ptr, len) => self.createSampler(id, ptr, len),
+                gpuCreateShaderModule: (id, ptr, len) => self.createShaderModule(id, ptr, len),
+                gpuCreateRenderPipeline: (id, ptr, len) => self.createRenderPipeline(id, ptr, len),
+                gpuCreateComputePipeline: (id, ptr, len) => self.createComputePipeline(id, ptr, len),
+                gpuCreateBindGroup: (id, layout, ptr, len) => self.createBindGroup(id, layout, ptr, len),
+                gpuBeginRenderPass: (tex, load, store, depth) => self.beginRenderPass(tex, load, store, depth),
+                gpuBeginComputePass: () => self.beginComputePass(),
+                gpuSetPipeline: (id) => {
+                    console.log(`[WASM->JS] gpuSetPipeline called with id=${id}`);
+                    self.setPipeline(id);
+                },
+                gpuSetBindGroup: (slot, id) => {
+                    console.log(`[WASM->JS] gpuSetBindGroup called with slot=${slot}, id=${id}`);
+                    self.setBindGroup(slot, id);
+                },
+                gpuSetVertexBuffer: (slot, id) => {
+                    console.log(`[WASM->JS] gpuSetVertexBuffer called with slot=${slot}, id=${id}`);
+                    self.setVertexBuffer(slot, id);
+                },
+                gpuDraw: (v, i) => {
+                    console.log(`[WASM->JS] gpuDraw called with v=${v}, i=${i}`);
+                    self.draw(v, i);
+                },
+                gpuDrawIndexed: (idx, i) => self.drawIndexed(idx, i),
+                gpuDispatch: (x, y, z) => self.dispatch(x, y, z),
+                gpuEndPass: () => self.endPass(),
+                gpuWriteBuffer: (id, off, ptr, len) => self.writeBuffer(id, off, ptr, len),
+                gpuSubmit: () => self.submit(),
             },
         };
     }

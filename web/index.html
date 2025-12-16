@@ -505,8 +505,11 @@
                 const time = (timestamp - startTime) / 1000.0; // seconds as f32
 
                 try {
-                    // Write time to uniform buffer (buffer 0, offset 0, 4 bytes for f32)
-                    pngine.writeTimeUniform(0, time);
+                    // Write time to uniform buffer (auto-detect uniform buffer ID)
+                    const uniformBufferId = pngine.findUniformBuffer();
+                    if (uniformBufferId !== null) {
+                        pngine.writeTimeUniform(uniformBufferId, time);
+                    }
 
                     // Re-execute all frames
                     pngine.executeAll();
@@ -651,7 +654,18 @@ Sections:
                 const start = performance.now();
 
                 pngine.loadModule(loadedBytecode);
+
+                // First execution: creates resources (buffers, pipelines, etc.)
+                // This renders with uninitialized uniforms (gray/broken)
                 pngine.executeAll();
+
+                // Now buffers exist - write uniform data (time=0, canvas dimensions)
+                const uniformBufferId = pngine.findUniformBuffer();
+                if (uniformBufferId !== null) {
+                    pngine.writeTimeUniform(uniformBufferId, 0);
+                    // Second execution: render with correct uniforms
+                    pngine.executeAll();
+                }
 
                 const elapsed = (performance.now() - start).toFixed(2);
                 setStatus(`Executed in ${elapsed}ms`, 'success');
