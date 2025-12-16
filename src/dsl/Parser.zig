@@ -547,13 +547,11 @@ pub const Parser = struct {
                 try self.scratch.append(self.gpa, elem.toInt());
             },
             .number_literal => {
-                // Try to parse as expression first (e.g., 1 + 2 in array)
-                if (try self.parseExpression()) |expr| {
-                    try self.scratch.append(self.gpa, expr.toInt());
-                } else {
-                    const elem = try self.parseSimpleValue(.number_value);
-                    try self.scratch.append(self.gpa, elem.toInt());
-                }
+                // In arrays, parse numbers as simple values (not expressions)
+                // This allows [1 -1 2 -2] to be 4 values, not 2 subtraction results
+                // Use parentheses for expressions: [(1+2) 3]
+                const elem = try self.parseSimpleValue(.number_value);
+                try self.scratch.append(self.gpa, elem.toInt());
             },
             .l_paren => {
                 // Grouped expression in array: [(1 + 2), 3]
@@ -565,8 +563,29 @@ pub const Parser = struct {
             },
             .minus => {
                 // Unary negation in array: [-1, -2]
-                if (try self.parseExpression()) |expr| {
-                    try self.scratch.append(self.gpa, expr.toInt());
+                // Don't use parseExpression to avoid "-1 -2" becoming "-1 - 2"
+                const minus_token = self.tok_i;
+                self.tok_i += 1; // consume -
+                if (self.currentTag() == .number_literal) {
+                    const operand = try self.parseSimpleValue(.number_value);
+                    const elem = try self.addNode(.{
+                        .tag = .expr_negate,
+                        .main_token = minus_token,
+                        .data = .{ .node = operand },
+                    });
+                    try self.scratch.append(self.gpa, elem.toInt());
+                } else if (self.currentTag() == .l_paren) {
+                    // Allow -(expr) for explicit negated expressions
+                    if (try self.parseExpression()) |expr| {
+                        const elem = try self.addNode(.{
+                            .tag = .expr_negate,
+                            .main_token = minus_token,
+                            .data = .{ .node = expr },
+                        });
+                        try self.scratch.append(self.gpa, elem.toInt());
+                    } else {
+                        return error.ParseError;
+                    }
                 } else {
                     return error.ParseError;
                 }
@@ -1505,7 +1524,10 @@ test "Parser: hex in expression" {
 }
 
 test "Parser: expression in array" {
-    const source: [:0]const u8 = "#buffer buf { values=[1+2 3*4] }";
+    // Expressions in arrays require parentheses to avoid ambiguity with space-separated values
+    // Without parens: [1 -1] is two values, not 1-1=0
+    // With parens: [(1+2) (3*4)] is two computed values
+    const source: [:0]const u8 = "#buffer buf { values=[(1+2) (3*4)] }";
     var ast = try parseSource(source);
     defer ast.deinit(testing.allocator);
 

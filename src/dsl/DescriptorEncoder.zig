@@ -374,6 +374,48 @@ pub const DescriptorEncoder = struct {
         return result;
     }
 
+    /// Encode a texture descriptor without explicit dimensions.
+    /// Runtime will use canvas size as the default.
+    /// Used for textures with size=["$canvas.width", "$canvas.height"].
+    ///
+    /// Memory: Caller owns returned slice.
+    pub fn encodeTextureCanvasSize(
+        allocator: Allocator,
+        format: TextureFormat,
+        usage: TextureUsage,
+        sample_count: u32,
+    ) ![]u8 {
+        var encoder = Self.init();
+        errdefer encoder.deinit(allocator);
+
+        const field_count_pos = try encoder.beginDescriptor(allocator, .texture);
+        var field_count: u8 = 0;
+
+        // No width/height fields - runtime will use canvas size by default
+
+        try encoder.writeEnumField(allocator, @intFromEnum(TextureField.format), @intFromEnum(format));
+        field_count += 1;
+
+        try encoder.writeByte(allocator, @intFromEnum(TextureField.usage));
+        try encoder.writeByte(allocator, @intFromEnum(ValueType.enum_val));
+        try encoder.writeByte(allocator, @bitCast(usage));
+        field_count += 1;
+
+        if (sample_count > 1) {
+            try encoder.writeU32Field(allocator, @intFromEnum(TextureField.sample_count), sample_count);
+            field_count += 1;
+        }
+
+        encoder.endDescriptor(field_count_pos, field_count);
+
+        const result = try encoder.toOwnedSlice(allocator);
+
+        // Post-condition: output starts with correct type tag.
+        assert(result[0] == @intFromEnum(DescriptorType.texture));
+
+        return result;
+    }
+
     /// Encode a sampler descriptor.
     ///
     /// Memory: Caller owns returned slice.
@@ -577,6 +619,25 @@ test "DescriptorEncoder: encode texture with MSAA" {
     try testing.expectEqual(@as(u8, @intFromEnum(DescriptorEncoder.DescriptorType.texture)), desc[0]);
     // Property: 5 fields when sample_count > 1.
     try testing.expectEqual(@as(u8, 5), desc[1]);
+}
+
+// Property: canvas-sized textures omit width/height fields (2 fields vs 4).
+// Regression test: size=["$canvas.width", "$canvas.height"] should NOT encode dimensions.
+test "DescriptorEncoder: encode texture canvas size" {
+    const desc = try DescriptorEncoder.encodeTextureCanvasSize(
+        testing.allocator,
+        .depth24plus,
+        .{ .render_attachment = true },
+        1,
+    );
+    defer testing.allocator.free(desc);
+
+    // Property: type tag is texture.
+    try testing.expectEqual(@as(u8, @intFromEnum(DescriptorEncoder.DescriptorType.texture)), desc[0]);
+    // Property: only 2 fields (format, usage) when no width/height.
+    try testing.expectEqual(@as(u8, 2), desc[1]);
+    // Property: smaller than explicit-size descriptor.
+    try testing.expect(desc.len < 15); // Explicit size would be ~20 bytes
 }
 
 // Property: sampler encoding produces correct type tag and field count.
