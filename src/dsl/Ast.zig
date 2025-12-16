@@ -29,10 +29,13 @@
 //! file = macro*
 //! macro = "#" macro_name identifier "{" property* "}"
 //! property = identifier "=" value
-//! value = string | number | identifier | reference | array | object
+//! value = string | number | identifier | reference | array | object | expr
 //! reference = "$" identifier ("." identifier)*
 //! array = "[" value* "]"
 //! object = "{" property* "}"
+//! expr = term (('+' | '-') term)*
+//! term = factor (('*' | '/') factor)*
+//! factor = number | '(' expr ')' | '-' factor
 //! ```
 //!
 //! ## Invariants
@@ -137,9 +140,14 @@ pub const Node = struct {
         // Values
         /// "string literal"
         string_value,
-        /// 123, 0.5, -1
+        /// "$canvas.width" - runtime interpolation string
+        /// The string contains $... patterns that resolve at runtime
+        runtime_interpolation,
+        /// 123, 0.5, -1, 0xFF
         number_value,
-        /// identifier (bareword)
+        /// true, false
+        boolean_value,
+        /// identifier (bareword) - may be resolved to reference later
         identifier_value,
         /// $wgsl.name - data.node_and_node = [namespace_token, name_token]
         reference,
@@ -147,6 +155,83 @@ pub const Node = struct {
         array,
         /// { ... } - data.extra_range contains properties
         object,
+
+        // ====================================================================
+        // Arithmetic expressions (compile-time evaluated)
+        // ====================================================================
+        //
+        // Expression nodes form a tree structure evaluated at compile time.
+        // The analyzer resolves these to constant f64 values.
+        //
+        // Precedence (lowest to highest):
+        // 1. Addition/subtraction: expr_add, expr_sub
+        // 2. Multiplication/division: expr_mul, expr_div
+        // 3. Unary negation: expr_negate
+        // 4. Atoms: number_value, parenthesized expressions
+        //
+        // Associativity: left-to-right for binary operators.
+        // Tree structure: 1+2+3 = (1+2)+3, stored as add(add(1,2),3)
+
+        /// Binary addition: a + b
+        ///
+        /// Layout:
+        /// - main_token: the '+' operator token
+        /// - data.node_and_node[0]: left operand node index (lhs)
+        /// - data.node_and_node[1]: right operand node index (rhs)
+        ///
+        /// Invariants:
+        /// - Both operands must be numeric expressions or number_value
+        /// - Result is f64 (lhs + rhs)
+        expr_add,
+
+        /// Binary subtraction: a - b
+        ///
+        /// Layout:
+        /// - main_token: the '-' operator token
+        /// - data.node_and_node[0]: left operand node index (lhs)
+        /// - data.node_and_node[1]: right operand node index (rhs)
+        ///
+        /// Invariants:
+        /// - Both operands must be numeric expressions or number_value
+        /// - Result is f64 (lhs - rhs)
+        expr_sub,
+
+        /// Binary multiplication: a * b
+        ///
+        /// Layout:
+        /// - main_token: the '*' operator token
+        /// - data.node_and_node[0]: left operand node index (lhs)
+        /// - data.node_and_node[1]: right operand node index (rhs)
+        ///
+        /// Invariants:
+        /// - Both operands must be numeric expressions or number_value
+        /// - Result is f64 (lhs * rhs)
+        expr_mul,
+
+        /// Binary division: a / b
+        ///
+        /// Layout:
+        /// - main_token: the '/' operator token
+        /// - data.node_and_node[0]: left operand node index (lhs)
+        /// - data.node_and_node[1]: right operand node index (rhs)
+        ///
+        /// Invariants:
+        /// - Both operands must be numeric expressions or number_value
+        /// - Division by zero returns +Inf or -Inf (IEEE 754)
+        /// - Result is f64 (lhs / rhs)
+        expr_div,
+
+        /// Unary negation: -a
+        ///
+        /// Layout:
+        /// - main_token: the '-' operator token
+        /// - data.node: operand node index
+        ///
+        /// Invariants:
+        /// - Operand must be a numeric expression or number_value
+        /// - Result is f64 (-operand)
+        /// - Double negation (--a) produces nested expr_negate nodes
+        expr_negate,
 
         // Properties
         /// key=value - main_token is key, data.node is value node
