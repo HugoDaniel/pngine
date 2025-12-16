@@ -142,6 +142,56 @@ pub const Emitter = struct {
         try self.emitVarint(allocator, entry_data_id);
     }
 
+    /// Emit create_texture instruction.
+    /// Creates a GPU texture with specified dimensions and format.
+    pub fn createTexture(
+        self: *Self,
+        allocator: Allocator,
+        texture_id: u16,
+        descriptor_data_id: u16,
+    ) !void {
+        try self.emitOpcode(allocator, .create_texture);
+        try self.emitVarint(allocator, texture_id);
+        try self.emitVarint(allocator, descriptor_data_id);
+    }
+
+    /// Emit create_sampler instruction.
+    /// Creates a texture sampler with specified filtering/wrapping.
+    pub fn createSampler(
+        self: *Self,
+        allocator: Allocator,
+        sampler_id: u16,
+        descriptor_data_id: u16,
+    ) !void {
+        try self.emitOpcode(allocator, .create_sampler);
+        try self.emitVarint(allocator, sampler_id);
+        try self.emitVarint(allocator, descriptor_data_id);
+    }
+
+    /// Emit create_bind_group_layout instruction.
+    pub fn createBindGroupLayout(
+        self: *Self,
+        allocator: Allocator,
+        layout_id: u16,
+        descriptor_data_id: u16,
+    ) !void {
+        try self.emitOpcode(allocator, .create_bind_group_layout);
+        try self.emitVarint(allocator, layout_id);
+        try self.emitVarint(allocator, descriptor_data_id);
+    }
+
+    /// Emit create_pipeline_layout instruction.
+    pub fn createPipelineLayout(
+        self: *Self,
+        allocator: Allocator,
+        layout_id: u16,
+        descriptor_data_id: u16,
+    ) !void {
+        try self.emitOpcode(allocator, .create_pipeline_layout);
+        try self.emitVarint(allocator, layout_id);
+        try self.emitVarint(allocator, descriptor_data_id);
+    }
+
     // ========================================================================
     // Pass Operations
     // ========================================================================
@@ -193,6 +243,18 @@ pub const Emitter = struct {
         try self.emitOpcode(allocator, .set_vertex_buffer);
         try self.emitByte(allocator, slot);
         try self.emitVarint(allocator, buffer_id);
+    }
+
+    /// Emit set_index_buffer instruction.
+    pub fn setIndexBuffer(
+        self: *Self,
+        allocator: Allocator,
+        buffer_id: u16,
+        format_id: u8,
+    ) !void {
+        try self.emitOpcode(allocator, .set_index_buffer);
+        try self.emitVarint(allocator, buffer_id);
+        try self.emitByte(allocator, format_id);
     }
 
     /// Emit draw instruction.
