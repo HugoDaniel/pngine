@@ -27,7 +27,8 @@ pub const Token = struct {
         // Literals & identifiers
         identifier, // foo, bar, entryPoint
         string_literal, // "text"
-        number_literal, // 123, 0.5, -1.5
+        number_literal, // 123, 0.5, -1.5, 0xFF (WebGPU uses hex for usage flags)
+        boolean_literal, // true, false (for enable/disable flags)
 
         // Macros (# prefix)
         macro_define, // #define
@@ -60,6 +61,12 @@ pub const Token = struct {
         dot, // .
         dollar, // $
 
+        // Arithmetic operators (for compile-time constant expressions)
+        plus, // +
+        minus, // -
+        star, // *
+        slash, // /
+
         // Comments (preserved for WGSL passthrough)
         line_comment, // // ...
         doc_comment, // /// ...
@@ -77,6 +84,10 @@ pub const Token = struct {
                 .comma => ",",
                 .dot => ".",
                 .dollar => "$",
+                .plus => "+",
+                .minus => "-",
+                .star => "*",
+                .slash => "/",
                 else => null,
             };
         }
@@ -107,6 +118,17 @@ pub const macro_keywords = std.StaticStringMap(Token.Tag).initComptime(.{
     .{ "data", .macro_data },
     .{ "queue", .macro_queue },
     .{ "querySet", .macro_query_set },
+});
+
+/// Literal keywords that produce special tokens instead of identifiers.
+///
+/// These reserved words have special meaning in the DSL and are tokenized
+/// as their corresponding literal type rather than generic identifiers.
+///
+/// Example: `enabled=true` tokenizes `true` as `.boolean_literal`, not `.identifier`.
+pub const literal_keywords = std.StaticStringMap(Token.Tag).initComptime(.{
+    .{ "true", .boolean_literal },
+    .{ "false", .boolean_literal },
 });
 
 test "Token: lexeme returns correct strings" {
