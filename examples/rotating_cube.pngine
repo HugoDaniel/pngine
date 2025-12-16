@@ -1,0 +1,257 @@
+#define CUBE_VERTEX_SIZE=4 * 10 // Byte size of one cube vertex.
+#define CUBE_POSITION_OFFSET=0
+#define CUBE_COLOR_OFFSET=4 * 4 // Byte offset of cube vertex color attribute.
+#define CUBE_UV_OFFSET=4 * 8
+#define CUBE_VERTEX_COUNT=36
+
+#data cubeVertexArray {
+  float32Array=[
+  // float4 position, float4 color, float2 uv,
+  1 -1 1 1   1 0 1 1  0 1
+  -1 -1 1 1  0 0 1 1  1 1
+  -1 -1 -1 1 0 0 0 1  1 0
+  1 -1 -1 1  1 0 0 1  0 0
+  1 -1 1 1   1 0 1 1  0 1
+  -1 -1 -1 1 0 0 0 1  1 0
+
+  1 1 1 1    1 1 1 1  0 1
+  1 -1 1 1   1 0 1 1  1 1
+  1 -1 -1 1  1 0 0 1  1 0
+  1 1 -1 1   1 1 0 1  0 0
+  1 1 1 1    1 1 1 1  0 1
+  1 -1 -1 1  1 0 0 1  1 0
+
+  -1 1 1 1   0 1 1 1  0 1
+  1 1 1 1    1 1 1 1  1 1
+  1 1 -1 1   1 1 0 1  1 0
+  -1 1 -1 1  0 1 0 1  0 0
+  -1 1 1 1   0 1 1 1  0 1
+  1 1 -1 1   1 1 0 1  1 0
+
+  -1 -1 1 1  0 0 1 1  0 1
+  -1 1 1 1   0 1 1 1  1 1
+  -1 1 -1 1  0 1 0 1  1 0
+  -1 -1 -1 1 0 0 0 1  0 0
+  -1 -1 1 1  0 0 1 1  0 1
+  -1 1 -1 1  0 1 0 1  1 0
+
+  1 1 1 1    1 1 1 1  0 1
+  -1 1 1 1   0 1 1 1  1 1
+  -1 -1 1 1  0 0 1 1  1 0
+  -1 -1 1 1  0 0 1 1  1 0
+  1 -1 1 1   1 0 1 1  0 0
+  1 1 1 1    1 1 1 1  0 1
+
+  1 -1 -1 1  1 0 0 1  0 1
+  -1 -1 -1 1 0 0 0 1  1 1
+  -1 1 -1 1  0 1 0 1  1 0
+  1 1 -1 1   1 1 0 1  0 0
+  1 -1 -1 1  1 0 0 1  0 1
+  -1 1 -1 1  0 1 0 1  1 0
+]}
+
+#buffer verticesBuffer {
+  size  = cubeVertexArray
+  usage = [VERTEX]
+  mappedAtCreation=cubeVertexArray
+}
+
+#renderPipeline renderCube {
+  layout=auto
+  vertex={
+    entrypoint=vertexMain
+    module=code 
+    buffers = [
+      {
+        arrayStride=CUBE_VERTEX_SIZE
+        attributes=[
+          { shaderLocation=0 offset=CUBE_POSITION_OFFSET format=float32x4 }
+          { shaderLocation=1 offset=CUBE_UV_OFFSET format=float32x2 }
+        ]
+      }
+    ]
+  }
+  fragment = {
+    entrypoint=fragMain
+    module=code 
+    targets=[{ format=preferredCanvasFormat }]
+  }
+  primitive={
+    topology = triangle-list
+    // Backface culling since the cube is solid piece of geometry.
+    // Faces pointing away from the camera will be occluded by faces
+    // pointing toward the camera.
+    cullMode = back
+  }
+  depthStencil={
+    depthWriteEnabled=true
+    depthCompare=less
+    format=depth24plus
+  }
+}
+
+
+#texture depthTexture {
+  size=["$canvas.width", "$canvas.height"]
+  format=depth24plus
+  usage=[RENDER_ATTACHMENT]
+}
+
+#buffer uniformInputsBuffer {
+  size="4+4+4"
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeInputUniforms {
+  writeBuffer={
+    buffer=uniformInputsBuffer
+    bufferOffset=0
+    data="$uniforms.code.inputs.data"
+  }
+}
+
+#bindGroup inputsBinding {
+  layout={ pipeline=renderCube index=0 }
+  entries=[
+    { binding=0 resource={ buffer=uniformInputsBuffer }}
+  ]
+}
+
+#renderPass drawCube {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.5 0.5 0.5 1.0]
+    loadOp=clear
+    storeOp=store
+  }]
+  depthStencilAttachment={
+    view=depthTexture
+    depthClearValue=1.0
+    depthLoadOp=clear
+    depthStoreOp=store
+  }
+  pipeline=renderCube
+  bindGroups=[inputsBinding]
+  vertexBuffers=[verticesBuffer]
+  draw=CUBE_VERTEX_COUNT
+}
+
+#frame cube {
+  perform=[
+    writeInputUniforms
+    drawCube
+  ]
+}
+
+#define FOV="(2 * PI) / 5"
+#shaderModule code {
+  code="
+struct PngineInputs {
+  time: f32,
+  canvasW: u32,
+  canvasH: u32,
+};
+@group(0) @binding(0) var<uniform> inputs : PngineInputs;
+
+struct VertexOutput {
+  @builtin(position) Position : vec4f,
+  @location(0) fragUV : vec2f,
+  @location(1) fragPosition: vec4f,
+}
+
+fn perspective(fieldOfViewY: f32, aspect: f32, zNear: f32, zFar: f32) -> mat4x4<f32> {
+    // Compute f = tan(π/2 - fieldOfViewY/2) which is equivalent to 1/tan(fieldOfViewY/2)
+    let f: f32 = tan(0.5 * 3.141592653589793 - 0.5 * fieldOfViewY);
+    
+    var A: f32;
+    var B: f32;
+    let rangeInv: f32 = 1.0 / (zNear - zFar);
+    A = zFar * rangeInv;
+    B = zFar * zNear * rangeInv;
+    
+    // Construct the matrix in column-major order:
+    // Column 0: (f/aspect, 0, 0, 0)
+    // Column 1: (0, f, 0, 0)
+    // Column 2: (0, 0, A, -1)
+    // Column 3: (0, 0, B, 0)
+    return mat4x4<f32>(
+        vec4<f32>(f / aspect, 0.0,   0.0, 0.0),
+        vec4<f32>(0.0,        f,     0.0, 0.0),
+        vec4<f32>(0.0,        0.0,   A,  -1.0),
+        vec4<f32>(0.0,        0.0,   B,  0.0)
+    );
+}
+
+fn getTransformationMatrix(now: f32, projectionMatrix: mat4x4<f32>) -> mat4x4<f32> {
+    // Create an identity matrix.
+    var viewMatrix: mat4x4<f32> = mat4x4<f32>(
+        vec4<f32>(1.0, 0.0, 0.0, 0.0),
+        vec4<f32>(0.0, 1.0, 0.0, 0.0),
+        vec4<f32>(0.0, 0.0, 1.0, 0.0),
+        vec4<f32>(0.0, 0.0, 0.0, 1.0)
+    );
+    
+    // Build a translation matrix to move along z by -4.
+    let translation: mat4x4<f32> = mat4x4<f32>(
+        vec4<f32>(1.0, 0.0, 0.0, 0.0),
+        vec4<f32>(0.0, 1.0, 0.0, 0.0),
+        vec4<f32>(0.0, 0.0, 1.0, 0.0),
+        vec4<f32>(0.0, 0.0, -4.0, 1.0)
+    );
+    // Apply the translation: viewMatrix = viewMatrix * translation.
+    viewMatrix = viewMatrix * translation;
+    
+    // Build a rotation matrix.
+    // Rotation angle (in radians).
+    let angle: f32 = 1.0;
+    // Rotation axis: (sin(now), cos(now), 0).
+    let axis: vec3<f32> = vec3<f32>(sin(now), cos(now), 0.0);
+    // Since sin²(now)+cos²(now)==1, the axis is already normalized.
+    let c: f32 = cos(angle);
+    let s: f32 = sin(angle);
+    let t: f32 = 1.0 - c;
+    let x: f32 = axis.x;
+    let y: f32 = axis.y;
+    let z: f32 = axis.z; // This is 0.
+    
+    // Construct the 4x4 rotation matrix (embedded in 4x4).
+    let rotation: mat4x4<f32> = mat4x4<f32>(
+        vec4<f32>(t * x * x + c,     t * x * y - s * z,   t * x * z + s * y,   0.0),
+        vec4<f32>(t * x * y + s * z,   t * y * y + c,       t * y * z - s * x,   0.0),
+        vec4<f32>(t * x * z - s * y,   t * y * z + s * x,   t * z * z + c,       0.0),
+        vec4<f32>(0.0,               0.0,                 0.0,                 1.0)
+    );
+    // Apply the rotation: viewMatrix = viewMatrix * rotation.
+    viewMatrix = viewMatrix * rotation;
+    
+    // Combine with the projection matrix.
+    let modelViewProjectionMatrix: mat4x4<f32> = projectionMatrix * viewMatrix;
+    
+    return modelViewProjectionMatrix;
+}
+
+@vertex
+fn vertexMain(
+  @location(0) position : vec4f,
+  @location(1) uv : vec2f
+) -> VertexOutput {
+
+  let projectionMatrix = perspective(FOV, f32(inputs.canvasW) / f32(inputs.canvasH), 1.0, 100.0);
+  var output : VertexOutput;
+  output.Position = getTransformationMatrix(inputs.time, projectionMatrix) * position;
+  output.fragUV = uv;
+  output.fragPosition = 0.5 * (position + vec4(1.0, 1.0, 1.0, 1.0));
+  return output;
+}
+
+@fragment
+fn fragMain(
+  @location(0) fragUV: vec2f,
+  @location(1) fragPosition: vec4f
+) -> @location(0) vec4f {
+  return fragPosition;
+}
+
+"
+}
+
