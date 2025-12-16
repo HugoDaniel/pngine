@@ -263,8 +263,12 @@ pub const MockGPU = struct {
         });
     }
 
+    /// Record texture creation.
+    /// Tracks texture ID in bitset for resource validation.
     pub fn createTexture(self: *Self, allocator: Allocator, texture_id: u16, descriptor_data_id: u16) !void {
+        // Pre-conditions
         assert(texture_id < MAX_TEXTURES);
+        assert(!self.textures_created.isSet(texture_id)); // No duplicate IDs
 
         self.textures_created.set(texture_id);
 
@@ -277,8 +281,13 @@ pub const MockGPU = struct {
         });
     }
 
+    /// Record sampler creation.
+    /// Samplers are not tracked in bitset (typically few per pipeline).
     pub fn createSampler(self: *Self, allocator: Allocator, sampler_id: u16, descriptor_data_id: u16) !void {
-        // Samplers don't have a bitset for tracking, just record the call
+        // Pre-conditions
+        assert(sampler_id < MAX_TEXTURES); // Use MAX_TEXTURES as reasonable upper bound
+        assert(self.calls.items.len < 10000); // Sanity check: not in runaway loop
+
         try self.calls.append(allocator, .{
             .call_type = .create_sampler,
             .params = .{ .create_sampler = .{
