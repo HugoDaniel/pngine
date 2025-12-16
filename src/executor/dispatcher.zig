@@ -36,6 +36,8 @@ pub fn Backend(comptime T: type) type {
             comptime {
                 // Resource creation
                 _ = @field(T, "createBuffer");
+                _ = @field(T, "createTexture");
+                _ = @field(T, "createSampler");
                 _ = @field(T, "createShaderModule");
                 _ = @field(T, "createRenderPipeline");
                 _ = @field(T, "createComputePipeline");
@@ -131,6 +133,18 @@ pub fn Dispatcher(comptime BackendType: type) type {
                     const size = try self.readVarint();
                     const usage = try self.readByte();
                     try self.backend.createBuffer(allocator, @intCast(buffer_id), size, usage);
+                },
+
+                .create_texture => {
+                    const texture_id = try self.readVarint();
+                    const descriptor_data_id = try self.readVarint();
+                    try self.backend.createTexture(allocator, @intCast(texture_id), @intCast(descriptor_data_id));
+                },
+
+                .create_sampler => {
+                    const sampler_id = try self.readVarint();
+                    const descriptor_data_id = try self.readVarint();
+                    try self.backend.createSampler(allocator, @intCast(sampler_id), @intCast(descriptor_data_id));
                 },
 
                 .create_shader_module => {
@@ -282,8 +296,6 @@ pub fn Dispatcher(comptime BackendType: type) type {
                     // No operation
                 },
 
-                .create_texture,
-                .create_sampler,
                 .create_shader_concat,
                 .create_bind_group_layout,
                 .create_pipeline_layout,

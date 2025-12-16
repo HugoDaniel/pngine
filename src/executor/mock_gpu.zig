@@ -19,6 +19,7 @@ pub const CallType = enum {
     create_texture,
     create_sampler,
     create_shader_module,
+    create_texture_view,
     create_bind_group_layout,
     create_pipeline_layout,
     create_render_pipeline,
@@ -52,6 +53,14 @@ pub const Call = struct {
             buffer_id: u16,
             size: u32,
             usage: u8,
+        },
+        create_texture: struct {
+            texture_id: u16,
+            descriptor_data_id: u16,
+        },
+        create_sampler: struct {
+            sampler_id: u16,
+            descriptor_data_id: u16,
         },
         create_shader_module: struct {
             shader_id: u16,
@@ -113,6 +122,14 @@ pub const Call = struct {
             .create_buffer => blk: {
                 const p = self.params.create_buffer;
                 break :blk std.fmt.bufPrint(buf, "create_buffer(id={d}, size={d}, usage=0x{x:0>2})", .{ p.buffer_id, p.size, p.usage }) catch "create_buffer(...)";
+            },
+            .create_texture => blk: {
+                const p = self.params.create_texture;
+                break :blk std.fmt.bufPrint(buf, "create_texture(id={d}, desc={d})", .{ p.texture_id, p.descriptor_data_id }) catch "create_texture(...)";
+            },
+            .create_sampler => blk: {
+                const p = self.params.create_sampler;
+                break :blk std.fmt.bufPrint(buf, "create_sampler(id={d}, desc={d})", .{ p.sampler_id, p.descriptor_data_id }) catch "create_sampler(...)";
             },
             .create_shader_module => blk: {
                 const p = self.params.create_shader_module;
@@ -242,6 +259,31 @@ pub const MockGPU = struct {
                 .buffer_id = buffer_id,
                 .size = size,
                 .usage = usage,
+            } },
+        });
+    }
+
+    pub fn createTexture(self: *Self, allocator: Allocator, texture_id: u16, descriptor_data_id: u16) !void {
+        assert(texture_id < MAX_TEXTURES);
+
+        self.textures_created.set(texture_id);
+
+        try self.calls.append(allocator, .{
+            .call_type = .create_texture,
+            .params = .{ .create_texture = .{
+                .texture_id = texture_id,
+                .descriptor_data_id = descriptor_data_id,
+            } },
+        });
+    }
+
+    pub fn createSampler(self: *Self, allocator: Allocator, sampler_id: u16, descriptor_data_id: u16) !void {
+        // Samplers don't have a bitset for tracking, just record the call
+        try self.calls.append(allocator, .{
+            .call_type = .create_sampler,
+            .params = .{ .create_sampler = .{
+                .sampler_id = sampler_id,
+                .descriptor_data_id = descriptor_data_id,
             } },
         });
     }
