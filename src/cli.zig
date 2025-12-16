@@ -235,6 +235,8 @@ fn runCheck(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     var dispatch_count: u32 = 0;
     var texture_count: u32 = 0;
     var sampler_count: u32 = 0;
+    var buffer_count: u32 = 0;
+    var bind_group_count: u32 = 0;
 
     for (calls) |call| {
         switch (call.call_type) {
@@ -244,16 +246,20 @@ fn runCheck(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
             .dispatch => dispatch_count += 1,
             .create_texture => texture_count += 1,
             .create_sampler => sampler_count += 1,
+            .create_buffer => buffer_count += 1,
+            .create_bind_group => bind_group_count += 1,
             else => {},
         }
     }
 
-    if (shader_count > 0) std.debug.print("  Shaders:   {d}\n", .{shader_count});
-    if (pipeline_count > 0) std.debug.print("  Pipelines: {d}\n", .{pipeline_count});
-    if (texture_count > 0) std.debug.print("  Textures:  {d}\n", .{texture_count});
-    if (sampler_count > 0) std.debug.print("  Samplers:  {d}\n", .{sampler_count});
-    if (draw_count > 0) std.debug.print("  Draw calls: {d}\n", .{draw_count});
-    if (dispatch_count > 0) std.debug.print("  Dispatches: {d}\n", .{dispatch_count});
+    if (shader_count > 0) std.debug.print("  Shaders:     {d}\n", .{shader_count});
+    if (pipeline_count > 0) std.debug.print("  Pipelines:   {d}\n", .{pipeline_count});
+    if (buffer_count > 0) std.debug.print("  Buffers:     {d}\n", .{buffer_count});
+    if (texture_count > 0) std.debug.print("  Textures:    {d}\n", .{texture_count});
+    if (sampler_count > 0) std.debug.print("  Samplers:    {d}\n", .{sampler_count});
+    if (bind_group_count > 0) std.debug.print("  Bind groups: {d}\n", .{bind_group_count});
+    if (draw_count > 0) std.debug.print("  Draw calls:  {d}\n", .{draw_count});
+    if (dispatch_count > 0) std.debug.print("  Dispatches:  {d}\n", .{dispatch_count});
 
     // Validate descriptor formats (catches issues before web runtime)
     const desc_errors = validateDescriptors(calls, &module);
@@ -265,6 +271,16 @@ fn runCheck(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
 
     // Report entry points for user verification
     reportEntryPoints(calls, &module);
+
+    // Report buffer usage for user verification
+    reportBufferUsage(calls);
+
+    // Validate bind group setup before draw calls
+    const bind_group_warnings = validateBindGroupSetup(calls);
+    if (bind_group_warnings > 0) {
+        std.debug.print("\nWarning: {d} draw call(s) may have missing bind groups\n", .{bind_group_warnings});
+        std.debug.print("  Ensure bindGroups=[...] is set in render pass definitions\n", .{});
+    }
 
     return 0;
 }
@@ -314,6 +330,67 @@ fn reportEntryPoints(calls: []const Call, module: *const format.Module) void {
                 }
             },
             else => {},
+        }
+    }
+}
+
+/// Report buffer usage flags for user verification.
+/// Displays buffer IDs and their usage flags in readable format.
+///
+/// Pre-condition: calls is a valid slice from MockGPU.
+/// Post-condition: output is written to stderr (no return value to assert).
+fn reportBufferUsage(calls: []const Call) void {
+    // Maximum flag string: "UNIFORM|STORAGE|VERTEX|INDEX|COPY_SRC|COPY_DST|MAP_READ|MAP_WRITE"
+    // = 7 + 7 + 6 + 5 + 8 + 8 + 8 + 9 + 7 separators = 65 chars max
+    const max_flags_len = 65;
+    var flags_buf: [128]u8 = undefined;
+
+    // Pre-condition: buffer is large enough for all flags.
+    comptime std.debug.assert(flags_buf.len >= max_flags_len);
+
+    var reported_any = false;
+
+    for (calls) |call| {
+        if (call.call_type == .create_buffer) {
+            if (!reported_any) {
+                std.debug.print("\nBuffer usage (verify these match shader bindings):\n", .{});
+                reported_any = true;
+            }
+
+            const buffer_id = call.params.create_buffer.buffer_id;
+            const size = call.params.create_buffer.size;
+            const usage: pngine.opcodes.BufferUsage = @bitCast(call.params.create_buffer.usage);
+
+            // Build usage string
+            var flags_len: usize = 0;
+
+            const flags_to_check = [_]struct { flag: bool, name: []const u8 }{
+                .{ .flag = usage.uniform, .name = "UNIFORM" },
+                .{ .flag = usage.storage, .name = "STORAGE" },
+                .{ .flag = usage.vertex, .name = "VERTEX" },
+                .{ .flag = usage.index, .name = "INDEX" },
+                .{ .flag = usage.copy_src, .name = "COPY_SRC" },
+                .{ .flag = usage.copy_dst, .name = "COPY_DST" },
+                .{ .flag = usage.map_read, .name = "MAP_READ" },
+                .{ .flag = usage.map_write, .name = "MAP_WRITE" },
+            };
+
+            for (flags_to_check) |f| {
+                if (f.flag) {
+                    if (flags_len > 0) {
+                        flags_buf[flags_len] = '|';
+                        flags_len += 1;
+                    }
+                    @memcpy(flags_buf[flags_len..][0..f.name.len], f.name);
+                    flags_len += f.name.len;
+                }
+            }
+
+            // Post-condition: flags_len never exceeds buffer.
+            std.debug.assert(flags_len <= flags_buf.len);
+
+            const flags_str = if (flags_len > 0) flags_buf[0..flags_len] else "(none)";
+            std.debug.print("  Buffer {d}: size={d}, usage={s}\n", .{ buffer_id, size, flags_str });
         }
     }
 }
@@ -397,11 +474,92 @@ fn validateDescriptors(calls: []const Call, module: *const format.Module) u32 {
                     error_count += 1;
                 }
             },
+            .create_bind_group => {
+                const data_id = call.params.create_bind_group.entry_data_id;
+                const data = module.data.get(@enumFromInt(data_id));
+
+                if (data.len < 2) {
+                    std.debug.print("  Error: bind group descriptor too short ({d} bytes)\n", .{data.len});
+                    error_count += 1;
+                    continue;
+                }
+
+                // Validate type tag
+                const type_tag = data[0];
+                if (type_tag != @intFromEnum(DescriptorEncoder.DescriptorType.bind_group)) {
+                    std.debug.print("  Error: bind group descriptor has invalid type tag 0x{X:0>2} (expected 0x03)\n", .{type_tag});
+                    error_count += 1;
+                    continue;
+                }
+
+                // Validate field count is at least 2 (layout + entries)
+                const field_count = data[1];
+                if (field_count < 2) {
+                    std.debug.print("  Error: bind group descriptor has invalid field count {d} (expected >= 2)\n", .{field_count});
+                    error_count += 1;
+                }
+            },
             else => {},
         }
     }
 
     return error_count;
+}
+
+/// Validate that bind groups are set before draw calls.
+/// Returns count of draw calls that may have missing bind group setup.
+///
+/// Checks the call sequence for each render pass to verify that set_bind_group
+/// appears between set_pipeline and draw/draw_indexed calls. This catches the
+/// common mistake of forgetting bindGroups=[...] in render pass definitions.
+fn validateBindGroupSetup(calls: []const Call) u32 {
+    // Pre-condition: calls slice is valid.
+    comptime std.debug.assert(@sizeOf(Call) > 0);
+
+    var warning_count: u32 = 0;
+
+    // Track state within each render pass
+    var in_render_pass = false;
+    var pipeline_set = false;
+    var bind_group_set = false;
+
+    for (calls) |call| {
+        switch (call.call_type) {
+            .begin_render_pass => {
+                in_render_pass = true;
+                pipeline_set = false;
+                bind_group_set = false;
+            },
+            .end_pass => {
+                in_render_pass = false;
+            },
+            .set_pipeline => {
+                if (in_render_pass) {
+                    pipeline_set = true;
+                }
+            },
+            .set_bind_group => {
+                if (in_render_pass) {
+                    bind_group_set = true;
+                }
+            },
+            .draw, .draw_indexed => {
+                // Check if pipeline uses bind groups but none were set
+                if (in_render_pass and pipeline_set and !bind_group_set) {
+                    // This is a heuristic - we warn but don't error since some
+                    // pipelines legitimately don't use bind groups
+                    warning_count += 1;
+                    std.debug.print("  Warning: draw call without set_bind_group (may be intentional)\n", .{});
+                }
+            },
+            else => {},
+        }
+    }
+
+    // Post-condition: warning_count is bounded by number of draw calls.
+    std.debug.assert(warning_count <= calls.len);
+
+    return warning_count;
 }
 
 /// Read binary file into buffer.
