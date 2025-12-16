@@ -189,3 +189,507 @@ test "Compiler: compute shader" {
 
     try testing.expectEqualStrings("PNGB", pngb[0..4]);
 }
+
+// ============================================================================
+// E2E Tests for Example Files
+// ============================================================================
+
+test "E2E: parse simple_triangle.pngine" {
+    // Test parsing the simple triangle example
+    const source: [:0]const u8 =
+        \\#renderPipeline pipeline {
+        \\  layout=auto
+        \\  vertex={ entryPoint=vertexMain module=code }
+        \\  fragment={
+        \\    entryPoint=fragMain
+        \\    module=code
+        \\    targets=[{ format=preferredCanvasFormat }]
+        \\  }
+        \\  primitive={ topology=triangle-list }
+        \\}
+        \\
+        \\#renderPass renderPipeline {
+        \\  colorAttachments=[{
+        \\    view=contextCurrentTexture
+        \\    clearValue=[0, 0, 0, 0]
+        \\    loadOp=clear
+        \\    storeOp=store
+        \\  }]
+        \\  pipeline=pipeline
+        \\  draw=3
+        \\}
+        \\
+        \\#frame simpleTriangle {
+        \\  perform=[renderPipeline]
+        \\}
+        \\
+        \\#shaderModule code {
+        \\  code="@vertex fn vertexMain() {}"
+        \\}
+    ;
+
+    // Parse
+    var ast = try Parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    // Analyze (verify bare name resolution works)
+    var analysis = try Analyzer.analyze(testing.allocator, &ast);
+    defer analysis.deinit(testing.allocator);
+
+    // Should have no errors (bare names resolve correctly)
+    try testing.expectEqual(@as(usize, 0), analysis.errors.len);
+
+    // Verify bare name resolution for module=code
+    try testing.expect(analysis.resolved_identifiers.count() > 0);
+}
+
+test "E2E: parse simple_triangle_msaa.pngine" {
+    // Test MSAA example with #define and #texture
+    const source: [:0]const u8 =
+        \\#define SAMPLE_COUNT=4
+        \\
+        \\#renderPipeline pipeline {
+        \\  layout=auto
+        \\  vertex={ entrypoint=vertexMain module=code }
+        \\  fragment={
+        \\    entrypoint=fragMain
+        \\    module=code
+        \\    targets=[{ format=preferredCanvasFormat }]
+        \\  }
+        \\  primitive={ topology=triangle-list }
+        \\  multisample=SAMPLE_COUNT
+        \\}
+        \\
+        \\#texture tex {
+        \\  size=["$canvas.width", "$canvas.height"]
+        \\  sampleCount=SAMPLE_COUNT
+        \\  format=preferredCanvasFormat
+        \\  usage=[RENDER_ATTACHMENT]
+        \\}
+        \\
+        \\#renderPass renderIt {
+        \\  colorAttachments=[{
+        \\    view=tex
+        \\    resolveTarget=contextCurrentTexture
+        \\    clearValue=[0, 0, 0, 0]
+        \\    loadOp=clear
+        \\    storeOp=discard
+        \\  }]
+        \\  pipeline=pipeline
+        \\  draw=3
+        \\}
+        \\
+        \\#frame msaaTriangle {
+        \\  perform=[renderIt]
+        \\}
+        \\
+        \\#shaderModule code {
+        \\  code="@vertex fn vertexMain() {}"
+        \\}
+    ;
+
+    // Parse
+    var ast = try Parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    // Analyze
+    var analysis = try Analyzer.analyze(testing.allocator, &ast);
+    defer analysis.deinit(testing.allocator);
+
+    // Should have no errors
+    try testing.expectEqual(@as(usize, 0), analysis.errors.len);
+
+    // Verify we have a #define node
+    try testing.expect(analysis.symbols.define.count() > 0);
+
+    // Verify we have a texture
+    try testing.expect(analysis.symbols.texture.count() > 0);
+
+    // Verify runtime interpolation was detected (for "$canvas.width")
+    var has_interpolation = false;
+    for (ast.nodes.items(.tag)) |tag| {
+        if (tag == .runtime_interpolation) {
+            has_interpolation = true;
+            break;
+        }
+    }
+    try testing.expect(has_interpolation);
+}
+
+test "E2E: parse moving_triangle.pngine" {
+    // Test animated example with uniforms, #buffer, #queue, #bindGroup
+    const source: [:0]const u8 =
+        \\#define SAMPLE_COUNT=4
+        \\
+        \\#renderPipeline pipeline {
+        \\  layout=auto
+        \\  vertex={ entrypoint=vertexMain module=code }
+        \\  fragment={
+        \\    entrypoint=fragMain
+        \\    module=code
+        \\    targets=[{ format=preferredCanvasFormat }]
+        \\  }
+        \\  primitive={ topology=triangle-list }
+        \\  multisample=SAMPLE_COUNT
+        \\}
+        \\
+        \\#texture tex {
+        \\  size=["$canvas.width", "$canvas.height"]
+        \\  sampleCount=SAMPLE_COUNT
+        \\  format=preferredCanvasFormat
+        \\  usage=[RENDER_ATTACHMENT]
+        \\}
+        \\
+        \\#renderPass drawTriangle {
+        \\  colorAttachments=[{
+        \\    view=tex
+        \\    resolveTarget=contextCurrentTexture
+        \\    clearValue=[0 0 0 0]
+        \\    loadOp=clear
+        \\    storeOp=discard
+        \\  }]
+        \\  pipeline=pipeline
+        \\  bindGroups=[inputsBinding]
+        \\  draw=3
+        \\}
+        \\
+        \\#frame msaaTriangle {
+        \\  perform=[
+        \\    writeInputUniforms
+        \\    drawTriangle
+        \\  ]
+        \\}
+        \\
+        \\#buffer uniformInputsBuffer {
+        \\  size=4
+        \\  usage=[UNIFORM COPY_DST]
+        \\}
+        \\
+        \\#queue writeInputUniforms {
+        \\  writeBuffer={
+        \\    buffer=uniformInputsBuffer
+        \\    bufferOffset=0
+        \\    data="$uniforms.code.inputs.data"
+        \\  }
+        \\}
+        \\
+        \\#bindGroup inputsBinding {
+        \\  layout={ pipeline=pipeline index=0 }
+        \\  entries=[
+        \\    { binding=0 resource={ buffer=uniformInputsBuffer }}
+        \\  ]
+        \\}
+        \\
+        \\#shaderModule code {
+        \\  code="@vertex fn vertexMain() {}"
+        \\}
+    ;
+
+    // Parse
+    var ast = try Parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    // Analyze
+    var analysis = try Analyzer.analyze(testing.allocator, &ast);
+    defer analysis.deinit(testing.allocator);
+
+    // Should have no errors
+    try testing.expectEqual(@as(usize, 0), analysis.errors.len);
+
+    // Verify all resource types are present
+    try testing.expect(analysis.symbols.buffer.count() > 0);
+    try testing.expect(analysis.symbols.bind_group.count() > 0);
+    try testing.expect(analysis.symbols.texture.count() > 0);
+    try testing.expect(analysis.symbols.render_pipeline.count() > 0);
+    try testing.expect(analysis.symbols.render_pass.count() > 0);
+    try testing.expect(analysis.symbols.frame.count() > 0);
+
+    // Verify bare name resolution for buffer=uniformInputsBuffer
+    try testing.expect(analysis.resolved_identifiers.count() > 0);
+
+    // Verify runtime interpolation for "$uniforms.code.inputs.data"
+    var has_interpolation = false;
+    for (ast.nodes.items(.tag)) |tag| {
+        if (tag == .runtime_interpolation) {
+            has_interpolation = true;
+            break;
+        }
+    }
+    try testing.expect(has_interpolation);
+}
+
+test "E2E: space-separated arrays parse correctly" {
+    // Test that space-separated arrays work (e.g., [0 0 0 0])
+    const source: [:0]const u8 =
+        \\#renderPass pass {
+        \\  colorAttachments=[{
+        \\    clearValue=[0 0 0 1]
+        \\    loadOp=clear
+        \\  }]
+        \\}
+    ;
+
+    var ast = try Parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    // Find the inner array (clearValue)
+    var found_array = false;
+    for (ast.nodes.items(.tag), 0..) |tag, i| {
+        if (tag == .array) {
+            const data = ast.nodes.items(.data)[i];
+            const elements = ast.extraData(data.extra_range);
+            // The clearValue array should have 4 elements
+            if (elements.len == 4) {
+                found_array = true;
+                break;
+            }
+        }
+    }
+    try testing.expect(found_array);
+}
+
+test "E2E: comma-separated arrays parse correctly" {
+    // Test that comma-separated arrays also work (e.g., [0, 0, 0, 0])
+    const source: [:0]const u8 =
+        \\#renderPass pass {
+        \\  colorAttachments=[{
+        \\    clearValue=[0, 0, 0, 1]
+        \\    loadOp=clear
+        \\  }]
+        \\}
+    ;
+
+    var ast = try Parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    // Find the inner array (clearValue)
+    var found_array = false;
+    for (ast.nodes.items(.tag), 0..) |tag, i| {
+        if (tag == .array) {
+            const data = ast.nodes.items(.data)[i];
+            const elements = ast.extraData(data.extra_range);
+            // The clearValue array should have 4 elements
+            if (elements.len == 4) {
+                found_array = true;
+                break;
+            }
+        }
+    }
+    try testing.expect(found_array);
+}
+
+// ============================================================================
+// Deep Nesting Tests (from old preprocessor tests)
+// ============================================================================
+
+test "E2E: vertex buffers with attributes (deep nesting)" {
+    // Test complex nested structure: buffers -> attributes
+    const source: [:0]const u8 =
+        \\#shaderModule code { code="" }
+        \\#renderPipeline pipe {
+        \\  vertex={
+        \\    module=code
+        \\    buffers=[{
+        \\      arrayStride=100
+        \\      stepMode=vertex
+        \\      attributes=[{
+        \\        format=float32x4
+        \\        offset=0
+        \\        shaderLocation=0
+        \\      }]
+        \\    }]
+        \\  }
+        \\}
+    ;
+
+    var ast = try Parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    var analysis = try Analyzer.analyze(testing.allocator, &ast);
+    defer analysis.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 0), analysis.errors.len);
+
+    // Verify deep nesting was parsed (multiple array levels)
+    var array_count: usize = 0;
+    var object_count: usize = 0;
+    for (ast.nodes.items(.tag)) |tag| {
+        if (tag == .array) array_count += 1;
+        if (tag == .object) object_count += 1;
+    }
+    // Should have: buffers array, attributes array
+    try testing.expect(array_count >= 2);
+    // Should have: vertex object, buffer object, attribute object
+    try testing.expect(object_count >= 3);
+}
+
+test "E2E: fragment blend state (complex object)" {
+    const source: [:0]const u8 =
+        \\#shaderModule code { code="" }
+        \\#renderPipeline pipe {
+        \\  vertex={ module=code }
+        \\  fragment={
+        \\    module=code
+        \\    targets=[{
+        \\      format=bgra8unorm
+        \\      blend={
+        \\        color={
+        \\          operation=add
+        \\          srcFactor=src-alpha
+        \\          dstFactor=one-minus-src-alpha
+        \\        }
+        \\        alpha={
+        \\          operation=add
+        \\          srcFactor=one
+        \\          dstFactor=zero
+        \\        }
+        \\      }
+        \\    }]
+        \\  }
+        \\}
+    ;
+
+    var ast = try Parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    var analysis = try Analyzer.analyze(testing.allocator, &ast);
+    defer analysis.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 0), analysis.errors.len);
+}
+
+test "E2E: depth stencil state (deep object)" {
+    const source: [:0]const u8 =
+        \\#shaderModule code { code="" }
+        \\#renderPipeline pipe {
+        \\  vertex={ module=code }
+        \\  depthStencil={
+        \\    format=depth24plus
+        \\    depthWriteEnabled=true
+        \\    depthCompare=less
+        \\    stencilFront={
+        \\      compare=always
+        \\      failOp=keep
+        \\      depthFailOp=keep
+        \\      passOp=keep
+        \\    }
+        \\    stencilBack={
+        \\      compare=always
+        \\      failOp=keep
+        \\      depthFailOp=keep
+        \\      passOp=keep
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    var ast = try Parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    var analysis = try Analyzer.analyze(testing.allocator, &ast);
+    defer analysis.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 0), analysis.errors.len);
+
+    // Verify boolean was parsed
+    var has_boolean = false;
+    for (ast.nodes.items(.tag)) |tag| {
+        if (tag == .boolean_value) {
+            has_boolean = true;
+            break;
+        }
+    }
+    try testing.expect(has_boolean);
+}
+
+test "E2E: multisample with hex mask" {
+    const source: [:0]const u8 =
+        \\#shaderModule code { code="" }
+        \\#renderPipeline pipe {
+        \\  vertex={ module=code }
+        \\  multisample={
+        \\    count=4
+        \\    mask=0xFFFFFFFF
+        \\    alphaToCoverageEnabled=false
+        \\  }
+        \\}
+    ;
+
+    var ast = try Parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    var analysis = try Analyzer.analyze(testing.allocator, &ast);
+    defer analysis.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 0), analysis.errors.len);
+
+    // Verify hex number and boolean were parsed
+    var has_number = false;
+    var has_boolean = false;
+    for (ast.nodes.items(.tag)) |tag| {
+        if (tag == .number_value) has_number = true;
+        if (tag == .boolean_value) has_boolean = true;
+    }
+    try testing.expect(has_number);
+    try testing.expect(has_boolean);
+}
+
+test "E2E: primitive state with all options" {
+    const source: [:0]const u8 =
+        \\#shaderModule code { code="" }
+        \\#renderPipeline pipe {
+        \\  vertex={ module=code }
+        \\  primitive={
+        \\    topology=triangle-strip
+        \\    stripIndexFormat=uint16
+        \\    frontFace=cw
+        \\    cullMode=back
+        \\    unclippedDepth=false
+        \\  }
+        \\}
+    ;
+
+    var ast = try Parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    var analysis = try Analyzer.analyze(testing.allocator, &ast);
+    defer analysis.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 0), analysis.errors.len);
+}
+
+test "E2E: bind group layout with multiple entry types" {
+    const source: [:0]const u8 =
+        \\#bindGroupLayout layout {
+        \\  entries=[
+        \\    { binding=0 visibility=[VERTEX FRAGMENT] buffer={ type=uniform } }
+        \\    { binding=1 visibility=[FRAGMENT] sampler={ type=filtering } }
+        \\    { binding=2 visibility=[FRAGMENT] texture={ sampleType=float } }
+        \\  ]
+        \\}
+    ;
+
+    var ast = try Parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    var analysis = try Analyzer.analyze(testing.allocator, &ast);
+    defer analysis.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 0), analysis.errors.len);
+
+    // Should have 3 entry objects in the array
+    var entry_count: usize = 0;
+    const tags = ast.nodes.items(.tag);
+    const data = ast.nodes.items(.data);
+    for (tags, 0..) |tag, i| {
+        if (tag == .array) {
+            const elements = ast.extraData(data[i].extra_range);
+            // Find entries array (has 3 elements)
+            if (elements.len == 3) {
+                entry_count = elements.len;
+                break;
+            }
+        }
+    }
+    try testing.expectEqual(@as(usize, 3), entry_count);
+}
