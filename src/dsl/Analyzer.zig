@@ -474,8 +474,8 @@ pub const Analyzer = struct {
     const required_props_map = std.StaticStringMap(RequiredProperties).initComptime(.{
         // GPUBufferDescriptor: size determines allocation, usage enables operations
         .{ "buffer", RequiredProperties{ .required = &.{ "size", "usage" }, .name = "#buffer" } },
-        // GPUTextureDescriptor: size for dimensions, format for memory layout, usage for binding
-        .{ "texture", RequiredProperties{ .required = &.{ "size", "format", "usage" }, .name = "#texture" } },
+        // GPUTextureDescriptor: width/height for dimensions, format for memory layout, usage for binding
+        .{ "texture", RequiredProperties{ .required = &.{ "format", "usage" }, .name = "#texture" } },
         // GPURenderPipelineDescriptor: vertex stage is the minimum for rasterization
         .{ "render_pipeline", RequiredProperties{ .required = &.{"vertex"}, .name = "#renderPipeline" } },
         // GPUShaderModuleDescriptor: code is the actual WGSL source
@@ -1617,20 +1617,21 @@ test "Analyzer: texture missing required properties" {
     var result = try parseAndAnalyze(source);
     defer result.deinit(testing.allocator);
 
-    // Should have errors for missing 'size' and 'usage'
+    // Should have error for missing 'usage' (format is present, width/height have defaults)
     var missing_count: usize = 0;
     for (result.errors) |err| {
         if (err.kind == .missing_required_property) {
             missing_count += 1;
         }
     }
-    try testing.expectEqual(@as(usize, 2), missing_count);
+    try testing.expectEqual(@as(usize, 1), missing_count);
 }
 
 test "Analyzer: texture with all required properties" {
     const source: [:0]const u8 =
         \\#texture tex {
-        \\  size=[512 512]
+        \\  width=512
+        \\  height=512
         \\  format=bgra8unorm
         \\  usage=[RENDER_ATTACHMENT]
         \\}
@@ -1729,14 +1730,14 @@ test "Analyzer: empty texture throws error" {
     var result = try parseAndAnalyze(source);
     defer result.deinit(testing.allocator);
 
-    // Should have 3 errors: missing size, format, usage
+    // Should have 2 errors: missing format, usage (width/height have defaults)
     var missing_count: usize = 0;
     for (result.errors) |err| {
         if (err.kind == .missing_required_property) {
             missing_count += 1;
         }
     }
-    try testing.expectEqual(@as(usize, 3), missing_count);
+    try testing.expectEqual(@as(usize, 2), missing_count);
 }
 
 // ----------------------------------------------------------------------------

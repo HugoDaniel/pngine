@@ -139,6 +139,7 @@ pub const DataSection = struct {
 };
 
 /// Deserialize data section from binary format.
+/// Makes owned copies of all blobs - input data can be freed after this returns.
 pub fn deserialize(allocator: Allocator, data: []const u8) !DataSection {
     // Pre-condition: at least header present
     if (data.len < 2) return error.InvalidDataSection;
@@ -160,7 +161,7 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !DataSection {
     const entries_start = header_size;
     const data_start = metadata_size;
 
-    // Read entries and extract blobs
+    // Read entries and extract blobs (making owned copies)
     for (0..data_count) |i| {
         const entry_pos = entries_start + i * 8;
         const blob_offset = std.mem.readInt(u32, data[entry_pos..][0..4], .little);
@@ -171,9 +172,10 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !DataSection {
 
         if (blob_end > data.len) return error.InvalidDataSection;
 
-        const blob = data[blob_start..blob_end];
-        section.blobs.appendAssumeCapacity(blob);
-        section.total_size += blob.len;
+        // Make owned copy of blob data
+        const owned = try allocator.dupe(u8, data[blob_start..blob_end]);
+        section.blobs.appendAssumeCapacity(owned);
+        section.total_size += owned.len;
     }
 
     return section;
