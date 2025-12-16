@@ -320,13 +320,19 @@ pub const Emitter = struct {
             self.next_pipeline_id += 1;
             try self.pipeline_ids.put(self.gpa, name, pipeline_id);
 
-            // Find shader reference
-            const shader_id = self.resolveShaderForPipeline(info.node);
+            // Build pipeline descriptor JSON for runtime
+            const desc = self.buildRenderPipelineDescriptor(info.node) catch |err| {
+                std.debug.print("Failed to build render pipeline descriptor: {}\n", .{err});
+                continue;
+            };
+            defer self.gpa.free(desc);
+
+            const desc_id = try self.builder.addData(self.gpa, desc);
 
             try self.builder.getEmitter().createRenderPipeline(
                 self.gpa,
                 pipeline_id,
-                shader_id,
+                desc_id.toInt(),
             );
         }
 
@@ -340,14 +346,145 @@ pub const Emitter = struct {
             self.next_pipeline_id += 1;
             try self.pipeline_ids.put(self.gpa, name, pipeline_id);
 
-            const shader_id = self.resolveShaderForPipeline(info.node);
+            // Build compute pipeline descriptor JSON
+            const desc = self.buildComputePipelineDescriptor(info.node) catch |err| {
+                std.debug.print("Failed to build compute pipeline descriptor: {}\n", .{err});
+                continue;
+            };
+            defer self.gpa.free(desc);
+
+            const desc_id = try self.builder.addData(self.gpa, desc);
 
             try self.builder.getEmitter().createComputePipeline(
                 self.gpa,
                 pipeline_id,
-                shader_id,
+                desc_id.toInt(),
             );
         }
+    }
+
+    /// Build JSON descriptor for render pipeline.
+    /// Format: {"vertex":{"shader":N,"entryPoint":"..."},"fragment":{"shader":N,"entryPoint":"..."}}
+    fn buildRenderPipelineDescriptor(self: *Self, node: Node.Index) ![]u8 {
+        var vertex_shader_id: u16 = 0;
+        var vertex_entry: []const u8 = "vertexMain";
+        var fragment_shader_id: u16 = 0;
+        var fragment_entry: []const u8 = "fragmentMain";
+        var has_fragment = false;
+
+        const data = self.ast.nodes.items(.data)[node.toInt()];
+        const props = self.ast.extraData(data.extra_range);
+
+        for (props) |prop_idx| {
+            const prop_node: Node.Index = @enumFromInt(prop_idx);
+            const prop_token = self.ast.nodes.items(.main_token)[prop_node.toInt()];
+            const prop_name = self.getTokenSlice(prop_token);
+
+            if (std.mem.eql(u8, prop_name, "vertex")) {
+                const stage_info = self.parseStageDescriptor(prop_node);
+                if (stage_info.shader_id) |id| vertex_shader_id = id;
+                if (stage_info.entry_point) |ep| vertex_entry = ep;
+            } else if (std.mem.eql(u8, prop_name, "fragment")) {
+                has_fragment = true;
+                const stage_info = self.parseStageDescriptor(prop_node);
+                if (stage_info.shader_id) |id| fragment_shader_id = id;
+                if (stage_info.entry_point) |ep| fragment_entry = ep;
+            }
+        }
+
+        // Build JSON string
+        if (has_fragment) {
+            return std.fmt.allocPrint(
+                self.gpa,
+                "{{\"vertex\":{{\"shader\":{d},\"entryPoint\":\"{s}\"}},\"fragment\":{{\"shader\":{d},\"entryPoint\":\"{s}\"}}}}",
+                .{ vertex_shader_id, vertex_entry, fragment_shader_id, fragment_entry },
+            );
+        } else {
+            return std.fmt.allocPrint(
+                self.gpa,
+                "{{\"vertex\":{{\"shader\":{d},\"entryPoint\":\"{s}\"}}}}",
+                .{ vertex_shader_id, vertex_entry },
+            );
+        }
+    }
+
+    /// Build JSON descriptor for compute pipeline.
+    /// Format: {"compute":{"shader":N,"entryPoint":"..."}}
+    fn buildComputePipelineDescriptor(self: *Self, node: Node.Index) ![]u8 {
+        var compute_shader_id: u16 = 0;
+        var compute_entry: []const u8 = "main";
+
+        const data = self.ast.nodes.items(.data)[node.toInt()];
+        const props = self.ast.extraData(data.extra_range);
+
+        for (props) |prop_idx| {
+            const prop_node: Node.Index = @enumFromInt(prop_idx);
+            const prop_token = self.ast.nodes.items(.main_token)[prop_node.toInt()];
+            const prop_name = self.getTokenSlice(prop_token);
+
+            if (std.mem.eql(u8, prop_name, "compute")) {
+                const stage_info = self.parseStageDescriptor(prop_node);
+                if (stage_info.shader_id) |id| compute_shader_id = id;
+                if (stage_info.entry_point) |ep| compute_entry = ep;
+            }
+        }
+
+        return std.fmt.allocPrint(
+            self.gpa,
+            "{{\"compute\":{{\"shader\":{d},\"entryPoint\":\"{s}\"}}}}",
+            .{ compute_shader_id, compute_entry },
+        );
+    }
+
+    const StageDescriptor = struct {
+        shader_id: ?u16,
+        entry_point: ?[]const u8,
+    };
+
+    /// Parse a shader stage descriptor (vertex, fragment, or compute).
+    fn parseStageDescriptor(self: *Self, prop_node: Node.Index) StageDescriptor {
+        var result = StageDescriptor{
+            .shader_id = null,
+            .entry_point = null,
+        };
+
+        const prop_data = self.ast.nodes.items(.data)[prop_node.toInt()];
+        const obj_node = prop_data.node;
+        const obj_tag = self.ast.nodes.items(.tag)[obj_node.toInt()];
+
+        if (obj_tag != .object) return result;
+
+        const obj_data = self.ast.nodes.items(.data)[obj_node.toInt()];
+        const obj_props = self.ast.extraData(obj_data.extra_range);
+
+        for (obj_props) |obj_prop_idx| {
+            const inner_prop: Node.Index = @enumFromInt(obj_prop_idx);
+            const inner_token = self.ast.nodes.items(.main_token)[inner_prop.toInt()];
+            const inner_name = self.getTokenSlice(inner_token);
+
+            if (std.mem.eql(u8, inner_name, "module")) {
+                if (self.findPropertyReference(inner_prop)) |ref| {
+                    result.shader_id = self.shader_ids.get(ref.name);
+                }
+            } else if (std.mem.eql(u8, inner_name, "entryPoint")) {
+                const inner_data = self.ast.nodes.items(.data)[inner_prop.toInt()];
+                const value_node = inner_data.node;
+                const value_tag = self.ast.nodes.items(.tag)[value_node.toInt()];
+
+                if (value_tag == .identifier_value) {
+                    result.entry_point = self.getNodeText(value_node);
+                } else if (value_tag == .string_value) {
+                    var text = self.getNodeText(value_node);
+                    // Strip quotes
+                    if (text.len >= 2 and text[0] == '"' and text[text.len - 1] == '"') {
+                        text = text[1 .. text.len - 1];
+                    }
+                    result.entry_point = text;
+                }
+            }
+        }
+
+        return result;
     }
 
     fn emitBindGroups(self: *Self) Error!void {
@@ -806,46 +943,6 @@ pub const Emitter = struct {
         }
 
         return usage;
-    }
-
-    fn resolveShaderForPipeline(self: *Self, node: Node.Index) u16 {
-        // Look for vertex.module or compute.module
-        const data = self.ast.nodes.items(.data)[node.toInt()];
-        const props = self.ast.extraData(data.extra_range);
-
-        for (props) |prop_idx| {
-            const prop_node: Node.Index = @enumFromInt(prop_idx);
-            const prop_token = self.ast.nodes.items(.main_token)[prop_node.toInt()];
-            const prop_name = self.getTokenSlice(prop_token);
-
-            if (std.mem.eql(u8, prop_name, "vertex") or std.mem.eql(u8, prop_name, "compute")) {
-                // This is an object with module property
-                const prop_data = self.ast.nodes.items(.data)[prop_node.toInt()];
-                const obj_node = prop_data.node;
-                const obj_tag = self.ast.nodes.items(.tag)[obj_node.toInt()];
-
-                if (obj_tag == .object) {
-                    const obj_data = self.ast.nodes.items(.data)[obj_node.toInt()];
-                    const obj_props = self.ast.extraData(obj_data.extra_range);
-
-                    for (obj_props) |obj_prop_idx| {
-                        const inner_prop: Node.Index = @enumFromInt(obj_prop_idx);
-                        const inner_token = self.ast.nodes.items(.main_token)[inner_prop.toInt()];
-                        const inner_name = self.getTokenSlice(inner_token);
-
-                        if (std.mem.eql(u8, inner_name, "module")) {
-                            if (self.findPropertyReference(inner_prop)) |ref| {
-                                if (self.shader_ids.get(ref.name)) |shader_id| {
-                                    return shader_id;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        return 0; // Default shader ID
     }
 
     // ========================================================================
