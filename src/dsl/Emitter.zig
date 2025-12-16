@@ -630,7 +630,6 @@ pub const Emitter = struct {
     }
 
     fn emitPassCommands(self: *Self, node: Node.Index) Error!void {
-        // Look for specific properties that represent commands
         const data = self.ast.nodes.items(.data)[node.toInt()];
         const props = self.ast.extraData(data.extra_range);
 
@@ -640,94 +639,105 @@ pub const Emitter = struct {
             const prop_name = self.getTokenSlice(prop_token);
 
             if (std.mem.eql(u8, prop_name, "pipeline")) {
-                // Set pipeline - handle both reference ($renderPipeline.x) and identifier (pipelineName)
-                if (self.findPropertyReference(prop_node)) |ref| {
-                    if (self.pipeline_ids.get(ref.name)) |pipeline_id| {
-                        try self.builder.getEmitter().setPipeline(self.gpa, pipeline_id);
-                    }
-                } else {
-                    // Try identifier value (e.g., pipeline=myPipeline)
-                    const prop_data = self.ast.nodes.items(.data)[prop_node.toInt()];
-                    const value_node = prop_data.node;
-                    const value_tag = self.ast.nodes.items(.tag)[value_node.toInt()];
-
-                    if (value_tag == .identifier_value) {
-                        const name = self.getNodeText(value_node);
-                        if (self.pipeline_ids.get(name)) |pipeline_id| {
-                            try self.builder.getEmitter().setPipeline(self.gpa, pipeline_id);
-                        }
-                    }
-                }
+                try self.emitPipelineCommand(prop_node);
             } else if (std.mem.eql(u8, prop_name, "bindGroups")) {
-                // Set bind groups: bindGroups=[$bindGroup.group0 $bindGroup.group1]
                 try self.emitBindGroupCommands(prop_node);
             } else if (std.mem.eql(u8, prop_name, "vertexBuffers")) {
-                // Set vertex buffers: vertexBuffers=[$buffer.verts]
                 try self.emitVertexBufferCommands(prop_node);
             } else if (std.mem.eql(u8, prop_name, "indexBuffer")) {
-                // Set index buffer: indexBuffer=$buffer.indices
                 try self.emitIndexBufferCommand(prop_node);
             } else if (std.mem.eql(u8, prop_name, "draw")) {
-                // Draw command
-                const prop_data = self.ast.nodes.items(.data)[prop_node.toInt()];
-                const value_node = prop_data.node;
-                const value_tag = self.ast.nodes.items(.tag)[value_node.toInt()];
-
-                if (value_tag == .number_value) {
-                    const count = self.parseNumber(value_node) orelse 3;
-                    try self.builder.getEmitter().draw(self.gpa, count, 1);
-                } else if (value_tag == .array) {
-                    // draw=[vertex_count instance_count]
-                    const array_data = self.ast.nodes.items(.data)[value_node.toInt()];
-                    const elements = self.ast.extraData(array_data.extra_range);
-                    var counts: [2]u32 = .{ 3, 1 };
-                    for (elements, 0..) |elem_idx, i| {
-                        if (i >= 2) break;
-                        const elem: Node.Index = @enumFromInt(elem_idx);
-                        counts[i] = self.parseNumber(elem) orelse if (i == 0) 3 else 1;
-                    }
-                    try self.builder.getEmitter().draw(self.gpa, counts[0], counts[1]);
-                }
+                try self.emitDrawCommand(prop_node);
             } else if (std.mem.eql(u8, prop_name, "drawIndexed")) {
-                // Draw indexed command
-                const prop_data = self.ast.nodes.items(.data)[prop_node.toInt()];
-                const value_node = prop_data.node;
-                const value_tag = self.ast.nodes.items(.tag)[value_node.toInt()];
-
-                if (value_tag == .number_value) {
-                    const count = self.parseNumber(value_node) orelse 3;
-                    try self.builder.getEmitter().drawIndexed(self.gpa, count, 1);
-                } else if (value_tag == .array) {
-                    const array_data = self.ast.nodes.items(.data)[value_node.toInt()];
-                    const elements = self.ast.extraData(array_data.extra_range);
-                    var counts: [2]u32 = .{ 3, 1 };
-                    for (elements, 0..) |elem_idx, i| {
-                        if (i >= 2) break;
-                        const elem: Node.Index = @enumFromInt(elem_idx);
-                        counts[i] = self.parseNumber(elem) orelse if (i == 0) 3 else 1;
-                    }
-                    try self.builder.getEmitter().drawIndexed(self.gpa, counts[0], counts[1]);
-                }
+                try self.emitDrawIndexedCommand(prop_node);
             } else if (std.mem.eql(u8, prop_name, "dispatch")) {
-                // Dispatch command for compute
-                const prop_data = self.ast.nodes.items(.data)[prop_node.toInt()];
-                const value_node = prop_data.node;
-                const value_tag = self.ast.nodes.items(.tag)[value_node.toInt()];
+                try self.emitDispatchCommand(prop_node);
+            }
+        }
+    }
 
-                if (value_tag == .array) {
-                    // Parse [x, y, z]
-                    const array_data = self.ast.nodes.items(.data)[value_node.toInt()];
-                    const elements = self.ast.extraData(array_data.extra_range);
-                    var xyz: [3]u32 = .{ 1, 1, 1 };
-                    for (elements, 0..) |elem_idx, i| {
-                        if (i >= 3) break;
-                        const elem: Node.Index = @enumFromInt(elem_idx);
-                        xyz[i] = self.parseNumber(elem) orelse 1;
-                    }
-                    try self.builder.getEmitter().dispatch(self.gpa, xyz[0], xyz[1], xyz[2]);
+    /// Emit set_pipeline command.
+    /// Handles both reference ($renderPipeline.x) and identifier (pipelineName) syntax.
+    fn emitPipelineCommand(self: *Self, prop_node: Node.Index) Error!void {
+        if (self.findPropertyReference(prop_node)) |ref| {
+            if (self.pipeline_ids.get(ref.name)) |pipeline_id| {
+                try self.builder.getEmitter().setPipeline(self.gpa, pipeline_id);
+            }
+        } else {
+            // Fallback: identifier value (e.g., pipeline=myPipeline)
+            const prop_data = self.ast.nodes.items(.data)[prop_node.toInt()];
+            const value_node = prop_data.node;
+            const value_tag = self.ast.nodes.items(.tag)[value_node.toInt()];
+
+            if (value_tag == .identifier_value) {
+                const name = self.getNodeText(value_node);
+                if (self.pipeline_ids.get(name)) |pipeline_id| {
+                    try self.builder.getEmitter().setPipeline(self.gpa, pipeline_id);
                 }
             }
         }
+    }
+
+    /// Emit draw command with vertex/instance counts.
+    fn emitDrawCommand(self: *Self, prop_node: Node.Index) Error!void {
+        const prop_data = self.ast.nodes.items(.data)[prop_node.toInt()];
+        const value_node = prop_data.node;
+        const value_tag = self.ast.nodes.items(.tag)[value_node.toInt()];
+
+        if (value_tag == .number_value) {
+            const count = self.parseNumber(value_node) orelse 3;
+            try self.builder.getEmitter().draw(self.gpa, count, 1);
+        } else if (value_tag == .array) {
+            const counts = self.parseCountPair(value_node, 3, 1);
+            try self.builder.getEmitter().draw(self.gpa, counts[0], counts[1]);
+        }
+    }
+
+    /// Emit draw_indexed command with index/instance counts.
+    fn emitDrawIndexedCommand(self: *Self, prop_node: Node.Index) Error!void {
+        const prop_data = self.ast.nodes.items(.data)[prop_node.toInt()];
+        const value_node = prop_data.node;
+        const value_tag = self.ast.nodes.items(.tag)[value_node.toInt()];
+
+        if (value_tag == .number_value) {
+            const count = self.parseNumber(value_node) orelse 3;
+            try self.builder.getEmitter().drawIndexed(self.gpa, count, 1);
+        } else if (value_tag == .array) {
+            const counts = self.parseCountPair(value_node, 3, 1);
+            try self.builder.getEmitter().drawIndexed(self.gpa, counts[0], counts[1]);
+        }
+    }
+
+    /// Emit dispatch command for compute passes.
+    fn emitDispatchCommand(self: *Self, prop_node: Node.Index) Error!void {
+        const prop_data = self.ast.nodes.items(.data)[prop_node.toInt()];
+        const value_node = prop_data.node;
+        const value_tag = self.ast.nodes.items(.tag)[value_node.toInt()];
+
+        if (value_tag == .array) {
+            const array_data = self.ast.nodes.items(.data)[value_node.toInt()];
+            const elements = self.ast.extraData(array_data.extra_range);
+            var xyz: [3]u32 = .{ 1, 1, 1 };
+            for (elements, 0..) |elem_idx, i| {
+                if (i >= 3) break;
+                const elem: Node.Index = @enumFromInt(elem_idx);
+                xyz[i] = self.parseNumber(elem) orelse 1;
+            }
+            try self.builder.getEmitter().dispatch(self.gpa, xyz[0], xyz[1], xyz[2]);
+        }
+    }
+
+    /// Parse array of 2 numbers (e.g., [vertex_count instance_count]).
+    fn parseCountPair(self: *Self, array_node: Node.Index, default0: u32, default1: u32) [2]u32 {
+        const array_data = self.ast.nodes.items(.data)[array_node.toInt()];
+        const elements = self.ast.extraData(array_data.extra_range);
+        var counts: [2]u32 = .{ default0, default1 };
+        for (elements, 0..) |elem_idx, i| {
+            if (i >= 2) break;
+            const elem: Node.Index = @enumFromInt(elem_idx);
+            counts[i] = self.parseNumber(elem) orelse if (i == 0) default0 else default1;
+        }
+        return counts;
     }
 
     fn emitBindGroupCommands(self: *Self, prop_node: Node.Index) Error!void {
