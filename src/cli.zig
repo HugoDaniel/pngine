@@ -1019,38 +1019,41 @@ fn printUsage() void {
         \\PNGine - DSL/PBSF to PNGB compiler
         \\
         \\Usage:
-        \\  pngine compile <input> [-o <output.pngb>]
-        \\  pngine check <input>
-        \\  pngine render <input> [-o <output.png>] [-s WxH] [-t time] [-e]
-        \\  pngine embed <image.png> <bytecode.pngb> [-o <output.png>]
-        \\  pngine extract <image.png> [-o <output.pngb>]
-        \\  pngine help
-        \\  pngine version
+        \\  pngine <input.pngine> [-o <output.png>]          Create PNG with bytecode
+        \\  pngine <input.pngine> --frame [-s WxH] [-t time] Render actual frame
+        \\  pngine compile <input> [-o <output.pngb>]        Compile to bytecode only
+        \\  pngine check <input>                             Validate bytecode
+        \\  pngine embed <image.png> <bytecode.pngb>         Embed into existing PNG
+        \\  pngine extract <image.png> [-o <output.pngb>]    Extract bytecode from PNG
         \\
         \\Commands:
         \\  compile     Compile source to PNGB bytecode
-        \\  check       Compile and validate bytecode execution
-        \\  render      Render shader to PNG image (use -h for options)
+        \\  check       Validate bytecode (supports .pngine, .pngb, .png)
+        \\  render      Create PNG with embedded bytecode (default command)
         \\  embed       Embed PNGB bytecode into a PNG image
         \\  extract     Extract PNGB bytecode from a PNG image
         \\  help        Show this help message
         \\  version     Show version information
         \\
-        \\Options:
-        \\  -o, --output <path>   Output file path
+        \\Render Options (use 'pngine render -h' for details):
+        \\  -o, --output <path>   Output file path (default: <input>.png)
+        \\  -f, --frame           Render actual frame via GPU (default: 1x1 transparent)
+        \\  -s, --size <WxH>      Output dimensions with --frame (default: 512x512)
+        \\  -t, --time <seconds>  Time value for animation (default: 0.0)
+        \\  --no-embed            Don't embed bytecode in PNG
         \\
         \\Supported formats:
         \\  .pngine     DSL format (macro-based syntax)
         \\  .pbsf       Legacy PBSF format (S-expressions)
         \\  .pngb       Compiled bytecode
-        \\  .png        PNG images (render/embed/extract)
+        \\  .png        PNG images (with optional embedded bytecode)
         \\
         \\Examples:
-        \\  pngine compile triangle.pngine -o triangle.pngb
-        \\  pngine check output.pngb
-        \\  pngine render shader.pngine -o preview.png --size 1024x1024
-        \\  pngine embed cover.png triangle.pngb -o artwork.png
-        \\  pngine extract artwork.png -o extracted.pngb
+        \\  pngine shader.pngine                      # 1x1 PNG with bytecode (~700 bytes)
+        \\  pngine shader.pngine --frame              # 512x512 rendered preview
+        \\  pngine shader.pngine --frame -s 1920x1080 # 1080p rendered frame
+        \\  pngine check output.png                   # Verify embedded bytecode
+        \\  pngine extract output.png -o shader.pngb  # Extract bytecode
         \\
     , .{});
 }
