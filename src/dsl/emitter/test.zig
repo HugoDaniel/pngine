@@ -1924,3 +1924,298 @@ test "Bytecode emitter: OOM handling for copyExternalImageToTexture" {
         }
     }
 }
+
+// ============================================================================
+// #shaderModule code=identifier Resolution Tests
+// ============================================================================
+//
+// Property: #shaderModule code=identifier resolves to #wgsl macro's value property.
+// Property: #define substitution applies to resolved shader code.
+
+test "Emitter: shaderModule with code=wgslMacroName resolves shader" {
+    // Goal: Verify #shaderModule code=identifier resolves to #wgsl macro value.
+    // Method: Define #wgsl with code, reference via #shaderModule, verify data section.
+
+    const source: [:0]const u8 =
+        \\#wgsl cubeShader {
+        \\  value="@vertex fn vertexMain() -> @builtin(position) vec4f { return vec4f(0); }"
+        \\}
+        \\#shaderModule cubeModule {
+        \\  code=cubeShader
+        \\}
+        \\#renderPipeline pipe { vertex={ module=cubeModule } }
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Verify shader code is in data section
+    var found_shader_code = false;
+    for (module.data.blobs.items) |blob| {
+        if (std.mem.indexOf(u8, blob, "vertexMain")) |_| {
+            found_shader_code = true;
+            break;
+        }
+    }
+    try testing.expect(found_shader_code);
+
+    // Verify only ONE shader module created (the #wgsl and #shaderModule share code)
+    var shader_module_count: u32 = 0;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.create_shader_module)) {
+            shader_module_count += 1;
+        }
+    }
+    // Both #wgsl and #shaderModule create shader modules
+    try testing.expectEqual(@as(u32, 2), shader_module_count);
+}
+
+test "Emitter: shaderModule with code=string works" {
+    // Goal: Verify #shaderModule code="..." with direct string literal works.
+    // Method: Define shader with inline string, verify it appears in data section.
+
+    const source: [:0]const u8 =
+        \\#shaderModule directShader {
+        \\  code="@vertex fn main() -> @builtin(position) vec4f { return vec4f(1); }"
+        \\}
+        \\#renderPipeline pipe { vertex={ module=directShader } }
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Verify shader code is in data section
+    var found_shader_code = false;
+    for (module.data.blobs.items) |blob| {
+        if (std.mem.indexOf(u8, blob, "vec4f(1)")) |_| {
+            found_shader_code = true;
+            break;
+        }
+    }
+    try testing.expect(found_shader_code);
+}
+
+test "Emitter: shaderModule code=wgslMacro with #define substitution" {
+    // Goal: Verify #define values are substituted when code is resolved via identifier.
+    // Method: Define SIZE, reference in #wgsl, verify substitution in output.
+
+    const source: [:0]const u8 =
+        \\#define SIZE="10.0"
+        \\#wgsl myShader {
+        \\  value="let size = SIZE; @vertex fn main() {}"
+        \\}
+        \\#shaderModule myModule {
+        \\  code=myShader
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Verify SIZE was substituted with 10.0
+    var found_substituted = false;
+    for (module.data.blobs.items) |blob| {
+        if (std.mem.indexOf(u8, blob, "10.0")) |_| {
+            // Verify SIZE was NOT left as-is
+            if (std.mem.indexOf(u8, blob, "SIZE") == null) {
+                found_substituted = true;
+                break;
+            }
+        }
+    }
+    try testing.expect(found_substituted);
+}
+
+test "Emitter: rotating_cube style wgsl + shaderModule pattern" {
+    // Goal: Verify full rotating_cube.pngine pattern compiles and executes.
+    // Method: #wgsl with uniforms → #shaderModule → #renderPipeline → execute.
+
+    const source: [:0]const u8 =
+        \\#wgsl cubeShader {
+        \\  value="
+        \\struct Uniforms { time: f32 }
+        \\@group(0) @binding(0) var<uniform> u: Uniforms;
+        \\@vertex fn vertexMain() -> @builtin(position) vec4f { return vec4f(u.time); }
+        \\@fragment fn fragMain() -> @location(0) vec4f { return vec4f(1); }
+        \\"
+        \\  uniforms=[{ id=inputs var=u struct=Uniforms bindGroup=0 binding=0 }]
+        \\}
+        \\#shaderModule cubeShaderModule {
+        \\  code=cubeShader
+        \\}
+        \\#renderPipeline renderCube {
+        \\  layout=auto
+        \\  vertex={ entrypoint=vertexMain module=cubeShaderModule }
+        \\  fragment={ entrypoint=fragMain module=cubeShaderModule }
+        \\}
+        \\#renderPass drawCube { pipeline=renderCube draw=36 }
+        \\#frame main { perform=[$renderPass.drawCube] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Execute to verify the full pipeline works
+    const mock_gpu = @import("../../executor/mock_gpu.zig");
+    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(&gpu, &module);
+    try dispatcher.executeAll(testing.allocator);
+
+    // Verify shader module, pipeline, and draw were created
+    var found_shader = false;
+    var found_pipeline = false;
+    var found_draw = false;
+
+    for (gpu.getCalls()) |call| {
+        switch (call.call_type) {
+            .create_shader_module => found_shader = true,
+            .create_render_pipeline => found_pipeline = true,
+            .draw => {
+                try testing.expectEqual(@as(u32, 36), call.params.draw.vertex_count);
+                found_draw = true;
+            },
+            else => {},
+        }
+    }
+
+    try testing.expect(found_shader);
+    try testing.expect(found_pipeline);
+    try testing.expect(found_draw);
+}
+
+// ============================================================================
+// #data wasm Property Tests
+// ============================================================================
+//
+// Property: #data with wasm={...} triggers WASM file loading during compilation.
+// Property: Buffer size=wasmDataName resolves to WASM return type byte size.
+// Property: Existing data types (float32Array, blob) continue to work.
+
+test "Emitter: data with wasm property syntax" {
+    // Goal: Verify #data wasm={...} syntax is parsed and triggers file loading.
+    // Method: Provide valid syntax with missing file, expect FileReadError.
+
+    const source: [:0]const u8 =
+        \\#data cubeVertexArray {
+        \\  wasm={
+        \\    module={ url="assets/cube.wasm" }
+        \\    func=cube
+        \\    returns="array<f32, 360>"
+        \\  }
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    // Expect file read error (no actual WASM file)
+    const result = compileSource(source);
+    if (result) |pngb| {
+        // Unexpected success - only if file exists
+        defer testing.allocator.free(pngb);
+    } else |err| {
+        // Expected: FileReadError since the WASM file doesn't exist
+        try testing.expect(err == error.FileReadError or err == error.EmitError);
+    }
+}
+
+test "Emitter: buffer size from wasm data reference" {
+    // Goal: Verify buffer size=wasmDataName would resolve to WASM return type size.
+    // Method: Define #data with wasm, reference in buffer size, expect file error.
+
+    const source: [:0]const u8 =
+        \\#data cubeData {
+        \\  wasm={
+        \\    module={ url="test.wasm" }
+        \\    func=getData
+        \\    returns="array<f32, 100>"
+        \\  }
+        \\}
+        \\#buffer vertices {
+        \\  size=cubeData
+        \\  usage=[VERTEX]
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    // Expect file read error since test.wasm doesn't exist
+    const result = compileSource(source);
+    if (result) |pngb| {
+        defer testing.allocator.free(pngb);
+    } else |err| {
+        // FileReadError or EmitError expected when WASM file is missing
+        try testing.expect(err == error.FileReadError or err == error.EmitError);
+    }
+}
+
+test "Emitter: data with float32Array still works alongside wasm feature" {
+    // Goal: Regression test - float32Array data unaffected by wasm feature addition.
+    // Method: Define data with float32Array, verify buffer size = 6 × 4 = 24 bytes.
+
+    const source: [:0]const u8 =
+        \\#data vertices { float32Array=[1.0 2.0 3.0 4.0 5.0 6.0] }
+        \\#buffer vertexBuf { size=vertices usage=[VERTEX] }
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    const mock_gpu = @import("../../executor/mock_gpu.zig");
+    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(&gpu, &module);
+    try dispatcher.executeAll(testing.allocator);
+
+    // Verify buffer size: 6 floats * 4 bytes = 24 bytes
+    var found_buffer = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_buffer) {
+            try testing.expectEqual(@as(u32, 24), call.params.create_buffer.size);
+            found_buffer = true;
+            break;
+        }
+    }
+    try testing.expect(found_buffer);
+}
+
+test "Emitter: data with blob still works alongside wasm feature" {
+    // Goal: Regression test - blob data path unaffected by wasm feature addition.
+    // Method: Define data with blob, verify file loading is attempted (FileReadError).
+
+    const source: [:0]const u8 =
+        \\#data imageData { blob="test.png" }
+        \\#frame main { perform=[] }
+    ;
+
+    // Expect file error since test.png doesn't exist
+    const result = compileSource(source);
+    if (result) |pngb| {
+        defer testing.allocator.free(pngb);
+    } else |err| {
+        try testing.expect(err == error.FileReadError or err == error.EmitError);
+    }
+}

@@ -751,3 +751,123 @@ pub fn emitImageBitmaps(e: *Emitter) Emitter.Error!void {
     // Post-condition: IDs assigned sequentially from initial value
     std.debug.assert(e.next_image_bitmap_id >= initial_id);
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
+//
+// Property: parseWgslReturnType("array<T, N>") = N × sizeof(T) for all supported T.
+// Property: parseWgslReturnType(T) = sizeof(T) for scalar/vector/matrix types.
+// Property: parseWgslReturnType returns 0 for invalid or unknown types.
+
+test "parseWgslReturnType: array<f32, N>" {
+    // Goal: Verify array size calculation for f32 element type.
+    // Method: Test N × 4 bytes for various N values and whitespace variants.
+
+    // Basic float arrays: N × 4 bytes
+    try std.testing.expectEqual(@as(u32, 1440), parseWgslReturnType("array<f32, 360>"));
+    try std.testing.expectEqual(@as(u32, 400), parseWgslReturnType("array<f32, 100>"));
+    try std.testing.expectEqual(@as(u32, 4), parseWgslReturnType("array<f32, 1>"));
+
+    // Whitespace tolerance: parsing should handle varied spacing
+    try std.testing.expectEqual(@as(u32, 1440), parseWgslReturnType("array<f32,360>"));
+    try std.testing.expectEqual(@as(u32, 1440), parseWgslReturnType("array< f32, 360 >"));
+    try std.testing.expectEqual(@as(u32, 1440), parseWgslReturnType("array<f32 , 360>"));
+}
+
+test "parseWgslReturnType: array<i32/u32, N>" {
+    // Goal: Verify array size calculation for integer types.
+    // Method: i32 and u32 are both 4 bytes, same as f32.
+
+    try std.testing.expectEqual(@as(u32, 400), parseWgslReturnType("array<i32, 100>"));
+    try std.testing.expectEqual(@as(u32, 400), parseWgslReturnType("array<u32, 100>"));
+}
+
+test "parseWgslReturnType: array<vec, N>" {
+    // Goal: Verify array size calculation for vector element types.
+    // Method: vec2=8, vec3=12, vec4=16 bytes; test with/without 'f' suffix.
+
+    // vec2 = 8 bytes per element
+    try std.testing.expectEqual(@as(u32, 80), parseWgslReturnType("array<vec2, 10>"));
+    try std.testing.expectEqual(@as(u32, 80), parseWgslReturnType("array<vec2f, 10>"));
+
+    // vec3 = 12 bytes per element
+    try std.testing.expectEqual(@as(u32, 120), parseWgslReturnType("array<vec3, 10>"));
+    try std.testing.expectEqual(@as(u32, 120), parseWgslReturnType("array<vec3f, 10>"));
+
+    // vec4 = 16 bytes per element
+    try std.testing.expectEqual(@as(u32, 160), parseWgslReturnType("array<vec4, 10>"));
+    try std.testing.expectEqual(@as(u32, 160), parseWgslReturnType("array<vec4f, 10>"));
+}
+
+test "parseWgslReturnType: array<mat, N>" {
+    // Goal: Verify array size calculation for matrix element types.
+    // Method: mat2x2=16, mat3x3=36, mat4x4=64 bytes.
+
+    // mat2x2 = 16 bytes per element (4 floats)
+    try std.testing.expectEqual(@as(u32, 160), parseWgslReturnType("array<mat2x2, 10>"));
+
+    // mat3x3 = 36 bytes per element (9 floats)
+    try std.testing.expectEqual(@as(u32, 360), parseWgslReturnType("array<mat3x3, 10>"));
+
+    // mat4x4 = 64 bytes per element (16 floats)
+    try std.testing.expectEqual(@as(u32, 640), parseWgslReturnType("array<mat4x4, 10>"));
+    try std.testing.expectEqual(@as(u32, 64), parseWgslReturnType("array<mat4x4, 1>"));
+}
+
+test "parseWgslReturnType: simple types" {
+    // Goal: Verify non-array types return their direct size.
+    // Method: Scalars, vectors, matrices without array wrapper.
+
+    try std.testing.expectEqual(@as(u32, 4), parseWgslReturnType("f32"));
+    try std.testing.expectEqual(@as(u32, 4), parseWgslReturnType("i32"));
+    try std.testing.expectEqual(@as(u32, 4), parseWgslReturnType("u32"));
+    try std.testing.expectEqual(@as(u32, 8), parseWgslReturnType("vec2"));
+    try std.testing.expectEqual(@as(u32, 12), parseWgslReturnType("vec3"));
+    try std.testing.expectEqual(@as(u32, 16), parseWgslReturnType("vec4"));
+    try std.testing.expectEqual(@as(u32, 64), parseWgslReturnType("mat4x4"));
+}
+
+test "parseWgslReturnType: invalid returns 0" {
+    // Goal: Verify graceful handling of invalid/unknown type strings.
+    // Method: Empty, unknown, malformed array syntax should all return 0.
+
+    try std.testing.expectEqual(@as(u32, 0), parseWgslReturnType(""));
+    try std.testing.expectEqual(@as(u32, 0), parseWgslReturnType("unknown"));
+    try std.testing.expectEqual(@as(u32, 0), parseWgslReturnType("array<"));
+    try std.testing.expectEqual(@as(u32, 0), parseWgslReturnType("array<f32>"));
+    try std.testing.expectEqual(@as(u32, 0), parseWgslReturnType("array<unknown, 10>"));
+}
+
+test "getTypeSize: all supported types" {
+    // Goal: Verify byte sizes for all WGSL types used in buffer calculations.
+    // Method: Check scalars, vectors (with suffixes), and matrices.
+
+    // Scalars: f32/i32/u32=4, f16=2
+    try std.testing.expectEqual(@as(u32, 4), getTypeSize("f32"));
+    try std.testing.expectEqual(@as(u32, 4), getTypeSize("i32"));
+    try std.testing.expectEqual(@as(u32, 4), getTypeSize("u32"));
+    try std.testing.expectEqual(@as(u32, 2), getTypeSize("f16"));
+
+    // Vectors: vec2=8, vec3=12, vec4=16 (with type suffixes)
+    try std.testing.expectEqual(@as(u32, 8), getTypeSize("vec2"));
+    try std.testing.expectEqual(@as(u32, 8), getTypeSize("vec2f"));
+    try std.testing.expectEqual(@as(u32, 8), getTypeSize("vec2i"));
+    try std.testing.expectEqual(@as(u32, 8), getTypeSize("vec2u"));
+    try std.testing.expectEqual(@as(u32, 12), getTypeSize("vec3"));
+    try std.testing.expectEqual(@as(u32, 12), getTypeSize("vec3f"));
+    try std.testing.expectEqual(@as(u32, 16), getTypeSize("vec4"));
+    try std.testing.expectEqual(@as(u32, 16), getTypeSize("vec4f"));
+
+    // Matrices: mat2x2=16, mat3x3=36, mat4x4=64
+    try std.testing.expectEqual(@as(u32, 16), getTypeSize("mat2x2"));
+    try std.testing.expectEqual(@as(u32, 16), getTypeSize("mat2x2f"));
+    try std.testing.expectEqual(@as(u32, 36), getTypeSize("mat3x3"));
+    try std.testing.expectEqual(@as(u32, 36), getTypeSize("mat3x3f"));
+    try std.testing.expectEqual(@as(u32, 64), getTypeSize("mat4x4"));
+    try std.testing.expectEqual(@as(u32, 64), getTypeSize("mat4x4f"));
+
+    // Unknown types return 0 (safe default)
+    try std.testing.expectEqual(@as(u32, 0), getTypeSize("unknown"));
+    try std.testing.expectEqual(@as(u32, 0), getTypeSize(""));
+}
