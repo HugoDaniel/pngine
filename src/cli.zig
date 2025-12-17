@@ -232,6 +232,21 @@ fn loadOrCompileBytecode(allocator: std.mem.Allocator, input: []const u8) ![]u8 
         return readBinaryFile(allocator, input);
     }
 
+    if (std.mem.eql(u8, extension, ".png")) {
+        // Extract bytecode from PNG with embedded pNGb chunk
+        const png_data = try readBinaryFile(allocator, input);
+        defer allocator.free(png_data);
+
+        const bytecode = pngine.png.extractBytecode(allocator, png_data) catch |err| {
+            std.debug.print("Error: failed to extract bytecode from PNG: {}\n", .{err});
+            return error.InvalidFormat;
+        };
+
+        // Post-condition: bytecode is non-empty
+        std.debug.assert(bytecode.len > 0);
+        return bytecode;
+    }
+
     // Compile source file
     const source = try readSourceFile(allocator, input);
     defer allocator.free(source);
