@@ -105,10 +105,10 @@ export function getPngbInfo(data) {
  * Extract PNGB bytecode from PNG data.
  *
  * @param {ArrayBuffer|Uint8Array} data - PNG file data
- * @returns {Uint8Array} Extracted PNGB bytecode
+ * @returns {Promise<Uint8Array>} Extracted PNGB bytecode
  * @throws {Error} If PNG is invalid or has no pNGb chunk
  */
-export function extractPngb(data) {
+export async function extractPngb(data) {
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
 
     // Validate PNG signature
@@ -129,7 +129,7 @@ export function extractPngb(data) {
 
         if (chunkTypesEqual(chunkType, PNGB_CHUNK_TYPE)) {
             const chunkData = bytes.slice(pos + 8, pos + 8 + length);
-            return parsePngbChunk(chunkData);
+            return await parsePngbChunk(chunkData);
         }
 
         pos += 12 + length;
@@ -142,10 +142,10 @@ export function extractPngb(data) {
  * Parse pNGb chunk data to extract bytecode.
  *
  * @param {Uint8Array} data - pNGb chunk data (after type, before CRC)
- * @returns {Uint8Array} Extracted bytecode
+ * @returns {Promise<Uint8Array>} Extracted bytecode
  * @throws {Error} If chunk format is invalid
  */
-function parsePngbChunk(data) {
+async function parsePngbChunk(data) {
     if (data.length < 3) {
         throw new Error('Invalid pNGb chunk: too short');
     }
@@ -162,11 +162,50 @@ function parsePngbChunk(data) {
     // Check compression flag
     const isCompressed = (flags & FLAG_COMPRESSED) !== 0;
     if (isCompressed) {
-        throw new Error('Compressed pNGb not supported (use deflate-raw)');
+        // Decompress using browser's DecompressionStream API
+        return await decompressDeflateRaw(payload);
     }
 
     // Return raw payload (copy to ensure ownership)
     return new Uint8Array(payload);
+}
+
+/**
+ * Decompress deflate-raw data using browser's DecompressionStream.
+ *
+ * @param {Uint8Array} compressed - Compressed data
+ * @returns {Promise<Uint8Array>} Decompressed data
+ */
+async function decompressDeflateRaw(compressed) {
+    // Use browser's built-in DecompressionStream API
+    const ds = new DecompressionStream('deflate-raw');
+    const writer = ds.writable.getWriter();
+    const reader = ds.readable.getReader();
+
+    // Write compressed data and close
+    writer.write(compressed);
+    writer.close();
+
+    // Read all decompressed chunks
+    const chunks = [];
+    let totalLength = 0;
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        totalLength += value.length;
+    }
+
+    // Combine into single Uint8Array
+    const result = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+        result.set(chunk, offset);
+        offset += chunk.length;
+    }
+
+    return result;
 }
 
 /**
