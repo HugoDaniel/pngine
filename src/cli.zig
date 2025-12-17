@@ -107,9 +107,14 @@ fn runCompile(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     var output_path: ?[]const u8 = null;
 
     // Parse arguments with bounded iteration
-    var i: u32 = 0;
     const args_len: u32 = @intCast(args.len);
-    while (i < args_len) : (i += 1) {
+    var skip_next = false;
+    for (0..args_len) |idx| {
+        if (skip_next) {
+            skip_next = false;
+            continue;
+        }
+        const i: u32 = @intCast(idx);
         const arg = args[i];
 
         if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
@@ -117,8 +122,8 @@ fn runCompile(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
                 std.debug.print("Error: -o requires an output path\n", .{});
                 return 1;
             }
-            i += 1;
-            output_path = args[i];
+            output_path = args[i + 1];
+            skip_next = true;
         } else if (arg.len > 0 and arg[0] == '-') {
             std.debug.print("Unknown option: {s}\n", .{arg});
             return 1;
@@ -391,30 +396,38 @@ fn printExecutionSummary(calls: []const Call, module: *const format.Module) u8 {
     return 0;
 }
 
-/// Execute the embed command.
-/// Embeds PNGB bytecode into a PNG file.
-/// Returns exit code.
-fn runEmbed(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
+/// Embed command arguments.
+const EmbedArgs = struct {
+    png_path: []const u8,
+    pngb_path: []const u8,
+    output_path: ?[]const u8,
+};
+
+/// Parse embed command arguments.
+/// Returns null on error (error message already printed).
+fn parseEmbedArgs(args: []const []const u8) ?EmbedArgs {
     var png_path: ?[]const u8 = null;
     var pngb_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
 
-    // Parse arguments
-    var i: u32 = 0;
     const args_len: u32 = @intCast(args.len);
-    while (i < args_len) : (i += 1) {
+    for (0..args_len) |idx| {
+        const i: u32 = @intCast(idx);
         const arg = args[i];
 
         if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
             if (i + 1 >= args_len) {
                 std.debug.print("Error: -o requires an output path\n", .{});
-                return 1;
+                return null;
             }
-            i += 1;
-            output_path = args[i];
+            output_path = args[i + 1];
         } else if (arg.len > 0 and arg[0] == '-') {
+            // Skip -o's value (already processed above)
+            if (idx > 0 and (std.mem.eql(u8, args[idx - 1], "-o") or std.mem.eql(u8, args[idx - 1], "--output"))) {
+                continue;
+            }
             std.debug.print("Unknown option: {s}\n", .{arg});
-            return 1;
+            return null;
         } else {
             // First positional arg is PNG, second is PNGB
             if (png_path == null) {
@@ -423,7 +436,7 @@ fn runEmbed(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
                 pngb_path = arg;
             } else {
                 std.debug.print("Error: too many arguments\n", .{});
-                return 1;
+                return null;
             }
         }
     }
@@ -431,18 +444,34 @@ fn runEmbed(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     if (png_path == null or pngb_path == null) {
         std.debug.print("Error: embed requires PNG file and PNGB bytecode file\n\n", .{});
         std.debug.print("Usage: pngine embed <image.png> <bytecode.pngb> [-o output.png]\n", .{});
-        return 1;
+        return null;
     }
 
-    const png_input = png_path.?;
-    const pngb_input = pngb_path.?;
+    return .{ .png_path = png_path.?, .pngb_path = pngb_path.?, .output_path = output_path };
+}
 
-    // Derive output path if not specified: input.png -> input_embedded.png
-    const output = output_path orelse deriveEmbedOutputPath(allocator, png_input) catch |err| {
+/// Execute the embed command.
+/// Embeds PNGB bytecode into a PNG file.
+/// Returns exit code.
+fn runEmbed(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
+    const parsed = parseEmbedArgs(args) orelse return 1;
+
+    // Derive output path if not specified
+    const output = parsed.output_path orelse deriveEmbedOutputPath(allocator, parsed.png_path) catch |err| {
         std.debug.print("Error: failed to derive output path: {}\n", .{err});
         return 2;
     };
-    defer if (output_path == null) allocator.free(output);
+    defer if (parsed.output_path == null) allocator.free(output);
+
+    // Read and validate inputs, then embed
+    return executeEmbed(allocator, parsed.png_path, parsed.pngb_path, output);
+}
+
+/// Execute the embed operation after argument parsing.
+fn executeEmbed(allocator: std.mem.Allocator, png_input: []const u8, pngb_input: []const u8, output: []const u8) u8 {
+    // Pre-conditions
+    std.debug.assert(png_input.len > 0);
+    std.debug.assert(pngb_input.len > 0);
 
     // Read PNG file
     const png_data = readBinaryFile(allocator, png_input) catch |err| {
@@ -451,14 +480,14 @@ fn runEmbed(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     };
     defer allocator.free(png_data);
 
-    // Read PNGB bytecode
+    // Read and validate PNGB bytecode
     const bytecode = readBinaryFile(allocator, pngb_input) catch |err| {
         std.debug.print("Error: failed to read PNGB '{s}': {}\n", .{ pngb_input, err });
         return 2;
     };
     defer allocator.free(bytecode);
 
-    // Validate PNGB
+    // Validate PNGB magic bytes to catch invalid files early
     if (bytecode.len < format.HEADER_SIZE or !std.mem.eql(u8, bytecode[0..4], format.MAGIC)) {
         std.debug.print("Error: '{s}' is not a valid PNGB file\n", .{pngb_input});
         return 4;
@@ -477,7 +506,6 @@ fn runEmbed(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         return 2;
     };
 
-    // Success message
     std.debug.print("Embedded {s} ({d} bytes) into {s} -> {s} ({d} bytes)\n", .{
         pngb_input, bytecode.len, png_input, output, embedded.len,
     });
@@ -492,10 +520,15 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     var input_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
 
-    // Parse arguments
-    var i: u32 = 0;
+    // Parse arguments with bounded iteration
     const args_len: u32 = @intCast(args.len);
-    while (i < args_len) : (i += 1) {
+    var skip_next = false;
+    for (0..args_len) |idx| {
+        if (skip_next) {
+            skip_next = false;
+            continue;
+        }
+        const i: u32 = @intCast(idx);
         const arg = args[i];
 
         if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
@@ -503,8 +536,8 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
                 std.debug.print("Error: -o requires an output path\n", .{});
                 return 1;
             }
-            i += 1;
-            output_path = args[i];
+            output_path = args[i + 1];
+            skip_next = true;
         } else if (arg.len > 0 and arg[0] == '-') {
             std.debug.print("Unknown option: {s}\n", .{arg});
             return 1;

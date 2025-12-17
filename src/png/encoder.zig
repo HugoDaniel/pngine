@@ -78,18 +78,18 @@ pub fn encode(
     var result: std.ArrayListUnmanaged(u8) = .{};
     errdefer result.deinit(allocator);
 
-    // PNG signature
+    // PNG signature - required magic bytes that identify file as PNG (RFC 2083)
     result.appendSlice(allocator, &chunk.PNG_SIGNATURE) catch {
         return Error.OutOfMemory;
     };
 
-    // IHDR chunk
+    // IHDR must be first chunk - contains critical image dimensions and format
     try writeIHDR(&result, allocator, width, height);
 
-    // IDAT chunk (compressed filtered pixel data)
+    // IDAT contains compressed pixel data - this is where most bytes go
     try writeIDAT(&result, allocator, pixels, width, height);
 
-    // IEND chunk
+    // IEND marks end of file - required for valid PNG structure
     chunk.writeChunk(&result, allocator, chunk.ChunkType.IEND, "") catch {
         return Error.OutOfMemory;
     };
@@ -282,44 +282,6 @@ fn compress(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     std.debug.assert(result[0] == 0x78);
 
     return result;
-}
-
-/// Compute Adler-32 checksum for zlib footer.
-fn computeAdler32(data: []const u8) u32 {
-    // Pre-condition: data is valid slice
-    std.debug.assert(data.len <= std.math.maxInt(usize));
-
-    const MOD_ADLER: u32 = 65521;
-    var a: u32 = 1;
-    var b: u32 = 0;
-
-    // Process in chunks to avoid overflow (bounded loop)
-    const chunk_size: usize = 5552; // Largest n where 255*n*(n+1)/2 + (n+1)*(65536-1) < 2^32
-    var remaining = data;
-
-    const max_chunks = (data.len / chunk_size) + 1;
-    for (0..max_chunks) |_| {
-        if (remaining.len == 0) break;
-
-        const slice_len = @min(remaining.len, chunk_size);
-        const slice = remaining[0..slice_len];
-
-        for (slice) |byte| {
-            a += byte;
-            b += a;
-        }
-
-        a %= MOD_ADLER;
-        b %= MOD_ADLER;
-
-        remaining = remaining[slice_len..];
-    }
-
-    // Post-condition: valid adler32
-    std.debug.assert(a < MOD_ADLER);
-    std.debug.assert(b < MOD_ADLER);
-
-    return (b << 16) | a;
 }
 
 /// Encode BGRA pixels to PNG (common format from GPU readbacks).
@@ -574,18 +536,6 @@ test "encoder: solid color image compresses significantly" {
     // Solid color should compress extremely well (>10x ratio)
     // Raw pixels = 256KB, compressed PNG should be <25KB
     try std.testing.expect(png.len < raw_size / 10);
-}
-
-test "encoder: adler32 known values" {
-    // Test with known Adler-32 values
-    // "Wikipedia" has Adler-32 = 0x11E60398
-    const adler = computeAdler32("Wikipedia");
-    try std.testing.expectEqual(@as(u32, 0x11E60398), adler);
-
-    // Empty-like single byte
-    const adler_a = computeAdler32("a");
-    // a=1+97=98, b=0+98=98, result = (98 << 16) | 98 = 0x00620062
-    try std.testing.expectEqual(@as(u32, 0x00620062), adler_a);
 }
 
 test "encoder: OOM handling with FailingAllocator" {

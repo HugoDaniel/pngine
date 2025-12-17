@@ -78,10 +78,16 @@ fn parseArgs(args: []const []const u8, opts: *Options) u8 {
     std.debug.assert(opts.width == 512);
 
     var input_path: ?[]const u8 = null;
-    var i: u32 = 0;
     const args_len: u32 = @intCast(args.len);
+    var skip_count: u32 = 0;
 
-    while (i < args_len) : (i += 1) {
+    for (0..args_len) |idx| {
+        // Skip arguments consumed by previous options (e.g., -o value)
+        if (skip_count > 0) {
+            skip_count -= 1;
+            continue;
+        }
+        const i: u32 = @intCast(idx);
         const arg = args[i];
 
         if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
@@ -89,14 +95,24 @@ fn parseArgs(args: []const []const u8, opts: *Options) u8 {
                 std.debug.print("Error: -o requires an output path\n", .{});
                 return 1;
             }
-            i += 1;
-            opts.output_path = args[i];
+            opts.output_path = args[i + 1];
+            skip_count = 1;
         } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--size")) {
-            const result = parseSize(args, &i, args_len, opts);
+            if (i + 1 >= args_len) {
+                std.debug.print("Error: -s requires dimensions (e.g., 512x512)\n", .{});
+                return 1;
+            }
+            const result = parseSizeValue(args[i + 1], opts);
             if (result != 0) return result;
+            skip_count = 1;
         } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--time")) {
-            const result = parseTime(args, &i, args_len, opts);
+            if (i + 1 >= args_len) {
+                std.debug.print("Error: -t requires a time value (e.g., 2.5)\n", .{});
+                return 1;
+            }
+            const result = parseTimeValue(args[i + 1], opts);
             if (result != 0) return result;
+            skip_count = 1;
         } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--frame")) {
             opts.render_frame = true;
         } else if (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--embed")) {
@@ -133,15 +149,8 @@ fn parseArgs(args: []const []const u8, opts: *Options) u8 {
     return 0;
 }
 
-/// Parse --size WxH argument.
-fn parseSize(args: []const []const u8, i: *u32, args_len: u32, opts: *Options) u8 {
-    if (i.* + 1 >= args_len) {
-        std.debug.print("Error: -s requires dimensions (e.g., 512x512)\n", .{});
-        return 1;
-    }
-    i.* += 1;
-    const size_str = args[i.*];
-
+/// Parse size value in WxH format.
+fn parseSizeValue(size_str: []const u8, opts: *Options) u8 {
     const x_pos = std.mem.indexOf(u8, size_str, "x") orelse {
         std.debug.print("Error: invalid size format '{s}' (expected WxH)\n", .{size_str});
         return 1;
@@ -163,15 +172,10 @@ fn parseSize(args: []const []const u8, i: *u32, args_len: u32, opts: *Options) u
     return 0;
 }
 
-/// Parse --time value argument.
-fn parseTime(args: []const []const u8, i: *u32, args_len: u32, opts: *Options) u8 {
-    if (i.* + 1 >= args_len) {
-        std.debug.print("Error: -t requires a time value (e.g., 2.5)\n", .{});
-        return 1;
-    }
-    i.* += 1;
-    opts.time = std.fmt.parseFloat(f32, args[i.*]) catch {
-        std.debug.print("Error: invalid time value '{s}'\n", .{args[i.*]});
+/// Parse time value as float.
+fn parseTimeValue(time_str: []const u8, opts: *Options) u8 {
+    opts.time = std.fmt.parseFloat(f32, time_str) catch {
+        std.debug.print("Error: invalid time value '{s}'\n", .{time_str});
         return 1;
     };
     return 0;
@@ -193,15 +197,8 @@ fn executePipeline(
     std.debug.assert(output.len > 0);
 
     // Read and compile source
-    const source = readSourceFile(allocator, input) catch |err| {
-        std.debug.print("Error: failed to read '{s}': {}\n", .{ input, err });
-        return 2;
-    };
-    defer allocator.free(source);
-
-    const bytecode = compileSource(allocator, input, source) catch |err| {
-        std.debug.print("Error: compilation failed: {}\n", .{err});
-        return 3;
+    const bytecode = compileFromFile(allocator, input) catch |compile_err| {
+        return handleCompileError(compile_err, input);
     };
     defer allocator.free(bytecode);
 
@@ -210,76 +207,118 @@ fn executePipeline(
         return 3;
     }
 
-    // Choose pixel generation strategy
-    var png_data: []u8 = undefined;
-    var actual_width: u32 = undefined;
-    var actual_height: u32 = undefined;
+    // Generate PNG (either rendered frame or 1x1 transparent pixel)
+    const png_result = generatePng(allocator, bytecode, width, height, time, render_frame);
+    if (png_result.exit_code != 0) return png_result.exit_code;
 
-    if (render_frame) {
-        // Full GPU rendering path
-        const result = renderWithGpu(allocator, bytecode, width, height, time);
-        if (result.exit_code != 0) return result.exit_code;
-        png_data = result.png_data;
-        actual_width = width;
-        actual_height = height;
-    } else {
-        // 1x1 transparent pixel - minimal PNG container for bytecode
-        png_data = createTransparentPixel(allocator) catch |err| {
-            std.debug.print("Error: failed to create PNG: {}\n", .{err});
-            return 4;
-        };
-        actual_width = 1;
-        actual_height = 1;
-    }
+    var png_data = png_result.png_data;
     defer allocator.free(png_data);
 
+    // Optionally embed bytecode in PNG
     if (embed_bytecode) {
-        const embedded = pngine.png.embedBytecode(allocator, png_data, bytecode) catch |err| {
+        png_data = embedBytecodeInPng(allocator, png_data, bytecode) catch |err| {
             std.debug.print("Error: failed to embed bytecode: {}\n", .{err});
             return 4;
         };
-        allocator.free(png_data);
-        png_data = embedded;
     }
 
+    // Write final output
     writeOutputFile(output, png_data) catch |err| {
         std.debug.print("Error: failed to write '{s}': {}\n", .{ output, err });
         return 2;
     };
 
-    // Success message
-    if (render_frame) {
-        if (embed_bytecode) {
-            std.debug.print("Rendered {s} -> {s} ({d}x{d}, t={d:.2}, embedded, {d} bytes)\n", .{
-                input, output, actual_width, actual_height, time, png_data.len,
-            });
-        } else {
-            std.debug.print("Rendered {s} -> {s} ({d}x{d}, t={d:.2}, {d} bytes)\n", .{
-                input, output, actual_width, actual_height, time, png_data.len,
-            });
-        }
-    } else {
-        if (embed_bytecode) {
-            std.debug.print("Created {s} -> {s} (1x1, embedded, {d} bytes)\n", .{
-                input, output, png_data.len,
-            });
-        } else {
-            std.debug.print("Created {s} -> {s} (1x1, {d} bytes)\n", .{
-                input, output, png_data.len,
-            });
-        }
-    }
-
+    // Report success to user
+    printSuccessMessage(input, output, png_data.len, width, height, time, embed_bytecode, render_frame);
     return 0;
 }
 
-/// Render bytecode using GPU and return PNG data.
-const RenderResult = struct {
+/// Compile source file to bytecode.
+fn compileFromFile(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    const source = try readSourceFile(allocator, input);
+    defer allocator.free(source);
+    return compileSource(allocator, input, source);
+}
+
+/// Handle compilation errors with appropriate messages.
+fn handleCompileError(err: anyerror, input: []const u8) u8 {
+    switch (err) {
+        error.FileNotFound, error.AccessDenied, error.FileTooLarge => {
+            std.debug.print("Error: failed to read '{s}': {}\n", .{ input, err });
+            return 2;
+        },
+        else => {
+            std.debug.print("Error: compilation failed: {}\n", .{err});
+            return 3;
+        },
+    }
+}
+
+/// PNG generation result.
+const PngResult = struct {
     png_data: []u8,
     exit_code: u8,
 };
 
-fn renderWithGpu(allocator: std.mem.Allocator, bytecode: []const u8, width: u32, height: u32, time: f32) RenderResult {
+/// Generate PNG data - either rendered frame or 1x1 transparent pixel.
+fn generatePng(
+    allocator: std.mem.Allocator,
+    bytecode: []const u8,
+    width: u32,
+    height: u32,
+    time: f32,
+    render_frame: bool,
+) PngResult {
+    if (render_frame) {
+        return renderWithGpu(allocator, bytecode, width, height, time);
+    }
+    // 1x1 transparent pixel - minimal PNG container for bytecode
+    const png_data = createTransparentPixel(allocator) catch |err| {
+        std.debug.print("Error: failed to create PNG: {}\n", .{err});
+        return .{ .png_data = undefined, .exit_code = 4 };
+    };
+    return .{ .png_data = png_data, .exit_code = 0 };
+}
+
+/// Embed bytecode in PNG, freeing original PNG data.
+fn embedBytecodeInPng(allocator: std.mem.Allocator, png_data: []u8, bytecode: []const u8) ![]u8 {
+    const embedded = try pngine.png.embedBytecode(allocator, png_data, bytecode);
+    allocator.free(png_data);
+    return embedded;
+}
+
+/// Print success message after render completes.
+fn printSuccessMessage(
+    input: []const u8,
+    output: []const u8,
+    size: usize,
+    width: u32,
+    height: u32,
+    time: f32,
+    embed_bytecode: bool,
+    render_frame: bool,
+) void {
+    if (render_frame) {
+        if (embed_bytecode) {
+            std.debug.print("Rendered {s} -> {s} ({d}x{d}, t={d:.2}, embedded, {d} bytes)\n", .{
+                input, output, width, height, time, size,
+            });
+        } else {
+            std.debug.print("Rendered {s} -> {s} ({d}x{d}, t={d:.2}, {d} bytes)\n", .{
+                input, output, width, height, time, size,
+            });
+        }
+    } else {
+        if (embed_bytecode) {
+            std.debug.print("Created {s} -> {s} (1x1, embedded, {d} bytes)\n", .{ input, output, size });
+        } else {
+            std.debug.print("Created {s} -> {s} (1x1, {d} bytes)\n", .{ input, output, size });
+        }
+    }
+}
+
+/// Render bytecode using GPU and return PNG data.
+fn renderWithGpu(allocator: std.mem.Allocator, bytecode: []const u8, width: u32, height: u32, time: f32) PngResult {
     const NativeGPU = pngine.gpu_backends.NativeGPU;
 
     // Pre-conditions
