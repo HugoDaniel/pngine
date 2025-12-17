@@ -251,6 +251,70 @@
             white-space: pre-wrap;
         }
 
+        .png-preview-container {
+            display: flex;
+            gap: 1rem;
+            flex: 1;
+            min-height: 0;
+        }
+
+        .png-preview {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            min-width: 0;
+        }
+
+        .png-image-wrapper {
+            flex: 1;
+            background: #1a1a2e;
+            border: 1px solid #333;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            min-height: 200px;
+        }
+
+        .png-image-wrapper img {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            image-rendering: pixelated;
+        }
+
+        .png-image-wrapper .placeholder {
+            color: #666;
+            font-size: 0.875rem;
+        }
+
+        .png-info-panel {
+            width: 280px;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .png-badge {
+            display: inline-block;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+
+        .png-badge.has-bytecode {
+            background: #1a4a2e;
+            color: #4ade80;
+        }
+
+        .png-badge.no-bytecode {
+            background: #4a3a1a;
+            color: #fbbf24;
+        }
+
         #error-banner {
             display: none;
             padding: 1rem;
@@ -270,6 +334,7 @@
             <div class="tabs">
                 <button class="tab active" data-tab="source">Source</button>
                 <button class="tab" data-tab="pngb">PNGB Upload</button>
+                <button class="tab" data-tab="png">PNG Image</button>
             </div>
 
             <div id="source-tab" class="tab-content active">
@@ -330,6 +395,39 @@
                     </div>
                 </div>
             </div>
+
+            <div id="png-tab" class="tab-content">
+                <div class="pngb-panel">
+                    <div id="png-drop-zone" class="drop-zone">
+                        Drop PNG image here or click to browse
+                    </div>
+                    <div class="file-upload">
+                        <input type="file" id="png-file" accept=".png,image/png">
+                        <label for="png-file">Choose PNG</label>
+                        <span id="png-file-name" class="file-name"></span>
+                    </div>
+                    <div class="png-preview-container">
+                        <div class="png-preview">
+                            <label>Preview</label>
+                            <div id="png-image-wrapper" class="png-image-wrapper">
+                                <span class="placeholder">No image loaded</span>
+                            </div>
+                        </div>
+                        <div class="png-info-panel">
+                            <label>Image Info</label>
+                            <div id="png-info" class="bytecode-info">
+                                <pre>No image loaded</pre>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="controls">
+                        <button id="run-png-btn" disabled>Run Embedded</button>
+                        <button id="play-png-btn" disabled>Play</button>
+                        <button id="clear-btn-3">Clear</button>
+                        <span id="time-display-3" class="time-display"></span>
+                    </div>
+                </div>
+            </div>
         </div>
         <div class="canvas-panel">
             <label>Output (512x512)</label>
@@ -340,6 +438,7 @@
 
     <script type="module">
         import { initPNGine } from './pngine-loader.js';
+        import { hasPngb, getPngbInfo, extractPngb } from './pngine-png.js';
 
         // DOM elements
         const canvas = document.getElementById('canvas');
@@ -348,6 +447,7 @@
         const playBtn = document.getElementById('play-btn');
         const clearBtn = document.getElementById('clear-btn');
         const clearBtn2 = document.getElementById('clear-btn-2');
+        const clearBtn3 = document.getElementById('clear-btn-3');
         const status = document.getElementById('status');
         const errorBanner = document.getElementById('error-banner');
         const timeDisplay = document.getElementById('time-display');
@@ -363,8 +463,19 @@
         const bytecodeInfo = document.getElementById('bytecode-info');
         const timeDisplay2 = document.getElementById('time-display-2');
 
+        // PNG Image tab elements
+        const pngDropZone = document.getElementById('png-drop-zone');
+        const pngFileInput = document.getElementById('png-file');
+        const pngFileName = document.getElementById('png-file-name');
+        const pngImageWrapper = document.getElementById('png-image-wrapper');
+        const pngInfo = document.getElementById('png-info');
+        const runPngBtn = document.getElementById('run-png-btn');
+        const playPngBtn = document.getElementById('play-png-btn');
+        const timeDisplay3 = document.getElementById('time-display-3');
+
         let pngine = null;
         let loadedBytecode = null;
+        let loadedPngBytecode = null;
 
         // Animation state
         let isPlaying = false;
@@ -460,19 +571,23 @@
         // Animation loop (Play feature)
         // ====================================================================
 
-        function startAnimation(useSourceTab = true) {
+        function startAnimation(tabType = 'source') {
             if (isPlaying) return;
 
             hideError();
 
             // First compile/load if needed
             try {
-                if (useSourceTab) {
+                if (tabType === 'source') {
                     setStatus('Compiling...');
                     pngine.run(source.value);
-                } else if (loadedBytecode) {
+                } else if (tabType === 'pngb' && loadedBytecode) {
                     setStatus('Loading PNGB...');
                     pngine.loadModule(loadedBytecode);
+                    pngine.executeAll();
+                } else if (tabType === 'png' && loadedPngBytecode) {
+                    setStatus('Loading PNG bytecode...');
+                    pngine.loadModule(loadedPngBytecode);
                     pngine.executeAll();
                 } else {
                     setStatus('No bytecode loaded', 'error');
@@ -487,13 +602,16 @@
             isPlaying = true;
             startTime = performance.now();
 
-            // Update button states
-            if (useSourceTab) {
+            // Update button states based on tab
+            if (tabType === 'source') {
                 playBtn.textContent = 'Stop';
                 playBtn.classList.add('playing');
-            } else {
+            } else if (tabType === 'pngb') {
                 playPngbBtn.textContent = 'Stop';
                 playPngbBtn.classList.add('playing');
+            } else if (tabType === 'png') {
+                playPngBtn.textContent = 'Stop';
+                playPngBtn.classList.add('playing');
             }
 
             setStatus('Playing...', 'success');
@@ -514,8 +632,11 @@
                     // Re-execute all frames
                     pngine.executeAll();
 
-                    // Update time display
-                    const display = useSourceTab ? timeDisplay : timeDisplay2;
+                    // Update time display based on tab
+                    let display;
+                    if (tabType === 'source') display = timeDisplay;
+                    else if (tabType === 'pngb') display = timeDisplay2;
+                    else display = timeDisplay3;
                     display.textContent = `t = ${time.toFixed(2)}s`;
 
                 } catch (err) {
@@ -540,20 +661,22 @@
                 animationId = null;
             }
 
-            // Reset button states
+            // Reset all button states
             playBtn.textContent = 'Play';
             playBtn.classList.remove('playing');
             playPngbBtn.textContent = 'Play';
             playPngbBtn.classList.remove('playing');
+            playPngBtn.textContent = 'Play';
+            playPngBtn.classList.remove('playing');
 
             setStatus('Stopped', '');
         }
 
-        function togglePlay(useSourceTab = true) {
+        function togglePlay(tabType = 'source') {
             if (isPlaying) {
                 stopAnimation();
             } else {
-                startAnimation(useSourceTab);
+                startAnimation(tabType);
             }
         }
 
@@ -676,14 +799,124 @@ Sections:
         }
 
         // ====================================================================
+        // PNG Image handling
+        // ====================================================================
+
+        async function handlePngFile(file) {
+            if (!file) return;
+
+            pngFileName.textContent = file.name;
+
+            try {
+                const buffer = await file.arrayBuffer();
+                const data = new Uint8Array(buffer);
+
+                // Display the image preview
+                const blob = new Blob([data], { type: 'image/png' });
+                const url = URL.createObjectURL(blob);
+                const img = document.createElement('img');
+                img.src = url;
+                img.onload = () => {
+                    // Clear previous content
+                    pngImageWrapper.innerHTML = '';
+                    pngImageWrapper.appendChild(img);
+                };
+
+                // Check for embedded bytecode
+                const hasEmbedded = hasPngb(data);
+                let infoHtml = `<pre>File: ${file.name}
+Size: ${formatBytes(data.length)}
+`;
+
+                if (hasEmbedded) {
+                    try {
+                        const info = getPngbInfo(data);
+                        const bytecode = extractPngb(data);
+                        loadedPngBytecode = bytecode;
+
+                        infoHtml += `
+<span class="png-badge has-bytecode">✓ Has Embedded Bytecode</span>
+
+pNGb Chunk:
+  Version: ${info.version}
+  Compressed: ${info.compressed ? 'Yes' : 'No'}
+  Payload: ${formatBytes(info.payloadSize)}
+
+Bytecode Header:
+  Magic: ${String.fromCharCode(...bytecode.slice(0, 4))}
+  Size: ${formatBytes(bytecode.length)}</pre>`;
+
+                        runPngBtn.disabled = !pngine;
+                        playPngBtn.disabled = !pngine;
+                    } catch (err) {
+                        infoHtml += `
+<span class="png-badge no-bytecode">⚠ Extraction Error</span>
+
+Error: ${err.message}</pre>`;
+                        loadedPngBytecode = null;
+                        runPngBtn.disabled = true;
+                        playPngBtn.disabled = true;
+                    }
+                } else {
+                    infoHtml += `
+<span class="png-badge no-bytecode">No Embedded Bytecode</span>
+
+This PNG does not contain a pNGb chunk.
+Use the CLI to embed bytecode:
+
+  pngine embed image.png code.pngb</pre>`;
+                    loadedPngBytecode = null;
+                    runPngBtn.disabled = true;
+                    playPngBtn.disabled = true;
+                }
+
+                pngInfo.innerHTML = infoHtml;
+
+            } catch (err) {
+                pngInfo.innerHTML = `<pre style="color: #e94560;">Error reading file: ${err.message}</pre>`;
+                pngImageWrapper.innerHTML = '<span class="placeholder">Error loading image</span>';
+                loadedPngBytecode = null;
+                runPngBtn.disabled = true;
+                playPngBtn.disabled = true;
+            }
+        }
+
+        function runPngBytecode() {
+            if (!pngine || !loadedPngBytecode) return;
+            hideError();
+
+            try {
+                setStatus('Loading embedded bytecode...');
+                const start = performance.now();
+
+                pngine.loadModule(loadedPngBytecode);
+                pngine.executeAll();
+
+                // Write uniforms if available
+                const uniformBufferId = pngine.findUniformBuffer();
+                if (uniformBufferId !== null) {
+                    pngine.writeTimeUniform(uniformBufferId, 0);
+                    pngine.executeAll();
+                }
+
+                const elapsed = (performance.now() - start).toFixed(2);
+                setStatus(`Executed in ${elapsed}ms`, 'success');
+            } catch (err) {
+                setStatus('Error: ' + err.message, 'error');
+                console.error('PNG bytecode execution error:', err);
+            }
+        }
+
+        // ====================================================================
         // Event listeners
         // ====================================================================
 
         // Source tab
         runBtn.addEventListener('click', run);
-        playBtn.addEventListener('click', () => togglePlay(true));
+        playBtn.addEventListener('click', () => togglePlay('source'));
         clearBtn.addEventListener('click', clear);
         clearBtn2.addEventListener('click', clear);
+        clearBtn3.addEventListener('click', clear);
 
         source.addEventListener('keydown', (e) => {
             if (e.ctrlKey && e.key === 'Enter') {
@@ -698,7 +931,7 @@ Sections:
         });
 
         runPngbBtn.addEventListener('click', runPngb);
-        playPngbBtn.addEventListener('click', () => togglePlay(false));
+        playPngbBtn.addEventListener('click', () => togglePlay('pngb'));
 
         // PNGB tab - drag and drop
         dropZone.addEventListener('click', () => pngbFileInput.click());
@@ -721,6 +954,38 @@ Sections:
                 handleFile(file);
             } else if (file) {
                 bytecodeInfo.innerHTML = `<pre style="color: #e94560;">Error: Expected .pngb file, got "${file.name}"</pre>`;
+            }
+        });
+
+        // PNG tab - file input
+        pngFileInput.addEventListener('change', (e) => {
+            handlePngFile(e.target.files[0]);
+        });
+
+        runPngBtn.addEventListener('click', runPngBytecode);
+        playPngBtn.addEventListener('click', () => togglePlay('png'));
+
+        // PNG tab - drag and drop
+        pngDropZone.addEventListener('click', () => pngFileInput.click());
+
+        pngDropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            pngDropZone.classList.add('dragover');
+        });
+
+        pngDropZone.addEventListener('dragleave', () => {
+            pngDropZone.classList.remove('dragover');
+        });
+
+        pngDropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            pngDropZone.classList.remove('dragover');
+
+            const file = e.dataTransfer.files[0];
+            if (file && (file.type === 'image/png' || file.name.endsWith('.png'))) {
+                handlePngFile(file);
+            } else if (file) {
+                pngInfo.innerHTML = `<pre style="color: #e94560;">Error: Expected PNG file, got "${file.name}"</pre>`;
             }
         });
 
