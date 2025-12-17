@@ -259,9 +259,15 @@ fn executePipeline(
             });
         }
     } else {
-        std.debug.print("Created {s} -> {s} (1x1, bytecode embedded, {d} bytes)\n", .{
-            input, output, png_data.len,
-        });
+        if (embed_bytecode) {
+            std.debug.print("Created {s} -> {s} (1x1, embedded, {d} bytes)\n", .{
+                input, output, png_data.len,
+            });
+        } else {
+            std.debug.print("Created {s} -> {s} (1x1, {d} bytes)\n", .{
+                input, output, png_data.len,
+            });
+        }
     }
 
     return 0;
