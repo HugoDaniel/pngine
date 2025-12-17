@@ -10,10 +10,10 @@
   - Handle headless rendering (no window/surface)
 
 ### PNG Encoder Compression
-- [ ] Implement actual zlib deflate compression
-  - Current `src/png/encoder.zig` uses zlib store (no compression)
-  - 512x512 RGBA = 1MB output vs ~50KB with compression
-  - Option: use `std.compress.flate` or external zlib
+- [x] ~~Implement actual zlib deflate compression~~ **DONE**
+  - Uses `std.compress.flate` with zlib container (level 6)
+  - Solid color 256x256 compresses to <10% of raw size
+  - 512x512 renders produce ~100KB files (was 1MB+)
 
 ---
 
@@ -83,7 +83,7 @@
 
 ## Known Issues
 
-1. **Large PNG files**: Uncompressed zlib produces ~1MB for 512x512
+1. ~~**Large PNG files**: Uncompressed zlib produces ~1MB for 512x512~~ **FIXED** - Now uses DEFLATE compression
 2. **zgpu not tested**: Lazy dependency added but never fetched/built
 3. **No real rendering**: NativeGPU produces gradient, not actual shader output
 4. **Time uniform unused**: `setTime()` called but stub ignores it
@@ -109,7 +109,7 @@ Dispatcher.executeAll() ──► GPU calls (stub: gradient fill)
 NativeGPU.readPixels() ──► RGBA bytes
     │
     ▼
-png/encoder.encode() ──► PNG file (uncompressed)
+png/encoder.encode() ──► PNG file (DEFLATE compressed)
     │
     ▼
 [optional] png/embed.embed() ──► PNG with pNGb chunk

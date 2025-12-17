@@ -16,7 +16,7 @@ ZIG=/Users/hugo/.zvm/bin/zig
 ## Quick Commands
 
 ```bash
-# Run all tests (289 tests)
+# Run all tests (386 tests)
 /Users/hugo/.zvm/bin/zig build test
 
 # Run tests with summary
@@ -28,9 +28,82 @@ ZIG=/Users/hugo/.zvm/bin/zig
 # Build WASM for web
 /Users/hugo/.zvm/bin/zig build web
 
-# Run CLI
-./zig-out/bin/pngine compile input.pbsf -o output.pngb
+# Run CLI - basic compilation
+./zig-out/bin/pngine compile shader.pngine -o output.pngb
+
+# Run CLI - create PNG with embedded bytecode (default: 1x1 transparent)
+./zig-out/bin/pngine shader.pngine -o output.png
+
+# Run CLI - render actual frame
+./zig-out/bin/pngine shader.pngine -o output.png --frame --size 512x512
 ```
+
+## CLI Reference
+
+### Commands
+
+```bash
+# Compile source to bytecode
+pngine compile <input.pngine> [-o output.pngb]
+
+# Validate bytecode (works with .pngine, .pbsf, .pngb, or .png with embedded bytecode)
+pngine check <input>
+
+# Create PNG with embedded bytecode (default: 1x1 transparent pixel)
+pngine <input.pngine> [-o output.png]
+pngine render <input.pngine> [-o output.png]
+
+# Render actual frame via GPU
+pngine <input.pngine> --frame [-s WxH] [-t time] [-o output.png]
+
+# Embed bytecode into existing PNG
+pngine embed <image.png> <bytecode.pngb> [-o output.png]
+
+# Extract bytecode from PNG
+pngine extract <image.png> [-o output.pngb]
+```
+
+### Render Options
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-o, --output <path>` | Output PNG path | `<input>.png` |
+| `-f, --frame` | Render actual frame via GPU | Off (1x1 transparent) |
+| `-s, --size <WxH>` | Output dimensions (with --frame) | `512x512` |
+| `-t, --time <seconds>` | Time value for animation | `0.0` |
+| `-e, --embed` | Embed bytecode in PNG | On |
+| `--no-embed` | Don't embed bytecode | Off |
+
+### Examples
+
+```bash
+# Create minimal PNG with embedded bytecode (~500 bytes)
+pngine shader.pngine
+
+# Render 512x512 preview with embedded bytecode
+pngine shader.pngine --frame
+
+# Render at 1080p
+pngine shader.pngine --frame -s 1920x1080
+
+# Render animation frame at t=2.5 seconds
+pngine shader.pngine --frame -t 2.5
+
+# Create PNG without embedded bytecode
+pngine shader.pngine --no-embed
+
+# Check bytecode in a PNG file
+pngine check output.png
+```
+
+### Supported File Formats
+
+| Extension | Description |
+|-----------|-------------|
+| `.pngine` | DSL source (macro-based syntax) |
+| `.pbsf` | Legacy PBSF source (S-expressions) |
+| `.pngb` | Compiled bytecode |
+| `.png` | PNG with optional embedded bytecode |
 
 ## Architecture
 
@@ -50,8 +123,10 @@ PNGB bytecode ──► executor/dispatcher.zig ──► GPU calls
 src/
 ├── main.zig              # Module exports and test discovery
 ├── cli.zig               # Command-line interface
+├── cli/
+│   └── render.zig        # Render command implementation
 ├── wasm.zig              # WASM entry points for browser
-├── dsl/                  # New macro-based DSL compiler
+├── dsl/                  # Macro-based DSL compiler
 │   ├── Token.zig         # Token definitions + macro keywords
 │   ├── Lexer.zig         # Labeled switch state machine tokenizer
 │   ├── Ast.zig           # Compact AST node definitions
@@ -59,7 +134,7 @@ src/
 │   ├── Analyzer.zig      # Semantic analysis + cycle detection
 │   ├── Emitter.zig       # AST to PNGB bytecode
 │   └── Compiler.zig      # High-level compile() interface
-├── pbsf/                 # S-expression parser (older format)
+├── pbsf/                 # S-expression parser (legacy format)
 │   ├── tokenizer.zig
 │   └── parser.zig
 ├── bytecode/             # PNGB binary format
@@ -69,6 +144,12 @@ src/
 │   ├── data_section.zig  # Shader code + vertex data
 │   ├── emitter.zig       # Low-level bytecode emission
 │   └── assembler.zig     # PBSF AST to PNGB
+├── png/                  # PNG encoding and bytecode embedding
+│   ├── encoder.zig       # RGBA to PNG with DEFLATE compression
+│   ├── embed.zig         # Embed bytecode in pNGb chunk
+│   └── extract.zig       # Extract bytecode from pNGb chunk
+├── gpu/                  # GPU backends
+│   └── native_gpu.zig    # Native GPU backend (stub)
 ├── executor/             # Bytecode interpreter
 │   ├── dispatcher.zig    # Opcode dispatch loop
 │   ├── mock_gpu.zig      # Test backend (records calls)
@@ -258,9 +339,16 @@ pub fn example() void {}
 - Analyzer: O(nodes + references + imports²) worst case
 - PNGB size: ~400 bytes for simple triangle (2.8x compression vs PBSF)
 
-## Future Work (from plan)
+## Completed Features
 
-1. **PNG Embedding** - `pNGb` ancillary chunk for PNGB data
+1. **PNG Embedding** - `pNGb` ancillary chunk with DEFLATE-compressed bytecode
+2. **PNG Extraction** - Extract bytecode from PNG files
+3. **DEFLATE Compression** - Real zlib compression for IDAT chunks
+4. **Render Command** - Default 1x1 transparent PNG, `--frame` for GPU rendering
+
+## Future Work
+
+1. **Real GPU Rendering** - Integrate zgpu/Dawn for actual shader execution
 2. **WASM Optimization** - Target ~15KB runtime (no std.fmt, static alloc)
 3. **JS Loader** - Extract from PNG, init WebGPU, execute frames
 
