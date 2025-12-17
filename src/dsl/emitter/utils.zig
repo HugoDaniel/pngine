@@ -117,7 +117,8 @@ pub fn getStringContent(e: *Emitter, value_node: Node.Index) []const u8 {
     std.debug.assert(value_node.toInt() < e.ast.nodes.len);
 
     const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
-    if (value_tag != .string_value) return "";
+    // Handle both regular strings and runtime interpolations (strings with $)
+    if (value_tag != .string_value and value_tag != .runtime_interpolation) return "";
 
     const value_token = e.ast.nodes.items(.main_token)[value_node.toInt()];
     const raw = getTokenSlice(e, value_token);
@@ -298,7 +299,8 @@ pub fn resolveNumericValueOrString(e: *Emitter, value_node: Node.Index) ?u32 {
 }
 
 /// Parse a string containing a simple arithmetic expression.
-/// Supports: integers, +, *, and combinations thereof.
+/// Supports: integers, +, *, and combinations thereof (e.g., "4*4*4", "4+4+4").
+/// Operator precedence: * before + (standard math rules).
 pub fn parseStringExpression(expr: []const u8) ?u32 {
     const trimmed = std.mem.trim(u8, expr, " \t\n\r");
     if (trimmed.len == 0) return null;
@@ -308,32 +310,54 @@ pub fn parseStringExpression(expr: []const u8) ?u32 {
         return val;
     } else |_| {}
 
-    // Handle addition: split by + and sum
+    // Handle addition: split by + and sum (+ has lower precedence than *)
     if (std.mem.indexOf(u8, trimmed, "+")) |_| {
         var sum: u32 = 0;
         var it = std.mem.splitScalar(u8, trimmed, '+');
         while (it.next()) |part| {
             const part_trimmed = std.mem.trim(u8, part, " \t");
-            // Handle multiplication within each part
-            if (std.mem.indexOf(u8, part_trimmed, "*")) |star_pos| {
-                const left = std.fmt.parseInt(u32, std.mem.trim(u8, part_trimmed[0..star_pos], " "), 10) catch return null;
-                const right = std.fmt.parseInt(u32, std.mem.trim(u8, part_trimmed[star_pos + 1 ..], " "), 10) catch return null;
-                sum += left * right;
-            } else {
-                sum += std.fmt.parseInt(u32, part_trimmed, 10) catch return null;
-            }
+            // Each part may contain multiplication - parse recursively
+            const part_value = parseMultiplication(part_trimmed) orelse return null;
+            sum += part_value;
         }
         return sum;
     }
 
-    // Handle multiplication only: N * M
-    if (std.mem.indexOf(u8, trimmed, "*")) |star_pos| {
-        const left = std.fmt.parseInt(u32, std.mem.trim(u8, trimmed[0..star_pos], " "), 10) catch return null;
-        const right = std.fmt.parseInt(u32, std.mem.trim(u8, trimmed[star_pos + 1 ..], " "), 10) catch return null;
-        return left * right;
+    // No addition - try multiplication only
+    return parseMultiplication(trimmed);
+}
+
+/// Parse multiplication expression (handles chained: "4*4*4" -> 64).
+/// Maximum 8 operands to bound iteration.
+fn parseMultiplication(expr: []const u8) ?u32 {
+    // Pre-condition
+    std.debug.assert(expr.len > 0);
+
+    // Check if contains *
+    if (std.mem.indexOf(u8, expr, "*") == null) {
+        // No multiplication - parse as single integer
+        return std.fmt.parseInt(u32, std.mem.trim(u8, expr, " \t"), 10) catch null;
     }
 
-    return null;
+    // Split by * and multiply all parts (handles "4*4*4", "2*3*4*5", etc.)
+    var product: u32 = 1;
+    var it = std.mem.splitScalar(u8, expr, '*');
+    var count: u32 = 0;
+    const max_operands: u32 = 8; // Bound iteration
+
+    while (it.next()) |part| {
+        if (count >= max_operands) break;
+        count += 1;
+
+        const part_trimmed = std.mem.trim(u8, part, " \t");
+        const value = std.fmt.parseInt(u32, part_trimmed, 10) catch return null;
+        product *= value;
+    }
+
+    // Post-condition: at least one operand was processed
+    std.debug.assert(count > 0);
+
+    return product;
 }
 
 /// Calculate byte size of a #data declaration.
@@ -508,6 +532,19 @@ pub fn parseBindGroupEntry(e: *Emitter, entry_node: Node.Index) ?DescriptorEncod
                         bg_entry.resource_id = id;
                     }
                 }
+            } else if (value_tag == .identifier_value) {
+                // Direct identifier reference - resolve by looking up in symbol tables
+                const name = getNodeText(e, value_node);
+                if (e.sampler_ids.get(name)) |id| {
+                    bg_entry.resource_type = .sampler;
+                    bg_entry.resource_id = id;
+                } else if (e.texture_ids.get(name)) |id| {
+                    bg_entry.resource_type = .texture_view;
+                    bg_entry.resource_id = id;
+                } else if (e.buffer_ids.get(name)) |id| {
+                    bg_entry.resource_type = .buffer;
+                    bg_entry.resource_id = id;
+                }
             }
         } else if (std.mem.eql(u8, prop_name, "buffer")) {
             bg_entry.resource_type = .buffer;
@@ -635,4 +672,45 @@ pub fn resolveBindGroupId(e: *Emitter, node: Node.Index) ?u16 {
         }
     }
     return null;
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "parseStringExpression: simple integers" {
+    try std.testing.expectEqual(@as(?u32, 42), parseStringExpression("42"));
+    try std.testing.expectEqual(@as(?u32, 0), parseStringExpression("0"));
+    try std.testing.expectEqual(@as(?u32, 64), parseStringExpression("64"));
+}
+
+test "parseStringExpression: two-operand multiplication" {
+    try std.testing.expectEqual(@as(?u32, 8), parseStringExpression("2*4"));
+    try std.testing.expectEqual(@as(?u32, 8), parseStringExpression("2 * 4"));
+    try std.testing.expectEqual(@as(?u32, 12), parseStringExpression("4+4+4"));
+}
+
+test "parseStringExpression: chained multiplication (mat4x4 size)" {
+    // This is the bug fix: "4*4*4" should evaluate to 64 for mat4x4<f32> size
+    try std.testing.expectEqual(@as(?u32, 64), parseStringExpression("4*4*4"));
+    try std.testing.expectEqual(@as(?u32, 64), parseStringExpression("4 * 4 * 4"));
+    try std.testing.expectEqual(@as(?u32, 120), parseStringExpression("2*3*4*5"));
+}
+
+test "parseStringExpression: addition and multiplication mixed" {
+    // Addition: 4 + 4 + 4 = 12
+    try std.testing.expectEqual(@as(?u32, 12), parseStringExpression("4+4+4"));
+    // With multiplication: (2*3) + (4*5) = 6 + 20 = 26
+    try std.testing.expectEqual(@as(?u32, 26), parseStringExpression("2*3+4*5"));
+}
+
+test "parseStringExpression: whitespace handling" {
+    try std.testing.expectEqual(@as(?u32, 64), parseStringExpression("  4*4*4  "));
+    try std.testing.expectEqual(@as(?u32, 64), parseStringExpression("\t4*4*4\n"));
+}
+
+test "parseStringExpression: invalid returns null" {
+    try std.testing.expectEqual(@as(?u32, null), parseStringExpression(""));
+    try std.testing.expectEqual(@as(?u32, null), parseStringExpression("abc"));
+    try std.testing.expectEqual(@as(?u32, null), parseStringExpression("4*"));
 }
