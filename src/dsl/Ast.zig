@@ -134,6 +134,10 @@ pub const Node = struct {
         macro_data,
         /// #queue name { ... }
         macro_queue,
+        /// #imageBitmap name { ... }
+        macro_image_bitmap,
+        /// #wasmCall name { ... }
+        macro_wasm_call,
         /// #define NAME=value
         macro_define,
 

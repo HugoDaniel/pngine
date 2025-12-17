@@ -202,6 +202,8 @@ pub const Parser = struct {
             .macro_shader_module => .macro_shader_module,
             .macro_data => .macro_data,
             .macro_queue => .macro_queue,
+            .macro_image_bitmap => .macro_image_bitmap,
+            .macro_wasm_call => .macro_wasm_call,
             .macro_define => return self.parseDefine(),
             else => return null,
         };
@@ -1260,6 +1262,8 @@ test "Parser: all macro types" {
         "#shaderModule sm { code=\"\" }",
         "#data d { float32Array=[1] }",
         "#queue q { writeBuffer=buf }",
+        "#wasmCall wc { module={url=\"test.wasm\"} func=test }",
+        "#imageBitmap ib { image=data }",
     };
 
     for (macros) |source| {
@@ -1268,6 +1272,32 @@ test "Parser: all macro types" {
         // Just verify it parses without error
         try testing.expect(ast.nodes.len >= 2);
     }
+}
+
+test "Parser: wasmCall macro" {
+    const source: [:0]const u8 =
+        \\#wasmCall mvpMatrix {
+        \\  module={
+        \\    url="assets/mvp.wasm"
+        \\  }
+        \\  func=buildMVPMatrix
+        \\  returns="mat4x4"
+        \\  args=[ "$canvas.width", "$canvas.height", "$t.total" ]
+        \\}
+    ;
+
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    // Verify root has one child (the wasmCall macro)
+    const root_data = ast.nodes.items(.data)[0];
+    const children = ast.extraData(root_data.extra_range);
+    try testing.expectEqual(@as(usize, 1), children.len);
+
+    // Verify macro node
+    const macro_idx = children[0];
+    const macro_tag = ast.nodes.items(.tag)[macro_idx];
+    try testing.expectEqual(Node.Tag.macro_wasm_call, macro_tag);
 }
 
 test "Parser: simpleTriangle example" {

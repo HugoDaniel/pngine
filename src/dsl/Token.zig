@@ -48,6 +48,8 @@ pub const Token = struct {
         macro_data, // #data
         macro_queue, // #queue
         macro_query_set, // #querySet
+        macro_image_bitmap, // #imageBitmap
+        macro_wasm_call, // #wasmCall
 
         // Punctuation
         l_brace, // {
@@ -118,6 +120,8 @@ pub const macro_keywords = std.StaticStringMap(Token.Tag).initComptime(.{
     .{ "data", .macro_data },
     .{ "queue", .macro_queue },
     .{ "querySet", .macro_query_set },
+    .{ "imageBitmap", .macro_image_bitmap },
+    .{ "wasmCall", .macro_wasm_call },
 });
 
 /// Literal keywords that produce special tokens instead of identifiers.
