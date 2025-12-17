@@ -69,6 +69,13 @@ fn run(allocator: std.mem.Allocator) !u8 {
 
     const command = args[1];
 
+    // Check if first arg is a .pngine file - treat as implicit render command
+    const extension = std.fs.path.extension(command);
+    if (std.mem.eql(u8, extension, ".pngine") or std.mem.eql(u8, extension, ".pbsf")) {
+        // Implicit render: pngine file.pngine == pngine render file.pngine
+        return render_cmd.run(allocator, args[1..]);
+    }
+
     if (std.mem.eql(u8, command, "compile")) {
         return runCompile(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "check")) {
@@ -173,6 +180,9 @@ fn runCompile(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
 /// Compiles source (or loads PNGB) and validates by running through MockGPU.
 /// Returns exit code.
 fn runCheck(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
+    // Pre-condition: args slice is valid
+    std.debug.assert(args.len <= 1024);
+
     if (args.len == 0) {
         std.debug.print("Error: no input file specified\n\n", .{});
         printUsage();
@@ -180,51 +190,21 @@ fn runCheck(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     }
 
     const input = args[0];
-    const extension = std.fs.path.extension(input);
 
-    // Get PNGB bytecode - either load directly or compile first
-    const bytecode = if (std.mem.eql(u8, extension, ".pngb"))
-        readBinaryFile(allocator, input) catch |err| {
-            std.debug.print("Error: failed to read '{s}': {}\n", .{ input, err });
-            return 2;
-        }
-    else blk: {
-        // Compile source file first
-        const source = readSourceFile(allocator, input) catch |err| {
-            std.debug.print("Error: failed to read '{s}': {}\n", .{ input, err });
-            return 2;
-        };
-        defer allocator.free(source);
-
-        break :blk compileSource(allocator, input, source) catch |err| {
-            std.debug.print("Error: compilation failed: {}\n", .{err});
-            return 3;
-        };
+    // Load or compile bytecode
+    const bytecode = loadOrCompileBytecode(allocator, input) catch |err| {
+        return handleLoadError(err, input);
     };
     defer allocator.free(bytecode);
 
-    // Validate PNGB header
-    if (bytecode.len < format.HEADER_SIZE) {
-        std.debug.print("Error: file too small to be valid PNGB\n", .{});
-        return 4;
-    }
-    if (!std.mem.eql(u8, bytecode[0..4], format.MAGIC)) {
-        std.debug.print("Error: invalid PNGB magic bytes\n", .{});
-        return 4;
-    }
-
-    // Deserialize module
-    var module = format.deserialize(allocator, bytecode) catch |err| {
-        std.debug.print("Error: failed to deserialize PNGB: {}\n", .{err});
-        return 4;
+    // Validate and deserialize
+    var module = validateAndDeserialize(allocator, bytecode) catch |err| {
+        return handleDeserializeError(err);
     };
     defer module.deinit(allocator);
 
     // Print module info
-    std.debug.print("PNGB: {s}\n", .{input});
-    std.debug.print("  Bytecode:     {d} bytes\n", .{module.bytecode.len});
-    std.debug.print("  Strings:      {d} entries\n", .{module.strings.count()});
-    std.debug.print("  Data section: {d} entries\n", .{module.data.count()});
+    printModuleInfo(input, &module);
 
     // Execute with MockGPU to validate bytecode
     var gpu: MockGPU = .empty;
@@ -236,45 +216,144 @@ fn runCheck(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         return 5;
     };
 
-    // Print execution summary
+    // Print execution summary and validate
     const calls = gpu.getCalls();
-    std.debug.print("\nExecution OK: {d} GPU calls\n", .{calls.len});
+    return printExecutionSummary(calls, &module);
+}
 
-    // Count call types
-    var shader_count: u32 = 0;
-    var pipeline_count: u32 = 0;
-    var draw_count: u32 = 0;
-    var dispatch_count: u32 = 0;
-    var texture_count: u32 = 0;
-    var sampler_count: u32 = 0;
-    var buffer_count: u32 = 0;
-    var bind_group_count: u32 = 0;
+/// Load bytecode from file or compile from source.
+fn loadOrCompileBytecode(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    // Pre-condition: input path is non-empty
+    std.debug.assert(input.len > 0);
+
+    const extension = std.fs.path.extension(input);
+
+    if (std.mem.eql(u8, extension, ".pngb")) {
+        return readBinaryFile(allocator, input);
+    }
+
+    // Compile source file
+    const source = try readSourceFile(allocator, input);
+    defer allocator.free(source);
+
+    const bytecode = try compileSource(allocator, input, source);
+
+    // Post-condition: bytecode is non-empty
+    std.debug.assert(bytecode.len > 0);
+
+    return bytecode;
+}
+
+/// Handle errors from loadOrCompileBytecode.
+fn handleLoadError(err: anyerror, input: []const u8) u8 {
+    switch (err) {
+        error.FileNotFound, error.AccessDenied, error.FileTooLarge => {
+            std.debug.print("Error: failed to read '{s}': {}\n", .{ input, err });
+            return 2;
+        },
+        else => {
+            std.debug.print("Error: compilation failed: {}\n", .{err});
+            return 3;
+        },
+    }
+}
+
+/// Validate PNGB header and deserialize module.
+fn validateAndDeserialize(allocator: std.mem.Allocator, bytecode: []const u8) !format.Module {
+    // Pre-condition: bytecode is non-empty
+    std.debug.assert(bytecode.len > 0);
+
+    if (bytecode.len < format.HEADER_SIZE) {
+        std.debug.print("Error: file too small to be valid PNGB\n", .{});
+        return error.InvalidFormat;
+    }
+    if (!std.mem.eql(u8, bytecode[0..4], format.MAGIC)) {
+        std.debug.print("Error: invalid PNGB magic bytes\n", .{});
+        return error.InvalidFormat;
+    }
+
+    const module = try format.deserialize(allocator, bytecode);
+
+    // Post-condition: module has bytecode
+    std.debug.assert(module.bytecode.len > 0);
+
+    return module;
+}
+
+/// Handle errors from validateAndDeserialize.
+fn handleDeserializeError(err: anyerror) u8 {
+    if (err == error.InvalidFormat) {
+        return 4;
+    }
+    std.debug.print("Error: failed to deserialize PNGB: {}\n", .{err});
+    return 4;
+}
+
+/// Print module information.
+fn printModuleInfo(input: []const u8, module: *const format.Module) void {
+    // Pre-condition: input is non-empty
+    std.debug.assert(input.len > 0);
+
+    std.debug.print("PNGB: {s}\n", .{input});
+    std.debug.print("  Bytecode:     {d} bytes\n", .{module.bytecode.len});
+    std.debug.print("  Strings:      {d} entries\n", .{module.strings.count()});
+    std.debug.print("  Data section: {d} entries\n", .{module.data.count()});
+}
+
+/// GPU call type counts for summary reporting.
+const CallCounts = struct {
+    shader: u32 = 0,
+    pipeline: u32 = 0,
+    draw: u32 = 0,
+    dispatch: u32 = 0,
+    texture: u32 = 0,
+    sampler: u32 = 0,
+    buffer: u32 = 0,
+    bind_group: u32 = 0,
+};
+
+/// Count GPU calls by type.
+fn countCallTypes(calls: []const Call) CallCounts {
+    var counts: CallCounts = .{};
 
     for (calls) |call| {
         switch (call.call_type) {
-            .create_shader_module => shader_count += 1,
-            .create_render_pipeline, .create_compute_pipeline => pipeline_count += 1,
-            .draw, .draw_indexed => draw_count += 1,
-            .dispatch => dispatch_count += 1,
-            .create_texture => texture_count += 1,
-            .create_sampler => sampler_count += 1,
-            .create_buffer => buffer_count += 1,
-            .create_bind_group => bind_group_count += 1,
+            .create_shader_module => counts.shader += 1,
+            .create_render_pipeline, .create_compute_pipeline => counts.pipeline += 1,
+            .draw, .draw_indexed => counts.draw += 1,
+            .dispatch => counts.dispatch += 1,
+            .create_texture => counts.texture += 1,
+            .create_sampler => counts.sampler += 1,
+            .create_buffer => counts.buffer += 1,
+            .create_bind_group => counts.bind_group += 1,
             else => {},
         }
     }
 
-    if (shader_count > 0) std.debug.print("  Shaders:     {d}\n", .{shader_count});
-    if (pipeline_count > 0) std.debug.print("  Pipelines:   {d}\n", .{pipeline_count});
-    if (buffer_count > 0) std.debug.print("  Buffers:     {d}\n", .{buffer_count});
-    if (texture_count > 0) std.debug.print("  Textures:    {d}\n", .{texture_count});
-    if (sampler_count > 0) std.debug.print("  Samplers:    {d}\n", .{sampler_count});
-    if (bind_group_count > 0) std.debug.print("  Bind groups: {d}\n", .{bind_group_count});
-    if (draw_count > 0) std.debug.print("  Draw calls:  {d}\n", .{draw_count});
-    if (dispatch_count > 0) std.debug.print("  Dispatches:  {d}\n", .{dispatch_count});
+    return counts;
+}
+
+/// Print call counts summary.
+fn printCallCounts(counts: CallCounts) void {
+    if (counts.shader > 0) std.debug.print("  Shaders:     {d}\n", .{counts.shader});
+    if (counts.pipeline > 0) std.debug.print("  Pipelines:   {d}\n", .{counts.pipeline});
+    if (counts.buffer > 0) std.debug.print("  Buffers:     {d}\n", .{counts.buffer});
+    if (counts.texture > 0) std.debug.print("  Textures:    {d}\n", .{counts.texture});
+    if (counts.sampler > 0) std.debug.print("  Samplers:    {d}\n", .{counts.sampler});
+    if (counts.bind_group > 0) std.debug.print("  Bind groups: {d}\n", .{counts.bind_group});
+    if (counts.draw > 0) std.debug.print("  Draw calls:  {d}\n", .{counts.draw});
+    if (counts.dispatch > 0) std.debug.print("  Dispatches:  {d}\n", .{counts.dispatch});
+}
+
+/// Print execution summary and validate. Returns exit code.
+fn printExecutionSummary(calls: []const Call, module: *const format.Module) u8 {
+    std.debug.print("\nExecution OK: {d} GPU calls\n", .{calls.len});
+
+    const counts = countCallTypes(calls);
+    printCallCounts(counts);
 
     // Validate descriptor formats (catches issues before web runtime)
-    const desc_errors = validateDescriptors(calls, &module);
+    const desc_errors = validateDescriptors(calls, module);
     if (desc_errors > 0) {
         std.debug.print("\nWarning: {d} invalid descriptor(s) detected\n", .{desc_errors});
         std.debug.print("  These may cause errors in the web runtime\n", .{});
@@ -282,7 +361,7 @@ fn runCheck(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     }
 
     // Report entry points for user verification
-    reportEntryPoints(calls, &module);
+    reportEntryPoints(calls, module);
 
     // Report buffer usage for user verification
     reportBufferUsage(calls);
