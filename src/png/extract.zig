@@ -9,6 +9,11 @@
 //! // bytecode is now valid PNGB that can be executed
 //! ```
 //!
+//! ## Decompression
+//!
+//! Handles real DEFLATE compressed data (LZ77 + Huffman) using std.compress.flate.
+//! Compatible with both store blocks and compressed blocks.
+//!
 //! ## Invariants
 //! - Returns exact original bytecode that was embedded
 //! - Caller owns returned memory
@@ -16,6 +21,7 @@
 const std = @import("std");
 const chunk = @import("chunk.zig");
 const embed = @import("embed.zig");
+const flate = std.compress.flate;
 
 pub const Error = error{
     InvalidPng,
@@ -86,7 +92,7 @@ fn parsePngbChunk(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
     const is_compressed = (flags & embed.FLAG_COMPRESSED) != 0;
 
     if (is_compressed) {
-        // Decompress deflate-raw payload
+        // Decompress raw DEFLATE payload
         return decompressDeflateRaw(allocator, payload) catch {
             return Error.DecompressionFailed;
         };
@@ -104,95 +110,42 @@ fn parsePngbChunk(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
     return result;
 }
 
-/// Decompress deflate-raw (store blocks) data.
+/// Decompress raw DEFLATE data using std.compress.flate.
 ///
-/// This handles the simple store block format used by embed.zig.
-/// Store blocks have format: [BFINAL|BTYPE=00] [LEN] [NLEN] [DATA...]
+/// Handles real LZ77+Huffman compressed data, not just store blocks.
 ///
 /// Pre-conditions:
-/// - data contains valid deflate store blocks
+/// - data contains valid raw DEFLATE stream
+/// - data.len >= 1 (empty streams are invalid)
 ///
 /// Post-conditions:
-/// - Returns decompressed data
+/// - Returns decompressed data with len > 0
 /// - Caller owns returned slice
 fn decompressDeflateRaw(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
-    // Pre-condition: need at least one block header
-    if (data.len < 5) {
+    // Pre-condition: need at least minimal deflate data (header byte)
+    if (data.len < 1) {
         return error.InvalidFormat;
     }
-    std.debug.assert(data.len >= 5);
+    std.debug.assert(data.len >= 1);
 
-    // First pass: calculate total decompressed size
-    var total_size: usize = 0;
-    var pos: usize = 0;
+    // Window buffer for decompression (32KB history window for back-references)
+    var window_buf: [flate.max_window_len]u8 = undefined;
 
-    // Upper bound: each block is at least 5 bytes (header), so max blocks = data.len / 5
-    const max_blocks = (data.len / 5) + 1;
+    // Create input reader from compressed data
+    var input_reader: std.Io.Reader = .fixed(data);
 
-    for (0..max_blocks) |_| {
-        if (pos >= data.len) break;
+    // Create decompressor for raw deflate (no zlib header/footer)
+    var decompressor: flate.Decompress = .init(&input_reader, .raw, &window_buf);
 
-        const header = data[pos];
-        const is_final = (header & 0x01) != 0;
-        const btype = (header >> 1) & 0x03;
+    // Read all decompressed data into allocated buffer.
+    // Unlimited is safe because bytecode size is bounded by PNGB format
+    // (max ~16MB per data section entry, typically <100KB total).
+    const result = decompressor.reader.allocRemaining(allocator, .unlimited) catch {
+        return error.DecompressionFailed;
+    };
 
-        // Only store blocks (BTYPE=00) supported
-        if (btype != 0) {
-            return error.UnsupportedBlockType;
-        }
-
-        if (pos + 5 > data.len) {
-            return error.InvalidFormat;
-        }
-
-        const len = std.mem.readInt(u16, data[pos + 1 ..][0..2], .little);
-        const nlen = std.mem.readInt(u16, data[pos + 3 ..][0..2], .little);
-
-        // Verify NLEN is one's complement of LEN
-        if (nlen != ~len) {
-            return error.InvalidFormat;
-        }
-
-        const block_len: usize = len;
-        total_size += block_len;
-        pos += 5 + block_len;
-
-        if (is_final) break;
-    } else {
-        // Exceeded max blocks without finding final - malformed input
-        return error.InvalidFormat;
-    }
-
-    // Allocate result buffer
-    const result = try allocator.alloc(u8, total_size);
-    errdefer allocator.free(result);
-
-    // Second pass: extract data
-    pos = 0;
-    var out_pos: usize = 0;
-
-    for (0..max_blocks) |_| {
-        if (pos >= data.len) break;
-
-        const header = data[pos];
-        const is_final = (header & 0x01) != 0;
-
-        const len = std.mem.readInt(u16, data[pos + 1 ..][0..2], .little);
-        const block_len: usize = len;
-
-        // Copy block data
-        @memcpy(result[out_pos..][0..block_len], data[pos + 5 ..][0..block_len]);
-        out_pos += block_len;
-        pos += 5 + block_len;
-
-        if (is_final) break;
-    } else {
-        // Should not reach here - first pass validated the data
-        unreachable;
-    }
-
-    // Post-condition: filled entire buffer
-    std.debug.assert(out_pos == total_size);
+    // Post-condition: decompression produced output (valid DEFLATE always produces data)
+    std.debug.assert(result.len > 0);
 
     return result;
 }
@@ -336,6 +289,48 @@ test "extract: roundtrip with large data" {
     try std.testing.expectEqualSlices(u8, &bytecode, extracted);
 }
 
+test "extract: roundtrip with highly compressible data" {
+    const allocator = std.testing.allocator;
+
+    const png_data = try createMinimalPng(allocator);
+    defer allocator.free(png_data);
+
+    // Highly compressible bytecode (all zeros except header)
+    var bytecode: [4096]u8 = undefined;
+    @memcpy(bytecode[0..4], "PNGB");
+    @memset(bytecode[4..], 0x00);
+
+    const embedded = try embed.embed(allocator, png_data, &bytecode);
+    defer allocator.free(embedded);
+
+    const extracted = try extract(allocator, embedded);
+    defer allocator.free(extracted);
+
+    try std.testing.expectEqualSlices(u8, &bytecode, extracted);
+}
+
+test "extract: roundtrip with pattern data" {
+    const allocator = std.testing.allocator;
+
+    const png_data = try createMinimalPng(allocator);
+    defer allocator.free(png_data);
+
+    // Pattern that compresses well
+    var bytecode: [1024]u8 = undefined;
+    @memcpy(bytecode[0..4], "PNGB");
+    for (4..1024) |i| {
+        bytecode[i] = @intCast(i & 0x0F); // Repeating 0-15
+    }
+
+    const embedded = try embed.embed(allocator, png_data, &bytecode);
+    defer allocator.free(embedded);
+
+    const extracted = try extract(allocator, embedded);
+    defer allocator.free(extracted);
+
+    try std.testing.expectEqualSlices(u8, &bytecode, extracted);
+}
+
 test "extract: hasPngb detection" {
     const allocator = std.testing.allocator;
 
@@ -372,10 +367,10 @@ test "extract: getPngbInfo returns correct metadata" {
 
     const info = try getPngbInfo(embedded);
     try std.testing.expectEqual(embed.PNGB_VERSION, info.version);
-    // Now embedded bytecode is compressed by default
+    // Embedded bytecode is compressed
     try std.testing.expect(info.compressed);
-    // Compressed payload: store_header(5) + data(32) = 37 bytes
-    try std.testing.expectEqual(@as(usize, 37), info.payload_size);
+    // Compressed payload should be smaller than original 32 bytes
+    try std.testing.expect(info.payload_size < 32);
 }
 
 test "extract: invalid PNG rejected" {
@@ -393,21 +388,21 @@ test "extract: PNG without pNGb returns error" {
     try std.testing.expectError(Error.NoPngbChunk, extract(allocator, png_data));
 }
 
-test "extract: multi-block roundtrip (>65535 bytes)" {
+test "extract: very large roundtrip (100KB)" {
     const allocator = std.testing.allocator;
 
     const png_data = try createMinimalPng(allocator);
     defer allocator.free(png_data);
 
-    // Large bytecode spanning multiple deflate blocks
-    const large_size: usize = 70000;
+    // 100KB bytecode (simulates WASM module)
+    const large_size: usize = 100 * 1024;
     const bytecode = try allocator.alloc(u8, large_size);
     defer allocator.free(bytecode);
 
     @memcpy(bytecode[0..4], "PNGB");
-    // Fill with pattern for verification
+    // Fill with semi-random pattern
     for (4..large_size) |i| {
-        bytecode[i] = @intCast(i & 0xFF);
+        bytecode[i] = @intCast((i * 31 + i / 256) & 0xFF);
     }
 
     // Embed
@@ -420,54 +415,6 @@ test "extract: multi-block roundtrip (>65535 bytes)" {
 
     // Verify exact roundtrip
     try std.testing.expectEqual(large_size, extracted.len);
-    try std.testing.expectEqualSlices(u8, bytecode, extracted);
-}
-
-test "extract: exact 65535 byte roundtrip" {
-    const allocator = std.testing.allocator;
-
-    const png_data = try createMinimalPng(allocator);
-    defer allocator.free(png_data);
-
-    // Exactly max single block size
-    const bytecode = try allocator.alloc(u8, 65535);
-    defer allocator.free(bytecode);
-
-    @memcpy(bytecode[0..4], "PNGB");
-    for (4..65535) |i| {
-        bytecode[i] = @intCast((i * 7) & 0xFF);
-    }
-
-    const embedded = try embed.embed(allocator, png_data, bytecode);
-    defer allocator.free(embedded);
-
-    const extracted = try extract(allocator, embedded);
-    defer allocator.free(extracted);
-
-    try std.testing.expectEqualSlices(u8, bytecode, extracted);
-}
-
-test "extract: 65536 byte roundtrip (two blocks)" {
-    const allocator = std.testing.allocator;
-
-    const png_data = try createMinimalPng(allocator);
-    defer allocator.free(png_data);
-
-    // One byte over max block triggers second block
-    const bytecode = try allocator.alloc(u8, 65536);
-    defer allocator.free(bytecode);
-
-    @memcpy(bytecode[0..4], "PNGB");
-    for (4..65536) |i| {
-        bytecode[i] = @intCast((i * 13) & 0xFF);
-    }
-
-    const embedded = try embed.embed(allocator, png_data, bytecode);
-    defer allocator.free(embedded);
-
-    const extracted = try extract(allocator, embedded);
-    defer allocator.free(extracted);
-
     try std.testing.expectEqualSlices(u8, bytecode, extracted);
 }
 
@@ -519,85 +466,75 @@ test "extract: minimum size bytecode roundtrip" {
     try std.testing.expectEqualSlices(u8, &bytecode, extracted);
 }
 
-test "extract: decompressDeflateRaw single block" {
+test "extract: WASM-like data roundtrip" {
     const allocator = std.testing.allocator;
 
-    // Manually construct a valid single-block deflate stream
-    const data = "Hello, World!";
-    const data_len: u16 = @intCast(data.len);
+    const png_data = try createMinimalPng(allocator);
+    defer allocator.free(png_data);
 
-    var compressed: [5 + data.len]u8 = undefined;
-    compressed[0] = 0x01; // BFINAL=1, BTYPE=00
-    std.mem.writeInt(u16, compressed[1..3], data_len, .little);
-    std.mem.writeInt(u16, compressed[3..5], ~data_len, .little);
-    @memcpy(compressed[5..], data);
+    // Simulate WASM module structure
+    var bytecode: [8192]u8 = undefined;
+    @memcpy(bytecode[0..4], "PNGB");
+    // WASM-like pattern: section headers, type indices, opcodes
+    for (4..8192) |i| {
+        const section = i / 256;
+        const offset_in_section = i % 256;
+        bytecode[i] = @intCast((section * 17 + offset_in_section) & 0xFF);
+    }
 
-    const decompressed = try decompressDeflateRaw(allocator, &compressed);
-    defer allocator.free(decompressed);
+    const embedded = try embed.embed(allocator, png_data, &bytecode);
+    defer allocator.free(embedded);
 
-    try std.testing.expectEqualStrings(data, decompressed);
+    const extracted = try extract(allocator, embedded);
+    defer allocator.free(extracted);
+
+    try std.testing.expectEqualSlices(u8, &bytecode, extracted);
 }
 
-test "extract: decompressDeflateRaw multi-block" {
+test "extract: compression actually reduces size" {
     const allocator = std.testing.allocator;
 
-    // Construct two-block deflate stream
-    const block1_data = "First block data";
-    const block2_data = "Second block!";
-    const len1: u16 = @intCast(block1_data.len);
-    const len2: u16 = @intCast(block2_data.len);
+    const png_data = try createMinimalPng(allocator);
+    defer allocator.free(png_data);
 
-    var compressed: [5 + block1_data.len + 5 + block2_data.len]u8 = undefined;
+    // Highly compressible data
+    var bytecode: [4096]u8 = undefined;
+    @memcpy(bytecode[0..4], "PNGB");
+    @memset(bytecode[4..], 'A');
 
-    // Block 1 (not final)
-    compressed[0] = 0x00; // BFINAL=0, BTYPE=00
-    std.mem.writeInt(u16, compressed[1..3], len1, .little);
-    std.mem.writeInt(u16, compressed[3..5], ~len1, .little);
-    @memcpy(compressed[5..][0..block1_data.len], block1_data);
+    const embedded = try embed.embed(allocator, png_data, &bytecode);
+    defer allocator.free(embedded);
 
-    // Block 2 (final)
-    const b2_start = 5 + block1_data.len;
-    compressed[b2_start] = 0x01; // BFINAL=1, BTYPE=00
-    std.mem.writeInt(u16, compressed[b2_start + 1 ..][0..2], len2, .little);
-    std.mem.writeInt(u16, compressed[b2_start + 3 ..][0..2], ~len2, .little);
-    @memcpy(compressed[b2_start + 5 ..][0..block2_data.len], block2_data);
+    // Verify compression achieved significant size reduction
+    const info = try getPngbInfo(embedded);
+    try std.testing.expect(info.compressed);
+    // Should compress to less than 10% of original
+    try std.testing.expect(info.payload_size < 400);
 
-    const decompressed = try decompressDeflateRaw(allocator, &compressed);
-    defer allocator.free(decompressed);
-
-    try std.testing.expectEqual(block1_data.len + block2_data.len, decompressed.len);
-    try std.testing.expectEqualStrings(block1_data, decompressed[0..block1_data.len]);
-    try std.testing.expectEqualStrings(block2_data, decompressed[block1_data.len..]);
+    // Still extracts correctly
+    const extracted = try extract(allocator, embedded);
+    defer allocator.free(extracted);
+    try std.testing.expectEqualSlices(u8, &bytecode, extracted);
 }
 
-test "extract: decompressDeflateRaw invalid header rejected" {
+test "extract: alternating bytes roundtrip" {
     const allocator = std.testing.allocator;
 
-    // Too short
-    const short = [_]u8{ 0x01, 0x00 };
-    try std.testing.expectError(error.InvalidFormat, decompressDeflateRaw(allocator, &short));
+    const png_data = try createMinimalPng(allocator);
+    defer allocator.free(png_data);
 
-    // Invalid NLEN (not one's complement of LEN)
-    var bad_nlen: [10]u8 = undefined;
-    bad_nlen[0] = 0x01;
-    std.mem.writeInt(u16, bad_nlen[1..3], 5, .little);
-    std.mem.writeInt(u16, bad_nlen[3..5], 0x1234, .little); // Wrong NLEN
-    @memset(bad_nlen[5..], 0);
-    try std.testing.expectError(error.InvalidFormat, decompressDeflateRaw(allocator, &bad_nlen));
-}
+    // Alternating 0x00/0xFF pattern (less compressible)
+    var bytecode: [512]u8 = undefined;
+    @memcpy(bytecode[0..4], "PNGB");
+    for (4..512) |i| {
+        bytecode[i] = if (i % 2 == 0) 0x00 else 0xFF;
+    }
 
-test "extract: decompressDeflateRaw unsupported block type rejected" {
-    const allocator = std.testing.allocator;
+    const embedded = try embed.embed(allocator, png_data, &bytecode);
+    defer allocator.free(embedded);
 
-    // BTYPE=01 (fixed Huffman)
-    var huffman: [10]u8 = undefined;
-    huffman[0] = 0x03; // BFINAL=1, BTYPE=01
-    @memset(huffman[1..], 0);
-    try std.testing.expectError(error.UnsupportedBlockType, decompressDeflateRaw(allocator, &huffman));
+    const extracted = try extract(allocator, embedded);
+    defer allocator.free(extracted);
 
-    // BTYPE=10 (dynamic Huffman)
-    var dynamic: [10]u8 = undefined;
-    dynamic[0] = 0x05; // BFINAL=1, BTYPE=10
-    @memset(dynamic[1..], 0);
-    try std.testing.expectError(error.UnsupportedBlockType, decompressDeflateRaw(allocator, &dynamic));
+    try std.testing.expectEqualSlices(u8, &bytecode, extracted);
 }
