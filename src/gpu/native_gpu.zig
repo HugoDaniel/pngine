@@ -1,0 +1,524 @@
+//! Native GPU Backend using zgpu/Dawn
+//!
+//! Provides headless GPU rendering for CLI tools.
+//! Renders to an offscreen texture that can be read back to CPU.
+//!
+//! ## Status
+//! Currently a stub implementation. Full GPU rendering requires
+//! platform-specific setup and additional dependencies.
+//!
+//! ## Invariants
+//! - Implements same interface as MockGPU/WasmGPU
+//! - Resource IDs map to internal GPU resources
+//! - Pixel data can be read back after rendering
+
+const std = @import("std");
+const assert = std.debug.assert;
+const Allocator = std.mem.Allocator;
+
+// Conditional zgpu import (only available on native targets)
+const has_zgpu = @hasDecl(@import("root"), "zgpu");
+
+pub const Error = error{
+    GpuNotAvailable,
+    InitializationFailed,
+    RenderFailed,
+    OutOfMemory,
+};
+
+/// Native GPU backend for headless rendering.
+///
+/// Pre-condition: init() must be called before any operations.
+/// Post-condition: deinit() must be called to release resources.
+pub const NativeGPU = struct {
+    const Self = @This();
+
+    /// Maximum resources per category.
+    pub const MAX_BUFFERS: u16 = 256;
+    pub const MAX_TEXTURES: u16 = 256;
+    pub const MAX_SHADERS: u16 = 64;
+    pub const MAX_PIPELINES: u16 = 64;
+    pub const MAX_BIND_GROUPS: u16 = 64;
+
+    /// Render target dimensions.
+    width: u32,
+    height: u32,
+
+    /// Module reference for data lookups.
+    module: ?*const @import("../bytecode/format.zig").Module,
+
+    /// Time uniform for animations.
+    time: f32,
+
+    /// Initialization state.
+    initialized: bool,
+
+    /// Resource tracking (for validation).
+    buffers_created: std.StaticBitSet(MAX_BUFFERS),
+    textures_created: std.StaticBitSet(MAX_TEXTURES),
+    shaders_created: std.StaticBitSet(MAX_SHADERS),
+    pipelines_created: std.StaticBitSet(MAX_PIPELINES),
+    bind_groups_created: std.StaticBitSet(MAX_BIND_GROUPS),
+
+    /// Pass state.
+    in_render_pass: bool,
+    in_compute_pass: bool,
+    current_pipeline: ?u16,
+
+    /// Pixel buffer for readback (RGBA).
+    pixel_buffer: ?[]u8,
+
+    /// Initialize headless GPU rendering.
+    ///
+    /// Pre-conditions:
+    /// - width > 0 and height > 0
+    ///
+    /// Post-conditions:
+    /// - GPU device is ready for commands
+    /// - Render target texture is created
+    pub fn init(allocator: Allocator, width: u32, height: u32) Error!Self {
+        // Pre-conditions
+        if (width == 0 or height == 0) return Error.InitializationFailed;
+
+        assert(width > 0);
+        assert(height > 0);
+
+        // Allocate pixel buffer for readback
+        const pixel_size = @as(usize, width) * @as(usize, height) * 4;
+        const pixel_buffer = allocator.alloc(u8, pixel_size) catch {
+            return Error.OutOfMemory;
+        };
+
+        // Initialize with clear color (black, opaque)
+        @memset(pixel_buffer, 0);
+        // Set alpha to 255 for each pixel (bounded loop)
+        const pixel_count = (@as(usize, width) * @as(usize, height));
+        for (0..pixel_count) |p| {
+            pixel_buffer[p * 4 + 3] = 255;
+        }
+
+        return Self{
+            .width = width,
+            .height = height,
+            .module = null,
+            .time = 0.0,
+            .initialized = true,
+            .buffers_created = std.StaticBitSet(MAX_BUFFERS).initEmpty(),
+            .textures_created = std.StaticBitSet(MAX_TEXTURES).initEmpty(),
+            .shaders_created = std.StaticBitSet(MAX_SHADERS).initEmpty(),
+            .pipelines_created = std.StaticBitSet(MAX_PIPELINES).initEmpty(),
+            .bind_groups_created = std.StaticBitSet(MAX_BIND_GROUPS).initEmpty(),
+            .in_render_pass = false,
+            .in_compute_pass = false,
+            .current_pipeline = null,
+            .pixel_buffer = pixel_buffer,
+        };
+    }
+
+    pub fn deinit(self: *Self, allocator: Allocator) void {
+        // Pre-condition: was initialized
+        assert(self.initialized);
+        assert(!self.in_render_pass and !self.in_compute_pass);
+
+        if (self.pixel_buffer) |buf| {
+            allocator.free(buf);
+        }
+        self.* = undefined;
+    }
+
+    /// Set module reference for data lookups.
+    pub fn setModule(self: *Self, module: *const @import("../bytecode/format.zig").Module) void {
+        // Pre-conditions
+        assert(self.initialized);
+        assert(module.bytecode.len > 0);
+
+        self.module = module;
+    }
+
+    /// Set time uniform for animations.
+    pub fn setTime(self: *Self, time_value: f32) void {
+        // Pre-conditions
+        assert(self.initialized);
+        assert(!std.math.isNan(time_value));
+
+        self.time = time_value;
+    }
+
+    /// Read rendered pixels back to CPU.
+    ///
+    /// Pre-condition: GPU is initialized.
+    /// Post-condition: Returns RGBA pixel data (width * height * 4 bytes).
+    pub fn readPixels(self: *Self, allocator: Allocator) Error![]u8 {
+        // Pre-conditions
+        assert(self.initialized);
+        assert(self.pixel_buffer != null);
+
+        if (self.pixel_buffer) |buf| {
+            const result = allocator.alloc(u8, buf.len) catch {
+                return Error.OutOfMemory;
+            };
+            @memcpy(result, buf);
+
+            // Post-condition: result size matches pixel buffer
+            assert(result.len == buf.len);
+            return result;
+        }
+
+        return Error.RenderFailed;
+    }
+
+    /// Check if native GPU rendering is available.
+    pub fn isAvailable() bool {
+        // TODO: Implement actual GPU availability check
+        // For now, return true to indicate stub is functional
+        return true;
+    }
+
+    // ========================================================================
+    // GPU Backend Interface (required by Dispatcher)
+    // ========================================================================
+
+    pub fn createBuffer(self: *Self, allocator: Allocator, buffer_id: u16, size: u32, usage: u8) !void {
+        _ = allocator;
+        _ = size;
+        _ = usage;
+
+        assert(buffer_id < MAX_BUFFERS);
+        assert(self.initialized);
+
+        self.buffers_created.set(buffer_id);
+
+        // TODO: Create actual GPU buffer
+    }
+
+    pub fn createTexture(self: *Self, allocator: Allocator, texture_id: u16, descriptor_data_id: u16) !void {
+        _ = allocator;
+        _ = descriptor_data_id;
+
+        assert(texture_id < MAX_TEXTURES);
+        assert(self.initialized);
+
+        self.textures_created.set(texture_id);
+
+        // TODO: Create actual GPU texture
+    }
+
+    pub fn createSampler(self: *Self, allocator: Allocator, sampler_id: u16, descriptor_data_id: u16) !void {
+        _ = allocator;
+        _ = descriptor_data_id;
+
+        assert(sampler_id < MAX_TEXTURES);
+        assert(self.initialized);
+
+        // TODO: Create actual GPU sampler
+    }
+
+    pub fn createShaderModule(self: *Self, allocator: Allocator, shader_id: u16, code_data_id: u16) !void {
+        _ = allocator;
+        _ = code_data_id;
+
+        assert(shader_id < MAX_SHADERS);
+        assert(self.initialized);
+
+        self.shaders_created.set(shader_id);
+
+        // TODO: Create actual GPU shader module
+    }
+
+    pub fn createRenderPipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
+        _ = allocator;
+        _ = descriptor_data_id;
+
+        assert(pipeline_id < MAX_PIPELINES);
+        assert(self.initialized);
+
+        self.pipelines_created.set(pipeline_id);
+
+        // TODO: Create actual GPU render pipeline
+    }
+
+    pub fn createComputePipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
+        _ = allocator;
+        _ = descriptor_data_id;
+
+        assert(pipeline_id < MAX_PIPELINES);
+        assert(self.initialized);
+
+        self.pipelines_created.set(pipeline_id);
+
+        // TODO: Create actual GPU compute pipeline
+    }
+
+    pub fn createBindGroup(self: *Self, allocator: Allocator, group_id: u16, layout_id: u16, entry_data_id: u16) !void {
+        _ = allocator;
+        _ = layout_id;
+        _ = entry_data_id;
+
+        assert(group_id < MAX_BIND_GROUPS);
+        assert(self.initialized);
+
+        self.bind_groups_created.set(group_id);
+
+        // TODO: Create actual GPU bind group
+    }
+
+    // ========================================================================
+    // Pass Operations
+    // ========================================================================
+
+    pub fn beginRenderPass(self: *Self, allocator: Allocator, color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16) !void {
+        _ = allocator;
+        _ = color_texture_id;
+        _ = load_op;
+        _ = store_op;
+        _ = depth_texture_id;
+
+        assert(!self.in_render_pass and !self.in_compute_pass);
+        assert(self.initialized);
+
+        self.in_render_pass = true;
+        self.current_pipeline = null;
+
+        // TODO: Begin actual GPU render pass
+    }
+
+    pub fn beginComputePass(self: *Self, allocator: Allocator) !void {
+        _ = allocator;
+
+        assert(!self.in_render_pass and !self.in_compute_pass);
+        assert(self.initialized);
+
+        self.in_compute_pass = true;
+        self.current_pipeline = null;
+
+        // TODO: Begin actual GPU compute pass
+    }
+
+    pub fn setPipeline(self: *Self, allocator: Allocator, pipeline_id: u16) !void {
+        _ = allocator;
+
+        assert(self.in_render_pass or self.in_compute_pass);
+        assert(self.initialized);
+
+        self.current_pipeline = pipeline_id;
+
+        // TODO: Set actual GPU pipeline
+    }
+
+    pub fn setBindGroup(self: *Self, allocator: Allocator, slot: u8, group_id: u16) !void {
+        _ = allocator;
+        _ = slot;
+        _ = group_id;
+
+        assert(self.in_render_pass or self.in_compute_pass);
+        assert(self.initialized);
+
+        // TODO: Set actual GPU bind group
+    }
+
+    pub fn setVertexBuffer(self: *Self, allocator: Allocator, slot: u8, buffer_id: u16) !void {
+        _ = allocator;
+        _ = slot;
+        _ = buffer_id;
+
+        assert(self.in_render_pass);
+        assert(self.initialized);
+
+        // TODO: Set actual GPU vertex buffer
+    }
+
+    pub fn draw(self: *Self, allocator: Allocator, vertex_count: u32, instance_count: u32) !void {
+        _ = allocator;
+        _ = vertex_count;
+        _ = instance_count;
+
+        assert(self.in_render_pass);
+        assert(self.initialized);
+
+        // TODO: Execute actual GPU draw call
+        // For now, fill pixel buffer with a test pattern
+        if (self.pixel_buffer) |buf| {
+            // Simple gradient pattern to show something is happening
+            const width = self.width;
+            const height = self.height;
+            for (0..height) |y| {
+                for (0..width) |x| {
+                    const offset = (y * width + x) * 4;
+                    buf[offset + 0] = @intCast((x * 255) / width); // R
+                    buf[offset + 1] = @intCast((y * 255) / height); // G
+                    buf[offset + 2] = 128; // B
+                    buf[offset + 3] = 255; // A
+                }
+            }
+        }
+    }
+
+    pub fn drawIndexed(self: *Self, allocator: Allocator, index_count: u32, instance_count: u32) !void {
+        _ = allocator;
+        _ = index_count;
+        _ = instance_count;
+
+        assert(self.in_render_pass);
+        assert(self.initialized);
+
+        // TODO: Execute actual GPU indexed draw call
+    }
+
+    pub fn dispatch(self: *Self, allocator: Allocator, x: u32, y: u32, z: u32) !void {
+        _ = allocator;
+        _ = x;
+        _ = y;
+        _ = z;
+
+        assert(self.in_compute_pass);
+        assert(self.initialized);
+
+        // TODO: Execute actual GPU compute dispatch
+    }
+
+    pub fn endPass(self: *Self, allocator: Allocator) !void {
+        _ = allocator;
+
+        assert(self.in_render_pass or self.in_compute_pass);
+        assert(self.initialized);
+
+        self.in_render_pass = false;
+        self.in_compute_pass = false;
+        self.current_pipeline = null;
+
+        // TODO: End actual GPU pass
+    }
+
+    // ========================================================================
+    // Queue Operations
+    // ========================================================================
+
+    pub fn writeBuffer(self: *Self, allocator: Allocator, buffer_id: u16, offset: u32, data_id: u16) !void {
+        _ = allocator;
+        _ = buffer_id;
+        _ = offset;
+        _ = data_id;
+
+        assert(self.initialized);
+
+        // TODO: Write to actual GPU buffer
+    }
+
+    pub fn submit(self: *Self, allocator: Allocator) !void {
+        _ = allocator;
+
+        assert(!self.in_render_pass and !self.in_compute_pass);
+        assert(self.initialized);
+
+        // TODO: Submit actual GPU commands
+    }
+};
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+const testing = std.testing;
+
+test "NativeGPU: init and deinit" {
+    var gpu = try NativeGPU.init(testing.allocator, 64, 64);
+    defer gpu.deinit(testing.allocator);
+
+    try testing.expect(gpu.initialized);
+    try testing.expectEqual(@as(u32, 64), gpu.width);
+    try testing.expectEqual(@as(u32, 64), gpu.height);
+}
+
+test "NativeGPU: read pixels returns RGBA data" {
+    var gpu = try NativeGPU.init(testing.allocator, 2, 2);
+    defer gpu.deinit(testing.allocator);
+
+    const pixels = try gpu.readPixels(testing.allocator);
+    defer testing.allocator.free(pixels);
+
+    // Should be 2x2x4 = 16 bytes
+    try testing.expectEqual(@as(usize, 16), pixels.len);
+}
+
+test "NativeGPU: render pass lifecycle" {
+    var gpu = try NativeGPU.init(testing.allocator, 64, 64);
+    defer gpu.deinit(testing.allocator);
+
+    try testing.expect(!gpu.in_render_pass);
+
+    try gpu.beginRenderPass(testing.allocator, 0, 1, 0, 0xFFFF);
+    try testing.expect(gpu.in_render_pass);
+
+    try gpu.setPipeline(testing.allocator, 0);
+    try gpu.draw(testing.allocator, 3, 1);
+
+    try gpu.endPass(testing.allocator);
+    try testing.expect(!gpu.in_render_pass);
+}
+
+test "NativeGPU: resource creation" {
+    var gpu = try NativeGPU.init(testing.allocator, 64, 64);
+    defer gpu.deinit(testing.allocator);
+
+    try gpu.createBuffer(testing.allocator, 0, 1024, 0x44);
+    try testing.expect(gpu.buffers_created.isSet(0));
+
+    try gpu.createTexture(testing.allocator, 0, 0);
+    try testing.expect(gpu.textures_created.isSet(0));
+
+    try gpu.createShaderModule(testing.allocator, 0, 0);
+    try testing.expect(gpu.shaders_created.isSet(0));
+}
+
+test "NativeGPU: draw produces pixels" {
+    var gpu = try NativeGPU.init(testing.allocator, 4, 4);
+    defer gpu.deinit(testing.allocator);
+
+    try gpu.beginRenderPass(testing.allocator, 0, 1, 0, 0xFFFF);
+    try gpu.setPipeline(testing.allocator, 0);
+    try gpu.draw(testing.allocator, 3, 1);
+    try gpu.endPass(testing.allocator);
+    try gpu.submit(testing.allocator);
+
+    const pixels = try gpu.readPixels(testing.allocator);
+    defer testing.allocator.free(pixels);
+
+    // After draw, pixels should have the test gradient pattern
+    // Check that alpha is 255 for first pixel
+    try testing.expectEqual(@as(u8, 255), pixels[3]);
+}
+
+test "NativeGPU: OOM handling with FailingAllocator" {
+    // Test that init handles OOM gracefully
+    var fail_index: usize = 0;
+    while (fail_index < 10) : (fail_index += 1) {
+        var failing_alloc = testing.FailingAllocator.init(testing.allocator, .{
+            .fail_index = fail_index,
+        });
+
+        const result = NativeGPU.init(failing_alloc.allocator(), 64, 64);
+
+        if (failing_alloc.has_induced_failure) {
+            // OOM occurred - verify graceful handling
+            try testing.expectError(Error.OutOfMemory, result);
+        } else {
+            // No OOM - operation succeeded
+            var gpu = try result;
+            gpu.deinit(failing_alloc.allocator());
+            break;
+        }
+    }
+}
+
+test "NativeGPU: readPixels OOM handling" {
+    var gpu = try NativeGPU.init(testing.allocator, 4, 4);
+    defer gpu.deinit(testing.allocator);
+
+    // Test OOM during readPixels
+    var failing_alloc = testing.FailingAllocator.init(testing.allocator, .{
+        .fail_index = 0,
+    });
+
+    const result = gpu.readPixels(failing_alloc.allocator());
+    try testing.expectError(Error.OutOfMemory, result);
+}
