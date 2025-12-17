@@ -831,7 +831,7 @@ Size: ${formatBytes(data.length)}
                 if (hasEmbedded) {
                     try {
                         const info = getPngbInfo(data);
-                        const bytecode = extractPngb(data);
+                        const bytecode = await extractPngb(data);
                         loadedPngBytecode = bytecode;
 
                         infoHtml += `

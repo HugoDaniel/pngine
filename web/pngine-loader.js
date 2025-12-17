@@ -265,8 +265,8 @@ export class PNGine {
      * @param {ArrayBuffer|Uint8Array} pngData - PNG file data
      * @throws {Error} On extraction or load failure
      */
-    loadFromPngData(pngData) {
-        const bytecode = extractPngb(pngData);
+    async loadFromPngData(pngData) {
+        const bytecode = await extractPngb(pngData);
         this.loadModule(bytecode);
     }
 
