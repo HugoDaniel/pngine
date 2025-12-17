@@ -128,6 +128,7 @@ pub fn build(b: *std.Build) void {
         "web/index.html",
         "web/pngine-gpu.js",
         "web/pngine-loader.js",
+        "web/pngine-png.js",
     };
 
     for (web_files) |file| {
