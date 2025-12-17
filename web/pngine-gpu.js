@@ -4,10 +4,25 @@
  * Implements the GPU operations called by the WASM module.
  * Manages WebGPU resources and translates WASM calls to actual GPU operations.
  *
- * Version: 2024-12-16-v2 (force cache refresh)
+ * ## Async ImageBitmap Pattern
+ *
+ * createImageBitmap() is async in browsers - it returns a Promise that decodes
+ * the image data. Since WASM execution is synchronous, the decode completes
+ * AFTER the draw call on the first frame, causing textures to appear black.
+ *
+ * Solution: After the first executeAll(), call waitForBitmaps() to wait for
+ * all pending ImageBitmap Promises to resolve, then re-execute:
+ *
+ * ```javascript
+ * pngine.executeAll();              // Starts async bitmap decode
+ * await pngine.waitForBitmaps();    // Waits for decode to complete
+ * pngine.executeAll();              // Re-renders with textures ready
+ * ```
+ *
+ * Version: 2024-12-17-v1
  */
 
-console.log('[PNGineGPU] Module loaded - version 2024-12-16-v2');
+console.log('[PNGineGPU] Module loaded - version 2024-12-17-v1');
 
 export class PNGineGPU {
     /**
@@ -27,11 +42,31 @@ export class PNGineGPU {
         this.shaders = new Map();
         this.pipelines = new Map();
         this.bindGroups = new Map();
+        this.imageBitmaps = new Map();  // ImageBitmap ID → ImageBitmap
+
+        // WASM module support
+        this.wasmModules = new Map();      // Module ID → { instance, memory }
+        this.wasmCallResults = new Map();  // Call ID → { ptr, moduleId }
+
+        // Runtime state for dynamic arguments
+        this.currentTime = 0;              // Total time in seconds ($t.total)
+        this.deltaTime = 0;                // Delta time since last frame ($t.delta)
 
         // Render state
         this.commandEncoder = null;
         this.currentPass = null;
         this.passType = null; // 'render' | 'compute'
+    }
+
+    /**
+     * Set current time for animation.
+     * Called before executeAll() to provide time for WASM calls.
+     * @param {number} totalTime - Total elapsed time in seconds
+     * @param {number} deltaTime - Time since last frame in seconds
+     */
+    setTime(totalTime, deltaTime = 0) {
+        this.currentTime = totalTime;
+        this.deltaTime = deltaTime;
     }
 
     /**
@@ -313,6 +348,309 @@ export class PNGineGPU {
             entries,
         });
         this.bindGroups.set(id, bindGroup);
+    }
+
+    /**
+     * Create an ImageBitmap from blob data.
+     * Blob format: [mime_len:u8][mime:bytes][data:bytes]
+     * This is async - stores a Promise that resolves to ImageBitmap.
+     * @param {number} id - ImageBitmap ID
+     * @param {number} blobPtr - Pointer to blob data
+     * @param {number} blobLen - Blob data length
+     */
+    createImageBitmap(id, blobPtr, blobLen) {
+        // Skip if already exists (allows executeAll in animation loop)
+        if (this.imageBitmaps.has(id)) {
+            return;
+        }
+
+        const bytes = this.readBytes(blobPtr, blobLen);
+
+        // Parse blob format: [mime_len:u8][mime:bytes][data:bytes]
+        const mimeLen = bytes[0];
+        const mimeBytes = bytes.slice(1, 1 + mimeLen);
+        const mimeType = new TextDecoder().decode(mimeBytes);
+        const imageData = bytes.slice(1 + mimeLen);
+
+        console.log(`[GPU] createImageBitmap(${id}), mime=${mimeType}, size=${imageData.length}`);
+
+        // Create Blob and decode to ImageBitmap (async)
+        const blob = new Blob([imageData], { type: mimeType });
+        const bitmapPromise = window.createImageBitmap(blob);
+
+        // Store the promise - will be awaited when copying to texture
+        this.imageBitmaps.set(id, bitmapPromise);
+    }
+
+    /**
+     * Wait for all pending ImageBitmap decoding to complete.
+     * Call this after init phase but before first frame to ensure
+     * all textures can be uploaded synchronously.
+     * @returns {Promise<void>}
+     */
+    async waitForBitmaps() {
+        const pending = [];
+        for (const [id, bitmap] of this.imageBitmaps.entries()) {
+            if (bitmap instanceof Promise) {
+                pending.push(
+                    bitmap.then(resolved => {
+                        this.imageBitmaps.set(id, resolved);
+                        console.log(`[GPU] ImageBitmap ${id} decoded: ${resolved.width}x${resolved.height}`);
+                        return resolved;
+                    })
+                );
+            }
+        }
+        if (pending.length > 0) {
+            console.log(`[GPU] Waiting for ${pending.length} ImageBitmap(s) to decode...`);
+            await Promise.all(pending);
+            console.log(`[GPU] All ImageBitmaps ready`);
+        }
+    }
+
+    // ========================================================================
+    // WASM Module Operations
+    // ========================================================================
+
+    /**
+     * Initialize a WASM module from embedded data.
+     * The WASM bytes come from the PNGine data section.
+     * @param {number} moduleId - Module ID
+     * @param {number} dataPtr - Pointer to WASM binary in memory
+     * @param {number} dataLen - Length of WASM binary
+     */
+    initWasmModule(moduleId, dataPtr, dataLen) {
+        // Skip if already loaded (allows executeAll in animation loop)
+        if (this.wasmModules.has(moduleId)) {
+            return;
+        }
+
+        const wasmBytes = this.readBytes(dataPtr, dataLen).slice();  // Copy bytes
+        console.log(`[GPU] initWasmModule(${moduleId}), size=${wasmBytes.length}`);
+
+        try {
+            // Compile synchronously (small modules expected)
+            const module = new WebAssembly.Module(wasmBytes);
+
+            // Minimal imports for typical WASM modules
+            const imports = {
+                env: {
+                    abort: (msg, file, line, col) => {
+                        console.error(`[WASM abort] ${msg} at ${file}:${line}:${col}`);
+                    },
+                    // Math imports for AssemblyScript
+                    'Math.sin': Math.sin,
+                    'Math.cos': Math.cos,
+                    'Math.tan': Math.tan,
+                    'Math.sqrt': Math.sqrt,
+                }
+            };
+
+            const instance = new WebAssembly.Instance(module, imports);
+
+            this.wasmModules.set(moduleId, {
+                instance,
+                memory: instance.exports.memory,
+            });
+
+            console.log(`[GPU]   WASM module ${moduleId} loaded, exports:`, Object.keys(instance.exports));
+        } catch (err) {
+            console.error(`[GPU] Failed to load WASM module ${moduleId}:`, err);
+        }
+    }
+
+    /**
+     * Call a WASM exported function with encoded arguments.
+     * The function returns a pointer to data in WASM linear memory.
+     *
+     * @param {number} callId - Unique call ID for result tracking
+     * @param {number} moduleId - Module ID
+     * @param {number} funcNamePtr - Pointer to function name string
+     * @param {number} funcNameLen - Function name length
+     * @param {number} argsPtr - Pointer to encoded arguments
+     * @param {number} argsLen - Arguments length
+     */
+    callWasmFunc(callId, moduleId, funcNamePtr, funcNameLen, argsPtr, argsLen) {
+        const wasm = this.wasmModules.get(moduleId);
+        if (!wasm) {
+            console.error(`[GPU] callWasmFunc: module ${moduleId} not found`);
+            return;
+        }
+
+        const funcName = this.readString(funcNamePtr, funcNameLen);
+        const func = wasm.instance.exports[funcName];
+
+        if (!func) {
+            console.error(`[GPU] callWasmFunc: function '${funcName}' not found in module ${moduleId}`);
+            return;
+        }
+
+        // Decode and resolve arguments
+        const encodedArgs = this.readBytes(argsPtr, argsLen);
+        const resolvedArgs = this.resolveWasmArgs(encodedArgs);
+
+        console.log(`[GPU] callWasmFunc(${callId}): ${funcName}(${resolvedArgs.join(', ')})`);
+
+        // Call WASM function - returns pointer to result in WASM memory
+        const resultPtr = func(...resolvedArgs);
+
+        // Store result for writeBufferFromWasm
+        this.wasmCallResults.set(callId, { ptr: resultPtr, moduleId });
+        console.log(`[GPU]   result ptr: ${resultPtr}`);
+    }
+
+    /**
+     * Write data from WASM memory to a GPU buffer.
+     * Uses the result pointer from a previous callWasmFunc.
+     *
+     * @param {number} callId - Call ID from callWasmFunc
+     * @param {number} bufferId - Target GPU buffer ID
+     * @param {number} offset - Offset in buffer
+     * @param {number} byteLen - Number of bytes to copy
+     */
+    writeBufferFromWasm(callId, bufferId, offset, byteLen) {
+        const result = this.wasmCallResults.get(callId);
+        if (!result) {
+            console.error(`[GPU] writeBufferFromWasm: call result ${callId} not found`);
+            return;
+        }
+
+        const wasm = this.wasmModules.get(result.moduleId);
+        if (!wasm || !wasm.memory) {
+            console.error(`[GPU] writeBufferFromWasm: WASM memory not available`);
+            return;
+        }
+
+        const buffer = this.buffers.get(bufferId);
+        if (!buffer) {
+            console.error(`[GPU] writeBufferFromWasm: buffer ${bufferId} not found`);
+            return;
+        }
+
+        // Read bytes from WASM linear memory
+        const data = new Uint8Array(wasm.memory.buffer, result.ptr, byteLen);
+
+        console.log(`[GPU] writeBufferFromWasm(${callId}): ${byteLen} bytes → buffer ${bufferId} @ ${offset}`);
+
+        // Write to GPU buffer
+        this.device.queue.writeBuffer(buffer, offset, data);
+    }
+
+    /**
+     * Resolve encoded WASM arguments to JavaScript values.
+     *
+     * Argument encoding format:
+     * - [arg_count:u8][arg_type:u8, value?:4 bytes]...
+     *
+     * Arg types:
+     * - 0x00: literal f32 (4 byte value follows)
+     * - 0x01: $canvas.width (no value)
+     * - 0x02: $canvas.height (no value)
+     * - 0x03: $t.total (no value)
+     * - 0x04: literal i32 (4 byte value follows)
+     * - 0x05: literal u32 (4 byte value follows)
+     * - 0x06: $t.delta (no value)
+     *
+     * @param {Uint8Array} encoded - Encoded arguments
+     * @returns {number[]} Resolved argument values
+     */
+    resolveWasmArgs(encoded) {
+        if (encoded.length === 0) return [];
+
+        const view = new DataView(encoded.buffer, encoded.byteOffset, encoded.byteLength);
+        const argCount = encoded[0];
+        const resolved = [];
+        let offset = 1;
+
+        for (let i = 0; i < argCount && offset < encoded.length; i++) {
+            const argType = encoded[offset++];
+
+            switch (argType) {
+                case 0x00: // literal_f32
+                    if (offset + 4 <= encoded.length) {
+                        resolved.push(view.getFloat32(offset, true));
+                        offset += 4;
+                    }
+                    break;
+
+                case 0x01: // canvas_width
+                    resolved.push(this.context.canvas.width);
+                    break;
+
+                case 0x02: // canvas_height
+                    resolved.push(this.context.canvas.height);
+                    break;
+
+                case 0x03: // time_total
+                    resolved.push(this.currentTime);
+                    break;
+
+                case 0x04: // literal_i32
+                    if (offset + 4 <= encoded.length) {
+                        resolved.push(view.getInt32(offset, true));
+                        offset += 4;
+                    }
+                    break;
+
+                case 0x05: // literal_u32
+                    if (offset + 4 <= encoded.length) {
+                        resolved.push(view.getUint32(offset, true));
+                        offset += 4;
+                    }
+                    break;
+
+                case 0x06: // time_delta
+                    resolved.push(this.deltaTime);
+                    break;
+
+                default:
+                    console.warn(`[GPU] Unknown WASM arg type: 0x${argType.toString(16)}`);
+                    break;
+            }
+        }
+
+        return resolved;
+    }
+
+    /**
+     * Copy an ImageBitmap to a GPU texture.
+     * Uses WebGPU's copyExternalImageToTexture queue operation.
+     * @param {number} bitmapId - ImageBitmap ID
+     * @param {number} textureId - Destination texture ID
+     * @param {number} mipLevel - Mip level (usually 0)
+     * @param {number} originX - X origin in texture
+     * @param {number} originY - Y origin in texture
+     */
+    async copyExternalImageToTexture(bitmapId, textureId, mipLevel, originX, originY) {
+        console.log(`[GPU] copyExternalImageToTexture(bitmap=${bitmapId}, texture=${textureId}, mip=${mipLevel}, origin=[${originX},${originY}])`);
+
+        // Get the ImageBitmap (may need to await promise)
+        let bitmap = this.imageBitmaps.get(bitmapId);
+        if (!bitmap) {
+            console.error(`[GPU] ImageBitmap ${bitmapId} not found`);
+            return;
+        }
+
+        // If it's a promise, await it
+        if (bitmap instanceof Promise) {
+            bitmap = await bitmap;
+            this.imageBitmaps.set(bitmapId, bitmap);  // Cache resolved bitmap
+        }
+
+        const texture = this.textures.get(textureId);
+        if (!texture) {
+            console.error(`[GPU] Texture ${textureId} not found`);
+            return;
+        }
+
+        // Copy ImageBitmap to texture
+        this.device.queue.copyExternalImageToTexture(
+            { source: bitmap },
+            { texture, mipLevel, origin: { x: originX, y: originY } },
+            { width: bitmap.width, height: bitmap.height }
+        );
+
+        console.log(`[GPU]   copied ${bitmap.width}x${bitmap.height} to texture ${textureId}`);
     }
 
     // ========================================================================
@@ -800,6 +1138,7 @@ export class PNGineGPU {
                 gpuCreateRenderPipeline: (id, ptr, len) => self.createRenderPipeline(id, ptr, len),
                 gpuCreateComputePipeline: (id, ptr, len) => self.createComputePipeline(id, ptr, len),
                 gpuCreateBindGroup: (id, layout, ptr, len) => self.createBindGroup(id, layout, ptr, len),
+                gpuCreateImageBitmap: (id, ptr, len) => self.createImageBitmap(id, ptr, len),
                 gpuBeginRenderPass: (tex, load, store, depth) => self.beginRenderPass(tex, load, store, depth),
                 gpuBeginComputePass: () => self.beginComputePass(),
                 gpuSetPipeline: (id) => {
@@ -823,6 +1162,15 @@ export class PNGineGPU {
                 gpuEndPass: () => self.endPass(),
                 gpuWriteBuffer: (id, off, ptr, len) => self.writeBuffer(id, off, ptr, len),
                 gpuSubmit: () => self.submit(),
+                gpuCopyExternalImageToTexture: (bitmapId, textureId, mipLevel, originX, originY) =>
+                    self.copyExternalImageToTexture(bitmapId, textureId, mipLevel, originX, originY),
+                // WASM module operations
+                gpuInitWasmModule: (moduleId, dataPtr, dataLen) =>
+                    self.initWasmModule(moduleId, dataPtr, dataLen),
+                gpuCallWasmFunc: (callId, moduleId, funcNamePtr, funcNameLen, argsPtr, argsLen) =>
+                    self.callWasmFunc(callId, moduleId, funcNamePtr, funcNameLen, argsPtr, argsLen),
+                gpuWriteBufferFromWasm: (callId, bufferId, offset, byteLen) =>
+                    self.writeBufferFromWasm(callId, bufferId, offset, byteLen),
             },
         };
     }
@@ -840,13 +1188,19 @@ export class PNGineGPU {
         }
 
         this.buffers.clear();
+        this.bufferMeta.clear();
         this.textures.clear();
         this.samplers.clear();
         this.shaders.clear();
         this.pipelines.clear();
         this.bindGroups.clear();
+        this.imageBitmaps.clear();
+        this.wasmModules.clear();
+        this.wasmCallResults.clear();
         this.commandEncoder = null;
         this.currentPass = null;
         this.passType = null;
+        this.currentTime = 0;
+        this.deltaTime = 0;
     }
 }

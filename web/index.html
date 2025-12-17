@@ -881,7 +881,7 @@ Use the CLI to embed bytecode:
             }
         }
 
-        function runPngBytecode() {
+        async function runPngBytecode() {
             if (!pngine || !loadedPngBytecode) return;
             hideError();
 
@@ -892,12 +892,17 @@ Use the CLI to embed bytecode:
                 pngine.loadModule(loadedPngBytecode);
                 pngine.executeAll();
 
+                // Wait for any async ImageBitmap decoding to complete
+                await pngine.waitForBitmaps();
+
                 // Write uniforms if available
                 const uniformBufferId = pngine.findUniformBuffer();
                 if (uniformBufferId !== null) {
                     pngine.writeTimeUniform(uniformBufferId, 0);
-                    pngine.executeAll();
                 }
+
+                // Re-execute with textures ready
+                pngine.executeAll();
 
                 const elapsed = (performance.now() - start).toFixed(2);
                 setStatus(`Executed in ${elapsed}ms`, 'success');

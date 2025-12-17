@@ -230,6 +230,25 @@ export class PNGine {
     }
 
     /**
+     * Wait for all pending ImageBitmap decoding to complete.
+     *
+     * IMPORTANT: createImageBitmap is async - textures will appear black on
+     * the first frame if you don't wait for decoding to complete.
+     *
+     * @returns {Promise<void>}
+     *
+     * @example
+     * // Correct pattern for textured rendering:
+     * pngine.loadModule(bytecode);
+     * pngine.executeAll();           // Starts async bitmap decode
+     * await pngine.waitForBitmaps(); // Wait for decode to finish
+     * pngine.executeAll();           // Re-render with textures ready
+     */
+    async waitForBitmaps() {
+        await this.gpu.waitForBitmaps();
+    }
+
+    /**
      * Compile and execute PBSF source in one step.
      *
      * @param {string} source - PBSF source code
