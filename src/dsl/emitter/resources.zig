@@ -91,6 +91,12 @@ pub fn emitData(e: *Emitter) Emitter.Error!void {
             try emitBlobData(e, name, blob_node, info.node);
             continue;
         }
+
+        // Try wasm property (WASM-generated data)
+        if (utils.findPropertyValue(e, info.node, "wasm")) |wasm_node| {
+            try emitWasmData(e, name, wasm_node);
+            continue;
+        }
     }
 
     // Post-condition: we processed data symbols
@@ -175,6 +181,148 @@ fn emitBlobData(e: *Emitter, name: []const u8, blob_node: Node.Index, data_node:
     try e.data_ids.put(e.gpa, name, data_id.toInt());
 }
 
+/// Emit WASM-generated data entry.
+/// Embeds WASM module and registers entry for runtime data generation.
+fn emitWasmData(e: *Emitter, name: []const u8, wasm_node: Node.Index) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(wasm_node.toInt() < e.ast.nodes.len);
+    std.debug.assert(name.len > 0);
+
+    const base_dir = e.options.base_dir orelse return;
+
+    // Parse wasm={module={url=...}, func=..., returns=...}
+    const wasm_tag = e.ast.nodes.items(.tag)[wasm_node.toInt()];
+    if (wasm_tag != .object) return;
+
+    // Get module URL
+    const module_node = utils.findPropertyValueInObject(e, wasm_node, "module") orelse return;
+    const module_tag = e.ast.nodes.items(.tag)[module_node.toInt()];
+    if (module_tag != .object) return;
+
+    const url_node = utils.findPropertyValueInObject(e, module_node, "url") orelse return;
+    const url = utils.getStringContent(e, url_node);
+    if (url.len == 0) return;
+
+    // Get function name
+    const func_node = utils.findPropertyValueInObject(e, wasm_node, "func") orelse return;
+    const func_tag = e.ast.nodes.items(.tag)[func_node.toInt()];
+    var func_name: []const u8 = "";
+    if (func_tag == .identifier_value) {
+        const token = e.ast.nodes.items(.main_token)[func_node.toInt()];
+        func_name = utils.getTokenSlice(e, token);
+    } else if (func_tag == .string_value) {
+        func_name = utils.getStringContent(e, func_node);
+    }
+    if (func_name.len == 0) return;
+
+    // Get returns type and parse byte size
+    const returns_node = utils.findPropertyValueInObject(e, wasm_node, "returns") orelse return;
+    const returns_str = utils.getStringContent(e, returns_node);
+    const byte_size = parseWgslReturnType(returns_str);
+    if (byte_size == 0) return;
+
+    // Read WASM file
+    var path_buf: [4096]u8 = undefined;
+    const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ base_dir, url }) catch return;
+
+    const wasm_bytes = readFile(e.gpa, full_path) catch |err| {
+        std.debug.print("Warning: Could not read WASM file '{s}': {}\n", .{ full_path, err });
+        return;
+    };
+    defer e.gpa.free(wasm_bytes);
+
+    // Add WASM to data section
+    const wasm_data_id = e.builder.addData(e.gpa, wasm_bytes) catch return;
+
+    // Assign module ID
+    const module_id = e.next_wasm_module_id;
+    e.next_wasm_module_id += 1;
+
+    // Emit init_wasm_module opcode
+    try e.builder.getEmitter().initWasmModule(e.gpa, module_id, wasm_data_id.toInt());
+
+    // Intern function name
+    const func_name_id = e.builder.internString(e.gpa, func_name) catch return;
+
+    // Register WASM data entry for buffer initialization
+    try e.wasm_data_entries.put(e.gpa, name, .{
+        .module_id = module_id,
+        .wasm_data_id = wasm_data_id.toInt(),
+        .func_name_id = func_name_id.toInt(),
+        .byte_size = byte_size,
+    });
+
+    // Post-condition: entry was registered
+    std.debug.assert(e.wasm_data_entries.get(name) != null);
+}
+
+/// Parse WGSL return type to byte size.
+/// Supports: array<f32, N>, mat4x4, vec4, f32, etc.
+fn parseWgslReturnType(type_str: []const u8) u32 {
+    // Pre-condition
+    if (type_str.len == 0) return 0;
+
+    // Handle array<type, count>
+    if (std.mem.startsWith(u8, type_str, "array<")) {
+        // Find the count after the comma
+        if (std.mem.lastIndexOf(u8, type_str, ",")) |comma_pos| {
+            const after_comma = type_str[comma_pos + 1 ..];
+            // Find the closing >
+            if (std.mem.indexOf(u8, after_comma, ">")) |gt_pos| {
+                const count_str = std.mem.trim(u8, after_comma[0..gt_pos], " \t");
+                const count = std.fmt.parseInt(u32, count_str, 10) catch return 0;
+
+                // Determine element size from type (between < and ,)
+                const type_start = 6; // "array<".len
+                const elem_type = std.mem.trim(u8, type_str[type_start..comma_pos], " \t");
+                const elem_size = getTypeSize(elem_type);
+
+                return count * elem_size;
+            }
+        }
+        return 0;
+    }
+
+    // Simple type
+    return getTypeSize(type_str);
+}
+
+/// Get byte size of a WGSL type.
+fn getTypeSize(type_name: []const u8) u32 {
+    const type_sizes = [_]struct { name: []const u8, size: u32 }{
+        .{ .name = "f32", .size = 4 },
+        .{ .name = "i32", .size = 4 },
+        .{ .name = "u32", .size = 4 },
+        .{ .name = "f16", .size = 2 },
+        .{ .name = "vec2", .size = 8 },
+        .{ .name = "vec2f", .size = 8 },
+        .{ .name = "vec2i", .size = 8 },
+        .{ .name = "vec2u", .size = 8 },
+        .{ .name = "vec3", .size = 12 },
+        .{ .name = "vec3f", .size = 12 },
+        .{ .name = "vec3i", .size = 12 },
+        .{ .name = "vec3u", .size = 12 },
+        .{ .name = "vec4", .size = 16 },
+        .{ .name = "vec4f", .size = 16 },
+        .{ .name = "vec4i", .size = 16 },
+        .{ .name = "vec4u", .size = 16 },
+        .{ .name = "mat2x2", .size = 16 },
+        .{ .name = "mat2x2f", .size = 16 },
+        .{ .name = "mat3x3", .size = 36 },
+        .{ .name = "mat3x3f", .size = 36 },
+        .{ .name = "mat4x4", .size = 64 },
+        .{ .name = "mat4x4f", .size = 64 },
+    };
+
+    for (type_sizes) |entry| {
+        if (std.mem.eql(u8, type_name, entry.name)) {
+            return entry.size;
+        }
+    }
+
+    return 0;
+}
+
 /// Parse a float value from an array element node.
 fn parseFloatElement(e: *Emitter, elem: Node.Index) f32 {
     // Pre-condition
@@ -219,9 +367,9 @@ pub fn emitBuffers(e: *Emitter) Emitter.Error!void {
         e.next_buffer_id += 1;
         try e.buffer_ids.put(e.gpa, name, buffer_id);
 
-        // Get size property - can be number, expression, or string expression
+        // Get size property - can be number, expression, string expression, or WASM data reference
         const size_value = utils.findPropertyValue(e, info.node, "size") orelse continue;
-        const size = utils.resolveNumericValueOrString(e, size_value) orelse 0;
+        const size = resolveBufferSize(e, size_value);
 
         // Get usage flags
         var usage = utils.parseBufferUsage(e, info.node);
@@ -249,6 +397,35 @@ pub fn emitBuffers(e: *Emitter) Emitter.Error!void {
     std.debug.assert(e.next_buffer_id >= initial_buffer_id);
 }
 
+/// Resolve buffer size from size property value.
+/// Handles: numbers, expressions, string expressions, identifier refs to #data (including WASM data).
+fn resolveBufferSize(e: *Emitter, size_node: Node.Index) u32 {
+    // Pre-condition
+    std.debug.assert(size_node.toInt() < e.ast.nodes.len);
+
+    const size_tag = e.ast.nodes.items(.tag)[size_node.toInt()];
+
+    // Check for identifier reference to #data (including WASM data)
+    if (size_tag == .identifier_value) {
+        const token = e.ast.nodes.items(.main_token)[size_node.toInt()];
+        const data_name = utils.getTokenSlice(e, token);
+
+        // Check WASM data entries first (they store byte size)
+        if (e.wasm_data_entries.get(data_name)) |wasm_entry| {
+            return wasm_entry.byte_size;
+        }
+
+        // Check regular data entries (need to look up actual data size)
+        if (e.data_ids.get(data_name)) |data_id| {
+            // Get size from data section
+            return e.builder.getDataSize(data_id);
+        }
+    }
+
+    // Fall back to normal numeric resolution
+    return utils.resolveNumericValueOrString(e, size_node) orelse 0;
+}
+
 /// Emit write_buffer for buffer initialization from mappedAtCreation.
 fn emitBufferInitialization(e: *Emitter, buffer_id: u16, mapped_value: Node.Index) Emitter.Error!void {
     // Pre-condition
@@ -260,7 +437,31 @@ fn emitBufferInitialization(e: *Emitter, buffer_id: u16, mapped_value: Node.Inde
     const token = e.ast.nodes.items(.main_token)[mapped_value.toInt()];
     const data_name = utils.getTokenSlice(e, token);
 
-    // Look up the data_id for this data declaration
+    // Check WASM data entries first
+    if (e.wasm_data_entries.get(data_name)) |wasm_entry| {
+        // Emit call_wasm_func to generate the data
+        // Note: For init-time WASM calls, we don't pass runtime args (canvas size, time)
+        // The WASM function should return static data
+        try e.builder.getEmitter().callWasmFunc(
+            e.gpa,
+            0, // call_id (not used for init-time calls)
+            wasm_entry.module_id,
+            wasm_entry.func_name_id,
+            &[_]u8{0}, // No arguments for init-time data generation
+        );
+
+        // Emit write_buffer_from_wasm to copy result to buffer
+        try e.builder.getEmitter().writeBufferFromWasm(
+            e.gpa,
+            0, // call_id (same as above)
+            buffer_id,
+            0, // offset
+            wasm_entry.byte_size,
+        );
+        return;
+    }
+
+    // Look up the data_id for regular data declaration
     if (e.data_ids.get(data_name)) |data_id| {
         try e.builder.getEmitter().writeBuffer(
             e.gpa,

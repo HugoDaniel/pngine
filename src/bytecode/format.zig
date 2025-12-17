@@ -217,6 +217,12 @@ pub const Builder = struct {
         return self.data.add(allocator, data);
     }
 
+    /// Get the size of a data entry by ID.
+    pub fn getDataSize(self: *const Self, data_id: u16) u32 {
+        const blob = self.data.blobs.items[data_id];
+        return @intCast(blob.len);
+    }
+
     /// Get the emitter for bytecode generation.
     pub fn getEmitter(self: *Self) *Emitter {
         return &self.emitter;

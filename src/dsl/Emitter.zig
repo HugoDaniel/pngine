@@ -72,6 +72,10 @@ pub const Emitter = struct {
     wasm_module_ids: std.StringHashMapUnmanaged(u16),
     wasm_call_ids: std.StringHashMapUnmanaged(u16),
 
+    /// WASM data entries for #data with wasm={...} property.
+    /// These are initialized at runtime by calling WASM functions.
+    wasm_data_entries: std.StringHashMapUnmanaged(WasmDataEntry),
+
     // Counters for generating IDs
     next_buffer_id: u16 = 0,
     next_texture_id: u16 = 0,
@@ -87,6 +91,19 @@ pub const Emitter = struct {
     next_wasm_call_id: u16 = 0,
 
     const Self = @This();
+
+    /// WASM data entry for runtime-generated data.
+    /// Used by #data with wasm={...} property.
+    pub const WasmDataEntry = struct {
+        /// WASM module ID (from wasm_module_ids).
+        module_id: u16,
+        /// Data section ID containing the WASM bytes.
+        wasm_data_id: u16,
+        /// Interned function name ID.
+        func_name_id: u16,
+        /// Byte size of the return value.
+        byte_size: u32,
+    };
 
     /// Emit options.
     pub const Options = struct {
@@ -126,6 +143,7 @@ pub const Emitter = struct {
             .image_bitmap_ids = .{},
             .wasm_module_ids = .{},
             .wasm_call_ids = .{},
+            .wasm_data_entries = .{},
         };
     }
 
@@ -144,6 +162,7 @@ pub const Emitter = struct {
         self.image_bitmap_ids.deinit(self.gpa);
         self.wasm_module_ids.deinit(self.gpa);
         self.wasm_call_ids.deinit(self.gpa);
+        self.wasm_data_entries.deinit(self.gpa);
     }
 
     /// Emit PNGB bytecode from analyzed DSL.
@@ -199,6 +218,7 @@ pub const Emitter = struct {
         self.image_bitmap_ids.deinit(self.gpa);
         self.wasm_module_ids.deinit(self.gpa);
         self.wasm_call_ids.deinit(self.gpa);
+        self.wasm_data_entries.deinit(self.gpa);
 
         return result;
     }
