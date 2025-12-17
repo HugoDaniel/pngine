@@ -1,7 +1,8 @@
 //! Resource Emission Module
 //!
 //! Handles emission of resource declarations:
-//! - #data (float32Array data to data section)
+//! - #data (float32Array data to data section, or blob file to data section)
+//! - #imageBitmap (create ImageBitmap from blob data)
 //! - #buffer (GPU buffers)
 //! - #texture (GPU textures)
 //! - #sampler (GPU samplers)
@@ -14,12 +15,14 @@
 //! * All iteration is bounded by MAX_RESOURCES or MAX_ARRAY_ELEMENTS.
 //! * Texture canvas size is detected from "$canvas" in size array elements.
 //! * Bind group entries are parsed before descriptor encoding.
+//! * Blob files are read from base_dir + relative URL during compilation.
 
 const std = @import("std");
 const Emitter = @import("../Emitter.zig").Emitter;
 const Node = @import("../Ast.zig").Node;
 const DescriptorEncoder = @import("../DescriptorEncoder.zig").DescriptorEncoder;
 const utils = @import("utils.zig");
+const fs = std.fs;
 
 /// Maximum resources of each type (prevents runaway iteration).
 const MAX_RESOURCES: u32 = 256;
@@ -27,7 +30,43 @@ const MAX_RESOURCES: u32 = 256;
 /// Maximum array elements to process.
 const MAX_ARRAY_ELEMENTS: u32 = 1024;
 
-/// Emit #data declarations - add float32Array data to data section.
+/// Maximum file size for embedded assets (16 MB).
+const MAX_FILE_SIZE: u32 = 16 * 1024 * 1024;
+
+/// Read file into allocated buffer.
+/// Caller owns returned memory.
+fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    // Pre-condition
+    std.debug.assert(path.len > 0);
+
+    const file = try fs.cwd().openFile(path, .{});
+    defer file.close();
+
+    const stat = try file.stat();
+    const size: u32 = if (stat.size > MAX_FILE_SIZE)
+        return error.FileTooLarge
+    else
+        @intCast(stat.size);
+
+    const buffer = try allocator.alloc(u8, size);
+    errdefer allocator.free(buffer);
+
+    // Bounded read loop
+    var bytes_read: u32 = 0;
+    for (0..size + 1) |_| {
+        if (bytes_read >= size) break;
+        const n: u32 = @intCast(try file.read(buffer[bytes_read..]));
+        if (n == 0) break;
+        bytes_read += n;
+    }
+
+    // Post-condition
+    std.debug.assert(bytes_read <= size);
+
+    return buffer;
+}
+
+/// Emit #data declarations - add float32Array or blob file data to data section.
 /// No bytecode emitted, just populates data section for buffer initialization.
 pub fn emitData(e: *Emitter) Emitter.Error!void {
     // Pre-condition
@@ -41,38 +80,99 @@ pub fn emitData(e: *Emitter) Emitter.Error!void {
         const name = entry.key_ptr.*;
         const info = entry.value_ptr.*;
 
-        // Find float32Array property
-        const float_array = utils.findPropertyValue(e, info.node, "float32Array") orelse continue;
-        const array_tag = e.ast.nodes.items(.tag)[float_array.toInt()];
-        if (array_tag != .array) continue;
-
-        // Get array elements
-        const array_data = e.ast.nodes.items(.data)[float_array.toInt()];
-        const elements = e.ast.extraData(array_data.extra_range);
-
-        // Convert elements to f32 bytes
-        var bytes = std.ArrayListUnmanaged(u8){};
-        defer bytes.deinit(e.gpa);
-
-        // Bounded iteration over elements
-        const max_elements = @min(elements.len, MAX_ARRAY_ELEMENTS);
-        for (0..max_elements) |i| {
-            const elem_idx = elements[i];
-            const elem: Node.Index = @enumFromInt(elem_idx);
-            const value = parseFloatElement(e, elem);
-
-            // Write f32 as little-endian bytes
-            const f32_bytes = @as([4]u8, @bitCast(value));
-            try bytes.appendSlice(e.gpa, &f32_bytes);
+        // Try float32Array first
+        if (utils.findPropertyValue(e, info.node, "float32Array")) |float_array| {
+            try emitFloat32ArrayData(e, name, float_array);
+            continue;
         }
 
-        // Add to data section
-        const data_id = try e.builder.addData(e.gpa, bytes.items);
-        try e.data_ids.put(e.gpa, name, data_id.toInt());
+        // Try blob property (file embedding)
+        if (utils.findPropertyValue(e, info.node, "blob")) |blob_node| {
+            try emitBlobData(e, name, blob_node, info.node);
+            continue;
+        }
     }
 
     // Post-condition: we processed data symbols
     std.debug.assert(e.data_ids.count() >= initial_count);
+}
+
+/// Emit float32Array data to data section.
+fn emitFloat32ArrayData(e: *Emitter, name: []const u8, float_array: Node.Index) Emitter.Error!void {
+    const array_tag = e.ast.nodes.items(.tag)[float_array.toInt()];
+    if (array_tag != .array) return;
+
+    // Get array elements
+    const array_data = e.ast.nodes.items(.data)[float_array.toInt()];
+    const elements = e.ast.extraData(array_data.extra_range);
+
+    // Convert elements to f32 bytes
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(e.gpa);
+
+    // Bounded iteration over elements
+    const max_elements = @min(elements.len, MAX_ARRAY_ELEMENTS);
+    for (0..max_elements) |i| {
+        const elem_idx = elements[i];
+        const elem: Node.Index = @enumFromInt(elem_idx);
+        const value = parseFloatElement(e, elem);
+
+        // Write f32 as little-endian bytes
+        const f32_bytes = @as([4]u8, @bitCast(value));
+        try bytes.appendSlice(e.gpa, &f32_bytes);
+    }
+
+    // Add to data section
+    const data_id = try e.builder.addData(e.gpa, bytes.items);
+    try e.data_ids.put(e.gpa, name, data_id.toInt());
+}
+
+/// Emit blob file data to data section.
+/// Format: [mime_len:u8][mime:bytes][data:bytes]
+fn emitBlobData(e: *Emitter, name: []const u8, blob_node: Node.Index, data_node: Node.Index) Emitter.Error!void {
+    const base_dir = e.options.base_dir orelse return; // Skip if no base_dir
+
+    // Parse blob={file={url="..."}}
+    const blob_tag = e.ast.nodes.items(.tag)[blob_node.toInt()];
+    if (blob_tag != .object) return;
+
+    const file_node = utils.findPropertyValueInObject(e, blob_node, "file") orelse return;
+    const file_tag = e.ast.nodes.items(.tag)[file_node.toInt()];
+    if (file_tag != .object) return;
+
+    const url_node = utils.findPropertyValueInObject(e, file_node, "url") orelse return;
+    const url = utils.getStringContent(e, url_node);
+    if (url.len == 0) return;
+
+    // Get mime type from parent data node
+    const mime = if (utils.findPropertyValue(e, data_node, "mime")) |mime_node|
+        utils.getStringContent(e, mime_node)
+    else
+        "application/octet-stream";
+
+    // Construct full path: base_dir + url
+    var path_buf: [4096]u8 = undefined;
+    const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ base_dir, url }) catch return;
+
+    // Read file from disk
+    const file_data = readFile(e.gpa, full_path) catch |err| {
+        std.debug.print("Warning: Could not read file '{s}': {}\n", .{ full_path, err });
+        return;
+    };
+    defer e.gpa.free(file_data);
+
+    // Build data entry: [mime_len:u8][mime:bytes][data:bytes]
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(e.gpa);
+
+    const mime_len: u8 = @intCast(@min(mime.len, 255));
+    try bytes.append(e.gpa, mime_len);
+    try bytes.appendSlice(e.gpa, mime[0..mime_len]);
+    try bytes.appendSlice(e.gpa, file_data);
+
+    // Add to data section
+    const data_id = try e.builder.addData(e.gpa, bytes.items);
+    try e.data_ids.put(e.gpa, name, data_id.toInt());
 }
 
 /// Parse a float value from an array element node.
@@ -395,4 +495,58 @@ fn parseBindGroupEntries(
 
     // Post-condition: entries_list was populated (may be empty if no valid entries)
     std.debug.assert(entries_list.capacity >= entries_list.items.len);
+}
+
+/// Emit #imageBitmap declarations.
+///
+/// ImageBitmaps are decoded image data that can be copied to textures.
+/// At runtime, the blob data is decoded via createImageBitmap() API,
+/// then copied to GPU texture via copyExternalImageToTexture().
+///
+/// This two-step process matches WebGPU's design: decode on CPU, then upload.
+pub fn emitImageBitmaps(e: *Emitter) Emitter.Error!void {
+    // Pre-condition: AST must be valid
+    std.debug.assert(e.ast.nodes.len > 0);
+
+    const initial_id = e.next_image_bitmap_id;
+
+    var it = e.analysis.symbols.image_bitmap.iterator();
+    for (0..MAX_RESOURCES) |_| {
+        const entry = it.next() orelse break;
+        const name = entry.key_ptr.*;
+        const info = entry.value_ptr.*;
+
+        const bitmap_id = e.next_image_bitmap_id;
+        e.next_image_bitmap_id += 1;
+        try e.image_bitmap_ids.put(e.gpa, name, bitmap_id);
+
+        // The `image` property must reference a #data blob containing encoded image bytes
+        const image_value = utils.findPropertyValue(e, info.node, "image") orelse continue;
+        const image_tag = e.ast.nodes.items(.tag)[image_value.toInt()];
+
+        // Support both bare identifiers (image=dataName) and refs (image=$data.name)
+        var data_name: []const u8 = "";
+        if (image_tag == .identifier_value) {
+            const token = e.ast.nodes.items(.main_token)[image_value.toInt()];
+            data_name = utils.getTokenSlice(e, token);
+        } else if (image_tag == .reference) {
+            if (utils.getReference(e, image_value)) |ref| {
+                data_name = ref.name;
+            }
+        }
+
+        if (data_name.len == 0) continue;
+
+        // Blob must have been emitted by emitData() - skip if missing
+        const blob_data_id = e.data_ids.get(data_name) orelse continue;
+
+        try e.builder.getEmitter().createImageBitmap(
+            e.gpa,
+            bitmap_id,
+            blob_data_id,
+        );
+    }
+
+    // Post-condition: IDs assigned sequentially from initial value
+    std.debug.assert(e.next_image_bitmap_id >= initial_id);
 }

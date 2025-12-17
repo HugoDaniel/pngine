@@ -19,6 +19,7 @@ const Emitter = @import("../Emitter.zig").Emitter;
 const Node = @import("../Ast.zig").Node;
 const utils = @import("utils.zig");
 const passes = @import("passes.zig");
+const wasm = @import("wasm.zig");
 
 /// Maximum queue actions per frame (prevents runaway iteration).
 const MAX_QUEUE_ACTIONS: u32 = 64;
@@ -50,7 +51,7 @@ pub fn collectQueues(e: *Emitter) Emitter.Error!void {
     std.debug.assert(e.next_queue_id - initial_id == e.queue_ids.count());
 }
 
-/// Emit a queue's actions (write_buffer commands) inline.
+/// Emit a queue's actions (write_buffer, copyExternalImageToTexture) inline.
 /// Called when a frame references a queue in its perform array.
 pub fn emitQueueAction(e: *Emitter, queue_name: []const u8) Emitter.Error!void {
     // Pre-conditions
@@ -62,12 +63,20 @@ pub fn emitQueueAction(e: *Emitter, queue_name: []const u8) Emitter.Error!void {
     std.debug.assert(info.node.toInt() < e.ast.nodes.len);
 
     // Look for writeBuffer property in queue definition
-    const write_buffer_value = utils.findPropertyValue(e, info.node, "writeBuffer") orelse return;
-    const wb_tag = e.ast.nodes.items(.tag)[write_buffer_value.toInt()];
+    if (utils.findPropertyValue(e, info.node, "writeBuffer")) |write_buffer_value| {
+        const wb_tag = e.ast.nodes.items(.tag)[write_buffer_value.toInt()];
+        if (wb_tag == .object) {
+            try emitWriteBufferFromObject(e, write_buffer_value);
+        }
+    }
 
-    if (wb_tag != .object) return;
-
-    try emitWriteBufferFromObject(e, write_buffer_value);
+    // Look for copyExternalImageToTexture property
+    if (utils.findPropertyValue(e, info.node, "copyExternalImageToTexture")) |ceit_value| {
+        const ceit_tag = e.ast.nodes.items(.tag)[ceit_value.toInt()];
+        if (ceit_tag == .object) {
+            try emitCopyExternalImageToTexture(e, ceit_value);
+        }
+    }
 }
 
 /// Parse and emit a writeBuffer command from an object node.
@@ -75,10 +84,11 @@ fn emitWriteBufferFromObject(e: *Emitter, obj_node: Node.Index) Emitter.Error!vo
     // Pre-condition
     std.debug.assert(obj_node.toInt() < e.ast.nodes.len);
 
-    // Parse writeBuffer object: { buffer=..., bufferOffset=..., data=... }
+    // Parse writeBuffer object: { buffer=..., bufferOffset=..., data=..., dataFrom=... }
     const buffer_prop = utils.findPropertyValueInObject(e, obj_node, "buffer");
     const offset_prop = utils.findPropertyValueInObject(e, obj_node, "bufferOffset");
     const data_prop = utils.findPropertyValueInObject(e, obj_node, "data");
+    const data_from_prop = utils.findPropertyValueInObject(e, obj_node, "dataFrom");
 
     // Resolve buffer reference
     const buffer_id = if (buffer_prop) |bp| passes.resolveBufferId(e, bp) else null;
@@ -90,9 +100,30 @@ fn emitWriteBufferFromObject(e: *Emitter, obj_node: Node.Index) Emitter.Error!vo
     else
         0;
 
-    // Handle data property
+    // Handle dataFrom={wasm=...} - calls WASM function and writes result
+    if (data_from_prop) |df| {
+        try emitDataFromSource(e, buffer_id.?, offset, df);
+        return;
+    }
+
+    // Handle data property (literal data)
     if (data_prop) |dp| {
         try emitWriteBufferData(e, buffer_id.?, offset, dp);
+    }
+}
+
+/// Emit buffer write from a dataFrom source.
+fn emitDataFromSource(e: *Emitter, buffer_id: u16, offset: u32, data_from_node: Node.Index) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(data_from_node.toInt() < e.ast.nodes.len);
+
+    const tag = e.ast.nodes.items(.tag)[data_from_node.toInt()];
+    if (tag != .object) return;
+
+    // Check for wasm={...} property
+    if (utils.findPropertyValueInObject(e, data_from_node, "wasm")) |wasm_ref| {
+        const wasm_call_name = resolveIdentifierOrReference(e, wasm_ref) orelse return;
+        try wasm.emitWasmCallForBuffer(e, wasm_call_name, buffer_id, offset);
     }
 }
 
@@ -172,6 +203,93 @@ fn emitWriteBufferString(e: *Emitter, buffer_id: u16, offset: u32, string_node: 
             data_id.toInt(),
         );
     }
+}
+
+/// Emit copyExternalImageToTexture queue command.
+///
+/// Maps WebGPU's copyExternalImageToTexture API which copies an ImageBitmap
+/// to a GPU texture. This is the standard way to upload decoded image data.
+///
+/// Syntax: copyExternalImageToTexture={source={source=...} destination={texture=...}}
+fn emitCopyExternalImageToTexture(e: *Emitter, obj_node: Node.Index) Emitter.Error!void {
+    // Pre-condition: node must be valid object
+    std.debug.assert(obj_node.toInt() < e.ast.nodes.len);
+
+    // WebGPU requires source.source to be an ImageBitmap (our #imageBitmap resource)
+    const source_obj = utils.findPropertyValueInObject(e, obj_node, "source") orelse return;
+    const source_tag = e.ast.nodes.items(.tag)[source_obj.toInt()];
+    if (source_tag != .object) return;
+
+    const source_prop = utils.findPropertyValueInObject(e, source_obj, "source") orelse return;
+    const bitmap_name = resolveIdentifierOrReference(e, source_prop) orelse return;
+
+    // Bitmap must exist - silently skip if not (analyzer should catch this)
+    const bitmap_id = e.image_bitmap_ids.get(bitmap_name) orelse return;
+
+    // WebGPU requires destination.texture to be a GPUTexture
+    const dest_obj = utils.findPropertyValueInObject(e, obj_node, "destination") orelse return;
+    const dest_tag = e.ast.nodes.items(.tag)[dest_obj.toInt()];
+    if (dest_tag != .object) return;
+
+    const texture_prop = utils.findPropertyValueInObject(e, dest_obj, "texture") orelse return;
+    const texture_name = resolveIdentifierOrReference(e, texture_prop) orelse return;
+
+    // Texture must exist - silently skip if not (analyzer should catch this)
+    const texture_id = e.texture_ids.get(texture_name) orelse return;
+
+    // mipLevel defaults to 0 per WebGPU spec
+    const mip_level: u8 = if (utils.findPropertyValueInObject(e, dest_obj, "mipLevel")) |ml|
+        @intCast(utils.parseNumber(e, ml) orelse 0)
+    else
+        0;
+
+    // origin defaults to [0, 0] per WebGPU spec
+    var origin_x: u16 = 0;
+    var origin_y: u16 = 0;
+    if (utils.findPropertyValueInObject(e, dest_obj, "origin")) |origin_node| {
+        const origin_tag = e.ast.nodes.items(.tag)[origin_node.toInt()];
+        if (origin_tag == .array) {
+            const array_data = e.ast.nodes.items(.data)[origin_node.toInt()];
+            const elements = e.ast.extraData(array_data.extra_range);
+            if (elements.len >= 1) {
+                const x_elem: Node.Index = @enumFromInt(elements[0]);
+                origin_x = @intCast(utils.parseNumber(e, x_elem) orelse 0);
+            }
+            if (elements.len >= 2) {
+                const y_elem: Node.Index = @enumFromInt(elements[1]);
+                origin_y = @intCast(utils.parseNumber(e, y_elem) orelse 0);
+            }
+        }
+    }
+
+    try e.builder.getEmitter().copyExternalImageToTexture(
+        e.gpa,
+        bitmap_id,
+        texture_id,
+        mip_level,
+        origin_x,
+        origin_y,
+    );
+}
+
+/// Resolve an identifier or reference node to its name string.
+/// Used for looking up resources by name when parsing queue operations.
+fn resolveIdentifierOrReference(e: *Emitter, node: Node.Index) ?[]const u8 {
+    // Pre-condition: node must be valid
+    std.debug.assert(node.toInt() < e.ast.nodes.len);
+
+    const tag = e.ast.nodes.items(.tag)[node.toInt()];
+
+    if (tag == .identifier_value) {
+        const token = e.ast.nodes.items(.main_token)[node.toInt()];
+        return utils.getTokenSlice(e, token);
+    } else if (tag == .reference) {
+        if (utils.getReference(e, node)) |ref| {
+            return ref.name;
+        }
+    }
+
+    return null;
 }
 
 /// Emit #frame declarations.

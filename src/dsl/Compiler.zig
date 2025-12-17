@@ -53,6 +53,14 @@ pub const Compiler = struct {
         DataSectionOverflow,
         TooManyDataEntries,
         StringTableOverflow,
+        FileReadError,
+    };
+
+    /// Options for compilation.
+    pub const Options = struct {
+        /// Base directory for resolving relative file paths (e.g., asset URLs).
+        /// If null, file embedding is disabled and blob={file={...}} will be ignored.
+        base_dir: ?[]const u8 = null,
     };
 
     pub const CompileResult = struct {
@@ -76,6 +84,13 @@ pub const Compiler = struct {
     ///
     /// Returns owned PNGB bytes that the caller must free.
     pub fn compile(gpa: Allocator, source: [:0]const u8) Error![]u8 {
+        return compileWithOptions(gpa, source, .{});
+    }
+
+    /// Compile DSL source to PNGB bytecode with options.
+    ///
+    /// Returns owned PNGB bytes that the caller must free.
+    pub fn compileWithOptions(gpa: Allocator, source: [:0]const u8, options: Options) Error![]u8 {
         // Pre-condition
         std.debug.assert(source.len == 0 or source[source.len] == 0);
 
@@ -102,7 +117,9 @@ pub const Compiler = struct {
         }
 
         // Phase 3: Emit PNGB
-        return Emitter.emit(gpa, &ast, &analysis);
+        return Emitter.emitWithOptions(gpa, &ast, &analysis, .{
+            .base_dir = options.base_dir,
+        });
     }
 
     /// Compile DSL source from a non-sentinel-terminated slice.

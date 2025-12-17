@@ -48,12 +48,14 @@ const resources = @import("emitter/resources.zig");
 const pipelines = @import("emitter/pipelines.zig");
 const passes = @import("emitter/passes.zig");
 const frames = @import("emitter/frames.zig");
+const wasm = @import("emitter/wasm.zig");
 
 pub const Emitter = struct {
     gpa: Allocator,
     ast: *const Ast,
     analysis: *const Analyzer.AnalysisResult,
     builder: format.Builder,
+    options: Options,
 
     // Resource ID tracking
     buffer_ids: std.StringHashMapUnmanaged(u16),
@@ -66,6 +68,9 @@ pub const Emitter = struct {
     frame_ids: std.StringHashMapUnmanaged(u16),
     queue_ids: std.StringHashMapUnmanaged(u16),
     data_ids: std.StringHashMapUnmanaged(u16),
+    image_bitmap_ids: std.StringHashMapUnmanaged(u16),
+    wasm_module_ids: std.StringHashMapUnmanaged(u16),
+    wasm_call_ids: std.StringHashMapUnmanaged(u16),
 
     // Counters for generating IDs
     next_buffer_id: u16 = 0,
@@ -77,8 +82,17 @@ pub const Emitter = struct {
     next_pass_id: u16 = 0,
     next_frame_id: u16 = 0,
     next_queue_id: u16 = 0,
+    next_image_bitmap_id: u16 = 0,
+    next_wasm_module_id: u16 = 0,
+    next_wasm_call_id: u16 = 0,
 
     const Self = @This();
+
+    /// Emit options.
+    pub const Options = struct {
+        /// Base directory for resolving relative file paths.
+        base_dir: ?[]const u8 = null,
+    };
 
     pub const Error = error{
         OutOfMemory,
@@ -86,17 +100,19 @@ pub const Emitter = struct {
         DataSectionOverflow,
         TooManyDataEntries,
         StringTableOverflow,
+        FileReadError,
     };
 
     /// Re-export Reference from utils for backward compatibility.
     pub const Reference = utils.Reference;
 
-    pub fn init(gpa: Allocator, ast: *const Ast, analysis: *const Analyzer.AnalysisResult) Self {
+    pub fn init(gpa: Allocator, ast: *const Ast, analysis: *const Analyzer.AnalysisResult, options: Options) Self {
         return .{
             .gpa = gpa,
             .ast = ast,
             .analysis = analysis,
             .builder = format.Builder.init(),
+            .options = options,
             .buffer_ids = .{},
             .texture_ids = .{},
             .sampler_ids = .{},
@@ -107,6 +123,9 @@ pub const Emitter = struct {
             .frame_ids = .{},
             .queue_ids = .{},
             .data_ids = .{},
+            .image_bitmap_ids = .{},
+            .wasm_module_ids = .{},
+            .wasm_call_ids = .{},
         };
     }
 
@@ -122,19 +141,29 @@ pub const Emitter = struct {
         self.frame_ids.deinit(self.gpa);
         self.queue_ids.deinit(self.gpa);
         self.data_ids.deinit(self.gpa);
+        self.image_bitmap_ids.deinit(self.gpa);
+        self.wasm_module_ids.deinit(self.gpa);
+        self.wasm_call_ids.deinit(self.gpa);
     }
 
     /// Emit PNGB bytecode from analyzed DSL.
     pub fn emit(gpa: Allocator, ast: *const Ast, analysis: *const Analyzer.AnalysisResult) Error![]u8 {
+        return emitWithOptions(gpa, ast, analysis, .{});
+    }
+
+    /// Emit PNGB bytecode from analyzed DSL with options.
+    pub fn emitWithOptions(gpa: Allocator, ast: *const Ast, analysis: *const Analyzer.AnalysisResult, options: Options) Error![]u8 {
         // Pre-conditions
         std.debug.assert(ast.nodes.len > 0);
         std.debug.assert(!analysis.hasErrors());
 
-        var self = Self.init(gpa, ast, analysis);
+        var self = Self.init(gpa, ast, analysis, options);
         errdefer self.deinit();
 
         // Pass 1: Emit resource declarations in dependency order
         try resources.emitData(&self);
+        try resources.emitImageBitmaps(&self);
+        try wasm.emitWasmCalls(&self);
         try shaders.emitShaders(&self);
         try resources.emitBuffers(&self);
         try resources.emitTextures(&self);
@@ -167,6 +196,9 @@ pub const Emitter = struct {
         self.frame_ids.deinit(self.gpa);
         self.queue_ids.deinit(self.gpa);
         self.data_ids.deinit(self.gpa);
+        self.image_bitmap_ids.deinit(self.gpa);
+        self.wasm_module_ids.deinit(self.gpa);
+        self.wasm_call_ids.deinit(self.gpa);
 
         return result;
     }

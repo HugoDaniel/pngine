@@ -71,6 +71,7 @@ pub const dsl = struct {
     pub const DescriptorEncoder = @import("dsl/DescriptorEncoder.zig").DescriptorEncoder;
     /// High-level compile function
     pub const compile = Compiler.compile;
+    pub const compileWithOptions = Compiler.compileWithOptions;
     pub const compileSlice = Compiler.compileSlice;
 };
 
