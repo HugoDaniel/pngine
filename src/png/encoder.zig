@@ -1,0 +1,603 @@
+//! PNG encoder for raw pixel data.
+//!
+//! Encodes RGBA pixels to PNG format with proper chunk structure.
+//! Uses deflate compression for IDAT chunk.
+//!
+//! ## Usage
+//! ```zig
+//! const png_data = try encoder.encode(allocator, pixels, 512, 512);
+//! defer allocator.free(png_data);
+//! ```
+//!
+//! ## Invariants
+//! - Input pixels must be exactly width * height * 4 bytes (RGBA)
+//! - Output is always a valid PNG file
+//! - Caller owns returned memory
+
+const std = @import("std");
+const chunk = @import("chunk.zig");
+
+pub const Error = error{
+    InvalidPixelDataSize,
+    CompressionFailed,
+    OutOfMemory,
+};
+
+/// PNG color type constants.
+const ColorType = struct {
+    const grayscale: u8 = 0;
+    const rgb: u8 = 2;
+    const indexed: u8 = 3;
+    const grayscale_alpha: u8 = 4;
+    const rgba: u8 = 6;
+};
+
+/// PNG filter method constants.
+const Filter = struct {
+    const none: u8 = 0;
+    const sub: u8 = 1;
+    const up: u8 = 2;
+    const average: u8 = 3;
+    const paeth: u8 = 4;
+};
+
+/// Encode RGBA pixels to PNG.
+///
+/// Pre-conditions:
+/// - pixels.len == width * height * 4
+/// - width > 0 and height > 0
+/// - width and height fit in u32
+///
+/// Post-conditions:
+/// - Returns valid PNG file data
+/// - Caller owns returned slice
+///
+/// Complexity: O(width * height) for filtering + compression
+pub fn encode(
+    allocator: std.mem.Allocator,
+    pixels: []const u8,
+    width: u32,
+    height: u32,
+) Error![]u8 {
+    // Pre-condition: dimensions are valid
+    if (width == 0 or height == 0) {
+        return Error.InvalidPixelDataSize;
+    }
+
+    const expected_size: usize = @as(usize, width) * @as(usize, height) * 4;
+    if (pixels.len != expected_size) {
+        return Error.InvalidPixelDataSize;
+    }
+
+    // Pre-condition assertions (after validation)
+    std.debug.assert(width > 0);
+    std.debug.assert(height > 0);
+    std.debug.assert(pixels.len == expected_size);
+
+    var result: std.ArrayListUnmanaged(u8) = .{};
+    errdefer result.deinit(allocator);
+
+    // PNG signature
+    result.appendSlice(allocator, &chunk.PNG_SIGNATURE) catch {
+        return Error.OutOfMemory;
+    };
+
+    // IHDR chunk
+    try writeIHDR(&result, allocator, width, height);
+
+    // IDAT chunk (compressed filtered pixel data)
+    try writeIDAT(&result, allocator, pixels, width, height);
+
+    // IEND chunk
+    chunk.writeChunk(&result, allocator, chunk.ChunkType.IEND, "") catch {
+        return Error.OutOfMemory;
+    };
+
+    const output = result.toOwnedSlice(allocator) catch {
+        return Error.OutOfMemory;
+    };
+
+    // Post-condition: valid PNG starts with signature
+    std.debug.assert(output.len >= 8);
+    std.debug.assert(std.mem.eql(u8, output[0..8], &chunk.PNG_SIGNATURE));
+
+    return output;
+}
+
+/// Write IHDR chunk to buffer.
+fn writeIHDR(
+    result: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    width: u32,
+    height: u32,
+) Error!void {
+    // Pre-conditions
+    std.debug.assert(width > 0);
+    std.debug.assert(height > 0);
+
+    var ihdr: [13]u8 = undefined;
+
+    // Width (4 bytes, big-endian)
+    std.mem.writeInt(u32, ihdr[0..4], width, .big);
+
+    // Height (4 bytes, big-endian)
+    std.mem.writeInt(u32, ihdr[4..8], height, .big);
+
+    ihdr[8] = 8; // Bit depth = 8
+    ihdr[9] = ColorType.rgba; // Color type = RGBA
+    ihdr[10] = 0; // Compression method = deflate
+    ihdr[11] = 0; // Filter method = adaptive
+    ihdr[12] = 0; // Interlace method = none
+
+    chunk.writeChunk(result, allocator, chunk.ChunkType.IHDR, &ihdr) catch {
+        return Error.OutOfMemory;
+    };
+
+    // Post-condition: IHDR data is 13 bytes
+    std.debug.assert(ihdr.len == 13);
+}
+
+/// Write IDAT chunk(s) with compressed pixel data.
+fn writeIDAT(
+    result: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    pixels: []const u8,
+    width: u32,
+    height: u32,
+) Error!void {
+    // Pre-conditions
+    std.debug.assert(width > 0);
+    std.debug.assert(height > 0);
+    std.debug.assert(pixels.len == @as(usize, width) * @as(usize, height) * 4);
+
+    // Add filter bytes to pixel data
+    const filtered = addFilterBytes(allocator, pixels, width, height) catch {
+        return Error.OutOfMemory;
+    };
+    defer allocator.free(filtered);
+
+    // Compress with deflate
+    const compressed = compress(allocator, filtered) catch {
+        return Error.CompressionFailed;
+    };
+    defer allocator.free(compressed);
+
+    // Write as IDAT chunk
+    chunk.writeChunk(result, allocator, chunk.ChunkType.IDAT, compressed) catch {
+        return Error.OutOfMemory;
+    };
+
+    // Post-condition: compressed data was written
+    std.debug.assert(compressed.len > 0);
+}
+
+/// Add PNG filter bytes before each row.
+///
+/// PNG requires a filter byte (0-4) before each scanline.
+/// We use filter 0 (None) for simplicity - each row is prepended with 0x00.
+fn addFilterBytes(
+    allocator: std.mem.Allocator,
+    pixels: []const u8,
+    width: u32,
+    height: u32,
+) ![]u8 {
+    // Pre-conditions
+    std.debug.assert(width > 0);
+    std.debug.assert(height > 0);
+
+    const row_size: usize = @as(usize, width) * 4;
+    const filtered_row_size = row_size + 1; // +1 for filter byte
+    const filtered_size = @as(usize, height) * filtered_row_size;
+
+    const filtered = try allocator.alloc(u8, filtered_size);
+    errdefer allocator.free(filtered);
+
+    // Process each row (bounded loop)
+    const height_usize: usize = @intCast(height);
+    for (0..height_usize) |y| {
+        const filtered_offset = y * filtered_row_size;
+        const pixel_offset = y * row_size;
+
+        // Filter byte (0 = None)
+        filtered[filtered_offset] = Filter.none;
+
+        // Copy row pixels
+        @memcpy(
+            filtered[filtered_offset + 1 ..][0..row_size],
+            pixels[pixel_offset..][0..row_size],
+        );
+    }
+
+    // Post-condition: all rows have filter byte
+    std.debug.assert(filtered.len == filtered_size);
+
+    return filtered;
+}
+
+/// Compress data using zlib format with deflate store blocks (no compression).
+///
+/// This produces valid zlib output that any PNG decoder can read.
+/// Store blocks are faster to encode and decode than compressed blocks.
+fn compress(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+    // Pre-condition: data is not empty
+    std.debug.assert(data.len > 0);
+
+    // Calculate output size:
+    // - 2 bytes zlib header
+    // - For each 65535-byte block: 5 bytes header + block data
+    // - 4 bytes adler32 checksum
+    const max_block_size: usize = 65535;
+    const num_full_blocks = data.len / max_block_size;
+    const last_block_size = data.len % max_block_size;
+    const num_blocks = num_full_blocks + @as(usize, if (last_block_size > 0) 1 else 0);
+
+    const output_size = 2 + (num_blocks * 5) + data.len + 4;
+    const output = try allocator.alloc(u8, output_size);
+    errdefer allocator.free(output);
+
+    var pos: usize = 0;
+
+    // Zlib header (RFC 1950)
+    // CMF = 0x78: CM=8 (deflate), CINFO=7 (32K window)
+    // FLG = 0x01: FCHECK makes header divisible by 31, no dict, fastest compression
+    output[pos] = 0x78;
+    pos += 1;
+    output[pos] = 0x01;
+    pos += 1;
+
+    // Write store blocks
+    var data_pos: usize = 0;
+    var blocks_written: usize = 0;
+
+    while (data_pos < data.len) : (blocks_written += 1) {
+        const remaining = data.len - data_pos;
+        const block_size: u16 = @intCast(@min(remaining, max_block_size));
+        const is_final = (data_pos + block_size >= data.len);
+
+        // Block header: BFINAL (1 bit) + BTYPE (2 bits) = 00 for stored
+        // If final: 0x01, else: 0x00
+        output[pos] = if (is_final) 0x01 else 0x00;
+        pos += 1;
+
+        // LEN (2 bytes, little-endian)
+        std.mem.writeInt(u16, output[pos..][0..2], block_size, .little);
+        pos += 2;
+
+        // NLEN (2 bytes, little-endian) = one's complement of LEN
+        std.mem.writeInt(u16, output[pos..][0..2], ~block_size, .little);
+        pos += 2;
+
+        // Block data
+        @memcpy(output[pos..][0..block_size], data[data_pos..][0..block_size]);
+        pos += block_size;
+        data_pos += block_size;
+    }
+
+    // Adler-32 checksum (big-endian)
+    const adler = computeAdler32(data);
+    std.mem.writeInt(u32, output[pos..][0..4], adler, .big);
+    pos += 4;
+
+    // Post-condition: wrote expected amount
+    std.debug.assert(pos == output_size);
+
+    return output;
+}
+
+/// Compute Adler-32 checksum for zlib footer.
+fn computeAdler32(data: []const u8) u32 {
+    // Pre-condition: data is valid slice
+    std.debug.assert(data.len <= std.math.maxInt(usize));
+
+    const MOD_ADLER: u32 = 65521;
+    var a: u32 = 1;
+    var b: u32 = 0;
+
+    // Process in chunks to avoid overflow (bounded loop)
+    const chunk_size: usize = 5552; // Largest n where 255*n*(n+1)/2 + (n+1)*(65536-1) < 2^32
+    var remaining = data;
+
+    const max_chunks = (data.len / chunk_size) + 1;
+    for (0..max_chunks) |_| {
+        if (remaining.len == 0) break;
+
+        const slice_len = @min(remaining.len, chunk_size);
+        const slice = remaining[0..slice_len];
+
+        for (slice) |byte| {
+            a += byte;
+            b += a;
+        }
+
+        a %= MOD_ADLER;
+        b %= MOD_ADLER;
+
+        remaining = remaining[slice_len..];
+    }
+
+    // Post-condition: valid adler32
+    std.debug.assert(a < MOD_ADLER);
+    std.debug.assert(b < MOD_ADLER);
+
+    return (b << 16) | a;
+}
+
+/// Encode BGRA pixels to PNG (common format from GPU readbacks).
+///
+/// Converts BGRA to RGBA before encoding.
+pub fn encodeBGRA(
+    allocator: std.mem.Allocator,
+    pixels: []const u8,
+    width: u32,
+    height: u32,
+) Error![]u8 {
+    // Pre-conditions
+    if (width == 0 or height == 0) {
+        return Error.InvalidPixelDataSize;
+    }
+
+    const expected_size: usize = @as(usize, width) * @as(usize, height) * 4;
+    if (pixels.len != expected_size) {
+        return Error.InvalidPixelDataSize;
+    }
+
+    std.debug.assert(width > 0);
+    std.debug.assert(height > 0);
+
+    // Convert BGRA to RGBA
+    const rgba = allocator.alloc(u8, pixels.len) catch {
+        return Error.OutOfMemory;
+    };
+    defer allocator.free(rgba);
+
+    // Process each pixel (bounded loop)
+    const pixel_count = pixels.len / 4;
+    for (0..pixel_count) |i| {
+        const offset = i * 4;
+        rgba[offset + 0] = pixels[offset + 2]; // R <- B
+        rgba[offset + 1] = pixels[offset + 1]; // G <- G
+        rgba[offset + 2] = pixels[offset + 0]; // B <- R
+        rgba[offset + 3] = pixels[offset + 3]; // A <- A
+    }
+
+    // Post-condition: converted all pixels
+    std.debug.assert(rgba.len == pixels.len);
+
+    return encode(allocator, rgba, width, height);
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "encoder: encode 1x1 red pixel" {
+    const allocator = std.testing.allocator;
+
+    // Single red pixel (RGBA)
+    const pixels = [_]u8{ 255, 0, 0, 255 };
+    const png = try encode(allocator, &pixels, 1, 1);
+    defer allocator.free(png);
+
+    // Verify PNG signature
+    try std.testing.expectEqualSlices(u8, &chunk.PNG_SIGNATURE, png[0..8]);
+
+    // Parse and verify chunks
+    var iter = try chunk.parseChunks(png);
+
+    // IHDR
+    const ihdr = (try iter.next()).?;
+    try std.testing.expectEqualSlices(u8, "IHDR", &ihdr.chunk_type);
+    try std.testing.expectEqual(@as(usize, 13), ihdr.data.len);
+    // Verify dimensions
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, ihdr.data[0..4], .big));
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, ihdr.data[4..8], .big));
+
+    // IDAT
+    const idat = (try iter.next()).?;
+    try std.testing.expectEqualSlices(u8, "IDAT", &idat.chunk_type);
+    try std.testing.expect(idat.data.len > 0);
+
+    // IEND
+    const iend = (try iter.next()).?;
+    try std.testing.expectEqualSlices(u8, "IEND", &iend.chunk_type);
+    try std.testing.expectEqual(@as(usize, 0), iend.data.len);
+
+    // No more chunks
+    try std.testing.expectEqual(@as(?chunk.Chunk, null), try iter.next());
+}
+
+test "encoder: encode 2x2 gradient" {
+    const allocator = std.testing.allocator;
+
+    // 2x2 image: red, green, blue, white
+    const pixels = [_]u8{
+        255, 0,   0,   255, // Red
+        0,   255, 0,   255, // Green
+        0,   0,   255, 255, // Blue
+        255, 255, 255, 255, // White
+    };
+
+    const png = try encode(allocator, &pixels, 2, 2);
+    defer allocator.free(png);
+
+    // Verify valid PNG
+    try std.testing.expectEqualSlices(u8, &chunk.PNG_SIGNATURE, png[0..8]);
+
+    // Parse and verify dimensions
+    var iter = try chunk.parseChunks(png);
+    const ihdr = (try iter.next()).?;
+    try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, ihdr.data[0..4], .big));
+    try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, ihdr.data[4..8], .big));
+}
+
+test "encoder: encode larger image" {
+    const allocator = std.testing.allocator;
+
+    const width: u32 = 64;
+    const height: u32 = 64;
+    const size = width * height * 4;
+
+    var pixels: [size]u8 = undefined;
+
+    // Fill with gradient pattern
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const offset = (y * width + x) * 4;
+            pixels[offset + 0] = @intCast(x * 4); // R
+            pixels[offset + 1] = @intCast(y * 4); // G
+            pixels[offset + 2] = 128; // B
+            pixels[offset + 3] = 255; // A
+        }
+    }
+
+    const png = try encode(allocator, &pixels, width, height);
+    defer allocator.free(png);
+
+    // Verify valid PNG structure
+    var iter = try chunk.parseChunks(png);
+
+    const ihdr = (try iter.next()).?;
+    try std.testing.expectEqual(@as(u32, 64), std.mem.readInt(u32, ihdr.data[0..4], .big));
+    try std.testing.expectEqual(@as(u32, 64), std.mem.readInt(u32, ihdr.data[4..8], .big));
+}
+
+test "encoder: invalid pixel size rejected" {
+    const allocator = std.testing.allocator;
+
+    // Wrong size: 3 bytes instead of 4 (1x1 requires 4 bytes)
+    const pixels = [_]u8{ 255, 0, 0 };
+    try std.testing.expectError(Error.InvalidPixelDataSize, encode(allocator, &pixels, 1, 1));
+}
+
+test "encoder: zero dimensions rejected" {
+    const allocator = std.testing.allocator;
+
+    const pixels = [_]u8{};
+    try std.testing.expectError(Error.InvalidPixelDataSize, encode(allocator, &pixels, 0, 1));
+    try std.testing.expectError(Error.InvalidPixelDataSize, encode(allocator, &pixels, 1, 0));
+}
+
+test "encoder: BGRA to PNG conversion" {
+    const allocator = std.testing.allocator;
+
+    // Single cyan pixel in BGRA (WebGPU typical format)
+    // BGRA: B=255, G=255, R=0, A=255 = cyan
+    const bgra = [_]u8{ 255, 255, 0, 255 };
+
+    const png = try encodeBGRA(allocator, &bgra, 1, 1);
+    defer allocator.free(png);
+
+    // Verify valid PNG
+    try std.testing.expectEqualSlices(u8, &chunk.PNG_SIGNATURE, png[0..8]);
+}
+
+test "encoder: filter bytes added correctly" {
+    const allocator = std.testing.allocator;
+
+    // 2x1 image
+    const pixels = [_]u8{
+        255, 0, 0, 255, // Red
+        0, 255, 0, 255, // Green
+    };
+
+    const filtered = try addFilterBytes(allocator, &pixels, 2, 1);
+    defer allocator.free(filtered);
+
+    // Should be: [filter=0] [R G B A] [R G B A]
+    try std.testing.expectEqual(@as(usize, 9), filtered.len); // 1 + 8
+    try std.testing.expectEqual(@as(u8, 0), filtered[0]); // Filter byte
+    try std.testing.expectEqual(@as(u8, 255), filtered[1]); // R of first pixel
+}
+
+test "encoder: multiple rows with filter bytes" {
+    const allocator = std.testing.allocator;
+
+    // 1x2 image (2 rows, 1 pixel each)
+    const pixels = [_]u8{
+        255, 0, 0, 255, // Row 0: Red
+        0, 255, 0, 255, // Row 1: Green
+    };
+
+    const filtered = try addFilterBytes(allocator, &pixels, 1, 2);
+    defer allocator.free(filtered);
+
+    // Should be: [filter=0][RGBA] [filter=0][RGBA]
+    try std.testing.expectEqual(@as(usize, 10), filtered.len); // (1 + 4) * 2
+    try std.testing.expectEqual(@as(u8, 0), filtered[0]); // Row 0 filter
+    try std.testing.expectEqual(@as(u8, 0), filtered[5]); // Row 1 filter
+}
+
+test "encoder: compression produces valid zlib output" {
+    const allocator = std.testing.allocator;
+
+    const data = "Hello, PNG compression!";
+    const compressed = try compress(allocator, data);
+    defer allocator.free(compressed);
+
+    // Compressed data should exist
+    try std.testing.expect(compressed.len > 0);
+
+    // Verify zlib header
+    try std.testing.expectEqual(@as(u8, 0x78), compressed[0]); // CMF
+    try std.testing.expectEqual(@as(u8, 0x01), compressed[1]); // FLG
+
+    // Verify header checksum (CMF*256 + FLG must be divisible by 31)
+    const header_check = @as(u16, compressed[0]) * 256 + compressed[1];
+    try std.testing.expectEqual(@as(u16, 0), header_check % 31);
+
+    // Verify store block header (byte 2)
+    // BFINAL=1, BTYPE=00 -> 0x01
+    try std.testing.expectEqual(@as(u8, 0x01), compressed[2]);
+
+    // Verify LEN/NLEN
+    const len = std.mem.readInt(u16, compressed[3..5], .little);
+    const nlen = std.mem.readInt(u16, compressed[5..7], .little);
+    try std.testing.expectEqual(~len, nlen);
+    try std.testing.expectEqual(@as(u16, @intCast(data.len)), len);
+
+    // Verify data is stored uncompressed
+    try std.testing.expectEqualStrings(data, compressed[7..][0..data.len]);
+}
+
+test "encoder: adler32 known values" {
+    // Test with known Adler-32 values
+    // "Wikipedia" has Adler-32 = 0x11E60398
+    const adler = computeAdler32("Wikipedia");
+    try std.testing.expectEqual(@as(u32, 0x11E60398), adler);
+
+    // Empty-like single byte
+    const adler_a = computeAdler32("a");
+    // a=1+97=98, b=0+98=98, result = (98 << 16) | 98 = 0x00620062
+    try std.testing.expectEqual(@as(u32, 0x00620062), adler_a);
+}
+
+test "encoder: OOM handling with FailingAllocator" {
+    // Test that encode handles OOM gracefully at each allocation point
+    const pixels = [_]u8{ 255, 0, 0, 255 }; // 1x1 red pixel
+
+    var fail_index: usize = 0;
+    while (fail_index < 20) : (fail_index += 1) {
+        var failing_alloc = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_index,
+        });
+
+        const result = encode(failing_alloc.allocator(), &pixels, 1, 1);
+
+        if (failing_alloc.has_induced_failure) {
+            // OOM occurred - verify graceful handling
+            // Both OutOfMemory and CompressionFailed are acceptable
+            // (CompressionFailed wraps OOM in compress())
+            if (result) |png| {
+                failing_alloc.allocator().free(png);
+                return error.TestUnexpectedResult;
+            } else |err| {
+                try std.testing.expect(err == Error.OutOfMemory or err == Error.CompressionFailed);
+            }
+        } else {
+            // No OOM - operation succeeded
+            const png = try result;
+            failing_alloc.allocator().free(png);
+            break;
+        }
+    }
+}
