@@ -105,6 +105,9 @@ pub fn encode(
 }
 
 /// Write IHDR chunk to buffer.
+///
+/// IHDR format is defined by PNG spec (RFC 2083). All multi-byte values
+/// are big-endian per PNG spec requirements.
 fn writeIHDR(
     result: *std.ArrayListUnmanaged(u8),
     allocator: std.mem.Allocator,
@@ -117,23 +120,26 @@ fn writeIHDR(
 
     var ihdr: [13]u8 = undefined;
 
-    // Width (4 bytes, big-endian)
+    // PNG spec requires big-endian for all multi-byte integers
     std.mem.writeInt(u32, ihdr[0..4], width, .big);
-
-    // Height (4 bytes, big-endian)
     std.mem.writeInt(u32, ihdr[4..8], height, .big);
 
-    ihdr[8] = 8; // Bit depth = 8
-    ihdr[9] = ColorType.rgba; // Color type = RGBA
-    ihdr[10] = 0; // Compression method = deflate
-    ihdr[11] = 0; // Filter method = adaptive
-    ihdr[12] = 0; // Interlace method = none
+    // 8-bit depth is sufficient for web display and keeps file size small
+    ihdr[8] = 8;
+    // RGBA (6) supports transparency needed for shader output compositing
+    ihdr[9] = ColorType.rgba;
+    // PNG only supports deflate compression (method 0)
+    ihdr[10] = 0;
+    // Adaptive filtering (method 0) allows per-row filter selection
+    ihdr[11] = 0;
+    // No interlacing - simpler and smaller for generated images
+    ihdr[12] = 0;
 
     chunk.writeChunk(result, allocator, chunk.ChunkType.IHDR, &ihdr) catch {
         return Error.OutOfMemory;
     };
 
-    // Post-condition: IHDR data is 13 bytes
+    // Post-condition: IHDR data is 13 bytes (PNG spec fixed size)
     std.debug.assert(ihdr.len == 13);
 }
 
@@ -214,10 +220,14 @@ fn addFilterBytes(
     return filtered;
 }
 
-/// Compress data using zlib format with deflate store blocks (no compression).
+/// Compress data using zlib format with deflate store blocks.
 ///
-/// This produces valid zlib output that any PNG decoder can read.
-/// Store blocks are faster to encode and decode than compressed blocks.
+/// Uses store blocks (BTYPE=00) which produce valid zlib output
+/// without actual compression. This is fast and universally supported.
+///
+/// TODO: Add real DEFLATE compression for smaller file sizes.
+/// The Zig 0.16 std.compress.flate API is complex; store blocks work
+/// correctly and are valid per RFC 1950/1951.
 fn compress(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     // Pre-condition: data is not empty
     std.debug.assert(data.len > 0);
@@ -247,12 +257,11 @@ fn compress(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
 
     // Write store blocks
     var data_pos: usize = 0;
-    var blocks_written: usize = 0;
 
-    while (data_pos < data.len) : (blocks_written += 1) {
+    for (0..num_blocks) |i| {
         const remaining = data.len - data_pos;
         const block_size: u16 = @intCast(@min(remaining, max_block_size));
-        const is_final = (data_pos + block_size >= data.len);
+        const is_final = (i == num_blocks - 1);
 
         // Block header: BFINAL (1 bit) + BTYPE (2 bits) = 00 for stored
         // If final: 0x01, else: 0x00
