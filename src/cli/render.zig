@@ -459,7 +459,11 @@ fn compileSource(allocator: std.mem.Allocator, path: []const u8, source: [:0]con
     if (std.mem.eql(u8, extension, ".pbsf")) {
         return pngine.compile(allocator, source);
     } else {
-        return pngine.dsl.compile(allocator, source);
+        // Pass base_dir for asset embedding (e.g., blob={file={url="..."}} )
+        const base_dir = std.fs.path.dirname(path);
+        return pngine.dsl.compileWithOptions(allocator, source, .{
+            .base_dir = base_dir,
+        });
     }
 }
 

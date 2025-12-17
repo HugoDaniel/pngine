@@ -953,7 +953,11 @@ fn compileSource(allocator: std.mem.Allocator, path: []const u8, source: [:0]con
         return pngine.compile(allocator, source);
     } else {
         // DSL format (.pngine or unknown)
-        return pngine.dsl.compile(allocator, source);
+        // Pass base_dir for asset embedding (e.g., blob={file={url="..."}} )
+        const base_dir = std.fs.path.dirname(path);
+        return pngine.dsl.compileWithOptions(allocator, source, .{
+            .base_dir = base_dir,
+        });
     }
 }
 
