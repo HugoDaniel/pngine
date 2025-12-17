@@ -1,0 +1,235 @@
+#define CUBE_VERTEX_SIZE=4 * 10 // Byte size of one cube vertex.
+#define CUBE_POSITION_OFFSET=0
+#define CUBE_COLOR_OFFSET=4 * 4 // Byte offset of cube vertex color attribute.
+#define CUBE_UV_OFFSET=4 * 8
+#define CUBE_VERTEX_COUNT=36
+
+#data cubeVertexArray {
+  float32Array=[
+  // float4 position, float4 color, float2 uv,
+  1 -1 1 1   1 0 1 1  0 1
+  -1 -1 1 1  0 0 1 1  1 1
+  -1 -1 -1 1 0 0 0 1  1 0
+  1 -1 -1 1  1 0 0 1  0 0
+  1 -1 1 1   1 0 1 1  0 1
+  -1 -1 -1 1 0 0 0 1  1 0
+
+  1 1 1 1    1 1 1 1  0 1
+  1 -1 1 1   1 0 1 1  1 1
+  1 -1 -1 1  1 0 0 1  1 0
+  1 1 -1 1   1 1 0 1  0 0
+  1 1 1 1    1 1 1 1  0 1
+  1 -1 -1 1  1 0 0 1  1 0
+
+  -1 1 1 1   0 1 1 1  0 1
+  1 1 1 1    1 1 1 1  1 1
+  1 1 -1 1   1 1 0 1  1 0
+  -1 1 -1 1  0 1 0 1  0 0
+  -1 1 1 1   0 1 1 1  0 1
+  1 1 -1 1   1 1 0 1  1 0
+
+  -1 -1 1 1  0 0 1 1  0 1
+  -1 1 1 1   0 1 1 1  1 1
+  -1 1 -1 1  0 1 0 1  1 0
+  -1 -1 -1 1 0 0 0 1  0 0
+  -1 -1 1 1  0 0 1 1  0 1
+  -1 1 -1 1  0 1 0 1  1 0
+
+  1 1 1 1    1 1 1 1  0 1
+  -1 1 1 1   0 1 1 1  1 1
+  -1 -1 1 1  0 0 1 1  1 0
+  -1 -1 1 1  0 0 1 1  1 0
+  1 -1 1 1   1 0 1 1  0 0
+  1 1 1 1    1 1 1 1  0 1
+
+  1 -1 -1 1  1 0 0 1  0 1
+  -1 -1 -1 1 0 0 0 1  1 1
+  -1 1 -1 1  0 1 0 1  1 0
+  1 1 -1 1   1 1 0 1  0 0
+  1 -1 -1 1  1 0 0 1  0 1
+  -1 1 -1 1  0 1 0 1  1 0
+]}
+
+#buffer verticesBuffer {
+  size  = cubeVertexArray
+  usage = [VERTEX]
+  mappedAtCreation=cubeVertexArray
+}
+
+#renderPipeline renderCube {
+  layout=auto
+  vertex={
+    entrypoint=vertexMain
+    module=code 
+    buffers = [
+      {
+        arrayStride=CUBE_VERTEX_SIZE
+        attributes=[
+          { shaderLocation=0 offset=CUBE_POSITION_OFFSET format=float32x4 }
+          { shaderLocation=1 offset=CUBE_UV_OFFSET format=float32x2 }
+        ]
+      }
+    ]
+  }
+  fragment = {
+    entrypoint=fragMain
+    module=code 
+    targets=[{ format=preferredCanvasFormat }]
+  }
+  primitive={
+    topology = triangle-list
+    // Backface culling since the cube is solid piece of geometry.
+    // Faces pointing away from the camera will be occluded by faces
+    // pointing toward the camera.
+    cullMode = back
+  }
+  depthStencil={
+    depthWriteEnabled=true
+    depthCompare=less
+    format=depth24plus
+  }
+}
+
+#texture depthTexture {
+  size=["$canvas.width", "$canvas.height"]
+  format=depth24plus
+  usage=[RENDER_ATTACHMENT]
+}
+
+#buffer uniformInputsBuffer {
+  size="4+4+4"
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeInputUniforms {
+  writeBuffer={
+    buffer=uniformInputsBuffer
+    bufferOffset=0
+    data="$uniforms.code.inputs.data"
+  }
+}
+
+#buffer cameraInput {
+  size="4*4*4"
+  usage=[UNIFORM COPY_DST]
+}
+
+#wasmCall mvpMatrix {
+  module={
+    url="assets/mvp.wasm"
+  }
+  func=buildMVPMatrix // This must be a function exported by the module
+  returns="mat4x4"
+  // The function will be called whenever "mvpMatrix" is referenced
+  args=[ "$canvas.width", "$canvas.height", "$t.total" ]
+}
+
+#queue writeCameraUniform {
+  writeBuffer={
+    buffer=cameraInput
+    bufferOffset=0
+    dataFrom={ wasm=mvpMatrix }
+  }
+}
+
+#bindGroup cubeUniformsBinding {
+  layout={ pipeline=renderCube index=0 }
+  entries=[
+    { binding=0 resource={ buffer=uniformInputsBuffer }}
+    { binding=1 resource={ buffer=cameraInput }}
+  ]
+}
+
+#renderPass drawCube {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.5 0.5 0.5 1.0]
+    loadOp=clear
+    storeOp=store
+  }]
+  depthStencilAttachment={
+    view=depthTexture
+    depthClearValue=1.0
+    depthLoadOp=clear
+    depthStoreOp=store
+  }
+  pipeline=renderCube
+  bindGroups=[cubeUniformsBinding]
+  vertexBuffers=[verticesBuffer]
+  draw=CUBE_VERTEX_COUNT
+}
+
+#frame cube {
+  perform=[
+    writeInputUniforms
+    writeCameraUniform
+    drawCube
+  ]
+}
+
+#define FOV="(2 * PI) / 5"
+#shaderModule code {
+  code="
+struct PngineInputs {
+  time: f32,
+};
+@group(0) @binding(0) var<uniform> inputs : PngineInputs;
+@group(0) @binding(1) var<uniform> camera : mat4x4<f32>;
+
+struct VertexOutput {
+  @builtin(position) Position : vec4f,
+  @location(0) fragUV : vec2f,
+  @location(1) fragPosition: vec4f,
+}
+
+// Rotation matrix around Y axis
+fn rotateY(angle: f32) -> mat4x4<f32> {
+  let c = cos(angle);
+  let s = sin(angle);
+  return mat4x4<f32>(
+    vec4f(c, 0, s, 0),
+    vec4f(0, 1, 0, 0),
+    vec4f(-s, 0, c, 0),
+    vec4f(0, 0, 0, 1)
+  );
+}
+
+// Rotation matrix around X axis
+fn rotateX(angle: f32) -> mat4x4<f32> {
+  let c = cos(angle);
+  let s = sin(angle);
+  return mat4x4<f32>(
+    vec4f(1, 0, 0, 0),
+    vec4f(0, c, -s, 0),
+    vec4f(0, s, c, 0),
+    vec4f(0, 0, 0, 1)
+  );
+}
+
+@vertex
+fn vertexMain(
+  @location(0) position : vec4f,
+  @location(1) uv : vec2f
+) -> VertexOutput {
+  // Apply rotation based on time
+  let rotY = rotateY(inputs.time);
+  let rotX = rotateX(inputs.time * 0.5);
+  let rotatedPos = rotY * rotX * position;
+
+  var output : VertexOutput;
+  output.Position = camera * rotatedPos;
+  output.fragUV = uv;
+  output.fragPosition = 0.5 * (rotatedPos + vec4(1.0, 1.0, 1.0, 1.0));
+  return output;
+}
+
+@fragment
+fn fragMain(
+  @location(0) fragUV: vec2f,
+  @location(1) fragPosition: vec4f
+) -> @location(0) vec4f {
+  return fragPosition;
+}
+"
+}
+

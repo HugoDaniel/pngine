@@ -1,0 +1,194 @@
+#define CUBE_VERTEX_SIZE=4 * 10 // Byte size of one cube vertex.
+#define CUBE_POSITION_OFFSET=0
+#define CUBE_COLOR_OFFSET=4 * 4 // Byte offset of cube vertex color attribute.
+#define CUBE_UV_OFFSET=4 * 8
+#define CUBE_VERTEX_COUNT=36
+
+// Define #wgsl macro for the cube shader with uniform descriptors
+#wgsl cubeShader {
+  value="
+struct PngineInputs {
+  time: f32,
+  canvasW: f32,
+  canvasH: f32,
+}
+
+@group(0) @binding(0) var<uniform> inputs : PngineInputs;
+@group(0) @binding(1) var<uniform> camera : mat4x4<f32>;
+
+struct VertexOutput {
+  @builtin(position) Position : vec4f,
+  @location(0) fragUV : vec2f,
+  @location(1) fragPosition: vec4f,
+}
+
+@vertex
+fn vertexMain(
+  @location(0) position : vec4f,
+  @location(1) uv : vec2f
+) -> VertexOutput {
+  var output : VertexOutput;
+  output.Position = camera * position;
+  output.fragUV = uv;
+  // Rotate based on time
+  output.fragPosition = sin(inputs.time) * 0.5 * (position + vec4(1.0, 1.0, 1.0, 1.0));
+  return output;
+}
+
+@fragment
+fn fragMain(
+  @location(0) fragUV: vec2f,
+  @location(1) fragPosition: vec4f
+) -> @location(0) vec4f {
+  return fragPosition;
+}
+"
+
+  // Define uniform descriptors for animation targeting
+  uniforms=[
+    {
+      id=cubeInputs
+      var=inputs
+      struct=PngineInputs
+      bindGroup=0
+      binding=0
+    }
+  ]
+
+  metadata={
+    version="1.0.0"
+    description="Rotating cube shader with WASM-generated data and descriptor-based uniforms"
+  }
+}
+
+#data cubeVertexArray {
+  wasm={
+    module={
+      url="assets/cube.wasm"
+    }
+    func=cube
+    returns="array<f32, 360>" // WGSL data type
+  }
+}
+
+#buffer verticesBuffer {
+  size  = cubeVertexArray
+  usage = [VERTEX]
+  mappedAtCreation=cubeVertexArray
+}
+
+#shaderModule cubeShaderModule {
+  code=cubeShader
+}
+
+#renderPipeline renderCube {
+  layout=auto
+  vertex={
+    entrypoint=vertexMain
+    module=cubeShaderModule
+    buffers = [
+      {
+        arrayStride=CUBE_VERTEX_SIZE
+        attributes=[
+          { shaderLocation=0 offset=CUBE_POSITION_OFFSET format=float32x4 }
+          { shaderLocation=1 offset=CUBE_UV_OFFSET format=float32x2 }
+        ]
+      }
+    ]
+  }
+  fragment = {
+    entrypoint=fragMain
+    module=cubeShaderModule
+    targets=[{ format=preferredCanvasFormat }]
+  }
+  primitive={
+    topology = triangle-list
+    // Backface culling since the cube is solid piece of geometry.
+    // Faces pointing away from the camera will be occluded by faces
+    // pointing toward the camera.
+    cullMode = back
+  }
+  depthStencil={
+    depthWriteEnabled=true
+    depthCompare=less
+    format=depth24plus
+  }
+}
+
+#texture depthTexture {
+  size=["$canvas.width", "$canvas.height"]
+  format=depth24plus
+  usage=[RENDER_ATTACHMENT]
+}
+
+#buffer uniformInputsBuffer {
+  size="4+4+4"  // 3 * f32 = 12 bytes (time, canvasW, canvasH)
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeInputUniforms {
+  writeBuffer={
+    buffer=uniformInputsBuffer
+    bufferOffset=0
+    data="$uniforms.cubeShaderModule.inputs.data"
+  }
+}
+
+#buffer cameraInput {
+  size="4*4*4"
+  usage=[UNIFORM COPY_DST]
+}
+
+#wasmCall mvpMatrix {
+  module={
+    url="assets/mvp.wasm"
+  }
+  func=buildMVPMatrix // This must be a function exported by the module
+  returns="mat4x4"
+  // The function will be called whenever "mvpMatrix" is referenced
+  args=[ "$canvas.width", "$canvas.height", "$t.total" ]
+}
+
+#queue writeCameraUniform {
+  writeBuffer={
+    buffer=cameraInput
+    bufferOffset=0
+    dataFrom={ wasm=mvpMatrix }
+  }
+}
+
+#bindGroup cubeUniformsBinding {
+  layout={ pipeline=renderCube index=0 }
+  entries=[
+    { binding=0 resource={ buffer=uniformInputsBuffer }}
+    { binding=1 resource={ buffer=cameraInput }}
+  ]
+}
+
+#renderPass drawCube {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.5 0.5 0.5 1.0]
+    loadOp=clear
+    storeOp=store
+  }]
+  depthStencilAttachment={
+    view=depthTexture
+    depthClearValue=1.0
+    depthLoadOp=clear
+    depthStoreOp=store
+  }
+  pipeline=renderCube
+  bindGroups=[cubeUniformsBinding]
+  vertexBuffers=[verticesBuffer]
+  draw=CUBE_VERTEX_COUNT
+}
+
+#frame cube {
+  perform=[
+    writeInputUniforms
+    writeCameraUniform
+    drawCube
+  ]
+}
+#define FOV="(2 * PI) / 5"
