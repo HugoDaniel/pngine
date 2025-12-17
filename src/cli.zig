@@ -32,6 +32,9 @@ const Call = mock_gpu.Call;
 const Dispatcher = pngine.Dispatcher;
 const DescriptorEncoder = pngine.DescriptorEncoder;
 
+// Subcommand modules
+const render_cmd = @import("cli/render.zig");
+
 /// Maximum input file size (16 MiB).
 /// Prevents DoS via memory exhaustion from malicious inputs.
 const max_file_size: u32 = 16 * 1024 * 1024;
@@ -74,6 +77,8 @@ fn run(allocator: std.mem.Allocator) !u8 {
         return runEmbed(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "extract")) {
         return runExtract(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "render")) {
+        return render_cmd.run(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
         printUsage();
         return 0;
@@ -922,6 +927,7 @@ fn printUsage() void {
         \\Usage:
         \\  pngine compile <input> [-o <output.pngb>]
         \\  pngine check <input>
+        \\  pngine render <input> [-o <output.png>] [-s WxH] [-t time] [-e]
         \\  pngine embed <image.png> <bytecode.pngb> [-o <output.png>]
         \\  pngine extract <image.png> [-o <output.pngb>]
         \\  pngine help
@@ -930,6 +936,7 @@ fn printUsage() void {
         \\Commands:
         \\  compile     Compile source to PNGB bytecode
         \\  check       Compile and validate bytecode execution
+        \\  render      Render shader to PNG image (use -h for options)
         \\  embed       Embed PNGB bytecode into a PNG image
         \\  extract     Extract PNGB bytecode from a PNG image
         \\  help        Show this help message
@@ -942,11 +949,12 @@ fn printUsage() void {
         \\  .pngine     DSL format (macro-based syntax)
         \\  .pbsf       Legacy PBSF format (S-expressions)
         \\  .pngb       Compiled bytecode
-        \\  .png        PNG images (embed/extract)
+        \\  .png        PNG images (render/embed/extract)
         \\
         \\Examples:
         \\  pngine compile triangle.pngine -o triangle.pngb
         \\  pngine check output.pngb
+        \\  pngine render shader.pngine -o preview.png --size 1024x1024
         \\  pngine embed cover.png triangle.pngb -o artwork.png
         \\  pngine extract artwork.png -o extracted.pngb
         \\

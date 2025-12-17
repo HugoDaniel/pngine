@@ -30,12 +30,19 @@ pub const mock_gpu = @import("executor/mock_gpu.zig");
 pub const dispatcher = @import("executor/dispatcher.zig");
 pub const executor_test = @import("executor/executor_test.zig");
 
-// PNG embedding/extraction
+// GPU backends
+pub const gpu_backends = struct {
+    pub const native_gpu = @import("gpu/native_gpu.zig");
+    pub const NativeGPU = native_gpu.NativeGPU;
+};
+
+// PNG embedding/extraction/encoding
 pub const png = struct {
     pub const crc32 = @import("png/crc32.zig");
     pub const chunk = @import("png/chunk.zig");
     pub const embed = @import("png/embed.zig");
     pub const extract = @import("png/extract.zig");
+    pub const encoder = @import("png/encoder.zig");
 
     // Re-export main types
     pub const Chunk = chunk.Chunk;
@@ -47,6 +54,8 @@ pub const png = struct {
     pub const extractBytecode = extract.extract;
     pub const hasPngb = extract.hasPngb;
     pub const getPngbInfo = extract.getPngbInfo;
+    pub const encode = encoder.encode;
+    pub const encodeBGRA = encoder.encodeBGRA;
 };
 
 // DSL compiler (new macro-based syntax)
@@ -145,11 +154,14 @@ test {
     _ = @import("dsl/Emitter.zig");
     _ = @import("dsl/emitter/test.zig");
     _ = @import("dsl/Compiler.zig");
-    // Run PNG embedding tests
+    // Run PNG embedding/encoding tests
     _ = @import("png/crc32.zig");
     _ = @import("png/chunk.zig");
     _ = @import("png/embed.zig");
     _ = @import("png/extract.zig");
+    _ = @import("png/encoder.zig");
+    // Run GPU backend tests
+    _ = @import("gpu/native_gpu.zig");
 }
 
 test "compile PBSF to PNGB" {
