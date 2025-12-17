@@ -68,6 +68,11 @@ pub const OpCode = enum(u8) {
     /// Params: group_id, layout_id, entry_count, entries...
     create_bind_group = 0x0A,
 
+    /// Create image bitmap from blob data.
+    /// Params: bitmap_id, blob_data_id
+    /// blob_data_id points to data section entry with format: [mime_len:u8][mime:bytes][data:bytes]
+    create_image_bitmap = 0x0B,
+
     // ========================================================================
     // Pass Operations (0x10-0x1F)
     // ========================================================================
@@ -135,6 +140,26 @@ pub const OpCode = enum(u8) {
     /// Submit command buffer to queue.
     /// Params: (none)
     submit = 0x24,
+
+    /// Copy external image (ImageBitmap) to texture.
+    /// Params: bitmap_id, texture_id, mip_level, origin_x, origin_y
+    copy_external_image_to_texture = 0x25,
+
+    /// Initialize WASM module from embedded data.
+    /// Params: module_id, wasm_data_id
+    /// wasm_data_id points to data section entry containing raw .wasm bytes
+    init_wasm_module = 0x26,
+
+    /// Call WASM exported function.
+    /// Params: call_id, module_id, func_name_id, arg_count, [args...]
+    /// Each arg is: [arg_type:u8][value:varies]
+    /// Returns pointer stored by call_id for later read
+    call_wasm_func = 0x27,
+
+    /// Write WASM memory to GPU buffer.
+    /// Params: call_id, buffer_id, offset, byte_len
+    /// Reads byte_len bytes from WASM memory at pointer from call_id
+    write_buffer_from_wasm = 0x28,
 
     // ========================================================================
     // Frame Control (0x30-0x3F)
@@ -212,6 +237,7 @@ pub const OpCode = enum(u8) {
             .create_render_pipeline,
             .create_compute_pipeline,
             .create_bind_group,
+            .create_image_bitmap,
             .begin_render_pass,
             .begin_compute_pass,
             .set_pipeline,
@@ -227,6 +253,10 @@ pub const OpCode = enum(u8) {
             .copy_buffer_to_buffer,
             .copy_texture_to_texture,
             .submit,
+            .copy_external_image_to_texture,
+            .init_wasm_module,
+            .call_wasm_func,
+            .write_buffer_from_wasm,
             .define_frame,
             .end_frame,
             .exec_pass,
@@ -289,6 +319,59 @@ pub const ElementType = enum(u8) {
     vec3f = 5,
     vec4f = 6,
     mat4x4f = 7,
+};
+
+/// WASM function argument types for call_wasm_func opcode.
+///
+/// Each argument in a WASM call is encoded as:
+/// - 1 byte: WasmArgType
+/// - 0-4 bytes: value (depends on type)
+///
+/// Runtime-resolved types (canvas_width, etc.) have no value bytes.
+pub const WasmArgType = enum(u8) {
+    /// Literal f32 value (4 bytes follow)
+    literal_f32 = 0x00,
+    /// Runtime: canvas.width (u32, no value bytes)
+    canvas_width = 0x01,
+    /// Runtime: canvas.height (u32, no value bytes)
+    canvas_height = 0x02,
+    /// Runtime: time in seconds (f32, no value bytes)
+    time_total = 0x03,
+    /// Literal i32 value (4 bytes follow)
+    literal_i32 = 0x04,
+    /// Literal u32 value (4 bytes follow)
+    literal_u32 = 0x05,
+    /// Runtime: delta time since last frame (f32, no value bytes)
+    time_delta = 0x06,
+
+    /// Returns byte size of value following the type byte.
+    /// Runtime types return 0 (resolved at execution time).
+    pub fn valueByteSize(self: WasmArgType) u8 {
+        return switch (self) {
+            .literal_f32, .literal_i32, .literal_u32 => 4,
+            .canvas_width, .canvas_height, .time_total, .time_delta => 0,
+        };
+    }
+};
+
+/// Return type size mapping for WASM call results.
+/// Maps type names to byte sizes for buffer writes.
+pub const WasmReturnType = struct {
+    /// Get byte size for a return type name.
+    /// Returns null for unknown types.
+    pub fn byteSize(type_name: []const u8) ?u32 {
+        const map = std.StaticStringMap(u32).initComptime(.{
+            .{ "f32", 4 },
+            .{ "i32", 4 },
+            .{ "u32", 4 },
+            .{ "vec2", 8 },
+            .{ "vec3", 12 },
+            .{ "vec4", 16 },
+            .{ "mat3x3", 36 },
+            .{ "mat4x4", 64 },
+        });
+        return map.get(type_name);
+    }
 };
 
 // ============================================================================
@@ -410,4 +493,191 @@ test "buffer usage flags" {
     try testing.expect(usage.copy_dst);
     try testing.expect(!usage.vertex);
     try testing.expect(!usage.storage);
+}
+
+// ============================================================================
+// New Opcode Tests (create_image_bitmap, copy_external_image_to_texture)
+// ============================================================================
+
+test "create_image_bitmap opcode validity" {
+    // Pre-condition: opcode is a valid u8
+    const op = OpCode.create_image_bitmap;
+    try testing.expectEqual(@as(u8, 0x0B), @intFromEnum(op));
+
+    // Post-condition: isValid returns true for this opcode
+    try testing.expect(op.isValid());
+}
+
+test "copy_external_image_to_texture opcode validity" {
+    // Pre-condition: opcode is a valid u8
+    const op = OpCode.copy_external_image_to_texture;
+    try testing.expectEqual(@as(u8, 0x25), @intFromEnum(op));
+
+    // Post-condition: isValid returns true for this opcode
+    try testing.expect(op.isValid());
+}
+
+test "image-related opcodes in correct category ranges" {
+    // create_image_bitmap in Resource Creation (0x00-0x0F)
+    const create_bitmap = @intFromEnum(OpCode.create_image_bitmap);
+    try testing.expect(create_bitmap >= 0x00 and create_bitmap <= 0x0F);
+
+    // copy_external_image_to_texture in Queue Operations (0x20-0x2F)
+    const copy_op = @intFromEnum(OpCode.copy_external_image_to_texture);
+    try testing.expect(copy_op >= 0x20 and copy_op <= 0x2F);
+}
+
+test "varint roundtrip for image bitmap IDs" {
+    // Test typical bitmap/texture ID values (small IDs common)
+    var buffer: [4]u8 = undefined;
+    const test_ids = [_]u32{ 0, 1, 10, 127, 128, 255, 1000 };
+
+    for (test_ids) |id| {
+        const len = encodeVarint(id, &buffer);
+        const decoded = decodeVarint(buffer[0..len]);
+
+        // Property: roundtrip preserves value and length
+        try testing.expectEqual(id, decoded.value);
+        try testing.expectEqual(len, decoded.len);
+    }
+}
+
+test "varint encoding boundary cases for origin coordinates" {
+    // Test origin_x, origin_y values for copyExternalImageToTexture
+    var buffer: [4]u8 = undefined;
+
+    // Small values: 1 byte encoding (< 128)
+    const len_small = encodeVarint(64, &buffer);
+    try testing.expectEqual(@as(u8, 1), len_small);
+    try testing.expectEqual(@as(u8, 64), buffer[0]);
+
+    // Boundary at 127: still 1 byte
+    const len_127 = encodeVarint(127, &buffer);
+    try testing.expectEqual(@as(u8, 1), len_127);
+
+    // At 128: switches to 2 bytes
+    const len_128 = encodeVarint(128, &buffer);
+    try testing.expectEqual(@as(u8, 2), len_128);
+
+    // Typical texture dimensions (512, 1024, 2048)
+    const len_512 = encodeVarint(512, &buffer);
+    try testing.expectEqual(@as(u8, 2), len_512);
+    const decoded_512 = decodeVarint(buffer[0..len_512]);
+    try testing.expectEqual(@as(u32, 512), decoded_512.value);
+}
+
+test "all resource creation opcodes valid" {
+    // Verify complete coverage of resource creation opcodes
+    const resource_ops = [_]OpCode{
+        .nop,
+        .create_buffer,
+        .create_texture,
+        .create_sampler,
+        .create_shader_module,
+        .create_shader_concat,
+        .create_bind_group_layout,
+        .create_pipeline_layout,
+        .create_render_pipeline,
+        .create_compute_pipeline,
+        .create_bind_group,
+        .create_image_bitmap, // New opcode
+    };
+
+    for (resource_ops) |op| {
+        try testing.expect(op.isValid());
+    }
+}
+
+test "all queue operation opcodes valid" {
+    // Verify complete coverage of queue operation opcodes
+    const queue_ops = [_]OpCode{
+        .write_buffer,
+        .write_uniform,
+        .copy_buffer_to_buffer,
+        .copy_texture_to_texture,
+        .submit,
+        .copy_external_image_to_texture,
+        .init_wasm_module,
+        .call_wasm_func,
+        .write_buffer_from_wasm,
+    };
+
+    for (queue_ops) |op| {
+        try testing.expect(op.isValid());
+    }
+}
+
+// ============================================================================
+// WASM Opcode Tests
+// ============================================================================
+
+test "init_wasm_module opcode validity" {
+    const op = OpCode.init_wasm_module;
+    try testing.expectEqual(@as(u8, 0x26), @intFromEnum(op));
+    try testing.expect(op.isValid());
+}
+
+test "call_wasm_func opcode validity" {
+    const op = OpCode.call_wasm_func;
+    try testing.expectEqual(@as(u8, 0x27), @intFromEnum(op));
+    try testing.expect(op.isValid());
+}
+
+test "write_buffer_from_wasm opcode validity" {
+    const op = OpCode.write_buffer_from_wasm;
+    try testing.expectEqual(@as(u8, 0x28), @intFromEnum(op));
+    try testing.expect(op.isValid());
+}
+
+test "WASM opcodes in Queue Operations range (0x20-0x2F)" {
+    const wasm_ops = [_]OpCode{
+        .init_wasm_module,
+        .call_wasm_func,
+        .write_buffer_from_wasm,
+    };
+
+    for (wasm_ops) |op| {
+        const code = @intFromEnum(op);
+        try testing.expect(code >= 0x20 and code <= 0x2F);
+    }
+}
+
+test "WasmArgType value byte sizes" {
+    // Literal types have 4 bytes of value
+    try testing.expectEqual(@as(u8, 4), WasmArgType.literal_f32.valueByteSize());
+    try testing.expectEqual(@as(u8, 4), WasmArgType.literal_i32.valueByteSize());
+    try testing.expectEqual(@as(u8, 4), WasmArgType.literal_u32.valueByteSize());
+
+    // Runtime types have no value bytes (resolved at execution)
+    try testing.expectEqual(@as(u8, 0), WasmArgType.canvas_width.valueByteSize());
+    try testing.expectEqual(@as(u8, 0), WasmArgType.canvas_height.valueByteSize());
+    try testing.expectEqual(@as(u8, 0), WasmArgType.time_total.valueByteSize());
+    try testing.expectEqual(@as(u8, 0), WasmArgType.time_delta.valueByteSize());
+}
+
+test "WasmArgType enum values" {
+    try testing.expectEqual(@as(u8, 0x00), @intFromEnum(WasmArgType.literal_f32));
+    try testing.expectEqual(@as(u8, 0x01), @intFromEnum(WasmArgType.canvas_width));
+    try testing.expectEqual(@as(u8, 0x02), @intFromEnum(WasmArgType.canvas_height));
+    try testing.expectEqual(@as(u8, 0x03), @intFromEnum(WasmArgType.time_total));
+    try testing.expectEqual(@as(u8, 0x06), @intFromEnum(WasmArgType.time_delta));
+}
+
+test "WasmReturnType byte sizes" {
+    // Scalar types
+    try testing.expectEqual(@as(u32, 4), WasmReturnType.byteSize("f32").?);
+    try testing.expectEqual(@as(u32, 4), WasmReturnType.byteSize("i32").?);
+    try testing.expectEqual(@as(u32, 4), WasmReturnType.byteSize("u32").?);
+
+    // Vector types
+    try testing.expectEqual(@as(u32, 8), WasmReturnType.byteSize("vec2").?);
+    try testing.expectEqual(@as(u32, 12), WasmReturnType.byteSize("vec3").?);
+    try testing.expectEqual(@as(u32, 16), WasmReturnType.byteSize("vec4").?);
+
+    // Matrix types
+    try testing.expectEqual(@as(u32, 36), WasmReturnType.byteSize("mat3x3").?);
+    try testing.expectEqual(@as(u32, 64), WasmReturnType.byteSize("mat4x4").?);
+
+    // Unknown type returns null
+    try testing.expect(WasmReturnType.byteSize("unknown") == null);
 }
