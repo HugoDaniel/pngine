@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const chunk = @import("chunk.zig");
+const flate = std.compress.flate;
 
 pub const Error = error{
     InvalidPixelDataSize,
@@ -220,77 +221,67 @@ fn addFilterBytes(
     return filtered;
 }
 
-/// Compress data using zlib format with deflate store blocks.
+/// Compress data using zlib format with real DEFLATE compression.
 ///
-/// Uses store blocks (BTYPE=00) which produce valid zlib output
-/// without actual compression. This is fast and universally supported.
+/// Uses std.compress.flate for LZ77+Huffman compression.
+/// Produces valid zlib output (RFC 1950) for PNG IDAT chunks.
 ///
-/// TODO: Add real DEFLATE compression for smaller file sizes.
-/// The Zig 0.16 std.compress.flate API is complex; store blocks work
-/// correctly and are valid per RFC 1950/1951.
+/// Pre-conditions:
+/// - data.len > 0
+///
+/// Post-conditions:
+/// - Returns valid zlib-compressed data
+/// - Caller owns returned slice
 fn compress(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     // Pre-condition: data is not empty
     std.debug.assert(data.len > 0);
 
-    // Calculate output size:
-    // - 2 bytes zlib header
-    // - For each 65535-byte block: 5 bytes header + block data
-    // - 4 bytes adler32 checksum
-    const max_block_size: usize = 65535;
-    const num_full_blocks = data.len / max_block_size;
-    const last_block_size = data.len % max_block_size;
-    const num_blocks = num_full_blocks + @as(usize, if (last_block_size > 0) 1 else 0);
+    // Allocate output buffer - compressed size is usually smaller than input,
+    // but worst case for incompressible data is ~0.1% larger plus headers
+    // Use input size + 1KB for headers/overhead as initial estimate
+    const initial_capacity = data.len + 1024;
+    var output_buf = try allocator.alloc(u8, initial_capacity);
+    errdefer allocator.free(output_buf);
 
-    const output_size = 2 + (num_blocks * 5) + data.len + 4;
-    const output = try allocator.alloc(u8, output_size);
-    errdefer allocator.free(output);
+    // Window buffer for compression (32KB history window)
+    var window_buf: [flate.max_window_len]u8 = undefined;
 
-    var pos: usize = 0;
+    // Create output writer
+    var output_writer: std.Io.Writer = .fixed(output_buf);
 
-    // Zlib header (RFC 1950)
-    // CMF = 0x78: CM=8 (deflate), CINFO=7 (32K window)
-    // FLG = 0x01: FCHECK makes header divisible by 31, no dict, fastest compression
-    output[pos] = 0x78;
-    pos += 1;
-    output[pos] = 0x01;
-    pos += 1;
+    // Create compressor with zlib container
+    // Use level 6 (default) - good balance of speed and compression
+    var compressor = flate.Compress.init(
+        &output_writer,
+        &window_buf,
+        .zlib,
+        flate.Compress.Options.level_6,
+    ) catch {
+        return error.CompressionFailed;
+    };
 
-    // Write store blocks
-    var data_pos: usize = 0;
+    // Write all data through the compressor
+    compressor.writer.writeAll(data) catch {
+        return error.CompressionFailed;
+    };
 
-    for (0..num_blocks) |i| {
-        const remaining = data.len - data_pos;
-        const block_size: u16 = @intCast(@min(remaining, max_block_size));
-        const is_final = (i == num_blocks - 1);
+    // Flush to finalize compression
+    compressor.writer.flush() catch {
+        return error.CompressionFailed;
+    };
 
-        // Block header: BFINAL (1 bit) + BTYPE (2 bits) = 00 for stored
-        // If final: 0x01, else: 0x00
-        output[pos] = if (is_final) 0x01 else 0x00;
-        pos += 1;
+    const compressed_len = output_writer.end;
 
-        // LEN (2 bytes, little-endian)
-        std.mem.writeInt(u16, output[pos..][0..2], block_size, .little);
-        pos += 2;
+    // Create result with exact size
+    const result = try allocator.alloc(u8, compressed_len);
+    @memcpy(result, output_buf[0..compressed_len]);
+    allocator.free(output_buf);
 
-        // NLEN (2 bytes, little-endian) = one's complement of LEN
-        std.mem.writeInt(u16, output[pos..][0..2], ~block_size, .little);
-        pos += 2;
+    // Post-condition: output starts with zlib header (0x78)
+    std.debug.assert(result.len > 0);
+    std.debug.assert(result[0] == 0x78);
 
-        // Block data
-        @memcpy(output[pos..][0..block_size], data[data_pos..][0..block_size]);
-        pos += block_size;
-        data_pos += block_size;
-    }
-
-    // Adler-32 checksum (big-endian)
-    const adler = computeAdler32(data);
-    std.mem.writeInt(u32, output[pos..][0..4], adler, .big);
-    pos += 4;
-
-    // Post-condition: wrote expected amount
-    std.debug.assert(pos == output_size);
-
-    return output;
+    return result;
 }
 
 /// Compute Adler-32 checksum for zlib footer.
@@ -539,33 +530,50 @@ test "encoder: multiple rows with filter bytes" {
 test "encoder: compression produces valid zlib output" {
     const allocator = std.testing.allocator;
 
-    const data = "Hello, PNG compression!";
+    // Repetitive data compresses well
+    const data = "Hello, PNG compression! This is a test string with some repetition. " ++
+        "Hello, PNG compression! This is a test string with some repetition.";
     const compressed = try compress(allocator, data);
     defer allocator.free(compressed);
 
-    // Compressed data should exist
+    // Compressed data should exist and be smaller than input (with repetitive data)
     try std.testing.expect(compressed.len > 0);
+    try std.testing.expect(compressed.len < data.len);
 
-    // Verify zlib header
-    try std.testing.expectEqual(@as(u8, 0x78), compressed[0]); // CMF
-    try std.testing.expectEqual(@as(u8, 0x01), compressed[1]); // FLG
+    // Verify zlib header - CMF byte indicates deflate with 32K window
+    try std.testing.expectEqual(@as(u8, 0x78), compressed[0]);
 
     // Verify header checksum (CMF*256 + FLG must be divisible by 31)
     const header_check = @as(u16, compressed[0]) * 256 + compressed[1];
     try std.testing.expectEqual(@as(u16, 0), header_check % 31);
 
-    // Verify store block header (byte 2)
-    // BFINAL=1, BTYPE=00 -> 0x01
-    try std.testing.expectEqual(@as(u8, 0x01), compressed[2]);
+    // Verify minimum zlib structure: 2 byte header + some data + 4 byte adler32
+    try std.testing.expect(compressed.len >= 7);
+}
 
-    // Verify LEN/NLEN
-    const len = std.mem.readInt(u16, compressed[3..5], .little);
-    const nlen = std.mem.readInt(u16, compressed[5..7], .little);
-    try std.testing.expectEqual(~len, nlen);
-    try std.testing.expectEqual(@as(u16, @intCast(data.len)), len);
+test "encoder: solid color image compresses significantly" {
+    const allocator = std.testing.allocator;
 
-    // Verify data is stored uncompressed
-    try std.testing.expectEqualStrings(data, compressed[7..][0..data.len]);
+    // Create 256x256 solid red image (highly compressible)
+    const width: u32 = 256;
+    const height: u32 = 256;
+    const raw_size = width * height * 4;
+    var pixels: [raw_size]u8 = undefined;
+
+    // Fill with solid red
+    for (0..width * height) |i| {
+        pixels[i * 4 + 0] = 255; // R
+        pixels[i * 4 + 1] = 0; // G
+        pixels[i * 4 + 2] = 0; // B
+        pixels[i * 4 + 3] = 255; // A
+    }
+
+    const png = try encode(allocator, &pixels, width, height);
+    defer allocator.free(png);
+
+    // Solid color should compress extremely well (>10x ratio)
+    // Raw pixels = 256KB, compressed PNG should be <25KB
+    try std.testing.expect(png.len < raw_size / 10);
 }
 
 test "encoder: adler32 known values" {
