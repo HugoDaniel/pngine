@@ -35,12 +35,13 @@ pub const Error = error{
     MissingIEND,
     OutOfMemory,
     BytecodeTooSmall,
+    CompressionFailed,
 };
 
 /// Embed PNGB bytecode into a PNG image.
 ///
-/// Inserts a pNGb chunk containing the bytecode immediately before
-/// the IEND chunk.
+/// Inserts a pNGb chunk containing the compressed bytecode immediately
+/// before the IEND chunk. Uses deflate-raw compression by default.
 ///
 /// Pre-conditions:
 /// - png_data starts with valid PNG signature
@@ -78,16 +79,22 @@ pub fn embed(
     // Post-condition: IEND must be after signature
     std.debug.assert(iend_pos >= 8);
 
-    // Build pNGb chunk data: version + flags + payload (no compression for now)
-    const pngb_data_size = 2 + bytecode.len;
+    // Compress bytecode using deflate-raw (compatible with browser DecompressionStream)
+    const compressed = compressDeflateRaw(allocator, bytecode) catch {
+        return Error.CompressionFailed;
+    };
+    defer allocator.free(compressed);
+
+    // Build pNGb chunk data: version + flags + compressed payload
+    const pngb_data_size = 2 + compressed.len;
     const pngb_data = allocator.alloc(u8, pngb_data_size) catch {
         return Error.OutOfMemory;
     };
     defer allocator.free(pngb_data);
 
     pngb_data[0] = PNGB_VERSION;
-    pngb_data[1] = 0; // No compression
-    @memcpy(pngb_data[2..], bytecode);
+    pngb_data[1] = FLAG_COMPRESSED; // Compressed with deflate-raw
+    @memcpy(pngb_data[2..], compressed);
 
     // Calculate output size
     const pngb_chunk_size = chunk.chunkSize(pngb_data_size);
@@ -128,28 +135,93 @@ fn findIEND(png_data: []const u8) ?usize {
 
     const iend_pattern = [8]u8{ 0, 0, 0, 0, 'I', 'E', 'N', 'D' };
 
-    // Search from end of file (IEND is always last)
-    // Start at minimum position: signature (8) + IHDR (25) = 33
-    if (png_data.len < 33 + 12) return null;
+    // Minimum valid PNG: signature (8) + IHDR (25) + IEND (12) = 45
+    if (png_data.len < 45) return null;
 
     // IEND chunk is 12 bytes total (4 len + 4 type + 0 data + 4 crc)
-    // Search backwards for efficiency (bounded by data length)
-    const max_iterations = png_data.len - 8;
+    // Search backwards for efficiency (IEND is always last chunk)
+    const min_pos: usize = 8; // After PNG signature
     var pos: usize = png_data.len - 12;
 
-    for (0..max_iterations) |_| {
+    // Bounded backward search - max iterations is data length
+    for (0..png_data.len) |_| {
         if (std.mem.eql(u8, png_data[pos..][0..8], &iend_pattern)) {
             // Post-condition: found position is valid
-            std.debug.assert(pos >= 8);
+            std.debug.assert(pos >= min_pos);
             std.debug.assert(pos + 12 <= png_data.len);
             return pos;
         }
-        if (pos == 8) break;
+        if (pos <= min_pos) break;
         pos -= 1;
+    } else {
+        // Loop completed without finding - should not happen for valid PNG
+        // Fall through to forward search
     }
 
-    // Forward search as fallback (std.mem.indexOf is bounded)
+    // Forward search as fallback (std.mem.indexOf is bounded internally)
     return std.mem.indexOf(u8, png_data, &iend_pattern);
+}
+
+/// Compress data using raw DEFLATE store blocks (no zlib header/footer).
+///
+/// This produces raw DEFLATE output compatible with browser's
+/// DecompressionStream('deflate-raw'). Uses store blocks (BTYPE=00)
+/// for simplicity and universal compatibility.
+///
+/// Pre-conditions:
+/// - data.len > 0
+///
+/// Post-conditions:
+/// - Returns valid raw DEFLATE stream
+/// - Caller owns returned slice
+fn compressDeflateRaw(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+    // Pre-condition: data is not empty
+    std.debug.assert(data.len > 0);
+
+    // Calculate output size:
+    // - For each 65535-byte block: 5 bytes header + block data
+    // - No header or footer (raw deflate)
+    const max_block_size: usize = 65535;
+    const num_full_blocks = data.len / max_block_size;
+    const last_block_size = data.len % max_block_size;
+    const num_blocks = num_full_blocks + @as(usize, if (last_block_size > 0) 1 else 0);
+
+    const output_size = (num_blocks * 5) + data.len;
+    const output = try allocator.alloc(u8, output_size);
+    errdefer allocator.free(output);
+
+    var pos: usize = 0;
+    var data_pos: usize = 0;
+
+    // Write store blocks
+    for (0..num_blocks) |i| {
+        const remaining = data.len - data_pos;
+        const block_size: u16 = @intCast(@min(remaining, max_block_size));
+        const is_final = (i == num_blocks - 1);
+
+        // Block header: BFINAL (1 bit) + BTYPE (2 bits) = 00 for stored
+        // If final: 0x01, else: 0x00
+        output[pos] = if (is_final) 0x01 else 0x00;
+        pos += 1;
+
+        // LEN (2 bytes, little-endian)
+        std.mem.writeInt(u16, output[pos..][0..2], block_size, .little);
+        pos += 2;
+
+        // NLEN (2 bytes, little-endian) = one's complement of LEN
+        std.mem.writeInt(u16, output[pos..][0..2], ~block_size, .little);
+        pos += 2;
+
+        // Block data
+        @memcpy(output[pos..][0..block_size], data[data_pos..][0..block_size]);
+        pos += block_size;
+        data_pos += block_size;
+    }
+
+    // Post-condition: wrote expected amount
+    std.debug.assert(pos == output_size);
+
+    return output;
 }
 
 // ============================================================================
@@ -228,13 +300,13 @@ test "embed: roundtrip with minimal PNG" {
     try std.testing.expect(found_iend);
 }
 
-test "embed: small bytecode" {
+test "embed: small bytecode is compressed" {
     const allocator = std.testing.allocator;
 
     const png_data = try createMinimalPng(allocator);
     defer allocator.free(png_data);
 
-    // Small bytecode
+    // Small bytecode (minimum size 16 bytes)
     var bytecode: [32]u8 = undefined;
     @memcpy(bytecode[0..4], "PNGB");
     @memset(bytecode[4..], 0x00);
@@ -247,9 +319,11 @@ test "embed: small bytecode" {
     while (try iter.next()) |c| {
         if (std.mem.eql(u8, &c.chunk_type, &chunk.ChunkType.pNGb)) {
             const flags = c.data[1];
-            try std.testing.expectEqual(@as(u8, 0), flags & FLAG_COMPRESSED);
-            // Payload should be exact size: version(1) + flags(1) + bytecode(32)
-            try std.testing.expectEqual(@as(usize, 34), c.data.len);
+            // Verify compression flag is set
+            try std.testing.expectEqual(FLAG_COMPRESSED, flags & FLAG_COMPRESSED);
+            // Compressed size: version(1) + flags(1) + store_header(5) + data(32)
+            // Store block adds 5 bytes overhead for small data
+            try std.testing.expectEqual(@as(usize, 39), c.data.len);
             break;
         }
     }
@@ -285,7 +359,7 @@ test "embed: missing IEND rejected" {
     try std.testing.expectError(Error.MissingIEND, embed(allocator, png_buf.items, &bytecode));
 }
 
-test "embed: large bytecode" {
+test "embed: large bytecode is compressed" {
     const allocator = std.testing.allocator;
 
     const png_data = try createMinimalPng(allocator);
@@ -299,15 +373,42 @@ test "embed: large bytecode" {
     const embedded = try embed(allocator, png_data, &bytecode);
     defer allocator.free(embedded);
 
-    // Find pNGb and verify it contains the full bytecode
+    // Find pNGb and verify compression flag
     var iter = try chunk.parseChunks(embedded);
     while (try iter.next()) |c| {
         if (std.mem.eql(u8, &c.chunk_type, &chunk.ChunkType.pNGb)) {
-            // Payload should be: version(1) + flags(1) + bytecode(1024)
-            try std.testing.expectEqual(@as(usize, 1026), c.data.len);
+            const flags = c.data[1];
+            try std.testing.expectEqual(FLAG_COMPRESSED, flags & FLAG_COMPRESSED);
+            // Compressed size: version(1) + flags(1) + store_header(5) + data(1024)
+            try std.testing.expectEqual(@as(usize, 1031), c.data.len);
             break;
         }
     }
+}
+
+test "embed: compressDeflateRaw produces valid output" {
+    const allocator = std.testing.allocator;
+
+    const data = "Hello, deflate-raw compression test!";
+    const compressed = try compressDeflateRaw(allocator, data);
+    defer allocator.free(compressed);
+
+    // Compressed output should exist
+    try std.testing.expect(compressed.len > 0);
+
+    // First byte should be 0x01 (BFINAL=1, BTYPE=00 for stored)
+    try std.testing.expectEqual(@as(u8, 0x01), compressed[0]);
+
+    // LEN should match data length
+    const len = std.mem.readInt(u16, compressed[1..3], .little);
+    try std.testing.expectEqual(@as(u16, @intCast(data.len)), len);
+
+    // NLEN should be one's complement
+    const nlen = std.mem.readInt(u16, compressed[3..5], .little);
+    try std.testing.expectEqual(~len, nlen);
+
+    // Data should be stored verbatim
+    try std.testing.expectEqualStrings(data, compressed[5..][0..data.len]);
 }
 
 test "embed: findIEND finds correct position" {
@@ -328,4 +429,191 @@ test "embed: findIEND finds correct position" {
 
     const found_pos = findIEND(png_buf.items);
     try std.testing.expectEqual(expected_iend_pos, found_pos.?);
+}
+
+test "embed: multi-block compression (>65535 bytes)" {
+    const allocator = std.testing.allocator;
+
+    const png_data = try createMinimalPng(allocator);
+    defer allocator.free(png_data);
+
+    // Create bytecode larger than one deflate block (65535 bytes)
+    // Use 70000 bytes to test multi-block
+    const large_size: usize = 70000;
+    const bytecode = try allocator.alloc(u8, large_size);
+    defer allocator.free(bytecode);
+
+    @memcpy(bytecode[0..4], "PNGB");
+    // Fill with pattern for verification
+    for (4..large_size) |i| {
+        bytecode[i] = @intCast(i & 0xFF);
+    }
+
+    const embedded = try embed(allocator, png_data, bytecode);
+    defer allocator.free(embedded);
+
+    // Find pNGb and verify structure
+    var iter = try chunk.parseChunks(embedded);
+    while (try iter.next()) |c| {
+        if (std.mem.eql(u8, &c.chunk_type, &chunk.ChunkType.pNGb)) {
+            const flags = c.data[1];
+            try std.testing.expectEqual(FLAG_COMPRESSED, flags & FLAG_COMPRESSED);
+
+            // Should have 2 blocks: one full (65535) + one partial (4465)
+            // Overhead: version(1) + flags(1) + 2*store_header(10) = 12 bytes
+            // Total: 12 + 70000 = 70012 bytes
+            try std.testing.expectEqual(@as(usize, 70012), c.data.len);
+            break;
+        }
+    }
+}
+
+test "embed: exact 65535 byte bytecode (single max block)" {
+    const allocator = std.testing.allocator;
+
+    const png_data = try createMinimalPng(allocator);
+    defer allocator.free(png_data);
+
+    // Exactly one max-size block
+    const bytecode = try allocator.alloc(u8, 65535);
+    defer allocator.free(bytecode);
+
+    @memcpy(bytecode[0..4], "PNGB");
+    @memset(bytecode[4..], 0xAB);
+
+    const embedded = try embed(allocator, png_data, bytecode);
+    defer allocator.free(embedded);
+
+    // Find pNGb and verify structure
+    var iter = try chunk.parseChunks(embedded);
+    while (try iter.next()) |c| {
+        if (std.mem.eql(u8, &c.chunk_type, &chunk.ChunkType.pNGb)) {
+            // Single block: version(1) + flags(1) + store_header(5) + data(65535) = 65542
+            try std.testing.expectEqual(@as(usize, 65542), c.data.len);
+            break;
+        }
+    }
+}
+
+test "embed: 65536 byte bytecode (triggers second block)" {
+    const allocator = std.testing.allocator;
+
+    const png_data = try createMinimalPng(allocator);
+    defer allocator.free(png_data);
+
+    // One byte over max block size
+    const bytecode = try allocator.alloc(u8, 65536);
+    defer allocator.free(bytecode);
+
+    @memcpy(bytecode[0..4], "PNGB");
+    @memset(bytecode[4..], 0xCD);
+
+    const embedded = try embed(allocator, png_data, bytecode);
+    defer allocator.free(embedded);
+
+    // Find pNGb and verify structure
+    var iter = try chunk.parseChunks(embedded);
+    while (try iter.next()) |c| {
+        if (std.mem.eql(u8, &c.chunk_type, &chunk.ChunkType.pNGb)) {
+            // Two blocks: version(1) + flags(1) + 2*store_header(10) + data(65536) = 65548
+            try std.testing.expectEqual(@as(usize, 65548), c.data.len);
+            break;
+        }
+    }
+}
+
+test "embed: bytecode with all byte values" {
+    const allocator = std.testing.allocator;
+
+    const png_data = try createMinimalPng(allocator);
+    defer allocator.free(png_data);
+
+    // Create bytecode with all 256 byte values
+    var bytecode: [256 + 16]u8 = undefined;
+    @memcpy(bytecode[0..4], "PNGB");
+    // Fill version/header bytes
+    @memset(bytecode[4..16], 0);
+    // All byte values 0x00-0xFF
+    for (0..256) |i| {
+        bytecode[16 + i] = @intCast(i);
+    }
+
+    const embedded = try embed(allocator, png_data, &bytecode);
+    defer allocator.free(embedded);
+
+    // Verify PNG is valid and contains pNGb
+    var iter = try chunk.parseChunks(embedded);
+    var found = false;
+    while (try iter.next()) |c| {
+        if (std.mem.eql(u8, &c.chunk_type, &chunk.ChunkType.pNGb)) {
+            found = true;
+            // Verify compression flag
+            try std.testing.expectEqual(FLAG_COMPRESSED, c.data[1] & FLAG_COMPRESSED);
+            break;
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "embed: compressDeflateRaw multi-block output" {
+    const allocator = std.testing.allocator;
+
+    // Create data spanning multiple blocks
+    const data = try allocator.alloc(u8, 70000);
+    defer allocator.free(data);
+    @memset(data, 'X');
+
+    const compressed = try compressDeflateRaw(allocator, data);
+    defer allocator.free(compressed);
+
+    // Should have 2 blocks
+    // Block 1: header(5) + data(65535) = 65540
+    // Block 2: header(5) + data(4465) = 4470
+    // Total: 70010 bytes
+    try std.testing.expectEqual(@as(usize, 70010), compressed.len);
+
+    // Verify first block header
+    try std.testing.expectEqual(@as(u8, 0x00), compressed[0]); // Not final
+    const len1 = std.mem.readInt(u16, compressed[1..3], .little);
+    try std.testing.expectEqual(@as(u16, 65535), len1);
+    const nlen1 = std.mem.readInt(u16, compressed[3..5], .little);
+    try std.testing.expectEqual(~len1, nlen1);
+
+    // Verify second block header (at offset 65540)
+    try std.testing.expectEqual(@as(u8, 0x01), compressed[65540]); // Final block
+    const len2 = std.mem.readInt(u16, compressed[65541..65543], .little);
+    try std.testing.expectEqual(@as(u16, 4465), len2);
+    const nlen2 = std.mem.readInt(u16, compressed[65543..65545], .little);
+    try std.testing.expectEqual(~len2, nlen2);
+}
+
+test "embed: minimum 16 byte bytecode" {
+    const allocator = std.testing.allocator;
+
+    const png_data = try createMinimalPng(allocator);
+    defer allocator.free(png_data);
+
+    // Exactly minimum size
+    var bytecode: [16]u8 = undefined;
+    @memcpy(bytecode[0..4], "PNGB");
+    @memset(bytecode[4..], 0);
+
+    const embedded = try embed(allocator, png_data, &bytecode);
+    defer allocator.free(embedded);
+
+    try std.testing.expect(embedded.len > png_data.len);
+}
+
+test "embed: bytecode too small rejected" {
+    const allocator = std.testing.allocator;
+
+    const png_data = try createMinimalPng(allocator);
+    defer allocator.free(png_data);
+
+    // 15 bytes - one less than minimum
+    var bytecode: [15]u8 = undefined;
+    @memcpy(bytecode[0..4], "PNGB");
+    @memset(bytecode[4..], 0);
+
+    try std.testing.expectError(Error.BytecodeTooSmall, embed(allocator, png_data, &bytecode));
 }
