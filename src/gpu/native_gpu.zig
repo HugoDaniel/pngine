@@ -262,6 +262,16 @@ pub const NativeGPU = struct {
         // TODO: Create actual GPU bind group
     }
 
+    pub fn createImageBitmap(self: *Self, allocator: Allocator, bitmap_id: u16, blob_data_id: u16) !void {
+        _ = allocator;
+        _ = bitmap_id;
+        _ = blob_data_id;
+
+        assert(self.initialized);
+
+        // TODO: Create actual ImageBitmap from blob data
+    }
+
     // ========================================================================
     // Pass Operations
     // ========================================================================
@@ -411,6 +421,60 @@ pub const NativeGPU = struct {
         assert(self.initialized);
 
         // TODO: Submit actual GPU commands
+    }
+
+    pub fn copyExternalImageToTexture(self: *Self, allocator: Allocator, bitmap_id: u16, texture_id: u16, mip_level: u8, origin_x: u16, origin_y: u16) !void {
+        _ = allocator;
+        _ = bitmap_id;
+        _ = texture_id;
+        _ = mip_level;
+        _ = origin_x;
+        _ = origin_y;
+
+        assert(self.initialized);
+
+        // TODO: Copy ImageBitmap to texture
+    }
+
+    // ========================================================================
+    // WASM Module Operations (stub - native GPU doesn't support WASM calls)
+    // ========================================================================
+
+    pub fn initWasmModule(self: *Self, allocator: Allocator, module_id: u16, wasm_data_id: u16) !void {
+        _ = allocator;
+        _ = module_id;
+        _ = wasm_data_id;
+
+        assert(self.initialized);
+
+        // WASM module initialization is a no-op for native GPU
+        // WASM calls are only meaningful in browser context
+    }
+
+    pub fn callWasmFunc(self: *Self, allocator: Allocator, call_id: u16, module_id: u16, func_name_id: u16, args: []const u8) !void {
+        _ = allocator;
+        _ = call_id;
+        _ = module_id;
+        _ = func_name_id;
+        _ = args;
+
+        assert(self.initialized);
+
+        // WASM function calls are a no-op for native GPU
+        // WASM calls are only meaningful in browser context
+    }
+
+    pub fn writeBufferFromWasm(self: *Self, allocator: Allocator, call_id: u16, buffer_id: u16, offset: u32, byte_len: u32) !void {
+        _ = allocator;
+        _ = call_id;
+        _ = buffer_id;
+        _ = offset;
+        _ = byte_len;
+
+        assert(self.initialized);
+
+        // WASM buffer writes are a no-op for native GPU
+        // WASM calls are only meaningful in browser context
     }
 };
 

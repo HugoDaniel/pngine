@@ -33,6 +33,7 @@ extern "env" fn gpuCreateShaderModule(shader_id: u16, code_ptr: [*]const u8, cod
 extern "env" fn gpuCreateRenderPipeline(pipeline_id: u16, desc_ptr: [*]const u8, desc_len: u32) void;
 extern "env" fn gpuCreateComputePipeline(pipeline_id: u16, desc_ptr: [*]const u8, desc_len: u32) void;
 extern "env" fn gpuCreateBindGroup(group_id: u16, layout_id: u16, entries_ptr: [*]const u8, entries_len: u32) void;
+extern "env" fn gpuCreateImageBitmap(bitmap_id: u16, blob_ptr: [*]const u8, blob_len: u32) void;
 extern "env" fn gpuBeginRenderPass(color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16) void;
 extern "env" fn gpuBeginComputePass() void;
 extern "env" fn gpuSetPipeline(pipeline_id: u16) void;
@@ -44,6 +45,10 @@ extern "env" fn gpuDispatch(x: u32, y: u32, z: u32) void;
 extern "env" fn gpuEndPass() void;
 extern "env" fn gpuWriteBuffer(buffer_id: u16, offset: u32, data_ptr: [*]const u8, data_len: u32) void;
 extern "env" fn gpuSubmit() void;
+extern "env" fn gpuCopyExternalImageToTexture(bitmap_id: u16, texture_id: u16, mip_level: u8, origin_x: u16, origin_y: u16) void;
+extern "env" fn gpuInitWasmModule(module_id: u16, data_ptr: [*]const u8, data_len: u32) void;
+extern "env" fn gpuCallWasmFunc(call_id: u16, module_id: u16, func_name_ptr: [*]const u8, func_name_len: u32, args_ptr: [*]const u8, args_len: u32) void;
+extern "env" fn gpuWriteBufferFromWasm(call_id: u16, buffer_id: u16, offset: u32, byte_len: u32) void;
 
 // ============================================================================
 // WasmGPU Backend
@@ -134,6 +139,16 @@ pub const WasmGPU = struct {
         gpuCreateBindGroup(group_id, layout_id, data.ptr, @intCast(data.len));
     }
 
+    /// Create an ImageBitmap from blob data in the data section.
+    /// Blob format: [mime_len:u8][mime:bytes][data:bytes]
+    pub fn createImageBitmap(self: *Self, allocator: Allocator, bitmap_id: u16, blob_data_id: u16) !void {
+        _ = allocator;
+        assert(self.module != null);
+
+        const data = self.getDataOrPanic(blob_data_id);
+        gpuCreateImageBitmap(bitmap_id, data.ptr, @intCast(data.len));
+    }
+
     // ========================================================================
     // Pass Operations
     // ========================================================================
@@ -219,6 +234,46 @@ pub const WasmGPU = struct {
         _ = self;
         _ = allocator;
         gpuSubmit();
+    }
+
+    /// Copy an ImageBitmap to a texture.
+    pub fn copyExternalImageToTexture(self: *Self, allocator: Allocator, bitmap_id: u16, texture_id: u16, mip_level: u8, origin_x: u16, origin_y: u16) !void {
+        _ = self;
+        _ = allocator;
+        gpuCopyExternalImageToTexture(bitmap_id, texture_id, mip_level, origin_x, origin_y);
+    }
+
+    // ========================================================================
+    // WASM Module Operations
+    // ========================================================================
+
+    /// Initialize a WASM module from embedded data.
+    pub fn initWasmModule(self: *Self, allocator: Allocator, module_id: u16, wasm_data_id: u16) !void {
+        _ = allocator;
+        assert(self.module != null);
+
+        const data = self.getDataOrPanic(wasm_data_id);
+        gpuInitWasmModule(module_id, data.ptr, @intCast(data.len));
+    }
+
+    /// Call a WASM exported function.
+    /// The function name comes from string table, args are pre-encoded.
+    pub fn callWasmFunc(self: *Self, allocator: Allocator, call_id: u16, module_id: u16, func_name_id: u16, args: []const u8) !void {
+        _ = allocator;
+        assert(self.module != null);
+
+        // Get function name from string table
+        const func_name = self.module.?.strings.get(@enumFromInt(func_name_id));
+
+        // Pass encoded args to JS for runtime resolution
+        gpuCallWasmFunc(call_id, module_id, func_name.ptr, @intCast(func_name.len), args.ptr, @intCast(args.len));
+    }
+
+    /// Write bytes from WASM memory to a GPU buffer.
+    pub fn writeBufferFromWasm(self: *Self, allocator: Allocator, call_id: u16, buffer_id: u16, offset: u32, byte_len: u32) !void {
+        _ = self;
+        _ = allocator;
+        gpuWriteBufferFromWasm(call_id, buffer_id, offset, byte_len);
     }
 
     // ========================================================================

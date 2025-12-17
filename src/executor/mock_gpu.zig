@@ -25,6 +25,7 @@ pub const CallType = enum {
     create_render_pipeline,
     create_compute_pipeline,
     create_bind_group,
+    create_image_bitmap,
 
     // Pass operations
     begin_render_pass,
@@ -41,6 +42,12 @@ pub const CallType = enum {
     // Queue operations
     write_buffer,
     submit,
+    copy_external_image_to_texture,
+
+    // WASM operations
+    init_wasm_module,
+    call_wasm_func,
+    write_buffer_from_wasm,
 };
 
 /// Recorded GPU API call with parameters.
@@ -113,6 +120,32 @@ pub const Call = struct {
             buffer_id: u16,
             offset: u32,
             data_id: u16,
+        },
+        create_image_bitmap: struct {
+            bitmap_id: u16,
+            blob_data_id: u16,
+        },
+        copy_external_image_to_texture: struct {
+            bitmap_id: u16,
+            texture_id: u16,
+            mip_level: u8,
+            origin_x: u16,
+            origin_y: u16,
+        },
+        init_wasm_module: struct {
+            module_id: u16,
+            wasm_data_id: u16,
+        },
+        call_wasm_func: struct {
+            call_id: u16,
+            module_id: u16,
+            func_name_id: u16,
+        },
+        write_buffer_from_wasm: struct {
+            call_id: u16,
+            buffer_id: u16,
+            offset: u32,
+            byte_len: u32,
         },
         none: void,
     };
@@ -503,6 +536,67 @@ pub const MockGPU = struct {
         });
     }
 
+    pub fn createImageBitmap(self: *Self, allocator: Allocator, bitmap_id: u16, blob_data_id: u16) !void {
+        try self.calls.append(allocator, .{
+            .call_type = .create_image_bitmap,
+            .params = .{ .create_image_bitmap = .{
+                .bitmap_id = bitmap_id,
+                .blob_data_id = blob_data_id,
+            } },
+        });
+    }
+
+    pub fn copyExternalImageToTexture(self: *Self, allocator: Allocator, bitmap_id: u16, texture_id: u16, mip_level: u8, origin_x: u16, origin_y: u16) !void {
+        try self.calls.append(allocator, .{
+            .call_type = .copy_external_image_to_texture,
+            .params = .{ .copy_external_image_to_texture = .{
+                .bitmap_id = bitmap_id,
+                .texture_id = texture_id,
+                .mip_level = mip_level,
+                .origin_x = origin_x,
+                .origin_y = origin_y,
+            } },
+        });
+    }
+
+    // ========================================================================
+    // WASM Operations
+    // ========================================================================
+
+    pub fn initWasmModule(self: *Self, allocator: Allocator, module_id: u16, wasm_data_id: u16) !void {
+        try self.calls.append(allocator, .{
+            .call_type = .init_wasm_module,
+            .params = .{ .init_wasm_module = .{
+                .module_id = module_id,
+                .wasm_data_id = wasm_data_id,
+            } },
+        });
+    }
+
+    pub fn callWasmFunc(self: *Self, allocator: Allocator, call_id: u16, module_id: u16, func_name_id: u16, args: []const u8) !void {
+        _ = args; // Args passed to JS at runtime, not needed for mock
+        try self.calls.append(allocator, .{
+            .call_type = .call_wasm_func,
+            .params = .{ .call_wasm_func = .{
+                .call_id = call_id,
+                .module_id = module_id,
+                .func_name_id = func_name_id,
+            } },
+        });
+    }
+
+    pub fn writeBufferFromWasm(self: *Self, allocator: Allocator, call_id: u16, buffer_id: u16, offset: u32, byte_len: u32) !void {
+        try self.calls.append(allocator, .{
+            .call_type = .write_buffer_from_wasm,
+            .params = .{ .write_buffer_from_wasm = .{
+                .call_id = call_id,
+                .buffer_id = buffer_id,
+                .offset = offset,
+                .byte_len = byte_len,
+            } },
+        });
+    }
+
     // ========================================================================
     // Verification
     // ========================================================================
@@ -658,4 +752,150 @@ test "mock gpu texture and sampler formatting" {
 
     const sampler_str = gpu.getCall(1).describe(&buf);
     try testing.expectEqualStrings("create_sampler(id=2, desc=99)", sampler_str);
+}
+
+// ============================================================================
+// New Method Tests (createImageBitmap, copyExternalImageToTexture)
+// ============================================================================
+
+test "mock gpu createImageBitmap records call" {
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    try gpu.createImageBitmap(testing.allocator, 0, 10);
+
+    // Property: call was recorded
+    try testing.expectEqual(@as(usize, 1), gpu.callCount());
+    try testing.expectEqual(CallType.create_image_bitmap, gpu.getCall(0).call_type);
+
+    // Property: parameters match
+    const params = gpu.getCall(0).params.create_image_bitmap;
+    try testing.expectEqual(@as(u16, 0), params.bitmap_id);
+    try testing.expectEqual(@as(u16, 10), params.blob_data_id);
+}
+
+test "mock gpu createImageBitmap multiple calls" {
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    try gpu.createImageBitmap(testing.allocator, 0, 10);
+    try gpu.createImageBitmap(testing.allocator, 1, 20);
+    try gpu.createImageBitmap(testing.allocator, 2, 30);
+
+    // Property: all calls recorded in order
+    try testing.expectEqual(@as(usize, 3), gpu.callCount());
+
+    for (gpu.getCalls(), 0..) |call, i| {
+        try testing.expectEqual(CallType.create_image_bitmap, call.call_type);
+        try testing.expectEqual(@as(u16, @intCast(i)), call.params.create_image_bitmap.bitmap_id);
+        try testing.expectEqual(@as(u16, @intCast((i + 1) * 10)), call.params.create_image_bitmap.blob_data_id);
+    }
+}
+
+test "mock gpu copyExternalImageToTexture records call" {
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    try gpu.copyExternalImageToTexture(testing.allocator, 5, 10, 2, 100, 200);
+
+    // Property: call was recorded
+    try testing.expectEqual(@as(usize, 1), gpu.callCount());
+    try testing.expectEqual(CallType.copy_external_image_to_texture, gpu.getCall(0).call_type);
+
+    // Property: all parameters match
+    const params = gpu.getCall(0).params.copy_external_image_to_texture;
+    try testing.expectEqual(@as(u16, 5), params.bitmap_id);
+    try testing.expectEqual(@as(u16, 10), params.texture_id);
+    try testing.expectEqual(@as(u8, 2), params.mip_level);
+    try testing.expectEqual(@as(u16, 100), params.origin_x);
+    try testing.expectEqual(@as(u16, 200), params.origin_y);
+}
+
+test "mock gpu copyExternalImageToTexture zero origin" {
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    // Test default case: zero origin (most common)
+    try gpu.copyExternalImageToTexture(testing.allocator, 0, 0, 0, 0, 0);
+
+    const params = gpu.getCall(0).params.copy_external_image_to_texture;
+    try testing.expectEqual(@as(u16, 0), params.origin_x);
+    try testing.expectEqual(@as(u16, 0), params.origin_y);
+}
+
+test "mock gpu image workflow sequence" {
+    // Test typical image upload workflow:
+    // 1. Create texture
+    // 2. Create image bitmap from blob
+    // 3. Copy image bitmap to texture
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    try gpu.createTexture(testing.allocator, 0, 1);
+    try gpu.createImageBitmap(testing.allocator, 0, 2);
+    try gpu.copyExternalImageToTexture(testing.allocator, 0, 0, 0, 0, 0);
+
+    const expected = [_]CallType{
+        .create_texture,
+        .create_image_bitmap,
+        .copy_external_image_to_texture,
+    };
+
+    try testing.expect(gpu.expectCallTypes(&expected));
+
+    // Property: texture_id matches between create and copy
+    const create_texture_id = gpu.getCall(0).params.create_texture.texture_id;
+    const copy_texture_id = gpu.getCall(2).params.copy_external_image_to_texture.texture_id;
+    try testing.expectEqual(create_texture_id, copy_texture_id);
+
+    // Property: bitmap_id matches between create and copy
+    const create_bitmap_id = gpu.getCall(1).params.create_image_bitmap.bitmap_id;
+    const copy_bitmap_id = gpu.getCall(2).params.copy_external_image_to_texture.bitmap_id;
+    try testing.expectEqual(create_bitmap_id, copy_bitmap_id);
+}
+
+test "mock gpu reset clears image bitmap calls" {
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    try gpu.createImageBitmap(testing.allocator, 0, 0);
+    try gpu.copyExternalImageToTexture(testing.allocator, 0, 0, 0, 0, 0);
+
+    try testing.expectEqual(@as(usize, 2), gpu.callCount());
+
+    gpu.reset();
+
+    try testing.expectEqual(@as(usize, 0), gpu.callCount());
+}
+
+test "mock gpu full rendering with texture upload" {
+    // Simulate a complete frame that uploads a texture then renders with it
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    // Setup phase: create resources
+    try gpu.createTexture(testing.allocator, 0, 0); // texture for upload
+    try gpu.createImageBitmap(testing.allocator, 0, 1); // from blob data
+    try gpu.copyExternalImageToTexture(testing.allocator, 0, 0, 0, 0, 0);
+    try gpu.createShaderModule(testing.allocator, 0, 2);
+    try gpu.createRenderPipeline(testing.allocator, 0, 3);
+
+    // Render phase
+    try gpu.beginRenderPass(testing.allocator, 0, 1, 0, 0xFFFF);
+    try gpu.setPipeline(testing.allocator, 0);
+    try gpu.draw(testing.allocator, 6, 1);
+    try gpu.endPass(testing.allocator);
+    try gpu.submit(testing.allocator);
+
+    // Property: correct number of calls
+    try testing.expectEqual(@as(usize, 10), gpu.callCount());
+
+    // Property: copy happens after create
+    var create_bitmap_idx: ?usize = null;
+    var copy_idx: ?usize = null;
+    for (gpu.getCalls(), 0..) |call, i| {
+        if (call.call_type == .create_image_bitmap) create_bitmap_idx = i;
+        if (call.call_type == .copy_external_image_to_texture) copy_idx = i;
+    }
+    try testing.expect(create_bitmap_idx.? < copy_idx.?);
 }

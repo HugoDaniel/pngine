@@ -688,3 +688,686 @@ test "buffer usage combinations encode correctly" {
     const index_copy_dst: u8 = @bitCast(opcodes.BufferUsage{ .index = true, .copy_dst = true });
     try testing.expectEqual(@as(u8, 0x18), index_copy_dst); // 0x10 | 0x08
 }
+
+// ============================================================================
+// Image Bitmap and Copy External Image Tests
+// ============================================================================
+
+test "create_image_bitmap dispatch" {
+    // Test that create_image_bitmap opcode is correctly dispatched
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    // Add blob data (simulating [mime_len:u8][mime:bytes][data:bytes])
+    // Format: mime_len (1 byte) + mime string + image data
+    var blob_data: [14]u8 = undefined;
+    blob_data[0] = 9; // mime length
+    @memcpy(blob_data[1..10], "image/png");
+    @memcpy(blob_data[10..14], &[_]u8{ 0x89, 0x50, 0x4E, 0x47 });
+    const blob_data_id = try builder.addData(testing.allocator, &blob_data);
+
+    const emitter = builder.getEmitter();
+
+    // Emit create_image_bitmap
+    try emitter.createImageBitmap(testing.allocator, 0, blob_data_id.toInt());
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var exec = MockDispatcher.init(&gpu, &module);
+    try exec.executeAll(testing.allocator);
+
+    // Property: create_image_bitmap was called
+    try testing.expectEqual(@as(usize, 1), gpu.callCount());
+    try testing.expectEqual(CallType.create_image_bitmap, gpu.getCall(0).call_type);
+
+    // Property: parameters match
+    const params = gpu.getCall(0).params.create_image_bitmap;
+    try testing.expectEqual(@as(u16, 0), params.bitmap_id);
+    try testing.expectEqual(blob_data_id.toInt(), params.blob_data_id);
+}
+
+test "copy_external_image_to_texture dispatch" {
+    // Test that copy_external_image_to_texture opcode is correctly dispatched
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    const emitter = builder.getEmitter();
+
+    // Emit copy_external_image_to_texture with various parameters
+    try emitter.copyExternalImageToTexture(testing.allocator, 0, 1, 2, 64, 128);
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var exec = MockDispatcher.init(&gpu, &module);
+    try exec.executeAll(testing.allocator);
+
+    // Property: copy was called
+    try testing.expectEqual(@as(usize, 1), gpu.callCount());
+    try testing.expectEqual(CallType.copy_external_image_to_texture, gpu.getCall(0).call_type);
+
+    // Property: all parameters match
+    const params = gpu.getCall(0).params.copy_external_image_to_texture;
+    try testing.expectEqual(@as(u16, 0), params.bitmap_id);
+    try testing.expectEqual(@as(u16, 1), params.texture_id);
+    try testing.expectEqual(@as(u8, 2), params.mip_level);
+    try testing.expectEqual(@as(u16, 64), params.origin_x);
+    try testing.expectEqual(@as(u16, 128), params.origin_y);
+}
+
+test "image texture upload sequence" {
+    // Test complete texture upload workflow via dispatcher
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    // Add texture descriptor
+    const texture_desc = try DescriptorEncoder.encodeTexture(
+        testing.allocator,
+        256,
+        256,
+        .rgba8unorm,
+        .{ .texture_binding = true, .copy_dst = true },
+        1,
+    );
+    defer testing.allocator.free(texture_desc);
+    const texture_desc_id = try builder.addData(testing.allocator, texture_desc);
+
+    // Add blob data for image
+    var blob_data: [26]u8 = undefined;
+    blob_data[0] = 9; // mime length
+    @memcpy(blob_data[1..10], "image/png");
+    @memset(blob_data[10..26], 0); // dummy image data
+    const blob_data_id = try builder.addData(testing.allocator, &blob_data);
+
+    const emitter = builder.getEmitter();
+
+    // 1. Create texture
+    try emitter.createTexture(testing.allocator, 0, texture_desc_id.toInt());
+
+    // 2. Create image bitmap from blob
+    try emitter.createImageBitmap(testing.allocator, 0, blob_data_id.toInt());
+
+    // 3. Copy image bitmap to texture
+    try emitter.copyExternalImageToTexture(testing.allocator, 0, 0, 0, 0, 0);
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var exec = MockDispatcher.init(&gpu, &module);
+    try exec.executeAll(testing.allocator);
+
+    // Property: correct call sequence
+    const expected = [_]CallType{
+        .create_texture,
+        .create_image_bitmap,
+        .copy_external_image_to_texture,
+    };
+    try testing.expect(gpu.expectCallTypes(&expected));
+}
+
+test "multiple image bitmaps dispatch" {
+    // Test creating multiple image bitmaps
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    var blob1: [14]u8 = undefined;
+    blob1[0] = 9; // mime length
+    @memcpy(blob1[1..10], "image/png");
+    @memset(blob1[10..14], 0);
+
+    var blob2: [15]u8 = undefined;
+    blob2[0] = 10; // mime length
+    @memcpy(blob2[1..11], "image/jpeg");
+    @memset(blob2[11..15], 0);
+
+    const blob1_id = try builder.addData(testing.allocator, &blob1);
+    const blob2_id = try builder.addData(testing.allocator, &blob2);
+
+    const emitter = builder.getEmitter();
+
+    try emitter.createImageBitmap(testing.allocator, 0, blob1_id.toInt());
+    try emitter.createImageBitmap(testing.allocator, 1, blob2_id.toInt());
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var exec = MockDispatcher.init(&gpu, &module);
+    try exec.executeAll(testing.allocator);
+
+    // Property: both image bitmaps created
+    try testing.expectEqual(@as(usize, 2), gpu.callCount());
+
+    try testing.expectEqual(@as(u16, 0), gpu.getCall(0).params.create_image_bitmap.bitmap_id);
+    try testing.expectEqual(@as(u16, 1), gpu.getCall(1).params.create_image_bitmap.bitmap_id);
+}
+
+test "image upload then render" {
+    // Full integration: upload texture then use it in render pass
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    // Add texture descriptor
+    const texture_desc = try DescriptorEncoder.encodeTexture(
+        testing.allocator,
+        256,
+        256,
+        .rgba8unorm,
+        .{ .texture_binding = true, .copy_dst = true },
+        1,
+    );
+    defer testing.allocator.free(texture_desc);
+    const texture_desc_id = try builder.addData(testing.allocator, texture_desc);
+
+    // Add blob data and shader code
+    var blob_data: [18]u8 = undefined;
+    blob_data[0] = 9; // mime length
+    @memcpy(blob_data[1..10], "image/png");
+    @memset(blob_data[10..18], 0); // dummy image data
+    const blob_data_id = try builder.addData(testing.allocator, &blob_data);
+    const shader_code_id = try builder.addData(testing.allocator, "@vertex fn vs() {}");
+    const pipeline_desc_id = try builder.addData(testing.allocator, "{}");
+
+    const emitter = builder.getEmitter();
+
+    // Setup: upload texture
+    try emitter.createTexture(testing.allocator, 0, texture_desc_id.toInt());
+    try emitter.createImageBitmap(testing.allocator, 0, blob_data_id.toInt());
+    try emitter.copyExternalImageToTexture(testing.allocator, 0, 0, 0, 0, 0);
+
+    // Setup: create pipeline
+    try emitter.createShaderModule(testing.allocator, 0, shader_code_id.toInt());
+    try emitter.createRenderPipeline(testing.allocator, 0, pipeline_desc_id.toInt());
+
+    // Render
+    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store, 0xFFFF);
+    try emitter.setPipeline(testing.allocator, 0);
+    try emitter.draw(testing.allocator, 6, 1); // Textured quad (2 triangles)
+    try emitter.endPass(testing.allocator);
+    try emitter.submit(testing.allocator);
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var exec = MockDispatcher.init(&gpu, &module);
+    try exec.executeAll(testing.allocator);
+
+    // Property: all expected calls made
+    const expected = [_]CallType{
+        .create_texture,
+        .create_image_bitmap,
+        .copy_external_image_to_texture,
+        .create_shader_module,
+        .create_render_pipeline,
+        .begin_render_pass,
+        .set_pipeline,
+        .draw,
+        .end_pass,
+        .submit,
+    };
+    try testing.expect(gpu.expectCallTypes(&expected));
+
+    // Property: texture was created before copy
+    try testing.expect(gpu.textures_created.isSet(0));
+}
+
+test "copy to non-zero mip level" {
+    // Test uploading to a specific mip level
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    const emitter = builder.getEmitter();
+
+    // Copy to mip level 3
+    try emitter.copyExternalImageToTexture(testing.allocator, 0, 0, 3, 0, 0);
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var exec = MockDispatcher.init(&gpu, &module);
+    try exec.executeAll(testing.allocator);
+
+    // Property: mip level preserved
+    try testing.expectEqual(@as(u8, 3), gpu.getCall(0).params.copy_external_image_to_texture.mip_level);
+}
+
+test "copy with large origin offset" {
+    // Test copying to offset position (e.g., for texture atlases)
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    const emitter = builder.getEmitter();
+
+    // Copy to offset (512, 1024) - requires 2-byte varints
+    try emitter.copyExternalImageToTexture(testing.allocator, 0, 0, 0, 512, 1024);
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var exec = MockDispatcher.init(&gpu, &module);
+    try exec.executeAll(testing.allocator);
+
+    // Property: origin preserved through varint encoding/decoding
+    const params = gpu.getCall(0).params.copy_external_image_to_texture;
+    try testing.expectEqual(@as(u16, 512), params.origin_x);
+    try testing.expectEqual(@as(u16, 1024), params.origin_y);
+}
+
+// ============================================================================
+// Blob Format Parsing Tests
+// ============================================================================
+
+/// Helper: parse blob format [mime_len:u8][mime:bytes][data:bytes]
+/// Returns (mime_type, image_data) or null if invalid
+fn parseBlobFormat(blob: []const u8) ?struct { mime: []const u8, data: []const u8 } {
+    if (blob.len == 0) return null;
+
+    const mime_len: usize = blob[0];
+    if (mime_len == 0) return null;
+    if (1 + mime_len > blob.len) return null;
+
+    return .{
+        .mime = blob[1 .. 1 + mime_len],
+        .data = blob[1 + mime_len ..],
+    };
+}
+
+test "blob format parsing: valid formats" {
+    // Test valid blob formats
+    var blob1: [14]u8 = undefined;
+    blob1[0] = 9; // mime length
+    @memcpy(blob1[1..10], "image/png");
+    @memset(blob1[10..14], 0xFF);
+
+    const result1 = parseBlobFormat(&blob1);
+    try testing.expect(result1 != null);
+    try testing.expectEqualStrings("image/png", result1.?.mime);
+    try testing.expectEqual(@as(usize, 4), result1.?.data.len);
+
+    // Test JPEG mime type
+    var blob2: [15]u8 = undefined;
+    blob2[0] = 10; // mime length
+    @memcpy(blob2[1..11], "image/jpeg");
+    @memset(blob2[11..15], 0xAB);
+
+    const result2 = parseBlobFormat(&blob2);
+    try testing.expect(result2 != null);
+    try testing.expectEqualStrings("image/jpeg", result2.?.mime);
+    try testing.expectEqual(@as(usize, 4), result2.?.data.len);
+}
+
+test "blob format parsing: edge cases" {
+    // Empty blob
+    const empty: []const u8 = &[_]u8{};
+    try testing.expect(parseBlobFormat(empty) == null);
+
+    // Zero mime length (invalid)
+    const zero_mime = [_]u8{0};
+    try testing.expect(parseBlobFormat(&zero_mime) == null);
+
+    // Mime length exceeds blob size
+    const truncated = [_]u8{ 50, 'a', 'b', 'c' };
+    try testing.expect(parseBlobFormat(&truncated) == null);
+
+    // Exactly mime, no data (valid but unusual)
+    var exact: [10]u8 = undefined;
+    exact[0] = 9;
+    @memcpy(exact[1..10], "image/png");
+    const result = parseBlobFormat(&exact);
+    try testing.expect(result != null);
+    try testing.expectEqual(@as(usize, 0), result.?.data.len);
+}
+
+test "blob format parsing: boundary values" {
+    // Minimum valid blob (1 byte mime + 0 data)
+    const min_blob = [_]u8{ 1, 'x' };
+    const result_min = parseBlobFormat(&min_blob);
+    try testing.expect(result_min != null);
+    try testing.expectEqualStrings("x", result_min.?.mime);
+    try testing.expectEqual(@as(usize, 0), result_min.?.data.len);
+
+    // Large mime length (200 bytes) - test larger but not max to avoid large stack allocation
+    var large_mime: [202]u8 = undefined;
+    large_mime[0] = 200;
+    for (1..201) |i| {
+        large_mime[i] = 'a';
+    }
+    large_mime[201] = 0xFF; // 1 byte of data
+
+    const result_large = parseBlobFormat(&large_mime);
+    try testing.expect(result_large != null);
+    try testing.expectEqual(@as(usize, 200), result_large.?.mime.len);
+    try testing.expectEqual(@as(usize, 1), result_large.?.data.len);
+}
+
+test "blob format property: mime_len + mime + data = blob.len" {
+    // Property-based test: for any valid blob, the structure is consistent
+    const test_cases = [_]struct { mime_len: u8, data_len: usize }{
+        .{ .mime_len = 9, .data_len = 100 },
+        .{ .mime_len = 10, .data_len = 0 },
+        .{ .mime_len = 1, .data_len = 50 },
+        .{ .mime_len = 100, .data_len = 50 },
+    };
+
+    for (test_cases) |tc| {
+        const mime_len_usize: usize = tc.mime_len;
+        const total_len = 1 + mime_len_usize + tc.data_len;
+        const blob = try testing.allocator.alloc(u8, total_len);
+        defer testing.allocator.free(blob);
+
+        blob[0] = tc.mime_len;
+        // Fill mime bytes
+        for (0..mime_len_usize) |i| {
+            blob[1 + i] = 'm';
+        }
+        // Fill data bytes
+        for (0..tc.data_len) |i| {
+            blob[1 + mime_len_usize + i] = 'd';
+        }
+
+        const result = parseBlobFormat(blob);
+        try testing.expect(result != null);
+
+        // Property: parsed structure matches input
+        try testing.expectEqual(mime_len_usize, result.?.mime.len);
+        try testing.expectEqual(tc.data_len, result.?.data.len);
+    }
+}
+
+test "fuzz blob parsing with random data" {
+    // Use deterministic random for reproducibility.
+    // Use a default seed if testing.random_seed is 0 to avoid PRNG issues.
+    const seed: u64 = if (std.testing.random_seed != 0)
+        std.testing.random_seed
+    else
+        0xDEADBEEF12345678;
+    var prng = std.Random.DefaultPrng.init(seed);
+    const random = prng.random();
+
+    const iterations = 100;
+    for (0..iterations) |_| {
+        const len = random.intRangeAtMost(usize, 1, 300);
+
+        const blob = try testing.allocator.alloc(u8, len);
+        defer testing.allocator.free(blob);
+
+        // Fill with random data
+        random.bytes(blob);
+
+        // Property: parsing never crashes
+        const result = parseBlobFormat(blob);
+
+        // Property: if valid, structure is consistent
+        if (result) |parsed| {
+            // mime_len matches actual mime length
+            try testing.expectEqual(@as(usize, blob[0]), parsed.mime.len);
+
+            // All data is accounted for
+            try testing.expectEqual(blob.len - 1 - parsed.mime.len, parsed.data.len);
+        }
+    }
+}
+
+// ============================================================================
+// Async Texture Upload Sequence Tests
+// ============================================================================
+//
+// These tests verify the correct ordering of operations for textured rendering.
+// In JavaScript, createImageBitmap is async - it returns a Promise that decodes
+// the image. The WASM bytecode executes synchronously, so:
+//
+// 1. create_image_bitmap starts async decode (JS stores Promise in imageBitmaps Map)
+// 2. copy_external_image_to_texture tries to copy from pending Promise
+// 3. draw executes with no texture data (black)
+// 4. Async decode completes AFTER submit
+//
+// Fix: JS must call waitForBitmaps() after first executeAll() to wait for
+// all ImageBitmap Promises to resolve, then re-execute.
+
+test "texture upload sequence: bitmap before copy" {
+    // Invariant: create_image_bitmap MUST come before copy_external_image_to_texture
+    // for the same bitmap_id. This test verifies bytecode order is correct.
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    var blob_data: [14]u8 = undefined;
+    blob_data[0] = 9; // mime length
+    @memcpy(blob_data[1..10], "image/png");
+    @memset(blob_data[10..14], 0);
+    const blob_id = try builder.addData(testing.allocator, &blob_data);
+
+    const emitter = builder.getEmitter();
+
+    // Correct order: create bitmap 0, then copy from bitmap 0
+    try emitter.createImageBitmap(testing.allocator, 0, blob_id.toInt());
+    try emitter.copyExternalImageToTexture(testing.allocator, 0, 0, 0, 0, 0);
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var exec = MockDispatcher.init(&gpu, &module);
+    try exec.executeAll(testing.allocator);
+
+    // Invariant: create_image_bitmap comes before copy_external_image_to_texture
+    const calls = gpu.getCalls();
+    try testing.expectEqual(@as(usize, 2), calls.len);
+    try testing.expectEqual(CallType.create_image_bitmap, calls[0].call_type);
+    try testing.expectEqual(CallType.copy_external_image_to_texture, calls[1].call_type);
+
+    // Invariant: same bitmap_id used in both calls
+    try testing.expectEqual(
+        calls[0].params.create_image_bitmap.bitmap_id,
+        calls[1].params.copy_external_image_to_texture.bitmap_id,
+    );
+}
+
+test "texture upload sequence: copy before draw" {
+    // Invariant: copy_external_image_to_texture MUST complete before draw
+    // for the texture to be visible. This test verifies bytecode order.
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    // Setup resources
+    const texture_desc = try DescriptorEncoder.encodeTexture(
+        testing.allocator,
+        256,
+        256,
+        .rgba8unorm,
+        .{ .texture_binding = true, .copy_dst = true },
+        1,
+    );
+    defer testing.allocator.free(texture_desc);
+    const texture_desc_id = try builder.addData(testing.allocator, texture_desc);
+
+    var blob_data: [14]u8 = undefined;
+    blob_data[0] = 9;
+    @memcpy(blob_data[1..10], "image/png");
+    @memset(blob_data[10..14], 0);
+    const blob_id = try builder.addData(testing.allocator, &blob_data);
+    const shader_id = try builder.addData(testing.allocator, "@vertex fn vs() {}");
+    const pipeline_id = try builder.addData(testing.allocator, "{}");
+
+    const emitter = builder.getEmitter();
+
+    // Resource creation phase
+    try emitter.createTexture(testing.allocator, 0, texture_desc_id.toInt());
+    try emitter.createImageBitmap(testing.allocator, 0, blob_id.toInt());
+    try emitter.copyExternalImageToTexture(testing.allocator, 0, 0, 0, 0, 0);
+    try emitter.createShaderModule(testing.allocator, 0, shader_id.toInt());
+    try emitter.createRenderPipeline(testing.allocator, 0, pipeline_id.toInt());
+
+    // Render phase - must come AFTER texture upload
+    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store, 0xFFFF);
+    try emitter.setPipeline(testing.allocator, 0);
+    try emitter.draw(testing.allocator, 6, 1);
+    try emitter.endPass(testing.allocator);
+    try emitter.submit(testing.allocator);
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var exec = MockDispatcher.init(&gpu, &module);
+    try exec.executeAll(testing.allocator);
+
+    // Find indices of key operations
+    const calls = gpu.getCalls();
+    var copy_idx: ?usize = null;
+    var draw_idx: ?usize = null;
+
+    for (calls, 0..) |call, i| {
+        if (call.call_type == .copy_external_image_to_texture) copy_idx = i;
+        if (call.call_type == .draw) draw_idx = i;
+    }
+
+    // Invariant: copy_external_image_to_texture appears before draw
+    try testing.expect(copy_idx != null);
+    try testing.expect(draw_idx != null);
+    try testing.expect(copy_idx.? < draw_idx.?);
+}
+
+test "texture upload sequence: full frame with multiple bitmaps" {
+    // Test frame that uploads multiple textures before rendering.
+    // This simulates the textured_rotating_cube example.
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    // Two textures
+    const tex_desc = try DescriptorEncoder.encodeTexture(
+        testing.allocator,
+        256,
+        256,
+        .rgba8unorm,
+        .{ .texture_binding = true, .copy_dst = true },
+        1,
+    );
+    defer testing.allocator.free(tex_desc);
+    const tex_desc_id = try builder.addData(testing.allocator, tex_desc);
+
+    // Two blobs
+    var blob1: [14]u8 = undefined;
+    blob1[0] = 9;
+    @memcpy(blob1[1..10], "image/png");
+    @memset(blob1[10..14], 0);
+    var blob2: [14]u8 = undefined;
+    blob2[0] = 9;
+    @memcpy(blob2[1..10], "image/png");
+    @memset(blob2[10..14], 1);
+
+    const blob1_id = try builder.addData(testing.allocator, &blob1);
+    const blob2_id = try builder.addData(testing.allocator, &blob2);
+    const shader_id = try builder.addData(testing.allocator, "@vertex fn vs() {}");
+    const pipeline_id = try builder.addData(testing.allocator, "{}");
+
+    const emitter = builder.getEmitter();
+
+    // Create two textures and upload both
+    try emitter.createTexture(testing.allocator, 0, tex_desc_id.toInt());
+    try emitter.createTexture(testing.allocator, 1, tex_desc_id.toInt());
+    try emitter.createImageBitmap(testing.allocator, 0, blob1_id.toInt());
+    try emitter.createImageBitmap(testing.allocator, 1, blob2_id.toInt());
+    try emitter.copyExternalImageToTexture(testing.allocator, 0, 0, 0, 0, 0);
+    try emitter.copyExternalImageToTexture(testing.allocator, 1, 1, 0, 0, 0);
+
+    // Pipeline and render
+    try emitter.createShaderModule(testing.allocator, 0, shader_id.toInt());
+    try emitter.createRenderPipeline(testing.allocator, 0, pipeline_id.toInt());
+    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store, 0xFFFF);
+    try emitter.setPipeline(testing.allocator, 0);
+    try emitter.draw(testing.allocator, 36, 1); // Cube with 36 vertices
+    try emitter.endPass(testing.allocator);
+    try emitter.submit(testing.allocator);
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var exec = MockDispatcher.init(&gpu, &module);
+    try exec.executeAll(testing.allocator);
+
+    // Count operations
+    var bitmap_count: usize = 0;
+    var copy_count: usize = 0;
+    var last_copy_idx: usize = 0;
+    var draw_idx: usize = 0;
+
+    const calls = gpu.getCalls();
+    for (calls, 0..) |call, i| {
+        switch (call.call_type) {
+            .create_image_bitmap => bitmap_count += 1,
+            .copy_external_image_to_texture => {
+                copy_count += 1;
+                last_copy_idx = i;
+            },
+            .draw => draw_idx = i,
+            else => {},
+        }
+    }
+
+    // Invariant: all bitmaps created
+    try testing.expectEqual(@as(usize, 2), bitmap_count);
+
+    // Invariant: all copies executed
+    try testing.expectEqual(@as(usize, 2), copy_count);
+
+    // Invariant: all copies before draw
+    try testing.expect(last_copy_idx < draw_idx);
+}

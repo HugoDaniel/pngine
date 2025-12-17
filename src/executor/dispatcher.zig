@@ -172,6 +172,12 @@ pub fn Dispatcher(comptime BackendType: type) type {
                     try self.backend.createBindGroup(allocator, @intCast(group_id), @intCast(layout_id), @intCast(entry_data_id));
                 },
 
+                .create_image_bitmap => {
+                    const bitmap_id = try self.readVarint();
+                    const blob_data_id = try self.readVarint();
+                    try self.backend.createImageBitmap(allocator, @intCast(bitmap_id), @intCast(blob_data_id));
+                },
+
                 // ============================================================
                 // Pass Operations
                 // ============================================================
@@ -243,6 +249,15 @@ pub fn Dispatcher(comptime BackendType: type) type {
                     try self.backend.submit(allocator);
                 },
 
+                .copy_external_image_to_texture => {
+                    const bitmap_id = try self.readVarint();
+                    const texture_id = try self.readVarint();
+                    const mip_level = try self.readByte();
+                    const origin_x = try self.readVarint();
+                    const origin_y = try self.readVarint();
+                    try self.backend.copyExternalImageToTexture(allocator, @intCast(bitmap_id), @intCast(texture_id), mip_level, @intCast(origin_x), @intCast(origin_y));
+                },
+
                 // ============================================================
                 // Frame Control (structural, no GPU calls)
                 // ============================================================
@@ -308,6 +323,59 @@ pub fn Dispatcher(comptime BackendType: type) type {
                 => {
                     // Not yet implemented
                     return error.InvalidOpcode;
+                },
+
+                // ============================================================
+                // WASM Operations (to be implemented)
+                // ============================================================
+
+                .init_wasm_module => {
+                    const module_id = try self.readVarint();
+                    const wasm_data_id = try self.readVarint();
+                    try self.backend.initWasmModule(allocator, @intCast(module_id), @intCast(wasm_data_id));
+                },
+
+                .call_wasm_func => {
+                    const call_id = try self.readVarint();
+                    const module_id = try self.readVarint();
+                    const func_name_id = try self.readVarint();
+                    const arg_count = try self.readByte();
+
+                    // Collect encoded args into buffer
+                    // Format: [arg_count][arg_type, value?]...
+                    var args_buf: [256]u8 = undefined;
+                    var args_len: usize = 0;
+                    args_buf[args_len] = arg_count;
+                    args_len += 1;
+
+                    for (0..arg_count) |_| {
+                        const arg_type = try self.readByte();
+                        if (args_len < args_buf.len) {
+                            args_buf[args_len] = arg_type;
+                            args_len += 1;
+                        }
+                        // Read value bytes based on arg type
+                        const value_size: u8 = switch (arg_type) {
+                            0x00, 0x04, 0x05 => 4, // literal f32/i32/u32
+                            else => 0, // runtime resolved
+                        };
+                        for (0..value_size) |_| {
+                            const byte = try self.readByte();
+                            if (args_len < args_buf.len) {
+                                args_buf[args_len] = byte;
+                                args_len += 1;
+                            }
+                        }
+                    }
+                    try self.backend.callWasmFunc(allocator, @intCast(call_id), @intCast(module_id), @intCast(func_name_id), args_buf[0..args_len]);
+                },
+
+                .write_buffer_from_wasm => {
+                    const call_id = try self.readVarint();
+                    const buffer_id = try self.readVarint();
+                    const offset = try self.readVarint();
+                    const byte_len = try self.readVarint();
+                    try self.backend.writeBufferFromWasm(allocator, @intCast(call_id), @intCast(buffer_id), offset, byte_len);
                 },
 
                 _ => {
