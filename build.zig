@@ -5,12 +5,23 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Add zgpu dependency for native GPU rendering (lazy - only fetched if needed)
+    const zgpu_dep = b.lazyDependency("zgpu", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Main library module (exposed for dependents)
     const lib_module = b.addModule("pngine", .{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
+
+    // Add zgpu to library module if available (native targets only)
+    if (zgpu_dep) |dep| {
+        lib_module.addImport("zgpu", dep.module("root"));
+    }
 
     // CLI executable
     const cli_module = b.createModule(.{
@@ -19,6 +30,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     cli_module.addImport("pngine", lib_module);
+
+    // Add zgpu to CLI module if available
+    if (zgpu_dep) |dep| {
+        cli_module.addImport("zgpu", dep.module("root"));
+    }
 
     const cli = b.addExecutable(.{
         .name = "pngine",
