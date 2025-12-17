@@ -22,6 +22,8 @@ pub const Options = struct {
     height: u32,
     time: f32,
     embed_bytecode: bool,
+    /// true if user explicitly set --embed or --no-embed
+    embed_explicit: bool,
 };
 
 /// Execute the render command.
@@ -36,7 +38,8 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         .width = 512,
         .height = 512,
         .time = 0.0,
-        .embed_bytecode = false,
+        .embed_bytecode = true, // Embed by default
+        .embed_explicit = false,
     };
 
     const parse_result = parseArgs(args, &opts);
@@ -87,6 +90,10 @@ fn parseArgs(args: []const []const u8, opts: *Options) u8 {
             if (result != 0) return result;
         } else if (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--embed")) {
             opts.embed_bytecode = true;
+            opts.embed_explicit = true;
+        } else if (std.mem.eql(u8, arg, "--no-embed")) {
+            opts.embed_bytecode = false;
+            opts.embed_explicit = true;
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             printUsage();
             return 255;
@@ -262,24 +269,27 @@ pub fn printUsage() void {
         \\pngine render - Render shader to PNG image
         \\
         \\Usage:
+        \\  pngine <input.pngine> [options]
         \\  pngine render <input.pngine> [options]
         \\
         \\Options:
-        \\  -o, --output <path>    Output PNG path (default: input_render.png)
+        \\  -o, --output <path>    Output PNG path (default: <input>.png)
         \\  -s, --size <WxH>       Output dimensions (default: 512x512)
         \\  -t, --time <seconds>   Time value for animation (default: 0.0)
-        \\  -e, --embed            Embed bytecode in output PNG
+        \\  -e, --embed            Embed bytecode in output PNG (default: on)
+        \\  --no-embed             Do not embed bytecode
         \\  -h, --help             Show this help
         \\
         \\Examples:
-        \\  pngine render shader.pngine
-        \\  pngine render shader.pngine -o preview.png --size 1920x1080
-        \\  pngine render animation.pngine -t 2.5 --embed
+        \\  pngine shader.pngine                    # Outputs shader.png with embedded bytecode
+        \\  pngine shader.pngine -o preview.png --size 1920x1080
+        \\  pngine render animation.pngine -t 2.5   # Explicit render command
+        \\  pngine shader.pngine --no-embed         # Output PNG without embedded bytecode
         \\
     , .{});
 }
 
-/// Derive output path: input.pngine -> input_render.png
+/// Derive output path: input.pngine -> input.png
 fn deriveOutputPath(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
     // Pre-condition
     std.debug.assert(input.len > 0);
@@ -288,12 +298,12 @@ fn deriveOutputPath(allocator: std.mem.Allocator, input: []const u8) ![]const u8
     const dir = std.fs.path.dirname(input);
 
     const result = if (dir) |d|
-        try std.fmt.allocPrint(allocator, "{s}/{s}_render.png", .{ d, stem })
+        try std.fmt.allocPrint(allocator, "{s}/{s}.png", .{ d, stem })
     else
-        try std.fmt.allocPrint(allocator, "{s}_render.png", .{stem});
+        try std.fmt.allocPrint(allocator, "{s}.png", .{stem});
 
     // Post-condition
-    std.debug.assert(std.mem.endsWith(u8, result, "_render.png"));
+    std.debug.assert(std.mem.endsWith(u8, result, ".png"));
 
     return result;
 }
@@ -348,4 +358,264 @@ fn writeOutputFile(path: []const u8, data: []const u8) !void {
     const file = try std.fs.cwd().createFile(path, .{});
     defer file.close();
     try file.writeAll(data);
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "deriveOutputPath: simple filename" {
+    const allocator = std.testing.allocator;
+    const result = try deriveOutputPath(allocator, "shader.pngine");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("shader.png", result);
+}
+
+test "deriveOutputPath: with directory" {
+    const allocator = std.testing.allocator;
+    const result = try deriveOutputPath(allocator, "path/to/shader.pngine");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("path/to/shader.png", result);
+}
+
+test "deriveOutputPath: pbsf extension" {
+    const allocator = std.testing.allocator;
+    const result = try deriveOutputPath(allocator, "legacy.pbsf");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("legacy.png", result);
+}
+
+test "parseArgs: input file only" {
+    var opts = Options{
+        .input_path = "",
+        .output_path = null,
+        .width = 512,
+        .height = 512,
+        .time = 0.0,
+        .embed_bytecode = true,
+        .embed_explicit = false,
+    };
+
+    const args = [_][]const u8{"shader.pngine"};
+    const result = parseArgs(&args, &opts);
+
+    try std.testing.expectEqual(@as(u8, 0), result);
+    try std.testing.expectEqualStrings("shader.pngine", opts.input_path);
+    try std.testing.expectEqual(@as(u32, 512), opts.width);
+    try std.testing.expectEqual(@as(u32, 512), opts.height);
+}
+
+test "parseArgs: with output path" {
+    var opts = Options{
+        .input_path = "",
+        .output_path = null,
+        .width = 512,
+        .height = 512,
+        .time = 0.0,
+        .embed_bytecode = true,
+        .embed_explicit = false,
+    };
+
+    const args = [_][]const u8{ "shader.pngine", "-o", "output.png" };
+    const result = parseArgs(&args, &opts);
+
+    try std.testing.expectEqual(@as(u8, 0), result);
+    try std.testing.expectEqualStrings("shader.pngine", opts.input_path);
+    try std.testing.expectEqualStrings("output.png", opts.output_path.?);
+}
+
+test "parseArgs: with size" {
+    var opts = Options{
+        .input_path = "",
+        .output_path = null,
+        .width = 512,
+        .height = 512,
+        .time = 0.0,
+        .embed_bytecode = true,
+        .embed_explicit = false,
+    };
+
+    const args = [_][]const u8{ "shader.pngine", "--size", "1920x1080" };
+    const result = parseArgs(&args, &opts);
+
+    try std.testing.expectEqual(@as(u8, 0), result);
+    try std.testing.expectEqual(@as(u32, 1920), opts.width);
+    try std.testing.expectEqual(@as(u32, 1080), opts.height);
+}
+
+test "parseArgs: with time" {
+    var opts = Options{
+        .input_path = "",
+        .output_path = null,
+        .width = 512,
+        .height = 512,
+        .time = 0.0,
+        .embed_bytecode = true,
+        .embed_explicit = false,
+    };
+
+    const args = [_][]const u8{ "shader.pngine", "-t", "2.5" };
+    const result = parseArgs(&args, &opts);
+
+    try std.testing.expectEqual(@as(u8, 0), result);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.5), opts.time, 0.001);
+}
+
+test "parseArgs: embed flag" {
+    var opts = Options{
+        .input_path = "",
+        .output_path = null,
+        .width = 512,
+        .height = 512,
+        .time = 0.0,
+        .embed_bytecode = false,
+        .embed_explicit = false,
+    };
+
+    const args = [_][]const u8{ "shader.pngine", "--embed" };
+    const result = parseArgs(&args, &opts);
+
+    try std.testing.expectEqual(@as(u8, 0), result);
+    try std.testing.expect(opts.embed_bytecode);
+    try std.testing.expect(opts.embed_explicit);
+}
+
+test "parseArgs: no-embed flag" {
+    var opts = Options{
+        .input_path = "",
+        .output_path = null,
+        .width = 512,
+        .height = 512,
+        .time = 0.0,
+        .embed_bytecode = true,
+        .embed_explicit = false,
+    };
+
+    const args = [_][]const u8{ "shader.pngine", "--no-embed" };
+    const result = parseArgs(&args, &opts);
+
+    try std.testing.expectEqual(@as(u8, 0), result);
+    try std.testing.expect(!opts.embed_bytecode);
+    try std.testing.expect(opts.embed_explicit);
+}
+
+test "parseArgs: missing input file" {
+    var opts = Options{
+        .input_path = "",
+        .output_path = null,
+        .width = 512,
+        .height = 512,
+        .time = 0.0,
+        .embed_bytecode = true,
+        .embed_explicit = false,
+    };
+
+    const args = [_][]const u8{};
+    const result = parseArgs(&args, &opts);
+
+    try std.testing.expectEqual(@as(u8, 1), result);
+}
+
+test "parseArgs: invalid size format" {
+    var opts = Options{
+        .input_path = "",
+        .output_path = null,
+        .width = 512,
+        .height = 512,
+        .time = 0.0,
+        .embed_bytecode = true,
+        .embed_explicit = false,
+    };
+
+    const args = [_][]const u8{ "shader.pngine", "-s", "invalid" };
+    const result = parseArgs(&args, &opts);
+
+    try std.testing.expectEqual(@as(u8, 1), result);
+}
+
+test "parseArgs: zero size rejected" {
+    var opts = Options{
+        .input_path = "",
+        .output_path = null,
+        .width = 512,
+        .height = 512,
+        .time = 0.0,
+        .embed_bytecode = true,
+        .embed_explicit = false,
+    };
+
+    const args = [_][]const u8{ "shader.pngine", "-s", "0x512" };
+    const result = parseArgs(&args, &opts);
+
+    try std.testing.expectEqual(@as(u8, 1), result);
+}
+
+test "parseArgs: help returns 255" {
+    var opts = Options{
+        .input_path = "",
+        .output_path = null,
+        .width = 512,
+        .height = 512,
+        .time = 0.0,
+        .embed_bytecode = true,
+        .embed_explicit = false,
+    };
+
+    const args = [_][]const u8{"--help"};
+    const result = parseArgs(&args, &opts);
+
+    try std.testing.expectEqual(@as(u8, 255), result);
+}
+
+test "parseArgs: unknown option rejected" {
+    var opts = Options{
+        .input_path = "",
+        .output_path = null,
+        .width = 512,
+        .height = 512,
+        .time = 0.0,
+        .embed_bytecode = true,
+        .embed_explicit = false,
+    };
+
+    const args = [_][]const u8{ "shader.pngine", "--unknown" };
+    const result = parseArgs(&args, &opts);
+
+    try std.testing.expectEqual(@as(u8, 1), result);
+}
+
+test "parseArgs: multiple input files rejected" {
+    var opts = Options{
+        .input_path = "",
+        .output_path = null,
+        .width = 512,
+        .height = 512,
+        .time = 0.0,
+        .embed_bytecode = true,
+        .embed_explicit = false,
+    };
+
+    const args = [_][]const u8{ "shader1.pngine", "shader2.pngine" };
+    const result = parseArgs(&args, &opts);
+
+    try std.testing.expectEqual(@as(u8, 1), result);
+}
+
+test "deriveOutputPath: handles OOM gracefully" {
+    var fail_index: usize = 0;
+    while (fail_index < 10) : (fail_index += 1) {
+        var failing_alloc = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_index,
+        });
+
+        const result = deriveOutputPath(failing_alloc.allocator(), "test.pngine");
+
+        if (failing_alloc.has_induced_failure) {
+            try std.testing.expectError(error.OutOfMemory, result);
+        } else {
+            const path = try result;
+            failing_alloc.allocator().free(path);
+            break;
+        }
+    }
 }
