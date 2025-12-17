@@ -73,9 +73,9 @@ pub fn emitShaders(e: *Emitter) Emitter.Error!void {
         e.next_shader_id += 1;
         try e.shader_ids.put(e.gpa, name, shader_id);
 
-        // Find code property, substitute defines, and add to data section
+        // Find code property - can be string literal or identifier referencing #wgsl
         const code_value = utils.findPropertyValue(e, info.node, "code") orelse continue;
-        const raw_code = utils.getStringContent(e, code_value);
+        const raw_code = resolveShaderCode(e, code_value);
         if (raw_code.len == 0) continue;
 
         const code = try substituteDefines(e, raw_code);
@@ -92,6 +92,42 @@ pub fn emitShaders(e: *Emitter) Emitter.Error!void {
 
     // Post-condition: shader IDs were assigned sequentially
     std.debug.assert(e.next_shader_id >= initial_shader_id);
+}
+
+/// Resolve shader code from a code property node.
+///
+/// The code property can be:
+/// - A string literal: code="@vertex fn vs() {}"
+/// - An identifier referencing a #wgsl macro: code=cubeShader
+///
+/// For identifier references, looks up the #wgsl macro and returns its value.
+fn resolveShaderCode(e: *Emitter, code_node: Node.Index) []const u8 {
+    // Pre-condition
+    std.debug.assert(code_node.toInt() < e.ast.nodes.len);
+
+    const code_tag = e.ast.nodes.items(.tag)[code_node.toInt()];
+
+    // Direct string value - just extract content
+    if (code_tag == .string_value) {
+        return utils.getStringContent(e, code_node);
+    }
+
+    // Identifier value - resolve to #wgsl macro
+    if (code_tag == .identifier_value) {
+        const token = e.ast.nodes.items(.main_token)[code_node.toInt()];
+        const wgsl_name = utils.getTokenSlice(e, token);
+
+        // Look up in #wgsl symbol table
+        if (e.analysis.symbols.wgsl.get(wgsl_name)) |wgsl_info| {
+            // Get the value property from the #wgsl macro
+            if (utils.findPropertyValue(e, wgsl_info.node, "value")) |value_node| {
+                return utils.getStringContent(e, value_node);
+            }
+        }
+    }
+
+    // Post-condition: return empty for unresolved
+    return "";
 }
 
 /// Substitute #define values into shader code.
