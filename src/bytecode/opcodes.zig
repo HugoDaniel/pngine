@@ -73,6 +73,14 @@ pub const OpCode = enum(u8) {
     /// blob_data_id points to data section entry with format: [mime_len:u8][mime:bytes][data:bytes]
     create_image_bitmap = 0x0B,
 
+    /// Create texture view.
+    /// Params: view_id, texture_id, descriptor_data_id
+    create_texture_view = 0x0C,
+
+    /// Create query set.
+    /// Params: query_set_id, descriptor_data_id
+    create_query_set = 0x0D,
+
     // ========================================================================
     // Pass Operations (0x10-0x1F)
     // ========================================================================
@@ -253,6 +261,8 @@ pub const OpCode = enum(u8) {
             .create_compute_pipeline,
             .create_bind_group,
             .create_image_bitmap,
+            .create_texture_view,
+            .create_query_set,
             .begin_render_pass,
             .begin_compute_pass,
             .set_pipeline,

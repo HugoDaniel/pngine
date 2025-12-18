@@ -247,6 +247,19 @@ pub fn Dispatcher(comptime BackendType: type) type {
                     try self.backend.createImageBitmap(allocator, @intCast(bitmap_id), @intCast(blob_data_id));
                 },
 
+                .create_texture_view => {
+                    const view_id = try self.readVarint();
+                    const texture_id = try self.readVarint();
+                    const descriptor_data_id = try self.readVarint();
+                    try self.backend.createTextureView(allocator, @intCast(view_id), @intCast(texture_id), @intCast(descriptor_data_id));
+                },
+
+                .create_query_set => {
+                    const query_set_id = try self.readVarint();
+                    const descriptor_data_id = try self.readVarint();
+                    try self.backend.createQuerySet(allocator, @intCast(query_set_id), @intCast(descriptor_data_id));
+                },
+
                 // ============================================================
                 // Pass Operations
                 // ============================================================
@@ -490,9 +503,19 @@ pub fn Dispatcher(comptime BackendType: type) type {
                     // No operation
                 },
 
+                .create_bind_group_layout => {
+                    const layout_id = try self.readVarint();
+                    const descriptor_data_id = try self.readVarint();
+                    try self.backend.createBindGroupLayout(allocator, @intCast(layout_id), @intCast(descriptor_data_id));
+                },
+
+                .create_pipeline_layout => {
+                    const layout_id = try self.readVarint();
+                    const descriptor_data_id = try self.readVarint();
+                    try self.backend.createPipelineLayout(allocator, @intCast(layout_id), @intCast(descriptor_data_id));
+                },
+
                 .create_shader_concat,
-                .create_bind_group_layout,
-                .create_pipeline_layout,
                 .set_index_buffer,
                 .write_uniform,
                 .copy_buffer_to_buffer,

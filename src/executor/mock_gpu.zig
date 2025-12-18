@@ -20,6 +20,7 @@ pub const CallType = enum {
     create_sampler,
     create_shader_module,
     create_texture_view,
+    create_query_set,
     create_bind_group_layout,
     create_pipeline_layout,
     create_render_pipeline,
@@ -67,6 +68,23 @@ pub const Call = struct {
         },
         create_sampler: struct {
             sampler_id: u16,
+            descriptor_data_id: u16,
+        },
+        create_texture_view: struct {
+            view_id: u16,
+            texture_id: u16,
+            descriptor_data_id: u16,
+        },
+        create_query_set: struct {
+            query_set_id: u16,
+            descriptor_data_id: u16,
+        },
+        create_bind_group_layout: struct {
+            layout_id: u16,
+            descriptor_data_id: u16,
+        },
+        create_pipeline_layout: struct {
+            layout_id: u16,
             descriptor_data_id: u16,
         },
         create_shader_module: struct {
@@ -331,6 +349,63 @@ pub const MockGPU = struct {
             .call_type = .create_sampler,
             .params = .{ .create_sampler = .{
                 .sampler_id = sampler_id,
+                .descriptor_data_id = descriptor_data_id,
+            } },
+        });
+    }
+
+    /// Record texture view creation.
+    pub fn createTextureView(self: *Self, allocator: Allocator, view_id: u16, texture_id: u16, descriptor_data_id: u16) !void {
+        assert(view_id < MAX_TEXTURES);
+        assert(self.calls.items.len < 10000);
+
+        try self.calls.append(allocator, .{
+            .call_type = .create_texture_view,
+            .params = .{ .create_texture_view = .{
+                .view_id = view_id,
+                .texture_id = texture_id,
+                .descriptor_data_id = descriptor_data_id,
+            } },
+        });
+    }
+
+    /// Record query set creation.
+    pub fn createQuerySet(self: *Self, allocator: Allocator, query_set_id: u16, descriptor_data_id: u16) !void {
+        assert(query_set_id < MAX_BUFFERS);
+        assert(self.calls.items.len < 10000);
+
+        try self.calls.append(allocator, .{
+            .call_type = .create_query_set,
+            .params = .{ .create_query_set = .{
+                .query_set_id = query_set_id,
+                .descriptor_data_id = descriptor_data_id,
+            } },
+        });
+    }
+
+    /// Record bind group layout creation.
+    pub fn createBindGroupLayout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
+        assert(layout_id < MAX_BIND_GROUPS);
+        assert(self.calls.items.len < 10000);
+
+        try self.calls.append(allocator, .{
+            .call_type = .create_bind_group_layout,
+            .params = .{ .create_bind_group_layout = .{
+                .layout_id = layout_id,
+                .descriptor_data_id = descriptor_data_id,
+            } },
+        });
+    }
+
+    /// Record pipeline layout creation.
+    pub fn createPipelineLayout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
+        assert(layout_id < MAX_PIPELINES);
+        assert(self.calls.items.len < 10000);
+
+        try self.calls.append(allocator, .{
+            .call_type = .create_pipeline_layout,
+            .params = .{ .create_pipeline_layout = .{
+                .layout_id = layout_id,
                 .descriptor_data_id = descriptor_data_id,
             } },
         });
