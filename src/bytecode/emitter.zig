@@ -3,7 +3,17 @@
 //! Produces PNGB bytecode from high-level operations.
 //! Uses variable-length encoding for compact output.
 //!
-//! Invariants:
+//! ## Performance
+//!
+//! Use `initWithCapacity` for best performance when bytecode size is known.
+//! Default capacity is 512 bytes (covers simple shaders without reallocation).
+//! Typical sizes:
+//! - Simple triangle: ~400 bytes
+//! - Rotating cube: ~600 bytes
+//! - Textured cube: ~800 bytes
+//!
+//! ## Invariants
+//!
 //! - Bytecode is appended sequentially, no backpatching
 //! - Each instruction is self-contained (no cross-references)
 //! - All IDs are validated before emission
@@ -23,12 +33,34 @@ const ElementType = opcodes.ElementType;
 pub const Emitter = struct {
     const Self = @This();
 
+    /// Default capacity covers simple shaders without reallocation.
+    /// Based on typical bytecode sizes (simple triangle: ~400 bytes).
+    pub const DEFAULT_CAPACITY: usize = 512;
+
     /// Output bytecode buffer.
     bytes: std.ArrayListUnmanaged(u8),
 
     pub const empty: Self = .{
         .bytes = .{},
     };
+
+    /// Initialize emitter with pre-allocated capacity.
+    /// Use this when bytecode size can be estimated to avoid reallocations.
+    ///
+    /// Complexity: O(1)
+    pub fn initWithCapacity(allocator: Allocator, capacity: usize) Allocator.Error!Self {
+        var self: Self = .empty;
+        try self.bytes.ensureTotalCapacity(allocator, capacity);
+        return self;
+    }
+
+    /// Initialize emitter with default capacity (512 bytes).
+    /// Suitable for most simple to medium shaders.
+    ///
+    /// Complexity: O(1)
+    pub fn initDefault(allocator: Allocator) Allocator.Error!Self {
+        return initWithCapacity(allocator, DEFAULT_CAPACITY);
+    }
 
     pub fn deinit(self: *Self, allocator: Allocator) void {
         self.bytes.deinit(allocator);
@@ -914,4 +946,51 @@ test "emit multiple image bitmaps" {
     offset += 1;
     result = opcodes.decodeVarint(bc[offset..]);
     try testing.expectEqual(@as(u32, 1), result.value); // bitmap_id 1
+}
+
+// ============================================================================
+// Pre-allocation Tests
+// ============================================================================
+
+test "initWithCapacity pre-allocates buffer" {
+    var emitter = try Emitter.initWithCapacity(testing.allocator, 1024);
+    defer emitter.deinit(testing.allocator);
+
+    // Property: capacity is at least what we requested
+    try testing.expect(emitter.bytes.capacity >= 1024);
+
+    // Property: length starts at 0
+    try testing.expectEqual(@as(usize, 0), emitter.len());
+}
+
+test "initDefault uses DEFAULT_CAPACITY" {
+    var emitter = try Emitter.initDefault(testing.allocator);
+    defer emitter.deinit(testing.allocator);
+
+    // Property: capacity is at least DEFAULT_CAPACITY
+    try testing.expect(emitter.bytes.capacity >= Emitter.DEFAULT_CAPACITY);
+}
+
+test "pre-allocated emitter avoids reallocation for typical shader" {
+    var emitter = try Emitter.initDefault(testing.allocator);
+    defer emitter.deinit(testing.allocator);
+
+    const initial_capacity = emitter.bytes.capacity;
+
+    // Emit operations that fit within DEFAULT_CAPACITY (512 bytes)
+    // Using simple operations with known signatures
+    for (0..20) |i| {
+        try emitter.createBuffer(testing.allocator, @intCast(i), 1024, .{ .vertex = true });
+        try emitter.createShaderModule(testing.allocator, @intCast(i), @intCast(i));
+    }
+    try emitter.draw(testing.allocator, 3, 1, 0, 0);
+    try emitter.endPass(testing.allocator);
+    try emitter.submit(testing.allocator);
+
+    // Property: no reallocation occurred (capacity unchanged)
+    try testing.expectEqual(initial_capacity, emitter.bytes.capacity);
+
+    // Property: bytecode was actually emitted
+    try testing.expect(emitter.len() > 0);
+    try testing.expect(emitter.len() < Emitter.DEFAULT_CAPACITY);
 }

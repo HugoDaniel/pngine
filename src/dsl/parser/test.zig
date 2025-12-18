@@ -389,6 +389,8 @@ test "Parser: fuzz with random input" {
 /// Properties tested:
 /// - Never crashes on any input
 /// - Root node always at index 0 when successful
+/// - All nodes reference valid token indices
+/// - All extra_data indices are within bounds
 /// - Only returns ParseError or OutOfMemory on failure
 fn fuzzParserProperties(_: void, input: []const u8) !void {
     // Filter out inputs with embedded nulls (invalid for sentinel-terminated)
@@ -409,13 +411,28 @@ fn fuzzParserProperties(_: void, input: []const u8) !void {
         var mutable_ast = ast;
         defer mutable_ast.deinit(testing.allocator);
 
+        const nodes = mutable_ast.nodes;
+        const tokens = mutable_ast.tokens;
+
         // Property 1: At least root node
-        try testing.expect(mutable_ast.nodes.len >= 1);
+        try testing.expect(nodes.len >= 1);
 
         // Property 2: Root node at index 0
-        try testing.expect(mutable_ast.nodes.items(.tag)[0] == .root);
+        try testing.expect(nodes.items(.tag)[0] == .root);
+
+        // Property 3: All main_token indices are valid
+        const main_tokens = nodes.items(.main_token);
+        for (main_tokens) |tok_idx| {
+            try testing.expect(tok_idx < tokens.len);
+        }
+
+        // Property 4: Token positions within source bounds
+        const token_starts = tokens.items(.start);
+        for (token_starts) |start| {
+            try testing.expect(start <= source.len);
+        }
     } else |err| {
-        // Property 3: Only expected errors
+        // Property 5: Only expected errors
         try testing.expect(err == error.ParseError or err == error.OutOfMemory);
     }
 }

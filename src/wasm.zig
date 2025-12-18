@@ -3,16 +3,31 @@
 //! Provides exported functions for browser usage.
 //! Uses global allocator since WASM has no thread-local storage.
 //!
-//! Exported API:
-//! - onInit(): Initialize the allocator
-//! - compile(src_ptr, src_len): Compile PBSF to PNGB
-//! - loadModule(ptr, len): Load PNGB bytecode for execution
-//! - executeAll(): Execute all bytecode
-//! - getOutputPtr/Len(): Get compilation output
-//! - freeOutput(): Free compilation output
-//! - alloc/free(): Memory management for JS
+//! ## Exported API
 //!
-//! Invariants:
+//! - `onInit()`: Initialize the allocator
+//! - `compile(src_ptr, src_len)`: Compile PBSF to PNGB
+//! - `loadModule(ptr, len)`: Load PNGB bytecode for execution
+//! - `executeAll()`: Execute all bytecode
+//! - `getOutputPtr/Len()`: Get compilation output
+//! - `freeOutput()`: Free compilation output
+//! - `alloc/free()`: Memory management for JS
+//!
+//! ## Error Codes
+//!
+//! All exported functions returning u32 use these codes:
+//! - 0: Success
+//! - 1: Not initialized (onInit not called)
+//! - 2: Out of memory
+//! - 3: Parse error
+//! - 4: Invalid format
+//! - 5: No module loaded
+//! - 6: Execution error
+//! - 10-19: Assembler errors (see ErrorCode enum)
+//! - 99: Unknown error
+//!
+//! ## Invariants
+//!
 //! - onInit() must be called before any other function
 //! - loadModule() must be called before executeAll()
 //! - Module data must remain valid while executing
@@ -24,6 +39,39 @@ const format = @import("bytecode/format.zig");
 const Module = format.Module;
 const WasmGPU = @import("executor/wasm_gpu.zig").WasmGPU;
 const Dispatcher = @import("executor/dispatcher.zig").Dispatcher;
+
+// ============================================================================
+// Error Codes
+// ============================================================================
+
+/// Error codes returned by exported functions.
+/// These map to the error codes documented in the module header.
+pub const ErrorCode = enum(u32) {
+    success = 0,
+    not_initialized = 1,
+    out_of_memory = 2,
+    parse_error = 3,
+    invalid_format = 4,
+    no_module_loaded = 5,
+    execution_error = 6,
+    // Assembler errors (10-19)
+    unknown_form = 10,
+    invalid_form_structure = 11,
+    undefined_resource = 12,
+    duplicate_resource = 13,
+    too_many_resources = 14,
+    expected_atom = 15,
+    expected_string = 16,
+    expected_number = 17,
+    expected_list = 18,
+    invalid_resource_id = 19,
+    // Catch-all
+    unknown = 99,
+
+    pub fn toU32(self: ErrorCode) u32 {
+        return @intFromEnum(self);
+    }
+};
 
 // ============================================================================
 // Global State (WASM has no TLS)
@@ -70,10 +118,10 @@ export fn onInit() void {
 }
 
 /// Compile PBSF source to PNGB bytecode.
-/// Returns: 0 on success, error code on failure.
+/// Returns: ErrorCode.success on success, error code on failure.
 /// Use getOutputPtr() and getOutputLen() to retrieve the result.
 export fn compile(src_ptr: [*]const u8, src_len: usize) u32 {
-    if (!initialized) return 1; // Not initialized
+    if (!initialized) return ErrorCode.not_initialized.toU32();
 
     // Free previous output
     if (last_output) |output| {
@@ -82,34 +130,34 @@ export fn compile(src_ptr: [*]const u8, src_len: usize) u32 {
     }
 
     // Create sentinel-terminated copy for parser
-    const source_z = allocator.allocSentinel(u8, src_len, 0) catch return 2;
+    const source_z = allocator.allocSentinel(u8, src_len, 0) catch return ErrorCode.out_of_memory.toU32();
     defer allocator.free(source_z[0 .. src_len + 1]);
     @memcpy(source_z[0..src_len], src_ptr[0..src_len]);
 
     // Compile
     const result = pngine.compile(allocator, source_z) catch |err| {
-        last_error = switch (err) {
-            error.ParseError => 3,
-            error.OutOfMemory => 2,
-            // Assembler errors (10-29)
-            error.UnknownForm => 10,
-            error.InvalidFormStructure => 11,
-            error.UndefinedResource => 12,
-            error.DuplicateResource => 13,
-            error.TooManyResources => 14,
-            error.ExpectedAtom => 15,
-            error.ExpectedString => 16,
-            error.ExpectedNumber => 17,
-            error.ExpectedList => 18,
-            error.InvalidResourceId => 19,
-            else => 99,
-        };
+        last_error = @intFromEnum(switch (err) {
+            error.ParseError => ErrorCode.parse_error,
+            error.OutOfMemory => ErrorCode.out_of_memory,
+            // Assembler errors
+            error.UnknownForm => ErrorCode.unknown_form,
+            error.InvalidFormStructure => ErrorCode.invalid_form_structure,
+            error.UndefinedResource => ErrorCode.undefined_resource,
+            error.DuplicateResource => ErrorCode.duplicate_resource,
+            error.TooManyResources => ErrorCode.too_many_resources,
+            error.ExpectedAtom => ErrorCode.expected_atom,
+            error.ExpectedString => ErrorCode.expected_string,
+            error.ExpectedNumber => ErrorCode.expected_number,
+            error.ExpectedList => ErrorCode.expected_list,
+            error.InvalidResourceId => ErrorCode.invalid_resource_id,
+            else => ErrorCode.unknown,
+        });
         return last_error;
     };
 
     last_output = result;
     last_error = 0;
-    return 0;
+    return ErrorCode.success.toU32();
 }
 
 /// Get pointer to last compilation output.
@@ -141,16 +189,13 @@ export fn freeOutput() void {
 // ============================================================================
 
 /// Load PNGB bytecode for execution.
-/// Returns: 0 on success, error code on failure.
-///   1 = Not initialized
-///   2 = Out of memory
-///   4 = Invalid format
+/// Returns: ErrorCode.success on success, error code on failure.
 ///
 /// Pre-condition: onInit() has been called.
 /// Post-condition: On success, current_module is valid and frame_counter == 0.
 export fn loadModule(pngb_ptr: [*]const u8, pngb_len: usize) u32 {
     // Pre-condition check
-    if (!initialized) return 1;
+    if (!initialized) return ErrorCode.not_initialized.toU32();
     assert(pngb_len > 0);
 
     // Free previous module if any
@@ -160,7 +205,7 @@ export fn loadModule(pngb_ptr: [*]const u8, pngb_len: usize) u32 {
     frame_counter = 0;
 
     // Make owned copy of PNGB data (must outlive module)
-    const data = allocator.alloc(u8, pngb_len) catch return 2;
+    const data = allocator.alloc(u8, pngb_len) catch return ErrorCode.out_of_memory.toU32();
     @memcpy(data, pngb_ptr[0..pngb_len]);
     module_data = data;
 
@@ -168,11 +213,11 @@ export fn loadModule(pngb_ptr: [*]const u8, pngb_len: usize) u32 {
     current_module = format.deserialize(allocator, data) catch |err| {
         allocator.free(data);
         module_data = null;
-        return switch (err) {
-            error.InvalidMagic, error.UnsupportedVersion, error.InvalidFormat, error.InvalidOffset => 4,
-            error.OutOfMemory => 2,
-            else => 99,
-        };
+        return @intFromEnum(switch (err) {
+            error.InvalidMagic, error.UnsupportedVersion, error.InvalidFormat, error.InvalidOffset => ErrorCode.invalid_format,
+            error.OutOfMemory => ErrorCode.out_of_memory,
+            else => ErrorCode.unknown,
+        });
     };
 
     // Set module reference for GPU backend
@@ -182,7 +227,7 @@ export fn loadModule(pngb_ptr: [*]const u8, pngb_len: usize) u32 {
     assert(current_module != null);
     assert(frame_counter == 0);
 
-    return 0;
+    return ErrorCode.success.toU32();
 }
 
 /// Get the current frame counter (for debugging).
@@ -191,23 +236,20 @@ export fn getFrameCounter() u32 {
 }
 
 /// Execute all bytecode in the loaded module.
-/// Returns: 0 on success, error code on failure.
-///   1 = Not initialized
-///   5 = No module loaded
-///   6 = Execution error
+/// Returns: ErrorCode.success on success, error code on failure.
 ///
 /// Pre-condition: onInit() and loadModule() have been called.
 /// Post-condition: frame_counter is incremented by number of end_frame opcodes.
 export fn executeAll() u32 {
     // Pre-condition checks
-    if (!initialized) return 1;
-    const module = &(current_module orelse return 5);
+    if (!initialized) return ErrorCode.not_initialized.toU32();
+    const module = &(current_module orelse return ErrorCode.no_module_loaded.toU32());
 
     const frame_before = frame_counter;
 
     // Use persistent frame counter for ping-pong buffer patterns
     var dispatcher = Dispatcher(WasmGPU).initWithFrame(allocator, &gpu, module, frame_counter);
-    dispatcher.executeAll(allocator) catch return 6;
+    dispatcher.executeAll(allocator) catch return ErrorCode.execution_error.toU32();
 
     // Update global frame counter for next call
     frame_counter = dispatcher.frame_counter;
@@ -215,7 +257,7 @@ export fn executeAll() u32 {
     // Post-condition: frame counter can only increase (never decreases)
     assert(frame_counter >= frame_before);
 
-    return 0;
+    return ErrorCode.success.toU32();
 }
 
 /// Free the loaded module.
