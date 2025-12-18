@@ -34,6 +34,10 @@ extern "env" fn gpuCreateRenderPipeline(pipeline_id: u16, desc_ptr: [*]const u8,
 extern "env" fn gpuCreateComputePipeline(pipeline_id: u16, desc_ptr: [*]const u8, desc_len: u32) void;
 extern "env" fn gpuCreateBindGroup(group_id: u16, layout_id: u16, entries_ptr: [*]const u8, entries_len: u32) void;
 extern "env" fn gpuCreateImageBitmap(bitmap_id: u16, blob_ptr: [*]const u8, blob_len: u32) void;
+extern "env" fn gpuCreateTextureView(view_id: u16, texture_id: u16, desc_ptr: [*]const u8, desc_len: u32) void;
+extern "env" fn gpuCreateQuerySet(query_set_id: u16, desc_ptr: [*]const u8, desc_len: u32) void;
+extern "env" fn gpuCreateBindGroupLayout(layout_id: u16, desc_ptr: [*]const u8, desc_len: u32) void;
+extern "env" fn gpuCreatePipelineLayout(layout_id: u16, desc_ptr: [*]const u8, desc_len: u32) void;
 extern "env" fn gpuBeginRenderPass(color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16) void;
 extern "env" fn gpuBeginComputePass() void;
 extern "env" fn gpuSetPipeline(pipeline_id: u16) void;
@@ -157,6 +161,42 @@ pub const WasmGPU = struct {
 
         const data = self.getDataOrPanic(blob_data_id);
         gpuCreateImageBitmap(bitmap_id, data.ptr, @intCast(data.len));
+    }
+
+    /// Create a texture view from an existing texture.
+    pub fn createTextureView(self: *Self, allocator: Allocator, view_id: u16, texture_id: u16, descriptor_data_id: u16) !void {
+        _ = allocator;
+        assert(self.module != null);
+
+        const data = self.getDataOrPanic(descriptor_data_id);
+        gpuCreateTextureView(view_id, texture_id, data.ptr, @intCast(data.len));
+    }
+
+    /// Create a query set for occlusion or timestamp queries.
+    pub fn createQuerySet(self: *Self, allocator: Allocator, query_set_id: u16, descriptor_data_id: u16) !void {
+        _ = allocator;
+        assert(self.module != null);
+
+        const data = self.getDataOrPanic(descriptor_data_id);
+        gpuCreateQuerySet(query_set_id, data.ptr, @intCast(data.len));
+    }
+
+    /// Create a bind group layout defining binding slot types.
+    pub fn createBindGroupLayout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
+        _ = allocator;
+        assert(self.module != null);
+
+        const data = self.getDataOrPanic(descriptor_data_id);
+        gpuCreateBindGroupLayout(layout_id, data.ptr, @intCast(data.len));
+    }
+
+    /// Create a pipeline layout from bind group layouts.
+    pub fn createPipelineLayout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
+        _ = allocator;
+        assert(self.module != null);
+
+        const data = self.getDataOrPanic(descriptor_data_id);
+        gpuCreatePipelineLayout(layout_id, data.ptr, @intCast(data.len));
     }
 
     // ========================================================================
