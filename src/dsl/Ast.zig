@@ -140,6 +140,10 @@ pub const Node = struct {
         macro_wasm_call,
         /// #define NAME=value
         macro_define,
+        /// #querySet name { ... }
+        macro_query_set,
+        /// #textureView name { ... }
+        macro_texture_view,
 
         // Values
         /// "string literal"

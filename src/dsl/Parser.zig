@@ -204,6 +204,8 @@ pub const Parser = struct {
             .macro_queue => .macro_queue,
             .macro_image_bitmap => .macro_image_bitmap,
             .macro_wasm_call => .macro_wasm_call,
+            .macro_query_set => .macro_query_set,
+            .macro_texture_view => .macro_texture_view,
             .macro_define => return self.parseDefine(),
             else => return null,
         };

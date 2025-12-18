@@ -48,6 +48,7 @@ pub const Token = struct {
         macro_data, // #data
         macro_queue, // #queue
         macro_query_set, // #querySet
+        macro_texture_view, // #textureView
         macro_image_bitmap, // #imageBitmap
         macro_wasm_call, // #wasmCall
 
@@ -120,6 +121,7 @@ pub const macro_keywords = std.StaticStringMap(Token.Tag).initComptime(.{
     .{ "data", .macro_data },
     .{ "queue", .macro_queue },
     .{ "querySet", .macro_query_set },
+    .{ "textureView", .macro_texture_view },
     .{ "imageBitmap", .macro_image_bitmap },
     .{ "wasmCall", .macro_wasm_call },
 });
