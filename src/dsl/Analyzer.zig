@@ -116,6 +116,8 @@ pub const Analyzer = struct {
         queue: std.StringHashMapUnmanaged(SymbolInfo),
         image_bitmap: std.StringHashMapUnmanaged(SymbolInfo),
         wasm_call: std.StringHashMapUnmanaged(SymbolInfo),
+        query_set: std.StringHashMapUnmanaged(SymbolInfo),
+        texture_view: std.StringHashMapUnmanaged(SymbolInfo),
 
         pub fn init() SymbolTable {
             return .{
@@ -137,6 +139,8 @@ pub const Analyzer = struct {
                 .queue = .{},
                 .image_bitmap = .{},
                 .wasm_call = .{},
+                .query_set = .{},
+                .texture_view = .{},
             };
         }
 
@@ -159,6 +163,8 @@ pub const Analyzer = struct {
             self.queue.deinit(gpa);
             self.image_bitmap.deinit(gpa);
             self.wasm_call.deinit(gpa);
+            self.query_set.deinit(gpa);
+            self.texture_view.deinit(gpa);
         }
 
         pub fn getNamespace(self: *SymbolTable, ns: Namespace) *std.StringHashMapUnmanaged(SymbolInfo) {
@@ -181,6 +187,8 @@ pub const Analyzer = struct {
                 .queue => &self.queue,
                 .image_bitmap => &self.image_bitmap,
                 .wasm_call => &self.wasm_call,
+                .query_set => &self.query_set,
+                .texture_view => &self.texture_view,
             };
         }
     };
@@ -216,6 +224,8 @@ pub const Analyzer = struct {
         queue,
         image_bitmap,
         wasm_call,
+        query_set,
+        texture_view,
 
         pub fn fromString(s: []const u8) ?Namespace {
             const map = std.StaticStringMap(Namespace).initComptime(.{
@@ -238,6 +248,8 @@ pub const Analyzer = struct {
                 .{ "imageBitmaps", .image_bitmap }, // Alias for plural form
                 .{ "wasmCall", .wasm_call },
                 .{ "wasmCalls", .wasm_call }, // Alias for plural form
+                .{ "querySet", .query_set },
+                .{ "textureView", .texture_view },
                 .{ "pipeline", .render_pipeline }, // Alias
                 .{ "pass", .render_pass }, // Alias
             });
@@ -448,6 +460,8 @@ pub const Analyzer = struct {
             .macro_queue => .queue,
             .macro_image_bitmap => .image_bitmap,
             .macro_wasm_call => .wasm_call,
+            .macro_query_set => .query_set,
+            .macro_texture_view => .texture_view,
             else => return, // Skip non-declaration nodes
         };
 
