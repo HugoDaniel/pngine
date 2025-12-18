@@ -71,6 +71,10 @@ pub const Emitter = struct {
     image_bitmap_ids: std.StringHashMapUnmanaged(u16),
     wasm_module_ids: std.StringHashMapUnmanaged(u16),
     wasm_call_ids: std.StringHashMapUnmanaged(u16),
+    bind_group_layout_ids: std.StringHashMapUnmanaged(u16),
+    pipeline_layout_ids: std.StringHashMapUnmanaged(u16),
+    query_set_ids: std.StringHashMapUnmanaged(u16),
+    texture_view_ids: std.StringHashMapUnmanaged(u16),
 
     /// WASM data entries for #data with wasm={...} property.
     /// These are initialized at runtime by calling WASM functions.
@@ -101,6 +105,10 @@ pub const Emitter = struct {
     next_wasm_module_id: u16 = 0,
     next_wasm_call_id: u16 = 0,
     next_data_id: u16 = 0,
+    next_bind_group_layout_id: u16 = 0,
+    next_pipeline_layout_id: u16 = 0,
+    next_query_set_id: u16 = 0,
+    next_texture_view_id: u16 = 0,
 
     const Self = @This();
 
@@ -155,6 +163,10 @@ pub const Emitter = struct {
             .image_bitmap_ids = .{},
             .wasm_module_ids = .{},
             .wasm_call_ids = .{},
+            .bind_group_layout_ids = .{},
+            .pipeline_layout_ids = .{},
+            .query_set_ids = .{},
+            .texture_view_ids = .{},
             .wasm_data_entries = .{},
             .generated_arrays = .{},
             .buffer_pools = .{},
@@ -177,6 +189,10 @@ pub const Emitter = struct {
         self.image_bitmap_ids.deinit(self.gpa);
         self.wasm_module_ids.deinit(self.gpa);
         self.wasm_call_ids.deinit(self.gpa);
+        self.bind_group_layout_ids.deinit(self.gpa);
+        self.pipeline_layout_ids.deinit(self.gpa);
+        self.query_set_ids.deinit(self.gpa);
+        self.texture_view_ids.deinit(self.gpa);
         self.wasm_data_entries.deinit(self.gpa);
         self.generated_arrays.deinit(self.gpa);
         self.buffer_pools.deinit(self.gpa);
@@ -204,7 +220,11 @@ pub const Emitter = struct {
         try shaders.emitShaders(&self);
         try resources.emitBuffers(&self);
         try resources.emitTextures(&self);
+        try resources.emitTextureViews(&self);
         try resources.emitSamplers(&self);
+        try resources.emitQuerySets(&self);
+        try resources.emitBindGroupLayouts(&self);
+        try resources.emitPipelineLayouts(&self);
         try pipelines.emitPipelines(&self);
         try resources.emitBindGroups(&self);
 
@@ -236,6 +256,10 @@ pub const Emitter = struct {
         self.image_bitmap_ids.deinit(self.gpa);
         self.wasm_module_ids.deinit(self.gpa);
         self.wasm_call_ids.deinit(self.gpa);
+        self.bind_group_layout_ids.deinit(self.gpa);
+        self.pipeline_layout_ids.deinit(self.gpa);
+        self.query_set_ids.deinit(self.gpa);
+        self.texture_view_ids.deinit(self.gpa);
         self.wasm_data_entries.deinit(self.gpa);
         self.generated_arrays.deinit(self.gpa);
         self.buffer_pools.deinit(self.gpa);
