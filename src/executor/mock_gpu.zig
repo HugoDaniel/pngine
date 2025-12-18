@@ -106,10 +106,15 @@ pub const Call = struct {
         draw: struct {
             vertex_count: u32,
             instance_count: u32,
+            first_vertex: u32,
+            first_instance: u32,
         },
         draw_indexed: struct {
             index_count: u32,
             instance_count: u32,
+            first_index: u32,
+            base_vertex: u32,
+            first_instance: u32,
         },
         dispatch: struct {
             x: u32,
@@ -460,7 +465,14 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn draw(self: *Self, allocator: Allocator, vertex_count: u32, instance_count: u32) !void {
+    pub fn draw(
+        self: *Self,
+        allocator: Allocator,
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    ) !void {
         assert(self.in_render_pass);
 
         try self.calls.append(allocator, .{
@@ -468,11 +480,21 @@ pub const MockGPU = struct {
             .params = .{ .draw = .{
                 .vertex_count = vertex_count,
                 .instance_count = instance_count,
+                .first_vertex = first_vertex,
+                .first_instance = first_instance,
             } },
         });
     }
 
-    pub fn drawIndexed(self: *Self, allocator: Allocator, index_count: u32, instance_count: u32) !void {
+    pub fn drawIndexed(
+        self: *Self,
+        allocator: Allocator,
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        base_vertex: u32,
+        first_instance: u32,
+    ) !void {
         assert(self.in_render_pass);
 
         try self.calls.append(allocator, .{
@@ -480,6 +502,9 @@ pub const MockGPU = struct {
             .params = .{ .draw_indexed = .{
                 .index_count = index_count,
                 .instance_count = instance_count,
+                .first_index = first_index,
+                .base_vertex = base_vertex,
+                .first_instance = first_instance,
             } },
         });
     }
@@ -598,6 +623,59 @@ pub const MockGPU = struct {
     }
 
     // ========================================================================
+    // Data Generation (stubs for testing - actual implementation in JS)
+    // ========================================================================
+
+    pub fn createTypedArray(self: *Self, allocator: Allocator, array_id: u16, element_type: u8, element_count: u32) !void {
+        _ = self;
+        _ = allocator;
+        _ = array_id;
+        _ = element_type;
+        _ = element_count;
+        // Mock: no-op, data generation happens in JS runtime
+    }
+
+    pub fn fillRandom(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, min_data_id: u16, max_data_id: u16) !void {
+        _ = self;
+        _ = allocator;
+        _ = array_id;
+        _ = offset;
+        _ = count;
+        _ = stride;
+        _ = min_data_id;
+        _ = max_data_id;
+    }
+
+    pub fn fillExpression(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, total_count: u32, expr_data_id: u16) !void {
+        _ = self;
+        _ = allocator;
+        _ = array_id;
+        _ = offset;
+        _ = count;
+        _ = stride;
+        _ = total_count;
+        _ = expr_data_id;
+    }
+
+    pub fn fillConstant(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, value_data_id: u16) !void {
+        _ = self;
+        _ = allocator;
+        _ = array_id;
+        _ = offset;
+        _ = count;
+        _ = stride;
+        _ = value_data_id;
+    }
+
+    pub fn writeBufferFromArray(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, array_id: u16) !void {
+        _ = self;
+        _ = allocator;
+        _ = buffer_id;
+        _ = buffer_offset;
+        _ = array_id;
+    }
+
+    // ========================================================================
     // Verification
     // ========================================================================
 
@@ -694,7 +772,7 @@ test "mock gpu render pass sequence" {
     try gpu.createRenderPipeline(testing.allocator, 0, 1);
     try gpu.beginRenderPass(testing.allocator, 0, 1, 0, 0xFFFF);
     try gpu.setPipeline(testing.allocator, 0);
-    try gpu.draw(testing.allocator, 3, 1);
+    try gpu.draw(testing.allocator, 3, 1, 0, 0);
     try gpu.endPass(testing.allocator);
     try gpu.submit(testing.allocator);
 
@@ -729,7 +807,7 @@ test "mock gpu call formatting" {
 
     // load_op=1 (clear), store_op=0 (store)
     try gpu.beginRenderPass(testing.allocator, 0, 1, 0, 0xFFFF);
-    try gpu.draw(testing.allocator, 3, 1);
+    try gpu.draw(testing.allocator, 3, 1, 0, 0);
     try gpu.endPass(testing.allocator);
 
     var buf: [256]u8 = undefined;
@@ -883,7 +961,7 @@ test "mock gpu full rendering with texture upload" {
     // Render phase
     try gpu.beginRenderPass(testing.allocator, 0, 1, 0, 0xFFFF);
     try gpu.setPipeline(testing.allocator, 0);
-    try gpu.draw(testing.allocator, 6, 1);
+    try gpu.draw(testing.allocator, 6, 1, 0, 0);
     try gpu.endPass(testing.allocator);
     try gpu.submit(testing.allocator);
 
