@@ -32,6 +32,9 @@ pub const ChunkType = struct {
     pub const IEND = [4]u8{ 'I', 'E', 'N', 'D' };
     /// PNGine bytecode chunk (ancillary, public, safe-to-copy)
     pub const pNGb = [4]u8{ 'p', 'N', 'G', 'b' };
+    /// PNGine runtime chunk (ancillary, public, safe-to-copy)
+    /// Contains optional WASM runtime for self-contained execution
+    pub const pNGr = [4]u8{ 'p', 'N', 'G', 'r' };
 };
 
 /// A parsed PNG chunk (references original data, no allocation).
