@@ -47,6 +47,9 @@ header {
     background: var(--color-bg-secondary);
     border-bottom: 1px solid var(--color-border);
     padding: 0 1rem;
+    position: sticky;
+    top: 0;
+    z-index: 100;
 }
 
 header nav {
@@ -225,7 +228,7 @@ th {
 
 .sidebar {
     position: sticky;
-    top: 1rem;
+    top: 76px; /* header height (60px) + padding (16px) */
     align-self: start;
 }
 
