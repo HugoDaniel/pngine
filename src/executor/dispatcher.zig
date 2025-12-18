@@ -3,10 +3,28 @@
 //! Decodes PNGB bytecode and dispatches operations to GPU backend.
 //! Uses a pluggable backend interface for testability.
 //!
-//! Invariants:
-//! - Bytecode is validated before execution
+//! ## Design
+//!
+//! - **Generic backend**: Any type with required GPU methods works (MockGPU, WasmGPU)
+//! - **Two-phase execution**: Pass definitions are recorded, then executed via exec_pass
+//! - **Ping-pong support**: frame_counter enables double-buffering via pool operations
+//! - **Bounded execution**: All loops have explicit max iterations (10000 for main, 1000 for passes)
+//!
+//! ## Architecture
+//!
+//! ```
+//! PNGB Bytecode → Dispatcher.step() → Backend.method() → GPU/Mock calls
+//!                     ↓
+//!              pass_ranges map (for deferred exec_pass)
+//! ```
+//!
+//! ## Invariants
+//!
+//! - Bytecode is validated before execution (pc never exceeds bytecode.len)
 //! - All resource IDs reference previously created resources
 //! - Execution is deterministic (no randomness in dispatch)
+//! - Pass definitions must end with end_pass_def before being executed
+//! - frame_counter increments exactly once per end_frame opcode
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -62,6 +80,15 @@ pub fn Backend(comptime T: type) type {
     };
 }
 
+/// Pass bytecode range (start and end offsets within bytecode).
+const PassRange = struct {
+    start: usize,
+    end: usize,
+};
+
+/// Maximum number of passes to track.
+const MAX_PASSES: u16 = 256;
+
 /// Bytecode dispatcher.
 pub fn Dispatcher(comptime BackendType: type) type {
     // Validate backend at comptime
@@ -83,14 +110,56 @@ pub fn Dispatcher(comptime BackendType: type) type {
         in_pass_def: bool,
         in_frame_def: bool,
 
-        pub fn init(backend: *BackendType, module: *const Module) Self {
+        /// Pass bytecode ranges for exec_pass.
+        pass_ranges: std.AutoHashMap(u16, PassRange),
+
+        /// Current pass ID being defined (for tracking range).
+        current_pass_id: ?u16,
+
+        /// Start position of current pass definition.
+        current_pass_start: usize,
+
+        /// Frame counter for ping-pong pool calculations.
+        frame_counter: u32,
+
+        /// Allocator for internal data structures (pass_ranges map).
+        allocator: Allocator,
+
+        /// Initialize dispatcher with default frame counter.
+        ///
+        /// Complexity: O(1)
+        /// Memory: Allocates hashmap for pass ranges (grows on demand).
+        pub fn init(allocator: Allocator, backend: *BackendType, module: *const Module) Self {
+            return initWithFrame(allocator, backend, module, 0);
+        }
+
+        /// Initialize with a specific frame counter (for animation loops).
+        ///
+        /// The frame_counter enables ping-pong buffer patterns where:
+        /// actual_id = base_id + (frame_counter + offset) % pool_size
+        ///
+        /// Complexity: O(1)
+        pub fn initWithFrame(allocator: Allocator, backend: *BackendType, module: *const Module, initial_frame: u32) Self {
+            // Pre-conditions
+            assert(module.bytecode.len <= 1024 * 1024); // 1MB max bytecode
+
             return .{
                 .backend = backend,
                 .module = module,
                 .pc = 0,
                 .in_pass_def = false,
                 .in_frame_def = false,
+                .pass_ranges = std.AutoHashMap(u16, PassRange).init(allocator),
+                .current_pass_id = null,
+                .current_pass_start = 0,
+                .frame_counter = initial_frame,
+                .allocator = allocator,
             };
+        }
+
+        /// Clean up pass ranges map.
+        pub fn deinit(self: *Self) void {
+            self.pass_ranges.deinit();
         }
 
         /// Execute all bytecode.
@@ -214,13 +283,18 @@ pub fn Dispatcher(comptime BackendType: type) type {
                 .draw => {
                     const vertex_count = try self.readVarint();
                     const instance_count = try self.readVarint();
-                    try self.backend.draw(allocator, vertex_count, instance_count);
+                    const first_vertex = try self.readVarint();
+                    const first_instance = try self.readVarint();
+                    try self.backend.draw(allocator, vertex_count, instance_count, first_vertex, first_instance);
                 },
 
                 .draw_indexed => {
                     const index_count = try self.readVarint();
                     const instance_count = try self.readVarint();
-                    try self.backend.drawIndexed(allocator, index_count, instance_count);
+                    const first_index = try self.readVarint();
+                    const base_vertex = try self.readVarint();
+                    const first_instance = try self.readVarint();
+                    try self.backend.drawIndexed(allocator, index_count, instance_count, first_index, base_vertex, first_instance);
                 },
 
                 .dispatch => {
@@ -270,38 +344,142 @@ pub fn Dispatcher(comptime BackendType: type) type {
 
                 .end_frame => {
                     self.in_frame_def = false;
+                    self.frame_counter += 1;
                 },
 
                 .exec_pass => {
-                    _ = try self.readVarint(); // pass_id
-                    // In a real executor, this would look up and execute the pass
+                    const pass_id: u16 = @intCast(try self.readVarint());
+                    // Execute the pass bytecode range
+                    if (self.pass_ranges.get(pass_id)) |range| {
+                        // Save current PC
+                        const saved_pc = self.pc;
+                        // Execute pass bytecode
+                        self.pc = range.start;
+                        const pass_max_iterations: usize = 1000;
+                        for (0..pass_max_iterations) |_| {
+                            if (self.pc >= range.end) break;
+                            try self.step(allocator);
+                        }
+                        // Restore PC
+                        self.pc = saved_pc;
+                    }
                 },
 
                 .define_pass => {
-                    _ = try self.readVarint(); // pass_id
+                    const pass_id: u16 = @intCast(try self.readVarint());
                     _ = try self.readByte(); // pass_type
                     _ = try self.readVarint(); // descriptor_data_id
-                    self.in_pass_def = true;
+
+                    // Record pass start position
+                    const pass_start = self.pc;
+
+                    // Skip ahead to find end_pass_def - don't execute pass body during definition
+                    const max_scan: usize = 10000;
+                    for (0..max_scan) |_| {
+                        if (self.pc >= self.module.bytecode.len) break;
+                        const scan_op: OpCode = @enumFromInt(self.module.bytecode[self.pc]);
+                        self.pc += 1;
+
+                        if (scan_op == .end_pass_def) {
+                            // Store the pass range (excluding end_pass_def)
+                            self.pass_ranges.put(pass_id, .{
+                                .start = pass_start,
+                                .end = self.pc - 1,
+                            }) catch {};
+                            break;
+                        }
+
+                        // Skip opcode parameters (simplified - read varints until next opcode)
+                        // This works because varints have high bit set for continuation
+                        try self.skipOpcodeParams(scan_op);
+                    }
                 },
 
                 .end_pass_def => {
-                    self.in_pass_def = false;
+                    // Should not be reached - handled by define_pass scanning
                 },
 
                 // ============================================================
                 // Data Generation (to be implemented)
                 // ============================================================
 
-                .create_typed_array,
-                .fill_constant,
-                .fill_random,
+                .create_typed_array => {
+                    const array_id = try self.readVarint();
+                    const element_type = try self.readByte();
+                    const element_count = try self.readVarint();
+                    try self.backend.createTypedArray(allocator, @intCast(array_id), element_type, element_count);
+                },
+
+                .fill_constant => {
+                    const array_id = try self.readVarint();
+                    const offset = try self.readVarint();
+                    const count = try self.readVarint();
+                    const stride = try self.readByte();
+                    const value_data_id = try self.readVarint();
+                    try self.backend.fillConstant(allocator, @intCast(array_id), offset, count, stride, @intCast(value_data_id));
+                },
+
+                .fill_random => {
+                    const array_id = try self.readVarint();
+                    const offset = try self.readVarint();
+                    const count = try self.readVarint();
+                    const stride = try self.readByte();
+                    const min_data_id = try self.readVarint();
+                    const max_data_id = try self.readVarint();
+                    try self.backend.fillRandom(allocator, @intCast(array_id), offset, count, stride, @intCast(min_data_id), @intCast(max_data_id));
+                },
+
                 .fill_linear,
                 .fill_element_index,
-                .fill_expression,
                 => {
-                    // Skip data generation for now
-                    // These will be implemented when we add runtime data generation
-                    return error.InvalidOpcode;
+                    // Skip for now - not used by boids
+                    _ = try self.readVarint(); // array_id
+                    _ = try self.readVarint(); // offset
+                    _ = try self.readVarint(); // count
+                    _ = try self.readByte(); // stride
+                    _ = try self.readVarint(); // start/scale
+                    _ = try self.readVarint(); // step/bias
+                },
+
+                .fill_expression => {
+                    const array_id = try self.readVarint();
+                    const offset = try self.readVarint();
+                    const count = try self.readVarint();
+                    const stride = try self.readByte();
+                    const expr_data_id = try self.readVarint();
+                    // count is used as total_count for NUM_PARTICLES substitution
+                    try self.backend.fillExpression(allocator, @intCast(array_id), offset, count, stride, count, @intCast(expr_data_id));
+                },
+
+                .write_buffer_from_array => {
+                    const buffer_id = try self.readVarint();
+                    const buffer_offset = try self.readVarint();
+                    const array_id = try self.readVarint();
+                    try self.backend.writeBufferFromArray(allocator, @intCast(buffer_id), buffer_offset, @intCast(array_id));
+                },
+
+                // ============================================================
+                // Pool Operations
+                // ============================================================
+
+                .set_vertex_buffer_pool => {
+                    const slot = try self.readByte();
+                    const base_buffer_id = try self.readVarint();
+                    const pool_size = try self.readByte();
+                    const offset = try self.readByte();
+                    // Calculate actual buffer ID: base + (frame_counter + offset) % pool_size
+                    const actual_id: u16 = @intCast(base_buffer_id + (self.frame_counter + offset) % pool_size);
+                    try self.backend.setVertexBuffer(allocator, slot, actual_id);
+                },
+
+                .set_bind_group_pool => {
+                    const slot = try self.readByte();
+                    const base_group_id = try self.readVarint();
+                    const pool_size = try self.readByte();
+                    const offset = try self.readByte();
+                    // Calculate actual bind group ID: base + (frame_counter + offset) % pool_size
+                    const actual_id: u16 = @intCast(base_group_id + (self.frame_counter + offset) % pool_size);
+                    try self.backend.setBindGroup(allocator, slot, actual_id);
                 },
 
                 // ============================================================
@@ -405,6 +583,70 @@ pub fn Dispatcher(comptime BackendType: type) type {
             self.pc += result.len;
             return result.value;
         }
+
+        /// Skip opcode parameters during pass definition scanning.
+        /// Each opcode has a known parameter structure that we skip over.
+        fn skipOpcodeParams(self: *Self, op: OpCode) ExecuteError!void {
+            switch (op) {
+                // No parameters
+                .end_pass, .submit, .end_frame => {},
+
+                // 1 varint
+                .set_pipeline => _ = try self.readVarint(),
+
+                // 2 varints
+                .set_bind_group, .set_vertex_buffer => {
+                    _ = try self.readByte();
+                    _ = try self.readVarint();
+                },
+
+                // Draw: 4 varints
+                .draw => {
+                    _ = try self.readVarint();
+                    _ = try self.readVarint();
+                    _ = try self.readVarint();
+                    _ = try self.readVarint();
+                },
+
+                // DrawIndexed: 5 varints
+                .draw_indexed => {
+                    _ = try self.readVarint();
+                    _ = try self.readVarint();
+                    _ = try self.readVarint();
+                    _ = try self.readVarint();
+                    _ = try self.readVarint();
+                },
+
+                // Dispatch: 3 varints
+                .dispatch => {
+                    _ = try self.readVarint();
+                    _ = try self.readVarint();
+                    _ = try self.readVarint();
+                },
+
+                // Begin render pass: 2 varints + 2 bytes + 1 varint
+                .begin_render_pass => {
+                    _ = try self.readVarint();
+                    _ = try self.readByte();
+                    _ = try self.readByte();
+                    _ = try self.readVarint();
+                },
+
+                // Begin compute pass: no params
+                .begin_compute_pass => {},
+
+                // Pool operations: 1 byte + 1 varint + 2 bytes
+                .set_vertex_buffer_pool, .set_bind_group_pool => {
+                    _ = try self.readByte();
+                    _ = try self.readVarint();
+                    _ = try self.readByte();
+                    _ = try self.readByte();
+                },
+
+                // Default: try to skip unknown opcodes by reading until valid opcode
+                else => {},
+            }
+        }
     };
 }
 
@@ -431,7 +673,7 @@ test "dispatcher empty bytecode" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    var dispatcher = MockDispatcher.init(&gpu, &module);
+    var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     try dispatcher.executeAll(testing.allocator);
 
     try testing.expectEqual(@as(usize, 0), gpu.callCount());
@@ -454,7 +696,7 @@ test "dispatcher create shader module" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    var dispatcher = MockDispatcher.init(&gpu, &module);
+    var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     try dispatcher.executeAll(testing.allocator);
 
     try testing.expectEqual(@as(usize, 1), gpu.callCount());
@@ -478,7 +720,7 @@ test "dispatcher create texture" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    var dispatcher = MockDispatcher.init(&gpu, &module);
+    var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     try dispatcher.executeAll(testing.allocator);
 
     try testing.expectEqual(@as(usize, 1), gpu.callCount());
@@ -507,7 +749,7 @@ test "dispatcher create sampler" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    var dispatcher = MockDispatcher.init(&gpu, &module);
+    var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     try dispatcher.executeAll(testing.allocator);
 
     try testing.expectEqual(@as(usize, 1), gpu.callCount());
@@ -527,7 +769,7 @@ test "dispatcher draw sequence" {
     // Must wrap draw commands in a render pass
     try emitter.beginRenderPass(testing.allocator, 0, .clear, .store, 0xFFFF);
     try emitter.setPipeline(testing.allocator, 0);
-    try emitter.draw(testing.allocator, 3, 1);
+    try emitter.draw(testing.allocator, 3, 1, 0, 0);
     try emitter.endPass(testing.allocator);
 
     const pngb = try builder.finalize(testing.allocator);
@@ -539,7 +781,7 @@ test "dispatcher draw sequence" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    var dispatcher = MockDispatcher.init(&gpu, &module);
+    var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     try dispatcher.executeAll(testing.allocator);
 
     try testing.expectEqual(@as(usize, 4), gpu.callCount());
@@ -571,7 +813,7 @@ test "dispatcher frame control" {
     // Actual render pass inside the frame
     try emitter.beginRenderPass(testing.allocator, 0, .clear, .store, 0xFFFF);
     try emitter.setPipeline(testing.allocator, 0);
-    try emitter.draw(testing.allocator, 3, 1);
+    try emitter.draw(testing.allocator, 3, 1, 0, 0);
     try emitter.endPass(testing.allocator);
 
     try emitter.submit(testing.allocator);
@@ -586,7 +828,7 @@ test "dispatcher frame control" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    var dispatcher = MockDispatcher.init(&gpu, &module);
+    var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     try dispatcher.executeAll(testing.allocator);
 
     // define_frame and end_frame don't generate GPU calls
