@@ -128,6 +128,11 @@ fn emitDataFromSource(e: *Emitter, buffer_id: u16, offset: u32, data_from_node: 
 }
 
 /// Emit write_buffer command with parsed data.
+/// Supports:
+/// - array: data=[1.0 2.0 3.0]
+/// - string: data="$data.X.buffer" or literal hex bytes
+/// - identifier: data=myDataName (references #data)
+/// - reference: data=$data.myDataName (references #data)
 fn emitWriteBufferData(e: *Emitter, buffer_id: u16, offset: u32, data_node: Node.Index) Emitter.Error!void {
     // Pre-condition
     std.debug.assert(data_node.toInt() < e.ast.nodes.len);
@@ -138,6 +143,22 @@ fn emitWriteBufferData(e: *Emitter, buffer_id: u16, offset: u32, data_node: Node
         try emitWriteBufferArray(e, buffer_id, offset, data_node);
     } else if (data_tag == .string_value) {
         try emitWriteBufferString(e, buffer_id, offset, data_node);
+    } else if (data_tag == .identifier_value) {
+        // Direct identifier reference: data=simParamsData
+        const name_token = e.ast.nodes.items(.main_token)[data_node.toInt()];
+        const data_name = utils.getTokenSlice(e, name_token);
+        if (e.data_ids.get(data_name)) |data_entry_id| {
+            try e.builder.getEmitter().writeBuffer(e.gpa, buffer_id, offset, data_entry_id);
+        }
+    } else if (data_tag == .reference) {
+        // Reference syntax: data=$data.simParamsData
+        if (utils.getReference(e, data_node)) |ref| {
+            if (std.mem.eql(u8, ref.namespace, "data")) {
+                if (e.data_ids.get(ref.name)) |data_entry_id| {
+                    try e.builder.getEmitter().writeBuffer(e.gpa, buffer_id, offset, data_entry_id);
+                }
+            }
+        }
     }
 }
 
@@ -179,14 +200,33 @@ fn emitWriteBufferArray(e: *Emitter, buffer_id: u16, offset: u32, array_node: No
     std.debug.assert(data_bytes.items.len == 0 or data_bytes.items.len % 4 == 0);
 }
 
-/// Emit write_buffer from a string value (hex bytes or skip for runtime refs).
+/// Emit write_buffer from a string value (hex bytes, $data refs, or skip for runtime refs).
 fn emitWriteBufferString(e: *Emitter, buffer_id: u16, offset: u32, string_node: Node.Index) Emitter.Error!void {
     // Pre-condition
     std.debug.assert(string_node.toInt() < e.ast.nodes.len);
 
     const data_str = utils.getStringContent(e, string_node);
 
-    // Check for runtime interpolation (starts with $)
+    // Check for $data.X.buffer reference pattern
+    if (data_str.len > 0 and std.mem.startsWith(u8, data_str, "$data.")) {
+        // Parse "$data.NAME.buffer" to extract NAME
+        const after_prefix = data_str[6..]; // Skip "$data."
+        if (std.mem.indexOf(u8, after_prefix, ".")) |dot_pos| {
+            const data_name = after_prefix[0..dot_pos];
+            // Look up the data entry in data_ids
+            if (e.data_ids.get(data_name)) |data_entry_id| {
+                try e.builder.getEmitter().writeBuffer(
+                    e.gpa,
+                    buffer_id,
+                    offset,
+                    data_entry_id,
+                );
+                return;
+            }
+        }
+    }
+
+    // Check for other runtime interpolation (starts with $)
     if (data_str.len > 0 and data_str[0] == '$') {
         // Runtime interpolation ($uniforms.x.y.data, $time, etc.)
         // Skip emitting write_buffer - JS will handle via writeTimeUniform
@@ -331,16 +371,31 @@ fn emitFrameBody(e: *Emitter, node: Node.Index) Emitter.Error!void {
     // Pre-condition
     std.debug.assert(node.toInt() < e.ast.nodes.len);
 
-    // Look for perform array
-    const perform_value = utils.findPropertyValue(e, node, "perform") orelse return;
-    const value_tag = e.ast.nodes.items(.tag)[perform_value.toInt()];
+    // Emit 'before' array (queue actions before passes)
+    if (utils.findPropertyValue(e, node, "before")) |before_value| {
+        try emitActionArray(e, before_value);
+    }
 
+    // Emit 'perform' array (pass/queue actions)
+    if (utils.findPropertyValue(e, node, "perform")) |perform_value| {
+        try emitActionArray(e, perform_value);
+    }
+
+    // Emit 'after' array (queue actions after passes)
+    if (utils.findPropertyValue(e, node, "after")) |after_value| {
+        try emitActionArray(e, after_value);
+    }
+}
+
+/// Emit an array of actions (passes or queues).
+fn emitActionArray(e: *Emitter, array_node: Node.Index) Emitter.Error!void {
+    const value_tag = e.ast.nodes.items(.tag)[array_node.toInt()];
     if (value_tag != .array) return;
 
-    const array_data = e.ast.nodes.items(.data)[perform_value.toInt()];
+    const array_data = e.ast.nodes.items(.data)[array_node.toInt()];
     const elements = e.ast.extraData(array_data.extra_range);
 
-    // Bounded iteration over perform actions
+    // Bounded iteration over actions
     const max_elements = @min(elements.len, MAX_PERFORM_ACTIONS);
     for (0..max_elements) |i| {
         const elem_idx = elements[i];

@@ -103,11 +103,58 @@ pub fn emitData(e: *Emitter) Emitter.Error!void {
     std.debug.assert(e.data_ids.count() >= initial_count);
 }
 
-/// Emit float32Array data to data section.
+/// Generated array info for runtime data generation.
+/// Used when float32Array={numberOfElements=N initEachElementWith=[...]}
+pub const GeneratedArrayInfo = struct {
+    /// Runtime array ID (for create_typed_array opcode).
+    array_id: u16,
+    /// Number of elements in the array.
+    element_count: u32,
+    /// Number of floats per element (from initEachElementWith length).
+    floats_per_element: u8,
+    /// Total byte size of the array.
+    byte_size: u32,
+};
+
+/// Pool info for ping-pong resources (buffers, bind groups).
+/// Used when pool=N is specified on a resource.
+pub const PoolInfo = struct {
+    /// Base resource ID (first in the pool).
+    base_id: u16,
+    /// Number of resources in the pool.
+    pool_size: u8,
+};
+
+/// Extended bind group entry with pingPong offset for pooled resources.
+/// Used during parsing before adjusting resource IDs for each pool instance.
+pub const BindGroupEntryWithPingPong = struct {
+    /// Underlying bind group entry data.
+    entry: DescriptorEncoder.BindGroupEntry,
+    /// PingPong offset for pooled resources (0 = no offset).
+    ping_pong: u8,
+    /// Buffer name for pool lookup (if applicable).
+    buffer_name: []const u8,
+};
+
+/// Emit float32Array data to data section or as runtime-generated array.
 fn emitFloat32ArrayData(e: *Emitter, name: []const u8, float_array: Node.Index) Emitter.Error!void {
     const array_tag = e.ast.nodes.items(.tag)[float_array.toInt()];
-    if (array_tag != .array) return;
 
+    // Case 1: Simple inline array - embed directly in data section
+    if (array_tag == .array) {
+        try emitInlineFloat32Array(e, name, float_array);
+        return;
+    }
+
+    // Case 2: Generated array object - emit runtime generation opcodes
+    if (array_tag == .object) {
+        try emitGeneratedFloat32Array(e, name, float_array);
+        return;
+    }
+}
+
+/// Emit inline float32Array to data section (original behavior).
+fn emitInlineFloat32Array(e: *Emitter, name: []const u8, float_array: Node.Index) Emitter.Error!void {
     // Get array elements
     const array_data = e.ast.nodes.items(.data)[float_array.toInt()];
     const elements = e.ast.extraData(array_data.extra_range);
@@ -131,6 +178,116 @@ fn emitFloat32ArrayData(e: *Emitter, name: []const u8, float_array: Node.Index) 
     // Add to data section
     const data_id = try e.builder.addData(e.gpa, bytes.items);
     try e.data_ids.put(e.gpa, name, data_id.toInt());
+}
+
+/// Emit runtime-generated float32Array using opcodes.
+/// Format: float32Array={numberOfElements=N initEachElementWith=[expr1, expr2, ...]}
+fn emitGeneratedFloat32Array(e: *Emitter, name: []const u8, obj_node: Node.Index) Emitter.Error!void {
+    // Pre-condition: obj_node is an object
+    std.debug.assert(e.ast.nodes.items(.tag)[obj_node.toInt()] == .object);
+
+    // Parse numberOfElements - can be literal or #define reference
+    const num_elements_node = utils.findPropertyValueInObject(e, obj_node, "numberOfElements") orelse return;
+    const element_count = resolveElementCount(e, num_elements_node);
+    if (element_count == 0) return;
+
+    // Parse initEachElementWith array
+    const init_array_node = utils.findPropertyValueInObject(e, obj_node, "initEachElementWith") orelse return;
+    const init_tag = e.ast.nodes.items(.tag)[init_array_node.toInt()];
+    if (init_tag != .array) return;
+
+    const init_data = e.ast.nodes.items(.data)[init_array_node.toInt()];
+    const expr_elements = e.ast.extraData(init_data.extra_range);
+    const floats_per_element: u8 = @intCast(@min(expr_elements.len, 255));
+    if (floats_per_element == 0) return;
+
+    // Assign runtime array ID
+    const array_id = e.next_data_id;
+    e.next_data_id += 1;
+
+    // Emit create_typed_array opcode
+    try e.builder.getEmitter().createTypedArray(
+        e.gpa,
+        array_id,
+        .f32, // ElementType.f32
+        element_count * floats_per_element,
+    );
+
+    // For each expression in initEachElementWith, emit fill_expression
+    for (0..floats_per_element) |i| {
+        const expr_node: Node.Index = @enumFromInt(expr_elements[i]);
+        const expr_str = getExpressionString(e, expr_node);
+        if (expr_str.len == 0) continue;
+
+        // Add expression string to data section
+        const expr_data_id = try e.builder.addData(e.gpa, expr_str);
+
+        // Emit fill_expression: fills element_count values at offset i with stride floats_per_element
+        try e.builder.getEmitter().fillExpression(
+            e.gpa,
+            array_id,
+            @intCast(i), // offset (which float in the element)
+            element_count, // count (number of elements)
+            floats_per_element, // stride
+            expr_data_id.toInt(),
+        );
+    }
+
+    // Store generated array info for buffer initialization
+    const byte_size = element_count * @as(u32, floats_per_element) * 4;
+    try e.generated_arrays.put(e.gpa, name, .{
+        .array_id = array_id,
+        .element_count = element_count,
+        .floats_per_element = floats_per_element,
+        .byte_size = byte_size,
+    });
+
+    // Post-condition: array was registered
+    std.debug.assert(e.generated_arrays.get(name) != null);
+}
+
+/// Resolve element count from numberOfElements property.
+/// Handles both literal numbers and #define references.
+fn resolveElementCount(e: *Emitter, node: Node.Index) u32 {
+    const tag = e.ast.nodes.items(.tag)[node.toInt()];
+
+    // Direct number
+    if (tag == .number_value) {
+        return utils.parseNumber(e, node) orelse 0;
+    }
+
+    // Identifier reference (e.g., NUM_PARTICLES from #define)
+    if (tag == .identifier_value) {
+        const token = e.ast.nodes.items(.main_token)[node.toInt()];
+        const name = utils.getTokenSlice(e, token);
+
+        // Look up in defines
+        if (e.analysis.symbols.define.get(name)) |info| {
+            const define_data = e.ast.nodes.items(.data)[info.node.toInt()];
+            const value_node = define_data.node;
+            return utils.resolveNumericValueOrString(e, value_node) orelse 0;
+        }
+    }
+
+    // Try resolving as expression
+    return utils.resolveNumericValueOrString(e, node) orelse 0;
+}
+
+/// Get expression string from a node.
+/// Handles string literals and identifier references.
+fn getExpressionString(e: *Emitter, node: Node.Index) []const u8 {
+    const tag = e.ast.nodes.items(.tag)[node.toInt()];
+
+    if (tag == .string_value) {
+        return utils.getStringContent(e, node);
+    }
+
+    if (tag == .identifier_value) {
+        const token = e.ast.nodes.items(.main_token)[node.toInt()];
+        return utils.getTokenSlice(e, token);
+    }
+
+    return "";
 }
 
 /// Emit blob file data to data section.
@@ -351,6 +508,7 @@ fn parseFloatElement(e: *Emitter, elem: Node.Index) f32 {
 }
 
 /// Emit #buffer declarations.
+/// Supports pool=N for ping-pong buffer patterns.
 pub fn emitBuffers(e: *Emitter) Emitter.Error!void {
     // Pre-condition
     std.debug.assert(e.ast.nodes.len > 0);
@@ -363,9 +521,24 @@ pub fn emitBuffers(e: *Emitter) Emitter.Error!void {
         const name = entry.key_ptr.*;
         const info = entry.value_ptr.*;
 
-        const buffer_id = e.next_buffer_id;
-        e.next_buffer_id += 1;
-        try e.buffer_ids.put(e.gpa, name, buffer_id);
+        // Check for pool property (ping-pong buffers)
+        const pool_size: u8 = if (utils.findPropertyValue(e, info.node, "pool")) |pool_node|
+            @intCast(utils.parseNumber(e, pool_node) orelse 1)
+        else
+            1;
+
+        const base_buffer_id = e.next_buffer_id;
+
+        // Store pool info if pool_size > 1
+        if (pool_size > 1) {
+            try e.buffer_pools.put(e.gpa, name, .{
+                .base_id = base_buffer_id,
+                .pool_size = pool_size,
+            });
+        }
+
+        // Register the base buffer ID with the name
+        try e.buffer_ids.put(e.gpa, name, base_buffer_id);
 
         // Get size property - can be number, expression, string expression, or WASM data reference
         const size_value = utils.findPropertyValue(e, info.node, "size") orelse continue;
@@ -380,16 +553,24 @@ pub fn emitBuffers(e: *Emitter) Emitter.Error!void {
             usage.copy_dst = true;
         }
 
-        try e.builder.getEmitter().createBuffer(
-            e.gpa,
-            buffer_id,
-            @intCast(size),
-            @bitCast(usage),
-        );
+        // Create pool_size buffers with sequential IDs
+        for (0..pool_size) |i| {
+            const buffer_id = e.next_buffer_id;
+            e.next_buffer_id += 1;
 
-        // If mappedAtCreation is set, emit write_buffer to initialize data
-        if (mapped_value) |mv| {
-            try emitBufferInitialization(e, buffer_id, mv);
+            try e.builder.getEmitter().createBuffer(
+                e.gpa,
+                buffer_id,
+                @intCast(size),
+                @bitCast(usage),
+            );
+
+            // If mappedAtCreation is set, initialize all pool buffers with the same data
+            if (mapped_value) |mv| {
+                try emitBufferInitialization(e, buffer_id, mv);
+            }
+
+            _ = i; // Used in loop counter
         }
     }
 
@@ -398,19 +579,24 @@ pub fn emitBuffers(e: *Emitter) Emitter.Error!void {
 }
 
 /// Resolve buffer size from size property value.
-/// Handles: numbers, expressions, string expressions, identifier refs to #data (including WASM data).
+/// Handles: numbers, expressions, string expressions, identifier refs to #data (including WASM data and generated arrays).
 fn resolveBufferSize(e: *Emitter, size_node: Node.Index) u32 {
     // Pre-condition
     std.debug.assert(size_node.toInt() < e.ast.nodes.len);
 
     const size_tag = e.ast.nodes.items(.tag)[size_node.toInt()];
 
-    // Check for identifier reference to #data (including WASM data)
+    // Check for identifier reference to #data (including WASM data and generated arrays)
     if (size_tag == .identifier_value) {
         const token = e.ast.nodes.items(.main_token)[size_node.toInt()];
         const data_name = utils.getTokenSlice(e, token);
 
-        // Check WASM data entries first (they store byte size)
+        // Check generated arrays first (runtime-generated data)
+        if (e.generated_arrays.get(data_name)) |gen_array| {
+            return gen_array.byte_size;
+        }
+
+        // Check WASM data entries (they store byte size)
         if (e.wasm_data_entries.get(data_name)) |wasm_entry| {
             return wasm_entry.byte_size;
         }
@@ -427,6 +613,7 @@ fn resolveBufferSize(e: *Emitter, size_node: Node.Index) u32 {
 }
 
 /// Emit write_buffer for buffer initialization from mappedAtCreation.
+/// Handles: inline data, WASM-generated data, and runtime-generated arrays.
 fn emitBufferInitialization(e: *Emitter, buffer_id: u16, mapped_value: Node.Index) Emitter.Error!void {
     // Pre-condition
     std.debug.assert(mapped_value.toInt() < e.ast.nodes.len);
@@ -437,7 +624,19 @@ fn emitBufferInitialization(e: *Emitter, buffer_id: u16, mapped_value: Node.Inde
     const token = e.ast.nodes.items(.main_token)[mapped_value.toInt()];
     const data_name = utils.getTokenSlice(e, token);
 
-    // Check WASM data entries first
+    // Check generated arrays first (runtime-generated data)
+    if (e.generated_arrays.get(data_name)) |gen_array| {
+        // Emit write_buffer_from_array to copy runtime-generated array to buffer
+        try e.builder.getEmitter().writeBufferFromArray(
+            e.gpa,
+            buffer_id,
+            0, // offset
+            gen_array.array_id,
+        );
+        return;
+    }
+
+    // Check WASM data entries
     if (e.wasm_data_entries.get(data_name)) |wasm_entry| {
         // Emit call_wasm_func to generate the data
         // Note: For init-time WASM calls, we don't pass runtime args (canvas size, time)
@@ -616,6 +815,7 @@ pub fn emitSamplers(e: *Emitter) Emitter.Error!void {
 }
 
 /// Emit #bindGroup declarations.
+/// Supports pool=N for ping-pong bind group patterns.
 pub fn emitBindGroups(e: *Emitter) Emitter.Error!void {
     // Pre-condition
     std.debug.assert(e.ast.nodes.len > 0);
@@ -628,36 +828,75 @@ pub fn emitBindGroups(e: *Emitter) Emitter.Error!void {
         const name = entry.key_ptr.*;
         const info = entry.value_ptr.*;
 
-        const group_id = e.next_bind_group_id;
-        e.next_bind_group_id += 1;
-        try e.bind_group_ids.put(e.gpa, name, group_id);
+        // Check for pool property (ping-pong bind groups)
+        const pool_size: u8 = if (utils.findPropertyValue(e, info.node, "pool")) |pool_node|
+            @intCast(utils.parseNumber(e, pool_node) orelse 1)
+        else
+            1;
 
-        // Parse entries array
-        var entries_list: std.ArrayListUnmanaged(DescriptorEncoder.BindGroupEntry) = .{};
-        defer entries_list.deinit(e.gpa);
+        const base_group_id = e.next_bind_group_id;
 
-        try parseBindGroupEntries(e, info.node, &entries_list);
+        // Store pool info if pool_size > 1
+        if (pool_size > 1) {
+            try e.bind_group_pools.put(e.gpa, name, .{
+                .base_id = base_group_id,
+                .pool_size = pool_size,
+            });
+        }
+
+        // Register the base bind group ID with the name
+        try e.bind_group_ids.put(e.gpa, name, base_group_id);
+
+        // Parse entries with pingPong info
+        var entries_with_pp: std.ArrayListUnmanaged(BindGroupEntryWithPingPong) = .{};
+        defer entries_with_pp.deinit(e.gpa);
+        try parseBindGroupEntriesWithPingPong(e, info.node, &entries_with_pp);
 
         // Resolve layout reference - returns pipeline ID for 'auto' layouts
         const pipeline_id = utils.resolveBindGroupLayoutId(e, info.node);
         const group_index = utils.getBindGroupIndex(e, info.node);
 
-        // Encode entries with group index
-        const desc = DescriptorEncoder.encodeBindGroupDescriptor(
-            e.gpa,
-            group_index,
-            entries_list.items,
-        ) catch return error.OutOfMemory;
-        defer e.gpa.free(desc);
+        // Create pool_size bind groups
+        for (0..pool_size) |pool_idx| {
+            const group_id = e.next_bind_group_id;
+            e.next_bind_group_id += 1;
 
-        const desc_id = try e.builder.addData(e.gpa, desc);
+            // Build adjusted entries for this pool instance
+            var entries_list: std.ArrayListUnmanaged(DescriptorEncoder.BindGroupEntry) = .{};
+            defer entries_list.deinit(e.gpa);
 
-        try e.builder.getEmitter().createBindGroup(
-            e.gpa,
-            group_id,
-            pipeline_id, // Pipeline ID to get layout from
-            desc_id.toInt(),
-        );
+            for (entries_with_pp.items) |ewp| {
+                var adjusted_entry = ewp.entry;
+
+                // Adjust buffer resource_id based on pingPong and pool index
+                if (ewp.entry.resource_type == .buffer and ewp.buffer_name.len > 0) {
+                    if (e.buffer_pools.get(ewp.buffer_name)) |buf_pool| {
+                        // Calculate adjusted buffer ID: base + (pingPong + poolIdx) % poolSize
+                        const offset: u8 = @intCast((ewp.ping_pong + pool_idx) % buf_pool.pool_size);
+                        adjusted_entry.resource_id = buf_pool.base_id + offset;
+                    }
+                }
+
+                entries_list.append(e.gpa, adjusted_entry) catch continue;
+            }
+
+            // Encode entries with group index
+            const desc = DescriptorEncoder.encodeBindGroupDescriptor(
+                e.gpa,
+                group_index,
+                entries_list.items,
+            ) catch return error.OutOfMemory;
+            defer e.gpa.free(desc);
+
+            const desc_id = try e.builder.addData(e.gpa, desc);
+
+            try e.builder.getEmitter().createBindGroup(
+                e.gpa,
+                group_id,
+                pipeline_id,
+                desc_id.toInt(),
+            );
+        }
     }
 
     // Post-condition: bind group IDs were assigned sequentially
@@ -696,6 +935,134 @@ fn parseBindGroupEntries(
 
     // Post-condition: entries_list was populated (may be empty if no valid entries)
     std.debug.assert(entries_list.capacity >= entries_list.items.len);
+}
+
+/// Parse bind group entries with pingPong info for pooled bind groups.
+/// Extracts both the standard entry data and pingPong offset from resource objects.
+fn parseBindGroupEntriesWithPingPong(
+    e: *Emitter,
+    node: Node.Index,
+    entries_list: *std.ArrayListUnmanaged(BindGroupEntryWithPingPong),
+) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(node.toInt() < e.ast.nodes.len);
+
+    const entries_value = utils.findPropertyValue(e, node, "entries") orelse return;
+    const ev_tag = e.ast.nodes.items(.tag)[entries_value.toInt()];
+    if (ev_tag != .array) return;
+
+    const array_data = e.ast.nodes.items(.data)[entries_value.toInt()];
+    const elements = e.ast.extraData(array_data.extra_range);
+
+    // Bounded iteration over entries
+    const max_elements = @min(elements.len, MAX_ARRAY_ELEMENTS);
+    for (0..max_elements) |i| {
+        const elem_idx = elements[i];
+        const elem: Node.Index = @enumFromInt(elem_idx);
+        const elem_tag = e.ast.nodes.items(.tag)[elem.toInt()];
+
+        if (elem_tag == .object) {
+            if (parseBindGroupEntryWithPingPong(e, elem)) |entry_with_pp| {
+                entries_list.append(e.gpa, entry_with_pp) catch continue;
+            }
+        }
+    }
+
+    // Post-condition
+    std.debug.assert(entries_list.capacity >= entries_list.items.len);
+}
+
+/// Parse a single bind group entry with pingPong info.
+/// Returns BindGroupEntryWithPingPong containing standard entry + pingPong offset + buffer name.
+fn parseBindGroupEntryWithPingPong(e: *Emitter, entry_node: Node.Index) ?BindGroupEntryWithPingPong {
+    const entry_data = e.ast.nodes.items(.data)[entry_node.toInt()];
+    const entry_props = e.ast.extraData(entry_data.extra_range);
+
+    var result = BindGroupEntryWithPingPong{
+        .entry = .{
+            .binding = 0,
+            .resource_type = .buffer,
+            .resource_id = 0,
+        },
+        .ping_pong = 0,
+        .buffer_name = "",
+    };
+
+    for (entry_props) |prop_idx| {
+        const prop: Node.Index = @enumFromInt(prop_idx);
+        const prop_token = e.ast.nodes.items(.main_token)[prop.toInt()];
+        const prop_name = utils.getTokenSlice(e, prop_token);
+        const prop_data = e.ast.nodes.items(.data)[prop.toInt()];
+        const value_node = prop_data.node;
+
+        if (std.mem.eql(u8, prop_name, "binding")) {
+            result.entry.binding = @intCast(utils.parseNumber(e, value_node) orelse 0);
+        } else if (std.mem.eql(u8, prop_name, "resource")) {
+            const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
+            if (value_tag == .object) {
+                // Parse resource={buffer=..., pingPong=..., size=...}
+                if (utils.findPropertyValueInObject(e, value_node, "buffer")) |buf_node| {
+                    result.entry.resource_type = .buffer;
+                    const buf_tag = e.ast.nodes.items(.tag)[buf_node.toInt()];
+
+                    // Get buffer name for pool lookup
+                    if (buf_tag == .identifier_value) {
+                        result.buffer_name = utils.getNodeText(e, buf_node);
+                        if (e.buffer_ids.get(result.buffer_name)) |id| {
+                            result.entry.resource_id = id;
+                        }
+                    } else if (buf_tag == .reference) {
+                        if (utils.getReference(e, buf_node)) |ref| {
+                            result.buffer_name = ref.name;
+                            if (e.buffer_ids.get(ref.name)) |id| {
+                                result.entry.resource_id = id;
+                            }
+                        }
+                    }
+
+                    // Extract pingPong offset
+                    if (utils.findPropertyValueInObject(e, value_node, "pingPong")) |pp_node| {
+                        result.ping_pong = @intCast(utils.parseNumber(e, pp_node) orelse 0);
+                    }
+
+                    // Extract size property (can be number, identifier, or expression)
+                    if (utils.findPropertyValueInObject(e, value_node, "size")) |size_node| {
+                        result.entry.size = resolveBufferSize(e, size_node);
+                    }
+                } else if (utils.findPropertyValueInObject(e, value_node, "texture")) |tex_node| {
+                    result.entry.resource_type = .texture_view;
+                    if (utils.resolveResourceId(e, tex_node, "texture")) |id| {
+                        result.entry.resource_id = id;
+                    }
+                } else if (utils.findPropertyValueInObject(e, value_node, "sampler")) |samp_node| {
+                    result.entry.resource_type = .sampler;
+                    if (utils.resolveResourceId(e, samp_node, "sampler")) |id| {
+                        result.entry.resource_id = id;
+                    }
+                }
+            } else if (value_tag == .identifier_value) {
+                // Direct identifier reference
+                const name = utils.getNodeText(e, value_node);
+                if (e.sampler_ids.get(name)) |id| {
+                    result.entry.resource_type = .sampler;
+                    result.entry.resource_id = id;
+                } else if (e.texture_ids.get(name)) |id| {
+                    result.entry.resource_type = .texture_view;
+                    result.entry.resource_id = id;
+                } else if (e.buffer_ids.get(name)) |id| {
+                    result.entry.resource_type = .buffer;
+                    result.entry.resource_id = id;
+                    result.buffer_name = name;
+                }
+            }
+        } else if (std.mem.eql(u8, prop_name, "offset")) {
+            result.entry.offset = utils.parseNumber(e, value_node) orelse 0;
+        } else if (std.mem.eql(u8, prop_name, "size")) {
+            result.entry.size = utils.parseNumber(e, value_node) orelse 0;
+        }
+    }
+
+    return result;
 }
 
 /// Emit #imageBitmap declarations.

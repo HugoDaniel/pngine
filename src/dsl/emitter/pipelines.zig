@@ -592,10 +592,11 @@ fn buildVertexBuffersJson(e: *Emitter, buffers_node: Node.Index) ?[]const u8 {
         if (!first_buffer) result.append(e.gpa, ',') catch return null;
         first_buffer = false;
 
-        // Parse buffer object: { arrayStride=N, attributes=[...] }
+        // Parse buffer object: { arrayStride=N, stepMode=instance|vertex, attributes=[...] }
         result.append(e.gpa, '{') catch return null;
 
         var array_stride: u32 = 0;
+        var step_mode: ?[]const u8 = null;
         var attributes_json: ?[]const u8 = null;
 
         const buf_data = e.ast.nodes.items(.data)[buf_node.toInt()];
@@ -608,7 +609,10 @@ fn buildVertexBuffersJson(e: *Emitter, buffers_node: Node.Index) ?[]const u8 {
 
             if (std.mem.eql(u8, bp_name, "arrayStride")) {
                 const bp_data = e.ast.nodes.items(.data)[bp_node.toInt()];
-                array_stride = utils.resolveNumericValue(e, bp_data.node) orelse 0;
+                array_stride = utils.resolveNumericValueOrString(e, bp_data.node) orelse 0;
+            } else if (std.mem.eql(u8, bp_name, "stepMode")) {
+                const bp_data = e.ast.nodes.items(.data)[bp_node.toInt()];
+                step_mode = utils.getNodeText(e, bp_data.node);
             } else if (std.mem.eql(u8, bp_name, "attributes")) {
                 const bp_data = e.ast.nodes.items(.data)[bp_node.toInt()];
                 attributes_json = buildAttributesJson(e, bp_data.node);
@@ -621,6 +625,16 @@ fn buildVertexBuffersJson(e: *Emitter, buffers_node: Node.Index) ?[]const u8 {
             return null;
         };
         e.gpa.free(stride_json);
+
+        // Add stepMode if specified (default is "vertex" so only emit if instance)
+        if (step_mode) |mode| {
+            const mode_json = std.fmt.allocPrint(e.gpa, ",\"stepMode\":\"{s}\"", .{mode}) catch return null;
+            result.appendSlice(e.gpa, mode_json) catch {
+                e.gpa.free(mode_json);
+                return null;
+            };
+            e.gpa.free(mode_json);
+        }
 
         if (attributes_json) |attrs| {
             result.appendSlice(e.gpa, ",\"attributes\":") catch return null;
@@ -673,10 +687,10 @@ fn buildAttributesJson(e: *Emitter, attrs_node: Node.Index) ?[]const u8 {
 
             if (std.mem.eql(u8, ap_name, "shaderLocation")) {
                 const ap_data = e.ast.nodes.items(.data)[ap_node.toInt()];
-                shader_location = utils.resolveNumericValue(e, ap_data.node) orelse 0;
+                shader_location = utils.resolveNumericValueOrString(e, ap_data.node) orelse 0;
             } else if (std.mem.eql(u8, ap_name, "offset")) {
                 const ap_data = e.ast.nodes.items(.data)[ap_node.toInt()];
-                attr_offset = utils.resolveNumericValue(e, ap_data.node) orelse 0;
+                attr_offset = utils.resolveNumericValueOrString(e, ap_data.node) orelse 0;
             } else if (std.mem.eql(u8, ap_name, "format")) {
                 const ap_data = e.ast.nodes.items(.data)[ap_node.toInt()];
                 attr_format = utils.getNodeText(e, ap_data.node);
@@ -701,11 +715,15 @@ fn buildAttributesJson(e: *Emitter, attrs_node: Node.Index) ?[]const u8 {
 
 /// Build JSON descriptor for compute pipeline.
 /// Format: {"compute":{"shader":N,"entryPoint":"..."}}
+///
+/// If no module is specified in compute stage, infers the shader module:
+/// - Uses the first available shader module from shader_ids
+/// - Supports simple single-module projects like boids.pngine
 fn buildComputePipelineDescriptor(e: *Emitter, node: Node.Index) ![]u8 {
     // Pre-condition
     std.debug.assert(node.toInt() < e.ast.nodes.len);
 
-    var compute_shader_id: u16 = 0;
+    var compute_shader_id: ?u16 = null;
     var compute_entry: []const u8 = "main";
 
     const data = e.ast.nodes.items(.data)[node.toInt()];
@@ -718,15 +736,22 @@ fn buildComputePipelineDescriptor(e: *Emitter, node: Node.Index) ![]u8 {
 
         if (std.mem.eql(u8, prop_name, "compute")) {
             const stage_info = parseStageDescriptor(e, prop_node);
-            if (stage_info.shader_id) |id| compute_shader_id = id;
+            compute_shader_id = stage_info.shader_id;
             if (stage_info.entry_point) |ep| compute_entry = ep;
         }
     }
 
+    // Module inference: if no module specified, use first available shader module
+    const final_shader_id: u16 = compute_shader_id orelse blk: {
+        var shader_it = e.shader_ids.iterator();
+        const first_entry = shader_it.next();
+        break :blk if (first_entry) |entry| entry.value_ptr.* else 0;
+    };
+
     const result = try std.fmt.allocPrint(
         e.gpa,
         "{{\"compute\":{{\"shader\":{d},\"entryPoint\":\"{s}\"}}}}",
-        .{ compute_shader_id, compute_entry },
+        .{ final_shader_id, compute_entry },
     );
 
     // Post-condition: valid JSON

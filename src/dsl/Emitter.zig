@@ -76,6 +76,17 @@ pub const Emitter = struct {
     /// These are initialized at runtime by calling WASM functions.
     wasm_data_entries: std.StringHashMapUnmanaged(WasmDataEntry),
 
+    /// Generated arrays for runtime data generation.
+    /// Used when float32Array={numberOfElements=N initEachElementWith=[...]}.
+    generated_arrays: std.StringHashMapUnmanaged(resources.GeneratedArrayInfo),
+
+    /// Buffer pool info for ping-pong buffers.
+    /// Maps buffer name -> PoolInfo (base_id, pool_size).
+    buffer_pools: std.StringHashMapUnmanaged(resources.PoolInfo),
+
+    /// Bind group pool info for ping-pong bind groups.
+    bind_group_pools: std.StringHashMapUnmanaged(resources.PoolInfo),
+
     // Counters for generating IDs
     next_buffer_id: u16 = 0,
     next_texture_id: u16 = 0,
@@ -89,6 +100,7 @@ pub const Emitter = struct {
     next_image_bitmap_id: u16 = 0,
     next_wasm_module_id: u16 = 0,
     next_wasm_call_id: u16 = 0,
+    next_data_id: u16 = 0,
 
     const Self = @This();
 
@@ -144,6 +156,9 @@ pub const Emitter = struct {
             .wasm_module_ids = .{},
             .wasm_call_ids = .{},
             .wasm_data_entries = .{},
+            .generated_arrays = .{},
+            .buffer_pools = .{},
+            .bind_group_pools = .{},
         };
     }
 
@@ -163,6 +178,9 @@ pub const Emitter = struct {
         self.wasm_module_ids.deinit(self.gpa);
         self.wasm_call_ids.deinit(self.gpa);
         self.wasm_data_entries.deinit(self.gpa);
+        self.generated_arrays.deinit(self.gpa);
+        self.buffer_pools.deinit(self.gpa);
+        self.bind_group_pools.deinit(self.gpa);
     }
 
     /// Emit PNGB bytecode from analyzed DSL.
@@ -219,6 +237,9 @@ pub const Emitter = struct {
         self.wasm_module_ids.deinit(self.gpa);
         self.wasm_call_ids.deinit(self.gpa);
         self.wasm_data_entries.deinit(self.gpa);
+        self.generated_arrays.deinit(self.gpa);
+        self.buffer_pools.deinit(self.gpa);
+        self.bind_group_pools.deinit(self.gpa);
 
         return result;
     }

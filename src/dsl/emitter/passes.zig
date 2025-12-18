@@ -19,6 +19,7 @@ const Emitter = @import("../Emitter.zig").Emitter;
 const Node = @import("../Ast.zig").Node;
 const opcodes = @import("../../bytecode/opcodes.zig");
 const utils = @import("utils.zig");
+const resources = @import("resources.zig");
 
 /// Maximum passes to emit (prevents runaway iteration).
 const MAX_PASSES: u32 = 128;
@@ -171,6 +172,17 @@ fn emitPassCommands(e: *Emitter, node: Node.Index) Emitter.Error!void {
     // Pre-condition
     std.debug.assert(node.toInt() < e.ast.nodes.len);
 
+    // First, collect pool offset arrays (if specified)
+    var vb_pool_offsets: [MAX_ARRAY_ELEMENTS]u8 = [_]u8{0} ** MAX_ARRAY_ELEMENTS;
+    var bg_pool_offsets: [MAX_ARRAY_ELEMENTS]u8 = [_]u8{0} ** MAX_ARRAY_ELEMENTS;
+
+    if (utils.findPropertyValue(e, node, "vertexBuffersPoolOffsets")) |offsets_node| {
+        parsePoolOffsets(e, offsets_node, &vb_pool_offsets);
+    }
+    if (utils.findPropertyValue(e, node, "bindGroupsPoolOffsets")) |offsets_node| {
+        parsePoolOffsets(e, offsets_node, &bg_pool_offsets);
+    }
+
     const data = e.ast.nodes.items(.data)[node.toInt()];
     const props = e.ast.extraData(data.extra_range);
 
@@ -185,9 +197,9 @@ fn emitPassCommands(e: *Emitter, node: Node.Index) Emitter.Error!void {
         if (std.mem.eql(u8, prop_name, "pipeline")) {
             try emitPipelineCommand(e, prop_node);
         } else if (std.mem.eql(u8, prop_name, "bindGroups")) {
-            try emitBindGroupCommands(e, prop_node);
+            try emitBindGroupCommandsWithOffsets(e, prop_node, &bg_pool_offsets);
         } else if (std.mem.eql(u8, prop_name, "vertexBuffers")) {
-            try emitVertexBufferCommands(e, prop_node);
+            try emitVertexBufferCommandsWithOffsets(e, prop_node, &vb_pool_offsets);
         } else if (std.mem.eql(u8, prop_name, "indexBuffer")) {
             try emitIndexBufferCommand(e, prop_node);
         } else if (std.mem.eql(u8, prop_name, "draw")) {
@@ -196,7 +208,25 @@ fn emitPassCommands(e: *Emitter, node: Node.Index) Emitter.Error!void {
             try emitDrawIndexedCommand(e, prop_node);
         } else if (std.mem.eql(u8, prop_name, "dispatch")) {
             try emitDispatchCommand(e, prop_node);
+        } else if (std.mem.eql(u8, prop_name, "dispatchWorkgroups")) {
+            try emitDispatchWorkgroupsCommand(e, prop_node);
         }
+    }
+}
+
+/// Parse pool offsets array into a fixed-size buffer.
+fn parsePoolOffsets(e: *Emitter, offsets_node: Node.Index, out: *[MAX_ARRAY_ELEMENTS]u8) void {
+    const tag = e.ast.nodes.items(.tag)[offsets_node.toInt()];
+    if (tag != .array) return;
+
+    const array_data = e.ast.nodes.items(.data)[offsets_node.toInt()];
+    const elements = e.ast.extraData(array_data.extra_range);
+
+    const max_elements = @min(elements.len, MAX_ARRAY_ELEMENTS);
+    for (0..max_elements) |i| {
+        const elem_idx = elements[i];
+        const elem: Node.Index = @enumFromInt(elem_idx);
+        out[i] = @intCast(utils.parseNumber(e, elem) orelse 0);
     }
 }
 
@@ -225,8 +255,29 @@ fn emitPipelineCommand(e: *Emitter, prop_node: Node.Index) Emitter.Error!void {
     }
 }
 
-/// Emit draw command with vertex/instance counts.
-/// Handles number literals, identifiers (#define references), and arrays.
+/// Draw parameters parsed from object syntax.
+const DrawParams = struct {
+    vertex_count: u32 = 3,
+    instance_count: u32 = 1,
+    first_vertex: u32 = 0,
+    first_instance: u32 = 0,
+};
+
+/// DrawIndexed parameters parsed from object syntax.
+const DrawIndexedParams = struct {
+    index_count: u32 = 3,
+    instance_count: u32 = 1,
+    first_index: u32 = 0,
+    base_vertex: u32 = 0,
+    first_instance: u32 = 0,
+};
+
+/// Emit draw command with full WebGPU parameters.
+/// Handles:
+/// - Number literals: draw=3
+/// - Identifier (#define refs): draw=VERTEX_COUNT
+/// - Arrays: draw=[3 1]
+/// - Objects: draw={ vertexCount=3 instanceCount=1 firstVertex=0 firstInstance=0 }
 fn emitDrawCommand(e: *Emitter, prop_node: Node.Index) Emitter.Error!void {
     // Pre-condition
     std.debug.assert(prop_node.toInt() < e.ast.nodes.len);
@@ -235,18 +286,57 @@ fn emitDrawCommand(e: *Emitter, prop_node: Node.Index) Emitter.Error!void {
     const value_node = prop_data.node;
     const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
 
-    if (value_tag == .array) {
+    if (value_tag == .object) {
+        // Parse object syntax: { vertexCount=N instanceCount=N ... }
+        const params = parseDrawParams(e, value_node);
+        try e.builder.getEmitter().draw(
+            e.gpa,
+            params.vertex_count,
+            params.instance_count,
+            params.first_vertex,
+            params.first_instance,
+        );
+    } else if (value_tag == .array) {
         const counts = parseCountPair(e, value_node, 3, 1);
-        try e.builder.getEmitter().draw(e.gpa, counts[0], counts[1]);
+        try e.builder.getEmitter().draw(e.gpa, counts[0], counts[1], 0, 0);
     } else {
         // Handle number_value, identifier_value (#define refs), and expressions
         const count = utils.resolveNumericValue(e, value_node) orelse 3;
-        try e.builder.getEmitter().draw(e.gpa, count, 1);
+        try e.builder.getEmitter().draw(e.gpa, count, 1, 0, 0);
     }
 }
 
-/// Emit draw_indexed command with index/instance counts.
-/// Handles number literals, identifiers (#define references), and arrays.
+/// Parse draw parameters from object node.
+fn parseDrawParams(e: *Emitter, obj_node: Node.Index) DrawParams {
+    var params = DrawParams{};
+
+    const obj_data = e.ast.nodes.items(.data)[obj_node.toInt()];
+    const props = e.ast.extraData(obj_data.extra_range);
+
+    const max_props = @min(props.len, MAX_COMMANDS);
+    for (0..max_props) |i| {
+        const prop_idx = props[i];
+        const inner: Node.Index = @enumFromInt(prop_idx);
+        const inner_token = e.ast.nodes.items(.main_token)[inner.toInt()];
+        const prop_name = utils.getTokenSlice(e, inner_token);
+        const inner_data = e.ast.nodes.items(.data)[inner.toInt()];
+
+        if (std.mem.eql(u8, prop_name, "vertexCount")) {
+            params.vertex_count = utils.resolveNumericValue(e, inner_data.node) orelse 3;
+        } else if (std.mem.eql(u8, prop_name, "instanceCount")) {
+            params.instance_count = utils.resolveNumericValue(e, inner_data.node) orelse 1;
+        } else if (std.mem.eql(u8, prop_name, "firstVertex")) {
+            params.first_vertex = utils.resolveNumericValue(e, inner_data.node) orelse 0;
+        } else if (std.mem.eql(u8, prop_name, "firstInstance")) {
+            params.first_instance = utils.resolveNumericValue(e, inner_data.node) orelse 0;
+        }
+    }
+
+    return params;
+}
+
+/// Emit draw_indexed command with full WebGPU parameters.
+/// Handles number literals, identifiers, arrays, and objects.
 fn emitDrawIndexedCommand(e: *Emitter, prop_node: Node.Index) Emitter.Error!void {
     // Pre-condition
     std.debug.assert(prop_node.toInt() < e.ast.nodes.len);
@@ -255,14 +345,56 @@ fn emitDrawIndexedCommand(e: *Emitter, prop_node: Node.Index) Emitter.Error!void
     const value_node = prop_data.node;
     const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
 
-    if (value_tag == .array) {
+    if (value_tag == .object) {
+        // Parse object syntax: { indexCount=N instanceCount=N ... }
+        const params = parseDrawIndexedParams(e, value_node);
+        try e.builder.getEmitter().drawIndexed(
+            e.gpa,
+            params.index_count,
+            params.instance_count,
+            params.first_index,
+            params.base_vertex,
+            params.first_instance,
+        );
+    } else if (value_tag == .array) {
         const counts = parseCountPair(e, value_node, 3, 1);
-        try e.builder.getEmitter().drawIndexed(e.gpa, counts[0], counts[1]);
+        try e.builder.getEmitter().drawIndexed(e.gpa, counts[0], counts[1], 0, 0, 0);
     } else {
         // Handle number_value, identifier_value (#define refs), and expressions
         const count = utils.resolveNumericValue(e, value_node) orelse 3;
-        try e.builder.getEmitter().drawIndexed(e.gpa, count, 1);
+        try e.builder.getEmitter().drawIndexed(e.gpa, count, 1, 0, 0, 0);
     }
+}
+
+/// Parse drawIndexed parameters from object node.
+fn parseDrawIndexedParams(e: *Emitter, obj_node: Node.Index) DrawIndexedParams {
+    var params = DrawIndexedParams{};
+
+    const obj_data = e.ast.nodes.items(.data)[obj_node.toInt()];
+    const props = e.ast.extraData(obj_data.extra_range);
+
+    const max_props = @min(props.len, MAX_COMMANDS);
+    for (0..max_props) |i| {
+        const prop_idx = props[i];
+        const inner: Node.Index = @enumFromInt(prop_idx);
+        const inner_token = e.ast.nodes.items(.main_token)[inner.toInt()];
+        const prop_name = utils.getTokenSlice(e, inner_token);
+        const inner_data = e.ast.nodes.items(.data)[inner.toInt()];
+
+        if (std.mem.eql(u8, prop_name, "indexCount")) {
+            params.index_count = utils.resolveNumericValue(e, inner_data.node) orelse 3;
+        } else if (std.mem.eql(u8, prop_name, "instanceCount")) {
+            params.instance_count = utils.resolveNumericValue(e, inner_data.node) orelse 1;
+        } else if (std.mem.eql(u8, prop_name, "firstIndex")) {
+            params.first_index = utils.resolveNumericValue(e, inner_data.node) orelse 0;
+        } else if (std.mem.eql(u8, prop_name, "baseVertex")) {
+            params.base_vertex = utils.resolveNumericValue(e, inner_data.node) orelse 0;
+        } else if (std.mem.eql(u8, prop_name, "firstInstance")) {
+            params.first_instance = utils.resolveNumericValue(e, inner_data.node) orelse 0;
+        }
+    }
+
+    return params;
 }
 
 /// Emit dispatch command for compute passes.
@@ -443,5 +575,179 @@ fn emitIndexBufferCommand(e: *Emitter, prop_node: Node.Index) Emitter.Error!void
                 try e.builder.getEmitter().setIndexBuffer(e.gpa, buffer_id, 0);
             }
         }
+    }
+}
+
+/// Emit vertex buffer commands with pool offsets.
+/// Uses set_vertex_buffer_pool for pooled buffers, set_vertex_buffer otherwise.
+fn emitVertexBufferCommandsWithOffsets(
+    e: *Emitter,
+    prop_node: Node.Index,
+    pool_offsets: *const [MAX_ARRAY_ELEMENTS]u8,
+) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(prop_node.toInt() < e.ast.nodes.len);
+
+    const prop_data = e.ast.nodes.items(.data)[prop_node.toInt()];
+    const value_node = prop_data.node;
+    const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
+
+    if (value_tag == .array) {
+        const array_data = e.ast.nodes.items(.data)[value_node.toInt()];
+        const elements = e.ast.extraData(array_data.extra_range);
+
+        const max_elements = @min(elements.len, MAX_ARRAY_ELEMENTS);
+        for (0..max_elements) |slot| {
+            const elem_idx = elements[slot];
+            const elem: Node.Index = @enumFromInt(elem_idx);
+            const buffer_name = getBufferName(e, elem);
+            const buffer_id = resolveBufferId(e, elem);
+
+            if (buffer_id) |base_id| {
+                // Check if this buffer has a pool
+                if (e.buffer_pools.get(buffer_name)) |pool_info| {
+                    // Use pool-aware opcode
+                    try e.builder.getEmitter().setVertexBufferPool(
+                        e.gpa,
+                        @intCast(slot),
+                        pool_info.base_id,
+                        pool_info.pool_size,
+                        pool_offsets[slot],
+                    );
+                } else {
+                    // Use regular opcode
+                    try e.builder.getEmitter().setVertexBuffer(
+                        e.gpa,
+                        @intCast(slot),
+                        base_id,
+                    );
+                }
+            }
+        }
+    } else {
+        // Single vertex buffer at slot 0
+        const buffer_name = getBufferName(e, value_node);
+        if (resolveBufferId(e, value_node)) |base_id| {
+            if (e.buffer_pools.get(buffer_name)) |pool_info| {
+                try e.builder.getEmitter().setVertexBufferPool(
+                    e.gpa,
+                    0,
+                    pool_info.base_id,
+                    pool_info.pool_size,
+                    pool_offsets[0],
+                );
+            } else {
+                try e.builder.getEmitter().setVertexBuffer(e.gpa, 0, base_id);
+            }
+        }
+    }
+}
+
+/// Emit bind group commands with pool offsets.
+/// Uses set_bind_group_pool for pooled bind groups, set_bind_group otherwise.
+fn emitBindGroupCommandsWithOffsets(
+    e: *Emitter,
+    prop_node: Node.Index,
+    pool_offsets: *const [MAX_ARRAY_ELEMENTS]u8,
+) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(prop_node.toInt() < e.ast.nodes.len);
+
+    const prop_data = e.ast.nodes.items(.data)[prop_node.toInt()];
+    const value_node = prop_data.node;
+    const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
+
+    if (value_tag == .array) {
+        const array_data = e.ast.nodes.items(.data)[value_node.toInt()];
+        const elements = e.ast.extraData(array_data.extra_range);
+
+        const max_elements = @min(elements.len, MAX_ARRAY_ELEMENTS);
+        for (0..max_elements) |slot| {
+            const elem_idx = elements[slot];
+            const elem: Node.Index = @enumFromInt(elem_idx);
+            const group_name = getBindGroupName(e, elem);
+            const group_id = resolveBindGroupId(e, elem);
+
+            if (group_id) |base_id| {
+                // Check if this bind group has a pool
+                if (e.bind_group_pools.get(group_name)) |pool_info| {
+                    // Use pool-aware opcode
+                    try e.builder.getEmitter().setBindGroupPool(
+                        e.gpa,
+                        @intCast(slot),
+                        pool_info.base_id,
+                        pool_info.pool_size,
+                        pool_offsets[slot],
+                    );
+                } else {
+                    // Use regular opcode
+                    try e.builder.getEmitter().setBindGroup(
+                        e.gpa,
+                        @intCast(slot),
+                        base_id,
+                    );
+                }
+            }
+        }
+    } else {
+        // Single bind group at slot 0
+        const group_name = getBindGroupName(e, value_node);
+        if (resolveBindGroupId(e, value_node)) |base_id| {
+            if (e.bind_group_pools.get(group_name)) |pool_info| {
+                try e.builder.getEmitter().setBindGroupPool(
+                    e.gpa,
+                    0,
+                    pool_info.base_id,
+                    pool_info.pool_size,
+                    pool_offsets[0],
+                );
+            } else {
+                try e.builder.getEmitter().setBindGroup(e.gpa, 0, base_id);
+            }
+        }
+    }
+}
+
+/// Get buffer name from a node (for pool lookup).
+fn getBufferName(e: *Emitter, node: Node.Index) []const u8 {
+    const tag = e.ast.nodes.items(.tag)[node.toInt()];
+
+    if (tag == .identifier_value) {
+        return utils.getNodeText(e, node);
+    } else if (tag == .reference) {
+        if (utils.getReference(e, node)) |ref| {
+            return ref.name;
+        }
+    }
+    return "";
+}
+
+/// Get bind group name from a node (for pool lookup).
+fn getBindGroupName(e: *Emitter, node: Node.Index) []const u8 {
+    const tag = e.ast.nodes.items(.tag)[node.toInt()];
+
+    if (tag == .identifier_value) {
+        return utils.getNodeText(e, node);
+    } else if (tag == .reference) {
+        if (utils.getReference(e, node)) |ref| {
+            return ref.name;
+        }
+    }
+    return "";
+}
+
+/// Emit dispatchWorkgroups command for compute passes.
+/// Supports expression evaluation (e.g., "ceil(NUM_PARTICLES / 64)").
+fn emitDispatchWorkgroupsCommand(e: *Emitter, prop_node: Node.Index) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(prop_node.toInt() < e.ast.nodes.len);
+
+    const prop_data = e.ast.nodes.items(.data)[prop_node.toInt()];
+    const value_node = prop_data.node;
+
+    // Try to resolve as numeric value (handles #define references and expressions)
+    if (utils.resolveNumericValueOrString(e, value_node)) |count| {
+        // Dispatch as single workgroup count (x = count, y = 1, z = 1)
+        try e.builder.getEmitter().dispatch(e.gpa, count, 1, 1);
     }
 }

@@ -287,15 +287,157 @@ pub fn resolveNumericValue(e: *Emitter, value_node: Node.Index) ?u32 {
 }
 
 /// Resolve numeric value including string expressions.
+/// Handles #define substitution and functions like ceil().
 pub fn resolveNumericValueOrString(e: *Emitter, value_node: Node.Index) ?u32 {
     const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
 
     if (value_tag == .string_value) {
         const text = getStringContent(e, value_node);
-        return parseStringExpression(text);
+        return parseExpressionWithDefines(e, text);
     }
 
     return resolveNumericValue(e, value_node);
+}
+
+/// Parse expression with #define substitution and function support.
+/// Supports: integers, +, *, /, ceil(), and #define references.
+fn parseExpressionWithDefines(e: *Emitter, expr: []const u8) ?u32 {
+    var buffer: [256]u8 = undefined;
+    var result = substituteDefines(e, expr, &buffer) orelse return null;
+
+    // Handle ceil() function
+    if (std.mem.startsWith(u8, result, "ceil(") and result[result.len - 1] == ')') {
+        const inner = result[5 .. result.len - 1];
+        const inner_value = parseArithmeticExpression(inner) orelse return null;
+        return inner_value; // ceil of integer division is already handled
+    }
+
+    return parseArithmeticExpression(result);
+}
+
+/// Substitute #define references in expression string.
+fn substituteDefines(e: *Emitter, expr: []const u8, buffer: *[256]u8) ?[]const u8 {
+    var pos: usize = 0;
+    var i: usize = 0;
+    const max_iterations: usize = 256;
+
+    for (0..max_iterations) |_| {
+        if (i >= expr.len) break;
+
+        const c = expr[i];
+
+        // Check for identifier start
+        if (std.ascii.isAlphabetic(c) or c == '_') {
+            const start = i;
+            while (i < expr.len and (std.ascii.isAlphanumeric(expr[i]) or expr[i] == '_')) : (i += 1) {}
+            const ident = expr[start..i];
+
+            // Look up in defines (via symbol table)
+            if (e.analysis.symbols.define.get(ident)) |def_info| {
+                // Get the define's value node and resolve it
+                const define_value_node = e.ast.nodes.items(.data)[def_info.node.toInt()].node;
+                if (resolveNumericValue(e, define_value_node)) |define_value| {
+                    // Append the define value
+                    const value_str = std.fmt.bufPrint(buffer[pos..], "{d}", .{define_value}) catch return null;
+                    pos += value_str.len;
+                } else {
+                    // Define exists but couldn't resolve value - keep identifier
+                    if (pos + ident.len > buffer.len) return null;
+                    @memcpy(buffer[pos..][0..ident.len], ident);
+                    pos += ident.len;
+                }
+            } else {
+                // Not a define, keep as-is (might be a function name)
+                if (pos + ident.len > buffer.len) return null;
+                @memcpy(buffer[pos..][0..ident.len], ident);
+                pos += ident.len;
+            }
+        } else {
+            // Copy character as-is
+            if (pos >= buffer.len) return null;
+            buffer[pos] = c;
+            pos += 1;
+            i += 1;
+        }
+    }
+
+    return buffer[0..pos];
+}
+
+/// Parse arithmetic expression with +, *, / operators.
+fn parseArithmeticExpression(expr: []const u8) ?u32 {
+    const trimmed = std.mem.trim(u8, expr, " \t\n\r");
+    if (trimmed.len == 0) return null;
+
+    // Try simple integer first
+    if (std.fmt.parseInt(u32, trimmed, 10)) |val| {
+        return val;
+    } else |_| {}
+
+    // Handle addition (lowest precedence)
+    if (std.mem.indexOf(u8, trimmed, "+")) |_| {
+        var sum: u32 = 0;
+        var it = std.mem.splitScalar(u8, trimmed, '+');
+        while (it.next()) |part| {
+            const part_trimmed = std.mem.trim(u8, part, " \t");
+            const part_value = parseMulDiv(part_trimmed) orelse return null;
+            sum += part_value;
+        }
+        return sum;
+    }
+
+    return parseMulDiv(trimmed);
+}
+
+/// Parse multiplication and division (handles "4*4", "2048/64", "4*4/2").
+fn parseMulDiv(expr: []const u8) ?u32 {
+    const trimmed = std.mem.trim(u8, expr, " \t");
+    if (trimmed.len == 0) return null;
+
+    // Check for * or /
+    var has_ops = false;
+    for (trimmed) |c| {
+        if (c == '*' or c == '/') {
+            has_ops = true;
+            break;
+        }
+    }
+
+    if (!has_ops) {
+        return std.fmt.parseInt(u32, trimmed, 10) catch null;
+    }
+
+    // Parse left to right (handles chained operations)
+    var result: u32 = 0;
+    var current_num: u32 = 0;
+    var last_op: u8 = '+'; // Start with implicit add
+    var i: usize = 0;
+
+    while (i <= trimmed.len) : (i += 1) {
+        const c = if (i < trimmed.len) trimmed[i] else 0;
+
+        if (c == '*' or c == '/' or c == 0) {
+            // Apply pending operation
+            switch (last_op) {
+                '+' => result = current_num,
+                '*' => result *= current_num,
+                '/' => {
+                    if (current_num == 0) return null;
+                    // Use ceiling division for ceil(a/b) pattern
+                    result = (result + current_num - 1) / current_num;
+                },
+                else => {},
+            }
+            last_op = c;
+            current_num = 0;
+        } else if (std.ascii.isDigit(c)) {
+            current_num = current_num * 10 + (c - '0');
+        } else if (c != ' ' and c != '\t') {
+            return null; // Invalid character
+        }
+    }
+
+    return result;
 }
 
 /// Parse a string containing a simple arithmetic expression.
