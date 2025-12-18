@@ -38,10 +38,14 @@ export class PNGineGPU {
         this.buffers = new Map();
         this.bufferMeta = new Map();  // Buffer ID → { size, usage }
         this.textures = new Map();
+        this.textureViews = new Map();  // TextureView ID → GPUTextureView
         this.samplers = new Map();
         this.shaders = new Map();
         this.pipelines = new Map();
         this.bindGroups = new Map();
+        this.bindGroupLayouts = new Map();  // BindGroupLayout ID → GPUBindGroupLayout
+        this.pipelineLayouts = new Map();   // PipelineLayout ID → GPUPipelineLayout
+        this.querySets = new Map();         // QuerySet ID → GPUQuerySet
         this.imageBitmaps = new Map();  // ImageBitmap ID → ImageBitmap
 
         // WASM module support
@@ -401,6 +405,115 @@ export class PNGineGPU {
 
         // Store the promise - will be awaited when copying to texture
         this.imageBitmaps.set(id, bitmapPromise);
+    }
+
+    /**
+     * Create a texture view from an existing texture.
+     * Skips creation if view already exists (for animation loop support).
+     * @param {number} viewId - TextureView ID
+     * @param {number} textureId - Source texture ID
+     * @param {number} descPtr - Pointer to binary descriptor
+     * @param {number} descLen - Descriptor length
+     */
+    createTextureView(viewId, textureId, descPtr, descLen) {
+        // Skip if already exists (allows executeAll in animation loop)
+        if (this.textureViews.has(viewId)) {
+            return;
+        }
+
+        const texture = this.textures.get(textureId);
+        if (!texture) {
+            console.error(`[GPU] createTextureView: texture ${textureId} not found`);
+            return;
+        }
+
+        const bytes = this.readBytes(descPtr, descLen);
+        const desc = this.decodeTextureViewDescriptor(bytes);
+        console.log(`[GPU] createTextureView(${viewId}, texture=${textureId}), desc:`, desc);
+
+        const view = texture.createView(desc);
+        this.textureViews.set(viewId, view);
+    }
+
+    /**
+     * Create a query set for occlusion/timestamp queries.
+     * Skips creation if query set already exists (for animation loop support).
+     * @param {number} querySetId - QuerySet ID
+     * @param {number} descPtr - Pointer to binary descriptor
+     * @param {number} descLen - Descriptor length
+     */
+    createQuerySet(querySetId, descPtr, descLen) {
+        // Skip if already exists (allows executeAll in animation loop)
+        if (this.querySets.has(querySetId)) {
+            return;
+        }
+
+        const bytes = this.readBytes(descPtr, descLen);
+        // Simple format: [type:u8][count:u16]
+        const type = bytes[0] === 0 ? 'occlusion' : 'timestamp';
+        const count = bytes[1] | (bytes[2] << 8);
+
+        console.log(`[GPU] createQuerySet(${querySetId}), type=${type}, count=${count}`);
+
+        const querySet = this.device.createQuerySet({ type, count });
+        this.querySets.set(querySetId, querySet);
+    }
+
+    /**
+     * Create a bind group layout defining binding slot layouts.
+     * Skips creation if layout already exists (for animation loop support).
+     * @param {number} layoutId - BindGroupLayout ID
+     * @param {number} descPtr - Pointer to binary descriptor
+     * @param {number} descLen - Descriptor length
+     */
+    createBindGroupLayout(layoutId, descPtr, descLen) {
+        // Skip if already exists (allows executeAll in animation loop)
+        if (this.bindGroupLayouts.has(layoutId)) {
+            return;
+        }
+
+        const bytes = this.readBytes(descPtr, descLen);
+        const entries = this.decodeBindGroupLayoutDescriptor(bytes);
+        console.log(`[GPU] createBindGroupLayout(${layoutId}), entries:`, entries);
+
+        const layout = this.device.createBindGroupLayout({ entries });
+        this.bindGroupLayouts.set(layoutId, layout);
+    }
+
+    /**
+     * Create a pipeline layout from bind group layouts.
+     * Skips creation if layout already exists (for animation loop support).
+     * @param {number} layoutId - PipelineLayout ID
+     * @param {number} descPtr - Pointer to binary descriptor
+     * @param {number} descLen - Descriptor length
+     */
+    createPipelineLayout(layoutId, descPtr, descLen) {
+        // Skip if already exists (allows executeAll in animation loop)
+        if (this.pipelineLayouts.has(layoutId)) {
+            return;
+        }
+
+        const bytes = this.readBytes(descPtr, descLen);
+        // Simple format: [count:u8][layout_id:u16]...
+        const count = bytes[0];
+        const bindGroupLayouts = [];
+
+        let offset = 1;
+        for (let i = 0; i < count && offset + 1 < bytes.length; i++) {
+            const bglId = bytes[offset] | (bytes[offset + 1] << 8);
+            offset += 2;
+            const bgl = this.bindGroupLayouts.get(bglId);
+            if (bgl) {
+                bindGroupLayouts.push(bgl);
+            } else {
+                console.warn(`[GPU] createPipelineLayout: bind group layout ${bglId} not found`);
+            }
+        }
+
+        console.log(`[GPU] createPipelineLayout(${layoutId}), bindGroupLayouts: ${count}`);
+
+        const layout = this.device.createPipelineLayout({ bindGroupLayouts });
+        this.pipelineLayouts.set(layoutId, layout);
     }
 
     /**
@@ -1112,6 +1225,161 @@ export class PNGineGPU {
     }
 
     /**
+     * Decode a binary texture view descriptor.
+     * Format: type_tag(u8) + field_count(u8) + fields...
+     * @param {Uint8Array} bytes - Binary descriptor data
+     * @returns {GPUTextureViewDescriptor}
+     */
+    decodeTextureViewDescriptor(bytes) {
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        let offset = 0;
+
+        // Skip type tag (may be bind_group_layout=0x04, reused for texture view encoding)
+        const typeTag = bytes[offset++];
+        const fieldCount = bytes[offset++];
+
+        const desc = {};
+
+        // Field IDs for texture view
+        const FIELD_FORMAT = 0x01;
+        const FIELD_DIMENSION = 0x02;
+        const FIELD_BASE_MIP_LEVEL = 0x03;
+        const FIELD_MIP_LEVEL_COUNT = 0x04;
+        const FIELD_BASE_ARRAY_LAYER = 0x05;
+        const FIELD_ARRAY_LAYER_COUNT = 0x06;
+
+        // Value types
+        const VALUE_U32 = 0x00;
+        const VALUE_ENUM = 0x07;
+
+        for (let i = 0; i < fieldCount && offset < bytes.length; i++) {
+            const fieldId = bytes[offset++];
+            const valueType = bytes[offset++];
+
+            if (valueType === VALUE_U32) {
+                const value = view.getUint32(offset, true);
+                offset += 4;
+
+                if (fieldId === FIELD_BASE_MIP_LEVEL) desc.baseMipLevel = value;
+                else if (fieldId === FIELD_MIP_LEVEL_COUNT) desc.mipLevelCount = value;
+                else if (fieldId === FIELD_BASE_ARRAY_LAYER) desc.baseArrayLayer = value;
+                else if (fieldId === FIELD_ARRAY_LAYER_COUNT) desc.arrayLayerCount = value;
+            } else if (valueType === VALUE_ENUM) {
+                const value = bytes[offset++];
+
+                if (fieldId === FIELD_FORMAT) {
+                    desc.format = this.decodeTextureFormat(value);
+                } else if (fieldId === FIELD_DIMENSION) {
+                    desc.dimension = this.decodeTextureViewDimension(value);
+                }
+            }
+        }
+
+        return desc;
+    }
+
+    /**
+     * Decode texture view dimension enum.
+     * @param {number} value - Dimension enum value
+     * @returns {string} WebGPU dimension string
+     */
+    decodeTextureViewDimension(value) {
+        const dimensions = ['1d', '2d', '2d-array', 'cube', 'cube-array', '3d'];
+        return dimensions[value] || '2d';
+    }
+
+    /**
+     * Decode a binary bind group layout descriptor.
+     * Format: type_tag(u8) + field_count(u8) + entries...
+     * @param {Uint8Array} bytes - Binary descriptor data
+     * @returns {Array<GPUBindGroupLayoutEntry>}
+     */
+    decodeBindGroupLayoutDescriptor(bytes) {
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        let offset = 0;
+
+        // Skip type tag (0x04 = bind_group_layout)
+        const typeTag = bytes[offset++];
+        const fieldCount = bytes[offset++];
+
+        const entries = [];
+
+        // Field 0x01 = entries array
+        if (bytes[offset++] !== 0x01) return entries; // entries field
+        if (bytes[offset++] !== 0x03) return entries; // VALUE_ARRAY
+        const entryCount = bytes[offset++];
+
+        for (let i = 0; i < entryCount && offset < bytes.length; i++) {
+            const binding = bytes[offset++];
+            const visibility = bytes[offset++];
+            const resourceType = bytes[offset++];
+
+            const entry = {
+                binding,
+                visibility: this.decodeVisibilityFlags(visibility),
+            };
+
+            // Decode resource-specific layout
+            if (resourceType === 0x00) { // buffer
+                const bufType = bytes[offset++];
+                const hasDynamicOffset = bytes[offset++] === 1;
+                const minBindingSize = view.getUint32(offset, true);
+                offset += 4;
+
+                entry.buffer = {
+                    type: ['uniform', 'storage', 'read-only-storage'][bufType] || 'uniform',
+                    hasDynamicOffset,
+                    minBindingSize,
+                };
+            } else if (resourceType === 0x01) { // sampler
+                const sampType = bytes[offset++];
+                entry.sampler = {
+                    type: ['filtering', 'non-filtering', 'comparison'][sampType] || 'filtering',
+                };
+            } else if (resourceType === 0x02) { // texture
+                const sampleType = bytes[offset++];
+                const viewDimension = bytes[offset++];
+                const multisampled = bytes[offset++] === 1;
+
+                entry.texture = {
+                    sampleType: ['float', 'unfilterable-float', 'depth', 'sint', 'uint'][sampleType] || 'float',
+                    viewDimension: this.decodeTextureViewDimension(viewDimension),
+                    multisampled,
+                };
+            } else if (resourceType === 0x03) { // storageTexture
+                const format = bytes[offset++];
+                const access = bytes[offset++];
+                const viewDimension = bytes[offset++];
+
+                entry.storageTexture = {
+                    format: this.decodeTextureFormat(format),
+                    access: ['write-only', 'read-only', 'read-write'][access] || 'write-only',
+                    viewDimension: this.decodeTextureViewDimension(viewDimension),
+                };
+            } else if (resourceType === 0x04) { // externalTexture
+                entry.externalTexture = {};
+            }
+
+            entries.push(entry);
+        }
+
+        return entries;
+    }
+
+    /**
+     * Decode visibility flags to WebGPU shader stage flags.
+     * @param {number} flags - Packed visibility flags (VERTEX=1, FRAGMENT=2, COMPUTE=4)
+     * @returns {number} WebGPU GPUShaderStageFlags
+     */
+    decodeVisibilityFlags(flags) {
+        let visibility = 0;
+        if (flags & 0x01) visibility |= GPUShaderStage.VERTEX;
+        if (flags & 0x02) visibility |= GPUShaderStage.FRAGMENT;
+        if (flags & 0x04) visibility |= GPUShaderStage.COMPUTE;
+        return visibility;
+    }
+
+    /**
      * Decode a binary bind group descriptor.
      * Format: type_tag(u8) + field_count(u8) + fields...
      * @param {Uint8Array} bytes - Binary descriptor data
@@ -1189,6 +1457,10 @@ export class PNGineGPU {
                 gpuCreateComputePipeline: (id, ptr, len) => self.createComputePipeline(id, ptr, len),
                 gpuCreateBindGroup: (id, layout, ptr, len) => self.createBindGroup(id, layout, ptr, len),
                 gpuCreateImageBitmap: (id, ptr, len) => self.createImageBitmap(id, ptr, len),
+                gpuCreateTextureView: (viewId, textureId, ptr, len) => self.createTextureView(viewId, textureId, ptr, len),
+                gpuCreateQuerySet: (querySetId, ptr, len) => self.createQuerySet(querySetId, ptr, len),
+                gpuCreateBindGroupLayout: (layoutId, ptr, len) => self.createBindGroupLayout(layoutId, ptr, len),
+                gpuCreatePipelineLayout: (layoutId, ptr, len) => self.createPipelineLayout(layoutId, ptr, len),
                 gpuBeginRenderPass: (tex, load, store, depth) => self.beginRenderPass(tex, load, store, depth),
                 gpuBeginComputePass: () => self.beginComputePass(),
                 gpuSetPipeline: (id) => {
@@ -1440,10 +1712,14 @@ export class PNGineGPU {
         this.buffers.clear();
         this.bufferMeta.clear();
         this.textures.clear();
+        this.textureViews.clear();
         this.samplers.clear();
         this.shaders.clear();
         this.pipelines.clear();
         this.bindGroups.clear();
+        this.bindGroupLayouts.clear();
+        this.pipelineLayouts.clear();
+        this.querySets.clear();
         this.imageBitmaps.clear();
         this.wasmModules.clear();
         this.wasmCallResults.clear();
