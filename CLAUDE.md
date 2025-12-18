@@ -16,7 +16,7 @@ ZIG=/Users/hugo/.zvm/bin/zig
 ## Quick Commands
 
 ```bash
-# Run all tests (386 tests)
+# Run all tests (473 tests)
 /Users/hugo/.zvm/bin/zig build test
 
 # Run tests with summary
@@ -131,8 +131,16 @@ src/
 │   ├── Lexer.zig         # Labeled switch state machine tokenizer
 │   ├── Ast.zig           # Compact AST node definitions
 │   ├── Parser.zig        # Iterative descent parser (no recursion)
+│   ├── parser/           # Parser tests (extracted for LLM-friendliness)
+│   │   ├── test.zig      # Macro parsing, error handling, fuzz tests
+│   │   └── expr_test.zig # Expression parsing, precedence tests
 │   ├── Analyzer.zig      # Semantic analysis + cycle detection
+│   ├── analyzer/         # Analyzer tests
+│   │   ├── test.zig      # Reference resolution, symbol table tests
+│   │   └── expr_test.zig # Expression evaluation, math constant tests
 │   ├── Emitter.zig       # AST to PNGB bytecode
+│   ├── emitter/          # Emitter tests
+│   │   └── test.zig      # End-to-end compilation tests
 │   └── Compiler.zig      # High-level compile() interface
 ├── pbsf/                 # S-expression parser (legacy format)
 │   ├── tokenizer.zig
@@ -154,8 +162,12 @@ src/
 │   ├── dispatcher.zig    # Opcode dispatch loop
 │   ├── mock_gpu.zig      # Test backend (records calls)
 │   └── wasm_gpu.zig      # Browser backend (WebGPU via JS)
-└── fixtures/             # Test fixtures
-    └── simple_triangle.zig
+├── fixtures/             # Test fixtures
+│   └── simple_triangle.zig
+examples/                 # Example .pngine files
+├── simple_triangle.pngine
+├── rotating_cube.pngine
+└── boids.pngine          # Compute simulation with ping-pong buffers
 ```
 
 ## DSL Syntax Reference
@@ -169,6 +181,7 @@ src/
 #buffer <name> {
   size=<bytes>
   usage=[vertex storage]       // Usage flags
+  pool=2                       // Optional: ping-pong buffer pool size
 }
 
 #texture <name> { ... }
@@ -192,6 +205,10 @@ src/
   pipeline=$renderPipeline.name
   draw=<vertex_count>
   // or: drawIndexed=<index_count>
+  vertexBuffers=[$buffer.pos $buffer.uv]  // Optional
+  vertexBuffersPoolOffsets=[1 0]          // Pool offsets for ping-pong
+  bindGroups=[$bindGroup.main]
+  bindGroupsPoolOffsets=[0]
 }
 
 #computePass <name> {
@@ -204,6 +221,39 @@ src/
 }
 
 #define <NAME>=<value>
+```
+
+### Ping-Pong Buffer Pattern
+
+For compute simulations (e.g., boids, particles), use pool buffers with offsets:
+
+```
+#buffer particles {
+  size=32768
+  usage=[vertex storage]
+  pool=2                // Creates particles_0, particles_1
+}
+
+#bindGroup sim {
+  layout=auto
+  entries=[
+    { binding=0 buffer=$buffer.particles }  // Read from
+    { binding=1 buffer=$buffer.particles }  // Write to
+  ]
+  bindGroupsPoolOffsets=[0 1]  // [0]: current, [1]: next
+}
+
+#computePass update {
+  pipeline=$computePipeline.sim
+  bindGroups=[$bindGroup.sim]
+  bindGroupsPoolOffsets=[0]  // Alternates each frame
+  dispatch=[64 1 1]
+}
+```
+
+The runtime selects the actual buffer using:
+```
+actual_id = base_id + (frame_counter + offset) % pool_size
 ```
 
 ## PNGB Bytecode Format
@@ -345,6 +395,8 @@ pub fn example() void {}
 2. **PNG Extraction** - Extract bytecode from PNG files
 3. **DEFLATE Compression** - Real zlib compression for IDAT chunks
 4. **Render Command** - Default 1x1 transparent PNG, `--frame` for GPU rendering
+5. **Pool Operations** - Ping-pong buffer patterns for compute simulations
+6. **Test Organization** - Tests extracted to subdirectories (~500 lines per file)
 
 ## Future Work
 

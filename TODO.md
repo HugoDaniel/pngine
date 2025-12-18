@@ -1,5 +1,22 @@
 # PNGine TODO
 
+## Recently Completed
+
+- [x] **Pool Operations** - Ping-pong buffer patterns for compute simulations
+  - `set_vertex_buffer_pool` and `set_bind_group_pool` opcodes
+  - `pool=N` property on buffers/bind groups
+  - `vertexBuffersPoolOffsets` and `bindGroupsPoolOffsets` for passes
+  - Formula: `actual_id = base_id + (frame_counter + offset) % pool_size`
+
+- [x] **Frame Counter Persistence** - WASM maintains frame counter across `executeAll()` calls
+
+- [x] **Test Organization** - Extracted tests to subdirectories (~500 lines per file)
+  - `dsl/parser/test.zig`, `dsl/parser/expr_test.zig`
+  - `dsl/analyzer/test.zig`, `dsl/analyzer/expr_test.zig`
+  - `dsl/emitter/test.zig`
+
+---
+
 ## Critical (Blocking Real Use)
 
 ### NativeGPU Backend
@@ -87,6 +104,7 @@
 2. **zgpu not tested**: Lazy dependency added but never fetched/built
 3. **No real rendering**: NativeGPU produces gradient, not actual shader output
 4. **Time uniform unused**: `setTime()` called but stub ignores it
+5. **Boids not animating**: Pool operations emit correctly but JS runtime needs debugging
 
 ---
 
