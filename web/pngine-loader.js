@@ -196,6 +196,11 @@ export class PNGine {
      * @throws {Error} On load failure
      */
     loadModule(bytecode) {
+        // Reset any previous state to ensure clean execution
+        // This is especially important for typed arrays (filled flag)
+        this.gpu.reset();
+        this.exports.freeModule();
+
         // Allocate memory for bytecode
         const ptr = this.exports.alloc(bytecode.length);
         if (!ptr) {
@@ -223,10 +228,16 @@ export class PNGine {
      * @throws {Error} On execution failure
      */
     executeAll() {
+        const frameBefore = this.exports.getFrameCounter ? this.exports.getFrameCounter() : -1;
+        console.log(`[PNGine] executeAll() starting, frame_counter=${frameBefore}`);
+
         const result = this.exports.executeAll();
         if (result !== ErrorCode.SUCCESS) {
             throw new Error(`Execution failed: ${this.getErrorMessage(result)}`);
         }
+
+        const frameAfter = this.exports.getFrameCounter ? this.exports.getFrameCounter() : -1;
+        console.log(`[PNGine] executeAll() finished, frame_counter=${frameAfter}`);
     }
 
     /**
@@ -255,7 +266,7 @@ export class PNGine {
      */
     run(source) {
         const bytecode = this.compile(source);
-        this.loadModule(bytecode);
+        this.loadModule(bytecode);  // loadModule resets GPU state
         this.executeAll();
     }
 
