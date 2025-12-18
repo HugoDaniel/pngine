@@ -3,14 +3,151 @@
 </head>
 <main id="main">
   <div class="hero">
-    <h1 :text="$page.title"></h1>
-    <p class="tagline" :text="$page.description"></p>
-    <div class="cta">
-      <a href="/docs/" class="btn primary">Get Started</a>
-      <a href="https://github.com/pngine/pngine" class="btn secondary">View Source</a>
+    <div class="hero-canvas" id="hero-shader">
+      <!-- Interactive shader background goes here -->
+    </div>
+    <div class="hero-content">
+      <h1>PNGine</h1>
+      <p class="tagline">GPU apps in a single file.</p>
+      <p class="tagline-sub">Write shaders. Compile to bytecode. Run on Web, iOS, and Android.</p>
+      <div class="cta">
+        <a href="/docs/getting-started/" class="btn primary">Get Started</a>
+        <a href="#playground" class="btn secondary">Try It Live</a>
+        <a href="https://github.com/pngine/pngine" class="btn tertiary">GitHub</a>
+      </div>
     </div>
   </div>
-  <div class="content">
-    <div :html="$page.content()"></div>
-  </div>
+
+  <section class="how-it-works">
+    <h2>How It Works</h2>
+    <div class="steps">
+      <div class="step">
+        <div class="step-number">1</div>
+        <h3>Write</h3>
+        <p>Describe your GPU pipeline in a simple DSL. Shaders, buffers, textures, render passes—all in one file.</p>
+      </div>
+      <div class="step">
+        <div class="step-number">2</div>
+        <h3>Compile</h3>
+        <p>The compiler produces compact bytecode. A full triangle shader fits in 412 bytes.</p>
+      </div>
+      <div class="step">
+        <div class="step-number">3</div>
+        <h3>Run Anywhere</h3>
+        <p>Embed in a PNG or bundle in a ZIP. Execute via WebGPU, Metal, or Vulkan with native runtimes.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="containers">
+    <h2>One Bytecode, Multiple Containers</h2>
+    <div class="container-grid">
+      <div class="container-card">
+        <div class="container-icon">PNG</div>
+        <h3>PNG Container</h3>
+        <p>Embed bytecode in a standard PNG image. The preview IS the program. Perfect for single shaders and visual effects.</p>
+      </div>
+      <div class="container-card">
+        <div class="container-icon">ZIP</div>
+        <h3>ZIP Container</h3>
+        <p>Bundle complex apps with multiple shaders, textures, and assets. Full applications in one downloadable file.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="platforms">
+    <h2>Native Performance Everywhere</h2>
+    <p class="platforms-intro">Same bytecode, platform-native execution.</p>
+    <div class="platform-grid">
+      <div class="platform">
+        <span class="platform-name">Web</span>
+        <span class="platform-tech">WebGPU</span>
+      </div>
+      <div class="platform">
+        <span class="platform-name">iOS</span>
+        <span class="platform-tech">Metal</span>
+      </div>
+      <div class="platform">
+        <span class="platform-name">Android</span>
+        <span class="platform-tech">Vulkan</span>
+      </div>
+      <div class="platform">
+        <span class="platform-name">Desktop</span>
+        <span class="platform-tech">Dawn</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="size-matters">
+    <h2>Size Matters</h2>
+    <div class="size-comparison">
+      <div class="size-bar pngb">
+        <span class="size-label">PNGine bytecode</span>
+        <span class="size-value">412 bytes</span>
+      </div>
+      <div class="size-bar wgsl">
+        <span class="size-label">Raw WGSL + JS</span>
+        <span class="size-value">~2 KB</span>
+      </div>
+      <div class="size-bar threejs">
+        <span class="size-label">Three.js bundle</span>
+        <span class="size-value">~150 KB</span>
+      </div>
+    </div>
+    <p class="size-note">Runtime adds ~15 KB (WASM). Total: still smaller than a typical favicon.</p>
+  </section>
+
+  <section class="example" id="playground">
+    <h2>See It In Action</h2>
+    <div class="example-split">
+      <div class="example-code">
+        <pre><code>#shaderModule triangle {
+  code=`
+    @vertex fn vs(@builtin(vertex_index) i: u32)
+        -> @builtin(position) vec4f {
+      var pos = array&lt;vec2f, 3&gt;(
+        vec2f( 0.0,  0.5),
+        vec2f(-0.5, -0.5),
+        vec2f( 0.5, -0.5)
+      );
+      return vec4f(pos[i], 0.0, 1.0);
+    }
+
+    @fragment fn fs() -> @location(0) vec4f {
+      return vec4f(1.0, 0.5, 0.2, 1.0);
+    }
+  `
+}
+
+#renderPipeline pipeline {
+  vertex={ module=triangle entryPoint=vs }
+  fragment={ module=triangle entryPoint=fs }
+}
+
+#renderPass draw {
+  pipeline=pipeline
+  draw=3
+}
+
+#frame main { perform=[draw] }</code></pre>
+      </div>
+      <div class="example-output">
+        <div class="example-canvas" id="example-triangle">
+          <!-- Triangle demo renders here -->
+        </div>
+        <div class="example-meta">
+          <span class="badge">412 bytes compiled</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="cta-final">
+    <h2>Ready to build?</h2>
+    <p>Get started in under a minute.</p>
+    <div class="cta">
+      <a href="/docs/getting-started/" class="btn primary">Read the Docs</a>
+      <a href="https://github.com/pngine/pngine" class="btn secondary">View on GitHub</a>
+    </div>
+  </section>
 </main>

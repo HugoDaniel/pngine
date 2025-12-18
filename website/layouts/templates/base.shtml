@@ -21,8 +21,8 @@
       <super>
     </main>
     <footer>
-      <p>PNGine - A register-based bytecode interpreter for WebGPU</p>
-      <p>Built with Zig and Zine</p>
+      <p>PNGine - GPU apps in a single file</p>
+      <p>Built with Zig</p>
     </footer>
   </body>
 </html>
