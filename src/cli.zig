@@ -868,24 +868,40 @@ fn listZipContents(allocator: std.mem.Allocator, input: []const u8, data: []cons
     return 0;
 }
 
-/// List contents of a PNG file (check for embedded bytecode).
+/// List contents of a PNG file (check for embedded bytecode and runtime).
 fn listPngContents(allocator: std.mem.Allocator, input: []const u8, data: []const u8) u8 {
     _ = allocator;
 
     std.debug.print("PNG: {s}\n", .{input});
 
+    // Check for pNGb (bytecode) chunk
     if (pngine.png.hasPngb(data)) {
         const info = pngine.png.getPngbInfo(data) catch |err| {
             std.debug.print("  Error reading pNGb chunk: {}\n", .{err});
             return 4;
         };
 
-        std.debug.print("  Embedded bytecode: yes\n", .{});
+        std.debug.print("  Embedded bytecode (pNGb): yes\n", .{});
         std.debug.print("    Version: {d}\n", .{info.version});
         std.debug.print("    Compressed: {s}\n", .{if (info.compressed) "yes" else "no"});
         std.debug.print("    Payload size: {d} bytes\n", .{info.payload_size});
     } else {
-        std.debug.print("  Embedded bytecode: no\n", .{});
+        std.debug.print("  Embedded bytecode (pNGb): no\n", .{});
+    }
+
+    // Check for pNGr (runtime) chunk
+    if (pngine.png.hasPngr(data)) {
+        const info = pngine.png.getPngrInfo(data) catch |err| {
+            std.debug.print("  Error reading pNGr chunk: {}\n", .{err});
+            return 4;
+        };
+
+        std.debug.print("  Embedded runtime (pNGr): yes\n", .{});
+        std.debug.print("    Version: {d}\n", .{info.version});
+        std.debug.print("    Compressed: {s}\n", .{if (info.compressed) "yes" else "no"});
+        std.debug.print("    Payload size: {d} bytes\n", .{info.payload_bytes});
+    } else {
+        std.debug.print("  Embedded runtime (pNGr): no\n", .{});
     }
 
     return 0;
