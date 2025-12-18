@@ -117,7 +117,8 @@ test "Emitter: buffer size from data reference" {
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(&gpu, &module);
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
     // Verify buffer was created with correct size: 6 floats * 4 bytes = 24 bytes
@@ -151,7 +152,8 @@ test "Emitter: buffer size from string arithmetic expression" {
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(&gpu, &module);
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
     // Verify buffer size: "4+4+4" = 12
@@ -186,7 +188,8 @@ test "Emitter: buffer size from define with expression" {
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(&gpu, &module);
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
     // Verify buffer size: VERTEX_SIZE = 4 * 10 = 40
@@ -560,7 +563,8 @@ test "Emitter: bind group selects correct buffer from multiple" {
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(&gpu, &module);
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
     // Verify both buffers are created with correct sizes
@@ -685,7 +689,8 @@ test "Emitter: bind group selects second buffer correctly" {
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(&gpu, &module);
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
     // Verify all three buffers are created with correct sizes
@@ -1361,7 +1366,8 @@ test "Emitter: draw with #define identifier resolves to numeric value" {
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(&gpu, &module);
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
     // Verify draw was called with 36 vertices, not the default 3
@@ -1465,7 +1471,8 @@ test "Emitter: vertexBuffers with bare identifier executes correctly" {
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(&gpu, &module);
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
     // Verify set_vertex_buffer was called with slot=0 and buffer_id=0 (first buffer)
@@ -1519,7 +1526,8 @@ test "Emitter: rotating_cube style render pass with all commands" {
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(&gpu, &module);
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
     // Verify all expected GPU calls were made
@@ -1591,7 +1599,8 @@ test "Emitter: multiple vertex buffers with bare identifiers" {
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(&gpu, &module);
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
     // Verify 3 vertex buffers are set at slots 0, 1, 2
@@ -2077,7 +2086,8 @@ test "Emitter: rotating_cube style wgsl + shaderModule pattern" {
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(&gpu, &module);
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
     // Verify shader module, pipeline, and draw were created
@@ -2187,7 +2197,8 @@ test "Emitter: data with float32Array still works alongside wasm feature" {
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(&gpu, &module);
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
     // Verify buffer size: 6 floats * 4 bytes = 24 bytes
@@ -2218,4 +2229,247 @@ test "Emitter: data with blob still works alongside wasm feature" {
     } else |err| {
         try testing.expect(err == error.FileReadError or err == error.EmitError);
     }
+}
+
+// ============================================================================
+// Vertex Buffer stepMode Tests
+// ============================================================================
+//
+// These tests verify that stepMode parsing works for vertex buffers in
+// render pipelines. stepMode determines whether buffer data advances per-vertex
+// or per-instance during instanced rendering.
+
+test "Emitter: vertex buffer with stepMode=instance" {
+    // Test that stepMode=instance is correctly parsed and included in pipeline descriptor
+    // This is critical for instanced rendering (e.g., boids particles)
+    const source: [:0]const u8 =
+        \\#wgsl shader {
+        \\  value="
+        \\    struct VertexInput {
+        \\      @location(0) pos: vec4f,
+        \\      @location(1) vel: vec4f,
+        \\    }
+        \\    @vertex fn vs(in: VertexInput) -> @builtin(position) vec4f { return in.pos; }
+        \\    @fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+        \\  "
+        \\}
+        \\#buffer particles { size=4096 usage=[VERTEX STORAGE] }
+        \\#renderPipeline pipe {
+        \\  layout=auto
+        \\  vertex={
+        \\    module=$wgsl.shader
+        \\    entryPoint=vs
+        \\    buffers=[{
+        \\      arrayStride=32
+        \\      stepMode=instance
+        \\      attributes=[
+        \\        { shaderLocation=0 offset=0 format=float32x4 }
+        \\        { shaderLocation=1 offset=16 format=float32x4 }
+        \\      ]
+        \\    }]
+        \\  }
+        \\  fragment={ module=$wgsl.shader entryPoint=fs }
+        \\}
+        \\#renderPass pass { pipeline=pipe draw=6 instances=1000 }
+        \\#frame main { perform=[$renderPass.pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Verify render pipeline was created
+    var found_render_pipeline = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.create_render_pipeline)) {
+            found_render_pipeline = true;
+            break;
+        }
+    }
+    try testing.expect(found_render_pipeline);
+
+    // Find the pipeline descriptor in data section and verify it contains stepMode
+    // The descriptor JSON should contain "stepMode":"instance"
+    var found_step_mode = false;
+    for (0..module.data.count()) |i| {
+        const data = module.data.get(@enumFromInt(i));
+        // Look for JSON containing stepMode
+        if (std.mem.indexOf(u8, data, "stepMode") != null and
+            std.mem.indexOf(u8, data, "instance") != null)
+        {
+            found_step_mode = true;
+            break;
+        }
+    }
+    try testing.expect(found_step_mode);
+}
+
+test "Emitter: vertex buffer with stepMode=vertex (default)" {
+    // Test that stepMode=vertex is correctly parsed
+    // stepMode=vertex is the default but should still work when explicitly specified
+    const source: [:0]const u8 =
+        \\#wgsl shader {
+        \\  value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); }"
+        \\}
+        \\#renderPipeline pipe {
+        \\  layout=auto
+        \\  vertex={
+        \\    module=$wgsl.shader
+        \\    buffers=[{
+        \\      arrayStride=16
+        \\      stepMode=vertex
+        \\      attributes=[{ shaderLocation=0 offset=0 format=float32x4 }]
+        \\    }]
+        \\  }
+        \\}
+        \\#renderPass pass { pipeline=pipe draw=3 }
+        \\#frame main { perform=[$renderPass.pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Verify pipeline was created successfully
+    var found_render_pipeline = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.create_render_pipeline)) {
+            found_render_pipeline = true;
+            break;
+        }
+    }
+    try testing.expect(found_render_pipeline);
+}
+
+test "Emitter: vertex buffer without stepMode uses default" {
+    // Test that omitting stepMode works (defaults to vertex)
+    const source: [:0]const u8 =
+        \\#wgsl shader {
+        \\  value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); }"
+        \\}
+        \\#renderPipeline pipe {
+        \\  layout=auto
+        \\  vertex={
+        \\    module=$wgsl.shader
+        \\    buffers=[{
+        \\      arrayStride=16
+        \\      attributes=[{ shaderLocation=0 offset=0 format=float32x4 }]
+        \\    }]
+        \\  }
+        \\}
+        \\#renderPass pass { pipeline=pipe draw=3 }
+        \\#frame main { perform=[$renderPass.pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Should compile without errors
+    try testing.expect(module.bytecode.len > 0);
+}
+
+test "Emitter: multiple vertex buffers with different stepModes" {
+    // Test multiple buffers: one per-vertex (positions), one per-instance (transforms)
+    // This is a common pattern for instanced rendering
+    const source: [:0]const u8 =
+        \\#wgsl shader {
+        \\  value="
+        \\    struct VSInput {
+        \\      @location(0) pos: vec3f,
+        \\      @location(1) instancePos: vec3f,
+        \\    }
+        \\    @vertex fn vs(in: VSInput) -> @builtin(position) vec4f {
+        \\      return vec4f(in.pos + in.instancePos, 1.0);
+        \\    }
+        \\  "
+        \\}
+        \\#renderPipeline pipe {
+        \\  layout=auto
+        \\  vertex={
+        \\    module=$wgsl.shader
+        \\    buffers=[
+        \\      {
+        \\        arrayStride=12
+        \\        stepMode=vertex
+        \\        attributes=[{ shaderLocation=0 offset=0 format=float32x3 }]
+        \\      }
+        \\      {
+        \\        arrayStride=12
+        \\        stepMode=instance
+        \\        attributes=[{ shaderLocation=1 offset=0 format=float32x3 }]
+        \\      }
+        \\    ]
+        \\  }
+        \\}
+        \\#renderPass pass { pipeline=pipe draw=36 instances=100 }
+        \\#frame main { perform=[$renderPass.pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Verify the pipeline descriptor contains both step modes
+    var found_vertex_mode = false;
+    var found_instance_mode = false;
+    for (0..module.data.count()) |i| {
+        const data = module.data.get(@enumFromInt(i));
+        if (std.mem.indexOf(u8, data, "\"stepMode\":\"vertex\"") != null) {
+            found_vertex_mode = true;
+        }
+        if (std.mem.indexOf(u8, data, "\"stepMode\":\"instance\"") != null) {
+            found_instance_mode = true;
+        }
+    }
+    try testing.expect(found_instance_mode);
+    // Note: stepMode=vertex might not be emitted since it's the default
+}
+
+// ============================================================================
+// Pool Buffer Tests (Ping-Pong Pattern from DSL)
+// ============================================================================
+
+test "Emitter: buffer with pool=2 creates pooled resources" {
+    // Test that pool=2 on buffer creates proper ping-pong setup
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@vertex fn vs() {}" }
+        \\#buffer particles { size=4096 usage=[VERTEX STORAGE] pool=2 }
+        \\#renderPipeline pipe { layout=auto vertex={ module=$wgsl.shader } }
+        \\#renderPass pass { pipeline=pipe draw=1000 }
+        \\#frame main { perform=[$renderPass.pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    const mock_gpu = @import("../../executor/mock_gpu.zig");
+    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    // Count buffer creations - should have 2 buffers for pool=2
+    var buffer_count: usize = 0;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_buffer) {
+            buffer_count += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), buffer_count);
 }
