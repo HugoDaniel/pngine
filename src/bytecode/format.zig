@@ -313,7 +313,7 @@ test "roundtrip serialization" {
     try emitter.createRenderPipeline(testing.allocator, 0, 0);
     try emitter.defineFrame(testing.allocator, 0, frame_name.toInt());
     try emitter.setPipeline(testing.allocator, 0);
-    try emitter.draw(testing.allocator, 3, 1);
+    try emitter.draw(testing.allocator, 3, 1, 0, 0);
     try emitter.submit(testing.allocator);
     try emitter.endFrame(testing.allocator);
 
@@ -412,7 +412,7 @@ test "serialize handles OOM gracefully" {
     const data_id = try builder.addData(testing.allocator, "data content");
     const emitter = builder.getEmitter();
     try emitter.createShaderModule(testing.allocator, 0, data_id.toInt());
-    try emitter.draw(testing.allocator, 3, 1);
+    try emitter.draw(testing.allocator, 3, 1, 0, 0);
 
     // Now test serialization with failing allocator
     var fail_index: usize = 0;

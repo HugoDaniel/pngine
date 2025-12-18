@@ -91,7 +91,7 @@ test "manual simpleTriangle AST to PNGB" {
         pass_desc_id.toInt(),
     );
     try emitter.setPipeline(testing.allocator, 0);
-    try emitter.draw(testing.allocator, 3, 1); // 3 vertices, 1 instance
+    try emitter.draw(testing.allocator, 3, 1, 0, 0); // 3 vertices, 1 instance
     try emitter.endPass(testing.allocator);
     try emitter.endPassDef(testing.allocator);
 
@@ -171,7 +171,7 @@ test "bytecode execution order" {
     try emitter.createRenderPipeline(testing.allocator, 0, 1);
     try emitter.definePass(testing.allocator, 0, .render, 2);
     try emitter.setPipeline(testing.allocator, 0);
-    try emitter.draw(testing.allocator, 3, 1);
+    try emitter.draw(testing.allocator, 3, 1, 0, 0);
     try emitter.endPass(testing.allocator);
     try emitter.endPassDef(testing.allocator);
     try emitter.defineFrame(testing.allocator, 0, 0);
@@ -204,18 +204,19 @@ test "bytecode size efficiency" {
     const emitter = builder.getEmitter();
 
     // Single draw instruction
-    try emitter.draw(testing.allocator, 3, 1);
+    try emitter.draw(testing.allocator, 3, 1, 0, 0);
 
-    // Should be 3 bytes: opcode + vertex_count + instance_count
-    try testing.expectEqual(@as(usize, 3), emitter.len());
+    // Should be 5 bytes: opcode + vertex_count + instance_count + first_vertex + first_instance
+    try testing.expectEqual(@as(usize, 5), emitter.len());
 
     // Draw with larger counts
-    try emitter.draw(testing.allocator, 1000, 100);
+    try emitter.draw(testing.allocator, 1000, 100, 0, 0);
 
     // Should use varint encoding efficiently
-    // 1000 = 2 bytes, 100 = 1 byte
-    // Total: 3 + 1 + 2 + 1 = 7 bytes for both draws
-    try testing.expectEqual(@as(usize, 7), emitter.len());
+    // First draw: 5 bytes (all 1-byte varints)
+    // Second draw: 1 (opcode) + 2 (1000) + 1 (100) + 1 (0) + 1 (0) = 6 bytes
+    // Total: 5 + 6 = 11 bytes
+    try testing.expectEqual(@as(usize, 11), emitter.len());
 }
 
 // ============================================================================

@@ -725,13 +725,20 @@ pub const Assembler = struct {
                     if (cmd_children.len < 3) continue;
                     const vertex_count = try self.parseNumber(cmd_children[1]);
                     const instance_count = try self.parseNumber(cmd_children[2]);
-                    emitter.draw(self.gpa, vertex_count, instance_count) catch return error.OutOfMemory;
+                    // Optional: first_vertex, first_instance (default to 0)
+                    const first_vertex: u32 = if (cmd_children.len > 3) try self.parseNumber(cmd_children[3]) else 0;
+                    const first_instance: u32 = if (cmd_children.len > 4) try self.parseNumber(cmd_children[4]) else 0;
+                    emitter.draw(self.gpa, vertex_count, instance_count, first_vertex, first_instance) catch return error.OutOfMemory;
                 },
                 .draw_indexed => {
                     if (cmd_children.len < 3) continue;
                     const index_count = try self.parseNumber(cmd_children[1]);
                     const instance_count = try self.parseNumber(cmd_children[2]);
-                    emitter.drawIndexed(self.gpa, index_count, instance_count) catch return error.OutOfMemory;
+                    // Optional: first_index, base_vertex, first_instance (default to 0)
+                    const first_index: u32 = if (cmd_children.len > 3) try self.parseNumber(cmd_children[3]) else 0;
+                    const base_vertex: u32 = if (cmd_children.len > 4) try self.parseNumber(cmd_children[4]) else 0;
+                    const first_instance: u32 = if (cmd_children.len > 5) try self.parseNumber(cmd_children[5]) else 0;
+                    emitter.drawIndexed(self.gpa, index_count, instance_count, first_index, base_vertex, first_instance) catch return error.OutOfMemory;
                 },
                 .dispatch => {
                     if (cmd_children.len < 4) continue;
@@ -870,17 +877,22 @@ pub const Assembler = struct {
                     }
                 },
                 .draw => {
-                    // (draw N M) where N=vertex_count, M=instance_count
+                    // (draw N M [first_vertex first_instance]) where N=vertex_count, M=instance_count
                     if (cmd_children.len < 3) continue;
                     const vertex_count = try self.parseNumber(cmd_children[1]);
                     const instance_count = try self.parseNumber(cmd_children[2]);
-                    emitter.draw(self.gpa, vertex_count, instance_count) catch return error.OutOfMemory;
+                    const first_vertex: u32 = if (cmd_children.len > 3) try self.parseNumber(cmd_children[3]) else 0;
+                    const first_instance: u32 = if (cmd_children.len > 4) try self.parseNumber(cmd_children[4]) else 0;
+                    emitter.draw(self.gpa, vertex_count, instance_count, first_vertex, first_instance) catch return error.OutOfMemory;
                 },
                 .draw_indexed => {
                     if (cmd_children.len < 3) continue;
                     const index_count = try self.parseNumber(cmd_children[1]);
                     const instance_count = try self.parseNumber(cmd_children[2]);
-                    emitter.drawIndexed(self.gpa, index_count, instance_count) catch return error.OutOfMemory;
+                    const first_index: u32 = if (cmd_children.len > 3) try self.parseNumber(cmd_children[3]) else 0;
+                    const base_vertex: u32 = if (cmd_children.len > 4) try self.parseNumber(cmd_children[4]) else 0;
+                    const first_instance: u32 = if (cmd_children.len > 5) try self.parseNumber(cmd_children[5]) else 0;
+                    emitter.drawIndexed(self.gpa, index_count, instance_count, first_index, base_vertex, first_instance) catch return error.OutOfMemory;
                 },
                 .dispatch => {
                     if (cmd_children.len < 4) continue;
