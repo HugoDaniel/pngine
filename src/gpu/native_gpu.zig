@@ -684,3 +684,73 @@ test "NativeGPU: readPixels OOM handling" {
     const result = gpu.readPixels(failing_alloc.allocator());
     try testing.expectError(Error.OutOfMemory, result);
 }
+
+// ============================================================================
+// Regression Tests - GPU Stub Methods
+// ============================================================================
+// These tests ensure the stub methods added for bytecode compatibility exist
+// and can be called without crashing. Required for dispatcher to work with
+// bytecode that uses these operations.
+
+test "regression: createTextureView stub exists and callable" {
+    var gpu = try NativeGPU.init(testing.allocator, 64, 64);
+    defer gpu.deinit(testing.allocator);
+
+    // Should not crash - stub method exists
+    try gpu.createTextureView(testing.allocator, 0, 0, 0);
+    try gpu.createTextureView(testing.allocator, 1, 0, 1);
+}
+
+test "regression: createBindGroupLayout stub exists and callable" {
+    var gpu = try NativeGPU.init(testing.allocator, 64, 64);
+    defer gpu.deinit(testing.allocator);
+
+    // Should not crash - stub method exists
+    try gpu.createBindGroupLayout(testing.allocator, 0, 0);
+    try gpu.createBindGroupLayout(testing.allocator, 1, 1);
+}
+
+test "regression: createPipelineLayout stub exists and callable" {
+    var gpu = try NativeGPU.init(testing.allocator, 64, 64);
+    defer gpu.deinit(testing.allocator);
+
+    // Should not crash - stub method exists
+    try gpu.createPipelineLayout(testing.allocator, 0, 0);
+    try gpu.createPipelineLayout(testing.allocator, 1, 1);
+}
+
+test "regression: createQuerySet stub exists and callable" {
+    var gpu = try NativeGPU.init(testing.allocator, 64, 64);
+    defer gpu.deinit(testing.allocator);
+
+    // Should not crash - stub method exists
+    try gpu.createQuerySet(testing.allocator, 0, 0);
+    try gpu.createQuerySet(testing.allocator, 1, 1);
+}
+
+test "regression: all GPU stubs work together in sequence" {
+    // This test simulates a bytecode execution that uses multiple stub methods
+    var gpu = try NativeGPU.init(testing.allocator, 64, 64);
+    defer gpu.deinit(testing.allocator);
+
+    // Resource creation phase (stubs)
+    try gpu.createBindGroupLayout(testing.allocator, 0, 0);
+    try gpu.createPipelineLayout(testing.allocator, 0, 0);
+    try gpu.createTexture(testing.allocator, 0, 0);
+    try gpu.createTextureView(testing.allocator, 0, 0, 0);
+    try gpu.createBuffer(testing.allocator, 0, 1024, 0x44);
+    try gpu.createShaderModule(testing.allocator, 0, 0);
+    try gpu.createQuerySet(testing.allocator, 0, 0);
+
+    // Render pass should still work after stub calls
+    try gpu.beginRenderPass(testing.allocator, 0, 1, 0, 0xFFFF);
+    try gpu.setPipeline(testing.allocator, 0);
+    try gpu.draw(testing.allocator, 3, 1, 0, 0);
+    try gpu.endPass(testing.allocator);
+    try gpu.submit(testing.allocator);
+
+    // Verify pixel output works
+    const pixels = try gpu.readPixels(testing.allocator);
+    defer testing.allocator.free(pixels);
+    try testing.expectEqual(@as(usize, 64 * 64 * 4), pixels.len);
+}

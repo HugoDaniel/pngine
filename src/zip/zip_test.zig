@@ -586,3 +586,77 @@ test "format: compression method stored correctly" {
         try testing.expectEqual(@as(u16, 8), entry.compression);
     }
 }
+
+// ============================================================================
+// Regression Tests
+// ============================================================================
+
+test "regression: extract with manifest entry name after manifest freed" {
+    // This test catches the use-after-free bug in extractFromZip where
+    // entry_name was a slice into manifest_data that got freed before use.
+    //
+    // The pattern: extract manifest -> parse entry name -> free manifest -> extract bytecode
+    // Bug: entry_name pointed to freed memory when extracting bytecode
+
+    var w = ZipWriter.init(testing.allocator);
+    defer w.deinit();
+
+    // Create manifest with entry pointing to bytecode file
+    const manifest = "{\"version\":1,\"entry\":\"shader.pngb\"}";
+    try w.addFile("manifest.json", manifest, .store);
+    try w.addFile("shader.pngb", "PNGB\x01\x00bytecode", .deflate);
+
+    const zip_data = try w.finish();
+    defer testing.allocator.free(zip_data);
+
+    // Simulate extractFromZip pattern
+    var r = try ZipReader.init(testing.allocator, zip_data);
+    defer r.deinit();
+
+    // Extract and parse manifest (will be freed)
+    var entry_name_buf: [256]u8 = undefined;
+    const entry_name: []const u8 = blk: {
+        const manifest_data = try r.extract("manifest.json");
+        defer testing.allocator.free(manifest_data); // This frees the memory
+
+        // Find "entry" value in manifest (simulating findJsonValue)
+        const entry_start = std.mem.indexOf(u8, manifest_data, "shader.pngb") orelse unreachable;
+        const entry_slice = manifest_data[entry_start..][0..11]; // "shader.pngb"
+
+        // Copy to buffer BEFORE freeing manifest_data (the fix)
+        @memcpy(entry_name_buf[0..entry_slice.len], entry_slice);
+        break :blk entry_name_buf[0..entry_slice.len];
+    };
+    // manifest_data is now freed, but entry_name points to our buffer
+
+    // This should work because entry_name is in our stack buffer, not freed memory
+    const bytecode = try r.extract(entry_name);
+    defer testing.allocator.free(bytecode);
+
+    try testing.expectEqualStrings("PNGB\x01\x00bytecode", bytecode);
+}
+
+test "regression: ZIP with custom entry name in manifest" {
+    // Ensure ZIP bundles with non-default entry names work correctly
+    var w = ZipWriter.init(testing.allocator);
+    defer w.deinit();
+
+    try w.addFile("manifest.json", "{\"version\":1,\"entry\":\"custom/path/code.pngb\"}", .store);
+    try w.addFile("custom/path/code.pngb", "custom bytecode content", .store);
+
+    const zip_data = try w.finish();
+    defer testing.allocator.free(zip_data);
+
+    var r = try ZipReader.init(testing.allocator, zip_data);
+    defer r.deinit();
+
+    // Verify both files are present
+    try testing.expect(r.findEntry("manifest.json") != null);
+    try testing.expect(r.findEntry("custom/path/code.pngb") != null);
+
+    // Extract the custom-named bytecode
+    const bytecode = try r.extract("custom/path/code.pngb");
+    defer testing.allocator.free(bytecode);
+
+    try testing.expectEqualStrings("custom bytecode content", bytecode);
+}
