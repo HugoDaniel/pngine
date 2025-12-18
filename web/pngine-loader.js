@@ -7,9 +7,88 @@
 
 import { PNGineGPU } from './pngine-gpu.js';
 import { extractPngb, fetchAndExtract, hasPngb, getPngbInfo } from './pngine-png.js';
+import { isZip, extractFromZip, fetchAndExtractZip, getZipBundleInfo, ZipReader } from './pngine-zip.js';
 
 // Re-export PNG utilities
 export { extractPngb, fetchAndExtract, hasPngb, getPngbInfo };
+
+// Re-export ZIP utilities
+export { isZip, extractFromZip, fetchAndExtractZip, getZipBundleInfo, ZipReader };
+
+/**
+ * PNG file signature for format detection.
+ */
+const PNG_SIGNATURE = [0x89, 0x50, 0x4E, 0x47];
+
+/**
+ * Detect format from file data.
+ *
+ * @param {Uint8Array} bytes - File data
+ * @returns {'png'|'zip'|'pngb'|null} Detected format
+ */
+export function detectFormat(bytes) {
+    if (bytes.length < 4) return null;
+
+    // ZIP: starts with 'PK'
+    if (bytes[0] === 0x50 && bytes[1] === 0x4B) {
+        return 'zip';
+    }
+
+    // PNG: starts with signature
+    if (bytes[0] === 0x89 && bytes[1] === 0x50 &&
+        bytes[2] === 0x4E && bytes[3] === 0x47) {
+        return 'png';
+    }
+
+    // PNGB: starts with 'PNGB'
+    if (bytes[0] === 0x50 && bytes[1] === 0x4E &&
+        bytes[2] === 0x47 && bytes[3] === 0x42) {
+        return 'pngb';
+    }
+
+    return null;
+}
+
+/**
+ * Extract bytecode from any supported format.
+ *
+ * Auto-detects format (PNG, ZIP, or raw PNGB) and extracts bytecode.
+ *
+ * @param {ArrayBuffer|Uint8Array} data - File data
+ * @returns {Promise<Uint8Array>} Extracted PNGB bytecode
+ */
+export async function extractBytecode(data) {
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    const format = detectFormat(bytes);
+
+    switch (format) {
+        case 'zip':
+            return extractFromZip(bytes);
+        case 'png':
+            return extractPngb(bytes);
+        case 'pngb':
+            // Already bytecode - return copy
+            return new Uint8Array(bytes);
+        default:
+            throw new Error('Unknown file format');
+    }
+}
+
+/**
+ * Fetch from URL and extract bytecode (auto-detects format).
+ *
+ * @param {string} url - URL of PNG, ZIP, or PNGB file
+ * @returns {Promise<Uint8Array>} Extracted PNGB bytecode
+ */
+export async function fetchBytecode(url) {
+    const response = await fetch(url);
+    if (!response.ok) {
+        throw new Error(`Failed to fetch: ${response.status}`);
+    }
+
+    const buffer = await response.arrayBuffer();
+    return extractBytecode(buffer);
+}
 
 /**
  * Error codes returned by WASM functions.
@@ -111,6 +190,69 @@ export async function initPNGine(canvas, wasmUrl = 'pngine.wasm') {
 export async function initFromPng(canvas, pngUrl, wasmUrl = 'pngine.wasm') {
     // 1. Fetch and extract bytecode from PNG (can happen in parallel with WASM init)
     const bytecodePromise = fetchAndExtract(pngUrl);
+
+    // 2. Initialize PNGine with WebGPU
+    const pngine = await initPNGine(canvas, wasmUrl);
+
+    // 3. Wait for bytecode extraction
+    const bytecode = await bytecodePromise;
+
+    // 4. Load the extracted bytecode
+    pngine.loadModule(bytecode);
+
+    return pngine;
+}
+
+/**
+ * Initialize PNGine from a ZIP bundle.
+ *
+ * ZIP bundles can contain bytecode, assets, and optionally the WASM runtime.
+ *
+ * @param {HTMLCanvasElement} canvas - Canvas element for rendering
+ * @param {string} zipUrl - URL to ZIP bundle
+ * @param {string} wasmUrl - URL to pngine.wasm (used if not in bundle)
+ * @returns {Promise<PNGine>} Initialized PNGine instance with loaded module
+ *
+ * @example
+ * const pngine = await initFromZip(canvas, 'shader.zip');
+ * pngine.executeAll();
+ */
+export async function initFromZip(canvas, zipUrl, wasmUrl = 'pngine.wasm') {
+    // 1. Fetch and extract bytecode from ZIP (can happen in parallel with WASM init)
+    const bytecodePromise = fetchAndExtractZip(zipUrl);
+
+    // 2. Initialize PNGine with WebGPU
+    const pngine = await initPNGine(canvas, wasmUrl);
+
+    // 3. Wait for bytecode extraction
+    const bytecode = await bytecodePromise;
+
+    // 4. Load the extracted bytecode
+    pngine.loadModule(bytecode);
+
+    return pngine;
+}
+
+/**
+ * Initialize PNGine from any supported URL (auto-detects format).
+ *
+ * Supports PNG with embedded bytecode, ZIP bundles, or raw PNGB files.
+ * Format is detected by magic bytes, not file extension.
+ *
+ * @param {HTMLCanvasElement} canvas - Canvas element for rendering
+ * @param {string} url - URL to PNG, ZIP, or PNGB file
+ * @param {string} wasmUrl - URL to pngine.wasm file
+ * @returns {Promise<PNGine>} Initialized PNGine instance with loaded module
+ *
+ * @example
+ * // Works with any format
+ * const pngine = await initFromUrl(canvas, 'shader.png');
+ * const pngine = await initFromUrl(canvas, 'shader.zip');
+ * const pngine = await initFromUrl(canvas, 'shader.pngb');
+ */
+export async function initFromUrl(canvas, url, wasmUrl = 'pngine.wasm') {
+    // 1. Fetch and extract bytecode (auto-detects format)
+    const bytecodePromise = fetchBytecode(url);
 
     // 2. Initialize PNGine with WebGPU
     const pngine = await initPNGine(canvas, wasmUrl);
@@ -297,6 +439,52 @@ export class PNGine {
      */
     async loadFromPngData(pngData) {
         const bytecode = await extractPngb(pngData);
+        this.loadModule(bytecode);
+    }
+
+    /**
+     * Load module from a ZIP bundle.
+     *
+     * @param {string} url - URL of ZIP bundle
+     * @throws {Error} On load failure
+     */
+    async loadFromZip(url) {
+        const bytecode = await fetchAndExtractZip(url);
+        this.loadModule(bytecode);
+    }
+
+    /**
+     * Load module from ZIP ArrayBuffer/Uint8Array.
+     *
+     * @param {ArrayBuffer|Uint8Array} zipData - ZIP file data
+     * @throws {Error} On extraction or load failure
+     */
+    async loadFromZipData(zipData) {
+        const bytecode = await extractFromZip(zipData);
+        this.loadModule(bytecode);
+    }
+
+    /**
+     * Load module from any supported URL (auto-detects format).
+     *
+     * Supports PNG with embedded bytecode, ZIP bundles, or raw PNGB files.
+     *
+     * @param {string} url - URL of PNG, ZIP, or PNGB file
+     * @throws {Error} On load failure
+     */
+    async loadFromUrl(url) {
+        const bytecode = await fetchBytecode(url);
+        this.loadModule(bytecode);
+    }
+
+    /**
+     * Load module from any supported data format (auto-detects).
+     *
+     * @param {ArrayBuffer|Uint8Array} data - PNG, ZIP, or PNGB data
+     * @throws {Error} On extraction or load failure
+     */
+    async loadFromData(data) {
+        const bytecode = await extractBytecode(data);
         this.loadModule(bytecode);
     }
 

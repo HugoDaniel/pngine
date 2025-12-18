@@ -36,6 +36,9 @@ pub const gpu_backends = struct {
     pub const NativeGPU = native_gpu.NativeGPU;
 };
 
+// ZIP bundle support
+pub const zip = @import("zip.zig");
+
 // PNG embedding/extraction/encoding
 pub const png = struct {
     pub const crc32 = @import("png/crc32.zig");
@@ -168,6 +171,8 @@ test {
     _ = @import("png/encoder.zig");
     // Run GPU backend tests
     _ = @import("gpu/native_gpu.zig");
+    // Run ZIP tests
+    _ = @import("zip.zig");
 }
 
 test "compile PBSF to PNGB" {
