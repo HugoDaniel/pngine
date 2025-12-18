@@ -220,7 +220,7 @@ fn runCheck(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(allocator);
 
-    var dispatcher = Dispatcher(MockGPU).init(&gpu, &module);
+    var dispatcher = Dispatcher(MockGPU).init(allocator, &gpu, &module);
     dispatcher.executeAll(allocator) catch |err| {
         std.debug.print("\nExecution error: {}\n", .{err});
         return 5;
@@ -629,15 +629,18 @@ fn extractFromZip(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     defer reader.deinit();
 
     // Try to read manifest.json to find entry point
-    const entry_name = blk: {
+    var entry_name_buf: [256]u8 = undefined;
+    const entry_name: []const u8 = blk: {
         if (reader.extract("manifest.json")) |manifest_data| {
             defer allocator.free(manifest_data);
 
             // Parse JSON to find "entry" field
             if (findJsonValue(manifest_data, "\"entry\"")) |entry_value| {
-                // entry_value is something like: "main.pngb"
-                // We need to extract the string value
-                break :blk entry_value;
+                // Copy entry_value to buffer before manifest_data is freed
+                if (entry_value.len <= entry_name_buf.len) {
+                    @memcpy(entry_name_buf[0..entry_value.len], entry_value);
+                    break :blk entry_name_buf[0..entry_value.len];
+                }
             }
         } else |_| {
             // No manifest, try default name

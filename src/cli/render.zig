@@ -340,7 +340,7 @@ fn renderWithGpu(allocator: std.mem.Allocator, bytecode: []const u8, width: u32,
     gpu.setModule(&module);
     gpu.setTime(time);
 
-    var dispatcher = pngine.Dispatcher(NativeGPU).init(&gpu, &module);
+    var dispatcher = pngine.Dispatcher(NativeGPU).init(allocator, &gpu, &module);
     dispatcher.executeAll(allocator) catch |err| {
         std.debug.print("Error: execution failed: {}\n", .{err});
         return .{ .png_data = undefined, .exit_code = 5 };

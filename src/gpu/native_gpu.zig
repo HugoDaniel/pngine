@@ -203,6 +203,17 @@ pub const NativeGPU = struct {
         // TODO: Create actual GPU texture
     }
 
+    pub fn createTextureView(self: *Self, allocator: Allocator, view_id: u16, texture_id: u16, descriptor_data_id: u16) !void {
+        _ = allocator;
+        _ = view_id;
+        _ = descriptor_data_id;
+
+        assert(texture_id < MAX_TEXTURES);
+        assert(self.initialized);
+
+        // TODO: Create actual GPU texture view
+    }
+
     pub fn createSampler(self: *Self, allocator: Allocator, sampler_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
         _ = descriptor_data_id;
@@ -260,6 +271,36 @@ pub const NativeGPU = struct {
         self.bind_groups_created.set(group_id);
 
         // TODO: Create actual GPU bind group
+    }
+
+    pub fn createBindGroupLayout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
+        _ = allocator;
+        _ = layout_id;
+        _ = descriptor_data_id;
+
+        assert(self.initialized);
+
+        // TODO: Create actual GPU bind group layout
+    }
+
+    pub fn createPipelineLayout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
+        _ = allocator;
+        _ = layout_id;
+        _ = descriptor_data_id;
+
+        assert(self.initialized);
+
+        // TODO: Create actual GPU pipeline layout
+    }
+
+    pub fn createQuerySet(self: *Self, allocator: Allocator, query_set_id: u16, descriptor_data_id: u16) !void {
+        _ = allocator;
+        _ = query_set_id;
+        _ = descriptor_data_id;
+
+        assert(self.initialized);
+
+        // TODO: Create actual GPU query set
     }
 
     pub fn createImageBitmap(self: *Self, allocator: Allocator, bitmap_id: u16, blob_data_id: u16) !void {
