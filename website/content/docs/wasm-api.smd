@@ -1,189 +1,228 @@
 ---
 .title = "WASM API",
-.description = "Using PNGine from JavaScript",
+.description = "WebAssembly module exports",
 .author = "PNGine Team",
-.date = @date("2024-12-15"),
+.date = @date("2024-12-18"),
 .layout = "page.shtml",
 ---
 
-PNGine compiles to WebAssembly for use in browsers. The WASM module exports functions to compile PBSF source code into PNGB bytecode.
+## Overview
 
-## Loading the Module
+The WASM module (`pngine.wasm`) provides two interfaces:
+1. **Compiler API** - Compile source to bytecode
+2. **Runtime API** - Execute bytecode via WebGPU
+
+## Loading
 
 ```javascript
-async function loadPNGine() {
-    const response = await fetch('pngine.wasm');
-    const wasmModule = await WebAssembly.instantiate(await response.arrayBuffer());
-    return wasmModule.instance.exports;
+async function loadPNGine(imports) {
+  const response = await fetch('pngine.wasm');
+  const { instance } = await WebAssembly.instantiate(
+    await response.arrayBuffer(),
+    imports
+  );
+  return instance.exports;
 }
-
-const pngine = await loadPNGine();
 ```
 
-## Initialization
+## Compiler Exports
 
-Before using any other function, initialize the module:
+### onInit()
+
+Initialize the module. Call once before other functions.
 
 ```javascript
 pngine.onInit();
 ```
 
-This sets up the internal memory allocator. Call this once after loading.
+### compile(srcPtr, srcLen): number
 
-## Exported Functions
+Compile source to bytecode.
 
-### `onInit()`
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| srcPtr | number | Pointer to source in WASM memory |
+| srcLen | number | Source length in bytes |
 
-Initialize the WASM module. Must be called before any other function.
+Returns:
+| Code | Description |
+|------|-------------|
+| 0 | Success |
+| 1 | Not initialized |
+| 2 | Out of memory |
+| 3 | Parse error |
+| 4 | Analysis error |
 
-### `compile(srcPtr: number, srcLen: number): number`
+### getOutputPtr(): number
 
-Compile PBSF source to PNGB bytecode.
+Pointer to compiled bytecode.
 
-**Parameters:**
-- `srcPtr` - Pointer to source bytes in WASM memory
-- `srcLen` - Length of source in bytes
+### getOutputLen(): number
 
-**Returns:**
-- `0` - Success
-- `1` - Module not initialized
-- `2` - Out of memory
-- `3` - Parse error
+Length of compiled bytecode.
 
-### `getOutputPtr(): number`
+### freeOutput()
 
-Get pointer to the last compilation output in WASM memory.
+Free the compilation output buffer.
 
-### `getOutputLen(): number`
+### alloc(len): number
 
-Get length of the last compilation output in bytes.
+Allocate memory. Returns pointer or 0 on failure.
 
-### `freeOutput()`
+### free(ptr, len)
 
-Free the last compilation output. Call this when you're done with the bytecode.
+Free allocated memory.
 
-### `alloc(len: number): number`
+## Runtime Exports
 
-Allocate memory in the WASM heap. Returns pointer or 0 on failure.
+The runtime executes bytecode by calling back into JavaScript for GPU operations.
 
-### `free(ptr: number, len: number)`
+### executeAll(bytecodePtr, bytecodeLen)
 
-Free previously allocated memory.
+Execute all opcodes in bytecode.
 
-## Complete Example
+### executeFrame(frameId)
+
+Execute a specific frame by ID.
+
+### setTime(seconds)
+
+Set the time uniform (f32).
+
+### setResolution(width, height)
+
+Set the resolution uniforms (u32, u32).
+
+## Required Imports
+
+The runtime requires these JavaScript imports under the `env` namespace:
+
+### Logging
 
 ```javascript
-class PNGineCompiler {
-    constructor(wasmExports) {
-        this.wasm = wasmExports;
-        this.wasm.onInit();
-    }
+wasm_log_write(ptr, len)   // Write to log buffer
+wasm_log_flush()           // Flush log to console
+```
 
-    compile(source) {
-        const encoder = new TextEncoder();
-        const sourceBytes = encoder.encode(source);
+### Resource Creation
 
-        // Allocate memory for source
-        const srcPtr = this.wasm.alloc(sourceBytes.length);
-        if (srcPtr === 0) {
-            throw new Error('Failed to allocate memory for source');
-        }
+```javascript
+gpuCreateBuffer(id, descPtr, descLen)
+gpuCreateTexture(id, descPtr, descLen)
+gpuCreateTextureView(viewId, textureId, descPtr, descLen)
+gpuCreateSampler(id, descPtr, descLen)
+gpuCreateShaderModule(id, codePtr, codeLen)
+gpuCreateRenderPipeline(id, descPtr, descLen)
+gpuCreateComputePipeline(id, descPtr, descLen)
+gpuCreateBindGroup(id, layoutId, descPtr, descLen)
+gpuCreateBindGroupLayout(id, descPtr, descLen)
+gpuCreatePipelineLayout(id, descPtr, descLen)
+gpuCreateQuerySet(id, descPtr, descLen)
+```
 
-        try {
-            // Copy source to WASM memory
-            const memory = new Uint8Array(this.wasm.memory.buffer);
-            memory.set(sourceBytes, srcPtr);
+### Render Pass
 
-            // Compile
-            const result = this.wasm.compile(srcPtr, sourceBytes.length);
+```javascript
+gpuBeginRenderPass(textureId, loadOp, storeOp, hasDepth)
+gpuSetPipeline(pipelineId)
+gpuSetBindGroup(slot, groupId)
+gpuSetVertexBuffer(slot, bufferId)
+gpuDraw(vertexCount, instanceCount, firstVertex, firstInstance)
+gpuDrawIndexed(indexCount, instanceCount, firstIndex, baseVertex, firstInstance)
+gpuEndRenderPass()
+```
 
-            if (result !== 0) {
-                const errors = {
-                    1: 'Module not initialized',
-                    2: 'Out of memory',
-                    3: 'Parse error'
-                };
-                throw new Error(errors[result] || `Unknown error: ${result}`);
-            }
+### Compute Pass
 
-            // Copy output
-            const outputPtr = this.wasm.getOutputPtr();
-            const outputLen = this.wasm.getOutputLen();
-            const bytecode = new Uint8Array(
-                this.wasm.memory.buffer, outputPtr, outputLen
-            ).slice(); // Copy to avoid referencing WASM memory
+```javascript
+gpuBeginComputePass()
+gpuDispatchWorkgroups(x, y, z)
+gpuEndComputePass()
+```
 
-            // Free output
-            this.wasm.freeOutput();
+### Execution
 
-            return bytecode;
-        } finally {
-            // Free source memory
-            this.wasm.free(srcPtr, sourceBytes.length);
-        }
-    }
-}
+```javascript
+gpuSubmit()
+gpuWriteBuffer(bufferId, offset, dataPtr, dataLen)
+```
 
-// Usage
-const response = await fetch('pngine.wasm');
-const { instance } = await WebAssembly.instantiate(await response.arrayBuffer());
-const compiler = new PNGineCompiler(instance.exports);
+## Example: Compilation
+
+```javascript
+const pngine = await loadPNGine({ env: {} });
+pngine.onInit();
 
 const source = `
-(module "triangle"
-  (data $d:0 "@vertex fn main() -> @builtin(position) vec4f { ... }")
-  (shader $shd:0 (code $d:0))
-  (render-pipeline $pipe:0 (shader $shd:0))
-  (frame $frm:0 "main"
-    (set-pipeline $pipe:0)
-    (draw 3 1)
-    (submit)))
+#shaderModule code { code="..." }
+#renderPipeline p { ... }
+#frame main { ... }
 `;
 
-const bytecode = compiler.compile(source);
-console.log('Compiled to', bytecode.length, 'bytes');
-```
+const encoder = new TextEncoder();
+const bytes = encoder.encode(source);
 
-## Error Handling
+const srcPtr = pngine.alloc(bytes.length);
+new Uint8Array(pngine.memory.buffer, srcPtr, bytes.length).set(bytes);
 
-The `compile` function returns error codes rather than throwing exceptions. Always check the return value:
+const result = pngine.compile(srcPtr, bytes.length);
+if (result === 0) {
+  const bytecode = new Uint8Array(
+    pngine.memory.buffer,
+    pngine.getOutputPtr(),
+    pngine.getOutputLen()
+  ).slice();
 
-```javascript
-const result = pngine.compile(srcPtr, srcLen);
-
-switch (result) {
-    case 0:
-        // Success - retrieve output
-        break;
-    case 1:
-        console.error('Call onInit() first');
-        break;
-    case 2:
-        console.error('Out of memory');
-        break;
-    case 3:
-        console.error('Invalid PBSF syntax');
-        break;
-    default:
-        console.error('Unknown error:', result);
+  console.log('Compiled:', bytecode.length, 'bytes');
+  pngine.freeOutput();
 }
+
+pngine.free(srcPtr, bytes.length);
 ```
 
-## Memory Management
-
-The WASM module manages its own memory. Follow these rules:
-
-1. **Always call `onInit()` first** - Sets up the allocator
-2. **Free what you allocate** - Use `free(ptr, len)` for memory from `alloc()`
-3. **Free compilation output** - Call `freeOutput()` when done with bytecode
-4. **Copy output if needed later** - The output buffer may be reused on next compile
+## Example: Runtime
 
 ```javascript
-// Good: Copy the bytecode before freeing
-const bytecode = new Uint8Array(wasm.memory.buffer, ptr, len).slice();
-wasm.freeOutput();
+import { PNGineGPU } from './pngine-gpu.js';
 
-// Bad: Keeping reference to WASM memory after free
-const bytecode = new Uint8Array(wasm.memory.buffer, ptr, len);
-wasm.freeOutput(); // bytecode is now invalid!
+const adapter = await navigator.gpu.requestAdapter();
+const device = await adapter.requestDevice();
+const context = canvas.getContext('webgpu');
+
+const gpu = new PNGineGPU(device, context);
+const imports = gpu.getImports();
+
+const pngine = await loadPNGine(imports);
+gpu.setMemory(pngine.memory);
+
+// Load bytecode
+const bytecodePtr = pngine.alloc(bytecode.length);
+new Uint8Array(pngine.memory.buffer, bytecodePtr, bytecode.length)
+  .set(bytecode);
+
+// Execute
+pngine.executeAll(bytecodePtr, bytecode.length);
+```
+
+## Memory Layout
+
+WASM linear memory is managed by the Zig allocator:
+
+```
+┌─────────────────────┐ 0x00000000
+│ Stack               │
+├─────────────────────┤
+│ Static Data         │
+├─────────────────────┤
+│ Heap                │ ← alloc() returns pointers here
+│   ↓ grows down      │
+└─────────────────────┘
+```
+
+Pointers passed to JavaScript point directly into this memory. Use `Uint8Array` views to read data:
+
+```javascript
+function readBytes(ptr, len) {
+  return new Uint8Array(pngine.memory.buffer, ptr, len);
+}
 ```

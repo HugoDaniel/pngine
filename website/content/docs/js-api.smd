@@ -1,0 +1,221 @@
+---
+.title = "JavaScript API",
+.description = "Browser runtime API reference",
+.author = "PNGine Team",
+.date = @date("2024-12-18"),
+.layout = "page.shtml",
+---
+
+## Overview
+
+The JavaScript runtime consists of three modules:
+
+| Module | Purpose |
+|--------|---------|
+| `pngine-loader.js` | High-level API for loading and running PNGine content |
+| `pngine-gpu.js` | WebGPU backend that executes bytecode |
+| `pngine-png.js` | PNG parsing and bytecode extraction |
+
+## PNGineLoader
+
+Main entry point for loading PNGine content.
+
+### Constructor
+
+```javascript
+const loader = new PNGineLoader(canvas);
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `canvas` | HTMLCanvasElement | Target canvas for rendering |
+
+### Methods
+
+#### loadFromPNG(url)
+
+Load bytecode from a PNG file.
+
+```javascript
+await loader.loadFromPNG('shader.png');
+```
+
+#### loadFromBytecode(bytes)
+
+Load raw PNGB bytecode.
+
+```javascript
+const response = await fetch('shader.pngb');
+const bytes = new Uint8Array(await response.arrayBuffer());
+await loader.loadFromBytecode(bytes);
+```
+
+#### renderFrame()
+
+Execute one frame.
+
+```javascript
+loader.renderFrame();
+```
+
+#### setTime(seconds)
+
+Set the time uniform for animations.
+
+```javascript
+loader.setTime(performance.now() / 1000);
+```
+
+#### setResolution(width, height)
+
+Update canvas resolution.
+
+```javascript
+loader.setResolution(1920, 1080);
+```
+
+#### dispose()
+
+Release GPU resources.
+
+```javascript
+loader.dispose();
+```
+
+## PNGineGPU
+
+Low-level WebGPU backend. Used internally by PNGineLoader.
+
+### Constructor
+
+```javascript
+const gpu = new PNGineGPU(device, context);
+```
+
+### Resource Creation
+
+These methods create GPU resources from binary descriptors passed by the WASM runtime.
+
+| Method | Parameters | Description |
+|--------|------------|-------------|
+| `createBuffer(id, ptr, len)` | Buffer ID, descriptor pointer, length | Create GPUBuffer |
+| `createTexture(id, ptr, len)` | Texture ID, descriptor pointer, length | Create GPUTexture |
+| `createTextureView(viewId, textureId, ptr, len)` | View ID, source texture ID, descriptor | Create GPUTextureView |
+| `createSampler(id, ptr, len)` | Sampler ID, descriptor pointer, length | Create GPUSampler |
+| `createShaderModule(id, ptr, len)` | Shader ID, code pointer, length | Create GPUShaderModule |
+| `createRenderPipeline(id, ptr, len)` | Pipeline ID, descriptor pointer, length | Create GPURenderPipeline |
+| `createComputePipeline(id, ptr, len)` | Pipeline ID, descriptor pointer, length | Create GPUComputePipeline |
+| `createBindGroup(id, layoutId, ptr, len)` | Group ID, layout ID, descriptor | Create GPUBindGroup |
+| `createBindGroupLayout(id, ptr, len)` | Layout ID, descriptor pointer, length | Create GPUBindGroupLayout |
+| `createPipelineLayout(id, ptr, len)` | Layout ID, descriptor pointer, length | Create GPUPipelineLayout |
+| `createQuerySet(id, ptr, len)` | Query set ID, descriptor pointer, length | Create GPUQuerySet |
+
+### Render Pass
+
+| Method | Parameters | Description |
+|--------|------------|-------------|
+| `beginRenderPass(texture, load, store, depth)` | Target texture, load/store ops | Begin render pass |
+| `setPipeline(id)` | Pipeline ID | Bind render/compute pipeline |
+| `setBindGroup(slot, id)` | Slot index, group ID | Bind resources |
+| `setVertexBuffer(slot, id)` | Slot index, buffer ID | Bind vertex buffer |
+| `draw(vertexCount, instanceCount, first, firstInstance)` | Draw parameters | Issue draw call |
+| `drawIndexed(indexCount, instanceCount, first, baseVertex, firstInstance)` | Draw parameters | Indexed draw |
+| `endRenderPass()` | None | End current pass |
+
+### Compute Pass
+
+| Method | Parameters | Description |
+|--------|------------|-------------|
+| `beginComputePass()` | None | Begin compute pass |
+| `dispatchWorkgroups(x, y, z)` | Workgroup counts | Dispatch compute |
+| `endComputePass()` | None | End compute pass |
+
+### Execution
+
+| Method | Description |
+|--------|-------------|
+| `submit()` | Submit command buffer to GPU |
+| `reset()` | Clear all resources |
+
+## PNGinePNG
+
+PNG parsing utilities.
+
+### extractBytecode(pngBytes)
+
+Extract PNGB bytecode from PNG file.
+
+```javascript
+const pngBytes = new Uint8Array(await fetch('shader.png').then(r => r.arrayBuffer()));
+const bytecode = PNGinePNG.extractBytecode(pngBytes);
+if (bytecode) {
+  console.log('Extracted', bytecode.length, 'bytes');
+}
+```
+
+Returns `Uint8Array` or `null` if no bytecode found.
+
+### findChunk(pngBytes, chunkType)
+
+Find a specific PNG chunk.
+
+```javascript
+const chunk = PNGinePNG.findChunk(pngBytes, 'pNGb');
+```
+
+## Animation Example
+
+```javascript
+import { PNGineLoader } from './pngine-loader.js';
+
+async function main() {
+  const canvas = document.getElementById('canvas');
+  const loader = new PNGineLoader(canvas);
+
+  await loader.loadFromPNG('animation.png');
+
+  function animate(timestamp) {
+    loader.setTime(timestamp / 1000);
+    loader.renderFrame();
+    requestAnimationFrame(animate);
+  }
+
+  requestAnimationFrame(animate);
+}
+
+main();
+```
+
+## Resize Handling
+
+```javascript
+function handleResize() {
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth * dpr;
+  const height = canvas.clientHeight * dpr;
+
+  canvas.width = width;
+  canvas.height = height;
+
+  loader.setResolution(width, height);
+}
+
+window.addEventListener('resize', handleResize);
+handleResize();
+```
+
+## Error Handling
+
+```javascript
+try {
+  await loader.loadFromPNG('shader.png');
+} catch (error) {
+  if (error.message.includes('No bytecode')) {
+    console.error('PNG does not contain embedded bytecode');
+  } else if (error.message.includes('WebGPU')) {
+    console.error('WebGPU not supported');
+  } else {
+    console.error('Failed to load:', error);
+  }
+}
+```

@@ -1,57 +1,51 @@
 ---
 .title = "Documentation",
-.description = "Learn how to use PNGine",
+.description = "PNGine reference documentation",
 .author = "PNGine Team",
-.date = @date("2024-12-15"),
+.date = @date("2024-12-18"),
 .layout = "docs.shtml",
 ---
 
-Welcome to the PNGine documentation. Here you'll learn how to use PNGine to create WebGPU graphics programs using a compact bytecode format.
+## Reference
 
-## Overview
-
-PNGine consists of three main components:
-
-1. **PBSF** - PNGine Bytecode Source Format, a human-readable S-expression syntax
-2. **PNGB** - PNGine Binary, the compiled bytecode format
-3. **Runtime** - The WebGPU interpreter that executes PNGB bytecode
-
-## Sections
-
-- [WASM API](/docs/wasm-api/) - Using PNGine from JavaScript
-- [PBSF Syntax](/docs/pbsf-syntax/) - The source language reference
+- [Getting Started](/docs/getting-started/) - Installation and first program
+- [DSL Syntax](/docs/dsl-syntax/) - Macro-based language reference
+- [CLI Reference](/docs/cli/) - Command-line interface
+- [JavaScript API](/docs/js-api/) - Browser runtime API
 - [Bytecode Format](/docs/bytecode/) - PNGB binary specification
+- [WASM API](/docs/wasm-api/) - WebAssembly exports
 
-## Quick Start
+## Architecture
 
-```javascript
-// Load the WASM module
-const response = await fetch('pngine.wasm');
-const wasmModule = await WebAssembly.instantiate(await response.arrayBuffer());
-const pngine = wasmModule.instance.exports;
-
-// Initialize
-pngine.onInit();
-
-// Compile PBSF source
-const source = `(module "hello" (nop))`;
-const encoder = new TextEncoder();
-const sourceBytes = encoder.encode(source);
-
-// Allocate and copy source
-const srcPtr = pngine.alloc(sourceBytes.length);
-new Uint8Array(pngine.memory.buffer, srcPtr, sourceBytes.length).set(sourceBytes);
-
-// Compile
-const result = pngine.compile(srcPtr, sourceBytes.length);
-if (result === 0) {
-    const outputPtr = pngine.getOutputPtr();
-    const outputLen = pngine.getOutputLen();
-    const bytecode = new Uint8Array(pngine.memory.buffer, outputPtr, outputLen);
-    console.log('Compiled', bytecode.length, 'bytes');
-}
-
-// Cleanup
-pngine.free(srcPtr, sourceBytes.length);
-pngine.freeOutput();
 ```
+Source (.pngine)
+    │
+    ▼
+┌─────────────────┐
+│  DSL Compiler   │  Lexer → Parser → Analyzer → Emitter
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  PNGB Bytecode  │  Header + Opcodes + Strings + Data
+└────────┬────────┘
+         │
+    ┌────┴────┐
+    ▼         ▼
+┌───────┐  ┌───────┐
+│  PNG  │  │ WASM  │
+│ Embed │  │Runtime│
+└───────┘  └───┬───┘
+               ▼
+         ┌──────────┐
+         │  WebGPU  │
+         └──────────┘
+```
+
+## File Formats
+
+| Extension | Description |
+|-----------|-------------|
+| `.pngine` | DSL source file |
+| `.pngb` | Compiled bytecode |
+| `.png` | PNG with optional embedded bytecode in `pNGb` chunk |

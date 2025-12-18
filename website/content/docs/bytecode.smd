@@ -2,91 +2,150 @@
 .title = "Bytecode Format",
 .description = "PNGB binary specification",
 .author = "PNGine Team",
-.date = @date("2024-12-15"),
+.date = @date("2024-12-18"),
 .layout = "page.shtml",
 ---
-
-PNGB (PNGine Binary) is the compiled bytecode format that PNGine executes.
 
 ## File Structure
 
 ```
-+----------------+
-| Header (12B)   |
-+----------------+
-| Instructions   |
-+----------------+
-| Data Section   |
-+----------------+
+┌──────────────────────────────┐
+│ Header (16 bytes)            │
+├──────────────────────────────┤
+│ Bytecode Section             │
+│ (variable length)            │
+├──────────────────────────────┤
+│ String Table                 │
+│ (variable length)            │
+├──────────────────────────────┤
+│ Data Section                 │
+│ (variable length)            │
+└──────────────────────────────┘
 ```
 
 ## Header
 
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
-| 0 | 4 | Magic | `PNGB` (0x50 0x4E 0x47 0x42) |
-| 4 | 2 | Version | Format version (currently 1) |
-| 6 | 2 | Flags | Reserved |
-| 8 | 4 | Code Size | Size of instruction section |
+| 0 | 4 | magic | `PNGB` (0x50 0x4E 0x47 0x42) |
+| 4 | 2 | version | Format version (currently 1) |
+| 6 | 2 | flags | Reserved, must be 0 |
+| 8 | 4 | string_table_offset | Byte offset to string table |
+| 12 | 4 | data_section_offset | Byte offset to data section |
 
-## Instructions
+## Bytecode Section
 
-Instructions use a fixed-width encoding for fast decoding:
+Bytecode starts at offset 16 and extends to `string_table_offset`.
 
-| Bits | Field |
-|------|-------|
-| 0-7 | Opcode |
-| 8-15 | Flags |
-| 16-31 | Operand |
+### Instruction Encoding
+
+Instructions use variable-length encoding with a 1-byte opcode followed by operands.
+
+```
+┌────────┬─────────────┐
+│ Opcode │ Operands... │
+│ (1B)   │ (variable)  │
+└────────┴─────────────┘
+```
 
 ### Opcodes
 
-| Code | Name | Description |
-|------|------|-------------|
-| 0x00 | NOP | No operation |
-| 0x01 | DATA | Define data block |
-| 0x02 | SHADER | Create shader module |
-| 0x03 | PIPELINE | Create render pipeline |
-| 0x10 | FRAME | Begin frame definition |
-| 0x11 | FRAME_END | End frame definition |
-| 0x20 | SET_PIPELINE | Bind pipeline |
-| 0x21 | DRAW | Draw primitives |
-| 0x22 | SUBMIT | Submit commands |
+| Code | Name | Operands | Description |
+|------|------|----------|-------------|
+| 0x00 | NOP | none | No operation |
+| 0x01 | CREATE_BUFFER | id:u16, desc:varint | Create GPU buffer |
+| 0x02 | CREATE_TEXTURE | id:u16, desc:varint | Create GPU texture |
+| 0x03 | CREATE_SAMPLER | id:u16, desc:varint | Create sampler |
+| 0x04 | CREATE_SHADER | id:u16, data:varint | Create shader module |
+| 0x05 | CREATE_BIND_GROUP | id:u16, layout:u16, desc:varint | Create bind group |
+| 0x06 | CREATE_BIND_GROUP_LAYOUT | id:u16, desc:varint | Create bind group layout |
+| 0x07 | CREATE_PIPELINE_LAYOUT | id:u16, desc:varint | Create pipeline layout |
+| 0x08 | CREATE_RENDER_PIPELINE | id:u16, desc:varint | Create render pipeline |
+| 0x09 | CREATE_COMPUTE_PIPELINE | id:u16, desc:varint | Create compute pipeline |
+| 0x0A | WRITE_BUFFER | buf:u16, offset:u32, data:varint | Write data to buffer |
+| 0x0B | COPY_BUFFER_TO_BUFFER | src:u16, dst:u16, size:u32 | Copy between buffers |
+| 0x0C | CREATE_TEXTURE_VIEW | id:u16, tex:u16, desc:varint | Create texture view |
+| 0x0D | CREATE_QUERY_SET | id:u16, desc:varint | Create query set |
+| 0x10 | BEGIN_FRAME | id:u16, name:string_id | Begin frame definition |
+| 0x11 | END_FRAME | none | End frame definition |
+| 0x20 | BEGIN_RENDER_PASS | desc:varint | Begin render pass |
+| 0x21 | END_RENDER_PASS | none | End render pass |
+| 0x22 | SET_PIPELINE | id:u16 | Bind pipeline |
+| 0x23 | SET_BIND_GROUP | slot:u8, id:u16 | Bind resources |
+| 0x24 | SET_VERTEX_BUFFER | slot:u8, id:u16 | Bind vertex buffer |
+| 0x25 | SET_INDEX_BUFFER | id:u16, format:u8 | Bind index buffer |
+| 0x26 | DRAW | vertices:u32, instances:u32 | Draw call |
+| 0x27 | DRAW_INDEXED | indices:u32, instances:u32 | Indexed draw |
+| 0x30 | BEGIN_COMPUTE_PASS | none | Begin compute pass |
+| 0x31 | END_COMPUTE_PASS | none | End compute pass |
+| 0x32 | DISPATCH | x:u32, y:u32, z:u32 | Dispatch workgroups |
+| 0x40 | SUBMIT | none | Submit command buffer |
+
+### Varint Encoding
+
+Variable-length integers use LEB128 encoding:
+- Values 0-127: 1 byte
+- Values 128-16383: 2 bytes
+- And so on
+
+## String Table
+
+Interned strings for entry point names and identifiers.
+
+```
+┌────────────────────┐
+│ count (u16)        │
+├────────────────────┤
+│ offsets[count] u16 │ Offset from table start
+├────────────────────┤
+│ string data        │ Null-terminated UTF-8
+└────────────────────┘
+```
 
 ## Data Section
 
-Variable-length data (shader source, names) stored at the end of the file. Instructions reference data by offset from the start of the data section.
-
-## Example Binary
-
-For this PBSF source:
-
-```lisp
-(module "test"
-  (nop))
-```
-
-The compiled PNGB:
+Binary data referenced by opcodes (shader code, vertex data, etc.).
 
 ```
-50 4E 47 42  ; Magic: "PNGB"
-01 00        ; Version: 1
-00 00        ; Flags: 0
-04 00 00 00  ; Code size: 4 bytes
-00 00 00 00  ; NOP instruction
+┌────────────────────┐
+│ count (u16)        │
+├────────────────────┤
+│ entries[count]     │
+│  ├─ offset (u32)   │ Offset from section start
+│  └─ length (u32)   │ Data length in bytes
+├────────────────────┤
+│ data bytes         │
+└────────────────────┘
 ```
 
-## Compression
+## PNG Embedding
 
-PNGB typically achieves 2-3x compression compared to PBSF source:
+PNGB bytecode is embedded in PNG files using a custom ancillary chunk:
 
-| Source | Compiled | Ratio |
-|--------|----------|-------|
-| 100B | 40B | 2.5x |
-| 1KB | 400B | 2.5x |
-| 10KB | 3.5KB | 2.8x |
+```
+┌────────────────────┐
+│ length (4B BE)     │ Chunk data length
+├────────────────────┤
+│ type: "pNGb"       │ Chunk type (4 bytes)
+├────────────────────┤
+│ compressed data    │ DEFLATE-compressed PNGB
+├────────────────────┤
+│ CRC32 (4B BE)      │ Chunk checksum
+└────────────────────┘
+```
 
-The compression comes from:
-- Binary opcodes vs text keywords
-- Compact integer encoding
-- Removed whitespace and comments
+The chunk type `pNGb` follows PNG naming conventions:
+- Lowercase first letter: ancillary (not critical)
+- Uppercase second letter: public (registered)
+- Lowercase third letter: reserved
+- Lowercase fourth letter: safe to copy
+
+## Size Comparison
+
+Typical compression ratios:
+
+| Content | Source | PNGB | Ratio |
+|---------|--------|------|-------|
+| Simple triangle | ~500B | ~180B | 2.8x |
+| Rotating cube | ~2KB | ~600B | 3.3x |
+| Boids simulation | ~8KB | ~2.5KB | 3.2x |

@@ -1,0 +1,135 @@
+---
+.title = "Getting Started",
+.description = "Installation and first program",
+.author = "PNGine Team",
+.date = @date("2024-12-18"),
+.layout = "page.shtml",
+---
+
+## Requirements
+
+- Zig 0.14.0 or later
+- WebGPU-capable browser for runtime execution
+
+## Building
+
+```bash
+git clone https://github.com/pngine/pngine
+cd pngine
+
+# Build CLI
+zig build
+
+# Build WASM runtime
+zig build web
+
+# Run tests
+zig build test
+```
+
+Output files:
+- `zig-out/bin/pngine` - CLI executable
+- `zig-out/lib/pngine.wasm` - Browser runtime
+
+## First Program
+
+Create `triangle.pngine`:
+
+```
+#shaderModule code {
+  code="
+    @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      var pos = array<vec2f, 3>(
+        vec2f(0.0, 0.5),
+        vec2f(-0.5, -0.5),
+        vec2f(0.5, -0.5)
+      );
+      return vec4f(pos[i], 0.0, 1.0);
+    }
+
+    @fragment fn fs() -> @location(0) vec4f {
+      return vec4f(1.0, 0.0, 0.0, 1.0);
+    }
+  "
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={ entryPoint=vs module=code }
+  fragment={
+    entryPoint=fs
+    module=code
+    targets=[{ format=preferredCanvasFormat }]
+  }
+  primitive={ topology=triangle-list }
+}
+
+#renderPass pass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0 0 0 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=pipeline
+  draw=3
+}
+
+#frame main {
+  perform=[pass]
+}
+```
+
+## Compile and Embed
+
+```bash
+# Create PNG with embedded bytecode
+pngine triangle.pngine -o triangle.png
+
+# Verify bytecode
+pngine check triangle.png
+```
+
+## Run in Browser
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+  <script type="module">
+    import { PNGineLoader } from './pngine-loader.js';
+
+    const canvas = document.getElementById('canvas');
+    const loader = new PNGineLoader(canvas);
+
+    // Load PNG with embedded bytecode
+    await loader.loadFromPNG('triangle.png');
+
+    // Render frame
+    loader.renderFrame();
+  </script>
+</head>
+<body>
+  <canvas id="canvas" width="512" height="512"></canvas>
+</body>
+</html>
+```
+
+## Animation Loop
+
+For animated content, call `renderFrame` in a loop:
+
+```javascript
+function animate(time) {
+  loader.setTime(time / 1000);  // Convert to seconds
+  loader.renderFrame();
+  requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+```
+
+## Next Steps
+
+- [DSL Syntax](/docs/dsl-syntax/) - Complete language reference
+- [CLI Reference](/docs/cli/) - All command options
+- [JavaScript API](/docs/js-api/) - Browser runtime details

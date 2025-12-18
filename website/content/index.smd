@@ -1,36 +1,67 @@
 ---
 .title = "PNGine",
-.description = "A register-based bytecode interpreter for WebGPU",
+.description = "WebGPU bytecode engine with PNG embedding",
 .author = "PNGine Team",
-.date = @date("2024-12-15"),
+.date = @date("2024-12-18"),
 .layout = "index.shtml",
 ---
 
-## What is PNGine?
+## Overview
 
-PNGine is a compact bytecode interpreter designed for WebGPU graphics programming. It compiles PBSF (a Lisp-like S-expression format) into PNGB binary bytecode that can be executed in the browser.
+PNGine compiles a macro-based DSL into PNGB bytecode for WebGPU execution. Bytecode can be embedded in PNG files using a custom `pNGb` ancillary chunk.
 
-## Features
+## Components
 
-- **Tiny WASM binary** - Under 30KB for the complete compiler
-- **S-expression syntax** - Human-readable PBSF source format
-- **Compact bytecode** - PNGB binary format with 2-3x compression
-- **WebGPU ready** - Designed for modern GPU programming
-- **Written in Zig** - Fast, safe, and portable
+| Component | Description |
+|-----------|-------------|
+| **DSL Compiler** | Compiles `.pngine` source to PNGB bytecode |
+| **PNGB Format** | Binary bytecode with string table and data section |
+| **WASM Runtime** | Executes bytecode via WebGPU in browsers |
+| **CLI** | Command-line tool for compilation and PNG embedding |
 
-## Quick Example
+## Example
 
-```lisp
-(module "triangle"
-  (data $d:0 "@vertex fn main() -> @builtin(position) vec4f { ... }")
-  (shader $shd:0 (code $d:0))
-  (render-pipeline $pipe:0 (shader $shd:0))
-  (frame $frm:0 "main"
-    (set-pipeline $pipe:0)
-    (draw 3 1)
-    (submit)))
+```
+#shaderModule code {
+  code="
+    @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      var pos = array<vec2f, 3>(
+        vec2f(0.0, 0.5), vec2f(-0.5, -0.5), vec2f(0.5, -0.5)
+      );
+      return vec4f(pos[i], 0.0, 1.0);
+    }
+    @fragment fn fs() -> @location(0) vec4f {
+      return vec4f(1.0, 0.0, 0.0, 1.0);
+    }
+  "
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={ entryPoint=vs module=code }
+  fragment={ entryPoint=fs module=code targets=[{ format=preferredCanvasFormat }] }
+}
+
+#renderPass pass {
+  colorAttachments=[{ view=contextCurrentTexture loadOp=clear storeOp=store }]
+  pipeline=pipeline
+  draw=3
+}
+
+#frame main { perform=[pass] }
 ```
 
-## Getting Started
+## Usage
 
-Check out the [documentation](/docs/) to learn how to use PNGine in your projects.
+```bash
+# Compile to PNG with embedded bytecode
+pngine shader.pngine -o output.png
+
+# Render frame to PNG
+pngine shader.pngine --frame -s 512x512 -o output.png
+
+# Extract bytecode from PNG
+pngine extract output.png -o output.pngb
+```
+
+See the [documentation](/docs/) for complete reference.

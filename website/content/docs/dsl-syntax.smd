@@ -1,0 +1,358 @@
+---
+.title = "DSL Syntax",
+.description = "Macro-based language reference",
+.author = "PNGine Team",
+.date = @date("2024-12-18"),
+.layout = "page.shtml",
+---
+
+## Structure
+
+A `.pngine` file contains macro declarations. Each macro starts with `#` followed by the macro type and name:
+
+```
+#macroType name {
+  field=value
+  field2=[array values]
+  nested={ key=value }
+}
+```
+
+## Macros
+
+### #shaderModule
+
+Defines WGSL shader code.
+
+```
+#shaderModule name {
+  code="WGSL source code"
+}
+```
+
+### #buffer
+
+Creates a GPU buffer.
+
+```
+#buffer name {
+  size=1024                    // Size in bytes or reference to #data
+  usage=[VERTEX STORAGE]       // Usage flags
+  mappedAtCreation=dataRef     // Optional: initialize with #data
+  pool=2                       // Optional: create N buffers for ping-pong
+}
+```
+
+**Usage flags:** `VERTEX`, `INDEX`, `UNIFORM`, `STORAGE`, `COPY_SRC`, `COPY_DST`, `MAP_READ`, `MAP_WRITE`, `INDIRECT`, `QUERY_RESOLVE`
+
+### #texture
+
+Creates a GPU texture.
+
+```
+#texture name {
+  size=[512 512]               // [width, height] or [width, height, depth]
+  format=rgba8unorm            // Texture format
+  usage=[TEXTURE_BINDING RENDER_ATTACHMENT]
+  sampleCount=4                // Optional: for MSAA
+}
+```
+
+**Common formats:** `rgba8unorm`, `bgra8unorm`, `rgba16float`, `rgba32float`, `depth24plus`, `depth32float`
+
+### #sampler
+
+Creates a texture sampler.
+
+```
+#sampler name {
+  magFilter=linear
+  minFilter=linear
+  addressModeU=repeat
+  addressModeV=repeat
+}
+```
+
+**Filter modes:** `nearest`, `linear`
+**Address modes:** `clamp-to-edge`, `repeat`, `mirror-repeat`
+
+### #textureView
+
+Creates a view into a texture.
+
+```
+#textureView name {
+  texture=textureName
+  format=rgba8unorm            // Optional: override format
+  dimension=2d                 // Optional: 1d, 2d, 2d-array, cube, cube-array, 3d
+  baseMipLevel=0
+  mipLevelCount=1
+  baseArrayLayer=0
+  arrayLayerCount=1
+}
+```
+
+### #bindGroupLayout
+
+Defines the layout of a bind group.
+
+```
+#bindGroupLayout name {
+  entries=[
+    { binding=0 visibility=[VERTEX FRAGMENT] buffer={ type=uniform } }
+    { binding=1 visibility=[FRAGMENT] texture={ sampleType=float } }
+    { binding=2 visibility=[FRAGMENT] sampler={ type=filtering } }
+  ]
+}
+```
+
+### #pipelineLayout
+
+Defines layout for a pipeline.
+
+```
+#pipelineLayout name {
+  bindGroupLayouts=[layout0 layout1]
+}
+```
+
+### #bindGroup
+
+Binds resources to shader bindings.
+
+```
+#bindGroup name {
+  layout={ pipeline=pipelineName index=0 }  // Derive from pipeline
+  // or: layout=bindGroupLayoutName          // Explicit layout
+  entries=[
+    { binding=0 resource={ buffer=bufferName } }
+    { binding=1 resource={ textureView=textureName } }
+    { binding=2 resource={ sampler=samplerName } }
+  ]
+  pool=2                                     // Optional: for ping-pong
+}
+```
+
+### #renderPipeline
+
+Creates a render pipeline.
+
+```
+#renderPipeline name {
+  layout=auto                  // or: layout=pipelineLayoutName
+  vertex={
+    entryPoint=vertexMain
+    module=shaderName
+    buffers=[                  // Optional: vertex buffer layouts
+      {
+        arrayStride=16
+        stepMode=vertex        // vertex or instance
+        attributes=[
+          { shaderLocation=0 offset=0 format=float32x4 }
+        ]
+      }
+    ]
+  }
+  fragment={
+    entryPoint=fragMain
+    module=shaderName
+    targets=[{ format=preferredCanvasFormat }]
+  }
+  primitive={
+    topology=triangle-list     // point-list, line-list, line-strip, triangle-list, triangle-strip
+    cullMode=back              // none, front, back
+    frontFace=ccw              // ccw, cw
+  }
+  depthStencil={               // Optional
+    format=depth24plus
+    depthWriteEnabled=true
+    depthCompare=less
+  }
+  multisample=4                // Optional: MSAA sample count
+}
+```
+
+### #computePipeline
+
+Creates a compute pipeline.
+
+```
+#computePipeline name {
+  layout=auto
+  compute={
+    entryPoint=main
+    module=shaderName
+  }
+}
+```
+
+### #renderPass
+
+Defines a render pass.
+
+```
+#renderPass name {
+  colorAttachments=[{
+    view=contextCurrentTexture  // or: view=textureName
+    resolveTarget=textureName   // Optional: for MSAA resolve
+    clearValue=[0 0 0 1]
+    loadOp=clear                // clear or load
+    storeOp=store               // store or discard
+  }]
+  depthStencilAttachment={      // Optional
+    view=depthTexture
+    depthClearValue=1.0
+    depthLoadOp=clear
+    depthStoreOp=store
+  }
+  pipeline=pipelineName
+  bindGroups=[group0 group1]
+  vertexBuffers=[buf0 buf1]
+  vertexBuffersPoolOffsets=[0 1]  // Optional: for ping-pong
+  draw=3                        // Vertex count
+  // or: draw={ vertexCount=3 instanceCount=100 firstVertex=0 firstInstance=0 }
+  // or: drawIndexed={ indexCount=36 instanceCount=1 }
+}
+```
+
+### #computePass
+
+Defines a compute pass.
+
+```
+#computePass name {
+  pipeline=pipelineName
+  bindGroups=[group0]
+  bindGroupsPoolOffsets=[0]     // Optional: for ping-pong
+  dispatchWorkgroups=[8 8 1]
+  // or: dispatchWorkgroups=64  // Single dimension
+  // or: dispatchWorkgroups="ceil(NUM_PARTICLES / 64)"  // Expression
+}
+```
+
+### #queue
+
+Queue operations for buffer writes.
+
+```
+#queue name {
+  writeBuffer={
+    buffer=bufferName
+    bufferOffset=0
+    data=dataName               // Reference to #data
+    // or: data="$uniforms.code.inputs.data"  // Runtime value
+  }
+}
+```
+
+### #data
+
+Defines data arrays.
+
+```
+#data name {
+  float32Array=[1.0 2.0 3.0 4.0]
+}
+
+// With computed initialization
+#data particles {
+  float32Array={
+    numberOfElements=1024
+    initEachElementWith=[
+      "cos((ELEMENT_ID / 1024) * PI * 2)"
+      "sin((ELEMENT_ID / 1024) * PI * 2)"
+    ]
+  }
+}
+```
+
+### #frame
+
+Defines a frame to execute.
+
+```
+#frame name {
+  before=[queueOp1 queueOp2]   // Optional: pre-frame operations
+  perform=[pass1 pass2]        // Render/compute passes in order
+}
+```
+
+### #define
+
+Defines a compile-time constant.
+
+```
+#define NUM_PARTICLES=2048
+#define SAMPLE_COUNT=4
+```
+
+Use in expressions: `size=NUM_PARTICLES`, `multisample=SAMPLE_COUNT`
+
+### #querySet
+
+Creates a query set for GPU queries.
+
+```
+#querySet name {
+  type=occlusion               // occlusion or timestamp
+  count=16
+}
+```
+
+## References
+
+Reference other resources with their name directly:
+
+```
+#renderPass pass {
+  pipeline=myPipeline          // References #renderPipeline myPipeline
+  bindGroups=[group0 group1]   // References #bindGroup resources
+}
+```
+
+## Special Values
+
+| Value | Description |
+|-------|-------------|
+| `contextCurrentTexture` | Current canvas texture (for render targets) |
+| `preferredCanvasFormat` | Browser's preferred texture format |
+| `auto` | Auto-derive layout from shader reflection |
+
+## Expressions
+
+Numeric fields support expressions:
+
+```
+size="4 * 1024"                // 4096
+dispatchWorkgroups="ceil(NUM_PARTICLES / 64)"
+arrayStride="4 * 4"            // 16 bytes for vec4
+```
+
+Available: `+`, `-`, `*`, `/`, `ceil`, `floor`, `PI`, `ELEMENT_ID`, `NUM_PARTICLES`, defined constants
+
+## Ping-Pong Buffers
+
+For compute simulations requiring double-buffering:
+
+```
+#buffer particles {
+  size=32768
+  usage=[VERTEX STORAGE]
+  pool=2                       // Creates particles_0, particles_1
+}
+
+#bindGroup sim {
+  entries=[
+    { binding=0 resource={ buffer=particles pingPong=0 } }  // Read
+    { binding=1 resource={ buffer=particles pingPong=1 } }  // Write
+  ]
+  pool=2
+}
+
+#computePass update {
+  bindGroups=[sim]
+  bindGroupsPoolOffsets=[0]    // Alternates each frame
+}
+```
+
+The runtime alternates: `actual_id = base_id + (frame_count + offset) % pool_size`

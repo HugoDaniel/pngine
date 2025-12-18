@@ -1,0 +1,141 @@
+---
+.title = "CLI Reference",
+.description = "Command-line interface",
+.author = "PNGine Team",
+.date = @date("2024-12-18"),
+.layout = "page.shtml",
+---
+
+## Synopsis
+
+```
+pngine [command] <input> [options]
+```
+
+## Commands
+
+### Default (render)
+
+Compile source to PNG with embedded bytecode.
+
+```bash
+pngine <input.pngine> [-o output.png] [options]
+```
+
+By default, creates a 1x1 transparent PNG with bytecode in the `pNGb` chunk.
+
+### compile
+
+Compile source to raw bytecode.
+
+```bash
+pngine compile <input.pngine> [-o output.pngb]
+```
+
+### check
+
+Validate bytecode. Accepts `.pngine`, `.pngb`, or `.png` files.
+
+```bash
+pngine check <input>
+```
+
+Returns exit code 0 if valid, non-zero otherwise.
+
+### embed
+
+Embed bytecode into an existing PNG.
+
+```bash
+pngine embed <image.png> <bytecode.pngb> [-o output.png]
+```
+
+### extract
+
+Extract bytecode from PNG.
+
+```bash
+pngine extract <image.png> [-o output.pngb]
+```
+
+## Options
+
+### Output
+
+| Option | Description |
+|--------|-------------|
+| `-o, --output <path>` | Output file path. Default: input name with appropriate extension |
+
+### Rendering
+
+| Option | Description |
+|--------|-------------|
+| `-f, --frame` | Render actual frame via GPU (requires GPU backend) |
+| `-s, --size <WxH>` | Output dimensions when rendering. Default: `512x512` |
+| `-t, --time <seconds>` | Time value for animation. Default: `0.0` |
+
+### Embedding
+
+| Option | Description |
+|--------|-------------|
+| `-e, --embed` | Embed bytecode in output PNG (default: on) |
+| `--no-embed` | Don't embed bytecode |
+
+## Examples
+
+```bash
+# Compile and embed in 1x1 PNG
+pngine shader.pngine
+
+# Compile with custom output path
+pngine shader.pngine -o build/shader.png
+
+# Render 512x512 frame with embedded bytecode
+pngine shader.pngine --frame
+
+# Render at specific size
+pngine shader.pngine --frame -s 1920x1080
+
+# Render animation at t=2.5 seconds
+pngine shader.pngine --frame -t 2.5
+
+# Render without embedding bytecode
+pngine shader.pngine --frame --no-embed
+
+# Compile to raw bytecode
+pngine compile shader.pngine -o shader.pngb
+
+# Validate a file
+pngine check shader.pngb
+pngine check output.png
+
+# Embed bytecode into existing artwork
+pngine embed artwork.png shader.pngb -o final.png
+
+# Extract bytecode from PNG
+pngine extract final.png -o extracted.pngb
+```
+
+## Input Formats
+
+| Extension | Description |
+|-----------|-------------|
+| `.pngine` | DSL source (macro-based syntax) |
+| `.pbsf` | Legacy PBSF source (S-expressions) |
+| `.pngb` | Compiled bytecode |
+| `.png` | PNG with embedded bytecode |
+
+## Exit Codes
+
+| Code | Description |
+|------|-------------|
+| 0 | Success |
+| 1 | Invalid arguments |
+| 2 | File not found |
+| 3 | Parse error |
+| 4 | Compilation error |
+| 5 | I/O error |
+
+## Environment
+
+The CLI reads no environment variables. All configuration is via command-line arguments.
