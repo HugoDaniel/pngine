@@ -161,6 +161,11 @@ pub const OpCode = enum(u8) {
     /// Reads byte_len bytes from WASM memory at pointer from call_id
     write_buffer_from_wasm = 0x28,
 
+    /// Write runtime-generated array to GPU buffer.
+    /// Params: buffer_id, buffer_offset, array_id
+    /// Copies typed array data to buffer at specified offset.
+    write_buffer_from_array = 0x29,
+
     // ========================================================================
     // Frame Control (0x30-0x3F)
     // ========================================================================
@@ -192,6 +197,16 @@ pub const OpCode = enum(u8) {
     /// Select resource from pool (ping-pong).
     /// Params: dest_slot, pool_id, frame_offset
     select_from_pool = 0x40,
+
+    /// Set vertex buffer from pool.
+    /// Params: slot, base_buffer_id, pool_size, offset
+    /// Actual buffer ID = base_buffer_id + (frame_counter + offset) % pool_size
+    set_vertex_buffer_pool = 0x41,
+
+    /// Set bind group from pool.
+    /// Params: slot, base_group_id, pool_size, offset
+    /// Actual group ID = base_group_id + (frame_counter + offset) % pool_size
+    set_bind_group_pool = 0x42,
 
     // ========================================================================
     // Data Generation (0x50-0x7F) - Runtime Data Generation
@@ -257,12 +272,15 @@ pub const OpCode = enum(u8) {
             .init_wasm_module,
             .call_wasm_func,
             .write_buffer_from_wasm,
+            .write_buffer_from_array,
             .define_frame,
             .end_frame,
             .exec_pass,
             .define_pass,
             .end_pass_def,
             .select_from_pool,
+            .set_vertex_buffer_pool,
+            .set_bind_group_pool,
             .create_typed_array,
             .fill_constant,
             .fill_random,

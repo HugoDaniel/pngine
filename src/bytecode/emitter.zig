@@ -262,6 +262,40 @@ pub const Emitter = struct {
         try self.emitVarint(allocator, buffer_id);
     }
 
+    /// Emit set_vertex_buffer_pool instruction for pooled buffers.
+    /// Runtime computes: actual_id = base_id + (frame_counter + offset) % pool_size
+    pub fn setVertexBufferPool(
+        self: *Self,
+        allocator: Allocator,
+        slot: u8,
+        base_buffer_id: u16,
+        pool_size: u8,
+        offset: u8,
+    ) !void {
+        try self.emitOpcode(allocator, .set_vertex_buffer_pool);
+        try self.emitByte(allocator, slot);
+        try self.emitVarint(allocator, base_buffer_id);
+        try self.emitByte(allocator, pool_size);
+        try self.emitByte(allocator, offset);
+    }
+
+    /// Emit set_bind_group_pool instruction for pooled bind groups.
+    /// Runtime computes: actual_id = base_id + (frame_counter + offset) % pool_size
+    pub fn setBindGroupPool(
+        self: *Self,
+        allocator: Allocator,
+        slot: u8,
+        base_group_id: u16,
+        pool_size: u8,
+        offset: u8,
+    ) !void {
+        try self.emitOpcode(allocator, .set_bind_group_pool);
+        try self.emitByte(allocator, slot);
+        try self.emitVarint(allocator, base_group_id);
+        try self.emitByte(allocator, pool_size);
+        try self.emitByte(allocator, offset);
+    }
+
     /// Emit set_index_buffer instruction.
     pub fn setIndexBuffer(
         self: *Self,
@@ -274,28 +308,40 @@ pub const Emitter = struct {
         try self.emitByte(allocator, format_id);
     }
 
-    /// Emit draw instruction.
+    /// Emit draw instruction with full WebGPU parameters.
+    /// Params: vertex_count, instance_count, first_vertex, first_instance
     pub fn draw(
         self: *Self,
         allocator: Allocator,
         vertex_count: u32,
         instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
     ) !void {
         try self.emitOpcode(allocator, .draw);
         try self.emitVarint(allocator, vertex_count);
         try self.emitVarint(allocator, instance_count);
+        try self.emitVarint(allocator, first_vertex);
+        try self.emitVarint(allocator, first_instance);
     }
 
-    /// Emit draw_indexed instruction.
+    /// Emit draw_indexed instruction with full WebGPU parameters.
+    /// Params: index_count, instance_count, first_index, base_vertex, first_instance
     pub fn drawIndexed(
         self: *Self,
         allocator: Allocator,
         index_count: u32,
         instance_count: u32,
+        first_index: u32,
+        base_vertex: u32,
+        first_instance: u32,
     ) !void {
         try self.emitOpcode(allocator, .draw_indexed);
         try self.emitVarint(allocator, index_count);
         try self.emitVarint(allocator, instance_count);
+        try self.emitVarint(allocator, first_index);
+        try self.emitVarint(allocator, base_vertex);
+        try self.emitVarint(allocator, first_instance);
     }
 
     /// Emit dispatch instruction.
@@ -463,6 +509,7 @@ pub const Emitter = struct {
     // ========================================================================
 
     /// Emit create_typed_array instruction.
+    /// Creates a typed array in runtime memory for later filling.
     pub fn createTypedArray(
         self: *Self,
         allocator: Allocator,
@@ -474,6 +521,81 @@ pub const Emitter = struct {
         try self.emitVarint(allocator, array_id);
         try self.emitByte(allocator, @intFromEnum(element_type));
         try self.emitVarint(allocator, element_count);
+    }
+
+    /// Emit fill_constant instruction.
+    /// Fills array elements with a constant value.
+    pub fn fillConstant(
+        self: *Self,
+        allocator: Allocator,
+        array_id: u16,
+        offset: u32,
+        count: u32,
+        stride: u8,
+        value_data_id: u16,
+    ) !void {
+        try self.emitOpcode(allocator, .fill_constant);
+        try self.emitVarint(allocator, array_id);
+        try self.emitVarint(allocator, offset);
+        try self.emitVarint(allocator, count);
+        try self.emitByte(allocator, stride);
+        try self.emitVarint(allocator, value_data_id);
+    }
+
+    /// Emit fill_random instruction.
+    /// Fills array elements with random values in [min, max].
+    pub fn fillRandom(
+        self: *Self,
+        allocator: Allocator,
+        array_id: u16,
+        offset: u32,
+        count: u32,
+        stride: u8,
+        min_data_id: u16,
+        max_data_id: u16,
+    ) !void {
+        try self.emitOpcode(allocator, .fill_random);
+        try self.emitVarint(allocator, array_id);
+        try self.emitVarint(allocator, offset);
+        try self.emitVarint(allocator, count);
+        try self.emitByte(allocator, stride);
+        try self.emitVarint(allocator, min_data_id);
+        try self.emitVarint(allocator, max_data_id);
+    }
+
+    /// Emit fill_expression instruction.
+    /// Fills array elements by evaluating expression for each element.
+    /// Expression can use: i (element index), n (total count), PI, random(), sin(), cos(), sqrt()
+    pub fn fillExpression(
+        self: *Self,
+        allocator: Allocator,
+        array_id: u16,
+        offset: u32,
+        count: u32,
+        stride: u8,
+        expr_data_id: u16,
+    ) !void {
+        try self.emitOpcode(allocator, .fill_expression);
+        try self.emitVarint(allocator, array_id);
+        try self.emitVarint(allocator, offset);
+        try self.emitVarint(allocator, count);
+        try self.emitByte(allocator, stride);
+        try self.emitVarint(allocator, expr_data_id);
+    }
+
+    /// Emit write_buffer_from_array instruction.
+    /// Copies runtime-generated array data to GPU buffer.
+    pub fn writeBufferFromArray(
+        self: *Self,
+        allocator: Allocator,
+        buffer_id: u16,
+        buffer_offset: u32,
+        array_id: u16,
+    ) !void {
+        try self.emitOpcode(allocator, .write_buffer_from_array);
+        try self.emitVarint(allocator, buffer_id);
+        try self.emitVarint(allocator, buffer_offset);
+        try self.emitVarint(allocator, array_id);
     }
 };
 
@@ -517,12 +639,14 @@ test "emit draw" {
     var emitter: Emitter = .empty;
     defer emitter.deinit(testing.allocator);
 
-    try emitter.draw(testing.allocator, 3, 1);
+    try emitter.draw(testing.allocator, 3, 1, 0, 0);
 
     const bc = emitter.bytecode();
     try testing.expectEqual(@as(u8, @intFromEnum(OpCode.draw)), bc[0]);
     try testing.expectEqual(@as(u8, 3), bc[1]); // vertex_count = 3
     try testing.expectEqual(@as(u8, 1), bc[2]); // instance_count = 1
+    try testing.expectEqual(@as(u8, 0), bc[3]); // first_vertex = 0
+    try testing.expectEqual(@as(u8, 0), bc[4]); // first_instance = 0
 }
 
 test "emit simple triangle sequence" {
@@ -543,7 +667,7 @@ test "emit simple triangle sequence" {
     try emitter.definePass(testing.allocator, 0, .render, 2); // pass $pass:0 render from descriptor $d:2
 
     try emitter.setPipeline(testing.allocator, 0);
-    try emitter.draw(testing.allocator, 3, 1);
+    try emitter.draw(testing.allocator, 3, 1, 0, 0);
     try emitter.endPass(testing.allocator);
 
     try emitter.endPassDef(testing.allocator);

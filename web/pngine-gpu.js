@@ -48,6 +48,9 @@ export class PNGineGPU {
         this.wasmModules = new Map();      // Module ID → { instance, memory }
         this.wasmCallResults = new Map();  // Call ID → { ptr, moduleId }
 
+        // Runtime data generation
+        this.typedArrays = new Map();      // Array ID → Float32Array (or other typed arrays)
+
         // Runtime state for dynamic arguments
         this.currentTime = 0;              // Total time in seconds ($t.total)
         this.deltaTime = 0;                // Delta time since last frame ($t.delta)
@@ -127,13 +130,17 @@ export class PNGineGPU {
     }
 
     /**
-     * Find the first buffer with UNIFORM usage.
+     * Find the first buffer with UNIFORM usage that matches our time uniform layout.
+     * Only returns buffers with size 12 (f32 time + u32 width + u32 height).
+     * This prevents corrupting other uniform buffers (e.g., simParams for boids).
      * @returns {number|null} Buffer ID or null if not found
      */
     findUniformBuffer() {
+        const TIME_UNIFORM_SIZE = 12;  // f32 time + u32 width + u32 height
         for (const [id, meta] of this.bufferMeta) {
             // GPUBufferUsage.UNIFORM = 0x0040 = 64
-            if (meta.usage & GPUBufferUsage.UNIFORM) {
+            // Only match buffers with exactly 12 bytes (time uniform layout)
+            if ((meta.usage & GPUBufferUsage.UNIFORM) && meta.size === TIME_UNIFORM_SIZE) {
                 return id;
             }
         }
@@ -321,13 +328,27 @@ export class PNGineGPU {
         }
         const bytes = this.readBytes(entriesPtr, entriesLen);
         const desc = this.decodeBindGroupDescriptor(bytes);
-        console.log(`[GPU] createBindGroup(${id}), pipeline=${pipelineId}, group=${desc.groupIndex}, entries=${desc.entries.length}`);
+        // Log detailed entry info for debugging ping-pong buffers
+        const entryDetails = desc.entries.map(e => {
+            const type = ['buf','tex','smp'][e.resourceType];
+            const size = e.resourceType === 0 ? `,sz=${e.size}` : '';
+            return `b${e.binding}:${type}${e.resourceId}${size}`;
+        }).join(', ');
+        console.log(`[GPU] createBindGroup(${id}), pipeline=${pipelineId}, group=${desc.groupIndex}, entries=[${entryDetails}]`);
 
         // Resolve resource references in entries
         const entries = desc.entries.map(entry => {
             const resolved = { binding: entry.binding };
             if (entry.resourceType === 0) { // buffer
-                resolved.resource = { buffer: this.buffers.get(entry.resourceId) };
+                const bufferResource = { buffer: this.buffers.get(entry.resourceId) };
+                // Include offset/size if specified (critical for storage buffers!)
+                if (entry.offset !== undefined && entry.offset !== 0) {
+                    bufferResource.offset = entry.offset;
+                }
+                if (entry.size !== undefined && entry.size !== 0) {
+                    bufferResource.size = entry.size;
+                }
+                resolved.resource = bufferResource;
             } else if (entry.resourceType === 1) { // texture_view
                 const texture = this.textures.get(entry.resourceId);
                 resolved.resource = texture.createView();
@@ -665,8 +686,14 @@ export class PNGineGPU {
      * @param {number} depthTextureId - Depth attachment texture (0xFFFF = none)
      */
     beginRenderPass(textureId, loadOp, storeOp, depthTextureId) {
-        console.log(`[GPU] beginRenderPass(texture=${textureId}, load=${loadOp}, store=${storeOp}, depth=${depthTextureId})`);
-        this.commandEncoder = this.device.createCommandEncoder();
+        console.log(`[GPU] beginRenderPass(texture=${textureId}, load=${loadOp}, store=${storeOp}, depth=${depthTextureId}) - encoder exists: ${!!this.commandEncoder}`);
+        // Reuse existing command encoder if available (allows compute + render in same frame)
+        if (!this.commandEncoder) {
+            this.commandEncoder = this.device.createCommandEncoder();
+            console.log(`[GPU]   created NEW command encoder`);
+        } else {
+            console.log(`[GPU]   REUSING existing command encoder`);
+        }
 
         // Get render target (0 = current canvas texture)
         let view;
@@ -710,7 +737,14 @@ export class PNGineGPU {
      * Begin a compute pass.
      */
     beginComputePass() {
-        this.commandEncoder = this.device.createCommandEncoder();
+        console.log(`[GPU] beginComputePass() - encoder exists: ${!!this.commandEncoder}`);
+        // Reuse existing command encoder if available (allows compute + render in same frame)
+        if (!this.commandEncoder) {
+            this.commandEncoder = this.device.createCommandEncoder();
+            console.log(`[GPU]   created NEW command encoder`);
+        } else {
+            console.log(`[GPU]   REUSING existing command encoder`);
+        }
         this.currentPass = this.commandEncoder.beginComputePass();
         this.passType = 'compute';
     }
@@ -737,8 +771,13 @@ export class PNGineGPU {
      * @param {number} id - Bind group ID
      */
     setBindGroup(slot, id) {
-        console.log(`[GPU] setBindGroup(slot=${slot}, id=${id})`);
+        // Log with pass type for debugging ping-pong
+        console.log(`[GPU] setBindGroup(slot=${slot}, id=${id}) in ${this.passType} pass`);
         const bindGroup = this.bindGroups.get(id);
+        if (!bindGroup) {
+            console.error(`[GPU] ERROR: Bind group ${id} not found!`);
+            return;
+        }
         this.currentPass.setBindGroup(slot, bindGroup);
     }
 
@@ -748,8 +787,12 @@ export class PNGineGPU {
      * @param {number} id - Buffer ID
      */
     setVertexBuffer(slot, id) {
-        console.log(`[GPU] setVertexBuffer(slot=${slot}, id=${id})`);
         const buffer = this.buffers.get(id);
+        const meta = this.bufferMeta.get(id);
+        console.log(`[GPU] setVertexBuffer(slot=${slot}, id=${id}, size=${meta?.size || 'unknown'}, buffer=${buffer ? 'OK' : 'MISSING'})`);
+        if (!buffer) {
+            console.error(`[GPU]   Buffer ${id} not found! Available buffers: ${[...this.buffers.keys()].join(', ')}`);
+        }
         this.currentPass.setVertexBuffer(slot, buffer);
     }
 
@@ -757,19 +800,24 @@ export class PNGineGPU {
      * Draw primitives.
      * @param {number} vertexCount - Number of vertices
      * @param {number} instanceCount - Number of instances
+     * @param {number} firstVertex - First vertex to draw
+     * @param {number} firstInstance - First instance to draw
      */
-    draw(vertexCount, instanceCount) {
-        console.log(`[GPU] draw(${vertexCount}, ${instanceCount})`);
-        this.currentPass.draw(vertexCount, instanceCount);
+    draw(vertexCount, instanceCount, firstVertex = 0, firstInstance = 0) {
+        console.log(`[GPU] draw(${vertexCount}, ${instanceCount}, ${firstVertex}, ${firstInstance})`);
+        this.currentPass.draw(vertexCount, instanceCount, firstVertex, firstInstance);
     }
 
     /**
      * Draw indexed primitives.
      * @param {number} indexCount - Number of indices
      * @param {number} instanceCount - Number of instances
+     * @param {number} firstIndex - First index to draw
+     * @param {number} baseVertex - Base vertex offset
+     * @param {number} firstInstance - First instance to draw
      */
-    drawIndexed(indexCount, instanceCount) {
-        this.currentPass.drawIndexed(indexCount, instanceCount);
+    drawIndexed(indexCount, instanceCount, firstIndex = 0, baseVertex = 0, firstInstance = 0) {
+        this.currentPass.drawIndexed(indexCount, instanceCount, firstIndex, baseVertex, firstInstance);
     }
 
     /**
@@ -779,6 +827,7 @@ export class PNGineGPU {
      * @param {number} z - Workgroups in Z
      */
     dispatch(x, y, z) {
+        console.log(`[GPU] dispatch(${x}, ${y}, ${z})`);
         this.currentPass.dispatchWorkgroups(x, y, z);
     }
 
@@ -804,6 +853,7 @@ export class PNGineGPU {
      * @param {number} dataLen - Data length
      */
     writeBuffer(bufferId, offset, dataPtr, dataLen) {
+        console.log(`[GPU] writeBuffer(buffer=${bufferId}, offset=${offset}, ptr=${dataPtr}, len=${dataLen})`);
         const buffer = this.buffers.get(bufferId);
         const data = this.readBytes(dataPtr, dataLen);
         this.device.queue.writeBuffer(buffer, offset, data);
@@ -1153,11 +1203,11 @@ export class PNGineGPU {
                     console.log(`[WASM->JS] gpuSetVertexBuffer called with slot=${slot}, id=${id}`);
                     self.setVertexBuffer(slot, id);
                 },
-                gpuDraw: (v, i) => {
-                    console.log(`[WASM->JS] gpuDraw called with v=${v}, i=${i}`);
-                    self.draw(v, i);
+                gpuDraw: (v, i, fv, fi) => {
+                    console.log(`[WASM->JS] gpuDraw called with v=${v}, i=${i}, fv=${fv}, fi=${fi}`);
+                    self.draw(v, i, fv, fi);
                 },
-                gpuDrawIndexed: (idx, i) => self.drawIndexed(idx, i),
+                gpuDrawIndexed: (idx, i, firstIdx, baseVtx, firstInst) => self.drawIndexed(idx, i, firstIdx, baseVtx, firstInst),
                 gpuDispatch: (x, y, z) => self.dispatch(x, y, z),
                 gpuEndPass: () => self.endPass(),
                 gpuWriteBuffer: (id, off, ptr, len) => self.writeBuffer(id, off, ptr, len),
@@ -1171,8 +1221,208 @@ export class PNGineGPU {
                     self.callWasmFunc(callId, moduleId, funcNamePtr, funcNameLen, argsPtr, argsLen),
                 gpuWriteBufferFromWasm: (callId, bufferId, offset, byteLen) =>
                     self.writeBufferFromWasm(callId, bufferId, offset, byteLen),
+                // Data generation operations
+                gpuCreateTypedArray: (arrayId, elementType, elementCount) =>
+                    self.createTypedArray(arrayId, elementType, elementCount),
+                gpuFillRandom: (arrayId, offset, count, stride, minPtr, maxPtr) =>
+                    self.fillRandom(arrayId, offset, count, stride, minPtr, maxPtr),
+                gpuFillExpression: (arrayId, offset, count, stride, totalCount, exprPtr, exprLen) =>
+                    self.fillExpression(arrayId, offset, count, stride, totalCount, exprPtr, exprLen),
+                gpuFillConstant: (arrayId, offset, count, stride, valuePtr) =>
+                    self.fillConstant(arrayId, offset, count, stride, valuePtr),
+                gpuWriteBufferFromArray: (bufferId, bufferOffset, arrayId) =>
+                    self.writeBufferFromArray(bufferId, bufferOffset, arrayId),
+                gpuDebugLog: (msgType, value) => {
+                    const types = ['FRAME_COUNTER', 'POOL_ACTUAL_ID', 'OTHER'];
+                    console.log(`[WASM DEBUG] ${types[msgType] || 'UNKNOWN'}: ${value}`);
+                },
             },
         };
+    }
+
+    // ========================================================================
+    // Data Generation Operations
+    // ========================================================================
+
+    /**
+     * Create a typed array for runtime data generation.
+     * Skips creation if array already exists (for animation loop support).
+     * @param {number} arrayId - Array identifier
+     * @param {number} elementType - Element type (0=f32, 1=u32, etc.)
+     * @param {number} elementCount - Number of elements
+     */
+    createTypedArray(arrayId, elementType, elementCount) {
+        // Skip if already exists (allows executeAll in animation loop)
+        if (this.typedArrays.has(arrayId)) {
+            return;
+        }
+        console.log(`[GPU] createTypedArray(${arrayId}, type=${elementType}, count=${elementCount})`);
+        // elementType 0 = f32 (most common)
+        const array = new Float32Array(elementCount);
+        this.typedArrays.set(arrayId, { array, filled: false });
+    }
+
+    /**
+     * Fill array with random values in [min, max] range.
+     * Skips if array was already filled (for animation loop support).
+     * @param {number} arrayId - Array identifier
+     * @param {number} offset - Starting offset within each element
+     * @param {number} count - Number of elements to fill
+     * @param {number} stride - Floats between each element
+     * @param {number} minPtr - Pointer to min value (f32)
+     * @param {number} maxPtr - Pointer to max value (f32)
+     */
+    fillRandom(arrayId, offset, count, stride, minPtr, maxPtr) {
+        const entry = this.typedArrays.get(arrayId);
+        if (!entry || entry.filled) return;
+
+        const array = entry.array;
+
+        // Read min/max from WASM memory
+        const minView = new Float32Array(this.memory.buffer, minPtr, 1);
+        const maxView = new Float32Array(this.memory.buffer, maxPtr, 1);
+        const min = minView[0];
+        const max = maxView[0];
+        const range = max - min;
+
+        console.log(`[GPU] fillRandom(array=${arrayId}, offset=${offset}, count=${count}, stride=${stride}, min=${min}, max=${max})`);
+
+        for (let i = 0; i < count; i++) {
+            const idx = i * stride + offset;
+            array[idx] = min + Math.random() * range;
+        }
+    }
+
+    /**
+     * Fill array by evaluating expression for each element.
+     * Expression can use: ELEMENT_ID, NUM_PARTICLES, PI, random(), sin(), cos(), sqrt()
+     * Skips if array was already filled (for animation loop support).
+     * Uses compiled function for performance instead of per-iteration eval.
+     * @param {number} arrayId - Array identifier
+     * @param {number} offset - Starting offset within each element
+     * @param {number} count - Number of elements to fill
+     * @param {number} stride - Floats between each element
+     * @param {number} totalCount - Total element count (for NUM_PARTICLES)
+     * @param {number} exprPtr - Pointer to expression string
+     * @param {number} exprLen - Length of expression string
+     */
+    fillExpression(arrayId, offset, count, stride, totalCount, exprPtr, exprLen) {
+        const entry = this.typedArrays.get(arrayId);
+        if (!entry || entry.filled) {
+            console.log(`[GPU] fillExpression SKIPPED (array=${arrayId}, filled=${entry?.filled})`);
+            return;
+        }
+
+        const array = entry.array;
+
+        // Read expression string from WASM memory
+        const exprBytes = new Uint8Array(this.memory.buffer, exprPtr, exprLen);
+        const expr = new TextDecoder().decode(exprBytes);
+
+        console.log(`[GPU] fillExpression(array=${arrayId}, offset=${offset}, count=${count}, stride=${stride}, total=${totalCount})`);
+        console.log(`[GPU]   expr: "${expr}"`);
+
+        try {
+            // Transform expression into JS function body (compile once, run many)
+            const jsExpr = expr
+                .replace(/NUM_PARTICLES/g, String(totalCount))
+                .replace(/PI/g, 'Math.PI')
+                .replace(/random\(\)/g, 'Math.random()')
+                .replace(/sin\(/g, 'Math.sin(')
+                .replace(/cos\(/g, 'Math.cos(')
+                .replace(/sqrt\(/g, 'Math.sqrt(')
+                .replace(/ceil\(/g, 'Math.ceil(')
+                .replace(/floor\(/g, 'Math.floor(')
+                .replace(/abs\(/g, 'Math.abs(');
+
+            console.log(`[GPU]   jsExpr: "${jsExpr}"`);
+
+            // Compile the expression into a function (one compilation, many calls)
+            const fn = new Function('ELEMENT_ID', `return ${jsExpr};`);
+
+            // Execute compiled function for each element
+            for (let i = 0; i < count; i++) {
+                const idx = i * stride + offset;
+                array[idx] = fn(i);
+            }
+
+            // Debug: show sample values (first few and last)
+            const samples = [0, 1, 2, 100, 500, 1000, count-1].filter(i => i < count);
+            const sampleVals = samples.map(i => `[${i}]=${array[i*stride+offset].toFixed(4)}`).join(', ');
+            console.log(`[GPU]   samples: ${sampleVals}`);
+        } catch (e) {
+            console.error(`Expression compile/eval error: ${expr}`, e);
+            // Fill with zeros on error
+            for (let i = 0; i < count; i++) {
+                array[i * stride + offset] = 0;
+            }
+        }
+    }
+
+    /**
+     * Fill array with constant value.
+     * Skips if array was already filled (for animation loop support).
+     * @param {number} arrayId - Array identifier
+     * @param {number} offset - Starting offset within each element
+     * @param {number} count - Number of elements to fill
+     * @param {number} stride - Floats between each element
+     * @param {number} valuePtr - Pointer to value (f32)
+     */
+    fillConstant(arrayId, offset, count, stride, valuePtr) {
+        const entry = this.typedArrays.get(arrayId);
+        if (!entry || entry.filled) return;
+
+        const array = entry.array;
+
+        const valueView = new Float32Array(this.memory.buffer, valuePtr, 1);
+        const value = valueView[0];
+
+        console.log(`[GPU] fillConstant(array=${arrayId}, offset=${offset}, count=${count}, stride=${stride}, value=${value})`);
+
+        for (let i = 0; i < count; i++) {
+            const idx = i * stride + offset;
+            array[idx] = value;
+        }
+    }
+
+    /**
+     * Write generated array data to GPU buffer.
+     * Tracks which buffers have been written to (prevents re-writing on animation loop).
+     * @param {number} bufferId - Buffer identifier
+     * @param {number} bufferOffset - Offset in buffer (bytes)
+     * @param {number} arrayId - Array identifier
+     */
+    writeBufferFromArray(bufferId, bufferOffset, arrayId) {
+        const entry = this.typedArrays.get(arrayId);
+        const buffer = this.buffers.get(bufferId);
+
+        if (!entry || !buffer) {
+            console.error(`[GPU] writeBufferFromArray: missing array ${arrayId} or buffer ${bufferId}`);
+            return;
+        }
+
+        // Track which buffers this array has been written to
+        if (!entry.writtenBuffers) entry.writtenBuffers = new Set();
+
+        // Skip if already written to this specific buffer
+        if (entry.writtenBuffers.has(bufferId)) {
+            console.log(`[GPU] writeBufferFromArray SKIPPED (already written to buffer ${bufferId})`);
+            return;
+        }
+
+        const array = entry.array;
+        console.log(`[GPU] writeBufferFromArray(buffer=${bufferId}, offset=${bufferOffset}, array=${arrayId}, size=${array.byteLength})`);
+
+        // Debug: show first few values being written
+        const floatView = new Float32Array(array.buffer, array.byteOffset, Math.min(16, array.length));
+        console.log(`[GPU]   first 16 floats: [${[...floatView].map(v => v.toFixed(4)).join(', ')}]`);
+
+        this.device.queue.writeBuffer(buffer, bufferOffset, array);
+        entry.writtenBuffers.add(bufferId);
+
+        // Mark array as filled once written to at least one buffer
+        // (fill operations can be skipped on subsequent frames)
+        entry.filled = true;
     }
 
     /**
@@ -1197,6 +1447,7 @@ export class PNGineGPU {
         this.imageBitmaps.clear();
         this.wasmModules.clear();
         this.wasmCallResults.clear();
+        this.typedArrays.clear();
         this.commandEncoder = null;
         this.currentPass = null;
         this.passType = null;

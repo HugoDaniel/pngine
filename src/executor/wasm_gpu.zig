@@ -39,8 +39,8 @@ extern "env" fn gpuBeginComputePass() void;
 extern "env" fn gpuSetPipeline(pipeline_id: u16) void;
 extern "env" fn gpuSetBindGroup(slot: u8, group_id: u16) void;
 extern "env" fn gpuSetVertexBuffer(slot: u8, buffer_id: u16) void;
-extern "env" fn gpuDraw(vertex_count: u32, instance_count: u32) void;
-extern "env" fn gpuDrawIndexed(index_count: u32, instance_count: u32) void;
+extern "env" fn gpuDraw(vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) void;
+extern "env" fn gpuDrawIndexed(index_count: u32, instance_count: u32, first_index: u32, base_vertex: u32, first_instance: u32) void;
 extern "env" fn gpuDispatch(x: u32, y: u32, z: u32) void;
 extern "env" fn gpuEndPass() void;
 extern "env" fn gpuWriteBuffer(buffer_id: u16, offset: u32, data_ptr: [*]const u8, data_len: u32) void;
@@ -49,6 +49,16 @@ extern "env" fn gpuCopyExternalImageToTexture(bitmap_id: u16, texture_id: u16, m
 extern "env" fn gpuInitWasmModule(module_id: u16, data_ptr: [*]const u8, data_len: u32) void;
 extern "env" fn gpuCallWasmFunc(call_id: u16, module_id: u16, func_name_ptr: [*]const u8, func_name_len: u32, args_ptr: [*]const u8, args_len: u32) void;
 extern "env" fn gpuWriteBufferFromWasm(call_id: u16, buffer_id: u16, offset: u32, byte_len: u32) void;
+
+// Data generation extern functions
+extern "env" fn gpuCreateTypedArray(array_id: u16, element_type: u8, element_count: u32) void;
+extern "env" fn gpuFillRandom(array_id: u16, offset: u32, count: u32, stride: u8, min_ptr: [*]const u8, max_ptr: [*]const u8) void;
+extern "env" fn gpuFillExpression(array_id: u16, offset: u32, count: u32, stride: u8, total_count: u32, expr_ptr: [*]const u8, expr_len: u32) void;
+extern "env" fn gpuFillConstant(array_id: u16, offset: u32, count: u32, stride: u8, value_ptr: [*]const u8) void;
+extern "env" fn gpuWriteBufferFromArray(buffer_id: u16, buffer_offset: u32, array_id: u16) void;
+
+// Debug logging
+extern "env" fn gpuDebugLog(msg_type: u8, value: u32) void;
 
 // ============================================================================
 // WasmGPU Backend
@@ -189,17 +199,17 @@ pub const WasmGPU = struct {
     }
 
     /// Draw primitives.
-    pub fn draw(self: *Self, allocator: Allocator, vertex_count: u32, instance_count: u32) !void {
+    pub fn draw(self: *Self, allocator: Allocator, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) !void {
         _ = self;
         _ = allocator;
-        gpuDraw(vertex_count, instance_count);
+        gpuDraw(vertex_count, instance_count, first_vertex, first_instance);
     }
 
     /// Draw indexed primitives.
-    pub fn drawIndexed(self: *Self, allocator: Allocator, index_count: u32, instance_count: u32) !void {
+    pub fn drawIndexed(self: *Self, allocator: Allocator, index_count: u32, instance_count: u32, first_index: u32, base_vertex: u32, first_instance: u32) !void {
         _ = self;
         _ = allocator;
-        gpuDrawIndexed(index_count, instance_count);
+        gpuDrawIndexed(index_count, instance_count, first_index, base_vertex, first_instance);
     }
 
     /// Dispatch compute workgroups.
@@ -274,6 +284,49 @@ pub const WasmGPU = struct {
         _ = self;
         _ = allocator;
         gpuWriteBufferFromWasm(call_id, buffer_id, offset, byte_len);
+    }
+
+    // ========================================================================
+    // Data Generation Operations
+    // ========================================================================
+
+    /// Create a typed array for runtime data generation.
+    pub fn createTypedArray(self: *Self, allocator: Allocator, array_id: u16, element_type: u8, element_count: u32) !void {
+        _ = self;
+        _ = allocator;
+        gpuCreateTypedArray(array_id, element_type, element_count);
+    }
+
+    /// Fill array with random values.
+    pub fn fillRandom(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, min_data_id: u16, max_data_id: u16) !void {
+        _ = allocator;
+        assert(self.module != null);
+        const min_data = self.getDataOrPanic(min_data_id);
+        const max_data = self.getDataOrPanic(max_data_id);
+        gpuFillRandom(array_id, offset, count, stride, min_data.ptr, max_data.ptr);
+    }
+
+    /// Fill array by evaluating expression for each element.
+    pub fn fillExpression(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, total_count: u32, expr_data_id: u16) !void {
+        _ = allocator;
+        assert(self.module != null);
+        const expr_data = self.getDataOrPanic(expr_data_id);
+        gpuFillExpression(array_id, offset, count, stride, total_count, expr_data.ptr, @intCast(expr_data.len));
+    }
+
+    /// Fill array with constant value.
+    pub fn fillConstant(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, value_data_id: u16) !void {
+        _ = allocator;
+        assert(self.module != null);
+        const value_data = self.getDataOrPanic(value_data_id);
+        gpuFillConstant(array_id, offset, count, stride, value_data.ptr);
+    }
+
+    /// Write generated array data to GPU buffer.
+    pub fn writeBufferFromArray(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, array_id: u16) !void {
+        _ = self;
+        _ = allocator;
+        gpuWriteBufferFromArray(buffer_id, buffer_offset, array_id);
     }
 
     // ========================================================================
