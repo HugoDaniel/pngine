@@ -3,7 +3,7 @@
 .description = "Installation and first program",
 .author = "PNGine Team",
 .date = @date("2024-12-18"),
-.layout = "page.shtml",
+.layout = "docs.shtml",
 ---
 
 ## Requirements

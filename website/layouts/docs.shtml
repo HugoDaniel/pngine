@@ -6,7 +6,10 @@
     <aside class="sidebar">
       <h3>Documentation</h3>
       <nav>
-        <ul :loop="$page.subpages()">
+        <ul>
+          <li><a href="/docs/">Overview</a></li>
+        </ul>
+        <ul :loop="$site.page('docs').subpages()">
           <li><a href="$loop.it.link()" :text="$loop.it.title"></a></li>
         </ul>
       </nav>

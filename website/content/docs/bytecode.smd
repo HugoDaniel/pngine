@@ -3,7 +3,7 @@
 .description = "PNGB binary specification",
 .author = "PNGine Team",
 .date = @date("2024-12-18"),
-.layout = "page.shtml",
+.layout = "docs.shtml",
 ---
 
 ## File Structure
