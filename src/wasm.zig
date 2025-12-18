@@ -18,6 +18,7 @@
 //! - Module data must remain valid while executing
 
 const std = @import("std");
+const assert = std.debug.assert;
 const pngine = @import("main.zig");
 const format = @import("bytecode/format.zig");
 const Module = format.Module;
@@ -44,12 +45,15 @@ var last_error: u32 = 0;
 var gpu: WasmGPU = .empty;
 var current_module: ?Module = null;
 var module_data: ?[]u8 = null; // Owned copy of PNGB data
+var frame_counter: u32 = 0; // Persists across executeAll calls for ping-pong
 
 // ============================================================================
 // Exported Functions
 // ============================================================================
 
 /// Initialize the WASM module. Must be called before any other function.
+///
+/// Post-condition: initialized == true, allocator is valid.
 export fn onInit() void {
     gpa = .{};
     allocator = gpa.allocator();
@@ -59,6 +63,10 @@ export fn onInit() void {
     gpu = .empty;
     current_module = null;
     module_data = null;
+    frame_counter = 0;
+
+    // Post-condition: runtime is ready
+    assert(initialized);
 }
 
 /// Compile PBSF source to PNGB bytecode.
@@ -137,11 +145,19 @@ export fn freeOutput() void {
 ///   1 = Not initialized
 ///   2 = Out of memory
 ///   4 = Invalid format
+///
+/// Pre-condition: onInit() has been called.
+/// Post-condition: On success, current_module is valid and frame_counter == 0.
 export fn loadModule(pngb_ptr: [*]const u8, pngb_len: usize) u32 {
+    // Pre-condition check
     if (!initialized) return 1;
+    assert(pngb_len > 0);
 
     // Free previous module if any
     freeModule();
+
+    // Reset frame counter for new module
+    frame_counter = 0;
 
     // Make owned copy of PNGB data (must outlive module)
     const data = allocator.alloc(u8, pngb_len) catch return 2;
@@ -162,7 +178,16 @@ export fn loadModule(pngb_ptr: [*]const u8, pngb_len: usize) u32 {
     // Set module reference for GPU backend
     gpu.setModule(&current_module.?);
 
+    // Post-condition: module loaded successfully
+    assert(current_module != null);
+    assert(frame_counter == 0);
+
     return 0;
+}
+
+/// Get the current frame counter (for debugging).
+export fn getFrameCounter() u32 {
+    return frame_counter;
 }
 
 /// Execute all bytecode in the loaded module.
@@ -170,13 +195,25 @@ export fn loadModule(pngb_ptr: [*]const u8, pngb_len: usize) u32 {
 ///   1 = Not initialized
 ///   5 = No module loaded
 ///   6 = Execution error
+///
+/// Pre-condition: onInit() and loadModule() have been called.
+/// Post-condition: frame_counter is incremented by number of end_frame opcodes.
 export fn executeAll() u32 {
+    // Pre-condition checks
     if (!initialized) return 1;
-
     const module = &(current_module orelse return 5);
 
-    var dispatcher = Dispatcher(WasmGPU).init(&gpu, module);
+    const frame_before = frame_counter;
+
+    // Use persistent frame counter for ping-pong buffer patterns
+    var dispatcher = Dispatcher(WasmGPU).initWithFrame(allocator, &gpu, module, frame_counter);
     dispatcher.executeAll(allocator) catch return 6;
+
+    // Update global frame counter for next call
+    frame_counter = dispatcher.frame_counter;
+
+    // Post-condition: frame counter can only increase (never decreases)
+    assert(frame_counter >= frame_before);
 
     return 0;
 }
