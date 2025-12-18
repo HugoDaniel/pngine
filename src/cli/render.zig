@@ -32,6 +32,8 @@ pub const Options = struct {
     embed_explicit: bool,
     /// true to render actual frame via GPU, false for 1x1 transparent pixel
     render_frame: bool,
+    /// Path to WASM runtime to embed (pNGr chunk)
+    runtime_path: ?[]const u8,
 };
 
 /// Execute the render command.
@@ -49,6 +51,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         .embed_bytecode = true, // Embed by default
         .embed_explicit = false,
         .render_frame = false, // 1x1 transparent pixel by default
+        .runtime_path = null, // No runtime embedded by default
     };
 
     const parse_result = parseArgs(args, &opts);
@@ -67,7 +70,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     defer if (opts.output_path == null) allocator.free(output);
 
     // Execute render pipeline
-    return executePipeline(allocator, opts.input_path, output, opts.width, opts.height, opts.time, opts.embed_bytecode, opts.render_frame);
+    return executePipeline(allocator, opts.input_path, output, opts.width, opts.height, opts.time, opts.embed_bytecode, opts.render_frame, opts.runtime_path);
 }
 
 /// Parse render command arguments.
@@ -121,6 +124,13 @@ fn parseArgs(args: []const []const u8, opts: *Options) u8 {
         } else if (std.mem.eql(u8, arg, "--no-embed")) {
             opts.embed_bytecode = false;
             opts.embed_explicit = true;
+        } else if (std.mem.eql(u8, arg, "--embed-runtime")) {
+            if (i + 1 >= args_len) {
+                std.debug.print("Error: --embed-runtime requires a WASM file path\n", .{});
+                return 1;
+            }
+            opts.runtime_path = args[i + 1];
+            skip_count = 1;
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             printUsage();
             return 255;
@@ -191,6 +201,7 @@ fn executePipeline(
     time: f32,
     embed_bytecode: bool,
     render_frame: bool,
+    runtime_path: ?[]const u8,
 ) !u8 {
     // Pre-conditions
     std.debug.assert(input.len > 0);
@@ -214,13 +225,22 @@ fn executePipeline(
     var png_data = png_result.png_data;
     defer allocator.free(png_data);
 
-    // Optionally embed bytecode in PNG
+    // Optionally embed bytecode in PNG (pNGb chunk)
     if (embed_bytecode) {
         png_data = embedBytecodeInPng(allocator, png_data, bytecode) catch |err| {
             std.debug.print("Error: failed to embed bytecode: {}\n", .{err});
             return 4;
         };
     }
+
+    // Optionally embed WASM runtime in PNG (pNGr chunk)
+    const runtime_embedded = if (runtime_path) |path| blk: {
+        png_data = embedRuntimeInPng(allocator, png_data, path) catch |err| {
+            std.debug.print("Error: failed to embed runtime: {}\n", .{err});
+            return 4;
+        };
+        break :blk true;
+    } else false;
 
     // Write final output
     writeOutputFile(output, png_data) catch |err| {
@@ -229,7 +249,7 @@ fn executePipeline(
     };
 
     // Report success to user
-    printSuccessMessage(input, output, png_data.len, width, height, time, embed_bytecode, render_frame);
+    printSuccessMessage(input, output, png_data.len, width, height, time, embed_bytecode, render_frame, runtime_embedded);
     return 0;
 }
 
@@ -287,6 +307,58 @@ fn embedBytecodeInPng(allocator: std.mem.Allocator, png_data: []u8, bytecode: []
     return embedded;
 }
 
+/// Embed WASM runtime in PNG from file, freeing original PNG data.
+fn embedRuntimeInPng(allocator: std.mem.Allocator, png_data: []u8, runtime_path: []const u8) ![]u8 {
+    // Pre-condition: path is valid
+    std.debug.assert(runtime_path.len > 0);
+
+    // Read runtime file
+    const runtime = readBinaryFile(allocator, runtime_path) catch |err| {
+        std.debug.print("Error: failed to read runtime '{s}': {}\n", .{ runtime_path, err });
+        return err;
+    };
+    defer allocator.free(runtime);
+
+    // Embed runtime in PNG (pNGr chunk)
+    const embedded = pngine.png.embedRuntime(allocator, png_data, runtime) catch |err| {
+        std.debug.print("Error: failed to embed runtime: {}\n", .{err});
+        return err;
+    };
+    allocator.free(png_data);
+
+    // Post-condition: result is larger
+    std.debug.assert(embedded.len > png_data.len);
+
+    return embedded;
+}
+
+/// Read binary file into buffer.
+fn readBinaryFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    std.debug.assert(path.len > 0);
+
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+
+    const stat = try file.stat();
+    const size: u32 = if (stat.size > max_file_size)
+        return error.FileTooLarge
+    else
+        @intCast(stat.size);
+
+    const buffer = try allocator.alloc(u8, size);
+    errdefer allocator.free(buffer);
+
+    var bytes_read: u32 = 0;
+    for (0..size + 1) |_| {
+        if (bytes_read >= size) break;
+        const n: u32 = @intCast(try file.read(buffer[bytes_read..]));
+        if (n == 0) break;
+        bytes_read += n;
+    }
+
+    return buffer;
+}
+
 /// Print success message after render completes.
 fn printSuccessMessage(
     input: []const u8,
@@ -297,23 +369,35 @@ fn printSuccessMessage(
     time: f32,
     embed_bytecode: bool,
     render_frame: bool,
+    runtime_embedded: bool,
 ) void {
+    // Build flags string
+    var flags_buf: [64]u8 = undefined;
+    var flags_len: usize = 0;
+
+    if (embed_bytecode) {
+        const text = "bytecode";
+        @memcpy(flags_buf[flags_len..][0..text.len], text);
+        flags_len += text.len;
+    }
+    if (runtime_embedded) {
+        if (flags_len > 0) {
+            flags_buf[flags_len] = '+';
+            flags_len += 1;
+        }
+        const text = "runtime";
+        @memcpy(flags_buf[flags_len..][0..text.len], text);
+        flags_len += text.len;
+    }
+
+    const flags_str = if (flags_len > 0) flags_buf[0..flags_len] else "image only";
+
     if (render_frame) {
-        if (embed_bytecode) {
-            std.debug.print("Rendered {s} -> {s} ({d}x{d}, t={d:.2}, embedded, {d} bytes)\n", .{
-                input, output, width, height, time, size,
-            });
-        } else {
-            std.debug.print("Rendered {s} -> {s} ({d}x{d}, t={d:.2}, {d} bytes)\n", .{
-                input, output, width, height, time, size,
-            });
-        }
+        std.debug.print("Rendered {s} -> {s} ({d}x{d}, t={d:.2}, {s}, {d} bytes)\n", .{
+            input, output, width, height, time, flags_str, size,
+        });
     } else {
-        if (embed_bytecode) {
-            std.debug.print("Created {s} -> {s} (1x1, embedded, {d} bytes)\n", .{ input, output, size });
-        } else {
-            std.debug.print("Created {s} -> {s} (1x1, {d} bytes)\n", .{ input, output, size });
-        }
+        std.debug.print("Created {s} -> {s} (1x1, {s}, {d} bytes)\n", .{ input, output, flags_str, size });
     }
 }
 
@@ -383,20 +467,22 @@ pub fn printUsage() void {
         \\  pngine render <input.pngine> [options]
         \\
         \\Options:
-        \\  -o, --output <path>    Output PNG path (default: <input>.png)
-        \\  -f, --frame            Render actual frame via GPU (default: 1x1 transparent)
-        \\  -s, --size <WxH>       Output dimensions when using --frame (default: 512x512)
-        \\  -t, --time <seconds>   Time value for animation (default: 0.0)
-        \\  -e, --embed            Embed bytecode in output PNG (default: on)
-        \\  --no-embed             Do not embed bytecode
-        \\  -h, --help             Show this help
+        \\  -o, --output <path>       Output PNG path (default: <input>.png)
+        \\  -f, --frame               Render actual frame via GPU (default: 1x1 transparent)
+        \\  -s, --size <WxH>          Output dimensions when using --frame (default: 512x512)
+        \\  -t, --time <seconds>      Time value for animation (default: 0.0)
+        \\  -e, --embed               Embed bytecode in output PNG (default: on)
+        \\  --no-embed                Do not embed bytecode
+        \\  --embed-runtime <path>    Embed WASM runtime for self-contained PNG (pNGr chunk)
+        \\  -h, --help                Show this help
         \\
         \\Examples:
-        \\  pngine shader.pngine                      # 1x1 transparent PNG with bytecode (~500 bytes)
-        \\  pngine shader.pngine --frame              # Render 512x512 preview with bytecode
-        \\  pngine shader.pngine --frame -s 1920x1080 # Render at 1080p
-        \\  pngine shader.pngine --frame -t 2.5       # Render frame at t=2.5 seconds
-        \\  pngine shader.pngine --no-embed           # 1x1 PNG without bytecode
+        \\  pngine shader.pngine                             # 1x1 PNG with bytecode (~500 bytes)
+        \\  pngine shader.pngine --frame                     # Render 512x512 preview
+        \\  pngine shader.pngine --frame -s 1920x1080        # Render at 1080p
+        \\  pngine shader.pngine --frame -t 2.5              # Render at t=2.5 seconds
+        \\  pngine shader.pngine --no-embed                  # 1x1 PNG without bytecode
+        \\  pngine shader.pngine --embed-runtime pngine.wasm # Self-contained (~31KB)
         \\
     , .{});
 }
@@ -511,6 +597,7 @@ test "parseArgs: input file only" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
+        .runtime_path = null,
     };
 
     const args = [_][]const u8{"shader.pngine"};
@@ -532,6 +619,7 @@ test "parseArgs: with output path" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
+        .runtime_path = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "-o", "output.png" };
@@ -552,6 +640,7 @@ test "parseArgs: with size" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
+        .runtime_path = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "--size", "1920x1080" };
@@ -572,6 +661,7 @@ test "parseArgs: with time" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
+        .runtime_path = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "-t", "2.5" };
@@ -591,6 +681,7 @@ test "parseArgs: embed flag" {
         .embed_bytecode = false,
         .embed_explicit = false,
         .render_frame = false,
+        .runtime_path = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "--embed" };
@@ -611,6 +702,7 @@ test "parseArgs: no-embed flag" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
+        .runtime_path = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "--no-embed" };
@@ -631,6 +723,7 @@ test "parseArgs: missing input file" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
+        .runtime_path = null,
     };
 
     const args = [_][]const u8{};
@@ -649,6 +742,7 @@ test "parseArgs: invalid size format" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
+        .runtime_path = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "-s", "invalid" };
@@ -667,6 +761,7 @@ test "parseArgs: zero size rejected" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
+        .runtime_path = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "-s", "0x512" };
@@ -685,6 +780,7 @@ test "parseArgs: help returns 255" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
+        .runtime_path = null,
     };
 
     const args = [_][]const u8{"--help"};
@@ -703,6 +799,7 @@ test "parseArgs: unknown option rejected" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
+        .runtime_path = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "--unknown" };
@@ -721,6 +818,7 @@ test "parseArgs: multiple input files rejected" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
+        .runtime_path = null,
     };
 
     const args = [_][]const u8{ "shader1.pngine", "shader2.pngine" };
@@ -739,6 +837,7 @@ test "parseArgs: frame flag" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
+        .runtime_path = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "--frame" };
@@ -758,6 +857,7 @@ test "parseArgs: frame flag short" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
+        .runtime_path = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "-f" };
@@ -777,6 +877,7 @@ test "parseArgs: frame with size" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
+        .runtime_path = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "--frame", "-s", "1920x1080" };
@@ -786,6 +887,26 @@ test "parseArgs: frame with size" {
     try std.testing.expect(opts.render_frame);
     try std.testing.expectEqual(@as(u32, 1920), opts.width);
     try std.testing.expectEqual(@as(u32, 1080), opts.height);
+}
+
+test "parseArgs: embed-runtime flag" {
+    var opts = Options{
+        .input_path = "",
+        .output_path = null,
+        .width = 512,
+        .height = 512,
+        .time = 0.0,
+        .embed_bytecode = true,
+        .embed_explicit = false,
+        .render_frame = false,
+        .runtime_path = null,
+    };
+
+    const args = [_][]const u8{ "shader.pngine", "--embed-runtime", "pngine.wasm" };
+    const result = parseArgs(&args, &opts);
+
+    try std.testing.expectEqual(@as(u8, 0), result);
+    try std.testing.expectEqualStrings("pngine.wasm", opts.runtime_path.?);
 }
 
 test "deriveOutputPath: handles OOM gracefully" {
