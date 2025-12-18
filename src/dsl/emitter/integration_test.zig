@@ -521,8 +521,57 @@ test "Integration: sampler with all attributes" {
 // ============================================================================
 
 test "Integration: texture view with dimension override" {
-    // TODO: Implement emitTextureViews in resources.zig
-    return error.SkipZigTest;
+    const source: [:0]const u8 =
+        \\#texture cubeMap {
+        \\  size=[256 256 6]
+        \\  format=rgba8unorm
+        \\  usage=[TEXTURE_BINDING]
+        \\}
+        \\
+        \\#textureView cubeView {
+        \\  texture=$texture.cubeMap
+        \\  dimension="cube"
+        \\  baseArrayLayer=0
+        \\  arrayLayerCount=6
+        \\}
+        \\
+        \\#wgsl shader {
+        \\  value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); }"
+        \\}
+        \\
+        \\#renderPipeline pipe {
+        \\  vertex={ module=$wgsl.shader entryPoint=vs }
+        \\}
+        \\
+        \\#frame main {
+        \\  perform=[]
+        \\}
+    ;
+
+    var gpu = try compileAndExecute(source);
+    defer gpu.deinit(testing.allocator);
+
+    // Verify texture was created
+    var found_texture = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_texture) {
+            found_texture = true;
+            break;
+        }
+    }
+    try testing.expect(found_texture);
+
+    // Verify texture view was created
+    var found_view = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_texture_view) {
+            found_view = true;
+            try testing.expectEqual(@as(u16, 0), call.params.create_texture_view.view_id);
+            try testing.expectEqual(@as(u16, 0), call.params.create_texture_view.texture_id);
+            break;
+        }
+    }
+    try testing.expect(found_view);
 }
 
 // ============================================================================
@@ -530,8 +579,38 @@ test "Integration: texture view with dimension override" {
 // ============================================================================
 
 test "Integration: query set for timestamps" {
-    // TODO: Implement emitQuerySets in resources.zig
-    return error.SkipZigTest;
+    const source: [:0]const u8 =
+        \\#querySet timestamps {
+        \\  type="timestamp"
+        \\  count=32
+        \\}
+        \\
+        \\#wgsl shader {
+        \\  value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); }"
+        \\}
+        \\
+        \\#renderPipeline pipe {
+        \\  vertex={ module=$wgsl.shader entryPoint=vs }
+        \\}
+        \\
+        \\#frame main {
+        \\  perform=[]
+        \\}
+    ;
+
+    var gpu = try compileAndExecute(source);
+    defer gpu.deinit(testing.allocator);
+
+    // Verify query set was created
+    var found_query_set = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_query_set) {
+            found_query_set = true;
+            try testing.expectEqual(@as(u16, 0), call.params.create_query_set.query_set_id);
+            break;
+        }
+    }
+    try testing.expect(found_query_set);
 }
 
 // ============================================================================
@@ -539,13 +618,96 @@ test "Integration: query set for timestamps" {
 // ============================================================================
 
 test "Integration: explicit bind group layout" {
-    // TODO: Implement emitBindGroupLayouts in resources.zig
-    return error.SkipZigTest;
+    const source: [:0]const u8 =
+        \\#bindGroupLayout layout0 {
+        \\  entries=[
+        \\    { binding=0 visibility=[VERTEX FRAGMENT] buffer={ type="uniform" } }
+        \\    { binding=1 visibility=[FRAGMENT] sampler={} }
+        \\    { binding=2 visibility=[FRAGMENT] texture={ sampleType="float" viewDimension="2d" } }
+        \\  ]
+        \\}
+        \\
+        \\#wgsl shader {
+        \\  value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); }"
+        \\}
+        \\
+        \\#renderPipeline pipe {
+        \\  vertex={ module=$wgsl.shader entryPoint=vs }
+        \\}
+        \\
+        \\#frame main {
+        \\  perform=[]
+        \\}
+    ;
+
+    var gpu = try compileAndExecute(source);
+    defer gpu.deinit(testing.allocator);
+
+    // Verify bind group layout was created
+    var found_layout = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_bind_group_layout) {
+            found_layout = true;
+            try testing.expectEqual(@as(u16, 0), call.params.create_bind_group_layout.layout_id);
+            break;
+        }
+    }
+    try testing.expect(found_layout);
 }
 
 test "Integration: explicit pipeline layout" {
-    // TODO: Implement emitPipelineLayouts in resources.zig
-    return error.SkipZigTest;
+    const source: [:0]const u8 =
+        \\#bindGroupLayout layout0 {
+        \\  entries=[
+        \\    { binding=0 visibility=[VERTEX] buffer={} }
+        \\  ]
+        \\}
+        \\
+        \\#bindGroupLayout layout1 {
+        \\  entries=[
+        \\    { binding=0 visibility=[FRAGMENT] sampler={} }
+        \\  ]
+        \\}
+        \\
+        \\#pipelineLayout pipeLayout {
+        \\  bindGroupLayouts=[$bindGroupLayout.layout0 $bindGroupLayout.layout1]
+        \\}
+        \\
+        \\#wgsl shader {
+        \\  value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); }"
+        \\}
+        \\
+        \\#renderPipeline pipe {
+        \\  vertex={ module=$wgsl.shader entryPoint=vs }
+        \\}
+        \\
+        \\#frame main {
+        \\  perform=[]
+        \\}
+    ;
+
+    var gpu = try compileAndExecute(source);
+    defer gpu.deinit(testing.allocator);
+
+    // Verify bind group layouts were created
+    var layout_count: usize = 0;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_bind_group_layout) {
+            layout_count += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), layout_count);
+
+    // Verify pipeline layout was created
+    var found_pipeline_layout = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_pipeline_layout) {
+            found_pipeline_layout = true;
+            try testing.expectEqual(@as(u16, 0), call.params.create_pipeline_layout.layout_id);
+            break;
+        }
+    }
+    try testing.expect(found_pipeline_layout);
 }
 
 // ============================================================================
