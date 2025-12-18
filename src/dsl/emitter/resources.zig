@@ -1120,6 +1120,464 @@ pub fn emitImageBitmaps(e: *Emitter) Emitter.Error!void {
 }
 
 // ============================================================================
+// Texture Views, Query Sets, Bind Group Layouts, Pipeline Layouts
+// ============================================================================
+
+/// Emit #textureView declarations.
+/// Creates GPUTextureView objects from existing textures.
+///
+/// Opcode: create_texture_view (0x0C)
+/// Params: view_id, texture_id, descriptor_data_id
+pub fn emitTextureViews(e: *Emitter) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(e.ast.nodes.len > 0);
+
+    const initial_id = e.next_texture_view_id;
+
+    var it = e.analysis.symbols.texture_view.iterator();
+    for (0..MAX_RESOURCES) |_| {
+        const entry = it.next() orelse break;
+        const name = entry.key_ptr.*;
+        const info = entry.value_ptr.*;
+
+        const view_id = e.next_texture_view_id;
+        e.next_texture_view_id += 1;
+        try e.texture_view_ids.put(e.gpa, name, view_id);
+
+        // Get texture reference
+        const texture_node = utils.findPropertyValue(e, info.node, "texture") orelse continue;
+        const texture_ref = utils.getReference(e, texture_node) orelse continue;
+        const texture_id = e.texture_ids.get(texture_ref.name) orelse continue;
+
+        // Encode descriptor with optional properties
+        var encoder = DescriptorEncoder.init();
+        defer encoder.deinit(e.gpa);
+
+        const field_count_pos = try encoder.beginDescriptor(e.gpa, .bind_group_layout);
+        var field_count: u8 = 0;
+
+        // Optional: format
+        if (utils.findPropertyValue(e, info.node, "format")) |format_node| {
+            const format_str = utils.getStringContent(e, format_node);
+            const format = DescriptorEncoder.TextureFormat.fromString(format_str);
+            try encoder.writeEnumField(e.gpa, 0x01, @intFromEnum(format));
+            field_count += 1;
+        }
+
+        // Optional: dimension
+        if (utils.findPropertyValue(e, info.node, "dimension")) |dim_node| {
+            const dim_str = utils.getStringContent(e, dim_node);
+            const dim_val = textureViewDimensionFromString(dim_str);
+            try encoder.writeEnumField(e.gpa, 0x02, dim_val);
+            field_count += 1;
+        }
+
+        // Optional: baseMipLevel
+        if (utils.findPropertyValue(e, info.node, "baseMipLevel")) |node| {
+            if (utils.resolveNumericValue(e, node)) |val| {
+                try encoder.writeU32Field(e.gpa, 0x03, val);
+                field_count += 1;
+            }
+        }
+
+        // Optional: mipLevelCount
+        if (utils.findPropertyValue(e, info.node, "mipLevelCount")) |node| {
+            if (utils.resolveNumericValue(e, node)) |val| {
+                try encoder.writeU32Field(e.gpa, 0x04, val);
+                field_count += 1;
+            }
+        }
+
+        // Optional: baseArrayLayer
+        if (utils.findPropertyValue(e, info.node, "baseArrayLayer")) |node| {
+            if (utils.resolveNumericValue(e, node)) |val| {
+                try encoder.writeU32Field(e.gpa, 0x05, val);
+                field_count += 1;
+            }
+        }
+
+        // Optional: arrayLayerCount
+        if (utils.findPropertyValue(e, info.node, "arrayLayerCount")) |node| {
+            if (utils.resolveNumericValue(e, node)) |val| {
+                try encoder.writeU32Field(e.gpa, 0x06, val);
+                field_count += 1;
+            }
+        }
+
+        encoder.endDescriptor(field_count_pos, field_count);
+
+        const desc_data = try encoder.toOwnedSlice(e.gpa);
+        defer e.gpa.free(desc_data);
+        const desc_data_id = try e.builder.addData(e.gpa, desc_data);
+
+        try e.builder.getEmitter().createTextureView(
+            e.gpa,
+            view_id,
+            texture_id,
+            @intFromEnum(desc_data_id),
+        );
+    }
+
+    // Post-condition
+    std.debug.assert(e.next_texture_view_id >= initial_id);
+}
+
+/// Emit #querySet declarations.
+/// Creates GPUQuerySet objects for occlusion/timestamp queries.
+///
+/// Opcode: create_query_set (0x0D)
+/// Params: query_set_id, descriptor_data_id
+pub fn emitQuerySets(e: *Emitter) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(e.ast.nodes.len > 0);
+
+    const initial_id = e.next_query_set_id;
+
+    var it = e.analysis.symbols.query_set.iterator();
+    for (0..MAX_RESOURCES) |_| {
+        const entry = it.next() orelse break;
+        const name = entry.key_ptr.*;
+        const info = entry.value_ptr.*;
+
+        const query_set_id = e.next_query_set_id;
+        e.next_query_set_id += 1;
+        try e.query_set_ids.put(e.gpa, name, query_set_id);
+
+        // Get type (default: occlusion)
+        var query_type: u8 = 0; // 0=occlusion, 1=timestamp
+        if (utils.findPropertyValue(e, info.node, "type")) |type_node| {
+            const type_str = utils.getStringContent(e, type_node);
+            if (std.mem.eql(u8, type_str, "timestamp")) {
+                query_type = 1;
+            }
+        }
+
+        // Get count (required)
+        const count: u32 = blk: {
+            if (utils.findPropertyValue(e, info.node, "count")) |count_node| {
+                break :blk utils.resolveNumericValue(e, count_node) orelse 1;
+            }
+            break :blk 1;
+        };
+
+        // Encode simple descriptor: [type:u8][count:u16]
+        var desc_buf: [3]u8 = undefined;
+        desc_buf[0] = query_type;
+        desc_buf[1] = @intCast(count & 0xFF);
+        desc_buf[2] = @intCast(count >> 8);
+
+        const desc_data_id = try e.builder.addData(e.gpa, &desc_buf);
+
+        try e.builder.getEmitter().createQuerySet(
+            e.gpa,
+            query_set_id,
+            @intFromEnum(desc_data_id),
+        );
+    }
+
+    // Post-condition
+    std.debug.assert(e.next_query_set_id >= initial_id);
+}
+
+/// Emit #bindGroupLayout declarations.
+/// Creates GPUBindGroupLayout objects defining binding slot layouts.
+///
+/// Opcode: create_bind_group_layout (0x06)
+/// Params: layout_id, descriptor_data_id
+pub fn emitBindGroupLayouts(e: *Emitter) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(e.ast.nodes.len > 0);
+
+    const initial_id = e.next_bind_group_layout_id;
+
+    var it = e.analysis.symbols.bind_group_layout.iterator();
+    for (0..MAX_RESOURCES) |_| {
+        const entry = it.next() orelse break;
+        const name = entry.key_ptr.*;
+        const info = entry.value_ptr.*;
+
+        const layout_id = e.next_bind_group_layout_id;
+        e.next_bind_group_layout_id += 1;
+        try e.bind_group_layout_ids.put(e.gpa, name, layout_id);
+
+        // Get entries array
+        const entries_node = utils.findPropertyValue(e, info.node, "entries") orelse continue;
+        const entries = utils.collectArrayElements(e, entries_node);
+        if (entries.len == 0) continue;
+
+        // Encode descriptor
+        var encoder = DescriptorEncoder.init();
+        defer encoder.deinit(e.gpa);
+
+        const field_count_pos = try encoder.beginDescriptor(e.gpa, .bind_group_layout);
+
+        // Write entries array header
+        try encoder.writeByte(e.gpa, 0x01); // entries field
+        try encoder.writeByte(e.gpa, @intFromEnum(DescriptorEncoder.ValueType.array));
+        try encoder.writeByte(e.gpa, @intCast(@min(entries.len, 255)));
+
+        // Encode each entry
+        for (entries) |entry_idx| {
+            try encodeBindGroupLayoutEntry(e, &encoder, @enumFromInt(entry_idx));
+        }
+
+        encoder.endDescriptor(field_count_pos, 1);
+
+        const desc_data = try encoder.toOwnedSlice(e.gpa);
+        defer e.gpa.free(desc_data);
+        const desc_data_id = try e.builder.addData(e.gpa, desc_data);
+
+        try e.builder.getEmitter().createBindGroupLayout(
+            e.gpa,
+            layout_id,
+            @intFromEnum(desc_data_id),
+        );
+    }
+
+    // Post-condition
+    std.debug.assert(e.next_bind_group_layout_id >= initial_id);
+}
+
+/// Emit #pipelineLayout declarations.
+/// Creates GPUPipelineLayout objects from bind group layouts.
+///
+/// Opcode: create_pipeline_layout (0x07)
+/// Params: layout_id, descriptor_data_id
+pub fn emitPipelineLayouts(e: *Emitter) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(e.ast.nodes.len > 0);
+
+    const initial_id = e.next_pipeline_layout_id;
+
+    var it = e.analysis.symbols.pipeline_layout.iterator();
+    for (0..MAX_RESOURCES) |_| {
+        const entry = it.next() orelse break;
+        const name = entry.key_ptr.*;
+        const info = entry.value_ptr.*;
+
+        const layout_id = e.next_pipeline_layout_id;
+        e.next_pipeline_layout_id += 1;
+        try e.pipeline_layout_ids.put(e.gpa, name, layout_id);
+
+        // Get bindGroupLayouts array
+        const bgl_node = utils.findPropertyValue(e, info.node, "bindGroupLayouts") orelse continue;
+        const bgl_elements = utils.collectArrayElements(e, bgl_node);
+        if (bgl_elements.len == 0) continue;
+
+        // Encode descriptor: [count:u8][layout_id:u16]...
+        var desc_buf = std.ArrayListUnmanaged(u8){};
+        defer desc_buf.deinit(e.gpa);
+
+        try desc_buf.append(e.gpa, @intCast(@min(bgl_elements.len, 255)));
+
+        for (bgl_elements) |elem_idx| {
+            const elem_node: Node.Index = @enumFromInt(elem_idx);
+            const ref = utils.getReference(e, elem_node) orelse continue;
+            const bgl_id = e.bind_group_layout_ids.get(ref.name) orelse continue;
+            try desc_buf.append(e.gpa, @intCast(bgl_id & 0xFF));
+            try desc_buf.append(e.gpa, @intCast(bgl_id >> 8));
+        }
+
+        const desc_data_id = try e.builder.addData(e.gpa, desc_buf.items);
+
+        try e.builder.getEmitter().createPipelineLayout(
+            e.gpa,
+            layout_id,
+            @intFromEnum(desc_data_id),
+        );
+    }
+
+    // Post-condition
+    std.debug.assert(e.next_pipeline_layout_id >= initial_id);
+}
+
+/// Encode a single bind group layout entry.
+fn encodeBindGroupLayoutEntry(e: *Emitter, encoder: *DescriptorEncoder, entry_node: Node.Index) !void {
+    // Get binding number
+    var binding: u8 = 0;
+    if (utils.findPropertyValueInObject(e, entry_node, "binding")) |b| {
+        binding = @intCast(utils.resolveNumericValue(e, b) orelse 0);
+    }
+
+    // Get visibility flags
+    var visibility: u8 = 0;
+    if (utils.findPropertyValueInObject(e, entry_node, "visibility")) |v| {
+        visibility = parseVisibilityFlags(e, v);
+    }
+
+    // Determine resource type and encode
+    try encoder.writeByte(e.gpa, binding);
+    try encoder.writeByte(e.gpa, visibility);
+
+    // Check for buffer binding
+    if (utils.findPropertyValueInObject(e, entry_node, "buffer")) |buf_node| {
+        try encoder.writeByte(e.gpa, 0x00); // resource_type = buffer
+        try encodeBufferBindingLayout(e, encoder, buf_node);
+        return;
+    }
+
+    // Check for sampler binding
+    if (utils.findPropertyValueInObject(e, entry_node, "sampler")) |samp_node| {
+        try encoder.writeByte(e.gpa, 0x01); // resource_type = sampler
+        try encodeSamplerBindingLayout(e, encoder, samp_node);
+        return;
+    }
+
+    // Check for texture binding
+    if (utils.findPropertyValueInObject(e, entry_node, "texture")) |tex_node| {
+        try encoder.writeByte(e.gpa, 0x02); // resource_type = texture
+        try encodeTextureBindingLayout(e, encoder, tex_node);
+        return;
+    }
+
+    // Check for storageTexture binding
+    if (utils.findPropertyValueInObject(e, entry_node, "storageTexture")) |st_node| {
+        try encoder.writeByte(e.gpa, 0x03); // resource_type = storageTexture
+        try encodeStorageTextureBindingLayout(e, encoder, st_node);
+        return;
+    }
+
+    // Check for externalTexture binding (no additional data)
+    if (utils.findPropertyValueInObject(e, entry_node, "externalTexture") != null) {
+        try encoder.writeByte(e.gpa, 0x04); // resource_type = externalTexture
+        return;
+    }
+
+    // Default: buffer with no specific layout
+    try encoder.writeByte(e.gpa, 0x00);
+}
+
+fn encodeBufferBindingLayout(e: *Emitter, encoder: *DescriptorEncoder, node: Node.Index) !void {
+    // type: "uniform" | "storage" | "read-only-storage"
+    var buf_type: u8 = 0; // uniform
+    if (utils.findPropertyValueInObject(e, node, "type")) |t| {
+        const type_str = utils.getStringContent(e, t);
+        if (std.mem.eql(u8, type_str, "storage")) buf_type = 1;
+        if (std.mem.eql(u8, type_str, "read-only-storage")) buf_type = 2;
+    }
+    try encoder.writeByte(e.gpa, buf_type);
+
+    // hasDynamicOffset
+    var dynamic_offset: u8 = 0;
+    if (utils.findPropertyValueInObject(e, node, "hasDynamicOffset")) |d| {
+        const bool_str = utils.getStringContent(e, d);
+        if (std.mem.eql(u8, bool_str, "true")) dynamic_offset = 1;
+    }
+    try encoder.writeByte(e.gpa, dynamic_offset);
+
+    // minBindingSize (u32)
+    var min_size: u32 = 0;
+    if (utils.findPropertyValueInObject(e, node, "minBindingSize")) |m| {
+        min_size = utils.resolveNumericValue(e, m) orelse 0;
+    }
+    try encoder.writeU32(e.gpa, min_size);
+}
+
+fn encodeSamplerBindingLayout(e: *Emitter, encoder: *DescriptorEncoder, node: Node.Index) !void {
+    // type: "filtering" | "non-filtering" | "comparison"
+    var samp_type: u8 = 0; // filtering
+    if (utils.findPropertyValueInObject(e, node, "type")) |t| {
+        const type_str = utils.getStringContent(e, t);
+        if (std.mem.eql(u8, type_str, "non-filtering")) samp_type = 1;
+        if (std.mem.eql(u8, type_str, "comparison")) samp_type = 2;
+    }
+    try encoder.writeByte(e.gpa, samp_type);
+}
+
+fn encodeTextureBindingLayout(e: *Emitter, encoder: *DescriptorEncoder, node: Node.Index) !void {
+    // sampleType: "float" | "unfilterable-float" | "depth" | "sint" | "uint"
+    var sample_type: u8 = 0; // float
+    if (utils.findPropertyValueInObject(e, node, "sampleType")) |t| {
+        const type_str = utils.getStringContent(e, t);
+        if (std.mem.eql(u8, type_str, "unfilterable-float")) sample_type = 1;
+        if (std.mem.eql(u8, type_str, "depth")) sample_type = 2;
+        if (std.mem.eql(u8, type_str, "sint")) sample_type = 3;
+        if (std.mem.eql(u8, type_str, "uint")) sample_type = 4;
+    }
+    try encoder.writeByte(e.gpa, sample_type);
+
+    // viewDimension
+    var view_dim: u8 = 1; // "2d"
+    if (utils.findPropertyValueInObject(e, node, "viewDimension")) |d| {
+        view_dim = textureViewDimensionFromString(utils.getStringContent(e, d));
+    } else if (utils.findPropertyValueInObject(e, node, "dimension")) |d| {
+        view_dim = textureViewDimensionFromString(utils.getStringContent(e, d));
+    }
+    try encoder.writeByte(e.gpa, view_dim);
+
+    // multisampled
+    var multisampled: u8 = 0;
+    if (utils.findPropertyValueInObject(e, node, "multisampled")) |m| {
+        const ms_str = utils.getStringContent(e, m);
+        if (std.mem.eql(u8, ms_str, "true")) multisampled = 1;
+    }
+    try encoder.writeByte(e.gpa, multisampled);
+}
+
+fn encodeStorageTextureBindingLayout(e: *Emitter, encoder: *DescriptorEncoder, node: Node.Index) !void {
+    // format (required)
+    var format: u8 = 0;
+    if (utils.findPropertyValueInObject(e, node, "format")) |f| {
+        format = @intFromEnum(DescriptorEncoder.TextureFormat.fromString(utils.getStringContent(e, f)));
+    }
+    try encoder.writeByte(e.gpa, format);
+
+    // access: "write-only" | "read-only" | "read-write"
+    var access: u8 = 0; // write-only
+    if (utils.findPropertyValueInObject(e, node, "access")) |a| {
+        const access_str = utils.getStringContent(e, a);
+        if (std.mem.eql(u8, access_str, "read-only")) access = 1;
+        if (std.mem.eql(u8, access_str, "read-write")) access = 2;
+    }
+    try encoder.writeByte(e.gpa, access);
+
+    // viewDimension
+    var view_dim: u8 = 1; // "2d"
+    if (utils.findPropertyValueInObject(e, node, "viewDimension")) |d| {
+        view_dim = textureViewDimensionFromString(utils.getStringContent(e, d));
+    } else if (utils.findPropertyValueInObject(e, node, "dimension")) |d| {
+        view_dim = textureViewDimensionFromString(utils.getStringContent(e, d));
+    }
+    try encoder.writeByte(e.gpa, view_dim);
+}
+
+fn textureViewDimensionFromString(s: []const u8) u8 {
+    const map = std.StaticStringMap(u8).initComptime(.{
+        .{ "1d", 0 },
+        .{ "2d", 1 },
+        .{ "2d-array", 2 },
+        .{ "cube", 3 },
+        .{ "cube-array", 4 },
+        .{ "3d", 5 },
+    });
+    return map.get(s) orelse 1; // default: 2d
+}
+
+fn parseVisibilityFlags(e: *Emitter, node: Node.Index) u8 {
+    const node_tag = e.ast.nodes.items(.tag)[@intFromEnum(node)];
+    var flags: u8 = 0;
+
+    if (node_tag == .array) {
+        const elements = utils.collectArrayElements(e, node);
+        for (elements) |elem_idx| {
+            const elem_node: Node.Index = @enumFromInt(elem_idx);
+            const flag_str = utils.getNodeText(e, elem_node);
+            if (std.mem.eql(u8, flag_str, "VERTEX")) flags |= 0x01;
+            if (std.mem.eql(u8, flag_str, "FRAGMENT")) flags |= 0x02;
+            if (std.mem.eql(u8, flag_str, "COMPUTE")) flags |= 0x04;
+        }
+    } else {
+        // Single value
+        const flag_str = utils.getNodeText(e, node);
+        if (std.mem.eql(u8, flag_str, "VERTEX")) flags |= 0x01;
+        if (std.mem.eql(u8, flag_str, "FRAGMENT")) flags |= 0x02;
+        if (std.mem.eql(u8, flag_str, "COMPUTE")) flags |= 0x04;
+    }
+
+    return flags;
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 //

@@ -247,16 +247,16 @@ pub const DescriptorEncoder = struct {
     // Low-level encoding
     // ========================================================================
 
-    fn writeByte(self: *Self, allocator: Allocator, byte: u8) !void {
+    pub fn writeByte(self: *Self, allocator: Allocator, byte: u8) !void {
         try self.buffer.append(allocator, byte);
     }
 
-    fn writeU16(self: *Self, allocator: Allocator, value: u16) !void {
+    pub fn writeU16(self: *Self, allocator: Allocator, value: u16) !void {
         try self.buffer.append(allocator, @intCast(value & 0xFF));
         try self.buffer.append(allocator, @intCast(value >> 8));
     }
 
-    fn writeU32(self: *Self, allocator: Allocator, value: u32) !void {
+    pub fn writeU32(self: *Self, allocator: Allocator, value: u32) !void {
         try self.buffer.append(allocator, @intCast(value & 0xFF));
         try self.buffer.append(allocator, @intCast((value >> 8) & 0xFF));
         try self.buffer.append(allocator, @intCast((value >> 16) & 0xFF));

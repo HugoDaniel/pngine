@@ -816,6 +816,16 @@ pub fn resolveBindGroupId(e: *Emitter, node: Node.Index) ?u16 {
     return null;
 }
 
+/// Collect array elements from an array node.
+/// Returns the extra_data range as a slice of u32 indices.
+pub fn collectArrayElements(e: *Emitter, node: Node.Index) []const u32 {
+    const tag = e.ast.nodes.items(.tag)[node.toInt()];
+    if (tag != .array) return &[_]u32{};
+
+    const data = e.ast.nodes.items(.data)[node.toInt()];
+    return e.ast.extra_data[data.extra_range.start..data.extra_range.end];
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
