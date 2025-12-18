@@ -1,0 +1,80 @@
+// Inercia Demoparty Demo - 260 seconds
+// Frame-based scene switching - each scene is a separate frame
+// Keyboard mapping: Q W E R T Y U I
+
+// Core stuff includes things that are common to a lot if not all scenes:
+// - depthTexture (texture)
+// - postProcessSampler (sampler)
+// - renderTarget (texture)
+// - uniformPngineInputsBuffer (buffer)
+// - writePngineInputs (queue)
+#import "./core.wgsl.pngine"
+
+#wgsl constants { value="./wgsl/inercia_constants.wgsl" }
+#wgsl transform2D { value="./wgsl/transform2D.wgsl" }
+#wgsl primitives { value="./wgsl/primitives.wgsl" }
+#wgsl tangram { value="./wgsl/tangram.wgsl" }
+#wgsl beats { value="./wgsl/beats.wgsl" }
+
+// Import all scene definitions - each defines its own #frame
+// #import "./sceneQ.wgsl.pngine"
+#import "./sceneQ.wgsl.pngine"
+#import "./sceneW.wgsl.pngine"
+#import "./sceneE.wgsl.pngine"
+#import "./sceneR.wgsl.pngine"
+#import "./sceneT.wgsl.pngine"
+#import "./sceneY.wgsl.pngine"
+#import "./sceneU.wgsl.pngine"
+#import "./sceneI.wgsl.pngine"
+
+// Scene definitions leverage the new #scene/#sequencer macros so the
+// interpreter knows each section's duration and ordering. JavaScript can now
+// query/seek scenes directly via viewer.getCurrentScene/seekScene.
+
+#scene sceneQ {
+  duration=35
+  perform=[sceneQ]
+}
+
+#scene sceneW {
+  duration=60
+  perform=[sceneW]
+}
+
+#scene sceneE {
+  duration=60
+  perform=[sceneE]
+}
+
+#scene sceneR {
+  duration=35
+  perform=[sceneR]
+}
+
+#scene sceneT {
+  duration=30
+  perform=[sceneT]
+}
+
+#scene sceneY {
+  duration=30
+  perform=[sceneY]
+}
+
+#scene sceneU {
+  duration=30
+  perform=[sceneU]
+}
+
+#scene sceneI {
+  duration=40
+  perform=[sceneI]
+}
+
+#sequencer inerciaShow {
+  scenes=[sceneQ, sceneW, sceneE, sceneR, sceneT, sceneY, sceneU, sceneI]
+  entry=sceneQ
+}
+
+// Note: Scene switching in demo.html now uses seekScene/getCurrentScene for
+// synchronization, while draw() simply points at the currently reported scene.

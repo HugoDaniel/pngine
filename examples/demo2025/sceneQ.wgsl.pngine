@@ -1,0 +1,135 @@
+#import "./core.wgsl.pngine"
+#import "./post_processing/starfield.wgsl.pngine"
+#import "./procedural_textures/star.wgsl.pngine"
+#import "./procedural_data/stars.wgsl.pngine"
+
+#buffer cameraInput {
+  size="4*4*4"
+  usage=[UNIFORM COPY_DST]
+}
+
+#buffer sceneQInputsBuffer {
+  size="8"
+  usage=[UNIFORM COPY_DST]
+}
+
+#wasmCall mvpMatrix {
+  module={
+    url="./wasm/camera.wasm"
+  }
+  func=staticCamera // This must be a function exported by the module
+  returns="mat4x4"
+  // The function will be called whenever "mvpMatrix" is referenced
+  args=[ "$canvas.width", "$canvas.height" ]
+}
+
+#queue writeCameraUniform {
+  writeBuffer={
+    buffer=cameraInput
+    bufferOffset=0
+    dataFrom={ wasm=mvpMatrix }
+  }
+}
+
+#queue writeSceneQInputs {
+  writeBuffer={
+    buffer=sceneQInputsBuffer
+    bufferOffset=0
+    data="$uniforms.sceneQ.inputs.data"
+  }
+}
+// Scene Q - Red Intro (0-35s)
+// Keyboard: Q key
+// Theme: Red, pulsating energy
+
+#bindGroup starfieldInputsBindGroup {
+  layout={ pipeline=renderStarfield index=0 }
+  entries=[
+    { binding=0 resource={ buffer=uniformPngineInputsBuffer } }
+    { binding=1 resource={ buffer=cameraInput }}
+    { binding=2 resource=starTexture },
+    { binding=3 resource=starTextureSampler },
+    { binding=4 resource={ buffer=sceneQInputsBuffer } },
+  ]
+}
+
+#renderPipeline renderStarfield {
+  layout=auto
+  vertex={
+    entryPoint=vs_starfield
+    module=sceneQ
+
+    buffers= [
+      // instanced particles buffer:
+      {
+        arrayStride = "8*4"
+        stepMode=instance
+        attributes=[
+
+          // instance position:
+          { shaderLocation=0 offset=0 format=float32x4 }
+
+          // instance velocity
+          { shaderLocation=1 offset="4*4" format=float32x4 }
+
+        ]
+      }
+    ]
+
+  }
+  fragment={
+    entryPoint=fs_starfield
+    module=sceneQ
+    targets=[{
+      format=rgba8unorm
+      blend={
+        color={ srcFactor=src-alpha dstFactor=one-minus-src-alpha operation=add }
+        alpha={ srcFactor=one dstFactor=one-minus-src-alpha operation=add }
+      }
+    }]
+  }
+  primitive={
+    topology=triangle-strip
+  }
+}
+
+#renderPass drawStarfield {
+  colorAttachments=[{
+    view=renderTarget
+    clearValue=[0.0 0.0 0.0 1.0]
+    loadOp=clear
+    storeOp=store
+  }]
+  vertexBuffers=[starsParticlesBuffers]
+  vertexBuffersPoolOffsets=[1]
+  pipeline=renderStarfield
+  bindGroups=[starfieldInputsBindGroup]
+  draw={
+    vertexCount=4
+    instanceCount=NUM_STARS_PARTICLES
+    firstVertex=0
+    firstInstance=0
+  }
+}
+
+#frame sceneQ {
+  perform=[
+    initStarsSimParams
+    writePngineInputs
+    writeCameraUniform
+    writeSceneQInputs
+    writeSceneTime
+    drawStarTexture
+    computeStarsParticlesPass
+    drawStarfield
+    postProcessStarfieldRenderPass
+  ]
+}
+
+#wgsl sceneQShader {
+  value="./wgsl/sceneQ.wgsl"
+  imports=["$wgsl.constants", "$wgsl.transform2D", "$wgsl.primitives","$wgsl.beats", "$wgsl.tangram"]
+}
+#shaderModule sceneQ {
+  code="$wgsl.sceneQShader"
+}

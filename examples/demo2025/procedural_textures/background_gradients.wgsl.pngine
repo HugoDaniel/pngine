@@ -1,0 +1,115 @@
+#buffer uniformSceneTimeBuffer {
+  size="4+4+4" // time, duration, normalizedTime
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeSceneTime {
+  writeBuffer={
+    buffer=uniformSceneTimeBuffer
+    bufferOffset=0
+    data="$uniforms._builtin.SceneTimeInputs.inputs.data"
+  }
+}
+
+#sampler bgGradientsTextureSampler {
+  minFilter=linear
+  magFilter=linear
+}
+
+#texture bgGradientsTexture{
+  size=["$canvas.width", "$canvas.height"]
+  format=rgba8unorm
+  usage=[RENDER_ATTACHMENT TEXTURE_BINDING]
+}
+
+#renderPipeline renderBgGradientsTexture {
+  layout=auto
+  vertex={
+    entryPoint=vs_bgGradientsTexture
+    module=bgGradientsTextureModule
+  }
+  fragment={
+    entryPoint=fs_bgGradientsTexture
+    module=bgGradientsTextureModule
+    targets=[{ format=rgba8unorm }]
+  }
+  primitive={
+    topology=triangle-list
+  }
+}
+
+#renderPass drawBgGradientsTexture {
+  colorAttachments=[{
+    view=bgGradientsTexture
+    clearValue=[1.0 1.0 1.0 0.0]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=renderBgGradientsTexture
+  bindGroups=[bgGradientsTextureInputsBindGroup]
+  draw=3
+}
+
+#bindGroup bgGradientsTextureInputsBindGroup {
+  layout={ pipeline=renderBgGradientsTexture index=0 }
+  entries=[
+    { binding=0 resource={ buffer=uniformSceneTimeBuffer } }
+  ]
+}
+
+
+#shaderModule bgGradientsTextureModule {
+
+  code="
+struct SceneTimeInputs {
+  time: f32,
+  duration: f32,
+  normalizedTime: f32,
+};
+
+struct VSOutput {
+  @builtin(position) position: vec4f,
+  @location(0) texcoord: vec2f,
+};
+
+@vertex fn vs_bgGradientsTexture(@builtin(vertex_index) vertexIndex : u32) -> VSOutput {
+  var pos = array(
+    vec2f(-1.0, -1.0),
+    vec2f(-1.0,  3.0),
+    vec2f( 3.0, -1.0),
+  );
+
+  var vsOutput: VSOutput;
+  let xy = pos[vertexIndex];
+  vsOutput.position = vec4f(xy, 0.0, 1.0);
+  vsOutput.texcoord = xy * vec2f(0.5, -0.5) + vec2f(0.5);
+  return vsOutput;
+}
+
+@group(0) @binding(0) var<uniform> inputs : SceneTimeInputs;
+
+fn hash(p: vec2f) -> f32 {
+  let p3 = fract(vec3f(p.xyx) * 0.1031);
+  let p3_add = p3 + dot(p3, p3.yzx + 33.33);
+  return fract((p3_add.x + p3_add.y) * p3_add.z);
+}
+
+@fragment fn fs_bgGradientsTexture(fsInput: VSOutput) -> @location(0) vec4f {
+  let uv = fsInput.texcoord;
+  let t = inputs.time;
+  // Fill the square with a single color:
+  var color = vec4f(sin(t), cos(t), 1.0, 0.0);
+
+  // Alpha Vignette creates a circle 
+  let vignette_strength = 0.45;
+  let vignette_falloff = 0.33;
+  let dist = length(uv - 0.5);
+  let vignette = smoothstep(vignette_falloff, vignette_strength, dist);
+  color.a = 1.0 - vignette;
+
+  return color;
+}
+"
+
+}
+

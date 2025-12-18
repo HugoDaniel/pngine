@@ -1,0 +1,54 @@
+#import "./core.wgsl.pngine"
+
+#wgsl sceneRShader {
+  value="./wgsl/sceneR.wgsl"
+  imports=["$wgsl.constants", "$wgsl.transform2D", "$wgsl.primitives","$wgsl.beats", "$wgsl.tangram"]
+}
+
+#bindGroup sceneRInputsBindGroup {
+  layout={ pipeline=renderSceneR index=0 }
+  entries=[
+    { binding=0 resource={ buffer=uniformPngineInputsBuffer } }
+  ]
+}
+
+#renderPipeline renderSceneR {
+  layout=auto
+  vertex={
+    entryPoint=vs_sceneR
+    module=sceneR
+  }
+  fragment={
+    entryPoint=fs_sceneR
+    module=sceneR
+    targets=[{ format=rgba8unorm }]
+  }
+  primitive={
+    topology=triangle-list
+  }
+}
+
+#renderPass drawSceneR {
+  colorAttachments=[{
+    view=renderTarget
+    clearValue=[0.0 0.0 0.0 1.0]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=renderSceneR
+  bindGroups=[sceneRInputsBindGroup]
+  draw=3
+}
+
+#frame sceneR {
+  perform=[
+    writePngineInputs
+    writePostProcessCommonInputs
+    drawSceneR
+    postProcessCommonRenderPass
+  ]
+}
+
+#shaderModule sceneR {
+  code="$wgsl.sceneRShader"
+}

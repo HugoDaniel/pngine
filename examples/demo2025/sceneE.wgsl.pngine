@@ -1,0 +1,71 @@
+#import "./core.wgsl.pngine"
+
+#wgsl sceneEShader {
+  value="./wgsl/sceneE.wgsl"
+  imports=["$wgsl.constants", "$wgsl.transform2D", "$wgsl.primitives", "$wgsl.beats", "$wgsl.tangram"]
+}
+
+#buffer sceneEInputsBuffer {
+  size="4+4+4+4"
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeSceneEInputs {
+  writeBuffer={
+    buffer=sceneEInputsBuffer
+    bufferOffset=0
+    data="$uniforms.sceneE.inputs.data"
+  }
+}
+
+#bindGroup sceneEInputsBindGroup {
+  layout={ pipeline=renderSceneE index=0 }
+  entries=[
+    { binding=0 resource={ buffer=uniformPngineInputsBuffer } }
+    { binding=1 resource={ buffer=sceneEInputsBuffer } }
+  ]
+}
+
+#renderPipeline renderSceneE {
+  layout=auto
+  vertex={
+    entryPoint=vs_sceneE
+    module=sceneE
+  }
+  fragment={
+    entryPoint=fs_sceneE
+    module=sceneE
+    targets=[{ format=rgba8unorm }]
+  }
+  primitive={
+    topology=triangle-list
+  }
+}
+
+#renderPass drawSceneE {
+  colorAttachments=[{
+    view=renderTarget
+    clearValue=[0.0 0.0 0.0 1.0]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=renderSceneE
+  bindGroups=[sceneEInputsBindGroup]
+  draw=3
+}
+
+#frame sceneE {
+  perform=[
+    writePngineInputs
+    writeSceneEInputs
+    writePostProcessCommonInputs
+    drawSceneE
+    postProcessCommonRenderPass
+  ]
+}
+
+#shaderModule sceneE {
+  code="$wgsl.sceneEShader"
+}
+
+

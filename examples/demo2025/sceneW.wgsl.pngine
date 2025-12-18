@@ -1,0 +1,100 @@
+#import "./core.wgsl.pngine"
+
+#wgsl mainBox { value="./wgsl/mainBox.wgsl" }
+#wgsl sceneWShader {
+  value="./wgsl/sceneW.wgsl"
+  imports=["$wgsl.constants", "$wgsl.transform2D", "$wgsl.primitives", "$wgsl.beats", "$wgsl.mainBox", "$wgsl.tangram"]
+  uniforms=[
+    { id=sceneWInputs var=inputs struct=SceneWInputs bindGroup=0 binding=1}
+  ]
+}
+
+// Video asset
+#videoAsset fertagus {
+  // url="./assets/fertagus_cropped.webm"
+  // url="./assets/fertagus_nuclear_1.webm"
+  url="./assets/fertagus_nuclear.webm"
+  // url="./assets/fertagus_blackhole.webm"
+  mimeType="video/webm"
+  loop=true
+}
+
+// Video sampler
+#sampler videoSampler {
+  magFilter=linear
+  minFilter=linear
+  addressModeU=clamp-to-edge
+  addressModeV=clamp-to-edge
+}
+
+#buffer sceneWInputsBuffer {
+  size="4+4+4+4+4+4+4"
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeSceneWInputs {
+  writeBuffer={
+    buffer=sceneWInputsBuffer
+    bufferOffset=0
+    data="$uniforms.sceneW.inputs.data"
+  }
+}
+
+#bindGroup sceneWInputsBindGroup {
+  layout={ pipeline=renderSceneW index=0 }
+  entries=[
+    { binding=0 resource={ buffer=uniformPngineInputsBuffer } }
+    { binding=1 resource={ buffer=sceneWInputsBuffer } }
+  ]
+}
+
+// Video bind group
+#bindGroup videoBindGroup {
+  layout={ pipeline=renderSceneW index=1 }
+  entries=[
+    { binding=0 resource=videoSampler }
+    { binding=1 resource=fertagus }
+  ]
+}
+
+#renderPipeline renderSceneW {
+  layout=auto
+  vertex={
+    entryPoint=vs_sceneW
+    module=sceneW
+  }
+  fragment={
+    entryPoint=fs_sceneW
+    module=sceneW
+    targets=[{ format=rgba8unorm }]
+  }
+  primitive={
+    topology=triangle-list
+  }
+}
+
+#renderPass drawSceneW {
+  colorAttachments=[{
+    view=renderTarget
+    clearValue=[0.0 0.0 0.0 1.0]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=renderSceneW
+  bindGroups=[sceneWInputsBindGroup videoBindGroup]
+  draw=3
+}
+
+#frame sceneW {
+  perform=[
+    writePngineInputs
+    writeSceneWInputs
+    writePostProcessCommonInputs
+    drawSceneW
+    postProcessCommonRenderPass
+  ]
+}
+
+#shaderModule sceneW {
+  code="$wgsl.sceneWShader"
+}

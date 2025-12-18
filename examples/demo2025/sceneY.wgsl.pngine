@@ -1,0 +1,73 @@
+#import "./core.wgsl.pngine"
+#import "./procedural_textures/cat_sdf.wgsl.pngine"
+
+#wgsl sceneYShader {
+  value="./wgsl/sceneY.wgsl"
+  imports=["$wgsl.constants", "$wgsl.transform2D", "$wgsl.primitives", "$wgsl.beats", "$wgsl.tangram"]
+}
+
+#buffer sceneYInputsBuffer {
+  size="4+4+4"
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeSceneYInputs {
+  writeBuffer={
+    buffer=sceneYInputsBuffer
+    bufferOffset=0
+    data="$uniforms.sceneY.inputs.data"
+  }
+}
+
+#bindGroup sceneYInputsBindGroup {
+  layout={ pipeline=renderSceneY index=0 }
+  entries=[
+    { binding=0 resource={ buffer=uniformPngineInputsBuffer } }
+    { binding=1 resource={ buffer=sceneYInputsBuffer } }
+    { binding=2 resource=catSdfTexture }
+    { binding=3 resource=catSdfTextureSampler }
+  ]
+}
+
+#renderPipeline renderSceneY {
+  layout=auto
+  vertex={
+    entryPoint=vs_sceneY
+    module=sceneY
+  }
+  fragment={
+    entryPoint=fs_sceneY
+    module=sceneY
+    targets=[{ format=rgba8unorm }]
+  }
+  primitive={
+    topology=triangle-list
+  }
+}
+
+#renderPass drawSceneY {
+  colorAttachments=[{
+    view=renderTarget
+    clearValue=[0.0 0.0 0.0 1.0]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=renderSceneY
+  bindGroups=[sceneYInputsBindGroup]
+  draw=3
+}
+
+#frame sceneY {
+  perform=[
+    writePngineInputs
+    writeSceneYInputs
+    writePostProcessCommonInputs
+    drawCatSdfTexture
+    drawSceneY
+    postProcessCommonRenderPass
+  ]
+}
+
+#shaderModule sceneY {
+  code="$wgsl.sceneYShader"
+}

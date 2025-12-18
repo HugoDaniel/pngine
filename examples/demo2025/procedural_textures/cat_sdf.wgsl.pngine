@@ -1,0 +1,53 @@
+#import "../core.wgsl.pngine"
+
+#define CAT_SDF_TEXTURE_SIZE=512.0
+#define CAT_SDF_COLS=3
+#define CAT_SDF_ROWS=2
+
+#sampler catSdfTextureSampler {
+  minFilter=linear
+  magFilter=linear
+}
+
+#texture catSdfTexture {
+  size=[CAT_SDF_TEXTURE_SIZE, CAT_SDF_TEXTURE_SIZE]
+  format=rgba8unorm
+  usage=[RENDER_ATTACHMENT TEXTURE_BINDING]
+}
+
+#renderPipeline renderCatSdfTexture {
+  layout=auto
+  vertex={
+    entryPoint=vs_catSdfTexture
+    module=catSdfTextureModule
+  }
+  fragment={
+    entryPoint=fs_catSdfTexture
+    module=catSdfTextureModule
+    targets=[{ format=rgba8unorm }]
+  }
+  primitive={
+    topology=triangle-list
+  }
+}
+
+#renderPass drawCatSdfTexture {
+  colorAttachments=[{
+    view=catSdfTexture
+    clearValue=[0.5 0.5 0.5 1.0]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=renderCatSdfTexture
+  bindGroups=[]
+  draw=3
+}
+
+#wgsl catSdfTextureShader {
+  value="./wgsl/cat_sdf_texture.wgsl"
+  imports=["$wgsl.constants", "$wgsl.transform2D", "$wgsl.primitives", "$wgsl.tangram"]
+}
+
+#shaderModule catSdfTextureModule {
+  code="$wgsl.catSdfTextureShader"
+}

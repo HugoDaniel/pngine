@@ -1,0 +1,32 @@
+#texture depthTexture {
+  size=["$canvas.width", "$canvas.height"]
+  format=depth24plus
+  usage=[RENDER_ATTACHMENT]
+}
+
+#sampler postProcessSampler {
+  minFilter=linear
+  magFilter=linear
+}
+
+#texture renderTarget {
+  size=["$canvas.width", "$canvas.height"]
+  format=rgba8unorm
+  usage=[RENDER_ATTACHMENT TEXTURE_BINDING]
+}
+
+#buffer uniformPngineInputsBuffer {
+  size="4+4+4+4" // time, canvasW, canvasH, canvasRatio
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writePngineInputs {
+  writeBuffer={
+    buffer=uniformPngineInputsBuffer
+    bufferOffset=0
+    data="$uniforms._builtin.PngineInputs.pngine.data"
+  }
+}
+
+#import "./post_processing/common.wgsl.pngine"
+

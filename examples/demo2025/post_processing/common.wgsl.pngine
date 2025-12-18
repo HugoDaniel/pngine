@@ -1,0 +1,140 @@
+#buffer postProcessCommonInputsBuffer {
+  size="4*8" // vec2 + vec2 + 4 floats
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writePostProcessCommonInputs {
+  writeBuffer={
+    buffer=postProcessCommonInputsBuffer
+    bufferOffset=0
+    data="$uniforms.postProcessCommonModule.post.data"
+  }
+}
+
+#renderPipeline postProcessCommonPipeline {
+  layout=auto
+  vertex={
+    entryPoint=vs
+    module=postProcessCommonModule
+  }
+  fragment={
+    entryPoint=fs2d
+    module=postProcessCommonModule
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#renderPass postProcessCommonRenderPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=postProcessCommonPipeline
+  bindGroups=[postProcessCommonBindGroup]
+  draw=3 
+}
+
+#bindGroup postProcessCommonBindGroup {
+  layout={ pipeline=postProcessCommonPipeline index=0 }
+  entries=[
+    { binding=0 resource=renderTarget },
+    { binding=1 resource=postProcessSampler },
+    { binding=2 resource={ buffer=uniformPngineInputsBuffer } },
+    { binding=3 resource={ buffer=postProcessCommonInputsBuffer } }
+  ]
+}
+
+#shaderModule postProcessCommonModule {
+
+  code="
+  struct PngineInputs {
+  time: f32,
+};
+
+struct PostProcessCommonInputs {
+  chromaRed: vec2f,
+  chromaBlue: vec2f,
+  chromaStrength: f32,
+  vignetteStrength: f32,
+  vignetteFalloff: f32,
+  vignetteEnabled: f32,
+};
+
+struct VSOutput {
+  @builtin(position) position: vec4f,
+  @location(0) texcoord: vec2f,
+};
+
+@vertex fn vs(@builtin(vertex_index) vertexIndex : u32) -> VSOutput {
+  var pos = array(
+    vec2f(-1.0, -1.0),
+    vec2f(-1.0,  3.0),
+    vec2f( 3.0, -1.0),
+  );
+
+  var vsOutput: VSOutput;
+  let xy = pos[vertexIndex];
+  vsOutput.position = vec4f(xy, 0.0, 1.0);
+  vsOutput.texcoord = xy * vec2f(0.5, -0.5) + vec2f(0.5);
+  return vsOutput;
+}
+
+@group(0) @binding(0) var postTexture2d: texture_2d<f32>;
+@group(0) @binding(1) var postSampler: sampler;
+@group(0) @binding(2) var<uniform> inputs : PngineInputs;
+@group(0) @binding(3) var<uniform> post : PostProcessCommonInputs;
+
+fn hash(p: vec2f) -> f32 {
+  let p3 = fract(vec3f(p.xyx) * 0.1031);
+  let p3_add = p3 + dot(p3, p3.yzx + 33.33);
+  return fract((p3_add.x + p3_add.y) * p3_add.z);
+}
+
+@fragment fn fs2d(fsInput: VSOutput) -> @location(0) vec4f {
+  let uv = fsInput.texcoord;
+  let t = inputs.time;
+  let baseColor = textureSample(postTexture2d, postSampler, uv).rgb;
+
+  // --- Chromatic aberration ---
+  let r_offset = post.chromaRed * post.chromaStrength * (1.0 - uv.y);
+  let b_offset = post.chromaBlue * post.chromaStrength * (1.0 - uv.y);
+
+  let r = textureSample(postTexture2d, postSampler, uv + r_offset).r;
+  let g = baseColor.g;
+  let b = textureSample(postTexture2d, postSampler, uv + b_offset).b;
+
+  var color = vec3f(r, g, b);
+
+  // --- Vignette ---
+  let dist = length(uv - 0.5);
+  let vignette = smoothstep(post.vignetteFalloff, post.vignetteStrength, dist);
+  color *= 1.0 - vignette * post.vignetteEnabled;
+
+  // --- Scanlines ---
+  // We use a high frequency sine wave based on UV.y
+  // 800.0 is the frequency (number of lines). You can adjust this number.
+  let scanline_count = 800.0; 
+  let scanline_intensity = sin(uv.y * scanline_count * 3.14159 * 2.0);
+  
+  // Normalize sine (-1 to 1) to (0.5 to 1.0) so lines aren't pitch black
+  let scanline_pattern = 0.75 + 0.25 * scanline_intensity;
+
+  // Mix between original color and scanline color based on scanlines_t
+  // If scanlines_t is 0.0, we use original color. 
+  // If scanlines_t is 1.0, we multiply by the pattern.
+
+  var scanlines_t = 1.0;
+  color = mix(color, color * scanline_pattern, scanlines_t);
+
+  // --- Film Grain (Optional/Commented) ---
+  // let grain_amount = 0.01;
+  // let grain = (hash(uv + inputs.time) - 0.5) * grain_amount;
+  // color += grain;
+
+  // return vec4f(color, 1.0);
+  return vec4f(baseColor, 1.0);
+}
+"
+
+}

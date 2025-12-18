@@ -1,0 +1,102 @@
+#define NUM_STARS_PARTICLES="64*64"
+
+#data initialStarsParticlesData {
+  float32Array={
+    numberOfElements=NUM_STARS_PARTICLES 
+    initEachElementWith=[
+    // position xyz:
+      // "cos((ELEMENT_ID / NUM_STARS_PARTICLES) * PI * 2) * sqrt(ELEMENT_ID / NUM_STARS_PARTICLES)"
+      // "sin((ELEMENT_ID / NUM_STARS_PARTICLES) * PI * 2) * sqrt(ELEMENT_ID / NUM_STARS_PARTICLES)"
+      // "(random() * 20) - 10"
+      "(random() * 20) - 10"
+      "(random() * 20) - 10"
+      "(random() * 20) - 10"
+      // padding / homogeneous coord so the buffer lines up with vec4f
+      "1.0"
+    // velocity:
+      "random()"
+      "random()"
+      "random()"
+      // padding lane for vec4f used as a channel for random positions:
+      "(random() * 20) - 10"
+    ]
+  }
+}
+
+// Pooled 2 buffers
+#buffer starsParticlesBuffers {
+  size = initialStarsParticlesData
+  usage = [VERTEX STORAGE]
+  mappedAtCreation = initialStarsParticlesData
+  pool=2
+}
+
+#buffer starsSimParamBuffer {
+  size="8*4" // deltaT + simId + vec3 + vec3
+  usage=[UNIFORM COPY_DST]
+}
+
+#data starsSimParamsData {
+  float32Array=[
+  // deltaT:
+  0.04,
+  // simId:
+  0.0
+  // rule1Distance:
+  0.1,
+  // rule2Distance:
+  0.025,
+  // rule3Distance:
+  0.025,
+  // rule1Scale:
+  0.02,
+  // rule2Scale:
+  0.05,
+  // rule3Scale:
+  0.005
+]}
+
+#queue initStarsSimParams {
+  writeBuffer={
+    buffer=starsSimParamBuffer
+    bufferOffset=0
+    data="$data.starsSimParamsData.buffer"
+  }
+}
+
+#bindGroup starsParticlesBindGroups {
+  layout={ pipeline=computeStarsParticles index=0 }
+  entries=[
+    { binding=0 resource={ buffer=starsParticlesBuffers size=initialStarsParticlesData pingPong=0 }}
+    { binding=1 resource={ buffer=starsParticlesBuffers size=initialStarsParticlesData pingPong=1 }}
+    { binding=2 resource={ buffer=starsSimParamBuffer }}
+    { binding=3 resource={ buffer=sceneQInputsBuffer }}
+    { binding=4 resource={ buffer=uniformPngineInputsBuffer } }
+  ]
+  pool=2
+}
+
+#computePipeline computeStarsParticles {
+  layout=auto
+  compute={
+    entrypoint=computeStarsParticlesMain
+    module=starsParticlesModule
+  }
+}
+
+#computePass computeStarsParticlesPass {
+  pipeline=computeStarsParticles
+  bindGroups=[starsParticlesBindGroups]
+  // Optionally set the pool offset at each bind group: bindGroupsPoolOffsets=[0]
+  // non pooled bind groups will be left as is regardless of the value set
+  dispatchWorkgroups="ceil(NUM_STARS_PARTICLES / 64)"
+}
+
+#wgsl sceneQStarsShader {
+  value="./wgsl/sceneQStars.wgsl"
+  imports=["$wgsl.constants", "$wgsl.transform2D", "$wgsl.primitives",  "$wgsl.beats", "$wgsl.tangram"]
+}
+
+#shaderModule starsParticlesModule {
+  code="$wgsl.sceneQStarsShader"
+}
