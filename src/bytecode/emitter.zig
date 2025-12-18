@@ -206,6 +206,34 @@ pub const Emitter = struct {
         try self.emitVarint(allocator, blob_data_id);
     }
 
+    /// Emit create_texture_view instruction.
+    /// Creates a GPUTextureView from an existing texture.
+    pub fn createTextureView(
+        self: *Self,
+        allocator: Allocator,
+        view_id: u16,
+        texture_id: u16,
+        descriptor_data_id: u16,
+    ) !void {
+        try self.emitOpcode(allocator, .create_texture_view);
+        try self.emitVarint(allocator, view_id);
+        try self.emitVarint(allocator, texture_id);
+        try self.emitVarint(allocator, descriptor_data_id);
+    }
+
+    /// Emit create_query_set instruction.
+    /// Creates a GPUQuerySet for occlusion or timestamp queries.
+    pub fn createQuerySet(
+        self: *Self,
+        allocator: Allocator,
+        query_set_id: u16,
+        descriptor_data_id: u16,
+    ) !void {
+        try self.emitOpcode(allocator, .create_query_set);
+        try self.emitVarint(allocator, query_set_id);
+        try self.emitVarint(allocator, descriptor_data_id);
+    }
+
     // ========================================================================
     // Pass Operations
     // ========================================================================
