@@ -158,6 +158,7 @@ test {
     _ = @import("dsl/analyzer/expr_test.zig");
     _ = @import("dsl/Emitter.zig");
     _ = @import("dsl/emitter/test.zig");
+    _ = @import("dsl/emitter/integration_test.zig");
     _ = @import("dsl/Compiler.zig");
     // Run PNG embedding/encoding tests
     _ = @import("png/crc32.zig");

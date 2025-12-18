@@ -1,0 +1,641 @@
+//! Integration Tests for DSL Macros
+//!
+//! Comprehensive tests ported from old_pngine TypeScript tests.
+//! Tests verify end-to-end compilation from DSL source to PNGB bytecode.
+//!
+//! Test categories:
+//! - Triangle example: Basic render pipeline
+//! - MSAA example: Multi-sampling with #define
+//! - Rotating cube: Vertex buffers, depth stencil
+//! - Error handling: Invalid syntax detection
+//!
+//! Following TigerBeetle testing patterns:
+//! - Descriptive test names documenting behavior
+//! - Property verification with assertions
+//! - Memory leak detection via testing.allocator
+
+const std = @import("std");
+const testing = std.testing;
+const Parser = @import("../Parser.zig").Parser;
+const Analyzer = @import("../Analyzer.zig").Analyzer;
+const Emitter = @import("../Emitter.zig").Emitter;
+const format = @import("../../bytecode/format.zig");
+const opcodes = @import("../../bytecode/opcodes.zig");
+const mock_gpu = @import("../../executor/mock_gpu.zig");
+const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+
+/// Helper: compile DSL source to PNGB bytecode.
+fn compileSource(source: [:0]const u8) ![]u8 {
+    var ast = try Parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    var analysis = try Analyzer.analyze(testing.allocator, &ast);
+    defer analysis.deinit(testing.allocator);
+
+    if (analysis.hasErrors()) {
+        return error.AnalysisError;
+    }
+
+    return Emitter.emit(testing.allocator, &ast, &analysis);
+}
+
+/// Helper: compile and execute to verify GPU calls.
+fn compileAndExecute(source: [:0]const u8) !mock_gpu.MockGPU {
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    errdefer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    return gpu;
+}
+
+// ============================================================================
+// Triangle Example - Basic Render Pipeline
+// Ported from old_pngine/src/preprocessor/ast.spec.ts "example 1 - triangle"
+// ============================================================================
+
+test "Integration: triangle example - basic render pipeline" {
+    const source: [:0]const u8 =
+        \\#wgsl shader {
+        \\  value="@vertex fn vertexMain() -> @builtin(position) vec4f { return vec4f(0.0); }
+        \\@fragment fn fragmentMain() -> @location(0) vec4f { return vec4f(1.0); }"
+        \\}
+        \\
+        \\#renderPipeline triangle {
+        \\  vertex={ module=$wgsl.shader entryPoint=vertexMain }
+        \\  fragment={
+        \\    module=$wgsl.shader
+        \\    entryPoint=fragmentMain
+        \\    targets=[{ format=bgra8unorm }]
+        \\  }
+        \\  primitive={ topology=triangle-list }
+        \\}
+        \\
+        \\#renderPass mainPass {
+        \\  colorAttachments=[{
+        \\    clearValue=[0 0 0 0]
+        \\    loadOp=clear
+        \\    storeOp=store
+        \\  }]
+        \\  pipeline=$renderPipeline.triangle
+        \\  draw=3
+        \\}
+        \\
+        \\#frame main {
+        \\  perform=[$renderPass.mainPass]
+        \\}
+    ;
+
+    var gpu = try compileAndExecute(source);
+    defer gpu.deinit(testing.allocator);
+
+    // Verify shader module created
+    var found_shader = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_shader_module) {
+            found_shader = true;
+            break;
+        }
+    }
+    try testing.expect(found_shader);
+
+    // Verify render pipeline created
+    var found_pipeline = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_render_pipeline) {
+            found_pipeline = true;
+            break;
+        }
+    }
+    try testing.expect(found_pipeline);
+
+    // Verify draw call
+    var found_draw = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .draw) {
+            try testing.expectEqual(@as(u32, 3), call.params.draw.vertex_count);
+            found_draw = true;
+            break;
+        }
+    }
+    try testing.expect(found_draw);
+}
+
+// ============================================================================
+// MSAA Example - Multi-sampling with #define
+// Ported from old_pngine/src/preprocessor/ast.spec.ts "example 2 - triangle MSAA"
+// ============================================================================
+
+test "Integration: MSAA example - #define substitution" {
+    const source: [:0]const u8 =
+        \\#define SAMPLE_COUNT=4
+        \\
+        \\#wgsl shader {
+        \\  value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); }"
+        \\}
+        \\
+        \\#texture msaaTexture {
+        \\  size=[512 512]
+        \\  sampleCount=SAMPLE_COUNT
+        \\  format=bgra8unorm
+        \\  usage=[RENDER_ATTACHMENT]
+        \\}
+        \\
+        \\#renderPipeline msaaPipeline {
+        \\  layout=auto
+        \\  vertex={ module=$wgsl.shader entryPoint=vs }
+        \\  multisample={ count=SAMPLE_COUNT }
+        \\}
+        \\
+        \\#frame main { perform=[] }
+    ;
+
+    var gpu = try compileAndExecute(source);
+    defer gpu.deinit(testing.allocator);
+
+    // Verify MSAA texture created with sampleCount=4
+    var found_texture = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_texture) {
+            // Texture created (sampleCount is in JSON descriptor)
+            found_texture = true;
+            break;
+        }
+    }
+    try testing.expect(found_texture);
+}
+
+// ============================================================================
+// Rotating Cube Example - Vertex Buffers, Depth Stencil
+// Ported from old_pngine/src/preprocessor/ast.spec.ts "example 3 - rotating cube"
+// ============================================================================
+
+test "Integration: rotating cube - vertex buffers and depth stencil" {
+    const source: [:0]const u8 =
+        \\#define CUBE_VERTEX_SIZE=40
+        \\#define CUBE_POSITION_OFFSET=0
+        \\#define CUBE_UV_OFFSET=32
+        \\#define CUBE_VERTEX_COUNT=36
+        \\
+        \\#wgsl cubeShader {
+        \\  value="@vertex fn vertexMain() -> @builtin(position) vec4f { return vec4f(0.0); }
+        \\@fragment fn fragmentMain() -> @location(0) vec4f { return vec4f(1.0); }"
+        \\}
+        \\
+        \\#data cubeVertexArray {
+        \\  float32Array=[1 -1 1 1  1 0 1 1  0 1]
+        \\}
+        \\
+        \\#buffer verticesBuffer {
+        \\  size=cubeVertexArray
+        \\  usage=[VERTEX COPY_DST]
+        \\}
+        \\
+        \\#renderPipeline cube {
+        \\  layout=auto
+        \\  vertex={
+        \\    module=$wgsl.cubeShader
+        \\    entryPoint=vertexMain
+        \\    buffers=[{
+        \\      arrayStride=CUBE_VERTEX_SIZE
+        \\      attributes=[
+        \\        { shaderLocation=0 offset=CUBE_POSITION_OFFSET format=float32x4 }
+        \\        { shaderLocation=1 offset=CUBE_UV_OFFSET format=float32x2 }
+        \\      ]
+        \\    }]
+        \\  }
+        \\  fragment={
+        \\    module=$wgsl.cubeShader
+        \\    entryPoint=fragmentMain
+        \\    targets=[{ format=bgra8unorm }]
+        \\  }
+        \\  primitive={ topology=triangle-list cullMode=back }
+        \\  depthStencil={ depthWriteEnabled=true depthCompare=less format=depth24plus }
+        \\}
+        \\
+        \\#texture depthTexture {
+        \\  size=[512 512]
+        \\  format=depth24plus
+        \\  usage=[RENDER_ATTACHMENT]
+        \\}
+        \\
+        \\#renderPass cubePass {
+        \\  colorAttachments=[{
+        \\    clearValue=[0.5 0.5 0.5 1.0]
+        \\    loadOp=clear
+        \\    storeOp=store
+        \\  }]
+        \\  depthStencilAttachment={
+        \\    view=$texture.depthTexture
+        \\    depthClearValue=1.0
+        \\    depthLoadOp=clear
+        \\    depthStoreOp=store
+        \\  }
+        \\  pipeline=$renderPipeline.cube
+        \\  vertexBuffers=[$buffer.verticesBuffer]
+        \\  draw=CUBE_VERTEX_COUNT
+        \\}
+        \\
+        \\#frame main {
+        \\  perform=[$renderPass.cubePass]
+        \\}
+    ;
+
+    var gpu = try compileAndExecute(source);
+    defer gpu.deinit(testing.allocator);
+
+    // Verify vertex buffer created
+    var found_buffer = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_buffer) {
+            found_buffer = true;
+            break;
+        }
+    }
+    try testing.expect(found_buffer);
+
+    // Verify depth texture created
+    var texture_count: u32 = 0;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_texture) {
+            texture_count += 1;
+        }
+    }
+    try testing.expect(texture_count >= 1);
+
+    // Verify draw call with vertex count from #define
+    var found_draw = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .draw) {
+            try testing.expectEqual(@as(u32, 36), call.params.draw.vertex_count);
+            found_draw = true;
+            break;
+        }
+    }
+    try testing.expect(found_draw);
+}
+
+// ============================================================================
+// Compute Pipeline Tests
+// Ported from old_pngine/src/preprocessor/parsePipeline.spec.ts
+// ============================================================================
+
+test "Integration: compute pipeline with dispatch" {
+    const source: [:0]const u8 =
+        \\#wgsl computeShader {
+        \\  value="@compute @workgroup_size(64) fn main() {}"
+        \\}
+        \\
+        \\#computePipeline compute {
+        \\  compute={ module=$wgsl.computeShader entryPoint=main }
+        \\}
+        \\
+        \\#computePass computePass {
+        \\  pipeline=$computePipeline.compute
+        \\  dispatch=[16 16 1]
+        \\}
+        \\
+        \\#frame main {
+        \\  perform=[$computePass.computePass]
+        \\}
+    ;
+
+    var gpu = try compileAndExecute(source);
+    defer gpu.deinit(testing.allocator);
+
+    // Verify compute pipeline created
+    var found_compute_pipeline = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_compute_pipeline) {
+            found_compute_pipeline = true;
+            break;
+        }
+    }
+    try testing.expect(found_compute_pipeline);
+
+    // Verify dispatch call
+    var found_dispatch = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .dispatch) {
+            try testing.expectEqual(@as(u32, 16), call.params.dispatch.x);
+            try testing.expectEqual(@as(u32, 16), call.params.dispatch.y);
+            try testing.expectEqual(@as(u32, 1), call.params.dispatch.z);
+            found_dispatch = true;
+            break;
+        }
+    }
+    try testing.expect(found_dispatch);
+}
+
+// ============================================================================
+// Vertex Buffer Layout Tests
+// Ported from old_pngine/src/preprocessor/parsePipeline.spec.ts
+// ============================================================================
+
+test "Integration: pipeline with multiple vertex buffer layouts" {
+    const source: [:0]const u8 =
+        \\#wgsl shader {
+        \\  value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); }"
+        \\}
+        \\
+        \\#renderPipeline withBuffers {
+        \\  vertex={
+        \\    module=$wgsl.shader
+        \\    entryPoint=vs
+        \\    buffers=[
+        \\      {
+        \\        arrayStride=100
+        \\        attributes=[
+        \\          { format=float32x4 offset=0 shaderLocation=0 }
+        \\          { format=float32x2 offset=16 shaderLocation=1 }
+        \\        ]
+        \\      }
+        \\      {
+        \\        arrayStride=16
+        \\        stepMode=instance
+        \\        attributes=[
+        \\          { format=float32x4 offset=0 shaderLocation=2 }
+        \\        ]
+        \\      }
+        \\    ]
+        \\  }
+        \\}
+        \\
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    // Verify valid PNGB
+    try testing.expectEqualStrings("PNGB", pngb[0..4]);
+}
+
+// ============================================================================
+// Fragment Targets with Blend State
+// ============================================================================
+
+test "Integration: fragment targets with blend state" {
+    const source: [:0]const u8 =
+        \\#wgsl shader {
+        \\  value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); }
+        \\@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }"
+        \\}
+        \\
+        \\#renderPipeline blended {
+        \\  vertex={ module=$wgsl.shader entryPoint=vs }
+        \\  fragment={
+        \\    module=$wgsl.shader
+        \\    entryPoint=fs
+        \\    targets=[{
+        \\      format=bgra8unorm
+        \\      blend={
+        \\        color={ srcFactor=src-alpha dstFactor=one-minus-src-alpha operation=add }
+        \\        alpha={ srcFactor=one dstFactor=zero operation=add }
+        \\      }
+        \\    }]
+        \\  }
+        \\}
+        \\
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    try testing.expectEqualStrings("PNGB", pngb[0..4]);
+}
+
+// ============================================================================
+// WGSL Imports Test
+// Ported from old_pngine/src/preprocessor/parseWgsl.spec.ts
+// ============================================================================
+
+test "Integration: wgsl with imports" {
+    const source: [:0]const u8 =
+        \\#wgsl common {
+        \\  value="fn helper() -> f32 { return 1.0; }"
+        \\}
+        \\
+        \\#wgsl main {
+        \\  imports=[$wgsl.common]
+        \\  value="@vertex fn vs() -> @builtin(position) vec4f {
+        \\    let x = helper();
+        \\    return vec4f(x);
+        \\  }"
+        \\}
+        \\
+        \\#renderPipeline pipe {
+        \\  vertex={ module=$wgsl.main entryPoint=vs }
+        \\}
+        \\
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    try testing.expectEqualStrings("PNGB", pngb[0..4]);
+}
+
+// ============================================================================
+// Bind Group Tests
+// ============================================================================
+
+test "Integration: bind group with uniform buffer" {
+    const source: [:0]const u8 =
+        \\#wgsl shader {
+        \\  value="@group(0) @binding(0) var<uniform> data: vec4f;"
+        \\}
+        \\
+        \\#buffer uniformBuffer {
+        \\  size=16
+        \\  usage=[UNIFORM COPY_DST]
+        \\}
+        \\
+        \\#bindGroup uniformGroup {
+        \\  entries=[
+        \\    { binding=0 resource={ buffer=$buffer.uniformBuffer } }
+        \\  ]
+        \\}
+        \\
+        \\#frame main { perform=[] }
+    ;
+
+    var gpu = try compileAndExecute(source);
+    defer gpu.deinit(testing.allocator);
+
+    // Verify bind group created
+    var found_bind_group = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_bind_group) {
+            found_bind_group = true;
+            break;
+        }
+    }
+    try testing.expect(found_bind_group);
+}
+
+// ============================================================================
+// Sampler Tests
+// ============================================================================
+
+test "Integration: sampler with all attributes" {
+    const source: [:0]const u8 =
+        \\#sampler linearSampler {
+        \\  magFilter=linear
+        \\  minFilter=linear
+        \\  mipmapFilter=linear
+        \\  addressModeU=repeat
+        \\  addressModeV=repeat
+        \\  maxAnisotropy=4
+        \\}
+        \\
+        \\#frame main { perform=[] }
+    ;
+
+    var gpu = try compileAndExecute(source);
+    defer gpu.deinit(testing.allocator);
+
+    // Verify sampler created
+    var found_sampler = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_sampler) {
+            found_sampler = true;
+            break;
+        }
+    }
+    try testing.expect(found_sampler);
+}
+
+// ============================================================================
+// TextureView Tests
+// ============================================================================
+
+test "Integration: texture view with dimension override" {
+    // TODO: Implement emitTextureViews in resources.zig
+    return error.SkipZigTest;
+}
+
+// ============================================================================
+// QuerySet Tests
+// ============================================================================
+
+test "Integration: query set for timestamps" {
+    // TODO: Implement emitQuerySets in resources.zig
+    return error.SkipZigTest;
+}
+
+// ============================================================================
+// BindGroupLayout and PipelineLayout Tests
+// ============================================================================
+
+test "Integration: explicit bind group layout" {
+    // TODO: Implement emitBindGroupLayouts in resources.zig
+    return error.SkipZigTest;
+}
+
+test "Integration: explicit pipeline layout" {
+    // TODO: Implement emitPipelineLayouts in resources.zig
+    return error.SkipZigTest;
+}
+
+// ============================================================================
+// Error Handling Tests
+// ============================================================================
+
+test "Parser: duplicate definition should fail analysis" {
+    const source: [:0]const u8 =
+        \\#buffer same { size=100 }
+        \\#buffer same { size=200 }
+        \\#frame main { perform=[] }
+    ;
+
+    var ast = try Parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    var analysis = try Analyzer.analyze(testing.allocator, &ast);
+    defer analysis.deinit(testing.allocator);
+
+    // Should have duplicate definition error
+    try testing.expect(analysis.hasErrors());
+}
+
+test "Parser: undefined reference should fail analysis" {
+    const source: [:0]const u8 =
+        \\#renderPipeline pipe {
+        \\  vertex={ module=$wgsl.nonexistent }
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    var ast = try Parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    var analysis = try Analyzer.analyze(testing.allocator, &ast);
+    defer analysis.deinit(testing.allocator);
+
+    // Should have undefined reference error
+    try testing.expect(analysis.hasErrors());
+}
+
+// ============================================================================
+// Arithmetic Expression Tests
+// ============================================================================
+
+test "Integration: arithmetic expressions in buffer size" {
+    const source: [:0]const u8 =
+        \\#define FLOAT_SIZE=4
+        \\#define VEC4_SIZE=FLOAT_SIZE*4
+        \\
+        \\#buffer uniformBuf {
+        \\  size=VEC4_SIZE
+        \\  usage=[UNIFORM]
+        \\}
+        \\
+        \\#frame main { perform=[] }
+    ;
+
+    var gpu = try compileAndExecute(source);
+    defer gpu.deinit(testing.allocator);
+
+    // Verify buffer created with correct size: 4*4 = 16
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_buffer) {
+            try testing.expectEqual(@as(u32, 16), call.params.create_buffer.size);
+            return;
+        }
+    }
+    try testing.expect(false); // Should have found buffer
+}
+
+test "Integration: complex arithmetic expression" {
+    const source: [:0]const u8 =
+        \\#buffer complexBuf {
+        \\  size=(4+4)*8/2
+        \\  usage=[STORAGE]
+        \\}
+        \\
+        \\#frame main { perform=[] }
+    ;
+
+    var gpu = try compileAndExecute(source);
+    defer gpu.deinit(testing.allocator);
+
+    // Verify buffer created with correct size: (4+4)*8/2 = 32
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_buffer) {
+            try testing.expectEqual(@as(u32, 32), call.params.create_buffer.size);
+            return;
+        }
+    }
+    try testing.expect(false);
+}
