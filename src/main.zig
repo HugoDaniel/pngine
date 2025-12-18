@@ -151,7 +151,11 @@ test {
     _ = @import("dsl/Lexer.zig");
     _ = @import("dsl/Ast.zig");
     _ = @import("dsl/Parser.zig");
+    _ = @import("dsl/parser/test.zig");
+    _ = @import("dsl/parser/expr_test.zig");
     _ = @import("dsl/Analyzer.zig");
+    _ = @import("dsl/analyzer/test.zig");
+    _ = @import("dsl/analyzer/expr_test.zig");
     _ = @import("dsl/Emitter.zig");
     _ = @import("dsl/emitter/test.zig");
     _ = @import("dsl/Compiler.zig");
@@ -219,7 +223,7 @@ test "full pipeline: compile and execute" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(std.testing.allocator);
 
-    var disp = MockDispatcher.init(&gpu, &module);
+    var disp = MockDispatcher.init(std.testing.allocator, &gpu, &module);
     try disp.executeAll(std.testing.allocator);
 
     // Verify GPU calls: create_shader_module, create_render_pipeline,
