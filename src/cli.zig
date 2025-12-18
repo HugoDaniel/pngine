@@ -1256,10 +1256,12 @@ fn compileSource(allocator: std.mem.Allocator, path: []const u8, source: [:0]con
         return pngine.compile(allocator, source);
     } else {
         // DSL format (.pngine or unknown)
-        // Pass base_dir for asset embedding (e.g., blob={file={url="..."}} )
-        const base_dir = std.fs.path.dirname(path);
+        // Pass base_dir for asset embedding and file_path for import resolution
+        // Use "." when path has no directory component (e.g., "file.pngine")
+        const base_dir = std.fs.path.dirname(path) orelse ".";
         return pngine.dsl.compileWithOptions(allocator, source, .{
             .base_dir = base_dir,
+            .file_path = path,
         });
     }
 }

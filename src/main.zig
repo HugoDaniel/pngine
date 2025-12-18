@@ -72,6 +72,7 @@ pub const dsl = struct {
     pub const Emitter = @import("dsl/Emitter.zig").Emitter;
     pub const Compiler = @import("dsl/Compiler.zig").Compiler;
     pub const DescriptorEncoder = @import("dsl/DescriptorEncoder.zig").DescriptorEncoder;
+    pub const ImportResolver = @import("dsl/ImportResolver.zig").ImportResolver;
     /// High-level compile function
     pub const compile = Compiler.compile;
     pub const compileWithOptions = Compiler.compileWithOptions;

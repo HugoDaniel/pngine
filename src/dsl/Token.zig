@@ -51,6 +51,7 @@ pub const Token = struct {
         macro_texture_view, // #textureView
         macro_image_bitmap, // #imageBitmap
         macro_wasm_call, // #wasmCall
+        macro_import, // #import
 
         // Punctuation
         l_brace, // {
@@ -124,6 +125,7 @@ pub const macro_keywords = std.StaticStringMap(Token.Tag).initComptime(.{
     .{ "textureView", .macro_texture_view },
     .{ "imageBitmap", .macro_image_bitmap },
     .{ "wasmCall", .macro_wasm_call },
+    .{ "import", .macro_import },
 });
 
 /// Literal keywords that produce special tokens instead of identifiers.

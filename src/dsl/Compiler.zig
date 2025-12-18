@@ -41,6 +41,7 @@ const Parser = @import("Parser.zig").Parser;
 const Analyzer = @import("Analyzer.zig").Analyzer;
 const Emitter = @import("Emitter.zig").Emitter;
 const Ast = @import("Ast.zig").Ast;
+const ImportResolver = @import("ImportResolver.zig").ImportResolver;
 
 pub const Compiler = struct {
     const Self = @This();
@@ -54,13 +55,25 @@ pub const Compiler = struct {
         TooManyDataEntries,
         StringTableOverflow,
         FileReadError,
+        ImportCycle,
+        ImportNotFound,
+        InvalidImportPath,
     };
 
     /// Options for compilation.
     pub const Options = struct {
-        /// Base directory for resolving relative file paths (e.g., asset URLs).
+        /// Base directory for resolving relative file paths (e.g., asset URLs, imports).
         /// If null, file embedding is disabled and blob={file={...}} will be ignored.
+        /// Also used for resolving #import directives.
         base_dir: ?[]const u8 = null,
+
+        /// File path of the source file (for import path resolution).
+        /// Required when using #import directives.
+        file_path: ?[]const u8 = null,
+
+        /// Whether to resolve #import directives.
+        /// Defaults to true when base_dir is set.
+        resolve_imports: bool = true,
     };
 
     pub const CompileResult = struct {
@@ -94,8 +107,29 @@ pub const Compiler = struct {
         // Pre-condition
         std.debug.assert(source.len == 0 or source[source.len] == 0);
 
+        // Phase 0: Resolve imports (if enabled and base_dir is set)
+        var resolved_source: ?[:0]u8 = null;
+        defer if (resolved_source) |s| gpa.free(s);
+
+        const actual_source = if (options.resolve_imports and options.base_dir != null) blk: {
+            var resolver = ImportResolver.init(gpa, options.base_dir.?);
+            defer resolver.deinit();
+
+            const file_path = options.file_path orelse "main.pngine";
+            resolved_source = resolver.resolve(source, file_path) catch |err| {
+                return switch (err) {
+                    error.ImportCycle => error.ImportCycle,
+                    error.ImportNotFound => error.ImportNotFound,
+                    error.InvalidImportPath => error.InvalidImportPath,
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.FileReadError => error.FileReadError,
+                };
+            };
+            break :blk resolved_source.?;
+        } else source;
+
         // Phase 1: Parse
-        var ast = Parser.parse(gpa, source) catch |err| {
+        var ast = Parser.parse(gpa, actual_source) catch |err| {
             return switch (err) {
                 error.ParseError => error.ParseError,
                 error.OutOfMemory => error.OutOfMemory,
