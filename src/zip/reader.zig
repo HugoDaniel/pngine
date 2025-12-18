@@ -71,6 +71,8 @@ pub const ZipReader = struct {
         errdefer allocator.free(entries);
 
         // Allocate space for all filenames - first pass to calculate total length
+        // Note: These use usize for slice indexing compatibility, but values are
+        // bounded by ZIP format limits (u32 max for offsets, u16 max for entries).
         var total_filename_len: usize = 0;
         var offset: usize = eocd.central_dir_offset;
 
@@ -117,8 +119,10 @@ pub const ZipReader = struct {
             offset += header.totalSize();
         }
 
-        // Post-condition
+        // Post-conditions: verify both passes produced consistent results
         std.debug.assert(entries.len == eocd.total_entries);
+        // Ensure filename buffer was fully populated (second pass matched first pass calculation)
+        std.debug.assert(filename_offset == total_filename_len);
 
         return ZipReader{
             .allocator = allocator,

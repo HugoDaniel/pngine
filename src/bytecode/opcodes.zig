@@ -407,12 +407,15 @@ pub const WasmReturnType = struct {
 // ============================================================================
 
 /// Encode a varint to buffer.
-/// Returns number of bytes written.
 ///
-/// Encoding:
-/// - 0-127: 0xxxxxxx (1 byte)
-/// - 128-16383: 10xxxxxx xxxxxxxx (2 bytes)
-/// - 16384+: 11xxxxxx xxxxxxxx xxxxxxxx xxxxxxxx (4 bytes)
+/// Returns number of bytes written (1, 2, or 4).
+///
+/// Encoding scheme (LEB128-style with 2/4 byte alignment):
+/// - 0-127: 0xxxxxxx (1 byte, values 0x00-0x7F)
+/// - 128-16383: 10xxxxxx xxxxxxxx (2 bytes, big-endian payload)
+/// - 16384+: 11xxxxxx xxxxxxxx xxxxxxxx xxxxxxxx (4 bytes, big-endian payload)
+///
+/// Complexity: O(1).
 pub fn encodeVarint(value: u32, buffer: *[4]u8) u8 {
     if (value < 128) {
         buffer[0] = @intCast(value);
@@ -431,7 +434,12 @@ pub fn encodeVarint(value: u32, buffer: *[4]u8) u8 {
 }
 
 /// Decode a varint from buffer.
-/// Returns value and number of bytes consumed.
+///
+/// Returns value and number of bytes consumed (1, 2, or 4).
+/// Pre-condition: buffer.len >= 1 (at minimum).
+/// Pre-condition: buffer.len >= encoded length (asserted at runtime).
+///
+/// Complexity: O(1).
 pub fn decodeVarint(buffer: []const u8) struct { value: u32, len: u8 } {
     // Pre-condition: buffer has at least 1 byte
     assert(buffer.len >= 1);

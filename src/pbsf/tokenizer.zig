@@ -578,7 +578,9 @@ test "token location invariants" {
     const source: [:0]const u8 = "(atom 123 \"str\")";
     var tokenizer = Tokenizer.init(source);
 
-    while (true) {
+    // Bounded loop for safety (max tokens = source length + 1 for EOF)
+    const max_tokens: usize = source.len + 1;
+    for (0..max_tokens) |_| {
         const token = tokenizer.next();
         // Invariant: end >= start
         try testing.expect(token.loc.end >= token.loc.start);
@@ -586,6 +588,9 @@ test "token location invariants" {
         try testing.expect(token.loc.end <= source.len);
 
         if (token.tag == .eof) break;
+    } else {
+        // Safety: detect if tokenizer didn't terminate
+        unreachable;
     }
 }
 

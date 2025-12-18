@@ -84,6 +84,11 @@ pub const DataSection = struct {
     }
 
     /// Get data blob by ID.
+    ///
+    /// **Lifetime**: The returned slice is valid until the DataSection is
+    /// deinitialized via `deinit()`. Slices remain valid across `add()` calls
+    /// because each blob is independently allocated.
+    ///
     /// Complexity: O(1).
     pub fn get(self: *const Self, id: DataId) []const u8 {
         // Pre-condition: ID is valid

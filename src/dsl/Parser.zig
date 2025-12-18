@@ -64,6 +64,10 @@ pub const Parser = struct {
 
     /// Scratch space for building lists before committing to extra_data.
     /// Restored after each parsing operation via shrinkRetainingCapacity.
+    ///
+    /// **Pointer invalidation**: Slices into `scratch.items` are invalidated when
+    /// `shrinkRetainingCapacity` is called. Always copy data to `extra_data` via
+    /// `addExtraSlice` before shrinking.
     scratch: std.ArrayListUnmanaged(u32),
 
     /// Current token index. Invariant: tok_i < tokens.len.

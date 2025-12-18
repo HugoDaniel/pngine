@@ -98,6 +98,12 @@ pub const LocalFileHeader = struct {
             .extra_len = std.mem.readInt(u16, data[28..30], .little),
         };
     }
+
+    // Comptime verification: FIXED_SIZE matches wire format
+    // (4 + 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4 + 2 + 2 = 30 bytes)
+    comptime {
+        std.debug.assert(FIXED_SIZE == 30);
+    }
 };
 
 /// Central directory header (46 bytes fixed + variable filename/extra/comment)
@@ -183,6 +189,12 @@ pub const CentralDirHeader = struct {
             .local_header_offset = std.mem.readInt(u32, data[42..46], .little),
         };
     }
+
+    // Comptime verification: FIXED_SIZE matches wire format
+    // (4 + 2 + 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4 + 2 + 2 + 2 + 2 + 2 + 4 + 4 = 46 bytes)
+    comptime {
+        std.debug.assert(FIXED_SIZE == 46);
+    }
 };
 
 /// End of central directory record (22 bytes fixed + variable comment)
@@ -236,6 +248,12 @@ pub const EndOfCentralDir = struct {
             .central_dir_offset = std.mem.readInt(u32, data[16..20], .little),
             .comment_len = std.mem.readInt(u16, data[20..22], .little),
         };
+    }
+
+    // Comptime verification: FIXED_SIZE matches wire format
+    // (4 + 2 + 2 + 2 + 2 + 4 + 4 + 2 = 22 bytes)
+    comptime {
+        std.debug.assert(FIXED_SIZE == 22);
     }
 };
 

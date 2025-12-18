@@ -79,32 +79,44 @@ pub fn findPropertyValueInObject(e: *Emitter, object_node: Node.Index, prop_name
 
 /// Get a reference from a property node's value.
 pub fn findPropertyReference(e: *Emitter, prop_node: Node.Index) ?Reference {
-    // Pre-condition
+    // Pre-conditions
     std.debug.assert(prop_node.toInt() < e.ast.nodes.len);
+    std.debug.assert(e.ast.nodes.len > 0);
 
     const prop_data = e.ast.nodes.items(.data)[prop_node.toInt()];
     const value_node = prop_data.node;
     const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
 
     if (value_tag == .reference) {
-        return getReference(e, value_node);
+        const result = getReference(e, value_node);
+        // Post-condition: if returning a reference, both parts are non-empty
+        if (result) |ref| {
+            std.debug.assert(ref.namespace.len > 0);
+        }
+        return result;
     }
     return null;
 }
 
 /// Extract Reference from a reference node.
 pub fn getReference(e: *Emitter, node: Node.Index) ?Reference {
-    // Pre-condition
+    // Pre-conditions
     std.debug.assert(node.toInt() < e.ast.nodes.len);
+    std.debug.assert(e.ast.tokens.len > 0);
 
     const data = e.ast.nodes.items(.data)[node.toInt()];
     const namespace_token = data.node_and_node[0];
     const name_token = data.node_and_node[1];
 
-    return Reference{
+    const result = Reference{
         .namespace = getTokenSlice(e, namespace_token),
         .name = getTokenSlice(e, name_token),
     };
+
+    // Post-condition: namespace is never empty for valid references
+    std.debug.assert(result.namespace.len > 0);
+
+    return result;
 }
 
 // ============================================================================
@@ -113,8 +125,9 @@ pub fn getReference(e: *Emitter, node: Node.Index) ?Reference {
 
 /// Get string content from a string_value node, stripping quotes.
 pub fn getStringContent(e: *Emitter, value_node: Node.Index) []const u8 {
-    // Pre-condition
+    // Pre-conditions
     std.debug.assert(value_node.toInt() < e.ast.nodes.len);
+    std.debug.assert(e.ast.source.len > 0);
 
     const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
     // Handle both regular strings and runtime interpolations (strings with $)
@@ -125,24 +138,33 @@ pub fn getStringContent(e: *Emitter, value_node: Node.Index) []const u8 {
 
     // Strip quotes
     if (raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"') {
-        return raw[1 .. raw.len - 1];
+        const result = raw[1 .. raw.len - 1];
+        // Post-condition: result length is raw length minus 2 (quotes)
+        std.debug.assert(result.len == raw.len - 2);
+        return result;
     }
     return raw;
 }
 
 /// Get text content from a node's main token.
 pub fn getNodeText(e: *Emitter, node: Node.Index) []const u8 {
-    // Pre-condition
+    // Pre-conditions
     std.debug.assert(node.toInt() < e.ast.nodes.len);
+    std.debug.assert(e.ast.tokens.len > 0);
 
     const token = e.ast.nodes.items(.main_token)[node.toInt()];
+    // Pre-condition: token index is valid
+    std.debug.assert(token < e.ast.tokens.len);
+
     return getTokenSlice(e, token);
 }
 
 /// Get the source slice for a token, trimming trailing whitespace.
+/// Returns the trimmed token text from source. Result is a view into source buffer.
 pub fn getTokenSlice(e: *Emitter, token_index: u32) []const u8 {
-    // Pre-condition
+    // Pre-conditions
     std.debug.assert(token_index < e.ast.tokens.len);
+    std.debug.assert(e.ast.source.len > 0);
 
     const starts = e.ast.tokens.items(.start);
     const start = starts[token_index];
@@ -151,14 +173,20 @@ pub fn getTokenSlice(e: *Emitter, token_index: u32) []const u8 {
     else
         @intCast(e.ast.source.len);
 
-    // Trim whitespace
+    // Pre-condition: start <= end (valid range)
+    std.debug.assert(start <= end);
+
+    // Trim whitespace (bounded loop for safety)
     var slice = e.ast.source[start..end];
-    while (slice.len > 0 and (slice[slice.len - 1] == ' ' or
-        slice[slice.len - 1] == '\n' or
-        slice[slice.len - 1] == '\t' or
-        slice[slice.len - 1] == '\r'))
-    {
-        slice = slice[0 .. slice.len - 1];
+    const max_trim: usize = 64; // Reasonable max whitespace to trim
+    for (0..max_trim) |_| {
+        if (slice.len == 0) break;
+        const last = slice[slice.len - 1];
+        if (last == ' ' or last == '\n' or last == '\t' or last == '\r') {
+            slice = slice[0 .. slice.len - 1];
+        } else {
+            break;
+        }
     }
     return slice;
 }
@@ -178,6 +206,10 @@ pub fn getIdentifierOrStringValue(e: *Emitter, value_node: Node.Index) []const u
 
 /// Parse a number_value node as u32.
 pub fn parseNumber(e: *Emitter, value_node: Node.Index) ?u32 {
+    // Pre-conditions
+    std.debug.assert(value_node.toInt() < e.ast.nodes.len);
+    std.debug.assert(e.ast.nodes.len > 0);
+
     const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
     if (value_tag != .number_value) return null;
 
@@ -203,12 +235,20 @@ pub fn parseFloatNumber(e: *Emitter, value_node: Node.Index) ?f64 {
 
 /// Parse a property as u32.
 pub fn parsePropertyNumber(e: *Emitter, node: Node.Index, prop_name: []const u8) ?u32 {
+    // Pre-conditions
+    std.debug.assert(node.toInt() < e.ast.nodes.len);
+    std.debug.assert(prop_name.len > 0);
+
     const value = findPropertyValue(e, node, prop_name) orelse return null;
     return parseNumber(e, value);
 }
 
 /// Parse a boolean value (identifier true/false).
 pub fn parseBoolValue(e: *Emitter, value_node: Node.Index) bool {
+    // Pre-conditions
+    std.debug.assert(value_node.toInt() < e.ast.nodes.len);
+    std.debug.assert(e.ast.nodes.len > 0);
+
     const text = getNodeText(e, value_node);
     return std.mem.eql(u8, text, "true");
 }
@@ -503,7 +543,12 @@ fn parseMultiplication(expr: []const u8) ?u32 {
 }
 
 /// Calculate byte size of a #data declaration.
+/// Returns the size in bytes based on float32Array element count.
 pub fn calculateDataByteSize(e: *Emitter, data_node: Node.Index) ?u32 {
+    // Pre-conditions
+    std.debug.assert(data_node.toInt() < e.ast.nodes.len);
+    std.debug.assert(e.ast.nodes.len > 0);
+
     const float_array = findPropertyValue(e, data_node, "float32Array") orelse return null;
     const array_tag = e.ast.nodes.items(.tag)[float_array.toInt()];
 
@@ -513,7 +558,12 @@ pub fn calculateDataByteSize(e: *Emitter, data_node: Node.Index) ?u32 {
     const elements = e.ast.extraData(array_data.extra_range);
 
     // Each f32 is 4 bytes
-    return @intCast(elements.len * 4);
+    const result: u32 = @intCast(elements.len * 4);
+
+    // Post-condition: result is multiple of 4 (f32 alignment)
+    std.debug.assert(result % 4 == 0);
+
+    return result;
 }
 
 // ============================================================================
@@ -521,7 +571,12 @@ pub fn calculateDataByteSize(e: *Emitter, data_node: Node.Index) ?u32 {
 // ============================================================================
 
 /// Parse buffer usage flags from a node.
+/// Returns default (empty) usage if no usage property found.
 pub fn parseBufferUsage(e: *Emitter, node: Node.Index) opcodes.BufferUsage {
+    // Pre-conditions
+    std.debug.assert(node.toInt() < e.ast.nodes.len);
+    std.debug.assert(e.ast.nodes.len > 0);
+
     var usage = opcodes.BufferUsage{};
 
     const usage_value = findPropertyValue(e, node, "usage") orelse return usage;
@@ -555,7 +610,12 @@ pub fn parseBufferUsage(e: *Emitter, node: Node.Index) opcodes.BufferUsage {
 }
 
 /// Parse texture format from a node.
+/// Returns rgba8unorm if no format property found.
 pub fn parseTextureFormat(e: *Emitter, node: Node.Index) DescriptorEncoder.TextureFormat {
+    // Pre-conditions
+    std.debug.assert(node.toInt() < e.ast.nodes.len);
+    std.debug.assert(e.ast.nodes.len > 0);
+
     const value = findPropertyValue(e, node, "format") orelse return .rgba8unorm;
     const value_tag = e.ast.nodes.items(.tag)[value.toInt()];
 
@@ -570,7 +630,12 @@ pub fn parseTextureFormat(e: *Emitter, node: Node.Index) DescriptorEncoder.Textu
 }
 
 /// Parse texture usage flags from a node.
+/// Returns default (empty) usage if no usage property found.
 pub fn parseTextureUsage(e: *Emitter, node: Node.Index) DescriptorEncoder.TextureUsage {
+    // Pre-conditions
+    std.debug.assert(node.toInt() < e.ast.nodes.len);
+    std.debug.assert(e.ast.nodes.len > 0);
+
     var usage = DescriptorEncoder.TextureUsage{};
 
     const usage_value = findPropertyValue(e, node, "usage") orelse return usage;

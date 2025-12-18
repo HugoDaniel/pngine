@@ -66,8 +66,18 @@ fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return buffer;
 }
 
-/// Emit #data declarations - add float32Array or blob file data to data section.
-/// No bytecode emitted, just populates data section for buffer initialization.
+/// Emit #data declarations to the data section.
+///
+/// Processes all `#data` macros and adds their content to the bytecode data section.
+/// Supports three data types:
+/// - `float32Array`: Inline f32 values or runtime-generated arrays
+/// - `blob`: File embedding from disk (requires base_dir)
+/// - `wasm`: WASM-generated data with module + function reference
+///
+/// No bytecode is emitted directly; data is stored in the data section for
+/// buffer initialization via `mappedAtCreation` or runtime writes.
+///
+/// Complexity: O(n × m) where n = data declarations, m = average elements per declaration.
 pub fn emitData(e: *Emitter) Emitter.Error!void {
     // Pre-condition
     std.debug.assert(e.ast.nodes.len > 0);
@@ -507,8 +517,20 @@ fn parseFloatElement(e: *Emitter, elem: Node.Index) f32 {
     return 0.0;
 }
 
-/// Emit #buffer declarations.
-/// Supports pool=N for ping-pong buffer patterns.
+/// Emit #buffer declarations to bytecode.
+///
+/// Processes all `#buffer` macros and emits `create_buffer` opcodes.
+/// Supports pool=N for ping-pong buffer patterns (creates N sequential buffers).
+///
+/// Buffer initialization modes:
+/// - `mappedAtCreation=dataName`: Pre-fill with inline data from #data
+/// - `mappedAtCreation=wasmDataName`: Pre-fill with WASM-generated data
+/// - `mappedAtCreation=generatedArrayName`: Pre-fill with runtime-generated array
+///
+/// Pool buffers get sequential IDs: buffer_0, buffer_1, ... buffer_{N-1}.
+/// The base ID is stored in buffer_ids for reference resolution.
+///
+/// Complexity: O(n × p) where n = buffer declarations, p = average pool size.
 pub fn emitBuffers(e: *Emitter) Emitter.Error!void {
     // Pre-condition
     std.debug.assert(e.ast.nodes.len > 0);
@@ -671,7 +693,17 @@ fn emitBufferInitialization(e: *Emitter, buffer_id: u16, mapped_value: Node.Inde
     }
 }
 
-/// Emit #texture declarations.
+/// Emit #texture declarations to bytecode.
+///
+/// Processes all `#texture` macros and emits `create_texture` opcodes.
+/// Supports two size modes:
+/// - Fixed size: `width=N height=M` - creates texture with specified dimensions
+/// - Canvas size: `size=["$canvas.width", "$canvas.height"]` - resizes with canvas
+///
+/// Texture descriptors are encoded to the data section and referenced by ID.
+/// Canvas-sized textures use a special descriptor flag for runtime resizing.
+///
+/// Complexity: O(n) where n = texture declarations.
 pub fn emitTextures(e: *Emitter) Emitter.Error!void {
     // Pre-condition
     std.debug.assert(e.ast.nodes.len > 0);
@@ -769,7 +801,16 @@ pub fn textureUsesCanvasSize(e: *Emitter, node: Node.Index) bool {
     return false;
 }
 
-/// Emit #sampler declarations.
+/// Emit #sampler declarations to bytecode.
+///
+/// Processes all `#sampler` macros and emits `create_sampler` opcodes.
+/// Sampler descriptors are encoded to the data section and referenced by ID.
+///
+/// Supported properties:
+/// - `magFilter`, `minFilter`: "nearest" | "linear"
+/// - `addressMode`: "clamp-to-edge" | "repeat" | "mirror-repeat"
+///
+/// Complexity: O(n) where n = sampler declarations.
 pub fn emitSamplers(e: *Emitter) Emitter.Error!void {
     // Pre-condition
     std.debug.assert(e.ast.nodes.len > 0);
@@ -814,8 +855,20 @@ pub fn emitSamplers(e: *Emitter) Emitter.Error!void {
     std.debug.assert(e.next_sampler_id >= initial_sampler_id);
 }
 
-/// Emit #bindGroup declarations.
+/// Emit #bindGroup declarations to bytecode.
+///
+/// Processes all `#bindGroup` macros and emits `create_bind_group` opcodes.
 /// Supports pool=N for ping-pong bind group patterns.
+///
+/// Bind group entries reference resources by ID:
+/// - `buffer`: References a #buffer (supports pingPong offset for pools)
+/// - `texture`: References a #texture (creates implicit texture view)
+/// - `sampler`: References a #sampler
+///
+/// Pool bind groups adjust buffer IDs based on pingPong offsets:
+/// `actual_id = base_id + (pingPong + pool_idx) % pool_size`
+///
+/// Complexity: O(n × p × e) where n = bind groups, p = pool size, e = entries.
 pub fn emitBindGroups(e: *Emitter) Emitter.Error!void {
     // Pre-condition
     std.debug.assert(e.ast.nodes.len > 0);

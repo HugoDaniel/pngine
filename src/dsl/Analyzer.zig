@@ -944,7 +944,7 @@ pub const Analyzer = struct {
                 .name = name,
                 .content_hash = hash,
                 .data_id = data_id,
-                .dependencies = &.{}, // TODO: populate from imports
+                .dependencies = &.{}, // TODO(Analyzer) Populate from imports for cross-module dependencies
             });
         }
     }
@@ -1133,13 +1133,16 @@ pub const Analyzer = struct {
         // Post-condition check variable
         var result: ?f64 = null;
 
+        // O(1) lookup for math constants
+        const math_constants = std.StaticStringMap(f64).initComptime(.{
+            .{ "PI", std.math.pi },
+            .{ "E", std.math.e },
+            .{ "TAU", std.math.tau },
+        });
+
         // Check for math constants: PI, E, TAU
-        if (std.mem.eql(u8, slice, "PI")) {
-            result = std.math.pi;
-        } else if (std.mem.eql(u8, slice, "E")) {
-            result = std.math.e;
-        } else if (std.mem.eql(u8, slice, "TAU")) {
-            result = std.math.tau;
+        if (math_constants.get(slice)) |value| {
+            result = value;
         } else if (slice.len == 0) {
             // Empty slice is invalid
         } else if (slice.len > 2 and slice[0] == '0' and (slice[1] == 'x' or slice[1] == 'X')) {

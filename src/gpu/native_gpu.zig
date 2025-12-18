@@ -169,7 +169,7 @@ pub const NativeGPU = struct {
 
     /// Check if native GPU rendering is available.
     pub fn isAvailable() bool {
-        // TODO: Implement actual GPU availability check
+        // TODO(NativeGPU) Implement actual GPU availability check
         // For now, return true to indicate stub is functional
         return true;
     }
@@ -188,7 +188,7 @@ pub const NativeGPU = struct {
 
         self.buffers_created.set(buffer_id);
 
-        // TODO: Create actual GPU buffer
+        // TODO(NativeGPU) Create actual GPU buffer
     }
 
     pub fn createTexture(self: *Self, allocator: Allocator, texture_id: u16, descriptor_data_id: u16) !void {
@@ -200,7 +200,7 @@ pub const NativeGPU = struct {
 
         self.textures_created.set(texture_id);
 
-        // TODO: Create actual GPU texture
+        // TODO(NativeGPU) Create actual GPU texture
     }
 
     pub fn createTextureView(self: *Self, allocator: Allocator, view_id: u16, texture_id: u16, descriptor_data_id: u16) !void {
@@ -211,7 +211,7 @@ pub const NativeGPU = struct {
         assert(texture_id < MAX_TEXTURES);
         assert(self.initialized);
 
-        // TODO: Create actual GPU texture view
+        // TODO(NativeGPU) Create actual GPU texture view
     }
 
     pub fn createSampler(self: *Self, allocator: Allocator, sampler_id: u16, descriptor_data_id: u16) !void {
@@ -221,7 +221,7 @@ pub const NativeGPU = struct {
         assert(sampler_id < MAX_TEXTURES);
         assert(self.initialized);
 
-        // TODO: Create actual GPU sampler
+        // TODO(NativeGPU) Create actual GPU sampler
     }
 
     pub fn createShaderModule(self: *Self, allocator: Allocator, shader_id: u16, code_data_id: u16) !void {
@@ -233,7 +233,7 @@ pub const NativeGPU = struct {
 
         self.shaders_created.set(shader_id);
 
-        // TODO: Create actual GPU shader module
+        // TODO(NativeGPU) Create actual GPU shader module
     }
 
     pub fn createRenderPipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
@@ -245,7 +245,7 @@ pub const NativeGPU = struct {
 
         self.pipelines_created.set(pipeline_id);
 
-        // TODO: Create actual GPU render pipeline
+        // TODO(NativeGPU) Create actual GPU render pipeline
     }
 
     pub fn createComputePipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
@@ -257,7 +257,7 @@ pub const NativeGPU = struct {
 
         self.pipelines_created.set(pipeline_id);
 
-        // TODO: Create actual GPU compute pipeline
+        // TODO(NativeGPU) Create actual GPU compute pipeline
     }
 
     pub fn createBindGroup(self: *Self, allocator: Allocator, group_id: u16, layout_id: u16, entry_data_id: u16) !void {
@@ -270,7 +270,7 @@ pub const NativeGPU = struct {
 
         self.bind_groups_created.set(group_id);
 
-        // TODO: Create actual GPU bind group
+        // TODO(NativeGPU) Create actual GPU bind group
     }
 
     pub fn createBindGroupLayout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
@@ -280,7 +280,7 @@ pub const NativeGPU = struct {
 
         assert(self.initialized);
 
-        // TODO: Create actual GPU bind group layout
+        // TODO(NativeGPU) Create actual GPU bind group layout
     }
 
     pub fn createPipelineLayout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
@@ -290,7 +290,7 @@ pub const NativeGPU = struct {
 
         assert(self.initialized);
 
-        // TODO: Create actual GPU pipeline layout
+        // TODO(NativeGPU) Create actual GPU pipeline layout
     }
 
     pub fn createQuerySet(self: *Self, allocator: Allocator, query_set_id: u16, descriptor_data_id: u16) !void {
@@ -300,7 +300,7 @@ pub const NativeGPU = struct {
 
         assert(self.initialized);
 
-        // TODO: Create actual GPU query set
+        // TODO(NativeGPU) Create actual GPU query set
     }
 
     pub fn createImageBitmap(self: *Self, allocator: Allocator, bitmap_id: u16, blob_data_id: u16) !void {
@@ -310,7 +310,7 @@ pub const NativeGPU = struct {
 
         assert(self.initialized);
 
-        // TODO: Create actual ImageBitmap from blob data
+        // TODO(NativeGPU) Create actual ImageBitmap from blob data
     }
 
     // ========================================================================
@@ -330,7 +330,7 @@ pub const NativeGPU = struct {
         self.in_render_pass = true;
         self.current_pipeline = null;
 
-        // TODO: Begin actual GPU render pass
+        // TODO(NativeGPU) Begin actual GPU render pass
     }
 
     pub fn beginComputePass(self: *Self, allocator: Allocator) !void {
@@ -342,7 +342,7 @@ pub const NativeGPU = struct {
         self.in_compute_pass = true;
         self.current_pipeline = null;
 
-        // TODO: Begin actual GPU compute pass
+        // TODO(NativeGPU) Begin actual GPU compute pass
     }
 
     pub fn setPipeline(self: *Self, allocator: Allocator, pipeline_id: u16) !void {
@@ -353,7 +353,7 @@ pub const NativeGPU = struct {
 
         self.current_pipeline = pipeline_id;
 
-        // TODO: Set actual GPU pipeline
+        // TODO(NativeGPU) Set actual GPU pipeline
     }
 
     pub fn setBindGroup(self: *Self, allocator: Allocator, slot: u8, group_id: u16) !void {
@@ -364,7 +364,7 @@ pub const NativeGPU = struct {
         assert(self.in_render_pass or self.in_compute_pass);
         assert(self.initialized);
 
-        // TODO: Set actual GPU bind group
+        // TODO(NativeGPU) Set actual GPU bind group
     }
 
     pub fn setVertexBuffer(self: *Self, allocator: Allocator, slot: u8, buffer_id: u16) !void {
@@ -375,7 +375,7 @@ pub const NativeGPU = struct {
         assert(self.in_render_pass);
         assert(self.initialized);
 
-        // TODO: Set actual GPU vertex buffer
+        // TODO(NativeGPU) Set actual GPU vertex buffer
     }
 
     pub fn draw(self: *Self, allocator: Allocator, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) !void {
@@ -388,7 +388,7 @@ pub const NativeGPU = struct {
         assert(self.in_render_pass);
         assert(self.initialized);
 
-        // TODO: Execute actual GPU draw call
+        // TODO(NativeGPU) Execute actual GPU draw call
         // For now, fill pixel buffer with a test pattern
         if (self.pixel_buffer) |buf| {
             // Simple gradient pattern to show something is happening
@@ -417,7 +417,7 @@ pub const NativeGPU = struct {
         assert(self.in_render_pass);
         assert(self.initialized);
 
-        // TODO: Execute actual GPU indexed draw call
+        // TODO(NativeGPU) Execute actual GPU indexed draw call
     }
 
     pub fn dispatch(self: *Self, allocator: Allocator, x: u32, y: u32, z: u32) !void {
@@ -429,7 +429,7 @@ pub const NativeGPU = struct {
         assert(self.in_compute_pass);
         assert(self.initialized);
 
-        // TODO: Execute actual GPU compute dispatch
+        // TODO(NativeGPU) Execute actual GPU compute dispatch
     }
 
     pub fn endPass(self: *Self, allocator: Allocator) !void {
@@ -442,7 +442,7 @@ pub const NativeGPU = struct {
         self.in_compute_pass = false;
         self.current_pipeline = null;
 
-        // TODO: End actual GPU pass
+        // TODO(NativeGPU) End actual GPU pass
     }
 
     // ========================================================================
@@ -457,7 +457,7 @@ pub const NativeGPU = struct {
 
         assert(self.initialized);
 
-        // TODO: Write to actual GPU buffer
+        // TODO(NativeGPU) Write to actual GPU buffer
     }
 
     pub fn submit(self: *Self, allocator: Allocator) !void {
@@ -466,7 +466,7 @@ pub const NativeGPU = struct {
         assert(!self.in_render_pass and !self.in_compute_pass);
         assert(self.initialized);
 
-        // TODO: Submit actual GPU commands
+        // TODO(NativeGPU) Submit actual GPU commands
     }
 
     pub fn copyExternalImageToTexture(self: *Self, allocator: Allocator, bitmap_id: u16, texture_id: u16, mip_level: u8, origin_x: u16, origin_y: u16) !void {
@@ -479,7 +479,7 @@ pub const NativeGPU = struct {
 
         assert(self.initialized);
 
-        // TODO: Copy ImageBitmap to texture
+        // TODO(NativeGPU) Copy ImageBitmap to texture
     }
 
     // ========================================================================
