@@ -386,7 +386,15 @@ pub const Parser = struct {
                     @as(u32, @intCast(self.source.len));
                 const text = std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r");
                 if (isMathConstant(text)) {
+                    // Math constants can be part of expressions
+                    if (try self.parseExpression()) |expr| {
+                        return expr;
+                    }
                     return try self.parseSimpleValue(.number_value);
+                }
+                // Non-math identifiers: try expression parsing (e.g., CONST*4)
+                if (try self.parseExpression()) |expr| {
+                    return expr;
                 }
                 return try self.parseSimpleValue(.identifier_value);
             },
@@ -807,16 +815,7 @@ pub const Parser = struct {
                 const next = self.tokens.items(.tag)[self.tok_i + 1];
                 break :blk next == .number_literal or next == .l_paren;
             },
-            .identifier => blk: {
-                // Check if identifier is a math constant (PI, E, TAU)
-                const token_start = self.tokens.items(.start)[self.tok_i];
-                const token_end = if (self.tok_i + 1 < self.tokens.len)
-                    self.tokens.items(.start)[self.tok_i + 1]
-                else
-                    @as(u32, @intCast(self.source.len));
-                const text = std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r");
-                break :blk isMathConstant(text);
-            },
+            .identifier => true, // All identifiers can start expressions (includes #define refs and math constants)
             else => false,
         };
     }
@@ -951,7 +950,7 @@ pub const Parser = struct {
                 });
             },
             .identifier => {
-                // Check for math constants: PI, E, TAU
+                // Identifiers in expressions: math constants (PI, E, TAU) or #define refs
                 const token_start = self.tokens.items(.start)[self.tok_i];
                 const token_end = if (self.tok_i + 1 < self.tokens.len)
                     self.tokens.items(.start)[self.tok_i + 1]
@@ -961,7 +960,8 @@ pub const Parser = struct {
                 if (isMathConstant(text)) {
                     return try self.parseSimpleValue(.number_value);
                 }
-                return null;
+                // Non-math-constant identifiers: could be #define references
+                return try self.parseSimpleValue(.identifier_value);
             },
             else => null,
         };
