@@ -337,10 +337,12 @@ pub const NativeGPU = struct {
         // TODO: Set actual GPU vertex buffer
     }
 
-    pub fn draw(self: *Self, allocator: Allocator, vertex_count: u32, instance_count: u32) !void {
+    pub fn draw(self: *Self, allocator: Allocator, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) !void {
         _ = allocator;
         _ = vertex_count;
         _ = instance_count;
+        _ = first_vertex;
+        _ = first_instance;
 
         assert(self.in_render_pass);
         assert(self.initialized);
@@ -363,10 +365,13 @@ pub const NativeGPU = struct {
         }
     }
 
-    pub fn drawIndexed(self: *Self, allocator: Allocator, index_count: u32, instance_count: u32) !void {
+    pub fn drawIndexed(self: *Self, allocator: Allocator, index_count: u32, instance_count: u32, first_index: u32, base_vertex: u32, first_instance: u32) !void {
         _ = allocator;
         _ = index_count;
         _ = instance_count;
+        _ = first_index;
+        _ = base_vertex;
+        _ = first_instance;
 
         assert(self.in_render_pass);
         assert(self.initialized);
@@ -476,6 +481,58 @@ pub const NativeGPU = struct {
         // WASM buffer writes are a no-op for native GPU
         // WASM calls are only meaningful in browser context
     }
+
+    // ========================================================================
+    // Data Generation (stubs - actual implementation in JS runtime)
+    // ========================================================================
+
+    pub fn createTypedArray(self: *Self, allocator: Allocator, array_id: u16, element_type: u8, element_count: u32) !void {
+        _ = allocator;
+        _ = array_id;
+        _ = element_type;
+        _ = element_count;
+        assert(self.initialized);
+    }
+
+    pub fn fillRandom(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, min_data_id: u16, max_data_id: u16) !void {
+        _ = allocator;
+        _ = array_id;
+        _ = offset;
+        _ = count;
+        _ = stride;
+        _ = min_data_id;
+        _ = max_data_id;
+        assert(self.initialized);
+    }
+
+    pub fn fillExpression(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, total_count: u32, expr_data_id: u16) !void {
+        _ = allocator;
+        _ = array_id;
+        _ = offset;
+        _ = count;
+        _ = stride;
+        _ = total_count;
+        _ = expr_data_id;
+        assert(self.initialized);
+    }
+
+    pub fn fillConstant(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, value_data_id: u16) !void {
+        _ = allocator;
+        _ = array_id;
+        _ = offset;
+        _ = count;
+        _ = stride;
+        _ = value_data_id;
+        assert(self.initialized);
+    }
+
+    pub fn writeBufferFromArray(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, array_id: u16) !void {
+        _ = allocator;
+        _ = buffer_id;
+        _ = buffer_offset;
+        _ = array_id;
+        assert(self.initialized);
+    }
 };
 
 // ============================================================================
@@ -514,7 +571,7 @@ test "NativeGPU: render pass lifecycle" {
     try testing.expect(gpu.in_render_pass);
 
     try gpu.setPipeline(testing.allocator, 0);
-    try gpu.draw(testing.allocator, 3, 1);
+    try gpu.draw(testing.allocator, 3, 1, 0, 0);
 
     try gpu.endPass(testing.allocator);
     try testing.expect(!gpu.in_render_pass);
@@ -540,7 +597,7 @@ test "NativeGPU: draw produces pixels" {
 
     try gpu.beginRenderPass(testing.allocator, 0, 1, 0, 0xFFFF);
     try gpu.setPipeline(testing.allocator, 0);
-    try gpu.draw(testing.allocator, 3, 1);
+    try gpu.draw(testing.allocator, 3, 1, 0, 0);
     try gpu.endPass(testing.allocator);
     try gpu.submit(testing.allocator);
 
