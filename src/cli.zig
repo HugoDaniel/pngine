@@ -1485,7 +1485,7 @@ fn printUsage() void {
         \\PNGine - DSL/PBSF to PNGB compiler
         \\
         \\Usage:
-        \\  pngine <input.pngine> [-o <output.png>]          Create PNG with bytecode
+        \\  pngine <input.pngine> [-o <output.png>]          Create self-contained PNG
         \\  pngine <input.pngine> --frame [-s WxH] [-t time] Render actual frame
         \\  pngine compile <input> [-o <output.pngb>]        Compile to bytecode only
         \\  pngine check <input>                             Validate bytecode
@@ -1497,7 +1497,7 @@ fn printUsage() void {
         \\Commands:
         \\  compile     Compile source to PNGB bytecode
         \\  check       Validate bytecode (supports .pngine, .pngb, .png, .zip)
-        \\  render      Create PNG with embedded bytecode (default command)
+        \\  render      Create self-contained PNG with bytecode + WASM runtime
         \\  embed       Embed PNGB bytecode into a PNG image
         \\  extract     Extract PNGB bytecode from PNG or ZIP
         \\  bundle      Create ZIP bundle with bytecode and manifest
@@ -1511,20 +1511,22 @@ fn printUsage() void {
         \\  -s, --size <WxH>      Output dimensions with --frame (default: 512x512)
         \\  -t, --time <seconds>  Time value for animation (default: 0.0)
         \\  --no-embed            Don't embed bytecode in PNG
+        \\  --no-runtime          Don't embed WASM runtime (smaller PNG)
         \\
         \\Bundle Options:
         \\  --assets <dir>        Include assets directory in bundle
-        \\  --no-runtime          Don't include pngine.wasm in manifest
+        \\  --no-runtime          Don't include pngine.wasm in bundle
         \\
         \\Supported formats:
         \\  .pngine     DSL format (macro-based syntax)
         \\  .pbsf       Legacy PBSF format (S-expressions)
         \\  .pngb       Compiled bytecode
-        \\  .png        PNG images (with optional embedded bytecode)
+        \\  .png        PNG images (with optional embedded bytecode + runtime)
         \\  .zip        ZIP bundles (manifest.json + main.pngb)
         \\
         \\Examples:
-        \\  pngine shader.pngine                      # 1x1 PNG with bytecode (~700 bytes)
+        \\  pngine shader.pngine                      # Self-contained PNG (~30KB)
+        \\  pngine shader.pngine --no-runtime         # Smaller PNG (~500 bytes)
         \\  pngine shader.pngine --frame              # 512x512 rendered preview
         \\  pngine shader.pngine --frame -s 1920x1080 # 1080p rendered frame
         \\  pngine check output.png                   # Verify embedded bytecode
