@@ -181,6 +181,7 @@ test {
     _ = @import("dsl/emitter/define_subst_test.zig");
     _ = @import("dsl/emitter/import_dedup_test.zig");
     _ = @import("dsl/emitter/wgsl_runtime_test.zig");
+    _ = @import("dsl/emitter/module_reference_test.zig");
     _ = @import("dsl/Compiler.zig");
     // Run WGSL table tests
     _ = @import("bytecode/wgsl_table_test.zig");

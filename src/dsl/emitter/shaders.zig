@@ -71,7 +71,8 @@ pub fn emitShaders(e: *Emitter) Emitter.Error!void {
     // Use iterative worklist to process in dependency order
     try emitWgslModulesInOrder(e);
 
-    // Phase 2: Handle #shaderModule (uses resolved_wgsl_cache for backward compat)
+    // Phase 2: Handle #shaderModule
+    // In v2, #shaderModule referencing $wgsl.* uses the existing wgsl_id
     var sm_it = e.analysis.symbols.shader_module.iterator();
     while (sm_it.next()) |entry| {
         const name = entry.key_ptr.*;
@@ -79,30 +80,46 @@ pub fn emitShaders(e: *Emitter) Emitter.Error!void {
 
         // Find code property - can be string literal or identifier referencing #wgsl
         const code_value = utils.findPropertyValue(e, info.node, "code") orelse continue;
-        const raw_code = resolveShaderCode(e, code_value);
-        if (raw_code.len == 0) continue;
 
-        const code = try substituteDefines(e, raw_code);
-        defer if (code.ptr != raw_code.ptr) e.gpa.free(code);
+        // Check if code references a #wgsl macro
+        const wgsl_ref = getWgslReference(e, code_value);
+        if (wgsl_ref) |ref_name| {
+            // Reference to #wgsl - use existing wgsl_id
+            const ref_wgsl_id = e.wgsl_name_to_id.get(ref_name) orelse continue;
 
-        // Only assign ID after confirming code is valid
-        const shader_id = e.next_shader_id;
-        e.next_shader_id += 1;
-        try e.shader_ids.put(e.gpa, name, shader_id);
+            // Assign shader_id for this #shaderModule
+            const shader_id = e.next_shader_id;
+            e.next_shader_id += 1;
+            try e.shader_ids.put(e.gpa, name, shader_id);
 
-        // For #shaderModule, store as data (no WGSL table entry needed)
-        // The code is already resolved with imports prepended
-        const data_id = try e.builder.addData(e.gpa, code);
+            // Emit create_shader_module with the referenced wgsl_id
+            try e.builder.getEmitter().createShaderModule(
+                e.gpa,
+                shader_id,
+                ref_wgsl_id,
+            );
+        } else {
+            // Inline code - store directly
+            const raw_code = resolveShaderCode(e, code_value);
+            if (raw_code.len == 0) continue;
 
-        // Add to WGSL table with no deps (code is already resolved)
-        const wgsl_id = try e.builder.addWgsl(e.gpa, data_id.toInt(), &[_]u16{});
-        try e.wgsl_name_to_id.put(e.gpa, name, wgsl_id);
+            const code = try substituteDefines(e, raw_code);
+            defer if (code.ptr != raw_code.ptr) e.gpa.free(code);
 
-        try e.builder.getEmitter().createShaderModule(
-            e.gpa,
-            shader_id,
-            wgsl_id,
-        );
+            const shader_id = e.next_shader_id;
+            e.next_shader_id += 1;
+            try e.shader_ids.put(e.gpa, name, shader_id);
+
+            const data_id = try e.builder.addData(e.gpa, code);
+            const wgsl_id = try e.builder.addWgsl(e.gpa, data_id.toInt(), &[_]u16{});
+            try e.wgsl_name_to_id.put(e.gpa, name, wgsl_id);
+
+            try e.builder.getEmitter().createShaderModule(
+                e.gpa,
+                shader_id,
+                wgsl_id,
+            );
+        }
     }
 
     // Post-condition: shader IDs were assigned sequentially
@@ -298,6 +315,38 @@ fn buildAndCacheResolvedCode(e: *Emitter, name: []const u8, code: []const u8, de
 
     const cached = try result.toOwnedSlice(e.gpa);
     try e.resolved_wgsl_cache.put(e.gpa, name, cached);
+}
+
+/// Extract #wgsl reference name from a code value.
+/// Returns the name part after "$wgsl." or the identifier name if it references a #wgsl.
+/// Returns null if it's inline code (not a reference).
+fn getWgslReference(e: *Emitter, code_node: Node.Index) ?[]const u8 {
+    // Pre-condition
+    std.debug.assert(code_node.toInt() < e.ast.nodes.len);
+
+    const code_tag = e.ast.nodes.items(.tag)[code_node.toInt()];
+
+    // String value like "$wgsl.sceneEShader"
+    // Note: strings with $ patterns are parsed as runtime_interpolation
+    if (code_tag == .string_value or code_tag == .runtime_interpolation) {
+        const content = utils.getStringContent(e, code_node);
+        if (std.mem.startsWith(u8, content, "$wgsl.")) {
+            return content[6..]; // Skip "$wgsl."
+        }
+        return null; // Inline code string
+    }
+
+    // Identifier value - reference to #wgsl macro
+    if (code_tag == .identifier_value) {
+        const token = e.ast.nodes.items(.main_token)[code_node.toInt()];
+        const wgsl_name = utils.getTokenSlice(e, token);
+        // Check if this name exists in the wgsl symbol table
+        if (e.wgsl_name_to_id.get(wgsl_name) != null) {
+            return wgsl_name;
+        }
+    }
+
+    return null;
 }
 
 /// Resolve shader code from a code property node.

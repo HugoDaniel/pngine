@@ -508,3 +508,102 @@ test "property: no duplicate deps in entry" {
         }
     }
 }
+
+// ============================================================================
+// #shaderModule referencing $wgsl.* (demo pattern)
+// ============================================================================
+
+test "#shaderModule referencing $wgsl with imports" {
+    // This is the exact pattern used in the demo:
+    // #wgsl sceneShader { imports=[...] }
+    // #shaderModule scene { code="$wgsl.sceneShader" }
+    const source: [:0]const u8 =
+        \\#wgsl constants { value="const AWAY: f32 = 1e10;" }
+        \\#wgsl utils { value="fn helper() -> f32 { return AWAY; }" imports=[$wgsl.constants] }
+        \\#wgsl sceneShader {
+        \\  value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0, 0.0, helper(), 1.0); }"
+        \\  imports=[$wgsl.constants, $wgsl.utils]
+        \\}
+        \\#shaderModule scene { code="$wgsl.sceneShader" }
+        \\#renderPipeline pipe {
+        \\  layout=auto
+        \\  vertex={ module=$shaderModule.scene entryPoint=vs }
+        \\  fragment={ module=$shaderModule.scene entryPoint=vs targets=[{format=preferredCanvasFormat}] }
+        \\}
+        \\#renderPass pass {
+        \\  pipeline=pipe
+        \\  colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store clearValue=[0,0,0,1]}]
+        \\  draw=3
+        \\}
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(testing.allocator, source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Should have 3 WGSL entries (constants, utils, sceneShader)
+    // Note: #shaderModule referencing $wgsl.* reuses the wgsl_id, doesn't create new entry
+    try testing.expectEqual(@as(u16, 3), module.wgsl.count());
+
+    // Find sceneShader entry (has 2 deps)
+    var scene_id: ?u16 = null;
+    for (0..module.wgsl.count()) |i| {
+        const entry = module.wgsl.get(@intCast(i)).?;
+        if (entry.deps.len == 2) {
+            scene_id = @intCast(i);
+            break;
+        }
+    }
+    try testing.expect(scene_id != null);
+
+    // Simulate runtime resolution - walk deps and concat code
+
+    // Collect all code in dependency order (simple DFS for test)
+    var visited = std.AutoHashMap(u16, void).init(testing.allocator);
+    defer visited.deinit();
+    var code_parts = std.ArrayListUnmanaged([]const u8){};
+    defer code_parts.deinit(testing.allocator);
+
+    // Simple recursive simulation (ok for test)
+    const WgslTable = format.WgslTable;
+    const DataSection = @import("../../bytecode/data_section.zig").DataSection;
+    const visitFn = struct {
+        fn visit(allocator: std.mem.Allocator, wgsl: *const WgslTable, data: *const DataSection, id: u16, v: *std.AutoHashMap(u16, void), parts: *std.ArrayListUnmanaged([]const u8)) !void {
+            if (v.contains(id)) return;
+            const entry = wgsl.get(id) orelse return;
+            // Visit deps first
+            for (entry.deps) |dep| {
+                try visit(allocator, wgsl, data, dep, v, parts);
+            }
+            try v.put(id, {});
+            try parts.append(allocator, data.get(@enumFromInt(entry.data_id)));
+        }
+    }.visit;
+
+    try visitFn(testing.allocator, &module.wgsl, &module.data, scene_id.?, &visited, &code_parts);
+
+    // Concatenate all code
+    var total_len: usize = 0;
+    for (code_parts.items) |part| {
+        total_len += part.len + 1;
+    }
+
+    const resolved = try testing.allocator.alloc(u8, total_len);
+    defer testing.allocator.free(resolved);
+
+    var pos: usize = 0;
+    for (code_parts.items) |part| {
+        @memcpy(resolved[pos..][0..part.len], part);
+        pos += part.len;
+        resolved[pos] = '\n';
+        pos += 1;
+    }
+
+    // Verify all code is present
+    try testing.expect(std.mem.indexOf(u8, resolved, "AWAY") != null);
+    try testing.expect(std.mem.indexOf(u8, resolved, "helper") != null);
+    try testing.expect(std.mem.indexOf(u8, resolved, "@vertex fn vs") != null);
+}

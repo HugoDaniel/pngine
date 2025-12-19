@@ -4,10 +4,14 @@ target format as the presentationFormat
 */
 #renderPipeline postProcessStarfieldPipeline {
   layout=auto
-  vertex={ module=postProcessStarfieldModule }
+  vertex={
+    entryPoint=vs
+    module=postProcessStarfieldModule
+  }
   fragment={
-	module=postProcessStarfieldModule
-	targets=[{ format=preferredCanvasFormat }]
+    entryPoint=fs2d
+    module=postProcessStarfieldModule
+    targets=[{ format=preferredCanvasFormat }]
   }
 }
 

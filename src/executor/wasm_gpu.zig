@@ -123,12 +123,27 @@ pub const WasmGPU = struct {
     /// Create a shader module from WGSL code.
     /// Resolves wgsl_id from the WGSL table, walking dependencies and concatenating code.
     pub fn createShaderModule(self: *Self, allocator: Allocator, shader_id: u16, wgsl_id: u16) !void {
+        // Debug: log entry into createShaderModule
+        gpuDebugLog(2, 0xAAAA); // Marker: entering createShaderModule
+        gpuDebugLog(2, shader_id);
+        gpuDebugLog(2, wgsl_id);
+
         // Pre-condition: module must be set
-        assert(self.module != null);
+        if (self.module == null) {
+            gpuDebugLog(2, 0xDEAD); // Marker: module is null!
+            return error.OutOfMemory;
+        }
 
         // Resolve from WGSL table (deduplicates transitive imports)
-        const resolved = try self.resolveWgsl(allocator, wgsl_id);
+        const resolved = self.resolveWgsl(allocator, wgsl_id) catch |err| {
+            gpuDebugLog(2, 0xBEEF); // Marker: resolveWgsl failed
+            return err;
+        };
         defer allocator.free(resolved);
+
+        gpuDebugLog(2, 0xCCCC); // Marker: about to call gpuCreateShaderModule
+        gpuDebugLog(2, @intCast(resolved.len));
+
         gpuCreateShaderModule(shader_id, resolved.ptr, @intCast(resolved.len));
     }
 
@@ -138,6 +153,10 @@ pub const WasmGPU = struct {
     fn resolveWgsl(self: *Self, allocator: Allocator, wgsl_id: u16) ![]u8 {
         const module = self.module orelse return error.OutOfMemory;
         const wgsl_table = &module.wgsl;
+
+        // Debug: log WGSL table info
+        gpuDebugLog(2, wgsl_table.count()); // Log WGSL table count
+        gpuDebugLog(2, wgsl_id); // Log requested wgsl_id
 
         // Maximum iterations for bounded execution
         const max_iterations: u32 = @as(u32, format.MAX_WGSL_MODULES) * @as(u32, format.MAX_WGSL_DEPS);
@@ -164,7 +183,11 @@ pub const WasmGPU = struct {
             if (included.contains(current)) continue;
 
             // Get WGSL entry
-            const entry = wgsl_table.get(current) orelse continue;
+            const entry = wgsl_table.get(current) orelse {
+                gpuDebugLog(2, 0xFFFF); // Log: entry not found
+                gpuDebugLog(2, current); // Log which ID was not found
+                continue;
+            };
 
             // Check if all deps are included
             var all_deps_ready = true;
@@ -183,6 +206,9 @@ pub const WasmGPU = struct {
             }
         }
 
+        // Debug: log how many modules will be concatenated
+        gpuDebugLog(2, @intCast(order.items.len));
+
         // Calculate total size
         var total_size: usize = 0;
         for (order.items) |id| {
@@ -190,6 +216,9 @@ pub const WasmGPU = struct {
             const data = module.data.get(@enumFromInt(entry.data_id));
             total_size += data.len + 1; // +1 for newline
         }
+
+        // Debug: log total code size
+        gpuDebugLog(2, @intCast(total_size));
 
         // Allocate and concatenate
         const result = try allocator.alloc(u8, total_size);
