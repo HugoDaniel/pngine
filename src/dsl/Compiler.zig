@@ -147,6 +147,11 @@ pub const Compiler = struct {
         defer analysis.deinit(gpa);
 
         if (analysis.hasErrors()) {
+            // Debug: print analysis errors
+            std.debug.print("\nAnalysis errors ({d}):\n", .{analysis.errors.len});
+            for (analysis.errors) |err| {
+                std.debug.print("  - [{s}] {s}\n", .{ @tagName(err.kind), err.message });
+            }
             return error.AnalysisError;
         }
 

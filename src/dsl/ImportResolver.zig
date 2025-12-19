@@ -17,6 +17,7 @@
 //!
 //! - **Pre-parse resolution**: Imports are inlined before tokenization
 //! - **Cycle detection**: Tracks visited files, errors on cycles
+//! - **Deduplication**: Files are included only once (like #pragma once)
 //! - **Relative paths**: Imports resolve relative to importing file
 //! - **No recursion**: Uses explicit stack for traversal
 //!
@@ -25,6 +26,7 @@
 //! - Import paths must be relative (no absolute paths)
 //! - Import paths must not escape base directory (no ../ to parent)
 //! - Circular imports produce error.ImportCycle
+//! - Each file is included at most once per resolution
 //! - Output is always sentinel-terminated
 //!
 //! ## Complexity
@@ -187,13 +189,21 @@ pub const ImportResolver = struct {
     }
 
     /// Load file and resolve its imports.
+    ///
+    /// Returns the file's resolved content on first import, empty string on subsequent
+    /// imports (deduplication like #pragma once).
     fn loadAndResolve(self: *Self, file_path: []const u8, depth: u32) Error![]const u8 {
         // Pre-condition
         std.debug.assert(depth < MAX_IMPORT_DEPTH);
 
-        // Check cache first
-        if (self.resolved.get(file_path)) |cached| {
-            return cached;
+        // Normalize path for consistent cache lookup
+        const normalized = self.normalizePath(file_path) catch return Error.OutOfMemory;
+        defer self.allocator.free(normalized);
+
+        // Check cache first - if already resolved, return empty (like #pragma once)
+        // This prevents the same file from being included multiple times in the output
+        if (self.resolved.contains(normalized)) {
+            return "";
         }
 
         // Load file
@@ -214,8 +224,8 @@ pub const ImportResolver = struct {
             self.allocator.free(ptr[0 .. resolved.len + 1]);
         }
 
-        // Cache result - resolved is already allocated, put it directly in cache
-        const cache_key = try self.allocator.dupe(u8, file_path);
+        // Cache result with normalized path
+        const cache_key = try self.allocator.dupe(u8, normalized);
         errdefer self.allocator.free(cache_key);
 
         // Put resolved directly in cache (cache owns this memory now)
@@ -270,12 +280,45 @@ pub const ImportResolver = struct {
         return buffer;
     }
 
-    /// Normalize path for consistent comparison.
+    /// Normalize path for consistent cache lookup.
+    ///
+    /// Removes redundant `.` and resolves `..` components.
+    /// Returns owned memory.
     fn normalizePath(self: *Self, path: []const u8) ![]const u8 {
-        // For now, just clean up the path
-        // Could add more normalization (resolve .., etc)
-        _ = self;
-        return path;
+        // Use std.fs.path to normalize (handles . and ..)
+        // Note: this doesn't resolve symlinks, just cleans the path string
+        var components = std.ArrayListUnmanaged([]const u8){};
+        defer components.deinit(self.allocator);
+
+        var iter = std.mem.splitScalar(u8, path, '/');
+        while (iter.next()) |component| {
+            if (component.len == 0 or std.mem.eql(u8, component, ".")) {
+                // Skip empty and "." components
+                continue;
+            } else if (std.mem.eql(u8, component, "..")) {
+                // Go up one level if possible
+                if (components.items.len > 0) {
+                    _ = components.pop();
+                }
+            } else {
+                try components.append(self.allocator, component);
+            }
+        }
+
+        // Reconstruct path
+        if (components.items.len == 0) {
+            return try self.allocator.dupe(u8, ".");
+        }
+
+        var result = std.ArrayListUnmanaged(u8){};
+        errdefer result.deinit(self.allocator);
+
+        for (components.items, 0..) |component, i| {
+            if (i > 0) try result.append(self.allocator, '/');
+            try result.appendSlice(self.allocator, component);
+        }
+
+        return try result.toOwnedSlice(self.allocator);
     }
 
     /// Check if line is an import directive.
@@ -878,9 +921,9 @@ test "ImportResolver: simple file import" {
     try testing.expect(std.mem.indexOf(u8, result, "#buffer buf") != null);
 }
 
-test "ImportResolver: diamond import pattern" {
+test "ImportResolver: diamond import pattern - deduplication" {
     // Diamond: main imports A and B, both A and B import core
-    // core should only be included once (cached)
+    // core should only be included ONCE (deduplication like #pragma once)
     const test_dir = ".test_import_diamond";
     cleanupTempDir(test_dir);
 
@@ -915,12 +958,14 @@ test "ImportResolver: diamond import pattern" {
     try testing.expect(std.mem.indexOf(u8, result, "#define B=2") != null);
     try testing.expect(std.mem.indexOf(u8, result, "#define MAIN=3") != null);
 
-    // Core marker should appear (at least once from first import)
-    try testing.expect(std.mem.indexOf(u8, result, "CORE_MARKER") != null);
+    // Core marker should appear exactly ONCE (deduplication)
+    const first_pos = std.mem.indexOf(u8, result, "CORE_MARKER");
+    try testing.expect(first_pos != null);
 
-    // Note: With caching, core content appears twice because A and B each
-    // get their own resolved copy. This is expected behavior - caching
-    // prevents re-reading files, not duplicate content in output.
+    // Check there's no second occurrence
+    const after_first = result[first_pos.? + "CORE_MARKER".len ..];
+    const second_pos = std.mem.indexOf(u8, after_first, "CORE_MARKER");
+    try testing.expect(second_pos == null); // Should NOT find a second occurrence
 }
 
 test "ImportResolver: nested directory import" {
@@ -1104,7 +1149,9 @@ test "ImportResolver: import ordering preserved" {
     try testing.expect(pos_third.? < pos_main.?);
 }
 
-test "ImportResolver: caching verification" {
+test "ImportResolver: deduplication across resolve calls" {
+    // Tests that files imported in one resolve() call are deduplicated
+    // in subsequent resolve() calls on the same resolver instance
     const test_dir = ".test_import_cache";
     cleanupTempDir(test_dir);
 
@@ -1115,27 +1162,31 @@ test "ImportResolver: caching verification" {
     defer dir.close();
 
     // Create file with unique content
-    try createTempFile(dir, "cached.pngine", "#define CACHED=yes");
+    try createTempFile(dir, "shared.pngine", "#define SHARED=yes");
 
-    // Resolve imports twice from different entry points
+    // Resolve imports twice from different entry points using SAME resolver
     var resolver = ImportResolver.init(testing.allocator, test_dir);
     defer resolver.deinit();
 
-    // First resolution
-    const source1 = "#import \"cached.pngine\"\n#define FIRST=1";
+    // First resolution - includes shared.pngine
+    const source1 = "#import \"shared.pngine\"\n#define FIRST=1";
     const result1 = try resolver.resolve(source1, "main1.pngine");
     defer testing.allocator.free(result1);
 
-    // Second resolution (should use cached content)
-    const source2 = "#import \"cached.pngine\"\n#define SECOND=2";
+    // Second resolution - shared.pngine is deduplicated (already included)
+    const source2 = "#import \"shared.pngine\"\n#define SECOND=2";
     const result2 = try resolver.resolve(source2, "main2.pngine");
     defer testing.allocator.free(result2);
 
-    // Both should have the cached content
-    try testing.expect(std.mem.indexOf(u8, result1, "#define CACHED=yes") != null);
-    try testing.expect(std.mem.indexOf(u8, result2, "#define CACHED=yes") != null);
+    // First result should have shared content
+    try testing.expect(std.mem.indexOf(u8, result1, "#define SHARED=yes") != null);
+    try testing.expect(std.mem.indexOf(u8, result1, "#define FIRST=1") != null);
 
-    // Cache should have one entry for cached.pngine
+    // Second result should NOT have shared content (deduplicated)
+    try testing.expect(std.mem.indexOf(u8, result2, "#define SHARED=yes") == null);
+    try testing.expect(std.mem.indexOf(u8, result2, "#define SECOND=2") != null);
+
+    // Cache should have entry for shared.pngine
     try testing.expect(resolver.resolved.count() >= 1);
 }
 
@@ -1188,4 +1239,832 @@ test "ImportResolver: import with trailing content" {
     // Both definitions should be present
     try testing.expect(std.mem.indexOf(u8, result, "#define TRAILING=1") != null);
     try testing.expect(std.mem.indexOf(u8, result, "#define AFTER=2") != null);
+}
+
+// ============================================================================
+// Path Normalization Tests
+// ============================================================================
+
+test "ImportResolver: normalizePath basic cases" {
+    var resolver = ImportResolver.init(testing.allocator, ".");
+    defer resolver.deinit();
+
+    // Simple path unchanged
+    const p1 = try resolver.normalizePath("a/b/c");
+    defer testing.allocator.free(p1);
+    try testing.expectEqualStrings("a/b/c", p1);
+
+    // Remove single dot
+    const p2 = try resolver.normalizePath("a/./b/./c");
+    defer testing.allocator.free(p2);
+    try testing.expectEqualStrings("a/b/c", p2);
+
+    // Resolve parent directory
+    const p3 = try resolver.normalizePath("a/b/../c");
+    defer testing.allocator.free(p3);
+    try testing.expectEqualStrings("a/c", p3);
+
+    // Multiple parent refs
+    const p4 = try resolver.normalizePath("a/b/c/../../d");
+    defer testing.allocator.free(p4);
+    try testing.expectEqualStrings("a/d", p4);
+}
+
+test "ImportResolver: normalizePath edge cases" {
+    var resolver = ImportResolver.init(testing.allocator, ".");
+    defer resolver.deinit();
+
+    // Just a dot
+    const p1 = try resolver.normalizePath(".");
+    defer testing.allocator.free(p1);
+    try testing.expectEqualStrings(".", p1);
+
+    // Multiple dots in sequence
+    const p2 = try resolver.normalizePath("./././.");
+    defer testing.allocator.free(p2);
+    try testing.expectEqualStrings(".", p2);
+
+    // Parent at start (can't go higher)
+    const p3 = try resolver.normalizePath("../a");
+    defer testing.allocator.free(p3);
+    try testing.expectEqualStrings("a", p3);
+
+    // Empty path components (double slashes)
+    const p4 = try resolver.normalizePath("a//b///c");
+    defer testing.allocator.free(p4);
+    try testing.expectEqualStrings("a/b/c", p4);
+
+    // Trailing slash
+    const p5 = try resolver.normalizePath("a/b/c/");
+    defer testing.allocator.free(p5);
+    try testing.expectEqualStrings("a/b/c", p5);
+
+    // Leading slash preserved... actually no, let's check
+    const p6 = try resolver.normalizePath("/a/b/c");
+    defer testing.allocator.free(p6);
+    try testing.expectEqualStrings("a/b/c", p6);
+
+    // Complex mix
+    const p7 = try resolver.normalizePath("./a/../b/./c/../d");
+    defer testing.allocator.free(p7);
+    try testing.expectEqualStrings("b/d", p7);
+}
+
+test "ImportResolver: normalizePath parent overflow" {
+    // More .. than path components
+    var resolver = ImportResolver.init(testing.allocator, ".");
+    defer resolver.deinit();
+
+    const p1 = try resolver.normalizePath("a/../../..");
+    defer testing.allocator.free(p1);
+    try testing.expectEqualStrings(".", p1);
+
+    const p2 = try resolver.normalizePath("../../../a");
+    defer testing.allocator.free(p2);
+    try testing.expectEqualStrings("a", p2);
+}
+
+test "ImportResolver: normalizePath idempotent" {
+    // Property: normalize(normalize(x)) == normalize(x)
+    var resolver = ImportResolver.init(testing.allocator, ".");
+    defer resolver.deinit();
+
+    const paths = [_][]const u8{
+        "a/b/c",
+        "./a/../b",
+        "a//b///c",
+        "../a/./b/../c",
+        ".",
+        "",
+        "a/b/c/../../d/e/../f",
+    };
+
+    for (paths) |path| {
+        const once = try resolver.normalizePath(path);
+        defer testing.allocator.free(once);
+
+        const twice = try resolver.normalizePath(once);
+        defer testing.allocator.free(twice);
+
+        try testing.expectEqualStrings(once, twice);
+    }
+}
+
+// ============================================================================
+// Deduplication with Path Variants
+// ============================================================================
+
+test "ImportResolver: dedup with dot prefix" {
+    // Import same file with and without ./ prefix
+    const test_dir = ".test_dedup_dot";
+    cleanupTempDir(test_dir);
+
+    std.fs.cwd().makeDir(test_dir) catch {};
+    defer cleanupTempDir(test_dir);
+
+    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
+    defer dir.close();
+
+    try createTempFile(dir, "core.pngine", "#define CORE_UNIQUE_MARKER=1");
+
+    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    defer resolver.deinit();
+
+    // Import with ./ and without - should deduplicate
+    const source = "#import \"./core.pngine\"\n#import \"core.pngine\"\n#define MAIN=1";
+    const result = try resolver.resolve(source, "main.pngine");
+    defer testing.allocator.free(result);
+
+    // Core should appear exactly once
+    const first = std.mem.indexOf(u8, result, "CORE_UNIQUE_MARKER");
+    try testing.expect(first != null);
+    const rest = result[first.? + "CORE_UNIQUE_MARKER".len ..];
+    try testing.expect(std.mem.indexOf(u8, rest, "CORE_UNIQUE_MARKER") == null);
+}
+
+test "ImportResolver: dedup with parent directory" {
+    // Import same file via parent ref: sub/../core.pngine vs core.pngine
+    const test_dir = ".test_dedup_parent";
+    cleanupTempDir(test_dir);
+
+    std.fs.cwd().makeDir(test_dir) catch {};
+    defer cleanupTempDir(test_dir);
+
+    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
+    defer dir.close();
+
+    dir.makeDir("sub") catch {};
+
+    try createTempFile(dir, "core.pngine", "#define CORE_PARENT_TEST=42");
+
+    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    defer resolver.deinit();
+
+    // Import via parent ref and direct - should deduplicate
+    const source = "#import \"core.pngine\"\n#import \"sub/../core.pngine\"\n#define MAIN=1";
+    const result = try resolver.resolve(source, "main.pngine");
+    defer testing.allocator.free(result);
+
+    // Should appear exactly once
+    const first = std.mem.indexOf(u8, result, "CORE_PARENT_TEST");
+    try testing.expect(first != null);
+    const rest = result[first.? + "CORE_PARENT_TEST".len ..];
+    try testing.expect(std.mem.indexOf(u8, rest, "CORE_PARENT_TEST") == null);
+}
+
+test "ImportResolver: dedup deep diamond" {
+    // A -> B -> C
+    // A -> D -> C
+    // C should appear once
+    const test_dir = ".test_dedup_deep_diamond";
+    cleanupTempDir(test_dir);
+
+    std.fs.cwd().makeDir(test_dir) catch {};
+    defer cleanupTempDir(test_dir);
+
+    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
+    defer dir.close();
+
+    try createTempFile(dir, "c.pngine", "#define C_DEEP_MARKER=deep");
+    try createTempFile(dir, "b.pngine", "#import \"c.pngine\"\n#define B=1");
+    try createTempFile(dir, "d.pngine", "#import \"c.pngine\"\n#define D=1");
+
+    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    defer resolver.deinit();
+
+    const source = "#import \"b.pngine\"\n#import \"d.pngine\"\n#define A=1";
+    const result = try resolver.resolve(source, "a.pngine");
+    defer testing.allocator.free(result);
+
+    // C should appear once, B and D once each
+    try testing.expect(std.mem.indexOf(u8, result, "#define B=1") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "#define D=1") != null);
+
+    const first_c = std.mem.indexOf(u8, result, "C_DEEP_MARKER");
+    try testing.expect(first_c != null);
+    const rest = result[first_c.? + "C_DEEP_MARKER".len ..];
+    try testing.expect(std.mem.indexOf(u8, rest, "C_DEEP_MARKER") == null);
+}
+
+test "ImportResolver: dedup wide fan-in" {
+    // Many files all importing the same core
+    const test_dir = ".test_dedup_fanin";
+    cleanupTempDir(test_dir);
+
+    std.fs.cwd().makeDir(test_dir) catch {};
+    defer cleanupTempDir(test_dir);
+
+    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
+    defer dir.close();
+
+    try createTempFile(dir, "shared.pngine", "#define SHARED_FANIN=unique123");
+
+    // Create 10 files that all import shared
+    var i: u32 = 0;
+    while (i < 10) : (i += 1) {
+        var name_buf: [32]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buf, "file{d}.pngine", .{i}) catch unreachable;
+        var content_buf: [128]u8 = undefined;
+        const content = std.fmt.bufPrint(&content_buf, "#import \"shared.pngine\"\n#define FILE{d}=1", .{i}) catch unreachable;
+        try createTempFile(dir, name, content);
+    }
+
+    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    defer resolver.deinit();
+
+    // Import all 10 files
+    const source =
+        \\#import "file0.pngine"
+        \\#import "file1.pngine"
+        \\#import "file2.pngine"
+        \\#import "file3.pngine"
+        \\#import "file4.pngine"
+        \\#import "file5.pngine"
+        \\#import "file6.pngine"
+        \\#import "file7.pngine"
+        \\#import "file8.pngine"
+        \\#import "file9.pngine"
+        \\#define MAIN=1
+    ;
+    const result = try resolver.resolve(source, "main.pngine");
+    defer testing.allocator.free(result);
+
+    // Shared should appear exactly ONCE despite 10 imports
+    const first = std.mem.indexOf(u8, result, "SHARED_FANIN");
+    try testing.expect(first != null);
+    const rest = result[first.? + "SHARED_FANIN".len ..];
+    try testing.expect(std.mem.indexOf(u8, rest, "SHARED_FANIN") == null);
+
+    // All file markers should be present
+    i = 0;
+    while (i < 10) : (i += 1) {
+        var marker_buf: [32]u8 = undefined;
+        const marker = std.fmt.bufPrint(&marker_buf, "#define FILE{d}=1", .{i}) catch unreachable;
+        try testing.expect(std.mem.indexOf(u8, result, marker) != null);
+    }
+}
+
+test "ImportResolver: dedup chain with branch" {
+    // A -> B -> C -> D
+    // A -> E -> D (E also imports D)
+    // D should appear once
+    const test_dir = ".test_dedup_chain";
+    cleanupTempDir(test_dir);
+
+    std.fs.cwd().makeDir(test_dir) catch {};
+    defer cleanupTempDir(test_dir);
+
+    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
+    defer dir.close();
+
+    try createTempFile(dir, "d.pngine", "#define D_CHAIN=terminus");
+    try createTempFile(dir, "c.pngine", "#import \"d.pngine\"\n#define C=1");
+    try createTempFile(dir, "b.pngine", "#import \"c.pngine\"\n#define B=1");
+    try createTempFile(dir, "e.pngine", "#import \"d.pngine\"\n#define E=1");
+
+    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    defer resolver.deinit();
+
+    const source = "#import \"b.pngine\"\n#import \"e.pngine\"\n#define A=1";
+    const result = try resolver.resolve(source, "a.pngine");
+    defer testing.allocator.free(result);
+
+    // D should appear once
+    const first = std.mem.indexOf(u8, result, "D_CHAIN");
+    try testing.expect(first != null);
+    const rest = result[first.? + "D_CHAIN".len ..];
+    try testing.expect(std.mem.indexOf(u8, rest, "D_CHAIN") == null);
+
+    // Order: D, C, B (from first path), E (D already included), A
+    try testing.expect(std.mem.indexOf(u8, result, "#define B=1") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "#define C=1") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "#define E=1") != null);
+}
+
+test "ImportResolver: dedup with nested directories" {
+    // main imports sub/a.pngine and sub/b.pngine
+    // both import ../shared.pngine (same as shared.pngine)
+    const test_dir = ".test_dedup_nested";
+    cleanupTempDir(test_dir);
+
+    std.fs.cwd().makeDir(test_dir) catch {};
+    defer cleanupTempDir(test_dir);
+
+    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
+    defer dir.close();
+
+    dir.makeDir("sub") catch {};
+    var sub = dir.openDir("sub", .{}) catch return;
+    defer sub.close();
+
+    try createTempFile(dir, "shared.pngine", "#define SHARED_NESTED=root");
+    try createTempFile(sub, "a.pngine", "#import \"../shared.pngine\"\n#define A=1");
+    try createTempFile(sub, "b.pngine", "#import \"../shared.pngine\"\n#define B=1");
+
+    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    defer resolver.deinit();
+
+    const source = "#import \"sub/a.pngine\"\n#import \"sub/b.pngine\"\n#define MAIN=1";
+    const result = try resolver.resolve(source, "main.pngine");
+    defer testing.allocator.free(result);
+
+    // Shared should appear once
+    const first = std.mem.indexOf(u8, result, "SHARED_NESTED");
+    try testing.expect(first != null);
+    const rest = result[first.? + "SHARED_NESTED".len ..];
+    try testing.expect(std.mem.indexOf(u8, rest, "SHARED_NESTED") == null);
+}
+
+// ============================================================================
+// Regression Test: demo2025 Pattern
+// ============================================================================
+
+test "ImportResolver: demo2025 pattern - main and scene both import core" {
+    // Simulates: main imports core, main imports sceneQ, sceneQ imports core
+    const test_dir = ".test_demo2025";
+    cleanupTempDir(test_dir);
+
+    std.fs.cwd().makeDir(test_dir) catch {};
+    defer cleanupTempDir(test_dir);
+
+    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
+    defer dir.close();
+
+    // Core has definitions that would cause duplicate_definition errors if included twice
+    try createTempFile(dir, "core.pngine",
+        \\#texture depthTexture { format=depth24plus }
+        \\#sampler postProcessSampler { }
+        \\#buffer uniformBuffer { size=64 }
+    );
+
+    // SceneQ imports core
+    try createTempFile(dir, "sceneQ.pngine",
+        \\#import "core.pngine"
+        \\#wgsl sceneQ { value="void main() {}" }
+    );
+
+    // Main imports both core and sceneQ
+    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    defer resolver.deinit();
+
+    const source =
+        \\#import "core.pngine"
+        \\#import "sceneQ.pngine"
+        \\#wgsl main { value="void mainFunc() {}" }
+    ;
+    const result = try resolver.resolve(source, "main.pngine");
+    defer testing.allocator.free(result);
+
+    // Each core definition should appear exactly once
+    const markers = [_][]const u8{ "depthTexture", "postProcessSampler", "uniformBuffer" };
+    for (markers) |marker| {
+        const first = std.mem.indexOf(u8, result, marker);
+        try testing.expect(first != null);
+        const rest = result[first.? + marker.len ..];
+        try testing.expect(std.mem.indexOf(u8, rest, marker) == null);
+    }
+
+    // SceneQ content should be present
+    try testing.expect(std.mem.indexOf(u8, result, "sceneQ") != null);
+}
+
+// ============================================================================
+// OOM Testing for New Code Paths
+// ============================================================================
+
+test "ImportResolver: OOM in normalizePath" {
+    // Test OOM at each allocation point in normalizePath
+    var fail_index: usize = 0;
+    const max_iterations: usize = 50;
+
+    while (fail_index < max_iterations) : (fail_index += 1) {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{
+            .fail_index = fail_index,
+        });
+
+        var resolver = ImportResolver.init(failing.allocator(), ".");
+        defer resolver.deinit();
+
+        const result = resolver.normalizePath("a/./b/../c/d");
+
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            const path = try result;
+            failing.allocator().free(path);
+            break;
+        }
+    }
+    try testing.expect(fail_index > 0);
+    try testing.expect(fail_index < max_iterations);
+}
+
+test "ImportResolver: OOM during dedup file import" {
+    const test_dir = ".test_oom_dedup";
+    cleanupTempDir(test_dir);
+    defer cleanupTempDir(test_dir);
+
+    std.fs.cwd().makeDir(test_dir) catch {};
+    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
+    defer dir.close();
+
+    try createTempFile(dir, "core.pngine", "#define CORE=1");
+
+    var fail_index: usize = 0;
+    const max_iterations: usize = 100;
+
+    while (fail_index < max_iterations) : (fail_index += 1) {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{
+            .fail_index = fail_index,
+        });
+
+        var resolver = ImportResolver.init(failing.allocator(), test_dir);
+        defer resolver.deinit();
+
+        const result = resolver.resolve("#import \"core.pngine\"\n#define MAIN=1", "main.pngine");
+
+        if (failing.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            const resolved = try result;
+            failing.allocator().free(resolved);
+            break;
+        }
+    }
+    try testing.expect(fail_index > 0);
+    try testing.expect(fail_index < max_iterations);
+}
+
+// ============================================================================
+// Property-Based Tests
+// ============================================================================
+
+test "ImportResolver: property - dedup reduces output size" {
+    // Property: with deduplication, output size <= sum of unique file contents
+    const test_dir = ".test_prop_size";
+    cleanupTempDir(test_dir);
+    defer cleanupTempDir(test_dir);
+
+    std.fs.cwd().makeDir(test_dir) catch {};
+    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
+    defer dir.close();
+
+    const shared_content = "#define SHARED=1\n" ** 10; // 160 bytes
+    try createTempFile(dir, "shared.pngine", shared_content);
+    try createTempFile(dir, "a.pngine", "#import \"shared.pngine\"\n#define A=1");
+    try createTempFile(dir, "b.pngine", "#import \"shared.pngine\"\n#define B=1");
+
+    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    defer resolver.deinit();
+
+    const source = "#import \"a.pngine\"\n#import \"b.pngine\"\n#define MAIN=1";
+    const result = try resolver.resolve(source, "main.pngine");
+    defer testing.allocator.free(result);
+
+    // Without dedup: source + a + b + shared*2 would be larger
+    // With dedup: source + a + b + shared*1
+    // shared appears once, so result.len < source.len + a.len + b.len + shared*2
+    const with_double_shared = source.len + 50 + 50 + shared_content.len * 2;
+    try testing.expect(result.len < with_double_shared);
+}
+
+test "ImportResolver: property - order preserved for non-duplicates" {
+    const test_dir = ".test_prop_order";
+    cleanupTempDir(test_dir);
+    defer cleanupTempDir(test_dir);
+
+    std.fs.cwd().makeDir(test_dir) catch {};
+    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
+    defer dir.close();
+
+    // Each file has unique content, no shared imports
+    try createTempFile(dir, "first.pngine", "FIRST_UNIQUE");
+    try createTempFile(dir, "second.pngine", "SECOND_UNIQUE");
+    try createTempFile(dir, "third.pngine", "THIRD_UNIQUE");
+
+    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    defer resolver.deinit();
+
+    const source = "#import \"first.pngine\"\n#import \"second.pngine\"\n#import \"third.pngine\"\nMAIN_UNIQUE";
+    const result = try resolver.resolve(source, "main.pngine");
+    defer testing.allocator.free(result);
+
+    const pos1 = std.mem.indexOf(u8, result, "FIRST_UNIQUE").?;
+    const pos2 = std.mem.indexOf(u8, result, "SECOND_UNIQUE").?;
+    const pos3 = std.mem.indexOf(u8, result, "THIRD_UNIQUE").?;
+    const pos4 = std.mem.indexOf(u8, result, "MAIN_UNIQUE").?;
+
+    try testing.expect(pos1 < pos2);
+    try testing.expect(pos2 < pos3);
+    try testing.expect(pos3 < pos4);
+}
+
+test "ImportResolver: property - first wins in diamond" {
+    // In diamond A->B->C, A->D->C, the first path (B) includes C
+    const test_dir = ".test_prop_first_wins";
+    cleanupTempDir(test_dir);
+    defer cleanupTempDir(test_dir);
+
+    std.fs.cwd().makeDir(test_dir) catch {};
+    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
+    defer dir.close();
+
+    try createTempFile(dir, "c.pngine", "C_CONTENT");
+    try createTempFile(dir, "b.pngine", "#import \"c.pngine\"\nB_AFTER_C");
+    try createTempFile(dir, "d.pngine", "#import \"c.pngine\"\nD_AFTER_C");
+
+    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    defer resolver.deinit();
+
+    const source = "#import \"b.pngine\"\n#import \"d.pngine\"\nA_MAIN";
+    const result = try resolver.resolve(source, "a.pngine");
+    defer testing.allocator.free(result);
+
+    // C appears before B_AFTER_C (because B imports C first)
+    const c_pos = std.mem.indexOf(u8, result, "C_CONTENT").?;
+    const b_pos = std.mem.indexOf(u8, result, "B_AFTER_C").?;
+    const d_pos = std.mem.indexOf(u8, result, "D_AFTER_C").?;
+
+    try testing.expect(c_pos < b_pos); // C comes before B's content
+    try testing.expect(b_pos < d_pos); // B comes before D
+}
+
+// ============================================================================
+// Fuzz Testing
+// ============================================================================
+
+test "ImportResolver: fuzz normalizePath" {
+    try std.testing.fuzz({}, fuzzNormalizePath, .{
+        .corpus = &.{
+            "a/b/c",
+            "./a/../b",
+            "a//b///c",
+            "../../../a",
+            ".",
+            "",
+            "a/b/c/../../d/e/../f",
+            "/absolute/path",
+            "very/deep/nested/path/that/goes/on/and/on",
+        },
+    });
+}
+
+fn fuzzNormalizePath(_: void, input: []const u8) !void {
+    // Filter nulls
+    for (input) |b| if (b == 0) return;
+    // Limit size
+    if (input.len > 1024) return;
+
+    var resolver = ImportResolver.init(std.testing.allocator, ".");
+    defer resolver.deinit();
+
+    const result = resolver.normalizePath(input) catch |err| {
+        switch (err) {
+            error.OutOfMemory => return,
+        }
+    };
+    defer std.testing.allocator.free(result);
+
+    // Property: result doesn't contain "//" (double slash)
+    try std.testing.expect(std.mem.indexOf(u8, result, "//") == null);
+
+    // Property: result doesn't contain "/." followed by "/" or end
+    var i: usize = 0;
+    while (i + 1 < result.len) : (i += 1) {
+        if (result[i] == '/' and result[i + 1] == '.') {
+            if (i + 2 >= result.len or result[i + 2] == '/') {
+                // Found "/." at end or followed by "/"
+                try std.testing.expect(false);
+            }
+        }
+    }
+
+    // Property: idempotent
+    const again = resolver.normalizePath(result) catch return;
+    defer std.testing.allocator.free(again);
+    try std.testing.expectEqualStrings(result, again);
+}
+
+test "ImportResolver: fuzz path deduplication equivalence" {
+    try std.testing.fuzz({}, fuzzPathEquivalence, .{
+        .corpus = &.{
+            "a/b",
+            "./a/b",
+            "a/./b",
+            "a/c/../b",
+            "x/../a/b",
+        },
+    });
+}
+
+fn fuzzPathEquivalence(_: void, input: []const u8) !void {
+    // Filter
+    for (input) |b| if (b == 0) return;
+    if (input.len > 256) return;
+    if (input.len == 0) return;
+
+    var resolver = ImportResolver.init(std.testing.allocator, ".");
+    defer resolver.deinit();
+
+    // Generate a few path variants
+    var variants: [4][]u8 = undefined;
+    var count: usize = 0;
+    defer for (variants[0..count]) |v| std.testing.allocator.free(v);
+
+    // Original
+    variants[count] = try std.testing.allocator.dupe(u8, input);
+    count += 1;
+
+    // With ./ prefix
+    if (count < variants.len) {
+        variants[count] = try std.fmt.allocPrint(std.testing.allocator, "./{s}", .{input});
+        count += 1;
+    }
+
+    // Normalize all and compare
+    var normalized: [4][]const u8 = undefined;
+    var norm_count: usize = 0;
+    defer for (normalized[0..norm_count]) |n| std.testing.allocator.free(n);
+
+    for (variants[0..count]) |v| {
+        const n = resolver.normalizePath(v) catch continue;
+        normalized[norm_count] = n;
+        norm_count += 1;
+    }
+
+    // All normalizations should produce same result
+    if (norm_count > 1) {
+        for (normalized[1..norm_count]) |n| {
+            try std.testing.expectEqualStrings(normalized[0], n);
+        }
+    }
+}
+
+// ============================================================================
+// Stress Tests
+// ============================================================================
+
+test "ImportResolver: stress - many imports same file" {
+    const test_dir = ".test_stress_many";
+    cleanupTempDir(test_dir);
+    defer cleanupTempDir(test_dir);
+
+    std.fs.cwd().makeDir(test_dir) catch {};
+    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
+    defer dir.close();
+
+    try createTempFile(dir, "shared.pngine", "#define STRESS_SHARED=1");
+
+    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    defer resolver.deinit();
+
+    // Build source with 100 imports of same file
+    var source_buf: [8192]u8 = undefined;
+    var source_len: usize = 0;
+
+    for (0..100) |_| {
+        const import_line = "#import \"shared.pngine\"\n";
+        @memcpy(source_buf[source_len..][0..import_line.len], import_line);
+        source_len += import_line.len;
+    }
+    @memcpy(source_buf[source_len..][0..12], "#define M=1\n");
+    source_len += 12;
+
+    const result = try resolver.resolve(source_buf[0..source_len], "main.pngine");
+    defer testing.allocator.free(result);
+
+    // Should still only have one instance of STRESS_SHARED
+    const first = std.mem.indexOf(u8, result, "STRESS_SHARED");
+    try testing.expect(first != null);
+    const rest = result[first.? + "STRESS_SHARED".len ..];
+    try testing.expect(std.mem.indexOf(u8, rest, "STRESS_SHARED") == null);
+}
+
+test "ImportResolver: stress - deep nesting" {
+    const test_dir = ".test_stress_deep";
+    cleanupTempDir(test_dir);
+    defer cleanupTempDir(test_dir);
+
+    std.fs.cwd().makeDir(test_dir) catch {};
+    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
+    defer dir.close();
+
+    // Create chain: a0 -> a1 -> a2 -> ... -> a19 -> shared
+    try createTempFile(dir, "shared.pngine", "#define DEEP_SHARED=terminus");
+
+    var i: u32 = 20;
+    while (i > 0) : (i -= 1) {
+        var name_buf: [32]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buf, "a{d}.pngine", .{i - 1}) catch unreachable;
+
+        var content_buf: [128]u8 = undefined;
+        const content = if (i == 20)
+            std.fmt.bufPrint(&content_buf, "#import \"shared.pngine\"\n#define A{d}=1", .{i - 1}) catch unreachable
+        else
+            std.fmt.bufPrint(&content_buf, "#import \"a{d}.pngine\"\n#define A{d}=1", .{ i, i - 1 }) catch unreachable;
+
+        try createTempFile(dir, name, content);
+    }
+
+    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    defer resolver.deinit();
+
+    const result = try resolver.resolve("#import \"a0.pngine\"\n#define MAIN=1", "main.pngine");
+    defer testing.allocator.free(result);
+
+    // Shared should appear exactly once
+    const first = std.mem.indexOf(u8, result, "DEEP_SHARED");
+    try testing.expect(first != null);
+
+    // All A markers should be present
+    i = 0;
+    while (i < 20) : (i += 1) {
+        var marker_buf: [32]u8 = undefined;
+        const marker = std.fmt.bufPrint(&marker_buf, "#define A{d}=1", .{i}) catch unreachable;
+        try testing.expect(std.mem.indexOf(u8, result, marker) != null);
+    }
+}
+
+// ============================================================================
+// Edge Cases
+// ============================================================================
+
+test "ImportResolver: import self returns cycle error" {
+    const test_dir = ".test_self_import";
+    cleanupTempDir(test_dir);
+    defer cleanupTempDir(test_dir);
+
+    std.fs.cwd().makeDir(test_dir) catch {};
+    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
+    defer dir.close();
+
+    try createTempFile(dir, "self.pngine", "#import \"self.pngine\"\n#define SELF=1");
+
+    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    defer resolver.deinit();
+
+    const result = resolver.resolve("#import \"self.pngine\"", "main.pngine");
+    try testing.expectError(error.ImportCycle, result);
+}
+
+test "ImportResolver: import with special characters in filename" {
+    const test_dir = ".test_special_chars";
+    cleanupTempDir(test_dir);
+    defer cleanupTempDir(test_dir);
+
+    std.fs.cwd().makeDir(test_dir) catch {};
+    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
+    defer dir.close();
+
+    // Files with underscores, dashes, numbers
+    try createTempFile(dir, "my-file_v2.pngine", "#define SPECIAL=yes");
+
+    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    defer resolver.deinit();
+
+    const result = try resolver.resolve("#import \"my-file_v2.pngine\"\n#define M=1", "main.pngine");
+    defer testing.allocator.free(result);
+
+    try testing.expect(std.mem.indexOf(u8, result, "#define SPECIAL=yes") != null);
+}
+
+test "ImportResolver: empty path after normalization" {
+    var resolver = ImportResolver.init(testing.allocator, ".");
+    defer resolver.deinit();
+
+    // Path that normalizes to "."
+    const p = try resolver.normalizePath("");
+    defer testing.allocator.free(p);
+    try testing.expectEqualStrings(".", p);
+}
+
+test "ImportResolver: very long path normalization" {
+    var resolver = ImportResolver.init(testing.allocator, ".");
+    defer resolver.deinit();
+
+    // Create a very long path
+    var long_path: [2048]u8 = undefined;
+    var pos: usize = 0;
+    for (0..100) |i| {
+        const segment = std.fmt.bufPrint(long_path[pos..], "dir{d}/", .{i}) catch break;
+        pos += segment.len;
+    }
+    if (pos > 0) pos -= 1; // Remove trailing slash
+
+    const result = try resolver.normalizePath(long_path[0..pos]);
+    defer testing.allocator.free(result);
+
+    // Should not crash, result should be same (no . or ..)
+    try testing.expect(result.len > 0);
+}
+
+test "ImportResolver: unicode in path preserved" {
+    var resolver = ImportResolver.init(testing.allocator, ".");
+    defer resolver.deinit();
+
+    const unicode_path = "café/日本語/путь";
+    const result = try resolver.normalizePath(unicode_path);
+    defer testing.allocator.free(result);
+
+    try testing.expectEqualStrings(unicode_path, result);
 }
