@@ -1,6 +1,15 @@
-// Inercia Demoparty Demo - 260 seconds
-// Frame-based scene switching - each scene is a separate frame
-// Keyboard mapping: Q W E R T Y U I
+// Inercia Demoparty Demo
+// Frame-based scene switching with animation timeline
+// Original 170 BPM tempo, adapted for PNGine viewer API
+//
+// Scene sequence (sceneW excluded - requires video):
+// - sceneU: Intro - technical pattern
+// - sceneE: Box of boxes with neon
+// - sceneR: Tangram shape animations
+// - sceneT: Recursive tangram zoom - build to climax
+// - sceneY: 3D tunnel - CLIMAX
+// - sceneQ: Starfield particles - resolution
+// - sceneU: Outro - technical pattern
 
 // Core stuff includes things that are common to a lot if not all scenes:
 // - depthTexture (texture)
@@ -17,13 +26,30 @@
 #wgsl beats { value="./wgsl/beats.wgsl" }
 
 // Import all scene definitions - each defines its own #frame
-// #import "./sceneQ.wgsl.pngine"
+// Note: sceneW excluded (requires video texture)
 #import "./sceneQ.wgsl.pngine"
-// #import "./sceneW.wgsl.pngine"
 #import "./sceneE.wgsl.pngine"
 #import "./sceneR.wgsl.pngine"
 #import "./sceneT.wgsl.pngine"
 #import "./sceneY.wgsl.pngine"
 #import "./sceneU.wgsl.pngine"
 #import "./sceneI.wgsl.pngine"
+
+// Animation timeline
+// At 170 BPM, 4 beats/compass = 1.41s per compass
+// Total: ~68 seconds (46 compasses without sceneW)
+#animation inercia2025 {
+  duration=68
+  loop=false
+  endBehavior=hold
+  scenes=[
+    { id="intro"   frame=$frame.sceneU start=0  end=2 }
+    { id="boxes"   frame=$frame.sceneE start=2  end=14 }
+    { id="tangram" frame=$frame.sceneR start=14 end=27 }
+    { id="zoom"    frame=$frame.sceneT start=27 end=44 }
+    { id="climax"  frame=$frame.sceneY start=44 end=56 }
+    { id="stars"   frame=$frame.sceneQ start=56 end=66 }
+    { id="outro"   frame=$frame.sceneU start=66 end=68 }
+  ]
+}
 
