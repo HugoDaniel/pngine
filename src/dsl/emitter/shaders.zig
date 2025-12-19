@@ -35,16 +35,15 @@ const MAX_CODE_LENGTH: u32 = 1024 * 1024; // 1MB
 /// Maximum file size for WGSL files.
 const MAX_FILE_SIZE: u32 = 256 * 1024; // 256KB
 
+/// Maximum imports per #wgsl macro.
+const MAX_IMPORTS: u32 = 32;
+
 /// Math constants available for substitution.
 const math_constants = [_]struct { name: []const u8, value: []const u8 }{
     .{ .name = "TAU", .value = "6.283185307179586" }, // Check TAU before PI (longer match)
     .{ .name = "PI", .value = "3.141592653589793" },
     .{ .name = "E", .value = "2.718281828459045" },
 };
-
-/// Cache for resolved WGSL code (with imports prepended).
-/// Key is the #wgsl macro name, value is the resolved code.
-var resolved_wgsl_cache: std.StringHashMapUnmanaged([]const u8) = .{};
 
 /// Emit #wgsl and #shaderModule declarations.
 pub fn emitShaders(e: *Emitter) Emitter.Error!void {
@@ -53,9 +52,7 @@ pub fn emitShaders(e: *Emitter) Emitter.Error!void {
 
     const initial_shader_id = e.next_shader_id;
 
-    // Clear cache from previous runs (if any)
-    clearCache(e.gpa);
-    defer clearCache(e.gpa);
+    // Note: resolved_wgsl_cache is owned by Emitter and cleared in deinit()
 
     // Emit #wgsl declarations
     var it = e.analysis.symbols.wgsl.iterator();
@@ -63,16 +60,18 @@ pub fn emitShaders(e: *Emitter) Emitter.Error!void {
         const name = entry.key_ptr.*;
         const info = entry.value_ptr.*;
 
-        const shader_id = e.next_shader_id;
-        e.next_shader_id += 1;
-        try e.shader_ids.put(e.gpa, name, shader_id);
-
-        // Resolve WGSL with imports prepended
+        // Resolve WGSL with imports prepended BEFORE assigning ID
+        // This prevents orphaned IDs when code resolution fails
         const raw_code = try resolveWgslWithImports(e, name, info.node);
         if (raw_code.len == 0) continue;
 
         const code = try substituteDefines(e, raw_code);
         defer if (code.ptr != raw_code.ptr) e.gpa.free(code);
+
+        // Only assign ID after confirming code is valid
+        const shader_id = e.next_shader_id;
+        e.next_shader_id += 1;
+        try e.shader_ids.put(e.gpa, name, shader_id);
 
         const data_id = try e.builder.addData(e.gpa, code);
 
@@ -90,17 +89,19 @@ pub fn emitShaders(e: *Emitter) Emitter.Error!void {
         const name = entry.key_ptr.*;
         const info = entry.value_ptr.*;
 
-        const shader_id = e.next_shader_id;
-        e.next_shader_id += 1;
-        try e.shader_ids.put(e.gpa, name, shader_id);
-
         // Find code property - can be string literal or identifier referencing #wgsl
+        // Resolve code BEFORE assigning ID to prevent orphaned IDs
         const code_value = utils.findPropertyValue(e, info.node, "code") orelse continue;
         const raw_code = resolveShaderCode(e, code_value);
         if (raw_code.len == 0) continue;
 
         const code = try substituteDefines(e, raw_code);
         defer if (code.ptr != raw_code.ptr) e.gpa.free(code);
+
+        // Only assign ID after confirming code is valid
+        const shader_id = e.next_shader_id;
+        e.next_shader_id += 1;
+        try e.shader_ids.put(e.gpa, name, shader_id);
 
         const data_id = try e.builder.addData(e.gpa, code);
 
@@ -137,7 +138,7 @@ fn resolveShaderCode(e: *Emitter, code_node: Node.Index) []const u8 {
         if (std.mem.startsWith(u8, content, "$wgsl.")) {
             const wgsl_name = content[6..]; // Skip "$wgsl."
             // Look up resolved code from cache (populated during #wgsl emission)
-            if (resolved_wgsl_cache.get(wgsl_name)) |cached| {
+            if (e.resolved_wgsl_cache.get(wgsl_name)) |cached| {
                 return cached;
             }
         }
@@ -151,7 +152,7 @@ fn resolveShaderCode(e: *Emitter, code_node: Node.Index) []const u8 {
         const wgsl_name = utils.getTokenSlice(e, token);
 
         // Look up resolved code from cache (populated during #wgsl emission)
-        if (resolved_wgsl_cache.get(wgsl_name)) |cached| {
+        if (e.resolved_wgsl_cache.get(wgsl_name)) |cached| {
             return cached;
         }
     }
@@ -311,6 +312,7 @@ fn trySubstitute(e: *Emitter, code: []const u8, pos: u32) SubstituteResult {
 }
 
 /// Check if identifier matches at position (whole word match).
+/// Returns false for declarations (identifier followed by ':').
 fn matchesIdentifier(code: []const u8, pos: u32, name: []const u8) bool {
     // Pre-conditions
     std.debug.assert(name.len > 0);
@@ -322,7 +324,26 @@ fn matchesIdentifier(code: []const u8, pos: u32, name: []const u8) bool {
     const before_ok = pos == 0 or !isIdentChar(code[pos - 1]);
     const after_ok = pos + name.len >= code.len or !isIdentChar(code[pos + name.len]);
 
-    return before_ok and after_ok;
+    if (!before_ok or !after_ok) return false;
+
+    // Check if this is a declaration (identifier followed by ':')
+    // e.g., "const PI: f32" - PI is being declared, not used
+    const after_pos = pos + @as(u32, @intCast(name.len));
+    if (after_pos < code.len) {
+        // Skip whitespace after identifier (bounded to 16 chars max)
+        var check_pos = after_pos;
+        for (0..16) |_| {
+            if (check_pos >= code.len) break;
+            if (code[check_pos] != ' ' and code[check_pos] != '\t') break;
+            check_pos += 1;
+        }
+        // If followed by ':', this is a declaration - don't substitute
+        if (check_pos < code.len and code[check_pos] == ':') {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 /// Check if a character is a valid identifier character.
@@ -370,52 +391,135 @@ fn getDefineValue(e: *Emitter, define_node: Node.Index) []const u8 {
 // WGSL Import Resolution
 // ============================================================================
 
-/// Clear the resolved WGSL cache, freeing all values and internal memory.
-fn clearCache(gpa: std.mem.Allocator) void {
-    var it = resolved_wgsl_cache.valueIterator();
-    while (it.next()) |value_ptr| {
-        gpa.free(value_ptr.*);
-    }
-    resolved_wgsl_cache.clearAndFree(gpa);
-}
+/// Maximum import depth (prevents unbounded iteration).
+const MAX_IMPORT_DEPTH: u32 = 64;
+
+/// Worklist item for iterative import resolution.
+const WorkItem = struct {
+    name: []const u8,
+    node: Node.Index,
+    state: State,
+
+    const State = enum { needs_deps, ready_to_build };
+};
 
 /// Resolve WGSL code with imports prepended.
-/// Memory: Result is cached and owned by the cache.
+/// Uses iterative worklist approach (no recursion) for bounded execution.
+/// Memory: Result is cached in e.resolved_wgsl_cache and owned by Emitter.
 fn resolveWgslWithImports(e: *Emitter, name: []const u8, macro_node: Node.Index) Emitter.Error![]const u8 {
     // Pre-conditions
     std.debug.assert(name.len > 0);
     std.debug.assert(macro_node.toInt() < e.ast.nodes.len);
 
     // Check cache first
-    if (resolved_wgsl_cache.get(name)) |cached| {
+    if (e.resolved_wgsl_cache.get(name)) |cached| {
         return cached;
     }
 
-    // Get the value property
-    const value_node = utils.findPropertyValue(e, macro_node, "value") orelse return "";
-    const value_str = utils.getStringContent(e, value_node);
-    if (value_str.len == 0) return "";
+    // Worklist for iterative processing (replaces recursion)
+    var worklist = std.ArrayListUnmanaged(WorkItem){};
+    defer worklist.deinit(e.gpa);
 
-    // Get imports array
-    const imports = getWgslImports(e, macro_node);
+    // Start with root item
+    try worklist.append(e.gpa, .{ .name = name, .node = macro_node, .state = .needs_deps });
 
-    // If no imports, just load the value (inline or from file)
-    if (imports.len == 0) {
-        const code = try loadWgslValue(e, value_str);
-        try resolved_wgsl_cache.put(e.gpa, name, code);
-        return code;
+    // Process worklist iteratively
+    for (0..MAX_IMPORT_DEPTH * MAX_IMPORTS) |_| {
+        if (worklist.items.len == 0) break;
+
+        const item = &worklist.items[worklist.items.len - 1];
+
+        // Skip if already cached
+        if (e.resolved_wgsl_cache.get(item.name)) |_| {
+            _ = worklist.pop();
+            continue;
+        }
+
+        switch (item.state) {
+            .needs_deps => {
+                // Get imports and check if all are resolved
+                const static_imports = getWgslImports(e, item.node);
+
+                // Copy import names (static buffer protection)
+                const import_names = try e.gpa.alloc([]const u8, static_imports.len);
+                defer e.gpa.free(import_names);
+                @memcpy(import_names, static_imports);
+
+                var all_deps_ready = true;
+                for (import_names) |import_name| {
+                    if (e.resolved_wgsl_cache.get(import_name) == null) {
+                        // Dependency not yet resolved - push it
+                        if (e.analysis.symbols.wgsl.get(import_name)) |import_info| {
+                            try worklist.append(e.gpa, .{
+                                .name = import_name,
+                                .node = import_info.node,
+                                .state = .needs_deps,
+                            });
+                            all_deps_ready = false;
+                        } else {
+                            std.debug.print("WARNING: Import '{s}' not found in wgsl symbols for '{s}'\n", .{ import_name, item.name });
+                        }
+                    }
+                }
+
+                if (all_deps_ready) {
+                    item.state = .ready_to_build;
+                }
+            },
+            .ready_to_build => {
+                // All dependencies are resolved, build this item
+                try buildWgslCode(e, item.name, item.node);
+                _ = worklist.pop();
+            },
+        }
+    } else {
+        // Hit max iterations - likely a bug or extremely deep imports
+        std.debug.print("WARNING: Max import depth exceeded for '{s}'\n", .{name});
     }
 
-    // Resolve imports and concatenate
+    // Post-condition: result should be cached now
+    return e.resolved_wgsl_cache.get(name) orelse "";
+}
+
+/// Build WGSL code for a single item (all imports already resolved).
+fn buildWgslCode(e: *Emitter, name: []const u8, macro_node: Node.Index) Emitter.Error!void {
+    // Pre-conditions
+    std.debug.assert(name.len > 0);
+    std.debug.assert(e.resolved_wgsl_cache.get(name) == null);
+
+    // Get the value property
+    const value_node = utils.findPropertyValue(e, macro_node, "value") orelse {
+        // No value property - cache empty string to prevent re-processing
+        try e.resolved_wgsl_cache.put(e.gpa, name, try e.gpa.dupe(u8, ""));
+        return;
+    };
+    const value_str = utils.getStringContent(e, value_node);
+    if (value_str.len == 0) {
+        // Empty value - cache empty string to prevent re-processing
+        try e.resolved_wgsl_cache.put(e.gpa, name, try e.gpa.dupe(u8, ""));
+        return;
+    }
+
+    // Get imports
+    const static_imports = getWgslImports(e, macro_node);
+    const import_names = try e.gpa.alloc([]const u8, static_imports.len);
+    defer e.gpa.free(import_names);
+    @memcpy(import_names, static_imports);
+
+    // If no imports, just load the value
+    if (import_names.len == 0) {
+        const code = try loadWgslValue(e, value_str);
+        try e.resolved_wgsl_cache.put(e.gpa, name, code);
+        return;
+    }
+
+    // Build result from imports + value
     var result = std.ArrayListUnmanaged(u8){};
     errdefer result.deinit(e.gpa);
 
-    // Add each import's resolved code
-    for (imports) |import_name| {
-        // Look up the imported #wgsl macro
-        if (e.analysis.symbols.wgsl.get(import_name)) |import_info| {
-            // Recursively resolve (with caching)
-            const import_code = try resolveWgslWithImports(e, import_name, import_info.node);
+    // Add each import's resolved code (all should be cached now)
+    for (import_names) |import_name| {
+        if (e.resolved_wgsl_cache.get(import_name)) |import_code| {
             if (import_code.len > 0) {
                 try result.appendSlice(e.gpa, import_code);
                 try result.append(e.gpa, '\n');
@@ -429,12 +533,10 @@ fn resolveWgslWithImports(e: *Emitter, name: []const u8, macro_node: Node.Index)
     try result.appendSlice(e.gpa, main_code);
 
     const final = try result.toOwnedSlice(e.gpa);
-    try resolved_wgsl_cache.put(e.gpa, name, final);
+    try e.resolved_wgsl_cache.put(e.gpa, name, final);
 
-    // Post-condition: result has content
-    std.debug.assert(final.len > 0);
-
-    return final;
+    // Post-condition: result was cached
+    std.debug.assert(e.resolved_wgsl_cache.get(name) != null);
 }
 
 /// Load WGSL code from a value string.
@@ -447,11 +549,19 @@ fn loadWgslValue(e: *Emitter, value: []const u8) Emitter.Error![]u8 {
 
     // Check if it's a file path
     if (isFilePath(value)) {
-        return loadWgslFile(e, value);
+        const result = try loadWgslFile(e, value);
+        // Post-condition: file content is non-empty (empty files are valid but unusual)
+        std.debug.assert(result.len > 0 or value.len > 0);
+        return result;
     }
 
     // Inline code - duplicate for caller ownership
-    return try e.gpa.dupe(u8, value);
+    const result = try e.gpa.dupe(u8, value);
+
+    // Post-condition: result matches input length
+    std.debug.assert(result.len == value.len);
+
+    return result;
 }
 
 /// Check if a value string is a file path.
@@ -468,18 +578,24 @@ fn isFilePath(value: []const u8) bool {
 /// Load WGSL code from a file path.
 /// Memory: Caller owns returned slice.
 fn loadWgslFile(e: *Emitter, path: []const u8) Emitter.Error![]u8 {
-    // Pre-condition
+    // Pre-conditions
     std.debug.assert(path.len > 0);
+    std.debug.assert(isFilePath(path));
 
     const base_dir = e.options.base_dir orelse ".";
     var path_buf: [4096]u8 = undefined;
     const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ base_dir, path }) catch
         return error.OutOfMemory;
 
-    return readFile(e.gpa, full_path) catch |err| {
+    const result = readFile(e.gpa, full_path) catch |err| {
         std.debug.print("Warning: Could not read WGSL file '{s}': {}\n", .{ full_path, err });
         return error.OutOfMemory;
     };
+
+    // Post-condition: result is a valid slice (length indicates validity)
+    // Note: Empty files are valid but unusual for WGSL
+
+    return result;
 }
 
 /// Read file into allocated buffer.
@@ -521,7 +637,14 @@ fn getWgslImports(e: *Emitter, macro_node: Node.Index) []const []const u8 {
     // Pre-condition
     std.debug.assert(macro_node.toInt() < e.ast.nodes.len);
 
+    const node_tag = e.ast.nodes.items(.tag)[macro_node.toInt()];
     const data = e.ast.nodes.items(.data)[macro_node.toInt()];
+
+    // Only #wgsl macros have imports
+    if (node_tag != .macro_wgsl) {
+        return &[_][]const u8{};
+    }
+
     const props = e.ast.extraData(data.extra_range);
 
     for (props) |prop_idx| {
@@ -544,7 +667,8 @@ fn getWgslImports(e: *Emitter, macro_node: Node.Index) []const []const u8 {
 }
 
 /// Extract import names from an array node.
-/// Uses static buffer for bounded iteration.
+/// WARNING: Returns slice into static buffer - caller must copy before any
+/// call that might re-enter this function (e.g., resolveWgslWithImports).
 fn extractImportNames(e: *Emitter, array_node: Node.Index) []const []const u8 {
     // Pre-condition
     std.debug.assert(array_node.toInt() < e.ast.nodes.len);
@@ -552,8 +676,7 @@ fn extractImportNames(e: *Emitter, array_node: Node.Index) []const []const u8 {
     const array_data = e.ast.nodes.items(.data)[array_node.toInt()];
     const elements = e.ast.extraData(array_data.extra_range);
 
-    // Static buffer for import names (max 32 imports)
-    const MAX_IMPORTS = 32;
+    // Static buffer for import names
     const S = struct {
         var names: [MAX_IMPORTS][]const u8 = undefined;
     };
@@ -571,8 +694,9 @@ fn extractImportNames(e: *Emitter, array_node: Node.Index) []const []const u8 {
             const name_token = ref_data.node_and_node[1];
             S.names[count] = utils.getTokenSlice(e, name_token);
             count += 1;
-        } else if (elem_tag == .string_value) {
+        } else if (elem_tag == .string_value or elem_tag == .runtime_interpolation) {
             // String like "$wgsl.name" - extract the name part
+            // Can be string_value or runtime_interpolation (strings with $ patterns)
             const str = utils.getStringContent(e, elem_node);
             if (std.mem.startsWith(u8, str, "$wgsl.")) {
                 S.names[count] = str[6..]; // Skip "$wgsl."
@@ -580,6 +704,9 @@ fn extractImportNames(e: *Emitter, array_node: Node.Index) []const []const u8 {
             }
         }
     }
+
+    // Post-condition: count is bounded
+    std.debug.assert(count <= MAX_IMPORTS);
 
     return S.names[0..count];
 }

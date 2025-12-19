@@ -49,6 +49,7 @@ const pipelines = @import("emitter/pipelines.zig");
 const passes = @import("emitter/passes.zig");
 const frames = @import("emitter/frames.zig");
 const wasm = @import("emitter/wasm.zig");
+const animations = @import("emitter/animations.zig");
 const reflect = @import("../reflect.zig");
 
 pub const Emitter = struct {
@@ -76,6 +77,11 @@ pub const Emitter = struct {
     pipeline_layout_ids: std.StringHashMapUnmanaged(u16),
     query_set_ids: std.StringHashMapUnmanaged(u16),
     texture_view_ids: std.StringHashMapUnmanaged(u16),
+    animation_ids: std.StringHashMapUnmanaged(u16),
+
+    /// Animation metadata extracted from #animation macro.
+    /// This data is serialized separately (pNGm chunk) rather than bytecode.
+    animation_metadata: ?AnimationMetadata = null,
 
     /// WASM data entries for #data with wasm={...} property.
     /// These are initialized at runtime by calling WASM functions.
@@ -96,6 +102,11 @@ pub const Emitter = struct {
     /// Maps shader name -> reflection data.
     wgsl_reflections: std.StringHashMapUnmanaged(reflect.ReflectionData),
 
+    /// Cache for resolved WGSL code (with imports prepended).
+    /// Key is the #wgsl macro name, value is the resolved code.
+    /// Moved from module-level to struct for thread safety and testability.
+    resolved_wgsl_cache: std.StringHashMapUnmanaged([]const u8),
+
     // Counters for generating IDs
     next_buffer_id: u16 = 0,
     next_texture_id: u16 = 0,
@@ -114,6 +125,7 @@ pub const Emitter = struct {
     next_pipeline_layout_id: u16 = 0,
     next_query_set_id: u16 = 0,
     next_texture_view_id: u16 = 0,
+    next_animation_id: u16 = 0,
 
     const Self = @This();
 
@@ -128,6 +140,94 @@ pub const Emitter = struct {
         func_name_id: u16,
         /// Byte size of the return value.
         byte_size: u32,
+    };
+
+    /// Animation metadata extracted from #animation macro.
+    /// Serialized to pNGm chunk for JS runtime consumption.
+    pub const AnimationMetadata = struct {
+        /// Animation name.
+        name: []const u8,
+        /// Total duration in seconds.
+        duration: f64,
+        /// Whether animation loops.
+        loop: bool,
+        /// Behavior when animation ends: hold, stop, restart.
+        end_behavior: EndBehavior,
+        /// Ordered list of scenes in the timeline.
+        scenes: []const Scene,
+
+        pub const EndBehavior = enum {
+            hold, // Keep last frame
+            stop, // Clear/stop
+            restart, // Loop back to start
+        };
+
+        pub const Scene = struct {
+            /// Scene identifier (used in draw options).
+            id: []const u8,
+            /// Frame name reference (from #frame).
+            frame_name: []const u8,
+            /// Start time in seconds.
+            start: f64,
+            /// End time in seconds.
+            end: f64,
+        };
+
+        /// Serialize to JSON for pNGm chunk.
+        pub fn toJson(self: *const AnimationMetadata, allocator: std.mem.Allocator) ![]u8 {
+            var buffer = std.ArrayListUnmanaged(u8){};
+            errdefer buffer.deinit(allocator);
+
+            try buffer.appendSlice(allocator, "{\"animation\":{");
+
+            // Name
+            try buffer.appendSlice(allocator, "\"name\":\"");
+            try buffer.appendSlice(allocator, self.name);
+            try buffer.appendSlice(allocator, "\",");
+
+            // Duration
+            try buffer.appendSlice(allocator, "\"duration\":");
+            var dur_buf: [32]u8 = undefined;
+            const dur_slice = std.fmt.bufPrint(&dur_buf, "{d}", .{self.duration}) catch "0";
+            try buffer.appendSlice(allocator, dur_slice);
+            try buffer.appendSlice(allocator, ",");
+
+            // Loop
+            try buffer.appendSlice(allocator, "\"loop\":");
+            try buffer.appendSlice(allocator, if (self.loop) "true" else "false");
+            try buffer.appendSlice(allocator, ",");
+
+            // End behavior
+            try buffer.appendSlice(allocator, "\"endBehavior\":\"");
+            try buffer.appendSlice(allocator, switch (self.end_behavior) {
+                .hold => "hold",
+                .stop => "stop",
+                .restart => "restart",
+            });
+            try buffer.appendSlice(allocator, "\",");
+
+            // Scenes array
+            try buffer.appendSlice(allocator, "\"scenes\":[");
+            for (self.scenes, 0..) |scene, i| {
+                if (i > 0) try buffer.append(allocator, ',');
+                try buffer.appendSlice(allocator, "{\"id\":\"");
+                try buffer.appendSlice(allocator, scene.id);
+                try buffer.appendSlice(allocator, "\",\"frame\":\"");
+                try buffer.appendSlice(allocator, scene.frame_name);
+                try buffer.appendSlice(allocator, "\",\"start\":");
+                var start_buf: [32]u8 = undefined;
+                const start_slice = std.fmt.bufPrint(&start_buf, "{d}", .{scene.start}) catch "0";
+                try buffer.appendSlice(allocator, start_slice);
+                try buffer.appendSlice(allocator, ",\"end\":");
+                var end_buf: [32]u8 = undefined;
+                const end_slice = std.fmt.bufPrint(&end_buf, "{d}", .{scene.end}) catch "0";
+                try buffer.appendSlice(allocator, end_slice);
+                try buffer.append(allocator, '}');
+            }
+            try buffer.appendSlice(allocator, "]}}");
+
+            return buffer.toOwnedSlice(allocator);
+        }
     };
 
     /// Emit options.
@@ -175,11 +275,13 @@ pub const Emitter = struct {
             .pipeline_layout_ids = .{},
             .query_set_ids = .{},
             .texture_view_ids = .{},
+            .animation_ids = .{},
             .wasm_data_entries = .{},
             .generated_arrays = .{},
             .buffer_pools = .{},
             .bind_group_pools = .{},
             .wgsl_reflections = .{},
+            .resolved_wgsl_cache = .{},
         };
     }
 
@@ -202,6 +304,7 @@ pub const Emitter = struct {
         self.pipeline_layout_ids.deinit(self.gpa);
         self.query_set_ids.deinit(self.gpa);
         self.texture_view_ids.deinit(self.gpa);
+        self.animation_ids.deinit(self.gpa);
         self.wasm_data_entries.deinit(self.gpa);
         self.generated_arrays.deinit(self.gpa);
         self.buffer_pools.deinit(self.gpa);
@@ -213,6 +316,18 @@ pub const Emitter = struct {
             ref_data.deinit();
         }
         self.wgsl_reflections.deinit(self.gpa);
+        // Free resolved WGSL cache
+        var wgsl_it = self.resolved_wgsl_cache.valueIterator();
+        while (wgsl_it.next()) |value_ptr| {
+            self.gpa.free(value_ptr.*);
+        }
+        self.resolved_wgsl_cache.deinit(self.gpa);
+        // Free animation metadata scenes array
+        if (self.animation_metadata) |meta| {
+            if (meta.scenes.len > 0) {
+                self.gpa.free(meta.scenes);
+            }
+        }
     }
 
     /// Emit PNGB bytecode from analyzed DSL.
@@ -227,7 +342,7 @@ pub const Emitter = struct {
         std.debug.assert(!analysis.hasErrors());
 
         var self = Self.init(gpa, ast, analysis, options);
-        errdefer self.deinit();
+        defer self.deinit();
 
         // Pass 1: Emit resource declarations in dependency order
         try resources.emitData(&self);
@@ -253,42 +368,13 @@ pub const Emitter = struct {
         // Pass 4: Emit frames (queues inlined via emitQueueAction)
         try frames.emitFrames(&self);
 
+        // Pass 5: Extract animation metadata (stored for pNGm, not bytecode)
+        try animations.extractAnimations(&self);
+
         // Finalize and return PNGB bytes
-        const result = try self.builder.finalize(gpa);
-        errdefer gpa.free(result);
-
-        // Clean up all resources
-        self.builder.deinit(self.gpa);
-        self.buffer_ids.deinit(self.gpa);
-        self.texture_ids.deinit(self.gpa);
-        self.sampler_ids.deinit(self.gpa);
-        self.shader_ids.deinit(self.gpa);
-        self.pipeline_ids.deinit(self.gpa);
-        self.bind_group_ids.deinit(self.gpa);
-        self.pass_ids.deinit(self.gpa);
-        self.frame_ids.deinit(self.gpa);
-        self.queue_ids.deinit(self.gpa);
-        self.data_ids.deinit(self.gpa);
-        self.image_bitmap_ids.deinit(self.gpa);
-        self.wasm_module_ids.deinit(self.gpa);
-        self.wasm_call_ids.deinit(self.gpa);
-        self.bind_group_layout_ids.deinit(self.gpa);
-        self.pipeline_layout_ids.deinit(self.gpa);
-        self.query_set_ids.deinit(self.gpa);
-        self.texture_view_ids.deinit(self.gpa);
-        self.wasm_data_entries.deinit(self.gpa);
-        self.generated_arrays.deinit(self.gpa);
-        self.buffer_pools.deinit(self.gpa);
-        self.bind_group_pools.deinit(self.gpa);
-        // Free all cached reflection data
-        var it = self.wgsl_reflections.iterator();
-        while (it.next()) |entry| {
-            var ref_data = entry.value_ptr.*;
-            ref_data.deinit();
-        }
-        self.wgsl_reflections.deinit(self.gpa);
-
-        return result;
+        // Note: finalize() transfers ownership of bytecode to caller,
+        // deinit() in defer will clean up remaining resources
+        return try self.builder.finalize(gpa);
     }
 
     // ========================================================================
