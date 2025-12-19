@@ -481,7 +481,8 @@ fn resolveWgslWithImports(e: *Emitter, name: []const u8, macro_node: Node.Index)
     return e.resolved_wgsl_cache.get(name) orelse "";
 }
 
-/// Build WGSL code for a single item (all imports already resolved).
+/// Build WGSL code for a single item with deduplicated imports.
+/// Collects all transitive imports, deduplicates them, then concatenates.
 fn buildWgslCode(e: *Emitter, name: []const u8, macro_node: Node.Index) Emitter.Error!void {
     // Pre-conditions
     std.debug.assert(name.len > 0);
@@ -500,36 +501,43 @@ fn buildWgslCode(e: *Emitter, name: []const u8, macro_node: Node.Index) Emitter.
         return;
     }
 
-    // Get imports
-    const static_imports = getWgslImports(e, macro_node);
-    const import_names = try e.gpa.alloc([]const u8, static_imports.len);
-    defer e.gpa.free(import_names);
-    @memcpy(import_names, static_imports);
+    // Collect all transitive imports (deduplicated, in dependency order)
+    var included = std.StringHashMapUnmanaged(void){};
+    defer included.deinit(e.gpa);
 
-    // If no imports, just load the value
-    if (import_names.len == 0) {
-        const code = try loadWgslValue(e, value_str);
+    var import_order = std.ArrayListUnmanaged([]const u8){};
+    defer import_order.deinit(e.gpa);
+
+    try collectTransitiveImports(e, macro_node, &included, &import_order);
+
+    // Load main value
+    const main_code = try loadWgslValue(e, value_str);
+    defer e.gpa.free(main_code);
+
+    // If no imports, just cache the main value
+    if (import_order.items.len == 0) {
+        const code = try e.gpa.dupe(u8, main_code);
         try e.resolved_wgsl_cache.put(e.gpa, name, code);
         return;
     }
 
-    // Build result from imports + value
+    // Build result from deduplicated imports + value
     var result = std.ArrayListUnmanaged(u8){};
     errdefer result.deinit(e.gpa);
 
-    // Add each import's resolved code (all should be cached now)
-    for (import_names) |import_name| {
-        if (e.resolved_wgsl_cache.get(import_name)) |import_code| {
-            if (import_code.len > 0) {
-                try result.appendSlice(e.gpa, import_code);
-                try result.append(e.gpa, '\n');
-            }
+    // Add each import's RAW code (not resolved - to avoid duplication)
+    for (import_order.items) |import_name| {
+        const raw_result = try getRawWgslCode(e, import_name);
+        const raw_code = raw_result.code;
+        defer if (raw_result.owned) e.gpa.free(raw_code);
+
+        if (raw_code.len > 0) {
+            try result.appendSlice(e.gpa, raw_code);
+            try result.append(e.gpa, '\n');
         }
     }
 
     // Add the main value
-    const main_code = try loadWgslValue(e, value_str);
-    defer e.gpa.free(main_code);
     try result.appendSlice(e.gpa, main_code);
 
     const final = try result.toOwnedSlice(e.gpa);
@@ -537,6 +545,84 @@ fn buildWgslCode(e: *Emitter, name: []const u8, macro_node: Node.Index) Emitter.
 
     // Post-condition: result was cached
     std.debug.assert(e.resolved_wgsl_cache.get(name) != null);
+}
+
+/// Collect all transitive imports in dependency order, deduplicated.
+/// Uses iterative approach with worklist (no recursion).
+fn collectTransitiveImports(
+    e: *Emitter,
+    macro_node: Node.Index,
+    included: *std.StringHashMapUnmanaged(void),
+    import_order: *std.ArrayListUnmanaged([]const u8),
+) Emitter.Error!void {
+    // Worklist of nodes to process
+    var worklist = std.ArrayListUnmanaged(Node.Index){};
+    defer worklist.deinit(e.gpa);
+    try worklist.append(e.gpa, macro_node);
+
+    // Process worklist iteratively (bounded loop)
+    for (0..MAX_IMPORTS * MAX_IMPORT_DEPTH) |_| {
+        if (worklist.items.len == 0) break;
+
+        const current_node = worklist.items[worklist.items.len - 1];
+        worklist.items.len -= 1;
+        const static_imports = getWgslImports(e, current_node);
+        if (static_imports.len == 0) continue;
+
+        // Copy to avoid static buffer issues
+        const import_names = try e.gpa.alloc([]const u8, static_imports.len);
+        defer e.gpa.free(import_names);
+        @memcpy(import_names, static_imports);
+
+        // Process imports in reverse order so they end up in correct order
+        var i: usize = import_names.len;
+        while (i > 0) {
+            i -= 1;
+            const import_name = import_names[i];
+
+            // Skip if already included
+            if (included.get(import_name) != null) continue;
+
+            // Mark as included
+            try included.put(e.gpa, import_name, {});
+            try import_order.append(e.gpa, import_name);
+
+            // Add this import's node to worklist for processing its dependencies
+            if (e.analysis.symbols.wgsl.get(import_name)) |import_info| {
+                try worklist.append(e.gpa, import_info.node);
+            }
+        }
+    }
+
+    // Reverse to get dependency order (dependencies before dependents)
+    std.mem.reverse([]const u8, import_order.items);
+}
+
+/// Result of getRawWgslCode - tracks ownership.
+const RawCodeResult = struct {
+    code: []const u8,
+    owned: bool, // true if code needs to be freed by caller
+};
+
+/// Get raw WGSL code for a module (without imports prepended).
+fn getRawWgslCode(e: *Emitter, name: []const u8) Emitter.Error!RawCodeResult {
+    // Look up the module's node
+    const info = e.analysis.symbols.wgsl.get(name) orelse return .{ .code = "", .owned = false };
+
+    // Get value property
+    const value_node = utils.findPropertyValue(e, info.node, "value") orelse return .{ .code = "", .owned = false };
+    const value_str = utils.getStringContent(e, value_node);
+    if (value_str.len == 0) return .{ .code = "", .owned = false };
+
+    // Load the raw code (file or inline)
+    if (isFilePath(value_str)) {
+        // For files, load and return owned slice
+        const code = try loadWgslFile(e, value_str);
+        return .{ .code = code, .owned = true };
+    }
+
+    // Inline code - not owned
+    return .{ .code = value_str, .owned = false };
 }
 
 /// Load WGSL code from a value string.
