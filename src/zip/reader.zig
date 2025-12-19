@@ -228,8 +228,8 @@ pub const ZipReader = struct {
     ///
     /// Uses raw DEFLATE format (no zlib header) as required by ZIP.
     fn decompressDeflate(allocator: std.mem.Allocator, compressed: []const u8, uncompressed_size: u32) ![]u8 {
-        // Pre-condition: need at least minimal deflate data
-        if (compressed.len < 1) {
+        // Minimum valid deflate stream is 2 bytes (final stored block with 0 bytes)
+        if (compressed.len < 2) {
             return error.DecompressionFailed;
         }
 

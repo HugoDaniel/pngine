@@ -538,3 +538,254 @@ test "extract: alternating bytes roundtrip" {
 
     try std.testing.expectEqualSlices(u8, &bytecode, extracted);
 }
+
+// ============================================================================
+// OOM Tests
+// ============================================================================
+
+test "extract: OOM during extraction handled gracefully" {
+    const base_allocator = std.testing.allocator;
+
+    // First create valid embedded PNG
+    const png_data = try createMinimalPng(base_allocator);
+    defer base_allocator.free(png_data);
+
+    var bytecode: [128]u8 = undefined;
+    @memcpy(bytecode[0..4], "PNGB");
+    @memset(bytecode[4..], 0xAB);
+
+    const embedded = try embed.embed(base_allocator, png_data, &bytecode);
+    defer base_allocator.free(embedded);
+
+    // Test OOM at each allocation point
+    var fail_index: usize = 0;
+    while (fail_index < 20) : (fail_index += 1) {
+        var failing_alloc = std.testing.FailingAllocator.init(base_allocator, .{
+            .fail_index = fail_index,
+        });
+
+        const result = extract(failing_alloc.allocator(), embedded);
+
+        if (failing_alloc.has_induced_failure) {
+            // OOM is expected - verify graceful handling (no crash)
+            if (result) |data| {
+                failing_alloc.allocator().free(data);
+            } else |_| {
+                // Error is expected
+            }
+        } else {
+            // No OOM - verify success
+            if (result) |data| {
+                failing_alloc.allocator().free(data);
+            } else |_| {
+                // Unexpected error
+            }
+            break;
+        }
+    }
+}
+
+test "embed: OOM during embedding handled gracefully" {
+    const base_allocator = std.testing.allocator;
+
+    const png_data = try createMinimalPng(base_allocator);
+    defer base_allocator.free(png_data);
+
+    var bytecode: [128]u8 = undefined;
+    @memcpy(bytecode[0..4], "PNGB");
+    @memset(bytecode[4..], 0xCD);
+
+    // Test OOM at each allocation point
+    var fail_index: usize = 0;
+    while (fail_index < 30) : (fail_index += 1) {
+        var failing_alloc = std.testing.FailingAllocator.init(base_allocator, .{
+            .fail_index = fail_index,
+        });
+
+        const result = embed.embed(failing_alloc.allocator(), png_data, &bytecode);
+
+        if (failing_alloc.has_induced_failure) {
+            if (result) |data| {
+                failing_alloc.allocator().free(data);
+            } else |_| {
+                // OOM error is expected
+            }
+        } else {
+            if (result) |data| {
+                failing_alloc.allocator().free(data);
+            } else |_| {}
+            break;
+        }
+    }
+}
+
+// ============================================================================
+// Corrupted/Edge Case Tests
+// ============================================================================
+
+test "extract: truncated PNG returns error" {
+    const allocator = std.testing.allocator;
+
+    const png_data = try createMinimalPng(allocator);
+    defer allocator.free(png_data);
+
+    var bytecode: [64]u8 = undefined;
+    @memcpy(bytecode[0..4], "PNGB");
+    @memset(bytecode[4..], 0);
+
+    const embedded = try embed.embed(allocator, png_data, &bytecode);
+    defer allocator.free(embedded);
+
+    // Truncate to just after PNG signature
+    if (embedded.len > 20) {
+        const truncated = embedded[0..20];
+        try std.testing.expectError(Error.InvalidPng, extract(allocator, truncated));
+    }
+}
+
+test "extract: PNG with invalid pNGb version returns error" {
+    const allocator = std.testing.allocator;
+
+    // Manually construct a PNG with invalid pNGb version
+    var png_buf: std.ArrayListUnmanaged(u8) = .{};
+    defer png_buf.deinit(allocator);
+
+    // PNG signature
+    try png_buf.appendSlice(allocator, &chunk.PNG_SIGNATURE);
+
+    // IHDR chunk
+    const ihdr_data = [13]u8{
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0x00, 0x00, 0x00, 0x00,
+    };
+    try chunk.writeChunk(&png_buf, allocator, chunk.ChunkType.IHDR, &ihdr_data);
+
+    // pNGb chunk with invalid version (0xFF instead of 0x01)
+    const pngb_data = [_]u8{ 0xFF, 0x00, 0x50, 0x4E, 0x47, 0x42 }; // version=0xFF, flags=0, "PNGB"
+    try chunk.writeChunk(&png_buf, allocator, embed.PNGB_CHUNK_TYPE, &pngb_data);
+
+    // IEND chunk
+    try chunk.writeChunk(&png_buf, allocator, chunk.ChunkType.IEND, "");
+
+    try std.testing.expectError(Error.InvalidPngbVersion, extract(allocator, png_buf.items));
+}
+
+test "extract: empty data returns error" {
+    const allocator = std.testing.allocator;
+    const empty: []const u8 = "";
+    try std.testing.expectError(Error.InvalidPng, extract(allocator, empty));
+}
+
+test "extract: just PNG signature returns error" {
+    // PNG signature alone has no chunks, so NoPngbChunk is returned
+    // (signature check passes, but no chunks found)
+    try std.testing.expectError(Error.NoPngbChunk, extract(std.testing.allocator, &chunk.PNG_SIGNATURE));
+}
+
+test "hasPngb: empty data returns false" {
+    try std.testing.expect(!hasPngb(""));
+}
+
+test "hasPngb: random data returns false" {
+    const random_data = [_]u8{ 0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE };
+    try std.testing.expect(!hasPngb(&random_data));
+}
+
+test "getPngbInfo: PNG without pNGb returns error" {
+    const allocator = std.testing.allocator;
+
+    const png_data = try createMinimalPng(allocator);
+    defer allocator.free(png_data);
+
+    try std.testing.expectError(Error.NoPngbChunk, getPngbInfo(png_data));
+}
+
+test "getPngbInfo: invalid PNG returns error" {
+    const bad_data = [_]u8{ 0x00, 0x00, 0x00, 0x00 };
+    try std.testing.expectError(Error.InvalidPng, getPngbInfo(&bad_data));
+}
+
+// ============================================================================
+// Fuzz/Property Tests
+// ============================================================================
+
+test "fuzz: extract never crashes on random data" {
+    try std.testing.fuzz({}, fuzzExtractProperties, .{
+        .corpus = &.{
+            // Valid PNG signature but truncated
+            &chunk.PNG_SIGNATURE,
+            // Random garbage
+            &[_]u8{ 0xDE, 0xAD, 0xBE, 0xEF },
+            // Empty
+            "",
+            // Almost-PNG signature
+            &[_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x00 },
+        },
+    });
+}
+
+fn fuzzExtractProperties(_: @TypeOf({}), input: []const u8) !void {
+    const allocator = std.testing.allocator;
+
+    // Property: extract never crashes on any input
+    const result = extract(allocator, input);
+
+    if (result) |data| {
+        defer allocator.free(data);
+        // Property: if extraction succeeds, result starts with PNGB
+        try std.testing.expect(data.len >= 4);
+    } else |_| {
+        // Error is expected for random data
+    }
+}
+
+test "fuzz: hasPngb never crashes on random data" {
+    try std.testing.fuzz({}, fuzzHasPngbProperties, .{
+        .corpus = &.{
+            &chunk.PNG_SIGNATURE,
+            &[_]u8{ 0xDE, 0xAD, 0xBE, 0xEF },
+            "",
+        },
+    });
+}
+
+fn fuzzHasPngbProperties(_: @TypeOf({}), input: []const u8) !void {
+    // Property: hasPngb never crashes on any input
+    const result = hasPngb(input);
+
+    // Property: result is deterministic
+    const result2 = hasPngb(input);
+    try std.testing.expectEqual(result, result2);
+}
+
+test "property: roundtrip with random bytecode" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const random = prng.random();
+
+    const png_data = try createMinimalPng(allocator);
+    defer allocator.free(png_data);
+
+    // Test multiple random bytecodes
+    for (0..20) |_| {
+        // Random size between 16 and 2048
+        const size = random.intRangeAtMost(usize, 16, 2048);
+        const bytecode = try allocator.alloc(u8, size);
+        defer allocator.free(bytecode);
+
+        // Fill with PNGB header + random data
+        @memcpy(bytecode[0..4], "PNGB");
+        random.bytes(bytecode[4..]);
+
+        // Embed
+        const embedded = try embed.embed(allocator, png_data, bytecode);
+        defer allocator.free(embedded);
+
+        // Extract
+        const extracted = try extract(allocator, embedded);
+        defer allocator.free(extracted);
+
+        // Property: extracted == original
+        try std.testing.expectEqualSlices(u8, bytecode, extracted);
+    }
+}

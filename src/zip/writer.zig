@@ -193,14 +193,9 @@ pub const ZipWriter = struct {
     fn compressDeflate(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
         const flate = std.compress.flate;
 
-        // Pre-condition: data is not empty
-        if (data.len == 0) {
-            // Return empty compressed output
-            return try allocator.alloc(u8, 0);
-        }
-
         // Allocate output buffer - compressed size may be larger for incompressible data
-        const initial_capacity = data.len + 1024;
+        // Even empty data needs at least 2 bytes for deflate end marker
+        const initial_capacity = @max(data.len, 64) + 1024;
         var output_buf = try allocator.alloc(u8, initial_capacity);
         errdefer allocator.free(output_buf);
 

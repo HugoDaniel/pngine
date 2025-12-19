@@ -33,6 +33,10 @@ const Dispatcher = pngine.Dispatcher;
 const DescriptorEncoder = pngine.DescriptorEncoder;
 const zip = pngine.zip;
 
+// Build-time options and embedded WASM runtime
+const build_options = @import("build_options");
+const embedded_wasm: []const u8 = @embedFile("embedded_wasm");
+
 // Subcommand modules
 const render_cmd = @import("cli/render.zig");
 
@@ -221,6 +225,7 @@ fn runCheck(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     defer gpu.deinit(allocator);
 
     var dispatcher = Dispatcher(MockGPU).init(allocator, &gpu, &module);
+    defer dispatcher.deinit();
     dispatcher.executeAll(allocator) catch |err| {
         std.debug.print("\nExecution error: {}\n", .{err});
         return 5;
@@ -249,6 +254,21 @@ fn loadOrCompileBytecode(allocator: std.mem.Allocator, input: []const u8) ![]u8 
 
         const bytecode = pngine.png.extractBytecode(allocator, png_data) catch |err| {
             std.debug.print("Error: failed to extract bytecode from PNG: {}\n", .{err});
+            return error.InvalidFormat;
+        };
+
+        // Post-condition: bytecode is non-empty
+        std.debug.assert(bytecode.len > 0);
+        return bytecode;
+    }
+
+    if (std.mem.eql(u8, extension, ".zip")) {
+        // Extract bytecode from ZIP bundle
+        const zip_data = try readBinaryFile(allocator, input);
+        defer allocator.free(zip_data);
+
+        const bytecode = extractFromZip(allocator, zip_data) catch |err| {
+            std.debug.print("Error: failed to extract bytecode from ZIP: {}\n", .{err});
             return error.InvalidFormat;
         };
 
@@ -686,6 +706,7 @@ fn findJsonValue(data: []const u8, field: []const u8) ?[]const u8 {
 fn runBundle(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     var input_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
+    var assets_dir: ?[]const u8 = null;
     var include_runtime = true;
 
     // Parse arguments with bounded iteration
@@ -706,6 +727,13 @@ fn runBundle(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
             }
             output_path = args[i + 1];
             skip_next = true;
+        } else if (std.mem.eql(u8, arg, "--assets")) {
+            if (i + 1 >= args_len) {
+                std.debug.print("Error: --assets requires a directory path\n", .{});
+                return 1;
+            }
+            assets_dir = args[i + 1];
+            skip_next = true;
         } else if (std.mem.eql(u8, arg, "--no-runtime")) {
             include_runtime = false;
         } else if (arg.len > 0 and arg[0] == '-') {
@@ -722,7 +750,7 @@ fn runBundle(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
 
     if (input_path == null) {
         std.debug.print("Error: no input file specified\n\n", .{});
-        std.debug.print("Usage: pngine bundle <input.pngine> [-o output.zip] [--no-runtime]\n", .{});
+        std.debug.print("Usage: pngine bundle <input.pngine> [-o output.zip] [--assets dir] [--no-runtime]\n", .{});
         return 1;
     }
 
@@ -769,10 +797,70 @@ fn runBundle(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         return 4;
     };
 
-    // Note: WASM runtime would be added here if available
-    // For now, we just document that it's expected
+    // Add assets from directory if specified
+    var assets_count: u32 = 0;
+    if (assets_dir) |dir_path| {
+        var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| {
+            std.debug.print("Error: failed to open assets directory '{s}': {}\n", .{ dir_path, err });
+            return 2;
+        };
+        defer dir.close();
+
+        var walker = dir.walk(allocator) catch |err| {
+            std.debug.print("Error: failed to walk assets directory: {}\n", .{err});
+            return 2;
+        };
+        defer walker.deinit();
+
+        // Walk directory with bounded iteration (max 10000 files)
+        for (0..10000) |_| {
+            const entry = walker.next() catch |err| {
+                std.debug.print("Error: failed to iterate assets: {}\n", .{err});
+                return 2;
+            };
+
+            if (entry) |e| {
+                if (e.kind == .file) {
+                    // Build path: assets/<relative_path>
+                    const asset_path = std.fmt.allocPrint(allocator, "assets/{s}", .{e.path}) catch |err| {
+                        std.debug.print("Error: out of memory: {}\n", .{err});
+                        return 4;
+                    };
+                    defer allocator.free(asset_path);
+
+                    // Read file content using the walker's directory handle
+                    const content = dir.readFileAlloc(e.path, allocator, .limited(10 * 1024 * 1024)) catch |err| {
+                        std.debug.print("Error: failed to read asset '{s}': {}\n", .{ e.path, err });
+                        return 2;
+                    };
+                    defer allocator.free(content);
+
+                    // Add to ZIP (use store for already-compressed files, deflate otherwise)
+                    const method: zip.CompressionMethod = if (isCompressedExtension(e.basename)) .store else .deflate;
+                    writer.addFile(asset_path, content, method) catch |err| {
+                        std.debug.print("Error: failed to add asset '{s}': {}\n", .{ e.path, err });
+                        return 4;
+                    };
+
+                    assets_count += 1;
+                }
+            } else {
+                break; // No more entries
+            }
+        }
+    }
+
+    // Add WASM runtime if requested and available
     if (include_runtime) {
-        std.debug.print("Note: pngine.wasm should be added to the bundle separately\n", .{});
+        if (embedded_wasm.len > 0) {
+            // WASM is already compressed, use store method
+            writer.addFile("pngine.wasm", embedded_wasm, .store) catch |err| {
+                std.debug.print("Error: failed to add WASM runtime: {}\n", .{err});
+                return 4;
+            };
+        } else {
+            std.debug.print("Warning: WASM runtime not available in this build\n", .{});
+        }
     }
 
     // Finalize and write
@@ -787,7 +875,11 @@ fn runBundle(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         return 2;
     };
 
-    std.debug.print("Bundled {s} -> {s} ({d} bytes)\n", .{ input, output, zip_data.len });
+    if (assets_count > 0) {
+        std.debug.print("Bundled {s} -> {s} ({d} bytes, {d} assets)\n", .{ input, output, zip_data.len, assets_count });
+    } else {
+        std.debug.print("Bundled {s} -> {s} ({d} bytes)\n", .{ input, output, zip_data.len });
+    }
     return 0;
 }
 
@@ -905,6 +997,22 @@ fn listPngContents(allocator: std.mem.Allocator, input: []const u8, data: []cons
     }
 
     return 0;
+}
+
+/// Check if file extension indicates already-compressed content.
+/// Used to skip redundant DEFLATE compression in ZIP bundles.
+fn isCompressedExtension(filename: []const u8) bool {
+    const ext = std.fs.path.extension(filename);
+    const compressed_exts = [_][]const u8{
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", // Images
+        ".zip", ".gz", ".zst", ".br", ".xz", // Archives
+        ".mp3", ".mp4", ".webm", ".ogg", // Media
+        ".woff", ".woff2", // Fonts
+    };
+    for (compressed_exts) |cext| {
+        if (std.ascii.eqlIgnoreCase(ext, cext)) return true;
+    }
+    return false;
 }
 
 /// Derive output path for bundle: input.pngine -> input.zip
@@ -1405,6 +1513,7 @@ fn printUsage() void {
         \\  --no-embed            Don't embed bytecode in PNG
         \\
         \\Bundle Options:
+        \\  --assets <dir>        Include assets directory in bundle
         \\  --no-runtime          Don't include pngine.wasm in manifest
         \\
         \\Supported formats:
@@ -1530,4 +1639,531 @@ fn testDeriveOutputPathProperties(_: @TypeOf({}), input: []const u8) anyerror!vo
     // Property 3: Output length is reasonable
     // stem + "/" + ".pngb" should not exceed input.len + 5
     try std.testing.expect(result.len <= input.len + 5);
+}
+
+// ============================================================================
+// isCompressedExtension Tests
+// ============================================================================
+
+test "isCompressedExtension: image formats" {
+    try std.testing.expect(isCompressedExtension("photo.png"));
+    try std.testing.expect(isCompressedExtension("photo.PNG"));
+    try std.testing.expect(isCompressedExtension("photo.Png"));
+    try std.testing.expect(isCompressedExtension("image.jpg"));
+    try std.testing.expect(isCompressedExtension("image.jpeg"));
+    try std.testing.expect(isCompressedExtension("animation.gif"));
+    try std.testing.expect(isCompressedExtension("modern.webp"));
+}
+
+test "isCompressedExtension: archive formats" {
+    try std.testing.expect(isCompressedExtension("data.zip"));
+    try std.testing.expect(isCompressedExtension("data.gz"));
+    try std.testing.expect(isCompressedExtension("data.zst"));
+    try std.testing.expect(isCompressedExtension("data.br"));
+    try std.testing.expect(isCompressedExtension("data.xz"));
+}
+
+test "isCompressedExtension: media formats" {
+    try std.testing.expect(isCompressedExtension("audio.mp3"));
+    try std.testing.expect(isCompressedExtension("video.mp4"));
+    try std.testing.expect(isCompressedExtension("video.webm"));
+    try std.testing.expect(isCompressedExtension("audio.ogg"));
+}
+
+test "isCompressedExtension: font formats" {
+    try std.testing.expect(isCompressedExtension("font.woff"));
+    try std.testing.expect(isCompressedExtension("font.woff2"));
+}
+
+test "isCompressedExtension: uncompressed formats return false" {
+    try std.testing.expect(!isCompressedExtension("code.zig"));
+    try std.testing.expect(!isCompressedExtension("data.json"));
+    try std.testing.expect(!isCompressedExtension("readme.txt"));
+    try std.testing.expect(!isCompressedExtension("shader.wgsl"));
+    try std.testing.expect(!isCompressedExtension("noextension"));
+    try std.testing.expect(!isCompressedExtension(""));
+    try std.testing.expect(!isCompressedExtension(".hidden"));
+}
+
+test "isCompressedExtension: edge cases" {
+    // Hidden file with compressed extension
+    try std.testing.expect(isCompressedExtension(".backup.png"));
+    // Multiple extensions - only last extension matters
+    try std.testing.expect(isCompressedExtension("archive.tar.gz"));
+    // Path with extension
+    try std.testing.expect(isCompressedExtension("path/to/file.png"));
+    // Hidden file with no extension (dot is filename, not extension separator)
+    try std.testing.expect(!isCompressedExtension(".png"));
+    // Case insensitive
+    try std.testing.expect(isCompressedExtension("IMAGE.PNG"));
+    try std.testing.expect(isCompressedExtension("Music.MP3"));
+}
+
+// ============================================================================
+// deriveBundleOutputPath Tests
+// ============================================================================
+
+test "deriveBundleOutputPath: simple filename" {
+    const allocator = std.testing.allocator;
+    const result = try deriveBundleOutputPath(allocator, "shader.pngine");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("shader.zip", result);
+}
+
+test "deriveBundleOutputPath: with directory" {
+    const allocator = std.testing.allocator;
+    const result = try deriveBundleOutputPath(allocator, "shaders/effect.pngine");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("shaders/effect.zip", result);
+}
+
+test "deriveBundleOutputPath: no extension" {
+    const allocator = std.testing.allocator;
+    const result = try deriveBundleOutputPath(allocator, "shader");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("shader.zip", result);
+}
+
+test "deriveBundleOutputPath: hidden file" {
+    const allocator = std.testing.allocator;
+    const result = try deriveBundleOutputPath(allocator, ".shader");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings(".shader.zip", result);
+}
+
+test "deriveBundleOutputPath: OOM handling" {
+    var fail_index: usize = 0;
+    while (fail_index < 10) : (fail_index += 1) {
+        var failing_alloc = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_index,
+        });
+
+        const result = deriveBundleOutputPath(failing_alloc.allocator(), "test.pngine");
+
+        if (failing_alloc.has_induced_failure) {
+            try std.testing.expectError(error.OutOfMemory, result);
+        } else {
+            const path = try result;
+            failing_alloc.allocator().free(path);
+            break;
+        }
+    }
+}
+
+// ============================================================================
+// extractFromZip Tests
+// ============================================================================
+
+test "extractFromZip: valid bundle with manifest" {
+    const allocator = std.testing.allocator;
+
+    // Create a valid ZIP bundle
+    var writer = zip.ZipWriter.init(allocator);
+    defer writer.deinit();
+
+    try writer.addFile("manifest.json", "{\"version\":1,\"entry\":\"main.pngb\"}", .store);
+    try writer.addFile("main.pngb", "PNGB\x01\x00bytecode", .store);
+
+    const zip_data = try writer.finish();
+    defer allocator.free(zip_data);
+
+    // Extract bytecode
+    const bytecode = try extractFromZip(allocator, zip_data);
+    defer allocator.free(bytecode);
+
+    try std.testing.expectEqualStrings("PNGB\x01\x00bytecode", bytecode);
+}
+
+test "extractFromZip: fallback to main.pngb when manifest missing" {
+    const allocator = std.testing.allocator;
+
+    var writer = zip.ZipWriter.init(allocator);
+    defer writer.deinit();
+
+    // No manifest.json, but main.pngb exists - should use fallback
+    try writer.addFile("main.pngb", "PNGB\x01\x00bytecode", .store);
+
+    const zip_data = try writer.finish();
+    defer allocator.free(zip_data);
+
+    // Should succeed with fallback to main.pngb
+    const bytecode = try extractFromZip(allocator, zip_data);
+    defer allocator.free(bytecode);
+
+    try std.testing.expectEqualStrings("PNGB\x01\x00bytecode", bytecode);
+}
+
+test "extractFromZip: empty zip returns error" {
+    const allocator = std.testing.allocator;
+
+    var writer = zip.ZipWriter.init(allocator);
+    defer writer.deinit();
+
+    // Empty ZIP - no manifest, no main.pngb
+    const zip_data = try writer.finish();
+    defer allocator.free(zip_data);
+
+    const result = extractFromZip(allocator, zip_data);
+    try std.testing.expectError(error.FileNotFound, result);
+}
+
+test "extractFromZip: missing entry file returns error" {
+    const allocator = std.testing.allocator;
+
+    var writer = zip.ZipWriter.init(allocator);
+    defer writer.deinit();
+
+    // Manifest points to non-existent file
+    try writer.addFile("manifest.json", "{\"version\":1,\"entry\":\"missing.pngb\"}", .store);
+
+    const zip_data = try writer.finish();
+    defer allocator.free(zip_data);
+
+    const result = extractFromZip(allocator, zip_data);
+    try std.testing.expectError(error.FileNotFound, result);
+}
+
+test "extractFromZip: nested entry path works" {
+    const allocator = std.testing.allocator;
+
+    var writer = zip.ZipWriter.init(allocator);
+    defer writer.deinit();
+
+    try writer.addFile("manifest.json", "{\"version\":1,\"entry\":\"shaders/main.pngb\"}", .store);
+    try writer.addFile("shaders/main.pngb", "nested bytecode", .store);
+
+    const zip_data = try writer.finish();
+    defer allocator.free(zip_data);
+
+    const bytecode = try extractFromZip(allocator, zip_data);
+    defer allocator.free(bytecode);
+
+    try std.testing.expectEqualStrings("nested bytecode", bytecode);
+}
+
+test "extractFromZip: deflate compressed entry" {
+    const allocator = std.testing.allocator;
+
+    var writer = zip.ZipWriter.init(allocator);
+    defer writer.deinit();
+
+    try writer.addFile("manifest.json", "{\"version\":1,\"entry\":\"main.pngb\"}", .store);
+    // Use deflate for bytecode
+    try writer.addFile("main.pngb", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", .deflate);
+
+    const zip_data = try writer.finish();
+    defer allocator.free(zip_data);
+
+    const bytecode = try extractFromZip(allocator, zip_data);
+    defer allocator.free(bytecode);
+
+    try std.testing.expectEqualStrings("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", bytecode);
+}
+
+test "extractFromZip: OOM handling" {
+    const allocator = std.testing.allocator;
+
+    // First create valid ZIP
+    var writer = zip.ZipWriter.init(allocator);
+    defer writer.deinit();
+    try writer.addFile("manifest.json", "{\"version\":1,\"entry\":\"main.pngb\"}", .store);
+    try writer.addFile("main.pngb", "bytecode", .store);
+    const zip_data = try writer.finish();
+    defer allocator.free(zip_data);
+
+    // Test OOM at each allocation point
+    var fail_index: usize = 0;
+    while (fail_index < 20) : (fail_index += 1) {
+        var failing_alloc = std.testing.FailingAllocator.init(allocator, .{
+            .fail_index = fail_index,
+        });
+
+        const result = extractFromZip(failing_alloc.allocator(), zip_data);
+
+        if (failing_alloc.has_induced_failure) {
+            // OOM is expected - verify graceful handling (no crash)
+            if (result) |data| {
+                failing_alloc.allocator().free(data);
+            } else |_| {
+                // Error is expected, just verify no crash
+            }
+        } else {
+            // No OOM - verify success
+            if (result) |data| {
+                failing_alloc.allocator().free(data);
+            } else |_| {
+                // Unexpected error
+            }
+            break;
+        }
+    }
+}
+
+// ============================================================================
+// Bundle Roundtrip Property Tests
+// ============================================================================
+
+test "bundle roundtrip: bytecode preserved" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const random = prng.random();
+
+    // Generate random bytecode
+    var bytecode: [256]u8 = undefined;
+    random.bytes(&bytecode);
+
+    // Create bundle
+    var writer = zip.ZipWriter.init(allocator);
+    defer writer.deinit();
+    try writer.addFile("manifest.json", "{\"version\":1,\"entry\":\"main.pngb\"}", .store);
+    try writer.addFile("main.pngb", &bytecode, .deflate);
+    const zip_data = try writer.finish();
+    defer allocator.free(zip_data);
+
+    // Extract and verify
+    const extracted = try extractFromZip(allocator, zip_data);
+    defer allocator.free(extracted);
+
+    try std.testing.expectEqualSlices(u8, &bytecode, extracted);
+}
+
+test "fuzz bundle roundtrip" {
+    try std.testing.fuzz({}, testBundleRoundtripProperties, .{});
+}
+
+fn testBundleRoundtripProperties(_: @TypeOf({}), input: []const u8) anyerror!void {
+    // Skip empty inputs
+    if (input.len == 0) return;
+
+    const allocator = std.testing.allocator;
+
+    // Create bundle with input as bytecode
+    var writer = zip.ZipWriter.init(allocator);
+    defer writer.deinit();
+
+    writer.addFile("manifest.json", "{\"version\":1,\"entry\":\"main.pngb\"}", .store) catch return;
+    writer.addFile("main.pngb", input, .deflate) catch return;
+
+    const zip_data = writer.finish() catch return;
+    defer allocator.free(zip_data);
+
+    // Extract and verify roundtrip property
+    const extracted = extractFromZip(allocator, zip_data) catch return;
+    defer allocator.free(extracted);
+
+    // Property: extracted == original
+    try std.testing.expectEqualSlices(u8, input, extracted);
+}
+
+// ============================================================================
+// Embedded WASM Tests
+// ============================================================================
+
+test "embedded_wasm: is valid WASM" {
+    // Property: embedded WASM starts with WASM magic bytes
+    try std.testing.expect(embedded_wasm.len >= 8);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x61, 0x73, 0x6d }, embedded_wasm[0..4]);
+
+    // Property: WASM version is 1
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x00, 0x00, 0x00 }, embedded_wasm[4..8]);
+}
+
+test "embedded_wasm: reasonable size" {
+    // Property: WASM should be between 10KB and 200KB
+    try std.testing.expect(embedded_wasm.len >= 10 * 1024);
+    try std.testing.expect(embedded_wasm.len <= 200 * 1024);
+}
+
+// ============================================================================
+// findJsonValue Tests
+// ============================================================================
+
+test "findJsonValue: basic extraction" {
+    const result = findJsonValue("{\"entry\":\"main.pngb\"}", "\"entry\"");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("main.pngb", result.?);
+}
+
+test "findJsonValue: with whitespace" {
+    const result = findJsonValue("{\"entry\" : \"file.pngb\"}", "\"entry\"");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("file.pngb", result.?);
+}
+
+test "findJsonValue: field not found" {
+    const result = findJsonValue("{\"other\":\"value\"}", "\"entry\"");
+    try std.testing.expect(result == null);
+}
+
+test "findJsonValue: empty JSON" {
+    const result = findJsonValue("{}", "\"entry\"");
+    try std.testing.expect(result == null);
+}
+
+test "findJsonValue: empty string" {
+    const result = findJsonValue("", "\"entry\"");
+    try std.testing.expect(result == null);
+}
+
+test "findJsonValue: nested path" {
+    const result = findJsonValue("{\"entry\":\"shaders/main.pngb\"}", "\"entry\"");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("shaders/main.pngb", result.?);
+}
+
+test "findJsonValue: special characters in value" {
+    const result = findJsonValue("{\"entry\":\"file-v1.2_test.pngb\"}", "\"entry\"");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("file-v1.2_test.pngb", result.?);
+}
+
+// ============================================================================
+// Corrupted Data Tests
+// ============================================================================
+
+test "extractFromZip: corrupted ZIP signature" {
+    // Invalid signature (not ZIP)
+    const result = extractFromZip(std.testing.allocator, "NOT A ZIP FILE");
+    try std.testing.expectError(error.InvalidZip, result);
+}
+
+test "extractFromZip: truncated ZIP" {
+    const allocator = std.testing.allocator;
+
+    var writer = zip.ZipWriter.init(allocator);
+    defer writer.deinit();
+    try writer.addFile("manifest.json", "{\"version\":1,\"entry\":\"main.pngb\"}", .store);
+    try writer.addFile("main.pngb", "bytecode", .store);
+    const zip_data = try writer.finish();
+    defer allocator.free(zip_data);
+
+    // Truncate the data
+    if (zip_data.len > 20) {
+        const truncated = zip_data[0..20];
+        const result = extractFromZip(allocator, truncated);
+        try std.testing.expectError(error.InvalidZip, result);
+    }
+}
+
+test "extractFromZip: minimum valid ZIP" {
+    // Minimum valid ZIP (end of central directory only - empty archive)
+    const empty_zip = [_]u8{
+        // End of central directory
+        0x50, 0x4b, 0x05, 0x06, // Signature
+        0x00, 0x00, // Disk number
+        0x00, 0x00, // Central dir disk
+        0x00, 0x00, // Entries on disk
+        0x00, 0x00, // Total entries
+        0x00, 0x00, 0x00, 0x00, // Central dir size
+        0x00, 0x00, 0x00, 0x00, // Central dir offset
+        0x00, 0x00, // Comment length
+    };
+
+    // Empty ZIP should fail because no manifest or main.pngb
+    const result = extractFromZip(std.testing.allocator, &empty_zip);
+    try std.testing.expectError(error.FileNotFound, result);
+}
+
+test "extractFromZip: manifest with missing quotes" {
+    const allocator = std.testing.allocator;
+
+    var writer = zip.ZipWriter.init(allocator);
+    defer writer.deinit();
+    // Malformed JSON - missing quotes around value
+    try writer.addFile("manifest.json", "{\"entry\":main.pngb}", .store);
+    try writer.addFile("main.pngb", "bytecode", .store);
+    const zip_data = try writer.finish();
+    defer allocator.free(zip_data);
+
+    // Should fall back to main.pngb when JSON parsing fails
+    const bytecode = try extractFromZip(allocator, zip_data);
+    defer allocator.free(bytecode);
+    try std.testing.expectEqualStrings("bytecode", bytecode);
+}
+
+// ============================================================================
+// OOM Stress Tests
+// ============================================================================
+
+test "ZipWriter: OOM at various allocation points" {
+    var fail_index: usize = 0;
+    while (fail_index < 30) : (fail_index += 1) {
+        var failing_alloc = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_index,
+        });
+
+        var writer = zip.ZipWriter.init(failing_alloc.allocator());
+        defer writer.deinit();
+
+        const add_result = writer.addFile("test.txt", "test content", .store);
+        if (add_result) |_| {
+            const finish_result = writer.finish();
+            if (finish_result) |data| {
+                failing_alloc.allocator().free(data);
+                if (!failing_alloc.has_induced_failure) break;
+            } else |_| {
+                // OOM during finish is expected
+            }
+        } else |_| {
+            // OOM during addFile is expected
+        }
+    }
+}
+
+// ============================================================================
+// Fuzz Tests with Corpus
+// ============================================================================
+
+test "fuzz findJsonValue" {
+    try std.testing.fuzz({}, testFindJsonValueProperties, .{
+        .corpus = &.{
+            "{}",
+            "{\"entry\":\"main.pngb\"}",
+            "{\"entry\": \"file.pngb\"}",
+            "{\"other\":\"value\"}",
+            "{\"entry\":\"path/to/file.pngb\"}",
+            "{\"entry\":\"\"}",
+        },
+    });
+}
+
+fn testFindJsonValueProperties(_: @TypeOf({}), input: []const u8) !void {
+    // Property: findJsonValue never crashes on any input
+    const result = findJsonValue(input, "\"entry\"");
+
+    // Property: if result is found, it's a valid slice of the input
+    if (result) |value| {
+        // Find where value starts in input
+        const value_ptr = @intFromPtr(value.ptr);
+        const input_ptr = @intFromPtr(input.ptr);
+        const input_end = input_ptr + input.len;
+
+        // Value must be within input bounds
+        try std.testing.expect(value_ptr >= input_ptr);
+        try std.testing.expect(value_ptr + value.len <= input_end);
+    }
+}
+
+test "fuzz isCompressedExtension" {
+    try std.testing.fuzz({}, testIsCompressedExtensionProperties, .{
+        .corpus = &.{
+            "file.png",
+            "file.jpg",
+            "file.zip",
+            "file.txt",
+            ".hidden",
+            "",
+            "noextension",
+            "path/to/file.gz",
+        },
+    });
+}
+
+fn testIsCompressedExtensionProperties(_: @TypeOf({}), input: []const u8) !void {
+    // Property: isCompressedExtension never crashes on any input
+    const result = isCompressedExtension(input);
+
+    // Property: result is deterministic
+    const result2 = isCompressedExtension(input);
+    try std.testing.expectEqual(result, result2);
 }

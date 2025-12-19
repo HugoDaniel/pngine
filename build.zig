@@ -23,6 +23,28 @@ pub fn build(b: *std.Build) void {
         lib_module.addImport("zgpu", dep.module("root"));
     }
 
+    // WASM build target (moved up so CLI can depend on it)
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+    });
+
+    // Create WASM entry module (separate from main library)
+    const wasm_module = b.createModule(.{
+        .root_source_file = b.path("src/wasm.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+
+    const wasm = b.addExecutable(.{
+        .name = "pngine",
+        .root_module = wasm_module,
+    });
+    // Export symbols for JS access
+    wasm.rdynamic = true;
+    // No main() - use exported functions
+    wasm.entry = .disabled;
+
     // CLI executable
     const cli_module = b.createModule(.{
         .root_source_file = b.path("src/cli.zig"),
@@ -36,10 +58,23 @@ pub fn build(b: *std.Build) void {
         cli_module.addImport("zgpu", dep.module("root"));
     }
 
+    // Create build options with embedded WASM
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "has_embedded_wasm", true);
+    cli_module.addImport("build_options", build_options.createModule());
+
+    // Embed WASM binary in CLI for bundle command
+    cli_module.addAnonymousImport("embedded_wasm", .{
+        .root_source_file = wasm.getEmittedBin(),
+    });
+
     const cli = b.addExecutable(.{
         .name = "pngine",
         .root_module = cli_module,
     });
+
+    // CLI depends on WASM being built first
+    cli.step.dependOn(&wasm.step);
 
     b.installArtifact(cli);
 
@@ -68,9 +103,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     cli_test_module.addImport("pngine", lib_module);
+    cli_test_module.addImport("build_options", build_options.createModule());
+    cli_test_module.addAnonymousImport("embedded_wasm", .{
+        .root_source_file = wasm.getEmittedBin(),
+    });
     const cli_tests = b.addTest(.{
         .root_module = cli_test_module,
     });
+    cli_tests.step.dependOn(&wasm.step);
     test_step.dependOn(&b.addRunArtifact(cli_tests).step);
 
     // Benchmark executable
@@ -89,28 +129,7 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run performance benchmarks");
     bench_step.dependOn(&run_bench.step);
 
-    // WASM build target
-    const wasm_target = b.resolveTargetQuery(.{
-        .cpu_arch = .wasm32,
-        .os_tag = .freestanding,
-    });
-
-    // Create WASM entry module (separate from main library)
-    const wasm_module = b.createModule(.{
-        .root_source_file = b.path("src/wasm.zig"),
-        .target = wasm_target,
-        .optimize = .ReleaseSmall,
-    });
-
-    const wasm = b.addExecutable(.{
-        .name = "pngine",
-        .root_module = wasm_module,
-    });
-    // Export symbols for JS access
-    wasm.rdynamic = true;
-    // No main() - use exported functions
-    wasm.entry = .disabled;
-
+    // WASM build step (wasm artifact defined earlier for CLI embedding)
     const wasm_step = b.step("wasm", "Build WASM for browser");
     wasm_step.dependOn(&b.addInstallArtifact(wasm, .{}).step);
 
