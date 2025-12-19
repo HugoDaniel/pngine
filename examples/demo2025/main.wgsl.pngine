@@ -21,8 +21,14 @@
 
 #wgsl constants { value="./wgsl/inercia_constants.wgsl" }
 #wgsl transform2D { value="./wgsl/transform2D.wgsl" }
-#wgsl primitives { value="./wgsl/primitives.wgsl" }
-#wgsl tangram { value="./wgsl/tangram.wgsl" }
+#wgsl primitives {
+  value="./wgsl/primitives.wgsl"
+  imports=["$wgsl.transform2D"]
+}
+#wgsl tangram {
+  value="./wgsl/tangram.wgsl"
+  imports=["$wgsl.transform2D"]
+}
 #wgsl beats { value="./wgsl/beats.wgsl" }
 
 // Import all scene definitions - each defines its own #frame
