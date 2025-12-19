@@ -179,6 +179,7 @@ test {
     _ = @import("dsl/emitter/animation_test.zig");
     _ = @import("dsl/emitter/shader_id_test.zig");
     _ = @import("dsl/emitter/define_subst_test.zig");
+    _ = @import("dsl/emitter/import_dedup_test.zig");
     _ = @import("dsl/Compiler.zig");
     // Run PNG embedding/encoding tests
     _ = @import("png/crc32.zig");
