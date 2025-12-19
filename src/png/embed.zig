@@ -31,6 +31,12 @@ const flate = std.compress.flate;
 /// pNGb chunk type identifier.
 pub const PNGB_CHUNK_TYPE = chunk.ChunkType.pNGb;
 
+/// pNGm chunk type identifier for metadata.
+pub const PNGM_CHUNK_TYPE = chunk.ChunkType.pNGm;
+
+/// Current pNGm format version.
+pub const PNGM_VERSION: u8 = 0x01;
+
 /// Current pNGb format version.
 pub const PNGB_VERSION: u8 = 0x01;
 
@@ -125,6 +131,106 @@ pub fn embed(
     // Post-condition: result starts with PNG signature
     std.debug.assert(std.mem.eql(u8, result[0..8], &chunk.PNG_SIGNATURE));
     // Post-condition: result is larger than original (contains pNGb)
+    std.debug.assert(result.len > png_data.len);
+
+    return result;
+}
+
+/// Embed PNGB bytecode and metadata into a PNG image.
+///
+/// Similar to embed(), but also embeds animation metadata in a pNGm chunk.
+/// Both chunks are inserted before IEND: pNGm first, then pNGb.
+///
+/// Pre-conditions:
+/// - png_data starts with valid PNG signature
+/// - png_data contains IEND chunk
+/// - bytecode is valid PNGB (>= 16 bytes with correct magic)
+/// - metadata is valid JSON (can be empty string to skip)
+///
+/// Post-conditions:
+/// - Returns valid PNG with embedded pNGb and optionally pNGm chunks
+/// - Original image data is preserved
+/// - Caller owns returned slice
+pub fn embedWithMetadata(
+    allocator: std.mem.Allocator,
+    png_data: []const u8,
+    bytecode: []const u8,
+    metadata: []const u8,
+) Error![]u8 {
+    // Pre-condition: valid PNG signature
+    if (png_data.len < 8 or !std.mem.eql(u8, png_data[0..8], &chunk.PNG_SIGNATURE)) {
+        return Error.InvalidPng;
+    }
+
+    // Pre-condition: bytecode is minimum PNGB size
+    if (bytecode.len < 16) {
+        return Error.BytecodeTooSmall;
+    }
+
+    std.debug.assert(png_data.len >= 8);
+    std.debug.assert(bytecode.len >= 16);
+
+    // Find IEND chunk position
+    const iend_pos = findIEND(png_data) orelse return Error.MissingIEND;
+    std.debug.assert(iend_pos >= 8);
+
+    // Compress bytecode
+    const compressed_bytecode = compressDeflateRaw(allocator, bytecode) catch {
+        return Error.CompressionFailed;
+    };
+    defer allocator.free(compressed_bytecode);
+
+    // Build pNGb chunk data: version + flags + compressed payload
+    const pngb_data_size = 2 + compressed_bytecode.len;
+    const pngb_data = allocator.alloc(u8, pngb_data_size) catch {
+        return Error.OutOfMemory;
+    };
+    defer allocator.free(pngb_data);
+
+    pngb_data[0] = PNGB_VERSION;
+    pngb_data[1] = FLAG_COMPRESSED;
+    @memcpy(pngb_data[2..], compressed_bytecode);
+
+    // Calculate chunk sizes
+    const pngb_chunk_size = chunk.chunkSize(pngb_data_size);
+    const pngm_chunk_size = if (metadata.len > 0) chunk.chunkSize(1 + metadata.len) else 0;
+    const total_chunks_size = pngm_chunk_size + pngb_chunk_size;
+
+    // Calculate output size
+    const result_size = iend_pos + total_chunks_size + (png_data.len - iend_pos);
+
+    // Allocate result buffer
+    const result = allocator.alloc(u8, result_size) catch {
+        return Error.OutOfMemory;
+    };
+    errdefer allocator.free(result);
+
+    // Assemble: [original up to IEND] + [pNGm chunk?] + [pNGb chunk] + [IEND chunk]
+    @memcpy(result[0..iend_pos], png_data[0..iend_pos]);
+
+    var write_pos = iend_pos;
+
+    // Write pNGm chunk if metadata provided
+    if (metadata.len > 0) {
+        const pngm_data = allocator.alloc(u8, 1 + metadata.len) catch {
+            return Error.OutOfMemory;
+        };
+        defer allocator.free(pngm_data);
+        pngm_data[0] = PNGM_VERSION;
+        @memcpy(pngm_data[1..], metadata);
+        _ = chunk.writeChunkToBuffer(result[write_pos..], PNGM_CHUNK_TYPE, pngm_data);
+        write_pos += pngm_chunk_size;
+    }
+
+    // Write pNGb chunk
+    _ = chunk.writeChunkToBuffer(result[write_pos..], PNGB_CHUNK_TYPE, pngb_data);
+    write_pos += pngb_chunk_size;
+
+    // Copy IEND chunk
+    @memcpy(result[write_pos..], png_data[iend_pos..]);
+
+    // Post-conditions
+    std.debug.assert(std.mem.eql(u8, result[0..8], &chunk.PNG_SIGNATURE));
     std.debug.assert(result.len > png_data.len);
 
     return result;

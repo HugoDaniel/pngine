@@ -35,6 +35,9 @@ pub const ChunkType = struct {
     /// PNGine runtime chunk (ancillary, public, safe-to-copy)
     /// Contains optional WASM runtime for self-contained execution
     pub const pNGr = [4]u8{ 'p', 'N', 'G', 'r' };
+    /// PNGine metadata chunk (ancillary, public, safe-to-copy)
+    /// Contains animation metadata as JSON for JS runtime consumption
+    pub const pNGm = [4]u8{ 'p', 'N', 'G', 'm' };
 };
 
 /// A parsed PNG chunk (references original data, no allocation).
