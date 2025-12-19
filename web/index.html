@@ -140,11 +140,70 @@
             border-radius: 4px;
             font-size: 0.75rem;
             min-width: 150px;
+            max-width: 300px;
         }
 
         .scene-selector select:focus {
             outline: none;
             border-color: #0f3460;
+        }
+
+        .scene-selector .nav-btn {
+            padding: 0.2rem 0.5rem;
+            background: #1a1a2e;
+            color: #ccc;
+            border: 1px solid #333;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.7rem;
+        }
+
+        .scene-selector .nav-btn:hover:not(:disabled) {
+            background: #0f3460;
+            border-color: #0f3460;
+        }
+
+        .scene-selector .nav-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .time-scrubber {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-top: 0.5rem;
+            padding: 0.25rem 0;
+        }
+
+        .time-scrubber input[type="range"] {
+            flex: 1;
+            height: 4px;
+            background: #333;
+            border-radius: 2px;
+            cursor: pointer;
+            -webkit-appearance: none;
+        }
+
+        .time-scrubber input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 12px;
+            height: 12px;
+            background: #e94560;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+
+        .time-scrubber input[type="range"]:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .time-scrubber #time-label {
+            font-size: 0.7rem;
+            color: #888;
+            min-width: 45px;
+            text-align: right;
         }
 
         .scene-info {
@@ -461,10 +520,16 @@
                     </div>
                     <div class="scene-selector">
                         <label for="scene-select">Scene:</label>
+                        <button id="prev-scene-btn" class="nav-btn" disabled title="Previous scene">◀</button>
                         <select id="scene-select" disabled>
                             <option value="__all__">All (Animation)</option>
                         </select>
+                        <button id="next-scene-btn" class="nav-btn" disabled title="Next scene">▶</button>
                         <span id="scene-info" class="scene-info"></span>
+                    </div>
+                    <div class="time-scrubber">
+                        <input type="range" id="time-slider" min="0" max="100" value="0" step="0.1" disabled>
+                        <span id="time-label">0.0s</span>
                     </div>
                 </div>
             </div>
@@ -516,6 +581,10 @@
         // Scene selector elements
         const sceneSelect = document.getElementById('scene-select');
         const sceneInfo = document.getElementById('scene-info');
+        const prevSceneBtn = document.getElementById('prev-scene-btn');
+        const nextSceneBtn = document.getElementById('next-scene-btn');
+        const timeSlider = document.getElementById('time-slider');
+        const timeLabel = document.getElementById('time-label');
 
         let pngine = null;
         let loadedBytecode = null;
@@ -551,49 +620,109 @@
             const dataSectionOffset = view.getUint32(12, true);
 
             // Parse string table
+            // Format: count (u16) + offsets[count] (u16 each) + lengths[count] (u16 each) + data
             const strings = [];
             let pos = stringTableOffset;
             if (pos + 2 <= bytecode.length) {
                 const count = view.getUint16(pos, true);
                 pos += 2;
-                for (let i = 0; i < count && pos < dataSectionOffset; i++) {
-                    if (pos + 2 > bytecode.length) break;
-                    const len = view.getUint16(pos, true);
+
+                // Read offsets array
+                const offsets = [];
+                for (let i = 0; i < count && pos + 2 <= bytecode.length; i++) {
+                    offsets.push(view.getUint16(pos, true));
                     pos += 2;
-                    if (pos + len > bytecode.length) break;
-                    const str = new TextDecoder().decode(bytecode.slice(pos, pos + len));
-                    strings.push(str);
-                    pos += len;
                 }
-            }
 
-            // Scan bytecode for define_frame opcodes (0x20)
-            const DEFINE_FRAME = 0x20;
-            let pc = 16; // Skip header
-
-            function readVarint() {
-                let result = 0;
-                let shift = 0;
-                while (pc < stringTableOffset) {
-                    const b = bytecode[pc++];
-                    result |= (b & 0x7f) << shift;
-                    if ((b & 0x80) === 0) break;
-                    shift += 7;
+                // Read lengths array
+                const lengths = [];
+                for (let i = 0; i < count && pos + 2 <= bytecode.length; i++) {
+                    lengths.push(view.getUint16(pos, true));
+                    pos += 2;
                 }
-                return result;
-            }
 
-            while (pc < stringTableOffset) {
-                const op = bytecode[pc++];
-                if (op === DEFINE_FRAME) {
-                    const frameId = readVarint();
-                    const nameId = readVarint();
-                    if (nameId < strings.length) {
-                        frames.push({ id: frameId, name: strings[nameId] });
+                // Data starts here
+                const dataStart = pos;
+
+                // Extract each string using offset and length
+                for (let i = 0; i < count; i++) {
+                    const strStart = dataStart + offsets[i];
+                    const strLen = lengths[i];
+                    if (strStart + strLen <= bytecode.length) {
+                        const str = new TextDecoder().decode(bytecode.slice(strStart, strStart + strLen));
+                        strings.push(str);
+                    } else {
+                        strings.push('');
                     }
                 }
-                // For other opcodes, we just keep scanning
-                // This is imperfect but works for finding frame definitions
+            }
+
+            // Scan bytecode for define_frame opcodes (0x30)
+            // See opcodes.zig: define_frame = 0x30 (Frame Control category 0x30-0x3F)
+            const DEFINE_FRAME = 0x30;
+            const END_FRAME = 0x31;
+            let pc = 16; // Skip header
+
+            // PNGine varint format (NOT standard LEB128):
+            // - 0-127: 0xxxxxxx (1 byte)
+            // - 128-16383: 10xxxxxx xxxxxxxx (2 bytes, big-endian)
+            // - 16384+: 11xxxxxx xxxxxxxx xxxxxxxx xxxxxxxx (4 bytes, big-endian)
+            function readVarint() {
+                if (pc >= stringTableOffset) return 0;
+                const first = bytecode[pc++];
+                if ((first & 0x80) === 0) {
+                    // 1 byte: 0xxxxxxx
+                    return first;
+                } else if ((first & 0xC0) === 0x80) {
+                    // 2 bytes: 10xxxxxx xxxxxxxx (big-endian)
+                    if (pc >= stringTableOffset) return 0;
+                    const high = first & 0x3F;
+                    const low = bytecode[pc++];
+                    return (high << 8) | low;
+                } else {
+                    // 4 bytes: 11xxxxxx xxxxxxxx xxxxxxxx xxxxxxxx (big-endian)
+                    if (pc + 2 >= stringTableOffset) return 0;
+                    const b0 = first & 0x3F;
+                    const b1 = bytecode[pc++];
+                    const b2 = bytecode[pc++];
+                    const b3 = bytecode[pc++];
+                    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+                }
+            }
+
+            // Valid frame name pattern: starts with letter, contains only alphanumeric/underscore
+            // This filters out false positives from byte scanning
+            const validFrameName = /^[a-zA-Z][a-zA-Z0-9_]*$/;
+            const MAX_FRAMES = 50; // Hard limit to prevent runaway
+
+            // Simple scan: look for define_frame opcode
+            while (pc < stringTableOffset - 4 && frames.length < MAX_FRAMES) {
+                const op = bytecode[pc];
+                if (op === DEFINE_FRAME) {
+                    pc++; // consume opcode
+                    const frameId = readVarint();
+                    const nameId = readVarint();
+
+                    // Strict validation:
+                    // 1. nameId in range
+                    // 2. name is non-empty
+                    // 3. name looks like a valid identifier
+                    // 4. frameId is reasonable (< 1000)
+                    if (nameId < strings.length &&
+                        frameId < 1000 &&
+                        strings[nameId] &&
+                        strings[nameId].length > 0 &&
+                        strings[nameId].length < 100 &&
+                        validFrameName.test(strings[nameId])) {
+                        // Check we don't already have this frame
+                        const existing = frames.find(f => f.name === strings[nameId]);
+                        if (!existing) {
+                            frames.push({ id: frameId, name: strings[nameId] });
+                        }
+                    }
+                } else {
+                    pc++; // skip non-matching byte
+                }
             }
 
             return frames;
@@ -605,53 +734,78 @@
         function updateSceneSelector(frames, metadata) {
             sceneSelect.innerHTML = '';
 
-            // Add "All" option if we have animation metadata
+            const hasMetadataScenes = metadata?.animation?.scenes?.length > 0;
+
+            // Add "All" option
+            const allOpt = document.createElement('option');
+            allOpt.value = '__all__';
             if (metadata?.animation) {
-                const allOpt = document.createElement('option');
-                allOpt.value = '__all__';
                 allOpt.textContent = `All (${metadata.animation.name || 'Animation'})`;
-                sceneSelect.appendChild(allOpt);
-
-                // Add scene-based options from animation
-                if (metadata.animation.scenes) {
-                    for (const scene of metadata.animation.scenes) {
-                        const opt = document.createElement('option');
-                        opt.value = scene.frame;
-                        opt.textContent = `${scene.id} (${scene.start.toFixed(1)}s - ${scene.end.toFixed(1)}s)`;
-                        sceneSelect.appendChild(opt);
-                    }
-                }
             } else if (frames.length > 0) {
-                // No animation metadata - just list frames
-                const allOpt = document.createElement('option');
-                allOpt.value = '__all__';
                 allOpt.textContent = 'All Frames';
-                sceneSelect.appendChild(allOpt);
+            } else {
+                allOpt.textContent = 'All';
+            }
+            sceneSelect.appendChild(allOpt);
+
+            // If we have pNGm metadata with scenes, use ONLY that (authoritative source)
+            if (hasMetadataScenes) {
+                for (const scene of metadata.animation.scenes) {
+                    // Validate scene data
+                    if (!scene.frame || !scene.id) {
+                        console.warn('[updateSceneSelector] Skipping invalid scene:', scene);
+                        continue;
+                    }
+                    const opt = document.createElement('option');
+                    opt.value = scene.frame;
+                    opt.textContent = `${scene.id} (${(scene.start || 0).toFixed(1)}s - ${(scene.end || 0).toFixed(1)}s)`;
+                    sceneSelect.appendChild(opt);
+                }
+            } else {
+                // No metadata - fall back to bytecode-parsed frames
+                for (const frame of frames) {
+                    // Extra validation: skip empty/invalid names
+                    if (!frame.name || frame.name.trim().length === 0) {
+                        console.warn('[updateSceneSelector] Skipping empty frame name');
+                        continue;
+                    }
+                    const opt = document.createElement('option');
+                    opt.value = frame.name;
+                    opt.textContent = frame.name;
+                    sceneSelect.appendChild(opt);
+                }
             }
 
-            // Add individual frame options
-            for (const frame of frames) {
-                // Skip if already added as scene
-                const existing = [...sceneSelect.options].find(o => o.value === frame.name);
-                if (existing) continue;
-
-                const opt = document.createElement('option');
-                opt.value = frame.name;
-                opt.textContent = frame.name;
-                sceneSelect.appendChild(opt);
-            }
-
-            sceneSelect.disabled = frames.length === 0;
+            // Enable if we have scenes or frames
+            const hasOptions = hasMetadataScenes || frames.length > 0;
+            sceneSelect.disabled = !hasOptions;
             selectedScene = '__all__';
             sceneSelect.value = '__all__';
 
-            // Update info text
+            // Enable/disable navigation buttons
+            prevSceneBtn.disabled = true; // At "All", can't go prev
+            nextSceneBtn.disabled = !hasOptions || sceneSelect.options.length <= 1;
+
+            // Configure time slider
             if (metadata?.animation) {
-                const duration = metadata.animation.duration || 0;
+                const duration = metadata.animation.duration || 30;
+                timeSlider.max = duration;
+                timeSlider.value = 0;
+                timeSlider.disabled = false;
+                timeLabel.textContent = '0.0s';
                 sceneInfo.textContent = `Duration: ${duration.toFixed(1)}s`;
+            } else if (frames.length > 0) {
+                timeSlider.max = 30; // Default 30s max
+                timeSlider.value = 0;
+                timeSlider.disabled = true; // Disabled on "All" without metadata
+                timeLabel.textContent = '0.0s';
+                sceneInfo.textContent = `${frames.length} frame(s)`;
             } else {
-                sceneInfo.textContent = frames.length > 0 ? `${frames.length} frame(s)` : '';
+                timeSlider.disabled = true;
+                timeLabel.textContent = '';
+                sceneInfo.textContent = '';
             }
+
         }
 
         /**
@@ -1248,21 +1402,109 @@ Use the CLI to embed bytecode:
         runPngBtn.addEventListener('click', runPngBytecode);
         playPngBtn.addEventListener('click', () => togglePlay('png'));
 
-        // Scene selector
+        // Scene selector change handler
         sceneSelect.addEventListener('change', (e) => {
             selectedScene = e.target.value;
-            console.log('Scene selected:', selectedScene);
+            updateSceneNavigation();
 
-            // If we have metadata, show scene duration
+            // Reset time slider to 0 when changing scenes
+            currentSceneTime = 0;
+            timeSlider.value = 0;
+            timeLabel.textContent = '0.0s';
+
+            // Draw the selected scene at time 0
+            if (pngine && loadedPngBytecode && selectedScene !== '__all__') {
+                drawSceneAtTime(selectedScene, 0);
+            }
+        });
+
+        // Prev/Next scene navigation
+        prevSceneBtn.addEventListener('click', () => {
+            const options = Array.from(sceneSelect.options);
+            const currentIdx = options.findIndex(o => o.value === selectedScene);
+            if (currentIdx > 0) {
+                sceneSelect.selectedIndex = currentIdx - 1;
+                sceneSelect.dispatchEvent(new Event('change'));
+            }
+        });
+
+        nextSceneBtn.addEventListener('click', () => {
+            const options = Array.from(sceneSelect.options);
+            const currentIdx = options.findIndex(o => o.value === selectedScene);
+            if (currentIdx < options.length - 1) {
+                sceneSelect.selectedIndex = currentIdx + 1;
+                sceneSelect.dispatchEvent(new Event('change'));
+            }
+        });
+
+        // Time slider for scrubbing within a scene
+        let currentSceneTime = 0;
+        timeSlider.addEventListener('input', (e) => {
+            currentSceneTime = parseFloat(e.target.value);
+            timeLabel.textContent = `${currentSceneTime.toFixed(1)}s`;
+
+            if (pngine && loadedPngBytecode && selectedScene && selectedScene !== '__all__') {
+                drawSceneAtTime(selectedScene, currentSceneTime);
+            }
+        });
+
+        // Helper: update scene navigation buttons and info
+        function updateSceneNavigation() {
+            const options = Array.from(sceneSelect.options);
+            const currentIdx = options.findIndex(o => o.value === selectedScene);
+
+            prevSceneBtn.disabled = currentIdx <= 0 || sceneSelect.disabled;
+            nextSceneBtn.disabled = currentIdx >= options.length - 1 || sceneSelect.disabled;
+
+            // Update scene info
             if (loadedMetadata?.animation?.scenes) {
                 const scene = loadedMetadata.animation.scenes.find(s => s.frame === selectedScene);
                 if (scene) {
-                    sceneInfo.textContent = `${scene.id}: ${(scene.end - scene.start).toFixed(1)}s`;
+                    const duration = scene.end - scene.start;
+                    sceneInfo.textContent = `${scene.id}: ${duration.toFixed(1)}s`;
+                    timeSlider.max = duration;
+                    timeSlider.disabled = false;
                 } else if (selectedScene === '__all__') {
                     sceneInfo.textContent = `Duration: ${loadedMetadata.animation.duration}s`;
+                    timeSlider.max = loadedMetadata.animation.duration;
+                    timeSlider.disabled = false;
+                }
+            } else if (detectedFrames.length > 0) {
+                // No metadata - use a default duration for manual scrubbing
+                const frame = detectedFrames.find(f => f.name === selectedScene);
+                if (frame) {
+                    sceneInfo.textContent = frame.name;
+                    timeSlider.max = 30; // Default 30s max for scenes without metadata
+                    timeSlider.disabled = false;
+                } else if (selectedScene === '__all__') {
+                    sceneInfo.textContent = `${detectedFrames.length} frame(s)`;
+                    timeSlider.max = 30;
+                    timeSlider.disabled = true;
                 }
             }
-        });
+        }
+
+        // Helper: draw a specific scene at a specific time
+        function drawSceneAtTime(sceneName, time) {
+            if (!pngine || !loadedPngBytecode) return;
+
+            try {
+                // Update time uniforms
+                pngine.gpu.setTime(time);
+
+                const uniformBufferId = pngine.findUniformBuffer();
+                if (uniformBufferId !== null) {
+                    pngine.writeTimeUniform(uniformBufferId, time);
+                }
+
+                // Execute the specific frame
+                pngine.executeFrameByName(sceneName);
+
+                timeDisplay3.textContent = `${time.toFixed(2)}s`;
+            } catch (err) {
+                console.warn(`Failed to draw scene '${sceneName}':`, err.message);
+            }
+        }
 
         // PNG tab - drag and drop
         pngDropZone.addEventListener('click', () => pngFileInput.click());
