@@ -118,6 +118,7 @@ pub const Analyzer = struct {
         wasm_call: std.StringHashMapUnmanaged(SymbolInfo),
         query_set: std.StringHashMapUnmanaged(SymbolInfo),
         texture_view: std.StringHashMapUnmanaged(SymbolInfo),
+        animation: std.StringHashMapUnmanaged(SymbolInfo),
 
         pub fn init() SymbolTable {
             return .{
@@ -141,6 +142,7 @@ pub const Analyzer = struct {
                 .wasm_call = .{},
                 .query_set = .{},
                 .texture_view = .{},
+                .animation = .{},
             };
         }
 
@@ -165,6 +167,7 @@ pub const Analyzer = struct {
             self.wasm_call.deinit(gpa);
             self.query_set.deinit(gpa);
             self.texture_view.deinit(gpa);
+            self.animation.deinit(gpa);
         }
 
         pub fn getNamespace(self: *SymbolTable, ns: Namespace) *std.StringHashMapUnmanaged(SymbolInfo) {
@@ -189,6 +192,7 @@ pub const Analyzer = struct {
                 .wasm_call => &self.wasm_call,
                 .query_set => &self.query_set,
                 .texture_view => &self.texture_view,
+                .animation => &self.animation,
             };
         }
     };
@@ -226,6 +230,7 @@ pub const Analyzer = struct {
         wasm_call,
         query_set,
         texture_view,
+        animation,
 
         pub fn fromString(s: []const u8) ?Namespace {
             const map = std.StaticStringMap(Namespace).initComptime(.{
@@ -250,6 +255,7 @@ pub const Analyzer = struct {
                 .{ "wasmCalls", .wasm_call }, // Alias for plural form
                 .{ "querySet", .query_set },
                 .{ "textureView", .texture_view },
+                .{ "animation", .animation },
                 .{ "pipeline", .render_pipeline }, // Alias
                 .{ "pass", .render_pass }, // Alias
             });
@@ -462,6 +468,7 @@ pub const Analyzer = struct {
             .macro_wasm_call => .wasm_call,
             .macro_query_set => .query_set,
             .macro_texture_view => .texture_view,
+            .macro_animation => .animation,
             else => return, // Skip non-declaration nodes
         };
 

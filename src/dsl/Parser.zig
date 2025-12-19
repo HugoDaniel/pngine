@@ -210,6 +210,7 @@ pub const Parser = struct {
             .macro_wasm_call => .macro_wasm_call,
             .macro_query_set => .macro_query_set,
             .macro_texture_view => .macro_texture_view,
+            .macro_animation => .macro_animation,
             .macro_define => return self.parseDefine(),
             else => return null,
         };

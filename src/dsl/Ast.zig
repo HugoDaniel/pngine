@@ -144,6 +144,14 @@ pub const Node = struct {
         macro_query_set,
         /// #textureView name { ... }
         macro_texture_view,
+        /// #animation name { duration=N loop=bool scenes=[...] }
+        /// Timeline definition for scene-based animations.
+        /// Properties:
+        /// - duration: total animation length in seconds
+        /// - loop: whether animation repeats (default: false)
+        /// - endBehavior: hold | stop | restart (default: hold)
+        /// - scenes: array of scene objects { id frame start end }
+        macro_animation,
 
         // Values
         /// "string literal"
