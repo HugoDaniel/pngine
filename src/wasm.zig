@@ -260,6 +260,252 @@ export fn executeAll() u32 {
     return ErrorCode.success.toU32();
 }
 
+/// Execute a specific frame by index.
+/// Returns: ErrorCode.success on success, error code on failure.
+///
+/// Pre-condition: onInit() and loadModule() have been called.
+/// Post-condition: frame_counter is incremented by 1.
+export fn executeFrame(target_frame_id: u32) u32 {
+    // Pre-condition checks
+    if (!initialized) return ErrorCode.not_initialized.toU32();
+    const module = &(current_module orelse return ErrorCode.no_module_loaded.toU32());
+
+    const frame_before = frame_counter;
+
+    // Scan bytecode to find frame with matching ID
+    var dispatcher = Dispatcher(WasmGPU).initWithFrame(allocator, &gpu, module, frame_counter);
+    defer dispatcher.deinit();
+
+    const frame_range = scanForFrame(module.bytecode, target_frame_id) orelse
+        return ErrorCode.execution_error.toU32();
+
+    // Execute just the frame's bytecode range
+    dispatcher.pc = frame_range.start;
+    const max_iterations: usize = 10000;
+    for (0..max_iterations) |_| {
+        if (dispatcher.pc >= frame_range.end) break;
+        dispatcher.step(allocator) catch return ErrorCode.execution_error.toU32();
+    }
+
+    // Update global frame counter
+    frame_counter = dispatcher.frame_counter;
+
+    // Post-condition: frame counter incremented
+    assert(frame_counter >= frame_before);
+
+    return ErrorCode.success.toU32();
+}
+
+/// Execute a specific frame by name (string ID in module's string table).
+/// Returns: ErrorCode.success on success, error code on failure.
+export fn executeFrameByName(name_ptr: [*]const u8, name_len: usize) u32 {
+    // Pre-condition checks
+    if (!initialized) return ErrorCode.not_initialized.toU32();
+    const module = &(current_module orelse return ErrorCode.no_module_loaded.toU32());
+
+    const target_name = name_ptr[0..name_len];
+
+    // Find string ID for the name
+    var target_string_id: ?u16 = null;
+    for (0..module.strings.count()) |i| {
+        const str = module.strings.get(@enumFromInt(@as(u16, @intCast(i))));
+        if (std.mem.eql(u8, str, target_name)) {
+            target_string_id = @intCast(i);
+            break;
+        }
+    }
+
+    const string_id = target_string_id orelse return ErrorCode.execution_error.toU32();
+
+    // Scan for frame with this name
+    const frame_range = scanForFrameByNameId(module.bytecode, string_id) orelse
+        return ErrorCode.execution_error.toU32();
+
+    const frame_before = frame_counter;
+
+    // Execute the frame
+    var dispatcher = Dispatcher(WasmGPU).initWithFrame(allocator, &gpu, module, frame_counter);
+    defer dispatcher.deinit();
+
+    dispatcher.pc = frame_range.start;
+    const max_iterations: usize = 10000;
+    for (0..max_iterations) |_| {
+        if (dispatcher.pc >= frame_range.end) break;
+        dispatcher.step(allocator) catch return ErrorCode.execution_error.toU32();
+    }
+
+    frame_counter = dispatcher.frame_counter;
+    assert(frame_counter >= frame_before);
+
+    return ErrorCode.success.toU32();
+}
+
+/// Frame bytecode range.
+const FrameRange = struct {
+    start: usize,
+    end: usize,
+};
+
+/// Scan bytecode to find frame definition by frame ID.
+fn scanForFrame(bytecode: []const u8, target_frame_id: u32) ?FrameRange {
+    const opcodes_mod = @import("bytecode/opcodes.zig");
+    var pc: usize = 0;
+    const max_scan: usize = 10000;
+
+    for (0..max_scan) |_| {
+        if (pc >= bytecode.len) break;
+
+        const op: opcodes_mod.OpCode = @enumFromInt(bytecode[pc]);
+        pc += 1;
+
+        if (op == .define_frame) {
+            const frame_id_result = opcodes_mod.decodeVarint(bytecode[pc..]);
+            pc += frame_id_result.len;
+            const name_result = opcodes_mod.decodeVarint(bytecode[pc..]);
+            pc += name_result.len;
+
+            if (frame_id_result.value == target_frame_id) {
+                // Found the frame - scan for end
+                const frame_start = pc;
+                for (0..max_scan) |_| {
+                    if (pc >= bytecode.len) break;
+                    const scan_op: opcodes_mod.OpCode = @enumFromInt(bytecode[pc]);
+                    if (scan_op == .end_frame) {
+                        return .{ .start = frame_start, .end = pc + 1 }; // Include end_frame
+                    }
+                    // Skip to next opcode (simplified)
+                    pc += 1;
+                    skipOpcodeParamsAt(bytecode, &pc, scan_op);
+                }
+            }
+        } else {
+            skipOpcodeParamsAt(bytecode, &pc, op);
+        }
+    }
+
+    return null;
+}
+
+/// Scan bytecode to find frame definition by name string ID.
+fn scanForFrameByNameId(bytecode: []const u8, target_name_id: u16) ?FrameRange {
+    const opcodes_mod = @import("bytecode/opcodes.zig");
+    var pc: usize = 0;
+    const max_scan: usize = 10000;
+
+    for (0..max_scan) |_| {
+        if (pc >= bytecode.len) break;
+
+        const op: opcodes_mod.OpCode = @enumFromInt(bytecode[pc]);
+        pc += 1;
+
+        if (op == .define_frame) {
+            const frame_id_result = opcodes_mod.decodeVarint(bytecode[pc..]);
+            pc += frame_id_result.len;
+            const name_result = opcodes_mod.decodeVarint(bytecode[pc..]);
+            pc += name_result.len;
+
+            if (name_result.value == target_name_id) {
+                // Found the frame - scan for end
+                const frame_start = pc;
+                for (0..max_scan) |_| {
+                    if (pc >= bytecode.len) break;
+                    const scan_op: opcodes_mod.OpCode = @enumFromInt(bytecode[pc]);
+                    if (scan_op == .end_frame) {
+                        return .{ .start = frame_start, .end = pc + 1 }; // Include end_frame
+                    }
+                    pc += 1;
+                    skipOpcodeParamsAt(bytecode, &pc, scan_op);
+                }
+            }
+        } else {
+            skipOpcodeParamsAt(bytecode, &pc, op);
+        }
+    }
+
+    return null;
+}
+
+/// Skip opcode parameters at current position (modifies pc).
+fn skipOpcodeParamsAt(bytecode: []const u8, pc: *usize, op: @import("bytecode/opcodes.zig").OpCode) void {
+    const opcodes_mod = @import("bytecode/opcodes.zig");
+    switch (op) {
+        .end_pass, .submit, .end_frame, .nop, .begin_compute_pass, .end_pass_def => {},
+        .set_pipeline, .exec_pass => pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len,
+        .define_frame => {
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+        },
+        .create_buffer => {
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += 1;
+        },
+        .set_bind_group, .set_vertex_buffer => {
+            pc.* += 1;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+        },
+        .draw => {
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+        },
+        .draw_indexed => {
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+        },
+        .dispatch => {
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+        },
+        .begin_render_pass => {
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += 1;
+            pc.* += 1;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+        },
+        .set_vertex_buffer_pool, .set_bind_group_pool => {
+            pc.* += 1;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += 1;
+            pc.* += 1;
+        },
+        else => {
+            // Default: try to skip varints until we hit something valid
+            // This is imprecise but handles most cases
+        },
+    }
+}
+
+/// Get frame count in loaded module.
+export fn getFrameCount() u32 {
+    const module = &(current_module orelse return 0);
+    const opcodes_mod = @import("bytecode/opcodes.zig");
+    var count: u32 = 0;
+    var pc: usize = 0;
+    const max_scan: usize = 10000;
+
+    for (0..max_scan) |_| {
+        if (pc >= module.bytecode.len) break;
+        const op: opcodes_mod.OpCode = @enumFromInt(module.bytecode[pc]);
+        pc += 1;
+        if (op == .define_frame) {
+            count += 1;
+            // Skip frame_id and name_id
+            pc += opcodes_mod.decodeVarint(module.bytecode[pc..]).len;
+            pc += opcodes_mod.decodeVarint(module.bytecode[pc..]).len;
+        } else {
+            skipOpcodeParamsAt(module.bytecode, &pc, op);
+        }
+    }
+
+    return count;
+}
+
 /// Free the loaded module.
 export fn freeModule() void {
     if (current_module) |*module| {
