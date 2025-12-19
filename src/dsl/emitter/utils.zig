@@ -99,6 +99,7 @@ pub fn findPropertyReference(e: *Emitter, prop_node: Node.Index) ?Reference {
 }
 
 /// Extract Reference from a reference node.
+/// Supports multi-part names like $wgsl.shader.binding (name="shader.binding").
 pub fn getReference(e: *Emitter, node: Node.Index) ?Reference {
     // Pre-conditions
     std.debug.assert(node.toInt() < e.ast.nodes.len);
@@ -108,15 +109,52 @@ pub fn getReference(e: *Emitter, node: Node.Index) ?Reference {
     const namespace_token = data.node_and_node[0];
     const name_token = data.node_and_node[1];
 
+    const namespace = getTokenSlice(e, namespace_token);
+
+    // For multi-part references, extract full name from source
+    // namespace_token + 2 is the first name token (after namespace and dot)
+    const name = if (name_token > namespace_token + 2)
+        getTokenRange(e, namespace_token + 2, name_token)
+    else
+        getTokenSlice(e, name_token);
+
     const result = Reference{
-        .namespace = getTokenSlice(e, namespace_token),
-        .name = getTokenSlice(e, name_token),
+        .namespace = namespace,
+        .name = name,
     };
 
     // Post-condition: namespace is never empty for valid references
     std.debug.assert(result.namespace.len > 0);
 
     return result;
+}
+
+/// Get source text spanning from start_token to end_token (inclusive).
+fn getTokenRange(e: *Emitter, start_token: u32, end_token: u32) []const u8 {
+    // Pre-conditions
+    std.debug.assert(start_token < e.ast.tokens.len);
+    std.debug.assert(end_token < e.ast.tokens.len);
+    std.debug.assert(start_token <= end_token);
+
+    const starts = e.ast.tokens.items(.start);
+    const start = starts[start_token];
+
+    // End is the start of the token after end_token (or source end)
+    const end: u32 = if (end_token + 1 < starts.len)
+        starts[end_token + 1]
+    else
+        @intCast(e.ast.source.len);
+
+    // Trim trailing whitespace
+    var slice = e.ast.source[start..end];
+    for (0..32) |_| {
+        if (slice.len == 0) break;
+        const last = slice[slice.len - 1];
+        if (last != ' ' and last != '\n' and last != '\t' and last != '\r') break;
+        slice = slice[0 .. slice.len - 1];
+    }
+
+    return slice;
 }
 
 // ============================================================================

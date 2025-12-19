@@ -779,13 +779,15 @@ pub const Parser = struct {
         const namespace_token = self.tok_i;
         self.tok_i += 1; // consume namespace
 
-        // Optional: .name
+        // Consume all .identifier pairs (supports multi-part refs like $wgsl.shader.binding)
+        // Bounded loop: max 8 parts should be more than enough
         var name_token: u32 = namespace_token;
-        if (self.currentTag() == .dot) {
+        for (0..8) |_| {
+            if (self.currentTag() != .dot) break;
             self.tok_i += 1; // consume .
             if (self.currentTag() != .identifier) return error.ParseError;
             name_token = self.tok_i;
-            self.tok_i += 1; // consume name
+            self.tok_i += 1; // consume identifier
         }
 
         // Post-condition

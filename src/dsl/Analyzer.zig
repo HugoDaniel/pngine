@@ -621,7 +621,16 @@ pub const Analyzer = struct {
         const name_token = node_and_node[1];
 
         const namespace_str = self.getTokenSlice(namespace_token);
-        const name_str = self.getTokenSlice(name_token);
+
+        // For multi-part references like $wgsl.shader.inputs, we need to look up
+        // the first name part ("shader"), not the last ("inputs").
+        // For 2-part refs (namespace_token+2 == name_token), use name_token directly.
+        // For 3+ part refs (namespace_token+2 < name_token), use namespace_token+2.
+        const first_name_token = if (namespace_token + 2 < name_token)
+            namespace_token + 2
+        else
+            name_token;
+        const name_str = self.getTokenSlice(first_name_token);
 
         // Parse namespace
         const namespace = Namespace.fromString(namespace_str) orelse {

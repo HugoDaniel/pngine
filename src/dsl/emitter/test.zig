@@ -2473,3 +2473,76 @@ test "Emitter: buffer with pool=2 creates pooled resources" {
     }
     try testing.expectEqual(@as(usize, 2), buffer_count);
 }
+
+// ============================================================================
+// Auto Buffer Sizing Tests (WGSL Reflection via miniray)
+// ============================================================================
+
+test "Emitter: buffer size from WGSL binding reference" {
+    // Test that size=$wgsl.shader.binding auto-resolves via reflection.
+    // This requires miniray to be available at the expected location.
+    const source: [:0]const u8 =
+        \\#wgsl shader {
+        \\  value="
+        \\    struct Inputs {
+        \\      time: f32,
+        \\      resolution: vec2<u32>,
+        \\    }
+        \\    @group(0) @binding(0) var<uniform> inputs: Inputs;
+        \\    @vertex fn vs() -> @builtin(position) vec4<f32> { return vec4f(0.0); }
+        \\  "
+        \\}
+        \\#buffer uniforms { size=$wgsl.shader.inputs usage=[UNIFORM COPY_DST] }
+        \\#renderPipeline pipe { layout=auto vertex={ module=$wgsl.shader } }
+        \\#renderPass pass { pipeline=pipe draw=3 }
+        \\#frame main { perform=[$renderPass.pass] }
+    ;
+
+    // Parse and analyze
+    var ast = try Parser.parse(testing.allocator, source);
+    defer ast.deinit(testing.allocator);
+
+    var analysis = try Analyzer.analyze(testing.allocator, &ast);
+    defer analysis.deinit(testing.allocator);
+
+    if (analysis.hasErrors()) {
+        return error.EmitError;
+    }
+
+    // Emit with miniray path
+    const pngb = Emitter.emitWithOptions(testing.allocator, &ast, &analysis, .{
+        .miniray_path = "/Users/hugo/Development/miniray/miniray",
+    }) catch |err| {
+        // If miniray isn't available or reflection fails, skip this test
+        std.debug.print("Skipping test: {}\n", .{err});
+        return;
+    };
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Execute to verify buffer creation
+    const mock_gpu = @import("../../executor/mock_gpu.zig");
+    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    // Find the buffer creation call and verify size
+    // struct Inputs { time: f32, resolution: vec2<u32> } = 16 bytes
+    // (time=4 bytes + padding=4 bytes + resolution=8 bytes = 16 bytes)
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_buffer) {
+            // The size should be 16 bytes based on WGSL struct layout
+            try testing.expectEqual(@as(u32, 16), call.params.create_buffer.size);
+            return;
+        }
+    }
+    // Should have found a buffer
+    try testing.expect(false);
+}

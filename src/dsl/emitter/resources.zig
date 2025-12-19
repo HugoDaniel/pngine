@@ -601,12 +601,27 @@ pub fn emitBuffers(e: *Emitter) Emitter.Error!void {
 }
 
 /// Resolve buffer size from size property value.
-/// Handles: numbers, expressions, string expressions, identifier refs to #data (including WASM data and generated arrays).
+/// Handles: numbers, expressions, string expressions, identifier refs to #data,
+/// and WGSL binding references ($wgsl.shader.binding for auto-sizing).
 fn resolveBufferSize(e: *Emitter, size_node: Node.Index) u32 {
     // Pre-condition
     std.debug.assert(size_node.toInt() < e.ast.nodes.len);
 
     const size_tag = e.ast.nodes.items(.tag)[size_node.toInt()];
+
+    // Check for reference to WGSL binding (e.g., $wgsl.code.inputs)
+    if (size_tag == .reference) {
+        if (utils.getReference(e, size_node)) |ref| {
+            if (std.mem.eql(u8, ref.namespace, "wgsl")) {
+                // ref.name is "shaderName.bindingName"
+                if (e.getBindingSizeFromWgsl(ref.name)) |size| {
+                    return size;
+                }
+                std.log.warn("Could not resolve WGSL binding size for '{s}'", .{ref.name});
+                return 0;
+            }
+        }
+    }
 
     // Check for identifier reference to #data (including WASM data and generated arrays)
     if (size_tag == .identifier_value) {

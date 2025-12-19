@@ -11,13 +11,29 @@
 const std = @import("std");
 
 pub const Token = struct {
+    /// Token type tag. 1 byte (enum(u8)).
     tag: Tag,
+    /// Source location. 8 bytes (2 x u32).
     loc: Loc,
 
+    /// Source location within input buffer.
     pub const Loc = struct {
+        /// Byte offset of first character (inclusive).
         start: u32,
+        /// Byte offset past last character (exclusive).
+        /// Invariant: end >= start.
         end: u32,
     };
+
+    // Compile-time layout verification
+    comptime {
+        // Token.Tag fits in 1 byte
+        std.debug.assert(@sizeOf(Tag) == 1);
+        // Token.Loc is exactly 8 bytes
+        std.debug.assert(@sizeOf(Loc) == 8);
+        // Token is compact (12 bytes with alignment padding)
+        std.debug.assert(@sizeOf(Token) <= 12);
+    }
 
     pub const Tag = enum(u8) {
         // Special

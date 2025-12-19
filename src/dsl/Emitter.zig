@@ -49,6 +49,7 @@ const pipelines = @import("emitter/pipelines.zig");
 const passes = @import("emitter/passes.zig");
 const frames = @import("emitter/frames.zig");
 const wasm = @import("emitter/wasm.zig");
+const reflect = @import("../reflect.zig");
 
 pub const Emitter = struct {
     gpa: Allocator,
@@ -91,6 +92,10 @@ pub const Emitter = struct {
     /// Bind group pool info for ping-pong bind groups.
     bind_group_pools: std.StringHashMapUnmanaged(resources.PoolInfo),
 
+    /// Cached WGSL reflection data for auto buffer sizing.
+    /// Maps shader name -> reflection data.
+    wgsl_reflections: std.StringHashMapUnmanaged(reflect.ReflectionData),
+
     // Counters for generating IDs
     next_buffer_id: u16 = 0,
     next_texture_id: u16 = 0,
@@ -129,6 +134,9 @@ pub const Emitter = struct {
     pub const Options = struct {
         /// Base directory for resolving relative file paths.
         base_dir: ?[]const u8 = null,
+        /// Path to miniray binary for WGSL reflection.
+        /// If null, uses "miniray" from PATH.
+        miniray_path: ?[]const u8 = null,
     };
 
     pub const Error = error{
@@ -171,6 +179,7 @@ pub const Emitter = struct {
             .generated_arrays = .{},
             .buffer_pools = .{},
             .bind_group_pools = .{},
+            .wgsl_reflections = .{},
         };
     }
 
@@ -197,6 +206,13 @@ pub const Emitter = struct {
         self.generated_arrays.deinit(self.gpa);
         self.buffer_pools.deinit(self.gpa);
         self.bind_group_pools.deinit(self.gpa);
+        // Free all cached reflection data
+        var it = self.wgsl_reflections.iterator();
+        while (it.next()) |entry| {
+            var ref_data = entry.value_ptr.*;
+            ref_data.deinit();
+        }
+        self.wgsl_reflections.deinit(self.gpa);
     }
 
     /// Emit PNGB bytecode from analyzed DSL.
@@ -264,6 +280,13 @@ pub const Emitter = struct {
         self.generated_arrays.deinit(self.gpa);
         self.buffer_pools.deinit(self.gpa);
         self.bind_group_pools.deinit(self.gpa);
+        // Free all cached reflection data
+        var it = self.wgsl_reflections.iterator();
+        while (it.next()) |entry| {
+            var ref_data = entry.value_ptr.*;
+            ref_data.deinit();
+        }
+        self.wgsl_reflections.deinit(self.gpa);
 
         return result;
     }
@@ -340,5 +363,83 @@ pub const Emitter = struct {
     /// Get bind group index (delegated to utils).
     pub fn getBindGroupIndex(self: *Self, node: Node.Index) u8 {
         return utils.getBindGroupIndex(self, node);
+    }
+
+    // ========================================================================
+    // WGSL Reflection
+    // ========================================================================
+
+    /// Get WGSL reflection data for a shader.
+    /// Caches results so reflection is only performed once per shader.
+    ///
+    /// Complexity: O(1) cache lookup, O(n) on first call (miniray subprocess).
+    pub fn getWgslReflection(self: *Self, shader_name: []const u8) ?*const reflect.ReflectionData {
+        // Pre-condition: shader_name is not empty
+        std.debug.assert(shader_name.len > 0);
+
+        // Check cache first
+        if (self.wgsl_reflections.getPtr(shader_name)) |cached| {
+            return cached;
+        }
+
+        // Get shader code from symbol table
+        const shader_info = self.analysis.symbols.wgsl.get(shader_name) orelse
+            self.analysis.symbols.shader_module.get(shader_name) orelse
+            return null;
+
+        // Get the WGSL code
+        const code_node = utils.findPropertyValue(self, shader_info.node, "value") orelse
+            utils.findPropertyValue(self, shader_info.node, "code") orelse
+            return null;
+
+        const wgsl_code = utils.getStringContent(self, code_node);
+        if (wgsl_code.len == 0) return null;
+
+        // Call miniray for reflection
+        const miniray = reflect.Miniray{ .miniray_path = self.options.miniray_path };
+        const reflection = miniray.reflect(self.gpa, wgsl_code) catch |err| {
+            std.log.warn("WGSL reflection failed for '{s}': {}", .{ shader_name, err });
+            return null;
+        };
+
+        // Cache the result
+        self.wgsl_reflections.put(self.gpa, shader_name, reflection) catch {
+            var ref_copy = reflection;
+            ref_copy.deinit();
+            return null;
+        };
+
+        return self.wgsl_reflections.getPtr(shader_name);
+    }
+
+    /// Get binding size from WGSL reflection.
+    /// Reference format: "shaderName.bindingName" (e.g., "code.inputs")
+    ///
+    /// Complexity: O(bindings) where bindings = number of @binding declarations.
+    pub fn getBindingSizeFromWgsl(self: *Self, wgsl_ref: []const u8) ?u32 {
+        // Pre-condition: wgsl_ref is not empty and contains at least one dot
+        std.debug.assert(wgsl_ref.len > 0);
+
+        // Parse "shaderName.bindingName"
+        const dot_pos = std.mem.indexOf(u8, wgsl_ref, ".") orelse return null;
+        if (dot_pos == 0 or dot_pos >= wgsl_ref.len - 1) return null;
+
+        const shader_name = wgsl_ref[0..dot_pos];
+        const binding_name = wgsl_ref[dot_pos + 1 ..];
+
+        // Post-condition: both parts are non-empty
+        std.debug.assert(shader_name.len > 0);
+        std.debug.assert(binding_name.len > 0);
+
+        // Get reflection data
+        const reflection = self.getWgslReflection(shader_name) orelse return null;
+
+        // Find the binding by name
+        const binding = reflection.getBindingByName(binding_name) orelse return null;
+
+        // Post-condition: size is always positive for valid bindings
+        std.debug.assert(binding.layout.size > 0);
+
+        return binding.layout.size;
     }
 };

@@ -39,6 +39,9 @@ pub const gpu_backends = struct {
 // ZIP bundle support
 pub const zip = @import("zip.zig");
 
+// WGSL Reflection (via miniray)
+pub const reflect = @import("reflect.zig");
+
 // PNG embedding/extraction/encoding
 pub const png = struct {
     pub const crc32 = @import("png/crc32.zig");
@@ -184,6 +187,8 @@ test {
     _ = @import("gpu/native_gpu.zig");
     // Run ZIP tests
     _ = @import("zip.zig");
+    // Run WGSL reflection tests
+    _ = @import("reflect.zig");
 }
 
 test "compile PBSF to PNGB" {

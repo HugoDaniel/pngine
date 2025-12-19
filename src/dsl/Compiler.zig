@@ -846,3 +846,4 @@ test "E2E: compile with texture and sampler" {
     try testing.expect(has_texture);
     try testing.expect(has_sampler);
 }
+
