@@ -3,16 +3,21 @@
 //! Calls out to JavaScript WebGPU implementation via extern functions.
 //! Used when running in the browser via WASM.
 //!
-//! Data Flow:
-//! 1. Bytecode calls createShaderModule(shader_id, code_data_id)
-//! 2. WasmGPU looks up code_data_id in Module.data section
-//! 3. Passes pointer + length to JS via extern gpuCreateShaderModule
+//! ## Data Flow
+//!
+//! 1. Bytecode calls createShaderModule(shader_id, wgsl_id)
+//! 2. WasmGPU resolves wgsl_id from Module.wgsl table:
+//!    - Walk dependencies in topological order (iterative DFS)
+//!    - Concatenate raw code from data section with deduplication
+//! 3. Passes resolved code pointer + length to JS
 //! 4. JS reads string from WASM memory, calls device.createShaderModule
 //!
-//! Invariants:
+//! ## Invariants
+//!
 //! - Module must be set before any GPU calls
 //! - All data IDs must reference valid module data
 //! - JS is responsible for resource tracking and error handling
+//! - Resolution uses bounded iteration (MAX_WGSL_MODULES × MAX_WGSL_DEPS)
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -115,15 +120,96 @@ pub const WasmGPU = struct {
         gpuCreateSampler(sampler_id, data.ptr, @intCast(data.len));
     }
 
-    /// Create a shader module from code in the data section.
-    pub fn createShaderModule(self: *Self, allocator: Allocator, shader_id: u16, code_data_id: u16) !void {
-        _ = allocator;
-
+    /// Create a shader module from WGSL code.
+    /// Resolves wgsl_id from the WGSL table, walking dependencies and concatenating code.
+    pub fn createShaderModule(self: *Self, allocator: Allocator, shader_id: u16, wgsl_id: u16) !void {
         // Pre-condition: module must be set
         assert(self.module != null);
 
-        const data = self.getDataOrPanic(code_data_id);
-        gpuCreateShaderModule(shader_id, data.ptr, @intCast(data.len));
+        // Resolve from WGSL table (deduplicates transitive imports)
+        const resolved = try self.resolveWgsl(allocator, wgsl_id);
+        defer allocator.free(resolved);
+        gpuCreateShaderModule(shader_id, resolved.ptr, @intCast(resolved.len));
+    }
+
+    /// Resolve a WGSL module by ID, concatenating all dependencies.
+    /// Uses iterative DFS with deduplication (no recursion).
+    /// Memory: Caller owns returned slice.
+    fn resolveWgsl(self: *Self, allocator: Allocator, wgsl_id: u16) ![]u8 {
+        const module = self.module orelse return error.OutOfMemory;
+        const wgsl_table = &module.wgsl;
+
+        // Maximum iterations for bounded execution
+        const max_iterations: u32 = @as(u32, format.MAX_WGSL_MODULES) * @as(u32, format.MAX_WGSL_DEPS);
+
+        // Track included modules and order
+        var included = std.AutoHashMapUnmanaged(u16, void){};
+        defer included.deinit(allocator);
+
+        var order = std.ArrayListUnmanaged(u16){};
+        defer order.deinit(allocator);
+
+        var stack = std.ArrayListUnmanaged(u16){};
+        defer stack.deinit(allocator);
+
+        try stack.append(allocator, wgsl_id);
+
+        // Iterative DFS
+        for (0..max_iterations) |_| {
+            if (stack.items.len == 0) break;
+
+            const current = stack.pop() orelse break;
+
+            // Skip if already included
+            if (included.contains(current)) continue;
+
+            // Get WGSL entry
+            const entry = wgsl_table.get(current) orelse continue;
+
+            // Check if all deps are included
+            var all_deps_ready = true;
+            for (entry.deps) |dep| {
+                if (!included.contains(dep)) {
+                    all_deps_ready = false;
+                    try stack.append(allocator, current); // Re-push current
+                    try stack.append(allocator, dep); // Process dep first
+                    break;
+                }
+            }
+
+            if (all_deps_ready) {
+                try included.put(allocator, current, {});
+                try order.append(allocator, current);
+            }
+        }
+
+        // Calculate total size
+        var total_size: usize = 0;
+        for (order.items) |id| {
+            const entry = wgsl_table.get(id) orelse continue;
+            const data = module.data.get(@enumFromInt(entry.data_id));
+            total_size += data.len + 1; // +1 for newline
+        }
+
+        // Allocate and concatenate
+        const result = try allocator.alloc(u8, total_size);
+        var pos: usize = 0;
+
+        for (order.items) |id| {
+            const entry = wgsl_table.get(id) orelse continue;
+            const data = module.data.get(@enumFromInt(entry.data_id));
+            if (data.len > 0) {
+                @memcpy(result[pos..][0..data.len], data);
+                pos += data.len;
+                result[pos] = '\n';
+                pos += 1;
+            }
+        }
+
+        // Post-condition: filled buffer
+        assert(pos == total_size);
+
+        return result;
     }
 
     /// Create a render pipeline from descriptor in the data section.

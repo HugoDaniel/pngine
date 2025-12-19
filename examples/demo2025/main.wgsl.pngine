@@ -27,7 +27,7 @@
 }
 #wgsl tangram {
   value="./wgsl/tangram.wgsl"
-  imports=["$wgsl.transform2D"]
+  imports=["$wgsl.transform2D", "$wgsl.primitives"]
 }
 #wgsl beats { value="./wgsl/beats.wgsl" }
 

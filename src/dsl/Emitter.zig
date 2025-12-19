@@ -105,7 +105,13 @@ pub const Emitter = struct {
     /// Cache for resolved WGSL code (with imports prepended).
     /// Key is the #wgsl macro name, value is the resolved code.
     /// Moved from module-level to struct for thread safety and testability.
+    /// NOTE: In v2 format, this is only used for #shaderModule code resolution,
+    /// not for #wgsl which now uses the WGSL table.
     resolved_wgsl_cache: std.StringHashMapUnmanaged([]const u8),
+
+    /// Maps #wgsl module names to WGSL table IDs.
+    /// Used for v2 format runtime deduplication.
+    wgsl_name_to_id: std.StringHashMapUnmanaged(u16),
 
     // Counters for generating IDs
     next_buffer_id: u16 = 0,
@@ -282,6 +288,7 @@ pub const Emitter = struct {
             .bind_group_pools = .{},
             .wgsl_reflections = .{},
             .resolved_wgsl_cache = .{},
+            .wgsl_name_to_id = .{},
         };
     }
 
@@ -322,6 +329,7 @@ pub const Emitter = struct {
             self.gpa.free(value_ptr.*);
         }
         self.resolved_wgsl_cache.deinit(self.gpa);
+        self.wgsl_name_to_id.deinit(self.gpa);
         // Free animation metadata scenes array
         if (self.animation_metadata) |meta| {
             if (meta.scenes.len > 0) {

@@ -1,20 +1,34 @@
-//! Shader Emission Module
+//! Shader Emission Module (v2 - Runtime Deduplication)
 //!
 //! Handles emission of #wgsl and #shaderModule declarations.
-//! Includes define substitution for shader code preprocessing.
+//! Uses runtime deduplication via WGSL table (v2 format).
 //!
-//! ## WGSL Import Resolution
+//! ## Design (v2)
+//!
+//! Instead of prepending imports at compile time (causing code duplication),
+//! each #wgsl module is stored separately with its dependency list:
+//!
+//! ```
+//! WGSL Table:
+//!   wgsl_id=0: data_id=0, deps=[]           // transform2D
+//!   wgsl_id=1: data_id=1, deps=[0]          // primitives
+//!   wgsl_id=2: data_id=2, deps=[0,1]        // tangram
+//! ```
+//!
+//! At runtime, the JS/WASM runtime resolves dependencies and concatenates
+//! code with deduplication.
+//!
+//! ## WGSL Macros
 //!
 //! #wgsl macros can have:
 //! - `value="inline code"` or `value="./path/to/file.wgsl"` (file path)
 //! - `imports=[$wgsl.a, $wgsl.b]` (references to other #wgsl macros)
 //!
-//! The final shader code is: imports[0] + imports[1] + ... + value
-//! This allows sharing common code (constants, utilities) across shaders.
-//!
 //! ## Invariants
 //!
+//! * Modules must be processed in dependency order (deps before dependents).
 //! * Shader IDs are assigned sequentially starting from next_shader_id.
+//! * WGSL IDs in builder.wgsl_table correspond to module order.
 //! * Define substitution is bounded to MAX_SUBSTITUTION_DEPTH passes.
 //! * String literals (quoted content) are never modified during substitution.
 //! * Math constants (PI, TAU, E) are substituted only if no user define exists.
@@ -46,51 +60,24 @@ const math_constants = [_]struct { name: []const u8, value: []const u8 }{
 };
 
 /// Emit #wgsl and #shaderModule declarations.
+/// v2 format: stores raw code + deps in WGSL table for runtime deduplication.
 pub fn emitShaders(e: *Emitter) Emitter.Error!void {
     // Pre-conditions
     std.debug.assert(e.ast.nodes.len > 0);
 
     const initial_shader_id = e.next_shader_id;
 
-    // Note: resolved_wgsl_cache is owned by Emitter and cleared in deinit()
+    // Phase 1: Emit #wgsl declarations in topological order (deps first)
+    // Use iterative worklist to process in dependency order
+    try emitWgslModulesInOrder(e);
 
-    // Emit #wgsl declarations
-    var it = e.analysis.symbols.wgsl.iterator();
-    while (it.next()) |entry| {
-        const name = entry.key_ptr.*;
-        const info = entry.value_ptr.*;
-
-        // Resolve WGSL with imports prepended BEFORE assigning ID
-        // This prevents orphaned IDs when code resolution fails
-        const raw_code = try resolveWgslWithImports(e, name, info.node);
-        if (raw_code.len == 0) continue;
-
-        const code = try substituteDefines(e, raw_code);
-        defer if (code.ptr != raw_code.ptr) e.gpa.free(code);
-
-        // Only assign ID after confirming code is valid
-        const shader_id = e.next_shader_id;
-        e.next_shader_id += 1;
-        try e.shader_ids.put(e.gpa, name, shader_id);
-
-        const data_id = try e.builder.addData(e.gpa, code);
-
-        // Emit create_shader_module opcode
-        try e.builder.getEmitter().createShaderModule(
-            e.gpa,
-            shader_id,
-            data_id.toInt(),
-        );
-    }
-
-    // Also handle #shaderModule
+    // Phase 2: Handle #shaderModule (uses resolved_wgsl_cache for backward compat)
     var sm_it = e.analysis.symbols.shader_module.iterator();
     while (sm_it.next()) |entry| {
         const name = entry.key_ptr.*;
         const info = entry.value_ptr.*;
 
         // Find code property - can be string literal or identifier referencing #wgsl
-        // Resolve code BEFORE assigning ID to prevent orphaned IDs
         const code_value = utils.findPropertyValue(e, info.node, "code") orelse continue;
         const raw_code = resolveShaderCode(e, code_value);
         if (raw_code.len == 0) continue;
@@ -103,17 +90,214 @@ pub fn emitShaders(e: *Emitter) Emitter.Error!void {
         e.next_shader_id += 1;
         try e.shader_ids.put(e.gpa, name, shader_id);
 
+        // For #shaderModule, store as data (no WGSL table entry needed)
+        // The code is already resolved with imports prepended
         const data_id = try e.builder.addData(e.gpa, code);
+
+        // Add to WGSL table with no deps (code is already resolved)
+        const wgsl_id = try e.builder.addWgsl(e.gpa, data_id.toInt(), &[_]u16{});
+        try e.wgsl_name_to_id.put(e.gpa, name, wgsl_id);
 
         try e.builder.getEmitter().createShaderModule(
             e.gpa,
             shader_id,
-            data_id.toInt(),
+            wgsl_id,
         );
     }
 
     // Post-condition: shader IDs were assigned sequentially
     std.debug.assert(e.next_shader_id >= initial_shader_id);
+}
+
+/// Emit #wgsl modules in topological order (dependencies before dependents).
+/// Uses iterative Kahn's algorithm for topological sort.
+fn emitWgslModulesInOrder(e: *Emitter) Emitter.Error!void {
+    const symbols = &e.analysis.symbols.wgsl;
+    if (symbols.count() == 0) return;
+
+    // Track which modules have been processed
+    var processed = std.StringHashMapUnmanaged(void){};
+    defer processed.deinit(e.gpa);
+
+    // Process modules iteratively (bounded loop)
+    // Use simple approach: repeatedly find modules whose deps are all processed
+    const max_iterations = symbols.count() * symbols.count() + 1;
+    for (0..max_iterations) |_| {
+        if (processed.count() >= symbols.count()) break;
+
+        var made_progress = false;
+
+        // Find a module whose deps are all processed
+        var it = symbols.iterator();
+        while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            const info = entry.value_ptr.*;
+
+            // Skip if already processed
+            if (processed.get(name) != null) continue;
+
+            // Check if all deps are processed
+            const deps = getWgslImports(e, info.node);
+            var all_deps_ready = true;
+            for (deps) |dep| {
+                if (processed.get(dep) == null) {
+                    // Check if dep exists in symbols (might be missing)
+                    if (symbols.get(dep) != null) {
+                        all_deps_ready = false;
+                        break;
+                    }
+                }
+            }
+
+            if (all_deps_ready) {
+                // Process this module
+                try emitWgslModule(e, name, info.node);
+                try processed.put(e.gpa, name, {});
+                made_progress = true;
+            }
+        }
+
+        if (!made_progress and processed.count() < symbols.count()) {
+            // Circular dependency detected - process remaining modules anyway
+            it = symbols.iterator();
+            while (it.next()) |entry| {
+                if (processed.get(entry.key_ptr.*) == null) {
+                    try emitWgslModule(e, entry.key_ptr.*, entry.value_ptr.*.node);
+                    try processed.put(e.gpa, entry.key_ptr.*, {});
+                }
+            }
+            break;
+        }
+    }
+}
+
+/// Emit a single #wgsl module.
+/// Stores raw code in data section and adds entry to WGSL table with deps.
+fn emitWgslModule(e: *Emitter, name: []const u8, macro_node: Node.Index) Emitter.Error!void {
+    // Pre-conditions
+    std.debug.assert(name.len > 0);
+    std.debug.assert(e.wgsl_name_to_id.get(name) == null);
+
+    // Get the value property
+    const value_node = utils.findPropertyValue(e, macro_node, "value") orelse {
+        // No value property - skip
+        return;
+    };
+    const value_str = utils.getStringContent(e, value_node);
+    if (value_str.len == 0) return;
+
+    // Load raw code (file or inline) - NO import prepending
+    const raw_code = try loadWgslValue(e, value_str);
+    defer e.gpa.free(raw_code);
+
+    if (raw_code.len == 0) return;
+
+    // Apply define substitution
+    const code = try substituteDefines(e, raw_code);
+    defer if (code.ptr != raw_code.ptr) e.gpa.free(code);
+
+    // Store in data section
+    const data_id = try e.builder.addData(e.gpa, code);
+
+    // Get direct dependencies (imports)
+    const import_names = getWgslImports(e, macro_node);
+    var deps = std.ArrayListUnmanaged(u16){};
+    defer deps.deinit(e.gpa);
+
+    for (import_names) |import_name| {
+        if (e.wgsl_name_to_id.get(import_name)) |dep_wgsl_id| {
+            try deps.append(e.gpa, dep_wgsl_id);
+        }
+        // Note: missing deps are silently ignored (analyzer should have caught this)
+    }
+
+    // Add to WGSL table
+    const wgsl_id = try e.builder.addWgsl(e.gpa, data_id.toInt(), deps.items);
+    try e.wgsl_name_to_id.put(e.gpa, name, wgsl_id);
+
+    // Assign shader_id and emit create_shader_module
+    const shader_id = e.next_shader_id;
+    e.next_shader_id += 1;
+    try e.shader_ids.put(e.gpa, name, shader_id);
+
+    try e.builder.getEmitter().createShaderModule(
+        e.gpa,
+        shader_id,
+        wgsl_id,
+    );
+
+    // Also cache the resolved code for #shaderModule backward compat
+    // Build resolved code by concatenating deps + this module's code
+    try buildAndCacheResolvedCode(e, name, code, deps.items);
+}
+
+/// Build and cache the fully resolved code for #shaderModule backward compatibility.
+/// This concatenates all dependency code (deduplicated) + this module's code.
+fn buildAndCacheResolvedCode(e: *Emitter, name: []const u8, code: []const u8, deps: []const u16) Emitter.Error!void {
+    if (deps.len == 0) {
+        // No deps - just cache the code itself
+        const cached = try e.gpa.dupe(u8, code);
+        try e.resolved_wgsl_cache.put(e.gpa, name, cached);
+        return;
+    }
+
+    // Collect all transitive deps (for full resolution)
+    var included = std.AutoHashMapUnmanaged(u16, void){};
+    defer included.deinit(e.gpa);
+
+    var order = std.ArrayListUnmanaged(u16){};
+    defer order.deinit(e.gpa);
+
+    // Iterative DFS to collect all deps
+    var stack = std.ArrayListUnmanaged(u16){};
+    defer stack.deinit(e.gpa);
+
+    for (deps) |dep| {
+        try stack.append(e.gpa, dep);
+    }
+
+    for (0..MAX_IMPORTS * MAX_IMPORT_DEPTH) |_| {
+        if (stack.items.len == 0) break;
+        const current = stack.pop() orelse break;
+
+        if (included.contains(current)) continue;
+
+        // Get this module's deps
+        const wgsl_entry = e.builder.wgsl_table.get(current) orelse continue;
+        var all_deps_included = true;
+        for (wgsl_entry.deps) |sub_dep| {
+            if (!included.contains(sub_dep)) {
+                all_deps_included = false;
+                try stack.append(e.gpa, current); // Re-push current
+                try stack.append(e.gpa, sub_dep); // Process dep first
+                break;
+            }
+        }
+
+        if (all_deps_included) {
+            try included.put(e.gpa, current, {});
+            try order.append(e.gpa, current);
+        }
+    }
+
+    // Build result
+    var result = std.ArrayListUnmanaged(u8){};
+    errdefer result.deinit(e.gpa);
+
+    for (order.items) |wgsl_id| {
+        const entry = e.builder.wgsl_table.get(wgsl_id) orelse continue;
+        const dep_code = e.builder.data.get(@enumFromInt(entry.data_id));
+        if (dep_code.len > 0) {
+            try result.appendSlice(e.gpa, dep_code);
+            try result.append(e.gpa, '\n');
+        }
+    }
+
+    // Add this module's code
+    try result.appendSlice(e.gpa, code);
+
+    const cached = try result.toOwnedSlice(e.gpa);
+    try e.resolved_wgsl_cache.put(e.gpa, name, cached);
 }
 
 /// Resolve shader code from a code property node.
@@ -388,242 +572,11 @@ fn getDefineValue(e: *Emitter, define_node: Node.Index) []const u8 {
 }
 
 // ============================================================================
-// WGSL Import Resolution
+// WGSL File Loading
 // ============================================================================
 
 /// Maximum import depth (prevents unbounded iteration).
 const MAX_IMPORT_DEPTH: u32 = 64;
-
-/// Worklist item for iterative import resolution.
-const WorkItem = struct {
-    name: []const u8,
-    node: Node.Index,
-    state: State,
-
-    const State = enum { needs_deps, ready_to_build };
-};
-
-/// Resolve WGSL code with imports prepended.
-/// Uses iterative worklist approach (no recursion) for bounded execution.
-/// Memory: Result is cached in e.resolved_wgsl_cache and owned by Emitter.
-fn resolveWgslWithImports(e: *Emitter, name: []const u8, macro_node: Node.Index) Emitter.Error![]const u8 {
-    // Pre-conditions
-    std.debug.assert(name.len > 0);
-    std.debug.assert(macro_node.toInt() < e.ast.nodes.len);
-
-    // Check cache first
-    if (e.resolved_wgsl_cache.get(name)) |cached| {
-        return cached;
-    }
-
-    // Worklist for iterative processing (replaces recursion)
-    var worklist = std.ArrayListUnmanaged(WorkItem){};
-    defer worklist.deinit(e.gpa);
-
-    // Start with root item
-    try worklist.append(e.gpa, .{ .name = name, .node = macro_node, .state = .needs_deps });
-
-    // Process worklist iteratively
-    for (0..MAX_IMPORT_DEPTH * MAX_IMPORTS) |_| {
-        if (worklist.items.len == 0) break;
-
-        const item = &worklist.items[worklist.items.len - 1];
-
-        // Skip if already cached
-        if (e.resolved_wgsl_cache.get(item.name)) |_| {
-            _ = worklist.pop();
-            continue;
-        }
-
-        switch (item.state) {
-            .needs_deps => {
-                // Get imports and check if all are resolved
-                const static_imports = getWgslImports(e, item.node);
-
-                // Copy import names (static buffer protection)
-                const import_names = try e.gpa.alloc([]const u8, static_imports.len);
-                defer e.gpa.free(import_names);
-                @memcpy(import_names, static_imports);
-
-                var all_deps_ready = true;
-                for (import_names) |import_name| {
-                    if (e.resolved_wgsl_cache.get(import_name) == null) {
-                        // Dependency not yet resolved - push it
-                        if (e.analysis.symbols.wgsl.get(import_name)) |import_info| {
-                            try worklist.append(e.gpa, .{
-                                .name = import_name,
-                                .node = import_info.node,
-                                .state = .needs_deps,
-                            });
-                            all_deps_ready = false;
-                        } else {
-                            std.debug.print("WARNING: Import '{s}' not found in wgsl symbols for '{s}'\n", .{ import_name, item.name });
-                        }
-                    }
-                }
-
-                if (all_deps_ready) {
-                    item.state = .ready_to_build;
-                }
-            },
-            .ready_to_build => {
-                // All dependencies are resolved, build this item
-                try buildWgslCode(e, item.name, item.node);
-                _ = worklist.pop();
-            },
-        }
-    } else {
-        // Hit max iterations - likely a bug or extremely deep imports
-        std.debug.print("WARNING: Max import depth exceeded for '{s}'\n", .{name});
-    }
-
-    // Post-condition: result should be cached now
-    return e.resolved_wgsl_cache.get(name) orelse "";
-}
-
-/// Build WGSL code for a single item with deduplicated imports.
-/// Collects all transitive imports, deduplicates them, then concatenates.
-fn buildWgslCode(e: *Emitter, name: []const u8, macro_node: Node.Index) Emitter.Error!void {
-    // Pre-conditions
-    std.debug.assert(name.len > 0);
-    std.debug.assert(e.resolved_wgsl_cache.get(name) == null);
-
-    // Get the value property
-    const value_node = utils.findPropertyValue(e, macro_node, "value") orelse {
-        // No value property - cache empty string to prevent re-processing
-        try e.resolved_wgsl_cache.put(e.gpa, name, try e.gpa.dupe(u8, ""));
-        return;
-    };
-    const value_str = utils.getStringContent(e, value_node);
-    if (value_str.len == 0) {
-        // Empty value - cache empty string to prevent re-processing
-        try e.resolved_wgsl_cache.put(e.gpa, name, try e.gpa.dupe(u8, ""));
-        return;
-    }
-
-    // Collect all transitive imports (deduplicated, in dependency order)
-    var included = std.StringHashMapUnmanaged(void){};
-    defer included.deinit(e.gpa);
-
-    var import_order = std.ArrayListUnmanaged([]const u8){};
-    defer import_order.deinit(e.gpa);
-
-    try collectTransitiveImports(e, macro_node, &included, &import_order);
-
-    // Load main value
-    const main_code = try loadWgslValue(e, value_str);
-    defer e.gpa.free(main_code);
-
-    // If no imports, just cache the main value
-    if (import_order.items.len == 0) {
-        const code = try e.gpa.dupe(u8, main_code);
-        try e.resolved_wgsl_cache.put(e.gpa, name, code);
-        return;
-    }
-
-    // Build result from deduplicated imports + value
-    var result = std.ArrayListUnmanaged(u8){};
-    errdefer result.deinit(e.gpa);
-
-    // Add each import's RAW code (not resolved - to avoid duplication)
-    for (import_order.items) |import_name| {
-        const raw_result = try getRawWgslCode(e, import_name);
-        const raw_code = raw_result.code;
-        defer if (raw_result.owned) e.gpa.free(raw_code);
-
-        if (raw_code.len > 0) {
-            try result.appendSlice(e.gpa, raw_code);
-            try result.append(e.gpa, '\n');
-        }
-    }
-
-    // Add the main value
-    try result.appendSlice(e.gpa, main_code);
-
-    const final = try result.toOwnedSlice(e.gpa);
-    try e.resolved_wgsl_cache.put(e.gpa, name, final);
-
-    // Post-condition: result was cached
-    std.debug.assert(e.resolved_wgsl_cache.get(name) != null);
-}
-
-/// Collect all transitive imports in dependency order, deduplicated.
-/// Uses iterative approach with worklist (no recursion).
-fn collectTransitiveImports(
-    e: *Emitter,
-    macro_node: Node.Index,
-    included: *std.StringHashMapUnmanaged(void),
-    import_order: *std.ArrayListUnmanaged([]const u8),
-) Emitter.Error!void {
-    // Worklist of nodes to process
-    var worklist = std.ArrayListUnmanaged(Node.Index){};
-    defer worklist.deinit(e.gpa);
-    try worklist.append(e.gpa, macro_node);
-
-    // Process worklist iteratively (bounded loop)
-    for (0..MAX_IMPORTS * MAX_IMPORT_DEPTH) |_| {
-        if (worklist.items.len == 0) break;
-
-        const current_node = worklist.items[worklist.items.len - 1];
-        worklist.items.len -= 1;
-        const static_imports = getWgslImports(e, current_node);
-        if (static_imports.len == 0) continue;
-
-        // Copy to avoid static buffer issues
-        const import_names = try e.gpa.alloc([]const u8, static_imports.len);
-        defer e.gpa.free(import_names);
-        @memcpy(import_names, static_imports);
-
-        // Process imports in reverse order so they end up in correct order
-        var i: usize = import_names.len;
-        while (i > 0) {
-            i -= 1;
-            const import_name = import_names[i];
-
-            // Skip if already included
-            if (included.get(import_name) != null) continue;
-
-            // Mark as included
-            try included.put(e.gpa, import_name, {});
-            try import_order.append(e.gpa, import_name);
-
-            // Add this import's node to worklist for processing its dependencies
-            if (e.analysis.symbols.wgsl.get(import_name)) |import_info| {
-                try worklist.append(e.gpa, import_info.node);
-            }
-        }
-    }
-
-    // Reverse to get dependency order (dependencies before dependents)
-    std.mem.reverse([]const u8, import_order.items);
-}
-
-/// Result of getRawWgslCode - tracks ownership.
-const RawCodeResult = struct {
-    code: []const u8,
-    owned: bool, // true if code needs to be freed by caller
-};
-
-/// Get raw WGSL code for a module (without imports prepended).
-fn getRawWgslCode(e: *Emitter, name: []const u8) Emitter.Error!RawCodeResult {
-    // Look up the module's node
-    const info = e.analysis.symbols.wgsl.get(name) orelse return .{ .code = "", .owned = false };
-
-    // Get value property
-    const value_node = utils.findPropertyValue(e, info.node, "value") orelse return .{ .code = "", .owned = false };
-    const value_str = utils.getStringContent(e, value_node);
-    if (value_str.len == 0) return .{ .code = "", .owned = false };
-
-    // Load the raw code (file or inline)
-    if (isFilePath(value_str)) {
-        // For files, load and return owned slice
-        const code = try loadWgslFile(e, value_str);
-        return .{ .code = code, .owned = true };
-    }
-
-    // Inline code - not owned
-    return .{ .code = value_str, .owned = false };
-}
 
 /// Load WGSL code from a value string.
 /// If the value is a file path (starts with "./" or "/"), reads from disk.

@@ -1,13 +1,16 @@
-//! Import Deduplication Tests
+//! WGSL Import Tests
 //!
-//! Comprehensive tests for transitive WGSL import deduplication.
+//! Comprehensive tests for WGSL module imports and the WGSL table.
+//! With v2 bytecode format, each WGSL module is stored once in the data section
+//! with dependency metadata in the WGSL table. Runtime resolves imports.
+//!
 //! Tests cover:
 //! - Basic import scenarios (none, single, multiple)
 //! - Diamond dependencies (A->B->D, A->C->D)
 //! - Deep import chains
 //! - Wide fan-out (many imports)
 //! - Order verification (dependencies before dependents)
-//! - Duplicate detection
+//! - Module deduplication (each module stored once)
 //! - Property-based and fuzz testing
 
 const std = @import("std");
