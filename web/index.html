@@ -120,6 +120,39 @@
             margin-left: auto;
         }
 
+        .scene-selector {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-top: 0.5rem;
+        }
+
+        .scene-selector label {
+            font-size: 0.75rem;
+            color: #888;
+        }
+
+        .scene-selector select {
+            padding: 0.25rem 0.5rem;
+            background: #0f0f23;
+            color: #ccc;
+            border: 1px solid #333;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            min-width: 150px;
+        }
+
+        .scene-selector select:focus {
+            outline: none;
+            border-color: #0f3460;
+        }
+
+        .scene-info {
+            font-size: 0.7rem;
+            color: #666;
+            margin-left: 0.5rem;
+        }
+
         .status {
             padding: 0.5rem;
             font-size: 0.75rem;
@@ -426,6 +459,13 @@
                         <button id="clear-btn-3">Clear</button>
                         <span id="time-display-3" class="time-display"></span>
                     </div>
+                    <div class="scene-selector">
+                        <label for="scene-select">Scene:</label>
+                        <select id="scene-select" disabled>
+                            <option value="__all__">All (Animation)</option>
+                        </select>
+                        <span id="scene-info" class="scene-info"></span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -438,7 +478,7 @@
 
     <script type="module">
         import { initPNGine } from './pngine-loader.js';
-        import { hasPngb, getPngbInfo, extractPngb } from './pngine-png.js';
+        import { hasPngb, getPngbInfo, extractPngb, hasPngm, extractPngm } from './pngine-png.js';
 
         // DOM elements
         const canvas = document.getElementById('canvas');
@@ -473,14 +513,178 @@
         const playPngBtn = document.getElementById('play-png-btn');
         const timeDisplay3 = document.getElementById('time-display-3');
 
+        // Scene selector elements
+        const sceneSelect = document.getElementById('scene-select');
+        const sceneInfo = document.getElementById('scene-info');
+
         let pngine = null;
         let loadedBytecode = null;
         let loadedPngBytecode = null;
+        let loadedMetadata = null;  // Animation metadata from pNGm chunk
+        let detectedFrames = [];    // Frame names detected from bytecode
 
         // Animation state
         let isPlaying = false;
         let animationId = null;
         let startTime = null;
+        let selectedScene = '__all__';  // Current selected scene
+
+        // ====================================================================
+        // Scene detection and selection
+        // ====================================================================
+
+        /**
+         * Parse frame names from PNGB bytecode string table.
+         * Frame definitions: define_frame opcode followed by frame_id and name_id varints.
+         */
+        function parseFrameNames(bytecode) {
+            const frames = [];
+
+            // Quick check for PNGB magic
+            if (bytecode.length < 16) return frames;
+            const magic = String.fromCharCode(bytecode[0], bytecode[1], bytecode[2], bytecode[3]);
+            if (magic !== 'PNGB') return frames;
+
+            // Read header
+            const view = new DataView(bytecode.buffer, bytecode.byteOffset, bytecode.byteLength);
+            const stringTableOffset = view.getUint32(8, true);
+            const dataSectionOffset = view.getUint32(12, true);
+
+            // Parse string table
+            const strings = [];
+            let pos = stringTableOffset;
+            if (pos + 2 <= bytecode.length) {
+                const count = view.getUint16(pos, true);
+                pos += 2;
+                for (let i = 0; i < count && pos < dataSectionOffset; i++) {
+                    if (pos + 2 > bytecode.length) break;
+                    const len = view.getUint16(pos, true);
+                    pos += 2;
+                    if (pos + len > bytecode.length) break;
+                    const str = new TextDecoder().decode(bytecode.slice(pos, pos + len));
+                    strings.push(str);
+                    pos += len;
+                }
+            }
+
+            // Scan bytecode for define_frame opcodes (0x20)
+            const DEFINE_FRAME = 0x20;
+            let pc = 16; // Skip header
+
+            function readVarint() {
+                let result = 0;
+                let shift = 0;
+                while (pc < stringTableOffset) {
+                    const b = bytecode[pc++];
+                    result |= (b & 0x7f) << shift;
+                    if ((b & 0x80) === 0) break;
+                    shift += 7;
+                }
+                return result;
+            }
+
+            while (pc < stringTableOffset) {
+                const op = bytecode[pc++];
+                if (op === DEFINE_FRAME) {
+                    const frameId = readVarint();
+                    const nameId = readVarint();
+                    if (nameId < strings.length) {
+                        frames.push({ id: frameId, name: strings[nameId] });
+                    }
+                }
+                // For other opcodes, we just keep scanning
+                // This is imperfect but works for finding frame definitions
+            }
+
+            return frames;
+        }
+
+        /**
+         * Update the scene selector dropdown.
+         */
+        function updateSceneSelector(frames, metadata) {
+            sceneSelect.innerHTML = '';
+
+            // Add "All" option if we have animation metadata
+            if (metadata?.animation) {
+                const allOpt = document.createElement('option');
+                allOpt.value = '__all__';
+                allOpt.textContent = `All (${metadata.animation.name || 'Animation'})`;
+                sceneSelect.appendChild(allOpt);
+
+                // Add scene-based options from animation
+                if (metadata.animation.scenes) {
+                    for (const scene of metadata.animation.scenes) {
+                        const opt = document.createElement('option');
+                        opt.value = scene.frame;
+                        opt.textContent = `${scene.id} (${scene.start.toFixed(1)}s - ${scene.end.toFixed(1)}s)`;
+                        sceneSelect.appendChild(opt);
+                    }
+                }
+            } else if (frames.length > 0) {
+                // No animation metadata - just list frames
+                const allOpt = document.createElement('option');
+                allOpt.value = '__all__';
+                allOpt.textContent = 'All Frames';
+                sceneSelect.appendChild(allOpt);
+            }
+
+            // Add individual frame options
+            for (const frame of frames) {
+                // Skip if already added as scene
+                const existing = [...sceneSelect.options].find(o => o.value === frame.name);
+                if (existing) continue;
+
+                const opt = document.createElement('option');
+                opt.value = frame.name;
+                opt.textContent = frame.name;
+                sceneSelect.appendChild(opt);
+            }
+
+            sceneSelect.disabled = frames.length === 0;
+            selectedScene = '__all__';
+            sceneSelect.value = '__all__';
+
+            // Update info text
+            if (metadata?.animation) {
+                const duration = metadata.animation.duration || 0;
+                sceneInfo.textContent = `Duration: ${duration.toFixed(1)}s`;
+            } else {
+                sceneInfo.textContent = frames.length > 0 ? `${frames.length} frame(s)` : '';
+            }
+        }
+
+        /**
+         * Get current scene info for animation playback at a given time.
+         */
+        function getSceneAt(time, metadata) {
+            if (!metadata?.animation?.scenes) return null;
+
+            const scenes = metadata.animation.scenes;
+            const duration = metadata.animation.duration || scenes[scenes.length - 1]?.end || 0;
+            const clampedTime = Math.min(time, duration - 0.001);
+
+            for (const scene of scenes) {
+                if (clampedTime >= scene.start && clampedTime < scene.end) {
+                    return {
+                        frame: scene.frame,
+                        id: scene.id,
+                        localTime: clampedTime - scene.start,
+                    };
+                }
+            }
+
+            // Fallback to last scene
+            const last = scenes[scenes.length - 1];
+            if (last) {
+                return {
+                    frame: last.frame,
+                    id: last.id,
+                    localTime: clampedTime - last.start,
+                };
+            }
+            return null;
+        }
 
         // ====================================================================
         // Tab switching
@@ -565,6 +769,11 @@
             hideError();
             pngine.freeModule();
             setStatus('Cleared', '');
+
+            // Reset scene selector
+            loadedMetadata = null;
+            detectedFrames = [];
+            updateSceneSelector([], null);
         }
 
         // ====================================================================
@@ -623,21 +832,45 @@
                 const time = (timestamp - startTime) / 1000.0; // seconds as f32
 
                 try {
-                    // Write time to uniform buffer (auto-detect uniform buffer ID)
-                    const uniformBufferId = pngine.findUniformBuffer();
-                    if (uniformBufferId !== null) {
-                        pngine.writeTimeUniform(uniformBufferId, time);
+                    let currentFrame = selectedScene;
+                    let displayTime = time;
+                    let sceneLabel = '';
+
+                    // Determine which frame to execute based on selection
+                    if (tabType === 'png' && selectedScene === '__all__' && loadedMetadata?.animation) {
+                        // Use animation timeline
+                        const sceneData = getSceneAt(time, loadedMetadata);
+                        if (sceneData) {
+                            currentFrame = sceneData.frame;
+                            displayTime = sceneData.localTime;
+                            sceneLabel = ` [${sceneData.id}]`;
+                        }
                     }
 
-                    // Re-execute all frames
-                    pngine.executeAll();
+                    // Write time to uniform buffer
+                    const uniformBufferId = pngine.findUniformBuffer();
+                    if (uniformBufferId !== null) {
+                        pngine.writeTimeUniform(uniformBufferId, displayTime);
+                    }
+
+                    // Execute: either specific frame or all
+                    if (currentFrame && currentFrame !== '__all__') {
+                        try {
+                            pngine.executeFrameByName(currentFrame);
+                        } catch (e) {
+                            // Fallback to executeAll if frame not found
+                            pngine.executeAll();
+                        }
+                    } else {
+                        pngine.executeAll();
+                    }
 
                     // Update time display based on tab
                     let display;
                     if (tabType === 'source') display = timeDisplay;
                     else if (tabType === 'pngb') display = timeDisplay2;
                     else display = timeDisplay3;
-                    display.textContent = `t = ${time.toFixed(2)}s`;
+                    display.textContent = `t = ${time.toFixed(2)}s${sceneLabel}`;
 
                 } catch (err) {
                     stopAnimation();
@@ -834,6 +1067,22 @@ Size: ${formatBytes(data.length)}
                         const bytecode = await extractPngb(data);
                         loadedPngBytecode = bytecode;
 
+                        // Parse frame names from bytecode
+                        detectedFrames = parseFrameNames(bytecode);
+
+                        // Try to extract animation metadata
+                        loadedMetadata = null;
+                        if (hasPngm(data)) {
+                            try {
+                                loadedMetadata = await extractPngm(data);
+                            } catch (e) {
+                                console.warn('Failed to parse pNGm:', e);
+                            }
+                        }
+
+                        // Update scene selector
+                        updateSceneSelector(detectedFrames, loadedMetadata);
+
                         infoHtml += `
 <span class="png-badge has-bytecode">✓ Has Embedded Bytecode</span>
 
@@ -844,7 +1093,21 @@ pNGb Chunk:
 
 Bytecode Header:
   Magic: ${String.fromCharCode(...bytecode.slice(0, 4))}
-  Size: ${formatBytes(bytecode.length)}</pre>`;
+  Size: ${formatBytes(bytecode.length)}
+  Frames: ${detectedFrames.length}`;
+
+                        if (loadedMetadata?.animation) {
+                            const anim = loadedMetadata.animation;
+                            infoHtml += `
+
+Animation:
+  Name: ${anim.name}
+  Duration: ${anim.duration}s
+  Loop: ${anim.loop}
+  Scenes: ${anim.scenes?.length || 0}`;
+                        }
+
+                        infoHtml += `</pre>`;
 
                         runPngBtn.disabled = !pngine;
                         playPngBtn.disabled = !pngine;
@@ -866,6 +1129,9 @@ Use the CLI to embed bytecode:
 
   pngine embed image.png code.pngb</pre>`;
                     loadedPngBytecode = null;
+                    loadedMetadata = null;
+                    detectedFrames = [];
+                    updateSceneSelector([], null);
                     runPngBtn.disabled = true;
                     playPngBtn.disabled = true;
                 }
@@ -876,6 +1142,9 @@ Use the CLI to embed bytecode:
                 pngInfo.innerHTML = `<pre style="color: #e94560;">Error reading file: ${err.message}</pre>`;
                 pngImageWrapper.innerHTML = '<span class="placeholder">Error loading image</span>';
                 loadedPngBytecode = null;
+                loadedMetadata = null;
+                detectedFrames = [];
+                updateSceneSelector([], null);
                 runPngBtn.disabled = true;
                 playPngBtn.disabled = true;
             }
@@ -901,11 +1170,20 @@ Use the CLI to embed bytecode:
                     pngine.writeTimeUniform(uniformBufferId, 0);
                 }
 
-                // Re-execute with textures ready
-                pngine.executeAll();
+                // Execute based on scene selection
+                if (selectedScene && selectedScene !== '__all__') {
+                    try {
+                        pngine.executeFrameByName(selectedScene);
+                    } catch (e) {
+                        pngine.executeAll();
+                    }
+                } else {
+                    pngine.executeAll();
+                }
 
                 const elapsed = (performance.now() - start).toFixed(2);
-                setStatus(`Executed in ${elapsed}ms`, 'success');
+                const sceneLabel = selectedScene !== '__all__' ? ` (${selectedScene})` : '';
+                setStatus(`Executed in ${elapsed}ms${sceneLabel}`, 'success');
             } catch (err) {
                 setStatus('Error: ' + err.message, 'error');
                 console.error('PNG bytecode execution error:', err);
@@ -969,6 +1247,22 @@ Use the CLI to embed bytecode:
 
         runPngBtn.addEventListener('click', runPngBytecode);
         playPngBtn.addEventListener('click', () => togglePlay('png'));
+
+        // Scene selector
+        sceneSelect.addEventListener('change', (e) => {
+            selectedScene = e.target.value;
+            console.log('Scene selected:', selectedScene);
+
+            // If we have metadata, show scene duration
+            if (loadedMetadata?.animation?.scenes) {
+                const scene = loadedMetadata.animation.scenes.find(s => s.frame === selectedScene);
+                if (scene) {
+                    sceneInfo.textContent = `${scene.id}: ${(scene.end - scene.start).toFixed(1)}s`;
+                } else if (selectedScene === '__all__') {
+                    sceneInfo.textContent = `Duration: ${loadedMetadata.animation.duration}s`;
+                }
+            }
+        });
 
         // PNG tab - drag and drop
         pngDropZone.addEventListener('click', () => pngFileInput.click());

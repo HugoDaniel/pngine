@@ -305,16 +305,28 @@ export class PNGineGPU {
             return;
         }
         const descJson = this.readString(descPtr, descLen);
+        console.log(`[GPU] createComputePipeline(${id}), desc: ${descJson}`);
         const desc = JSON.parse(descJson);
+
+        // Resolve shader module reference
+        const computeShader = this.shaders.get(desc.compute.shader);
+        console.log(`[GPU]   compute shader ${desc.compute.shader}: ${computeShader ? 'found' : 'NOT FOUND'}`);
+
+        if (!computeShader) {
+            console.error(`[GPU] ERROR: Shader ${desc.compute.shader} not found for compute pipeline ${id}`);
+            console.error(`[GPU]   Available shaders: ${[...this.shaders.keys()].join(', ')}`);
+            return;
+        }
 
         const pipeline = this.device.createComputePipeline({
             layout: 'auto',
             compute: {
-                module: this.shaders.get(desc.compute.shader),
+                module: computeShader,
                 entryPoint: desc.compute.entryPoint || 'main',
             },
         });
         this.pipelines.set(id, pipeline);
+        console.log(`[GPU]   compute pipeline ${id} created: ${pipeline ? 'yes' : 'no'}`);
     }
 
     /**

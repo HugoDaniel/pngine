@@ -6,11 +6,11 @@
  */
 
 import { PNGineGPU } from './pngine-gpu.js';
-import { extractPngb, fetchAndExtract, hasPngb, getPngbInfo } from './pngine-png.js';
+import { extractPngb, fetchAndExtract, hasPngb, getPngbInfo, hasPngm, extractPngm, extractAll } from './pngine-png.js';
 import { isZip, extractFromZip, fetchAndExtractZip, getZipBundleInfo, ZipReader } from './pngine-zip.js';
 
 // Re-export PNG utilities
-export { extractPngb, fetchAndExtract, hasPngb, getPngbInfo };
+export { extractPngb, fetchAndExtract, hasPngb, getPngbInfo, hasPngm, extractPngm, extractAll };
 
 // Re-export ZIP utilities
 export { isZip, extractFromZip, fetchAndExtractZip, getZipBundleInfo, ZipReader };
@@ -399,6 +399,45 @@ export class PNGine {
      */
     async waitForBitmaps() {
         await this.gpu.waitForBitmaps();
+    }
+
+    /**
+     * Execute a specific frame by name.
+     *
+     * @param {string} frameName - Name of the frame to execute (e.g., 'sceneQ')
+     * @throws {Error} On execution failure
+     */
+    executeFrameByName(frameName) {
+        const encoder = new TextEncoder();
+        const nameBytes = encoder.encode(frameName);
+
+        // Allocate memory for name
+        const namePtr = this.exports.alloc(nameBytes.length);
+        if (!namePtr) {
+            throw new Error('Failed to allocate memory for frame name');
+        }
+
+        // Copy name to WASM memory
+        const memory = new Uint8Array(this.exports.memory.buffer);
+        memory.set(nameBytes, namePtr);
+
+        // Execute
+        const result = this.exports.executeFrameByName(namePtr, nameBytes.length);
+
+        // Free name memory
+        this.exports.free(namePtr, nameBytes.length);
+
+        if (result !== ErrorCode.SUCCESS) {
+            throw new Error(`Frame execution failed: ${this.getErrorMessage(result)}`);
+        }
+    }
+
+    /**
+     * Get the number of frames in the loaded module.
+     * @returns {number} Frame count
+     */
+    getFrameCount() {
+        return this.exports.getFrameCount ? this.exports.getFrameCount() : 0;
     }
 
     /**

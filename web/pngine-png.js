@@ -11,9 +11,14 @@
 const PNG_SIGNATURE = new Uint8Array([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
 
 /**
- * pNGb chunk type as 4-byte array.
+ * pNGb chunk type as 4-byte array (bytecode).
  */
 const PNGB_CHUNK_TYPE = new Uint8Array([0x70, 0x4E, 0x47, 0x62]); // 'pNGb'
+
+/**
+ * pNGm chunk type as 4-byte array (animation metadata).
+ */
+const PNGM_CHUNK_TYPE = new Uint8Array([0x70, 0x4E, 0x47, 0x6D]); // 'pNGm'
 
 /**
  * Current pNGb format version.
@@ -249,4 +254,118 @@ function readUint32BE(bytes, offset) {
  */
 function chunkTypesEqual(a, b) {
     return a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3];
+}
+
+/**
+ * Check if PNG data contains a pNGm (animation metadata) chunk.
+ *
+ * @param {ArrayBuffer|Uint8Array} data - PNG file data
+ * @returns {boolean} True if pNGm chunk exists
+ */
+export function hasPngm(data) {
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+
+    // Check PNG signature
+    if (bytes.length < 8) return false;
+    for (let i = 0; i < 8; i++) {
+        if (bytes[i] !== PNG_SIGNATURE[i]) return false;
+    }
+
+    // Scan chunks for pNGm
+    let pos = 8;
+    while (pos + 12 <= bytes.length) {
+        const length = readUint32BE(bytes, pos);
+        const chunkType = bytes.slice(pos + 4, pos + 8);
+
+        if (chunkTypesEqual(chunkType, PNGM_CHUNK_TYPE)) {
+            return true;
+        }
+
+        // Move to next chunk: length(4) + type(4) + data(length) + crc(4)
+        pos += 12 + length;
+    }
+
+    return false;
+}
+
+/**
+ * Extract animation metadata from PNG data.
+ *
+ * @param {ArrayBuffer|Uint8Array} data - PNG file data
+ * @returns {Promise<Object|null>} Animation metadata object or null if not found
+ */
+export async function extractPngm(data) {
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+
+    // Validate PNG signature
+    if (bytes.length < 8) {
+        return null;
+    }
+    for (let i = 0; i < 8; i++) {
+        if (bytes[i] !== PNG_SIGNATURE[i]) {
+            return null;
+        }
+    }
+
+    // Scan chunks for pNGm
+    let pos = 8;
+    while (pos + 12 <= bytes.length) {
+        const length = readUint32BE(bytes, pos);
+        const chunkType = bytes.slice(pos + 4, pos + 8);
+
+        if (chunkTypesEqual(chunkType, PNGM_CHUNK_TYPE)) {
+            const chunkData = bytes.slice(pos + 8, pos + 8 + length);
+            return await parsePngmChunk(chunkData);
+        }
+
+        pos += 12 + length;
+    }
+
+    return null;
+}
+
+/**
+ * Parse pNGm chunk data to extract metadata.
+ *
+ * @param {Uint8Array} data - pNGm chunk data (after type, before CRC)
+ * @returns {Promise<Object>} Parsed metadata
+ */
+async function parsePngmChunk(data) {
+    if (data.length < 2) {
+        throw new Error('Invalid pNGm chunk: too short');
+    }
+
+    const version = data[0];
+    const flags = data[1];
+    const payload = data.slice(2);
+
+    // Check version
+    if (version !== 0x01) {
+        throw new Error(`Unsupported pNGm version: ${version}`);
+    }
+
+    // Check compression flag
+    const isCompressed = (flags & FLAG_COMPRESSED) !== 0;
+    let jsonBytes;
+    if (isCompressed) {
+        jsonBytes = await decompressDeflateRaw(payload);
+    } else {
+        jsonBytes = payload;
+    }
+
+    // Parse JSON
+    const jsonStr = new TextDecoder().decode(jsonBytes);
+    return JSON.parse(jsonStr);
+}
+
+/**
+ * Extract both bytecode and metadata from PNG.
+ *
+ * @param {ArrayBuffer|Uint8Array} data - PNG file data
+ * @returns {Promise<{bytecode: Uint8Array, metadata: Object|null}>}
+ */
+export async function extractAll(data) {
+    const bytecode = await extractPngb(data);
+    const metadata = await extractPngm(data);
+    return { bytecode, metadata };
 }
