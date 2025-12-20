@@ -327,6 +327,9 @@ export fn executeFrameByName(name_ptr: [*]const u8, name_len: usize) u32 {
     var dispatcher = Dispatcher(WasmGPU).initWithFrame(allocator, &gpu, module, frame_counter);
     defer dispatcher.deinit();
 
+    // Scan for pass definitions before executing - exec_pass needs pass_ranges
+    dispatcher.scanPassDefinitions();
+
     dispatcher.pc = frame_range.start;
     const max_iterations: usize = 10000;
     for (0..max_iterations) |_| {

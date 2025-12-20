@@ -145,9 +145,9 @@ class PNGineViewer {
         this.pngine.gpu.setTime(localTime);
 
         // Find and write to uniform buffer
-        const uniformBufferId = this.pngine.findUniformBuffer();
-        if (uniformBufferId !== null) {
-            this.pngine.writeTimeUniform(uniformBufferId, localTime);
+        const uniformInfo = this.pngine.findUniformBuffer();
+        if (uniformInfo !== null) {
+            this.pngine.writeTimeUniform(uniformInfo.id, localTime, uniformInfo.size);
         }
 
         // Execute the specific frame

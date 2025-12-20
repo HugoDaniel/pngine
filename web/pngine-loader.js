@@ -338,6 +338,14 @@ export class PNGine {
      * @throws {Error} On load failure
      */
     loadModule(bytecode) {
+        console.log(`[PNGine] loadModule() called, bytecode size: ${bytecode.length}`);
+
+        // Verify bytecode header
+        if (bytecode.length >= 4) {
+            const magic = String.fromCharCode(bytecode[0], bytecode[1], bytecode[2], bytecode[3]);
+            console.log(`[PNGine] loadModule() bytecode magic: "${magic}"`);
+        }
+
         // Reset any previous state to ensure clean execution
         // This is especially important for typed arrays (filled flag)
         this.gpu.reset();
@@ -348,13 +356,16 @@ export class PNGine {
         if (!ptr) {
             throw new Error('Failed to allocate memory for bytecode');
         }
+        console.log(`[PNGine] loadModule() allocated WASM memory at ptr=${ptr}`);
 
         // Copy bytecode to WASM memory
         const memory = new Uint8Array(this.exports.memory.buffer);
         memory.set(bytecode, ptr);
 
         // Load module
+        console.log(`[PNGine] loadModule() calling WASM loadModule()`);
         const result = this.exports.loadModule(ptr, bytecode.length);
+        console.log(`[PNGine] loadModule() WASM result: ${result}`);
 
         // Free bytecode memory (module makes its own copy)
         this.exports.free(ptr, bytecode.length);
@@ -362,6 +373,7 @@ export class PNGine {
         if (result !== ErrorCode.SUCCESS) {
             throw new Error(`Failed to load module: ${this.getErrorMessage(result)}`);
         }
+        console.log(`[PNGine] loadModule() success`);
     }
 
     /**
@@ -370,16 +382,15 @@ export class PNGine {
      * @throws {Error} On execution failure
      */
     executeAll() {
-        const frameBefore = this.exports.getFrameCounter ? this.exports.getFrameCounter() : -1;
-        console.log(`[PNGine] executeAll() starting, frame_counter=${frameBefore}`);
-
+        console.log('[PNGine] executeAll() called');
+        console.log('[PNGine] executeAll() checking exports:', Object.keys(this.exports));
+        console.log('[PNGine] executeAll() GPU state - buffers:', this.gpu.buffers.size, 'shaders:', this.gpu.shaders.size, 'pipelines:', this.gpu.pipelines.size);
         const result = this.exports.executeAll();
+        console.log('[PNGine] executeAll() result:', result);
+        console.log('[PNGine] executeAll() GPU state after - buffers:', this.gpu.buffers.size, 'shaders:', this.gpu.shaders.size, 'pipelines:', this.gpu.pipelines.size);
         if (result !== ErrorCode.SUCCESS) {
             throw new Error(`Execution failed: ${this.getErrorMessage(result)}`);
         }
-
-        const frameAfter = this.exports.getFrameCounter ? this.exports.getFrameCounter() : -1;
-        console.log(`[PNGine] executeAll() finished, frame_counter=${frameAfter}`);
     }
 
     /**
@@ -534,20 +545,24 @@ export class PNGine {
      * @param {number} bufferId - Buffer ID to write to
      * @param {number} time - Time value in seconds (f32)
      */
-    writeTimeUniform(bufferId, time) {
+    writeTimeUniform(bufferId, time, bufferSize = 12) {
         // Get canvas dimensions
         const canvas = this.gpu.context.canvas;
         const width = canvas.width;
         const height = canvas.height;
 
-        // Create buffer: f32 time + u32 width + u32 height = 12 bytes
-        const buffer = new ArrayBuffer(12);
-        const floatView = new Float32Array(buffer, 0, 1);
-        const uintView = new Uint32Array(buffer, 4, 2);
+        // Create buffer based on layout (all f32):
+        // - 12 bytes: f32 time + f32 width + f32 height
+        // - 16 bytes: f32 time + f32 width + f32 height + f32 ratio
+        const buffer = new ArrayBuffer(bufferSize);
+        const floatView = new Float32Array(buffer);
 
         floatView[0] = time;
-        uintView[0] = width;
-        uintView[1] = height;
+        floatView[1] = width;   // f32, not u32
+        floatView[2] = height;  // f32, not u32
+        if (bufferSize >= 16) {
+            floatView[3] = width / height; // aspect ratio
+        }
 
         // Write to GPU buffer
         this.gpu.writeTimeToBuffer(bufferId, new Uint8Array(buffer));

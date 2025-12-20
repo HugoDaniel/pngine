@@ -984,6 +984,7 @@
                 if (!isPlaying) return;
 
                 const time = (timestamp - startTime) / 1000.0; // seconds as f32
+                console.log('[animate] time:', time.toFixed(2));
 
                 try {
                     let currentFrame = selectedScene;
@@ -1002,9 +1003,9 @@
                     }
 
                     // Write time to uniform buffer
-                    const uniformBufferId = pngine.findUniformBuffer();
-                    if (uniformBufferId !== null) {
-                        pngine.writeTimeUniform(uniformBufferId, displayTime);
+                    const uniformInfo = pngine.findUniformBuffer();
+                    if (uniformInfo !== null) {
+                        pngine.writeTimeUniform(uniformInfo.id, displayTime, uniformInfo.size);
                     }
 
                     // Execute: either specific frame or all
@@ -1170,9 +1171,9 @@ Sections:
                 pngine.executeAll();
 
                 // Now buffers exist - write uniform data (time=0, canvas dimensions)
-                const uniformBufferId = pngine.findUniformBuffer();
-                if (uniformBufferId !== null) {
-                    pngine.writeTimeUniform(uniformBufferId, 0);
+                const uniformInfo = pngine.findUniformBuffer();
+                if (uniformInfo !== null) {
+                    pngine.writeTimeUniform(uniformInfo.id, 0, uniformInfo.size);
                     // Second execution: render with correct uniforms
                     pngine.executeAll();
                 }
@@ -1305,6 +1306,7 @@ Use the CLI to embed bytecode:
         }
 
         async function runPngBytecode() {
+            console.log('[runPngBytecode] Called, pngine:', !!pngine, 'bytecode:', !!loadedPngBytecode);
             if (!pngine || !loadedPngBytecode) return;
             hideError();
 
@@ -1312,16 +1314,19 @@ Use the CLI to embed bytecode:
                 setStatus('Loading embedded bytecode...');
                 const start = performance.now();
 
+                console.log('[runPngBytecode] Loading module...');
                 pngine.loadModule(loadedPngBytecode);
+                console.log('[runPngBytecode] Executing all...');
                 pngine.executeAll();
+                console.log('[runPngBytecode] executeAll done');
 
                 // Wait for any async ImageBitmap decoding to complete
                 await pngine.waitForBitmaps();
 
                 // Write uniforms if available
-                const uniformBufferId = pngine.findUniformBuffer();
-                if (uniformBufferId !== null) {
-                    pngine.writeTimeUniform(uniformBufferId, 0);
+                const uniformInfo = pngine.findUniformBuffer();
+                if (uniformInfo !== null) {
+                    pngine.writeTimeUniform(uniformInfo.id, 0, uniformInfo.size);
                 }
 
                 // Execute based on scene selection
@@ -1492,9 +1497,9 @@ Use the CLI to embed bytecode:
                 // Update time uniforms
                 pngine.gpu.setTime(time);
 
-                const uniformBufferId = pngine.findUniformBuffer();
-                if (uniformBufferId !== null) {
-                    pngine.writeTimeUniform(uniformBufferId, time);
+                const uniformInfo = pngine.findUniformBuffer();
+                if (uniformInfo !== null) {
+                    pngine.writeTimeUniform(uniformInfo.id, time, uniformInfo.size);
                 }
 
                 // Execute the specific frame
@@ -1502,7 +1507,7 @@ Use the CLI to embed bytecode:
 
                 timeDisplay3.textContent = `${time.toFixed(2)}s`;
             } catch (err) {
-                console.warn(`Failed to draw scene '${sceneName}':`, err.message);
+                console.error(`Failed to draw scene '${sceneName}':`, err.message);
             }
         }
 

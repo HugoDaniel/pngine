@@ -22,7 +22,6 @@
  * Version: 2024-12-17-v1
  */
 
-console.log('[PNGineGPU] Module loaded - version 2024-12-17-v1');
 
 export class PNGineGPU {
     /**
@@ -117,10 +116,8 @@ export class PNGineGPU {
      * @param {number} usage - Usage flags
      */
     createBuffer(id, size, usage) {
-        console.log(`[GPU] createBuffer(${id}), size=${size}, usage=${usage}`);
         // Skip if already exists (allows executeAll in animation loop)
         if (this.buffers.has(id)) {
-            console.log(`[GPU]   buffer ${id} already exists, skipping`);
             return;
         }
         const gpuUsage = this.mapBufferUsage(usage);
@@ -130,22 +127,22 @@ export class PNGineGPU {
         });
         this.buffers.set(id, buffer);
         this.bufferMeta.set(id, { size, usage: gpuUsage });
-        console.log(`[GPU]   buffer ${id} created: ${buffer ? 'yes' : 'no'}`);
     }
 
     /**
-     * Find the first buffer with UNIFORM usage that matches our time uniform layout.
-     * Only returns buffers with size 12 (f32 time + u32 width + u32 height).
-     * This prevents corrupting other uniform buffers (e.g., simParams for boids).
-     * @returns {number|null} Buffer ID or null if not found
+     * Find the first buffer with UNIFORM usage that matches time uniform layout.
+     * Supports:
+     * - 12 bytes: f32 time + u32 width + u32 height (simple)
+     * - 16 bytes: f32 time + u32 width + u32 height + f32 ratio (demo2025)
+     * @returns {{id: number, size: number}|null} Buffer info or null if not found
      */
     findUniformBuffer() {
-        const TIME_UNIFORM_SIZE = 12;  // f32 time + u32 width + u32 height
-        for (const [id, meta] of this.bufferMeta) {
-            // GPUBufferUsage.UNIFORM = 0x0040 = 64
-            // Only match buffers with exactly 12 bytes (time uniform layout)
-            if ((meta.usage & GPUBufferUsage.UNIFORM) && meta.size === TIME_UNIFORM_SIZE) {
-                return id;
+        // Prefer 16-byte buffer (demo2025 layout), fallback to 12-byte
+        for (const size of [16, 12]) {
+            for (const [id, meta] of this.bufferMeta) {
+                if ((meta.usage & GPUBufferUsage.UNIFORM) && meta.size === size) {
+                    return { id, size };
+                }
             }
         }
         return null;
@@ -165,7 +162,7 @@ export class PNGineGPU {
         }
         const bytes = this.readBytes(descPtr, descLen);
         const desc = this.decodeTextureDescriptor(bytes);
-        console.log(`[GPU] createTexture(${id}), decoded:`, desc);
+        console.log(`[GPU] createTexture(${id}) format=${desc.format} size=${desc.size[0]}x${desc.size[1]} usage=0x${desc.usage.toString(16)}`);
 
         const texture = this.device.createTexture(desc);
         this.textures.set(id, texture);
@@ -185,7 +182,6 @@ export class PNGineGPU {
         }
         const bytes = this.readBytes(descPtr, descLen);
         const desc = this.decodeSamplerDescriptor(bytes);
-        console.log(`[GPU] createSampler(${id}), decoded:`, desc);
 
         const sampler = this.device.createSampler(desc);
         this.samplers.set(id, sampler);
@@ -204,8 +200,17 @@ export class PNGineGPU {
             return;
         }
         const code = this.readString(codePtr, codeLen);
-        console.log(`[GPU] createShaderModule(${id}), code length: ${code.length}`);
         const module = this.device.createShaderModule({ code });
+        // Check for shader compilation errors
+        module.getCompilationInfo().then(info => {
+            for (const msg of info.messages) {
+                if (msg.type === 'error') {
+                    console.error(`[GPU] Shader ${id} error: ${msg.message} at line ${msg.lineNum}`);
+                } else if (msg.type === 'warning') {
+                    console.warn(`[GPU] Shader ${id} warning: ${msg.message}`);
+                }
+            }
+        });
         this.shaders.set(id, module);
     }
 
@@ -222,15 +227,12 @@ export class PNGineGPU {
             return;
         }
         const descJson = this.readString(descPtr, descLen);
-        console.log(`[GPU] createRenderPipeline(${id}), desc: ${descJson}`);
         const desc = JSON.parse(descJson);
 
         // Resolve shader module references
         const vertexShader = this.shaders.get(desc.vertex.shader);
         const fragmentShader = desc.fragment ? this.shaders.get(desc.fragment.shader) : null;
-        console.log(`[GPU]   vertex shader ${desc.vertex.shader}: ${vertexShader ? 'found' : 'NOT FOUND'}`);
         if (desc.fragment) {
-            console.log(`[GPU]   fragment shader ${desc.fragment.shader}: ${fragmentShader ? 'found' : 'NOT FOUND'}`);
         }
 
         const pipelineDesc = {
@@ -259,15 +261,17 @@ export class PNGineGPU {
         // Add vertex buffer layouts if present
         if (desc.vertex.buffers && desc.vertex.buffers.length > 0) {
             pipelineDesc.vertex.buffers = desc.vertex.buffers;
-            console.log(`[GPU]   vertex buffers: ${JSON.stringify(desc.vertex.buffers)}`);
         }
 
         if (desc.fragment) {
+            // Use target format from descriptor, or canvas format if not specified
+            const targetFormat = desc.fragment.targetFormat || navigator.gpu.getPreferredCanvasFormat();
+            console.log(`[GPU] createRenderPipeline(${id}) targetFormat=${targetFormat}`);
             pipelineDesc.fragment = {
                 module: fragmentShader,
                 entryPoint: desc.fragment.entryPoint || 'fragmentMain',
                 targets: [{
-                    format: navigator.gpu.getPreferredCanvasFormat(),
+                    format: targetFormat,
                 }],
             };
         }
@@ -279,7 +283,6 @@ export class PNGineGPU {
                 depthWriteEnabled: desc.depthStencil.depthWriteEnabled !== false,
                 depthCompare: desc.depthStencil.depthCompare || 'less',
             };
-            console.log(`[GPU]   depthStencil: ${JSON.stringify(pipelineDesc.depthStencil)}`);
         }
 
         // Add multisample state if present
@@ -289,7 +292,6 @@ export class PNGineGPU {
 
         const pipeline = this.device.createRenderPipeline(pipelineDesc);
         this.pipelines.set(id, pipeline);
-        console.log(`[GPU]   pipeline ${id} created: ${pipeline ? 'yes' : 'no'}`);
     }
 
     /**
@@ -304,13 +306,12 @@ export class PNGineGPU {
         if (this.pipelines.has(id)) {
             return;
         }
+        console.log(`[GPU] createComputePipeline(${id})`);
         const descJson = this.readString(descPtr, descLen);
-        console.log(`[GPU] createComputePipeline(${id}), desc: ${descJson}`);
         const desc = JSON.parse(descJson);
 
         // Resolve shader module reference
         const computeShader = this.shaders.get(desc.compute.shader);
-        console.log(`[GPU]   compute shader ${desc.compute.shader}: ${computeShader ? 'found' : 'NOT FOUND'}`);
 
         if (!computeShader) {
             console.error(`[GPU] ERROR: Shader ${desc.compute.shader} not found for compute pipeline ${id}`);
@@ -326,7 +327,6 @@ export class PNGineGPU {
             },
         });
         this.pipelines.set(id, pipeline);
-        console.log(`[GPU]   compute pipeline ${id} created: ${pipeline ? 'yes' : 'no'}`);
     }
 
     /**
@@ -338,6 +338,7 @@ export class PNGineGPU {
      * @param {number} entriesLen - Descriptor length
      */
     createBindGroup(id, pipelineId, entriesPtr, entriesLen) {
+        console.log(`[GPU] createBindGroup(${id}, pipeline=${pipelineId})`);
         // Skip if already exists (allows executeAll in animation loop)
         if (this.bindGroups.has(id)) {
             return;
@@ -350,7 +351,6 @@ export class PNGineGPU {
             const size = e.resourceType === 0 ? `,sz=${e.size}` : '';
             return `b${e.binding}:${type}${e.resourceId}${size}`;
         }).join(', ');
-        console.log(`[GPU] createBindGroup(${id}), pipeline=${pipelineId}, group=${desc.groupIndex}, entries=[${entryDetails}]`);
 
         // Resolve resource references in entries
         const entries = desc.entries.map(entry => {
@@ -409,7 +409,6 @@ export class PNGineGPU {
         const mimeType = new TextDecoder().decode(mimeBytes);
         const imageData = bytes.slice(1 + mimeLen);
 
-        console.log(`[GPU] createImageBitmap(${id}), mime=${mimeType}, size=${imageData.length}`);
 
         // Create Blob and decode to ImageBitmap (async)
         const blob = new Blob([imageData], { type: mimeType });
@@ -441,7 +440,6 @@ export class PNGineGPU {
 
         const bytes = this.readBytes(descPtr, descLen);
         const desc = this.decodeTextureViewDescriptor(bytes);
-        console.log(`[GPU] createTextureView(${viewId}, texture=${textureId}), desc:`, desc);
 
         const view = texture.createView(desc);
         this.textureViews.set(viewId, view);
@@ -465,7 +463,6 @@ export class PNGineGPU {
         const type = bytes[0] === 0 ? 'occlusion' : 'timestamp';
         const count = bytes[1] | (bytes[2] << 8);
 
-        console.log(`[GPU] createQuerySet(${querySetId}), type=${type}, count=${count}`);
 
         const querySet = this.device.createQuerySet({ type, count });
         this.querySets.set(querySetId, querySet);
@@ -486,7 +483,6 @@ export class PNGineGPU {
 
         const bytes = this.readBytes(descPtr, descLen);
         const entries = this.decodeBindGroupLayoutDescriptor(bytes);
-        console.log(`[GPU] createBindGroupLayout(${layoutId}), entries:`, entries);
 
         const layout = this.device.createBindGroupLayout({ entries });
         this.bindGroupLayouts.set(layoutId, layout);
@@ -522,7 +518,6 @@ export class PNGineGPU {
             }
         }
 
-        console.log(`[GPU] createPipelineLayout(${layoutId}), bindGroupLayouts: ${count}`);
 
         const layout = this.device.createPipelineLayout({ bindGroupLayouts });
         this.pipelineLayouts.set(layoutId, layout);
@@ -541,16 +536,13 @@ export class PNGineGPU {
                 pending.push(
                     bitmap.then(resolved => {
                         this.imageBitmaps.set(id, resolved);
-                        console.log(`[GPU] ImageBitmap ${id} decoded: ${resolved.width}x${resolved.height}`);
                         return resolved;
                     })
                 );
             }
         }
         if (pending.length > 0) {
-            console.log(`[GPU] Waiting for ${pending.length} ImageBitmap(s) to decode...`);
             await Promise.all(pending);
-            console.log(`[GPU] All ImageBitmaps ready`);
         }
     }
 
@@ -572,7 +564,6 @@ export class PNGineGPU {
         }
 
         const wasmBytes = this.readBytes(dataPtr, dataLen).slice();  // Copy bytes
-        console.log(`[GPU] initWasmModule(${moduleId}), size=${wasmBytes.length}`);
 
         try {
             // Compile synchronously (small modules expected)
@@ -599,7 +590,6 @@ export class PNGineGPU {
                 memory: instance.exports.memory,
             });
 
-            console.log(`[GPU]   WASM module ${moduleId} loaded, exports:`, Object.keys(instance.exports));
         } catch (err) {
             console.error(`[GPU] Failed to load WASM module ${moduleId}:`, err);
         }
@@ -635,14 +625,12 @@ export class PNGineGPU {
         const encodedArgs = this.readBytes(argsPtr, argsLen);
         const resolvedArgs = this.resolveWasmArgs(encodedArgs);
 
-        console.log(`[GPU] callWasmFunc(${callId}): ${funcName}(${resolvedArgs.join(', ')})`);
 
         // Call WASM function - returns pointer to result in WASM memory
         const resultPtr = func(...resolvedArgs);
 
         // Store result for writeBufferFromWasm
         this.wasmCallResults.set(callId, { ptr: resultPtr, moduleId });
-        console.log(`[GPU]   result ptr: ${resultPtr}`);
     }
 
     /**
@@ -676,7 +664,6 @@ export class PNGineGPU {
         // Read bytes from WASM linear memory
         const data = new Uint8Array(wasm.memory.buffer, result.ptr, byteLen);
 
-        console.log(`[GPU] writeBufferFromWasm(${callId}): ${byteLen} bytes → buffer ${bufferId} @ ${offset}`);
 
         // Write to GPU buffer
         this.device.queue.writeBuffer(buffer, offset, data);
@@ -768,7 +755,6 @@ export class PNGineGPU {
      * @param {number} originY - Y origin in texture
      */
     async copyExternalImageToTexture(bitmapId, textureId, mipLevel, originX, originY) {
-        console.log(`[GPU] copyExternalImageToTexture(bitmap=${bitmapId}, texture=${textureId}, mip=${mipLevel}, origin=[${originX},${originY}])`);
 
         // Get the ImageBitmap (may need to await promise)
         let bitmap = this.imageBitmaps.get(bitmapId);
@@ -796,7 +782,6 @@ export class PNGineGPU {
             { width: bitmap.width, height: bitmap.height }
         );
 
-        console.log(`[GPU]   copied ${bitmap.width}x${bitmap.height} to texture ${textureId}`);
     }
 
     // ========================================================================
@@ -805,28 +790,34 @@ export class PNGineGPU {
 
     /**
      * Begin a render pass.
-     * @param {number} textureId - Color attachment texture (0 = canvas)
+     * @param {number} textureId - Color attachment texture (0xFFFE = canvas, other = custom texture)
      * @param {number} loadOp - Load operation (0=load, 1=clear)
      * @param {number} storeOp - Store operation (0=store, 1=discard)
      * @param {number} depthTextureId - Depth attachment texture (0xFFFF = none)
      */
     beginRenderPass(textureId, loadOp, storeOp, depthTextureId) {
-        console.log(`[GPU] beginRenderPass(texture=${textureId}, load=${loadOp}, store=${storeOp}, depth=${depthTextureId}) - encoder exists: ${!!this.commandEncoder}`);
+        console.log(`[GPU] beginRenderPass(texture=${textureId}, load=${loadOp}, store=${storeOp}, depth=${depthTextureId})`);
         // Reuse existing command encoder if available (allows compute + render in same frame)
         if (!this.commandEncoder) {
             this.commandEncoder = this.device.createCommandEncoder();
-            console.log(`[GPU]   created NEW command encoder`);
-        } else {
-            console.log(`[GPU]   REUSING existing command encoder`);
         }
 
-        // Get render target (0 = current canvas texture)
+        // Get render target (0xFFFE = current canvas texture, other = custom texture)
+        // 0xFFFE (65534) is the sentinel value for contextCurrentTexture
+        const CANVAS_TEXTURE_ID = 0xFFFE; // 65534
         let view;
-        if (textureId === 0) {
+        if (textureId === CANVAS_TEXTURE_ID || textureId === 65534) {
             view = this.context.getCurrentTexture().createView();
         } else {
-            // TODO: Support custom render targets
-            view = this.context.getCurrentTexture().createView();
+            // Custom render target texture
+            const texture = this.textures.get(textureId);
+            if (texture) {
+                view = texture.createView();
+            } else {
+                // Fallback to canvas if texture not found
+                console.warn(`[GPU] Render target texture ${textureId} not found, using canvas`);
+                view = this.context.getCurrentTexture().createView();
+            }
         }
 
         const passDesc = {
@@ -848,7 +839,6 @@ export class PNGineGPU {
                     depthLoadOp: 'clear',
                     depthStoreOp: 'store',
                 };
-                console.log(`[GPU]   depth attachment: texture ${depthTextureId}`);
             } else {
                 console.warn(`[GPU] Depth texture ${depthTextureId} not found`);
             }
@@ -862,13 +852,10 @@ export class PNGineGPU {
      * Begin a compute pass.
      */
     beginComputePass() {
-        console.log(`[GPU] beginComputePass() - encoder exists: ${!!this.commandEncoder}`);
+        console.log('[GPU] beginComputePass()');
         // Reuse existing command encoder if available (allows compute + render in same frame)
         if (!this.commandEncoder) {
             this.commandEncoder = this.device.createCommandEncoder();
-            console.log(`[GPU]   created NEW command encoder`);
-        } else {
-            console.log(`[GPU]   REUSING existing command encoder`);
         }
         this.currentPass = this.commandEncoder.beginComputePass();
         this.passType = 'compute';
@@ -879,13 +866,15 @@ export class PNGineGPU {
      * @param {number} id - Pipeline ID
      */
     setPipeline(id) {
+        console.log(`[GPU] setPipeline(${id})`);
         const pipeline = this.pipelines.get(id);
-        console.log(`[GPU] setPipeline(${id}): ${pipeline ? 'found' : 'NOT FOUND'}, currentPass: ${this.currentPass ? 'active' : 'null'}`);
         if (!pipeline) {
             console.error(`[GPU] Pipeline ${id} not found! Available: ${[...this.pipelines.keys()].join(', ')}`);
+            return;
         }
         if (!this.currentPass) {
             console.error(`[GPU] No active pass for setPipeline!`);
+            return;
         }
         this.currentPass.setPipeline(pipeline);
     }
@@ -896,11 +885,10 @@ export class PNGineGPU {
      * @param {number} id - Bind group ID
      */
     setBindGroup(slot, id) {
-        // Log with pass type for debugging ping-pong
-        console.log(`[GPU] setBindGroup(slot=${slot}, id=${id}) in ${this.passType} pass`);
+        console.log(`[GPU] setBindGroup(slot=${slot}, id=${id})`);
         const bindGroup = this.bindGroups.get(id);
         if (!bindGroup) {
-            console.error(`[GPU] ERROR: Bind group ${id} not found!`);
+            console.error(`[GPU] ERROR: Bind group ${id} not found! Available: ${[...this.bindGroups.keys()].join(', ')}`);
             return;
         }
         this.currentPass.setBindGroup(slot, bindGroup);
@@ -914,7 +902,6 @@ export class PNGineGPU {
     setVertexBuffer(slot, id) {
         const buffer = this.buffers.get(id);
         const meta = this.bufferMeta.get(id);
-        console.log(`[GPU] setVertexBuffer(slot=${slot}, id=${id}, size=${meta?.size || 'unknown'}, buffer=${buffer ? 'OK' : 'MISSING'})`);
         if (!buffer) {
             console.error(`[GPU]   Buffer ${id} not found! Available buffers: ${[...this.buffers.keys()].join(', ')}`);
         }
@@ -929,7 +916,7 @@ export class PNGineGPU {
      * @param {number} firstInstance - First instance to draw
      */
     draw(vertexCount, instanceCount, firstVertex = 0, firstInstance = 0) {
-        console.log(`[GPU] draw(${vertexCount}, ${instanceCount}, ${firstVertex}, ${firstInstance})`);
+        console.log(`[GPU] draw(${vertexCount}, ${instanceCount})`);
         this.currentPass.draw(vertexCount, instanceCount, firstVertex, firstInstance);
     }
 
@@ -960,7 +947,11 @@ export class PNGineGPU {
      * End the current pass.
      */
     endPass() {
-        console.log(`[GPU] endPass()`);
+        console.log('[GPU] endPass()');
+        if (!this.currentPass) {
+            console.error('[GPU] No active pass to end!');
+            return;
+        }
         this.currentPass.end();
         this.currentPass = null;
         this.passType = null;
@@ -978,7 +969,7 @@ export class PNGineGPU {
      * @param {number} dataLen - Data length
      */
     writeBuffer(bufferId, offset, dataPtr, dataLen) {
-        console.log(`[GPU] writeBuffer(buffer=${bufferId}, offset=${offset}, ptr=${dataPtr}, len=${dataLen})`);
+        console.log(`[GPU] writeBuffer(${bufferId}, offset=${offset}, len=${dataLen})`);
         const buffer = this.buffers.get(bufferId);
         const data = this.readBytes(dataPtr, dataLen);
         this.device.queue.writeBuffer(buffer, offset, data);
@@ -988,22 +979,13 @@ export class PNGineGPU {
      * Write uniform data directly to a buffer (called from JS, not WASM).
      * Used by the Play feature to update uniform buffers each frame.
      * @param {number} bufferId - Buffer ID
-     * @param {Uint8Array} data - Data to write (12 bytes: f32 time + u32 width + u32 height)
+     * @param {Uint8Array} data - Data to write (12-16 bytes: f32 time + f32 width + f32 height [+ f32 ratio])
      */
     writeTimeToBuffer(bufferId, data) {
         const buffer = this.buffers.get(bufferId);
         if (!buffer) {
             console.warn(`[GPU] writeTimeToBuffer: buffer ${bufferId} not found`);
             return;
-        }
-        // Log first frame only to avoid spam
-        if (!this._uniformLogged) {
-            const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-            const time = view.getFloat32(0, true);
-            const width = view.getUint32(4, true);
-            const height = view.getUint32(8, true);
-            console.log(`[GPU] writeTimeToBuffer(${bufferId}): time=${time.toFixed(3)}, width=${width}, height=${height}`);
-            this._uniformLogged = true;
         }
         this.device.queue.writeBuffer(buffer, 0, data);
     }
@@ -1012,7 +994,7 @@ export class PNGineGPU {
      * Submit command buffer to queue.
      */
     submit() {
-        console.log(`[GPU] submit() - commandEncoder: ${this.commandEncoder ? 'present' : 'null'}`);
+        console.log('[GPU] submit()');
         if (this.commandEncoder) {
             const commandBuffer = this.commandEncoder.finish();
             this.device.queue.submit([commandBuffer]);
@@ -1457,7 +1439,6 @@ export class PNGineGPU {
      * @returns {Object} Imports object
      */
     getImports() {
-        console.log('[PNGineGPU] Creating WASM imports object');
         const self = this;
         return {
             env: {
@@ -1476,19 +1457,15 @@ export class PNGineGPU {
                 gpuBeginRenderPass: (tex, load, store, depth) => self.beginRenderPass(tex, load, store, depth),
                 gpuBeginComputePass: () => self.beginComputePass(),
                 gpuSetPipeline: (id) => {
-                    console.log(`[WASM->JS] gpuSetPipeline called with id=${id}`);
                     self.setPipeline(id);
                 },
                 gpuSetBindGroup: (slot, id) => {
-                    console.log(`[WASM->JS] gpuSetBindGroup called with slot=${slot}, id=${id}`);
                     self.setBindGroup(slot, id);
                 },
                 gpuSetVertexBuffer: (slot, id) => {
-                    console.log(`[WASM->JS] gpuSetVertexBuffer called with slot=${slot}, id=${id}`);
                     self.setVertexBuffer(slot, id);
                 },
                 gpuDraw: (v, i, fv, fi) => {
-                    console.log(`[WASM->JS] gpuDraw called with v=${v}, i=${i}, fv=${fv}, fi=${fi}`);
                     self.draw(v, i, fv, fi);
                 },
                 gpuDrawIndexed: (idx, i, firstIdx, baseVtx, firstInst) => self.drawIndexed(idx, i, firstIdx, baseVtx, firstInst),
@@ -1517,8 +1494,13 @@ export class PNGineGPU {
                 gpuWriteBufferFromArray: (bufferId, bufferOffset, arrayId) =>
                     self.writeBufferFromArray(bufferId, bufferOffset, arrayId),
                 gpuDebugLog: (msgType, value) => {
-                    const types = ['FRAME_COUNTER', 'POOL_ACTUAL_ID', 'OTHER'];
-                    console.log(`[WASM DEBUG] ${types[msgType] || 'UNKNOWN'}: ${value}`);
+                    // Debug logging for pass execution tracing
+                    if (msgType === 10) console.log(`[WASM] exec_pass id=${value}`);
+                    else if (msgType === 11) console.log(`[WASM]   range.start=${value}`);
+                    else if (msgType === 12) console.log(`[WASM]   range.end=${value}`);
+                    else if (msgType === 20) console.log(`[WASM] dispatch x=${value}`);
+                    else if (msgType === 21) console.log(`[WASM]   y=${value}`);
+                    else if (msgType === 22) console.log(`[WASM]   z=${value}`);
                 },
             },
         };
@@ -1540,7 +1522,6 @@ export class PNGineGPU {
         if (this.typedArrays.has(arrayId)) {
             return;
         }
-        console.log(`[GPU] createTypedArray(${arrayId}, type=${elementType}, count=${elementCount})`);
         // elementType 0 = f32 (most common)
         const array = new Float32Array(elementCount);
         this.typedArrays.set(arrayId, { array, filled: false });
@@ -1569,7 +1550,6 @@ export class PNGineGPU {
         const max = maxView[0];
         const range = max - min;
 
-        console.log(`[GPU] fillRandom(array=${arrayId}, offset=${offset}, count=${count}, stride=${stride}, min=${min}, max=${max})`);
 
         for (let i = 0; i < count; i++) {
             const idx = i * stride + offset;
@@ -1593,7 +1573,6 @@ export class PNGineGPU {
     fillExpression(arrayId, offset, count, stride, totalCount, exprPtr, exprLen) {
         const entry = this.typedArrays.get(arrayId);
         if (!entry || entry.filled) {
-            console.log(`[GPU] fillExpression SKIPPED (array=${arrayId}, filled=${entry?.filled})`);
             return;
         }
 
@@ -1603,8 +1582,6 @@ export class PNGineGPU {
         const exprBytes = new Uint8Array(this.memory.buffer, exprPtr, exprLen);
         const expr = new TextDecoder().decode(exprBytes);
 
-        console.log(`[GPU] fillExpression(array=${arrayId}, offset=${offset}, count=${count}, stride=${stride}, total=${totalCount})`);
-        console.log(`[GPU]   expr: "${expr}"`);
 
         try {
             // Transform expression into JS function body (compile once, run many)
@@ -1619,7 +1596,6 @@ export class PNGineGPU {
                 .replace(/floor\(/g, 'Math.floor(')
                 .replace(/abs\(/g, 'Math.abs(');
 
-            console.log(`[GPU]   jsExpr: "${jsExpr}"`);
 
             // Compile the expression into a function (one compilation, many calls)
             const fn = new Function('ELEMENT_ID', `return ${jsExpr};`);
@@ -1633,7 +1609,6 @@ export class PNGineGPU {
             // Debug: show sample values (first few and last)
             const samples = [0, 1, 2, 100, 500, 1000, count-1].filter(i => i < count);
             const sampleVals = samples.map(i => `[${i}]=${array[i*stride+offset].toFixed(4)}`).join(', ');
-            console.log(`[GPU]   samples: ${sampleVals}`);
         } catch (e) {
             console.error(`Expression compile/eval error: ${expr}`, e);
             // Fill with zeros on error
@@ -1661,7 +1636,6 @@ export class PNGineGPU {
         const valueView = new Float32Array(this.memory.buffer, valuePtr, 1);
         const value = valueView[0];
 
-        console.log(`[GPU] fillConstant(array=${arrayId}, offset=${offset}, count=${count}, stride=${stride}, value=${value})`);
 
         for (let i = 0; i < count; i++) {
             const idx = i * stride + offset;
@@ -1677,6 +1651,7 @@ export class PNGineGPU {
      * @param {number} arrayId - Array identifier
      */
     writeBufferFromArray(bufferId, bufferOffset, arrayId) {
+        console.log(`[GPU] writeBufferFromArray(buffer=${bufferId}, offset=${bufferOffset}, array=${arrayId})`);
         const entry = this.typedArrays.get(arrayId);
         const buffer = this.buffers.get(bufferId);
 
@@ -1690,16 +1665,14 @@ export class PNGineGPU {
 
         // Skip if already written to this specific buffer
         if (entry.writtenBuffers.has(bufferId)) {
-            console.log(`[GPU] writeBufferFromArray SKIPPED (already written to buffer ${bufferId})`);
+            console.log(`[GPU]   -> skipped (already written)`);
             return;
         }
 
         const array = entry.array;
-        console.log(`[GPU] writeBufferFromArray(buffer=${bufferId}, offset=${bufferOffset}, array=${arrayId}, size=${array.byteLength})`);
 
         // Debug: show first few values being written
         const floatView = new Float32Array(array.buffer, array.byteOffset, Math.min(16, array.length));
-        console.log(`[GPU]   first 16 floats: [${[...floatView].map(v => v.toFixed(4)).join(', ')}]`);
 
         this.device.queue.writeBuffer(buffer, bufferOffset, array);
         entry.writtenBuffers.add(bufferId);
