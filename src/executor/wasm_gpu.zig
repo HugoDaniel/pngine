@@ -67,7 +67,7 @@ extern "env" fn gpuFillConstant(array_id: u16, offset: u32, count: u32, stride: 
 extern "env" fn gpuWriteBufferFromArray(buffer_id: u16, buffer_offset: u32, array_id: u16) void;
 
 // Debug logging
-extern "env" fn gpuDebugLog(msg_type: u8, value: u32) void;
+pub extern "env" fn gpuDebugLog(msg_type: u8, value: u32) void;
 
 // ============================================================================
 // WasmGPU Backend

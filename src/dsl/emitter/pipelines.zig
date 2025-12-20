@@ -93,6 +93,7 @@ const RenderPipelineProps = struct {
     fragment_shader_id: u16 = 0,
     fragment_entry: []const u8 = "fragmentMain",
     has_fragment: bool = false,
+    target_format: ?[]const u8 = null, // e.g., "rgba8unorm", null = use canvas format
     vertex_buffers_json: ?[]const u8 = null,
     primitive_json: ?[]const u8 = null,
     depth_stencil_json: ?[]const u8 = null,
@@ -124,6 +125,7 @@ fn parseRenderPipelineProps(e: *Emitter, node: Node.Index) RenderPipelineProps {
             const stage_info = parseStageDescriptor(e, prop_node);
             if (stage_info.shader_id) |id| props.fragment_shader_id = id;
             if (stage_info.entry_point) |ep| props.fragment_entry = ep;
+            props.target_format = parseFragmentTargetFormat(e, prop_node);
         } else if (std.mem.eql(u8, prop_name, "primitive")) {
             props.primitive_json = buildPrimitiveJson(e, prop_node);
         } else if (std.mem.eql(u8, prop_name, "depthStencil")) {
@@ -137,6 +139,56 @@ fn parseRenderPipelineProps(e: *Emitter, node: Node.Index) RenderPipelineProps {
     std.debug.assert(props.vertex_entry.len > 0);
 
     return props;
+}
+
+/// Parse the target format from fragment stage's targets array.
+/// Parses: fragment={ ... targets=[{ format=rgba8unorm }] }
+/// Returns null if not specified (will use canvas format at runtime).
+fn parseFragmentTargetFormat(e: *Emitter, prop_node: Node.Index) ?[]const u8 {
+    // Pre-condition
+    std.debug.assert(prop_node.toInt() < e.ast.nodes.len);
+
+    const prop_data = e.ast.nodes.items(.data)[prop_node.toInt()];
+    const obj_node = prop_data.node;
+    const obj_tag = e.ast.nodes.items(.tag)[obj_node.toInt()];
+
+    if (obj_tag != .object) return null;
+
+    const obj_data = e.ast.nodes.items(.data)[obj_node.toInt()];
+    const obj_props = e.ast.extraData(obj_data.extra_range);
+
+    for (obj_props) |obj_prop_idx| {
+        const inner_prop: Node.Index = @enumFromInt(obj_prop_idx);
+        const inner_token = e.ast.nodes.items(.main_token)[inner_prop.toInt()];
+        const inner_name = utils.getTokenSlice(e, inner_token);
+
+        if (std.mem.eql(u8, inner_name, "targets")) {
+            const inner_data = e.ast.nodes.items(.data)[inner_prop.toInt()];
+            const targets_node = inner_data.node;
+            const targets_tag = e.ast.nodes.items(.tag)[targets_node.toInt()];
+
+            if (targets_tag != .array) return null;
+
+            // Get first target from array
+            const first_target = utils.getArrayFirstElement(e, targets_node) orelse return null;
+            const first_tag = e.ast.nodes.items(.tag)[first_target.toInt()];
+
+            if (first_tag != .object) return null;
+
+            // Look for format property in first target
+            const format_node = utils.findPropertyValueInObject(e, first_target, "format") orelse return null;
+            const format_text = getIdentifierOrStringValue(e, format_node);
+
+            // Handle special case: preferredCanvasFormat means use canvas format
+            if (std.mem.eql(u8, format_text, "preferredCanvasFormat")) {
+                return null;
+            }
+
+            return format_text;
+        }
+    }
+
+    return null;
 }
 
 /// Build JSON descriptor for render pipeline.
@@ -226,7 +278,16 @@ fn appendFragmentStageJson(e: *Emitter, json: *std.ArrayListUnmanaged(u8), props
     try json.appendSlice(e.gpa, frag_str);
     try json.appendSlice(e.gpa, ",\"entryPoint\":\"");
     try json.appendSlice(e.gpa, props.fragment_entry);
-    try json.appendSlice(e.gpa, "\"}");
+    try json.append(e.gpa, '"');
+
+    // Add target format if specified (otherwise JS will use canvas format)
+    if (props.target_format) |format| {
+        try json.appendSlice(e.gpa, ",\"targetFormat\":\"");
+        try json.appendSlice(e.gpa, format);
+        try json.append(e.gpa, '"');
+    }
+
+    try json.append(e.gpa, '}');
 
     // Post-condition: JSON ends with closing brace
     std.debug.assert(json.items.len > 0 and json.items[json.items.len - 1] == '}');

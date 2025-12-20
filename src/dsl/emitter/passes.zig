@@ -88,10 +88,13 @@ fn emitRenderPassDefinition(e: *Emitter, pass_id: u16, node: Node.Index) Emitter
     // Parse depth texture from depthStencilAttachment if present
     const depth_texture_id = getDepthTextureId(e, node);
 
-    // Begin render pass (texture 0 = canvas, clear, store)
+    // Parse color texture from colorAttachments[0].view
+    const color_texture_id = getColorTextureId(e, node);
+
+    // Begin render pass with parsed color texture
     try e.builder.getEmitter().beginRenderPass(
         e.gpa,
-        0, // color texture ID (0 = canvas/surface)
+        color_texture_id,
         opcodes.LoadOp.clear,
         opcodes.StoreOp.store,
         depth_texture_id,
@@ -139,6 +142,60 @@ pub fn getDepthTextureId(e: *Emitter, node: Node.Index) u16 {
     }
 
     return 0xFFFF;
+}
+
+/// Special value for canvas/surface texture (contextCurrentTexture).
+/// Uses 0xFFFE to distinguish from 0xFFFF (no depth texture).
+pub const CANVAS_TEXTURE_ID: u16 = 0xFFFE;
+
+/// Get color texture ID from colorAttachments[0].view property.
+/// Returns CANVAS_TEXTURE_ID (0xFFFE) for contextCurrentTexture or if not specified.
+/// Returns the actual texture ID for other texture references.
+pub fn getColorTextureId(e: *Emitter, node: Node.Index) u16 {
+    // Pre-condition
+    std.debug.assert(node.toInt() < e.ast.nodes.len);
+
+    // Find colorAttachments property
+    const color_attachments = utils.findPropertyValue(e, node, "colorAttachments") orelse return CANVAS_TEXTURE_ID;
+    const ca_tag = e.ast.nodes.items(.tag)[color_attachments.toInt()];
+
+    // Must be an array
+    if (ca_tag != .array) return CANVAS_TEXTURE_ID;
+
+    // Get first element of the array
+    const first_attachment = utils.getArrayFirstElement(e, color_attachments) orelse return CANVAS_TEXTURE_ID;
+    const first_tag = e.ast.nodes.items(.tag)[first_attachment.toInt()];
+
+    // First element must be an object
+    if (first_tag != .object) return CANVAS_TEXTURE_ID;
+
+    // Look for view property in the attachment object
+    const view_value = utils.findPropertyValueInObject(e, first_attachment, "view") orelse return CANVAS_TEXTURE_ID;
+    const view_tag = e.ast.nodes.items(.tag)[view_value.toInt()];
+
+    if (view_tag == .identifier_value) {
+        const token = e.ast.nodes.items(.main_token)[view_value.toInt()];
+        const texture_name = utils.getTokenSlice(e, token);
+
+        // contextCurrentTexture means canvas
+        if (std.mem.eql(u8, texture_name, "contextCurrentTexture")) {
+            return CANVAS_TEXTURE_ID;
+        }
+
+        // Look up the texture ID
+        if (e.texture_ids.get(texture_name)) |id| {
+            return id;
+        }
+    } else if (view_tag == .reference) {
+        if (utils.getReference(e, view_value)) |ref| {
+            if (e.texture_ids.get(ref.name)) |id| {
+                return id;
+            }
+        }
+    }
+
+    // Default to canvas
+    return CANVAS_TEXTURE_ID;
 }
 
 fn emitComputePassDefinition(e: *Emitter, pass_id: u16, node: Node.Index) Emitter.Error!void {

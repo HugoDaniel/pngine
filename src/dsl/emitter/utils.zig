@@ -77,6 +77,23 @@ pub fn findPropertyValueInObject(e: *Emitter, object_node: Node.Index, prop_name
     return null;
 }
 
+/// Get the first element of an array node.
+/// Returns null if the node is not an array or is empty.
+pub fn getArrayFirstElement(e: *Emitter, array_node: Node.Index) ?Node.Index {
+    // Pre-condition
+    std.debug.assert(array_node.toInt() < e.ast.nodes.len);
+
+    const tag = e.ast.nodes.items(.tag)[array_node.toInt()];
+    if (tag != .array) return null;
+
+    const data = e.ast.nodes.items(.data)[array_node.toInt()];
+    const elements = e.ast.extraData(data.extra_range);
+
+    if (elements.len == 0) return null;
+
+    return @enumFromInt(elements[0]);
+}
+
 /// Get a reference from a property node's value.
 pub fn findPropertyReference(e: *Emitter, prop_node: Node.Index) ?Reference {
     // Pre-conditions
@@ -414,8 +431,16 @@ fn substituteDefines(e: *Emitter, expr: []const u8, buffer: *[256]u8) ?[]const u
             if (e.analysis.symbols.define.get(ident)) |def_info| {
                 // Get the define's value node and resolve it
                 const define_value_node = e.ast.nodes.items(.data)[def_info.node.toInt()].node;
-                if (resolveNumericValue(e, define_value_node)) |define_value| {
-                    // Append the define value
+                const define_tag = e.ast.nodes.items(.tag)[define_value_node.toInt()];
+
+                // Handle string values: substitute the string content (e.g., "64*64" → 64*64)
+                if (define_tag == .string_value) {
+                    const content = getStringContent(e, define_value_node);
+                    if (pos + content.len > buffer.len) return null;
+                    @memcpy(buffer[pos..][0..content.len], content);
+                    pos += content.len;
+                } else if (resolveNumericValue(e, define_value_node)) |define_value| {
+                    // Append the define value as a number
                     const value_str = std.fmt.bufPrint(buffer[pos..], "{d}", .{define_value}) catch return null;
                     pos += value_str.len;
                 } else {

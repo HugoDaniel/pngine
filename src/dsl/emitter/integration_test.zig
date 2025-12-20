@@ -321,6 +321,16 @@ test "Integration: compute pipeline with dispatch" {
     }
     try testing.expect(found_compute_pipeline);
 
+    // Verify begin_compute_pass is called
+    var found_begin_compute = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .begin_compute_pass) {
+            found_begin_compute = true;
+            break;
+        }
+    }
+    try testing.expect(found_begin_compute);
+
     // Verify dispatch call
     var found_dispatch = false;
     for (gpu.getCalls()) |call| {
