@@ -1,0 +1,220 @@
+---
+.title = "#animation",
+.description = "Timeline-based scene animation",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+Defines a timeline-based animation with multiple scenes that activate at different times.
+
+## Syntax
+
+```pngine
+#animation name {
+  duration=60.0
+  loop=true
+  endBehavior=hold
+  scenes=[
+    { id="intro" frame=frameA start=0.0 end=10.0 }
+    { id="main" frame=frameB start=10.0 end=50.0 }
+    { id="outro" frame=frameA start=50.0 end=60.0 }
+  ]
+}
+```
+
+## Attributes
+
+| Attribute | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `duration` | number | Yes | - | Total duration in seconds |
+| `loop` | boolean | No | `false` | Loop animation |
+| `endBehavior` | string | No | `hold` | Behavior at end |
+| `scenes` | array | Yes | - | Scene definitions |
+
+### duration
+
+**Type:** `number`
+
+Total animation duration in seconds.
+
+```pngine
+duration=120.0  // 2 minutes
+```
+
+### loop
+
+**Type:** `boolean`
+
+Whether the animation loops back to the start after finishing.
+
+```pngine
+loop=true
+```
+
+### endBehavior
+
+**Type:** `string`
+
+What happens when the animation reaches the end (if not looping):
+
+| Value | Description |
+|-------|-------------|
+| `hold` | Stay on last frame (default) |
+| `stop` | Stop rendering |
+| `restart` | Jump back to start |
+
+### scenes
+
+**Type:** `array` of scene objects
+
+Each scene defines when a frame should be active:
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `id` | string | Yes | Unique scene identifier |
+| `frame` | reference | Yes | Frame to execute |
+| `start` | number | Yes | Start time in seconds |
+| `end` | number | Yes | End time in seconds |
+
+```pngine
+scenes=[
+  { id="intro" frame=introFrame start=0.0 end=5.0 }
+  { id="main" frame=mainFrame start=5.0 end=55.0 }
+  { id="outro" frame=outroFrame start=55.0 end=60.0 }
+]
+```
+
+## Examples
+
+### Simple Animation
+
+```pngine
+#frame scene {
+  before=[writeTime]
+  perform=[render]
+}
+
+#animation demo {
+  duration=30.0
+  scenes=[
+    { id="all" frame=scene start=0.0 end=30.0 }
+  ]
+}
+```
+
+### Multi-Scene Demo
+
+```pngine
+#frame titleScene {
+  perform=[renderTitle]
+}
+
+#frame gameScene {
+  before=[updatePhysics]
+  perform=[renderGame]
+}
+
+#frame creditsScene {
+  perform=[renderCredits]
+}
+
+#animation game {
+  duration=180.0
+  loop=false
+  endBehavior=hold
+  scenes=[
+    { id="title" frame=titleScene start=0.0 end=10.0 }
+    { id="gameplay" frame=gameScene start=10.0 end=170.0 }
+    { id="credits" frame=creditsScene start=170.0 end=180.0 }
+  ]
+}
+```
+
+### Looping Demo Reel
+
+```pngine
+#animation demoReel {
+  duration=60.0
+  loop=true
+  scenes=[
+    { id="effect1" frame=effectA start=0.0 end=15.0 }
+    { id="effect2" frame=effectB start=15.0 end=30.0 }
+    { id="effect3" frame=effectC start=30.0 end=45.0 }
+    { id="effect4" frame=effectD start=45.0 end=60.0 }
+  ]
+}
+```
+
+### Overlapping Transitions
+
+Scenes can overlap for crossfade effects (requires custom shader handling):
+
+```pngine
+#animation transitions {
+  duration=30.0
+  scenes=[
+    { id="scene1" frame=frame1 start=0.0 end=12.0 }
+    { id="scene2" frame=frame2 start=10.0 end=22.0 }
+    { id="scene3" frame=frame3 start=20.0 end=30.0 }
+  ]
+}
+```
+
+Note: Scene overlap is stored in metadata; actual transition handling is up to the runtime.
+
+## JavaScript Integration
+
+The animation metadata is stored in the `pNGm` PNG chunk and accessible via JavaScript:
+
+```javascript
+const anim = await viewer({ animation: pngBlob, canvas: myCanvas });
+
+// Access metadata
+console.log(anim.metadata.animation);
+// { name: "demo", duration: 60, loop: true, scenes: [...] }
+
+// Draw specific time
+anim.draw(15.5);  // Draws at t=15.5 seconds
+
+// Or with scene ID
+anim.draw(15.5, "main");  // Explicitly select scene
+```
+
+## Scene Selection
+
+At any given time `t`, the active scene is determined by:
+
+1. Find scenes where `start <= t < end`
+2. If multiple, use the last one in array order
+3. Execute that scene's `frame`
+
+## Data Flow
+
+```
+#animation
+    │
+    ├─► Metadata (pNGm chunk) ─► JavaScript viewer
+    │
+    └─► Scene timing ─► Runtime frame selection
+                              │
+                              ▼
+                          #frame execution
+```
+
+## Validation Rules
+
+| Rule | Error |
+|------|-------|
+| Name must be unique across all namespaces | `duplicate_definition` |
+| `duration` attribute is required | `missing_required_property` |
+| `scenes` attribute is required | `missing_required_property` |
+| Scene `id` must be unique within animation | `duplicate_definition` |
+| Referenced frames must exist | `undefined_reference` |
+| Scene `end` must be > `start` | `type_mismatch` |
+| Scene times must be within duration | `type_mismatch` |
+
+## Related
+
+- [`#frame`](/docs/dsl/frame/) - Frame definitions
+- [JavaScript API](/docs/js-api/) - Runtime animation control

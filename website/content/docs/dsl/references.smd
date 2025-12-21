@@ -1,0 +1,192 @@
+---
+.title = "References",
+.description = "Resource references and name resolution",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+PNGine DSL uses bare identifiers to reference resources. The analyzer automatically resolves identifiers to the correct resource type based on context.
+
+## Bare Identifier Syntax
+
+Reference resources by their name directly:
+
+```pngine
+pipeline=mainPipeline
+buffer=vertexData
+module=shaderCode
+```
+
+No special prefix is needed. The analyzer determines which type of resource you're referencing based on the property name.
+
+## Context-Based Resolution
+
+When you write `module=code`, the analyzer searches for a resource named `code` in the appropriate namespaces. The search order depends on the property:
+
+| Property | Searches In |
+|----------|-------------|
+| `module` | shaderModule, wgsl |
+| `pipeline` | renderPipeline, computePipeline |
+| `layout` | pipelineLayout, bindGroupLayout |
+| `buffer` | buffer |
+| `texture`, `view` | texture |
+| `sampler` | sampler |
+| `frame` | frame |
+| `image` | imageBitmap |
+| `perform`, `before`, `after` | renderPass, computePass, queue |
+| `bindGroups` | bindGroup |
+| `vertexBuffers` | buffer |
+| `imports` | wgsl, shaderModule |
+
+**First match wins.** For `module=code`, the analyzer first checks shaderModule, then wgsl.
+
+## Examples
+
+### Pipeline References
+
+```pngine
+#renderPipeline mainPipeline { ... }
+
+#renderPass pass {
+  pipeline=mainPipeline    // Resolved to #renderPipeline
+  draw=3
+}
+```
+
+### Shader Module References
+
+```pngine
+#shaderModule vertexShader { code="..." }
+#wgsl fragmentCode { value="..." }
+
+#renderPipeline render {
+  vertex={ module=vertexShader entryPoint=vs }     // #shaderModule
+  fragment={ module=fragmentCode entryPoint=fs }   // #wgsl
+}
+```
+
+### Buffer References
+
+```pngine
+#buffer positions { size=1024 usage=[VERTEX] }
+#buffer indices { size=256 usage=[INDEX] }
+
+#renderPass draw {
+  pipeline=meshPipeline
+  vertexBuffers=[positions]    // Resolved to #buffer
+  indexBuffer=indices          // Resolved to #buffer
+  drawIndexed=100
+}
+```
+
+### Bind Group References
+
+```pngine
+#bindGroup uniforms { ... }
+#bindGroup textures { ... }
+
+#renderPass render {
+  pipeline=pipeline
+  bindGroups=[uniforms textures]    // Each resolved to #bindGroup
+  draw=3
+}
+```
+
+### Pass References in Frame
+
+```pngine
+#renderPass shadowPass { ... }
+#renderPass mainPass { ... }
+#computePass physics { ... }
+#queue writeUniforms { ... }
+
+#frame game {
+  before=[writeUniforms]           // #queue
+  perform=[physics shadowPass mainPass]   // #computePass, #renderPass, #renderPass
+}
+```
+
+## Special Values
+
+Some identifiers are reserved keywords and not resolved as references:
+
+### Layout
+- `auto` - Auto-derive layout from shaders
+
+```pngine
+layout=auto    // Special keyword, not a reference
+```
+
+### Texture Views
+- `contextCurrentTexture` - Current canvas texture
+
+```pngine
+view=contextCurrentTexture    // Special keyword
+```
+
+### Load/Store Operations
+- `clear`, `load` - Load operations
+- `store`, `discard` - Store operations
+
+```pngine
+loadOp=clear     // Special keyword
+storeOp=store    // Special keyword
+```
+
+### Texture Formats
+- `preferredCanvasFormat` - Browser's preferred format
+- All WebGPU formats: `rgba8unorm`, `depth24plus`, etc.
+
+```pngine
+format=preferredCanvasFormat    // Special keyword
+format=rgba8unorm               // Special keyword
+```
+
+### Primitive Topology
+- `triangle-list`, `triangle-strip`, `line-list`, `line-strip`, `point-list`
+
+```pngine
+topology=triangle-list    // Special keyword
+```
+
+### Cull Mode and Face
+- `none`, `front`, `back` - Cull modes
+- `ccw`, `cw` - Front face winding
+
+```pngine
+cullMode=back     // Special keyword
+frontFace=ccw     // Special keyword
+```
+
+### Filter Modes
+- `nearest`, `linear` - Texture filters
+- `clamp-to-edge`, `repeat`, `mirror-repeat` - Address modes
+
+```pngine
+magFilter=linear           // Special keyword
+addressModeU=repeat        // Special keyword
+```
+
+## Uniqueness Requirement
+
+All resource names must be unique across **all** macro types:
+
+```pngine
+#buffer myResource { ... }
+#texture myResource { ... }    // ERROR: duplicate_definition
+```
+
+This ensures unambiguous resolution - when you write `buffer=myResource`, there's only one possible match.
+
+## Validation Errors
+
+| Error | Cause |
+|-------|-------|
+| `undefined_reference` | No resource with that name exists |
+| `duplicate_definition` | Same name used for multiple resources |
+
+## Related
+
+- [Expressions](/docs/dsl/expressions/) - Compile-time arithmetic
+- [`#define`](/docs/dsl/define/) - Define constants

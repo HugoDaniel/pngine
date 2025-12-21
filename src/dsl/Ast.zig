@@ -165,7 +165,7 @@ pub const Node = struct {
         boolean_value,
         /// identifier (bareword) - may be resolved to reference later
         identifier_value,
-        /// $wgsl.name - data.node_and_node = [namespace_token, name_token]
+        /// $namespace.name - data.node_and_node = [namespace_token, name_token] (legacy PBSF)
         reference,
         /// canvas.width, time.total - built-in runtime values
         /// No $ prefix needed for these special namespaces.

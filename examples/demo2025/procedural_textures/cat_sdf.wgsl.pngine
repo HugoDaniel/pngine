@@ -45,9 +45,9 @@
 
 #wgsl catSdfTextureShader {
   value="./wgsl/cat_sdf_texture.wgsl"
-  imports=["$wgsl.constants", "$wgsl.transform2D", "$wgsl.primitives", "$wgsl.tangram"]
+  imports=[constants, transform2D, primitives, tangram]
 }
 
 #shaderModule catSdfTextureModule {
-  code="$wgsl.catSdfTextureShader"
+  code=catSdfTextureShader
 }

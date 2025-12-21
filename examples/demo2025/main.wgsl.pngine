@@ -23,11 +23,11 @@
 #wgsl transform2D { value="./wgsl/transform2D.wgsl" }
 #wgsl primitives {
   value="./wgsl/primitives.wgsl"
-  imports=["$wgsl.transform2D"]
+  imports=[transform2D]
 }
 #wgsl tangram {
   value="./wgsl/tangram.wgsl"
-  imports=["$wgsl.constants", "$wgsl.transform2D", "$wgsl.primitives"]
+  imports=[constants, transform2D, primitives]
 }
 #wgsl beats { value="./wgsl/beats.wgsl" }
 

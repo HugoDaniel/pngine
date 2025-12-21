@@ -1,0 +1,265 @@
+---
+.title = "#frame",
+.description = "Frame execution with pass ordering",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+Defines a frame that orchestrates the execution of passes and queue operations.
+
+## Syntax
+
+```pngine
+#frame name {
+  before=[queueOp1 queueOp2]
+  perform=[pass1 pass2 pass3]
+  after=[queueOp3]
+  onLoad=[initOp]
+  onUnload=[cleanupOp]
+}
+```
+
+## Attributes
+
+| Attribute | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `perform` | array | Yes | - | Main pass sequence |
+| `before` | array | No | `[]` | Pre-frame operations |
+| `after` | array | No | `[]` | Post-frame operations |
+| `onLoad` | array | No | `[]` | Initialization (first frame) |
+| `onUnload` | array | No | `[]` | Cleanup (scene switch) |
+
+### perform
+
+**Type:** `array` of references
+
+The main sequence of passes to execute each frame. Order matters - passes execute left to right.
+
+```pngine
+perform=[shadowPass mainPass postProcess uiPass]
+```
+
+Can reference:
+- `#renderPass` - Render passes
+- `#computePass` - Compute passes
+- `#queue` - Queue operations
+
+### before
+
+**Type:** `array` of references
+
+Operations executed before the main pass sequence. Typically queue operations to update uniforms.
+
+```pngine
+before=[writeUniforms writeTransforms]
+```
+
+### after
+
+**Type:** `array` of references
+
+Operations executed after the main pass sequence. Useful for readback or cleanup.
+
+```pngine
+after=[copyResults]
+```
+
+### onLoad
+
+**Type:** `array` of references
+
+Operations executed once when the frame is first activated (scene load). Used for initialization.
+
+```pngine
+onLoad=[loadTextures initParticles]
+```
+
+### onUnload
+
+**Type:** `array` of references
+
+Operations executed when switching away from this frame (scene unload). Used for cleanup.
+
+```pngine
+onUnload=[saveState]
+```
+
+## Examples
+
+### Simple Frame
+
+```pngine
+#frame main {
+  perform=[renderPass]
+}
+```
+
+### With Uniform Updates
+
+```pngine
+#queue writeTime {
+  writeBuffer={
+    buffer=uniforms
+    data="$uniforms.shader.inputs.data"
+  }
+}
+
+#renderPass render {
+  pipeline=mainPipeline
+  bindGroups=[uniformGroup]
+  draw=3
+}
+
+#frame main {
+  before=[writeTime]
+  perform=[render]
+}
+```
+
+### Multi-Pass Rendering
+
+```pngine
+#frame deferred {
+  before=[updateCamera updateLights]
+  perform=[
+    geometryPass
+    lightingPass
+    postProcess
+    uiPass
+  ]
+}
+```
+
+### Compute + Render
+
+```pngine
+#frame simulation {
+  before=[writeParams]
+  perform=[
+    physicsCompute
+    collisionCompute
+    renderParticles
+  ]
+}
+```
+
+### With Initialization
+
+```pngine
+#queue loadTexture {
+  copyExternalImageToTexture={
+    source={ source=textureImage }
+    destination={ texture=diffuseMap }
+    copySize=[1024 1024]
+  }
+}
+
+#frame game {
+  onLoad=[loadTexture initBuffers]
+  before=[updateUniforms]
+  perform=[shadowPass mainPass]
+}
+```
+
+### Scene-Based Animation
+
+```pngine
+#frame sceneA {
+  before=[updateSceneA]
+  perform=[renderSceneA]
+}
+
+#frame sceneB {
+  before=[updateSceneB]
+  perform=[renderSceneB]
+}
+
+#animation demo {
+  duration=60.0
+  scenes=[
+    { id="intro" frame=sceneA start=0.0 end=10.0 }
+    { id="main" frame=sceneB start=10.0 end=50.0 }
+    { id="outro" frame=sceneA start=50.0 end=60.0 }
+  ]
+}
+```
+
+## Execution Order
+
+Each frame execution follows this order:
+
+1. `onLoad` (first frame only, or on scene transition)
+2. `before` (every frame)
+3. `perform` (every frame, in order)
+4. `after` (every frame)
+5. `onUnload` (on scene transition away)
+
+## Ping-Pong Pattern
+
+For double-buffered compute:
+
+```pngine
+#computePass simulate {
+  pipeline=simPipeline
+  bindGroups=[simGroup]
+  bindGroupsPoolOffsets=[0]
+  dispatchWorkgroups=[64 1 1]
+}
+
+#renderPass draw {
+  pipeline=renderPipeline
+  vertexBuffers=[particles]
+  vertexBuffersPoolOffsets=[0]
+  draw={ vertexCount=6 instanceCount=2048 }
+}
+
+#frame boids {
+  perform=[simulate draw]
+}
+```
+
+The runtime automatically alternates pool offsets each frame.
+
+## Validation Rules
+
+| Rule | Error |
+|------|-------|
+| Name must be unique across all namespaces | `duplicate_definition` |
+| `perform` attribute is required | `missing_required_property` |
+| Referenced passes must exist | `undefined_reference` |
+
+## WebGPU Mapping
+
+Each frame creates a command encoder and submits to queue:
+
+```javascript
+const encoder = device.createCommandEncoder();
+
+// Execute before operations
+for (const op of frame.before) {
+  executeQueueOp(op);
+}
+
+// Execute passes
+for (const pass of frame.perform) {
+  if (pass.type === 'render') {
+    const passEncoder = encoder.beginRenderPass(descriptor);
+    // ... draw commands
+    passEncoder.end();
+  } else if (pass.type === 'compute') {
+    const passEncoder = encoder.beginComputePass();
+    // ... dispatch commands
+    passEncoder.end();
+  }
+}
+
+device.queue.submit([encoder.finish()]);
+```
+
+## Related
+
+- [`#renderPass`](/docs/dsl/render-pass/) - Render passes
+- [`#computePass`](/docs/dsl/compute-pass/) - Compute passes
+- [`#queue`](/docs/dsl/queue/) - Queue operations
+- [`#animation`](/docs/dsl/animation/) - Scene-based animation

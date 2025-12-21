@@ -3,7 +3,7 @@
 #wgsl mainBox { value="./wgsl/mainBox.wgsl" }
 #wgsl sceneWShader {
   value="./wgsl/sceneW.wgsl"
-  imports=["$wgsl.constants", "$wgsl.transform2D", "$wgsl.primitives", "$wgsl.beats", "$wgsl.mainBox", "$wgsl.tangram"]
+  imports=[constants, transform2D, primitives, beats, mainBox, tangram]
   uniforms=[
     { id=sceneWInputs var=inputs struct=SceneWInputs bindGroup=0 binding=1}
   ]
@@ -96,5 +96,5 @@
 }
 
 #shaderModule sceneW {
-  code="$wgsl.sceneWShader"
+  code=sceneWShader
 }

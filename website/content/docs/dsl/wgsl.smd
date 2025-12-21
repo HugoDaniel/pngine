@@ -1,0 +1,159 @@
+---
+.title = "#wgsl",
+.description = "Shader code fragment with optional imports",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+Defines a WGSL shader code fragment. Fragments can import other `#wgsl` macros to compose larger shaders.
+
+## Syntax
+
+```pngine
+#wgsl name {
+  value="WGSL shader code"
+  imports=[other common]
+}
+```
+
+## Attributes
+
+| Attribute | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `value` | string | Yes | - | WGSL shader source code |
+| `imports` | array | No | `[]` | Other `#wgsl` fragments to prepend |
+
+### value
+
+**Type:** `string`
+
+The WGSL shader source code. Can be multi-line.
+
+```pngine
+#wgsl vertex {
+  value="
+    @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      return vec4f(0.0, 0.0, 0.0, 1.0);
+    }
+  "
+}
+```
+
+### imports
+
+**Type:** `array` of identifiers
+
+Names of other `#wgsl` macros that will be prepended to this fragment's code before compilation. Used to share common utilities.
+
+```pngine
+#wgsl constants {
+  value="const PI: f32 = 3.14159;"
+}
+
+#wgsl shader {
+  imports=[constants]
+  value="
+    @fragment fn fs() -> @location(0) vec4f {
+      return vec4f(PI / 3.14159, 0.0, 0.0, 1.0);
+    }
+  "
+}
+```
+
+**Validation:**
+- Each name must refer to an existing `#wgsl` macro
+- Circular imports are detected and reported as errors
+
+## Examples
+
+### Basic Shader Fragment
+
+```pngine
+#wgsl main {
+  value="
+    @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      var pos = array<vec2f, 3>(
+        vec2f(0.0, 0.5),
+        vec2f(-0.5, -0.5),
+        vec2f(0.5, -0.5)
+      );
+      return vec4f(pos[i], 0.0, 1.0);
+    }
+
+    @fragment fn fs() -> @location(0) vec4f {
+      return vec4f(1.0, 0.0, 0.0, 1.0);
+    }
+  "
+}
+```
+
+### Composing Shaders with Imports
+
+```pngine
+#wgsl utils {
+  value="
+    fn srgb_to_linear(c: vec3f) -> vec3f {
+      return pow(c, vec3f(2.2));
+    }
+  "
+}
+
+#wgsl fragment {
+  imports=[utils]
+  value="
+    @fragment fn fs(@location(0) color: vec3f) -> @location(0) vec4f {
+      return vec4f(srgb_to_linear(color), 1.0);
+    }
+  "
+}
+```
+
+### Multi-Level Imports
+
+```pngine
+#wgsl math {
+  value="const TAU: f32 = 6.28318;"
+}
+
+#wgsl primitives {
+  imports=[math]
+  value="
+    fn circle(uv: vec2f, r: f32) -> f32 {
+      return smoothstep(r, r - 0.01, length(uv));
+    }
+  "
+}
+
+#wgsl main {
+  imports=[primitives]
+  value="
+    @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+      let c = circle(uv - 0.5, 0.3);
+      return vec4f(c, c, c, 1.0);
+    }
+  "
+}
+```
+
+## Validation Rules
+
+| Rule | Error |
+|------|-------|
+| Name must be unique across all namespaces | `duplicate_definition` |
+| Imported names must exist as `#wgsl` macros | `undefined_reference` |
+| No circular import chains | `circular_dependency` |
+
+## Shader Deduplication
+
+Fragments with identical `value` content share the same bytecode data section. This enables code reuse without bytecode bloat.
+
+## WebGPU Mapping
+
+`#wgsl` fragments are concatenated and compiled into `GPUShaderModule` objects at runtime using `device.createShaderModule()`.
+
+## Related
+
+- [`#shaderModule`](/docs/dsl/shader-module/) - Named shader module (alternative syntax)
+- [`#renderPipeline`](/docs/dsl/render-pipeline/) - Uses shaders for vertex/fragment stages
+- [`#computePipeline`](/docs/dsl/compute-pipeline/) - Uses shaders for compute stage

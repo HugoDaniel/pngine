@@ -13,7 +13,7 @@
 }
 
 #texture tex {
-  size=["$canvas.width", "$canvas.height"]
+  size=["$canvas.width", "$canvas.height]
   sampleCount=SAMPLE_COUNT
   format=preferredCanvasFormat
   usage=[RENDER_ATTACHMENT]

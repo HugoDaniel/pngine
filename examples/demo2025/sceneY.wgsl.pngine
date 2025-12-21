@@ -3,7 +3,7 @@
 
 #wgsl sceneYShader {
   value="./wgsl/sceneY.wgsl"
-  imports=["$wgsl.constants", "$wgsl.transform2D", "$wgsl.primitives", "$wgsl.beats", "$wgsl.tangram"]
+  imports=[constants, transform2D, primitives, beats, tangram]
 }
 
 #buffer sceneYInputsBuffer {
@@ -69,5 +69,5 @@
 }
 
 #shaderModule sceneY {
-  code="$wgsl.sceneYShader"
+  code=sceneYShader
 }

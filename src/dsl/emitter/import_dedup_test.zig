@@ -83,7 +83,7 @@ test "imports: single import" {
         \\#wgsl base { value="const BASE: f32 = 1.0;" }
         \\#wgsl shader {
         \\  value="fn use() -> f32 { return BASE; }"
-        \\  imports=["$wgsl.base"]
+        \\  imports=[base]
         \\}
         \\#frame main { perform=[] }
     ;
@@ -103,7 +103,7 @@ test "imports: multiple independent imports" {
         \\#wgsl c { value="const C: f32 = 3.0;" }
         \\#wgsl shader {
         \\  value="fn sum() -> f32 { return A + B + C; }"
-        \\  imports=["$wgsl.a", "$wgsl.b", "$wgsl.c"]
+        \\  imports=[a, b, c]
         \\}
         \\#frame main { perform=[] }
     ;
@@ -126,11 +126,11 @@ test "imports: diamond dependency deduplication" {
     // D should appear only once in shader's resolved code
     const source: [:0]const u8 =
         \\#wgsl D { value="struct Shared { x: f32 }" }
-        \\#wgsl B { value="fn useB(s: Shared) {}" imports=["$wgsl.D"] }
-        \\#wgsl C { value="fn useC(s: Shared) {}" imports=["$wgsl.D"] }
+        \\#wgsl B { value="fn useB(s: Shared) {}" imports=[D] }
+        \\#wgsl C { value="fn useC(s: Shared) {}" imports=[D] }
         \\#wgsl shader {
         \\  value="fn main(s: Shared) { useB(s); useC(s); }"
-        \\  imports=["$wgsl.B", "$wgsl.C"]
+        \\  imports=[B, C]
         \\}
         \\#frame main { perform=[] }
     ;
@@ -153,12 +153,12 @@ test "imports: triple diamond" {
     // A imports [B, C, D], all three import E
     const source: [:0]const u8 =
         \\#wgsl E { value="const E_VAL: f32 = 1.0;" }
-        \\#wgsl B { value="const B_VAL: f32 = E_VAL;" imports=["$wgsl.E"] }
-        \\#wgsl C { value="const C_VAL: f32 = E_VAL;" imports=["$wgsl.E"] }
-        \\#wgsl D { value="const D_VAL: f32 = E_VAL;" imports=["$wgsl.E"] }
+        \\#wgsl B { value="const B_VAL: f32 = E_VAL;" imports=[E] }
+        \\#wgsl C { value="const C_VAL: f32 = E_VAL;" imports=[E] }
+        \\#wgsl D { value="const D_VAL: f32 = E_VAL;" imports=[E] }
         \\#wgsl shader {
         \\  value="fn sum() -> f32 { return B_VAL + C_VAL + D_VAL; }"
-        \\  imports=["$wgsl.B", "$wgsl.C", "$wgsl.D"]
+        \\  imports=[B, C, D]
         \\}
         \\#frame main { perform=[] }
     ;
@@ -179,10 +179,10 @@ test "imports: triple diamond" {
 test "imports: deep chain (5 levels)" {
     const source: [:0]const u8 =
         \\#wgsl L1 { value="const L1: f32 = 1.0;" }
-        \\#wgsl L2 { value="const L2: f32 = L1;" imports=["$wgsl.L1"] }
-        \\#wgsl L3 { value="const L3: f32 = L2;" imports=["$wgsl.L2"] }
-        \\#wgsl L4 { value="const L4: f32 = L3;" imports=["$wgsl.L3"] }
-        \\#wgsl L5 { value="const L5: f32 = L4;" imports=["$wgsl.L4"] }
+        \\#wgsl L2 { value="const L2: f32 = L1;" imports=[L1] }
+        \\#wgsl L3 { value="const L3: f32 = L2;" imports=[L2] }
+        \\#wgsl L4 { value="const L4: f32 = L3;" imports=[L3] }
+        \\#wgsl L5 { value="const L5: f32 = L4;" imports=[L4] }
         \\#frame main { perform=[] }
     ;
 
@@ -197,11 +197,11 @@ test "imports: deep chain (5 levels)" {
 test "imports: deep chain with usage at end" {
     const source: [:0]const u8 =
         \\#wgsl base { value="struct Base { v: f32 }" }
-        \\#wgsl mid1 { value="fn mid1(b: Base) {}" imports=["$wgsl.base"] }
-        \\#wgsl mid2 { value="fn mid2(b: Base) {}" imports=["$wgsl.mid1"] }
+        \\#wgsl mid1 { value="fn mid1(b: Base) {}" imports=[base] }
+        \\#wgsl mid2 { value="fn mid2(b: Base) {}" imports=[mid1] }
         \\#wgsl top {
         \\  value="fn top(b: Base) { mid2(b); }"
-        \\  imports=["$wgsl.mid2"]
+        \\  imports=[mid2]
         \\}
         \\#frame main { perform=[] }
     ;
@@ -222,7 +222,7 @@ test "imports: dependency order - dependency before dependent" {
         \\#wgsl types { value="struct MyType { x: f32 }" }
         \\#wgsl funcs {
         \\  value="fn useType(t: MyType) {}"
-        \\  imports=["$wgsl.types"]
+        \\  imports=[types]
         \\}
         \\#frame main { perform=[] }
     ;
@@ -244,10 +244,10 @@ test "imports: dependency order - dependency before dependent" {
 test "imports: multiple dependencies maintain order" {
     const source: [:0]const u8 =
         \\#wgsl first { value="const FIRST: f32 = 1.0;" }
-        \\#wgsl second { value="const SECOND: f32 = FIRST + 1.0;" imports=["$wgsl.first"] }
+        \\#wgsl second { value="const SECOND: f32 = FIRST + 1.0;" imports=[first] }
         \\#wgsl third {
         \\  value="const THIRD: f32 = SECOND + 1.0;"
-        \\  imports=["$wgsl.second"]
+        \\  imports=[second]
         \\}
         \\#frame main { perform=[] }
     ;
@@ -270,7 +270,7 @@ test "imports: same import listed twice in imports array" {
         \\#wgsl shared { value="const SHARED: f32 = 42.0;" }
         \\#wgsl shader {
         \\  value="fn get() -> f32 { return SHARED; }"
-        \\  imports=["$wgsl.shared", "$wgsl.shared"]
+        \\  imports=[shared, shared]
         \\}
         \\#frame main { perform=[] }
     ;
@@ -286,10 +286,10 @@ test "imports: import already imported transitively" {
     // shader imports [A, B], A imports B - B should appear once
     const source: [:0]const u8 =
         \\#wgsl B { value="const B_CONST: f32 = 1.0;" }
-        \\#wgsl A { value="const A_CONST: f32 = B_CONST;" imports=["$wgsl.B"] }
+        \\#wgsl A { value="const A_CONST: f32 = B_CONST;" imports=[B] }
         \\#wgsl shader {
         \\  value="fn sum() -> f32 { return A_CONST + B_CONST; }"
-        \\  imports=["$wgsl.A", "$wgsl.B"]
+        \\  imports=[A, B]
         \\}
         \\#frame main { perform=[] }
     ;
@@ -311,7 +311,7 @@ test "imports: empty value module" {
         \\#wgsl empty { value="" }
         \\#wgsl shader {
         \\  value="fn main() {}"
-        \\  imports=["$wgsl.empty"]
+        \\  imports=[empty]
         \\}
         \\#frame main { perform=[] }
     ;
@@ -328,7 +328,7 @@ test "imports: whitespace-only value module" {
         \\#wgsl ws { value="   \n\t  " }
         \\#wgsl shader {
         \\  value="fn main() {}"
-        \\  imports=["$wgsl.ws"]
+        \\  imports=[ws]
         \\}
         \\#frame main { perform=[] }
     ;
@@ -344,7 +344,7 @@ test "imports: import with only comments" {
         \\#wgsl comments { value="// just a comment\n// another" }
         \\#wgsl shader {
         \\  value="fn main() {}"
-        \\  imports=["$wgsl.comments"]
+        \\  imports=[comments]
         \\}
         \\#frame main { perform=[] }
     ;
@@ -363,12 +363,12 @@ test "imports: property - each import appears exactly once per module" {
     // Create a complex dependency graph and verify deduplication
     const source: [:0]const u8 =
         \\#wgsl shared { value="const UNIQUE_MARKER_XYZ: f32 = 1.0;" }
-        \\#wgsl a { value="const A: f32 = UNIQUE_MARKER_XYZ;" imports=["$wgsl.shared"] }
-        \\#wgsl b { value="const B: f32 = UNIQUE_MARKER_XYZ;" imports=["$wgsl.shared"] }
-        \\#wgsl c { value="const C: f32 = UNIQUE_MARKER_XYZ;" imports=["$wgsl.shared"] }
+        \\#wgsl a { value="const A: f32 = UNIQUE_MARKER_XYZ;" imports=[shared] }
+        \\#wgsl b { value="const B: f32 = UNIQUE_MARKER_XYZ;" imports=[shared] }
+        \\#wgsl c { value="const C: f32 = UNIQUE_MARKER_XYZ;" imports=[shared] }
         \\#wgsl final {
         \\  value="fn sum() -> f32 { return A + B + C + UNIQUE_MARKER_XYZ; }"
-        \\  imports=["$wgsl.a", "$wgsl.b", "$wgsl.c", "$wgsl.shared"]
+        \\  imports=[a, b, c, shared]
         \\}
         \\#frame main { perform=[] }
     ;
@@ -439,7 +439,7 @@ test "imports: fuzz - random dependency graphs don't crash" {
                             const comma = std.fmt.bufPrint(source_buf[pos..], ", ", .{}) catch break;
                             pos += comma.len;
                         }
-                        const import_ref = std.fmt.bufPrint(source_buf[pos..], "\"$wgsl.m{d}\"", .{j}) catch break;
+                        const import_ref = std.fmt.bufPrint(source_buf[pos..], "m{d}", .{j}) catch break;
                         pos += import_ref.len;
                         first = false;
                     }
@@ -496,7 +496,7 @@ test "imports: fuzz - deep chains up to limit" {
             pos += module_start.len;
 
             if (i > 0) {
-                const imports = std.fmt.bufPrint(source_buf[pos..], " imports=[\"$wgsl.m{d}\"]", .{i - 1}) catch {
+                const imports = std.fmt.bufPrint(source_buf[pos..], " imports=[m{d}]", .{i - 1}) catch {
                     gen_ok = false;
                     break;
                 };
@@ -558,7 +558,7 @@ test "imports: stress - many imports (16)" {
         \\#wgsl m15 { value="const M15: f32 = 15.0;" }
         \\#wgsl all {
         \\  value="fn sum() -> f32 { return M0+M1+M2+M3+M4+M5+M6+M7+M8+M9+M10+M11+M12+M13+M14+M15; }"
-        \\  imports=["$wgsl.m0","$wgsl.m1","$wgsl.m2","$wgsl.m3","$wgsl.m4","$wgsl.m5","$wgsl.m6","$wgsl.m7","$wgsl.m8","$wgsl.m9","$wgsl.m10","$wgsl.m11","$wgsl.m12","$wgsl.m13","$wgsl.m14","$wgsl.m15"]
+        \\  imports=[m0, m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15]
         \\}
         \\#frame main { perform=[] }
     ;
@@ -585,13 +585,13 @@ test "imports: stress - complex graph with multiple paths" {
     //       H
     const source: [:0]const u8 =
         \\#wgsl H { value="const H: f32 = 1.0;" }
-        \\#wgsl E { value="const E: f32 = H;" imports=["$wgsl.H"] }
-        \\#wgsl F { value="const F: f32 = H;" imports=["$wgsl.H"] }
-        \\#wgsl G { value="const G: f32 = H;" imports=["$wgsl.H"] }
-        \\#wgsl B { value="const B: f32 = E + F;" imports=["$wgsl.E", "$wgsl.F"] }
-        \\#wgsl C { value="const C: f32 = E + G;" imports=["$wgsl.E", "$wgsl.G"] }
-        \\#wgsl D { value="const D: f32 = F + G;" imports=["$wgsl.F", "$wgsl.G"] }
-        \\#wgsl A { value="const A: f32 = B + C + D;" imports=["$wgsl.B", "$wgsl.C", "$wgsl.D"] }
+        \\#wgsl E { value="const E: f32 = H;" imports=[H] }
+        \\#wgsl F { value="const F: f32 = H;" imports=[H] }
+        \\#wgsl G { value="const G: f32 = H;" imports=[H] }
+        \\#wgsl B { value="const B: f32 = E + F;" imports=[E, F] }
+        \\#wgsl C { value="const C: f32 = E + G;" imports=[E, G] }
+        \\#wgsl D { value="const D: f32 = F + G;" imports=[F, G] }
+        \\#wgsl A { value="const A: f32 = B + C + D;" imports=[B, C, D] }
         \\#frame main { perform=[] }
     ;
 
@@ -615,7 +615,7 @@ test "imports: stress - complex graph with multiple paths" {
 test "imports: self-import should not infinite loop" {
     // A module importing itself - should be handled gracefully
     const source: [:0]const u8 =
-        \\#wgsl self { value="const SELF: f32 = 1.0;" imports=["$wgsl.self"] }
+        \\#wgsl self { value="const SELF: f32 = 1.0;" imports=[self] }
         \\#frame main { perform=[] }
     ;
 
@@ -634,9 +634,9 @@ test "imports: similar names should not collide" {
     // Names that could be confused: m, m1, m10, m_test
     const source: [:0]const u8 =
         \\#wgsl m { value="const M_BASE: f32 = 0.0;" }
-        \\#wgsl m1 { value="const M1_VAL: f32 = 1.0;" imports=["$wgsl.m"] }
-        \\#wgsl m10 { value="const M10_VAL: f32 = 10.0;" imports=["$wgsl.m1"] }
-        \\#wgsl m_test { value="const M_TEST_VAL: f32 = M_BASE + M1_VAL + M10_VAL;" imports=["$wgsl.m10"] }
+        \\#wgsl m1 { value="const M1_VAL: f32 = 1.0;" imports=[m] }
+        \\#wgsl m10 { value="const M10_VAL: f32 = 10.0;" imports=[m1] }
+        \\#wgsl m_test { value="const M_TEST_VAL: f32 = M_BASE + M1_VAL + M10_VAL;" imports=[m10] }
         \\#frame main { perform=[] }
     ;
 
@@ -655,7 +655,7 @@ test "imports: import order preserved in output" {
     const source: [:0]const u8 =
         \\#wgsl first { value="// FIRST_MARKER" }
         \\#wgsl second { value="// SECOND_MARKER" }
-        \\#wgsl third { value="// THIRD_MARKER" imports=["$wgsl.first", "$wgsl.second"] }
+        \\#wgsl third { value="// THIRD_MARKER" imports=[first, second] }
         \\#frame main { perform=[] }
     ;
 
@@ -675,9 +675,9 @@ test "imports: re-export pattern" {
     // Common pattern: a "prelude" module re-exports several others
     const source: [:0]const u8 =
         \\#wgsl types { value="struct Vec2 { x: f32, y: f32 }" }
-        \\#wgsl math { value="fn add(a: Vec2, b: Vec2) -> Vec2 { return Vec2(a.x+b.x, a.y+b.y); }" imports=["$wgsl.types"] }
-        \\#wgsl prelude { value="// prelude" imports=["$wgsl.types", "$wgsl.math"] }
-        \\#wgsl app { value="fn main() { let v = add(Vec2(1.0, 2.0), Vec2(3.0, 4.0)); }" imports=["$wgsl.prelude"] }
+        \\#wgsl math { value="fn add(a: Vec2, b: Vec2) -> Vec2 { return Vec2(a.x+b.x, a.y+b.y); }" imports=[types] }
+        \\#wgsl prelude { value="// prelude" imports=[types, math] }
+        \\#wgsl app { value="fn main() { let v = add(Vec2(1.0, 2.0), Vec2(3.0, 4.0)); }" imports=[prelude] }
         \\#frame main { perform=[] }
     ;
 
@@ -694,11 +694,11 @@ test "imports: deeply nested with fan-out" {
     // Creates many paths to L4
     const source: [:0]const u8 =
         \\#wgsl L4 { value="const LEAF: f32 = 4.0;" }
-        \\#wgsl L3a { value="const L3A: f32 = LEAF;" imports=["$wgsl.L4"] }
-        \\#wgsl L3b { value="const L3B: f32 = LEAF;" imports=["$wgsl.L4"] }
-        \\#wgsl L2a { value="const L2A: f32 = L3A + L3B;" imports=["$wgsl.L3a", "$wgsl.L3b"] }
-        \\#wgsl L2b { value="const L2B: f32 = L3A + L3B;" imports=["$wgsl.L3a", "$wgsl.L3b"] }
-        \\#wgsl L1 { value="const ROOT: f32 = L2A + L2B;" imports=["$wgsl.L2a", "$wgsl.L2b"] }
+        \\#wgsl L3a { value="const L3A: f32 = LEAF;" imports=[L4] }
+        \\#wgsl L3b { value="const L3B: f32 = LEAF;" imports=[L4] }
+        \\#wgsl L2a { value="const L2A: f32 = L3A + L3B;" imports=[L3a, L3b] }
+        \\#wgsl L2b { value="const L2B: f32 = L3A + L3B;" imports=[L3a, L3b] }
+        \\#wgsl L1 { value="const ROOT: f32 = L2A + L2B;" imports=[L2a, L2b] }
         \\#frame main { perform=[] }
     ;
 

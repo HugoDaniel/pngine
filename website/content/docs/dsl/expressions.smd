@@ -1,0 +1,251 @@
+---
+.title = "Expressions",
+.description = "Compile-time arithmetic expressions",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+PNGine supports compile-time arithmetic expressions for calculating sizes, counts, and other numeric values.
+
+## Expression Syntax
+
+Expressions are evaluated at compile time and must result in a number.
+
+### In Quoted Strings
+
+```pngine
+size="4 * 256"
+dispatchWorkgroups="ceil(NUM_PARTICLES / 64)"
+```
+
+### With Defines
+
+```pngine
+#define SIZE=256
+size=SIZE  // Direct use
+size="SIZE * 4"  // In expression
+```
+
+## Operators
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `+` | Addition | `1 + 2` = 3 |
+| `-` | Subtraction | `5 - 3` = 2 |
+| `*` | Multiplication | `4 * 5` = 20 |
+| `/` | Division | `10 / 4` = 2.5 |
+| `()` | Grouping | `(1 + 2) * 3` = 9 |
+| `-` (unary) | Negation | `-5` |
+
+### Precedence
+
+Standard mathematical precedence:
+
+1. Parentheses `()`
+2. Unary negation `-`
+3. Multiplication `*`, Division `/`
+4. Addition `+`, Subtraction `-`
+
+```pngine
+"1 + 2 * 3"      // = 7 (not 9)
+"(1 + 2) * 3"    // = 9
+"10 / 2 + 3"     // = 8
+"10 / (2 + 3)"   // = 2
+```
+
+### Associativity
+
+Left-to-right for operators of equal precedence:
+
+```pngine
+"1 - 2 - 3"      // = -4 (not 2)
+"24 / 4 / 2"     // = 3 (not 12)
+```
+
+## Built-in Constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `PI` | 3.14159265358979... | Pi |
+| `E` | 2.71828182845904... | Euler's number |
+| `TAU` | 6.28318530717958... | 2 * PI |
+
+```pngine
+#define FOV="PI / 4"
+#define CIRCLE="TAU"
+#define GROWTH="E"
+```
+
+## Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `ceil(x)` | Round up | `ceil(2.3)` = 3 |
+| `floor(x)` | Round down | `floor(2.7)` = 2 |
+| `random()` | Random 0-1 | Data generation |
+
+**Note:** `random()` is only available in `#data` generation expressions, not general expressions.
+
+## Using Defines
+
+Defines can be used in expressions:
+
+```pngine
+#define NUM_PARTICLES=2048
+#define PARTICLE_SIZE=32
+#define WORKGROUP_SIZE=64
+
+#buffer particles {
+  size="NUM_PARTICLES * PARTICLE_SIZE"
+  usage=[STORAGE]
+}
+
+#computePass simulate {
+  dispatchWorkgroups="ceil(NUM_PARTICLES / WORKGROUP_SIZE)"
+}
+```
+
+### Chained Defines
+
+Defines can reference other defines:
+
+```pngine
+#define A=10
+#define B="A * 2"         // = 20
+#define C="A + B"         // = 30
+#define D="(A + B) * 2"   // = 60
+```
+
+## Common Patterns
+
+### Buffer Size Calculation
+
+```pngine
+#define VERTEX_COUNT=1000
+#define FLOATS_PER_VERTEX=8
+#define BYTES_PER_FLOAT=4
+
+#buffer vertices {
+  size="VERTEX_COUNT * FLOATS_PER_VERTEX * BYTES_PER_FLOAT"
+  usage=[VERTEX]
+}
+```
+
+### Compute Dispatch
+
+```pngine
+#define NUM_ITEMS=4096
+#define WORKGROUP_SIZE=256
+
+#computePass process {
+  dispatchWorkgroups="ceil(NUM_ITEMS / WORKGROUP_SIZE)"
+}
+```
+
+### Array Stride
+
+```pngine
+#renderPipeline mesh {
+  vertex={
+    buffers=[{
+      arrayStride="4 * 8"  // 8 floats = 32 bytes
+      attributes=[
+        { shaderLocation=0 offset=0 format=float32x3 }
+        { shaderLocation=1 offset="4 * 3" format=float32x3 }
+        { shaderLocation=2 offset="4 * 6" format=float32x2 }
+      ]
+    }]
+  }
+}
+```
+
+### Angle Calculations
+
+```pngine
+#define FOV_DEGREES=60
+#define FOV_RADIANS="FOV_DEGREES * PI / 180"
+
+#define QUARTER_TURN="PI / 2"
+#define FULL_ROTATION="TAU"
+```
+
+## Data Generation Expressions
+
+In `#data` with `initEachElementWith`, additional variables are available:
+
+| Variable | Description |
+|----------|-------------|
+| `ELEMENT_ID` | Current element index (0 to N-1) |
+| `random()` | Random value between 0 and 1 |
+
+```pngine
+#define NUM_PARTICLES=2048
+
+#data particles {
+  float32Array={
+    numberOfElements=NUM_PARTICLES
+    initEachElementWith=[
+      "cos((ELEMENT_ID / NUM_PARTICLES) * TAU)"
+      "sin((ELEMENT_ID / NUM_PARTICLES) * TAU)"
+      "(random() - 0.5) * 0.1"
+      "(random() - 0.5) * 0.1"
+    ]
+  }
+}
+```
+
+## Error Handling
+
+### Division by Zero
+
+Division by zero returns `null` (graceful failure):
+
+```pngine
+size="10 / 0"  // Compile error
+```
+
+### Invalid Expressions
+
+Malformed expressions produce compile errors:
+
+```pngine
+size="1 +"      // Error: unexpected end
+size="1 * * 2"  // Error: unexpected operator
+size="foo"      // Error: undefined reference (if not a define)
+```
+
+## Evaluation Limits
+
+To prevent infinite loops, expression evaluation is bounded:
+
+- Maximum expression depth: 64
+- Maximum evaluation steps: 1000
+
+## Type Coercion
+
+All expression results are `f64` (double precision float). When used in integer contexts (like `size`), the value is truncated.
+
+```pngine
+size="100.7"   // Uses 100 bytes
+size="100 / 3" // Uses 33 bytes (truncated from 33.333...)
+```
+
+## Comparison with WGSL
+
+PNGine expressions are **not** WGSL expressions:
+
+| Feature | PNGine | WGSL |
+|---------|--------|------|
+| Evaluation | Compile time | Shader compile time |
+| Types | f64 only | Multiple types |
+| Functions | ceil, floor | Full stdlib |
+| Use | Resource creation | Shader logic |
+
+Use PNGine expressions for resource configuration, WGSL for shader logic.
+
+## Related
+
+- [`#define`](/docs/dsl/define/) - Define constants
+- [References](/docs/dsl/references/) - Reference syntax
+- [`#data`](/docs/dsl/data/) - Data generation

@@ -1,0 +1,202 @@
+---
+.title = "#shaderModule",
+.description = "Named shader module with WGSL code",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+Defines a named shader module containing WGSL code. Similar to `#wgsl` but designed for complete shader modules rather than composable fragments.
+
+## Syntax
+
+```pngine
+#shaderModule name {
+  code="WGSL shader code"
+  uniforms=[{ var="name" bindGroup=0 binding=0 size=64 }]
+}
+```
+
+## Attributes
+
+| Attribute | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `code` | string | Yes | - | Complete WGSL shader code |
+| `uniforms` | array | No | `[]` | Uniform metadata for buffer operations |
+
+### code
+
+**Type:** `string`
+
+The complete WGSL shader source code including all entry points.
+
+```pngine
+#shaderModule triangle {
+  code="
+    @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      var pos = array<vec2f, 3>(
+        vec2f(0.0, 0.5),
+        vec2f(-0.5, -0.5),
+        vec2f(0.5, -0.5)
+      );
+      return vec4f(pos[i], 0.0, 1.0);
+    }
+
+    @fragment fn fs() -> @location(0) vec4f {
+      return vec4f(1.0, 0.5, 0.0, 1.0);
+    }
+  "
+}
+```
+
+### uniforms
+
+**Type:** `array` of `object`
+
+Metadata for uniform variables in the shader. Used by `#queue` operations to locate uniform buffers.
+
+Each uniform object has:
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `var` | string | Yes | Variable name in shader |
+| `bindGroup` | number | No | Bind group index (default: 0) |
+| `binding` | number | No | Binding index (default: 0) |
+| `size` | number | No | Size in bytes (default: 12) |
+
+```pngine
+#shaderModule main {
+  code="
+    struct Uniforms {
+      time: f32,
+      resolution: vec2f,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    @fragment fn fs() -> @location(0) vec4f {
+      return vec4f(sin(u.time), 0.0, 0.0, 1.0);
+    }
+  "
+  uniforms=[{ var="u" bindGroup=0 binding=0 size=12 }]
+}
+```
+
+**WGSL Reflection:**
+
+The analyzer can automatically extract uniform metadata from WGSL code using reflection. If your shader uses the standard pattern:
+
+```wgsl
+@group(G) @binding(B) var<uniform> NAME : Type;
+```
+
+The metadata is extracted automatically. Explicit `uniforms` overrides reflection.
+
+## Examples
+
+### Basic Triangle
+
+```pngine
+#shaderModule code {
+  code="
+    @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      var pos = array<vec2f, 3>(
+        vec2f(0.0, 0.5),
+        vec2f(-0.5, -0.5),
+        vec2f(0.5, -0.5)
+      );
+      return vec4f(pos[i], 0.0, 1.0);
+    }
+
+    @fragment fn fs() -> @location(0) vec4f {
+      return vec4f(1.0, 0.0, 0.0, 1.0);
+    }
+  "
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={ module=code entryPoint=vs }
+  fragment={ module=code entryPoint=fs targets=[{ format=preferredCanvasFormat }] }
+}
+```
+
+### With Uniform Buffer
+
+```pngine
+#shaderModule main {
+  code="
+    struct Inputs {
+      mvp: mat4x4f,
+      time: f32,
+    }
+    @group(0) @binding(0) var<uniform> inputs: Inputs;
+
+    @vertex fn vs(@location(0) pos: vec3f) -> @builtin(position) vec4f {
+      return inputs.mvp * vec4f(pos, 1.0);
+    }
+
+    @fragment fn fs() -> @location(0) vec4f {
+      return vec4f(sin(inputs.time), 0.0, 0.0, 1.0);
+    }
+  "
+}
+
+#buffer uniformBuffer {
+  size=80
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={
+    buffer=uniformBuffer
+    data="$uniforms.main.inputs.data"
+  }
+}
+```
+
+### Compute Shader
+
+```pngine
+#shaderModule compute {
+  code="
+    struct Particle {
+      pos: vec2f,
+      vel: vec2f,
+    }
+
+    @group(0) @binding(0) var<storage, read> particlesA: array<Particle>;
+    @group(0) @binding(1) var<storage, read_write> particlesB: array<Particle>;
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+      let i = id.x;
+      particlesB[i].pos = particlesA[i].pos + particlesA[i].vel;
+      particlesB[i].vel = particlesA[i].vel;
+    }
+  "
+}
+```
+
+## Validation Rules
+
+| Rule | Error |
+|------|-------|
+| Name must be unique across all namespaces | `duplicate_definition` |
+| `code` attribute is required | `missing_required_property` |
+
+## WebGPU Mapping
+
+Compiles to `GPUShaderModule` via:
+
+```javascript
+device.createShaderModule({
+  code: shaderCode
+});
+```
+
+## Related
+
+- [`#wgsl`](/docs/dsl/wgsl/) - Composable shader fragments with imports
+- [`#renderPipeline`](/docs/dsl/render-pipeline/) - Uses modules for vertex/fragment
+- [`#computePipeline`](/docs/dsl/compute-pipeline/) - Uses modules for compute
+- [`#queue`](/docs/dsl/queue/) - Write uniform data to buffers

@@ -1,0 +1,272 @@
+---
+.title = "#computePass",
+.description = "Compute pass with dispatch",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+Defines a compute pass that dispatches compute shader workgroups.
+
+## Syntax
+
+```pngine
+#computePass name {
+  pipeline=pipelineName
+  bindGroups=[group0 group1]
+  bindGroupsPoolOffsets=[0]
+  dispatchWorkgroups=[64 1 1]
+}
+```
+
+## Attributes
+
+| Attribute | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `pipeline` | reference | Yes | - | Compute pipeline |
+| `bindGroups` | array | No | `[]` | Bind groups |
+| `bindGroupsPoolOffsets` | array | No | `[]` | Pool offsets |
+| `dispatchWorkgroups` | array/string/number | * | - | Workgroup counts |
+| `dispatchWorkgroupsIndirect` | reference | * | - | Indirect dispatch buffer |
+
+*Either `dispatchWorkgroups` or `dispatchWorkgroupsIndirect` required.
+
+### pipeline
+
+**Type:** `reference`
+
+Reference to `#computePipeline`. Can use bare identifier.
+
+```pngine
+pipeline=simPipeline
+```
+
+### bindGroups
+
+**Type:** `array` of references
+
+Bind groups in order matching `@group(N)`:
+
+```pngine
+bindGroups=[particleGroup uniformGroup]
+```
+
+### bindGroupsPoolOffsets
+
+**Type:** `array` of numbers
+
+Pool offsets for ping-pong bind groups. Each offset corresponds to a bind group in the `bindGroups` array.
+
+```pngine
+bindGroups=[simBindGroup]
+bindGroupsPoolOffsets=[0]  // Alternates each frame
+```
+
+The actual bind group used is:
+
+```
+actual_id = base_id + (frame_counter + offset) % pool_size
+```
+
+### dispatchWorkgroups
+
+**Type:** `array`, `string`, or `number`
+
+Specifies number of workgroups to dispatch.
+
+**Array format (x, y, z):**
+```pngine
+dispatchWorkgroups=[64 1 1]
+dispatchWorkgroups=[8 8 1]
+dispatchWorkgroups=[4 4 4]
+```
+
+**Single number (x only):**
+```pngine
+dispatchWorkgroups=64  // Same as [64 1 1]
+```
+
+**Expression string:**
+```pngine
+#define NUM_PARTICLES=2048
+
+dispatchWorkgroups="ceil(NUM_PARTICLES / 64)"
+```
+
+Total threads = workgroups * workgroup_size (from shader).
+
+### dispatchWorkgroupsIndirect
+
+**Type:** `reference`
+
+Reference to a buffer containing dispatch parameters. The buffer must contain three `u32` values: `[workgroups_x, workgroups_y, workgroups_z]`.
+
+```pngine
+#buffer dispatchArgs {
+  size=12
+  usage=[INDIRECT COPY_DST]
+}
+
+#computePass dynamicDispatch {
+  pipeline=computePipeline
+  bindGroups=[dataGroup]
+  dispatchWorkgroupsIndirect=dispatchArgs
+}
+```
+
+## Examples
+
+### Basic Compute
+
+```pngine
+#computePass process {
+  pipeline=processPipeline
+  bindGroups=[dataBindGroup]
+  dispatchWorkgroups=[16 1 1]
+}
+```
+
+### 2D Dispatch (Image Processing)
+
+```pngine
+#computePass blur {
+  pipeline=blurPipeline
+  bindGroups=[imageBindGroup]
+  dispatchWorkgroups=[64 64 1]  // 512x512 with 8x8 workgroups
+}
+```
+
+### With Expression
+
+```pngine
+#define NUM_PARTICLES=4096
+#define WORKGROUP_SIZE=64
+
+#computePass simulate {
+  pipeline=simPipeline
+  bindGroups=[particleGroup]
+  dispatchWorkgroups="ceil(NUM_PARTICLES / WORKGROUP_SIZE)"
+}
+```
+
+### Ping-Pong Simulation
+
+```pngine
+#buffer particles {
+  size=65536
+  usage=[STORAGE]
+  pool=2
+}
+
+#bindGroup simGroup {
+  layout={ pipeline=simPipeline index=0 }
+  entries=[
+    { binding=0 resource={ buffer=particles pingPong=0 } }
+    { binding=1 resource={ buffer=particles pingPong=1 } }
+  ]
+  pool=2
+}
+
+#computePass update {
+  pipeline=simPipeline
+  bindGroups=[simGroup]
+  bindGroupsPoolOffsets=[0]
+  dispatchWorkgroups=[64 1 1]
+}
+
+#frame main {
+  perform=[update render]
+}
+```
+
+Each frame:
+- Frame 0: Read from `particles_0`, write to `particles_1`
+- Frame 1: Read from `particles_1`, write to `particles_0`
+- Frame 2: Read from `particles_0`, write to `particles_1`
+- etc.
+
+### Multiple Compute Passes
+
+```pngine
+#computePass integrate {
+  pipeline=integratePipeline
+  bindGroups=[physicsGroup]
+  bindGroupsPoolOffsets=[0]
+  dispatchWorkgroups=[64 1 1]
+}
+
+#computePass collide {
+  pipeline=collidePipeline
+  bindGroups=[physicsGroup]
+  bindGroupsPoolOffsets=[0]
+  dispatchWorkgroups=[64 1 1]
+}
+
+#frame physics {
+  perform=[integrate collide render]
+}
+```
+
+### Indirect Dispatch
+
+```pngine
+#buffer instanceCount {
+  size=4
+  usage=[STORAGE INDIRECT COPY_DST]
+}
+
+#buffer dispatchArgs {
+  size=12
+  usage=[STORAGE INDIRECT]
+}
+
+#computePass buildDispatch {
+  pipeline=buildDispatchPipeline
+  bindGroups=[buildGroup]
+  dispatchWorkgroups=[1 1 1]
+}
+
+#computePass process {
+  pipeline=processPipeline
+  bindGroups=[processGroup]
+  dispatchWorkgroupsIndirect=dispatchArgs
+}
+
+#frame main {
+  perform=[buildDispatch process render]
+}
+```
+
+## Validation Rules
+
+| Rule | Error |
+|------|-------|
+| Name must be unique across all namespaces | `duplicate_definition` |
+| `pipeline` attribute is required | `missing_required_property` |
+| Either `dispatchWorkgroups` or `dispatchWorkgroupsIndirect` required | `missing_required_property` |
+| Referenced resources must exist | `undefined_reference` |
+
+## WebGPU Mapping
+
+Maps to compute pass encoding:
+
+```javascript
+const passEncoder = commandEncoder.beginComputePass();
+passEncoder.setPipeline(pipeline);
+passEncoder.setBindGroup(0, bindGroup);
+passEncoder.dispatchWorkgroups(64, 1, 1);
+passEncoder.end();
+```
+
+Or for indirect dispatch:
+
+```javascript
+passEncoder.dispatchWorkgroupsIndirect(indirectBuffer, 0);
+```
+
+## Related
+
+- [`#computePipeline`](/docs/dsl/compute-pipeline/) - Pipeline configuration
+- [`#bindGroup`](/docs/dsl/bind-group/) - Resource bindings
+- [`#buffer`](/docs/dsl/buffer/) - Storage buffers
+- [`#frame`](/docs/dsl/frame/) - Execute passes

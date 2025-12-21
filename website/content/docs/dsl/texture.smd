@@ -1,0 +1,251 @@
+---
+.title = "#texture",
+.description = "GPU texture resource",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+Creates a GPU texture for sampling, render targets, or storage.
+
+## Syntax
+
+```pngine
+#texture name {
+  size=[512 512]
+  format=rgba8unorm
+  usage=[TEXTURE_BINDING RENDER_ATTACHMENT]
+  sampleCount=4
+  dimension=2d
+  mipLevelCount=1
+}
+```
+
+## Attributes
+
+| Attribute | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `size` | array | No | `[canvas.width, canvas.height]` | Texture dimensions |
+| `format` | string | Yes | - | Texture format |
+| `usage` | array | Yes | - | Usage flags |
+| `dimension` | string | No | `2d` | Texture dimension |
+| `sampleCount` | number | No | `1` | MSAA sample count |
+| `mipLevelCount` | number | No | `1` | Number of mip levels |
+
+### size
+
+**Type:** `array` of `[width, height]` or `[width, height, depth]`
+
+Texture dimensions. Can use runtime values:
+
+```pngine
+// Static size
+#texture image {
+  size=[512 512]
+  format=rgba8unorm
+  usage=[TEXTURE_BINDING]
+}
+
+// Canvas-relative (uses quotes for runtime interpolation)
+#texture renderTarget {
+  size=["$canvas.width" "$canvas.height"]
+  format=preferredCanvasFormat
+  usage=[RENDER_ATTACHMENT]
+}
+
+// 3D texture
+#texture volume {
+  size=[64 64 64]
+  format=r32float
+  usage=[STORAGE_BINDING]
+  dimension=3d
+}
+```
+
+### format
+
+**Type:** `string`
+
+Texture format. Common formats:
+
+| Format | Description |
+|--------|-------------|
+| `rgba8unorm` | 8-bit RGBA, normalized |
+| `bgra8unorm` | 8-bit BGRA, normalized |
+| `rgba16float` | 16-bit float RGBA |
+| `rgba32float` | 32-bit float RGBA |
+| `r8unorm` | 8-bit red channel |
+| `r32float` | 32-bit float red channel |
+| `depth24plus` | 24-bit depth |
+| `depth32float` | 32-bit float depth |
+| `depth24plus-stencil8` | Depth + stencil |
+| `preferredCanvasFormat` | Browser preferred format |
+
+### usage
+
+**Type:** `array` of identifiers
+
+Texture usage flags. At least one required.
+
+| Flag | Description |
+|------|-------------|
+| `TEXTURE_BINDING` | Sample in shaders |
+| `STORAGE_BINDING` | Read/write in compute |
+| `RENDER_ATTACHMENT` | Render target |
+| `COPY_SRC` | Copy from texture |
+| `COPY_DST` | Copy to texture |
+
+### dimension
+
+**Type:** `string`
+
+Texture dimensionality.
+
+| Value | Description |
+|-------|-------------|
+| `1d` | 1D texture |
+| `2d` | 2D texture (default) |
+| `3d` | 3D/volume texture |
+
+### sampleCount
+
+**Type:** `number`
+
+MSAA sample count for multisampled textures. Must be 1 or 4.
+
+```pngine
+#define SAMPLE_COUNT=4
+
+#texture msaaTarget {
+  size=["$canvas.width" "$canvas.height"]
+  format=preferredCanvasFormat
+  usage=[RENDER_ATTACHMENT]
+  sampleCount=SAMPLE_COUNT
+}
+```
+
+### mipLevelCount
+
+**Type:** `number`
+
+Number of mipmap levels.
+
+```pngine
+#texture mipmapped {
+  size=[256 256]
+  format=rgba8unorm
+  usage=[TEXTURE_BINDING COPY_DST]
+  mipLevelCount=8
+}
+```
+
+## Examples
+
+### Render Target
+
+```pngine
+#texture colorTarget {
+  size=["$canvas.width" "$canvas.height"]
+  format=preferredCanvasFormat
+  usage=[RENDER_ATTACHMENT TEXTURE_BINDING]
+}
+```
+
+### Depth Buffer
+
+```pngine
+#texture depthTexture {
+  size=["$canvas.width" "$canvas.height"]
+  format=depth24plus
+  usage=[RENDER_ATTACHMENT]
+}
+
+#renderPass main {
+  depthStencilAttachment={
+    view=depthTexture
+    depthClearValue=1.0
+    depthLoadOp=clear
+    depthStoreOp=store
+  }
+}
+```
+
+### MSAA with Resolve
+
+```pngine
+#define SAMPLE_COUNT=4
+
+#texture msaaTexture {
+  size=["$canvas.width" "$canvas.height"]
+  format=preferredCanvasFormat
+  usage=[RENDER_ATTACHMENT]
+  sampleCount=SAMPLE_COUNT
+}
+
+#renderPass msaaPass {
+  colorAttachments=[{
+    view=msaaTexture
+    resolveTarget=contextCurrentTexture
+    clearValue=[0 0 0 1]
+    loadOp=clear
+    storeOp=discard
+  }]
+}
+```
+
+### External Image Texture
+
+```pngine
+#data imageData {
+  blob={ file={ url="texture.png" } }
+}
+
+#imageBitmap image {
+  image=imageData
+}
+
+#texture diffuseMap {
+  size=[512 512]
+  format=rgba8unorm
+  usage=[TEXTURE_BINDING COPY_DST RENDER_ATTACHMENT]
+}
+
+#queue loadTexture {
+  copyExternalImageToTexture={
+    source={ source=image }
+    destination={ texture=diffuseMap }
+    copySize=[512 512]
+  }
+}
+```
+
+## Validation Rules
+
+| Rule | Error |
+|------|-------|
+| Name must be unique across all namespaces | `duplicate_definition` |
+| `format` attribute is required | `missing_required_property` |
+| `usage` attribute is required | `missing_required_property` |
+
+## WebGPU Mapping
+
+Maps to `GPUTexture` via:
+
+```javascript
+device.createTexture({
+  size: [width, height, depth],
+  format: format,
+  usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+  dimension: dimension,
+  sampleCount: sampleCount,
+  mipLevelCount: mipLevelCount
+});
+```
+
+## Related
+
+- [`#textureView`](/docs/dsl/texture-view/) - Create views into textures
+- [`#sampler`](/docs/dsl/sampler/) - Configure texture sampling
+- [`#bindGroup`](/docs/dsl/bind-group/) - Bind textures to shaders
+- [`#renderPass`](/docs/dsl/render-pass/) - Use as render target
+- [`#queue`](/docs/dsl/queue/) - Copy images to textures

@@ -1,0 +1,204 @@
+---
+.title = "#wasmCall",
+.description = "Call WASM module functions",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+Calls a function from a WebAssembly module to generate data or perform computations.
+
+## Syntax
+
+```pngine
+#wasmCall name {
+  module={ url="path/to/module.wasm" }
+  func="functionName"
+  args=[arg1 arg2]
+  returns="f32"
+}
+```
+
+## Attributes
+
+| Attribute | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `module` | object | Yes | - | WASM module reference |
+| `func` | string | Yes | - | Function name to call |
+| `args` | array | No | `[]` | Function arguments |
+| `returns` | string | No | - | Return type |
+
+### module
+
+**Type:** `object`
+
+WASM module specification:
+
+```pngine
+module={ url="math.wasm" }
+```
+
+The WASM file is embedded in bytecode at compile time.
+
+### func
+
+**Type:** `string`
+
+Exported function name to call:
+
+```pngine
+func="computeMatrix"
+```
+
+### args
+
+**Type:** `array`
+
+Arguments to pass to the function. Can be:
+
+- Numbers: `1.0`, `42`, `0xFF`
+- Expressions: `"PI * 2"`, `"WIDTH / HEIGHT"`
+- References to other values
+
+```pngine
+args=[45.0 1.777 0.1 100.0]
+```
+
+### returns
+
+**Type:** `string`
+
+Return type of the function:
+
+| Type | Description |
+|------|-------------|
+| `f32` | Single float |
+| `vec2f` | 2 floats |
+| `vec3f` | 3 floats |
+| `vec4f` | 4 floats |
+| `mat4x4f` | 16 floats (4x4 matrix) |
+
+## Examples
+
+### Perspective Matrix
+
+```pngine
+#wasmCall perspective {
+  module={ url="matrices.wasm" }
+  func="perspective"
+  args=[1.0472 1.777 0.1 100.0]
+  returns="mat4x4f"
+}
+
+#buffer mvpBuffer {
+  size=64
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeMVP {
+  writeBuffer={
+    buffer=mvpBuffer
+    data=perspective
+  }
+}
+```
+
+### Model-View-Projection
+
+```pngine
+#wasmCall modelMatrix {
+  module={ url="transform.wasm" }
+  func="rotateY"
+  args=["time.total"]
+  returns="mat4x4f"
+}
+
+#wasmCall viewMatrix {
+  module={ url="transform.wasm" }
+  func="lookAt"
+  args=[0 0 5  0 0 0  0 1 0]
+  returns="mat4x4f"
+}
+
+#wasmCall projMatrix {
+  module={ url="transform.wasm" }
+  func="perspective"
+  args=[45 1.0 0.1 100]
+  returns="mat4x4f"
+}
+```
+
+### Procedural Generation
+
+```pngine
+#wasmCall noiseData {
+  module={ url="noise.wasm" }
+  func="generateNoise"
+  args=[256 256 4]
+  returns="f32"
+}
+```
+
+### Runtime Arguments
+
+```pngine
+#wasmCall rotatedMVP {
+  module={ url="matrices.wasm" }
+  func="rotatingMVP"
+  args=["time.total" "canvas.width" "canvas.height"]
+  returns="mat4x4f"
+}
+```
+
+## WASM Module Requirements
+
+Exported functions must follow C ABI conventions:
+
+```c
+// Example WASM source (C)
+__attribute__((export_name("perspective")))
+void perspective(float fov, float aspect, float near, float far, float* out) {
+    // Write 16 floats to out pointer
+}
+```
+
+Or in Rust:
+
+```rust
+#[no_mangle]
+pub extern "C" fn perspective(fov: f32, aspect: f32, near: f32, far: f32, out: *mut f32) {
+    // Write to out
+}
+```
+
+## Data Flow
+
+```
+WASM Function
+      │
+      ▼
+  Return Data
+      │
+      ▼
+#wasmCall (captures result)
+      │
+      ▼
+#queue writeBuffer (writes to GPU)
+      │
+      ▼
+GPU Buffer (available in shaders)
+```
+
+## Validation Rules
+
+| Rule | Error |
+|------|-------|
+| Name must be unique across all namespaces | `duplicate_definition` |
+| `module` attribute is required | `missing_required_property` |
+| `func` attribute is required | `missing_required_property` |
+
+## Related
+
+- [`#data`](/docs/dsl/data/) - Alternative for static/generated data
+- [`#queue`](/docs/dsl/queue/) - Write WASM results to buffers
+- [`#buffer`](/docs/dsl/buffer/) - GPU buffers for results

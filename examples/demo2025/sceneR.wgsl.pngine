@@ -2,7 +2,7 @@
 
 #wgsl sceneRShader {
   value="./wgsl/sceneR.wgsl"
-  imports=["$wgsl.constants", "$wgsl.transform2D", "$wgsl.primitives","$wgsl.beats", "$wgsl.tangram"]
+  imports=[constants, transform2D, primitives, beats, tangram]
 }
 
 #bindGroup sceneRInputsBindGroup {
@@ -50,5 +50,5 @@
 }
 
 #shaderModule sceneR {
-  code="$wgsl.sceneRShader"
+  code=sceneRShader
 }

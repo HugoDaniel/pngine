@@ -1,0 +1,216 @@
+---
+.title = "#computePipeline",
+.description = "Compute pipeline configuration",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+Creates a compute pipeline for general-purpose GPU computation.
+
+## Syntax
+
+```pngine
+#computePipeline name {
+  layout=auto
+  compute={
+    module=shaderName
+    entryPoint=main
+  }
+}
+```
+
+## Attributes
+
+| Attribute | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `layout` | string/reference | No | `auto` | Pipeline layout |
+| `compute` | object | Yes | - | Compute stage |
+
+### layout
+
+**Type:** `string` or `reference`
+
+- `auto` - Derive layout from shader (default)
+- Reference to `#pipelineLayout`
+
+```pngine
+layout=auto
+// or
+layout=computeLayout
+```
+
+### compute
+
+**Type:** `object`
+
+Compute shader stage configuration.
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `module` | reference | Yes | Shader module |
+| `entryPoint` | string | Yes | Entry function name |
+
+```pngine
+compute={
+  module=computeShader
+  entryPoint=main
+}
+```
+
+## Examples
+
+### Basic Compute Pipeline
+
+```pngine
+#shaderModule computeShader {
+  code="
+    @group(0) @binding(0) var<storage, read_write> data: array<f32>;
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+      data[id.x] = data[id.x] * 2.0;
+    }
+  "
+}
+
+#computePipeline doublePipeline {
+  layout=auto
+  compute={ module=computeShader entryPoint=main }
+}
+
+#computePass double {
+  pipeline=doublePipeline
+  bindGroups=[dataGroup]
+  dispatchWorkgroups=[16 1 1]
+}
+```
+
+### Particle Simulation
+
+```pngine
+#shaderModule particleSim {
+  code="
+    struct Particle {
+      pos: vec2f,
+      vel: vec2f,
+    }
+
+    @group(0) @binding(0) var<storage, read> particlesA: array<Particle>;
+    @group(0) @binding(1) var<storage, read_write> particlesB: array<Particle>;
+    @group(0) @binding(2) var<uniform> params: vec4f;
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+      let i = id.x;
+      let dt = params.x;
+
+      var p = particlesA[i];
+      p.pos = p.pos + p.vel * dt;
+
+      // Wrap around
+      p.pos = fract(p.pos);
+
+      particlesB[i] = p;
+    }
+  "
+}
+
+#computePipeline simPipeline {
+  layout=auto
+  compute={ module=particleSim entryPoint=main }
+}
+```
+
+### Image Processing
+
+```pngine
+#shaderModule blur {
+  code="
+    @group(0) @binding(0) var inputTex: texture_2d<f32>;
+    @group(0) @binding(1) var outputTex: texture_storage_2d<rgba8unorm, write>;
+
+    @compute @workgroup_size(8, 8)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+      let dims = textureDimensions(inputTex);
+      if (id.x >= dims.x || id.y >= dims.y) { return; }
+
+      var sum = vec4f(0);
+      for (var dy: i32 = -1; dy <= 1; dy++) {
+        for (var dx: i32 = -1; dx <= 1; dx++) {
+          let coord = vec2i(id.xy) + vec2i(dx, dy);
+          sum += textureLoad(inputTex, clamp(coord, vec2i(0), vec2i(dims) - 1), 0);
+        }
+      }
+      textureStore(outputTex, id.xy, sum / 9.0);
+    }
+  "
+}
+
+#computePipeline blurPipeline {
+  layout=auto
+  compute={ module=blur entryPoint=main }
+}
+```
+
+### With Explicit Layout
+
+```pngine
+#bindGroupLayout computeLayout {
+  entries=[
+    { binding=0 visibility=[COMPUTE] buffer={ type=read-only-storage } }
+    { binding=1 visibility=[COMPUTE] buffer={ type=storage } }
+  ]
+}
+
+#pipelineLayout simLayout {
+  bindGroupLayouts=[computeLayout]
+}
+
+#computePipeline simulation {
+  layout=simLayout
+  compute={ module=simShader entryPoint=main }
+}
+```
+
+## Workgroup Sizes
+
+The shader defines workgroup size with `@workgroup_size(x, y, z)`:
+
+```wgsl
+@compute @workgroup_size(64)        // 1D: 64 threads
+@compute @workgroup_size(8, 8)      // 2D: 8x8 = 64 threads
+@compute @workgroup_size(4, 4, 4)   // 3D: 4x4x4 = 64 threads
+```
+
+Dispatch with `dispatchWorkgroups` in `#computePass` specifies how many workgroups to run.
+
+## Validation Rules
+
+| Rule | Error |
+|------|-------|
+| Name must be unique across all namespaces | `duplicate_definition` |
+| `compute` attribute is required | `missing_required_property` |
+| Referenced module must exist | `undefined_reference` |
+
+## WebGPU Mapping
+
+Maps to `GPUComputePipeline` via:
+
+```javascript
+device.createComputePipeline({
+  layout: 'auto',
+  compute: {
+    module: shaderModule,
+    entryPoint: 'main'
+  }
+});
+```
+
+## Related
+
+- [`#shaderModule`](/docs/dsl/shader-module/) - Shader modules
+- [`#wgsl`](/docs/dsl/wgsl/) - Shader fragments
+- [`#computePass`](/docs/dsl/compute-pass/) - Execute compute pipelines
+- [`#buffer`](/docs/dsl/buffer/) - Storage buffers
+- [`#bindGroup`](/docs/dsl/bind-group/) - Resource bindings

@@ -1,0 +1,193 @@
+---
+.title = "#define",
+.description = "Compile-time constants",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+Defines compile-time constants that are substituted throughout the DSL file.
+
+## Syntax
+
+```pngine
+#define NAME=value
+#define NAME="expression"
+```
+
+## Attributes
+
+`#define` uses a special syntax without braces. The value immediately follows the `=`.
+
+### Simple Values
+
+```pngine
+#define NUM_PARTICLES=2048
+#define SAMPLE_COUNT=4
+#define FOV=1.0472
+```
+
+### Expressions
+
+String expressions are evaluated at compile time:
+
+```pngine
+#define VERTEX_SIZE="4 * 10"
+#define BUFFER_SIZE="NUM_PARTICLES * VERTEX_SIZE"
+#define HALF_PI="PI / 2"
+```
+
+## Usage
+
+Defined constants can be used anywhere a number is expected:
+
+```pngine
+#define NUM_PARTICLES=4096
+#define PARTICLE_SIZE=16
+#define WORKGROUP_SIZE=64
+
+#buffer particles {
+  size="NUM_PARTICLES * PARTICLE_SIZE"
+  usage=[STORAGE]
+}
+
+#computePass simulate {
+  pipeline=simPipeline
+  dispatchWorkgroups="ceil(NUM_PARTICLES / WORKGROUP_SIZE)"
+}
+```
+
+## Examples
+
+### MSAA Configuration
+
+```pngine
+#define SAMPLE_COUNT=4
+
+#texture msaaTarget {
+  size=["$canvas.width" "$canvas.height"]
+  format=preferredCanvasFormat
+  usage=[RENDER_ATTACHMENT]
+  sampleCount=SAMPLE_COUNT
+}
+
+#renderPipeline msaaPipeline {
+  multisample=SAMPLE_COUNT
+  // ...
+}
+```
+
+### Compute Configuration
+
+```pngine
+#define NUM_PARTICLES=8192
+#define PARTICLE_STRIDE=32
+#define WORKGROUP_SIZE=256
+
+#buffer particleBuffer {
+  size="NUM_PARTICLES * PARTICLE_STRIDE"
+  usage=[STORAGE VERTEX]
+}
+
+#computePass update {
+  pipeline=simPipeline
+  dispatchWorkgroups="ceil(NUM_PARTICLES / WORKGROUP_SIZE)"
+}
+
+#renderPass render {
+  draw={ vertexCount=6 instanceCount=NUM_PARTICLES }
+}
+```
+
+### Math Constants
+
+```pngine
+#define PI_OVER_4="PI / 4"
+#define TAU_OVER_8="TAU / 8"
+#define ASPECT_RATIO="16 / 9"
+```
+
+### Size Calculations
+
+```pngine
+#define VERTEX_COUNT=1000
+#define FLOATS_PER_VERTEX=8
+#define BYTES_PER_FLOAT=4
+
+#buffer vertices {
+  size="VERTEX_COUNT * FLOATS_PER_VERTEX * BYTES_PER_FLOAT"
+  usage=[VERTEX]
+}
+```
+
+## Available Constants
+
+Built-in constants available in expressions:
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `PI` | 3.14159... | Pi |
+| `E` | 2.71828... | Euler's number |
+| `TAU` | 6.28318... | 2 * PI |
+
+## Expression Operators
+
+| Operator | Description |
+|----------|-------------|
+| `+` | Addition |
+| `-` | Subtraction |
+| `*` | Multiplication |
+| `/` | Division |
+| `()` | Grouping |
+
+Operator precedence follows standard math: `* /` before `+ -`.
+
+```pngine
+#define RESULT="1 + 2 * 3"      // = 7
+#define GROUPED="(1 + 2) * 3"   // = 9
+```
+
+## Scope
+
+Defines are global and can be used:
+- In other `#define` expressions
+- In any numeric attribute
+- In `dispatchWorkgroups` expressions
+
+```pngine
+#define A=10
+#define B="A * 2"
+#define C="A + B"  // = 30
+```
+
+## Validation Rules
+
+| Rule | Error |
+|------|-------|
+| Name must be unique across all namespaces | `duplicate_definition` |
+| Expression must evaluate to number | `type_mismatch` |
+| Referenced defines must exist | `undefined_reference` |
+
+## Comparison with WGSL
+
+Unlike WGSL `const`, `#define` is resolved at PNGine compile time (not shader compile time). Use `#define` for values that affect resource creation.
+
+```pngine
+// PNGine compile time
+#define SIZE=256
+
+#buffer buf { size=SIZE }  // Creates buffer of 256 bytes
+
+// For shader constants, use WGSL const
+#shaderModule code {
+  code="
+    const SIZE: u32 = 256;  // WGSL compile time
+  "
+}
+```
+
+## Related
+
+- [Expressions](/docs/dsl/expressions/) - Full expression syntax
+- [`#buffer`](/docs/dsl/buffer/) - Use in size calculations
+- [`#computePass`](/docs/dsl/compute-pass/) - Use in dispatch

@@ -1,0 +1,282 @@
+---
+.title = "#queue",
+.description = "Queue operations for buffer and texture updates",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+Defines queue operations for writing data to buffers and copying images to textures.
+
+## Syntax
+
+```pngine
+#queue name {
+  writeBuffer={
+    buffer=bufferName
+    bufferOffset=0
+    data=dataName
+  }
+}
+
+#queue name {
+  copyExternalImageToTexture={
+    source={ source=imageBitmapName }
+    destination={ texture=textureName }
+    copySize=[512 512]
+  }
+}
+```
+
+## Attributes
+
+| Attribute | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `writeBuffer` | object | * | Write data to buffer |
+| `copyExternalImageToTexture` | object | * | Copy image to texture |
+| `copyTextureToTexture` | object | * | Copy between textures |
+| `copyBufferToBuffer` | object | * | Copy between buffers |
+
+*At least one operation required.
+
+### writeBuffer
+
+**Type:** `object`
+
+Writes data to a GPU buffer.
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `buffer` | reference | Yes | Target buffer |
+| `bufferOffset` | number | No | Byte offset (default: 0) |
+| `data` | reference/string | Yes | Data source |
+| `dataOffset` | number | No | Source data offset |
+| `size` | number | No | Bytes to write |
+
+**Data sources:**
+
+Static data reference:
+```pngine
+data=vertexData
+```
+
+Runtime uniform data:
+```pngine
+data="$uniforms.shader.inputs.data"
+```
+
+The `$uniforms` syntax accesses runtime-computed uniform data from shader modules.
+
+### copyExternalImageToTexture
+
+**Type:** `object`
+
+Copies an image bitmap to a texture.
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `source` | object | Yes | Image source |
+| `destination` | object | Yes | Texture destination |
+| `copySize` | array | Yes | `[width, height]` |
+
+**source object:**
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `source` | reference | ImageBitmap reference |
+| `origin` | array | `[x, y]` offset |
+| `flipY` | boolean | Flip vertically |
+
+**destination object:**
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `texture` | reference | Target texture |
+| `mipLevel` | number | Target mip level |
+| `origin` | array | `[x, y, z]` offset |
+
+### copyTextureToTexture
+
+**Type:** `object`
+
+Copies between textures.
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `source` | object | Yes | Source texture info |
+| `destination` | object | Yes | Destination texture info |
+| `copySize` | array | Yes | `[width, height, depth]` |
+
+### copyBufferToBuffer
+
+**Type:** `object`
+
+Copies between buffers.
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `source` | reference | Yes | Source buffer |
+| `sourceOffset` | number | No | Source byte offset |
+| `destination` | reference | Yes | Destination buffer |
+| `destinationOffset` | number | No | Dest byte offset |
+| `size` | number | Yes | Bytes to copy |
+
+## Examples
+
+### Write Static Data
+
+```pngine
+#data vertexData {
+  float32Array=[0 0.5 -0.5 -0.5 0.5 -0.5]
+}
+
+#buffer vertices {
+  size=24
+  usage=[VERTEX COPY_DST]
+}
+
+#queue initVertices {
+  writeBuffer={
+    buffer=vertices
+    data=vertexData
+  }
+}
+```
+
+### Write Uniform Data
+
+```pngine
+#shaderModule shader {
+  code="
+    struct Inputs {
+      time: f32,
+      resolution: vec2f,
+    }
+    @group(0) @binding(0) var<uniform> inputs: Inputs;
+  "
+}
+
+#buffer uniformBuffer {
+  size=12
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={
+    buffer=uniformBuffer
+    data="$uniforms.shader.inputs.data"
+  }
+}
+```
+
+The runtime automatically populates uniform data with:
+- `time`: Current animation time
+- `resolution`: Canvas dimensions
+
+### Load Texture from Image
+
+```pngine
+#data imageFile {
+  blob={ file={ url="texture.png" } }
+}
+
+#imageBitmap textureBitmap {
+  image=imageFile
+}
+
+#texture colorMap {
+  size=[512 512]
+  format=rgba8unorm
+  usage=[TEXTURE_BINDING COPY_DST RENDER_ATTACHMENT]
+}
+
+#queue loadTexture {
+  copyExternalImageToTexture={
+    source={ source=textureBitmap }
+    destination={ texture=colorMap }
+    copySize=[512 512]
+  }
+}
+
+#frame init {
+  perform=[loadTexture]
+}
+```
+
+### Partial Buffer Update
+
+```pngine
+#queue updateTransform {
+  writeBuffer={
+    buffer=uniformBuffer
+    bufferOffset=64
+    data=transformData
+    size=64
+  }
+}
+```
+
+### Buffer Copy
+
+```pngine
+#queue copyResults {
+  copyBufferToBuffer={
+    source=gpuBuffer
+    sourceOffset=0
+    destination=readbackBuffer
+    destinationOffset=0
+    size=4096
+  }
+}
+```
+
+## Frame Integration
+
+Queue operations are executed when included in `#frame`:
+
+```pngine
+#frame main {
+  perform=[writeUniforms renderPass]
+}
+```
+
+Or in initialization:
+
+```pngine
+#frame init {
+  before=[loadTexture]
+  perform=[renderPass]
+}
+```
+
+## Validation Rules
+
+| Rule | Error |
+|------|-------|
+| Name must be unique across all namespaces | `duplicate_definition` |
+| Referenced buffers/textures must exist | `undefined_reference` |
+| At least one operation required | `missing_required_property` |
+
+## WebGPU Mapping
+
+Maps to queue operations:
+
+```javascript
+// writeBuffer
+device.queue.writeBuffer(buffer, offset, data);
+
+// copyExternalImageToTexture
+device.queue.copyExternalImageToTexture(
+  { source: imageBitmap },
+  { texture: gpuTexture },
+  [width, height]
+);
+```
+
+## Related
+
+- [`#data`](/docs/dsl/data/) - Define data to write
+- [`#buffer`](/docs/dsl/buffer/) - Target buffers
+- [`#texture`](/docs/dsl/texture/) - Target textures
+- [`#imageBitmap`](/docs/dsl/image-bitmap/) - Image sources
+- [`#frame`](/docs/dsl/frame/) - Execute queue operations

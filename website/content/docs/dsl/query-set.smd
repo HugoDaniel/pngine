@@ -1,0 +1,104 @@
+---
+.title = "#querySet",
+.description = "GPU query set for timing and occlusion",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+Creates a query set for GPU timing or occlusion queries.
+
+## Syntax
+
+```pngine
+#querySet name {
+  type=timestamp
+  count=16
+}
+```
+
+## Attributes
+
+| Attribute | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `type` | string | Yes | - | Query type |
+| `count` | number | Yes | - | Number of queries |
+
+### type
+
+**Type:** `string`
+
+Type of GPU query.
+
+| Value | Description |
+|-------|-------------|
+| `timestamp` | GPU timestamp queries for performance measurement |
+| `occlusion` | Occlusion queries for visibility testing |
+
+### count
+
+**Type:** `number`
+
+Number of queries in the set. Determines how many query results can be stored.
+
+```pngine
+#querySet timingQueries {
+  type=timestamp
+  count=4
+}
+```
+
+## Examples
+
+### Timestamp Queries
+
+```pngine
+#querySet gpuTiming {
+  type=timestamp
+  count=8
+}
+
+#buffer timestampBuffer {
+  size=64
+  usage=[QUERY_RESOLVE COPY_SRC]
+}
+```
+
+### Occlusion Queries
+
+```pngine
+#querySet occlusionQueries {
+  type=occlusion
+  count=100
+}
+```
+
+## Validation Rules
+
+| Rule | Error |
+|------|-------|
+| Name must be unique across all namespaces | `duplicate_definition` |
+| `type` attribute is required | `missing_required_property` |
+| `count` attribute is required | `missing_required_property` |
+
+## WebGPU Mapping
+
+Maps to `GPUQuerySet` via:
+
+```javascript
+device.createQuerySet({
+  type: type,
+  count: count
+});
+```
+
+## Notes
+
+- Timestamp queries require the `timestamp-query` feature
+- Query results are written to buffers with `QUERY_RESOLVE` usage
+- Use `resolveQuerySet` to get results
+
+## Related
+
+- [`#buffer`](/docs/dsl/buffer/) - Store query results
+- [`#renderPass`](/docs/dsl/render-pass/) - Use occlusion queries

@@ -1,0 +1,343 @@
+---
+.title = "#renderPipeline",
+.description = "Render pipeline configuration",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+Creates a render pipeline for vertex and fragment shader execution.
+
+## Syntax
+
+```pngine
+#renderPipeline name {
+  layout=auto
+  vertex={
+    module=shaderName
+    entryPoint=vs
+    buffers=[...]
+  }
+  fragment={
+    module=shaderName
+    entryPoint=fs
+    targets=[{ format=preferredCanvasFormat }]
+  }
+  primitive={
+    topology=triangle-list
+    cullMode=back
+    frontFace=ccw
+  }
+  depthStencil={
+    format=depth24plus
+    depthWriteEnabled=true
+    depthCompare=less
+  }
+  multisample=4
+}
+```
+
+## Attributes
+
+| Attribute | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `layout` | string/reference | No | `auto` | Pipeline layout |
+| `vertex` | object | Yes | - | Vertex stage |
+| `fragment` | object | No | - | Fragment stage |
+| `primitive` | object | No | defaults | Primitive assembly |
+| `depthStencil` | object | No | - | Depth/stencil state |
+| `multisample` | number | No | `1` | MSAA sample count |
+
+### layout
+
+**Type:** `string` or `reference`
+
+- `auto` - Derive layout from shaders (default)
+- Reference to `#pipelineLayout`
+
+```pngine
+layout=auto
+// or
+layout=myLayout
+```
+
+### vertex
+
+**Type:** `object`
+
+Vertex shader stage configuration.
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `module` | reference | Yes | Shader module |
+| `entryPoint` | string | Yes | Entry function name |
+| `buffers` | array | No | Vertex buffer layouts |
+
+#### buffers
+
+Array of vertex buffer layout objects:
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `arrayStride` | number | Yes | Bytes between vertices |
+| `stepMode` | string | No | `vertex` or `instance` |
+| `attributes` | array | Yes | Attribute definitions |
+
+Attribute object:
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `shaderLocation` | number | Yes | `@location(N)` |
+| `offset` | number | Yes | Byte offset in vertex |
+| `format` | string | Yes | Vertex format |
+
+Common formats:
+
+| Format | Description |
+|--------|-------------|
+| `float32` | Single float |
+| `float32x2` | vec2f |
+| `float32x3` | vec3f |
+| `float32x4` | vec4f |
+| `uint32` | Single u32 |
+| `sint32` | Single i32 |
+| `unorm8x4` | 4 normalized u8 |
+
+```pngine
+vertex={
+  module=shader
+  entryPoint=vs
+  buffers=[
+    {
+      arrayStride=24
+      attributes=[
+        { shaderLocation=0 offset=0 format=float32x3 }
+        { shaderLocation=1 offset=12 format=float32x3 }
+      ]
+    }
+  ]
+}
+```
+
+### fragment
+
+**Type:** `object`
+
+Fragment shader stage configuration.
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `module` | reference | Yes | Shader module |
+| `entryPoint` | string | Yes | Entry function name |
+| `targets` | array | Yes | Color target states |
+
+#### targets
+
+Array of color target state objects:
+
+| Property | Type | Required | Description |
+|----------|------|---------|-------------|
+| `format` | string | Yes | Texture format |
+| `blend` | object | No | Blend state |
+| `writeMask` | number | No | Color write mask |
+
+Blend object:
+
+```pngine
+blend={
+  color={ srcFactor=src-alpha dstFactor=one-minus-src-alpha operation=add }
+  alpha={ srcFactor=one dstFactor=one-minus-src-alpha operation=add }
+}
+```
+
+Blend factors: `zero`, `one`, `src`, `one-minus-src`, `src-alpha`, `one-minus-src-alpha`, `dst`, `one-minus-dst`, `dst-alpha`, `one-minus-dst-alpha`
+
+Operations: `add`, `subtract`, `reverse-subtract`, `min`, `max`
+
+### primitive
+
+**Type:** `object`
+
+Primitive assembly configuration.
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `topology` | string | `triangle-list` | Primitive topology |
+| `stripIndexFormat` | string | - | Index format for strips |
+| `frontFace` | string | `ccw` | Front face winding |
+| `cullMode` | string | `none` | Culling mode |
+
+Topologies:
+
+| Value | Description |
+|-------|-------------|
+| `point-list` | Individual points |
+| `line-list` | Separate lines |
+| `line-strip` | Connected lines |
+| `triangle-list` | Separate triangles |
+| `triangle-strip` | Connected triangles |
+
+Cull modes: `none`, `front`, `back`
+
+Front face: `ccw` (counter-clockwise), `cw` (clockwise)
+
+### depthStencil
+
+**Type:** `object`
+
+Depth and stencil testing configuration.
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `format` | string | - | Depth texture format |
+| `depthWriteEnabled` | boolean | `false` | Write to depth buffer |
+| `depthCompare` | string | `always` | Depth test function |
+| `stencilFront` | object | - | Front stencil state |
+| `stencilBack` | object | - | Back stencil state |
+| `depthBias` | number | `0` | Depth bias |
+| `depthBiasSlopeScale` | number | `0` | Slope-based bias |
+| `depthBiasClamp` | number | `0` | Bias clamp |
+
+Compare functions: `never`, `less`, `equal`, `less-equal`, `greater`, `not-equal`, `greater-equal`, `always`
+
+### multisample
+
+**Type:** `number`
+
+MSAA sample count. Must be `1` or `4`.
+
+```pngine
+#define SAMPLE_COUNT=4
+
+#renderPipeline msaaPipeline {
+  multisample=SAMPLE_COUNT
+  // ...
+}
+```
+
+## Examples
+
+### Basic Triangle
+
+```pngine
+#shaderModule code {
+  code="
+    @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      var pos = array<vec2f, 3>(vec2f(0, 0.5), vec2f(-0.5, -0.5), vec2f(0.5, -0.5));
+      return vec4f(pos[i], 0, 1);
+    }
+    @fragment fn fs() -> @location(0) vec4f { return vec4f(1, 0, 0, 1); }
+  "
+}
+
+#renderPipeline triangle {
+  layout=auto
+  vertex={ module=code entryPoint=vs }
+  fragment={ module=code entryPoint=fs targets=[{ format=preferredCanvasFormat }] }
+}
+```
+
+### With Vertex Buffers
+
+```pngine
+#renderPipeline mesh {
+  layout=auto
+  vertex={
+    module=shader
+    entryPoint=vs
+    buffers=[
+      {
+        arrayStride=32
+        attributes=[
+          { shaderLocation=0 offset=0 format=float32x3 }
+          { shaderLocation=1 offset=12 format=float32x3 }
+          { shaderLocation=2 offset=24 format=float32x2 }
+        ]
+      }
+    ]
+  }
+  fragment={
+    module=shader
+    entryPoint=fs
+    targets=[{ format=preferredCanvasFormat }]
+  }
+  primitive={ cullMode=back frontFace=ccw }
+  depthStencil={
+    format=depth24plus
+    depthWriteEnabled=true
+    depthCompare=less
+  }
+}
+```
+
+### Instanced Rendering
+
+```pngine
+#renderPipeline instanced {
+  vertex={
+    module=shader
+    entryPoint=vs
+    buffers=[
+      {
+        arrayStride=12
+        stepMode=vertex
+        attributes=[{ shaderLocation=0 offset=0 format=float32x3 }]
+      }
+      {
+        arrayStride=16
+        stepMode=instance
+        attributes=[{ shaderLocation=1 offset=0 format=float32x4 }]
+      }
+    ]
+  }
+}
+```
+
+### Alpha Blending
+
+```pngine
+#renderPipeline transparent {
+  fragment={
+    module=shader
+    entryPoint=fs
+    targets=[{
+      format=preferredCanvasFormat
+      blend={
+        color={ srcFactor=src-alpha dstFactor=one-minus-src-alpha operation=add }
+        alpha={ srcFactor=one dstFactor=one-minus-src-alpha operation=add }
+      }
+    }]
+  }
+}
+```
+
+## Validation Rules
+
+| Rule | Error |
+|------|-------|
+| Name must be unique across all namespaces | `duplicate_definition` |
+| `vertex` attribute is required | `missing_required_property` |
+| Referenced modules must exist | `undefined_reference` |
+
+## WebGPU Mapping
+
+Maps to `GPURenderPipeline` via:
+
+```javascript
+device.createRenderPipeline({
+  layout: 'auto',
+  vertex: { module: shaderModule, entryPoint: 'vs', buffers: [...] },
+  fragment: { module: shaderModule, entryPoint: 'fs', targets: [...] },
+  primitive: { topology: 'triangle-list', cullMode: 'back' },
+  depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
+  multisample: { count: 4 }
+});
+```
+
+## Related
+
+- [`#shaderModule`](/docs/dsl/shader-module/) - Shader modules
+- [`#wgsl`](/docs/dsl/wgsl/) - Shader fragments
+- [`#pipelineLayout`](/docs/dsl/pipeline-layout/) - Explicit layouts
+- [`#renderPass`](/docs/dsl/render-pass/) - Use pipeline in passes
+- [`#buffer`](/docs/dsl/buffer/) - Vertex buffers

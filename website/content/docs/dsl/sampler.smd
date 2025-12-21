@@ -1,0 +1,236 @@
+---
+.title = "#sampler",
+.description = "Texture sampler configuration",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+Creates a texture sampler for controlling how textures are sampled in shaders.
+
+## Syntax
+
+```pngine
+#sampler name {
+  magFilter=linear
+  minFilter=linear
+  mipmapFilter=linear
+  addressModeU=repeat
+  addressModeV=repeat
+  addressModeW=clamp-to-edge
+  compare=less
+  maxAnisotropy=4
+}
+```
+
+## Attributes
+
+| Attribute | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `magFilter` | string | No | `nearest` | Magnification filter |
+| `minFilter` | string | No | `nearest` | Minification filter |
+| `mipmapFilter` | string | No | `nearest` | Mipmap filter |
+| `addressModeU` | string | No | `clamp-to-edge` | U-axis wrapping |
+| `addressModeV` | string | No | `clamp-to-edge` | V-axis wrapping |
+| `addressModeW` | string | No | `clamp-to-edge` | W-axis wrapping |
+| `compare` | string | No | - | Comparison function (shadow maps) |
+| `maxAnisotropy` | number | No | `1` | Anisotropic filtering level |
+| `lodMinClamp` | number | No | `0` | Minimum LOD clamp |
+| `lodMaxClamp` | number | No | `32` | Maximum LOD clamp |
+
+### magFilter / minFilter
+
+**Type:** `string`
+
+Filter mode for texture magnification and minification.
+
+| Value | Description |
+|-------|-------------|
+| `nearest` | Nearest-neighbor (pixelated) |
+| `linear` | Bilinear interpolation (smooth) |
+
+```pngine
+#sampler pixelArt {
+  magFilter=nearest
+  minFilter=nearest
+}
+
+#sampler smooth {
+  magFilter=linear
+  minFilter=linear
+}
+```
+
+### mipmapFilter
+
+**Type:** `string`
+
+Filter mode between mipmap levels.
+
+| Value | Description |
+|-------|-------------|
+| `nearest` | Use closest mip level |
+| `linear` | Blend between mip levels (trilinear) |
+
+```pngine
+#sampler trilinear {
+  magFilter=linear
+  minFilter=linear
+  mipmapFilter=linear
+}
+```
+
+### addressModeU / addressModeV / addressModeW
+
+**Type:** `string`
+
+Texture wrapping mode for each axis.
+
+| Value | Description |
+|-------|-------------|
+| `clamp-to-edge` | Clamp to edge pixels |
+| `repeat` | Tile texture |
+| `mirror-repeat` | Tile with mirroring |
+
+```pngine
+#sampler tiling {
+  addressModeU=repeat
+  addressModeV=repeat
+}
+
+#sampler clamped {
+  addressModeU=clamp-to-edge
+  addressModeV=clamp-to-edge
+}
+```
+
+### compare
+
+**Type:** `string`
+
+Comparison function for shadow map sampling. When set, sampler returns comparison result instead of texel value.
+
+| Value | Description |
+|-------|-------------|
+| `never` | Always 0 |
+| `less` | 1 if ref < texel |
+| `equal` | 1 if ref == texel |
+| `less-equal` | 1 if ref <= texel |
+| `greater` | 1 if ref > texel |
+| `not-equal` | 1 if ref != texel |
+| `greater-equal` | 1 if ref >= texel |
+| `always` | Always 1 |
+
+```pngine
+#sampler shadowSampler {
+  compare=less
+  magFilter=linear
+  minFilter=linear
+}
+```
+
+### maxAnisotropy
+
+**Type:** `number`
+
+Anisotropic filtering level (1-16). Higher values improve quality at oblique angles but cost performance.
+
+```pngine
+#sampler anisotropic {
+  magFilter=linear
+  minFilter=linear
+  maxAnisotropy=16
+}
+```
+
+## Examples
+
+### Basic Linear Sampler
+
+```pngine
+#sampler linearSampler {
+  magFilter=linear
+  minFilter=linear
+}
+
+#bindGroup textures {
+  entries=[
+    { binding=0 resource={ textureView=diffuseMap } }
+    { binding=1 resource={ sampler=linearSampler } }
+  ]
+}
+```
+
+### Tiling Texture Sampler
+
+```pngine
+#sampler tilingSampler {
+  magFilter=linear
+  minFilter=linear
+  mipmapFilter=linear
+  addressModeU=repeat
+  addressModeV=repeat
+}
+```
+
+### Shadow Map Sampler
+
+```pngine
+#sampler shadowCompare {
+  compare=less
+  magFilter=linear
+  minFilter=linear
+}
+```
+
+### Pixel Art Sampler
+
+```pngine
+#sampler pixelPerfect {
+  magFilter=nearest
+  minFilter=nearest
+  addressModeU=clamp-to-edge
+  addressModeV=clamp-to-edge
+}
+```
+
+### High Quality Sampler
+
+```pngine
+#sampler highQuality {
+  magFilter=linear
+  minFilter=linear
+  mipmapFilter=linear
+  maxAnisotropy=16
+}
+```
+
+## Validation Rules
+
+| Rule | Error |
+|------|-------|
+| Name must be unique across all namespaces | `duplicate_definition` |
+
+## WebGPU Mapping
+
+Maps to `GPUSampler` via:
+
+```javascript
+device.createSampler({
+  magFilter: 'linear',
+  minFilter: 'linear',
+  mipmapFilter: 'linear',
+  addressModeU: 'repeat',
+  addressModeV: 'repeat',
+  addressModeW: 'clamp-to-edge',
+  compare: 'less',
+  maxAnisotropy: 4
+});
+```
+
+## Related
+
+- [`#texture`](/docs/dsl/texture/) - Texture resources to sample
+- [`#textureView`](/docs/dsl/texture-view/) - Views for sampling
+- [`#bindGroup`](/docs/dsl/bind-group/) - Bind samplers to shaders
+- [`#bindGroupLayout`](/docs/dsl/bind-group-layout/) - Define sampler bindings

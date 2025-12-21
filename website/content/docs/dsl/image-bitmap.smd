@@ -1,0 +1,183 @@
+---
+.title = "#imageBitmap",
+.description = "Image bitmap from embedded data",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+Creates an image bitmap from embedded blob data for loading textures.
+
+## Syntax
+
+```pngine
+#imageBitmap name {
+  image=dataName
+}
+```
+
+## Attributes
+
+| Attribute | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `image` | reference | Yes | - | Reference to `#data` with blob |
+
+### image
+
+**Type:** `reference`
+
+Reference to a `#data` macro containing blob file data.
+
+```pngine
+#data pngFile {
+  blob={ file={ url="textures/diffuse.png" } }
+  mime="image/png"
+}
+
+#imageBitmap diffuseImage {
+  image=pngFile
+}
+```
+
+## Examples
+
+### Load PNG Texture
+
+```pngine
+#data textureFile {
+  blob={ file={ url="assets/logo.png" } }
+  mime="image/png"
+}
+
+#imageBitmap logo {
+  image=textureFile
+}
+
+#texture logoTexture {
+  size=[256 256]
+  format=rgba8unorm
+  usage=[TEXTURE_BINDING COPY_DST RENDER_ATTACHMENT]
+}
+
+#queue loadLogo {
+  copyExternalImageToTexture={
+    source={ source=logo }
+    destination={ texture=logoTexture }
+    copySize=[256 256]
+  }
+}
+
+#sampler linearSampler {
+  magFilter=linear
+  minFilter=linear
+}
+
+#bindGroup textureGroup {
+  entries=[
+    { binding=0 resource={ textureView=logoTexture } }
+    { binding=1 resource={ sampler=linearSampler } }
+  ]
+}
+```
+
+### Multiple Textures
+
+```pngine
+#data diffuseFile {
+  blob={ file={ url="textures/diffuse.png" } }
+}
+
+#data normalFile {
+  blob={ file={ url="textures/normal.png" } }
+}
+
+#imageBitmap diffuseImg {
+  image=diffuseFile
+}
+
+#imageBitmap normalImg {
+  image=normalFile
+}
+
+#queue loadTextures {
+  copyExternalImageToTexture={
+    source={ source=diffuseImg }
+    destination={ texture=diffuseMap }
+    copySize=[1024 1024]
+  }
+}
+
+// Note: Multiple copy operations need separate #queue macros
+#queue loadNormal {
+  copyExternalImageToTexture={
+    source={ source=normalImg }
+    destination={ texture=normalMap }
+    copySize=[1024 1024]
+  }
+}
+
+#frame init {
+  before=[loadTextures loadNormal]
+  perform=[render]
+}
+```
+
+### Sprite Sheet
+
+```pngine
+#data spriteSheet {
+  blob={ file={ url="sprites/sheet.png" } }
+}
+
+#imageBitmap sprites {
+  image=spriteSheet
+}
+
+#texture spriteTexture {
+  size=[2048 2048]
+  format=rgba8unorm
+  usage=[TEXTURE_BINDING COPY_DST]
+}
+
+#queue loadSprites {
+  copyExternalImageToTexture={
+    source={ source=sprites }
+    destination={ texture=spriteTexture }
+    copySize=[2048 2048]
+  }
+}
+```
+
+## Supported Formats
+
+The browser's `createImageBitmap` API is used, so all browser-supported formats work:
+
+- PNG
+- JPEG
+- GIF
+- WebP
+- SVG (rasterized)
+
+## Validation Rules
+
+| Rule | Error |
+|------|-------|
+| Name must be unique across all namespaces | `duplicate_definition` |
+| `image` attribute is required | `missing_required_property` |
+| Referenced data must exist | `undefined_reference` |
+| Referenced data must have blob | `type_mismatch` |
+
+## WebGPU Mapping
+
+At runtime, converts to `ImageBitmap` for use with `copyExternalImageToTexture`:
+
+```javascript
+const blob = new Blob([data], { type: mimeType });
+const imageBitmap = await createImageBitmap(blob);
+```
+
+## Related
+
+- [`#data`](/docs/dsl/data/) - Define blob data
+- [`#texture`](/docs/dsl/texture/) - Target textures
+- [`#queue`](/docs/dsl/queue/) - Copy to textures

@@ -128,8 +128,8 @@
 
 #wgsl sceneQShader {
   value="./wgsl/sceneQ.wgsl"
-  imports=["$wgsl.constants", "$wgsl.transform2D", "$wgsl.primitives","$wgsl.beats", "$wgsl.tangram"]
+  imports=[constants, transform2D, primitives, beats, tangram]
 }
 #shaderModule sceneQ {
-  code="$wgsl.sceneQShader"
+  code=sceneQShader
 }

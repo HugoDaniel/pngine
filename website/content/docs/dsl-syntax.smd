@@ -27,8 +27,7 @@ A `.pngine` file contains macro declarations. Each macro starts with `#` followe
 | String | `"WGSL code"` | Quoted text |
 | Number | `123`, `0.5`, `0xFF` | Decimal, float, or hex |
 | Boolean | `true`, `false` | Boolean values |
-| Identifier | `myName` | Bareword (auto-resolved) |
-| Reference | `$buffer.name` | Explicit reference |
+| Identifier | `myName` | Bare identifier (auto-resolved) |
 | Array | `[a b c]` | Space-separated list |
 | Object | `{x=1 y=2}` | Key-value pairs |
 | Expression | `"4*16"` | Compile-time arithmetic |
@@ -97,14 +96,12 @@ A `.pngine` file contains macro declarations. Each macro starts with `#` followe
 
 ## References
 
-Resources reference each other using bare names or explicit `$namespace.name` syntax:
+Resources reference each other using bare identifiers. The analyzer resolves them based on context:
 
 ```pngine
-// Bare identifier (auto-resolved)
-pipeline=myPipeline
-
-// Explicit reference
-pipeline=$renderPipeline.myPipeline
+pipeline=myPipeline       // Resolves to #renderPipeline or #computePipeline
+module=shader             // Resolves to #shaderModule or #wgsl
+buffer=vertices           // Resolves to #buffer
 ```
 
 See [References](/docs/dsl/references/) for complete documentation.

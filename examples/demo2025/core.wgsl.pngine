@@ -1,5 +1,5 @@
 #texture depthTexture {
-  size=["$canvas.width", "$canvas.height"]
+  size=["$canvas.width", "$canvas.height]
   format=depth24plus
   usage=[RENDER_ATTACHMENT]
 }
@@ -10,7 +10,7 @@
 }
 
 #texture renderTarget {
-  size=["$canvas.width", "$canvas.height"]
+  size=["$canvas.width", "$canvas.height]
   format=rgba8unorm
   usage=[RENDER_ATTACHMENT TEXTURE_BINDING]
 }

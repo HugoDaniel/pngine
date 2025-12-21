@@ -1,0 +1,231 @@
+---
+.title = "#bindGroup",
+.description = "Resource binding to shader slots",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+Creates a bind group that binds GPU resources (buffers, textures, samplers) to shader binding slots.
+
+## Syntax
+
+```pngine
+#bindGroup name {
+  layout={ pipeline=pipelineName index=0 }
+  entries=[
+    { binding=0 resource={ buffer=bufferName } }
+    { binding=1 resource={ textureView=textureName } }
+    { binding=2 resource={ sampler=samplerName } }
+  ]
+  pool=2
+}
+```
+
+## Attributes
+
+| Attribute | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `layout` | object/reference | Yes | - | Bind group layout |
+| `entries` | array | Yes | - | Resource bindings |
+| `pool` | number | No | `1` | Ping-pong pool size |
+
+### layout
+
+**Type:** `object` or `reference`
+
+Specifies the bind group layout. Can be:
+
+**Derived from pipeline:**
+```pngine
+layout={ pipeline=renderPipeline index=0 }
+```
+
+**Bind group layout reference:**
+```pngine
+layout=myLayout
+```
+
+### entries
+
+**Type:** `array` of entry objects
+
+Each entry binds a resource to a binding index:
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `binding` | number | Yes | Binding index |
+| `resource` | object | Yes | Resource to bind |
+| `offset` | number | No | Buffer offset |
+| `size` | number | No | Buffer size |
+| `pingPong` | number | No | Pool offset for ping-pong |
+
+#### resource
+
+The resource object specifies what to bind:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `buffer` | reference | Buffer reference |
+| `textureView` | reference | Texture view reference |
+| `sampler` | reference | Sampler reference |
+
+Only one property per resource object.
+
+```pngine
+entries=[
+  { binding=0 resource={ buffer=uniformBuffer } }
+  { binding=1 resource={ textureView=colorTexture } }
+  { binding=2 resource={ sampler=linearSampler } }
+]
+```
+
+### pool
+
+**Type:** `number`
+
+Creates multiple bind group instances for ping-pong patterns. Used with pooled buffers.
+
+```pngine
+#bindGroup particleBindGroup {
+  layout={ pipeline=simPipeline index=0 }
+  entries=[
+    { binding=0 resource={ buffer=particles pingPong=0 } }
+    { binding=1 resource={ buffer=particles pingPong=1 } }
+  ]
+  pool=2
+}
+```
+
+## Examples
+
+### Simple Uniform Binding
+
+```pngine
+#buffer uniforms {
+  size=64
+  usage=[UNIFORM COPY_DST]
+}
+
+#bindGroup mainBindGroup {
+  layout={ pipeline=mainPipeline index=0 }
+  entries=[
+    { binding=0 resource={ buffer=uniforms } }
+  ]
+}
+```
+
+### Texture and Sampler
+
+```pngine
+#texture diffuse {
+  size=[512 512]
+  format=rgba8unorm
+  usage=[TEXTURE_BINDING]
+}
+
+#sampler linearSampler {
+  magFilter=linear
+  minFilter=linear
+}
+
+#bindGroup materials {
+  layout={ pipeline=renderPipeline index=1 }
+  entries=[
+    { binding=0 resource={ textureView=diffuse } }
+    { binding=1 resource={ sampler=linearSampler } }
+  ]
+}
+```
+
+### Buffer Subset
+
+```pngine
+#bindGroup partial {
+  layout={ pipeline=pipeline index=0 }
+  entries=[
+    { binding=0 resource={ buffer=largeBuffer } offset=256 size=64 }
+  ]
+}
+```
+
+### Ping-Pong Compute
+
+```pngine
+#buffer particles {
+  size=65536
+  usage=[STORAGE]
+  pool=2
+}
+
+#bindGroup simGroup {
+  layout={ pipeline=simPipeline index=0 }
+  entries=[
+    { binding=0 resource={ buffer=particles pingPong=0 } }
+    { binding=1 resource={ buffer=particles pingPong=1 } }
+  ]
+  pool=2
+}
+
+#computePass simulate {
+  pipeline=simPipeline
+  bindGroups=[simGroup]
+  bindGroupsPoolOffsets=[0]
+  dispatchWorkgroups=[64 1 1]
+}
+```
+
+### Multiple Bind Groups
+
+```pngine
+#bindGroup perFrame {
+  layout={ pipeline=renderPipeline index=0 }
+  entries=[
+    { binding=0 resource={ buffer=frameUniforms } }
+  ]
+}
+
+#bindGroup perMaterial {
+  layout={ pipeline=renderPipeline index=1 }
+  entries=[
+    { binding=0 resource={ textureView=albedo } }
+    { binding=1 resource={ sampler=linearSampler } }
+  ]
+}
+
+#renderPass draw {
+  pipeline=renderPipeline
+  bindGroups=[perFrame perMaterial]
+  draw=1000
+}
+```
+
+## Validation Rules
+
+| Rule | Error |
+|------|-------|
+| Name must be unique across all namespaces | `duplicate_definition` |
+| `layout` attribute is required | `missing_required_property` |
+| `entries` attribute is required | `missing_required_property` |
+| Referenced resources must exist | `undefined_reference` |
+
+## WebGPU Mapping
+
+Maps to `GPUBindGroup` via:
+
+```javascript
+device.createBindGroup({
+  layout: pipeline.getBindGroupLayout(0),
+  entries: [
+    { binding: 0, resource: { buffer: uniformBuffer } }
+  ]
+});
+```
+
+## Related
+
+- [`#bindGroupLayout`](/docs/dsl/bind-group-layout/) - Define layouts
+- [`#buffer`](/docs/dsl/buffer/) - Buffer resources
+- [`#texture`](/docs/dsl/texture/) - Texture resources
+- [`#sampler`](/docs/dsl/sampler/) - Sampler resources
+- [`#renderPass`](/docs/dsl/render-pass/) - Use bind groups in passes

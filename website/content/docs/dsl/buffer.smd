@@ -1,0 +1,229 @@
+---
+.title = "#buffer",
+.description = "GPU buffer for vertex, uniform, or storage data",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+Creates a GPU buffer for storing vertex data, uniforms, storage data, or indices.
+
+## Syntax
+
+```pngine
+#buffer name {
+  size=1024
+  usage=[VERTEX STORAGE]
+  mappedAtCreation=dataRef
+  pool=2
+}
+```
+
+## Attributes
+
+| Attribute | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `size` | number/expression/reference | Yes | - | Size in bytes |
+| `usage` | array | Yes | - | Usage flags |
+| `mappedAtCreation` | reference | No | - | Initial data from `#data` |
+| `pool` | number | No | 1 | Ping-pong buffer pool size |
+
+### size
+
+**Type:** `number | expression | reference`
+
+Buffer size in bytes. Can be:
+
+- **Number:** `size=1024`
+- **Expression:** `size="4 * 256"` (compile-time evaluated)
+- **Reference:** `size=vertexData` (uses size of referenced `#data`)
+- **Define:** `size=BUFFER_SIZE` (uses `#define` value)
+
+```pngine
+#define VERTEX_SIZE=40
+#define VERTEX_COUNT=100
+
+#buffer vertices {
+  size="VERTEX_SIZE * VERTEX_COUNT"
+  usage=[VERTEX]
+}
+```
+
+### usage
+
+**Type:** `array` of identifiers
+
+GPU buffer usage flags. At least one required.
+
+| Flag | Description |
+|------|-------------|
+| `VERTEX` | Vertex buffer |
+| `INDEX` | Index buffer |
+| `UNIFORM` | Uniform buffer |
+| `STORAGE` | Storage buffer (compute) |
+| `COPY_SRC` | Can be copied from |
+| `COPY_DST` | Can be copied to |
+| `MAP_READ` | CPU can read |
+| `MAP_WRITE` | CPU can write |
+| `INDIRECT` | Indirect draw/dispatch |
+| `QUERY_RESOLVE` | Query result destination |
+
+```pngine
+#buffer storageBuffer {
+  size=4096
+  usage=[STORAGE COPY_DST]
+}
+```
+
+### mappedAtCreation
+
+**Type:** `reference`
+
+Reference to a `#data` macro for initial buffer contents. Buffer is created with data already mapped.
+
+```pngine
+#data cubeVertices {
+  float32Array=[
+    -1 -1 -1  1 0 0
+     1 -1 -1  1 0 0
+     1  1 -1  1 0 0
+  ]
+}
+
+#buffer vertexBuffer {
+  size=cubeVertices
+  usage=[VERTEX]
+  mappedAtCreation=cubeVertices
+}
+```
+
+### pool
+
+**Type:** `number`
+
+Creates multiple buffer instances for ping-pong patterns. Used in compute simulations where you read from one buffer and write to another.
+
+```pngine
+#buffer particles {
+  size=32768
+  usage=[VERTEX STORAGE]
+  pool=2
+}
+```
+
+With `pool=2`, the runtime creates `particles_0` and `particles_1`. Selection uses:
+
+```
+actual_id = base_id + (frame_counter + pool_offset) % pool_size
+```
+
+See [Ping-Pong Pattern](#ping-pong-pattern) below.
+
+## Examples
+
+### Simple Vertex Buffer
+
+```pngine
+#buffer positions {
+  size=48
+  usage=[VERTEX]
+}
+```
+
+### Uniform Buffer with Copy
+
+```pngine
+#buffer uniforms {
+  size=64
+  usage=[UNIFORM COPY_DST]
+}
+```
+
+### Data-Initialized Buffer
+
+```pngine
+#data triangleVerts {
+  float32Array=[
+    0.0  0.5  1 0 0
+   -0.5 -0.5  0 1 0
+    0.5 -0.5  0 0 1
+  ]
+}
+
+#buffer vertexBuffer {
+  size=triangleVerts
+  usage=[VERTEX]
+  mappedAtCreation=triangleVerts
+}
+```
+
+### Compute Storage Buffer
+
+```pngine
+#define NUM_PARTICLES=2048
+#define PARTICLE_SIZE=16
+
+#buffer particles {
+  size="NUM_PARTICLES * PARTICLE_SIZE"
+  usage=[VERTEX STORAGE]
+  pool=2
+}
+```
+
+### Ping-Pong Pattern
+
+For compute simulations requiring double-buffering:
+
+```pngine
+#buffer particles {
+  size=32768
+  usage=[VERTEX STORAGE]
+  pool=2
+}
+
+#bindGroup simBindGroup {
+  layout={ pipeline=simPipeline index=0 }
+  entries=[
+    { binding=0 resource={ buffer=particles pingPong=0 } }
+    { binding=1 resource={ buffer=particles pingPong=1 } }
+  ]
+  pool=2
+}
+
+#computePass simulate {
+  pipeline=simPipeline
+  bindGroups=[simBindGroup]
+  bindGroupsPoolOffsets=[0]
+  dispatchWorkgroups=[32 1 1]
+}
+```
+
+Each frame alternates which buffer is read vs written.
+
+## Validation Rules
+
+| Rule | Error |
+|------|-------|
+| Name must be unique across all namespaces | `duplicate_definition` |
+| `size` attribute is required | `missing_required_property` |
+| `usage` attribute is required | `missing_required_property` |
+| `mappedAtCreation` must reference valid `#data` | `undefined_reference` |
+
+## WebGPU Mapping
+
+Maps to `GPUBuffer` via:
+
+```javascript
+device.createBuffer({
+  size: size,
+  usage: GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE,
+  mappedAtCreation: hasMappedData
+});
+```
+
+## Related
+
+- [`#data`](/docs/dsl/data/) - Define initial buffer data
+- [`#bindGroup`](/docs/dsl/bind-group/) - Bind buffers to shaders
+- [`#renderPass`](/docs/dsl/render-pass/) - Use as vertex buffer
+- [`#queue`](/docs/dsl/queue/) - Write data to buffer

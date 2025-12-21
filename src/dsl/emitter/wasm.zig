@@ -283,20 +283,17 @@ fn encodeWasmArgs(e: *Emitter, node: Node.Index, buf: []u8) ![]u8 {
 }
 
 /// Parse argument type from a node.
-/// Recognizes: canvas.width, time.total, "$canvas.width", "$t.total", literals
+/// Recognizes: canvas.width, time.total, literals
 fn parseArgType(e: *Emitter, node: Node.Index) opcodes.WasmArgType {
     const tag = e.ast.nodes.items(.tag)[node.toInt()];
 
-    // Handle builtin refs (canvas.width, time.total) - new clean syntax
+    // Handle builtin refs (canvas.width, time.total)
     if (tag == .builtin_ref) {
         return classifyBuiltinRef(e, node);
     }
 
-    // Handle string values and runtime interpolations (strings with $ like "$canvas.width")
-    if (tag == .string_value or tag == .runtime_interpolation) {
-        const content = utils.getStringContent(e, node);
-        return classifyDynamicArg(content);
-    } else if (tag == .number_value) {
+    // Handle number values
+    if (tag == .number_value) {
         // Check if it's a float or integer
         const token = e.ast.nodes.items(.main_token)[node.toInt()];
         const text = utils.getTokenSlice(e, token);
@@ -330,21 +327,6 @@ fn classifyBuiltinRef(e: *Emitter, node: Node.Index) opcodes.WasmArgType {
     }
 
     return .literal_f32; // Unknown builtin - treat as literal
-}
-
-/// Classify a dynamic argument string like "$canvas.width".
-fn classifyDynamicArg(content: []const u8) opcodes.WasmArgType {
-    if (std.mem.eql(u8, content, "$canvas.width")) {
-        return .canvas_width;
-    } else if (std.mem.eql(u8, content, "$canvas.height")) {
-        return .canvas_height;
-    } else if (std.mem.eql(u8, content, "$t.total")) {
-        return .time_total;
-    } else if (std.mem.eql(u8, content, "$t.delta")) {
-        return .time_delta;
-    }
-    // Unknown dynamic arg - treat as literal 0
-    return .literal_f32;
 }
 
 /// Parse literal value from a node into 4 bytes.

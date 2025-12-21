@@ -16,7 +16,7 @@
 Complete reference for all 22 macro types:
 
 - [DSL Reference](/docs/dsl/) - Full macro documentation
-- [References](/docs/dsl/references/) - `$namespace.name` syntax
+- [References](/docs/dsl/references/) - Bare identifier resolution
 - [Expressions](/docs/dsl/expressions/) - Compile-time arithmetic
 
 ## API Reference

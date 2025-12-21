@@ -1,0 +1,257 @@
+---
+.title = "#textureView",
+.description = "View into a texture subresource",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+Creates a view into a texture, allowing access to specific mip levels, array layers, or with a different format.
+
+## Syntax
+
+```pngine
+#textureView name {
+  texture=textureName
+  format=rgba8unorm
+  dimension=2d
+  baseMipLevel=0
+  mipLevelCount=1
+  baseArrayLayer=0
+  arrayLayerCount=1
+  aspect=all
+}
+```
+
+## Attributes
+
+| Attribute | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `texture` | reference | Yes | - | Source texture |
+| `format` | string | No | texture format | View format |
+| `dimension` | string | No | texture dimension | View dimension |
+| `baseMipLevel` | number | No | `0` | First mip level |
+| `mipLevelCount` | number | No | `1` | Number of mip levels |
+| `baseArrayLayer` | number | No | `0` | First array layer |
+| `arrayLayerCount` | number | No | `1` | Number of array layers |
+| `aspect` | string | No | `all` | Texture aspect to view |
+
+### texture
+
+**Type:** `reference`
+
+Reference to the source `#texture`.
+
+```pngine
+#textureView myView {
+  texture=myTexture
+}
+```
+
+### format
+
+**Type:** `string`
+
+View format. Must be compatible with texture format. Defaults to texture's format.
+
+```pngine
+#texture rgbaTexture {
+  size=[256 256]
+  format=rgba8unorm
+  usage=[TEXTURE_BINDING]
+}
+
+#textureView asUnorm {
+  texture=rgbaTexture
+  format=rgba8unorm
+}
+```
+
+### dimension
+
+**Type:** `string`
+
+View dimensionality.
+
+| Value | Description |
+|-------|-------------|
+| `1d` | 1D view |
+| `2d` | 2D view (default) |
+| `2d-array` | 2D array view |
+| `cube` | Cube map view |
+| `cube-array` | Cube map array view |
+| `3d` | 3D view |
+
+### baseMipLevel / mipLevelCount
+
+**Type:** `number`
+
+Select a range of mip levels.
+
+```pngine
+#texture mipmapped {
+  size=[256 256]
+  format=rgba8unorm
+  usage=[TEXTURE_BINDING]
+  mipLevelCount=8
+}
+
+#textureView mip0 {
+  texture=mipmapped
+  baseMipLevel=0
+  mipLevelCount=1
+}
+
+#textureView mip4to7 {
+  texture=mipmapped
+  baseMipLevel=4
+  mipLevelCount=4
+}
+```
+
+### baseArrayLayer / arrayLayerCount
+
+**Type:** `number`
+
+Select a range of array layers for array textures.
+
+```pngine
+#texture arrayTexture {
+  size=[256 256 6]
+  format=rgba8unorm
+  usage=[TEXTURE_BINDING]
+  dimension=2d
+}
+
+#textureView layer0 {
+  texture=arrayTexture
+  baseArrayLayer=0
+  arrayLayerCount=1
+}
+
+#textureView allLayers {
+  texture=arrayTexture
+  baseArrayLayer=0
+  arrayLayerCount=6
+  dimension=2d-array
+}
+```
+
+### aspect
+
+**Type:** `string`
+
+Which aspect of a depth-stencil texture to view.
+
+| Value | Description |
+|-------|-------------|
+| `all` | All aspects (default) |
+| `depth-only` | Depth aspect only |
+| `stencil-only` | Stencil aspect only |
+
+```pngine
+#texture depthStencil {
+  size=[512 512]
+  format=depth24plus-stencil8
+  usage=[RENDER_ATTACHMENT TEXTURE_BINDING]
+}
+
+#textureView depthOnly {
+  texture=depthStencil
+  aspect=depth-only
+}
+```
+
+## Examples
+
+### Basic View
+
+```pngine
+#texture colorTexture {
+  size=[512 512]
+  format=rgba8unorm
+  usage=[TEXTURE_BINDING RENDER_ATTACHMENT]
+}
+
+#textureView colorView {
+  texture=colorTexture
+}
+
+#bindGroup textures {
+  entries=[
+    { binding=0 resource={ textureView=colorView } }
+  ]
+}
+```
+
+### Mipmap Level View
+
+```pngine
+#texture source {
+  size=[1024 1024]
+  format=rgba8unorm
+  usage=[TEXTURE_BINDING]
+  mipLevelCount=10
+}
+
+#textureView level3 {
+  texture=source
+  baseMipLevel=3
+  mipLevelCount=1
+}
+```
+
+### Cube Map Face
+
+```pngine
+#texture cubemap {
+  size=[256 256 6]
+  format=rgba8unorm
+  usage=[TEXTURE_BINDING]
+}
+
+#textureView positiveX {
+  texture=cubemap
+  dimension=2d
+  baseArrayLayer=0
+  arrayLayerCount=1
+}
+
+#textureView cubeView {
+  texture=cubemap
+  dimension=cube
+  baseArrayLayer=0
+  arrayLayerCount=6
+}
+```
+
+## Validation Rules
+
+| Rule | Error |
+|------|-------|
+| Name must be unique across all namespaces | `duplicate_definition` |
+| `texture` attribute is required | `missing_required_property` |
+| Referenced texture must exist | `undefined_reference` |
+
+## WebGPU Mapping
+
+Maps to `GPUTextureView` via:
+
+```javascript
+texture.createView({
+  format: format,
+  dimension: dimension,
+  baseMipLevel: baseMipLevel,
+  mipLevelCount: mipLevelCount,
+  baseArrayLayer: baseArrayLayer,
+  arrayLayerCount: arrayLayerCount,
+  aspect: aspect
+});
+```
+
+## Related
+
+- [`#texture`](/docs/dsl/texture/) - Source texture resources
+- [`#sampler`](/docs/dsl/sampler/) - Configure texture sampling
+- [`#bindGroup`](/docs/dsl/bind-group/) - Bind texture views to shaders
+- [`#renderPass`](/docs/dsl/render-pass/) - Use as attachment

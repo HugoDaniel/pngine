@@ -22,7 +22,7 @@
 //!
 //! #wgsl macros can have:
 //! - `value="inline code"` or `value="./path/to/file.wgsl"` (file path)
-//! - `imports=[$wgsl.a, $wgsl.b]` (references to other #wgsl macros)
+//! - `imports=[a, b]` (bare identifiers referencing other #wgsl macros)
 //!
 //! ## Invariants
 //!
@@ -72,7 +72,7 @@ pub fn emitShaders(e: *Emitter) Emitter.Error!void {
     try emitWgslModulesInOrder(e);
 
     // Phase 2: Handle #shaderModule
-    // In v2, #shaderModule referencing $wgsl.* uses the existing wgsl_id
+    // #shaderModule with code=wgslName uses the existing wgsl_id
     var sm_it = e.analysis.symbols.shader_module.iterator();
     while (sm_it.next()) |entry| {
         const name = entry.key_ptr.*;
@@ -318,23 +318,13 @@ fn buildAndCacheResolvedCode(e: *Emitter, name: []const u8, code: []const u8, de
 }
 
 /// Extract #wgsl reference name from a code value.
-/// Returns the name part after "$wgsl." or the identifier name if it references a #wgsl.
+/// Returns the identifier name if it references a #wgsl.
 /// Returns null if it's inline code (not a reference).
 fn getWgslReference(e: *Emitter, code_node: Node.Index) ?[]const u8 {
     // Pre-condition
     std.debug.assert(code_node.toInt() < e.ast.nodes.len);
 
     const code_tag = e.ast.nodes.items(.tag)[code_node.toInt()];
-
-    // String value like "$wgsl.sceneEShader"
-    // Note: strings with $ patterns are parsed as runtime_interpolation
-    if (code_tag == .string_value or code_tag == .runtime_interpolation) {
-        const content = utils.getStringContent(e, code_node);
-        if (std.mem.startsWith(u8, content, "$wgsl.")) {
-            return content[6..]; // Skip "$wgsl."
-        }
-        return null; // Inline code string
-    }
 
     // Identifier value - reference to #wgsl macro
     if (code_tag == .identifier_value) {
@@ -354,29 +344,17 @@ fn getWgslReference(e: *Emitter, code_node: Node.Index) ?[]const u8 {
 /// The code property can be:
 /// - A string literal: code="@vertex fn vs() {}"
 /// - An identifier referencing a #wgsl macro: code=cubeShader
-/// - A string reference: code="$wgsl.sceneEShader"
 ///
-/// For identifier/string references, looks up the resolved #wgsl code from cache.
+/// For identifier references, looks up the resolved #wgsl code from cache.
 fn resolveShaderCode(e: *Emitter, code_node: Node.Index) []const u8 {
     // Pre-condition
     std.debug.assert(code_node.toInt() < e.ast.nodes.len);
 
     const code_tag = e.ast.nodes.items(.tag)[code_node.toInt()];
 
-    // Direct string value
+    // Direct string value (inline code)
     if (code_tag == .string_value) {
-        const content = utils.getStringContent(e, code_node);
-
-        // Check if it's a reference string like "$wgsl.name"
-        if (std.mem.startsWith(u8, content, "$wgsl.")) {
-            const wgsl_name = content[6..]; // Skip "$wgsl."
-            // Look up resolved code from cache (populated during #wgsl emission)
-            if (e.resolved_wgsl_cache.get(wgsl_name)) |cached| {
-                return cached;
-            }
-        }
-
-        return content;
+        return utils.getStringContent(e, code_node);
     }
 
     // Identifier value - resolve to #wgsl macro
@@ -776,22 +754,8 @@ fn extractImportNames(e: *Emitter, array_node: Node.Index) []const []const u8 {
         const elem_node: Node.Index = @enumFromInt(elem_idx);
         const elem_tag = e.ast.nodes.items(.tag)[elem_node.toInt()];
 
-        // Handle reference ($wgsl.name), string ("$wgsl.name"), or bare identifier (name)
-        if (elem_tag == .reference) {
-            const ref_data = e.ast.nodes.items(.data)[elem_node.toInt()];
-            const name_token = ref_data.node_and_node[1];
-            S.names[count] = utils.getTokenSlice(e, name_token);
-            count += 1;
-        } else if (elem_tag == .string_value or elem_tag == .runtime_interpolation) {
-            // String like "$wgsl.name" - extract the name part
-            // Can be string_value or runtime_interpolation (strings with $ patterns)
-            const str = utils.getStringContent(e, elem_node);
-            if (std.mem.startsWith(u8, str, "$wgsl.")) {
-                S.names[count] = str[6..]; // Skip "$wgsl."
-                count += 1;
-            }
-        } else if (elem_tag == .identifier_value) {
-            // Bare identifier - use directly (e.g., imports=[transform2D primitives])
+        // Handle bare identifiers (imports=[transform2D primitives])
+        if (elem_tag == .identifier_value) {
             const elem_token = e.ast.nodes.items(.main_token)[elem_node.toInt()];
             S.names[count] = utils.getTokenSlice(e, elem_token);
             count += 1;

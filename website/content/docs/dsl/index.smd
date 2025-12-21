@@ -1,0 +1,129 @@
+---
+.title = "DSL Reference",
+.description = "Complete reference for PNGine DSL macros",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+PNGine uses a macro-based DSL (Domain-Specific Language) that compiles to compact bytecode. Each macro maps to WebGPU resources and operations.
+
+## Quick Reference
+
+| Macro | Purpose | Required |
+|-------|---------|----------|
+| [`#wgsl`](/docs/dsl/wgsl/) | Shader code fragment | `value` |
+| [`#shaderModule`](/docs/dsl/shader-module/) | Named shader module | `code` |
+| [`#buffer`](/docs/dsl/buffer/) | GPU buffer | `size`, `usage` |
+| [`#texture`](/docs/dsl/texture/) | GPU texture | `format`, `usage` |
+| [`#sampler`](/docs/dsl/sampler/) | Texture sampler | - |
+| [`#textureView`](/docs/dsl/texture-view/) | Texture view | `texture` |
+| [`#bindGroupLayout`](/docs/dsl/bind-group-layout/) | Bind group layout | `entries` |
+| [`#bindGroup`](/docs/dsl/bind-group/) | Resource binding | `layout`, `entries` |
+| [`#pipelineLayout`](/docs/dsl/pipeline-layout/) | Pipeline layout | - |
+| [`#renderPipeline`](/docs/dsl/render-pipeline/) | Render pipeline | `vertex` |
+| [`#computePipeline`](/docs/dsl/compute-pipeline/) | Compute pipeline | `compute` |
+| [`#renderPass`](/docs/dsl/render-pass/) | Render pass | `pipeline` |
+| [`#computePass`](/docs/dsl/compute-pass/) | Compute pass | `pipeline` |
+| [`#frame`](/docs/dsl/frame/) | Frame execution | `perform` |
+| [`#data`](/docs/dsl/data/) | Embedded data | one of `float32Array`, `blob`, `wasm` |
+| [`#queue`](/docs/dsl/queue/) | Queue operations | - |
+| [`#querySet`](/docs/dsl/query-set/) | GPU queries | `type`, `count` |
+| [`#imageBitmap`](/docs/dsl/image-bitmap/) | Image bitmap | `image` |
+| [`#wasmCall`](/docs/dsl/wasm-call/) | WASM function call | `module`, `func` |
+| [`#animation`](/docs/dsl/animation/) | Timeline animation | `duration`, `scenes` |
+| [`#define`](/docs/dsl/define/) | Compile-time constant | value |
+| [`#import`](/docs/dsl/import/) | File import | path |
+
+## Categories
+
+### Shader Resources
+
+Define shader code and modules.
+
+- [`#wgsl`](/docs/dsl/wgsl/) - Shader code fragment with optional imports
+- [`#shaderModule`](/docs/dsl/shader-module/) - Named shader module
+
+### GPU Resources
+
+Create GPU buffers, textures, and samplers.
+
+- [`#buffer`](/docs/dsl/buffer/) - GPU buffer for vertex/uniform/storage data
+- [`#texture`](/docs/dsl/texture/) - GPU texture resource
+- [`#sampler`](/docs/dsl/sampler/) - Texture sampler configuration
+- [`#textureView`](/docs/dsl/texture-view/) - View into a texture
+- [`#querySet`](/docs/dsl/query-set/) - GPU timing/occlusion queries
+
+### Pipelines
+
+Configure render and compute pipelines.
+
+- [`#bindGroupLayout`](/docs/dsl/bind-group-layout/) - Bind group layout definition
+- [`#bindGroup`](/docs/dsl/bind-group/) - Resource binding to shaders
+- [`#pipelineLayout`](/docs/dsl/pipeline-layout/) - Pipeline layout with bind group layouts
+- [`#renderPipeline`](/docs/dsl/render-pipeline/) - Render pipeline configuration
+- [`#computePipeline`](/docs/dsl/compute-pipeline/) - Compute pipeline configuration
+
+### Passes
+
+Define render and compute passes.
+
+- [`#renderPass`](/docs/dsl/render-pass/) - Render pass with draw commands
+- [`#computePass`](/docs/dsl/compute-pass/) - Compute pass with dispatch
+
+### Data & Queue
+
+Embed data and manage queue operations.
+
+- [`#data`](/docs/dsl/data/) - Embedded arrays, blobs, or WASM-generated data
+- [`#queue`](/docs/dsl/queue/) - Buffer writes and texture copies
+- [`#imageBitmap`](/docs/dsl/image-bitmap/) - Image bitmap from embedded data
+- [`#wasmCall`](/docs/dsl/wasm-call/) - Call WASM module functions
+
+### Control Flow
+
+Control frame execution and animation.
+
+- [`#frame`](/docs/dsl/frame/) - Frame execution with pass ordering
+- [`#animation`](/docs/dsl/animation/) - Timeline-based scene animation
+- [`#define`](/docs/dsl/define/) - Compile-time constant
+- [`#import`](/docs/dsl/import/) - Import from another file
+
+## Concepts
+
+- [References](/docs/dsl/references/) - Bare identifier resolution and special values
+- [Expressions](/docs/dsl/expressions/) - Compile-time arithmetic and constants
+
+## Syntax Overview
+
+```pngine
+#macroType name {
+  property=value
+  array=[item1 item2]
+  nested={ key=value }
+}
+```
+
+### Value Types
+
+| Type | Example | Description |
+|------|---------|-------------|
+| String | `"WGSL code"` | Quoted text |
+| Number | `123`, `0.5`, `0xFF` | Decimal, float, or hex |
+| Boolean | `true`, `false` | Boolean values |
+| Identifier | `myName` | Bare identifier (auto-resolved to resource) |
+| Array | `[a b c]` | Space-separated list |
+| Object | `{x=1 y=2}` | Key-value pairs |
+| Expression | `"4*16"` | Compile-time arithmetic |
+
+### Bare Identifier Resolution
+
+Resources are referenced by their name directly. The analyzer resolves identifiers based on context:
+
+```pngine
+pipeline=mainPipeline      // Resolves to #renderPipeline or #computePipeline
+module=shader              // Resolves to #shaderModule or #wgsl
+buffer=vertices            // Resolves to #buffer
+```
+
+See [References](/docs/dsl/references/) for complete resolution rules.

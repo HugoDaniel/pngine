@@ -1,0 +1,151 @@
+---
+.title = "#pipelineLayout",
+.description = "Pipeline layout with bind group layouts",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+Defines a pipeline layout that specifies which bind group layouts a pipeline uses.
+
+## Syntax
+
+```pngine
+#pipelineLayout name {
+  bindGroupLayouts=[layout0 layout1 layout2]
+}
+```
+
+## Attributes
+
+| Attribute | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `bindGroupLayouts` | array | No | `[]` | Bind group layouts in order |
+
+### bindGroupLayouts
+
+**Type:** `array` of references
+
+Array of `#bindGroupLayout` references. Order corresponds to `@group(N)` in shaders:
+
+- `bindGroupLayouts[0]` → `@group(0)`
+- `bindGroupLayouts[1]` → `@group(1)`
+- etc.
+
+```pngine
+#pipelineLayout myLayout {
+  bindGroupLayouts=[frameLayout materialLayout objectLayout]
+}
+```
+
+## Examples
+
+### Single Bind Group
+
+```pngine
+#bindGroupLayout uniformLayout {
+  entries=[
+    { binding=0 visibility=[VERTEX FRAGMENT] buffer={ type=uniform } }
+  ]
+}
+
+#pipelineLayout simple {
+  bindGroupLayouts=[uniformLayout]
+}
+
+#renderPipeline pipeline {
+  layout=simple
+  vertex={ module=shader entryPoint=vs }
+}
+```
+
+### Multiple Bind Groups
+
+```pngine
+#bindGroupLayout frameLayout {
+  entries=[
+    { binding=0 visibility=[VERTEX] buffer={ type=uniform } }
+  ]
+}
+
+#bindGroupLayout materialLayout {
+  entries=[
+    { binding=0 visibility=[FRAGMENT] texture={ sampleType=float } }
+    { binding=1 visibility=[FRAGMENT] sampler={ type=filtering } }
+  ]
+}
+
+#bindGroupLayout objectLayout {
+  entries=[
+    { binding=0 visibility=[VERTEX] buffer={ type=uniform } }
+  ]
+}
+
+#pipelineLayout fullLayout {
+  bindGroupLayouts=[frameLayout materialLayout objectLayout]
+}
+```
+
+### Compute Pipeline Layout
+
+```pngine
+#bindGroupLayout computeLayout {
+  entries=[
+    { binding=0 visibility=[COMPUTE] buffer={ type=read-only-storage } }
+    { binding=1 visibility=[COMPUTE] buffer={ type=storage } }
+  ]
+}
+
+#pipelineLayout computePipelineLayout {
+  bindGroupLayouts=[computeLayout]
+}
+
+#computePipeline sim {
+  layout=computePipelineLayout
+  compute={ module=shader entryPoint=main }
+}
+```
+
+## Auto Layout
+
+For simpler cases, use `layout=auto` on pipelines to derive layout from shaders:
+
+```pngine
+#renderPipeline simple {
+  layout=auto
+  vertex={ module=shader entryPoint=vs }
+  fragment={ module=shader entryPoint=fs targets=[{ format=preferredCanvasFormat }] }
+}
+```
+
+With auto layout, bind groups derive layout from pipeline:
+
+```pngine
+#bindGroup uniforms {
+  layout={ pipeline=simple index=0 }
+  entries=[{ binding=0 resource={ buffer=uniformBuffer } }]
+}
+```
+
+## Validation Rules
+
+| Rule | Error |
+|------|-------|
+| Name must be unique across all namespaces | `duplicate_definition` |
+| Referenced layouts must exist | `undefined_reference` |
+
+## WebGPU Mapping
+
+Maps to `GPUPipelineLayout` via:
+
+```javascript
+device.createPipelineLayout({
+  bindGroupLayouts: [layout0, layout1, layout2]
+});
+```
+
+## Related
+
+- [`#bindGroupLayout`](/docs/dsl/bind-group-layout/) - Define individual layouts
+- [`#renderPipeline`](/docs/dsl/render-pipeline/) - Use layout in render pipeline
+- [`#computePipeline`](/docs/dsl/compute-pipeline/) - Use layout in compute pipeline

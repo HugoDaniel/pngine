@@ -1,0 +1,369 @@
+---
+.title = "#renderPass",
+.description = "Render pass with draw commands",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+Defines a render pass that configures render targets and issues draw commands.
+
+## Syntax
+
+```pngine
+#renderPass name {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0 0 0 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  depthStencilAttachment={
+    view=depthTexture
+    depthClearValue=1.0
+    depthLoadOp=clear
+    depthStoreOp=store
+  }
+  pipeline=pipelineName
+  bindGroups=[group0 group1]
+  vertexBuffers=[vertices]
+  draw=3
+}
+```
+
+## Attributes
+
+| Attribute | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `colorAttachments` | array | No | current texture | Color render targets |
+| `depthStencilAttachment` | object | No | - | Depth/stencil target |
+| `pipeline` | reference | Yes | - | Render pipeline |
+| `bindGroups` | array | No | `[]` | Bind groups |
+| `bindGroupsPoolOffsets` | array | No | `[]` | Pool offsets for bind groups |
+| `vertexBuffers` | array | No | `[]` | Vertex buffers |
+| `vertexBuffersPoolOffsets` | array | No | `[]` | Pool offsets for vertex buffers |
+| `draw` | number/object | * | - | Draw call parameters |
+| `drawIndexed` | number/object | * | - | Indexed draw parameters |
+| `indexBuffer` | reference | No | - | Index buffer |
+| `indexFormat` | string | No | `uint16` | Index format |
+
+*Either `draw` or `drawIndexed` required.
+
+### colorAttachments
+
+**Type:** `array` of attachment objects
+
+Each color attachment:
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `view` | reference | Yes | Texture view or `contextCurrentTexture` |
+| `resolveTarget` | reference | No | MSAA resolve target |
+| `clearValue` | array | No | Clear color `[r, g, b, a]` |
+| `loadOp` | string | Yes | `clear` or `load` |
+| `storeOp` | string | Yes | `store` or `discard` |
+
+```pngine
+colorAttachments=[{
+  view=contextCurrentTexture
+  clearValue=[0.1 0.1 0.1 1.0]
+  loadOp=clear
+  storeOp=store
+}]
+```
+
+### depthStencilAttachment
+
+**Type:** `object`
+
+Depth and stencil attachment:
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `view` | reference | Yes | Depth texture |
+| `depthClearValue` | number | No | Depth clear value (0-1) |
+| `depthLoadOp` | string | No | `clear` or `load` |
+| `depthStoreOp` | string | No | `store` or `discard` |
+| `stencilClearValue` | number | No | Stencil clear value |
+| `stencilLoadOp` | string | No | `clear` or `load` |
+| `stencilStoreOp` | string | No | `store` or `discard` |
+
+### pipeline
+
+**Type:** `reference`
+
+Reference to `#renderPipeline`. Can use bare identifier.
+
+```pngine
+pipeline=myPipeline
+```
+
+### bindGroups
+
+**Type:** `array` of references
+
+Bind groups in order matching `@group(N)`:
+
+```pngine
+bindGroups=[frameBindGroup materialBindGroup objectBindGroup]
+```
+
+### bindGroupsPoolOffsets
+
+**Type:** `array` of numbers
+
+Pool offsets for ping-pong bind groups. Each offset corresponds to a bind group.
+
+```pngine
+bindGroups=[simBindGroup]
+bindGroupsPoolOffsets=[0]  // Alternates each frame
+```
+
+### vertexBuffers
+
+**Type:** `array` of references
+
+Vertex buffers in order matching vertex stage buffer indices:
+
+```pngine
+vertexBuffers=[positionBuffer normalBuffer uvBuffer]
+```
+
+### vertexBuffersPoolOffsets
+
+**Type:** `array` of numbers
+
+Pool offsets for ping-pong vertex buffers:
+
+```pngine
+vertexBuffers=[particleBuffer]
+vertexBuffersPoolOffsets=[1]  // Use the "other" buffer
+```
+
+### draw
+
+**Type:** `number` or `object`
+
+Non-indexed draw call.
+
+**Simple (vertex count only):**
+```pngine
+draw=3
+```
+
+**Full object:**
+```pngine
+draw={
+  vertexCount=36
+  instanceCount=100
+  firstVertex=0
+  firstInstance=0
+}
+```
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `vertexCount` | number | required | Vertices to draw |
+| `instanceCount` | number | `1` | Instances |
+| `firstVertex` | number | `0` | First vertex |
+| `firstInstance` | number | `0` | First instance |
+
+### drawIndexed
+
+**Type:** `number` or `object`
+
+Indexed draw call. Requires `indexBuffer`.
+
+**Simple (index count only):**
+```pngine
+indexBuffer=indices
+drawIndexed=36
+```
+
+**Full object:**
+```pngine
+drawIndexed={
+  indexCount=36
+  instanceCount=1
+  firstIndex=0
+  baseVertex=0
+  firstInstance=0
+}
+```
+
+### indexBuffer / indexFormat
+
+**Type:** `reference` / `string`
+
+Index buffer and format for indexed drawing:
+
+```pngine
+indexBuffer=indexData
+indexFormat=uint16  // or uint32
+drawIndexed=36
+```
+
+## Examples
+
+### Simple Triangle
+
+```pngine
+#renderPass drawTriangle {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0 0 0 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=trianglePipeline
+  draw=3
+}
+```
+
+### With Depth Buffer
+
+```pngine
+#texture depthTexture {
+  size=["$canvas.width" "$canvas.height"]
+  format=depth24plus
+  usage=[RENDER_ATTACHMENT]
+}
+
+#renderPass render3D {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.1 0.1 0.2 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  depthStencilAttachment={
+    view=depthTexture
+    depthClearValue=1.0
+    depthLoadOp=clear
+    depthStoreOp=store
+  }
+  pipeline=meshPipeline
+  bindGroups=[uniforms materials]
+  vertexBuffers=[vertices]
+  drawIndexed=1000
+  indexBuffer=indices
+}
+```
+
+### MSAA with Resolve
+
+```pngine
+#define SAMPLE_COUNT=4
+
+#texture msaaTarget {
+  size=["$canvas.width" "$canvas.height"]
+  format=preferredCanvasFormat
+  usage=[RENDER_ATTACHMENT]
+  sampleCount=SAMPLE_COUNT
+}
+
+#renderPass msaaPass {
+  colorAttachments=[{
+    view=msaaTarget
+    resolveTarget=contextCurrentTexture
+    clearValue=[0 0 0 1]
+    loadOp=clear
+    storeOp=discard
+  }]
+  pipeline=msaaPipeline
+  draw=3
+}
+```
+
+### Instanced Drawing
+
+```pngine
+#renderPass drawParticles {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    loadOp=load
+    storeOp=store
+  }]
+  pipeline=particlePipeline
+  bindGroups=[uniforms]
+  vertexBuffers=[quadVerts particleData]
+  vertexBuffersPoolOffsets=[0 1]
+  draw={ vertexCount=6 instanceCount=2048 }
+}
+```
+
+### Ping-Pong Rendering
+
+```pngine
+#buffer particles {
+  size=131072
+  usage=[VERTEX STORAGE]
+  pool=2
+}
+
+#renderPass drawParticles {
+  pipeline=renderPipeline
+  vertexBuffers=[particles]
+  vertexBuffersPoolOffsets=[0]  // Read from current frame's buffer
+  draw={ vertexCount=6 instanceCount=2048 }
+}
+```
+
+### Render to Texture
+
+```pngine
+#texture offscreen {
+  size=[1024 1024]
+  format=rgba8unorm
+  usage=[RENDER_ATTACHMENT TEXTURE_BINDING]
+}
+
+#renderPass offscreenPass {
+  colorAttachments=[{
+    view=offscreen
+    clearValue=[0 0 0 0]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=scenePipeline
+  draw=1000
+}
+```
+
+## Validation Rules
+
+| Rule | Error |
+|------|-------|
+| Name must be unique across all namespaces | `duplicate_definition` |
+| `pipeline` attribute is required | `missing_required_property` |
+| Either `draw` or `drawIndexed` required | `missing_required_property` |
+| `indexBuffer` required for `drawIndexed` | `missing_required_property` |
+| Referenced resources must exist | `undefined_reference` |
+
+## WebGPU Mapping
+
+Maps to render pass encoding:
+
+```javascript
+const passEncoder = commandEncoder.beginRenderPass({
+  colorAttachments: [{
+    view: texture.createView(),
+    clearValue: { r: 0, g: 0, b: 0, a: 1 },
+    loadOp: 'clear',
+    storeOp: 'store'
+  }]
+});
+passEncoder.setPipeline(pipeline);
+passEncoder.setBindGroup(0, bindGroup);
+passEncoder.setVertexBuffer(0, vertexBuffer);
+passEncoder.draw(3);
+passEncoder.end();
+```
+
+## Related
+
+- [`#renderPipeline`](/docs/dsl/render-pipeline/) - Pipeline configuration
+- [`#bindGroup`](/docs/dsl/bind-group/) - Resource bindings
+- [`#buffer`](/docs/dsl/buffer/) - Vertex/index buffers
+- [`#texture`](/docs/dsl/texture/) - Render targets
+- [`#frame`](/docs/dsl/frame/) - Execute passes

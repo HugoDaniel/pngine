@@ -1,0 +1,213 @@
+---
+.title = "#bindGroupLayout",
+.description = "Bind group layout definition",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+Defines the layout of a bind group, specifying what resources (buffers, textures, samplers) can be bound at each binding index.
+
+## Syntax
+
+```pngine
+#bindGroupLayout name {
+  entries=[
+    { binding=0 visibility=[VERTEX FRAGMENT] buffer={ type=uniform } }
+    { binding=1 visibility=[FRAGMENT] texture={ sampleType=float } }
+    { binding=2 visibility=[FRAGMENT] sampler={ type=filtering } }
+  ]
+}
+```
+
+## Attributes
+
+| Attribute | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `entries` | array | Yes | - | Array of binding layout entries |
+
+### entries
+
+**Type:** `array` of entry objects
+
+Each entry describes a single binding slot:
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `binding` | number | Yes | Binding index (0-based) |
+| `visibility` | array | Yes | Shader stages that can access |
+| `buffer` | object | * | Buffer binding layout |
+| `texture` | object | * | Texture binding layout |
+| `sampler` | object | * | Sampler binding layout |
+| `storageTexture` | object | * | Storage texture layout |
+
+*Exactly one of `buffer`, `texture`, `sampler`, or `storageTexture` required per entry.
+
+#### visibility
+
+Array of shader stages:
+
+| Value | Description |
+|-------|-------------|
+| `VERTEX` | Vertex shader |
+| `FRAGMENT` | Fragment shader |
+| `COMPUTE` | Compute shader |
+
+#### buffer
+
+Buffer binding layout:
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `type` | string | `uniform` | Buffer type |
+| `hasDynamicOffset` | boolean | `false` | Dynamic offset support |
+| `minBindingSize` | number | `0` | Minimum buffer size |
+
+Buffer types:
+
+| Type | Description |
+|------|-------------|
+| `uniform` | Uniform buffer (read-only, size-limited) |
+| `storage` | Storage buffer (read-write) |
+| `read-only-storage` | Read-only storage buffer |
+
+#### texture
+
+Texture binding layout:
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `sampleType` | string | `float` | Sample type |
+| `viewDimension` | string | `2d` | View dimension |
+| `multisampled` | boolean | `false` | Multisampled texture |
+
+Sample types:
+
+| Type | Description |
+|------|-------------|
+| `float` | Floating point texture |
+| `unfilterable-float` | Float without filtering |
+| `sint` | Signed integer |
+| `uint` | Unsigned integer |
+| `depth` | Depth texture |
+
+#### sampler
+
+Sampler binding layout:
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `type` | string | `filtering` | Sampler type |
+
+Sampler types:
+
+| Type | Description |
+|------|-------------|
+| `filtering` | Supports filtering |
+| `non-filtering` | No filtering (nearest only) |
+| `comparison` | Comparison sampler |
+
+#### storageTexture
+
+Storage texture binding layout:
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `access` | string | `write-only` | Access mode |
+| `format` | string | required | Texture format |
+| `viewDimension` | string | `2d` | View dimension |
+
+Access modes:
+
+| Mode | Description |
+|------|-------------|
+| `write-only` | Write only access |
+| `read-only` | Read only access |
+| `read-write` | Read and write access |
+
+## Examples
+
+### Uniform Buffer Layout
+
+```pngine
+#bindGroupLayout uniformLayout {
+  entries=[
+    { binding=0 visibility=[VERTEX FRAGMENT] buffer={ type=uniform } }
+  ]
+}
+```
+
+### Texture and Sampler Layout
+
+```pngine
+#bindGroupLayout textureLayout {
+  entries=[
+    { binding=0 visibility=[FRAGMENT] texture={ sampleType=float viewDimension=2d } }
+    { binding=1 visibility=[FRAGMENT] sampler={ type=filtering } }
+  ]
+}
+```
+
+### Compute Storage Layout
+
+```pngine
+#bindGroupLayout computeLayout {
+  entries=[
+    { binding=0 visibility=[COMPUTE] buffer={ type=read-only-storage } }
+    { binding=1 visibility=[COMPUTE] buffer={ type=storage } }
+  ]
+}
+```
+
+### Shadow Map Layout
+
+```pngine
+#bindGroupLayout shadowLayout {
+  entries=[
+    { binding=0 visibility=[FRAGMENT] texture={ sampleType=depth viewDimension=2d } }
+    { binding=1 visibility=[FRAGMENT] sampler={ type=comparison } }
+  ]
+}
+```
+
+### Storage Texture Layout
+
+```pngine
+#bindGroupLayout imageLayout {
+  entries=[
+    { binding=0 visibility=[COMPUTE] storageTexture={ access=write-only format=rgba8unorm } }
+  ]
+}
+```
+
+## Validation Rules
+
+| Rule | Error |
+|------|-------|
+| Name must be unique across all namespaces | `duplicate_definition` |
+| `entries` attribute is required | `missing_required_property` |
+| Each entry must have exactly one resource type | `type_mismatch` |
+
+## WebGPU Mapping
+
+Maps to `GPUBindGroupLayout` via:
+
+```javascript
+device.createBindGroupLayout({
+  entries: [
+    {
+      binding: 0,
+      visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+      buffer: { type: 'uniform' }
+    }
+  ]
+});
+```
+
+## Related
+
+- [`#bindGroup`](/docs/dsl/bind-group/) - Create bind groups using layout
+- [`#pipelineLayout`](/docs/dsl/pipeline-layout/) - Combine layouts for pipelines
+- [`#buffer`](/docs/dsl/buffer/) - Buffer resources
+- [`#texture`](/docs/dsl/texture/) - Texture resources
+- [`#sampler`](/docs/dsl/sampler/) - Sampler resources

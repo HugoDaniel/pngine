@@ -1,0 +1,229 @@
+---
+.title = "#import",
+.description = "Import from another file",
+.author = "PNGine Team",
+.date = @date("2024-12-21"),
+.layout = "docs.shtml",
+---
+
+Imports macros from another PNGine file for modular composition.
+
+## Syntax
+
+```pngine
+#import "./path/to/file.pngine"
+```
+
+## Usage
+
+### File Import
+
+```pngine
+#import "./common.pngine"
+#import "./shaders.pngine"
+#import "./resources.pngine"
+```
+
+Paths are relative to the importing file.
+
+## Examples
+
+### Modular Project Structure
+
+**core.pngine:**
+```pngine
+#texture depthTexture {
+  size=["$canvas.width" "$canvas.height"]
+  format=depth24plus
+  usage=[RENDER_ATTACHMENT]
+}
+
+#sampler linearSampler {
+  magFilter=linear
+  minFilter=linear
+}
+```
+
+**shaders.pngine:**
+```pngine
+#shaderModule vertexShader {
+  code="..."
+}
+
+#shaderModule fragmentShader {
+  code="..."
+}
+```
+
+**main.pngine:**
+```pngine
+#import "./core.pngine"
+#import "./shaders.pngine"
+
+#renderPipeline mainPipeline {
+  vertex={ module=vertexShader entryPoint=vs }
+  fragment={ module=fragmentShader entryPoint=fs }
+}
+
+#renderPass render {
+  depthStencilAttachment={
+    view=depthTexture
+    depthClearValue=1.0
+    depthLoadOp=clear
+    depthStoreOp=store
+  }
+  pipeline=mainPipeline
+  draw=3
+}
+
+#frame main {
+  perform=[render]
+}
+```
+
+### Demo2025 Pattern
+
+Multi-scene demo with shared resources:
+
+**core.wgsl.pngine:**
+```pngine
+#define SAMPLE_COUNT=4
+
+#texture renderTarget {
+  size=["$canvas.width" "$canvas.height"]
+  format=preferredCanvasFormat
+  usage=[RENDER_ATTACHMENT TEXTURE_BINDING]
+}
+
+#sampler defaultSampler {
+  magFilter=linear
+  minFilter=linear
+}
+```
+
+**sceneA.wgsl.pngine:**
+```pngine
+#shaderModule sceneAShader {
+  code="..."
+}
+
+#renderPipeline sceneAPipeline {
+  vertex={ module=sceneAShader entryPoint=vs }
+  fragment={ module=sceneAShader entryPoint=fs }
+}
+
+#renderPass sceneAPass {
+  pipeline=sceneAPipeline
+  draw=3
+}
+
+#frame sceneA {
+  perform=[sceneAPass]
+}
+```
+
+**main.wgsl.pngine:**
+```pngine
+#import "./core.wgsl.pngine"
+#import "./sceneA.wgsl.pngine"
+#import "./sceneB.wgsl.pngine"
+#import "./sceneC.wgsl.pngine"
+
+#animation demo {
+  duration=60.0
+  loop=true
+  scenes=[
+    { id="a" frame=sceneA start=0.0 end=20.0 }
+    { id="b" frame=sceneB start=20.0 end=40.0 }
+    { id="c" frame=sceneC start=40.0 end=60.0 }
+  ]
+}
+```
+
+### Shared Utilities
+
+**utils.pngine:**
+```pngine
+#wgsl math {
+  value="
+    const PI: f32 = 3.14159;
+    const TAU: f32 = 6.28318;
+
+    fn rotate2d(p: vec2f, a: f32) -> vec2f {
+      let c = cos(a);
+      let s = sin(a);
+      return vec2f(p.x * c - p.y * s, p.x * s + p.y * c);
+    }
+  "
+}
+
+#wgsl sdf {
+  imports=[math]
+  value="
+    fn sdCircle(p: vec2f, r: f32) -> f32 {
+      return length(p) - r;
+    }
+
+    fn sdBox(p: vec2f, b: vec2f) -> f32 {
+      let d = abs(p) - b;
+      return length(max(d, vec2f(0))) + min(max(d.x, d.y), 0);
+    }
+  "
+}
+```
+
+**main.pngine:**
+```pngine
+#import "./utils.pngine"
+
+#shaderModule shader {
+  code="..."
+  // Can use math and sdf imports
+}
+
+#wgsl mainShader {
+  imports=[sdf]
+  value="
+    @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+      let d = sdCircle(uv - 0.5, 0.3);
+      return vec4f(vec3f(smoothstep(0.01, 0, d)), 1);
+    }
+  "
+}
+```
+
+## Import Resolution
+
+1. Path is resolved relative to the importing file
+2. Imported file is parsed and analyzed
+3. All macros from imported file become available
+4. Imported files can import other files (with cycle detection)
+
+## Uniqueness
+
+All macro names must be unique across all imported files:
+
+```pngine
+// file_a.pngine
+#buffer myBuffer { size=100 usage=[VERTEX] }
+
+// file_b.pngine
+#buffer myBuffer { size=200 usage=[STORAGE] }  // ERROR!
+
+// main.pngine
+#import "./file_a.pngine"
+#import "./file_b.pngine"  // Conflict: myBuffer defined twice
+```
+
+## Validation Rules
+
+| Rule | Error |
+|------|-------|
+| Import path must be valid | `file_not_found` |
+| Circular imports are detected | `circular_dependency` |
+| All names unique across imports | `duplicate_definition` |
+
+## Related
+
+- [`#wgsl`](/docs/dsl/wgsl/) - Shader fragments with imports
+- [`#animation`](/docs/dsl/animation/) - Multi-scene composition
