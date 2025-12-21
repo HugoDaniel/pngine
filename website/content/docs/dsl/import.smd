@@ -33,7 +33,7 @@ Paths are relative to the importing file.
 **core.pngine:**
 ```pngine
 #texture depthTexture {
-  size=["$canvas.width" "$canvas.height"]
+  size=[canvas.width canvas.height]
   format=depth24plus
   usage=[RENDER_ATTACHMENT]
 }
@@ -90,7 +90,7 @@ Multi-scene demo with shared resources:
 #define SAMPLE_COUNT=4
 
 #texture renderTarget {
-  size=["$canvas.width" "$canvas.height"]
+  size=[canvas.width canvas.height]
   format=preferredCanvasFormat
   usage=[RENDER_ATTACHMENT TEXTURE_BINDING]
 }

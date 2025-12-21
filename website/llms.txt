@@ -1,0 +1,274 @@
+# PNGine DSL Reference for LLMs
+
+> PNGine is a WebGPU bytecode engine that compiles a macro-based DSL into compact bytecode (PNGB) for embedding in PNG files and executing in browsers.
+
+## Quick Facts
+
+- File extension: `.pngine`
+- Syntax: Macro-based with `#macroType name { properties }`
+- References: Bare identifiers (auto-resolved by context)
+- Compile-time expressions: `"4 * 256"`, `PI`, `ceil(N/64)`
+- Output: PNGB bytecode embedded in PNG files
+
+## All Macros
+
+### Shader Resources
+- `#wgsl name { value="WGSL code" imports=[other] }` - Shader fragment
+- `#shaderModule name { code="WGSL code" }` - Named shader module
+
+### GPU Resources
+- `#buffer name { size=N usage=[VERTEX STORAGE] pool=2 }` - GPU buffer
+- `#texture name { size=[W H] format=rgba8unorm usage=[TEXTURE_BINDING] }` - Texture
+- `#sampler name { magFilter=linear minFilter=linear }` - Sampler
+- `#textureView name { texture=texName }` - Texture view
+- `#querySet name { type=timestamp count=N }` - Query set
+
+### Pipelines
+- `#bindGroupLayout name { entries=[...] }` - Bind group layout
+- `#bindGroup name { layout={pipeline=P index=0} entries=[...] }` - Bind group
+- `#pipelineLayout name { bindGroupLayouts=[L0 L1] }` - Pipeline layout
+- `#renderPipeline name { layout=auto vertex={...} fragment={...} }` - Render pipeline
+- `#computePipeline name { layout=auto compute={module=M entryPoint=main} }` - Compute pipeline
+
+### Passes
+- `#renderPass name { pipeline=P bindGroups=[G] draw=3 }` - Render pass
+- `#computePass name { pipeline=P dispatchWorkgroups=[64 1 1] }` - Compute pass
+
+### Data
+- `#data name { float32Array=[1.0 2.0 3.0] }` - Inline data
+- `#data name { float32Array={numberOfElements=N initEachElementWith=[...]} }` - Generated data
+- `#data name { blob={file={url="path.png"}} }` - Blob file
+- `#queue name { writeBuffer={buffer=B data=D} }` - Queue operation
+- `#imageBitmap name { image=dataRef }` - Image bitmap
+- `#wasmCall name { module={url="m.wasm"} func="fn" }` - WASM call
+
+### Control Flow
+- `#frame name { perform=[pass1 pass2] before=[queue1] }` - Frame definition
+- `#animation name { duration=60 scenes=[{id="a" frame=F start=0 end=10}] }` - Animation
+- `#define NAME=value` - Compile-time constant
+- `#import "./path.pngine"` - File import
+
+## Property Reference
+
+### #buffer
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| size | number/expr/ref | Yes | Size in bytes |
+| usage | array | Yes | VERTEX, INDEX, UNIFORM, STORAGE, COPY_SRC, COPY_DST |
+| mappedAtCreation | ref | No | Initial data from #data |
+| pool | number | No | Ping-pong pool size |
+
+### #texture
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| size | array | No | [width, height] or canvas-relative |
+| format | string | Yes | rgba8unorm, depth24plus, preferredCanvasFormat, etc. |
+| usage | array | Yes | TEXTURE_BINDING, RENDER_ATTACHMENT, COPY_DST, etc. |
+| sampleCount | number | No | MSAA samples (1 or 4) |
+
+### #renderPipeline
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| layout | string/ref | No | "auto" or pipelineLayout reference |
+| vertex | object | Yes | {module=M entryPoint=fn buffers=[...]} |
+| fragment | object | No | {module=M entryPoint=fn targets=[{format=F}]} |
+| primitive | object | No | {topology=triangle-list cullMode=back} |
+| depthStencil | object | No | {format=depth24plus depthCompare=less} |
+| multisample | number | No | Sample count (1 or 4) |
+
+### #renderPass
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| colorAttachments | array | No | [{view=T clearValue=[r g b a] loadOp=clear storeOp=store}] |
+| depthStencilAttachment | object | No | {view=D depthClearValue=1 depthLoadOp=clear} |
+| pipeline | ref | Yes | Render pipeline reference |
+| bindGroups | array | No | Bind group references |
+| vertexBuffers | array | No | Buffer references |
+| draw | number/object | * | Vertex count or {vertexCount instanceCount} |
+| drawIndexed | number/object | * | Index count (requires indexBuffer) |
+
+### #computePass
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| pipeline | ref | Yes | Compute pipeline reference |
+| bindGroups | array | No | Bind group references |
+| bindGroupsPoolOffsets | array | No | Pool offsets for ping-pong |
+| dispatchWorkgroups | array/expr | Yes | [x, y, z] or expression |
+
+### #frame
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| perform | array | Yes | Passes to execute in order |
+| before | array | No | Pre-frame queue operations |
+| after | array | No | Post-frame operations |
+| onLoad | array | No | First-frame initialization |
+
+## Reference Syntax
+
+### Bare Identifiers (Auto-Resolved by Context)
+
+Resources are referenced by name. The analyzer resolves based on property context:
+
+```
+pipeline=main        // Searches: renderPipeline, computePipeline
+module=shader        // Searches: shaderModule, wgsl
+buffer=vertices      // Searches: buffer
+layout=myLayout      // Searches: pipelineLayout, bindGroupLayout
+texture=target       // Searches: texture
+imports=[utils]      // Searches: wgsl, shaderModule
+```
+
+### Context-Based Resolution
+
+| Property | Searches In |
+|----------|-------------|
+| `module` | shaderModule, wgsl |
+| `pipeline` | renderPipeline, computePipeline |
+| `layout` | pipelineLayout, bindGroupLayout |
+| `buffer` | buffer |
+| `texture`, `view` | texture |
+| `sampler` | sampler |
+| `frame` | frame |
+| `perform`, `before`, `after` | renderPass, computePass, queue |
+| `imports` | wgsl, shaderModule |
+
+### Special Values (Reserved Keywords)
+- `auto` - Layout auto-derivation
+- `contextCurrentTexture` - Current canvas texture
+- `preferredCanvasFormat` - Browser format
+- `clear`, `load`, `store`, `discard` - Load/store ops
+- `triangle-list`, `none`, `back`, `ccw` - Topology/cull
+
+## Expressions
+
+### Operators
+`+`, `-`, `*`, `/`, `()`, `-` (unary)
+
+### Constants
+`PI` (3.14159...), `E` (2.71828...), `TAU` (6.28318...)
+
+### Functions
+`ceil(x)`, `floor(x)`, `random()` (data generation only)
+
+### Examples
+```
+size="4 * 256"
+dispatchWorkgroups="ceil(NUM_PARTICLES / 64)"
+#define STRIDE="4 * 8"
+```
+
+## Common Patterns
+
+### Simple Triangle
+```pngine
+#shaderModule code {
+  code="
+    @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      var pos = array<vec2f, 3>(vec2f(0, 0.5), vec2f(-0.5, -0.5), vec2f(0.5, -0.5));
+      return vec4f(pos[i], 0, 1);
+    }
+    @fragment fn fs() -> @location(0) vec4f { return vec4f(1, 0, 0, 1); }
+  "
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={ module=code entryPoint=vs }
+  fragment={ module=code entryPoint=fs targets=[{ format=preferredCanvasFormat }] }
+}
+
+#renderPass pass {
+  colorAttachments=[{ view=contextCurrentTexture clearValue=[0 0 0 1] loadOp=clear storeOp=store }]
+  pipeline=pipeline
+  draw=3
+}
+
+#frame main { perform=[pass] }
+```
+
+### Ping-Pong Compute
+```pngine
+#buffer particles { size=65536 usage=[VERTEX STORAGE] pool=2 }
+
+#bindGroup simGroup {
+  layout={ pipeline=simPipeline index=0 }
+  entries=[
+    { binding=0 resource={ buffer=particles pingPong=0 } }
+    { binding=1 resource={ buffer=particles pingPong=1 } }
+  ]
+  pool=2
+}
+
+#computePass simulate {
+  pipeline=simPipeline
+  bindGroups=[simGroup]
+  bindGroupsPoolOffsets=[0]
+  dispatchWorkgroups=[64 1 1]
+}
+```
+
+### With Depth Buffer
+```pngine
+#texture depthTexture {
+  size=[canvas.width canvas.height]
+  format=depth24plus
+  usage=[RENDER_ATTACHMENT]
+}
+
+#renderPass render {
+  depthStencilAttachment={
+    view=depthTexture
+    depthClearValue=1.0
+    depthLoadOp=clear
+    depthStoreOp=store
+  }
+  pipeline=meshPipeline
+  draw=1000
+}
+```
+
+### Scene Animation
+```pngine
+#frame sceneA { perform=[renderA] }
+#frame sceneB { perform=[renderB] }
+
+#animation demo {
+  duration=60.0
+  loop=true
+  scenes=[
+    { id="intro" frame=sceneA start=0.0 end=20.0 }
+    { id="main" frame=sceneB start=20.0 end=60.0 }
+  ]
+}
+```
+
+## Validation Rules
+
+1. **Uniqueness**: All resource names must be unique across ALL macro types
+2. **Required Properties**: Each macro type has required properties (see tables above)
+3. **Reference Validity**: All bare identifiers must reference existing resources
+4. **Circular Dependencies**: `#wgsl imports` cannot form cycles
+5. **Type Matching**: Property values must match expected types
+
+## Errors
+
+| Error | Cause |
+|-------|-------|
+| `undefined_reference` | Referenced resource doesn't exist |
+| `duplicate_definition` | Same name used for multiple resources |
+| `circular_dependency` | Cycle in #wgsl imports |
+| `missing_required_property` | Required property not provided |
+
+## File Format
+
+Output is PNGB bytecode, typically embedded in PNG:
+- `pNGb` chunk: Compressed bytecode
+- `pNGm` chunk: Animation metadata (optional)
+
+## CLI
+
+```bash
+pngine shader.pngine -o output.png       # Compile + embed
+pngine shader.pngine --frame -s 512x512  # Render frame
+pngine check output.png                   # Validate
+```

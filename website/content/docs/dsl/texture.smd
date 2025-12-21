@@ -46,9 +46,9 @@ Texture dimensions. Can use runtime values:
   usage=[TEXTURE_BINDING]
 }
 
-// Canvas-relative (uses quotes for runtime interpolation)
+// Canvas-relative
 #texture renderTarget {
-  size=["$canvas.width" "$canvas.height"]
+  size=[canvas.width canvas.height]
   format=preferredCanvasFormat
   usage=[RENDER_ATTACHMENT]
 }
@@ -117,7 +117,7 @@ MSAA sample count for multisampled textures. Must be 1 or 4.
 #define SAMPLE_COUNT=4
 
 #texture msaaTarget {
-  size=["$canvas.width" "$canvas.height"]
+  size=[canvas.width canvas.height]
   format=preferredCanvasFormat
   usage=[RENDER_ATTACHMENT]
   sampleCount=SAMPLE_COUNT
@@ -145,7 +145,7 @@ Number of mipmap levels.
 
 ```pngine
 #texture colorTarget {
-  size=["$canvas.width" "$canvas.height"]
+  size=[canvas.width canvas.height]
   format=preferredCanvasFormat
   usage=[RENDER_ATTACHMENT TEXTURE_BINDING]
 }
@@ -155,7 +155,7 @@ Number of mipmap levels.
 
 ```pngine
 #texture depthTexture {
-  size=["$canvas.width" "$canvas.height"]
+  size=[canvas.width canvas.height]
   format=depth24plus
   usage=[RENDER_ATTACHMENT]
 }
@@ -176,7 +176,7 @@ Number of mipmap levels.
 #define SAMPLE_COUNT=4
 
 #texture msaaTexture {
-  size=["$canvas.width" "$canvas.height"]
+  size=[canvas.width canvas.height]
   format=preferredCanvasFormat
   usage=[RENDER_ATTACHMENT]
   sampleCount=SAMPLE_COUNT

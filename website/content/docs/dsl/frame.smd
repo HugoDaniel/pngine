@@ -101,7 +101,7 @@ onUnload=[saveState]
 #queue writeTime {
   writeBuffer={
     buffer=uniforms
-    data="$uniforms.shader.inputs.data"
+    data=shader.inputs
   }
 }
 

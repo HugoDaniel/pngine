@@ -224,7 +224,7 @@ drawIndexed=36
 
 ```pngine
 #texture depthTexture {
-  size=["$canvas.width" "$canvas.height"]
+  size=[canvas.width canvas.height]
   format=depth24plus
   usage=[RENDER_ATTACHMENT]
 }
@@ -256,7 +256,7 @@ drawIndexed=36
 #define SAMPLE_COUNT=4
 
 #texture msaaTarget {
-  size=["$canvas.width" "$canvas.height"]
+  size=[canvas.width canvas.height]
   format=preferredCanvasFormat
   usage=[RENDER_ATTACHMENT]
   sampleCount=SAMPLE_COUNT

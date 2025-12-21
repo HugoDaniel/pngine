@@ -149,7 +149,7 @@ The metadata is extracted automatically. Explicit `uniforms` overrides reflectio
 #queue writeUniforms {
   writeBuffer={
     buffer=uniformBuffer
-    data="$uniforms.main.inputs.data"
+    data=main.inputs
   }
 }
 ```

@@ -60,12 +60,12 @@ Static data reference:
 data=vertexData
 ```
 
-Runtime uniform data:
+Runtime uniform data (from shader module):
 ```pngine
-data="$uniforms.shader.inputs.data"
+data=shader.inputs
 ```
 
-The `$uniforms` syntax accesses runtime-computed uniform data from shader modules.
+This syntax references the uniform inputs defined in a shader module.
 
 ### copyExternalImageToTexture
 
@@ -164,14 +164,12 @@ Copies between buffers.
 #queue writeUniforms {
   writeBuffer={
     buffer=uniformBuffer
-    data="$uniforms.shader.inputs.data"
+    data=shader.inputs
   }
 }
 ```
 
-The runtime automatically populates uniform data with:
-- `time`: Current animation time
-- `resolution`: Canvas dimensions
+The runtime automatically populates uniform data with values like time and canvas dimensions based on the shader's uniform struct.
 
 ### Load Texture from Image
 
