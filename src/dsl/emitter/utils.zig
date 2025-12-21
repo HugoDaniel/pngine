@@ -115,6 +115,30 @@ pub fn findPropertyReference(e: *Emitter, prop_node: Node.Index) ?Reference {
     return null;
 }
 
+/// Get resource name from either a reference or identifier_value node.
+/// Returns the bare identifier name for both patterns:
+/// - $namespace.name (reference) -> "name"
+/// - name (identifier_value) -> "name"
+pub fn getResourceName(e: *Emitter, node: Node.Index) ?[]const u8 {
+    // Pre-conditions
+    std.debug.assert(node.toInt() < e.ast.nodes.len);
+
+    const tag = e.ast.nodes.items(.tag)[node.toInt()];
+
+    if (tag == .identifier_value) {
+        // Bare identifier: main_token has the name
+        const token = e.ast.nodes.items(.main_token)[node.toInt()];
+        return getTokenSlice(e, token);
+    } else if (tag == .reference) {
+        // Reference: get the name part
+        if (getReference(e, node)) |ref| {
+            return ref.name;
+        }
+    }
+
+    return null;
+}
+
 /// Extract Reference from a reference node.
 /// Supports multi-part names like $wgsl.shader.binding (name="shader.binding").
 pub fn getReference(e: *Emitter, node: Node.Index) ?Reference {

@@ -1244,10 +1244,10 @@ pub fn emitTextureViews(e: *Emitter) Emitter.Error!void {
         e.next_texture_view_id += 1;
         try e.texture_view_ids.put(e.gpa, name, view_id);
 
-        // Get texture reference
+        // Get texture reference (supports both bare identifiers and references)
         const texture_node = utils.findPropertyValue(e, info.node, "texture") orelse continue;
-        const texture_ref = utils.getReference(e, texture_node) orelse continue;
-        const texture_id = e.texture_ids.get(texture_ref.name) orelse continue;
+        const texture_name = utils.getResourceName(e, texture_node) orelse continue;
+        const texture_id = e.texture_ids.get(texture_name) orelse continue;
 
         // Encode descriptor with optional properties
         var encoder = DescriptorEncoder.init();
