@@ -853,7 +853,7 @@ fn parseStageDescriptor(e: *Emitter, prop_node: Node.Index) StageDescriptor {
 
         if (std.mem.eql(u8, inner_name, "module")) {
             if (utils.findPropertyReference(e, inner_prop)) |ref| {
-                // Reference: $wgsl.name or $shaderModule.name
+                // Reference: wgsl name or shaderModule name
                 result.shader_id = e.shader_ids.get(ref.name);
             } else {
                 // Bare identifier: module=sceneE

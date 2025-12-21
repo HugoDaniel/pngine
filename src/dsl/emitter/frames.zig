@@ -252,9 +252,9 @@ fn emitWriteBufferString(e: *Emitter, buffer_id: u16, offset: u32, string_node: 
         }
     }
 
-    // Check for other runtime interpolation (starts with $)
+    // Check for other runtime interpolation (starts with $ - legacy syntax)
     if (data_str.len > 0 and data_str[0] == '$') {
-        // Runtime interpolation ($uniforms.x.y.data, $time, etc.)
+        // Runtime interpolation (legacy: $uniforms.x.y.data, $time, etc.)
         // Skip emitting write_buffer - JS will handle via writeTimeUniform
         return;
     }

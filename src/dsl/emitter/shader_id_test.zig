@@ -221,7 +221,7 @@ test "ShaderID: alternating valid/empty shaders" {
 // ============================================================================
 
 test "ShaderID: shaderModule referencing valid wgsl" {
-    // When #shaderModule references a #wgsl via string "$wgsl.name",
+    // When #shaderModule references a #wgsl via identifier (bare name),
     // it creates its own shader using the resolved code from cache.
     // This test verifies both #wgsl and #shaderModule create shaders.
     const source: [:0]const u8 =

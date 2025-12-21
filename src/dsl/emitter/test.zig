@@ -1257,7 +1257,7 @@ test "Emitter: texture with canvas size uses canvas-size encoding" {
                 try testing.expectEqual(@as(u8, @intFromEnum(DescriptorEncoder.DescriptorType.texture)), desc[0]);
 
                 // Canvas-size texture should have 2 fields (format + usage), not 4 (width + height + format + usage)
-                // This verifies that $canvas.width/height triggers canvas-size encoding
+                // This verifies that canvas.width/height triggers canvas-size encoding
                 try testing.expectEqual(@as(u8, 2), desc[1]);
             } else {
                 // desc_id out of range means something is wrong
@@ -1276,7 +1276,7 @@ test "Emitter: render pass with depth attachment emits depth texture ID" {
     // the depth texture ID in begin_render_pass opcode (not 0xFFFF)
     const source: [:0]const u8 =
         \\#texture depthTexture {
-        \\  size=["$canvas.width" "$canvas.height"]
+        \\  size=[canvas.width canvas.height]
         \\  format=depth24plus
         \\  usage=[render-attachment]
         \\}
@@ -1622,12 +1622,12 @@ test "Emitter: multiple vertex buffers with bare identifiers" {
 test "Emitter: textureUsesCanvasSize detects runtime_interpolation nodes" {
     // Regression test: strings containing "$" are parsed as .runtime_interpolation nodes,
     // not .string_value nodes. The textureUsesCanvasSize function must check for both.
-    // Bug: originally only checked .string_value, causing $canvas.width to be missed.
+    // Bug: originally only checked .string_value, causing canvas.width to be missed.
 
     // Test 1: Texture with runtime interpolation should use canvas-size encoding (2 fields)
     const canvas_size_source: [:0]const u8 =
         \\#texture canvasTexture {
-        \\  size=["$canvas.width", "$canvas.height"]
+        \\  size=[canvas.width canvas.height]
         \\  format=rgba8unorm
         \\  usage=[RENDER_ATTACHMENT]
         \\}

@@ -510,13 +510,13 @@ test "property: no duplicate deps in entry" {
 }
 
 // ============================================================================
-// #shaderModule referencing $wgsl.* (demo pattern)
+// #shaderModule referencing #wgsl (demo pattern)
 // ============================================================================
 
-test "#shaderModule referencing $wgsl with imports" {
+test "#shaderModule referencing wgsl with imports" {
     // This is the exact pattern used in the demo:
     // #wgsl sceneShader { imports=[...] }
-    // #shaderModule scene { code="$wgsl.sceneShader" }
+    // #shaderModule scene { code=sceneShader }
     const source: [:0]const u8 =
         \\#wgsl constants { value="const AWAY: f32 = 1e10;" }
         \\#wgsl utils { value="fn helper() -> f32 { return AWAY; }" imports=[constants] }
@@ -524,7 +524,7 @@ test "#shaderModule referencing $wgsl with imports" {
         \\  value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0, 0.0, helper(), 1.0); }"
         \\  imports=[constants, utils]
         \\}
-        \\#shaderModule scene { code="$wgsl.sceneShader" }
+        \\#shaderModule scene { code=sceneShader }
         \\#renderPipeline pipe {
         \\  layout=auto
         \\  vertex={ module=scene entryPoint=vs }
@@ -545,7 +545,7 @@ test "#shaderModule referencing $wgsl with imports" {
     defer module.deinit(testing.allocator);
 
     // Should have 3 WGSL entries (constants, utils, sceneShader)
-    // Note: #shaderModule referencing $wgsl.* reuses the wgsl_id, doesn't create new entry
+    // Note: #shaderModule referencing #wgsl reuses the wgsl_id, doesn't create new entry
     try testing.expectEqual(@as(u16, 3), module.wgsl.count());
 
     // Find sceneShader entry (has 2 deps)

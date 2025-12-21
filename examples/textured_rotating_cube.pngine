@@ -91,7 +91,7 @@
 }
 
 #texture depthTexture {
-  size=["$canvas.width", "$canvas.height]
+  size=[canvas.width canvas.height]
   format=depth24plus
   usage=[RENDER_ATTACHMENT]
 }
@@ -156,7 +156,7 @@
 #imageBitmap cubeImage { image=d3Image }
 
 #texture cubeTexture {
-  size=["$imageBitmaps.cubeImage.width", "$imageBitmaps.cubeImage.height]
+  size=[imageBitmaps.cubeImage.width imageBitmaps.cubeImage.height]
   format=rgba8unorm
   usage=[TEXTURE_BINDING, COPY_DST, RENDER_ATTACHMENT]
 }
@@ -168,7 +168,7 @@
     destination={
       texture=cubeTexture
     }
-    copySize=["$imageBitmaps.cubeImage.width", "$imageBitmaps.cubeImage.height]
+    copySize=[imageBitmaps.cubeImage.width imageBitmaps.cubeImage.height]
   }
 }
 

@@ -376,7 +376,7 @@ pub const DescriptorEncoder = struct {
 
     /// Encode a texture descriptor without explicit dimensions.
     /// Runtime will use canvas size as the default.
-    /// Used for textures with size=["$canvas.width", "$canvas.height"].
+    /// Used for textures with size=[canvas.width canvas.height].
     ///
     /// Memory: Caller owns returned slice.
     pub fn encodeTextureCanvasSize(
@@ -622,7 +622,7 @@ test "DescriptorEncoder: encode texture with MSAA" {
 }
 
 // Property: canvas-sized textures omit width/height fields (2 fields vs 4).
-// Regression test: size=["$canvas.width", "$canvas.height"] should NOT encode dimensions.
+// Regression test: size=[canvas.width canvas.height] should NOT encode dimensions.
 test "DescriptorEncoder: encode texture canvas size" {
     const desc = try DescriptorEncoder.encodeTextureCanvasSize(
         testing.allocator,

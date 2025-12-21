@@ -13,7 +13,7 @@
 //! * Resource IDs are assigned sequentially starting from their respective counters.
 //! * Data section entries are created before buffer initialization.
 //! * All iteration is bounded by MAX_RESOURCES or MAX_ARRAY_ELEMENTS.
-//! * Texture canvas size is detected from "$canvas" in size array elements.
+//! * Texture canvas size is detected from canvas builtin refs in size array elements.
 //! * Bind group entries are parsed before descriptor encoding.
 //! * Blob files are read from base_dir + relative URL during compilation.
 
@@ -602,14 +602,14 @@ pub fn emitBuffers(e: *Emitter) Emitter.Error!void {
 
 /// Resolve buffer size from size property value.
 /// Handles: numbers, expressions, string expressions, identifier refs to #data,
-/// and WGSL binding references ($wgsl.shader.binding for auto-sizing).
+/// and WGSL binding references (shader.binding for auto-sizing).
 fn resolveBufferSize(e: *Emitter, size_node: Node.Index) u32 {
     // Pre-condition
     std.debug.assert(size_node.toInt() < e.ast.nodes.len);
 
     const size_tag = e.ast.nodes.items(.tag)[size_node.toInt()];
 
-    // Check for reference to WGSL binding (e.g., $wgsl.code.inputs)
+    // Check for reference to WGSL binding (e.g., code.inputs)
     if (size_tag == .reference) {
         if (utils.getReference(e, size_node)) |ref| {
             if (std.mem.eql(u8, ref.namespace, "wgsl")) {
@@ -735,7 +735,7 @@ fn emitBufferInitialization(e: *Emitter, buffer_id: u16, mapped_value: Node.Inde
 /// Processes all `#texture` macros and emits `create_texture` opcodes.
 /// Supports two size modes:
 /// - Fixed size: `width=N height=M` - creates texture with specified dimensions
-/// - Canvas size: `size=["$canvas.width", "$canvas.height"]` - resizes with canvas
+/// - Canvas size: `size=[canvas.width canvas.height]` - resizes with canvas
 ///
 /// Texture descriptors are encoded to the data section and referenced by ID.
 /// Canvas-sized textures use a special descriptor flag for runtime resizing.
@@ -757,7 +757,7 @@ pub fn emitTextures(e: *Emitter) Emitter.Error!void {
         e.next_texture_id += 1;
         try e.texture_ids.put(e.gpa, name, texture_id);
 
-        // Check if texture uses canvas size (size=["$canvas.width", "$canvas.height"])
+        // Check if texture uses canvas size (size=[canvas.width canvas.height])
         const use_canvas_size = textureUsesCanvasSize(e, info.node);
 
         const sample_count = utils.parsePropertyNumber(e, info.node, "sampleCount") orelse 1;
@@ -804,7 +804,7 @@ pub fn emitTextures(e: *Emitter) Emitter.Error!void {
     std.debug.assert(e.next_texture_id >= initial_texture_id);
 }
 
-/// Check if texture has size=[canvas.width canvas.height] or size=["$canvas.width", "$canvas.height"].
+/// Check if texture has size=[canvas.width canvas.height] (builtin refs or legacy runtime interpolation strings).
 pub fn textureUsesCanvasSize(e: *Emitter, node: Node.Index) bool {
     // Pre-condition
     std.debug.assert(node.toInt() < e.ast.nodes.len);
@@ -817,12 +817,12 @@ pub fn textureUsesCanvasSize(e: *Emitter, node: Node.Index) bool {
     const array_data = e.ast.nodes.items(.data)[size_value.toInt()];
     const elements = e.ast.extraData(array_data.extra_range);
 
-    // Check if any element is a builtin ref, runtime interpolation, or string containing "$canvas"
+    // Check if any element is a builtin ref or runtime interpolation (legacy)
     for (elements) |elem_idx| {
         const elem: Node.Index = @enumFromInt(elem_idx);
         const elem_tag = e.ast.nodes.items(.tag)[elem.toInt()];
 
-        // Builtin ref (canvas.width, canvas.height) - new clean syntax
+        // Builtin ref (canvas.width, canvas.height) - clean syntax
         if (elem_tag == .builtin_ref) {
             const data = e.ast.nodes.items(.data)[elem.toInt()];
             const namespace_token = data.node_and_node[0];
@@ -832,16 +832,9 @@ pub fn textureUsesCanvasSize(e: *Emitter, node: Node.Index) bool {
             }
         }
 
-        // Runtime interpolation strings are marked with a separate tag
+        // Runtime interpolation strings (legacy syntax support)
         if (elem_tag == .runtime_interpolation) {
             return true;
-        }
-
-        if (elem_tag == .string_value) {
-            const content = utils.getStringContent(e, elem);
-            if (std.mem.indexOf(u8, content, "$canvas") != null) {
-                return true;
-            }
         }
     }
 

@@ -17,7 +17,7 @@
 }
 
 #texture bgGradientsTexture{
-  size=["$canvas.width", "$canvas.height]
+  size=[canvas.width canvas.height]
   format=rgba8unorm
   usage=[RENDER_ATTACHMENT TEXTURE_BINDING]
 }

@@ -116,7 +116,7 @@ fn fragMain(
 }
 
 #texture depthTexture {
-  size=["$canvas.width", "$canvas.height]
+  size=[canvas.width canvas.height]
   format=depth24plus
   usage=[RENDER_ATTACHMENT]
 }
@@ -146,7 +146,7 @@ fn fragMain(
   func=buildMVPMatrix // This must be a function exported by the module
   returns="mat4x4"
   // The function will be called whenever "mvpMatrix" is referenced
-  args=[ "$canvas.width", "$canvas.height", "$t.total" ]
+  args=[canvas.width canvas.height t.total]
 }
 
 #queue writeCameraUniform {

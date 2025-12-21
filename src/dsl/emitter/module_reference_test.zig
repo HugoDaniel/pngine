@@ -5,10 +5,10 @@
 //! 2. `parseStageDescriptor()` handling of bare identifier module references
 //!
 //! ## Bug Fixes Tested
-//! - `runtime_interpolation`: Strings like `"$wgsl.name"` are parsed as runtime_interpolation,
+//! - `runtime_interpolation`: Legacy strings like `"$wgsl.name"` are parsed as runtime_interpolation,
 //!   not string_value. Code now handles both tags.
 //! - Bare identifiers: Pipeline `module=sceneE` was not finding shader IDs because
-//!   only reference syntax (`$wgsl.name`) was handled, not bare identifiers.
+//!   only reference syntax was handled, not bare identifiers.
 //!
 //! ## Test Categories
 //! - Unit tests: basic reference patterns
@@ -830,7 +830,7 @@ test "ModuleRef: OOM resilience baseline" {
 // ============================================================================
 
 test "ModuleRef: module name containing 'wgsl' substring" {
-    // Edge case: name contains 'wgsl' but shouldn't be parsed as $wgsl reference
+    // Edge case: name contains 'wgsl' but is a regular identifier
     const source: [:0]const u8 =
         \\#shaderModule myWgslShader { code="fn f() {}" }
         \\#renderPipeline pipe {

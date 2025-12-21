@@ -140,7 +140,7 @@ pub fn getResourceName(e: *Emitter, node: Node.Index) ?[]const u8 {
 }
 
 /// Extract Reference from a reference node.
-/// Supports multi-part names like $wgsl.shader.binding (name="shader.binding").
+/// Supports multi-part names like shader.binding (name="shader.binding").
 pub fn getReference(e: *Emitter, node: Node.Index) ?Reference {
     // Pre-conditions
     std.debug.assert(node.toInt() < e.ast.nodes.len);

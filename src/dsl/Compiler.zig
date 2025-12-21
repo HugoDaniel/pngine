@@ -323,7 +323,7 @@ test "E2E: parse simple_triangle_msaa.pngine" {
         \\}
         \\
         \\#texture tex {
-        \\  size=["$canvas.width", "$canvas.height"]
+        \\  size=[canvas.width canvas.height]
         \\  sampleCount=SAMPLE_COUNT
         \\  format=preferredCanvasFormat
         \\  usage=[RENDER_ATTACHMENT]
@@ -367,15 +367,15 @@ test "E2E: parse simple_triangle_msaa.pngine" {
     // Verify we have a texture
     try testing.expect(analysis.symbols.texture.count() > 0);
 
-    // Verify runtime interpolation was detected (for "$canvas.width")
-    var has_interpolation = false;
+    // Verify builtin refs were detected (canvas.width/height)
+    var has_builtin_ref = false;
     for (ast.nodes.items(.tag)) |tag| {
-        if (tag == .runtime_interpolation) {
-            has_interpolation = true;
+        if (tag == .builtin_ref) {
+            has_builtin_ref = true;
             break;
         }
     }
-    try testing.expect(has_interpolation);
+    try testing.expect(has_builtin_ref);
 }
 
 test "E2E: parse moving_triangle.pngine" {
@@ -396,7 +396,7 @@ test "E2E: parse moving_triangle.pngine" {
         \\}
         \\
         \\#texture tex {
-        \\  size=["$canvas.width", "$canvas.height"]
+        \\  size=[canvas.width canvas.height]
         \\  sampleCount=SAMPLE_COUNT
         \\  format=preferredCanvasFormat
         \\  usage=[RENDER_ATTACHMENT]
@@ -469,7 +469,7 @@ test "E2E: parse moving_triangle.pngine" {
     // Verify bare name resolution for buffer=uniformInputsBuffer
     try testing.expect(analysis.resolved_identifiers.count() > 0);
 
-    // Verify runtime interpolation for "$uniforms.code.inputs.data"
+    // Verify runtime interpolation for legacy syntax "$uniforms.code.inputs.data"
     var has_interpolation = false;
     for (ast.nodes.items(.tag)) |tag| {
         if (tag == .runtime_interpolation) {

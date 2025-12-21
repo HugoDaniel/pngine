@@ -223,7 +223,7 @@ test "Parser: wasmCall macro" {
         \\  }
         \\  func=buildMVPMatrix
         \\  returns="mat4x4"
-        \\  args=[ "$canvas.width", "$canvas.height", "$t.total" ]
+        \\  args=[canvas.width canvas.height time.total]
         \\}
     ;
 
@@ -406,24 +406,24 @@ test "Parser: OOM handling" {
 // String and Interpolation Tests
 // ============================================================================
 
-test "Parser: runtime interpolation strings" {
+test "Parser: builtin references (canvas.width, canvas.height)" {
     const source: [:0]const u8 =
         \\#texture tex {
-        \\  size=["$canvas.width", "$canvas.height"]
+        \\  size=[canvas.width canvas.height]
         \\}
     ;
     var ast = try parseSource(source);
     defer ast.deinit(testing.allocator);
 
-    // Find runtime_interpolation nodes
-    var interpolation_count: usize = 0;
+    // Find builtin_ref nodes
+    var builtin_ref_count: usize = 0;
     for (ast.nodes.items(.tag)) |tag| {
-        if (tag == .runtime_interpolation) {
-            interpolation_count += 1;
+        if (tag == .builtin_ref) {
+            builtin_ref_count += 1;
         }
     }
-    // Should find 2 runtime interpolation strings
-    try testing.expectEqual(@as(usize, 2), interpolation_count);
+    // Should find 2 builtin references
+    try testing.expectEqual(@as(usize, 2), builtin_ref_count);
 }
 
 test "Parser: regular string vs interpolation" {

@@ -20,7 +20,7 @@
   func=staticCamera // This must be a function exported by the module
   returns="mat4x4"
   // The function will be called whenever "mvpMatrix" is referenced
-  args=[ "$canvas.width", "$canvas.height" ]
+  args=[canvas.width canvas.height]
 }
 
 #queue writeCameraUniform {

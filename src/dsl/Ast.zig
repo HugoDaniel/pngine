@@ -156,7 +156,7 @@ pub const Node = struct {
         // Values
         /// "string literal"
         string_value,
-        /// "$canvas.width" - runtime interpolation string
+        /// Legacy runtime interpolation string (e.g., "$canvas.width")
         /// The string contains $... patterns that resolve at runtime
         runtime_interpolation,
         /// 123, 0.5, -1, 0xFF
