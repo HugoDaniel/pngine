@@ -209,8 +209,8 @@ pub fn getStringContent(e: *Emitter, value_node: Node.Index) []const u8 {
     std.debug.assert(e.ast.source.len > 0);
 
     const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
-    // Handle both regular strings and runtime interpolations (strings with $)
-    if (value_tag != .string_value and value_tag != .runtime_interpolation) return "";
+    // Only handle regular strings (runtime_interpolation is deprecated and caught by Analyzer)
+    if (value_tag != .string_value) return "";
 
     const value_token = e.ast.nodes.items(.main_token)[value_node.toInt()];
     const raw = getTokenSlice(e, value_token);

@@ -832,10 +832,7 @@ pub fn textureUsesCanvasSize(e: *Emitter, node: Node.Index) bool {
             }
         }
 
-        // Runtime interpolation strings (legacy syntax support)
-        if (elem_tag == .runtime_interpolation) {
-            return true;
-        }
+        // Note: runtime_interpolation is deprecated and caught by Analyzer
     }
 
     return false;

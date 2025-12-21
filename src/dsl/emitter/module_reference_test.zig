@@ -1,20 +1,17 @@
 //! Module Reference Resolution Tests
 //!
 //! Comprehensive tests for shader module reference resolution, specifically testing:
-//! 1. `getWgslReference()` handling of `runtime_interpolation` tags (strings with `$`)
-//! 2. `parseStageDescriptor()` handling of bare identifier module references
+//! 1. Bare identifier module references (e.g., module=shaderName)
+//! 2. WGSL reference patterns (e.g., code=wgslName)
 //!
 //! ## Bug Fixes Tested
-//! - `runtime_interpolation`: Legacy strings like `"$wgsl.name"` are parsed as runtime_interpolation,
-//!   not string_value. Code now handles both tags.
 //! - Bare identifiers: Pipeline `module=sceneE` was not finding shader IDs because
 //!   only reference syntax was handled, not bare identifiers.
 //!
 //! ## Test Categories
 //! - Unit tests: basic reference patterns
-//! - Edge cases: unusual `$` patterns, mixed syntax
+//! - Edge cases: unusual naming patterns
 //! - Property tests: all module references resolve correctly
-//! - Fuzz tests: random valid/invalid patterns
 //! - Integration tests: end-to-end with mock GPU
 
 const std = @import("std");
@@ -188,7 +185,7 @@ test "ModuleRef: bare identifier module reference in pipeline" {
 }
 
 // ============================================================================
-// Edge Cases for runtime_interpolation
+// Edge Cases for Naming Patterns
 // ============================================================================
 
 test "ModuleRef: wgsl name with underscores" {
@@ -216,8 +213,8 @@ test "ModuleRef: wgsl name with underscores" {
     try testing.expect(shader_count >= 1);
 }
 
-test "ModuleRef: inline WGSL code with $ literal (not reference)" {
-    // Inline code that happens to contain $ should not be treated as reference
+test "ModuleRef: inline WGSL code is treated as literal" {
+    // Inline code should be treated as a literal string, not a reference
     const source: [:0]const u8 =
         \\#shaderModule mod { code="fn check() -> f32 { return 3.14; }" }
         \\#renderPipeline pipe {

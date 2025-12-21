@@ -1619,12 +1619,11 @@ test "Emitter: multiple vertex buffers with bare identifiers" {
     try testing.expect(slot_2_set);
 }
 
-test "Emitter: textureUsesCanvasSize detects runtime_interpolation nodes" {
-    // Regression test: strings containing "$" are parsed as .runtime_interpolation nodes,
-    // not .string_value nodes. The textureUsesCanvasSize function must check for both.
-    // Bug: originally only checked .string_value, causing canvas.width to be missed.
+test "Emitter: textureUsesCanvasSize detects builtin_ref nodes" {
+    // Test that size=[canvas.width canvas.height] is properly detected as canvas-dependent.
+    // Uses builtin_ref nodes (bare identifiers like canvas.width).
 
-    // Test 1: Texture with runtime interpolation should use canvas-size encoding (2 fields)
+    // Test 1: Texture with canvas size should use canvas-size encoding (2 fields)
     const canvas_size_source: [:0]const u8 =
         \\#texture canvasTexture {
         \\  size=[canvas.width canvas.height]

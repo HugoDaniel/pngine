@@ -85,7 +85,7 @@ pub const Analyzer = struct {
         message: []const u8,
 
         pub const Kind = enum {
-            /// Reference to undefined symbol ($namespace.missing).
+            /// Reference to undefined symbol.
             undefined_reference,
             /// Symbol defined more than once in same namespace.
             duplicate_definition,
@@ -97,6 +97,9 @@ pub const Analyzer = struct {
             missing_required_property,
             /// Property value has wrong type.
             type_mismatch,
+            /// Deprecated $ syntax in string (e.g., "$canvas.width").
+            /// Use bare identifiers instead (canvas.width).
+            deprecated_dollar_syntax,
         };
     };
 
@@ -467,6 +470,9 @@ pub const Analyzer = struct {
 
         // Pass 7: Resolve uniform access nodes (code.inputs → UniformInfo)
         try self.resolveUniformAccess();
+
+        // Pass 8: Validate no deprecated $ syntax in strings
+        try self.validateNoDeprecatedDollarSyntax();
 
         // Post-condition
         std.debug.assert(self.symbols.wgsl.count() + self.symbols.buffer.count() +
@@ -1062,8 +1068,9 @@ pub const Analyzer = struct {
                             const name_token = ref_data.node_and_node[1];
                             const dep_name = self.getTokenSlice(name_token);
                             try deps.append(self.gpa, dep_name);
-                        } else if (elem_tag == .string_value or elem_tag == .runtime_interpolation) {
+                        } else if (elem_tag == .string_value) {
                             // String-style references like imports=["name"]
+                            // Note: runtime_interpolation is deprecated and caught by Pass 8
                             const elem_token = self.ast.nodes.items(.main_token)[elem_node.toInt()];
                             const raw_str = self.getTokenSlice(elem_token);
                             // Strip quotes if present
@@ -1592,6 +1599,45 @@ pub const Analyzer = struct {
         }
 
         return result;
+    }
+
+    // ========================================================================
+    // Pass 8: Validate No Deprecated $ Syntax
+    // ========================================================================
+
+    /// Validate that no runtime_interpolation nodes exist in the AST.
+    /// These represent deprecated "$..." string patterns that should now use
+    /// bare identifiers (e.g., canvas.width instead of "$canvas.width").
+    fn validateNoDeprecatedDollarSyntax(self: *Self) Error!void {
+        const tags = self.ast.nodes.items(.tag);
+        const main_tokens = self.ast.nodes.items(.main_token);
+
+        // Scan all nodes for runtime_interpolation
+        for (tags, 0..) |tag, i| {
+            if (tag == .runtime_interpolation) {
+                const node_idx: Node.Index = @enumFromInt(i);
+                const token = main_tokens[i];
+                const content = self.getTokenSlice(token);
+
+                // Build helpful error message with suggestion
+                var suggestion: []const u8 = "use bare identifiers instead";
+                if (std.mem.indexOf(u8, content, "$canvas.")) |_| {
+                    suggestion = "use 'canvas.width' or 'canvas.height' without quotes";
+                } else if (std.mem.indexOf(u8, content, "$uniforms.")) |_| {
+                    suggestion = "use 'shaderModule.varName' without quotes (e.g., code.inputs)";
+                } else if (std.mem.indexOf(u8, content, "$data.")) |_| {
+                    suggestion = "use bare identifier 'dataName' without quotes";
+                } else if (std.mem.indexOf(u8, content, "$frame.")) |_| {
+                    suggestion = "use bare identifier 'frameName' without quotes";
+                }
+
+                try self.errors.append(self.gpa, .{
+                    .kind = .deprecated_dollar_syntax,
+                    .node = node_idx,
+                    .message = suggestion,
+                });
+            }
+        }
     }
 
     // ========================================================================
