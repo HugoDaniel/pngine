@@ -94,7 +94,7 @@
 
 #wgsl sceneQStarsShader {
   value="./wgsl/sceneQStars.wgsl"
-  imports=[constants, transform2D, primitives",  beats, tangram]
+  imports=[constants, transform2D, primitives, beats, tangram]
 }
 
 #shaderModule starsParticlesModule {

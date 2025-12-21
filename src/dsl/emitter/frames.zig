@@ -147,10 +147,22 @@ fn emitWriteBufferData(e: *Emitter, buffer_id: u16, offset: u32, data_node: Node
         // Uniform access: data=code.inputs → write_time_uniform
         try emitUniformAccess(e, buffer_id, offset, data_node);
     } else if (data_tag == .identifier_value) {
-        // Direct identifier reference: data=simParamsData
+        // Direct identifier reference: data=simParamsData or data=pngineInputs
         const name_token = e.ast.nodes.items(.main_token)[data_node.toInt()];
         const data_name = utils.getTokenSlice(e, name_token);
-        if (e.data_ids.get(data_name)) |data_entry_id| {
+
+        // Check for built-in data sources
+        if (std.mem.eql(u8, data_name, "pngineInputs")) {
+            // Emit write_time_uniform for runtime-provided uniform data.
+            // Currently 16 bytes: time(f32), width(f32), height(f32), aspect(f32).
+            // See PLAN_PNGINE_INPUTS.md for full 112-byte struct (future).
+            try e.builder.getEmitter().writeTimeUniform(e.gpa, buffer_id, offset, 16);
+        } else if (std.mem.eql(u8, data_name, "sceneTimeInputs")) {
+            // Emit write_time_uniform for scene-specific timing data.
+            // 12 bytes: sceneTime(f32), sceneDuration(f32), normalizedTime(f32).
+            // Used by animation system for scene-relative timing.
+            try e.builder.getEmitter().writeTimeUniform(e.gpa, buffer_id, offset, 12);
+        } else if (e.data_ids.get(data_name)) |data_entry_id| {
             try e.builder.getEmitter().writeBuffer(e.gpa, buffer_id, offset, data_entry_id);
         }
     }

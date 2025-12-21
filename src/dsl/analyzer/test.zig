@@ -89,7 +89,7 @@ test "Analyzer: duplicate definition" {
     try testing.expectEqual(Analyzer.AnalysisError.Kind.duplicate_definition, result.errors[0].kind);
 }
 
-test "Analyzer: same name different namespace is error" {
+test "Analyzer: same name different namespace is allowed" {
     const source: [:0]const u8 =
         \\#wgsl main { value="" }
         \\#buffer main { size=100 usage=[UNIFORM] }
@@ -99,10 +99,8 @@ test "Analyzer: same name different namespace is error" {
     var result = try parseAndAnalyze(source);
     defer result.deinit(testing.allocator);
 
-    // Same name in different namespaces is now an error (global uniqueness required)
-    try testing.expectEqual(@as(usize, 2), result.errors.len);
-    try testing.expectEqual(Analyzer.AnalysisError.Kind.duplicate_definition, result.errors[0].kind);
-    try testing.expectEqual(Analyzer.AnalysisError.Kind.duplicate_definition, result.errors[1].kind);
+    // Same name in different namespaces is allowed (each has its own namespace)
+    try testing.expectEqual(@as(usize, 0), result.errors.len);
 }
 
 // ----------------------------------------------------------------------------

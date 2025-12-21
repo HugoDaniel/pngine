@@ -19,18 +19,6 @@
 // - writePngineInputs (queue)
 #import "./core.wgsl.pngine"
 
-#wgsl constants { value="./wgsl/inercia_constants.wgsl" }
-#wgsl transform2D { value="./wgsl/transform2D.wgsl" }
-#wgsl primitives {
-  value="./wgsl/primitives.wgsl"
-  imports=[transform2D]
-}
-#wgsl tangram {
-  value="./wgsl/tangram.wgsl"
-  imports=[constants, transform2D, primitives]
-}
-#wgsl beats { value="./wgsl/beats.wgsl" }
-
 // Import all scene definitions - each defines its own #frame
 // Note: sceneW excluded (requires video texture)
 #import "./sceneQ.wgsl.pngine"

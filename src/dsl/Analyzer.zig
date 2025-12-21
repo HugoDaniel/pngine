@@ -543,31 +543,24 @@ pub const Analyzer = struct {
         const name_token = main_token + 1;
         const name = self.getTokenSlice(name_token);
 
-        // Check for global uniqueness - IDs must be unique across ALL namespaces
-        if (self.symbols.all_names.get(name)) |existing| {
-            // Format error message with existing namespace info
-            var msg_buf: [128]u8 = undefined;
-            const msg = std.fmt.bufPrint(&msg_buf, "'{s}' already defined as #{s}", .{
-                name,
-                @tagName(existing.namespace),
-            }) catch "duplicate definition";
-
+        // Check for duplicates within the same namespace
+        const table = self.symbols.getNamespace(namespace);
+        if (table.get(name)) |_| {
             try self.errors.append(self.gpa, .{
                 .kind = .duplicate_definition,
                 .node = node_idx,
-                .message = msg,
+                .message = "identifier already defined",
             });
             return;
         }
 
-        // Register in global map
+        // Register in global map (for dependency tracking)
         try self.symbols.all_names.put(self.gpa, name, .{
             .namespace = namespace,
             .node = node_idx.toInt(),
         });
 
         // Register in namespace-specific table
-        const table = self.symbols.getNamespace(namespace);
         try table.put(self.gpa, name, .{
             .node = node_idx,
         });
@@ -903,6 +896,9 @@ pub const Analyzer = struct {
             .{ "bgra8unorm", {} },
             .{ "depth24plus", {} },
             .{ "depth32float", {} },
+            // Built-in data sources
+            .{ "pngineInputs", {} },
+            .{ "sceneTimeInputs", {} },
         });
         return specials.get(identifier) != null;
     }

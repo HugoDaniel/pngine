@@ -217,10 +217,61 @@ examples/                 # Example .pngine files
 }
 
 #frame <name> {
-  perform=[$renderPass.pass1 $computePass.pass2]
+  perform=[renderPass computePass queue]
+}
+
+#queue <name> {
+  writeBuffer={
+    buffer=<buffer_name>
+    bufferOffset=<offset>
+    data=<data_source>           // Can be: data block, pngineInputs, sceneTimeInputs
+  }
 }
 
 #define <NAME>=<value>
+```
+
+### Built-in Data Sources
+
+Runtime-provided uniform data that can be used in `#queue` writeBuffer operations:
+
+| Identifier | Size | Description |
+|------------|------|-------------|
+| `pngineInputs` | 16 bytes | time(f32), width(f32), height(f32), aspect(f32) |
+| `sceneTimeInputs` | 12 bytes | sceneTime(f32), sceneDuration(f32), normalizedTime(f32) |
+
+**Example: Writing runtime inputs to a uniform buffer**
+
+```
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeInputs {
+  writeBuffer={
+    buffer=uniforms
+    bufferOffset=0
+    data=pngineInputs    // Built-in: runtime provides time/canvas data
+  }
+}
+
+#frame main {
+  perform=[writeInputs myRenderPass]  // Must include queue explicitly
+}
+```
+
+**In WGSL (shader developer chooses binding):**
+
+```wgsl
+struct PngineInputs {
+    time: f32,           // elapsed seconds since start
+    canvasWidth: f32,    // canvas width in pixels
+    canvasHeight: f32,   // canvas height in pixels
+    aspect: f32,         // width / height
+}
+
+@group(0) @binding(0) var<uniform> pngine: PngineInputs;
 ```
 
 ### Ping-Pong Buffer Pattern

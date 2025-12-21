@@ -24,9 +24,22 @@
   writeBuffer={
     buffer=uniformPngineInputsBuffer
     bufferOffset=0
-    data=_builtin.PngineInputs.pngine
+    data=pngineInputs
   }
 }
 
 #import "./post_processing/common.wgsl.pngine"
+
+// Shared WGSL blocks - imported by all scenes
+#wgsl constants { value="./wgsl/inercia_constants.wgsl" }
+#wgsl transform2D { value="./wgsl/transform2D.wgsl" }
+#wgsl primitives {
+  value="./wgsl/primitives.wgsl"
+  imports=[transform2D]
+}
+#wgsl tangram {
+  value="./wgsl/tangram.wgsl"
+  imports=[constants, transform2D, primitives]
+}
+#wgsl beats { value="./wgsl/beats.wgsl" }
 

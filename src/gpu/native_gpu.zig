@@ -574,6 +574,17 @@ pub const NativeGPU = struct {
         _ = array_id;
         assert(self.initialized);
     }
+
+    /// Write time/canvas uniform data to GPU buffer.
+    /// Runtime provides f32 values: time, canvas_width, canvas_height[, aspect_ratio].
+    pub fn writeTimeUniform(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
+        _ = allocator;
+        _ = buffer_id;
+        _ = buffer_offset;
+        _ = size;
+        assert(self.initialized);
+        // TODO(NativeGPU) Write actual time uniform to buffer
+    }
 };
 
 // ============================================================================

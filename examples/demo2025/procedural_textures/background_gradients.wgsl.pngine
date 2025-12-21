@@ -7,7 +7,7 @@
   writeBuffer={
     buffer=uniformSceneTimeBuffer
     bufferOffset=0
-    data=_builtin.SceneTimeInputs.inputs
+    data=sceneTimeInputs
   }
 }
 
