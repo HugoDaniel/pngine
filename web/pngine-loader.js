@@ -327,15 +327,18 @@ export class PNGine {
         // Reset uniform buffer tracking
         this.uniformBufferId = null;
 
-        // Transfer the bytecode buffer for efficiency
+        // Copy bytecode before transfer (original may be reused)
+        const copy = new Uint8Array(bytecode);
+
+        // Transfer the copy's buffer for efficiency
         const result = await this.rpc.call(
             MessageType.LOAD_MODULE,
-            { bytecode },
-            [bytecode.buffer]
+            { bytecode: copy },
+            [copy.buffer]
         );
 
-        // Auto-detect uniform buffer for animation
-        await this._detectUniformBuffer();
+        // Note: uniform buffer detection happens after first executeAll()
+        // since buffers aren't created until bytecode executes
 
         return result;
     }
@@ -408,6 +411,11 @@ export class PNGine {
      */
     async executeAll() {
         await this.rpc.call(MessageType.EXECUTE_ALL);
+
+        // Detect uniform buffer after first execution (buffers created during execute)
+        if (this.uniformBufferId == null) {
+            await this._detectUniformBuffer();
+        }
     }
 
     /**

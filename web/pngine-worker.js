@@ -433,7 +433,7 @@ function handleRenderFrame(payload) {
     gpu.setTime(time, deltaTime);
 
     // If uniform buffer specified, write time uniform
-    if (uniformBufferId !== undefined && uniformBufferSize > 0) {
+    if (uniformBufferId != null && uniformBufferSize > 0) {
         const width = canvas.width;
         const height = canvas.height;
 
