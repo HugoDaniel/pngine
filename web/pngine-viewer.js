@@ -2,7 +2,7 @@
  * PNGine Viewer API
  *
  * High-level animation API for playing PNGine demos with scene-based rendering.
- * Matches the pattern used in the inercia2025 demo.
+ * All operations are async as GPU work happens in a WebWorker.
  *
  * @example
  * import { viewer } from './pngine-viewer.js';
@@ -20,7 +20,7 @@
  * console.log(anim.metadata);  // { name, duration, loop, scenes }
  */
 
-import { initPNGine, extractAll, extractBytecode, extractPngm } from './pngine-loader.js';
+import { initPNGine, extractAll } from './pngine-loader.js';
 
 /**
  * Create a PNGine viewer from a PNG with embedded bytecode and metadata.
@@ -56,21 +56,21 @@ export async function viewer(options) {
         document.body.appendChild(targetCanvas);
     }
 
-    // Initialize PNGine
+    // Initialize PNGine (creates Worker)
     const pngine = await initPNGine(targetCanvas, wasmUrl);
 
-    // Load bytecode
-    pngine.loadModule(bytecode);
+    // Load bytecode (async)
+    await pngine.loadModule(bytecode);
 
-    // Do initial executeAll to set up resources, then wait for bitmaps
-    pngine.executeAll();
-    await pngine.waitForBitmaps();
+    // Do initial executeAll to set up resources
+    await pngine.executeAll();
 
     return new PNGineViewer(pngine, metadata, targetCanvas);
 }
 
 /**
  * PNGine Viewer - high-level animation player.
+ * All rendering operations are async as GPU work happens in a WebWorker.
  */
 class PNGineViewer {
     /**
@@ -141,22 +141,16 @@ class PNGineViewer {
      * @param {string} sceneName - Frame name to render (e.g., 'sceneQ')
      */
     async draw(localTime, sceneName) {
-        // Update time uniforms
-        this.pngine.gpu.setTime(localTime);
-
-        // Find and write to uniform buffer
-        const uniformInfo = this.pngine.findUniformBuffer();
-        if (uniformInfo !== null) {
-            this.pngine.writeTimeUniform(uniformInfo.id, localTime, uniformInfo.size);
-        }
+        // Render frame at given time (Worker handles uniform buffer updates)
+        await this.pngine.renderFrame(localTime);
 
         // Execute the specific frame
         try {
-            this.pngine.executeFrameByName(sceneName);
+            await this.pngine.executeFrameByName(sceneName);
         } catch (e) {
             console.warn(`[Viewer] Failed to execute frame '${sceneName}':`, e.message);
             // Fallback to executeAll if frame not found
-            this.pngine.executeAll();
+            await this.pngine.executeAll();
         }
 
         this._lastScene = sceneName;
@@ -209,17 +203,18 @@ class PNGineViewer {
 
     /**
      * Get frame count in loaded module.
-     * @returns {number}
+     * Note: This is async in the Worker-based API.
+     * @returns {Promise<number>}
      */
-    get frameCount() {
+    async getFrameCount() {
         return this.pngine.getFrameCount();
     }
 
     /**
-     * Clean up resources.
+     * Clean up resources and terminate Worker.
      */
     destroy() {
-        this.pngine.freeModule();
+        this.pngine.terminate();
     }
 }
 

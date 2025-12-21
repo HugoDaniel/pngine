@@ -419,7 +419,7 @@
 <body>
     <div id="error-banner"></div>
     <header>
-        <h1>PNGine WebGPU Demo</h1>
+        <h1>PNGine WebGPU Demo (Worker Mode)</h1>
     </header>
     <main>
         <div class="editor-panel">
@@ -520,11 +520,11 @@
                     </div>
                     <div class="scene-selector">
                         <label for="scene-select">Scene:</label>
-                        <button id="prev-scene-btn" class="nav-btn" disabled title="Previous scene">◀</button>
+                        <button id="prev-scene-btn" class="nav-btn" disabled title="Previous scene">&#9664;</button>
                         <select id="scene-select" disabled>
                             <option value="__all__">All (Animation)</option>
                         </select>
-                        <button id="next-scene-btn" class="nav-btn" disabled title="Next scene">▶</button>
+                        <button id="next-scene-btn" class="nav-btn" disabled title="Next scene">&#9654;</button>
                         <span id="scene-info" class="scene-info"></span>
                     </div>
                     <div class="time-scrubber">
@@ -537,7 +537,7 @@
         <div class="canvas-panel">
             <label>Output (512x512)</label>
             <canvas id="canvas" width="512" height="512"></canvas>
-            <div id="status" class="status">Initializing WebGPU...</div>
+            <div id="status" class="status">Initializing WebGPU Worker...</div>
         </div>
     </main>
 
@@ -592,11 +592,11 @@
         let loadedMetadata = null;  // Animation metadata from pNGm chunk
         let detectedFrames = [];    // Frame names detected from bytecode
 
-        // Animation state
+        // Animation state (now managed by PNGine)
         let isPlaying = false;
-        let animationId = null;
-        let startTime = null;
-        let selectedScene = '__all__';  // Current selected scene
+        let animationStartTime = 0;
+        let currentTabType = 'source';
+        let selectedScene = '__all__';
 
         // ====================================================================
         // Scene detection and selection
@@ -604,47 +604,39 @@
 
         /**
          * Parse frame names from PNGB bytecode string table.
-         * Frame definitions: define_frame opcode followed by frame_id and name_id varints.
          */
         function parseFrameNames(bytecode) {
             const frames = [];
 
-            // Quick check for PNGB magic
             if (bytecode.length < 16) return frames;
             const magic = String.fromCharCode(bytecode[0], bytecode[1], bytecode[2], bytecode[3]);
             if (magic !== 'PNGB') return frames;
 
-            // Read header
             const view = new DataView(bytecode.buffer, bytecode.byteOffset, bytecode.byteLength);
             const stringTableOffset = view.getUint32(8, true);
             const dataSectionOffset = view.getUint32(12, true);
 
             // Parse string table
-            // Format: count (u16) + offsets[count] (u16 each) + lengths[count] (u16 each) + data
             const strings = [];
             let pos = stringTableOffset;
             if (pos + 2 <= bytecode.length) {
                 const count = view.getUint16(pos, true);
                 pos += 2;
 
-                // Read offsets array
                 const offsets = [];
                 for (let i = 0; i < count && pos + 2 <= bytecode.length; i++) {
                     offsets.push(view.getUint16(pos, true));
                     pos += 2;
                 }
 
-                // Read lengths array
                 const lengths = [];
                 for (let i = 0; i < count && pos + 2 <= bytecode.length; i++) {
                     lengths.push(view.getUint16(pos, true));
                     pos += 2;
                 }
 
-                // Data starts here
                 const dataStart = pos;
 
-                // Extract each string using offset and length
                 for (let i = 0; i < count; i++) {
                     const strStart = dataStart + offsets[i];
                     const strLen = lengths[i];
@@ -658,29 +650,20 @@
             }
 
             // Scan bytecode for define_frame opcodes (0x30)
-            // See opcodes.zig: define_frame = 0x30 (Frame Control category 0x30-0x3F)
             const DEFINE_FRAME = 0x30;
-            const END_FRAME = 0x31;
-            let pc = 16; // Skip header
+            let pc = 16;
 
-            // PNGine varint format (NOT standard LEB128):
-            // - 0-127: 0xxxxxxx (1 byte)
-            // - 128-16383: 10xxxxxx xxxxxxxx (2 bytes, big-endian)
-            // - 16384+: 11xxxxxx xxxxxxxx xxxxxxxx xxxxxxxx (4 bytes, big-endian)
             function readVarint() {
                 if (pc >= stringTableOffset) return 0;
                 const first = bytecode[pc++];
                 if ((first & 0x80) === 0) {
-                    // 1 byte: 0xxxxxxx
                     return first;
                 } else if ((first & 0xC0) === 0x80) {
-                    // 2 bytes: 10xxxxxx xxxxxxxx (big-endian)
                     if (pc >= stringTableOffset) return 0;
                     const high = first & 0x3F;
                     const low = bytecode[pc++];
                     return (high << 8) | low;
                 } else {
-                    // 4 bytes: 11xxxxxx xxxxxxxx xxxxxxxx xxxxxxxx (big-endian)
                     if (pc + 2 >= stringTableOffset) return 0;
                     const b0 = first & 0x3F;
                     const b1 = bytecode[pc++];
@@ -690,38 +673,29 @@
                 }
             }
 
-            // Valid frame name pattern: starts with letter, contains only alphanumeric/underscore
-            // This filters out false positives from byte scanning
             const validFrameName = /^[a-zA-Z][a-zA-Z0-9_]*$/;
-            const MAX_FRAMES = 50; // Hard limit to prevent runaway
+            const MAX_FRAMES = 50;
 
-            // Simple scan: look for define_frame opcode
             while (pc < stringTableOffset - 4 && frames.length < MAX_FRAMES) {
                 const op = bytecode[pc];
                 if (op === DEFINE_FRAME) {
-                    pc++; // consume opcode
+                    pc++;
                     const frameId = readVarint();
                     const nameId = readVarint();
 
-                    // Strict validation:
-                    // 1. nameId in range
-                    // 2. name is non-empty
-                    // 3. name looks like a valid identifier
-                    // 4. frameId is reasonable (< 1000)
                     if (nameId < strings.length &&
                         frameId < 1000 &&
                         strings[nameId] &&
                         strings[nameId].length > 0 &&
                         strings[nameId].length < 100 &&
                         validFrameName.test(strings[nameId])) {
-                        // Check we don't already have this frame
                         const existing = frames.find(f => f.name === strings[nameId]);
                         if (!existing) {
                             frames.push({ id: frameId, name: strings[nameId] });
                         }
                     }
                 } else {
-                    pc++; // skip non-matching byte
+                    pc++;
                 }
             }
 
@@ -736,7 +710,6 @@
 
             const hasMetadataScenes = metadata?.animation?.scenes?.length > 0;
 
-            // Add "All" option
             const allOpt = document.createElement('option');
             allOpt.value = '__all__';
             if (metadata?.animation) {
@@ -748,27 +721,17 @@
             }
             sceneSelect.appendChild(allOpt);
 
-            // If we have pNGm metadata with scenes, use ONLY that (authoritative source)
             if (hasMetadataScenes) {
                 for (const scene of metadata.animation.scenes) {
-                    // Validate scene data
-                    if (!scene.frame || !scene.id) {
-                        console.warn('[updateSceneSelector] Skipping invalid scene:', scene);
-                        continue;
-                    }
+                    if (!scene.frame || !scene.id) continue;
                     const opt = document.createElement('option');
                     opt.value = scene.frame;
                     opt.textContent = `${scene.id} (${(scene.start || 0).toFixed(1)}s - ${(scene.end || 0).toFixed(1)}s)`;
                     sceneSelect.appendChild(opt);
                 }
             } else {
-                // No metadata - fall back to bytecode-parsed frames
                 for (const frame of frames) {
-                    // Extra validation: skip empty/invalid names
-                    if (!frame.name || frame.name.trim().length === 0) {
-                        console.warn('[updateSceneSelector] Skipping empty frame name');
-                        continue;
-                    }
+                    if (!frame.name || frame.name.trim().length === 0) continue;
                     const opt = document.createElement('option');
                     opt.value = frame.name;
                     opt.textContent = frame.name;
@@ -776,17 +739,14 @@
                 }
             }
 
-            // Enable if we have scenes or frames
             const hasOptions = hasMetadataScenes || frames.length > 0;
             sceneSelect.disabled = !hasOptions;
             selectedScene = '__all__';
             sceneSelect.value = '__all__';
 
-            // Enable/disable navigation buttons
-            prevSceneBtn.disabled = true; // At "All", can't go prev
+            prevSceneBtn.disabled = true;
             nextSceneBtn.disabled = !hasOptions || sceneSelect.options.length <= 1;
 
-            // Configure time slider
             if (metadata?.animation) {
                 const duration = metadata.animation.duration || 30;
                 timeSlider.max = duration;
@@ -795,9 +755,9 @@
                 timeLabel.textContent = '0.0s';
                 sceneInfo.textContent = `Duration: ${duration.toFixed(1)}s`;
             } else if (frames.length > 0) {
-                timeSlider.max = 30; // Default 30s max
+                timeSlider.max = 30;
                 timeSlider.value = 0;
-                timeSlider.disabled = true; // Disabled on "All" without metadata
+                timeSlider.disabled = true;
                 timeLabel.textContent = '0.0s';
                 sceneInfo.textContent = `${frames.length} frame(s)`;
             } else {
@@ -805,39 +765,6 @@
                 timeLabel.textContent = '';
                 sceneInfo.textContent = '';
             }
-
-        }
-
-        /**
-         * Get current scene info for animation playback at a given time.
-         */
-        function getSceneAt(time, metadata) {
-            if (!metadata?.animation?.scenes) return null;
-
-            const scenes = metadata.animation.scenes;
-            const duration = metadata.animation.duration || scenes[scenes.length - 1]?.end || 0;
-            const clampedTime = Math.min(time, duration - 0.001);
-
-            for (const scene of scenes) {
-                if (clampedTime >= scene.start && clampedTime < scene.end) {
-                    return {
-                        frame: scene.frame,
-                        id: scene.id,
-                        localTime: clampedTime - scene.start,
-                    };
-                }
-            }
-
-            // Fallback to last scene
-            const last = scenes[scenes.length - 1];
-            if (last) {
-                return {
-                    frame: last.frame,
-                    id: last.id,
-                    localTime: clampedTime - last.start,
-                };
-            }
-            return null;
         }
 
         // ====================================================================
@@ -848,11 +775,9 @@
             tab.addEventListener('click', () => {
                 const tabId = tab.dataset.tab;
 
-                // Update tab buttons
                 tabs.forEach(t => t.classList.remove('active'));
                 tab.classList.add('active');
 
-                // Update tab content
                 tabContents.forEach(content => {
                     content.classList.toggle('active', content.id === `${tabId}-tab`);
                 });
@@ -883,9 +808,14 @@
 
         async function init() {
             try {
-                setStatus('Loading WASM...');
+                // Check OffscreenCanvas support first
+                if (!canvas.transferControlToOffscreen) {
+                    throw new Error('OffscreenCanvas not supported - please use a modern browser (Chrome 69+, Firefox 105+, Safari 16.4+)');
+                }
+
+                setStatus('Loading WASM and initializing Worker...');
                 pngine = await initPNGine(canvas, 'pngine.wasm');
-                setStatus('Ready', 'success');
+                setStatus('Ready (Worker mode)', 'success');
                 runBtn.disabled = false;
                 playBtn.disabled = false;
             } catch (err) {
@@ -899,7 +829,7 @@
         // Source compilation and execution
         // ====================================================================
 
-        function run() {
+        async function run() {
             if (!pngine) return;
             hideError();
 
@@ -907,7 +837,7 @@
                 setStatus('Compiling...');
                 const start = performance.now();
 
-                pngine.run(source.value);
+                await pngine.run(source.value);
 
                 const elapsed = (performance.now() - start).toFixed(2);
                 setStatus(`Done in ${elapsed}ms`, 'success');
@@ -917,41 +847,41 @@
             }
         }
 
-        function clear() {
+        async function clear() {
             if (!pngine) return;
             stopAnimation();
             hideError();
-            pngine.freeModule();
+            await pngine.freeModule();
             setStatus('Cleared', '');
 
-            // Reset scene selector
             loadedMetadata = null;
             detectedFrames = [];
             updateSceneSelector([], null);
         }
 
         // ====================================================================
-        // Animation loop (Play feature)
+        // Animation loop (Play feature) - uses PNGine's built-in animation
         // ====================================================================
 
-        function startAnimation(tabType = 'source') {
+        async function startAnimation(tabType = 'source') {
             if (isPlaying) return;
 
             hideError();
+            currentTabType = tabType;
 
             // First compile/load if needed
             try {
                 if (tabType === 'source') {
                     setStatus('Compiling...');
-                    pngine.run(source.value);
+                    await pngine.run(source.value);
                 } else if (tabType === 'pngb' && loadedBytecode) {
                     setStatus('Loading PNGB...');
-                    pngine.loadModule(loadedBytecode);
-                    pngine.executeAll();
+                    await pngine.loadModule(loadedBytecode);
+                    await pngine.executeAll();
                 } else if (tabType === 'png' && loadedPngBytecode) {
                     setStatus('Loading PNG bytecode...');
-                    pngine.loadModule(loadedPngBytecode);
-                    pngine.executeAll();
+                    await pngine.loadModule(loadedPngBytecode);
+                    await pngine.executeAll();
                 } else {
                     setStatus('No bytecode loaded', 'error');
                     return;
@@ -963,9 +893,9 @@
             }
 
             isPlaying = true;
-            startTime = performance.now();
+            animationStartTime = performance.now();
 
-            // Update button states based on tab
+            // Update button states
             if (tabType === 'source') {
                 playBtn.textContent = 'Stop';
                 playBtn.classList.add('playing');
@@ -979,74 +909,34 @@
 
             setStatus('Playing...', 'success');
 
-            // Start animation loop
-            function animate(timestamp) {
-                if (!isPlaying) return;
+            // Start PNGine's built-in animation
+            pngine.startAnimation();
 
-                const time = (timestamp - startTime) / 1000.0; // seconds as f32
-                console.log('[animate] time:', time.toFixed(2));
+            // Update time display in a separate loop
+            requestAnimationFrame(updateTimeDisplay);
+        }
 
-                try {
-                    let currentFrame = selectedScene;
-                    let displayTime = time;
-                    let sceneLabel = '';
+        function updateTimeDisplay() {
+            if (!isPlaying) return;
 
-                    // Determine which frame to execute based on selection
-                    if (tabType === 'png' && selectedScene === '__all__' && loadedMetadata?.animation) {
-                        // Use animation timeline
-                        const sceneData = getSceneAt(time, loadedMetadata);
-                        if (sceneData) {
-                            currentFrame = sceneData.frame;
-                            displayTime = sceneData.localTime;
-                            sceneLabel = ` [${sceneData.id}]`;
-                        }
-                    }
+            const time = (performance.now() - animationStartTime) / 1000.0;
+            let display;
+            if (currentTabType === 'source') display = timeDisplay;
+            else if (currentTabType === 'pngb') display = timeDisplay2;
+            else display = timeDisplay3;
+            display.textContent = `t = ${time.toFixed(2)}s`;
 
-                    // Write time to uniform buffer
-                    const uniformInfo = pngine.findUniformBuffer();
-                    if (uniformInfo !== null) {
-                        pngine.writeTimeUniform(uniformInfo.id, displayTime, uniformInfo.size);
-                    }
-
-                    // Execute: either specific frame or all
-                    if (currentFrame && currentFrame !== '__all__') {
-                        try {
-                            pngine.executeFrameByName(currentFrame);
-                        } catch (e) {
-                            // Fallback to executeAll if frame not found
-                            pngine.executeAll();
-                        }
-                    } else {
-                        pngine.executeAll();
-                    }
-
-                    // Update time display based on tab
-                    let display;
-                    if (tabType === 'source') display = timeDisplay;
-                    else if (tabType === 'pngb') display = timeDisplay2;
-                    else display = timeDisplay3;
-                    display.textContent = `t = ${time.toFixed(2)}s${sceneLabel}`;
-
-                } catch (err) {
-                    stopAnimation();
-                    setStatus('Animation error: ' + err.message, 'error');
-                    console.error('Animation error:', err);
-                    return;
-                }
-
-                animationId = requestAnimationFrame(animate);
-            }
-
-            animationId = requestAnimationFrame(animate);
+            requestAnimationFrame(updateTimeDisplay);
         }
 
         function stopAnimation() {
             if (!isPlaying) return;
 
             isPlaying = false;
-            if (animationId) {
-                cancelAnimationFrame(animationId);
-                animationId = null;
+
+            // Stop PNGine's animation
+            if (pngine) {
+                pngine.stopAnimation();
             }
 
             // Reset all button states
@@ -1156,7 +1046,7 @@ Sections:
             }
         }
 
-        function runPngb() {
+        async function runPngb() {
             if (!pngine || !loadedBytecode) return;
             hideError();
 
@@ -1164,19 +1054,8 @@ Sections:
                 setStatus('Loading PNGB...');
                 const start = performance.now();
 
-                pngine.loadModule(loadedBytecode);
-
-                // First execution: creates resources (buffers, pipelines, etc.)
-                // This renders with uninitialized uniforms (gray/broken)
-                pngine.executeAll();
-
-                // Now buffers exist - write uniform data (time=0, canvas dimensions)
-                const uniformInfo = pngine.findUniformBuffer();
-                if (uniformInfo !== null) {
-                    pngine.writeTimeUniform(uniformInfo.id, 0, uniformInfo.size);
-                    // Second execution: render with correct uniforms
-                    pngine.executeAll();
-                }
+                await pngine.loadModule(loadedBytecode);
+                await pngine.executeAll();
 
                 const elapsed = (performance.now() - start).toFixed(2);
                 setStatus(`Executed in ${elapsed}ms`, 'success');
@@ -1205,12 +1084,10 @@ Sections:
                 const img = document.createElement('img');
                 img.src = url;
                 img.onload = () => {
-                    // Clear previous content
                     pngImageWrapper.innerHTML = '';
                     pngImageWrapper.appendChild(img);
                 };
 
-                // Check for embedded bytecode
                 const hasEmbedded = hasPngb(data);
                 let infoHtml = `<pre>File: ${file.name}
 Size: ${formatBytes(data.length)}
@@ -1222,10 +1099,8 @@ Size: ${formatBytes(data.length)}
                         const bytecode = await extractPngb(data);
                         loadedPngBytecode = bytecode;
 
-                        // Parse frame names from bytecode
                         detectedFrames = parseFrameNames(bytecode);
 
-                        // Try to extract animation metadata
                         loadedMetadata = null;
                         if (hasPngm(data)) {
                             try {
@@ -1235,11 +1110,10 @@ Size: ${formatBytes(data.length)}
                             }
                         }
 
-                        // Update scene selector
                         updateSceneSelector(detectedFrames, loadedMetadata);
 
                         infoHtml += `
-<span class="png-badge has-bytecode">✓ Has Embedded Bytecode</span>
+<span class="png-badge has-bytecode">Has Embedded Bytecode</span>
 
 pNGb Chunk:
   Version: ${info.version}
@@ -1268,7 +1142,7 @@ Animation:
                         playPngBtn.disabled = !pngine;
                     } catch (err) {
                         infoHtml += `
-<span class="png-badge no-bytecode">⚠ Extraction Error</span>
+<span class="png-badge no-bytecode">Extraction Error</span>
 
 Error: ${err.message}</pre>`;
                         loadedPngBytecode = null;
@@ -1306,7 +1180,6 @@ Use the CLI to embed bytecode:
         }
 
         async function runPngBytecode() {
-            console.log('[runPngBytecode] Called, pngine:', !!pngine, 'bytecode:', !!loadedPngBytecode);
             if (!pngine || !loadedPngBytecode) return;
             hideError();
 
@@ -1314,31 +1187,8 @@ Use the CLI to embed bytecode:
                 setStatus('Loading embedded bytecode...');
                 const start = performance.now();
 
-                console.log('[runPngBytecode] Loading module...');
-                pngine.loadModule(loadedPngBytecode);
-                console.log('[runPngBytecode] Executing all...');
-                pngine.executeAll();
-                console.log('[runPngBytecode] executeAll done');
-
-                // Wait for any async ImageBitmap decoding to complete
-                await pngine.waitForBitmaps();
-
-                // Write uniforms if available
-                const uniformInfo = pngine.findUniformBuffer();
-                if (uniformInfo !== null) {
-                    pngine.writeTimeUniform(uniformInfo.id, 0, uniformInfo.size);
-                }
-
-                // Execute based on scene selection
-                if (selectedScene && selectedScene !== '__all__') {
-                    try {
-                        pngine.executeFrameByName(selectedScene);
-                    } catch (e) {
-                        pngine.executeAll();
-                    }
-                } else {
-                    pngine.executeAll();
-                }
+                await pngine.loadModule(loadedPngBytecode);
+                await pngine.executeAll();
 
                 const elapsed = (performance.now() - start).toFixed(2);
                 const sceneLabel = selectedScene !== '__all__' ? ` (${selectedScene})` : '';
@@ -1411,16 +1261,6 @@ Use the CLI to embed bytecode:
         sceneSelect.addEventListener('change', (e) => {
             selectedScene = e.target.value;
             updateSceneNavigation();
-
-            // Reset time slider to 0 when changing scenes
-            currentSceneTime = 0;
-            timeSlider.value = 0;
-            timeLabel.textContent = '0.0s';
-
-            // Draw the selected scene at time 0
-            if (pngine && loadedPngBytecode && selectedScene !== '__all__') {
-                drawSceneAtTime(selectedScene, 0);
-            }
         });
 
         // Prev/Next scene navigation
@@ -1444,12 +1284,12 @@ Use the CLI to embed bytecode:
 
         // Time slider for scrubbing within a scene
         let currentSceneTime = 0;
-        timeSlider.addEventListener('input', (e) => {
+        timeSlider.addEventListener('input', async (e) => {
             currentSceneTime = parseFloat(e.target.value);
             timeLabel.textContent = `${currentSceneTime.toFixed(1)}s`;
 
             if (pngine && loadedPngBytecode && selectedScene && selectedScene !== '__all__') {
-                drawSceneAtTime(selectedScene, currentSceneTime);
+                await drawSceneAtTime(selectedScene, currentSceneTime);
             }
         });
 
@@ -1461,7 +1301,6 @@ Use the CLI to embed bytecode:
             prevSceneBtn.disabled = currentIdx <= 0 || sceneSelect.disabled;
             nextSceneBtn.disabled = currentIdx >= options.length - 1 || sceneSelect.disabled;
 
-            // Update scene info
             if (loadedMetadata?.animation?.scenes) {
                 const scene = loadedMetadata.animation.scenes.find(s => s.frame === selectedScene);
                 if (scene) {
@@ -1475,11 +1314,10 @@ Use the CLI to embed bytecode:
                     timeSlider.disabled = false;
                 }
             } else if (detectedFrames.length > 0) {
-                // No metadata - use a default duration for manual scrubbing
                 const frame = detectedFrames.find(f => f.name === selectedScene);
                 if (frame) {
                     sceneInfo.textContent = frame.name;
-                    timeSlider.max = 30; // Default 30s max for scenes without metadata
+                    timeSlider.max = 30;
                     timeSlider.disabled = false;
                 } else if (selectedScene === '__all__') {
                     sceneInfo.textContent = `${detectedFrames.length} frame(s)`;
@@ -1490,21 +1328,12 @@ Use the CLI to embed bytecode:
         }
 
         // Helper: draw a specific scene at a specific time
-        function drawSceneAtTime(sceneName, time) {
+        async function drawSceneAtTime(sceneName, time) {
             if (!pngine || !loadedPngBytecode) return;
 
             try {
-                // Update time uniforms
-                pngine.gpu.setTime(time);
-
-                const uniformInfo = pngine.findUniformBuffer();
-                if (uniformInfo !== null) {
-                    pngine.writeTimeUniform(uniformInfo.id, time, uniformInfo.size);
-                }
-
-                // Execute the specific frame
-                pngine.executeFrameByName(sceneName);
-
+                await pngine.renderFrame(time);
+                await pngine.executeFrameByName(sceneName);
                 timeDisplay3.textContent = `${time.toFixed(2)}s`;
             } catch (err) {
                 console.error(`Failed to draw scene '${sceneName}':`, err.message);
