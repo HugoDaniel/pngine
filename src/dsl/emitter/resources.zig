@@ -623,6 +623,28 @@ fn resolveBufferSize(e: *Emitter, size_node: Node.Index) u32 {
         }
     }
 
+    // Check for uniform_access (shader.binding) - new bare identifier syntax
+    if (size_tag == .uniform_access) {
+        const data = e.ast.nodes.items(.data)[size_node.toInt()];
+        const module_token = data.node_and_node[0];
+        const var_token = data.node_and_node[1];
+        const module_name = utils.getTokenSlice(e, module_token);
+        const var_name = utils.getTokenSlice(e, var_token);
+
+        // Construct "module.var" for lookup
+        var buf: [256]u8 = undefined;
+        const full_name = std.fmt.bufPrint(&buf, "{s}.{s}", .{ module_name, var_name }) catch {
+            std.log.warn("Could not format WGSL binding name", .{});
+            return 0;
+        };
+
+        if (e.getBindingSizeFromWgsl(full_name)) |size| {
+            return size;
+        }
+        std.log.warn("Could not resolve WGSL binding size for '{s}'", .{full_name});
+        return 0;
+    }
+
     // Check for identifier reference to #data (including WASM data and generated arrays)
     if (size_tag == .identifier_value) {
         const token = e.ast.nodes.items(.main_token)[size_node.toInt()];

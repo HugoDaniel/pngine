@@ -385,6 +385,14 @@ pub const Parser = struct {
             },
             .boolean_literal => return try self.parseSimpleValue(.boolean_value),
             .identifier => {
+                // Check for builtin ref pattern (canvas.width, time.total)
+                if (self.isBuiltinRefPattern()) {
+                    return try self.parseBuiltinRef();
+                }
+                // Check for uniform access pattern (shader.inputs)
+                if (self.isUniformAccessPattern()) {
+                    return try self.parseUniformAccess();
+                }
                 // Check if identifier is a math constant (PI, E, TAU)
                 const token_start = self.tokens.items(.start)[self.tok_i];
                 const token_end = if (self.tok_i + 1 < self.tokens.len)
