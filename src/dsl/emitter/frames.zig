@@ -130,9 +130,8 @@ fn emitDataFromSource(e: *Emitter, buffer_id: u16, offset: u32, data_from_node: 
 /// Emit write_buffer command with parsed data.
 /// Supports:
 /// - array: data=[1.0 2.0 3.0]
-/// - string: data="$data.X.buffer" or literal hex bytes
+/// - string: literal hex bytes
 /// - identifier: data=myDataName (references #data)
-/// - reference: data=$data.myDataName (references #data)
 /// - uniform_access: data=code.inputs (references shader uniform)
 fn emitWriteBufferData(e: *Emitter, buffer_id: u16, offset: u32, data_node: Node.Index) Emitter.Error!void {
     // Pre-condition
@@ -153,15 +152,6 @@ fn emitWriteBufferData(e: *Emitter, buffer_id: u16, offset: u32, data_node: Node
         const data_name = utils.getTokenSlice(e, name_token);
         if (e.data_ids.get(data_name)) |data_entry_id| {
             try e.builder.getEmitter().writeBuffer(e.gpa, buffer_id, offset, data_entry_id);
-        }
-    } else if (data_tag == .reference) {
-        // Reference syntax: data=$data.simParamsData
-        if (utils.getReference(e, data_node)) |ref| {
-            if (std.mem.eql(u8, ref.namespace, "data")) {
-                if (e.data_ids.get(ref.name)) |data_entry_id| {
-                    try e.builder.getEmitter().writeBuffer(e.gpa, buffer_id, offset, data_entry_id);
-                }
-            }
         }
     }
 }
@@ -226,38 +216,12 @@ fn emitWriteBufferArray(e: *Emitter, buffer_id: u16, offset: u32, array_node: No
     std.debug.assert(data_bytes.items.len == 0 or data_bytes.items.len % 4 == 0);
 }
 
-/// Emit write_buffer from a string value (hex bytes, $data refs, or skip for runtime refs).
+/// Emit write_buffer from a string value (literal hex bytes only).
 fn emitWriteBufferString(e: *Emitter, buffer_id: u16, offset: u32, string_node: Node.Index) Emitter.Error!void {
     // Pre-condition
     std.debug.assert(string_node.toInt() < e.ast.nodes.len);
 
     const data_str = utils.getStringContent(e, string_node);
-
-    // Check for $data.X.buffer reference pattern
-    if (data_str.len > 0 and std.mem.startsWith(u8, data_str, "$data.")) {
-        // Parse "$data.NAME.buffer" to extract NAME
-        const after_prefix = data_str[6..]; // Skip "$data."
-        if (std.mem.indexOf(u8, after_prefix, ".")) |dot_pos| {
-            const data_name = after_prefix[0..dot_pos];
-            // Look up the data entry in data_ids
-            if (e.data_ids.get(data_name)) |data_entry_id| {
-                try e.builder.getEmitter().writeBuffer(
-                    e.gpa,
-                    buffer_id,
-                    offset,
-                    data_entry_id,
-                );
-                return;
-            }
-        }
-    }
-
-    // Check for other runtime interpolation (starts with $ - legacy syntax)
-    if (data_str.len > 0 and data_str[0] == '$') {
-        // Runtime interpolation (legacy: $uniforms.x.y.data, $time, etc.)
-        // Skip emitting write_buffer - JS will handle via writeTimeUniform
-        return;
-    }
 
     // Literal string data (hex bytes)
     if (data_str.len > 0) {

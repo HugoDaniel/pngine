@@ -130,7 +130,7 @@ fn fragMain(
   writeBuffer={
     buffer=uniformInputsBuffer
     bufferOffset=0
-    data="$uniforms.cubeShaderModule.inputs.data"
+    data=cubeShaderModule.inputs
   }
 }
 

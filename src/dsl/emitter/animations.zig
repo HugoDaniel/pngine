@@ -137,7 +137,7 @@ fn parseScenes(
 
 /// Parse a single scene object.
 fn parseScene(e: *Emitter, obj_node: Node.Index) ?Emitter.AnimationMetadata.Scene {
-    // Scene object: { id="name" frame=$frame.name start=0 end=30 }
+    // Scene object: { id="name" frame=frameName start=0 end=30 }
     const id = if (utils.findPropertyValueInObject(e, obj_node, "id")) |id_node|
         utils.getStringContent(e, id_node)
     else

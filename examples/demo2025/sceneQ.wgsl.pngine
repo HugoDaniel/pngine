@@ -35,7 +35,7 @@
   writeBuffer={
     buffer=sceneQInputsBuffer
     bufferOffset=0
-    data="$uniforms.sceneQ.inputs.data"
+    data=sceneQ.inputs
   }
 }
 // Scene Q - Red Intro (0-35s)

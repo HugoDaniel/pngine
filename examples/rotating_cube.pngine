@@ -106,7 +106,7 @@
   writeBuffer={
     buffer=uniformInputsBuffer
     bufferOffset=0
-    data="$uniforms.code.inputs.data"
+    data=code.inputs
   }
 }
 

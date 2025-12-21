@@ -1185,7 +1185,7 @@ pub fn emitImageBitmaps(e: *Emitter) Emitter.Error!void {
         const image_value = utils.findPropertyValue(e, info.node, "image") orelse continue;
         const image_tag = e.ast.nodes.items(.tag)[image_value.toInt()];
 
-        // Support both bare identifiers (image=dataName) and refs (image=$data.name)
+        // Support bare identifiers (image=dataName) referencing #data
         var data_name: []const u8 = "";
         if (image_tag == .identifier_value) {
             const token = e.ast.nodes.items(.main_token)[image_value.toInt()];

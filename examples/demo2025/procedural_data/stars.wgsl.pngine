@@ -60,7 +60,7 @@
   writeBuffer={
     buffer=starsSimParamBuffer
     bufferOffset=0
-    data="$data.starsSimParamsData.buffer"
+    data=starsSimParamsData
   }
 }
 

@@ -9,7 +9,7 @@
   writeBuffer={
     buffer=uniformSceneTimeBuffer
     bufferOffset=0
-    data="$uniforms._builtin.SceneTimeInputs.inputs.data"
+    data=_builtin.SceneTimeInputs.inputs
   }
 }
 

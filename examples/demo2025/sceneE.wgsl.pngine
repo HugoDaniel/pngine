@@ -14,7 +14,7 @@
   writeBuffer={
     buffer=sceneEInputsBuffer
     bufferOffset=0
-    data="$uniforms.sceneE.inputs.data"
+    data=sceneE.inputs
   }
 }
 

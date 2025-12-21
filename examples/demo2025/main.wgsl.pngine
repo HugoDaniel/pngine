@@ -49,13 +49,13 @@
   loop=false
   endBehavior=hold
   scenes=[
-    { id="intro"   frame=$frame.sceneU start=0  end=2 }
-    { id="boxes"   frame=$frame.sceneE start=2  end=14 }
-    { id="tangram" frame=$frame.sceneR start=14 end=27 }
-    { id="zoom"    frame=$frame.sceneT start=27 end=44 }
-    { id="climax"  frame=$frame.sceneY start=44 end=56 }
-    { id="stars"   frame=$frame.sceneQ start=56 end=66 }
-    { id="outro"   frame=$frame.sceneU start=66 end=68 }
+    { id="intro"   frame=sceneU start=0  end=2 }
+    { id="boxes"   frame=sceneE start=2  end=14 }
+    { id="tangram" frame=sceneR start=14 end=27 }
+    { id="zoom"    frame=sceneT start=27 end=44 }
+    { id="climax"  frame=sceneY start=44 end=56 }
+    { id="stars"   frame=sceneQ start=56 end=66 }
+    { id="outro"   frame=sceneU start=66 end=68 }
   ]
 }
 

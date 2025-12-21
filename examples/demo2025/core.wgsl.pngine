@@ -24,7 +24,7 @@
   writeBuffer={
     buffer=uniformPngineInputsBuffer
     bufferOffset=0
-    data="$uniforms._builtin.PngineInputs.pngine.data"
+    data=_builtin.PngineInputs.pngine
   }
 }
 

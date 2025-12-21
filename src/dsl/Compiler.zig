@@ -431,7 +431,7 @@ test "E2E: parse moving_triangle.pngine" {
         \\  writeBuffer={
         \\    buffer=uniformInputsBuffer
         \\    bufferOffset=0
-        \\    data="$uniforms.code.inputs.data"
+        \\    data=code.inputs
         \\  }
         \\}
         \\
@@ -469,15 +469,15 @@ test "E2E: parse moving_triangle.pngine" {
     // Verify bare name resolution for buffer=uniformInputsBuffer
     try testing.expect(analysis.resolved_identifiers.count() > 0);
 
-    // Verify runtime interpolation for legacy syntax "$uniforms.code.inputs.data"
-    var has_interpolation = false;
+    // Verify uniform_access node for data=code.inputs
+    var has_uniform_access = false;
     for (ast.nodes.items(.tag)) |tag| {
-        if (tag == .runtime_interpolation) {
-            has_interpolation = true;
+        if (tag == .uniform_access) {
+            has_uniform_access = true;
             break;
         }
     }
-    try testing.expect(has_interpolation);
+    try testing.expect(has_uniform_access);
 }
 
 test "E2E: space-separated arrays parse correctly" {

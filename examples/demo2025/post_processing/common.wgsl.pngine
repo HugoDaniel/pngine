@@ -7,7 +7,7 @@
   writeBuffer={
     buffer=postProcessCommonInputsBuffer
     bufferOffset=0
-    data="$uniforms.postProcessCommonModule.post.data"
+    data=postProcessCommonModule.post
   }
 }
 
