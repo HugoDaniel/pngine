@@ -1051,11 +1051,25 @@ pub const Analyzer = struct {
                         const elem_node: Node.Index = @enumFromInt(elem_idx);
                         const elem_tag = self.ast.nodes.items(.tag)[elem_node.toInt()];
 
-                        if (elem_tag == .reference) {
+                        // Handle bare identifiers (new syntax)
+                        if (elem_tag == .identifier_value) {
+                            const elem_token = self.ast.nodes.items(.main_token)[elem_node.toInt()];
+                            const dep_name = self.getTokenSlice(elem_token);
+                            try deps.append(self.gpa, dep_name);
+                        } else if (elem_tag == .reference) {
+                            // Legacy reference syntax (deprecated)
                             const ref_data = self.ast.nodes.items(.data)[elem_node.toInt()];
                             const name_token = ref_data.node_and_node[1];
                             const dep_name = self.getTokenSlice(name_token);
                             try deps.append(self.gpa, dep_name);
+                        } else if (elem_tag == .string_value or elem_tag == .runtime_interpolation) {
+                            // String-style references like imports=["name"]
+                            const elem_token = self.ast.nodes.items(.main_token)[elem_node.toInt()];
+                            const raw_str = self.getTokenSlice(elem_token);
+                            // Strip quotes if present
+                            if (raw_str.len >= 2 and raw_str[0] == '"' and raw_str[raw_str.len - 1] == '"') {
+                                try deps.append(self.gpa, raw_str[1 .. raw_str.len - 1]);
+                            }
                         }
                     }
                 }
