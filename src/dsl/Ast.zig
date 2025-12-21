@@ -124,6 +124,18 @@ pub const Node = struct {
         macro_render_pass,
         /// #computePass name { ... }
         macro_compute_pass,
+        /// #renderBundle name { ... }
+        /// Pre-recorded draw commands for efficient replay.
+        /// Properties:
+        /// - colorFormats: array of texture formats
+        /// - depthStencilFormat: optional depth format
+        /// - sampleCount: MSAA sample count (default 1)
+        /// - pipeline: render pipeline reference
+        /// - bindGroups: array of bind group references
+        /// - vertexBuffers: array of buffer references
+        /// - indexBuffer: optional index buffer reference
+        /// - draw/drawIndexed: draw command
+        macro_render_bundle,
         /// #frame name { ... }
         macro_frame,
         /// #wgsl name { ... }

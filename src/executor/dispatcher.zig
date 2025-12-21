@@ -244,6 +244,13 @@ pub fn Dispatcher(comptime BackendType: type) type {
                     pc.* += opcodes.decodeVarint(bytecode[pc.*..]).len;
                     pc.* += opcodes.decodeVarint(bytecode[pc.*..]).len;
                 },
+                .execute_bundles => {
+                    const bundle_count = opcodes.decodeVarint(bytecode[pc.*..]);
+                    pc.* += bundle_count.len;
+                    for (0..bundle_count.value) |_| {
+                        pc.* += opcodes.decodeVarint(bytecode[pc.*..]).len;
+                    }
+                },
                 .begin_render_pass => {
                     pc.* += opcodes.decodeVarint(bytecode[pc.*..]).len;
                     pc.* += 1;
@@ -339,7 +346,7 @@ pub fn Dispatcher(comptime BackendType: type) type {
                         pc.* += opcodes.decodeVarint(bytecode[pc.*..]).len;
                     }
                 },
-                .create_bind_group_layout, .create_pipeline_layout, .create_texture_view, .create_query_set => {
+                .create_bind_group_layout, .create_pipeline_layout, .create_texture_view, .create_query_set, .create_render_bundle => {
                     pc.* += opcodes.decodeVarint(bytecode[pc.*..]).len;
                     pc.* += opcodes.decodeVarint(bytecode[pc.*..]).len;
                 },
@@ -557,6 +564,21 @@ pub fn Dispatcher(comptime BackendType: type) type {
                     try self.backend.dispatch(allocator, x, y, z);
                 },
 
+                .execute_bundles => {
+                    const bundle_count = try self.readVarint();
+                    // Read bundle IDs into temporary buffer
+                    var bundle_ids: [16]u16 = undefined;
+                    const count = @min(bundle_count, 16);
+                    for (0..count) |i| {
+                        bundle_ids[i] = @intCast(try self.readVarint());
+                    }
+                    // Skip any excess bundles
+                    for (count..bundle_count) |_| {
+                        _ = try self.readVarint();
+                    }
+                    try self.backend.executeBundles(allocator, bundle_ids[0..count]);
+                },
+
                 .end_pass => {
                     try self.backend.endPass(allocator);
                 },
@@ -769,6 +791,12 @@ pub fn Dispatcher(comptime BackendType: type) type {
                     try self.backend.createPipelineLayout(allocator, @intCast(layout_id), @intCast(descriptor_data_id));
                 },
 
+                .create_render_bundle => {
+                    const bundle_id = try self.readVarint();
+                    const descriptor_data_id = try self.readVarint();
+                    try self.backend.createRenderBundle(allocator, @intCast(bundle_id), @intCast(descriptor_data_id));
+                },
+
                 .create_shader_concat,
                 .set_index_buffer,
                 .write_uniform,
@@ -905,6 +933,14 @@ pub fn Dispatcher(comptime BackendType: type) type {
                     _ = try self.readVarint();
                     _ = try self.readVarint();
                     _ = try self.readVarint();
+                },
+
+                // ExecuteBundles: count + bundle_ids
+                .execute_bundles => {
+                    const bundle_count = try self.readVarint();
+                    for (0..bundle_count) |_| {
+                        _ = try self.readVarint();
+                    }
                 },
 
                 // Write time uniform: 3 varints

@@ -77,6 +77,7 @@ pub const Emitter = struct {
     pipeline_layout_ids: std.StringHashMapUnmanaged(u16),
     query_set_ids: std.StringHashMapUnmanaged(u16),
     texture_view_ids: std.StringHashMapUnmanaged(u16),
+    render_bundle_ids: std.StringHashMapUnmanaged(u16),
     animation_ids: std.StringHashMapUnmanaged(u16),
 
     /// Animation metadata extracted from #animation macro.
@@ -131,6 +132,7 @@ pub const Emitter = struct {
     next_pipeline_layout_id: u16 = 0,
     next_query_set_id: u16 = 0,
     next_texture_view_id: u16 = 0,
+    next_render_bundle_id: u16 = 0,
     next_animation_id: u16 = 0,
 
     const Self = @This();
@@ -281,6 +283,7 @@ pub const Emitter = struct {
             .pipeline_layout_ids = .{},
             .query_set_ids = .{},
             .texture_view_ids = .{},
+            .render_bundle_ids = .{},
             .animation_ids = .{},
             .wasm_data_entries = .{},
             .generated_arrays = .{},
@@ -311,6 +314,7 @@ pub const Emitter = struct {
         self.pipeline_layout_ids.deinit(self.gpa);
         self.query_set_ids.deinit(self.gpa);
         self.texture_view_ids.deinit(self.gpa);
+        self.render_bundle_ids.deinit(self.gpa);
         self.animation_ids.deinit(self.gpa);
         self.wasm_data_entries.deinit(self.gpa);
         self.generated_arrays.deinit(self.gpa);
@@ -366,6 +370,7 @@ pub const Emitter = struct {
         try resources.emitPipelineLayouts(&self);
         try pipelines.emitPipelines(&self);
         try resources.emitBindGroups(&self);
+        try resources.emitRenderBundles(&self);
 
         // Pass 2: Collect queues (no bytecode emitted, just ID tracking)
         try frames.collectQueues(&self);

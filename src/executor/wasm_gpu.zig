@@ -43,6 +43,7 @@ extern "env" fn gpuCreateTextureView(view_id: u16, texture_id: u16, desc_ptr: [*
 extern "env" fn gpuCreateQuerySet(query_set_id: u16, desc_ptr: [*]const u8, desc_len: u32) void;
 extern "env" fn gpuCreateBindGroupLayout(layout_id: u16, desc_ptr: [*]const u8, desc_len: u32) void;
 extern "env" fn gpuCreatePipelineLayout(layout_id: u16, desc_ptr: [*]const u8, desc_len: u32) void;
+extern "env" fn gpuCreateRenderBundle(bundle_id: u16, desc_ptr: [*]const u8, desc_len: u32) void;
 extern "env" fn gpuBeginRenderPass(color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16) void;
 extern "env" fn gpuBeginComputePass() void;
 extern "env" fn gpuSetPipeline(pipeline_id: u16) void;
@@ -51,6 +52,7 @@ extern "env" fn gpuSetVertexBuffer(slot: u8, buffer_id: u16) void;
 extern "env" fn gpuDraw(vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) void;
 extern "env" fn gpuDrawIndexed(index_count: u32, instance_count: u32, first_index: u32, base_vertex: u32, first_instance: u32) void;
 extern "env" fn gpuDispatch(x: u32, y: u32, z: u32) void;
+extern "env" fn gpuExecuteBundles(bundle_ids_ptr: [*]const u16, bundle_count: u16) void;
 extern "env" fn gpuEndPass() void;
 extern "env" fn gpuWriteBuffer(buffer_id: u16, offset: u32, data_ptr: [*]const u8, data_len: u32) void;
 extern "env" fn gpuSubmit() void;
@@ -315,6 +317,15 @@ pub const WasmGPU = struct {
         gpuCreatePipelineLayout(layout_id, data.ptr, @intCast(data.len));
     }
 
+    /// Create a render bundle from pre-recorded draw commands.
+    pub fn createRenderBundle(self: *Self, allocator: Allocator, bundle_id: u16, descriptor_data_id: u16) !void {
+        _ = allocator;
+        assert(self.module != null);
+
+        const data = self.getDataOrPanic(descriptor_data_id);
+        gpuCreateRenderBundle(bundle_id, data.ptr, @intCast(data.len));
+    }
+
     // ========================================================================
     // Pass Operations
     // ========================================================================
@@ -373,6 +384,13 @@ pub const WasmGPU = struct {
         _ = self;
         _ = allocator;
         gpuDispatch(x, y, z);
+    }
+
+    /// Execute pre-recorded render bundles.
+    pub fn executeBundles(self: *Self, allocator: Allocator, bundle_ids: []const u16) !void {
+        _ = self;
+        _ = allocator;
+        gpuExecuteBundles(bundle_ids.ptr, @intCast(bundle_ids.len));
     }
 
     /// End the current pass.

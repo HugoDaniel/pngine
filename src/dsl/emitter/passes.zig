@@ -267,6 +267,8 @@ fn emitPassCommands(e: *Emitter, node: Node.Index) Emitter.Error!void {
             try emitDispatchCommand(e, prop_node);
         } else if (std.mem.eql(u8, prop_name, "dispatchWorkgroups")) {
             try emitDispatchWorkgroupsCommand(e, prop_node);
+        } else if (std.mem.eql(u8, prop_name, "executeBundles")) {
+            try emitExecuteBundlesCommand(e, prop_node);
         }
     }
 }
@@ -807,4 +809,68 @@ fn emitDispatchWorkgroupsCommand(e: *Emitter, prop_node: Node.Index) Emitter.Err
         // Dispatch as single workgroup count (x = count, y = 1, z = 1)
         try e.builder.getEmitter().dispatch(e.gpa, count, 1, 1);
     }
+}
+
+/// Emit execute_bundles command to replay pre-recorded render bundles.
+/// Handles arrays of render bundle references.
+fn emitExecuteBundlesCommand(e: *Emitter, prop_node: Node.Index) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(prop_node.toInt() < e.ast.nodes.len);
+
+    const prop_data = e.ast.nodes.items(.data)[prop_node.toInt()];
+    const value_node = prop_data.node;
+    const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
+
+    var bundle_ids: [16]u16 = undefined;
+    var count: usize = 0;
+
+    if (value_tag == .array) {
+        const array_data = e.ast.nodes.items(.data)[value_node.toInt()];
+        const elements = e.ast.extraData(array_data.extra_range);
+
+        // Bounded iteration
+        const max_elements = @min(elements.len, 16);
+        for (0..max_elements) |i| {
+            const elem_idx = elements[i];
+            const elem: Node.Index = @enumFromInt(elem_idx);
+            const bundle_id = resolveRenderBundleId(e, elem);
+
+            if (bundle_id) |id| {
+                bundle_ids[count] = id;
+                count += 1;
+            }
+        }
+    } else {
+        // Single render bundle
+        const bundle_id = resolveRenderBundleId(e, value_node);
+        if (bundle_id) |id| {
+            bundle_ids[0] = id;
+            count = 1;
+        }
+    }
+
+    // Only emit if we have bundles to execute
+    if (count > 0) {
+        try e.builder.getEmitter().executeBundles(e.gpa, bundle_ids[0..count]);
+    }
+}
+
+/// Resolve a render bundle reference to its ID.
+/// Handles both bare identifiers (myBundle) and references ($renderBundle.name).
+fn resolveRenderBundleId(e: *Emitter, node: Node.Index) ?u16 {
+    // Pre-condition
+    std.debug.assert(node.toInt() < e.ast.nodes.len);
+
+    const tag = e.ast.nodes.items(.tag)[node.toInt()];
+
+    if (tag == .reference) {
+        if (utils.getReference(e, node)) |ref| {
+            return e.render_bundle_ids.get(ref.name);
+        }
+    } else if (tag == .identifier_value) {
+        const name = utils.getNodeText(e, node);
+        return e.render_bundle_ids.get(name);
+    }
+
+    return null;
 }

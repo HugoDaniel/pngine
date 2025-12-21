@@ -224,6 +224,19 @@ pub const Emitter = struct {
         try self.emitVarint(allocator, descriptor_data_id);
     }
 
+    /// Emit create_render_bundle instruction.
+    /// Creates a pre-recorded render bundle for efficient draw command replay.
+    pub fn createRenderBundle(
+        self: *Self,
+        allocator: Allocator,
+        bundle_id: u16,
+        descriptor_data_id: u16,
+    ) !void {
+        try self.emitOpcode(allocator, .create_render_bundle);
+        try self.emitVarint(allocator, bundle_id);
+        try self.emitVarint(allocator, descriptor_data_id);
+    }
+
     /// Emit create_image_bitmap instruction.
     /// Creates an ImageBitmap from blob data in data section.
     /// blob_data_id points to entry with format: [mime_len:u8][mime:bytes][data:bytes]
@@ -416,6 +429,25 @@ pub const Emitter = struct {
         try self.emitVarint(allocator, x);
         try self.emitVarint(allocator, y);
         try self.emitVarint(allocator, z);
+    }
+
+    /// Emit execute_bundles instruction.
+    /// Replays pre-recorded render bundles in the current render pass.
+    /// Params: bundle_count, bundle_id_0, bundle_id_1, ...
+    pub fn executeBundles(
+        self: *Self,
+        allocator: Allocator,
+        bundle_ids: []const u16,
+    ) !void {
+        // Pre-conditions
+        assert(bundle_ids.len > 0);
+        assert(bundle_ids.len <= 16);
+
+        try self.emitOpcode(allocator, .execute_bundles);
+        try self.emitVarint(allocator, @intCast(bundle_ids.len));
+        for (bundle_ids) |id| {
+            try self.emitVarint(allocator, id);
+        }
     }
 
     /// Emit end_pass instruction.

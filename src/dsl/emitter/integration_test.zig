@@ -811,3 +811,119 @@ test "Integration: complex arithmetic expression" {
     }
     try testing.expect(false);
 }
+
+// ============================================================================
+// Render Bundle Tests
+// ============================================================================
+
+test "Integration: render bundle creation and execution" {
+    const source: [:0]const u8 =
+        \\#wgsl shader {
+        \\  value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); }
+        \\@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }"
+        \\}
+        \\
+        \\#renderPipeline pipeline {
+        \\  vertex={ module=shader entryPoint=vs }
+        \\  fragment={
+        \\    module=shader
+        \\    entryPoint=fs
+        \\    targets=[{ format=bgra8unorm }]
+        \\  }
+        \\}
+        \\
+        \\#renderBundle bundle {
+        \\  colorFormats=[bgra8unorm]
+        \\  pipeline=pipeline
+        \\  draw=3
+        \\}
+        \\
+        \\#renderPass pass {
+        \\  executeBundles=[bundle]
+        \\}
+        \\
+        \\#frame main { perform=[pass] }
+    ;
+
+    var gpu = try compileAndExecute(source);
+    defer gpu.deinit(testing.allocator);
+
+    // Verify render bundle was created
+    var found_bundle = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_render_bundle) {
+            found_bundle = true;
+            try testing.expectEqual(@as(u16, 0), call.params.create_render_bundle.bundle_id);
+            break;
+        }
+    }
+    try testing.expect(found_bundle);
+
+    // Verify execute_bundles was called
+    var found_execute = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .execute_bundles) {
+            found_execute = true;
+            try testing.expectEqual(@as(u16, 1), call.params.execute_bundles.bundle_count);
+            break;
+        }
+    }
+    try testing.expect(found_execute);
+}
+
+test "Integration: render bundle with multiple bundles" {
+    const source: [:0]const u8 =
+        \\#wgsl shader {
+        \\  value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); }
+        \\@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }"
+        \\}
+        \\
+        \\#renderPipeline pipeline {
+        \\  vertex={ module=shader entryPoint=vs }
+        \\  fragment={
+        \\    module=shader
+        \\    entryPoint=fs
+        \\    targets=[{ format=bgra8unorm }]
+        \\  }
+        \\}
+        \\
+        \\#renderBundle bundle1 {
+        \\  colorFormats=[bgra8unorm]
+        \\  pipeline=pipeline
+        \\  draw=3
+        \\}
+        \\
+        \\#renderBundle bundle2 {
+        \\  colorFormats=[bgra8unorm]
+        \\  pipeline=pipeline
+        \\  draw=6
+        \\}
+        \\
+        \\#renderPass pass {
+        \\  executeBundles=[bundle1 bundle2]
+        \\}
+        \\
+        \\#frame main { perform=[pass] }
+    ;
+
+    var gpu = try compileAndExecute(source);
+    defer gpu.deinit(testing.allocator);
+
+    // Count render bundle creations
+    var bundle_count: usize = 0;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_render_bundle) {
+            bundle_count += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), bundle_count);
+
+    // Verify execute_bundles was called with both bundles
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .execute_bundles) {
+            try testing.expectEqual(@as(u16, 2), call.params.execute_bundles.bundle_count);
+            return;
+        }
+    }
+    try testing.expect(false); // Should have found execute_bundles
+}

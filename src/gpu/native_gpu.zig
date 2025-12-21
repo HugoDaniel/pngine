@@ -313,6 +313,26 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Create actual ImageBitmap from blob data
     }
 
+    pub fn createRenderBundle(self: *Self, allocator: Allocator, bundle_id: u16, descriptor_data_id: u16) !void {
+        _ = allocator;
+        _ = bundle_id;
+        _ = descriptor_data_id;
+
+        assert(self.initialized);
+
+        // TODO(NativeGPU) Create actual GPU render bundle
+    }
+
+    pub fn executeBundles(self: *Self, allocator: Allocator, bundle_ids: []const u16) !void {
+        _ = allocator;
+        _ = bundle_ids;
+
+        assert(self.in_render_pass);
+        assert(self.initialized);
+
+        // TODO(NativeGPU) Execute actual GPU render bundles
+    }
+
     // ========================================================================
     // Pass Operations
     // ========================================================================

@@ -60,6 +60,7 @@ pub const Token = struct {
         macro_pipeline_layout, // #pipelineLayout
         macro_render_pass, // #renderPass
         macro_compute_pass, // #computePass
+        macro_render_bundle, // #renderBundle
         macro_frame, // #frame
         macro_data, // #data
         macro_queue, // #queue
@@ -133,6 +134,7 @@ pub const macro_keywords = std.StaticStringMap(Token.Tag).initComptime(.{
     .{ "pipelineLayout", .macro_pipeline_layout },
     .{ "renderPass", .macro_render_pass },
     .{ "computePass", .macro_compute_pass },
+    .{ "renderBundle", .macro_render_bundle },
     .{ "frame", .macro_frame },
     .{ "data", .macro_data },
     .{ "queue", .macro_queue },

@@ -38,7 +38,9 @@ pub const CallType = enum {
     draw,
     draw_indexed,
     dispatch,
+    execute_bundles,
     end_pass,
+    create_render_bundle,
 
     // Queue operations
     write_buffer,
@@ -138,6 +140,13 @@ pub const Call = struct {
             x: u32,
             y: u32,
             z: u32,
+        },
+        execute_bundles: struct {
+            bundle_count: u16,
+        },
+        create_render_bundle: struct {
+            bundle_id: u16,
+            descriptor_data_id: u16,
         },
         write_buffer: struct {
             buffer_id: u16,
@@ -411,6 +420,20 @@ pub const MockGPU = struct {
         });
     }
 
+    /// Record render bundle creation.
+    pub fn createRenderBundle(self: *Self, allocator: Allocator, bundle_id: u16, descriptor_data_id: u16) !void {
+        assert(bundle_id < MAX_PIPELINES);
+        assert(self.calls.items.len < 10000);
+
+        try self.calls.append(allocator, .{
+            .call_type = .create_render_bundle,
+            .params = .{ .create_render_bundle = .{
+                .bundle_id = bundle_id,
+                .descriptor_data_id = descriptor_data_id,
+            } },
+        });
+    }
+
     pub fn createShaderModule(self: *Self, allocator: Allocator, shader_id: u16, code_data_id: u16) !void {
         assert(shader_id < MAX_SHADERS);
 
@@ -593,6 +616,18 @@ pub const MockGPU = struct {
                 .x = x,
                 .y = y,
                 .z = z,
+            } },
+        });
+    }
+
+    /// Execute pre-recorded render bundles.
+    pub fn executeBundles(self: *Self, allocator: Allocator, bundle_ids: []const u16) !void {
+        assert(self.in_render_pass);
+
+        try self.calls.append(allocator, .{
+            .call_type = .execute_bundles,
+            .params = .{ .execute_bundles = .{
+                .bundle_count = @intCast(bundle_ids.len),
             } },
         });
     }

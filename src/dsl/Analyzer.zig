@@ -127,6 +127,7 @@ pub const Analyzer = struct {
         compute_pipeline: std.StringHashMapUnmanaged(SymbolInfo),
         render_pass: std.StringHashMapUnmanaged(SymbolInfo),
         compute_pass: std.StringHashMapUnmanaged(SymbolInfo),
+        render_bundle: std.StringHashMapUnmanaged(SymbolInfo),
         frame: std.StringHashMapUnmanaged(SymbolInfo),
         shader_module: std.StringHashMapUnmanaged(SymbolInfo),
         data: std.StringHashMapUnmanaged(SymbolInfo),
@@ -152,6 +153,7 @@ pub const Analyzer = struct {
                 .compute_pipeline = .{},
                 .render_pass = .{},
                 .compute_pass = .{},
+                .render_bundle = .{},
                 .frame = .{},
                 .shader_module = .{},
                 .data = .{},
@@ -178,6 +180,7 @@ pub const Analyzer = struct {
             self.compute_pipeline.deinit(gpa);
             self.render_pass.deinit(gpa);
             self.compute_pass.deinit(gpa);
+            self.render_bundle.deinit(gpa);
             self.frame.deinit(gpa);
             self.shader_module.deinit(gpa);
             self.data.deinit(gpa);
@@ -203,6 +206,7 @@ pub const Analyzer = struct {
                 .compute_pipeline => &self.compute_pipeline,
                 .render_pass => &self.render_pass,
                 .compute_pass => &self.compute_pass,
+                .render_bundle => &self.render_bundle,
                 .frame => &self.frame,
                 .shader_module => &self.shader_module,
                 .data => &self.data,
@@ -241,6 +245,7 @@ pub const Analyzer = struct {
         compute_pipeline,
         render_pass,
         compute_pass,
+        render_bundle,
         frame,
         shader_module,
         data,
@@ -265,6 +270,7 @@ pub const Analyzer = struct {
                 .{ "computePipeline", .compute_pipeline },
                 .{ "renderPass", .render_pass },
                 .{ "computePass", .compute_pass },
+                .{ "renderBundle", .render_bundle },
                 .{ "frame", .frame },
                 .{ "shaderModule", .shader_module },
                 .{ "data", .data },
@@ -341,6 +347,7 @@ pub const Analyzer = struct {
         const sampler_ns: []const Namespace = &.{.sampler};
         // Array property namespaces
         const pass_ns: []const Namespace = &.{ .render_pass, .compute_pass, .queue };
+        const render_bundle_ns: []const Namespace = &.{.render_bundle};
         const bind_group_ns: []const Namespace = &.{.bind_group};
         const wgsl_ns: []const Namespace = &.{ .wgsl, .shader_module };
         const frame_ns: []const Namespace = &.{.frame};
@@ -363,6 +370,7 @@ pub const Analyzer = struct {
             .{ "after", PropertyContext{ .namespaces = pass_ns } },
             .{ "bindGroups", PropertyContext{ .namespaces = bind_group_ns } },
             .{ "vertexBuffers", PropertyContext{ .namespaces = buffer_ns } },
+            .{ "executeBundles", PropertyContext{ .namespaces = render_bundle_ns } },
             .{ "imports", PropertyContext{ .namespaces = wgsl_ns } },
             // Nested object properties
             .{ "frame", PropertyContext{ .namespaces = frame_ns } },
@@ -526,6 +534,7 @@ pub const Analyzer = struct {
             .macro_compute_pipeline => .compute_pipeline,
             .macro_render_pass => .render_pass,
             .macro_compute_pass => .compute_pass,
+            .macro_render_bundle => .render_bundle,
             .macro_frame => .frame,
             .macro_shader_module => .shader_module,
             .macro_data => .data,

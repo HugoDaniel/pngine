@@ -1481,6 +1481,179 @@ pub fn emitPipelineLayouts(e: *Emitter) Emitter.Error!void {
     std.debug.assert(e.next_pipeline_layout_id >= initial_id);
 }
 
+/// Emit #renderBundle declarations.
+/// Creates pre-recorded render bundles for efficient draw command replay.
+///
+/// Opcode: create_render_bundle (0x0E)
+/// Params: bundle_id, descriptor_data_id
+///
+/// Descriptor format:
+/// - colorFormats count (u8)
+/// - colorFormats array (u8 format IDs)
+/// - depthStencilFormat (u8, 0xFF = none)
+/// - sampleCount (u8)
+/// - pipeline_id (u16)
+/// - bindGroups count (u8)
+/// - bindGroups array (u16 group IDs)
+/// - vertexBuffers count (u8)
+/// - vertexBuffers array (u16 buffer IDs)
+/// - hasIndexBuffer (u8)
+/// - indexBuffer (u16, if hasIndexBuffer)
+/// - drawType (u8: 0=draw, 1=drawIndexed)
+/// - draw params (4 or 5 u32s)
+pub fn emitRenderBundles(e: *Emitter) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(e.ast.nodes.len > 0);
+
+    const initial_id = e.next_render_bundle_id;
+
+    var it = e.analysis.symbols.render_bundle.iterator();
+    for (0..MAX_RESOURCES) |_| {
+        const entry = it.next() orelse break;
+        const name = entry.key_ptr.*;
+        const info = entry.value_ptr.*;
+
+        const bundle_id = e.next_render_bundle_id;
+        e.next_render_bundle_id += 1;
+        try e.render_bundle_ids.put(e.gpa, name, bundle_id);
+
+        // Build descriptor
+        var desc_buf = std.ArrayListUnmanaged(u8){};
+        defer desc_buf.deinit(e.gpa);
+
+        // colorFormats
+        if (utils.findPropertyValue(e, info.node, "colorFormats")) |cf_node| {
+            const formats = utils.collectArrayElements(e, cf_node);
+            try desc_buf.append(e.gpa, @intCast(@min(formats.len, 255)));
+            for (formats) |fmt_idx| {
+                const fmt_node: Node.Index = @enumFromInt(fmt_idx);
+                const fmt_str = utils.getStringContent(e, fmt_node);
+                const fmt_id = @intFromEnum(DescriptorEncoder.TextureFormat.fromString(fmt_str));
+                try desc_buf.append(e.gpa, fmt_id);
+            }
+        } else {
+            try desc_buf.append(e.gpa, 0); // 0 color formats
+        }
+
+        // depthStencilFormat
+        if (utils.findPropertyValue(e, info.node, "depthStencilFormat")) |ds_node| {
+            const ds_str = utils.getStringContent(e, ds_node);
+            const ds_fmt = @intFromEnum(DescriptorEncoder.TextureFormat.fromString(ds_str));
+            try desc_buf.append(e.gpa, ds_fmt);
+        } else {
+            try desc_buf.append(e.gpa, 0xFF); // none
+        }
+
+        // sampleCount
+        const sample_count: u8 = if (utils.findPropertyValue(e, info.node, "sampleCount")) |sc|
+            @intCast(utils.resolveNumericValue(e, sc) orelse 1)
+        else
+            1;
+        try desc_buf.append(e.gpa, sample_count);
+
+        // pipeline reference
+        var pipeline_id: u16 = 0;
+        if (utils.findPropertyValue(e, info.node, "pipeline")) |p_node| {
+            if (utils.getReference(e, p_node)) |ref| {
+                pipeline_id = e.pipeline_ids.get(ref.name) orelse 0;
+            }
+        }
+        try desc_buf.append(e.gpa, @intCast(pipeline_id & 0xFF));
+        try desc_buf.append(e.gpa, @intCast(pipeline_id >> 8));
+
+        // bindGroups
+        if (utils.findPropertyValue(e, info.node, "bindGroups")) |bg_node| {
+            const groups = utils.collectArrayElements(e, bg_node);
+            try desc_buf.append(e.gpa, @intCast(@min(groups.len, 255)));
+            for (groups) |grp_idx| {
+                const grp_node: Node.Index = @enumFromInt(grp_idx);
+                if (utils.getReference(e, grp_node)) |ref| {
+                    const grp_id = e.bind_group_ids.get(ref.name) orelse 0;
+                    try desc_buf.append(e.gpa, @intCast(grp_id & 0xFF));
+                    try desc_buf.append(e.gpa, @intCast(grp_id >> 8));
+                }
+            }
+        } else {
+            try desc_buf.append(e.gpa, 0); // 0 bind groups
+        }
+
+        // vertexBuffers
+        if (utils.findPropertyValue(e, info.node, "vertexBuffers")) |vb_node| {
+            const buffers = utils.collectArrayElements(e, vb_node);
+            try desc_buf.append(e.gpa, @intCast(@min(buffers.len, 255)));
+            for (buffers) |buf_idx| {
+                const buf_node: Node.Index = @enumFromInt(buf_idx);
+                if (utils.getReference(e, buf_node)) |ref| {
+                    const buf_id = e.buffer_ids.get(ref.name) orelse 0;
+                    try desc_buf.append(e.gpa, @intCast(buf_id & 0xFF));
+                    try desc_buf.append(e.gpa, @intCast(buf_id >> 8));
+                }
+            }
+        } else {
+            try desc_buf.append(e.gpa, 0); // 0 vertex buffers
+        }
+
+        // indexBuffer
+        if (utils.findPropertyValue(e, info.node, "indexBuffer")) |ib_node| {
+            try desc_buf.append(e.gpa, 1); // has index buffer
+            if (utils.getReference(e, ib_node)) |ref| {
+                const buf_id = e.buffer_ids.get(ref.name) orelse 0;
+                try desc_buf.append(e.gpa, @intCast(buf_id & 0xFF));
+                try desc_buf.append(e.gpa, @intCast(buf_id >> 8));
+            } else {
+                try desc_buf.append(e.gpa, 0);
+                try desc_buf.append(e.gpa, 0);
+            }
+        } else {
+            try desc_buf.append(e.gpa, 0); // no index buffer
+        }
+
+        // draw command
+        if (utils.findPropertyValue(e, info.node, "drawIndexed")) |di_node| {
+            try desc_buf.append(e.gpa, 1); // drawIndexed
+            const count = utils.resolveNumericValue(e, di_node) orelse 0;
+            // index_count, instance_count=1, first_index=0, base_vertex=0, first_instance=0
+            try appendU32(&desc_buf, e.gpa, count);
+            try appendU32(&desc_buf, e.gpa, 1);
+            try appendU32(&desc_buf, e.gpa, 0);
+            try appendU32(&desc_buf, e.gpa, 0);
+            try appendU32(&desc_buf, e.gpa, 0);
+        } else if (utils.findPropertyValue(e, info.node, "draw")) |d_node| {
+            try desc_buf.append(e.gpa, 0); // draw
+            const count = utils.resolveNumericValue(e, d_node) orelse 0;
+            // vertex_count, instance_count=1, first_vertex=0, first_instance=0
+            try appendU32(&desc_buf, e.gpa, count);
+            try appendU32(&desc_buf, e.gpa, 1);
+            try appendU32(&desc_buf, e.gpa, 0);
+            try appendU32(&desc_buf, e.gpa, 0);
+        } else {
+            try desc_buf.append(e.gpa, 0); // draw with 0 vertices
+            try appendU32(&desc_buf, e.gpa, 0);
+            try appendU32(&desc_buf, e.gpa, 1);
+            try appendU32(&desc_buf, e.gpa, 0);
+            try appendU32(&desc_buf, e.gpa, 0);
+        }
+
+        const desc_data_id = try e.builder.addData(e.gpa, desc_buf.items);
+
+        try e.builder.getEmitter().createRenderBundle(
+            e.gpa,
+            bundle_id,
+            @intFromEnum(desc_data_id),
+        );
+    }
+
+    // Post-condition
+    std.debug.assert(e.next_render_bundle_id >= initial_id);
+}
+
+fn appendU32(buf: *std.ArrayListUnmanaged(u8), gpa: std.mem.Allocator, value: u32) !void {
+    try buf.append(gpa, @intCast(value & 0xFF));
+    try buf.append(gpa, @intCast((value >> 8) & 0xFF));
+    try buf.append(gpa, @intCast((value >> 16) & 0xFF));
+    try buf.append(gpa, @intCast((value >> 24) & 0xFF));
+}
+
 /// Encode a single bind group layout entry.
 fn encodeBindGroupLayoutEntry(e: *Emitter, encoder: *DescriptorEncoder, entry_node: Node.Index) !void {
     // Get binding number

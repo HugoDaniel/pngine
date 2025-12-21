@@ -19,7 +19,7 @@
  * pngine.executeAll();              // Re-renders with textures ready
  * ```
  *
- * Version: 2024-12-17-v1
+ * Version: 2024-12-21-v1
  */
 
 
@@ -46,6 +46,7 @@ export class PNGineGPU {
         this.pipelineLayouts = new Map();   // PipelineLayout ID → GPUPipelineLayout
         this.querySets = new Map();         // QuerySet ID → GPUQuerySet
         this.imageBitmaps = new Map();  // ImageBitmap ID → ImageBitmap
+        this.renderBundles = new Map();     // RenderBundle ID → GPURenderBundle
 
         // WASM module support
         this.wasmModules = new Map();      // Module ID → { instance, memory }
@@ -137,15 +138,16 @@ export class PNGineGPU {
      * @returns {{id: number, size: number}|null} Buffer info or null if not found
      */
     findUniformBuffer() {
-        // Prefer 16-byte buffer (demo2025 layout), fallback to 12-byte
-        for (const size of [16, 12]) {
-            for (const [id, meta] of this.bufferMeta) {
-                if ((meta.usage & GPUBufferUsage.UNIFORM) && meta.size === size) {
-                    return { id, size };
+        // Find any uniform buffer, prefer larger sizes for more uniform data
+        let bestMatch = null;
+        for (const [id, meta] of this.bufferMeta) {
+            if (meta.usage & GPUBufferUsage.UNIFORM) {
+                if (!bestMatch || meta.size > bestMatch.size) {
+                    bestMatch = { id, size: meta.size };
                 }
             }
         }
-        return null;
+        return bestMatch;
     }
 
     /**
@@ -521,6 +523,185 @@ export class PNGineGPU {
 
         const layout = this.device.createPipelineLayout({ bindGroupLayouts });
         this.pipelineLayouts.set(layoutId, layout);
+    }
+
+    /**
+     * Create a render bundle from pre-recorded draw commands.
+     * Skips creation if render bundle already exists (for animation loop support).
+     *
+     * Descriptor format:
+     * - colorFormats: [count:u8][format:u8]...
+     * - depthStencilFormat: u8 (0xFF = none)
+     * - sampleCount: u8
+     * - pipeline_id: u16
+     * - bindGroups: [count:u8][group_id:u16]...
+     * - vertexBuffers: [count:u8][buffer_id:u16]...
+     * - indexBuffer: [hasIndex:u8][buffer_id:u16]
+     * - drawType: u8 (0=draw, 1=drawIndexed)
+     * - drawParams: varies by type
+     *
+     * @param {number} bundleId - RenderBundle ID
+     * @param {number} descPtr - Pointer to binary descriptor
+     * @param {number} descLen - Descriptor length
+     */
+    createRenderBundle(bundleId, descPtr, descLen) {
+        // Skip if already exists (allows executeAll in animation loop)
+        if (this.renderBundles.has(bundleId)) {
+            return;
+        }
+
+        const bytes = this.readBytes(descPtr, descLen);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        let offset = 0;
+
+        // Parse colorFormats
+        const colorFormatCount = bytes[offset++];
+        const colorFormats = [];
+        for (let i = 0; i < colorFormatCount && offset < bytes.length; i++) {
+            colorFormats.push(this.decodeTextureFormat(bytes[offset++]));
+        }
+
+        // Parse depthStencilFormat (0xFF = none)
+        const depthFormatByte = bytes[offset++];
+        const depthStencilFormat = depthFormatByte === 0xFF ? undefined : this.decodeTextureFormat(depthFormatByte);
+
+        // Parse sampleCount
+        const sampleCount = bytes[offset++] || 1;
+
+        // Parse pipeline_id
+        const pipelineId = view.getUint16(offset, true);
+        offset += 2;
+
+        // Parse bindGroups
+        const bindGroupCount = bytes[offset++];
+        const bindGroupIds = [];
+        for (let i = 0; i < bindGroupCount && offset + 1 < bytes.length; i++) {
+            bindGroupIds.push(view.getUint16(offset, true));
+            offset += 2;
+        }
+
+        // Parse vertexBuffers
+        const vertexBufferCount = bytes[offset++];
+        const vertexBufferIds = [];
+        for (let i = 0; i < vertexBufferCount && offset + 1 < bytes.length; i++) {
+            vertexBufferIds.push(view.getUint16(offset, true));
+            offset += 2;
+        }
+
+        // Parse indexBuffer
+        const hasIndexBuffer = bytes[offset++] === 1;
+        let indexBufferId = 0;
+        if (hasIndexBuffer) {
+            indexBufferId = view.getUint16(offset, true);
+            offset += 2;
+        }
+
+        // Parse drawType and params
+        const drawType = bytes[offset++]; // 0=draw, 1=drawIndexed
+        let vertexCount = 3, instanceCount = 1, firstVertex = 0, firstInstance = 0;
+        let indexCount = 3, firstIndex = 0, baseVertex = 0;
+
+        if (drawType === 0) { // draw
+            vertexCount = view.getUint32(offset, true); offset += 4;
+            instanceCount = view.getUint32(offset, true); offset += 4;
+            firstVertex = view.getUint32(offset, true); offset += 4;
+            firstInstance = view.getUint32(offset, true); offset += 4;
+        } else { // drawIndexed
+            indexCount = view.getUint32(offset, true); offset += 4;
+            instanceCount = view.getUint32(offset, true); offset += 4;
+            firstIndex = view.getUint32(offset, true); offset += 4;
+            baseVertex = view.getUint32(offset, true); offset += 4;
+            firstInstance = view.getUint32(offset, true); offset += 4;
+        }
+
+        console.log(`[GPU] createRenderBundle(${bundleId}) colorFormats=[${colorFormats.join(',')}] depth=${depthStencilFormat ?? 'none'} pipeline=${pipelineId}`);
+
+        // Get pipeline
+        const pipeline = this.pipelines.get(pipelineId);
+        if (!pipeline) {
+            console.error(`[GPU] createRenderBundle: pipeline ${pipelineId} not found`);
+            return;
+        }
+
+        // Create RenderBundleEncoder with format compatibility
+        const encoderDesc = {
+            colorFormats,
+            sampleCount,
+        };
+        if (depthStencilFormat) {
+            encoderDesc.depthStencilFormat = depthStencilFormat;
+        }
+
+        const encoder = this.device.createRenderBundleEncoder(encoderDesc);
+
+        // Record commands
+        encoder.setPipeline(pipeline);
+
+        // Set bind groups
+        for (let i = 0; i < bindGroupIds.length; i++) {
+            const bindGroup = this.bindGroups.get(bindGroupIds[i]);
+            if (bindGroup) {
+                encoder.setBindGroup(i, bindGroup);
+            }
+        }
+
+        // Set vertex buffers
+        for (let i = 0; i < vertexBufferIds.length; i++) {
+            const buffer = this.buffers.get(vertexBufferIds[i]);
+            if (buffer) {
+                encoder.setVertexBuffer(i, buffer);
+            }
+        }
+
+        // Set index buffer if present
+        if (hasIndexBuffer) {
+            const indexBuffer = this.buffers.get(indexBufferId);
+            if (indexBuffer) {
+                encoder.setIndexBuffer(indexBuffer, 'uint16'); // Default to uint16
+            }
+        }
+
+        // Draw
+        if (drawType === 0) {
+            encoder.draw(vertexCount, instanceCount, firstVertex, firstInstance);
+        } else {
+            encoder.drawIndexed(indexCount, instanceCount, firstIndex, baseVertex, firstInstance);
+        }
+
+        // Finish and store the bundle
+        const bundle = encoder.finish();
+        this.renderBundles.set(bundleId, bundle);
+    }
+
+    /**
+     * Execute pre-recorded render bundles in the current render pass.
+     * @param {number} bundleIdsPtr - Pointer to array of bundle IDs (u16[])
+     * @param {number} bundleCount - Number of bundles to execute
+     */
+    executeBundles(bundleIdsPtr, bundleCount) {
+        if (!this.currentPass || this.passType !== 'render') {
+            console.error('[GPU] executeBundles: no active render pass');
+            return;
+        }
+
+        const bundleIdsBytes = this.readBytes(bundleIdsPtr, bundleCount * 2);
+        const bundleIdsView = new DataView(bundleIdsBytes.buffer, bundleIdsBytes.byteOffset, bundleIdsBytes.byteLength);
+
+        const bundles = [];
+        for (let i = 0; i < bundleCount; i++) {
+            const bundleId = bundleIdsView.getUint16(i * 2, true);
+            const bundle = this.renderBundles.get(bundleId);
+            if (bundle) {
+                bundles.push(bundle);
+            } else {
+                console.warn(`[GPU] executeBundles: bundle ${bundleId} not found`);
+            }
+        }
+
+        if (bundles.length > 0) {
+            console.log(`[GPU] executeBundles(${bundles.length} bundles)`);
+            this.currentPass.executeBundles(bundles);
+        }
     }
 
     /**
@@ -979,7 +1160,7 @@ export class PNGineGPU {
      * Write uniform data directly to a buffer (called from JS, not WASM).
      * Used by the Play feature to update uniform buffers each frame.
      * @param {number} bufferId - Buffer ID
-     * @param {Uint8Array} data - Data to write (12-16 bytes: f32 time + f32 width + f32 height [+ f32 ratio])
+     * @param {Uint8Array} data - Data to write
      */
     writeTimeToBuffer(bufferId, data) {
         const buffer = this.buffers.get(bufferId);
@@ -987,7 +1168,13 @@ export class PNGineGPU {
             console.warn(`[GPU] writeTimeToBuffer: buffer ${bufferId} not found`);
             return;
         }
-        this.device.queue.writeBuffer(buffer, 0, data);
+
+        // Get actual buffer size and only write what fits
+        const meta = this.bufferMeta.get(bufferId);
+        const actualSize = meta?.size ?? data.length;
+        const writeSize = Math.min(data.length, actualSize);
+
+        this.device.queue.writeBuffer(buffer, 0, data.subarray(0, writeSize));
     }
 
     /**
@@ -1454,6 +1641,8 @@ export class PNGineGPU {
                 gpuCreateQuerySet: (querySetId, ptr, len) => self.createQuerySet(querySetId, ptr, len),
                 gpuCreateBindGroupLayout: (layoutId, ptr, len) => self.createBindGroupLayout(layoutId, ptr, len),
                 gpuCreatePipelineLayout: (layoutId, ptr, len) => self.createPipelineLayout(layoutId, ptr, len),
+                gpuCreateRenderBundle: (bundleId, ptr, len) => self.createRenderBundle(bundleId, ptr, len),
+                gpuExecuteBundles: (bundleIdsPtr, bundleCount) => self.executeBundles(bundleIdsPtr, bundleCount),
                 gpuBeginRenderPass: (tex, load, store, depth) => self.beginRenderPass(tex, load, store, depth),
                 gpuBeginComputePass: () => self.beginComputePass(),
                 gpuSetPipeline: (id) => {
@@ -1698,18 +1887,30 @@ export class PNGineGPU {
             return;
         }
 
+        // Get actual buffer size from metadata
+        const meta = this.bufferMeta.get(bufferId);
+        const actualSize = meta?.size ?? size;
+        const availableSize = actualSize - bufferOffset;
+
         // Get current time and canvas dimensions
         const time = this.time ?? 0.0;
         const width = this.canvas?.width ?? 512;
         const height = this.canvas?.height ?? 512;
         const aspectRatio = width / height;
 
-        // Create uniform data based on size
+        // Create uniform data based on available space
         let data;
-        if (size >= 16) {
+        if (availableSize >= 16) {
             data = new Float32Array([time, width, height, aspectRatio]);
-        } else {
+        } else if (availableSize >= 12) {
             data = new Float32Array([time, width, height]);
+        } else if (availableSize >= 8) {
+            data = new Float32Array([time, width]);
+        } else if (availableSize >= 4) {
+            data = new Float32Array([time]);
+        } else {
+            console.warn(`[GPU] writeTimeUniform: buffer ${bufferId} too small (${availableSize} bytes available)`);
+            return;
         }
 
         this.device.queue.writeBuffer(buffer, bufferOffset, data);
@@ -1739,6 +1940,7 @@ export class PNGineGPU {
         this.pipelineLayouts.clear();
         this.querySets.clear();
         this.imageBitmaps.clear();
+        this.renderBundles.clear();
         this.wasmModules.clear();
         this.wasmCallResults.clear();
         this.typedArrays.clear();

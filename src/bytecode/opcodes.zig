@@ -81,6 +81,12 @@ pub const OpCode = enum(u8) {
     /// Params: query_set_id, descriptor_data_id
     create_query_set = 0x0D,
 
+    /// Create render bundle from pre-recorded draw commands.
+    /// Params: bundle_id, descriptor_data_id
+    /// Descriptor contains: colorFormats, depthStencilFormat, sampleCount,
+    /// pipeline, bindGroups, vertexBuffers, indexBuffer, draw command.
+    create_render_bundle = 0x0E,
+
     // ========================================================================
     // Pass Operations (0x10-0x1F)
     // ========================================================================
@@ -120,6 +126,10 @@ pub const OpCode = enum(u8) {
     /// Dispatch compute workgroups.
     /// Params: x, y, z
     dispatch = 0x18,
+
+    /// Execute pre-recorded render bundles.
+    /// Params: bundle_count, bundle_id_0, bundle_id_1, ...
+    execute_bundles = 0x1A,
 
     /// End current pass.
     /// Params: (none)
@@ -269,6 +279,7 @@ pub const OpCode = enum(u8) {
             .create_image_bitmap,
             .create_texture_view,
             .create_query_set,
+            .create_render_bundle,
             .begin_render_pass,
             .begin_compute_pass,
             .set_pipeline,
@@ -278,6 +289,7 @@ pub const OpCode = enum(u8) {
             .draw,
             .draw_indexed,
             .dispatch,
+            .execute_bundles,
             .end_pass,
             .write_buffer,
             .write_uniform,
@@ -623,7 +635,10 @@ test "all resource creation opcodes valid" {
         .create_render_pipeline,
         .create_compute_pipeline,
         .create_bind_group,
-        .create_image_bitmap, // New opcode
+        .create_image_bitmap,
+        .create_texture_view,
+        .create_query_set,
+        .create_render_bundle,
     };
 
     for (resource_ops) |op| {
