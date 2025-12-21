@@ -55,8 +55,8 @@ export class PNGineGPU {
         this.typedArrays = new Map();      // Array ID → Float32Array (or other typed arrays)
 
         // Runtime state for dynamic arguments
-        this.currentTime = 0;              // Total time in seconds ($t.total)
-        this.deltaTime = 0;                // Delta time since last frame ($t.delta)
+        this.currentTime = 0;              // Total time in seconds (time.total)
+        this.deltaTime = 0;                // Delta time since last frame (time.delta)
 
         // Render state
         this.commandEncoder = null;
@@ -677,12 +677,12 @@ export class PNGineGPU {
      *
      * Arg types:
      * - 0x00: literal f32 (4 byte value follows)
-     * - 0x01: $canvas.width (no value)
-     * - 0x02: $canvas.height (no value)
-     * - 0x03: $t.total (no value)
+     * - 0x01: canvas.width (no value)
+     * - 0x02: canvas.height (no value)
+     * - 0x03: time.total (no value)
      * - 0x04: literal i32 (4 byte value follows)
      * - 0x05: literal u32 (4 byte value follows)
-     * - 0x06: $t.delta (no value)
+     * - 0x06: time.delta (no value)
      *
      * @param {Uint8Array} encoded - Encoded arguments
      * @returns {number[]} Resolved argument values
