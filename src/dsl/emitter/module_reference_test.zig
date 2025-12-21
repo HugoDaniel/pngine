@@ -137,11 +137,11 @@ test "ModuleRef: bare identifier module reference (the main bug fix)" {
     try testing.expectEqual(@as(u32, 1), pipeline_count);
 }
 
-test "ModuleRef: $wgsl reference in shaderModule code (runtime_interpolation fix)" {
-    // This pattern was broken because "$wgsl.name" is parsed as runtime_interpolation
+test "ModuleRef: wgsl reference in shaderModule code" {
+    // shaderModule code property references a wgsl by name
     const source: [:0]const u8 =
         \\#wgsl shaderCode { value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); }" }
-        \\#shaderModule scene { code="$wgsl.shaderCode" }
+        \\#shaderModule scene { code=shaderCode }
         \\#renderPipeline pipe {
         \\  layout=auto
         \\  vertex={ module=scene entryPoint=vs }
@@ -163,14 +163,14 @@ test "ModuleRef: $wgsl reference in shaderModule code (runtime_interpolation fix
     try testing.expect(shader_count >= 1);
 }
 
-test "ModuleRef: module reference syntax ($wgsl.name)" {
-    // Direct reference syntax should still work
+test "ModuleRef: bare identifier module reference in pipeline" {
+    // Bare identifier reference to wgsl from pipeline
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); }" }
         \\#renderPipeline pipe {
         \\  layout=auto
-        \\  vertex={ module=$wgsl.shader entryPoint=vs }
-        \\  fragment={ module=$wgsl.shader entryPoint=vs targets=[{format=preferredCanvasFormat}] }
+        \\  vertex={ module=shader entryPoint=vs }
+        \\  fragment={ module=shader entryPoint=vs targets=[{format=preferredCanvasFormat}] }
         \\}
         \\#renderPass pass {
         \\  pipeline=pipe
@@ -191,11 +191,11 @@ test "ModuleRef: module reference syntax ($wgsl.name)" {
 // Edge Cases for runtime_interpolation
 // ============================================================================
 
-test "ModuleRef: $wgsl.name with special characters in name" {
+test "ModuleRef: wgsl name with underscores" {
     // Names with underscores
     const source: [:0]const u8 =
         \\#wgsl shader_code_v2 { value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); }" }
-        \\#shaderModule mod { code="$wgsl.shader_code_v2" }
+        \\#shaderModule mod { code=shader_code_v2 }
         \\#renderPipeline pipe {
         \\  layout=auto
         \\  vertex={ module=mod entryPoint=vs }
@@ -244,16 +244,16 @@ test "ModuleRef: inline WGSL code with $ literal (not reference)" {
 // Mixed Syntax Tests
 // ============================================================================
 
-test "ModuleRef: mixed reference and bare identifier in same file" {
-    // Some pipelines use $wgsl.name, others use bare identifiers
+test "ModuleRef: multiple shaders referenced by bare identifier" {
+    // All pipelines use bare identifiers
     const source: [:0]const u8 =
         \\#wgsl shader1 { value="@vertex fn vs1() -> @builtin(position) vec4f { return vec4f(0); }" }
         \\#wgsl shader2 { value="@vertex fn vs2() -> @builtin(position) vec4f { return vec4f(1); }" }
         \\#shaderModule mod3 { code="@vertex fn vs3() -> @builtin(position) vec4f { return vec4f(2); }" }
         \\#renderPipeline pipe1 {
         \\  layout=auto
-        \\  vertex={ module=$wgsl.shader1 entryPoint=vs1 }
-        \\  fragment={ module=$wgsl.shader1 entryPoint=vs1 targets=[{format=preferredCanvasFormat}] }
+        \\  vertex={ module=shader1 entryPoint=vs1 }
+        \\  fragment={ module=shader1 entryPoint=vs1 targets=[{format=preferredCanvasFormat}] }
         \\}
         \\#renderPipeline pipe2 {
         \\  layout=auto
@@ -310,16 +310,16 @@ test "ModuleRef: mixed reference and bare identifier in same file" {
 // Complex Patterns (Demo-like)
 // ============================================================================
 
-test "ModuleRef: demo2025 pattern - wgsl with imports, shaderModule ref, bare identifier" {
-    // Exact pattern that was failing in demo2025
+test "ModuleRef: demo pattern - wgsl with imports, shaderModule ref" {
+    // Pattern with wgsl imports and shaderModule reference
     const source: [:0]const u8 =
         \\#wgsl constants { value="const AWAY: f32 = 1e10;" }
         \\#wgsl transform2D { value="fn transform(p: vec2f) -> vec2f { return p; }" }
         \\#wgsl sceneEShader {
         \\  value="@vertex fn vs_sceneE() -> @builtin(position) vec4f { return vec4f(transform(vec2f(0.0)), 0.0, 1.0); }"
-        \\  imports=[$wgsl.constants, $wgsl.transform2D]
+        \\  imports=[constants transform2D]
         \\}
-        \\#shaderModule sceneE { code="$wgsl.sceneEShader" }
+        \\#shaderModule sceneE { code=sceneEShader }
         \\#renderPipeline renderSceneE {
         \\  layout=auto
         \\  vertex={ entryPoint=vs_sceneE module=sceneE }
@@ -483,17 +483,10 @@ test "ModuleRef: property - all pipelines get valid shader IDs" {
             }
         }
 
-        // Generate a pipeline referencing first shader
-        const use_reference = random.boolean();
-        if (use_reference) {
-            const pipe_line = "#renderPipeline pipe { layout=auto vertex={ module=$wgsl.s0 entryPoint=f0 } fragment={ module=$wgsl.s0 entryPoint=f0 targets=[{format=preferredCanvasFormat}] } }\n";
-            @memcpy(source_buf[pos..][0..pipe_line.len], pipe_line);
-            pos += pipe_line.len;
-        } else {
-            const pipe_line = "#renderPipeline pipe { layout=auto vertex={ module=s0 entryPoint=f0 } fragment={ module=s0 entryPoint=f0 targets=[{format=preferredCanvasFormat}] } }\n";
-            @memcpy(source_buf[pos..][0..pipe_line.len], pipe_line);
-            pos += pipe_line.len;
-        }
+        // Generate a pipeline referencing first shader using bare identifier
+        const pipe_line = "#renderPipeline pipe { layout=auto vertex={ module=s0 entryPoint=f0 } fragment={ module=s0 entryPoint=f0 targets=[{format=preferredCanvasFormat}] } }\n";
+        @memcpy(source_buf[pos..][0..pipe_line.len], pipe_line);
+        pos += pipe_line.len;
 
         const pass_frame =
             \\#renderPass pass { pipeline=pipe colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}] draw=3 }
@@ -610,7 +603,7 @@ fn fuzzModuleReference(_: void, input: []const u8) !void {
 
     // Use input to determine pattern
     const use_wgsl = input[0] % 2 == 0;
-    const use_ref_syntax = input[1] % 2 == 0;
+    _ = input[1]; // Previously used for ref syntax, now always bare identifier
 
     var source_buf: [2048]u8 = undefined;
     @memset(&source_buf, 0);
@@ -627,16 +620,10 @@ fn fuzzModuleReference(_: void, input: []const u8) !void {
         pos += shader.len;
     }
 
-    // Generate pipeline with either reference or bare identifier
-    if (use_ref_syntax) {
-        const pipe = "#renderPipeline pipe { layout=auto vertex={ module=$wgsl.test entryPoint=f } fragment={ module=$wgsl.test entryPoint=f targets=[{format=preferredCanvasFormat}] } }\n";
-        @memcpy(source_buf[pos..][0..pipe.len], pipe);
-        pos += pipe.len;
-    } else {
-        const pipe = "#renderPipeline pipe { layout=auto vertex={ module=test entryPoint=f } fragment={ module=test entryPoint=f targets=[{format=preferredCanvasFormat}] } }\n";
-        @memcpy(source_buf[pos..][0..pipe.len], pipe);
-        pos += pipe.len;
-    }
+    // Generate pipeline using bare identifier
+    const pipe = "#renderPipeline pipe { layout=auto vertex={ module=test entryPoint=f } fragment={ module=test entryPoint=f targets=[{format=preferredCanvasFormat}] } }\n";
+    @memcpy(source_buf[pos..][0..pipe.len], pipe);
+    pos += pipe.len;
 
     const rest =
         \\#renderPass pass { pipeline=pipe colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}] draw=3 }
@@ -870,8 +857,8 @@ test "ModuleRef: chained wgsl references with shaderModule" {
     // Complex chain: wgsl A -> wgsl B -> shaderModule C referencing B
     const source: [:0]const u8 =
         \\#wgsl base { value="fn base() -> f32 { return 1.0; }" }
-        \\#wgsl derived { value="fn derived() -> f32 { return base() * 2.0; }" imports=[$wgsl.base] }
-        \\#shaderModule final { code="$wgsl.derived" }
+        \\#wgsl derived { value="fn derived() -> f32 { return base() * 2.0; }" imports=[base] }
+        \\#shaderModule final { code=derived }
         \\#renderPipeline pipe {
         \\  layout=auto
         \\  vertex={ module=final entryPoint=derived }

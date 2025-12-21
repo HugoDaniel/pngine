@@ -270,7 +270,7 @@ test "ShaderID: import chain with empty base" {
         \\#wgsl empty { value="" }
         \\#wgsl main {
         \\  value="fn main() {}"
-        \\  imports=[$wgsl.empty]
+        \\  imports=[empty]
         \\}
         \\#frame f { perform=[] }
     ;
@@ -299,7 +299,7 @@ test "ShaderID: pipeline references valid shader after empty ones" {
         \\#wgsl empty1 { value="" }
         \\#wgsl empty2 { value="" }
         \\#wgsl valid { value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); }" }
-        \\#renderPipeline pipe { vertex={ module=$wgsl.valid } }
+        \\#renderPipeline pipe { vertex={ module=valid } }
         \\#frame main { perform=[] }
     ;
 
@@ -664,7 +664,7 @@ test "ShaderID: pipeline after skipped shaders uses correct ID" {
         \\#wgsl skip2 { value="" }
         \\#wgsl skip3 { value="" }
         \\#wgsl actualShader { value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); }" }
-        \\#renderPipeline pipe { vertex={ module=$wgsl.actualShader } }
+        \\#renderPipeline pipe { vertex={ module=actualShader } }
         \\#frame main { perform=[] }
     ;
 
@@ -705,7 +705,7 @@ test "ShaderID: compute pipeline after skipped shaders" {
         \\#wgsl skip1 { value="" }
         \\#wgsl skip2 { value="" }
         \\#wgsl compute { value="@compute @workgroup_size(1) fn main() {}" }
-        \\#computePipeline pipe { compute={ module=$wgsl.compute } }
+        \\#computePipeline pipe { compute={ module=compute } }
         \\#frame main { perform=[] }
     ;
 

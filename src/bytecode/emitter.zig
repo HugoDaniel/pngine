@@ -657,6 +657,22 @@ pub const Emitter = struct {
         try self.emitVarint(allocator, buffer_offset);
         try self.emitVarint(allocator, array_id);
     }
+
+    /// Emit write_time_uniform instruction.
+    /// Writes time/canvas uniform data to buffer.
+    /// Runtime provides: f32 time, f32 width, f32 height[, f32 aspect_ratio]
+    pub fn writeTimeUniform(
+        self: *Self,
+        allocator: Allocator,
+        buffer_id: u16,
+        offset: u32,
+        size: u16,
+    ) !void {
+        try self.emitOpcode(allocator, .write_time_uniform);
+        try self.emitVarint(allocator, buffer_id);
+        try self.emitVarint(allocator, offset);
+        try self.emitVarint(allocator, size);
+    }
 };
 
 // ============================================================================

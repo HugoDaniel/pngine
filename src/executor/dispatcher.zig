@@ -311,6 +311,11 @@ pub fn Dispatcher(comptime BackendType: type) type {
                     pc.* += opcodes.decodeVarint(bytecode[pc.*..]).len;
                     pc.* += opcodes.decodeVarint(bytecode[pc.*..]).len;
                 },
+                .write_time_uniform => {
+                    pc.* += opcodes.decodeVarint(bytecode[pc.*..]).len; // buffer_id
+                    pc.* += opcodes.decodeVarint(bytecode[pc.*..]).len; // offset
+                    pc.* += opcodes.decodeVarint(bytecode[pc.*..]).len; // size
+                },
                 .set_bind_group_pool => {
                     pc.* += 1;
                     pc.* += opcodes.decodeVarint(bytecode[pc.*..]).len;
@@ -713,6 +718,13 @@ pub fn Dispatcher(comptime BackendType: type) type {
                     try self.backend.writeBufferFromArray(allocator, @intCast(buffer_id), buffer_offset, @intCast(array_id));
                 },
 
+                .write_time_uniform => {
+                    const buffer_id = try self.readVarint();
+                    const buffer_offset = try self.readVarint();
+                    const size = try self.readVarint();
+                    try self.backend.writeTimeUniform(allocator, @intCast(buffer_id), buffer_offset, @intCast(size));
+                },
+
                 // ============================================================
                 // Pool Operations
                 // ============================================================
@@ -890,6 +902,13 @@ pub fn Dispatcher(comptime BackendType: type) type {
 
                 // Dispatch: 3 varints
                 .dispatch => {
+                    _ = try self.readVarint();
+                    _ = try self.readVarint();
+                    _ = try self.readVarint();
+                },
+
+                // Write time uniform: 3 varints
+                .write_time_uniform => {
                     _ = try self.readVarint();
                     _ = try self.readVarint();
                     _ = try self.readVarint();

@@ -49,20 +49,20 @@ test "animation: analyze #animation with scenes" {
     const source =
         \\#wgsl shader { value="@vertex fn vs() {}" }
         \\#renderPipeline pipe {
-        \\  vertex={ module=$wgsl.shader entryPoint="vs" }
+        \\  vertex={ module=shader entryPoint="vs" }
         \\}
         \\#renderPass pass1 {
-        \\  pipeline=$renderPipeline.pipe
+        \\  pipeline=pipe
         \\  draw=3
         \\}
-        \\#frame scene1 { perform=[$renderPass.pass1] }
-        \\#frame scene2 { perform=[$renderPass.pass1] }
+        \\#frame scene1 { perform=[pass1] }
+        \\#frame scene2 { perform=[pass1] }
         \\#animation demo {
         \\  duration=120
         \\  loop=false
         \\  scenes=[
-        \\    { id="intro" frame=$frame.scene1 start=0 end=60 }
-        \\    { id="main" frame=$frame.scene2 start=60 end=120 }
+        \\    { id="intro" frame=scene1 start=0 end=60 }
+        \\    { id="main" frame=scene2 start=60 end=120 }
         \\  ]
         \\}
     ;
@@ -85,21 +85,21 @@ test "animation: emit animation metadata" {
     const source =
         \\#wgsl shader { value="@vertex fn vs() {}" }
         \\#renderPipeline pipe {
-        \\  vertex={ module=$wgsl.shader entryPoint="vs" }
+        \\  vertex={ module=shader entryPoint="vs" }
         \\}
         \\#renderPass pass1 {
-        \\  pipeline=$renderPipeline.pipe
+        \\  pipeline=pipe
         \\  draw=3
         \\}
-        \\#frame sceneQ { perform=[$renderPass.pass1] }
-        \\#frame sceneE { perform=[$renderPass.pass1] }
+        \\#frame sceneQ { perform=[pass1] }
+        \\#frame sceneE { perform=[pass1] }
         \\#animation inercia2025 {
         \\  duration=260
         \\  loop=false
         \\  endBehavior=hold
         \\  scenes=[
-        \\    { id="intro" frame=$frame.sceneQ start=0 end=60 }
-        \\    { id="outro" frame=$frame.sceneE start=60 end=260 }
+        \\    { id="intro" frame=sceneQ start=0 end=60 }
+        \\    { id="outro" frame=sceneE start=60 end=260 }
         \\  ]
         \\}
     ;
@@ -601,20 +601,20 @@ test "animation: full pipeline parse->analyze->emit" {
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); }" }
         \\#renderPipeline pipe {
-        \\  vertex={ module=$wgsl.shader entryPoint="vs" }
+        \\  vertex={ module=shader entryPoint="vs" }
         \\}
         \\#renderPass pass {
-        \\  pipeline=$renderPipeline.pipe
+        \\  pipeline=pipe
         \\  draw=3
         \\}
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#frame main { perform=[pass] }
         \\#animation demo {
         \\  duration=60
         \\  loop=true
         \\  endBehavior=restart
         \\  scenes=[
-        \\    { id="intro" frame=$frame.main start=0 end=30 }
-        \\    { id="outro" frame=$frame.main start=30 end=60 }
+        \\    { id="intro" frame=main start=0 end=30 }
+        \\    { id="outro" frame=main start=30 end=60 }
         \\  ]
         \\}
     ;
@@ -643,9 +643,9 @@ test "animation: full pipeline parse->analyze->emit" {
 test "animation: multiple animations (should use first)" {
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {}" }
-        \\#renderPipeline pipe { vertex={ module=$wgsl.shader entryPoint="vs" } }
-        \\#renderPass pass { pipeline=$renderPipeline.pipe draw=3 }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#renderPipeline pipe { vertex={ module=shader entryPoint="vs" } }
+        \\#renderPass pass { pipeline=pipe draw=3 }
+        \\#frame main { perform=[pass] }
         \\#animation first { duration=30 loop=false }
         \\#animation second { duration=60 loop=true }
     ;

@@ -70,9 +70,9 @@ test "Integration: triangle example - basic render pipeline" {
         \\}
         \\
         \\#renderPipeline triangle {
-        \\  vertex={ module=$wgsl.shader entryPoint=vertexMain }
+        \\  vertex={ module=shader entryPoint=vertexMain }
         \\  fragment={
-        \\    module=$wgsl.shader
+        \\    module=shader
         \\    entryPoint=fragmentMain
         \\    targets=[{ format=bgra8unorm }]
         \\  }
@@ -85,12 +85,12 @@ test "Integration: triangle example - basic render pipeline" {
         \\    loadOp=clear
         \\    storeOp=store
         \\  }]
-        \\  pipeline=$renderPipeline.triangle
+        \\  pipeline=triangle
         \\  draw=3
         \\}
         \\
         \\#frame main {
-        \\  perform=[$renderPass.mainPass]
+        \\  perform=[mainPass]
         \\}
     ;
 
@@ -151,7 +151,7 @@ test "Integration: MSAA example - #define substitution" {
         \\
         \\#renderPipeline msaaPipeline {
         \\  layout=auto
-        \\  vertex={ module=$wgsl.shader entryPoint=vs }
+        \\  vertex={ module=shader entryPoint=vs }
         \\  multisample={ count=SAMPLE_COUNT }
         \\}
         \\
@@ -202,7 +202,7 @@ test "Integration: rotating cube - vertex buffers and depth stencil" {
         \\#renderPipeline cube {
         \\  layout=auto
         \\  vertex={
-        \\    module=$wgsl.cubeShader
+        \\    module=cubeShader
         \\    entryPoint=vertexMain
         \\    buffers=[{
         \\      arrayStride=CUBE_VERTEX_SIZE
@@ -213,7 +213,7 @@ test "Integration: rotating cube - vertex buffers and depth stencil" {
         \\    }]
         \\  }
         \\  fragment={
-        \\    module=$wgsl.cubeShader
+        \\    module=cubeShader
         \\    entryPoint=fragmentMain
         \\    targets=[{ format=bgra8unorm }]
         \\  }
@@ -234,18 +234,18 @@ test "Integration: rotating cube - vertex buffers and depth stencil" {
         \\    storeOp=store
         \\  }]
         \\  depthStencilAttachment={
-        \\    view=$texture.depthTexture
+        \\    view=depthTexture
         \\    depthClearValue=1.0
         \\    depthLoadOp=clear
         \\    depthStoreOp=store
         \\  }
-        \\  pipeline=$renderPipeline.cube
-        \\  vertexBuffers=[$buffer.verticesBuffer]
+        \\  pipeline=cube
+        \\  vertexBuffers=[verticesBuffer]
         \\  draw=CUBE_VERTEX_COUNT
         \\}
         \\
         \\#frame main {
-        \\  perform=[$renderPass.cubePass]
+        \\  perform=[cubePass]
         \\}
     ;
 
@@ -295,16 +295,16 @@ test "Integration: compute pipeline with dispatch" {
         \\}
         \\
         \\#computePipeline compute {
-        \\  compute={ module=$wgsl.computeShader entryPoint=main }
+        \\  compute={ module=computeShader entryPoint=main }
         \\}
         \\
         \\#computePass computePass {
-        \\  pipeline=$computePipeline.compute
+        \\  pipeline=compute
         \\  dispatch=[16 16 1]
         \\}
         \\
         \\#frame main {
-        \\  perform=[$computePass.computePass]
+        \\  perform=[computePass]
         \\}
     ;
 
@@ -358,7 +358,7 @@ test "Integration: pipeline with multiple vertex buffer layouts" {
         \\
         \\#renderPipeline withBuffers {
         \\  vertex={
-        \\    module=$wgsl.shader
+        \\    module=shader
         \\    entryPoint=vs
         \\    buffers=[
         \\      {
@@ -401,9 +401,9 @@ test "Integration: fragment targets with blend state" {
         \\}
         \\
         \\#renderPipeline blended {
-        \\  vertex={ module=$wgsl.shader entryPoint=vs }
+        \\  vertex={ module=shader entryPoint=vs }
         \\  fragment={
-        \\    module=$wgsl.shader
+        \\    module=shader
         \\    entryPoint=fs
         \\    targets=[{
         \\      format=bgra8unorm
@@ -435,8 +435,8 @@ test "Integration: wgsl with imports" {
         \\  value="fn helper() -> f32 { return 1.0; }"
         \\}
         \\
-        \\#wgsl main {
-        \\  imports=[$wgsl.common]
+        \\#wgsl shader {
+        \\  imports=[common]
         \\  value="@vertex fn vs() -> @builtin(position) vec4f {
         \\    let x = helper();
         \\    return vec4f(x);
@@ -444,7 +444,7 @@ test "Integration: wgsl with imports" {
         \\}
         \\
         \\#renderPipeline pipe {
-        \\  vertex={ module=$wgsl.main entryPoint=vs }
+        \\  vertex={ module=shader entryPoint=vs }
         \\}
         \\
         \\#frame main { perform=[] }
@@ -473,7 +473,7 @@ test "Integration: bind group with uniform buffer" {
         \\
         \\#bindGroup uniformGroup {
         \\  entries=[
-        \\    { binding=0 resource={ buffer=$buffer.uniformBuffer } }
+        \\    { binding=0 resource={ buffer=uniformBuffer } }
         \\  ]
         \\}
         \\
@@ -539,7 +539,7 @@ test "Integration: texture view with dimension override" {
         \\}
         \\
         \\#textureView cubeView {
-        \\  texture=$texture.cubeMap
+        \\  texture=cubeMap
         \\  dimension="cube"
         \\  baseArrayLayer=0
         \\  arrayLayerCount=6
@@ -550,7 +550,7 @@ test "Integration: texture view with dimension override" {
         \\}
         \\
         \\#renderPipeline pipe {
-        \\  vertex={ module=$wgsl.shader entryPoint=vs }
+        \\  vertex={ module=shader entryPoint=vs }
         \\}
         \\
         \\#frame main {
@@ -600,7 +600,7 @@ test "Integration: query set for timestamps" {
         \\}
         \\
         \\#renderPipeline pipe {
-        \\  vertex={ module=$wgsl.shader entryPoint=vs }
+        \\  vertex={ module=shader entryPoint=vs }
         \\}
         \\
         \\#frame main {
@@ -642,7 +642,7 @@ test "Integration: explicit bind group layout" {
         \\}
         \\
         \\#renderPipeline pipe {
-        \\  vertex={ module=$wgsl.shader entryPoint=vs }
+        \\  vertex={ module=shader entryPoint=vs }
         \\}
         \\
         \\#frame main {
@@ -680,7 +680,7 @@ test "Integration: explicit pipeline layout" {
         \\}
         \\
         \\#pipelineLayout pipeLayout {
-        \\  bindGroupLayouts=[$bindGroupLayout.layout0 $bindGroupLayout.layout1]
+        \\  bindGroupLayouts=[layout0 layout1]
         \\}
         \\
         \\#wgsl shader {
@@ -688,7 +688,7 @@ test "Integration: explicit pipeline layout" {
         \\}
         \\
         \\#renderPipeline pipe {
-        \\  vertex={ module=$wgsl.shader entryPoint=vs }
+        \\  vertex={ module=shader entryPoint=vs }
         \\}
         \\
         \\#frame main {
@@ -744,7 +744,7 @@ test "Parser: duplicate definition should fail analysis" {
 test "Parser: undefined reference should fail analysis" {
     const source: [:0]const u8 =
         \\#renderPipeline pipe {
-        \\  vertex={ module=$wgsl.nonexistent }
+        \\  vertex={ module=nonexistent }
         \\}
         \\#frame main { perform=[] }
     ;

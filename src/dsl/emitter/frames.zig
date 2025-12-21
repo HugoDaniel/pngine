@@ -45,7 +45,7 @@ pub fn collectQueues(e: *Emitter) Emitter.Error!void {
         const queue_id = e.next_queue_id;
         e.next_queue_id += 1;
         try e.queue_ids.put(e.gpa, name, queue_id);
-    }
+    } else unreachable; // Exceeded MAX_QUEUE_ACTIONS
 
     // Post-condition: IDs assigned match symbol count
     std.debug.assert(e.next_queue_id - initial_id == e.queue_ids.count());
@@ -133,6 +133,7 @@ fn emitDataFromSource(e: *Emitter, buffer_id: u16, offset: u32, data_from_node: 
 /// - string: data="$data.X.buffer" or literal hex bytes
 /// - identifier: data=myDataName (references #data)
 /// - reference: data=$data.myDataName (references #data)
+/// - uniform_access: data=code.inputs (references shader uniform)
 fn emitWriteBufferData(e: *Emitter, buffer_id: u16, offset: u32, data_node: Node.Index) Emitter.Error!void {
     // Pre-condition
     std.debug.assert(data_node.toInt() < e.ast.nodes.len);
@@ -143,6 +144,9 @@ fn emitWriteBufferData(e: *Emitter, buffer_id: u16, offset: u32, data_node: Node
         try emitWriteBufferArray(e, buffer_id, offset, data_node);
     } else if (data_tag == .string_value) {
         try emitWriteBufferString(e, buffer_id, offset, data_node);
+    } else if (data_tag == .uniform_access) {
+        // Uniform access: data=code.inputs → write_time_uniform
+        try emitUniformAccess(e, buffer_id, offset, data_node);
     } else if (data_tag == .identifier_value) {
         // Direct identifier reference: data=simParamsData
         const name_token = e.ast.nodes.items(.main_token)[data_node.toInt()];
@@ -160,6 +164,28 @@ fn emitWriteBufferData(e: *Emitter, buffer_id: u16, offset: u32, data_node: Node
             }
         }
     }
+}
+
+/// Emit write_time_uniform for uniform_access nodes (code.inputs).
+fn emitUniformAccess(e: *Emitter, buffer_id: u16, offset: u32, node: Node.Index) Emitter.Error!void {
+    // Pre-condition: node is uniform_access
+    std.debug.assert(node.toInt() < e.ast.nodes.len);
+    std.debug.assert(e.ast.nodes.items(.tag)[node.toInt()] == .uniform_access);
+
+    // Use pre-resolved metadata from Analyzer
+    const uniform_info = e.analysis.resolved_uniforms.get(node.toInt()) orelse {
+        // Fallback if not resolved (shouldn't happen if Analyzer ran)
+        try e.builder.getEmitter().writeTimeUniform(e.gpa, buffer_id, offset, 12);
+        return;
+    };
+
+    // Emit opcode with resolved size
+    try e.builder.getEmitter().writeTimeUniform(
+        e.gpa,
+        buffer_id,
+        offset,
+        uniform_info.size,
+    );
 }
 
 /// Emit write_buffer from an array of numbers (as f32 values).
@@ -361,7 +387,7 @@ pub fn emitFrames(e: *Emitter) Emitter.Error!void {
         // Submit and end frame
         try e.builder.getEmitter().submit(e.gpa);
         try e.builder.getEmitter().endFrame(e.gpa);
-    }
+    } else unreachable; // Exceeded MAX_QUEUE_ACTIONS
 
     // Post-condition: frame IDs were assigned sequentially
     std.debug.assert(e.next_frame_id >= initial_frame_id);

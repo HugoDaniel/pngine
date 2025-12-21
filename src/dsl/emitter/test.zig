@@ -55,7 +55,7 @@ test "Emitter: simple shader" {
 test "Emitter: shader and pipeline" {
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {}" }
-        \\#renderPipeline pipe { vertex={ module=$wgsl.shader } }
+        \\#renderPipeline pipe { vertex={ module=shader } }
         \\#frame main { perform=[] }
     ;
 
@@ -207,9 +207,9 @@ test "Emitter: buffer size from define with expression" {
 test "Emitter: render pass with draw" {
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {}" }
-        \\#renderPipeline pipe { vertex={ module=$wgsl.shader } }
-        \\#renderPass pass { pipeline=$renderPipeline.pipe draw=3 }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#renderPipeline pipe { vertex={ module=shader } }
+        \\#renderPass pass { pipeline=pipe draw=3 }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -238,15 +238,15 @@ test "Emitter: simpleTriangle example" {
         \\#wgsl triangleShader { value="@vertex fn vs() { } @fragment fn fs() { }" }
         \\#renderPipeline pipeline {
         \\  layout=auto
-        \\  vertex={ entryPoint=vs module=$wgsl.triangleShader }
-        \\  fragment={ entryPoint=fs module=$wgsl.triangleShader }
+        \\  vertex={ entryPoint=vs module=triangleShader }
+        \\  fragment={ entryPoint=fs module=triangleShader }
         \\}
         \\#renderPass drawPass {
-        \\  pipeline=$renderPipeline.pipeline
+        \\  pipeline=pipeline
         \\  draw=3
         \\}
         \\#frame main {
-        \\  perform=[$renderPass.drawPass]
+        \\  perform=[drawPass]
         \\}
     ;
 
@@ -271,9 +271,9 @@ test "Emitter: simpleTriangle example" {
 test "Emitter: compute pipeline" {
     const source: [:0]const u8 =
         \\#wgsl computeShader { value="@compute fn main() { }" }
-        \\#computePipeline pipe { compute={ module=$wgsl.computeShader } }
-        \\#computePass pass { pipeline=$computePipeline.pipe dispatch=[8 8 1] }
-        \\#frame main { perform=[$computePass.pass] }
+        \\#computePipeline pipe { compute={ module=computeShader } }
+        \\#computePass pass { pipeline=pipe dispatch=[8 8 1] }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -300,15 +300,15 @@ test "Emitter: entrypoint case insensitivity" {
         \\#wgsl triangleShader { value="@vertex fn vs() { } @fragment fn fs() { }" }
         \\#renderPipeline pipeline {
         \\  layout=auto
-        \\  vertex={ entrypoint=vs module=$wgsl.triangleShader }
-        \\  fragment={ entrypoint=fs module=$wgsl.triangleShader }
+        \\  vertex={ entrypoint=vs module=triangleShader }
+        \\  fragment={ entrypoint=fs module=triangleShader }
         \\}
         \\#renderPass drawPass {
-        \\  pipeline=$renderPipeline.pipeline
+        \\  pipeline=pipeline
         \\  draw=3
         \\}
         \\#frame main {
-        \\  perform=[$renderPass.drawPass]
+        \\  perform=[drawPass]
         \\}
     ;
 
@@ -339,15 +339,15 @@ test "Emitter: entryPoint camelCase also works" {
         \\#wgsl triangleShader { value="@vertex fn vs() { } @fragment fn fs() { }" }
         \\#renderPipeline pipeline {
         \\  layout=auto
-        \\  vertex={ entryPoint=myVertex module=$wgsl.triangleShader }
-        \\  fragment={ entryPoint=myFragment module=$wgsl.triangleShader }
+        \\  vertex={ entryPoint=myVertex module=triangleShader }
+        \\  fragment={ entryPoint=myFragment module=triangleShader }
         \\}
         \\#renderPass drawPass {
-        \\  pipeline=$renderPipeline.pipeline
+        \\  pipeline=pipeline
         \\  draw=3
         \\}
         \\#frame main {
-        \\  perform=[$renderPass.drawPass]
+        \\  perform=[drawPass]
         \\}
     ;
 
@@ -406,12 +406,11 @@ test "Emitter: multiple frames" {
 
 test "Emitter: setPipeline with identifier value" {
     // Regression test: pipeline=pipelineName should emit set_pipeline
-    // Previously only $renderPipeline.name references worked.
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {}" }
-        \\#renderPipeline myPipeline { vertex={ module=$wgsl.shader } }
+        \\#renderPipeline myPipeline { vertex={ module=shader } }
         \\#renderPass pass { pipeline=myPipeline draw=3 }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -431,13 +430,13 @@ test "Emitter: setPipeline with identifier value" {
     try testing.expect(found_set_pipeline);
 }
 
-test "Emitter: setPipeline with reference syntax" {
-    // Verify that $renderPipeline.name syntax still works
+test "Emitter: setPipeline with bare identifier syntax" {
+    // Bare identifier syntax for pipeline reference
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {}" }
-        \\#renderPipeline myPipeline { vertex={ module=$wgsl.shader } }
-        \\#renderPass pass { pipeline=$renderPipeline.myPipeline draw=3 }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#renderPipeline myPipeline { vertex={ module=shader } }
+        \\#renderPass pass { pipeline=myPipeline draw=3 }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -462,9 +461,9 @@ test "Emitter: render pass emits begin/setPipeline/draw/end sequence" {
     // This catches missing begin_render_pass or end_pass.
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {}" }
-        \\#renderPipeline pipe { vertex={ module=$wgsl.shader } }
+        \\#renderPipeline pipe { vertex={ module=shader } }
         \\#renderPass pass { pipeline=pipe draw=3 }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -510,14 +509,13 @@ test "Emitter: render pass emits begin/setPipeline/draw/end sequence" {
 
 test "Emitter: render pass with bind group emits set_bind_group" {
     // Regression test: bindGroups=[name] should emit set_bind_group opcode.
-    // Previously only $bindGroup.name references worked, not bare identifiers.
     const source: [:0]const u8 =
         \\#wgsl shader { value="@group(0) @binding(0) var<uniform> u: f32; @vertex fn vs() { } @fragment fn fs() { }" }
         \\#buffer uniformBuf { size=4 usage=[UNIFORM COPY_DST] }
-        \\#renderPipeline pipe { layout=auto vertex={ module=$wgsl.shader } fragment={ module=$wgsl.shader } }
+        \\#renderPipeline pipe { layout=auto vertex={ module=shader } fragment={ module=shader } }
         \\#bindGroup bg { layout={ pipeline=pipe index=0 } entries=[{ binding=0 resource={ buffer=uniformBuf } }] }
         \\#renderPass pass { pipeline=pipe bindGroups=[bg] draw=3 }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -544,10 +542,10 @@ test "Emitter: bind group selects correct buffer from multiple" {
         \\#wgsl shader { value="@vertex fn vs() { }" }
         \\#buffer verticesBuffer { size=64 usage=[VERTEX] }
         \\#buffer uniformInputsBuffer { size=16 usage=[UNIFORM] }
-        \\#renderPipeline pipe { layout=auto vertex={ module=$wgsl.shader } }
+        \\#renderPipeline pipe { layout=auto vertex={ module=shader } }
         \\#bindGroup myBindGroup { layout={ pipeline=pipe index=0 } entries=[{ binding=0 resource={ buffer=uniformInputsBuffer } }] }
         \\#renderPass pass { pipeline=pipe bindGroups=[myBindGroup] draw=3 }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -589,15 +587,14 @@ test "Emitter: bind group selects correct buffer from multiple" {
 }
 
 test "Emitter: bind group with bare identifier reference" {
-    // Tests that bindGroups=[name] works without $ prefix.
-    // This is the common DSL syntax users expect.
+    // Tests that bindGroups=[name] works.
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() { }" }
         \\#buffer buf { size=16 usage=[UNIFORM] }
-        \\#renderPipeline pipe { layout=auto vertex={ module=$wgsl.shader } }
+        \\#renderPipeline pipe { layout=auto vertex={ module=shader } }
         \\#bindGroup myBindGroup { layout={ pipeline=pipe index=0 } entries=[{ binding=0 resource={ buffer=buf } }] }
         \\#renderPass pass { pipeline=pipe bindGroups=[myBindGroup] draw=3 }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -635,15 +632,15 @@ test "Emitter: bind group with bare identifier reference" {
     try testing.expect(found_draw);
 }
 
-test "Emitter: bind group with explicit $buffer reference" {
-    // Tests that entries=[{ binding=0 resource={ buffer=$buffer.name } }] works
+test "Emitter: bind group with buffer reference" {
+    // Tests that entries=[{ binding=0 resource={ buffer=name } }] works
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() { }" }
         \\#buffer uniformBuf { size=16 usage=[UNIFORM] }
-        \\#renderPipeline pipe { layout=auto vertex={ module=$wgsl.shader } }
-        \\#bindGroup myBindGroup { layout={ pipeline=pipe index=0 } entries=[{ binding=0 resource={ buffer=$buffer.uniformBuf } }] }
+        \\#renderPipeline pipe { layout=auto vertex={ module=shader } }
+        \\#bindGroup myBindGroup { layout={ pipeline=pipe index=0 } entries=[{ binding=0 resource={ buffer=uniformBuf } }] }
         \\#renderPass pass { pipeline=pipe bindGroups=[myBindGroup] draw=3 }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -671,10 +668,10 @@ test "Emitter: bind group selects second buffer correctly" {
         \\#buffer firstBuffer { size=100 usage=[VERTEX] }
         \\#buffer secondBuffer { size=200 usage=[UNIFORM] }
         \\#buffer thirdBuffer { size=300 usage=[STORAGE] }
-        \\#renderPipeline pipe { layout=auto vertex={ module=$wgsl.shader } }
+        \\#renderPipeline pipe { layout=auto vertex={ module=shader } }
         \\#bindGroup myBindGroup { layout={ pipeline=pipe index=0 } entries=[{ binding=0 resource={ buffer=secondBuffer } }] }
         \\#renderPass pass { pipeline=pipe bindGroups=[myBindGroup] draw=3 }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -715,10 +712,10 @@ test "Emitter: bind group direct buffer syntax (alternative)" {
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() { }" }
         \\#buffer buf { size=16 usage=[UNIFORM] }
-        \\#renderPipeline pipe { layout=auto vertex={ module=$wgsl.shader } }
+        \\#renderPipeline pipe { layout=auto vertex={ module=shader } }
         \\#bindGroup myBindGroup { layout={ pipeline=pipe index=0 } entries=[{ binding=0 buffer=buf }] }
         \\#renderPass pass { pipeline=pipe bindGroups=[myBindGroup] draw=3 }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -768,10 +765,10 @@ test "Emitter: queue with writeBuffer emits write_buffer opcode" {
 }
 
 test "Emitter: queue with buffer reference" {
-    // Test that queue can reference buffer by $buffer.name syntax
+    // Test that queue can reference buffer by bare identifier
     const source: [:0]const u8 =
         \\#buffer uniformBuf { size=16 usage=[UNIFORM COPY_DST] }
-        \\#queue writeUniforms { writeBuffer={ buffer=$buffer.uniformBuf data=[1.0 2.0 3.0 4.0] } }
+        \\#queue writeUniforms { writeBuffer={ buffer=uniformBuf data=[1.0 2.0 3.0 4.0] } }
         \\#frame main { perform=[writeUniforms] }
     ;
 
@@ -797,10 +794,10 @@ test "Emitter: queue invoked alongside render pass" {
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {}" }
         \\#buffer uniformBuf { size=4 usage=[UNIFORM COPY_DST] }
-        \\#renderPipeline pipe { vertex={ module=$wgsl.shader } }
+        \\#renderPipeline pipe { vertex={ module=shader } }
         \\#renderPass pass { pipeline=pipe draw=3 }
         \\#queue writeUniforms { writeBuffer={ buffer=uniformBuf data=[0.5] } }
-        \\#frame main { perform=[writeUniforms $renderPass.pass] }
+        \\#frame main { perform=[writeUniforms pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -875,12 +872,12 @@ test "Emitter: queue writeBuffer with default offset (no bufferOffset)" {
     try testing.expect(found_write_buffer);
 }
 
-test "Emitter: queue writeBuffer with $queue.name reference in perform" {
-    // Test that $queue.name syntax works in perform array
+test "Emitter: queue writeBuffer with bare identifier in perform" {
+    // Test that bare identifier syntax works in perform array
     const source: [:0]const u8 =
         \\#buffer uniformBuf { size=4 usage=[UNIFORM COPY_DST] }
         \\#queue writeUniforms { writeBuffer={ buffer=uniformBuf data=[0.5] } }
-        \\#frame main { perform=[$queue.writeUniforms] }
+        \\#frame main { perform=[writeUniforms] }
     ;
 
     const pngb = try compileSource(source);
@@ -1214,11 +1211,12 @@ test "Emitter: render pipeline complete rotating_cube style" {
 }
 
 test "Emitter: texture with canvas size uses canvas-size encoding" {
-    // Regression test: texture with size=["$canvas.width", "$canvas.height"]
+    // Regression test: texture with size=[canvas.width canvas.height]
     // should encode without explicit width/height (runtime uses canvas dimensions)
+    // This test uses the NEW syntax without $ or quotes
     const source: [:0]const u8 =
         \\#texture depthTexture {
-        \\  size=["$canvas.width", "$canvas.height"]
+        \\  size=[canvas.width canvas.height]
         \\  format=depth24plus
         \\  usage=[RENDER_ATTACHMENT]
         \\}
@@ -1297,7 +1295,7 @@ test "Emitter: render pass with depth attachment emits depth texture ID" {
         \\  }
         \\  draw=3
         \\}
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -1349,9 +1347,9 @@ test "Emitter: draw with #define identifier resolves to numeric value" {
     const source: [:0]const u8 =
         \\#define CUBE_VERTEX_COUNT=36
         \\#wgsl shader { value="@vertex fn vs() {}" }
-        \\#renderPipeline pipe { vertex={ module=$wgsl.shader } }
+        \\#renderPipeline pipe { vertex={ module=shader } }
         \\#renderPass pass { pipeline=pipe draw=CUBE_VERTEX_COUNT }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -1389,9 +1387,9 @@ test "Emitter: drawIndexed with #define identifier emits correct bytecode" {
     const source: [:0]const u8 =
         \\#define MESH_INDEX_COUNT=72
         \\#wgsl shader { value="@vertex fn vs() {}" }
-        \\#renderPipeline pipe { vertex={ module=$wgsl.shader } }
+        \\#renderPipeline pipe { vertex={ module=shader } }
         \\#renderPass pass { pipeline=pipe drawIndexed=MESH_INDEX_COUNT }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -1422,14 +1420,13 @@ test "Emitter: drawIndexed with #define identifier emits correct bytecode" {
 }
 
 test "Emitter: vertexBuffers with bare identifier emits set_vertex_buffer" {
-    // Regression test: vertexBuffers=[verticesBuffer] with bare identifier (not $buffer.x)
-    // Previously only $buffer.name references worked.
+    // Regression test: vertexBuffers=[verticesBuffer] with bare identifier
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {}" }
         \\#buffer verticesBuffer { size=1440 usage=[VERTEX] }
-        \\#renderPipeline pipe { vertex={ module=$wgsl.shader } }
+        \\#renderPipeline pipe { vertex={ module=shader } }
         \\#renderPass pass { pipeline=pipe vertexBuffers=[verticesBuffer] draw=36 }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -1454,9 +1451,9 @@ test "Emitter: vertexBuffers with bare identifier executes correctly" {
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {}" }
         \\#buffer verticesBuffer { size=1440 usage=[VERTEX] }
-        \\#renderPipeline pipe { vertex={ module=$wgsl.shader } }
+        \\#renderPipeline pipe { vertex={ module=shader } }
         \\#renderPass pass { pipeline=pipe vertexBuffers=[verticesBuffer] draw=36 }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -1498,8 +1495,8 @@ test "Emitter: rotating_cube style render pass with all commands" {
         \\#buffer inputsBuffer { size=12 usage=[UNIFORM COPY_DST] }
         \\#renderPipeline renderCube {
         \\  layout=auto
-        \\  vertex={ module=$wgsl.cubeShader }
-        \\  fragment={ module=$wgsl.cubeShader }
+        \\  vertex={ module=cubeShader }
+        \\  fragment={ module=cubeShader }
         \\}
         \\#bindGroup inputsBinding {
         \\  layout={ pipeline=renderCube index=0 }
@@ -1511,7 +1508,7 @@ test "Emitter: rotating_cube style render pass with all commands" {
         \\  vertexBuffers=[verticesBuffer]
         \\  draw=CUBE_VERTEX_COUNT
         \\}
-        \\#frame main { perform=[$renderPass.cubePass] }
+        \\#frame main { perform=[cubePass] }
     ;
 
     const pngb = try compileSource(source);
@@ -1582,9 +1579,9 @@ test "Emitter: multiple vertex buffers with bare identifiers" {
         \\#buffer positionBuffer { size=1024 usage=[VERTEX] }
         \\#buffer normalBuffer { size=1024 usage=[VERTEX] }
         \\#buffer uvBuffer { size=512 usage=[VERTEX] }
-        \\#renderPipeline pipe { vertex={ module=$wgsl.shader } }
+        \\#renderPipeline pipe { vertex={ module=shader } }
         \\#renderPass pass { pipeline=pipe vertexBuffers=[positionBuffer normalBuffer uvBuffer] draw=36 }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -1714,10 +1711,9 @@ test "Emitter: textureUsesCanvasSize detects runtime_interpolation nodes" {
 test "Emitter: imageBitmap with inline data" {
     // Note: #imageBitmap requires file path or data reference.
     // Since we can't use file paths in tests, we test the data reference pattern.
-    // The DSL syntax: #imageBitmap name { image=$data.blobName }
     const source: [:0]const u8 =
         \\#data imageBlob { blob="test_image.png" }
-        \\#imageBitmap myImage { image=$data.imageBlob }
+        \\#imageBitmap myImage { image=imageBlob }
         \\#frame main { perform=[] }
     ;
 
@@ -1747,7 +1743,7 @@ test "Emitter: queue copyExternalImageToTexture syntax" {
         \\  usage=[TEXTURE_BINDING COPY_DST]
         \\}
         \\#data imageBlob { blob="test.png" }
-        \\#imageBitmap srcBitmap { image=$data.imageBlob }
+        \\#imageBitmap srcBitmap { image=imageBlob }
         \\#queue uploadTexture {
         \\  copyExternalImageToTexture={
         \\    source={ source=srcBitmap }
@@ -1777,7 +1773,7 @@ test "Emitter: queue copyExternalImageToTexture with mip level" {
         \\  usage=[TEXTURE_BINDING COPY_DST]
         \\}
         \\#data imageBlob { blob="test.png" }
-        \\#imageBitmap srcBitmap { image=$data.imageBlob }
+        \\#imageBitmap srcBitmap { image=imageBlob }
         \\#queue uploadTexture {
         \\  copyExternalImageToTexture={
         \\    source={ source=srcBitmap }
@@ -1806,7 +1802,7 @@ test "Emitter: queue copyExternalImageToTexture with origin offset" {
         \\  usage=[TEXTURE_BINDING COPY_DST]
         \\}
         \\#data imageBlob { blob="test.png" }
-        \\#imageBitmap srcBitmap { image=$data.imageBlob }
+        \\#imageBitmap srcBitmap { image=imageBlob }
         \\#queue uploadTexture {
         \\  copyExternalImageToTexture={
         \\    source={ source=srcBitmap }
@@ -1830,8 +1826,8 @@ test "Emitter: multiple imageBitmaps" {
     const source: [:0]const u8 =
         \\#data imageBlob1 { blob="image1.png" }
         \\#data imageBlob2 { blob="image2.png" }
-        \\#imageBitmap image1 { image=$data.imageBlob1 }
-        \\#imageBitmap image2 { image=$data.imageBlob2 }
+        \\#imageBitmap image1 { image=imageBlob1 }
+        \\#imageBitmap image2 { image=imageBlob2 }
         \\#frame main { perform=[] }
     ;
 
@@ -1844,8 +1840,8 @@ test "Emitter: multiple imageBitmaps" {
     }
 }
 
-test "Emitter: imageBitmap referenced in queue $imageBitmap.name" {
-    // Test that $imageBitmap.name reference syntax works
+test "Emitter: imageBitmap referenced in queue" {
+    // Test that bare identifier reference syntax works
     const source: [:0]const u8 =
         \\#texture destTexture {
         \\  width=256
@@ -1854,14 +1850,14 @@ test "Emitter: imageBitmap referenced in queue $imageBitmap.name" {
         \\  usage=[TEXTURE_BINDING COPY_DST]
         \\}
         \\#data imageBlob { blob="test.png" }
-        \\#imageBitmap srcBitmap { image=$data.imageBlob }
+        \\#imageBitmap srcBitmap { image=imageBlob }
         \\#queue uploadTexture {
         \\  copyExternalImageToTexture={
-        \\    source={ source=$imageBitmap.srcBitmap }
-        \\    destination={ texture=$texture.destTexture }
+        \\    source={ source=srcBitmap }
+        \\    destination={ texture=destTexture }
         \\  }
         \\}
-        \\#frame main { perform=[$queue.uploadTexture] }
+        \\#frame main { perform=[uploadTexture] }
     ;
 
     const result = compileSource(source);
@@ -2070,7 +2066,7 @@ test "Emitter: rotating_cube style wgsl + shaderModule pattern" {
         \\  fragment={ entrypoint=fragMain module=cubeShaderModule }
         \\}
         \\#renderPass drawCube { pipeline=renderCube draw=36 }
-        \\#frame main { perform=[$renderPass.drawCube] }
+        \\#frame main { perform=[drawCube] }
     ;
 
     const pngb = try compileSource(source);
@@ -2232,6 +2228,43 @@ test "Emitter: data with blob still works alongside wasm feature" {
 }
 
 // ============================================================================
+// Canvas/Time Builtin Refs Tests
+// ============================================================================
+//
+// These tests verify that the new canvas.width, time.total syntax works
+// without requiring $ prefix or quotes.
+
+test "Emitter: canvas.width time.total in texture size parses correctly" {
+    // Goal: Verify new builtin ref syntax parses and compiles in texture size.
+    // Method: Use canvas.width canvas.height without $ or quotes in size array.
+
+    const source: [:0]const u8 =
+        \\#texture renderTarget {
+        \\  size=[canvas.width canvas.height]
+        \\  format=rgba8unorm
+        \\  usage=[RENDER_ATTACHMENT TEXTURE_BINDING]
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Verify the bytecode contains create_texture opcode
+    var found_create_texture = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.create_texture)) {
+            found_create_texture = true;
+            break;
+        }
+    }
+    try testing.expect(found_create_texture);
+}
+
+// ============================================================================
 // Vertex Buffer stepMode Tests
 // ============================================================================
 //
@@ -2257,7 +2290,7 @@ test "Emitter: vertex buffer with stepMode=instance" {
         \\#renderPipeline pipe {
         \\  layout=auto
         \\  vertex={
-        \\    module=$wgsl.shader
+        \\    module=shader
         \\    entryPoint=vs
         \\    buffers=[{
         \\      arrayStride=32
@@ -2268,10 +2301,10 @@ test "Emitter: vertex buffer with stepMode=instance" {
         \\      ]
         \\    }]
         \\  }
-        \\  fragment={ module=$wgsl.shader entryPoint=fs }
+        \\  fragment={ module=shader entryPoint=fs }
         \\}
         \\#renderPass pass { pipeline=pipe draw=6 instances=1000 }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -2316,7 +2349,7 @@ test "Emitter: vertex buffer with stepMode=vertex (default)" {
         \\#renderPipeline pipe {
         \\  layout=auto
         \\  vertex={
-        \\    module=$wgsl.shader
+        \\    module=shader
         \\    buffers=[{
         \\      arrayStride=16
         \\      stepMode=vertex
@@ -2325,7 +2358,7 @@ test "Emitter: vertex buffer with stepMode=vertex (default)" {
         \\  }
         \\}
         \\#renderPass pass { pipeline=pipe draw=3 }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -2354,7 +2387,7 @@ test "Emitter: vertex buffer without stepMode uses default" {
         \\#renderPipeline pipe {
         \\  layout=auto
         \\  vertex={
-        \\    module=$wgsl.shader
+        \\    module=shader
         \\    buffers=[{
         \\      arrayStride=16
         \\      attributes=[{ shaderLocation=0 offset=0 format=float32x4 }]
@@ -2362,7 +2395,7 @@ test "Emitter: vertex buffer without stepMode uses default" {
         \\  }
         \\}
         \\#renderPass pass { pipeline=pipe draw=3 }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -2393,7 +2426,7 @@ test "Emitter: multiple vertex buffers with different stepModes" {
         \\#renderPipeline pipe {
         \\  layout=auto
         \\  vertex={
-        \\    module=$wgsl.shader
+        \\    module=shader
         \\    buffers=[
         \\      {
         \\        arrayStride=12
@@ -2409,7 +2442,7 @@ test "Emitter: multiple vertex buffers with different stepModes" {
         \\  }
         \\}
         \\#renderPass pass { pipeline=pipe draw=36 instances=100 }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -2443,9 +2476,9 @@ test "Emitter: buffer with pool=2 creates pooled resources" {
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {}" }
         \\#buffer particles { size=4096 usage=[VERTEX STORAGE] pool=2 }
-        \\#renderPipeline pipe { layout=auto vertex={ module=$wgsl.shader } }
+        \\#renderPipeline pipe { layout=auto vertex={ module=shader } }
         \\#renderPass pass { pipeline=pipe draw=1000 }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try compileSource(source);
@@ -2479,7 +2512,7 @@ test "Emitter: buffer with pool=2 creates pooled resources" {
 // ============================================================================
 
 test "Emitter: buffer size from WGSL binding reference" {
-    // Test that size=$wgsl.shader.binding auto-resolves via reflection.
+    // Test that size=shader.binding auto-resolves via reflection.
     // This requires miniray to be available at the expected location.
     const source: [:0]const u8 =
         \\#wgsl shader {
@@ -2492,10 +2525,10 @@ test "Emitter: buffer size from WGSL binding reference" {
         \\    @vertex fn vs() -> @builtin(position) vec4<f32> { return vec4f(0.0); }
         \\  "
         \\}
-        \\#buffer uniforms { size=$wgsl.shader.inputs usage=[UNIFORM COPY_DST] }
-        \\#renderPipeline pipe { layout=auto vertex={ module=$wgsl.shader } }
+        \\#buffer uniforms { size=shader.inputs usage=[UNIFORM COPY_DST] }
+        \\#renderPipeline pipe { layout=auto vertex={ module=shader } }
         \\#renderPass pass { pipeline=pipe draw=3 }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#frame main { perform=[pass] }
     ;
 
     // Parse and analyze

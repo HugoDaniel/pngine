@@ -1,358 +1,131 @@
 ---
 .title = "DSL Syntax",
-.description = "Macro-based language reference",
+.description = "Quick language overview",
 .author = "PNGine Team",
 .date = @date("2024-12-18"),
 .layout = "docs.shtml",
 ---
 
-## Structure
+This page provides a quick overview of PNGine DSL syntax. For complete documentation of each macro, see the [DSL Reference](/docs/dsl/).
+
+## Basic Structure
 
 A `.pngine` file contains macro declarations. Each macro starts with `#` followed by the macro type and name:
 
-```
+```pngine
 #macroType name {
-  field=value
-  field2=[array values]
+  property=value
+  array=[item1 item2]
   nested={ key=value }
 }
 ```
 
-## Macros
+## Value Types
 
-### #shaderModule
+| Type | Example | Description |
+|------|---------|-------------|
+| String | `"WGSL code"` | Quoted text |
+| Number | `123`, `0.5`, `0xFF` | Decimal, float, or hex |
+| Boolean | `true`, `false` | Boolean values |
+| Identifier | `myName` | Bareword (auto-resolved) |
+| Reference | `$buffer.name` | Explicit reference |
+| Array | `[a b c]` | Space-separated list |
+| Object | `{x=1 y=2}` | Key-value pairs |
+| Expression | `"4*16"` | Compile-time arithmetic |
 
-Defines WGSL shader code.
+## Quick Reference
 
-```
-#shaderModule name {
-  code="WGSL source code"
+| Macro | Purpose | Details |
+|-------|---------|---------|
+| `#wgsl` | Shader fragment | [Full docs](/docs/dsl/wgsl/) |
+| `#shaderModule` | Shader module | [Full docs](/docs/dsl/shader-module/) |
+| `#buffer` | GPU buffer | [Full docs](/docs/dsl/buffer/) |
+| `#texture` | GPU texture | [Full docs](/docs/dsl/texture/) |
+| `#sampler` | Texture sampler | [Full docs](/docs/dsl/sampler/) |
+| `#bindGroup` | Resource binding | [Full docs](/docs/dsl/bind-group/) |
+| `#renderPipeline` | Render pipeline | [Full docs](/docs/dsl/render-pipeline/) |
+| `#computePipeline` | Compute pipeline | [Full docs](/docs/dsl/compute-pipeline/) |
+| `#renderPass` | Render pass | [Full docs](/docs/dsl/render-pass/) |
+| `#computePass` | Compute pass | [Full docs](/docs/dsl/compute-pass/) |
+| `#frame` | Frame execution | [Full docs](/docs/dsl/frame/) |
+| `#data` | Embedded data | [Full docs](/docs/dsl/data/) |
+| `#queue` | Queue operations | [Full docs](/docs/dsl/queue/) |
+| `#define` | Constants | [Full docs](/docs/dsl/define/) |
+| `#animation` | Scene animation | [Full docs](/docs/dsl/animation/) |
+
+## Minimal Example
+
+```pngine
+#shaderModule code {
+  code="
+    @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      var pos = array<vec2f, 3>(
+        vec2f(0.0, 0.5),
+        vec2f(-0.5, -0.5),
+        vec2f(0.5, -0.5)
+      );
+      return vec4f(pos[i], 0.0, 1.0);
+    }
+
+    @fragment fn fs() -> @location(0) vec4f {
+      return vec4f(1.0, 0.0, 0.0, 1.0);
+    }
+  "
 }
-```
 
-### #buffer
-
-Creates a GPU buffer.
-
-```
-#buffer name {
-  size=1024                    // Size in bytes or reference to #data
-  usage=[VERTEX STORAGE]       // Usage flags
-  mappedAtCreation=dataRef     // Optional: initialize with #data
-  pool=2                       // Optional: create N buffers for ping-pong
-}
-```
-
-**Usage flags:** `VERTEX`, `INDEX`, `UNIFORM`, `STORAGE`, `COPY_SRC`, `COPY_DST`, `MAP_READ`, `MAP_WRITE`, `INDIRECT`, `QUERY_RESOLVE`
-
-### #texture
-
-Creates a GPU texture.
-
-```
-#texture name {
-  size=[512 512]               // [width, height] or [width, height, depth]
-  format=rgba8unorm            // Texture format
-  usage=[TEXTURE_BINDING RENDER_ATTACHMENT]
-  sampleCount=4                // Optional: for MSAA
-}
-```
-
-**Common formats:** `rgba8unorm`, `bgra8unorm`, `rgba16float`, `rgba32float`, `depth24plus`, `depth32float`
-
-### #sampler
-
-Creates a texture sampler.
-
-```
-#sampler name {
-  magFilter=linear
-  minFilter=linear
-  addressModeU=repeat
-  addressModeV=repeat
-}
-```
-
-**Filter modes:** `nearest`, `linear`
-**Address modes:** `clamp-to-edge`, `repeat`, `mirror-repeat`
-
-### #textureView
-
-Creates a view into a texture.
-
-```
-#textureView name {
-  texture=textureName
-  format=rgba8unorm            // Optional: override format
-  dimension=2d                 // Optional: 1d, 2d, 2d-array, cube, cube-array, 3d
-  baseMipLevel=0
-  mipLevelCount=1
-  baseArrayLayer=0
-  arrayLayerCount=1
-}
-```
-
-### #bindGroupLayout
-
-Defines the layout of a bind group.
-
-```
-#bindGroupLayout name {
-  entries=[
-    { binding=0 visibility=[VERTEX FRAGMENT] buffer={ type=uniform } }
-    { binding=1 visibility=[FRAGMENT] texture={ sampleType=float } }
-    { binding=2 visibility=[FRAGMENT] sampler={ type=filtering } }
-  ]
-}
-```
-
-### #pipelineLayout
-
-Defines layout for a pipeline.
-
-```
-#pipelineLayout name {
-  bindGroupLayouts=[layout0 layout1]
-}
-```
-
-### #bindGroup
-
-Binds resources to shader bindings.
-
-```
-#bindGroup name {
-  layout={ pipeline=pipelineName index=0 }  // Derive from pipeline
-  // or: layout=bindGroupLayoutName          // Explicit layout
-  entries=[
-    { binding=0 resource={ buffer=bufferName } }
-    { binding=1 resource={ textureView=textureName } }
-    { binding=2 resource={ sampler=samplerName } }
-  ]
-  pool=2                                     // Optional: for ping-pong
-}
-```
-
-### #renderPipeline
-
-Creates a render pipeline.
-
-```
-#renderPipeline name {
-  layout=auto                  // or: layout=pipelineLayoutName
-  vertex={
-    entryPoint=vertexMain
-    module=shaderName
-    buffers=[                  // Optional: vertex buffer layouts
-      {
-        arrayStride=16
-        stepMode=vertex        // vertex or instance
-        attributes=[
-          { shaderLocation=0 offset=0 format=float32x4 }
-        ]
-      }
-    ]
-  }
-  fragment={
-    entryPoint=fragMain
-    module=shaderName
-    targets=[{ format=preferredCanvasFormat }]
-  }
-  primitive={
-    topology=triangle-list     // point-list, line-list, line-strip, triangle-list, triangle-strip
-    cullMode=back              // none, front, back
-    frontFace=ccw              // ccw, cw
-  }
-  depthStencil={               // Optional
-    format=depth24plus
-    depthWriteEnabled=true
-    depthCompare=less
-  }
-  multisample=4                // Optional: MSAA sample count
-}
-```
-
-### #computePipeline
-
-Creates a compute pipeline.
-
-```
-#computePipeline name {
+#renderPipeline pipeline {
   layout=auto
-  compute={
-    entryPoint=main
-    module=shaderName
-  }
+  vertex={ module=code entryPoint=vs }
+  fragment={ module=code entryPoint=fs targets=[{ format=preferredCanvasFormat }] }
 }
-```
 
-### #renderPass
-
-Defines a render pass.
-
-```
-#renderPass name {
+#renderPass pass {
   colorAttachments=[{
-    view=contextCurrentTexture  // or: view=textureName
-    resolveTarget=textureName   // Optional: for MSAA resolve
+    view=contextCurrentTexture
     clearValue=[0 0 0 1]
-    loadOp=clear                // clear or load
-    storeOp=store               // store or discard
+    loadOp=clear
+    storeOp=store
   }]
-  depthStencilAttachment={      // Optional
-    view=depthTexture
-    depthClearValue=1.0
-    depthLoadOp=clear
-    depthStoreOp=store
-  }
-  pipeline=pipelineName
-  bindGroups=[group0 group1]
-  vertexBuffers=[buf0 buf1]
-  vertexBuffersPoolOffsets=[0 1]  // Optional: for ping-pong
-  draw=3                        // Vertex count
-  // or: draw={ vertexCount=3 instanceCount=100 firstVertex=0 firstInstance=0 }
-  // or: drawIndexed={ indexCount=36 instanceCount=1 }
-}
-```
-
-### #computePass
-
-Defines a compute pass.
-
-```
-#computePass name {
-  pipeline=pipelineName
-  bindGroups=[group0]
-  bindGroupsPoolOffsets=[0]     // Optional: for ping-pong
-  dispatchWorkgroups=[8 8 1]
-  // or: dispatchWorkgroups=64  // Single dimension
-  // or: dispatchWorkgroups="ceil(NUM_PARTICLES / 64)"  // Expression
-}
-```
-
-### #queue
-
-Queue operations for buffer writes.
-
-```
-#queue name {
-  writeBuffer={
-    buffer=bufferName
-    bufferOffset=0
-    data=dataName               // Reference to #data
-    // or: data="$uniforms.code.inputs.data"  // Runtime value
-  }
-}
-```
-
-### #data
-
-Defines data arrays.
-
-```
-#data name {
-  float32Array=[1.0 2.0 3.0 4.0]
+  pipeline=pipeline
+  draw=3
 }
 
-// With computed initialization
-#data particles {
-  float32Array={
-    numberOfElements=1024
-    initEachElementWith=[
-      "cos((ELEMENT_ID / 1024) * PI * 2)"
-      "sin((ELEMENT_ID / 1024) * PI * 2)"
-    ]
-  }
-}
-```
-
-### #frame
-
-Defines a frame to execute.
-
-```
-#frame name {
-  before=[queueOp1 queueOp2]   // Optional: pre-frame operations
-  perform=[pass1 pass2]        // Render/compute passes in order
-}
-```
-
-### #define
-
-Defines a compile-time constant.
-
-```
-#define NUM_PARTICLES=2048
-#define SAMPLE_COUNT=4
-```
-
-Use in expressions: `size=NUM_PARTICLES`, `multisample=SAMPLE_COUNT`
-
-### #querySet
-
-Creates a query set for GPU queries.
-
-```
-#querySet name {
-  type=occlusion               // occlusion or timestamp
-  count=16
+#frame main {
+  perform=[pass]
 }
 ```
 
 ## References
 
-Reference other resources with their name directly:
+Resources reference each other using bare names or explicit `$namespace.name` syntax:
 
+```pngine
+// Bare identifier (auto-resolved)
+pipeline=myPipeline
+
+// Explicit reference
+pipeline=$renderPipeline.myPipeline
 ```
-#renderPass pass {
-  pipeline=myPipeline          // References #renderPipeline myPipeline
-  bindGroups=[group0 group1]   // References #bindGroup resources
-}
-```
 
-## Special Values
-
-| Value | Description |
-|-------|-------------|
-| `contextCurrentTexture` | Current canvas texture (for render targets) |
-| `preferredCanvasFormat` | Browser's preferred texture format |
-| `auto` | Auto-derive layout from shader reflection |
+See [References](/docs/dsl/references/) for complete documentation.
 
 ## Expressions
 
-Numeric fields support expressions:
+Numeric fields support compile-time expressions:
 
-```
-size="4 * 1024"                // 4096
+```pngine
+#define NUM_PARTICLES=2048
+
+size="NUM_PARTICLES * 16"
 dispatchWorkgroups="ceil(NUM_PARTICLES / 64)"
-arrayStride="4 * 4"            // 16 bytes for vec4
 ```
 
-Available: `+`, `-`, `*`, `/`, `ceil`, `floor`, `PI`, `ELEMENT_ID`, `NUM_PARTICLES`, defined constants
+Available: `+`, `-`, `*`, `/`, `PI`, `E`, `TAU`, `ceil()`, `floor()`
 
-## Ping-Pong Buffers
+See [Expressions](/docs/dsl/expressions/) for complete documentation.
 
-For compute simulations requiring double-buffering:
+## Next Steps
 
-```
-#buffer particles {
-  size=32768
-  usage=[VERTEX STORAGE]
-  pool=2                       // Creates particles_0, particles_1
-}
-
-#bindGroup sim {
-  entries=[
-    { binding=0 resource={ buffer=particles pingPong=0 } }  // Read
-    { binding=1 resource={ buffer=particles pingPong=1 } }  // Write
-  ]
-  pool=2
-}
-
-#computePass update {
-  bindGroups=[sim]
-  bindGroupsPoolOffsets=[0]    // Alternates each frame
-}
-```
-
-The runtime alternates: `actual_id = base_id + (frame_count + offset) % pool_size`
+- [DSL Reference](/docs/dsl/) - Complete macro documentation
+- [Getting Started](/docs/getting-started/) - Build your first PNGine program
+- [CLI Reference](/docs/cli/) - Command-line tools

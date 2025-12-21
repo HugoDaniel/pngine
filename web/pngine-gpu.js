@@ -1493,6 +1493,8 @@ export class PNGineGPU {
                     self.fillConstant(arrayId, offset, count, stride, valuePtr),
                 gpuWriteBufferFromArray: (bufferId, bufferOffset, arrayId) =>
                     self.writeBufferFromArray(bufferId, bufferOffset, arrayId),
+                gpuWriteTimeUniform: (bufferId, bufferOffset, size) =>
+                    self.writeTimeUniform(bufferId, bufferOffset, size),
                 gpuDebugLog: (msgType, value) => {
                     // Debug logging for pass execution tracing
                     if (msgType === 10) console.log(`[WASM] exec_pass id=${value}`);
@@ -1680,6 +1682,37 @@ export class PNGineGPU {
         // Mark array as filled once written to at least one buffer
         // (fill operations can be skipped on subsequent frames)
         entry.filled = true;
+    }
+
+    /**
+     * Write time/canvas uniform data to GPU buffer.
+     * Writes f32 values: time, canvas_width, canvas_height[, aspect_ratio] based on size.
+     * @param {number} bufferId - Buffer identifier
+     * @param {number} bufferOffset - Offset in buffer (bytes)
+     * @param {number} size - Number of bytes to write (12 or 16)
+     */
+    writeTimeUniform(bufferId, bufferOffset, size) {
+        const buffer = this.buffers.get(bufferId);
+        if (!buffer) {
+            console.error(`[GPU] writeTimeUniform: missing buffer ${bufferId}`);
+            return;
+        }
+
+        // Get current time and canvas dimensions
+        const time = this.time ?? 0.0;
+        const width = this.canvas?.width ?? 512;
+        const height = this.canvas?.height ?? 512;
+        const aspectRatio = width / height;
+
+        // Create uniform data based on size
+        let data;
+        if (size >= 16) {
+            data = new Float32Array([time, width, height, aspectRatio]);
+        } else {
+            data = new Float32Array([time, width, height]);
+        }
+
+        this.device.queue.writeBuffer(buffer, bufferOffset, data);
     }
 
     /**

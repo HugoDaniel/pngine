@@ -405,7 +405,6 @@ pub const Parser = struct {
                 }
                 return try self.parseSimpleValue(.identifier_value);
             },
-            .dollar => return try self.parseReference(),
             .l_bracket, .l_brace => {}, // Fall through to iterative parsing
             else => return null,
         }
@@ -612,20 +611,26 @@ pub const Parser = struct {
                 try self.scratch.append(self.gpa, elem.toInt());
             },
             .identifier => {
-                // Check if identifier is a math constant (PI, E, TAU)
-                const token_start = self.tokens.items(.start)[self.tok_i];
-                const token_end = if (self.tok_i + 1 < self.tokens.len)
-                    self.tokens.items(.start)[self.tok_i + 1]
-                else
-                    @as(u32, @intCast(self.source.len));
-                const text = std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r");
-                const node_tag: Node.Tag = if (isMathConstant(text)) .number_value else .identifier_value;
-                const elem = try self.parseSimpleValue(node_tag);
-                try self.scratch.append(self.gpa, elem.toInt());
-            },
-            .dollar => {
-                const elem = try self.parseReference();
-                try self.scratch.append(self.gpa, elem.toInt());
+                // Check for builtin ref pattern (canvas.width, time.total)
+                if (self.isBuiltinRefPattern()) {
+                    const elem = try self.parseBuiltinRef();
+                    try self.scratch.append(self.gpa, elem.toInt());
+                } else if (self.isUniformAccessPattern()) {
+                    // Check for uniform access pattern (module.varName)
+                    const elem = try self.parseUniformAccess();
+                    try self.scratch.append(self.gpa, elem.toInt());
+                } else {
+                    // Check if identifier is a math constant (PI, E, TAU)
+                    const token_start = self.tokens.items(.start)[self.tok_i];
+                    const token_end = if (self.tok_i + 1 < self.tokens.len)
+                        self.tokens.items(.start)[self.tok_i + 1]
+                    else
+                        @as(u32, @intCast(self.source.len));
+                    const text = std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r");
+                    const node_tag: Node.Tag = if (isMathConstant(text)) .number_value else .identifier_value;
+                    const elem = try self.parseSimpleValue(node_tag);
+                    try self.scratch.append(self.gpa, elem.toInt());
+                }
             },
             .l_bracket, .l_brace => {
                 // Nested container - push task (result will come later)
@@ -733,24 +738,23 @@ pub const Parser = struct {
                 try self.scratch.append(self.gpa, prop.toInt());
             },
             .identifier => {
-                // Check if identifier is a math constant (PI, E, TAU)
-                const token_start = self.tokens.items(.start)[self.tok_i];
-                const token_end = if (self.tok_i + 1 < self.tokens.len)
-                    self.tokens.items(.start)[self.tok_i + 1]
-                else
-                    @as(u32, @intCast(self.source.len));
-                const text = std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r");
-                const node_tag: Node.Tag = if (isMathConstant(text)) .number_value else .identifier_value;
-                const value = try self.parseSimpleValue(node_tag);
-                const prop = try self.addNode(.{
-                    .tag = .property,
-                    .main_token = key_token,
-                    .data = .{ .node = value },
-                });
-                try self.scratch.append(self.gpa, prop.toInt());
-            },
-            .dollar => {
-                const value = try self.parseReference();
+                // Check for builtin ref pattern (canvas.width, time.total)
+                // or uniform access pattern (module.varName)
+                const value = if (self.isBuiltinRefPattern())
+                    try self.parseBuiltinRef()
+                else if (self.isUniformAccessPattern())
+                    try self.parseUniformAccess()
+                else blk: {
+                    // Check if identifier is a math constant (PI, E, TAU)
+                    const token_start = self.tokens.items(.start)[self.tok_i];
+                    const token_end = if (self.tok_i + 1 < self.tokens.len)
+                        self.tokens.items(.start)[self.tok_i + 1]
+                    else
+                        @as(u32, @intCast(self.source.len));
+                    const text = std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r");
+                    const node_tag: Node.Tag = if (isMathConstant(text)) .number_value else .identifier_value;
+                    break :blk try self.parseSimpleValue(node_tag);
+                };
                 const prop = try self.addNode(.{
                     .tag = .property,
                     .main_token = key_token,
@@ -769,36 +773,86 @@ pub const Parser = struct {
         return false;
     }
 
-    fn parseReference(self: *Self) Error!Node.Index {
-        // Pre-condition
-        std.debug.assert(self.currentTag() == .dollar);
+    // NOTE: The parseReference function has been removed.
+    // The $namespace.name reference syntax is no longer supported.
+    // Bare identifiers are now used everywhere and resolved based on context.
 
-        const dollar_token = self.tok_i;
-        self.tok_i += 1; // consume $
+    /// Check if identifier is a builtin namespace (canvas, time).
+    fn isBuiltinNamespace(self: *Self) bool {
+        if (self.currentTag() != .identifier) return false;
+        const text = self.getTokenText(self.tok_i);
+        return std.mem.eql(u8, text, "canvas") or std.mem.eql(u8, text, "time");
+    }
 
-        if (self.currentTag() != .identifier) return error.ParseError;
+    /// Check if current position is a builtin ref pattern (canvas.width, time.total).
+    fn isBuiltinRefPattern(self: *Self) bool {
+        if (!self.isBuiltinNamespace()) return false;
+        // Check for .identifier pattern following
+        if (self.tok_i + 2 >= self.tokens.len) return false;
+        if (self.tokens.items(.tag)[self.tok_i + 1] != .dot) return false;
+        if (self.tokens.items(.tag)[self.tok_i + 2] != .identifier) return false;
+        return true;
+    }
+
+    /// Parse a builtin ref (canvas.width, time.total).
+    fn parseBuiltinRef(self: *Self) Error!Node.Index {
+        // Pre-condition: at builtin namespace identifier
+        std.debug.assert(self.isBuiltinRefPattern());
+
         const namespace_token = self.tok_i;
         self.tok_i += 1; // consume namespace
-
-        // Consume all .identifier pairs (supports multi-part refs like $wgsl.shader.binding)
-        // Bounded loop: max 8 parts should be more than enough
-        var name_token: u32 = namespace_token;
-        for (0..8) |_| {
-            if (self.currentTag() != .dot) break;
-            self.tok_i += 1; // consume .
-            if (self.currentTag() != .identifier) return error.ParseError;
-            name_token = self.tok_i;
-            self.tok_i += 1; // consume identifier
-        }
-
-        // Post-condition
-        std.debug.assert(name_token >= namespace_token);
+        self.tok_i += 1; // consume .
+        const property_token = self.tok_i;
+        self.tok_i += 1; // consume property
 
         return try self.addNode(.{
-            .tag = .reference,
-            .main_token = dollar_token,
-            .data = .{ .node_and_node = .{ namespace_token, name_token } },
+            .tag = .builtin_ref,
+            .main_token = namespace_token,
+            .data = .{ .node_and_node = .{ namespace_token, property_token } },
         });
+    }
+
+    /// Check if current position is a uniform access pattern (module.varName).
+    /// This is similar to builtin_ref but for shader uniform references.
+    /// Returns true for identifier.identifier patterns that aren't builtin refs.
+    fn isUniformAccessPattern(self: *Self) bool {
+        // Must be identifier
+        if (self.currentTag() != .identifier) return false;
+        // Must NOT be a builtin namespace (canvas, time)
+        if (self.isBuiltinNamespace()) return false;
+        // Check for .identifier pattern following
+        if (self.tok_i + 2 >= self.tokens.len) return false;
+        if (self.tokens.items(.tag)[self.tok_i + 1] != .dot) return false;
+        if (self.tokens.items(.tag)[self.tok_i + 2] != .identifier) return false;
+        return true;
+    }
+
+    /// Parse a uniform access (module.varName).
+    fn parseUniformAccess(self: *Self) Error!Node.Index {
+        // Pre-condition: at module identifier
+        std.debug.assert(self.isUniformAccessPattern());
+
+        const module_token = self.tok_i;
+        self.tok_i += 1; // consume module
+        self.tok_i += 1; // consume .
+        const var_token = self.tok_i;
+        self.tok_i += 1; // consume varName
+
+        return try self.addNode(.{
+            .tag = .uniform_access,
+            .main_token = module_token,
+            .data = .{ .node_and_node = .{ module_token, var_token } },
+        });
+    }
+
+    /// Get token text for current position.
+    fn getTokenText(self: *Self, tok_i: u32) []const u8 {
+        const token_start = self.tokens.items(.start)[tok_i];
+        const token_end = if (tok_i + 1 < self.tokens.len)
+            self.tokens.items(.start)[tok_i + 1]
+        else
+            @as(u32, @intCast(self.source.len));
+        return std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r.=[]{}");
     }
 
     // Kept for backward compatibility with parsePropertyList

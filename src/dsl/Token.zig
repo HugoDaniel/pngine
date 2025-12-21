@@ -80,7 +80,6 @@ pub const Token = struct {
         equals, // =
         comma, // ,
         dot, // .
-        dollar, // $
 
         // Arithmetic operators (for compile-time constant expressions)
         plus, // +
@@ -104,7 +103,6 @@ pub const Token = struct {
                 .equals => "=",
                 .comma => ",",
                 .dot => ".",
-                .dollar => "$",
                 .plus => "+",
                 .minus => "-",
                 .star => "*",

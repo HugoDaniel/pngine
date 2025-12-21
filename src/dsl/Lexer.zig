@@ -151,10 +151,6 @@ pub const Lexer = struct {
                         result.tag = .dot;
                         self.index += 1;
                     },
-                    '$' => {
-                        result.tag = .dollar;
-                        self.index += 1;
-                    },
                     else => {
                         result.tag = .invalid;
                         self.index += 1;
@@ -418,7 +414,7 @@ test "Lexer: string with escapes" {
 }
 
 test "Lexer: punctuation" {
-    try expectTokens("{ } [ ] ( ) = , . $", &.{
+    try expectTokens("{ } [ ] ( ) = , .", &.{
         .l_brace,
         .r_brace,
         .l_bracket,
@@ -428,7 +424,6 @@ test "Lexer: punctuation" {
         .equals,
         .comma,
         .dot,
-        .dollar,
         .eof,
     });
 }
@@ -538,13 +533,8 @@ test "Lexer: slash vs comment" {
     });
 }
 
-test "Lexer: references" {
-    try expectTokens("$wgsl.helper $buffer.verts", &.{
-        .dollar, .identifier, .dot, .identifier,
-        .dollar, .identifier, .dot, .identifier,
-        .eof,
-    });
-}
+// NOTE: The $namespace.name reference syntax has been removed.
+// Bare identifiers are now used everywhere and resolved based on context.
 
 test "Lexer: line comments" {
     try expectTokensWithSlices("foo // comment\nbar", &.{
@@ -745,12 +735,10 @@ test "Lexer: fuzz properties" {
         "\"\\\"",
         "///",
         "//\n",
-        "$",
-        "$..",
         "123.456.789",
         "-",
         "--1",
-        "{}[]()=,.$",
+        "{}[]()=,.",
     };
 
     for (edge_cases) |source| {

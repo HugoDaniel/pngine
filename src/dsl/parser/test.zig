@@ -99,21 +99,8 @@ test "Parser: frame with perform array" {
     try testing.expect(frame_idx != null);
 }
 
-test "Parser: reference syntax" {
-    const source: [:0]const u8 = "#buffer buf { data=$wgsl.shader }";
-    var ast = try parseSource(source);
-    defer ast.deinit(testing.allocator);
-
-    // Find reference node
-    var found_ref = false;
-    for (ast.nodes.items(.tag)) |tag| {
-        if (tag == .reference) {
-            found_ref = true;
-            break;
-        }
-    }
-    try testing.expect(found_ref);
-}
+// NOTE: The $namespace.name reference syntax has been removed.
+// Bare identifiers are now used everywhere and resolved based on context.
 
 test "Parser: define constant" {
     const source: [:0]const u8 = "#define FOV=1.5";
@@ -252,6 +239,90 @@ test "Parser: wasmCall macro" {
     const macro_idx = children[0];
     const macro_tag = ast.nodes.items(.tag)[macro_idx];
     try testing.expectEqual(Node.Tag.macro_wasm_call, macro_tag);
+}
+
+test "Parser: builtin refs - canvas.width, time.total without dollar" {
+    const source: [:0]const u8 =
+        \\#wasmCall mvpMatrix {
+        \\  module={ url="assets/mvp.wasm" }
+        \\  func=buildMVPMatrix
+        \\  args=[canvas.width canvas.height time.total]
+        \\}
+    ;
+
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    // Verify root has the macro
+    const root_data = ast.nodes.items(.data)[0];
+    const children = ast.extraData(root_data.extra_range);
+    try testing.expectEqual(@as(usize, 1), children.len);
+
+    // Verify macro is a wasmCall
+    const macro_idx = children[0];
+    const macro_tag = ast.nodes.items(.tag)[macro_idx];
+    try testing.expectEqual(Node.Tag.macro_wasm_call, macro_tag);
+
+    // Get macro properties and find args
+    const macro_data = ast.nodes.items(.data)[macro_idx];
+    const props = ast.extraData(macro_data.extra_range);
+
+    // Find the args property
+    var args_array: ?Node.Index = null;
+    for (props) |prop_idx| {
+        const prop_tag = ast.nodes.items(.tag)[prop_idx];
+        if (prop_tag == .property) {
+            const prop_token = ast.nodes.items(.main_token)[prop_idx];
+            const prop_name = ast.tokenSlice(prop_token);
+            if (std.mem.eql(u8, std.mem.trimRight(u8, prop_name, " \t\n\r={"), "args")) {
+                const prop_data = ast.nodes.items(.data)[prop_idx];
+                args_array = prop_data.node;
+                break;
+            }
+        }
+    }
+
+    try testing.expect(args_array != null);
+    const array_tag = ast.nodes.items(.tag)[args_array.?.toInt()];
+    try testing.expectEqual(Node.Tag.array, array_tag);
+
+    // Get array elements
+    const array_data = ast.nodes.items(.data)[args_array.?.toInt()];
+    const elements = ast.extraData(array_data.extra_range);
+    try testing.expectEqual(@as(usize, 3), elements.len);
+
+    // Verify first element is builtin_ref (canvas.width)
+    const first_elem_tag = ast.nodes.items(.tag)[elements[0]];
+    try testing.expectEqual(Node.Tag.builtin_ref, first_elem_tag);
+
+    // Verify second element is builtin_ref (canvas.height)
+    const second_elem_tag = ast.nodes.items(.tag)[elements[1]];
+    try testing.expectEqual(Node.Tag.builtin_ref, second_elem_tag);
+
+    // Verify third element is builtin_ref (time.total)
+    const third_elem_tag = ast.nodes.items(.tag)[elements[2]];
+    try testing.expectEqual(Node.Tag.builtin_ref, third_elem_tag);
+}
+
+test "Parser: builtin refs in texture size" {
+    const source: [:0]const u8 =
+        \\#texture depthTexture {
+        \\  size=[canvas.width canvas.height]
+        \\  format=depth24plus
+        \\}
+    ;
+
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    // Verify root has the macro
+    const root_data = ast.nodes.items(.data)[0];
+    const children = ast.extraData(root_data.extra_range);
+    try testing.expectEqual(@as(usize, 1), children.len);
+
+    // Verify macro is a texture
+    const macro_tag = ast.nodes.items(.tag)[children[0]];
+    try testing.expectEqual(Node.Tag.macro_texture, macro_tag);
 }
 
 test "Parser: simpleTriangle example" {

@@ -49,8 +49,8 @@ test "single #wgsl module produces WGSL table entry" {
         \\#wgsl shader { value="fn main() {}" }
         \\#renderPipeline pipe {
         \\  layout=auto
-        \\  vertex={ module=$wgsl.shader entryPoint=main }
-        \\  fragment={ module=$wgsl.shader entryPoint=main targets=[{format=preferredCanvasFormat}] }
+        \\  vertex={ module=shader entryPoint=main }
+        \\  fragment={ module=shader entryPoint=main targets=[{format=preferredCanvasFormat}] }
         \\}
         \\#renderPass pass {
         \\  pipeline=pipe
@@ -80,8 +80,8 @@ test "two independent #wgsl modules" {
         \\#wgsl fragShader { value="fn frag() {}" }
         \\#renderPipeline pipe {
         \\  layout=auto
-        \\  vertex={ module=$wgsl.vertShader entryPoint=vert }
-        \\  fragment={ module=$wgsl.fragShader entryPoint=frag targets=[{format=preferredCanvasFormat}] }
+        \\  vertex={ module=vertShader entryPoint=vert }
+        \\  fragment={ module=fragShader entryPoint=frag targets=[{format=preferredCanvasFormat}] }
         \\}
         \\#renderPass pass {
         \\  pipeline=pipe
@@ -112,11 +112,11 @@ test "two independent #wgsl modules" {
 test "#wgsl with single import" {
     const source: [:0]const u8 =
         \\#wgsl utils { value="fn helper() -> f32 { return 1.0; }" }
-        \\#wgsl main { value="fn mainFn() { helper(); }" imports=[$wgsl.utils] }
+        \\#wgsl shader { value="fn mainFn() { helper(); }" imports=[utils] }
         \\#renderPipeline pipe {
         \\  layout=auto
-        \\  vertex={ module=$wgsl.main entryPoint=mainFn }
-        \\  fragment={ module=$wgsl.main entryPoint=mainFn targets=[{format=preferredCanvasFormat}] }
+        \\  vertex={ module=shader entryPoint=mainFn }
+        \\  fragment={ module=shader entryPoint=mainFn targets=[{format=preferredCanvasFormat}] }
         \\}
         \\#renderPass pass {
         \\  pipeline=pipe
@@ -149,12 +149,12 @@ test "#wgsl with single import" {
 test "#wgsl linear dependency chain" {
     const source: [:0]const u8 =
         \\#wgsl a { value="fn a() {}" }
-        \\#wgsl b { value="fn b() { a(); }" imports=[$wgsl.a] }
-        \\#wgsl c { value="fn c() { b(); }" imports=[$wgsl.b] }
+        \\#wgsl b { value="fn b() { a(); }" imports=[a] }
+        \\#wgsl c { value="fn c() { b(); }" imports=[b] }
         \\#renderPipeline pipe {
         \\  layout=auto
-        \\  vertex={ module=$wgsl.c entryPoint=c }
-        \\  fragment={ module=$wgsl.c entryPoint=c targets=[{format=preferredCanvasFormat}] }
+        \\  vertex={ module=c entryPoint=c }
+        \\  fragment={ module=c entryPoint=c targets=[{format=preferredCanvasFormat}] }
         \\}
         \\#renderPass pass {
         \\  pipeline=pipe
@@ -188,13 +188,13 @@ test "#wgsl linear dependency chain" {
 test "#wgsl diamond dependency pattern" {
     const source: [:0]const u8 =
         \\#wgsl base { value="fn base() {}" }
-        \\#wgsl left { value="fn left() { base(); }" imports=[$wgsl.base] }
-        \\#wgsl right { value="fn right() { base(); }" imports=[$wgsl.base] }
-        \\#wgsl top { value="fn top() { left(); right(); }" imports=[$wgsl.left, $wgsl.right] }
+        \\#wgsl left { value="fn left() { base(); }" imports=[base] }
+        \\#wgsl right { value="fn right() { base(); }" imports=[base] }
+        \\#wgsl top { value="fn top() { left(); right(); }" imports=[left, right] }
         \\#renderPipeline pipe {
         \\  layout=auto
-        \\  vertex={ module=$wgsl.top entryPoint=top }
-        \\  fragment={ module=$wgsl.top entryPoint=top targets=[{format=preferredCanvasFormat}] }
+        \\  vertex={ module=top entryPoint=top }
+        \\  fragment={ module=top entryPoint=top targets=[{format=preferredCanvasFormat}] }
         \\}
         \\#renderPass pass {
         \\  pipeline=pipe
@@ -231,23 +231,23 @@ test "shared modules stored once (deduplication)" {
     // Create a scenario where shared code would be duplicated in v1
     const source: [:0]const u8 =
         \\#wgsl shared { value="// Shared code that should only appear once\nfn shared() -> f32 { return 3.14159; }" }
-        \\#wgsl user1 { value="fn user1() { shared(); }" imports=[$wgsl.shared] }
-        \\#wgsl user2 { value="fn user2() { shared(); }" imports=[$wgsl.shared] }
-        \\#wgsl user3 { value="fn user3() { shared(); }" imports=[$wgsl.shared] }
+        \\#wgsl user1 { value="fn user1() { shared(); }" imports=[shared] }
+        \\#wgsl user2 { value="fn user2() { shared(); }" imports=[shared] }
+        \\#wgsl user3 { value="fn user3() { shared(); }" imports=[shared] }
         \\#renderPipeline pipe1 {
         \\  layout=auto
-        \\  vertex={ module=$wgsl.user1 entryPoint=user1 }
-        \\  fragment={ module=$wgsl.user1 entryPoint=user1 targets=[{format=preferredCanvasFormat}] }
+        \\  vertex={ module=user1 entryPoint=user1 }
+        \\  fragment={ module=user1 entryPoint=user1 targets=[{format=preferredCanvasFormat}] }
         \\}
         \\#renderPipeline pipe2 {
         \\  layout=auto
-        \\  vertex={ module=$wgsl.user2 entryPoint=user2 }
-        \\  fragment={ module=$wgsl.user2 entryPoint=user2 targets=[{format=preferredCanvasFormat}] }
+        \\  vertex={ module=user2 entryPoint=user2 }
+        \\  fragment={ module=user2 entryPoint=user2 targets=[{format=preferredCanvasFormat}] }
         \\}
         \\#renderPipeline pipe3 {
         \\  layout=auto
-        \\  vertex={ module=$wgsl.user3 entryPoint=user3 }
-        \\  fragment={ module=$wgsl.user3 entryPoint=user3 targets=[{format=preferredCanvasFormat}] }
+        \\  vertex={ module=user3 entryPoint=user3 }
+        \\  fragment={ module=user3 entryPoint=user3 targets=[{format=preferredCanvasFormat}] }
         \\}
         \\#renderPass pass1 {
         \\  pipeline=pipe1
@@ -304,8 +304,8 @@ test "#shaderModule still works (legacy path)" {
         \\#shaderModule code { code="fn main() {}" }
         \\#renderPipeline pipe {
         \\  layout=auto
-        \\  vertex={ module=$shaderModule.code entryPoint=main }
-        \\  fragment={ module=$shaderModule.code entryPoint=main targets=[{format=preferredCanvasFormat}] }
+        \\  vertex={ module=code entryPoint=main }
+        \\  fragment={ module=code entryPoint=main targets=[{format=preferredCanvasFormat}] }
         \\}
         \\#renderPass pass {
         \\  pipeline=pipe
@@ -336,13 +336,13 @@ test "complex dependency graph - multiple shared bases" {
     const source: [:0]const u8 =
         \\#wgsl math { value="fn pi() -> f32 { return 3.14; }" }
         \\#wgsl transform { value="struct T { m: mat4x4f }" }
-        \\#wgsl geom { value="fn circle() {}" imports=[$wgsl.math] }
-        \\#wgsl render { value="fn draw() {}" imports=[$wgsl.transform, $wgsl.geom] }
-        \\#wgsl main { value="fn mainFn() {}" imports=[$wgsl.render, $wgsl.math] }
+        \\#wgsl geom { value="fn circle() {}" imports=[math] }
+        \\#wgsl render { value="fn draw() {}" imports=[transform, geom] }
+        \\#wgsl shader { value="fn mainFn() {}" imports=[render, math] }
         \\#renderPipeline pipe {
         \\  layout=auto
-        \\  vertex={ module=$wgsl.main entryPoint=mainFn }
-        \\  fragment={ module=$wgsl.main entryPoint=mainFn targets=[{format=preferredCanvasFormat}] }
+        \\  vertex={ module=shader entryPoint=mainFn }
+        \\  fragment={ module=shader entryPoint=mainFn targets=[{format=preferredCanvasFormat}] }
         \\}
         \\#renderPass pass {
         \\  pipeline=pipe
@@ -371,8 +371,8 @@ test "#wgsl with define substitution" {
         \\#wgsl shader { value="const PI_VAL: f32 = PI;" }
         \\#renderPipeline pipe {
         \\  layout=auto
-        \\  vertex={ module=$wgsl.shader entryPoint=main }
-        \\  fragment={ module=$wgsl.shader entryPoint=main targets=[{format=preferredCanvasFormat}] }
+        \\  vertex={ module=shader entryPoint=main }
+        \\  fragment={ module=shader entryPoint=main targets=[{format=preferredCanvasFormat}] }
         \\}
         \\#renderPass pass {
         \\  pipeline=pipe
@@ -403,8 +403,8 @@ test "empty #wgsl value handled gracefully" {
         \\#wgsl main { value="fn mainFn() {}" }
         \\#renderPipeline pipe {
         \\  layout=auto
-        \\  vertex={ module=$wgsl.main entryPoint=mainFn }
-        \\  fragment={ module=$wgsl.main entryPoint=mainFn targets=[{format=preferredCanvasFormat}] }
+        \\  vertex={ module=main entryPoint=mainFn }
+        \\  fragment={ module=main entryPoint=mainFn targets=[{format=preferredCanvasFormat}] }
         \\}
         \\#renderPass pass {
         \\  pipeline=pipe
@@ -442,13 +442,13 @@ test "empty #wgsl value handled gracefully" {
 test "property: all deps reference earlier entries" {
     const source: [:0]const u8 =
         \\#wgsl a { value="fn a() {}" }
-        \\#wgsl b { value="fn b() {}" imports=[$wgsl.a] }
-        \\#wgsl c { value="fn c() {}" imports=[$wgsl.a, $wgsl.b] }
-        \\#wgsl d { value="fn d() {}" imports=[$wgsl.b, $wgsl.c] }
+        \\#wgsl b { value="fn b() {}" imports=[a] }
+        \\#wgsl c { value="fn c() {}" imports=[a, b] }
+        \\#wgsl d { value="fn d() {}" imports=[b, c] }
         \\#renderPipeline pipe {
         \\  layout=auto
-        \\  vertex={ module=$wgsl.d entryPoint=d }
-        \\  fragment={ module=$wgsl.d entryPoint=d targets=[{format=preferredCanvasFormat}] }
+        \\  vertex={ module=d entryPoint=d }
+        \\  fragment={ module=d entryPoint=d targets=[{format=preferredCanvasFormat}] }
         \\}
         \\#renderPass pass {
         \\  pipeline=pipe
@@ -476,13 +476,13 @@ test "property: all deps reference earlier entries" {
 test "property: no duplicate deps in entry" {
     const source: [:0]const u8 =
         \\#wgsl base { value="fn base() {}" }
-        \\#wgsl mid1 { value="fn mid1() {}" imports=[$wgsl.base] }
-        \\#wgsl mid2 { value="fn mid2() {}" imports=[$wgsl.base] }
-        \\#wgsl top { value="fn top() {}" imports=[$wgsl.mid1, $wgsl.mid2] }
+        \\#wgsl mid1 { value="fn mid1() {}" imports=[base] }
+        \\#wgsl mid2 { value="fn mid2() {}" imports=[base] }
+        \\#wgsl top { value="fn top() {}" imports=[mid1, mid2] }
         \\#renderPipeline pipe {
         \\  layout=auto
-        \\  vertex={ module=$wgsl.top entryPoint=top }
-        \\  fragment={ module=$wgsl.top entryPoint=top targets=[{format=preferredCanvasFormat}] }
+        \\  vertex={ module=top entryPoint=top }
+        \\  fragment={ module=top entryPoint=top targets=[{format=preferredCanvasFormat}] }
         \\}
         \\#renderPass pass {
         \\  pipeline=pipe
@@ -519,16 +519,16 @@ test "#shaderModule referencing $wgsl with imports" {
     // #shaderModule scene { code="$wgsl.sceneShader" }
     const source: [:0]const u8 =
         \\#wgsl constants { value="const AWAY: f32 = 1e10;" }
-        \\#wgsl utils { value="fn helper() -> f32 { return AWAY; }" imports=[$wgsl.constants] }
+        \\#wgsl utils { value="fn helper() -> f32 { return AWAY; }" imports=[constants] }
         \\#wgsl sceneShader {
         \\  value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0, 0.0, helper(), 1.0); }"
-        \\  imports=[$wgsl.constants, $wgsl.utils]
+        \\  imports=[constants, utils]
         \\}
         \\#shaderModule scene { code="$wgsl.sceneShader" }
         \\#renderPipeline pipe {
         \\  layout=auto
-        \\  vertex={ module=$shaderModule.scene entryPoint=vs }
-        \\  fragment={ module=$shaderModule.scene entryPoint=vs targets=[{format=preferredCanvasFormat}] }
+        \\  vertex={ module=scene entryPoint=vs }
+        \\  fragment={ module=scene entryPoint=vs targets=[{format=preferredCanvasFormat}] }
         \\}
         \\#renderPass pass {
         \\  pipeline=pipe

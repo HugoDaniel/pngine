@@ -65,6 +65,7 @@ extern "env" fn gpuFillRandom(array_id: u16, offset: u32, count: u32, stride: u8
 extern "env" fn gpuFillExpression(array_id: u16, offset: u32, count: u32, stride: u8, total_count: u32, expr_ptr: [*]const u8, expr_len: u32) void;
 extern "env" fn gpuFillConstant(array_id: u16, offset: u32, count: u32, stride: u8, value_ptr: [*]const u8) void;
 extern "env" fn gpuWriteBufferFromArray(buffer_id: u16, buffer_offset: u32, array_id: u16) void;
+extern "env" fn gpuWriteTimeUniform(buffer_id: u16, buffer_offset: u32, size: u16) void;
 
 // Debug logging
 pub extern "env" fn gpuDebugLog(msg_type: u8, value: u32) void;
@@ -482,6 +483,14 @@ pub const WasmGPU = struct {
         _ = self;
         _ = allocator;
         gpuWriteBufferFromArray(buffer_id, buffer_offset, array_id);
+    }
+
+    /// Write time/canvas uniform data to GPU buffer.
+    /// Runtime provides f32 values: time, canvas_width, canvas_height[, aspect_ratio].
+    pub fn writeTimeUniform(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
+        _ = self;
+        _ = allocator;
+        gpuWriteTimeUniform(buffer_id, buffer_offset, size);
     }
 
     // ========================================================================

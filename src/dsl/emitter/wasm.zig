@@ -283,9 +283,14 @@ fn encodeWasmArgs(e: *Emitter, node: Node.Index, buf: []u8) ![]u8 {
 }
 
 /// Parse argument type from a node.
-/// Recognizes: "$canvas.width", "$canvas.height", "$t.total", literals
+/// Recognizes: canvas.width, time.total, "$canvas.width", "$t.total", literals
 fn parseArgType(e: *Emitter, node: Node.Index) opcodes.WasmArgType {
     const tag = e.ast.nodes.items(.tag)[node.toInt()];
+
+    // Handle builtin refs (canvas.width, time.total) - new clean syntax
+    if (tag == .builtin_ref) {
+        return classifyBuiltinRef(e, node);
+    }
 
     // Handle string values and runtime interpolations (strings with $ like "$canvas.width")
     if (tag == .string_value or tag == .runtime_interpolation) {
@@ -305,6 +310,26 @@ fn parseArgType(e: *Emitter, node: Node.Index) opcodes.WasmArgType {
     }
 
     return .literal_f32; // Default
+}
+
+/// Classify a builtin ref node (canvas.width, time.total).
+fn classifyBuiltinRef(e: *Emitter, node: Node.Index) opcodes.WasmArgType {
+    const data = e.ast.nodes.items(.data)[node.toInt()];
+    const namespace_token = data.node_and_node[0];
+    const property_token = data.node_and_node[1];
+
+    const namespace = utils.getTokenSlice(e, namespace_token);
+    const property = utils.getTokenSlice(e, property_token);
+
+    if (std.mem.eql(u8, namespace, "canvas")) {
+        if (std.mem.eql(u8, property, "width")) return .canvas_width;
+        if (std.mem.eql(u8, property, "height")) return .canvas_height;
+    } else if (std.mem.eql(u8, namespace, "time")) {
+        if (std.mem.eql(u8, property, "total")) return .time_total;
+        if (std.mem.eql(u8, property, "delta")) return .time_delta;
+    }
+
+    return .literal_f32; // Unknown builtin - treat as literal
 }
 
 /// Classify a dynamic argument string like "$canvas.width".

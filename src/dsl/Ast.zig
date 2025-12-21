@@ -167,6 +167,21 @@ pub const Node = struct {
         identifier_value,
         /// $wgsl.name - data.node_and_node = [namespace_token, name_token]
         reference,
+        /// canvas.width, time.total - built-in runtime values
+        /// No $ prefix needed for these special namespaces.
+        /// Layout:
+        /// - main_token: namespace token (canvas, time)
+        /// - data.node_and_node[0]: namespace token index
+        /// - data.node_and_node[1]: property token index
+        builtin_ref,
+        /// code.inputs - uniform data access for shader modules
+        /// References a uniform variable in a shader module.
+        /// Analyzer validates module exists and resolves metadata.
+        /// Layout:
+        /// - main_token: module name token
+        /// - data.node_and_node[0]: module token index
+        /// - data.node_and_node[1]: var name token index
+        uniform_access,
         /// [ ... ] - data.extra_range contains elements
         array,
         /// { ... } - data.extra_range contains properties

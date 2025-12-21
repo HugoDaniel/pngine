@@ -59,6 +59,10 @@ pub const Analyzer = struct {
     /// Used for bare name resolution (e.g., `module=code` → `$shaderModule.code`).
     resolved_identifiers: std.AutoHashMapUnmanaged(u32, ResolvedIdentifier),
 
+    /// Map from uniform_access node index to resolved uniform metadata.
+    /// Used by emitter to generate write_time_uniform opcodes.
+    resolved_uniforms: std.AutoHashMapUnmanaged(u32, UniformInfo),
+
     /// Dependency graph for cycle detection in #wgsl imports.
     /// Only populated for symbols with dependencies.
     dep_graph: DependencyGraph,
@@ -96,7 +100,18 @@ pub const Analyzer = struct {
         };
     };
 
+    /// Global symbol info for cross-namespace uniqueness checking.
+    /// Stores which namespace a name was first defined in.
+    pub const GlobalSymbolInfo = struct {
+        namespace: Namespace,
+        node: u32,
+    };
+
     pub const SymbolTable = struct {
+        /// Global map: name -> first definition (for uniqueness check).
+        /// All resource IDs must be unique across the entire bundled DSL.
+        all_names: std.StringHashMapUnmanaged(GlobalSymbolInfo),
+
         // Maps name -> SymbolInfo for each namespace
         wgsl: std.StringHashMapUnmanaged(SymbolInfo),
         buffer: std.StringHashMapUnmanaged(SymbolInfo),
@@ -122,6 +137,7 @@ pub const Analyzer = struct {
 
         pub fn init() SymbolTable {
             return .{
+                .all_names = .{},
                 .wgsl = .{},
                 .buffer = .{},
                 .texture = .{},
@@ -147,6 +163,7 @@ pub const Analyzer = struct {
         }
 
         pub fn deinit(self: *SymbolTable, gpa: Allocator) void {
+            self.all_names.deinit(gpa);
             self.wgsl.deinit(gpa);
             self.buffer.deinit(gpa);
             self.texture.deinit(gpa);
@@ -279,6 +296,21 @@ pub const Analyzer = struct {
         name: []const u8,
     };
 
+    /// Resolved uniform metadata for uniform_access nodes.
+    /// Used by emitter to generate write_time_uniform opcodes.
+    pub const UniformInfo = struct {
+        /// Byte size of uniform data (default: 12 for time + canvas)
+        size: u16,
+        /// Bind group index from uniforms=[] metadata
+        bind_group: u8,
+        /// Binding index within group
+        binding: u8,
+        /// Module name (e.g., "code")
+        module_name: []const u8,
+        /// Uniform var name (e.g., "inputs")
+        var_name: []const u8,
+    };
+
     /// Property context for bare name resolution.
     ///
     /// Enables shorthand syntax like `module=code` instead of `module=$shaderModule.code`.
@@ -288,6 +320,7 @@ pub const Analyzer = struct {
     /// Example:
     /// - `module=myShader` in vertex config → searches shaderModule, then wgsl namespaces
     /// - `pipeline=main` in render pass → searches renderPipeline, computePipeline
+    /// - `perform=[draw sim]` in frame → searches renderPass, computePass, queue
     ///
     /// Thread-safe: Yes (immutable after init).
     pub const PropertyContext = struct {
@@ -303,10 +336,17 @@ pub const Analyzer = struct {
         const buffer_ns: []const Namespace = &.{.buffer};
         const layout_ns: []const Namespace = &.{ .pipeline_layout, .bind_group_layout };
         const sampler_ns: []const Namespace = &.{.sampler};
+        // Array property namespaces
+        const pass_ns: []const Namespace = &.{ .render_pass, .compute_pass, .queue };
+        const bind_group_ns: []const Namespace = &.{.bind_group};
+        const wgsl_ns: []const Namespace = &.{ .wgsl, .shader_module };
+        const frame_ns: []const Namespace = &.{.frame};
+        const data_ns: []const Namespace = &.{.data};
 
         /// Map from property name to resolution context.
         /// Used during bare identifier resolution pass.
         pub const map = std.StaticStringMap(PropertyContext).initComptime(.{
+            // Single-value properties
             .{ "module", PropertyContext{ .namespaces = module_ns } },
             .{ "pipeline", PropertyContext{ .namespaces = pipeline_ns } },
             .{ "view", PropertyContext{ .namespaces = texture_ns } },
@@ -314,6 +354,17 @@ pub const Analyzer = struct {
             .{ "buffer", PropertyContext{ .namespaces = buffer_ns } },
             .{ "layout", PropertyContext{ .namespaces = layout_ns } },
             .{ "sampler", PropertyContext{ .namespaces = sampler_ns } },
+            // Array properties
+            .{ "perform", PropertyContext{ .namespaces = pass_ns } },
+            .{ "before", PropertyContext{ .namespaces = pass_ns } },
+            .{ "after", PropertyContext{ .namespaces = pass_ns } },
+            .{ "bindGroups", PropertyContext{ .namespaces = bind_group_ns } },
+            .{ "vertexBuffers", PropertyContext{ .namespaces = buffer_ns } },
+            .{ "imports", PropertyContext{ .namespaces = wgsl_ns } },
+            // Nested object properties
+            .{ "frame", PropertyContext{ .namespaces = frame_ns } },
+            .{ "data", PropertyContext{ .namespaces = data_ns } },
+            .{ "mappedAtCreation", PropertyContext{ .namespaces = data_ns } },
         });
     };
 
@@ -341,12 +392,16 @@ pub const Analyzer = struct {
         /// Map from identifier_value node index to resolved namespace.
         /// Used by emitter to resolve bare names like `module=code`.
         resolved_identifiers: std.AutoHashMapUnmanaged(u32, ResolvedIdentifier),
+        /// Map from uniform_access node index to resolved uniform metadata.
+        /// Used by emitter to generate write_time_uniform opcodes.
+        resolved_uniforms: std.AutoHashMapUnmanaged(u32, UniformInfo),
 
         pub fn deinit(self: *AnalysisResult, gpa: Allocator) void {
             self.symbols.deinit(gpa);
             gpa.free(self.shader_fragments);
             gpa.free(self.errors);
             self.resolved_identifiers.deinit(gpa);
+            self.resolved_uniforms.deinit(gpa);
             self.* = undefined;
         }
 
@@ -369,6 +424,7 @@ pub const Analyzer = struct {
             .errors = .{},
             .shader_fragments = .{},
             .resolved_identifiers = .{},
+            .resolved_uniforms = .{},
             .dep_graph = DependencyGraph.init(),
         };
     }
@@ -378,6 +434,7 @@ pub const Analyzer = struct {
         self.errors.deinit(self.gpa);
         self.shader_fragments.deinit(self.gpa);
         self.resolved_identifiers.deinit(self.gpa);
+        self.resolved_uniforms.deinit(self.gpa);
         self.dep_graph.deinit(self.gpa);
     }
 
@@ -408,6 +465,9 @@ pub const Analyzer = struct {
         // Pass 6: Deduplicate shader fragments
         try self.deduplicateShaders();
 
+        // Pass 7: Resolve uniform access nodes (code.inputs → UniformInfo)
+        try self.resolveUniformAccess();
+
         // Post-condition
         std.debug.assert(self.symbols.wgsl.count() + self.symbols.buffer.count() +
             self.symbols.frame.count() >= 0);
@@ -420,6 +480,7 @@ pub const Analyzer = struct {
             .shader_fragments = try self.shader_fragments.toOwnedSlice(self.gpa),
             .errors = try self.errors.toOwnedSlice(self.gpa),
             .resolved_identifiers = self.resolved_identifiers,
+            .resolved_uniforms = self.resolved_uniforms,
         };
     }
 
@@ -476,18 +537,31 @@ pub const Analyzer = struct {
         const name_token = main_token + 1;
         const name = self.getTokenSlice(name_token);
 
-        const table = self.symbols.getNamespace(namespace);
+        // Check for global uniqueness - IDs must be unique across ALL namespaces
+        if (self.symbols.all_names.get(name)) |existing| {
+            // Format error message with existing namespace info
+            var msg_buf: [128]u8 = undefined;
+            const msg = std.fmt.bufPrint(&msg_buf, "'{s}' already defined as #{s}", .{
+                name,
+                @tagName(existing.namespace),
+            }) catch "duplicate definition";
 
-        // Check for duplicate
-        if (table.get(name)) |_| {
             try self.errors.append(self.gpa, .{
                 .kind = .duplicate_definition,
                 .node = node_idx,
-                .message = "duplicate definition",
+                .message = msg,
             });
             return;
         }
 
+        // Register in global map
+        try self.symbols.all_names.put(self.gpa, name, .{
+            .namespace = namespace,
+            .node = node_idx.toInt(),
+        });
+
+        // Register in namespace-specific table
+        const table = self.symbols.getNamespace(namespace);
         try table.put(self.gpa, name, .{
             .node = node_idx,
         });
@@ -667,6 +741,10 @@ pub const Analyzer = struct {
     /// Resolve bare identifiers to their namespaces based on property context.
     /// For example, `module=code` in a renderPipeline vertex property
     /// resolves to `$shaderModule.code`.
+    ///
+    /// Handles both single values and arrays:
+    /// - `module=code` → resolves single identifier
+    /// - `perform=[draw sim]` → resolves each array element
     fn resolveBareIdentifiers(self: *Self) Error!void {
         // Walk all property nodes and check their values
         const tags = self.ast.nodes.items(.tag);
@@ -686,28 +764,90 @@ pub const Analyzer = struct {
             const value_node: Node.Index = data[i].node;
             const value_tag = tags[value_node.toInt()];
 
-            // Only resolve identifier_value nodes (bare names)
-            if (value_tag != .identifier_value) continue;
-
-            const value_token = main_tokens[value_node.toInt()];
-            const identifier = self.getTokenSlice(value_token);
-
-            // Skip special values
-            if (isSpecialValue(identifier)) continue;
-
-            // Try to resolve in each namespace
-            for (context.namespaces) |namespace| {
-                const table = self.symbols.getNamespace(namespace);
-                if (table.get(identifier) != null) {
-                    // Found it! Record the resolution
-                    try self.resolved_identifiers.put(self.gpa, value_node.toInt(), .{
-                        .namespace = namespace,
-                        .name = identifier,
-                    });
-                    break;
-                }
+            switch (value_tag) {
+                .identifier_value => {
+                    // Single bare identifier
+                    try self.resolveIdentifier(value_node, context);
+                },
+                .array => {
+                    // Array of identifiers - resolve each element
+                    try self.resolveArrayElements(value_node, context);
+                },
+                else => {},
             }
         }
+    }
+
+    /// Resolve array elements that are bare identifiers.
+    fn resolveArrayElements(self: *Self, array_node: Node.Index, context: PropertyContext) Error!void {
+        const data = self.ast.nodes.items(.data)[array_node.toInt()];
+        const elements = self.ast.extraData(data.extra_range);
+        const tags = self.ast.nodes.items(.tag);
+
+        for (elements) |elem_idx| {
+            const elem: Node.Index = @enumFromInt(elem_idx);
+            if (tags[elem.toInt()] == .identifier_value) {
+                try self.resolveIdentifier(elem, context);
+            }
+        }
+    }
+
+    /// Resolve a single bare identifier in the given context.
+    fn resolveIdentifier(self: *Self, node: Node.Index, context: PropertyContext) Error!void {
+        const main_tokens = self.ast.nodes.items(.main_token);
+        const token = main_tokens[node.toInt()];
+        const identifier = self.getTokenSlice(token);
+
+        // Skip special values
+        if (isSpecialValue(identifier)) return;
+
+        // Try to resolve in each namespace (first match wins)
+        for (context.namespaces) |namespace| {
+            const table = self.symbols.getNamespace(namespace);
+            if (table.get(identifier) != null) {
+                // Found it! Record the resolution
+                try self.resolved_identifiers.put(self.gpa, node.toInt(), .{
+                    .namespace = namespace,
+                    .name = identifier,
+                });
+                return;
+            }
+        }
+
+        // Not found - add error with helpful message
+        try self.reportUndefinedReference(node, identifier, context);
+    }
+
+    /// Report undefined reference with context about expected namespaces.
+    fn reportUndefinedReference(
+        self: *Self,
+        node: Node.Index,
+        identifier: []const u8,
+        context: PropertyContext,
+    ) Error!void {
+        _ = identifier; // Used in error reporting (identifier visible in AST)
+
+        // Use static message based on first expected namespace
+        // (Full message would require allocator - keeping it simple)
+        const message: []const u8 = if (context.namespaces.len > 0)
+            switch (context.namespaces[0]) {
+                .render_pass, .compute_pass, .queue => "undefined reference - expected pass or queue",
+                .buffer => "undefined reference - expected buffer",
+                .bind_group => "undefined reference - expected bind group",
+                .texture => "undefined reference - expected texture",
+                .wgsl, .shader_module => "undefined reference - expected shader module",
+                .data => "undefined reference - expected data",
+                .frame => "undefined reference - expected frame",
+                else => "undefined reference",
+            }
+        else
+            "undefined reference";
+
+        try self.errors.append(self.gpa, .{
+            .kind = .undefined_reference,
+            .node = node,
+            .message = message,
+        });
     }
 
     /// Check if an identifier is a special/reserved value that shouldn't be resolved.
@@ -991,6 +1131,260 @@ pub const Analyzer = struct {
             }
         }
 
+        return null;
+    }
+
+    // ========================================================================
+    // Pass 7: Uniform Access Resolution
+    // ========================================================================
+
+    /// Resolve uniform_access nodes (code.inputs) to UniformInfo.
+    /// Validates module exists and extracts metadata from uniforms=[] property.
+    fn resolveUniformAccess(self: *Self) Error!void {
+        // Iterate all nodes looking for uniform_access
+        const tags = self.ast.nodes.items(.tag);
+        const data = self.ast.nodes.items(.data);
+
+        for (0..self.ast.nodes.len) |i| {
+            if (tags[i] != .uniform_access) continue;
+
+            const node_idx: Node.Index = @enumFromInt(i);
+            const node_data = data[i];
+            const module_token = node_data.node_and_node[0];
+            const var_token = node_data.node_and_node[1];
+
+            const module_name = self.getTokenSlice(module_token);
+            const var_name = self.getTokenSlice(var_token);
+
+            // Find shader module (check both shader_module and wgsl namespaces)
+            const shader_node: ?Node.Index = blk: {
+                if (self.symbols.shader_module.get(module_name)) |info| break :blk info.node;
+                if (self.symbols.wgsl.get(module_name)) |info| break :blk info.node;
+                break :blk null;
+            };
+
+            if (shader_node == null) {
+                // Module not found - add error
+                try self.errors.append(self.gpa, .{
+                    .kind = .undefined_reference,
+                    .node = node_idx,
+                    .message = "undefined shader module in uniform access",
+                });
+                continue;
+            }
+
+            // Look up uniform metadata from uniforms=[] property
+            const uniform_meta = self.findUniformMetadata(shader_node.?, var_name);
+
+            // Store resolved info
+            try self.resolved_uniforms.put(self.gpa, @intCast(i), .{
+                .size = if (uniform_meta) |u| u.size else 12, // default: time + canvas
+                .bind_group = if (uniform_meta) |u| u.bind_group else 0,
+                .binding = if (uniform_meta) |u| u.binding else 0,
+                .module_name = module_name,
+                .var_name = var_name,
+            });
+        }
+    }
+
+    /// Extracted uniform metadata from WGSL reflection or uniforms=[] property.
+    const UniformMeta = struct {
+        size: u16,
+        bind_group: u8,
+        binding: u8,
+    };
+
+    /// Find uniform metadata by reflection from WGSL source code.
+    /// Looks for patterns like: @group(0) @binding(0) var<uniform> name : Type;
+    fn findUniformMetadata(self: *Self, shader_node: Node.Index, var_name: []const u8) ?UniformMeta {
+        // First, try WGSL reflection from source code
+        const wgsl_source = self.getShaderSource(shader_node);
+        if (wgsl_source) |source| {
+            if (self.extractUniformFromWgsl(source, var_name)) |info| {
+                return info;
+            }
+        }
+
+        // Fall back to explicit uniforms=[] property
+        const data = self.ast.nodes.items(.data)[shader_node.toInt()];
+        const props = self.ast.extraData(data.extra_range);
+
+        for (props) |prop_idx| {
+            const prop_node: Node.Index = @enumFromInt(prop_idx);
+            const prop_token = self.ast.nodes.items(.main_token)[prop_node.toInt()];
+            const prop_name = self.getTokenSlice(prop_token);
+
+            if (!std.mem.eql(u8, prop_name, "uniforms")) continue;
+
+            const prop_data = self.ast.nodes.items(.data)[prop_node.toInt()];
+            const uniforms_node = prop_data.node;
+            const uniforms_tag = self.ast.nodes.items(.tag)[uniforms_node.toInt()];
+            if (uniforms_tag != .array) continue;
+
+            const array_data = self.ast.nodes.items(.data)[uniforms_node.toInt()];
+            const elements = self.ast.extraData(array_data.extra_range);
+
+            for (elements) |elem_idx| {
+                const elem: Node.Index = @enumFromInt(elem_idx);
+                const elem_tag = self.ast.nodes.items(.tag)[elem.toInt()];
+                if (elem_tag != .object) continue;
+
+                const var_value = self.findObjectPropertyValue(elem, "var") orelse continue;
+                const var_value_str = self.getNodeStringValue(var_value) orelse continue;
+                if (!std.mem.eql(u8, var_value_str, var_name)) continue;
+
+                const bind_group = self.findObjectPropertyNumber(elem, "bindGroup") orelse 0;
+                const binding = self.findObjectPropertyNumber(elem, "binding") orelse 0;
+
+                return .{
+                    .size = 12,
+                    .bind_group = @intCast(bind_group),
+                    .binding = @intCast(binding),
+                };
+            }
+        }
+        return null;
+    }
+
+    /// Get shader source code from a #wgsl or #shaderModule node.
+    fn getShaderSource(self: *Self, shader_node: Node.Index) ?[]const u8 {
+        const data = self.ast.nodes.items(.data)[shader_node.toInt()];
+        const props = self.ast.extraData(data.extra_range);
+
+        for (props) |prop_idx| {
+            const prop_node: Node.Index = @enumFromInt(prop_idx);
+            const prop_token = self.ast.nodes.items(.main_token)[prop_node.toInt()];
+            const prop_name = self.getTokenSlice(prop_token);
+
+            // #wgsl uses "value=", #shaderModule uses "code="
+            if (std.mem.eql(u8, prop_name, "value") or std.mem.eql(u8, prop_name, "code")) {
+                const prop_data = self.ast.nodes.items(.data)[prop_node.toInt()];
+                return self.getNodeStringValue(prop_data.node);
+            }
+        }
+        return null;
+    }
+
+    /// Extract uniform binding info from WGSL source code.
+    /// Scans for pattern: @group(N) @binding(M) var<uniform> name : Type;
+    fn extractUniformFromWgsl(self: *Self, source: []const u8, var_name: []const u8) ?UniformMeta {
+        _ = self;
+
+        // Search for the variable declaration pattern
+        // Pattern: @group(G) @binding(B) var<uniform> NAME : TYPE;
+        var pos: usize = 0;
+        const max_iterations = source.len;
+
+        for (0..max_iterations) |_| {
+            // Find @group
+            const group_start = std.mem.indexOfPos(u8, source, pos, "@group(") orelse break;
+            const group_end = std.mem.indexOfPos(u8, source, group_start + 7, ")") orelse break;
+            const group_str = source[group_start + 7 .. group_end];
+            const group = std.fmt.parseInt(u8, group_str, 10) catch {
+                pos = group_end;
+                continue;
+            };
+
+            // Find @binding after @group
+            const binding_start = std.mem.indexOfPos(u8, source, group_end, "@binding(") orelse break;
+            // Ensure @binding is close to @group (within 20 chars)
+            if (binding_start > group_end + 20) {
+                pos = group_end + 1;
+                continue;
+            }
+            const binding_end = std.mem.indexOfPos(u8, source, binding_start + 9, ")") orelse break;
+            const binding_str = source[binding_start + 9 .. binding_end];
+            const binding = std.fmt.parseInt(u8, binding_str, 10) catch {
+                pos = binding_end;
+                continue;
+            };
+
+            // Find var<uniform> after @binding
+            const var_start = std.mem.indexOfPos(u8, source, binding_end, "var<uniform>") orelse {
+                pos = binding_end + 1;
+                continue;
+            };
+            // Ensure var<uniform> is close to @binding (within 30 chars)
+            if (var_start > binding_end + 30) {
+                pos = binding_end + 1;
+                continue;
+            }
+
+            // Extract variable name (after "var<uniform>" and whitespace)
+            var name_start = var_start + 12; // len("var<uniform>")
+            while (name_start < source.len and (source[name_start] == ' ' or source[name_start] == '\t')) {
+                name_start += 1;
+            }
+
+            // Find end of variable name (at ':' or whitespace)
+            var name_end = name_start;
+            while (name_end < source.len and source[name_end] != ':' and source[name_end] != ' ' and source[name_end] != '\t') {
+                name_end += 1;
+            }
+
+            const found_name = source[name_start..name_end];
+            if (std.mem.eql(u8, found_name, var_name)) {
+                // Found it! Default size is 12 bytes (time + canvas)
+                return .{
+                    .size = 12,
+                    .bind_group = group,
+                    .binding = binding,
+                };
+            }
+
+            pos = name_end;
+        } else {
+            // Exhausted source without finding match - valid termination
+        }
+        return null;
+    }
+
+    /// Find a property value node in an object.
+    fn findObjectPropertyValue(self: *Self, obj_node: Node.Index, prop_name: []const u8) ?Node.Index {
+        const obj_data = self.ast.nodes.items(.data)[obj_node.toInt()];
+        const props = self.ast.extraData(obj_data.extra_range);
+
+        for (props) |prop_idx| {
+            const prop_node: Node.Index = @enumFromInt(prop_idx);
+            const prop_token = self.ast.nodes.items(.main_token)[prop_node.toInt()];
+            const name = self.getTokenSlice(prop_token);
+
+            if (std.mem.eql(u8, name, prop_name)) {
+                const prop_data = self.ast.nodes.items(.data)[prop_node.toInt()];
+                return prop_data.node;
+            }
+        }
+        return null;
+    }
+
+    /// Get string value from a node (handles string_value and identifier_value).
+    fn getNodeStringValue(self: *Self, node: Node.Index) ?[]const u8 {
+        const tag = self.ast.nodes.items(.tag)[node.toInt()];
+        const main_token = self.ast.nodes.items(.main_token)[node.toInt()];
+        const raw = self.getTokenSlice(main_token);
+
+        if (tag == .string_value) {
+            // Strip quotes
+            if (raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"') {
+                return raw[1 .. raw.len - 1];
+            }
+            return raw;
+        } else if (tag == .identifier_value) {
+            return raw;
+        }
+        return null;
+    }
+
+    /// Find a numeric property in an object and parse it.
+    fn findObjectPropertyNumber(self: *Self, obj_node: Node.Index, prop_name: []const u8) ?u32 {
+        const value_node = self.findObjectPropertyValue(obj_node, prop_name) orelse return null;
+        const tag = self.ast.nodes.items(.tag)[value_node.toInt()];
+
+        if (tag == .number_value) {
+            const main_token = self.ast.nodes.items(.main_token)[value_node.toInt()];
+            const raw = self.getTokenSlice(main_token);
+            return std.fmt.parseInt(u32, raw, 10) catch return null;
+        }
         return null;
     }
 

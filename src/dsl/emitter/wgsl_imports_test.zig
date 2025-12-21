@@ -54,9 +54,9 @@ test "WGSL imports: single inline import prepended" {
         \\}
         \\#wgsl shader {
         \\  value="fn main() { let x = MYCONST; }"
-        \\  imports=[$wgsl.constants]
+        \\  imports=[constants]
         \\}
-        \\#shaderModule main { code="$wgsl.shader" }
+        \\#shaderModule main { code=shader }
     ;
 
     const pngb = try compileSource(source);
@@ -79,9 +79,9 @@ test "WGSL imports: multiple imports prepended in order" {
         \\#wgsl third { value="MARKER_THIRD" }
         \\#wgsl shader {
         \\  value="MARKER_MAIN"
-        \\  imports=[$wgsl.first, $wgsl.second, $wgsl.third]
+        \\  imports=[first second third]
         \\}
-        \\#shaderModule main { code="$wgsl.shader" }
+        \\#shaderModule main { code=shader }
     ;
 
     const pngb = try compileSource(source);
@@ -104,18 +104,80 @@ test "WGSL imports: multiple imports prepended in order" {
     try testing.expect(third_pos < main_pos);
 }
 
+test "WGSL imports: bare identifiers in imports array" {
+    // Bare identifiers in imports array
+    const source: [:0]const u8 =
+        \\#wgsl first { value="BARE_FIRST" }
+        \\#wgsl second { value="BARE_SECOND" }
+        \\#wgsl third { value="BARE_THIRD" }
+        \\#wgsl shader {
+        \\  value="BARE_MAIN"
+        \\  imports=[first second third]
+        \\}
+        \\#shaderModule main { code=shader }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    // Verify all content present
+    try testing.expect(std.mem.indexOf(u8, pngb, "BARE_FIRST") != null);
+    try testing.expect(std.mem.indexOf(u8, pngb, "BARE_SECOND") != null);
+    try testing.expect(std.mem.indexOf(u8, pngb, "BARE_THIRD") != null);
+    try testing.expect(std.mem.indexOf(u8, pngb, "BARE_MAIN") != null);
+
+    // Verify order: all imports should come before MAIN
+    const main_pos = std.mem.indexOf(u8, pngb, "BARE_MAIN").?;
+    const first_pos = std.mem.indexOf(u8, pngb, "BARE_FIRST").?;
+    const second_pos = std.mem.indexOf(u8, pngb, "BARE_SECOND").?;
+    const third_pos = std.mem.indexOf(u8, pngb, "BARE_THIRD").?;
+
+    try testing.expect(first_pos < main_pos);
+    try testing.expect(second_pos < main_pos);
+    try testing.expect(third_pos < main_pos);
+}
+
+test "WGSL imports: multiple bare identifiers in imports" {
+    // Multiple bare identifiers in imports
+    const source: [:0]const u8 =
+        \\#wgsl first { value="MIXED_FIRST" }
+        \\#wgsl second { value="MIXED_SECOND" }
+        \\#wgsl shader {
+        \\  value="MIXED_MAIN"
+        \\  imports=[first second]
+        \\}
+        \\#shaderModule main { code=shader }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    // Verify all content present
+    try testing.expect(std.mem.indexOf(u8, pngb, "MIXED_FIRST") != null);
+    try testing.expect(std.mem.indexOf(u8, pngb, "MIXED_SECOND") != null);
+    try testing.expect(std.mem.indexOf(u8, pngb, "MIXED_MAIN") != null);
+
+    // Verify order: imports should come before MAIN
+    const main_pos = std.mem.indexOf(u8, pngb, "MIXED_MAIN").?;
+    const first_pos = std.mem.indexOf(u8, pngb, "MIXED_FIRST").?;
+    const second_pos = std.mem.indexOf(u8, pngb, "MIXED_SECOND").?;
+
+    try testing.expect(first_pos < main_pos);
+    try testing.expect(second_pos < main_pos);
+}
+
 test "WGSL imports: nested imports (A imports B imports C)" {
     const source: [:0]const u8 =
         \\#wgsl base { value="NESTED_BASE" }
         \\#wgsl middle {
         \\  value="NESTED_MIDDLE"
-        \\  imports=[$wgsl.base]
+        \\  imports=[base]
         \\}
         \\#wgsl top {
         \\  value="NESTED_TOP"
-        \\  imports=[$wgsl.middle]
+        \\  imports=[middle]
         \\}
-        \\#shaderModule main { code="$wgsl.top" }
+        \\#shaderModule main { code=top }
     ;
 
     const pngb = try compileSource(source);
@@ -146,17 +208,17 @@ test "WGSL imports: diamond dependency has shared import present" {
         \\#wgsl common { value="DIAMOND_COMMON" }
         \\#wgsl branchA {
         \\  value="DIAMOND_A"
-        \\  imports=[$wgsl.common]
+        \\  imports=[common]
         \\}
         \\#wgsl branchB {
         \\  value="DIAMOND_B"
-        \\  imports=[$wgsl.common]
+        \\  imports=[common]
         \\}
         \\#wgsl shader {
         \\  value="DIAMOND_MAIN"
-        \\  imports=[$wgsl.branchA, $wgsl.branchB]
+        \\  imports=[branchA branchB]
         \\}
-        \\#shaderModule main { code="$wgsl.shader" }
+        \\#shaderModule main { code=shader }
     ;
 
     const pngb = try compileSource(source);
@@ -174,9 +236,9 @@ test "WGSL imports: same import listed twice produces content" {
         \\#wgsl common { value="DUPE_MARKER" }
         \\#wgsl shader {
         \\  value="DUPE_MAIN"
-        \\  imports=[$wgsl.common, $wgsl.common]
+        \\  imports=[common common]
         \\}
-        \\#shaderModule main { code="$wgsl.shader" }
+        \\#shaderModule main { code=shader }
     ;
 
     const pngb = try compileSource(source);
@@ -192,14 +254,14 @@ test "WGSL imports: multiple shaderModules share same resolved wgsl" {
         \\#wgsl shared { value="// SHARED_CODE" }
         \\#wgsl shaderA {
         \\  value="// SHADER_A"
-        \\  imports=[$wgsl.shared]
+        \\  imports=[shared]
         \\}
         \\#wgsl shaderB {
         \\  value="// SHADER_B"
-        \\  imports=[$wgsl.shared]
+        \\  imports=[shared]
         \\}
-        \\#shaderModule modA { code="$wgsl.shaderA" }
-        \\#shaderModule modB { code="$wgsl.shaderB" }
+        \\#shaderModule modA { code=shaderA }
+        \\#shaderModule modB { code=shaderB }
     ;
 
     const pngb = try compileSource(source);
@@ -223,7 +285,7 @@ test "WGSL imports: empty imports array" {
         \\  value="fn main() {}"
         \\  imports=[]
         \\}
-        \\#shaderModule main { code="$wgsl.shader" }
+        \\#shaderModule main { code=shader }
     ;
 
     const pngb = try compileSource(source);
@@ -235,7 +297,7 @@ test "WGSL imports: empty imports array" {
 test "WGSL imports: no imports property" {
     const source: [:0]const u8 =
         \\#wgsl shader { value="fn main() {}" }
-        \\#shaderModule main { code="$wgsl.shader" }
+        \\#shaderModule main { code=shader }
     ;
 
     const pngb = try compileSource(source);
@@ -249,9 +311,9 @@ test "WGSL imports: empty value string" {
         \\#wgsl empty { value="" }
         \\#wgsl shader {
         \\  value="fn main() {}"
-        \\  imports=[$wgsl.empty]
+        \\  imports=[empty]
         \\}
-        \\#shaderModule main { code="$wgsl.shader" }
+        \\#shaderModule main { code=shader }
     ;
 
     const pngb = try compileSource(source);
@@ -262,14 +324,14 @@ test "WGSL imports: empty value string" {
 }
 
 test "WGSL imports: string-style references in imports array" {
-    // Some demos use string references like imports=["$wgsl.name"]
+    // String references in imports array
     const source: [:0]const u8 =
         \\#wgsl constants { value="const X: f32 = 1.0;" }
         \\#wgsl shader {
         \\  value="fn main() { let y = X; }"
-        \\  imports=["$wgsl.constants"]
+        \\  imports=["constants"]
         \\}
-        \\#shaderModule main { code="$wgsl.shader" }
+        \\#shaderModule main { code=shader }
     ;
 
     const pngb = try compileSource(source);
@@ -283,9 +345,9 @@ test "WGSL imports: import references non-existent wgsl causes error" {
     const source: [:0]const u8 =
         \\#wgsl shader {
         \\  value="fn main() {}"
-        \\  imports=[$wgsl.doesNotExist]
+        \\  imports=[doesNotExist]
         \\}
-        \\#shaderModule main { code="$wgsl.shader" }
+        \\#shaderModule main { code=shader }
     ;
 
     // Referencing non-existent wgsl triggers analysis error (undefined reference)
@@ -306,12 +368,12 @@ test "WGSL imports: very long import chain (stress test)" {
 
     // Chain: each imports the previous
     for (1..20) |i| {
-        const line = std.fmt.bufPrint(source_buf[pos..], "#wgsl m{d} {{ value=\"M{d}_MARKER\" imports=[$wgsl.m{d}] }}\n", .{ i, i, i - 1 }) catch break;
+        const line = std.fmt.bufPrint(source_buf[pos..], "#wgsl m{d} {{ value=\"M{d}_MARKER\" imports=[m{d}] }}\n", .{ i, i, i - 1 }) catch break;
         pos += line.len;
     }
 
     // Final shader
-    const final = "#wgsl shader { value=\"FINAL_MARKER\" imports=[$wgsl.m19] }\n#shaderModule main { code=\"$wgsl.shader\" }\n";
+    const final = "#wgsl shader { value=\"FINAL_MARKER\" imports=[m19] }\n#shaderModule main { code=shader }\n";
     @memcpy(source_buf[pos..][0..final.len], final);
     pos += final.len;
 
@@ -347,15 +409,14 @@ test "WGSL imports: wide import tree (many direct imports)" {
 
     for (0..30) |i| {
         if (i > 0) {
-            source_buf[pos] = ',';
-            source_buf[pos + 1] = ' ';
-            pos += 2;
+            source_buf[pos] = ' ';
+            pos += 1;
         }
-        const ref = std.fmt.bufPrint(source_buf[pos..], "$wgsl.lib{d}", .{i}) catch break;
+        const ref = std.fmt.bufPrint(source_buf[pos..], "lib{d}", .{i}) catch break;
         pos += ref.len;
     }
 
-    const imports_end = "] }\n#shaderModule main { code=\"$wgsl.shader\" }\n";
+    const imports_end = "] }\n#shaderModule main { code=shader }\n";
     @memcpy(source_buf[pos..][0..imports_end.len], imports_end);
     pos += imports_end.len;
 
@@ -390,7 +451,7 @@ test "WGSL imports: load from file path" {
 
     const source: [:0]const u8 =
         \\#wgsl constants { value="./constants.wgsl" }
-        \\#shaderModule main { code="$wgsl.constants" }
+        \\#shaderModule main { code=constants }
     ;
 
     const pngb = try compileWithBaseDir(source, tmp_dir);
@@ -421,11 +482,11 @@ test "WGSL imports: file with imports from file" {
 
     const source: [:0]const u8 =
         \\#wgsl base { value="./base.wgsl" }
-        \\#wgsl main {
+        \\#wgsl mainShader {
         \\  value="./main.wgsl"
-        \\  imports=[$wgsl.base]
+        \\  imports=[base]
         \\}
-        \\#shaderModule shader { code="$wgsl.main" }
+        \\#shaderModule shader { code=mainShader }
     ;
 
     const pngb = try compileWithBaseDir(source, tmp_dir);
@@ -438,7 +499,7 @@ test "WGSL imports: file with imports from file" {
 test "WGSL imports: missing file path handled gracefully" {
     const source: [:0]const u8 =
         \\#wgsl missing { value="./does_not_exist.wgsl" }
-        \\#shaderModule main { code="$wgsl.missing" }
+        \\#shaderModule main { code=missing }
     ;
 
     // Should return error for missing file
@@ -455,7 +516,7 @@ test "WGSL imports: multiline content preserved" {
         \\#wgsl multiline {
         \\  value="struct Vertex {\n  position: vec3f,\n  color: vec4f,\n};"
         \\}
-        \\#shaderModule main { code="$wgsl.multiline" }
+        \\#shaderModule main { code=multiline }
     ;
 
     const pngb = try compileSource(source);
@@ -471,7 +532,7 @@ test "WGSL imports: special characters in WGSL preserved" {
         \\#wgsl special {
         \\  value="// Comment with unicode: αβγ δεζ\nconst x = 1.0e-10;"
         \\}
-        \\#shaderModule main { code="$wgsl.special" }
+        \\#shaderModule main { code=special }
     ;
 
     const pngb = try compileSource(source);
@@ -490,9 +551,9 @@ test "WGSL imports: #define substitution applied to imported code" {
         \\#wgsl constants { value="const r = RADIUS;" }
         \\#wgsl shader {
         \\  value="fn main() { let x = r; }"
-        \\  imports=[$wgsl.constants]
+        \\  imports=[constants]
         \\}
-        \\#shaderModule main { code="$wgsl.shader" }
+        \\#shaderModule main { code=shader }
     ;
 
     const pngb = try compileSource(source);
@@ -509,10 +570,10 @@ test "WGSL imports: #define substitution applied to imported code" {
 test "WGSL imports: cache produces consistent results" {
     const source: [:0]const u8 =
         \\#wgsl base { value="// BASE" }
-        \\#wgsl a { value="// A" imports=[$wgsl.base] }
-        \\#wgsl b { value="// B" imports=[$wgsl.base] }
-        \\#shaderModule modA { code="$wgsl.a" }
-        \\#shaderModule modB { code="$wgsl.b" }
+        \\#wgsl a { value="// A" imports=[base] }
+        \\#wgsl b { value="// B" imports=[base] }
+        \\#shaderModule modA { code=a }
+        \\#shaderModule modB { code=b }
     ;
 
     // Compile multiple times - should be consistent
@@ -536,9 +597,9 @@ test "WGSL imports: OOM during resolution" {
     // Full FailingAllocator testing is complex due to cleanup code paths.
     const source: [:0]const u8 =
         \\#wgsl a { value="// A" }
-        \\#wgsl b { value="// B" imports=[$wgsl.a] }
-        \\#wgsl c { value="// C" imports=[$wgsl.b] }
-        \\#shaderModule main { code="$wgsl.c" }
+        \\#wgsl b { value="// B" imports=[a] }
+        \\#wgsl c { value="// C" imports=[b] }
+        \\#shaderModule main { code=c }
     ;
 
     // Verify normal compilation works
@@ -600,16 +661,16 @@ test "WGSL imports: property - resolved code length >= original" {
             pos += imports_start.len;
             for (0..num_imports) |i| {
                 if (i > 0) {
-                    @memcpy(source_buf[pos..][0..2], ", ");
-                    pos += 2;
+                    source_buf[pos] = ' ';
+                    pos += 1;
                 }
-                const ref = std.fmt.bufPrint(source_buf[pos..], "$wgsl.imp{d}", .{i}) catch break;
+                const ref = std.fmt.bufPrint(source_buf[pos..], "imp{d}", .{i}) catch break;
                 pos += ref.len;
             }
             source_buf[pos] = ']';
             pos += 1;
         }
-        const ending = " }\n#shaderModule mod { code=\"$wgsl.main\" }\n";
+        const ending = " }\n#shaderModule mod { code=main }\n";
         @memcpy(source_buf[pos..][0..ending.len], ending);
         pos += ending.len;
 
@@ -655,7 +716,7 @@ fn fuzzWgslImports(_: void, input: []const u8) !void {
 
     if (escaped_len == 0) return;
 
-    const source = std.fmt.bufPrint(&source_buf, "#wgsl fuzz {{ value=\"{s}\" }}\n#shaderModule m {{ code=\"$wgsl.fuzz\" }}\n", .{escaped_buf[0..escaped_len]}) catch return;
+    const source = std.fmt.bufPrint(&source_buf, "#wgsl fuzz {{ value=\"{s}\" }}\n#shaderModule m {{ code=fuzz }}\n", .{escaped_buf[0..escaped_len]}) catch return;
 
     const source_z = source[0..source.len :0];
 

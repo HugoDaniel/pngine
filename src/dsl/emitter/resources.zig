@@ -107,7 +107,7 @@ pub fn emitData(e: *Emitter) Emitter.Error!void {
             try emitWasmData(e, name, wasm_node);
             continue;
         }
-    }
+    } else unreachable; // Exceeded MAX_RESOURCES
 
     // Post-condition: we processed data symbols
     std.debug.assert(e.data_ids.count() >= initial_count);
@@ -782,7 +782,7 @@ pub fn emitTextures(e: *Emitter) Emitter.Error!void {
     std.debug.assert(e.next_texture_id >= initial_texture_id);
 }
 
-/// Check if texture has size=["$canvas.width", "$canvas.height"] or similar.
+/// Check if texture has size=[canvas.width canvas.height] or size=["$canvas.width", "$canvas.height"].
 pub fn textureUsesCanvasSize(e: *Emitter, node: Node.Index) bool {
     // Pre-condition
     std.debug.assert(node.toInt() < e.ast.nodes.len);
@@ -795,10 +795,20 @@ pub fn textureUsesCanvasSize(e: *Emitter, node: Node.Index) bool {
     const array_data = e.ast.nodes.items(.data)[size_value.toInt()];
     const elements = e.ast.extraData(array_data.extra_range);
 
-    // Check if any element is a runtime interpolation or string containing "$canvas"
+    // Check if any element is a builtin ref, runtime interpolation, or string containing "$canvas"
     for (elements) |elem_idx| {
         const elem: Node.Index = @enumFromInt(elem_idx);
         const elem_tag = e.ast.nodes.items(.tag)[elem.toInt()];
+
+        // Builtin ref (canvas.width, canvas.height) - new clean syntax
+        if (elem_tag == .builtin_ref) {
+            const data = e.ast.nodes.items(.data)[elem.toInt()];
+            const namespace_token = data.node_and_node[0];
+            const namespace = utils.getTokenSlice(e, namespace_token);
+            if (std.mem.eql(u8, namespace, "canvas")) {
+                return true;
+            }
+        }
 
         // Runtime interpolation strings are marked with a separate tag
         if (elem_tag == .runtime_interpolation) {

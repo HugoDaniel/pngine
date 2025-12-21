@@ -750,6 +750,14 @@ pub const MockGPU = struct {
         _ = array_id;
     }
 
+    pub fn writeTimeUniform(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
+        _ = self;
+        _ = allocator;
+        _ = buffer_id;
+        _ = buffer_offset;
+        _ = size;
+    }
+
     // ========================================================================
     // Verification
     // ========================================================================

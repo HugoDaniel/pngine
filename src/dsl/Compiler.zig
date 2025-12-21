@@ -156,9 +156,15 @@ pub const Compiler = struct {
         }
 
         // Phase 3: Emit PNGB
-        return Emitter.emitWithOptions(gpa, &ast, &analysis, .{
+        const pngb = try Emitter.emitWithOptions(gpa, &ast, &analysis, .{
             .base_dir = options.base_dir,
         });
+
+        // Post-condition: valid PNGB header
+        std.debug.assert(pngb.len >= 4);
+        std.debug.assert(std.mem.eql(u8, pngb[0..4], "PNGB"));
+
+        return pngb;
     }
 
     /// Compile DSL source from a non-sentinel-terminated slice.
@@ -193,9 +199,9 @@ test "Compiler: simple shader to PNGB" {
 test "Compiler: full pipeline" {
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {} @fragment fn fs() {}" }
-        \\#renderPipeline pipe { vertex={ module=$wgsl.shader } }
-        \\#renderPass pass { pipeline=$renderPipeline.pipe draw=3 }
-        \\#frame main { perform=[$renderPass.pass] }
+        \\#renderPipeline pipe { vertex={ module=shader } }
+        \\#renderPass pass { pipeline=pipe draw=3 }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try Compiler.compile(testing.allocator, source);
@@ -206,7 +212,7 @@ test "Compiler: full pipeline" {
 
 test "Compiler: error on undefined reference" {
     const source: [:0]const u8 =
-        \\#renderPipeline pipe { vertex={ module=$wgsl.missing } }
+        \\#renderPipeline pipe { vertex={ module=missing } }
         \\#frame main { perform=[] }
     ;
 
@@ -235,9 +241,9 @@ test "Compiler: empty input" {
 test "Compiler: compute shader" {
     const source: [:0]const u8 =
         \\#wgsl compute { value="@compute fn main() {}" }
-        \\#computePipeline pipe { compute={ module=$wgsl.compute } }
-        \\#computePass pass { pipeline=$computePipeline.pipe dispatch=[8 8 1] }
-        \\#frame main { perform=[$computePass.pass] }
+        \\#computePipeline pipe { compute={ module=compute } }
+        \\#computePass pass { pipeline=pipe dispatch=[8 8 1] }
+        \\#frame main { perform=[pass] }
     ;
 
     const pngb = try Compiler.compile(testing.allocator, source);
@@ -763,17 +769,17 @@ test "E2E: compile simple_triangle to PNGB" {
         \\
         \\#renderPipeline pipeline {
         \\  layout=auto
-        \\  vertex={ entryPoint=vertexMain module=$shaderModule.code }
-        \\  fragment={ entryPoint=fragMain module=$shaderModule.code }
+        \\  vertex={ entryPoint=vertexMain module=code }
+        \\  fragment={ entryPoint=fragMain module=code }
         \\}
         \\
         \\#renderPass render {
-        \\  pipeline=$renderPipeline.pipeline
+        \\  pipeline=pipeline
         \\  draw=3
         \\}
         \\
         \\#frame main {
-        \\  perform=[$renderPass.render]
+        \\  perform=[render]
         \\}
     ;
 

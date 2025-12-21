@@ -6,10 +6,21 @@
 .layout = "docs.shtml",
 ---
 
-## Reference
+## Getting Started
 
 - [Getting Started](/docs/getting-started/) - Installation and first program
-- [DSL Syntax](/docs/dsl-syntax/) - Macro-based language reference
+- [DSL Syntax](/docs/dsl-syntax/) - Quick language overview
+
+## DSL Reference
+
+Complete reference for all 22 macro types:
+
+- [DSL Reference](/docs/dsl/) - Full macro documentation
+- [References](/docs/dsl/references/) - `$namespace.name` syntax
+- [Expressions](/docs/dsl/expressions/) - Compile-time arithmetic
+
+## API Reference
+
 - [CLI Reference](/docs/cli/) - Command-line interface
 - [JavaScript API](/docs/js-api/) - Browser runtime API
 - [Bytecode Format](/docs/bytecode/) - PNGB binary specification

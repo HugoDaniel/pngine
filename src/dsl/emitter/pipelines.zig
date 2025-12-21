@@ -53,7 +53,7 @@ pub fn emitPipelines(e: *Emitter) Emitter.Error!void {
             pipeline_id,
             desc_id.toInt(),
         );
-    }
+    } else unreachable; // Exceeded MAX_PROPERTIES
 
     // Compute pipelines (bounded iteration)
     var cp_it = e.analysis.symbols.compute_pipeline.iterator();
@@ -80,7 +80,7 @@ pub fn emitPipelines(e: *Emitter) Emitter.Error!void {
             pipeline_id,
             desc_id.toInt(),
         );
-    }
+    } else unreachable; // Exceeded MAX_PROPERTIES
 
     // Post-condition: pipeline IDs were assigned sequentially
     std.debug.assert(e.next_pipeline_id >= initial_pipeline_id);

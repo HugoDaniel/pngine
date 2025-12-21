@@ -49,7 +49,7 @@ pub fn emitPasses(e: *Emitter) Emitter.Error!void {
         try e.pass_ids.put(e.gpa, name, pass_id);
 
         try emitRenderPassDefinition(e, pass_id, info.node);
-    }
+    } else unreachable; // Exceeded MAX_PASSES
 
     // Compute passes
     var cp_it = e.analysis.symbols.compute_pass.iterator();
@@ -63,7 +63,7 @@ pub fn emitPasses(e: *Emitter) Emitter.Error!void {
         try e.pass_ids.put(e.gpa, name, pass_id);
 
         try emitComputePassDefinition(e, pass_id, info.node);
-    }
+    } else unreachable; // Exceeded MAX_PASSES
 
     // Post-condition: pass IDs were assigned sequentially
     std.debug.assert(e.next_pass_id >= initial_pass_id);

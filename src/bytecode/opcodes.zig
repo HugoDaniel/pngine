@@ -174,6 +174,12 @@ pub const OpCode = enum(u8) {
     /// Copies typed array data to buffer at specified offset.
     write_buffer_from_array = 0x29,
 
+    /// Write time/canvas uniform data to buffer.
+    /// Params: buffer_id, offset, size
+    /// Runtime provides: f32 time, f32 canvas_width, f32 canvas_height[, f32 aspect_ratio]
+    /// Size determines layout: 12 bytes (3 floats), 16 bytes (4 floats)
+    write_time_uniform = 0x2A,
+
     // ========================================================================
     // Frame Control (0x30-0x3F)
     // ========================================================================
@@ -297,6 +303,7 @@ pub const OpCode = enum(u8) {
             .fill_linear,
             .fill_element_index,
             .fill_expression,
+            .write_time_uniform,
             => true,
             _ => false,
         };

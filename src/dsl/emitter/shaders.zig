@@ -776,7 +776,7 @@ fn extractImportNames(e: *Emitter, array_node: Node.Index) []const []const u8 {
         const elem_node: Node.Index = @enumFromInt(elem_idx);
         const elem_tag = e.ast.nodes.items(.tag)[elem_node.toInt()];
 
-        // Handle reference ($wgsl.name) or string ("$wgsl.name")
+        // Handle reference ($wgsl.name), string ("$wgsl.name"), or bare identifier (name)
         if (elem_tag == .reference) {
             const ref_data = e.ast.nodes.items(.data)[elem_node.toInt()];
             const name_token = ref_data.node_and_node[1];
@@ -790,6 +790,11 @@ fn extractImportNames(e: *Emitter, array_node: Node.Index) []const []const u8 {
                 S.names[count] = str[6..]; // Skip "$wgsl."
                 count += 1;
             }
+        } else if (elem_tag == .identifier_value) {
+            // Bare identifier - use directly (e.g., imports=[transform2D primitives])
+            const elem_token = e.ast.nodes.items(.main_token)[elem_node.toInt()];
+            S.names[count] = utils.getTokenSlice(e, elem_token);
+            count += 1;
         }
     }
 
