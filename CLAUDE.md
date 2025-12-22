@@ -448,12 +448,56 @@ pub fn example() void {}
 4. **Render Command** - Default 1x1 transparent PNG, `--frame` for GPU rendering
 5. **Pool Operations** - Ping-pong buffer patterns for compute simulations
 6. **Test Organization** - Tests extracted to subdirectories (~500 lines per file)
+7. **WebWorker Runtime** - OffscreenCanvas + WebWorker architecture for GPU operations
+
+## Web Runtime
+
+The web runtime uses WebWorker + OffscreenCanvas for all GPU operations.
+
+### Debug Mode
+
+Enable debug logging via any of:
+
+```javascript
+// URL parameter
+http://localhost:8000/?debug=true
+
+// localStorage (persists across sessions)
+localStorage.setItem('pngine_debug', 'true')
+
+// Runtime API
+pngine.setDebug(true)
+```
+
+Debug output uses `[PNGine]` prefix for main thread, `[Worker]` for worker thread.
+
+### Animation API
+
+```javascript
+const pngine = await initPNGine(canvas);
+await pngine.loadFromUrl('shader.png');
+
+// Start/stop animation
+pngine.startAnimation();
+pngine.stopAnimation();
+
+// Select specific frame for animation
+pngine.setFrame('sceneA');  // Render only sceneA
+pngine.setFrame(null);      // Render all frames
+
+// Time update callback (for UI slider sync)
+pngine.onTimeUpdate = (time) => {
+    slider.value = time;
+};
+
+// Manual frame rendering
+await pngine.renderFrame(2.5);  // Render at t=2.5s
+```
 
 ## Future Work
 
 1. **Real GPU Rendering** - Integrate zgpu/Dawn for actual shader execution
 2. **WASM Optimization** - Target ~15KB runtime (no std.fmt, static alloc)
-3. **JS Loader** - Extract from PNG, init WebGPU, execute frames
 
 ## Related Files
 
