@@ -96,6 +96,26 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // Coverage step (requires kcov installed)
+    const coverage_step = b.step("coverage", "Run tests with coverage (requires kcov)");
+
+    // Build test executable for coverage (don't run it directly)
+    const coverage_tests = b.addTest(.{
+        .root_module = lib_module,
+    });
+
+    // Run kcov with the test binary
+    const run_coverage = b.addSystemCommand(&.{
+        "kcov",
+        "--clean",
+        "--include-path=src",
+        "--exclude-pattern=test.zig,_test.zig",
+        "--exclude-line=unreachable,@panic",
+        "coverage",
+    });
+    run_coverage.addArtifactArg(coverage_tests);
+    coverage_step.dependOn(&run_coverage.step);
+
     // CLI tests
     const cli_test_module = b.createModule(.{
         .root_source_file = b.path("src/cli.zig"),

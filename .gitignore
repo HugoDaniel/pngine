@@ -11,3 +11,6 @@ test-results/
 # Generated example outputs
 examples/*.png
 examples/*.pngb
+
+# Coverage reports
+coverage/
