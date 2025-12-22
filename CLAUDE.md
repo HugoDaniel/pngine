@@ -28,6 +28,9 @@ ZIG=/Users/hugo/.zvm/bin/zig
 # Build WASM for web
 /Users/hugo/.zvm/bin/zig build web
 
+# Build npm package (cross-compile for all platforms)
+/Users/hugo/.zvm/bin/zig build npm
+
 # Run CLI - basic compilation
 ./zig-out/bin/pngine compile shader.pngine -o output.pngb
 
@@ -168,6 +171,12 @@ examples/                 # Example .pngine files
 ├── simple_triangle.pngine
 ├── rotating_cube.pngine
 └── boids.pngine          # Compute simulation with ping-pong buffers
+npm/                      # NPM package source
+├── pngine/               # Main package
+│   ├── bin/pngine        # CLI wrapper
+│   ├── dist/             # Bundled JS + TypeScript defs
+│   └── wasm/             # WASM runtime
+└── pngine-{platform}/    # Platform-specific binaries (6 total)
 ```
 
 ## DSL Syntax Reference
@@ -449,6 +458,7 @@ pub fn example() void {}
 5. **Pool Operations** - Ping-pong buffer patterns for compute simulations
 6. **Test Organization** - Tests extracted to subdirectories (~500 lines per file)
 7. **WebWorker Runtime** - OffscreenCanvas + WebWorker architecture for GPU operations
+8. **NPM Package** - esbuild-style distribution with native binaries for 6 platforms
 
 ## Web Runtime
 
@@ -493,6 +503,111 @@ pngine.onTimeUpdate = (time) => {
 // Manual frame rendering
 await pngine.renderFrame(2.5);  // Render at t=2.5s
 ```
+
+## NPM Package
+
+PNGine is distributed as an npm package with native CLI binaries (similar to esbuild).
+
+### Package Structure
+
+```
+npm/
+├── pngine/                      # Main package
+│   ├── bin/pngine               # CLI wrapper (finds native binary)
+│   ├── dist/
+│   │   ├── browser.mjs          # Browser bundle with inline worker
+│   │   ├── browser.js           # CJS wrapper for bundlers
+│   │   ├── index.mjs            # Node.js ESM entry
+│   │   ├── index.js             # Node.js CJS entry
+│   │   └── index.d.ts           # TypeScript definitions
+│   ├── wasm/pngine.wasm         # WASM runtime (57K)
+│   ├── scripts/
+│   │   ├── bundle.js            # JS bundler script
+│   │   └── prepare-publish.sh   # Copy binaries for publishing
+│   ├── package.json
+│   └── README.md
+│
+├── pngine-darwin-arm64/         # macOS Apple Silicon
+├── pngine-darwin-x64/           # macOS Intel
+├── pngine-linux-x64/            # Linux x64
+├── pngine-linux-arm64/          # Linux ARM64
+├── pngine-win32-x64/            # Windows x64
+└── pngine-win32-arm64/          # Windows ARM64
+    └── bin/pngine[.exe]         # Native binary
+```
+
+### Build Commands
+
+```bash
+# Build all platform binaries (cross-compilation)
+/Users/hugo/.zvm/bin/zig build npm
+
+# Bundle JavaScript (creates dist/ files)
+node npm/pngine/scripts/bundle.js
+
+# Prepare for publishing (copies binaries from zig-out to npm/)
+./npm/pngine/scripts/prepare-publish.sh
+```
+
+### Binary Sizes
+
+| Platform | Size |
+|----------|------|
+| darwin-arm64 | 927K |
+| darwin-x64 | 981K |
+| linux-x64 | 6.8M |
+| linux-arm64 | 7.0M |
+| win32-x64 | 1.2M |
+| win32-arm64 | 1.1M |
+| WASM | 57K |
+
+### Publishing Workflow
+
+```bash
+# 1. Build everything
+zig build npm
+node npm/pngine/scripts/bundle.js
+./npm/pngine/scripts/prepare-publish.sh
+
+# 2. Publish platform packages first (order doesn't matter)
+cd npm/pngine-darwin-arm64 && npm publish --access public
+cd npm/pngine-darwin-x64 && npm publish --access public
+cd npm/pngine-linux-x64 && npm publish --access public
+cd npm/pngine-linux-arm64 && npm publish --access public
+cd npm/pngine-win32-x64 && npm publish --access public
+cd npm/pngine-win32-arm64 && npm publish --access public
+
+# 3. Publish main package (after platform packages)
+cd npm/pngine && npm publish
+```
+
+### Usage
+
+```bash
+# Install
+npm install pngine
+
+# CLI usage (uses native binary)
+npx pngine compile shader.pngine -o output.pngb
+npx pngine shader.pngine -o output.png --frame
+```
+
+```javascript
+// Browser usage
+import { initPNGine } from 'pngine';
+
+const canvas = document.getElementById('canvas');
+const pngine = await initPNGine(canvas);
+await pngine.loadFromUrl('shader.png');
+pngine.startAnimation();
+```
+
+### Build System Integration
+
+The `build.zig` npm step:
+- Cross-compiles CLI for 6 platforms using `b.resolveTargetQuery()`
+- Uses `has_embedded_wasm = false` for cross-compiled builds (WASM not available at cross-compile time)
+- Outputs to `zig-out/npm/pngine-{platform}/bin/`
 
 ## Future Work
 

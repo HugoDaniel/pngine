@@ -3,7 +3,6 @@
  * PNGine - Node.js ESM entry point
  */
 
-// PNG signature
 const PNG_SIGNATURE = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
 export function isPng(data) {
@@ -53,22 +52,19 @@ export function getErrorMessage(code) {
   }
 }
 
-export const MessageType = {
-  INIT: 'init',
-  TERMINATE: 'terminate',
-  COMPILE: 'compile',
-  LOAD_MODULE: 'loadModule',
-  RESPONSE: 'response',
-  ERROR: 'error',
-};
-
-export function initPNGine() {
+function browserOnly() {
   throw new Error(
     'PNGine requires a browser environment with WebGPU support.\n' +
     'Use the CLI for compilation: npx pngine compile input.pngine -o output.pngb'
   );
 }
 
-export const initFromUrl = initPNGine;
-export const initFromPng = initPNGine;
-export const initFromZip = initPNGine;
+export const pngine = browserOnly;
+export const destroy = browserOnly;
+export const draw = browserOnly;
+export const play = browserOnly;
+export const pause = browserOnly;
+export const stop = browserOnly;
+export const seek = browserOnly;
+export const setFrame = browserOnly;
+export const extractBytecode = browserOnly;

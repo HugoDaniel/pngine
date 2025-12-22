@@ -28,6 +28,7 @@ pub const assembler_test = @import("bytecode/assembler_test.zig");
 // Executor
 pub const mock_gpu = @import("executor/mock_gpu.zig");
 pub const dispatcher = @import("executor/dispatcher.zig");
+pub const command_buffer = @import("executor/command_buffer.zig");
 pub const executor_test = @import("executor/executor_test.zig");
 
 // GPU backends

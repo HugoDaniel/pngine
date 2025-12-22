@@ -39,6 +39,9 @@ const format = @import("bytecode/format.zig");
 const Module = format.Module;
 const WasmGPU = @import("executor/wasm_gpu.zig").WasmGPU;
 const Dispatcher = @import("executor/dispatcher.zig").Dispatcher;
+const command_buffer = @import("executor/command_buffer.zig");
+const CommandBuffer = command_buffer.CommandBuffer;
+const CommandGPU = command_buffer.CommandGPU;
 
 // ============================================================================
 // Error Codes
@@ -94,6 +97,9 @@ var gpu: WasmGPU = .empty;
 var current_module: ?Module = null;
 var module_data: ?[]u8 = null; // Owned copy of PNGB data
 var frame_counter: u32 = 0; // Persists across executeAll calls for ping-pong
+
+// Command buffer for renderFrame (static allocation)
+var cmd_buffer: [command_buffer.DEFAULT_CAPACITY]u8 = undefined;
 
 // ============================================================================
 // Exported Functions
@@ -353,6 +359,61 @@ export fn executeFrameByName(name_ptr: [*]const u8, name_len: usize) u32 {
 
     gpu.consoleLog("[WASM] executeFrameByName: done", "");
     return ErrorCode.success.toU32();
+}
+
+// ============================================================================
+// Command Buffer API (new - for minimal JS bundle)
+// ============================================================================
+
+/// Render a frame and return pointer to command buffer.
+/// Instead of calling extern JS functions directly, this writes GPU commands
+/// to a buffer that JS can execute with a minimal dispatcher.
+///
+/// Returns: Pointer to command buffer, or 0 on error.
+///
+/// Command buffer format:
+/// - [total_len: u32] [cmd_count: u16] [flags: u16]
+/// - [cmd: u8] [args: ...] repeated for each command
+///
+/// Pre-condition: onInit() and loadModule() have been called.
+/// Static CommandGPU to keep WGSL alive until next frame.
+var static_cmd_gpu: ?CommandGPU = null;
+
+export fn renderFrame(time: f32, frame_id: u16) ?[*]const u8 {
+    _ = time; // TODO: pass time to commands
+    _ = frame_id; // TODO: filter by frame
+
+    // Pre-condition checks
+    if (!initialized) return null;
+    const module = &(current_module orelse return null);
+
+    // Clean up previous frame's allocations
+    if (static_cmd_gpu) |*prev_gpu| {
+        prev_gpu.deinit();
+    }
+
+    // Create command buffer and backend
+    var cmds = CommandBuffer.init(&cmd_buffer);
+    static_cmd_gpu = CommandGPU.init(&cmds);
+    var cmd_gpu = &(static_cmd_gpu.?);
+    cmd_gpu.setModule(module);
+
+    // Execute bytecode with command GPU backend
+    var dispatcher = Dispatcher(CommandGPU).initWithFrame(allocator, cmd_gpu, module, frame_counter);
+    defer dispatcher.deinit();
+    dispatcher.executeAll(allocator) catch return null;
+
+    // Update frame counter
+    frame_counter = dispatcher.frame_counter;
+
+    // Finalize and return pointer
+    _ = cmds.finish();
+    return cmds.ptr();
+}
+
+/// Get command buffer size after renderFrame.
+export fn getCommandBufferLen() u32 {
+    return std.mem.readInt(u32, cmd_buffer[0..4], .little);
 }
 
 /// Frame bytecode range.
