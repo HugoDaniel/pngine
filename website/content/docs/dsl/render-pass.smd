@@ -10,7 +10,7 @@ Defines a render pass that configures render targets and issues draw commands.
 
 ## Syntax
 
-```pngine
+```zig
 #renderPass name {
   colorAttachments=[{
     view=contextCurrentTexture
@@ -63,7 +63,7 @@ Each color attachment:
 | `loadOp` | string | Yes | `clear` or `load` |
 | `storeOp` | string | Yes | `store` or `discard` |
 
-```pngine
+```zig
 colorAttachments=[{
   view=contextCurrentTexture
   clearValue=[0.1 0.1 0.1 1.0]
@@ -94,7 +94,7 @@ Depth and stencil attachment:
 
 Reference to `#renderPipeline`. Can use bare identifier.
 
-```pngine
+```zig
 pipeline=myPipeline
 ```
 
@@ -104,7 +104,7 @@ pipeline=myPipeline
 
 Bind groups in order matching `@group(N)`:
 
-```pngine
+```zig
 bindGroups=[frameBindGroup materialBindGroup objectBindGroup]
 ```
 
@@ -114,7 +114,7 @@ bindGroups=[frameBindGroup materialBindGroup objectBindGroup]
 
 Pool offsets for ping-pong bind groups. Each offset corresponds to a bind group.
 
-```pngine
+```zig
 bindGroups=[simBindGroup]
 bindGroupsPoolOffsets=[0]  // Alternates each frame
 ```
@@ -125,7 +125,7 @@ bindGroupsPoolOffsets=[0]  // Alternates each frame
 
 Vertex buffers in order matching vertex stage buffer indices:
 
-```pngine
+```zig
 vertexBuffers=[positionBuffer normalBuffer uvBuffer]
 ```
 
@@ -135,7 +135,7 @@ vertexBuffers=[positionBuffer normalBuffer uvBuffer]
 
 Pool offsets for ping-pong vertex buffers:
 
-```pngine
+```zig
 vertexBuffers=[particleBuffer]
 vertexBuffersPoolOffsets=[1]  // Use the "other" buffer
 ```
@@ -147,12 +147,12 @@ vertexBuffersPoolOffsets=[1]  // Use the "other" buffer
 Non-indexed draw call.
 
 **Simple (vertex count only):**
-```pngine
+```zig
 draw=3
 ```
 
 **Full object:**
-```pngine
+```zig
 draw={
   vertexCount=36
   instanceCount=100
@@ -175,13 +175,13 @@ draw={
 Indexed draw call. Requires `indexBuffer`.
 
 **Simple (index count only):**
-```pngine
+```zig
 indexBuffer=indices
 drawIndexed=36
 ```
 
 **Full object:**
-```pngine
+```zig
 drawIndexed={
   indexCount=36
   instanceCount=1
@@ -197,7 +197,7 @@ drawIndexed={
 
 Index buffer and format for indexed drawing:
 
-```pngine
+```zig
 indexBuffer=indexData
 indexFormat=uint16  // or uint32
 drawIndexed=36
@@ -207,7 +207,7 @@ drawIndexed=36
 
 ### Simple Triangle
 
-```pngine
+```zig
 #renderPass drawTriangle {
   colorAttachments=[{
     view=contextCurrentTexture
@@ -222,7 +222,7 @@ drawIndexed=36
 
 ### With Depth Buffer
 
-```pngine
+```zig
 #texture depthTexture {
   size=[canvas.width canvas.height]
   format=depth24plus
@@ -252,7 +252,7 @@ drawIndexed=36
 
 ### MSAA with Resolve
 
-```pngine
+```zig
 #define SAMPLE_COUNT=4
 
 #texture msaaTarget {
@@ -277,7 +277,7 @@ drawIndexed=36
 
 ### Instanced Drawing
 
-```pngine
+```zig
 #renderPass drawParticles {
   colorAttachments=[{
     view=contextCurrentTexture
@@ -294,7 +294,7 @@ drawIndexed=36
 
 ### Ping-Pong Rendering
 
-```pngine
+```zig
 #buffer particles {
   size=131072
   usage=[VERTEX STORAGE]
@@ -311,7 +311,7 @@ drawIndexed=36
 
 ### Render to Texture
 
-```pngine
+```zig
 #texture offscreen {
   size=[1024 1024]
   format=rgba8unorm

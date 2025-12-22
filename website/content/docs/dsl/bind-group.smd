@@ -10,7 +10,7 @@ Creates a bind group that binds GPU resources (buffers, textures, samplers) to s
 
 ## Syntax
 
-```pngine
+```zig
 #bindGroup name {
   layout={ pipeline=pipelineName index=0 }
   entries=[
@@ -37,12 +37,12 @@ Creates a bind group that binds GPU resources (buffers, textures, samplers) to s
 Specifies the bind group layout. Can be:
 
 **Derived from pipeline:**
-```pngine
+```zig
 layout={ pipeline=renderPipeline index=0 }
 ```
 
 **Bind group layout reference:**
-```pngine
+```zig
 layout=myLayout
 ```
 
@@ -72,7 +72,7 @@ The resource object specifies what to bind:
 
 Only one property per resource object.
 
-```pngine
+```zig
 entries=[
   { binding=0 resource={ buffer=uniformBuffer } }
   { binding=1 resource={ textureView=colorTexture } }
@@ -86,7 +86,7 @@ entries=[
 
 Creates multiple bind group instances for ping-pong patterns. Used with pooled buffers.
 
-```pngine
+```zig
 #bindGroup particleBindGroup {
   layout={ pipeline=simPipeline index=0 }
   entries=[
@@ -101,7 +101,7 @@ Creates multiple bind group instances for ping-pong patterns. Used with pooled b
 
 ### Simple Uniform Binding
 
-```pngine
+```zig
 #buffer uniforms {
   size=64
   usage=[UNIFORM COPY_DST]
@@ -117,7 +117,7 @@ Creates multiple bind group instances for ping-pong patterns. Used with pooled b
 
 ### Texture and Sampler
 
-```pngine
+```zig
 #texture diffuse {
   size=[512 512]
   format=rgba8unorm
@@ -140,7 +140,7 @@ Creates multiple bind group instances for ping-pong patterns. Used with pooled b
 
 ### Buffer Subset
 
-```pngine
+```zig
 #bindGroup partial {
   layout={ pipeline=pipeline index=0 }
   entries=[
@@ -151,7 +151,7 @@ Creates multiple bind group instances for ping-pong patterns. Used with pooled b
 
 ### Ping-Pong Compute
 
-```pngine
+```zig
 #buffer particles {
   size=65536
   usage=[STORAGE]
@@ -177,7 +177,7 @@ Creates multiple bind group instances for ping-pong patterns. Used with pooled b
 
 ### Multiple Bind Groups
 
-```pngine
+```zig
 #bindGroup perFrame {
   layout={ pipeline=renderPipeline index=0 }
   entries=[

@@ -10,7 +10,7 @@ Calls a function from a WebAssembly module to generate data or perform computati
 
 ## Syntax
 
-```pngine
+```zig
 #wasmCall name {
   module={ url="path/to/module.wasm" }
   func="functionName"
@@ -34,7 +34,7 @@ Calls a function from a WebAssembly module to generate data or perform computati
 
 WASM module specification:
 
-```pngine
+```zig
 module={ url="math.wasm" }
 ```
 
@@ -46,7 +46,7 @@ The WASM file is embedded in bytecode at compile time.
 
 Exported function name to call:
 
-```pngine
+```zig
 func="computeMatrix"
 ```
 
@@ -60,7 +60,7 @@ Arguments to pass to the function. Can be:
 - Expressions: `"PI * 2"`, `"WIDTH / HEIGHT"`
 - References to other values
 
-```pngine
+```zig
 args=[45.0 1.777 0.1 100.0]
 ```
 
@@ -82,7 +82,7 @@ Return type of the function:
 
 ### Perspective Matrix
 
-```pngine
+```zig
 #wasmCall perspective {
   module={ url="matrices.wasm" }
   func="perspective"
@@ -105,7 +105,7 @@ Return type of the function:
 
 ### Model-View-Projection
 
-```pngine
+```zig
 #wasmCall modelMatrix {
   module={ url="transform.wasm" }
   func="rotateY"
@@ -130,7 +130,7 @@ Return type of the function:
 
 ### Procedural Generation
 
-```pngine
+```zig
 #wasmCall noiseData {
   module={ url="noise.wasm" }
   func="generateNoise"
@@ -141,7 +141,7 @@ Return type of the function:
 
 ### Runtime Arguments
 
-```pngine
+```zig
 #wasmCall rotatedMVP {
   module={ url="matrices.wasm" }
   func="rotatingMVP"

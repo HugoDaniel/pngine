@@ -160,7 +160,7 @@ dispatchWorkgroups="ceil(NUM_PARTICLES / 64)"
 ## Common Patterns
 
 ### Simple Triangle
-```pngine
+```zig
 #shaderModule code {
   code="
     @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
@@ -187,7 +187,7 @@ dispatchWorkgroups="ceil(NUM_PARTICLES / 64)"
 ```
 
 ### Ping-Pong Compute
-```pngine
+```zig
 #buffer particles { size=65536 usage=[VERTEX STORAGE] pool=2 }
 
 #bindGroup simGroup {
@@ -208,7 +208,7 @@ dispatchWorkgroups="ceil(NUM_PARTICLES / 64)"
 ```
 
 ### With Depth Buffer
-```pngine
+```zig
 #texture depthTexture {
   size=[canvas.width canvas.height]
   format=depth24plus
@@ -228,7 +228,7 @@ dispatchWorkgroups="ceil(NUM_PARTICLES / 64)"
 ```
 
 ### Scene Animation
-```pngine
+```zig
 #frame sceneA { perform=[renderA] }
 #frame sceneB { perform=[renderB] }
 

@@ -10,7 +10,7 @@ Defines the layout of a bind group, specifying what resources (buffers, textures
 
 ## Syntax
 
-```pngine
+```zig
 #bindGroupLayout name {
   entries=[
     { binding=0 visibility=[VERTEX FRAGMENT] buffer={ type=uniform } }
@@ -129,7 +129,7 @@ Access modes:
 
 ### Uniform Buffer Layout
 
-```pngine
+```zig
 #bindGroupLayout uniformLayout {
   entries=[
     { binding=0 visibility=[VERTEX FRAGMENT] buffer={ type=uniform } }
@@ -139,7 +139,7 @@ Access modes:
 
 ### Texture and Sampler Layout
 
-```pngine
+```zig
 #bindGroupLayout textureLayout {
   entries=[
     { binding=0 visibility=[FRAGMENT] texture={ sampleType=float viewDimension=2d } }
@@ -150,7 +150,7 @@ Access modes:
 
 ### Compute Storage Layout
 
-```pngine
+```zig
 #bindGroupLayout computeLayout {
   entries=[
     { binding=0 visibility=[COMPUTE] buffer={ type=read-only-storage } }
@@ -161,7 +161,7 @@ Access modes:
 
 ### Shadow Map Layout
 
-```pngine
+```zig
 #bindGroupLayout shadowLayout {
   entries=[
     { binding=0 visibility=[FRAGMENT] texture={ sampleType=depth viewDimension=2d } }
@@ -172,7 +172,7 @@ Access modes:
 
 ### Storage Texture Layout
 
-```pngine
+```zig
 #bindGroupLayout imageLayout {
   entries=[
     { binding=0 visibility=[COMPUTE] storageTexture={ access=write-only format=rgba8unorm } }

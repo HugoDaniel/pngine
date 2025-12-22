@@ -10,7 +10,7 @@ Defines queue operations for writing data to buffers and copying images to textu
 
 ## Syntax
 
-```pngine
+```zig
 #queue name {
   writeBuffer={
     buffer=bufferName
@@ -56,12 +56,12 @@ Writes data to a GPU buffer.
 **Data sources:**
 
 Static data reference:
-```pngine
+```zig
 data=vertexData
 ```
 
 Runtime uniform data (from shader module):
-```pngine
+```zig
 data=shader.inputs
 ```
 
@@ -125,7 +125,7 @@ Copies between buffers.
 
 ### Write Static Data
 
-```pngine
+```zig
 #data vertexData {
   float32Array=[0 0.5 -0.5 -0.5 0.5 -0.5]
 }
@@ -145,7 +145,7 @@ Copies between buffers.
 
 ### Write Uniform Data
 
-```pngine
+```zig
 #shaderModule shader {
   code="
     struct Inputs {
@@ -173,7 +173,7 @@ The runtime automatically populates uniform data with values like time and canva
 
 ### Load Texture from Image
 
-```pngine
+```zig
 #data imageFile {
   blob={ file={ url="texture.png" } }
 }
@@ -203,7 +203,7 @@ The runtime automatically populates uniform data with values like time and canva
 
 ### Partial Buffer Update
 
-```pngine
+```zig
 #queue updateTransform {
   writeBuffer={
     buffer=uniformBuffer
@@ -216,7 +216,7 @@ The runtime automatically populates uniform data with values like time and canva
 
 ### Buffer Copy
 
-```pngine
+```zig
 #queue copyResults {
   copyBufferToBuffer={
     source=gpuBuffer
@@ -232,7 +232,7 @@ The runtime automatically populates uniform data with values like time and canva
 
 Queue operations are executed when included in `#frame`:
 
-```pngine
+```zig
 #frame main {
   perform=[writeUniforms renderPass]
 }
@@ -240,7 +240,7 @@ Queue operations are executed when included in `#frame`:
 
 Or in initialization:
 
-```pngine
+```zig
 #frame init {
   before=[loadTexture]
   perform=[renderPass]

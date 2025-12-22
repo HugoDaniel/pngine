@@ -12,7 +12,7 @@ This page provides a quick overview of PNGine DSL syntax. For complete documenta
 
 A `.pngine` file contains macro declarations. Each macro starts with `#` followed by the macro type and name:
 
-```pngine
+```zig
 #macroType name {
   property=value
   array=[item1 item2]
@@ -54,7 +54,7 @@ A `.pngine` file contains macro declarations. Each macro starts with `#` followe
 
 ## Minimal Example
 
-```pngine
+```zig
 #shaderModule code {
   code="
     @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
@@ -98,7 +98,7 @@ A `.pngine` file contains macro declarations. Each macro starts with `#` followe
 
 Resources reference each other using bare identifiers. The analyzer resolves them based on context:
 
-```pngine
+```zig
 pipeline=myPipeline       // Resolves to #renderPipeline or #computePipeline
 module=shader             // Resolves to #shaderModule or #wgsl
 buffer=vertices           // Resolves to #buffer
@@ -110,7 +110,7 @@ See [References](/docs/dsl/references/) for complete documentation.
 
 Numeric fields support compile-time expressions:
 
-```pngine
+```zig
 #define NUM_PARTICLES=2048
 
 size="NUM_PARTICLES * 16"

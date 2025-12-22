@@ -10,7 +10,7 @@ Defines a named shader module containing WGSL code. Similar to `#wgsl` but desig
 
 ## Syntax
 
-```pngine
+```zig
 #shaderModule name {
   code="WGSL shader code"
   uniforms=[{ var="name" bindGroup=0 binding=0 size=64 }]
@@ -30,7 +30,7 @@ Defines a named shader module containing WGSL code. Similar to `#wgsl` but desig
 
 The complete WGSL shader source code including all entry points.
 
-```pngine
+```zig
 #shaderModule triangle {
   code="
     @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
@@ -64,7 +64,7 @@ Each uniform object has:
 | `binding` | number | No | Binding index (default: 0) |
 | `size` | number | No | Size in bytes (default: 12) |
 
-```pngine
+```zig
 #shaderModule main {
   code="
     struct Uniforms {
@@ -85,7 +85,7 @@ Each uniform object has:
 
 The analyzer can automatically extract uniform metadata from WGSL code using reflection. If your shader uses the standard pattern:
 
-```wgsl
+```zig
 @group(G) @binding(B) var<uniform> NAME : Type;
 ```
 
@@ -95,7 +95,7 @@ The metadata is extracted automatically. Explicit `uniforms` overrides reflectio
 
 ### Basic Triangle
 
-```pngine
+```zig
 #shaderModule code {
   code="
     @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
@@ -122,7 +122,7 @@ The metadata is extracted automatically. Explicit `uniforms` overrides reflectio
 
 ### With Uniform Buffer
 
-```pngine
+```zig
 #shaderModule main {
   code="
     struct Inputs {
@@ -156,7 +156,7 @@ The metadata is extracted automatically. Explicit `uniforms` overrides reflectio
 
 ### Compute Shader
 
-```pngine
+```zig
 #shaderModule compute {
   code="
     struct Particle {

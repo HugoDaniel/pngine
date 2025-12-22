@@ -10,7 +10,7 @@ Creates a GPU texture for sampling, render targets, or storage.
 
 ## Syntax
 
-```pngine
+```zig
 #texture name {
   size=[512 512]
   format=rgba8unorm
@@ -38,7 +38,7 @@ Creates a GPU texture for sampling, render targets, or storage.
 
 Texture dimensions. Can use runtime values:
 
-```pngine
+```zig
 // Static size
 #texture image {
   size=[512 512]
@@ -113,7 +113,7 @@ Texture dimensionality.
 
 MSAA sample count for multisampled textures. Must be 1 or 4.
 
-```pngine
+```zig
 #define SAMPLE_COUNT=4
 
 #texture msaaTarget {
@@ -130,7 +130,7 @@ MSAA sample count for multisampled textures. Must be 1 or 4.
 
 Number of mipmap levels.
 
-```pngine
+```zig
 #texture mipmapped {
   size=[256 256]
   format=rgba8unorm
@@ -143,7 +143,7 @@ Number of mipmap levels.
 
 ### Render Target
 
-```pngine
+```zig
 #texture colorTarget {
   size=[canvas.width canvas.height]
   format=preferredCanvasFormat
@@ -153,7 +153,7 @@ Number of mipmap levels.
 
 ### Depth Buffer
 
-```pngine
+```zig
 #texture depthTexture {
   size=[canvas.width canvas.height]
   format=depth24plus
@@ -172,7 +172,7 @@ Number of mipmap levels.
 
 ### MSAA with Resolve
 
-```pngine
+```zig
 #define SAMPLE_COUNT=4
 
 #texture msaaTexture {
@@ -195,7 +195,7 @@ Number of mipmap levels.
 
 ### External Image Texture
 
-```pngine
+```zig
 #data imageData {
   blob={ file={ url="texture.png" } }
 }

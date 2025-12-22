@@ -96,7 +96,7 @@ Control frame execution and animation.
 
 ## Syntax Overview
 
-```pngine
+```zig
 #macroType name {
   property=value
   array=[item1 item2]
@@ -120,7 +120,7 @@ Control frame execution and animation.
 
 Resources are referenced by their name directly. The analyzer resolves identifiers based on context:
 
-```pngine
+```zig
 pipeline=mainPipeline      // Resolves to #renderPipeline or #computePipeline
 module=shader              // Resolves to #shaderModule or #wgsl
 buffer=vertices            // Resolves to #buffer

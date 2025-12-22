@@ -10,7 +10,7 @@ Creates a query set for GPU timing or occlusion queries.
 
 ## Syntax
 
-```pngine
+```zig
 #querySet name {
   type=timestamp
   count=16
@@ -41,7 +41,7 @@ Type of GPU query.
 
 Number of queries in the set. Determines how many query results can be stored.
 
-```pngine
+```zig
 #querySet timingQueries {
   type=timestamp
   count=4
@@ -52,7 +52,7 @@ Number of queries in the set. Determines how many query results can be stored.
 
 ### Timestamp Queries
 
-```pngine
+```zig
 #querySet gpuTiming {
   type=timestamp
   count=8
@@ -66,7 +66,7 @@ Number of queries in the set. Determines how many query results can be stored.
 
 ### Occlusion Queries
 
-```pngine
+```zig
 #querySet occlusionQueries {
   type=occlusion
   count=100

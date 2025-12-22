@@ -10,7 +10,7 @@ Creates a texture sampler for controlling how textures are sampled in shaders.
 
 ## Syntax
 
-```pngine
+```zig
 #sampler name {
   magFilter=linear
   minFilter=linear
@@ -49,7 +49,7 @@ Filter mode for texture magnification and minification.
 | `nearest` | Nearest-neighbor (pixelated) |
 | `linear` | Bilinear interpolation (smooth) |
 
-```pngine
+```zig
 #sampler pixelArt {
   magFilter=nearest
   minFilter=nearest
@@ -72,7 +72,7 @@ Filter mode between mipmap levels.
 | `nearest` | Use closest mip level |
 | `linear` | Blend between mip levels (trilinear) |
 
-```pngine
+```zig
 #sampler trilinear {
   magFilter=linear
   minFilter=linear
@@ -92,7 +92,7 @@ Texture wrapping mode for each axis.
 | `repeat` | Tile texture |
 | `mirror-repeat` | Tile with mirroring |
 
-```pngine
+```zig
 #sampler tiling {
   addressModeU=repeat
   addressModeV=repeat
@@ -121,7 +121,7 @@ Comparison function for shadow map sampling. When set, sampler returns compariso
 | `greater-equal` | 1 if ref >= texel |
 | `always` | Always 1 |
 
-```pngine
+```zig
 #sampler shadowSampler {
   compare=less
   magFilter=linear
@@ -135,7 +135,7 @@ Comparison function for shadow map sampling. When set, sampler returns compariso
 
 Anisotropic filtering level (1-16). Higher values improve quality at oblique angles but cost performance.
 
-```pngine
+```zig
 #sampler anisotropic {
   magFilter=linear
   minFilter=linear
@@ -147,7 +147,7 @@ Anisotropic filtering level (1-16). Higher values improve quality at oblique ang
 
 ### Basic Linear Sampler
 
-```pngine
+```zig
 #sampler linearSampler {
   magFilter=linear
   minFilter=linear
@@ -163,7 +163,7 @@ Anisotropic filtering level (1-16). Higher values improve quality at oblique ang
 
 ### Tiling Texture Sampler
 
-```pngine
+```zig
 #sampler tilingSampler {
   magFilter=linear
   minFilter=linear
@@ -175,7 +175,7 @@ Anisotropic filtering level (1-16). Higher values improve quality at oblique ang
 
 ### Shadow Map Sampler
 
-```pngine
+```zig
 #sampler shadowCompare {
   compare=less
   magFilter=linear
@@ -185,7 +185,7 @@ Anisotropic filtering level (1-16). Higher values improve quality at oblique ang
 
 ### Pixel Art Sampler
 
-```pngine
+```zig
 #sampler pixelPerfect {
   magFilter=nearest
   minFilter=nearest
@@ -196,7 +196,7 @@ Anisotropic filtering level (1-16). Higher values improve quality at oblique ang
 
 ### High Quality Sampler
 
-```pngine
+```zig
 #sampler highQuality {
   magFilter=linear
   minFilter=linear

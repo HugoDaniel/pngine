@@ -12,7 +12,7 @@ PNGine DSL uses bare identifiers to reference resources. The analyzer automatica
 
 Reference resources by their name directly:
 
-```pngine
+```zig
 pipeline=mainPipeline
 buffer=vertexData
 module=shaderCode
@@ -45,7 +45,7 @@ When you write `module=code`, the analyzer searches for a resource named `code` 
 
 ### Pipeline References
 
-```pngine
+```zig
 #renderPipeline mainPipeline { ... }
 
 #renderPass pass {
@@ -56,7 +56,7 @@ When you write `module=code`, the analyzer searches for a resource named `code` 
 
 ### Shader Module References
 
-```pngine
+```zig
 #shaderModule vertexShader { code="..." }
 #wgsl fragmentCode { value="..." }
 
@@ -68,7 +68,7 @@ When you write `module=code`, the analyzer searches for a resource named `code` 
 
 ### Buffer References
 
-```pngine
+```zig
 #buffer positions { size=1024 usage=[VERTEX] }
 #buffer indices { size=256 usage=[INDEX] }
 
@@ -82,7 +82,7 @@ When you write `module=code`, the analyzer searches for a resource named `code` 
 
 ### Bind Group References
 
-```pngine
+```zig
 #bindGroup uniforms { ... }
 #bindGroup textures { ... }
 
@@ -95,7 +95,7 @@ When you write `module=code`, the analyzer searches for a resource named `code` 
 
 ### Pass References in Frame
 
-```pngine
+```zig
 #renderPass shadowPass { ... }
 #renderPass mainPass { ... }
 #computePass physics { ... }
@@ -114,14 +114,14 @@ Some identifiers are reserved keywords and not resolved as references:
 ### Layout
 - `auto` - Auto-derive layout from shaders
 
-```pngine
+```zig
 layout=auto    // Special keyword, not a reference
 ```
 
 ### Texture Views
 - `contextCurrentTexture` - Current canvas texture
 
-```pngine
+```zig
 view=contextCurrentTexture    // Special keyword
 ```
 
@@ -129,7 +129,7 @@ view=contextCurrentTexture    // Special keyword
 - `clear`, `load` - Load operations
 - `store`, `discard` - Store operations
 
-```pngine
+```zig
 loadOp=clear     // Special keyword
 storeOp=store    // Special keyword
 ```
@@ -138,7 +138,7 @@ storeOp=store    // Special keyword
 - `preferredCanvasFormat` - Browser's preferred format
 - All WebGPU formats: `rgba8unorm`, `depth24plus`, etc.
 
-```pngine
+```zig
 format=preferredCanvasFormat    // Special keyword
 format=rgba8unorm               // Special keyword
 ```
@@ -146,7 +146,7 @@ format=rgba8unorm               // Special keyword
 ### Primitive Topology
 - `triangle-list`, `triangle-strip`, `line-list`, `line-strip`, `point-list`
 
-```pngine
+```zig
 topology=triangle-list    // Special keyword
 ```
 
@@ -154,7 +154,7 @@ topology=triangle-list    // Special keyword
 - `none`, `front`, `back` - Cull modes
 - `ccw`, `cw` - Front face winding
 
-```pngine
+```zig
 cullMode=back     // Special keyword
 frontFace=ccw     // Special keyword
 ```
@@ -163,7 +163,7 @@ frontFace=ccw     // Special keyword
 - `nearest`, `linear` - Texture filters
 - `clamp-to-edge`, `repeat`, `mirror-repeat` - Address modes
 
-```pngine
+```zig
 magFilter=linear           // Special keyword
 addressModeU=repeat        // Special keyword
 ```
@@ -172,7 +172,7 @@ addressModeU=repeat        // Special keyword
 
 All resource names must be unique across **all** macro types:
 
-```pngine
+```zig
 #buffer myResource { ... }
 #texture myResource { ... }    // ERROR: duplicate_definition
 ```

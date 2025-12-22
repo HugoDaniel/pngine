@@ -10,7 +10,7 @@ Creates a render pipeline for vertex and fragment shader execution.
 
 ## Syntax
 
-```pngine
+```zig
 #renderPipeline name {
   layout=auto
   vertex={
@@ -55,7 +55,7 @@ Creates a render pipeline for vertex and fragment shader execution.
 - `auto` - Derive layout from shaders (default)
 - Reference to `#pipelineLayout`
 
-```pngine
+```zig
 layout=auto
 // or
 layout=myLayout
@@ -103,7 +103,7 @@ Common formats:
 | `sint32` | Single i32 |
 | `unorm8x4` | 4 normalized u8 |
 
-```pngine
+```zig
 vertex={
   module=shader
   entryPoint=vs
@@ -143,7 +143,7 @@ Array of color target state objects:
 
 Blend object:
 
-```pngine
+```zig
 blend={
   color={ srcFactor=src-alpha dstFactor=one-minus-src-alpha operation=add }
   alpha={ srcFactor=one dstFactor=one-minus-src-alpha operation=add }
@@ -206,7 +206,7 @@ Compare functions: `never`, `less`, `equal`, `less-equal`, `greater`, `not-equal
 
 MSAA sample count. Must be `1` or `4`.
 
-```pngine
+```zig
 #define SAMPLE_COUNT=4
 
 #renderPipeline msaaPipeline {
@@ -219,7 +219,7 @@ MSAA sample count. Must be `1` or `4`.
 
 ### Basic Triangle
 
-```pngine
+```zig
 #shaderModule code {
   code="
     @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
@@ -239,7 +239,7 @@ MSAA sample count. Must be `1` or `4`.
 
 ### With Vertex Buffers
 
-```pngine
+```zig
 #renderPipeline mesh {
   layout=auto
   vertex={
@@ -272,7 +272,7 @@ MSAA sample count. Must be `1` or `4`.
 
 ### Instanced Rendering
 
-```pngine
+```zig
 #renderPipeline instanced {
   vertex={
     module=shader
@@ -295,7 +295,7 @@ MSAA sample count. Must be `1` or `4`.
 
 ### Alpha Blending
 
-```pngine
+```zig
 #renderPipeline transparent {
   fragment={
     module=shader

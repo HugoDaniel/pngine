@@ -10,7 +10,7 @@ Imports macros from another PNGine file for modular composition.
 
 ## Syntax
 
-```pngine
+```zig
 #import "./path/to/file.pngine"
 ```
 
@@ -18,7 +18,7 @@ Imports macros from another PNGine file for modular composition.
 
 ### File Import
 
-```pngine
+```zig
 #import "./common.pngine"
 #import "./shaders.pngine"
 #import "./resources.pngine"
@@ -31,7 +31,7 @@ Paths are relative to the importing file.
 ### Modular Project Structure
 
 **core.pngine:**
-```pngine
+```zig
 #texture depthTexture {
   size=[canvas.width canvas.height]
   format=depth24plus
@@ -45,7 +45,7 @@ Paths are relative to the importing file.
 ```
 
 **shaders.pngine:**
-```pngine
+```zig
 #shaderModule vertexShader {
   code="..."
 }
@@ -56,7 +56,7 @@ Paths are relative to the importing file.
 ```
 
 **main.pngine:**
-```pngine
+```zig
 #import "./core.pngine"
 #import "./shaders.pngine"
 
@@ -86,7 +86,7 @@ Paths are relative to the importing file.
 Multi-scene demo with shared resources:
 
 **core.wgsl.pngine:**
-```pngine
+```zig
 #define SAMPLE_COUNT=4
 
 #texture renderTarget {
@@ -102,7 +102,7 @@ Multi-scene demo with shared resources:
 ```
 
 **sceneA.wgsl.pngine:**
-```pngine
+```zig
 #shaderModule sceneAShader {
   code="..."
 }
@@ -123,7 +123,7 @@ Multi-scene demo with shared resources:
 ```
 
 **main.wgsl.pngine:**
-```pngine
+```zig
 #import "./core.wgsl.pngine"
 #import "./sceneA.wgsl.pngine"
 #import "./sceneB.wgsl.pngine"
@@ -143,7 +143,7 @@ Multi-scene demo with shared resources:
 ### Shared Utilities
 
 **utils.pngine:**
-```pngine
+```zig
 #wgsl math {
   value="
     const PI: f32 = 3.14159;
@@ -173,7 +173,7 @@ Multi-scene demo with shared resources:
 ```
 
 **main.pngine:**
-```pngine
+```zig
 #import "./utils.pngine"
 
 #shaderModule shader {
@@ -203,7 +203,7 @@ Multi-scene demo with shared resources:
 
 All macro names must be unique across all imported files:
 
-```pngine
+```zig
 // file_a.pngine
 #buffer myBuffer { size=100 usage=[VERTEX] }
 

@@ -10,7 +10,7 @@ Defines a frame that orchestrates the execution of passes and queue operations.
 
 ## Syntax
 
-```pngine
+```zig
 #frame name {
   before=[queueOp1 queueOp2]
   perform=[pass1 pass2 pass3]
@@ -36,7 +36,7 @@ Defines a frame that orchestrates the execution of passes and queue operations.
 
 The main sequence of passes to execute each frame. Order matters - passes execute left to right.
 
-```pngine
+```zig
 perform=[shadowPass mainPass postProcess uiPass]
 ```
 
@@ -51,7 +51,7 @@ Can reference:
 
 Operations executed before the main pass sequence. Typically queue operations to update uniforms.
 
-```pngine
+```zig
 before=[writeUniforms writeTransforms]
 ```
 
@@ -61,7 +61,7 @@ before=[writeUniforms writeTransforms]
 
 Operations executed after the main pass sequence. Useful for readback or cleanup.
 
-```pngine
+```zig
 after=[copyResults]
 ```
 
@@ -71,7 +71,7 @@ after=[copyResults]
 
 Operations executed once when the frame is first activated (scene load). Used for initialization.
 
-```pngine
+```zig
 onLoad=[loadTextures initParticles]
 ```
 
@@ -81,7 +81,7 @@ onLoad=[loadTextures initParticles]
 
 Operations executed when switching away from this frame (scene unload). Used for cleanup.
 
-```pngine
+```zig
 onUnload=[saveState]
 ```
 
@@ -89,7 +89,7 @@ onUnload=[saveState]
 
 ### Simple Frame
 
-```pngine
+```zig
 #frame main {
   perform=[renderPass]
 }
@@ -97,7 +97,7 @@ onUnload=[saveState]
 
 ### With Uniform Updates
 
-```pngine
+```zig
 #queue writeTime {
   writeBuffer={
     buffer=uniforms
@@ -119,7 +119,7 @@ onUnload=[saveState]
 
 ### Multi-Pass Rendering
 
-```pngine
+```zig
 #frame deferred {
   before=[updateCamera updateLights]
   perform=[
@@ -133,7 +133,7 @@ onUnload=[saveState]
 
 ### Compute + Render
 
-```pngine
+```zig
 #frame simulation {
   before=[writeParams]
   perform=[
@@ -146,7 +146,7 @@ onUnload=[saveState]
 
 ### With Initialization
 
-```pngine
+```zig
 #queue loadTexture {
   copyExternalImageToTexture={
     source={ source=textureImage }
@@ -164,7 +164,7 @@ onUnload=[saveState]
 
 ### Scene-Based Animation
 
-```pngine
+```zig
 #frame sceneA {
   before=[updateSceneA]
   perform=[renderSceneA]
@@ -199,7 +199,7 @@ Each frame execution follows this order:
 
 For double-buffered compute:
 
-```pngine
+```zig
 #computePass simulate {
   pipeline=simPipeline
   bindGroups=[simGroup]

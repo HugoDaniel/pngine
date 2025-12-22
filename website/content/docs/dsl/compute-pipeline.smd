@@ -10,7 +10,7 @@ Creates a compute pipeline for general-purpose GPU computation.
 
 ## Syntax
 
-```pngine
+```zig
 #computePipeline name {
   layout=auto
   compute={
@@ -34,7 +34,7 @@ Creates a compute pipeline for general-purpose GPU computation.
 - `auto` - Derive layout from shader (default)
 - Reference to `#pipelineLayout`
 
-```pngine
+```zig
 layout=auto
 // or
 layout=computeLayout
@@ -51,7 +51,7 @@ Compute shader stage configuration.
 | `module` | reference | Yes | Shader module |
 | `entryPoint` | string | Yes | Entry function name |
 
-```pngine
+```zig
 compute={
   module=computeShader
   entryPoint=main
@@ -62,7 +62,7 @@ compute={
 
 ### Basic Compute Pipeline
 
-```pngine
+```zig
 #shaderModule computeShader {
   code="
     @group(0) @binding(0) var<storage, read_write> data: array<f32>;
@@ -88,7 +88,7 @@ compute={
 
 ### Particle Simulation
 
-```pngine
+```zig
 #shaderModule particleSim {
   code="
     struct Particle {
@@ -124,7 +124,7 @@ compute={
 
 ### Image Processing
 
-```pngine
+```zig
 #shaderModule blur {
   code="
     @group(0) @binding(0) var inputTex: texture_2d<f32>;
@@ -155,7 +155,7 @@ compute={
 
 ### With Explicit Layout
 
-```pngine
+```zig
 #bindGroupLayout computeLayout {
   entries=[
     { binding=0 visibility=[COMPUTE] buffer={ type=read-only-storage } }
@@ -177,7 +177,7 @@ compute={
 
 The shader defines workgroup size with `@workgroup_size(x, y, z)`:
 
-```wgsl
+```zig
 @compute @workgroup_size(64)        // 1D: 64 threads
 @compute @workgroup_size(8, 8)      // 2D: 8x8 = 64 threads
 @compute @workgroup_size(4, 4, 4)   // 3D: 4x4x4 = 64 threads

@@ -10,7 +10,7 @@ Creates an image bitmap from embedded blob data for loading textures.
 
 ## Syntax
 
-```pngine
+```zig
 #imageBitmap name {
   image=dataName
 }
@@ -28,7 +28,7 @@ Creates an image bitmap from embedded blob data for loading textures.
 
 Reference to a `#data` macro containing blob file data.
 
-```pngine
+```zig
 #data pngFile {
   blob={ file={ url="textures/diffuse.png" } }
   mime="image/png"
@@ -43,7 +43,7 @@ Reference to a `#data` macro containing blob file data.
 
 ### Load PNG Texture
 
-```pngine
+```zig
 #data textureFile {
   blob={ file={ url="assets/logo.png" } }
   mime="image/png"
@@ -82,7 +82,7 @@ Reference to a `#data` macro containing blob file data.
 
 ### Multiple Textures
 
-```pngine
+```zig
 #data diffuseFile {
   blob={ file={ url="textures/diffuse.png" } }
 }
@@ -124,7 +124,7 @@ Reference to a `#data` macro containing blob file data.
 
 ### Sprite Sheet
 
-```pngine
+```zig
 #data spriteSheet {
   blob={ file={ url="sprites/sheet.png" } }
 }

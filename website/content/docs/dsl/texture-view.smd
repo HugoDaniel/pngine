@@ -10,7 +10,7 @@ Creates a view into a texture, allowing access to specific mip levels, array lay
 
 ## Syntax
 
-```pngine
+```zig
 #textureView name {
   texture=textureName
   format=rgba8unorm
@@ -42,7 +42,7 @@ Creates a view into a texture, allowing access to specific mip levels, array lay
 
 Reference to the source `#texture`.
 
-```pngine
+```zig
 #textureView myView {
   texture=myTexture
 }
@@ -54,7 +54,7 @@ Reference to the source `#texture`.
 
 View format. Must be compatible with texture format. Defaults to texture's format.
 
-```pngine
+```zig
 #texture rgbaTexture {
   size=[256 256]
   format=rgba8unorm
@@ -88,7 +88,7 @@ View dimensionality.
 
 Select a range of mip levels.
 
-```pngine
+```zig
 #texture mipmapped {
   size=[256 256]
   format=rgba8unorm
@@ -115,7 +115,7 @@ Select a range of mip levels.
 
 Select a range of array layers for array textures.
 
-```pngine
+```zig
 #texture arrayTexture {
   size=[256 256 6]
   format=rgba8unorm
@@ -149,7 +149,7 @@ Which aspect of a depth-stencil texture to view.
 | `depth-only` | Depth aspect only |
 | `stencil-only` | Stencil aspect only |
 
-```pngine
+```zig
 #texture depthStencil {
   size=[512 512]
   format=depth24plus-stencil8
@@ -166,7 +166,7 @@ Which aspect of a depth-stencil texture to view.
 
 ### Basic View
 
-```pngine
+```zig
 #texture colorTexture {
   size=[512 512]
   format=rgba8unorm
@@ -186,7 +186,7 @@ Which aspect of a depth-stencil texture to view.
 
 ### Mipmap Level View
 
-```pngine
+```zig
 #texture source {
   size=[1024 1024]
   format=rgba8unorm
@@ -203,7 +203,7 @@ Which aspect of a depth-stencil texture to view.
 
 ### Cube Map Face
 
-```pngine
+```zig
 #texture cubemap {
   size=[256 256 6]
   format=rgba8unorm

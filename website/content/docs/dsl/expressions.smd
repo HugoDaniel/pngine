@@ -14,14 +14,14 @@ Expressions are evaluated at compile time and must result in a number.
 
 ### In Quoted Strings
 
-```pngine
+```zig
 size="4 * 256"
 dispatchWorkgroups="ceil(NUM_PARTICLES / 64)"
 ```
 
 ### With Defines
 
-```pngine
+```zig
 #define SIZE=256
 size=SIZE  // Direct use
 size="SIZE * 4"  // In expression
@@ -47,7 +47,7 @@ Standard mathematical precedence:
 3. Multiplication `*`, Division `/`
 4. Addition `+`, Subtraction `-`
 
-```pngine
+```zig
 "1 + 2 * 3"      // = 7 (not 9)
 "(1 + 2) * 3"    // = 9
 "10 / 2 + 3"     // = 8
@@ -58,7 +58,7 @@ Standard mathematical precedence:
 
 Left-to-right for operators of equal precedence:
 
-```pngine
+```zig
 "1 - 2 - 3"      // = -4 (not 2)
 "24 / 4 / 2"     // = 3 (not 12)
 ```
@@ -71,7 +71,7 @@ Left-to-right for operators of equal precedence:
 | `E` | 2.71828182845904... | Euler's number |
 | `TAU` | 6.28318530717958... | 2 * PI |
 
-```pngine
+```zig
 #define FOV="PI / 4"
 #define CIRCLE="TAU"
 #define GROWTH="E"
@@ -91,7 +91,7 @@ Left-to-right for operators of equal precedence:
 
 Defines can be used in expressions:
 
-```pngine
+```zig
 #define NUM_PARTICLES=2048
 #define PARTICLE_SIZE=32
 #define WORKGROUP_SIZE=64
@@ -110,7 +110,7 @@ Defines can be used in expressions:
 
 Defines can reference other defines:
 
-```pngine
+```zig
 #define A=10
 #define B="A * 2"         // = 20
 #define C="A + B"         // = 30
@@ -121,7 +121,7 @@ Defines can reference other defines:
 
 ### Buffer Size Calculation
 
-```pngine
+```zig
 #define VERTEX_COUNT=1000
 #define FLOATS_PER_VERTEX=8
 #define BYTES_PER_FLOAT=4
@@ -134,7 +134,7 @@ Defines can reference other defines:
 
 ### Compute Dispatch
 
-```pngine
+```zig
 #define NUM_ITEMS=4096
 #define WORKGROUP_SIZE=256
 
@@ -145,7 +145,7 @@ Defines can reference other defines:
 
 ### Array Stride
 
-```pngine
+```zig
 #renderPipeline mesh {
   vertex={
     buffers=[{
@@ -162,7 +162,7 @@ Defines can reference other defines:
 
 ### Angle Calculations
 
-```pngine
+```zig
 #define FOV_DEGREES=60
 #define FOV_RADIANS="FOV_DEGREES * PI / 180"
 
@@ -179,7 +179,7 @@ In `#data` with `initEachElementWith`, additional variables are available:
 | `ELEMENT_ID` | Current element index (0 to N-1) |
 | `random()` | Random value between 0 and 1 |
 
-```pngine
+```zig
 #define NUM_PARTICLES=2048
 
 #data particles {
@@ -201,7 +201,7 @@ In `#data` with `initEachElementWith`, additional variables are available:
 
 Division by zero returns `null` (graceful failure):
 
-```pngine
+```zig
 size="10 / 0"  // Compile error
 ```
 
@@ -209,7 +209,7 @@ size="10 / 0"  // Compile error
 
 Malformed expressions produce compile errors:
 
-```pngine
+```zig
 size="1 +"      // Error: unexpected end
 size="1 * * 2"  // Error: unexpected operator
 size="foo"      // Error: undefined reference (if not a define)
@@ -226,7 +226,7 @@ To prevent infinite loops, expression evaluation is bounded:
 
 All expression results are `f64` (double precision float). When used in integer contexts (like `size`), the value is truncated.
 
-```pngine
+```zig
 size="100.7"   // Uses 100 bytes
 size="100 / 3" // Uses 33 bytes (truncated from 33.333...)
 ```

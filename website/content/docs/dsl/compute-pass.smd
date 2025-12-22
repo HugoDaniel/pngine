@@ -10,7 +10,7 @@ Defines a compute pass that dispatches compute shader workgroups.
 
 ## Syntax
 
-```pngine
+```zig
 #computePass name {
   pipeline=pipelineName
   bindGroups=[group0 group1]
@@ -37,7 +37,7 @@ Defines a compute pass that dispatches compute shader workgroups.
 
 Reference to `#computePipeline`. Can use bare identifier.
 
-```pngine
+```zig
 pipeline=simPipeline
 ```
 
@@ -47,7 +47,7 @@ pipeline=simPipeline
 
 Bind groups in order matching `@group(N)`:
 
-```pngine
+```zig
 bindGroups=[particleGroup uniformGroup]
 ```
 
@@ -57,7 +57,7 @@ bindGroups=[particleGroup uniformGroup]
 
 Pool offsets for ping-pong bind groups. Each offset corresponds to a bind group in the `bindGroups` array.
 
-```pngine
+```zig
 bindGroups=[simBindGroup]
 bindGroupsPoolOffsets=[0]  // Alternates each frame
 ```
@@ -75,19 +75,19 @@ actual_id = base_id + (frame_counter + offset) % pool_size
 Specifies number of workgroups to dispatch.
 
 **Array format (x, y, z):**
-```pngine
+```zig
 dispatchWorkgroups=[64 1 1]
 dispatchWorkgroups=[8 8 1]
 dispatchWorkgroups=[4 4 4]
 ```
 
 **Single number (x only):**
-```pngine
+```zig
 dispatchWorkgroups=64  // Same as [64 1 1]
 ```
 
 **Expression string:**
-```pngine
+```zig
 #define NUM_PARTICLES=2048
 
 dispatchWorkgroups="ceil(NUM_PARTICLES / 64)"
@@ -101,7 +101,7 @@ Total threads = workgroups * workgroup_size (from shader).
 
 Reference to a buffer containing dispatch parameters. The buffer must contain three `u32` values: `[workgroups_x, workgroups_y, workgroups_z]`.
 
-```pngine
+```zig
 #buffer dispatchArgs {
   size=12
   usage=[INDIRECT COPY_DST]
@@ -118,7 +118,7 @@ Reference to a buffer containing dispatch parameters. The buffer must contain th
 
 ### Basic Compute
 
-```pngine
+```zig
 #computePass process {
   pipeline=processPipeline
   bindGroups=[dataBindGroup]
@@ -128,7 +128,7 @@ Reference to a buffer containing dispatch parameters. The buffer must contain th
 
 ### 2D Dispatch (Image Processing)
 
-```pngine
+```zig
 #computePass blur {
   pipeline=blurPipeline
   bindGroups=[imageBindGroup]
@@ -138,7 +138,7 @@ Reference to a buffer containing dispatch parameters. The buffer must contain th
 
 ### With Expression
 
-```pngine
+```zig
 #define NUM_PARTICLES=4096
 #define WORKGROUP_SIZE=64
 
@@ -151,7 +151,7 @@ Reference to a buffer containing dispatch parameters. The buffer must contain th
 
 ### Ping-Pong Simulation
 
-```pngine
+```zig
 #buffer particles {
   size=65536
   usage=[STORAGE]
@@ -187,7 +187,7 @@ Each frame:
 
 ### Multiple Compute Passes
 
-```pngine
+```zig
 #computePass integrate {
   pipeline=integratePipeline
   bindGroups=[physicsGroup]
@@ -209,7 +209,7 @@ Each frame:
 
 ### Indirect Dispatch
 
-```pngine
+```zig
 #buffer instanceCount {
   size=4
   usage=[STORAGE INDIRECT COPY_DST]

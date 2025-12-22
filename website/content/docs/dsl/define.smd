@@ -10,7 +10,7 @@ Defines compile-time constants that are substituted throughout the DSL file.
 
 ## Syntax
 
-```pngine
+```zig
 #define NAME=value
 #define NAME="expression"
 ```
@@ -21,7 +21,7 @@ Defines compile-time constants that are substituted throughout the DSL file.
 
 ### Simple Values
 
-```pngine
+```zig
 #define NUM_PARTICLES=2048
 #define SAMPLE_COUNT=4
 #define FOV=1.0472
@@ -31,7 +31,7 @@ Defines compile-time constants that are substituted throughout the DSL file.
 
 String expressions are evaluated at compile time:
 
-```pngine
+```zig
 #define VERTEX_SIZE="4 * 10"
 #define BUFFER_SIZE="NUM_PARTICLES * VERTEX_SIZE"
 #define HALF_PI="PI / 2"
@@ -41,7 +41,7 @@ String expressions are evaluated at compile time:
 
 Defined constants can be used anywhere a number is expected:
 
-```pngine
+```zig
 #define NUM_PARTICLES=4096
 #define PARTICLE_SIZE=16
 #define WORKGROUP_SIZE=64
@@ -61,7 +61,7 @@ Defined constants can be used anywhere a number is expected:
 
 ### MSAA Configuration
 
-```pngine
+```zig
 #define SAMPLE_COUNT=4
 
 #texture msaaTarget {
@@ -79,7 +79,7 @@ Defined constants can be used anywhere a number is expected:
 
 ### Compute Configuration
 
-```pngine
+```zig
 #define NUM_PARTICLES=8192
 #define PARTICLE_STRIDE=32
 #define WORKGROUP_SIZE=256
@@ -101,7 +101,7 @@ Defined constants can be used anywhere a number is expected:
 
 ### Math Constants
 
-```pngine
+```zig
 #define PI_OVER_4="PI / 4"
 #define TAU_OVER_8="TAU / 8"
 #define ASPECT_RATIO="16 / 9"
@@ -109,7 +109,7 @@ Defined constants can be used anywhere a number is expected:
 
 ### Size Calculations
 
-```pngine
+```zig
 #define VERTEX_COUNT=1000
 #define FLOATS_PER_VERTEX=8
 #define BYTES_PER_FLOAT=4
@@ -142,7 +142,7 @@ Built-in constants available in expressions:
 
 Operator precedence follows standard math: `* /` before `+ -`.
 
-```pngine
+```zig
 #define RESULT="1 + 2 * 3"      // = 7
 #define GROUPED="(1 + 2) * 3"   // = 9
 ```
@@ -154,7 +154,7 @@ Defines are global and can be used:
 - In any numeric attribute
 - In `dispatchWorkgroups` expressions
 
-```pngine
+```zig
 #define A=10
 #define B="A * 2"
 #define C="A + B"  // = 30
@@ -172,7 +172,7 @@ Defines are global and can be used:
 
 Unlike WGSL `const`, `#define` is resolved at PNGine compile time (not shader compile time). Use `#define` for values that affect resource creation.
 
-```pngine
+```zig
 // PNGine compile time
 #define SIZE=256
 

@@ -10,7 +10,7 @@ Creates a GPU buffer for storing vertex data, uniforms, storage data, or indices
 
 ## Syntax
 
-```pngine
+```zig
 #buffer name {
   size=1024
   usage=[VERTEX STORAGE]
@@ -39,7 +39,7 @@ Buffer size in bytes. Can be:
 - **Reference:** `size=vertexData` (uses size of referenced `#data`)
 - **Define:** `size=BUFFER_SIZE` (uses `#define` value)
 
-```pngine
+```zig
 #define VERTEX_SIZE=40
 #define VERTEX_COUNT=100
 
@@ -68,7 +68,7 @@ GPU buffer usage flags. At least one required.
 | `INDIRECT` | Indirect draw/dispatch |
 | `QUERY_RESOLVE` | Query result destination |
 
-```pngine
+```zig
 #buffer storageBuffer {
   size=4096
   usage=[STORAGE COPY_DST]
@@ -81,7 +81,7 @@ GPU buffer usage flags. At least one required.
 
 Reference to a `#data` macro for initial buffer contents. Buffer is created with data already mapped.
 
-```pngine
+```zig
 #data cubeVertices {
   float32Array=[
     -1 -1 -1  1 0 0
@@ -103,7 +103,7 @@ Reference to a `#data` macro for initial buffer contents. Buffer is created with
 
 Creates multiple buffer instances for ping-pong patterns. Used in compute simulations where you read from one buffer and write to another.
 
-```pngine
+```zig
 #buffer particles {
   size=32768
   usage=[VERTEX STORAGE]
@@ -123,7 +123,7 @@ See [Ping-Pong Pattern](#ping-pong-pattern) below.
 
 ### Simple Vertex Buffer
 
-```pngine
+```zig
 #buffer positions {
   size=48
   usage=[VERTEX]
@@ -132,7 +132,7 @@ See [Ping-Pong Pattern](#ping-pong-pattern) below.
 
 ### Uniform Buffer with Copy
 
-```pngine
+```zig
 #buffer uniforms {
   size=64
   usage=[UNIFORM COPY_DST]
@@ -141,7 +141,7 @@ See [Ping-Pong Pattern](#ping-pong-pattern) below.
 
 ### Data-Initialized Buffer
 
-```pngine
+```zig
 #data triangleVerts {
   float32Array=[
     0.0  0.5  1 0 0
@@ -159,7 +159,7 @@ See [Ping-Pong Pattern](#ping-pong-pattern) below.
 
 ### Compute Storage Buffer
 
-```pngine
+```zig
 #define NUM_PARTICLES=2048
 #define PARTICLE_SIZE=16
 
@@ -170,11 +170,11 @@ See [Ping-Pong Pattern](#ping-pong-pattern) below.
 }
 ```
 
-### Ping-Pong Pattern
+### [Ping-Pong Pattern]($section.id('ping-pong-pattern'))
 
 For compute simulations requiring double-buffering:
 
-```pngine
+```zig
 #buffer particles {
   size=32768
   usage=[VERTEX STORAGE]

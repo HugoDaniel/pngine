@@ -10,7 +10,7 @@ Defines a pipeline layout that specifies which bind group layouts a pipeline use
 
 ## Syntax
 
-```pngine
+```zig
 #pipelineLayout name {
   bindGroupLayouts=[layout0 layout1 layout2]
 }
@@ -32,7 +32,7 @@ Array of `#bindGroupLayout` references. Order corresponds to `@group(N)` in shad
 - `bindGroupLayouts[1]` → `@group(1)`
 - etc.
 
-```pngine
+```zig
 #pipelineLayout myLayout {
   bindGroupLayouts=[frameLayout materialLayout objectLayout]
 }
@@ -42,7 +42,7 @@ Array of `#bindGroupLayout` references. Order corresponds to `@group(N)` in shad
 
 ### Single Bind Group
 
-```pngine
+```zig
 #bindGroupLayout uniformLayout {
   entries=[
     { binding=0 visibility=[VERTEX FRAGMENT] buffer={ type=uniform } }
@@ -61,7 +61,7 @@ Array of `#bindGroupLayout` references. Order corresponds to `@group(N)` in shad
 
 ### Multiple Bind Groups
 
-```pngine
+```zig
 #bindGroupLayout frameLayout {
   entries=[
     { binding=0 visibility=[VERTEX] buffer={ type=uniform } }
@@ -88,7 +88,7 @@ Array of `#bindGroupLayout` references. Order corresponds to `@group(N)` in shad
 
 ### Compute Pipeline Layout
 
-```pngine
+```zig
 #bindGroupLayout computeLayout {
   entries=[
     { binding=0 visibility=[COMPUTE] buffer={ type=read-only-storage } }
@@ -110,7 +110,7 @@ Array of `#bindGroupLayout` references. Order corresponds to `@group(N)` in shad
 
 For simpler cases, use `layout=auto` on pipelines to derive layout from shaders:
 
-```pngine
+```zig
 #renderPipeline simple {
   layout=auto
   vertex={ module=shader entryPoint=vs }
@@ -120,7 +120,7 @@ For simpler cases, use `layout=auto` on pipelines to derive layout from shaders:
 
 With auto layout, bind groups derive layout from pipeline:
 
-```pngine
+```zig
 #bindGroup uniforms {
   layout={ pipeline=simple index=0 }
   entries=[{ binding=0 resource={ buffer=uniformBuffer } }]

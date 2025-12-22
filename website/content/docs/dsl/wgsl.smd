@@ -10,7 +10,7 @@ Defines a WGSL shader code fragment. Fragments can import other `#wgsl` macros t
 
 ## Syntax
 
-```pngine
+```zig
 #wgsl name {
   value="WGSL shader code"
   imports=[other common]
@@ -30,7 +30,7 @@ Defines a WGSL shader code fragment. Fragments can import other `#wgsl` macros t
 
 The WGSL shader source code. Can be multi-line.
 
-```pngine
+```zig
 #wgsl vertex {
   value="
     @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
@@ -46,7 +46,7 @@ The WGSL shader source code. Can be multi-line.
 
 Names of other `#wgsl` macros that will be prepended to this fragment's code before compilation. Used to share common utilities.
 
-```pngine
+```zig
 #wgsl constants {
   value="const PI: f32 = 3.14159;"
 }
@@ -69,7 +69,7 @@ Names of other `#wgsl` macros that will be prepended to this fragment's code bef
 
 ### Basic Shader Fragment
 
-```pngine
+```zig
 #wgsl main {
   value="
     @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
@@ -90,7 +90,7 @@ Names of other `#wgsl` macros that will be prepended to this fragment's code bef
 
 ### Composing Shaders with Imports
 
-```pngine
+```zig
 #wgsl utils {
   value="
     fn srgb_to_linear(c: vec3f) -> vec3f {
@@ -111,7 +111,7 @@ Names of other `#wgsl` macros that will be prepended to this fragment's code bef
 
 ### Multi-Level Imports
 
-```pngine
+```zig
 #wgsl math {
   value="const TAU: f32 = 6.28318;"
 }
