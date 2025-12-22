@@ -1,0 +1,15 @@
+{
+  "name": "@pngine/darwin-arm64",
+  "version": "0.1.0",
+  "description": "PNGine native binary for macOS ARM64 (Apple Silicon)",
+  "author": "Hugo Daniel",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HugoDaniel/pngine"
+  },
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "main": "bin/pngine",
+  "files": ["bin/"]
+}

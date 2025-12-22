@@ -1,0 +1,15 @@
+{
+  "name": "@pngine/win32-arm64",
+  "version": "0.1.0",
+  "description": "PNGine native binary for Windows ARM64",
+  "author": "Hugo Daniel",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HugoDaniel/pngine"
+  },
+  "os": ["win32"],
+  "cpu": ["arm64"],
+  "main": "bin/pngine.exe",
+  "files": ["bin/"]
+}

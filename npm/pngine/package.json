@@ -1,0 +1,58 @@
+{
+  "name": "pngine",
+  "version": "0.1.0",
+  "description": "WebGPU bytecode engine - shader art that fits in a PNG",
+  "author": "Hugo Daniel",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HugoDaniel/pngine"
+  },
+  "homepage": "https://pngine.dev",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "browser": "dist/browser.mjs",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "pngine": "bin/pngine"
+  },
+  "exports": {
+    ".": {
+      "browser": {
+        "import": "./dist/browser.mjs",
+        "default": "./dist/browser.js"
+      },
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./wasm": "./wasm/pngine.wasm"
+  },
+  "optionalDependencies": {
+    "@pngine/darwin-arm64": "0.1.0",
+    "@pngine/darwin-x64": "0.1.0",
+    "@pngine/linux-x64": "0.1.0",
+    "@pngine/linux-arm64": "0.1.0",
+    "@pngine/win32-x64": "0.1.0",
+    "@pngine/win32-arm64": "0.1.0"
+  },
+  "files": [
+    "dist/",
+    "bin/",
+    "wasm/",
+    "README.md"
+  ],
+  "keywords": [
+    "webgpu",
+    "shader",
+    "wgsl",
+    "png",
+    "bytecode",
+    "graphics",
+    "rendering",
+    "creative-coding"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

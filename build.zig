@@ -158,6 +158,67 @@ pub fn build(b: *std.Build) void {
         const install_file = b.addInstallFile(b.path(file), b.fmt("web/{s}", .{std.fs.path.basename(file)}));
         web_step.dependOn(&install_file.step);
     }
+
+    // NPM package build: cross-compile CLI for all platforms
+    const npm_step = b.step("npm", "Build npm package binaries for all platforms");
+
+    // Target platforms for npm distribution
+    const NpmTarget = struct {
+        query: std.Target.Query,
+        name: []const u8,
+        exe_name: []const u8,
+    };
+
+    const npm_targets = [_]NpmTarget{
+        .{ .query = .{ .cpu_arch = .aarch64, .os_tag = .macos }, .name = "darwin-arm64", .exe_name = "pngine" },
+        .{ .query = .{ .cpu_arch = .x86_64, .os_tag = .macos }, .name = "darwin-x64", .exe_name = "pngine" },
+        .{ .query = .{ .cpu_arch = .x86_64, .os_tag = .linux }, .name = "linux-x64", .exe_name = "pngine" },
+        .{ .query = .{ .cpu_arch = .aarch64, .os_tag = .linux }, .name = "linux-arm64", .exe_name = "pngine" },
+        .{ .query = .{ .cpu_arch = .x86_64, .os_tag = .windows }, .name = "win32-x64", .exe_name = "pngine.exe" },
+        .{ .query = .{ .cpu_arch = .aarch64, .os_tag = .windows }, .name = "win32-arm64", .exe_name = "pngine.exe" },
+    };
+
+    for (npm_targets) |npm_target| {
+        const cross_target = b.resolveTargetQuery(npm_target.query);
+
+        // Create library module for this target
+        const cross_lib = b.addModule("pngine", .{
+            .root_source_file = b.path("src/main.zig"),
+            .target = cross_target,
+            .optimize = .ReleaseFast,
+        });
+
+        // Create CLI module for this target
+        const cross_cli_module = b.createModule(.{
+            .root_source_file = b.path("src/cli.zig"),
+            .target = cross_target,
+            .optimize = .ReleaseFast,
+        });
+        cross_cli_module.addImport("pngine", cross_lib);
+
+        // Add build options (no embedded WASM for cross-compiled CLI)
+        const cross_build_options = b.addOptions();
+        cross_build_options.addOption(bool, "has_embedded_wasm", false);
+        cross_cli_module.addImport("build_options", cross_build_options.createModule());
+
+        const cross_cli = b.addExecutable(.{
+            .name = "pngine",
+            .root_module = cross_cli_module,
+        });
+
+        // Install to npm package directory
+        const install_path = b.fmt("npm/pngine-{s}/bin/{s}", .{ npm_target.name, npm_target.exe_name });
+        const install_cross = b.addInstallArtifact(cross_cli, .{
+            .dest_dir = .{ .override = .{ .custom = install_path } },
+        });
+        npm_step.dependOn(&install_cross.step);
+    }
+
+    // Also copy WASM to npm package
+    const npm_wasm = b.addInstallArtifact(wasm, .{
+        .dest_dir = .{ .override = .{ .custom = "npm/pngine/wasm" } },
+    });
+    npm_step.dependOn(&npm_wasm.step);
 }
 
 // Version check at comptime
