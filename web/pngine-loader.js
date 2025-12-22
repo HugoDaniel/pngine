@@ -503,14 +503,16 @@ export class PNGine {
      * Does not start animation loop.
      *
      * @param {number} time - Time in seconds
+     * @param {string} [frameName] - Optional specific frame to render (null = all frames)
      * @returns {Promise<void>}
      */
-    async renderFrame(time) {
+    async renderFrame(time, frameName = null) {
         await this.rpc.call(MessageType.RENDER_FRAME, {
             time,
             deltaTime: 0,
             uniformBufferId: this.uniformBufferId,
             uniformBufferSize: this.uniformBufferSize,
+            frameName,
         });
     }
 
@@ -525,6 +527,11 @@ export class PNGine {
         const time = (now - this.startTime) / 1000;
         const deltaTime = (now - this.lastTime) / 1000;
         this.lastTime = now;
+
+        // Log every 60 frames (roughly once per second)
+        if (Math.floor(time * 60) % 60 === 0) {
+            console.log(`[PNGine] _animationLoop: time=${time.toFixed(3)}, uniformBufferId=${this.uniformBufferId}`);
+        }
 
         // Fire-and-forget render call (don't block on response)
         this.rpc.fire(MessageType.RENDER_FRAME, {
@@ -542,9 +549,13 @@ export class PNGine {
      */
     async _detectUniformBuffer() {
         const bufferInfo = await this.findUniformBuffer();
+        console.log(`[PNGine] _detectUniformBuffer: bufferInfo=`, bufferInfo);
         if (bufferInfo) {
             this.uniformBufferId = bufferInfo.id;
             this.uniformBufferSize = bufferInfo.size;
+            console.log(`[PNGine] uniformBufferId=${this.uniformBufferId}, size=${this.uniformBufferSize}`);
+        } else {
+            console.log(`[PNGine] No uniform buffer found`);
         }
     }
 

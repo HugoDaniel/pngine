@@ -74,6 +74,7 @@ export class PNGineGPU {
     setTime(totalTime, deltaTime = 0) {
         this.currentTime = totalTime;
         this.deltaTime = deltaTime;
+        console.log(`[GPU] setTime(${totalTime.toFixed(3)}, ${deltaTime.toFixed(3)})`);
     }
 
     /**
@@ -142,11 +143,13 @@ export class PNGineGPU {
         let bestMatch = null;
         for (const [id, meta] of this.bufferMeta) {
             if (meta.usage & GPUBufferUsage.UNIFORM) {
+                console.log(`[GPU] findUniformBuffer: found buffer ${id} size=${meta.size}`);
                 if (!bestMatch || meta.size > bestMatch.size) {
                     bestMatch = { id, size: meta.size };
                 }
             }
         }
+        console.log(`[GPU] findUniformBuffer: returning`, bestMatch);
         return bestMatch;
     }
 
@@ -1150,9 +1153,15 @@ export class PNGineGPU {
      * @param {number} dataLen - Data length
      */
     writeBuffer(bufferId, offset, dataPtr, dataLen) {
-        console.log(`[GPU] writeBuffer(${bufferId}, offset=${offset}, len=${dataLen})`);
         const buffer = this.buffers.get(bufferId);
         const data = this.readBytes(dataPtr, dataLen);
+        // Log time value if writing to uniform buffer with floats
+        if (dataLen >= 4) {
+            const floats = new Float32Array(data.buffer, data.byteOffset, Math.min(4, dataLen / 4));
+            console.log(`[GPU] writeBuffer(${bufferId}, offset=${offset}, len=${dataLen}) time=${floats[0].toFixed(3)}`);
+        } else {
+            console.log(`[GPU] writeBuffer(${bufferId}, offset=${offset}, len=${dataLen})`);
+        }
         this.device.queue.writeBuffer(buffer, offset, data);
     }
 
@@ -1173,6 +1182,12 @@ export class PNGineGPU {
         const meta = this.bufferMeta.get(bufferId);
         const actualSize = meta?.size ?? data.length;
         const writeSize = Math.min(data.length, actualSize);
+
+        // Log what we're writing
+        if (writeSize >= 4) {
+            const floats = new Float32Array(data.buffer, data.byteOffset, Math.min(4, writeSize / 4));
+            console.log(`[GPU] writeTimeToBuffer(${bufferId}) time=${floats[0].toFixed(3)}`);
+        }
 
         this.device.queue.writeBuffer(buffer, 0, data.subarray(0, writeSize));
     }
@@ -1881,6 +1896,7 @@ export class PNGineGPU {
      * @param {number} size - Number of bytes to write (12 or 16)
      */
     writeTimeUniform(bufferId, bufferOffset, size) {
+        console.log(`[GPU] writeTimeUniform(buffer=${bufferId}, offset=${bufferOffset}, size=${size}) time=${this.currentTime?.toFixed(3) ?? 'undefined'}`);
         const buffer = this.buffers.get(bufferId);
         if (!buffer) {
             console.error(`[GPU] writeTimeUniform: missing buffer ${bufferId}`);
@@ -1893,7 +1909,7 @@ export class PNGineGPU {
         const availableSize = actualSize - bufferOffset;
 
         // Get current time and canvas dimensions
-        const time = this.time ?? 0.0;
+        const time = this.currentTime ?? 0.0;
         const width = this.canvas?.width ?? 512;
         const height = this.canvas?.height ?? 512;
         const aspectRatio = width / height;

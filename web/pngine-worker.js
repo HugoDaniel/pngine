@@ -388,6 +388,7 @@ function handleExecuteFrame(payload) {
     assertInitialized();
 
     const { frameName } = payload;
+    console.log(`[Worker] handleExecuteFrame: frameName="${frameName}"`);
     const exports = wasmInstance.exports;
     const encoder = new TextEncoder();
     const nameBytes = encoder.encode(frameName);
@@ -423,11 +424,14 @@ function handleExecuteFrame(payload) {
  * @param {number} [payload.deltaTime] - Delta time since last frame
  * @param {number} [payload.uniformBufferId] - Buffer ID for time uniform
  * @param {number} [payload.uniformBufferSize] - Size of uniform buffer
+ * @param {string|null} [payload.frameName] - Optional specific frame to execute
  */
 function handleRenderFrame(payload) {
     assertInitialized();
 
-    const { time, deltaTime = 0, uniformBufferId, uniformBufferSize = 12 } = payload;
+    const { time, deltaTime = 0, uniformBufferId, uniformBufferSize = 12, frameName = null } = payload;
+
+    console.log(`[Worker] handleRenderFrame: time=${time?.toFixed(3)}, uniformBufferId=${uniformBufferId}, frameName=${frameName}`);
 
     // Set time for WASM calls
     gpu.setTime(time, deltaTime);
@@ -449,8 +453,26 @@ function handleRenderFrame(payload) {
         gpu.writeTimeToBuffer(uniformBufferId, new Uint8Array(floatView.buffer));
     }
 
-    // Execute all (renders the frame)
-    const result = wasmInstance.exports.executeAll();
+    // Execute specific frame or all frames
+    let result;
+    if (frameName) {
+        const exports = wasmInstance.exports;
+        const encoder = new TextEncoder();
+        const nameBytes = encoder.encode(frameName);
+
+        const namePtr = exports.alloc(nameBytes.length);
+        if (!namePtr) {
+            throw new Error('Failed to allocate memory for frame name');
+        }
+
+        const memory = new Uint8Array(exports.memory.buffer);
+        memory.set(nameBytes, namePtr);
+
+        result = exports.executeFrameByName(namePtr, nameBytes.length);
+        exports.free(namePtr, nameBytes.length);
+    } else {
+        result = wasmInstance.exports.executeAll();
+    }
 
     if (result !== ErrorCode.SUCCESS) {
         throw new Error(`Render failed: ${getErrorMessage(result)}`);

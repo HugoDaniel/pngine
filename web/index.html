@@ -1258,9 +1258,16 @@ Use the CLI to embed bytecode:
         playPngBtn.addEventListener('click', () => togglePlay('png'));
 
         // Scene selector change handler
-        sceneSelect.addEventListener('change', (e) => {
+        sceneSelect.addEventListener('change', async (e) => {
             selectedScene = e.target.value;
             updateSceneNavigation();
+
+            // Actually render the selected scene
+            if (pngine && loadedPngBytecode && !isPlaying) {
+                const frameName = selectedScene === '__all__' ? null : selectedScene;
+                await pngine.renderFrame(0, frameName);
+                timeDisplay3.textContent = '0.00s';
+            }
         });
 
         // Prev/Next scene navigation
@@ -1332,8 +1339,8 @@ Use the CLI to embed bytecode:
             if (!pngine || !loadedPngBytecode) return;
 
             try {
-                await pngine.renderFrame(time);
-                await pngine.executeFrameByName(sceneName);
+                // Render with optional frame name (null = all frames)
+                await pngine.renderFrame(time, sceneName);
                 timeDisplay3.textContent = `${time.toFixed(2)}s`;
             } catch (err) {
                 console.error(`Failed to draw scene '${sceneName}':`, err.message);
