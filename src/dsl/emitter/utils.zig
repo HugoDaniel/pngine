@@ -355,10 +355,10 @@ pub fn resolveNumericValue(e: *Emitter, value_node: Node.Index) ?u32 {
     if (value_tag == .identifier_value) {
         const name = getNodeText(e, value_node);
 
-        // Check #define first
+        // Check #define first - use resolveNumericValueOrString to handle string defines like "64*64"
         if (e.analysis.symbols.define.get(name)) |def_info| {
             const define_value = e.ast.nodes.items(.data)[def_info.node.toInt()].node;
-            return resolveNumericValue(e, define_value);
+            return resolveNumericValueOrString(e, define_value);
         }
 
         // Check #data - return byte size of the data array

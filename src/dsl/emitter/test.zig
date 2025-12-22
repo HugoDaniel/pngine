@@ -2578,3 +2578,378 @@ test "Emitter: buffer size from WGSL binding reference" {
     // Should have found a buffer
     try testing.expect(false);
 }
+
+// ============================================================================
+// #define String Expression Tests
+// ============================================================================
+// These tests verify that #define with string expressions like "64*64" are
+// properly evaluated when used in draw commands, dispatch, and other contexts.
+
+test "Emitter: define with string multiplication expression in instanceCount" {
+    // This is the exact pattern that caused the sceneQ bug:
+    // #define NUM="64*64" used in instanceCount should emit 4096, not 1
+    const source: [:0]const u8 =
+        \\#define NUM_PARTICLES="64*64"
+        \\#wgsl shader { value="@vertex fn vs() {} @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }" }
+        \\#shaderModule mod { code=shader }
+        \\#renderPipeline pipe { layout=auto vertex={ module=mod entryPoint=vs } fragment={ module=mod entryPoint=fs targets=[{format=rgba8unorm}] } }
+        \\#renderPass pass { colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}] pipeline=pipe draw={ vertexCount=4 instanceCount=NUM_PARTICLES } }
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    // Parse and execute to verify draw command
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    const mock_gpu = @import("../../executor/mock_gpu.zig");
+    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    // Find the draw call and verify instanceCount is 4096, not 1
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .draw) {
+            try testing.expectEqual(@as(u32, 4), call.params.draw.vertex_count);
+            try testing.expectEqual(@as(u32, 4096), call.params.draw.instance_count);
+            return;
+        }
+    }
+    try testing.expect(false); // Should have found draw call
+}
+
+test "Emitter: define with string addition expression" {
+    const source: [:0]const u8 =
+        \\#define COUNT="100+200"
+        \\#wgsl shader { value="@vertex fn vs() {} @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }" }
+        \\#shaderModule mod { code=shader }
+        \\#renderPipeline pipe { layout=auto vertex={ module=mod entryPoint=vs } fragment={ module=mod entryPoint=fs targets=[{format=rgba8unorm}] } }
+        \\#renderPass pass { colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}] pipeline=pipe draw={ vertexCount=3 instanceCount=COUNT } }
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    const mock_gpu = @import("../../executor/mock_gpu.zig");
+    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .draw) {
+            try testing.expectEqual(@as(u32, 300), call.params.draw.instance_count);
+            return;
+        }
+    }
+    try testing.expect(false);
+}
+
+test "Emitter: define with string division expression" {
+    const source: [:0]const u8 =
+        \\#define COUNT="1000/10"
+        \\#wgsl shader { value="@vertex fn vs() {} @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }" }
+        \\#shaderModule mod { code=shader }
+        \\#renderPipeline pipe { layout=auto vertex={ module=mod entryPoint=vs } fragment={ module=mod entryPoint=fs targets=[{format=rgba8unorm}] } }
+        \\#renderPass pass { colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}] pipeline=pipe draw={ vertexCount=3 instanceCount=COUNT } }
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    const mock_gpu = @import("../../executor/mock_gpu.zig");
+    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .draw) {
+            try testing.expectEqual(@as(u32, 100), call.params.draw.instance_count);
+            return;
+        }
+    }
+    try testing.expect(false);
+}
+
+test "Emitter: define with nested define reference in string" {
+    // #define A=10, #define B="A*5" - B should resolve to 50
+    const source: [:0]const u8 =
+        \\#define BASE=10
+        \\#define MULTIPLIED="BASE*5"
+        \\#wgsl shader { value="@vertex fn vs() {} @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }" }
+        \\#shaderModule mod { code=shader }
+        \\#renderPipeline pipe { layout=auto vertex={ module=mod entryPoint=vs } fragment={ module=mod entryPoint=fs targets=[{format=rgba8unorm}] } }
+        \\#renderPass pass { colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}] pipeline=pipe draw={ vertexCount=3 instanceCount=MULTIPLIED } }
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    const mock_gpu = @import("../../executor/mock_gpu.zig");
+    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .draw) {
+            try testing.expectEqual(@as(u32, 50), call.params.draw.instance_count);
+            return;
+        }
+    }
+    try testing.expect(false);
+}
+
+test "Emitter: define with ceil function in string" {
+    const source: [:0]const u8 =
+        \\#define COUNT="ceil(100/3)"
+        \\#wgsl shader { value="@compute @workgroup_size(64) fn main() {}" }
+        \\#shaderModule mod { code=shader }
+        \\#computePipeline pipe { layout=auto compute={ module=mod entryPoint=main } }
+        \\#computePass pass { pipeline=pipe dispatchWorkgroups=COUNT }
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    const mock_gpu = @import("../../executor/mock_gpu.zig");
+    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .dispatch) {
+            // ceil(100/3) = ceil(33.33...) = 34
+            try testing.expectEqual(@as(u32, 34), call.params.dispatch.x);
+            return;
+        }
+    }
+    try testing.expect(false);
+}
+
+test "Emitter: define with plain number string" {
+    const source: [:0]const u8 =
+        \\#define COUNT="42"
+        \\#wgsl shader { value="@vertex fn vs() {} @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }" }
+        \\#shaderModule mod { code=shader }
+        \\#renderPipeline pipe { layout=auto vertex={ module=mod entryPoint=vs } fragment={ module=mod entryPoint=fs targets=[{format=rgba8unorm}] } }
+        \\#renderPass pass { colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}] pipeline=pipe draw={ vertexCount=3 instanceCount=COUNT } }
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    const mock_gpu = @import("../../executor/mock_gpu.zig");
+    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .draw) {
+            try testing.expectEqual(@as(u32, 42), call.params.draw.instance_count);
+            return;
+        }
+    }
+    try testing.expect(false);
+}
+
+test "Emitter: define with complex chained expression" {
+    // Test: (8*8) * 4 = 256
+    const source: [:0]const u8 =
+        \\#define GRID="8*8"
+        \\#define TOTAL="GRID*4"
+        \\#wgsl shader { value="@vertex fn vs() {} @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }" }
+        \\#shaderModule mod { code=shader }
+        \\#renderPipeline pipe { layout=auto vertex={ module=mod entryPoint=vs } fragment={ module=mod entryPoint=fs targets=[{format=rgba8unorm}] } }
+        \\#renderPass pass { colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}] pipeline=pipe draw={ vertexCount=3 instanceCount=TOTAL } }
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    const mock_gpu = @import("../../executor/mock_gpu.zig");
+    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .draw) {
+            try testing.expectEqual(@as(u32, 256), call.params.draw.instance_count);
+            return;
+        }
+    }
+    try testing.expect(false);
+}
+
+test "Emitter: define number literal (not string) still works" {
+    // Ensure we didn't break the simple case
+    const source: [:0]const u8 =
+        \\#define COUNT=100
+        \\#wgsl shader { value="@vertex fn vs() {} @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }" }
+        \\#shaderModule mod { code=shader }
+        \\#renderPipeline pipe { layout=auto vertex={ module=mod entryPoint=vs } fragment={ module=mod entryPoint=fs targets=[{format=rgba8unorm}] } }
+        \\#renderPass pass { colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}] pipeline=pipe draw={ vertexCount=3 instanceCount=COUNT } }
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    const mock_gpu = @import("../../executor/mock_gpu.zig");
+    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .draw) {
+            try testing.expectEqual(@as(u32, 100), call.params.draw.instance_count);
+            return;
+        }
+    }
+    try testing.expect(false);
+}
+
+test "Emitter: drawIndexed with string define instanceCount" {
+    const source: [:0]const u8 =
+        \\#define NUM_INSTANCES="32*32"
+        \\#buffer indexBuf { size=12 usage=[INDEX] }
+        \\#wgsl shader { value="@vertex fn vs() {} @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }" }
+        \\#shaderModule mod { code=shader }
+        \\#renderPipeline pipe { layout=auto vertex={ module=mod entryPoint=vs } fragment={ module=mod entryPoint=fs targets=[{format=rgba8unorm}] } }
+        \\#renderPass pass { colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}] pipeline=pipe indexBuffer=indexBuf drawIndexed={ indexCount=6 instanceCount=NUM_INSTANCES } }
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    const mock_gpu = @import("../../executor/mock_gpu.zig");
+    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .draw_indexed) {
+            try testing.expectEqual(@as(u32, 6), call.params.draw_indexed.index_count);
+            try testing.expectEqual(@as(u32, 1024), call.params.draw_indexed.instance_count);
+            return;
+        }
+    }
+    try testing.expect(false);
+}
+
+test "Emitter: multiple draw params from string defines" {
+    const source: [:0]const u8 =
+        \\#define VERTS="6"
+        \\#define INSTANCES="10*10"
+        \\#define FIRST_VERT="2"
+        \\#define FIRST_INST="5"
+        \\#wgsl shader { value="@vertex fn vs() {} @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }" }
+        \\#shaderModule mod { code=shader }
+        \\#renderPipeline pipe { layout=auto vertex={ module=mod entryPoint=vs } fragment={ module=mod entryPoint=fs targets=[{format=rgba8unorm}] } }
+        \\#renderPass pass { colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}] pipeline=pipe draw={ vertexCount=VERTS instanceCount=INSTANCES firstVertex=FIRST_VERT firstInstance=FIRST_INST } }
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    const mock_gpu = @import("../../executor/mock_gpu.zig");
+    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .draw) {
+            try testing.expectEqual(@as(u32, 6), call.params.draw.vertex_count);
+            try testing.expectEqual(@as(u32, 100), call.params.draw.instance_count);
+            try testing.expectEqual(@as(u32, 2), call.params.draw.first_vertex);
+            try testing.expectEqual(@as(u32, 5), call.params.draw.first_instance);
+            return;
+        }
+    }
+    try testing.expect(false);
+}

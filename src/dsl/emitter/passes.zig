@@ -381,13 +381,13 @@ fn parseDrawParams(e: *Emitter, obj_node: Node.Index) DrawParams {
         const inner_data = e.ast.nodes.items(.data)[inner.toInt()];
 
         if (std.mem.eql(u8, prop_name, "vertexCount")) {
-            params.vertex_count = utils.resolveNumericValue(e, inner_data.node) orelse 3;
+            params.vertex_count = utils.resolveNumericValueOrString(e, inner_data.node) orelse 3;
         } else if (std.mem.eql(u8, prop_name, "instanceCount")) {
-            params.instance_count = utils.resolveNumericValue(e, inner_data.node) orelse 1;
+            params.instance_count = utils.resolveNumericValueOrString(e, inner_data.node) orelse 1;
         } else if (std.mem.eql(u8, prop_name, "firstVertex")) {
-            params.first_vertex = utils.resolveNumericValue(e, inner_data.node) orelse 0;
+            params.first_vertex = utils.resolveNumericValueOrString(e, inner_data.node) orelse 0;
         } else if (std.mem.eql(u8, prop_name, "firstInstance")) {
-            params.first_instance = utils.resolveNumericValue(e, inner_data.node) orelse 0;
+            params.first_instance = utils.resolveNumericValueOrString(e, inner_data.node) orelse 0;
         }
     }
 
@@ -441,15 +441,15 @@ fn parseDrawIndexedParams(e: *Emitter, obj_node: Node.Index) DrawIndexedParams {
         const inner_data = e.ast.nodes.items(.data)[inner.toInt()];
 
         if (std.mem.eql(u8, prop_name, "indexCount")) {
-            params.index_count = utils.resolveNumericValue(e, inner_data.node) orelse 3;
+            params.index_count = utils.resolveNumericValueOrString(e, inner_data.node) orelse 3;
         } else if (std.mem.eql(u8, prop_name, "instanceCount")) {
-            params.instance_count = utils.resolveNumericValue(e, inner_data.node) orelse 1;
+            params.instance_count = utils.resolveNumericValueOrString(e, inner_data.node) orelse 1;
         } else if (std.mem.eql(u8, prop_name, "firstIndex")) {
-            params.first_index = utils.resolveNumericValue(e, inner_data.node) orelse 0;
+            params.first_index = utils.resolveNumericValueOrString(e, inner_data.node) orelse 0;
         } else if (std.mem.eql(u8, prop_name, "baseVertex")) {
-            params.base_vertex = utils.resolveNumericValue(e, inner_data.node) orelse 0;
+            params.base_vertex = utils.resolveNumericValueOrString(e, inner_data.node) orelse 0;
         } else if (std.mem.eql(u8, prop_name, "firstInstance")) {
-            params.first_instance = utils.resolveNumericValue(e, inner_data.node) orelse 0;
+            params.first_instance = utils.resolveNumericValueOrString(e, inner_data.node) orelse 0;
         }
     }
 
