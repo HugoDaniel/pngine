@@ -32,6 +32,21 @@ let wasmInstance = null;
 /** @type {boolean} */
 let initialized = false;
 
+/** @type {boolean} */
+let moduleLoaded = false;
+
+/** @type {boolean} */
+let debugEnabled = false;
+
+/**
+ * Debug logger - only logs when debug mode is enabled.
+ */
+const debug = {
+    log: (...args) => debugEnabled && console.log('[Worker]', ...args),
+    warn: (...args) => debugEnabled && console.warn('[Worker]', ...args),
+    error: (...args) => console.error('[Worker]', ...args),  // Always log errors
+};
+
 // ============================================================================
 // Message Handling
 // ============================================================================
@@ -93,6 +108,12 @@ self.onmessage = async (event) => {
 
             case MessageType.FIND_UNIFORM_BUFFER:
                 result = handleFindUniformBuffer();
+                break;
+
+            case MessageType.SET_DEBUG:
+                debugEnabled = payload.enabled;
+                debug.log(`Debug mode ${debugEnabled ? 'enabled' : 'disabled'}`);
+                result = { success: true };
                 break;
 
             default:
@@ -213,6 +234,7 @@ function handleTerminate() {
     gpu = null;
     wasmInstance = null;
     initialized = false;
+    moduleLoaded = false;
 
     return { success: true };
 }
@@ -281,6 +303,7 @@ function handleLoadModule(payload) {
     const exports = wasmInstance.exports;
 
     // Reset any previous state
+    moduleLoaded = false;
     gpu.reset();
     exports.freeModule();
 
@@ -301,11 +324,16 @@ function handleLoadModule(payload) {
     exports.free(ptr, bytecode.length);
 
     if (result !== ErrorCode.SUCCESS) {
+        moduleLoaded = false;
         throw new Error(`Failed to load module: ${getErrorMessage(result)}`);
     }
 
+    moduleLoaded = true;
+
     // Get frame info
     const frameCount = exports.getFrameCount ? exports.getFrameCount() : 0;
+
+    debug.log(`Module loaded successfully, frameCount=${frameCount}`);
 
     return {
         success: true,
@@ -360,6 +388,9 @@ function handleFreeModule() {
 
     wasmInstance.exports.freeModule();
     gpu.reset();
+    moduleLoaded = false;
+
+    debug.log('Module freed');
 
     return { success: true };
 }
@@ -388,7 +419,7 @@ function handleExecuteFrame(payload) {
     assertInitialized();
 
     const { frameName } = payload;
-    console.log(`[Worker] handleExecuteFrame: frameName="${frameName}"`);
+    debug.log(`executeFrame: frameName="${frameName}"`);
     const exports = wasmInstance.exports;
     const encoder = new TextEncoder();
     const nameBytes = encoder.encode(frameName);
@@ -429,9 +460,11 @@ function handleExecuteFrame(payload) {
 function handleRenderFrame(payload) {
     assertInitialized();
 
-    const { time, deltaTime = 0, uniformBufferId, uniformBufferSize = 12, frameName = null } = payload;
+    if (!moduleLoaded) {
+        throw new Error('No module loaded - call loadModule() first');
+    }
 
-    console.log(`[Worker] handleRenderFrame: time=${time?.toFixed(3)}, uniformBufferId=${uniformBufferId}, frameName=${frameName}`);
+    const { time, deltaTime = 0, uniformBufferId, uniformBufferSize = 12, frameName = null } = payload;
 
     // Set time for WASM calls
     gpu.setTime(time, deltaTime);
@@ -475,6 +508,7 @@ function handleRenderFrame(payload) {
     }
 
     if (result !== ErrorCode.SUCCESS) {
+        debug.error(`Render failed: result=${result}, moduleLoaded=${moduleLoaded}, frameName=${frameName}`);
         throw new Error(`Render failed: ${getErrorMessage(result)}`);
     }
 

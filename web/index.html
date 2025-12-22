@@ -909,24 +909,33 @@
 
             setStatus('Playing...', 'success');
 
+            // Set the frame to render (for PNG tab, use selected scene)
+            if (tabType === 'png') {
+                const frameName = selectedScene === '__all__' ? null : selectedScene;
+                pngine.setFrame(frameName);
+            } else {
+                pngine.setFrame(null);  // Render all frames for source/pngb
+            }
+
+            // Set up time update callback for slider and display
+            pngine.onTimeUpdate = (time) => {
+                let display;
+                if (currentTabType === 'source') display = timeDisplay;
+                else if (currentTabType === 'pngb') display = timeDisplay2;
+                else display = timeDisplay3;
+                display.textContent = `t = ${time.toFixed(2)}s`;
+
+                // Update slider if in PNG tab
+                if (currentTabType === 'png' && !timeSlider.disabled) {
+                    const maxTime = parseFloat(timeSlider.max);
+                    if (time <= maxTime) {
+                        timeSlider.value = time;
+                    }
+                }
+            };
+
             // Start PNGine's built-in animation
             pngine.startAnimation();
-
-            // Update time display in a separate loop
-            requestAnimationFrame(updateTimeDisplay);
-        }
-
-        function updateTimeDisplay() {
-            if (!isPlaying) return;
-
-            const time = (performance.now() - animationStartTime) / 1000.0;
-            let display;
-            if (currentTabType === 'source') display = timeDisplay;
-            else if (currentTabType === 'pngb') display = timeDisplay2;
-            else display = timeDisplay3;
-            display.textContent = `t = ${time.toFixed(2)}s`;
-
-            requestAnimationFrame(updateTimeDisplay);
         }
 
         function stopAnimation() {
@@ -934,9 +943,10 @@
 
             isPlaying = false;
 
-            // Stop PNGine's animation
+            // Stop PNGine's animation and clear callback
             if (pngine) {
                 pngine.stopAnimation();
+                pngine.onTimeUpdate = null;
             }
 
             // Reset all button states
@@ -1262,11 +1272,18 @@ Use the CLI to embed bytecode:
             selectedScene = e.target.value;
             updateSceneNavigation();
 
-            // Actually render the selected scene
+            const frameName = selectedScene === '__all__' ? null : selectedScene;
+
+            // Update the frame being rendered (works during playback too)
+            if (pngine) {
+                pngine.setFrame(frameName);
+            }
+
+            // If not playing, render the selected scene at t=0
             if (pngine && loadedPngBytecode && !isPlaying) {
-                const frameName = selectedScene === '__all__' ? null : selectedScene;
                 await pngine.renderFrame(0, frameName);
                 timeDisplay3.textContent = '0.00s';
+                timeSlider.value = 0;
             }
         });
 

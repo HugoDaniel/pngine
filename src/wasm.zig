@@ -304,6 +304,7 @@ export fn executeFrameByName(name_ptr: [*]const u8, name_len: usize) u32 {
     const module = &(current_module orelse return ErrorCode.no_module_loaded.toU32());
 
     const target_name = name_ptr[0..name_len];
+    gpu.consoleLog("[WASM] executeFrameByName: ", target_name);
 
     // Find string ID for the name
     var target_string_id: ?u16 = null;
@@ -315,11 +316,21 @@ export fn executeFrameByName(name_ptr: [*]const u8, name_len: usize) u32 {
         }
     }
 
-    const string_id = target_string_id orelse return ErrorCode.execution_error.toU32();
+    const string_id = target_string_id orelse {
+        gpu.consoleLog("[WASM] executeFrameByName: frame not found in string table", "");
+        return ErrorCode.execution_error.toU32();
+    };
+
+    gpu.consoleLogInt("[WASM] executeFrameByName: string_id=", string_id);
 
     // Scan for frame with this name
-    const frame_range = scanForFrameByNameId(module.bytecode, string_id) orelse
+    const frame_range = scanForFrameByNameId(module.bytecode, string_id) orelse {
+        gpu.consoleLog("[WASM] executeFrameByName: frame not found in bytecode", "");
         return ErrorCode.execution_error.toU32();
+    };
+
+    gpu.consoleLogInt("[WASM] executeFrameByName: range.start=", @intCast(frame_range.start));
+    gpu.consoleLogInt("[WASM] executeFrameByName: range.end=", @intCast(frame_range.end));
 
     const frame_before = frame_counter;
 
@@ -340,6 +351,7 @@ export fn executeFrameByName(name_ptr: [*]const u8, name_len: usize) u32 {
     frame_counter = dispatcher.frame_counter;
     assert(frame_counter >= frame_before);
 
+    gpu.consoleLog("[WASM] executeFrameByName: done", "");
     return ErrorCode.success.toU32();
 }
 

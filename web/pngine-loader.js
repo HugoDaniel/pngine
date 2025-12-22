@@ -19,6 +19,58 @@ export { isZip, extractFromZip, fetchAndExtractZip, getZipBundleInfo, ZipReader 
 export { MessageType, ErrorCode, getErrorMessage };
 
 // ============================================================================
+// Debug Mode
+// ============================================================================
+
+/**
+ * Debug mode state.
+ * Enable via:
+ *   - URL parameter: ?debug=true
+ *   - Console: PNGine.setDebug(true)
+ *   - Console: localStorage.setItem('pngine_debug', 'true')
+ */
+let debugEnabled = false;
+
+// Check URL parameter
+if (typeof window !== 'undefined') {
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.get('debug') === 'true' || urlParams.get('debug') === '1') {
+        debugEnabled = true;
+    }
+    // Check localStorage
+    if (localStorage.getItem('pngine_debug') === 'true') {
+        debugEnabled = true;
+    }
+}
+
+/**
+ * Debug logger - only logs when debug mode is enabled.
+ */
+const debug = {
+    log: (...args) => debugEnabled && console.log('[PNGine]', ...args),
+    warn: (...args) => debugEnabled && console.warn('[PNGine]', ...args),
+    error: (...args) => console.error('[PNGine]', ...args),  // Always log errors
+};
+
+/**
+ * Enable or disable debug mode.
+ * @param {boolean} enabled
+ */
+export function setDebug(enabled) {
+    debugEnabled = enabled;
+    localStorage.setItem('pngine_debug', enabled ? 'true' : 'false');
+    debug.log(`Debug mode ${enabled ? 'enabled' : 'disabled'}`);
+}
+
+/**
+ * Check if debug mode is enabled.
+ * @returns {boolean}
+ */
+export function isDebugEnabled() {
+    return debugEnabled;
+}
+
+// ============================================================================
 // WorkerRPC - Promise-based Worker Communication
 // ============================================================================
 
@@ -300,10 +352,34 @@ export class PNGine {
         this.animationId = null;
         this.startTime = 0;
         this.lastTime = 0;
+        this.currentTime = 0;
+
+        // Frame selection for animation
+        this.currentFrameName = null;  // null = all frames, string = specific frame
+
+        // Callback for time updates (UI can use this to update slider)
+        this.onTimeUpdate = null;
+
+        // Frame pacing - track pending render to prevent queue buildup
+        this.renderPending = false;
 
         // Uniform buffer tracking (for animation)
         this.uniformBufferId = null;
         this.uniformBufferSize = 12;
+
+        // Sync debug state with worker
+        if (debugEnabled) {
+            this.rpc.call(MessageType.SET_DEBUG, { enabled: true }).catch(() => {});
+        }
+    }
+
+    /**
+     * Enable or disable debug mode for this instance and its worker.
+     * @param {boolean} enabled
+     */
+    async setDebug(enabled) {
+        setDebug(enabled);  // Update global state
+        await this.rpc.call(MessageType.SET_DEBUG, { enabled });
     }
 
     /**
@@ -492,10 +568,27 @@ export class PNGine {
      */
     stopAnimation() {
         this.isPlaying = false;
+        this.renderPending = false;
         if (this.animationId !== null) {
             cancelAnimationFrame(this.animationId);
             this.animationId = null;
         }
+    }
+
+    /**
+     * Set the frame to render during animation.
+     * @param {string|null} frameName - Frame name or null for all frames
+     */
+    setFrame(frameName) {
+        this.currentFrameName = frameName;
+    }
+
+    /**
+     * Get current animation time in seconds.
+     * @returns {number}
+     */
+    getTime() {
+        return this.currentTime;
     }
 
     /**
@@ -518,7 +611,7 @@ export class PNGine {
 
     /**
      * Internal animation loop.
-     * Uses fire-and-forget to maintain smooth framerate.
+     * Uses frame pacing to prevent message queue buildup.
      */
     _animationLoop() {
         if (!this.isPlaying) return;
@@ -527,18 +620,34 @@ export class PNGine {
         const time = (now - this.startTime) / 1000;
         const deltaTime = (now - this.lastTime) / 1000;
         this.lastTime = now;
+        this.currentTime = time;
 
-        // Log every 60 frames (roughly once per second)
-        if (Math.floor(time * 60) % 60 === 0) {
-            console.log(`[PNGine] _animationLoop: time=${time.toFixed(3)}, uniformBufferId=${this.uniformBufferId}`);
+        // Call time update callback if set (for UI slider updates)
+        if (this.onTimeUpdate) {
+            this.onTimeUpdate(time);
         }
 
-        // Fire-and-forget render call (don't block on response)
-        this.rpc.fire(MessageType.RENDER_FRAME, {
+        // Skip frame if previous render is still pending (prevents queue buildup)
+        if (this.renderPending) {
+            this.animationId = requestAnimationFrame(() => this._animationLoop());
+            return;
+        }
+
+        // Mark render as pending
+        this.renderPending = true;
+
+        // Send render request with frame name and await completion
+        this.rpc.call(MessageType.RENDER_FRAME, {
             time,
             deltaTime,
             uniformBufferId: this.uniformBufferId,
             uniformBufferSize: this.uniformBufferSize,
+            frameName: this.currentFrameName,
+        }).then(() => {
+            this.renderPending = false;
+        }).catch((err) => {
+            console.error('[PNGine] Render error:', err);
+            this.renderPending = false;
         });
 
         this.animationId = requestAnimationFrame(() => this._animationLoop());
@@ -549,13 +658,13 @@ export class PNGine {
      */
     async _detectUniformBuffer() {
         const bufferInfo = await this.findUniformBuffer();
-        console.log(`[PNGine] _detectUniformBuffer: bufferInfo=`, bufferInfo);
+        debug.log(`_detectUniformBuffer: bufferInfo=`, bufferInfo);
         if (bufferInfo) {
             this.uniformBufferId = bufferInfo.id;
             this.uniformBufferSize = bufferInfo.size;
-            console.log(`[PNGine] uniformBufferId=${this.uniformBufferId}, size=${this.uniformBufferSize}`);
+            debug.log(`uniformBufferId=${this.uniformBufferId}, size=${this.uniformBufferSize}`);
         } else {
-            console.log(`[PNGine] No uniform buffer found`);
+            debug.log(`No uniform buffer found`);
         }
     }
 

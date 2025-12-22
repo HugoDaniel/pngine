@@ -71,6 +71,8 @@ extern "env" fn gpuWriteTimeUniform(buffer_id: u16, buffer_offset: u32, size: u1
 
 // Debug logging
 pub extern "env" fn gpuDebugLog(msg_type: u8, value: u32) void;
+extern "env" fn jsConsoleLog(ptr: [*]const u8, len: u32) void;
+extern "env" fn jsConsoleLogInt(ptr: [*]const u8, len: u32, value: i32) void;
 
 // ============================================================================
 // WasmGPU Backend
@@ -91,6 +93,27 @@ pub const WasmGPU = struct {
     /// Must be called before any GPU operations that reference data IDs.
     pub fn setModule(self: *Self, module: *const Module) void {
         self.module = module;
+    }
+
+    // ========================================================================
+    // Debug Logging
+    // ========================================================================
+
+    /// Log a message to the console.
+    pub fn consoleLog(_: *Self, prefix: []const u8, msg: []const u8) void {
+        // Concatenate prefix and msg (simple approach using stack buffer)
+        var buf: [512]u8 = undefined;
+        const total_len = @min(prefix.len + msg.len, buf.len);
+        @memcpy(buf[0..prefix.len], prefix);
+        if (msg.len > 0 and prefix.len + msg.len <= buf.len) {
+            @memcpy(buf[prefix.len .. prefix.len + msg.len], msg);
+        }
+        jsConsoleLog(&buf, @intCast(total_len));
+    }
+
+    /// Log a message with an integer value.
+    pub fn consoleLogInt(_: *Self, prefix: []const u8, value: i32) void {
+        jsConsoleLogInt(prefix.ptr, @intCast(prefix.len), value);
     }
 
     // ========================================================================

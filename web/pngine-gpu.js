@@ -1009,7 +1009,7 @@ export class PNGineGPU {
                 view,
                 loadOp: loadOp === 1 ? 'clear' : 'load',
                 storeOp: storeOp === 0 ? 'store' : 'discard',
-                clearValue: { r: 0.5, g: 0.5, b: 0.5, a: 1 },  // Gray background
+                clearValue: { r: 0, g: 0, b: 0, a: 1 },  // Black background (WebGPU default)
             }],
         };
 
@@ -1707,6 +1707,14 @@ export class PNGineGPU {
                     else if (msgType === 20) console.log(`[WASM] dispatch x=${value}`);
                     else if (msgType === 21) console.log(`[WASM]   y=${value}`);
                     else if (msgType === 22) console.log(`[WASM]   z=${value}`);
+                },
+                jsConsoleLog: (ptr, len) => {
+                    const msg = self.readString(ptr, len);
+                    console.log(msg);
+                },
+                jsConsoleLogInt: (ptr, len, value) => {
+                    const msg = self.readString(ptr, len);
+                    console.log(`${msg}${value}`);
                 },
             },
         };

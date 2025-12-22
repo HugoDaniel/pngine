@@ -30,6 +30,9 @@ export const MessageType = {
     GET_METADATA: 'getMetadata',
     FIND_UNIFORM_BUFFER: 'findUniformBuffer',
 
+    // Debug
+    SET_DEBUG: 'setDebug',
+
     // Response types
     RESPONSE: 'response',
     ERROR: 'error',
