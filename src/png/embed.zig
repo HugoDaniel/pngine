@@ -597,6 +597,64 @@ test "embed: findIEND finds correct position" {
     try std.testing.expectEqual(expected_iend_pos, found_pos.?);
 }
 
+test "embed: findIEND returns null for PNG without IEND" {
+    const allocator = std.testing.allocator;
+
+    // Create a buffer that looks like PNG but has no IEND pattern
+    var png_buf: std.ArrayListUnmanaged(u8) = .{};
+    defer png_buf.deinit(allocator);
+
+    // PNG signature
+    try png_buf.appendSlice(allocator, &chunk.PNG_SIGNATURE);
+
+    // IHDR chunk
+    const ihdr_data = [13]u8{
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0x00, 0x00, 0x00, 0x00,
+    };
+    try chunk.writeChunk(&png_buf, allocator, chunk.ChunkType.IHDR, &ihdr_data);
+
+    // Add garbage instead of IEND (need at least 45 bytes total)
+    // Current: 8 (sig) + 25 (IHDR) = 33, need 12 more
+    try png_buf.appendSlice(allocator, &[_]u8{0xFF} ** 20);
+
+    // findIEND should return null (backward search fails, forward search fails)
+    const found_pos = findIEND(png_buf.items);
+    try std.testing.expectEqual(@as(?usize, null), found_pos);
+}
+
+test "embed: findIEND forward search fallback" {
+    const allocator = std.testing.allocator;
+
+    // Create PNG with IEND in middle, garbage at end
+    // This forces backward search to fail and forward search to find it
+    var png_buf: std.ArrayListUnmanaged(u8) = .{};
+    defer png_buf.deinit(allocator);
+
+    // PNG signature
+    try png_buf.appendSlice(allocator, &chunk.PNG_SIGNATURE);
+
+    // IHDR chunk
+    const ihdr_data = [13]u8{
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0x00, 0x00, 0x00, 0x00,
+    };
+    try chunk.writeChunk(&png_buf, allocator, chunk.ChunkType.IHDR, &ihdr_data);
+
+    // IEND chunk (in correct position)
+    const iend_pos = png_buf.items.len;
+    try chunk.writeChunk(&png_buf, allocator, chunk.ChunkType.IEND, "");
+
+    // Add garbage AFTER IEND - this makes backward search start from wrong place
+    // but forward search will still find the real IEND
+    try png_buf.appendSlice(allocator, &[_]u8{0xAB} ** 20);
+
+    // findIEND should find it via forward search since backward search
+    // starts at len-12 which points into the garbage
+    const found_pos = findIEND(png_buf.items);
+    try std.testing.expectEqual(iend_pos, found_pos.?);
+}
+
 test "embed: very large bytecode (100KB)" {
     const allocator = std.testing.allocator;
 
