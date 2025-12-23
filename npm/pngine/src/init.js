@@ -1,7 +1,7 @@
 // Main thread initialization
 // Spawns worker, creates POJO
 
-import { extractBytecode } from "./_extract.js";
+import { extractBytecode } from "./extract.js";
 
 // Worker URL (will be replaced with blob URL by bundler)
 let workerUrl = null;
@@ -238,7 +238,7 @@ function getWorkerUrl() {
 
   // For development: use separate file
   // For production: bundler replaces this with blob URL
-  return new URL("./_worker.js", import.meta.url);
+  return new URL("./worker.js", import.meta.url);
 }
 
 /**

@@ -1,7 +1,7 @@
 // Worker thread - owns WebGPU, WASM, and resources
 // Uses command buffer approach for minimal bundle size
 
-import { CommandDispatcher } from "./_gpu.js";
+import { CommandDispatcher } from "./gpu.js";
 
 let canvas, device, context, gpu, wasm, memory;
 let initialized = false;

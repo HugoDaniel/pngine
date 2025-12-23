@@ -168,19 +168,27 @@ pub fn build(b: *std.Build) void {
     });
     web_step.dependOn(&install_npm_wasm.step);
 
-    // Copy JS files to web output (new API)
-    const web_files = [_][]const u8{
+    // Copy web HTML files
+    const html_files = [_][]const u8{
         "web/index.html",
-        "web/pngine.js",
-        "web/_init.js",
-        "web/_worker.js",
-        "web/_gpu.js",
-        "web/_anim.js",
-        "web/_extract.js",
     };
-
-    for (web_files) |file| {
+    for (html_files) |file| {
         const install_file = b.addInstallFile(b.path(file), b.fmt("web/{s}", .{std.fs.path.basename(file)}));
+        web_step.dependOn(&install_file.step);
+    }
+
+    // Copy JS source files from npm/pngine/src/ to web output for development
+    const SrcFile = struct { src: []const u8, dest: []const u8 };
+    const js_files = [_]SrcFile{
+        .{ .src = "npm/pngine/src/index.js", .dest = "web/pngine.js" },
+        .{ .src = "npm/pngine/src/init.js", .dest = "web/init.js" },
+        .{ .src = "npm/pngine/src/worker.js", .dest = "web/worker.js" },
+        .{ .src = "npm/pngine/src/gpu.js", .dest = "web/gpu.js" },
+        .{ .src = "npm/pngine/src/anim.js", .dest = "web/anim.js" },
+        .{ .src = "npm/pngine/src/extract.js", .dest = "web/extract.js" },
+    };
+    for (js_files) |file| {
+        const install_file = b.addInstallFile(b.path(file.src), file.dest);
         web_step.dependOn(&install_file.step);
     }
 

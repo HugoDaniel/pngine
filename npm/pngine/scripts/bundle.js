@@ -1,90 +1,138 @@
 #!/usr/bin/env node
 
 /**
- * Bundle script for PNGine npm package.
+ * PNGine Bundle Script
  *
- * Bundles web/ JavaScript modules into dist/ with inline worker.
- * Uses command buffer approach for minimal bundle size.
+ * Uses esbuild for bundling and minification.
+ *
+ * Usage:
+ *   node scripts/bundle.js          # Production build (minified)
+ *   node scripts/bundle.js --debug  # Debug build (source maps, no minify)
  */
 
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
 
-const WEB_DIR = path.join(__dirname, '../../../web');
+const SRC_DIR = path.join(__dirname, '../src');
 const DIST_DIR = path.join(__dirname, '../dist');
+const DEBUG = process.argv.includes('--debug');
 
 // Ensure dist directory exists
 if (!fs.existsSync(DIST_DIR)) {
   fs.mkdirSync(DIST_DIR, { recursive: true });
 }
 
+console.log(`Bundling PNGine (${DEBUG ? 'debug' : 'production'})...\n`);
+
 /**
- * Read a file and return its contents.
+ * Run esbuild with given options
  */
-function readFile(filename) {
-  return fs.readFileSync(path.join(WEB_DIR, filename), 'utf-8');
+function esbuild(entry, outfile, opts = {}) {
+  const args = [
+    'esbuild',
+    entry,
+    `--outfile=${outfile}`,
+    '--bundle',
+    '--format=esm',
+    '--target=es2020',
+  ];
+
+  if (!DEBUG) {
+    args.push('--minify');
+    args.push('--drop:console');
+    args.push('--drop:debugger');
+  } else {
+    args.push('--sourcemap');
+  }
+
+  if (opts.external) {
+    opts.external.forEach(e => args.push(`--external:${e}`));
+  }
+
+  if (opts.define) {
+    Object.entries(opts.define).forEach(([k, v]) => {
+      args.push(`--define:${k}=${v}`);
+    });
+  }
+
+  try {
+    execSync(args.join(' '), { stdio: 'pipe' });
+    return true;
+  } catch (e) {
+    console.error(`esbuild failed: ${e.message}`);
+    return false;
+  }
 }
 
 /**
- * Write a file to dist.
+ * Get file size info
  */
-function writeFile(filename, content) {
-  fs.writeFileSync(path.join(DIST_DIR, filename), content);
-  console.log(`  Created: dist/${filename}`);
+function sizeInfo(filepath) {
+  const stat = fs.statSync(filepath);
+  const raw = stat.size;
+  const gzipped = execSync(`gzip -c "${filepath}" | wc -c`).toString().trim();
+  return { raw, gzipped: parseInt(gzipped) };
 }
 
-/**
- * Remove import statements from code.
- */
-function removeImports(code) {
+// Step 1: Bundle worker code (_gpu.js + _worker.js)
+console.log('1. Bundling worker code...');
+
+// Create a temporary entry that imports both worker modules
+const workerEntry = path.join(DIST_DIR, '_worker-entry.js');
+fs.writeFileSync(workerEntry, `
+import './gpu.js';
+import './worker.js';
+`);
+
+// Copy worker source files to dist for bundling
+fs.copyFileSync(path.join(SRC_DIR, 'gpu.js'), path.join(DIST_DIR, 'gpu.js'));
+fs.copyFileSync(path.join(SRC_DIR, 'worker.js'), path.join(DIST_DIR, 'worker.js'));
+
+const workerOut = path.join(DIST_DIR, '_worker-bundle.js');
+if (!esbuild(workerEntry, workerOut)) {
+  process.exit(1);
+}
+
+// Read bundled worker code
+const workerCode = fs.readFileSync(workerOut, 'utf-8');
+
+// Cleanup temp files
+fs.unlinkSync(workerEntry);
+fs.unlinkSync(path.join(DIST_DIR, 'gpu.js'));
+fs.unlinkSync(path.join(DIST_DIR, 'worker.js'));
+fs.unlinkSync(workerOut);
+
+// Step 2: Create browser bundle with inlined worker
+console.log('2. Creating browser bundle...');
+
+// Read source files
+const extract = fs.readFileSync(path.join(SRC_DIR, 'extract.js'), 'utf-8');
+const anim = fs.readFileSync(path.join(SRC_DIR, 'anim.js'), 'utf-8');
+const init = fs.readFileSync(path.join(SRC_DIR, 'init.js'), 'utf-8');
+
+// Remove import/export statements
+function stripImports(code) {
   return code.replace(/^import\s+.*?from\s+['"].*?['"];?\s*$/gm, '');
 }
 
-/**
- * Remove export statements but keep the declarations.
- */
-function removeExports(code) {
-  // Remove "export " prefix from declarations
+function stripExports(code) {
   code = code.replace(/^export\s+(const|let|var|function|class|async\s+function)/gm, '$1');
-  // Remove "export default"
   code = code.replace(/^export\s+default\s+/gm, '');
-  // Remove "export { ... }"
   code = code.replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
   return code;
 }
 
-console.log('Bundling PNGine npm package (command buffer)...\n');
-
-// 1. Read source files for command buffer approach
-console.log('Reading source files...');
-const gpu = readFile('_gpu.js');
-const worker = readFile('_worker.js');
-const init = readFile('_init.js');
-const anim = readFile('_anim.js');
-const extract = readFile('_extract.js');
-
-// 2. Bundle worker code (_gpu.js + _worker.js)
-console.log('Bundling worker code...');
-const workerBundle = [
-  '// === _gpu.js (CommandDispatcher) ===',
-  removeImports(removeExports(gpu)),
-  '',
-  '// === _worker.js ===',
-  removeImports(removeExports(worker)),
-].join('\n');
-
-// 3. Create browser.mjs with inline worker
-console.log('Creating browser bundle...');
-
-// Build main thread code
-const mainBundle = `
+// Build browser bundle source
+const browserSource = `
 /**
  * PNGine Browser Bundle
- * Command buffer approach for minimal size
+ * ${DEBUG ? 'Debug build' : 'Production build'}
+ * Generated: ${new Date().toISOString()}
  */
 
-// === Inline Worker Code ===
-const WORKER_CODE = ${JSON.stringify(workerBundle)};
+// Inlined worker code
+const WORKER_CODE = ${JSON.stringify(workerCode)};
 
 function createWorkerBlobUrl() {
   const blob = new Blob([WORKER_CODE], { type: 'application/javascript' });
@@ -92,13 +140,13 @@ function createWorkerBlobUrl() {
 }
 
 // === _extract.js ===
-${removeImports(removeExports(extract))}
+${stripImports(stripExports(extract))}
 
 // === _anim.js ===
-${removeImports(removeExports(anim))}
+${stripImports(stripExports(anim))}
 
-// === _init.js (modified for inline worker) ===
-${removeImports(removeExports(init))
+// === _init.js ===
+${stripImports(stripExports(init))
   .replace(
     /new\s+Worker\s*\(\s*getWorkerUrl\s*\(\s*\)\s*,\s*\{\s*type:\s*["']module["']\s*\}\s*\)/g,
     'new Worker(createWorkerBlobUrl())'
@@ -115,186 +163,152 @@ export { draw, play, pause, stop, seek, setFrame };
 export { extractBytecode, detectFormat, isPng, isZip, isPngb };
 `;
 
-writeFile('browser.mjs', mainBundle);
+// Write unminified browser source
+const browserSourcePath = path.join(DIST_DIR, '_browser-source.mjs');
+fs.writeFileSync(browserSourcePath, browserSource);
 
-// 4. Create browser.js (CommonJS wrapper)
-const browserCjs = `
-'use strict';
+// Minify with esbuild
+const browserOut = path.join(DIST_DIR, 'browser.mjs');
+if (!esbuild(browserSourcePath, browserOut)) {
+  process.exit(1);
+}
 
-// CommonJS wrapper for browser bundle
-// Note: This is for bundlers that don't support ESM
+// Cleanup
+fs.unlinkSync(browserSourcePath);
 
-const browserModule = require('./browser.mjs');
-module.exports = browserModule;
-`;
-writeFile('browser.js', browserCjs);
+// Step 3: Create Node.js stubs
+console.log('3. Creating Node.js stubs...');
 
-// 5. Create index.js (Node.js CJS)
-const nodeLoader = `
+const nodeStub = `
 /**
- * PNGine - Node.js entry point
+ * PNGine - Node.js entry
  *
- * Note: PNGine requires a browser environment with WebGPU support.
- * This module provides utility functions that work in Node.js.
+ * Note: PNGine requires a browser with WebGPU support.
+ * Use the CLI for compilation: npx pngine compile input.pngine -o output.pngb
  */
 
-// PNG signature
-const PNG_SIGNATURE = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+const PNG_SIG = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
-function isPng(data) {
-  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-  if (bytes.length < 8) return false;
-  return PNG_SIGNATURE.every((b, i) => bytes[i] === b);
+function isPng(d) {
+  const b = d instanceof Uint8Array ? d : new Uint8Array(d);
+  return b.length >= 8 && PNG_SIG.every((v, i) => b[i] === v);
 }
 
-function isZip(data) {
-  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-  return bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4B;
+function isZip(d) {
+  const b = d instanceof Uint8Array ? d : new Uint8Array(d);
+  return b.length >= 4 && b[0] === 0x50 && b[1] === 0x4B;
 }
 
-function isPngb(data) {
-  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-  return bytes.length >= 4 &&
-    bytes[0] === 0x50 && bytes[1] === 0x4E &&
-    bytes[2] === 0x47 && bytes[3] === 0x42;
+function isPngb(d) {
+  const b = d instanceof Uint8Array ? d : new Uint8Array(d);
+  return b.length >= 4 && b[0] === 0x50 && b[1] === 0x4E && b[2] === 0x47 && b[3] === 0x42;
 }
 
-function detectFormat(bytes) {
-  if (isZip(bytes)) return 'zip';
-  if (isPng(bytes)) return 'png';
-  if (isPngb(bytes)) return 'pngb';
+function detectFormat(d) {
+  if (isZip(d)) return 'zip';
+  if (isPng(d)) return 'png';
+  if (isPngb(d)) return 'pngb';
   return null;
 }
 
-const ErrorCode = {
-  SUCCESS: 0,
-  NOT_INITIALIZED: 1,
-  OUT_OF_MEMORY: 2,
-  PARSE_ERROR: 3,
-  INVALID_FORMAT: 4,
-  NO_MODULE: 5,
-  EXECUTION_ERROR: 6,
-};
-
-function getErrorMessage(code) {
-  switch (code) {
-    case ErrorCode.NOT_INITIALIZED: return 'WASM not initialized';
-    case ErrorCode.OUT_OF_MEMORY: return 'Out of memory';
-    case ErrorCode.PARSE_ERROR: return 'Parse error';
-    case ErrorCode.INVALID_FORMAT: return 'Invalid bytecode format';
-    case ErrorCode.NO_MODULE: return 'No module loaded';
-    case ErrorCode.EXECUTION_ERROR: return 'Execution error';
-    default: return \`Unknown error (\${code})\`;
-  }
-}
-
-function pngine() {
-  throw new Error(
-    'PNGine requires a browser environment with WebGPU support.\\n' +
-    'Use the CLI for compilation: npx pngine compile input.pngine -o output.pngb'
-  );
-}
+const browserOnly = () => { throw new Error('PNGine requires browser with WebGPU'); };
 
 module.exports = {
-  pngine,
-  destroy: pngine,
-  draw: pngine,
-  play: pngine,
-  pause: pngine,
-  stop: pngine,
-  seek: pngine,
-  setFrame: pngine,
-  detectFormat,
-  isPng,
-  isZip,
-  isPngb,
-  extractBytecode: pngine,
-  ErrorCode,
-  getErrorMessage,
+  pngine: browserOnly, destroy: browserOnly, draw: browserOnly,
+  play: browserOnly, pause: browserOnly, stop: browserOnly,
+  seek: browserOnly, setFrame: browserOnly, extractBytecode: browserOnly,
+  isPng, isZip, isPngb, detectFormat,
 };
 `;
-writeFile('index.js', nodeLoader);
 
-// 6. Create index.mjs (Node.js ESM)
-const nodeLoaderEsm = `
-/**
- * PNGine - Node.js ESM entry point
- */
-
-const PNG_SIGNATURE = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
-
-export function isPng(data) {
-  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-  if (bytes.length < 8) return false;
-  return PNG_SIGNATURE.every((b, i) => bytes[i] === b);
+const nodeStubEsm = `
+export function isPng(d) {
+  const b = d instanceof Uint8Array ? d : new Uint8Array(d);
+  const s = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+  return b.length >= 8 && s.every((v, i) => b[i] === v);
 }
-
-export function isZip(data) {
-  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-  return bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4B;
+export function isZip(d) {
+  const b = d instanceof Uint8Array ? d : new Uint8Array(d);
+  return b.length >= 4 && b[0] === 0x50 && b[1] === 0x4B;
 }
-
-export function isPngb(data) {
-  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-  return bytes.length >= 4 &&
-    bytes[0] === 0x50 && bytes[1] === 0x4E &&
-    bytes[2] === 0x47 && bytes[3] === 0x42;
+export function isPngb(d) {
+  const b = d instanceof Uint8Array ? d : new Uint8Array(d);
+  return b.length >= 4 && b[0] === 0x50 && b[1] === 0x4E && b[2] === 0x47 && b[3] === 0x42;
 }
-
-export function detectFormat(bytes) {
-  if (isZip(bytes)) return 'zip';
-  if (isPng(bytes)) return 'png';
-  if (isPngb(bytes)) return 'pngb';
+export function detectFormat(d) {
+  if (isZip(d)) return 'zip';
+  if (isPng(d)) return 'png';
+  if (isPngb(d)) return 'pngb';
   return null;
 }
-
-export const ErrorCode = {
-  SUCCESS: 0,
-  NOT_INITIALIZED: 1,
-  OUT_OF_MEMORY: 2,
-  PARSE_ERROR: 3,
-  INVALID_FORMAT: 4,
-  NO_MODULE: 5,
-  EXECUTION_ERROR: 6,
-};
-
-export function getErrorMessage(code) {
-  switch (code) {
-    case ErrorCode.NOT_INITIALIZED: return 'WASM not initialized';
-    case ErrorCode.OUT_OF_MEMORY: return 'Out of memory';
-    case ErrorCode.PARSE_ERROR: return 'Parse error';
-    case ErrorCode.INVALID_FORMAT: return 'Invalid bytecode format';
-    case ErrorCode.NO_MODULE: return 'No module loaded';
-    case ErrorCode.EXECUTION_ERROR: return 'Execution error';
-    default: return \`Unknown error (\${code})\`;
-  }
-}
-
-function browserOnly() {
-  throw new Error(
-    'PNGine requires a browser environment with WebGPU support.\\n' +
-    'Use the CLI for compilation: npx pngine compile input.pngine -o output.pngb'
-  );
-}
-
-export const pngine = browserOnly;
-export const destroy = browserOnly;
-export const draw = browserOnly;
-export const play = browserOnly;
-export const pause = browserOnly;
-export const stop = browserOnly;
-export const seek = browserOnly;
-export const setFrame = browserOnly;
-export const extractBytecode = browserOnly;
+const browserOnly = () => { throw new Error('PNGine requires browser with WebGPU'); };
+export const pngine = browserOnly, destroy = browserOnly, draw = browserOnly;
+export const play = browserOnly, pause = browserOnly, stop = browserOnly;
+export const seek = browserOnly, setFrame = browserOnly, extractBytecode = browserOnly;
 `;
-writeFile('index.mjs', nodeLoaderEsm);
 
-console.log('\nBundle complete!');
+fs.writeFileSync(path.join(DIST_DIR, 'index.js'), nodeStub);
+fs.writeFileSync(path.join(DIST_DIR, 'index.mjs'), nodeStubEsm);
 
-// Show bundle size
-const browserSize = fs.statSync(path.join(DIST_DIR, 'browser.mjs')).size;
-console.log(`\nBrowser bundle size: ${(browserSize / 1024).toFixed(1)} KB`);
+// Step 4: Create TypeScript definitions
+console.log('4. Creating TypeScript definitions...');
 
-console.log('\nNext steps:');
-console.log('  1. Run: zig build web');
-console.log('  2. Copy zig-out/web/pngine.wasm to npm/pngine/wasm/');
+const typeDefs = `
+export interface PngineOptions {
+  canvas?: HTMLCanvasElement;
+  debug?: boolean;
+  wasmUrl?: string | URL;
+  onError?: (error: Error) => void;
+}
+
+export interface DrawOptions {
+  time?: number;
+  frame?: string;
+}
+
+export interface PngineInstance {
+  readonly width: number;
+  readonly height: number;
+  readonly frameCount: number;
+  readonly isPlaying: boolean;
+  readonly time: number;
+}
+
+export function pngine(
+  source: ArrayBuffer | Uint8Array | Blob | string,
+  options?: PngineOptions
+): Promise<PngineInstance>;
+
+export function destroy(instance: PngineInstance): void;
+export function draw(instance: PngineInstance, options?: DrawOptions): void;
+export function play(instance: PngineInstance): PngineInstance;
+export function pause(instance: PngineInstance): PngineInstance;
+export function stop(instance: PngineInstance): PngineInstance;
+export function seek(instance: PngineInstance, time: number): PngineInstance;
+export function setFrame(instance: PngineInstance, frame: string | null): PngineInstance;
+
+export function extractBytecode(data: ArrayBuffer | Uint8Array): Promise<Uint8Array>;
+export function detectFormat(data: ArrayBuffer | Uint8Array): 'png' | 'zip' | 'pngb' | null;
+export function isPng(data: ArrayBuffer | Uint8Array): boolean;
+export function isZip(data: ArrayBuffer | Uint8Array): boolean;
+export function isPngb(data: ArrayBuffer | Uint8Array): boolean;
+`;
+
+fs.writeFileSync(path.join(DIST_DIR, 'index.d.ts'), typeDefs);
+
+// Step 5: Report sizes
+console.log('\n=== Bundle Sizes ===\n');
+
+const browserInfo = sizeInfo(browserOut);
+console.log(`browser.mjs:  ${(browserInfo.raw / 1024).toFixed(1)} KB (${(browserInfo.gzipped / 1024).toFixed(1)} KB gzipped)`);
+
+const indexInfo = sizeInfo(path.join(DIST_DIR, 'index.js'));
+console.log(`index.js:     ${(indexInfo.raw / 1024).toFixed(1)} KB`);
+
+console.log(`\nTotal gzipped: ${((browserInfo.gzipped + indexInfo.raw) / 1024).toFixed(1)} KB`);
+
+if (DEBUG) {
+  console.log('\n[Debug build - includes source maps]');
+}
+
+console.log('\nDone!');

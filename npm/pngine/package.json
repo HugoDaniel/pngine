@@ -2,6 +2,10 @@
   "name": "pngine",
   "version": "0.1.0",
   "description": "WebGPU bytecode engine - shader art that fits in a PNG",
+  "scripts": {
+    "build": "node scripts/bundle.js",
+    "build:debug": "node scripts/bundle.js --debug"
+  },
   "author": "Hugo Daniel",
   "license": "MIT",
   "repository": {
