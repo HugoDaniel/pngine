@@ -16,7 +16,7 @@ ZIG=/Users/hugo/.zvm/bin/zig
 ## Quick Commands
 
 ```bash
-# Run all tests (473 tests)
+# Run all tests
 /Users/hugo/.zvm/bin/zig build test
 
 # Run tests with summary
@@ -25,7 +25,7 @@ ZIG=/Users/hugo/.zvm/bin/zig
 # Build CLI
 /Users/hugo/.zvm/bin/zig build
 
-# Build WASM for web
+# Build WASM + JS for demo (outputs to zig-out/demo/)
 /Users/hugo/.zvm/bin/zig build web
 
 # Build npm package (cross-compile for all platforms)
@@ -171,10 +171,23 @@ examples/                 # Example .pngine files
 ├── simple_triangle.pngine
 ├── rotating_cube.pngine
 └── boids.pngine          # Compute simulation with ping-pong buffers
-npm/                      # NPM package source
+demo/                     # Demo/test HTML files (not sources)
+├── index.html            # Interactive demo page
+├── test-*.html           # Development test pages
+└── *.png                 # Demo assets (gitignored)
+npm/                      # NPM package
 ├── pngine/               # Main package
+│   ├── src/              # JS source files (authoritative)
+│   │   ├── index.js      # Public API exports
+│   │   ├── init.js       # Main thread initialization
+│   │   ├── worker.js     # WebWorker entry point
+│   │   ├── gpu.js        # CommandDispatcher (~1200 lines)
+│   │   ├── anim.js       # Animation controls
+│   │   └── extract.js    # Bytecode extraction
 │   ├── bin/pngine        # CLI wrapper
 │   ├── dist/             # Bundled JS + TypeScript defs
+│   ├── scripts/          # Build scripts
+│   │   └── bundle.js     # esbuild bundler
 │   └── wasm/             # WASM runtime
 └── pngine-{platform}/    # Platform-specific binaries (6 total)
 ```
@@ -484,24 +497,27 @@ Debug output uses `[PNGine]` prefix for main thread, `[Worker]` for worker threa
 ### Animation API
 
 ```javascript
-const pngine = await initPNGine(canvas);
-await pngine.loadFromUrl('shader.png');
+import { pngine, play, pause, stop, draw, destroy } from 'pngine';
 
-// Start/stop animation
-pngine.startAnimation();
-pngine.stopAnimation();
+// Initialize from PNG with embedded bytecode
+const p = await pngine('shader.png', {
+  canvas: document.getElementById('canvas'),
+  debug: true,
+});
 
-// Select specific frame for animation
-pngine.setFrame('sceneA');  // Render only sceneA
-pngine.setFrame(null);      // Render all frames
+// Animation control (functional API)
+play(p);                 // Start animation loop
+pause(p);                // Pause (keeps time)
+stop(p);                 // Stop and reset to t=0
+draw(p, { time: 2.5 });  // Manual render at specific time
+destroy(p);              // Cleanup resources
 
-// Time update callback (for UI slider sync)
-pngine.onTimeUpdate = (time) => {
-    slider.value = time;
-};
-
-// Manual frame rendering
-await pngine.renderFrame(2.5);  // Render at t=2.5s
+// Properties (read-only)
+p.width;      // Canvas width
+p.height;     // Canvas height
+p.frameCount; // Number of frames
+p.isPlaying;  // Animation state
+p.time;       // Current time in seconds
 ```
 
 ## NPM Package
@@ -513,17 +529,21 @@ PNGine is distributed as an npm package with native CLI binaries (similar to esb
 ```
 npm/
 ├── pngine/                      # Main package
+│   ├── src/                     # JS source files (authoritative)
+│   │   ├── index.js             # Public API exports
+│   │   ├── init.js              # Main thread initialization
+│   │   ├── worker.js            # WebWorker entry point
+│   │   ├── gpu.js               # CommandDispatcher
+│   │   ├── anim.js              # Animation controls
+│   │   └── extract.js           # Bytecode extraction
 │   ├── bin/pngine               # CLI wrapper (finds native binary)
-│   ├── dist/
+│   ├── dist/                    # Bundled output (generated)
 │   │   ├── browser.mjs          # Browser bundle with inline worker
-│   │   ├── browser.js           # CJS wrapper for bundlers
-│   │   ├── index.mjs            # Node.js ESM entry
-│   │   ├── index.js             # Node.js CJS entry
+│   │   ├── index.mjs            # Node.js ESM entry (stubs)
+│   │   ├── index.js             # Node.js CJS entry (stubs)
 │   │   └── index.d.ts           # TypeScript definitions
 │   ├── wasm/pngine.wasm         # WASM runtime (57K)
-│   ├── scripts/
-│   │   ├── bundle.js            # JS bundler script
-│   │   └── prepare-publish.sh   # Copy binaries for publishing
+│   ├── scripts/bundle.js        # esbuild bundler script
 │   ├── package.json
 │   └── README.md
 │
@@ -594,12 +614,11 @@ npx pngine shader.pngine -o output.png --frame
 
 ```javascript
 // Browser usage
-import { initPNGine } from 'pngine';
+import { pngine, play } from 'pngine';
 
 const canvas = document.getElementById('canvas');
-const pngine = await initPNGine(canvas);
-await pngine.loadFromUrl('shader.png');
-pngine.startAnimation();
+const p = await pngine('shader.png', { canvas });
+play(p);
 ```
 
 ### Build System Integration
