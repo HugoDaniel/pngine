@@ -17,8 +17,6 @@ let workerUrl = null;
  * @returns {Promise<Pngine>}
  */
 export async function pngine(source, options = {}) {
-  const log = options.debug ? console.log.bind(console, "[PNGine]") : () => {};
-
   // Resolve source to canvas + bytecode
   let canvas, bytecode;
 
@@ -26,12 +24,11 @@ export async function pngine(source, options = {}) {
     // Check for CSS selector (# or . but not relative paths like ./ or ../)
     const isSelector = source.startsWith("#") || (source.startsWith(".") && !source.startsWith("./") && !source.startsWith(".."));
     if (isSelector) {
-      // Query selector
       const el = document.querySelector(source);
       if (!el) throw new Error(`Element not found: ${source}`);
 
       if (el instanceof HTMLImageElement) {
-        ({ canvas, bytecode } = await initFromImage(el, options, log));
+        ({ canvas, bytecode } = await initFromImage(el, options));
       } else if (el instanceof HTMLCanvasElement) {
         canvas = el;
         throw new Error("Canvas source requires URL or data");
@@ -39,16 +36,14 @@ export async function pngine(source, options = {}) {
         throw new Error(`Invalid element type`);
       }
     } else {
-      // URL
       canvas = options.canvas;
       if (!canvas) throw new Error("Canvas required for URL source");
-      log(`Fetching: ${source}`);
       const resp = await fetch(source);
       if (!resp.ok) throw new Error(`Fetch failed: ${resp.status}`);
       bytecode = await extractBytecode(await resp.arrayBuffer());
     }
   } else if (source instanceof HTMLImageElement) {
-    ({ canvas, bytecode } = await initFromImage(source, options, log));
+    ({ canvas, bytecode } = await initFromImage(source, options));
   } else if (
     source instanceof ArrayBuffer ||
     source instanceof Uint8Array ||
@@ -61,9 +56,6 @@ export async function pngine(source, options = {}) {
   } else {
     throw new Error("Invalid source type");
   }
-
-  log(`Canvas: ${canvas.width}x${canvas.height}`);
-  log(`Bytecode: ${bytecode.byteLength} bytes`);
 
   // Get OffscreenCanvas
   const offscreen = canvas.transferControlToOffscreen();
@@ -118,11 +110,6 @@ export async function pngine(source, options = {}) {
     }
   };
 
-  log(`Ready: ${result.frameCount} frames`);
-  if (result.animation) {
-    log(`Animation: ${result.animation.name}, ${result.animation.duration}ms, ${result.animation.scenes.length} scenes`);
-  }
-
   // Create POJO
   return createPngine({
     canvas,
@@ -138,15 +125,13 @@ export async function pngine(source, options = {}) {
     time: 0,
     startTime: 0,
     animationId: null,
-    debug: options.debug || false,
-    log,
   });
 }
 
 /**
  * Initialize from image element
  */
-async function initFromImage(img, options, log) {
+async function initFromImage(img, options) {
   // Wait for image to load if needed
   if (!img.complete) {
     await new Promise((resolve, reject) => {
@@ -157,8 +142,6 @@ async function initFromImage(img, options, log) {
 
   const { naturalWidth: w, naturalHeight: h } = img;
   if (w === 0 || h === 0) throw new Error("Image has no dimensions");
-
-  log(`Image: ${w}x${h} from ${img.src}`);
 
   // Create canvas
   const canvas = options.canvas || document.createElement("canvas");
@@ -245,7 +228,6 @@ export function destroy(p) {
   i.worker.terminate();
 
   p._ = null;
-  i.log("Destroyed");
   return p;
 }
 

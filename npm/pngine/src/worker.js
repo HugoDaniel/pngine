@@ -7,8 +7,7 @@ let canvas, device, context, gpu, wasm, memory;
 let initialized = false;
 let moduleLoaded = false;
 let frameCount = 0;
-let animationInfo = null;  // Animation metadata from WASM
-let log = () => {};
+let animationInfo = null;
 
 // Message types
 const MSG = {
@@ -53,7 +52,6 @@ async function handleInit(data) {
   if (initialized) throw new Error("Already initialized");
 
   canvas = data.canvas;
-  log = data.debug ? console.log.bind(console, "[Worker]") : () => {};
 
   // Initialize WebGPU
   const adapter = await navigator.gpu?.requestAdapter();
@@ -85,8 +83,6 @@ async function handleInit(data) {
   // Initialize WASM
   wasm.onInit();
   initialized = true;
-
-  log("Initialized");
 
   // If bytecode was provided, load it
   if (data.bytecode) {
@@ -145,11 +141,6 @@ async function loadBytecode(bytecode) {
 
   // First render to create resources
   renderWithCommandBuffer(0, 0);
-
-  log(`Loaded module: ${frameCount} frames`);
-  if (animationInfo) {
-    log(`Animation: ${animationInfo.name}, ${animationInfo.duration}ms, ${animationInfo.scenes.length} scenes`);
-  }
 }
 
 /**
@@ -253,42 +244,28 @@ function applyUniforms(uniforms) {
   const encoder = new TextEncoder();
 
   for (const [name, value] of Object.entries(uniforms)) {
-    // Encode name as UTF-8 bytes
     const nameBytes = encoder.encode(name);
     const namePtr = wasm.alloc(nameBytes.length);
-    if (!namePtr) {
-      log(`Failed to allocate memory for uniform name: ${name}`);
-      continue;
-    }
+    if (!namePtr) continue;
     new Uint8Array(memory.buffer, namePtr, nameBytes.length).set(nameBytes);
 
-    // Convert JS value to typed array bytes
     const valueBytes = uniformValueToBytes(value);
     if (!valueBytes) {
       wasm.free(namePtr, nameBytes.length);
-      log(`Unsupported uniform value type for: ${name}`);
       continue;
     }
 
     const valuePtr = wasm.alloc(valueBytes.length);
     if (!valuePtr) {
       wasm.free(namePtr, nameBytes.length);
-      log(`Failed to allocate memory for uniform value: ${name}`);
       continue;
     }
     new Uint8Array(memory.buffer, valuePtr, valueBytes.length).set(valueBytes);
 
-    // Call WASM setUniform
-    const result = wasm.setUniform(namePtr, nameBytes.length, valuePtr, valueBytes.length);
+    wasm.setUniform(namePtr, nameBytes.length, valuePtr, valueBytes.length);
 
-    // Free temporary allocations
     wasm.free(namePtr, nameBytes.length);
     wasm.free(valuePtr, valueBytes.length);
-
-    if (result !== 0) {
-      const errors = ["success", "field not found", "size mismatch", "no module"];
-      log(`setUniform(${name}) failed: ${errors[result] || `error ${result}`}`);
-    }
   }
 }
 
@@ -327,14 +304,9 @@ function uniformValueToBytes(value) {
 function renderWithCommandBuffer(time, frameId) {
   gpu.setTime(time);
 
-  // Get command buffer from WASM
   const ptr = wasm.renderFrame(time, frameId);
-  if (!ptr) {
-    log("renderFrame returned null");
-    return;
-  }
+  if (!ptr) return;
 
-  // Execute commands
   gpu.execute(ptr);
 }
 
@@ -349,7 +321,6 @@ function handleDestroy() {
     device = null;
   }
   initialized = false;
-  log("Destroyed");
 }
 
 // WASM imports - mostly stubs since command buffer doesn't need them
@@ -385,16 +356,10 @@ function getWasmImports() {
       gpuExecuteBundles: stub,
       gpuEndPass: stub,
 
-      // gpuWriteBuffer: Used by setUniform() to write uniform values directly
-      // This is called from WASM when JS calls wasm.setUniform()
+      // gpuWriteBuffer: Used by setUniform() to write uniform values
       gpuWriteBuffer: (bufferId, offset, dataPtr, dataLen) => {
         const buffer = gpu?.buffers?.get(bufferId);
-        if (!buffer) {
-          log(`gpuWriteBuffer: buffer ${bufferId} not found`);
-          return;
-        }
-
-        // Copy data from WASM memory to GPU buffer
+        if (!buffer) return;
         const data = new Uint8Array(memory.buffer, dataPtr, dataLen);
         device.queue.writeBuffer(buffer, offset, data);
       },
@@ -411,18 +376,8 @@ function getWasmImports() {
       gpuWriteBufferFromArray: stub,
       gpuWriteTimeUniform: stub,
       gpuDebugLog: stub,
-      jsConsoleLog: (ptr, len) => {
-        const msg = new TextDecoder().decode(
-          new Uint8Array(memory.buffer, ptr, len)
-        );
-        log(msg);
-      },
-      jsConsoleLogInt: (ptr, len, value) => {
-        const msg = new TextDecoder().decode(
-          new Uint8Array(memory.buffer, ptr, len)
-        );
-        log(msg, value);
-      },
+      jsConsoleLog: stub,
+      jsConsoleLogInt: stub,
     },
   };
 }
