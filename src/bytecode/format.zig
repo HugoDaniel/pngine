@@ -778,3 +778,88 @@ test "full module with WGSL table" {
     try testing.expectEqualStrings(code0, module.data.get(@enumFromInt(e0.data_id)));
     try testing.expectEqualStrings(code1, module.data.get(@enumFromInt(e1.data_id)));
 }
+
+test "deserialize: errdefer cleans up string table on data section failure" {
+    // Create a valid PNGB with valid string table but corrupted data section
+    // This tests that string table is properly cleaned up when data section fails
+
+    // Build a valid PNGB with normal allocator first
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    _ = try builder.internString(testing.allocator, "test_string");
+    _ = try builder.addData(testing.allocator, "test_data");
+
+    const output = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(output);
+
+    // Corrupt the data section by making it claim more entries than it has
+    // The data section starts at data_section_offset
+    const header: *const Header = @ptrCast(@alignCast(output[0..HEADER_SIZE]));
+    const data_section_start = header.data_section_offset;
+
+    // Create a copy we can corrupt
+    const corrupted = try testing.allocator.dupe(u8, output);
+    defer testing.allocator.free(corrupted);
+
+    // Set data section entry count to a large value (but leave actual data short)
+    // This will make data_section.deserialize fail after string_table.deserialize succeeds
+    corrupted[data_section_start] = 0xFF; // count low byte
+    corrupted[data_section_start + 1] = 0xFF; // count high byte (65535 entries)
+
+    // Attempt deserialize - should fail but not leak
+    const result = deserialize(testing.allocator, corrupted);
+    try testing.expectError(error.InvalidDataSection, result);
+}
+
+test "deserialize: errdefer cleans up on WGSL table OOM" {
+    // Test that data section is properly cleaned up when WGSL table allocation fails
+    // Uses FailingAllocator to trigger OOM at specific allocation points
+
+    // Build a valid PNGB with WGSL entries
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    _ = try builder.internString(testing.allocator, "entry_point");
+    const data0 = try builder.addData(testing.allocator, "shader code 0");
+    const data1 = try builder.addData(testing.allocator, "shader code 1");
+    _ = try builder.addWgsl(testing.allocator, data0.toInt(), &[_]u16{});
+    _ = try builder.addWgsl(testing.allocator, data1.toInt(), &[_]u16{0}); // depends on first
+
+    const output = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(output);
+
+    // Test with failing allocator at various points
+    // We want to fail during WGSL table deserialization (after string table and data section succeed)
+    var fail_index: usize = 0;
+    const max_iterations: usize = 50;
+
+    var hit_errdefer = false;
+
+    for (0..max_iterations) |_| {
+        var failing_alloc = std.testing.FailingAllocator.init(testing.allocator, .{
+            .fail_index = fail_index,
+        });
+
+        const result = deserialize(failing_alloc.allocator(), output);
+
+        if (failing_alloc.has_induced_failure) {
+            // OOM occurred - check that it was handled properly (no leak)
+            try testing.expectError(error.OutOfMemory, result);
+            // If we got past a certain point, the errdefer paths were exercised
+            if (fail_index >= 3) {
+                hit_errdefer = true;
+            }
+        } else {
+            // Success - clean up and stop
+            var module = try result;
+            module.deinit(failing_alloc.allocator());
+            break;
+        }
+
+        fail_index += 1;
+    }
+
+    // Verify we exercised the errdefer paths
+    try testing.expect(hit_errdefer);
+}
