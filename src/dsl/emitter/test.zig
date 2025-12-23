@@ -3434,3 +3434,409 @@ test "Emitter: bindGroupLayout with storageTexture" {
     }
     try testing.expect(found);
 }
+
+// ============================================================================
+// Pass and Frame Coverage Tests
+// ============================================================================
+
+test "Emitter: renderPass with depth attachment identifier" {
+    // Goal: Verify depth attachment using bare identifier (not reference).
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@vertex fn vs() {} @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }" }
+        \\#shaderModule mod { code=shader }
+        \\#texture depthTex { size=[512 512] format=depth24plus usage=[RENDER_ATTACHMENT] }
+        \\#renderPipeline pipe {
+        \\  layout=auto
+        \\  vertex={ module=mod entryPoint=vs }
+        \\  fragment={ module=mod entryPoint=fs targets=[{format=rgba8unorm}] }
+        \\  depthStencil={ format=depth24plus depthCompare=less depthWriteEnabled=true }
+        \\}
+        \\#renderPass pass {
+        \\  colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}]
+        \\  depthStencilAttachment={ view=depthTex depthLoadOp=clear depthStoreOp=store depthClearValue=1.0 }
+        \\  pipeline=pipe
+        \\  draw=3
+        \\}
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.begin_render_pass)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "Emitter: renderPass with custom color texture" {
+    // Goal: Verify color attachment with non-canvas texture.
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@vertex fn vs() {} @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }" }
+        \\#shaderModule mod { code=shader }
+        \\#texture renderTarget { size=[512 512] format=rgba8unorm usage=[RENDER_ATTACHMENT TEXTURE_BINDING] }
+        \\#renderPipeline pipe {
+        \\  layout=auto
+        \\  vertex={ module=mod entryPoint=vs }
+        \\  fragment={ module=mod entryPoint=fs targets=[{format=rgba8unorm}] }
+        \\}
+        \\#renderPass offscreen {
+        \\  colorAttachments=[{view=renderTarget loadOp=clear storeOp=store}]
+        \\  pipeline=pipe
+        \\  draw=3
+        \\}
+        \\#frame main { perform=[offscreen] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.begin_render_pass)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "Emitter: renderPass executeBundles array" {
+    // Goal: Verify executeBundles command with array of bundles.
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@vertex fn vs() {} @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }" }
+        \\#shaderModule mod { code=shader }
+        \\#renderPipeline pipe {
+        \\  layout=auto
+        \\  vertex={ module=mod entryPoint=vs }
+        \\  fragment={ module=mod entryPoint=fs targets=[{format=rgba8unorm}] }
+        \\}
+        \\#renderBundle bundle1 { colorFormats=[rgba8unorm] pipeline=pipe }
+        \\#renderPass pass {
+        \\  colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}]
+        \\  executeBundles=[bundle1]
+        \\}
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.execute_bundles)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "Emitter: renderPass executeBundles single" {
+    // Goal: Verify executeBundles with single bundle (non-array syntax).
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@vertex fn vs() {} @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }" }
+        \\#shaderModule mod { code=shader }
+        \\#renderPipeline pipe {
+        \\  layout=auto
+        \\  vertex={ module=mod entryPoint=vs }
+        \\  fragment={ module=mod entryPoint=fs targets=[{format=rgba8unorm}] }
+        \\}
+        \\#renderBundle myBundle { colorFormats=[rgba8unorm] pipeline=pipe }
+        \\#renderPass pass {
+        \\  colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}]
+        \\  executeBundles=myBundle
+        \\}
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.execute_bundles)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "Emitter: computePass with begin and dispatch" {
+    // Goal: Verify compute pass emits begin_compute_pass and dispatch.
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@compute @workgroup_size(8,8,1) fn main() {}" }
+        \\#shaderModule mod { code=shader }
+        \\#computePipeline pipe { layout=auto compute={ module=mod entryPoint=main } }
+        \\#computePass pass { pipeline=pipe dispatch=[16 16 1] }
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found_begin = false;
+    var found_dispatch = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.begin_compute_pass)) {
+            found_begin = true;
+        }
+        if (byte == @intFromEnum(opcodes.OpCode.dispatch)) {
+            found_dispatch = true;
+        }
+    }
+    try testing.expect(found_begin);
+    try testing.expect(found_dispatch);
+}
+
+test "Emitter: queue with sceneTimeInputs" {
+    // Goal: Verify queue writeBuffer with sceneTimeInputs built-in.
+    const source: [:0]const u8 =
+        \\#buffer uniformBuf { size=12 usage=[UNIFORM COPY_DST] }
+        \\#queue writeUniforms {
+        \\  writeBuffer={ buffer=uniformBuf bufferOffset=0 data=sceneTimeInputs }
+        \\}
+        \\#frame main { perform=[writeUniforms] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.write_time_uniform)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "Emitter: queue with literal array data" {
+    // Goal: Verify queue writeBuffer with inline array of numbers.
+    const source: [:0]const u8 =
+        \\#buffer buf { size=16 usage=[UNIFORM COPY_DST] }
+        \\#queue writeData {
+        \\  writeBuffer={ buffer=buf bufferOffset=0 data=[1.0 2.0 3.0 4.0] }
+        \\}
+        \\#frame main { perform=[writeData] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.write_buffer)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "Emitter: queue with string literal data" {
+    // Goal: Verify queue writeBuffer with literal string bytes.
+    const source: [:0]const u8 =
+        \\#buffer buf { size=16 usage=[UNIFORM COPY_DST] }
+        \\#queue writeData {
+        \\  writeBuffer={ buffer=buf bufferOffset=0 data="hello" }
+        \\}
+        \\#frame main { perform=[writeData] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.write_buffer)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "Emitter: multiple frames with shared pass" {
+    // Goal: Verify multiple frame definitions sharing a pass.
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@vertex fn vs() {} @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }" }
+        \\#shaderModule mod { code=shader }
+        \\#renderPipeline pipe {
+        \\  layout=auto
+        \\  vertex={ module=mod entryPoint=vs }
+        \\  fragment={ module=mod entryPoint=fs targets=[{format=rgba8unorm}] }
+        \\}
+        \\#renderPass pass { colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}] pipeline=pipe draw=3 }
+        \\#frame frameA { perform=[pass] }
+        \\#frame frameB { perform=[pass] }
+        \\#frame frameC { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Count define_frame opcodes
+    var frame_count: u32 = 0;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.define_frame)) {
+            frame_count += 1;
+        }
+    }
+    try testing.expectEqual(@as(u32, 3), frame_count);
+}
+
+test "Emitter: renderPass with pool offsets" {
+    // Goal: Verify vertexBuffersPoolOffsets and bindGroupsPoolOffsets parsing.
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@vertex fn vs() {} @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }" }
+        \\#shaderModule mod { code=shader }
+        \\#buffer vbuf { size=1024 usage=[VERTEX] pool=2 }
+        \\#buffer uniforms { size=64 usage=[UNIFORM] }
+        \\#renderPipeline pipe {
+        \\  layout=auto
+        \\  vertex={ module=mod entryPoint=vs }
+        \\  fragment={ module=mod entryPoint=fs targets=[{format=rgba8unorm}] }
+        \\}
+        \\#bindGroup bg { layout={ pipeline=pipe index=0 } entries=[{binding=0 resource={buffer=uniforms}}] }
+        \\#renderPass pass {
+        \\  colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}]
+        \\  pipeline=pipe
+        \\  vertexBuffers=[vbuf]
+        \\  vertexBuffersPoolOffsets=[1]
+        \\  bindGroups=[bg]
+        \\  bindGroupsPoolOffsets=[0]
+        \\  draw=3
+        \\}
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // With pool offsets, set_vertex_buffer_pool is emitted instead of set_vertex_buffer
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.set_vertex_buffer_pool)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "Emitter: drawIndexed with all params" {
+    // Goal: Verify drawIndexed with all optional parameters.
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@vertex fn vs() {} @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }" }
+        \\#shaderModule mod { code=shader }
+        \\#buffer indexBuf { size=64 usage=[INDEX] }
+        \\#renderPipeline pipe {
+        \\  layout=auto
+        \\  vertex={ module=mod entryPoint=vs }
+        \\  fragment={ module=mod entryPoint=fs targets=[{format=rgba8unorm}] }
+        \\}
+        \\#renderPass pass {
+        \\  colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}]
+        \\  pipeline=pipe
+        \\  indexBuffer=indexBuf
+        \\  drawIndexed={ indexCount=36 instanceCount=10 firstIndex=0 baseVertex=0 firstInstance=0 }
+        \\}
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.draw_indexed)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "Emitter: draw with object params execution" {
+    // Goal: Verify draw command with object-style parameters executes correctly.
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@vertex fn vs() {} @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }" }
+        \\#shaderModule mod { code=shader }
+        \\#renderPipeline pipe {
+        \\  layout=auto
+        \\  vertex={ module=mod entryPoint=vs }
+        \\  fragment={ module=mod entryPoint=fs targets=[{format=rgba8unorm}] }
+        \\}
+        \\#renderPass pass {
+        \\  colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}]
+        \\  pipeline=pipe
+        \\  draw={ vertexCount=6 instanceCount=100 firstVertex=0 firstInstance=0 }
+        \\}
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    const mock_gpu = @import("../../executor/mock_gpu.zig");
+    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .draw) {
+            try testing.expectEqual(@as(u32, 6), call.params.draw.vertex_count);
+            try testing.expectEqual(@as(u32, 100), call.params.draw.instance_count);
+            return;
+        }
+    }
+    try testing.expect(false);
+}
