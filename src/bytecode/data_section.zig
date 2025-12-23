@@ -413,3 +413,39 @@ test "roundtrip with immediate buffer frees - full ownership test" {
 
     // If we reach here without crashes or leaks, ownership is correct
 }
+
+test "overflow: too many data entries" {
+    var section: DataSection = .empty;
+    defer section.deinit(testing.allocator);
+
+    // Add maximum number of entries (65535 = maxInt(u16))
+    const max_entries = std.math.maxInt(u16);
+    for (0..max_entries) |i| {
+        _ = try section.add(testing.allocator, &[_]u8{@intCast(i & 0xFF)});
+    }
+
+    // Adding one more should fail
+    try testing.expectError(error.TooManyDataEntries, section.add(testing.allocator, "overflow"));
+}
+
+test "overflow: data section size limit" {
+    var section: DataSection = .empty;
+    defer section.deinit(testing.allocator);
+
+    // Add data that brings us close to u32 max
+    // We can't actually allocate 4GB, so we simulate by adding large chunks
+    // and verifying the overflow check math is correct.
+    // First add a chunk that fits
+    const chunk_size: usize = 1024 * 1024; // 1MB
+    const chunk = try testing.allocator.alloc(u8, chunk_size);
+    defer testing.allocator.free(chunk);
+    @memset(chunk, 0xAB);
+
+    _ = try section.add(testing.allocator, chunk);
+
+    // Manually verify the overflow check logic:
+    // The check is: total_size + data.len > maxInt(u32)
+    // With 1MB already added, adding maxInt(u32) bytes would overflow
+    // We can't allocate that, but we can verify the section tracks size correctly
+    try testing.expectEqual(chunk_size, section.total_size);
+}

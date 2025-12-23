@@ -267,3 +267,16 @@ test "empty string" {
     try testing.expectEqual(@as(u16, 0), id.toInt());
     try testing.expectEqualStrings("", table.get(id));
 }
+
+test "overflow: string table size limit" {
+    var table: StringTable = .empty;
+    defer table.deinit(testing.allocator);
+
+    // Add a large string that fills most of the table (max is 65535 bytes)
+    const large_str = "x" ** 65000;
+    _ = try table.intern(testing.allocator, large_str);
+
+    // Adding another string that would exceed the limit should fail
+    const overflow_str = "y" ** 1000; // 65000 + 1000 > 65535
+    try testing.expectError(error.StringTableOverflow, table.intern(testing.allocator, overflow_str));
+}
