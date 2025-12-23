@@ -212,7 +212,7 @@ function getWasmImports() {
       gpuCallWasmFunc: stub,
       gpuWriteBufferFromWasm: stub,
       gpuCreateTypedArray: stub,
-      gpuFillRandom: stub,
+      gpuFillRandomData: stub,
       gpuFillExpression: stub,
       gpuFillConstant: stub,
       gpuWriteBufferFromArray: stub,

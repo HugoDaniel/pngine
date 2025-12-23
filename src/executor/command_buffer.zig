@@ -436,15 +436,15 @@ pub const CommandBuffer = struct {
         self.writeU32(size);
     }
 
-    /// FILL_RANDOM: [buffer_id:u16] [offset:u32] [size:u32] [type:u8] [min:u16] [max:u16]
-    pub fn fillRandom(self: *Self, buffer_id: u16, offset: u32, size: u32, value_type: u8, min: u16, max: u16) void {
+    /// FILL_RANDOM: [array_id:u16] [offset:u32] [count:u32] [stride:u8] [data_ptr:u32]
+    /// data_ptr points to pre-generated f32 values in WASM memory
+    pub fn fillRandom(self: *Self, array_id: u16, offset: u32, count: u32, stride: u8, data_ptr: u32) void {
         self.writeCmd(.fill_random);
-        self.writeU16(buffer_id);
+        self.writeU16(array_id);
         self.writeU32(offset);
-        self.writeU32(size);
-        self.writeU8(value_type);
-        self.writeU16(min);
-        self.writeU16(max);
+        self.writeU32(count);
+        self.writeU8(stride);
+        self.writeU32(data_ptr);
     }
 
     /// FILL_EXPRESSION: [array_id:u16] [offset:u32] [count:u32] [stride:u8] [expr_ptr:u32] [expr_len:u16]
@@ -510,7 +510,11 @@ pub const CommandGPU = struct {
     /// Freed in deinit().
     resolved_wgsl: std.ArrayListUnmanaged([]const u8),
 
-    /// Allocator used for resolved_wgsl.
+    /// Random data buffers that must be kept alive until command buffer is consumed.
+    /// Freed in deinit().
+    random_data: std.ArrayListUnmanaged([]f32),
+
+    /// Allocator used for resolved_wgsl and random_data.
     alloc: ?Allocator,
 
     pub fn init(cmds: *CommandBuffer) Self {
@@ -518,17 +522,22 @@ pub const CommandGPU = struct {
             .cmds = cmds,
             .module = null,
             .resolved_wgsl = .{},
+            .random_data = .{},
             .alloc = null,
         };
     }
 
-    /// Free all resolved WGSL allocations.
+    /// Free all resolved WGSL and random data allocations.
     pub fn deinit(self: *Self) void {
         if (self.alloc) |a| {
             for (self.resolved_wgsl.items) |code| {
                 a.free(code);
             }
             self.resolved_wgsl.deinit(a);
+            for (self.random_data.items) |data| {
+                a.free(data);
+            }
+            self.random_data.deinit(a);
         }
     }
 
@@ -744,9 +753,36 @@ pub const CommandGPU = struct {
         self.cmds.createTypedArray(id, array_type, size);
     }
 
-    pub fn fillRandom(self: *Self, allocator: Allocator, buffer_id: u16, offset: u32, size: u32, value_type: u8, min: u16, max: u16) !void {
-        _ = allocator;
-        self.cmds.fillRandom(buffer_id, offset, size, value_type, min, max);
+    pub fn fillRandom(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, seed_data_id: u16, min_data_id: u16, max_data_id: u16) !void {
+        const seed_data = self.getData(seed_data_id) orelse return;
+        const min_data = self.getData(min_data_id) orelse return;
+        const max_data = self.getData(max_data_id) orelse return;
+
+        // Parse values (stored as little-endian in data section)
+        const seed = std.mem.readInt(u32, seed_data[0..4], .little);
+        const min_val = @as(f32, @bitCast(std.mem.readInt(u32, min_data[0..4], .little)));
+        const max_val = @as(f32, @bitCast(std.mem.readInt(u32, max_data[0..4], .little)));
+        const range = max_val - min_val;
+
+        // Allocate buffer for random values (persists until deinit)
+        const values = try allocator.alloc(f32, count);
+        errdefer allocator.free(values);
+
+        // Generate random values using seeded PRNG (xoshiro256)
+        const seed64: u64 = @as(u64, seed) | (@as(u64, seed ^ 0x6D2B79F5) << 32);
+        var prng = std.Random.DefaultPrng.init(seed64);
+        const random = prng.random();
+
+        for (values) |*v| {
+            v.* = min_val + random.float(f32) * range;
+        }
+
+        // Track allocation for cleanup
+        self.alloc = allocator;
+        try self.random_data.append(allocator, values);
+
+        // Pass pointer to generated data
+        self.cmds.fillRandom(array_id, offset, count, stride, @truncate(@intFromPtr(values.ptr)));
     }
 
     pub fn fillExpression(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, total_count: u32, expr_data_id: u16) !void {

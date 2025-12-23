@@ -690,7 +690,9 @@ pub const Emitter = struct {
     }
 
     /// Emit fill_random instruction.
-    /// Fills array elements with random values in [min, max].
+    /// Fills array elements with random values in [min, max] using seeded PRNG.
+    /// Params: array_id, offset, count, stride, seed_data_id, min_data_id, max_data_id
+    /// The seed enables deterministic random generation (same seed = same output).
     pub fn fillRandom(
         self: *Self,
         allocator: Allocator,
@@ -698,6 +700,7 @@ pub const Emitter = struct {
         offset: u32,
         count: u32,
         stride: u8,
+        seed_data_id: u16,
         min_data_id: u16,
         max_data_id: u16,
     ) !void {
@@ -706,6 +709,7 @@ pub const Emitter = struct {
         try self.emitVarint(allocator, offset);
         try self.emitVarint(allocator, count);
         try self.emitByte(allocator, stride);
+        try self.emitVarint(allocator, seed_data_id);
         try self.emitVarint(allocator, min_data_id);
         try self.emitVarint(allocator, max_data_id);
     }
@@ -1582,8 +1586,8 @@ test "emit data generation sequence for particles" {
     // Create float32 array for 1000 particles, 3 components each
     try emitter.createTypedArray(testing.allocator, 0, .f32, 3000);
 
-    // Fill x-coordinates with random [0, 1]
-    try emitter.fillRandom(testing.allocator, 0, 0, 1000, 3, 0, 1);
+    // Fill x-coordinates with random [0, 1] using seed=42
+    try emitter.fillRandom(testing.allocator, 0, 0, 1000, 3, 42, 0, 1);
 
     // Fill y-coordinates with linear 0 to 1
     try emitter.fillLinear(testing.allocator, 0, 1, 1000, 3, 2, 3);
@@ -1629,4 +1633,251 @@ test "emit fill operations produce consistent encoding" {
     // Property: only opcode differs
     try testing.expect(bc_linear[0] != bc_index[0]);
     try testing.expect(std.mem.eql(u8, bc_linear[1..], bc_index[1..]));
+}
+
+test "emit fillRandom with seed parameter" {
+    var emitter: Emitter = .empty;
+    defer emitter.deinit(testing.allocator);
+
+    // fillRandom(array_id, offset, count, stride, seed_data_id, min_data_id, max_data_id)
+    try emitter.fillRandom(testing.allocator, 0, 0, 100, 4, 42, 0, 1);
+
+    const bc = emitter.bytecode();
+
+    // Verify opcode
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.fill_random)), bc[0]);
+
+    // Decode all 7 parameters: array_id, offset, count, stride, seed, min, max
+    var pos: usize = 1;
+    const array_id = opcodes.decodeVarint(bc[pos..]);
+    pos += array_id.len;
+    try testing.expectEqual(@as(u32, 0), array_id.value);
+
+    const offset_val = opcodes.decodeVarint(bc[pos..]);
+    pos += offset_val.len;
+    try testing.expectEqual(@as(u32, 0), offset_val.value);
+
+    const count = opcodes.decodeVarint(bc[pos..]);
+    pos += count.len;
+    try testing.expectEqual(@as(u32, 100), count.value);
+
+    const stride = bc[pos];
+    pos += 1;
+    try testing.expectEqual(@as(u8, 4), stride);
+
+    const seed = opcodes.decodeVarint(bc[pos..]);
+    pos += seed.len;
+    try testing.expectEqual(@as(u32, 42), seed.value);
+
+    const min_data_id = opcodes.decodeVarint(bc[pos..]);
+    pos += min_data_id.len;
+    try testing.expectEqual(@as(u32, 0), min_data_id.value);
+
+    const max_data_id = opcodes.decodeVarint(bc[pos..]);
+    pos += max_data_id.len;
+    try testing.expectEqual(@as(u32, 1), max_data_id.value);
+
+    // Verify all bytes consumed
+    try testing.expectEqual(bc.len, pos);
+}
+
+test "emit fillRandom with large seed (2-byte varint)" {
+    var emitter: Emitter = .empty;
+    defer emitter.deinit(testing.allocator);
+
+    // Use seed value > 127 to force 2-byte varint
+    try emitter.fillRandom(testing.allocator, 0, 0, 100, 4, 12345, 0, 1);
+
+    const bc = emitter.bytecode();
+
+    // Skip to seed position
+    var pos: usize = 1;
+    pos += opcodes.decodeVarint(bc[pos..]).len; // array_id
+    pos += opcodes.decodeVarint(bc[pos..]).len; // offset
+    pos += opcodes.decodeVarint(bc[pos..]).len; // count
+    pos += 1; // stride
+
+    // Decode seed
+    const seed = opcodes.decodeVarint(bc[pos..]);
+    try testing.expectEqual(@as(u32, 12345), seed.value);
+    try testing.expectEqual(@as(usize, 2), seed.len); // 2-byte encoding
+}
+
+test "emit fillRandom determinism - same seed produces same encoding" {
+    var emitter1: Emitter = .empty;
+    defer emitter1.deinit(testing.allocator);
+    var emitter2: Emitter = .empty;
+    defer emitter2.deinit(testing.allocator);
+
+    // Same parameters including seed
+    try emitter1.fillRandom(testing.allocator, 5, 100, 1000, 8, 999, 10, 20);
+    try emitter2.fillRandom(testing.allocator, 5, 100, 1000, 8, 999, 10, 20);
+
+    // Property: identical bytecode
+    try testing.expect(std.mem.eql(u8, emitter1.bytecode(), emitter2.bytecode()));
+}
+
+test "emit fillRandom vs fillLinear - different parameter count" {
+    var emitter_random: Emitter = .empty;
+    defer emitter_random.deinit(testing.allocator);
+    var emitter_linear: Emitter = .empty;
+    defer emitter_linear.deinit(testing.allocator);
+
+    // fillRandom has 7 params (including seed)
+    try emitter_random.fillRandom(testing.allocator, 0, 0, 100, 4, 42, 0, 1);
+    // fillLinear has 6 params (no seed)
+    try emitter_linear.fillLinear(testing.allocator, 0, 0, 100, 4, 0, 1);
+
+    // Property: fillRandom should be longer due to extra seed param
+    try testing.expect(emitter_random.bytecode().len > emitter_linear.bytecode().len);
+}
+
+// ============================================================================
+// Random Distribution Tests (using std.Random which is used in fill_random)
+// ============================================================================
+
+/// Helper to create seeded PRNG matching fill_random implementation.
+fn createSeededPrng(seed: u32) std.Random.DefaultPrng {
+    const seed64: u64 = @as(u64, seed) | (@as(u64, seed ^ 0x6D2B79F5) << 32);
+    return std.Random.DefaultPrng.init(seed64);
+}
+
+test "seeded PRNG: uniform distribution - mean test" {
+    // Generate 10000 random floats in [0, 1) and check mean is ~0.5
+    var prng = createSeededPrng(12345);
+    const random = prng.random();
+    var sum: f64 = 0;
+    const n: usize = 10000;
+
+    for (0..n) |_| {
+        sum += random.float(f32);
+    }
+
+    const mean = sum / @as(f64, @floatFromInt(n));
+    // Expected mean: 0.5, tolerance: 0.02 (2%)
+    try testing.expect(mean > 0.48);
+    try testing.expect(mean < 0.52);
+}
+
+test "seeded PRNG: uniform distribution - range coverage" {
+    // Check that values cover the full [0, 1) range
+    var prng = createSeededPrng(42);
+    const random = prng.random();
+    var min_val: f32 = 1.0;
+    var max_val: f32 = 0.0;
+    const n: usize = 10000;
+
+    for (0..n) |_| {
+        const val = random.float(f32);
+        if (val < min_val) min_val = val;
+        if (val > max_val) max_val = val;
+    }
+
+    // Should cover most of the range
+    try testing.expect(min_val < 0.01); // Close to 0
+    try testing.expect(max_val > 0.99); // Close to 1
+}
+
+test "seeded PRNG: uniform distribution - bucket test (chi-squared proxy)" {
+    // Divide [0, 1) into 10 buckets, check each has ~10% of samples
+    var prng = createSeededPrng(99999);
+    const random = prng.random();
+    var buckets = [_]u32{0} ** 10;
+    const n: usize = 10000;
+
+    for (0..n) |_| {
+        const val = random.float(f32);
+        const bucket: usize = @min(9, @as(usize, @intFromFloat(val * 10.0)));
+        buckets[bucket] += 1;
+    }
+
+    // Each bucket should have ~1000 samples (10%)
+    // Allow 20% deviation: 800-1200
+    for (buckets) |count| {
+        try testing.expect(count >= 800);
+        try testing.expect(count <= 1200);
+    }
+}
+
+test "seeded PRNG: determinism - same seed produces same sequence" {
+    var prng1 = createSeededPrng(777);
+    var prng2 = createSeededPrng(777);
+    const r1 = prng1.random();
+    const r2 = prng2.random();
+
+    for (0..100) |_| {
+        try testing.expectEqual(r1.int(u32), r2.int(u32));
+    }
+}
+
+test "seeded PRNG: different seeds produce different sequences" {
+    var prng1 = createSeededPrng(111);
+    var prng2 = createSeededPrng(222);
+    const r1 = prng1.random();
+    const r2 = prng2.random();
+
+    var same_count: usize = 0;
+    for (0..100) |_| {
+        if (r1.int(u32) == r2.int(u32)) same_count += 1;
+    }
+
+    // Extremely unlikely to have more than a few matches by chance
+    try testing.expect(same_count < 5);
+}
+
+test "seeded PRNG: range scaling works correctly" {
+    var prng = createSeededPrng(555);
+    const random = prng.random();
+    const min_range: f32 = -10.0;
+    const max_range: f32 = 10.0;
+    const range = max_range - min_range;
+    const n: usize = 1000;
+
+    for (0..n) |_| {
+        const val = min_range + random.float(f32) * range;
+        try testing.expect(val >= min_range);
+        try testing.expect(val < max_range);
+    }
+}
+
+test "seeded PRNG: range scaling - mean test" {
+    var prng = createSeededPrng(888);
+    const random = prng.random();
+    var sum: f64 = 0;
+    const min_range: f32 = 5.0;
+    const max_range: f32 = 15.0;
+    const range = max_range - min_range;
+    const n: usize = 10000;
+
+    for (0..n) |_| {
+        sum += min_range + random.float(f32) * range;
+    }
+
+    const mean = sum / @as(f64, @floatFromInt(n));
+    // Expected mean: (5 + 15) / 2 = 10, tolerance: 0.2
+    try testing.expect(mean > 9.8);
+    try testing.expect(mean < 10.2);
+}
+
+test "seeded PRNG: variance test" {
+    // For uniform [0, 1), variance should be 1/12 ≈ 0.0833
+    var prng = createSeededPrng(31337);
+    const random = prng.random();
+    var sum: f64 = 0;
+    var sum_sq: f64 = 0;
+    const n: usize = 10000;
+
+    for (0..n) |_| {
+        const val: f64 = random.float(f32);
+        sum += val;
+        sum_sq += val * val;
+    }
+
+    const n_f = @as(f64, @floatFromInt(n));
+    const mean = sum / n_f;
+    const variance = (sum_sq / n_f) - (mean * mean);
+
+    // Expected variance: 1/12 ≈ 0.0833, tolerance: 0.01
+    try testing.expect(variance > 0.073);
+    try testing.expect(variance < 0.093);
 }

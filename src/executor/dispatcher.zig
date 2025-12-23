@@ -307,12 +307,12 @@ pub fn Dispatcher(comptime BackendType: type) type {
                     pc.* += opcodes.decodeVarint(bytecode[pc.*..]).len;
                 },
                 .fill_random => {
-                    // array_id, offset, count, stride, min_data_id, max_data_id
-                    // Note: seed is not in emitter - runtime uses its own PRNG
+                    // array_id, offset, count, stride, seed_data_id, min_data_id, max_data_id
                     pc.* += opcodes.decodeVarint(bytecode[pc.*..]).len;
                     pc.* += opcodes.decodeVarint(bytecode[pc.*..]).len;
                     pc.* += opcodes.decodeVarint(bytecode[pc.*..]).len;
                     pc.* += 1;
+                    pc.* += opcodes.decodeVarint(bytecode[pc.*..]).len;
                     pc.* += opcodes.decodeVarint(bytecode[pc.*..]).len;
                     pc.* += opcodes.decodeVarint(bytecode[pc.*..]).len;
                 },
@@ -733,9 +733,10 @@ pub fn Dispatcher(comptime BackendType: type) type {
                     const offset = try self.readVarint();
                     const count = try self.readVarint();
                     const stride = try self.readByte();
+                    const seed_data_id = try self.readVarint();
                     const min_data_id = try self.readVarint();
                     const max_data_id = try self.readVarint();
-                    try self.backend.fillRandom(allocator, @intCast(array_id), offset, count, stride, @intCast(min_data_id), @intCast(max_data_id));
+                    try self.backend.fillRandom(allocator, @intCast(array_id), offset, count, stride, @intCast(seed_data_id), @intCast(min_data_id), @intCast(max_data_id));
                 },
 
                 .fill_linear,
@@ -2684,7 +2685,7 @@ test "skipOpcodeParamsAt sync: fill_element_index" {
 test "skipOpcodeParamsAt sync: fill_random" {
     try testOpcodeSkipSync(struct {
         fn emit(e: *Emitter, a: Allocator) !void {
-            try e.fillRandom(a, 0, 0, 100, 4, 0, 1); // min_data_id, max_data_id
+            try e.fillRandom(a, 0, 0, 100, 4, 42, 0, 1); // seed_data_id, min_data_id, max_data_id
         }
     }.emit, .fill_random);
 }

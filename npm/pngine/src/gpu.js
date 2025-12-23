@@ -437,13 +437,13 @@ export class CommandDispatcher {
       }
 
       case CMD.FILL_RANDOM: {
-        const bufferId = view.getUint16(pos, true);
+        // Format: array_id, offset, count, stride, data_ptr (pre-generated f32 values)
+        const arrayId = view.getUint16(pos, true);
         const offset = view.getUint32(pos + 2, true);
-        const size = view.getUint32(pos + 6, true);
-        const valueType = view.getUint8(pos + 10);
-        const min = view.getUint16(pos + 11, true);
-        const max = view.getUint16(pos + 13, true);
-        this._fillRandom(bufferId, offset, size, valueType, min, max);
+        const count = view.getUint32(pos + 6, true);
+        const stride = view.getUint8(pos + 10);
+        const dataPtr = view.getUint32(pos + 11, true);
+        this._fillRandom(arrayId, offset, count, stride, dataPtr);
         return pos + 15;
       }
 
@@ -1097,25 +1097,26 @@ export class CommandDispatcher {
     this.typedArrays.set(id, array);
   }
 
-  _fillRandom(bufferId, offset, size, valueType, min, max) {
-    const buffer = this.buffers.get(bufferId);
-    if (!buffer) return;
+  _fillRandom(arrayId, offset, count, stride, dataPtr) {
+    const array = this.typedArrays.get(arrayId);
+    if (!array) {
+      console.error(`[GPU] fillRandom: array ${arrayId} not found`);
+      return;
+    }
 
-    // Create random data based on value type
-    let data;
-    const range = max - min;
-    if (valueType === 6) { // float32
-      data = new Float32Array(size / 4);
-      for (let i = 0; i < data.length; i++) {
-        data[i] = min + Math.random() * range;
-      }
-    } else { // integers
-      data = new Uint8Array(size);
-      for (let i = 0; i < data.length; i++) {
-        data[i] = min + Math.floor(Math.random() * range);
+    // Read pre-generated f32 values from WASM memory
+    // Random generation happens in Zig using xoroshiro128 PRNG
+    const wasmData = new Float32Array(this.memory.buffer, dataPtr, count);
+
+    console.log(`[GPU] fillRandom(array=${arrayId}, offset=${offset}, count=${count}, stride=${stride}, dataPtr=${dataPtr})`);
+
+    // Copy values to array at offset with stride
+    for (let i = 0; i < count; i++) {
+      const idx = offset + i * stride;
+      if (idx < array.length) {
+        array[idx] = wasmData[i];
       }
     }
-    this.device.queue.writeBuffer(buffer, offset, data);
   }
 
   _fillExpression(arrayId, offset, count, stride, exprPtr, exprLen) {
