@@ -555,12 +555,13 @@ pub const NativeGPU = struct {
         assert(self.initialized);
     }
 
-    pub fn fillRandom(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, min_data_id: u16, max_data_id: u16) !void {
+    pub fn fillRandom(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, seed_data_id: u16, min_data_id: u16, max_data_id: u16) !void {
         _ = allocator;
         _ = array_id;
         _ = offset;
         _ = count;
         _ = stride;
+        _ = seed_data_id;
         _ = min_data_id;
         _ = max_data_id;
         assert(self.initialized);

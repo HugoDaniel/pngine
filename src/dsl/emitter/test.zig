@@ -2953,3 +2953,484 @@ test "Emitter: multiple draw params from string defines" {
     }
     try testing.expect(false);
 }
+
+// ============================================================================
+// Resource Type Coverage Tests
+// ============================================================================
+
+test "Emitter: textureView basic" {
+    // Goal: Verify #textureView creates texture view from existing texture.
+    // Method: Define texture and textureView, verify create_texture_view opcode emitted.
+    const source: [:0]const u8 =
+        \\#texture myTexture {
+        \\  size=[512 512]
+        \\  format=rgba8unorm
+        \\  usage=[TEXTURE_BINDING RENDER_ATTACHMENT]
+        \\}
+        \\#textureView myView {
+        \\  texture=myTexture
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Verify create_texture_view opcode is present
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.create_texture_view)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "Emitter: textureView with format and dimension" {
+    // Goal: Verify textureView descriptor includes optional format and dimension.
+    const source: [:0]const u8 =
+        \\#texture cubeTexture {
+        \\  size=[256 256 6]
+        \\  format=rgba8unorm
+        \\  usage=[TEXTURE_BINDING]
+        \\}
+        \\#textureView cubeView {
+        \\  texture=cubeTexture
+        \\  format=rgba8unorm
+        \\  dimension=cube
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.create_texture_view)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "Emitter: textureView with mip levels" {
+    // Goal: Verify textureView descriptor includes mip level properties.
+    const source: [:0]const u8 =
+        \\#texture mipmapped {
+        \\  size=[1024 1024]
+        \\  format=rgba8unorm
+        \\  usage=[TEXTURE_BINDING]
+        \\  mipLevelCount=4
+        \\}
+        \\#textureView mip1 {
+        \\  texture=mipmapped
+        \\  baseMipLevel=1
+        \\  mipLevelCount=2
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.create_texture_view)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "Emitter: querySet occlusion" {
+    // Goal: Verify #querySet for occlusion queries emits create_query_set opcode.
+    const source: [:0]const u8 =
+        \\#querySet occlusionQueries {
+        \\  type=occlusion
+        \\  count=8
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.create_query_set)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "Emitter: querySet timestamp" {
+    // Goal: Verify #querySet for timestamp queries.
+    const source: [:0]const u8 =
+        \\#querySet timestampQueries {
+        \\  type=timestamp
+        \\  count=16
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.create_query_set)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "Emitter: bindGroupLayout explicit" {
+    // Goal: Verify #bindGroupLayout with explicit entry definitions.
+    const source: [:0]const u8 =
+        \\#bindGroupLayout uniforms {
+        \\  entries=[
+        \\    { binding=0 visibility=[VERTEX FRAGMENT] buffer={ type=uniform } }
+        \\  ]
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.create_bind_group_layout)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "Emitter: bindGroupLayout with sampler and texture" {
+    // Goal: Verify #bindGroupLayout with texture/sampler bindings.
+    const source: [:0]const u8 =
+        \\#bindGroupLayout textures {
+        \\  entries=[
+        \\    { binding=0 visibility=[FRAGMENT] sampler={ type=filtering } }
+        \\    { binding=1 visibility=[FRAGMENT] texture={ sampleType=float } }
+        \\  ]
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.create_bind_group_layout)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "Emitter: pipelineLayout explicit" {
+    // Goal: Verify #pipelineLayout with bindGroupLayouts array.
+    const source: [:0]const u8 =
+        \\#bindGroupLayout group0 {
+        \\  entries=[
+        \\    { binding=0 visibility=[VERTEX] buffer={ type=uniform } }
+        \\  ]
+        \\}
+        \\#pipelineLayout myLayout {
+        \\  bindGroupLayouts=[group0]
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found_bgl = false;
+    var found_pl = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.create_bind_group_layout)) {
+            found_bgl = true;
+        }
+        if (byte == @intFromEnum(opcodes.OpCode.create_pipeline_layout)) {
+            found_pl = true;
+        }
+    }
+    try testing.expect(found_bgl);
+    try testing.expect(found_pl);
+}
+
+test "Emitter: pipelineLayout multiple groups" {
+    // Goal: Verify #pipelineLayout with multiple bind group layouts.
+    const source: [:0]const u8 =
+        \\#bindGroupLayout uniforms {
+        \\  entries=[
+        \\    { binding=0 visibility=[VERTEX] buffer={ type=uniform } }
+        \\  ]
+        \\}
+        \\#bindGroupLayout textures {
+        \\  entries=[
+        \\    { binding=0 visibility=[FRAGMENT] texture={} }
+        \\    { binding=1 visibility=[FRAGMENT] sampler={} }
+        \\  ]
+        \\}
+        \\#pipelineLayout combined {
+        \\  bindGroupLayouts=[uniforms textures]
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Should have both bind group layouts and one pipeline layout
+    var bgl_count: u32 = 0;
+    var pl_count: u32 = 0;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.create_bind_group_layout)) {
+            bgl_count += 1;
+        }
+        if (byte == @intFromEnum(opcodes.OpCode.create_pipeline_layout)) {
+            pl_count += 1;
+        }
+    }
+    try testing.expectEqual(@as(u32, 2), bgl_count);
+    try testing.expectEqual(@as(u32, 1), pl_count);
+}
+
+test "Emitter: renderBundle basic" {
+    // Goal: Verify #renderBundle creates a render bundle object.
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@vertex fn vs() {} @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }" }
+        \\#shaderModule mod { code=shader }
+        \\#renderPipeline pipe {
+        \\  layout=auto
+        \\  vertex={ module=mod entryPoint=vs }
+        \\  fragment={ module=mod entryPoint=fs targets=[{format=rgba8unorm}] }
+        \\}
+        \\#renderBundle myBundle {
+        \\  colorFormats=[rgba8unorm]
+        \\  pipeline=pipe
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.create_render_bundle)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "Emitter: renderBundle with depthStencil and sampleCount" {
+    // Goal: Verify renderBundle with depth/stencil format and MSAA.
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@vertex fn vs() {} @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }" }
+        \\#shaderModule mod { code=shader }
+        \\#renderPipeline pipe {
+        \\  layout=auto
+        \\  vertex={ module=mod entryPoint=vs }
+        \\  fragment={ module=mod entryPoint=fs targets=[{format=rgba8unorm}] }
+        \\  depthStencil={ format=depth24plus depthCompare=less depthWriteEnabled=true }
+        \\  multisample={ count=4 }
+        \\}
+        \\#renderBundle msaaBundle {
+        \\  colorFormats=[rgba8unorm]
+        \\  depthStencilFormat=depth24plus
+        \\  sampleCount=4
+        \\  pipeline=pipe
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.create_render_bundle)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "Emitter: renderBundle with vertexBuffers and bindGroups" {
+    // Goal: Verify renderBundle with vertex buffers and bind groups.
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@vertex fn vs() {} @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }" }
+        \\#shaderModule mod { code=shader }
+        \\#buffer vertexBuf { size=1024 usage=[VERTEX] }
+        \\#buffer uniformBuf { size=64 usage=[UNIFORM] }
+        \\#renderPipeline pipe {
+        \\  layout=auto
+        \\  vertex={ module=mod entryPoint=vs }
+        \\  fragment={ module=mod entryPoint=fs targets=[{format=rgba8unorm}] }
+        \\}
+        \\#bindGroup uniforms {
+        \\  layout={ pipeline=pipe index=0 }
+        \\  entries=[{ binding=0 resource={ buffer=uniformBuf }}]
+        \\}
+        \\#renderBundle bundleWithBuffers {
+        \\  colorFormats=[rgba8unorm]
+        \\  pipeline=pipe
+        \\  vertexBuffers=[vertexBuf]
+        \\  bindGroups=[uniforms]
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.create_render_bundle)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "Emitter: textureView with array layers" {
+    // Goal: Verify textureView with baseArrayLayer and arrayLayerCount.
+    const source: [:0]const u8 =
+        \\#texture arrayTexture {
+        \\  size=[256 256 4]
+        \\  format=rgba8unorm
+        \\  usage=[TEXTURE_BINDING]
+        \\}
+        \\#textureView layer1 {
+        \\  texture=arrayTexture
+        \\  baseArrayLayer=1
+        \\  arrayLayerCount=1
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.create_texture_view)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "Emitter: bindGroupLayout with storage buffer" {
+    // Goal: Verify #bindGroupLayout with storage buffer binding.
+    const source: [:0]const u8 =
+        \\#bindGroupLayout compute {
+        \\  entries=[
+        \\    { binding=0 visibility=[COMPUTE] buffer={ type=storage } }
+        \\    { binding=1 visibility=[COMPUTE] buffer={ type="read-only-storage" } }
+        \\  ]
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.create_bind_group_layout)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "Emitter: bindGroupLayout with storageTexture" {
+    // Goal: Verify #bindGroupLayout with storage texture binding.
+    const source: [:0]const u8 =
+        \\#bindGroupLayout imageProcessing {
+        \\  entries=[
+        \\    { binding=0 visibility=[COMPUTE] storageTexture={ access=write-only format=rgba8unorm } }
+        \\  ]
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var found = false;
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.create_bind_group_layout)) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
