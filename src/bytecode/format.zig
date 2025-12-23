@@ -1,16 +1,17 @@
-//! PNGB Binary Format (v2)
+//! PNGB Binary Format (v3)
 //!
 //! Serializes and deserializes the complete PNGB binary format.
 //!
-//! File Structure (20 bytes header):
+//! File Structure (24 bytes header):
 //! ┌─────────────────────────────────────┐
-//! │ Header (20 bytes)                   │
+//! │ Header (24 bytes)                   │
 //! │   magic: "PNGB" (4 bytes)           │
 //! │   version: u16                      │
 //! │   flags: u16                        │
 //! │   string_table_offset: u32          │
 //! │   data_section_offset: u32          │
 //! │   wgsl_table_offset: u32            │
+//! │   uniform_table_offset: u32         │
 //! ├─────────────────────────────────────┤
 //! │ Bytecode Section                    │
 //! │   (immediately after header)        │
@@ -21,11 +22,14 @@
 //! ├─────────────────────────────────────┤
 //! │ WGSL Table                          │
 //! │   (wgsl_id → data_id + deps)        │
+//! ├─────────────────────────────────────┤
+//! │ Uniform Table                       │
+//! │   (binding → buffer + fields)       │
 //! └─────────────────────────────────────┘
 //!
 //! Invariants:
 //! - Magic must be "PNGB"
-//! - Version must be 2
+//! - Version must be 3
 //! - Offsets point to valid positions within the file
 
 const std = @import("std");
@@ -34,15 +38,17 @@ const Allocator = std.mem.Allocator;
 const StringTable = @import("string_table.zig").StringTable;
 const DataSection = @import("data_section.zig").DataSection;
 const Emitter = @import("emitter.zig").Emitter;
+const uniform_table_mod = @import("uniform_table.zig");
+const UniformTable = uniform_table_mod.UniformTable;
 
 /// Magic bytes identifying PNGB format.
 pub const MAGIC: *const [4]u8 = "PNGB";
 
-/// Current format version (v2 adds WGSL table for runtime deduplication).
-pub const VERSION: u16 = 2;
+/// Current format version (v3 adds uniform table for runtime reflection).
+pub const VERSION: u16 = 3;
 
 /// Header size in bytes.
-pub const HEADER_SIZE: usize = 20;
+pub const HEADER_SIZE: usize = 24;
 
 /// Maximum WGSL modules per file.
 pub const MAX_WGSL_MODULES: u16 = 1024;
@@ -64,9 +70,10 @@ pub const Header = extern struct {
     string_table_offset: u32,
     data_section_offset: u32,
     wgsl_table_offset: u32,
+    uniform_table_offset: u32,
 
     comptime {
-        // Verify header is exactly 20 bytes
+        // Verify header is exactly 24 bytes
         assert(@sizeOf(Header) == HEADER_SIZE);
     }
 
@@ -260,11 +267,13 @@ pub const Module = struct {
     strings: StringTable,
     data: DataSection,
     wgsl: WgslTable,
+    uniforms: UniformTable,
 
     pub fn deinit(self: *Module, allocator: Allocator) void {
         self.strings.deinit(allocator);
         self.data.deinit(allocator);
         self.wgsl.deinit(allocator);
+        self.uniforms.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -276,6 +285,7 @@ pub fn serialize(
     strings: *const StringTable,
     data: *const DataSection,
     wgsl: *const WgslTable,
+    uniforms: *const UniformTable,
 ) ![]u8 {
     // Serialize string table
     const string_bytes = try strings.serialize(allocator);
@@ -289,13 +299,18 @@ pub fn serialize(
     const wgsl_bytes = try wgsl.serialize(allocator);
     defer allocator.free(wgsl_bytes);
 
+    // Serialize uniform table
+    const uniform_bytes = try uniforms.serialize(allocator);
+    defer allocator.free(uniform_bytes);
+
     // Calculate offsets
     const string_table_offset: u32 = @intCast(HEADER_SIZE + bytecode.len);
     const data_section_offset: u32 = @intCast(HEADER_SIZE + bytecode.len + string_bytes.len);
     const wgsl_table_offset: u32 = @intCast(HEADER_SIZE + bytecode.len + string_bytes.len + data_bytes.len);
+    const uniform_table_offset: u32 = @intCast(HEADER_SIZE + bytecode.len + string_bytes.len + data_bytes.len + wgsl_bytes.len);
 
     // Total size
-    const total_size = HEADER_SIZE + bytecode.len + string_bytes.len + data_bytes.len + wgsl_bytes.len;
+    const total_size = HEADER_SIZE + bytecode.len + string_bytes.len + data_bytes.len + wgsl_bytes.len + uniform_bytes.len;
 
     // Allocate output buffer
     const output = try allocator.alloc(u8, total_size);
@@ -311,6 +326,7 @@ pub fn serialize(
         .string_table_offset = string_table_offset,
         .data_section_offset = data_section_offset,
         .wgsl_table_offset = wgsl_table_offset,
+        .uniform_table_offset = uniform_table_offset,
     };
     @memcpy(output[offset..][0..HEADER_SIZE], std.mem.asBytes(&header));
     offset += HEADER_SIZE;
@@ -330,6 +346,10 @@ pub fn serialize(
     // Write WGSL table
     @memcpy(output[offset..][0..wgsl_bytes.len], wgsl_bytes);
     offset += wgsl_bytes.len;
+
+    // Write uniform table
+    @memcpy(output[offset..][0..uniform_bytes.len], uniform_bytes);
+    offset += uniform_bytes.len;
 
     // Post-condition: wrote exactly total_size
     assert(offset == total_size);
@@ -351,6 +371,7 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !Module {
     if (header.string_table_offset > data.len) return error.InvalidOffset;
     if (header.data_section_offset > data.len) return error.InvalidOffset;
     if (header.wgsl_table_offset > data.len) return error.InvalidOffset;
+    if (header.uniform_table_offset > data.len) return error.InvalidOffset;
     if (header.string_table_offset < HEADER_SIZE) return error.InvalidOffset;
 
     // Extract bytecode (between header and string table)
@@ -373,9 +394,17 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !Module {
         ds.deinit(allocator);
     }
 
-    // Deserialize WGSL table (from wgsl_table_offset to end)
-    const wgsl_data = data[header.wgsl_table_offset..];
+    // Deserialize WGSL table (between wgsl_table_offset and uniform_table_offset)
+    const wgsl_data = data[header.wgsl_table_offset..header.uniform_table_offset];
     const wgsl = try deserializeWgslTable(allocator, wgsl_data);
+    errdefer {
+        var w = wgsl;
+        w.deinit(allocator);
+    }
+
+    // Deserialize uniform table (from uniform_table_offset to end)
+    const uniform_data = data[header.uniform_table_offset..];
+    const uniforms = try uniform_table_mod.deserialize(allocator, uniform_data);
 
     return Module{
         .header = header.*,
@@ -383,6 +412,7 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !Module {
         .strings = strings,
         .data = data_section,
         .wgsl = wgsl,
+        .uniforms = uniforms,
     };
 }
 
@@ -397,6 +427,7 @@ pub const Builder = struct {
     strings: StringTable,
     data: DataSection,
     wgsl_table: WgslTable,
+    uniform_table: UniformTable,
     emitter: Emitter,
 
     pub fn init() Self {
@@ -404,6 +435,7 @@ pub const Builder = struct {
             .strings = .empty,
             .data = .empty,
             .wgsl_table = .empty,
+            .uniform_table = .empty,
             .emitter = .empty,
         };
     }
@@ -412,6 +444,7 @@ pub const Builder = struct {
         self.strings.deinit(allocator);
         self.data.deinit(allocator);
         self.wgsl_table.deinit(allocator);
+        self.uniform_table.deinit(allocator);
         self.emitter.deinit(allocator);
         self.* = undefined;
     }
@@ -443,6 +476,24 @@ pub const Builder = struct {
         return self.wgsl_table.add(allocator, data_id, deps);
     }
 
+    /// Add a uniform binding with fields to the uniform table.
+    pub fn addUniformBinding(
+        self: *Self,
+        allocator: Allocator,
+        buffer_id: u16,
+        name_string_id: u16,
+        group: u8,
+        binding_index: u8,
+        fields: []const uniform_table_mod.UniformField,
+    ) !void {
+        return self.uniform_table.addBinding(allocator, buffer_id, name_string_id, group, binding_index, fields);
+    }
+
+    /// Get uniform table for direct manipulation.
+    pub fn getUniformTable(self: *Self) *UniformTable {
+        return &self.uniform_table;
+    }
+
     /// Finalize and serialize to PNGB format.
     pub fn finalize(self: *Self, allocator: Allocator) ![]u8 {
         return serialize(
@@ -451,6 +502,7 @@ pub const Builder = struct {
             &self.strings,
             &self.data,
             &self.wgsl_table,
+            &self.uniform_table,
         );
     }
 };
@@ -462,7 +514,7 @@ pub const Builder = struct {
 const testing = std.testing;
 
 test "header size" {
-    try testing.expectEqual(@as(usize, 20), @sizeOf(Header));
+    try testing.expectEqual(@as(usize, 24), @sizeOf(Header));
 }
 
 test "empty module" {
@@ -645,6 +697,7 @@ test "serialize handles OOM gracefully" {
             &builder.strings,
             &builder.data,
             &builder.wgsl_table,
+            &builder.uniform_table,
         );
 
         if (failing_alloc.has_induced_failure) {
@@ -757,7 +810,7 @@ test "full module with WGSL table" {
     // Verify header
     try testing.expectEqualStrings("PNGB", output[0..4]);
     const version = std.mem.readInt(u16, output[4..6], .little);
-    try testing.expectEqual(@as(u16, 2), version);
+    try testing.expectEqual(@as(u16, 3), version);
 
     // Deserialize
     var module = try deserialize(testing.allocator, output);

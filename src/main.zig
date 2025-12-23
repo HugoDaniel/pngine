@@ -22,6 +22,7 @@ pub const data_section = @import("bytecode/data_section.zig");
 pub const opcodes = @import("bytecode/opcodes.zig");
 pub const emitter = @import("bytecode/emitter.zig");
 pub const format = @import("bytecode/format.zig");
+pub const uniform_table = @import("bytecode/uniform_table.zig");
 pub const assembler = @import("bytecode/assembler.zig");
 pub const assembler_test = @import("bytecode/assembler_test.zig");
 
