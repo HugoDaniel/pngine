@@ -705,6 +705,100 @@ test "getPngbInfo: invalid PNG returns error" {
     try std.testing.expectError(Error.InvalidPng, getPngbInfo(&bad_data));
 }
 
+test "extract: pNGb chunk with data < 3 bytes returns InvalidPngbFormat" {
+    const allocator = std.testing.allocator;
+
+    // Construct PNG with pNGb chunk containing only 2 bytes (version + flags, no payload)
+    var png_buf: std.ArrayListUnmanaged(u8) = .{};
+    defer png_buf.deinit(allocator);
+
+    // PNG signature
+    try png_buf.appendSlice(allocator, &chunk.PNG_SIGNATURE);
+
+    // IHDR chunk
+    const ihdr_data = [13]u8{
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0x00, 0x00, 0x00, 0x00,
+    };
+    try chunk.writeChunk(&png_buf, allocator, chunk.ChunkType.IHDR, &ihdr_data);
+
+    // pNGb chunk with only 2 bytes (version=1, flags=0) - triggers line 76
+    const pngb_data = [_]u8{ 0x01, 0x00 }; // Only 2 bytes, need >= 3
+    try chunk.writeChunk(&png_buf, allocator, embed.PNGB_CHUNK_TYPE, &pngb_data);
+
+    // IEND chunk
+    try chunk.writeChunk(&png_buf, allocator, chunk.ChunkType.IEND, "");
+
+    try std.testing.expectError(Error.InvalidPngbFormat, extract(allocator, png_buf.items));
+}
+
+test "extract: uncompressed pNGb payload roundtrips correctly" {
+    const allocator = std.testing.allocator;
+
+    // Construct PNG with pNGb chunk where FLAG_COMPRESSED is NOT set
+    var png_buf: std.ArrayListUnmanaged(u8) = .{};
+    defer png_buf.deinit(allocator);
+
+    // PNG signature
+    try png_buf.appendSlice(allocator, &chunk.PNG_SIGNATURE);
+
+    // IHDR chunk
+    const ihdr_data = [13]u8{
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0x00, 0x00, 0x00, 0x00,
+    };
+    try chunk.writeChunk(&png_buf, allocator, chunk.ChunkType.IHDR, &ihdr_data);
+
+    // pNGb chunk with uncompressed data (flags=0x00, no compression)
+    // This tests lines 102-110
+    var pngb_data: [34]u8 = undefined;
+    pngb_data[0] = embed.PNGB_VERSION; // version = 1
+    pngb_data[1] = 0x00; // flags = 0 (NOT compressed)
+    @memcpy(pngb_data[2..6], "PNGB"); // Payload starts with PNGB header
+    @memset(pngb_data[6..], 0xAB); // Fill rest with test data
+    try chunk.writeChunk(&png_buf, allocator, embed.PNGB_CHUNK_TYPE, &pngb_data);
+
+    // IEND chunk
+    try chunk.writeChunk(&png_buf, allocator, chunk.ChunkType.IEND, "");
+
+    // Extract should return the uncompressed payload
+    const extracted = try extract(allocator, png_buf.items);
+    defer allocator.free(extracted);
+
+    // Verify extracted matches the payload (pngb_data[2..])
+    try std.testing.expectEqual(@as(usize, 32), extracted.len);
+    try std.testing.expectEqualSlices(u8, pngb_data[2..], extracted);
+}
+
+test "extract: compressed pNGb with invalid DEFLATE returns DecompressionFailed" {
+    const allocator = std.testing.allocator;
+
+    // Construct PNG with pNGb chunk with compression flag but invalid DEFLATE data
+    var png_buf: std.ArrayListUnmanaged(u8) = .{};
+    defer png_buf.deinit(allocator);
+
+    // PNG signature
+    try png_buf.appendSlice(allocator, &chunk.PNG_SIGNATURE);
+
+    // IHDR chunk
+    const ihdr_data = [13]u8{
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0x00, 0x00, 0x00, 0x00,
+    };
+    try chunk.writeChunk(&png_buf, allocator, chunk.ChunkType.IHDR, &ihdr_data);
+
+    // pNGb chunk with compression flag set but invalid DEFLATE payload
+    // 0xFF is not a valid DEFLATE block header
+    const pngb_data = [_]u8{ embed.PNGB_VERSION, embed.FLAG_COMPRESSED, 0xFF, 0xFF, 0xFF };
+    try chunk.writeChunk(&png_buf, allocator, embed.PNGB_CHUNK_TYPE, &pngb_data);
+
+    // IEND chunk
+    try chunk.writeChunk(&png_buf, allocator, chunk.ChunkType.IEND, "");
+
+    // Extract should fail because DEFLATE data is invalid
+    try std.testing.expectError(Error.DecompressionFailed, extract(allocator, png_buf.items));
+}
+
 // ============================================================================
 // Fuzz/Property Tests
 // ============================================================================
