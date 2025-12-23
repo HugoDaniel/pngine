@@ -72,7 +72,6 @@ extern "env" fn gpuWriteTimeUniform(buffer_id: u16, buffer_offset: u32, size: u1
 // Debug logging
 pub extern "env" fn gpuDebugLog(msg_type: u8, value: u32) void;
 extern "env" fn jsConsoleLog(ptr: [*]const u8, len: u32) void;
-extern "env" fn jsConsoleLogInt(ptr: [*]const u8, len: u32, value: i32) void;
 
 // ============================================================================
 // WasmGPU Backend
@@ -109,11 +108,6 @@ pub const WasmGPU = struct {
             @memcpy(buf[prefix.len .. prefix.len + msg.len], msg);
         }
         jsConsoleLog(&buf, @intCast(total_len));
-    }
-
-    /// Log a message with an integer value.
-    pub fn consoleLogInt(_: *Self, prefix: []const u8, value: i32) void {
-        jsConsoleLogInt(prefix.ptr, @intCast(prefix.len), value);
     }
 
     // ========================================================================

@@ -760,6 +760,9 @@ pub fn emitTextures(e: *Emitter) Emitter.Error!void {
         // Check if texture uses canvas size (size=[canvas.width canvas.height])
         const use_canvas_size = textureUsesCanvasSize(e, info.node);
 
+        // Check if texture uses imageBitmap size (size=[img.width img.height])
+        const image_bitmap_id = textureUsesImageBitmapSize(e, info.node);
+
         const sample_count = utils.parsePropertyNumber(e, info.node, "sampleCount") orelse 1;
 
         // Parse format
@@ -772,6 +775,14 @@ pub fn emitTextures(e: *Emitter) Emitter.Error!void {
         const desc = if (use_canvas_size)
             DescriptorEncoder.encodeTextureCanvasSize(
                 e.gpa,
+                format_enum,
+                usage,
+                sample_count,
+            ) catch return error.OutOfMemory
+        else if (image_bitmap_id) |ib_id|
+            DescriptorEncoder.encodeTextureImageBitmapSize(
+                e.gpa,
+                ib_id,
                 format_enum,
                 usage,
                 sample_count,
@@ -836,6 +847,46 @@ pub fn textureUsesCanvasSize(e: *Emitter, node: Node.Index) bool {
     }
 
     return false;
+}
+
+/// Check if texture has size=[imageBitmap.width imageBitmap.height] (uniform_access refs to imageBitmap).
+/// Returns the imageBitmap ID if found, null otherwise.
+pub fn textureUsesImageBitmapSize(e: *Emitter, node: Node.Index) ?u16 {
+    // Pre-condition
+    std.debug.assert(node.toInt() < e.ast.nodes.len);
+
+    const size_value = utils.findPropertyValue(e, node, "size") orelse return null;
+    const size_tag = e.ast.nodes.items(.tag)[size_value.toInt()];
+
+    if (size_tag != .array) return null;
+
+    const array_data = e.ast.nodes.items(.data)[size_value.toInt()];
+    const elements = e.ast.extraData(array_data.extra_range);
+
+    // Check if any element is a uniform_access referencing an imageBitmap
+    for (elements) |elem_idx| {
+        const elem: Node.Index = @enumFromInt(elem_idx);
+        const elem_tag = e.ast.nodes.items(.tag)[elem.toInt()];
+
+        // uniform_access (imageBitmap.width, imageBitmap.height)
+        if (elem_tag == .uniform_access) {
+            const data = e.ast.nodes.items(.data)[elem.toInt()];
+            const name_token = data.node_and_node[0];
+            const prop_token = data.node_and_node[1];
+            const name = utils.getTokenSlice(e, name_token);
+            const prop = utils.getTokenSlice(e, prop_token);
+
+            // Check if this references an imageBitmap and is width/height property
+            if ((std.mem.eql(u8, prop, "width") or std.mem.eql(u8, prop, "height"))) {
+                // Look up the imageBitmap ID
+                if (e.image_bitmap_ids.get(name)) |ib_id| {
+                    return ib_id;
+                }
+            }
+        }
+    }
+
+    return null;
 }
 
 /// Emit #sampler declarations to bytecode.

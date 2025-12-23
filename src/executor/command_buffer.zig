@@ -43,6 +43,12 @@ pub const Cmd = enum(u8) {
     create_render_pipeline = 0x05,
     create_compute_pipeline = 0x06,
     create_bind_group = 0x07,
+    create_texture_view = 0x08,
+    create_query_set = 0x09,
+    create_bind_group_layout = 0x0A,
+    create_image_bitmap = 0x0B,
+    create_pipeline_layout = 0x0C,
+    create_render_bundle = 0x0D,
 
     // Pass Operations (0x10-0x1F)
     begin_render_pass = 0x10,
@@ -55,10 +61,26 @@ pub const Cmd = enum(u8) {
     end_pass = 0x17,
     dispatch = 0x18,
     set_index_buffer = 0x19,
+    execute_bundles = 0x1A,
 
     // Queue Operations (0x20-0x2F)
     write_buffer = 0x20,
     write_time_uniform = 0x21,
+    copy_buffer_to_buffer = 0x22,
+    copy_texture_to_texture = 0x23,
+    write_buffer_from_wasm = 0x24,
+    copy_external_image_to_texture = 0x25,
+
+    // WASM Module Operations (0x30-0x3F)
+    init_wasm_module = 0x30,
+    call_wasm_func = 0x31,
+
+    // Utility Operations (0x40-0x4F)
+    create_typed_array = 0x40,
+    fill_random = 0x41,
+    fill_expression = 0x42,
+    fill_constant = 0x43,
+    write_buffer_from_array = 0x44,
 
     // Control (0xF0-0xFF)
     submit = 0xF0,
@@ -291,6 +313,169 @@ pub const CommandBuffer = struct {
         self.writeU16(size);
     }
 
+    /// CREATE_IMAGE_BITMAP: [id:u16] [data_ptr:u32] [data_len:u32]
+    pub fn createImageBitmap(self: *Self, id: u16, data_ptr: u32, data_len: u32) void {
+        self.writeCmd(.create_image_bitmap);
+        self.writeU16(id);
+        self.writeU32(data_ptr);
+        self.writeU32(data_len);
+    }
+
+    /// COPY_EXTERNAL_IMAGE_TO_TEXTURE: [bitmap_id:u16] [texture_id:u16] [mip_level:u8] [origin_x:u16] [origin_y:u16]
+    pub fn copyExternalImageToTexture(self: *Self, bitmap_id: u16, texture_id: u16, mip_level: u8, origin_x: u16, origin_y: u16) void {
+        self.writeCmd(.copy_external_image_to_texture);
+        self.writeU16(bitmap_id);
+        self.writeU16(texture_id);
+        self.writeU8(mip_level);
+        self.writeU16(origin_x);
+        self.writeU16(origin_y);
+    }
+
+    /// CREATE_TEXTURE_VIEW: [id:u16] [texture_id:u16] [desc_ptr:u32] [desc_len:u32]
+    pub fn createTextureView(self: *Self, id: u16, texture_id: u16, desc_ptr: u32, desc_len: u32) void {
+        self.writeCmd(.create_texture_view);
+        self.writeU16(id);
+        self.writeU16(texture_id);
+        self.writeU32(desc_ptr);
+        self.writeU32(desc_len);
+    }
+
+    /// CREATE_QUERY_SET: [id:u16] [desc_ptr:u32] [desc_len:u32]
+    pub fn createQuerySet(self: *Self, id: u16, desc_ptr: u32, desc_len: u32) void {
+        self.writeCmd(.create_query_set);
+        self.writeU16(id);
+        self.writeU32(desc_ptr);
+        self.writeU32(desc_len);
+    }
+
+    /// CREATE_BIND_GROUP_LAYOUT: [id:u16] [desc_ptr:u32] [desc_len:u32]
+    pub fn createBindGroupLayout(self: *Self, id: u16, desc_ptr: u32, desc_len: u32) void {
+        self.writeCmd(.create_bind_group_layout);
+        self.writeU16(id);
+        self.writeU32(desc_ptr);
+        self.writeU32(desc_len);
+    }
+
+    /// CREATE_PIPELINE_LAYOUT: [id:u16] [desc_ptr:u32] [desc_len:u32]
+    pub fn createPipelineLayout(self: *Self, id: u16, desc_ptr: u32, desc_len: u32) void {
+        self.writeCmd(.create_pipeline_layout);
+        self.writeU16(id);
+        self.writeU32(desc_ptr);
+        self.writeU32(desc_len);
+    }
+
+    /// CREATE_RENDER_BUNDLE: [id:u16] [desc_ptr:u32] [desc_len:u32]
+    pub fn createRenderBundle(self: *Self, id: u16, desc_ptr: u32, desc_len: u32) void {
+        self.writeCmd(.create_render_bundle);
+        self.writeU16(id);
+        self.writeU32(desc_ptr);
+        self.writeU32(desc_len);
+    }
+
+    /// EXECUTE_BUNDLES: [count:u8] [bundle_ids:u16...]
+    pub fn executeBundles(self: *Self, bundle_ids: []const u16) void {
+        self.writeCmd(.execute_bundles);
+        self.writeU8(@intCast(bundle_ids.len));
+        for (bundle_ids) |id| {
+            self.writeU16(id);
+        }
+    }
+
+    /// COPY_BUFFER_TO_BUFFER: [src_id:u16] [src_offset:u32] [dst_id:u16] [dst_offset:u32] [size:u32]
+    pub fn copyBufferToBuffer(self: *Self, src_id: u16, src_offset: u32, dst_id: u16, dst_offset: u32, size: u32) void {
+        self.writeCmd(.copy_buffer_to_buffer);
+        self.writeU16(src_id);
+        self.writeU32(src_offset);
+        self.writeU16(dst_id);
+        self.writeU32(dst_offset);
+        self.writeU32(size);
+    }
+
+    /// COPY_TEXTURE_TO_TEXTURE: [src_id:u16] [dst_id:u16] [width:u16] [height:u16]
+    pub fn copyTextureToTexture(self: *Self, src_id: u16, dst_id: u16, width: u16, height: u16) void {
+        self.writeCmd(.copy_texture_to_texture);
+        self.writeU16(src_id);
+        self.writeU16(dst_id);
+        self.writeU16(width);
+        self.writeU16(height);
+    }
+
+    /// WRITE_BUFFER_FROM_WASM: [buffer_id:u16] [buffer_offset:u32] [wasm_ptr:u32] [size:u32]
+    pub fn writeBufferFromWasm(self: *Self, buffer_id: u16, buffer_offset: u32, wasm_ptr: u32, size: u32) void {
+        self.writeCmd(.write_buffer_from_wasm);
+        self.writeU16(buffer_id);
+        self.writeU32(buffer_offset);
+        self.writeU32(wasm_ptr);
+        self.writeU32(size);
+    }
+
+    /// INIT_WASM_MODULE: [module_id:u16] [data_ptr:u32] [data_len:u32]
+    pub fn initWasmModule(self: *Self, module_id: u16, data_ptr: u32, data_len: u32) void {
+        self.writeCmd(.init_wasm_module);
+        self.writeU16(module_id);
+        self.writeU32(data_ptr);
+        self.writeU32(data_len);
+    }
+
+    /// CALL_WASM_FUNC: [call_id:u16] [module_id:u16] [func_name_ptr:u32] [func_name_len:u32] [args_ptr:u32] [args_len:u32]
+    pub fn callWasmFunc(self: *Self, call_id: u16, module_id: u16, func_name_ptr: u32, func_name_len: u32, args_ptr: u32, args_len: u32) void {
+        self.writeCmd(.call_wasm_func);
+        self.writeU16(call_id);
+        self.writeU16(module_id);
+        self.writeU32(func_name_ptr);
+        self.writeU32(func_name_len);
+        self.writeU32(args_ptr);
+        self.writeU32(args_len);
+    }
+
+    /// CREATE_TYPED_ARRAY: [id:u16] [type:u8] [size:u32]
+    pub fn createTypedArray(self: *Self, id: u16, array_type: u8, size: u32) void {
+        self.writeCmd(.create_typed_array);
+        self.writeU16(id);
+        self.writeU8(array_type);
+        self.writeU32(size);
+    }
+
+    /// FILL_RANDOM: [buffer_id:u16] [offset:u32] [size:u32] [type:u8] [min:u16] [max:u16]
+    pub fn fillRandom(self: *Self, buffer_id: u16, offset: u32, size: u32, value_type: u8, min: u16, max: u16) void {
+        self.writeCmd(.fill_random);
+        self.writeU16(buffer_id);
+        self.writeU32(offset);
+        self.writeU32(size);
+        self.writeU8(value_type);
+        self.writeU16(min);
+        self.writeU16(max);
+    }
+
+    /// FILL_EXPRESSION: [array_id:u16] [offset:u32] [count:u32] [stride:u8] [expr_ptr:u32] [expr_len:u16]
+    pub fn fillExpression(self: *Self, array_id: u16, offset: u32, count: u32, stride: u8, expr_ptr: u32, expr_len: u16) void {
+        self.writeCmd(.fill_expression);
+        self.writeU16(array_id);
+        self.writeU32(offset);
+        self.writeU32(count);
+        self.writeU8(stride);
+        self.writeU32(expr_ptr);
+        self.writeU16(expr_len);
+    }
+
+    /// FILL_CONSTANT: [array_id:u16] [offset:u32] [count:u32] [stride:u8] [value_ptr:u32]
+    pub fn fillConstant(self: *Self, array_id: u16, offset: u32, count: u32, stride: u8, value_ptr: u32) void {
+        self.writeCmd(.fill_constant);
+        self.writeU16(array_id);
+        self.writeU32(offset);
+        self.writeU32(count);
+        self.writeU8(stride);
+        self.writeU32(value_ptr);
+    }
+
+    /// WRITE_BUFFER_FROM_ARRAY: [buffer_id:u16] [buffer_offset:u32] [array_id:u16]
+    pub fn writeBufferFromArray(self: *Self, buffer_id: u16, buffer_offset: u32, array_id: u16) void {
+        self.writeCmd(.write_buffer_from_array);
+        self.writeU16(buffer_id);
+        self.writeU32(buffer_offset);
+        self.writeU16(array_id);
+    }
+
     /// SUBMIT: (no args)
     pub fn submit(self: *Self) void {
         self.writeCmd(.submit);
@@ -478,85 +663,109 @@ pub const CommandGPU = struct {
         self.cmds.submit();
     }
 
-    // Stubs for operations not yet supported in command buffer
-    pub fn createImageBitmap(self: *Self, allocator: Allocator, _: u16, _: u16) !void {
-        _ = self;
+    // Image bitmap and texture copy operations
+    pub fn createImageBitmap(self: *Self, allocator: Allocator, bitmap_id: u16, blob_data_id: u16) !void {
         _ = allocator;
+        const data = self.getData(blob_data_id) orelse return;
+        self.cmds.createImageBitmap(bitmap_id, @intFromPtr(data.ptr), @intCast(data.len));
     }
 
-    pub fn createTextureView(self: *Self, allocator: Allocator, _: u16, _: u16, _: u16) !void {
-        _ = self;
+    pub fn createTextureView(self: *Self, allocator: Allocator, view_id: u16, texture_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
+        const data = self.getData(descriptor_data_id) orelse return;
+        self.cmds.createTextureView(view_id, texture_id, @intFromPtr(data.ptr), @intCast(data.len));
     }
 
-    pub fn createQuerySet(self: *Self, allocator: Allocator, _: u16, _: u16) !void {
-        _ = self;
+    pub fn createQuerySet(self: *Self, allocator: Allocator, query_set_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
+        const data = self.getData(descriptor_data_id) orelse return;
+        self.cmds.createQuerySet(query_set_id, @intFromPtr(data.ptr), @intCast(data.len));
     }
 
-    pub fn createBindGroupLayout(self: *Self, allocator: Allocator, _: u16, _: u16) !void {
-        _ = self;
+    pub fn createBindGroupLayout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
+        const data = self.getData(descriptor_data_id) orelse return;
+        self.cmds.createBindGroupLayout(layout_id, @intFromPtr(data.ptr), @intCast(data.len));
     }
 
-    pub fn createPipelineLayout(self: *Self, allocator: Allocator, _: u16, _: u16) !void {
-        _ = self;
+    pub fn createPipelineLayout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
+        const data = self.getData(descriptor_data_id) orelse return;
+        self.cmds.createPipelineLayout(layout_id, @intFromPtr(data.ptr), @intCast(data.len));
     }
 
-    pub fn createRenderBundle(self: *Self, allocator: Allocator, _: u16, _: u16) !void {
-        _ = self;
+    pub fn createRenderBundle(self: *Self, allocator: Allocator, bundle_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
+        const data = self.getData(descriptor_data_id) orelse return;
+        self.cmds.createRenderBundle(bundle_id, @intFromPtr(data.ptr), @intCast(data.len));
     }
 
-    pub fn executeBundles(self: *Self, allocator: Allocator, _: []const u16) !void {
-        _ = self;
+    pub fn executeBundles(self: *Self, allocator: Allocator, bundle_ids: []const u16) !void {
         _ = allocator;
+        self.cmds.executeBundles(bundle_ids);
     }
 
-    pub fn copyExternalImageToTexture(self: *Self, allocator: Allocator, _: u16, _: u16, _: u8, _: u16, _: u16) !void {
-        _ = self;
+    pub fn copyExternalImageToTexture(self: *Self, allocator: Allocator, bitmap_id: u16, texture_id: u16, mip_level: u8, origin_x: u16, origin_y: u16) !void {
         _ = allocator;
+        self.cmds.copyExternalImageToTexture(bitmap_id, texture_id, mip_level, origin_x, origin_y);
     }
 
-    pub fn initWasmModule(self: *Self, allocator: Allocator, _: u16, _: u16) !void {
-        _ = self;
+    pub fn copyBufferToBuffer(self: *Self, allocator: Allocator, src_id: u16, src_offset: u32, dst_id: u16, dst_offset: u32, size: u32) !void {
         _ = allocator;
+        self.cmds.copyBufferToBuffer(src_id, src_offset, dst_id, dst_offset, size);
     }
 
-    pub fn callWasmFunc(self: *Self, allocator: Allocator, _: u16, _: u16, _: u16, _: []const u8) !void {
-        _ = self;
+    pub fn copyTextureToTexture(self: *Self, allocator: Allocator, src_id: u16, dst_id: u16, width: u16, height: u16) !void {
         _ = allocator;
+        self.cmds.copyTextureToTexture(src_id, dst_id, width, height);
     }
 
-    pub fn writeBufferFromWasm(self: *Self, allocator: Allocator, _: u16, _: u16, _: u32, _: u32) !void {
-        _ = self;
+    pub fn initWasmModule(self: *Self, allocator: Allocator, module_id: u16, wasm_data_id: u16) !void {
         _ = allocator;
+        const data = self.getData(wasm_data_id) orelse return;
+        self.cmds.initWasmModule(module_id, @intFromPtr(data.ptr), @intCast(data.len));
     }
 
-    pub fn createTypedArray(self: *Self, allocator: Allocator, _: u16, _: u8, _: u32) !void {
-        _ = self;
+    pub fn callWasmFunc(self: *Self, allocator: Allocator, call_id: u16, module_id: u16, func_name_id: u16, args: []const u8) !void {
         _ = allocator;
+        const module = self.module orelse return;
+        const string_id: @import("../bytecode/string_table.zig").StringId = @enumFromInt(func_name_id);
+        const func_name = module.strings.get(string_id);
+        self.cmds.callWasmFunc(call_id, module_id, @intFromPtr(func_name.ptr), @intCast(func_name.len), @intFromPtr(args.ptr), @intCast(args.len));
     }
 
-    pub fn fillRandom(self: *Self, allocator: Allocator, _: u16, _: u32, _: u32, _: u8, _: u16, _: u16) !void {
-        _ = self;
+    pub fn writeBufferFromWasm(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u16, wasm_ptr: u32, size: u32) !void {
         _ = allocator;
+        self.cmds.writeBufferFromWasm(buffer_id, buffer_offset, wasm_ptr, size);
     }
 
-    pub fn fillExpression(self: *Self, allocator: Allocator, _: u16, _: u32, _: u32, _: u8, _: u32, _: u16) !void {
-        _ = self;
+    pub fn createTypedArray(self: *Self, allocator: Allocator, id: u16, array_type: u8, size: u32) !void {
         _ = allocator;
+        self.cmds.createTypedArray(id, array_type, size);
     }
 
-    pub fn fillConstant(self: *Self, allocator: Allocator, _: u16, _: u32, _: u32, _: u8, _: u16) !void {
-        _ = self;
+    pub fn fillRandom(self: *Self, allocator: Allocator, buffer_id: u16, offset: u32, size: u32, value_type: u8, min: u16, max: u16) !void {
         _ = allocator;
+        self.cmds.fillRandom(buffer_id, offset, size, value_type, min, max);
     }
 
-    pub fn writeBufferFromArray(self: *Self, allocator: Allocator, _: u16, _: u32, _: u16) !void {
-        _ = self;
+    pub fn fillExpression(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, total_count: u32, expr_data_id: u16) !void {
         _ = allocator;
+        _ = total_count; // total_count is implicit in the iteration
+        const expr_data = self.getData(expr_data_id) orelse return;
+        self.cmds.fillExpression(array_id, offset, count, stride, @truncate(@intFromPtr(expr_data.ptr)), @intCast(expr_data.len));
+    }
+
+    pub fn fillConstant(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, value_data_id: u16) !void {
+        _ = allocator;
+        const value_data = self.getData(value_data_id) orelse return;
+        // value_ptr is a pointer to f32 value in data section
+        self.cmds.fillConstant(array_id, offset, count, stride, @truncate(@intFromPtr(value_data.ptr)));
+    }
+
+    pub fn writeBufferFromArray(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, array_id: u16) !void {
+        _ = allocator;
+        self.cmds.writeBufferFromArray(buffer_id, buffer_offset, array_id);
     }
 
     pub fn consoleLog(self: *Self, _: []const u8, _: []const u8) void {

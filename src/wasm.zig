@@ -44,6 +44,12 @@ const CommandBuffer = command_buffer.CommandBuffer;
 const CommandGPU = command_buffer.CommandGPU;
 
 // ============================================================================
+// Debug Logging (extern to JS)
+// ============================================================================
+
+extern "env" fn jsConsoleLog(ptr: [*]const u8, len: u32) void;
+
+// ============================================================================
 // Error Codes
 // ============================================================================
 
@@ -97,6 +103,7 @@ var gpu: WasmGPU = .empty;
 var current_module: ?Module = null;
 var module_data: ?[]u8 = null; // Owned copy of PNGB data
 var frame_counter: u32 = 0; // Persists across executeAll calls for ping-pong
+var resources_created: bool = false; // Track if first frame has run (resources created)
 
 // Command buffer for renderFrame (static allocation)
 var cmd_buffer: [command_buffer.DEFAULT_CAPACITY]u8 = undefined;
@@ -207,8 +214,9 @@ export fn loadModule(pngb_ptr: [*]const u8, pngb_len: usize) u32 {
     // Free previous module if any
     freeModule();
 
-    // Reset frame counter for new module
+    // Reset frame counter and resources flag for new module
     frame_counter = 0;
+    resources_created = false;
 
     // Make owned copy of PNGB data (must outlive module)
     const data = allocator.alloc(u8, pngb_len) catch return ErrorCode.out_of_memory.toU32();
@@ -310,7 +318,6 @@ export fn executeFrameByName(name_ptr: [*]const u8, name_len: usize) u32 {
     const module = &(current_module orelse return ErrorCode.no_module_loaded.toU32());
 
     const target_name = name_ptr[0..name_len];
-    gpu.consoleLog("[WASM] executeFrameByName: ", target_name);
 
     // Find string ID for the name
     var target_string_id: ?u16 = null;
@@ -323,20 +330,13 @@ export fn executeFrameByName(name_ptr: [*]const u8, name_len: usize) u32 {
     }
 
     const string_id = target_string_id orelse {
-        gpu.consoleLog("[WASM] executeFrameByName: frame not found in string table", "");
         return ErrorCode.execution_error.toU32();
     };
-
-    gpu.consoleLogInt("[WASM] executeFrameByName: string_id=", string_id);
 
     // Scan for frame with this name
     const frame_range = scanForFrameByNameId(module.bytecode, string_id) orelse {
-        gpu.consoleLog("[WASM] executeFrameByName: frame not found in bytecode", "");
         return ErrorCode.execution_error.toU32();
     };
-
-    gpu.consoleLogInt("[WASM] executeFrameByName: range.start=", @intCast(frame_range.start));
-    gpu.consoleLogInt("[WASM] executeFrameByName: range.end=", @intCast(frame_range.end));
 
     const frame_before = frame_counter;
 
@@ -357,7 +357,6 @@ export fn executeFrameByName(name_ptr: [*]const u8, name_len: usize) u32 {
     frame_counter = dispatcher.frame_counter;
     assert(frame_counter >= frame_before);
 
-    gpu.consoleLog("[WASM] executeFrameByName: done", "");
     return ErrorCode.success.toU32();
 }
 
@@ -401,14 +400,60 @@ export fn renderFrame(time: f32, frame_id: u16) ?[*]const u8 {
     // Execute bytecode with command GPU backend
     var dispatcher = Dispatcher(CommandGPU).initWithFrame(allocator, cmd_gpu, module, frame_counter);
     defer dispatcher.deinit();
-    dispatcher.executeAll(allocator) catch return null;
 
-    // Update frame counter
+    if (!resources_created) {
+        // First call: execute all bytecode (create resources + first frame)
+        dispatcher.executeAll(allocator) catch return null;
+        resources_created = true;
+    } else {
+        // Subsequent calls: skip to frame portion only (avoid re-initializing buffers)
+        // Find first define_frame and execute from there
+        const frame_start = findFirstFrameStart(module.bytecode) orelse {
+            // No frame definition found, execute all (shouldn't happen)
+            dispatcher.executeAll(allocator) catch return null;
+            return finishFrame(&cmds, &dispatcher);
+        };
+
+        // CRITICAL: Scan for pass definitions before executing the frame.
+        // exec_pass opcodes within the frame need pass_ranges to be populated.
+        dispatcher.scanPassDefinitions();
+
+        dispatcher.pc = frame_start;
+        dispatcher.executeFromPC(allocator) catch return null;
+    }
+
+    return finishFrame(&cmds, &dispatcher);
+}
+
+/// Helper to finish frame and return command buffer pointer.
+fn finishFrame(cmds: *CommandBuffer, dispatcher: *Dispatcher(CommandGPU)) ?[*]const u8 {
+    // Update frame counter for ping-pong buffer selection
     frame_counter = dispatcher.frame_counter;
 
     // Finalize and return pointer
     _ = cmds.finish();
     return cmds.ptr();
+}
+
+/// Find the bytecode offset of the first define_frame opcode.
+fn findFirstFrameStart(bytecode: []const u8) ?usize {
+    const opcodes_mod = @import("bytecode/opcodes.zig");
+    var pc: usize = 0;
+    const max_scan: usize = 10000;
+
+    for (0..max_scan) |_| {
+        if (pc >= bytecode.len) break;
+
+        const op: opcodes_mod.OpCode = @enumFromInt(bytecode[pc]);
+        if (op == .define_frame) {
+            return pc; // Return position of define_frame opcode
+        }
+
+        pc += 1;
+        skipOpcodeParamsAt(bytecode, &pc, op);
+    }
+
+    return null;
 }
 
 /// Get command buffer size after renderFrame.
@@ -502,58 +547,209 @@ fn scanForFrameByNameId(bytecode: []const u8, target_name_id: u16) ?FrameRange {
 }
 
 /// Skip opcode parameters at current position (modifies pc).
+/// This must handle ALL opcodes that can appear before define_frame in bytecode.
 fn skipOpcodeParamsAt(bytecode: []const u8, pc: *usize, op: @import("bytecode/opcodes.zig").OpCode) void {
     const opcodes_mod = @import("bytecode/opcodes.zig");
     switch (op) {
+        // No parameters
         .end_pass, .submit, .end_frame, .nop, .begin_compute_pass, .end_pass_def => {},
+
+        // 1 varint
         .set_pipeline, .exec_pass => pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len,
-        .define_frame => {
+
+        // 2 varints
+        .define_frame, .create_shader_module, .write_buffer, .write_uniform => {
             pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
             pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
         },
+
+        // 2 varints (resource creation with descriptor)
+        .create_texture, .create_bind_group, .create_render_pipeline, .create_compute_pipeline,
+        .create_sampler, .create_bind_group_layout, .create_pipeline_layout, .create_texture_view,
+        .create_query_set, .create_render_bundle, .create_image_bitmap => {
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+        },
+
+        // 2 varints + 1 byte
         .create_buffer => {
             pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
             pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
             pc.* += 1;
         },
-        .set_bind_group, .set_vertex_buffer => {
-            pc.* += 1;
+
+        // 3 varints
+        .dispatch, .write_buffer_from_array, .write_time_uniform => {
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
             pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
         },
+
+        // 4 varints (write_buffer_from_wasm: call_id, buffer_id, offset, byte_len)
+        .write_buffer_from_wasm => {
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+        },
+
+        // 4 varints
         .draw => {
             pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
             pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
             pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
             pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
         },
-        .draw_indexed => {
+
+        // 5 varints
+        .draw_indexed, .copy_buffer_to_buffer, .copy_external_image_to_texture => {
             pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
             pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
             pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
             pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
             pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
         },
-        .dispatch => {
-            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
-            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
-            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
-        },
+
+        // 1 varint + 2 bytes + 1 varint
         .begin_render_pass => {
             pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
             pc.* += 1;
             pc.* += 1;
             pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
         },
+
+        // 1 byte + 1 varint
+        .set_bind_group, .set_vertex_buffer => {
+            pc.* += 1;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+        },
+
+        // 1 byte + 1 varint + 2 bytes
         .set_vertex_buffer_pool, .set_bind_group_pool => {
             pc.* += 1;
             pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
             pc.* += 1;
             pc.* += 1;
         },
-        else => {
-            // Default: try to skip varints until we hit something valid
-            // This is imprecise but handles most cases
+
+        // 1 varint + 1 byte
+        .set_index_buffer => {
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += 1;
         },
+
+        // 1 varint + 1 byte + 1 varint (create_typed_array: array_id, elem_type, count)
+        .create_typed_array => {
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += 1;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+        },
+
+        // 5 varints + 1 byte (fill_constant: array_id, offset, count, stride, value)
+        .fill_constant => {
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += 1; // stride
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+        },
+
+        // 6 varints + 1 byte (fill_linear, fill_element_index)
+        .fill_linear, .fill_element_index => {
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += 1; // stride
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+        },
+
+        // 7 varints + 1 byte (fill_random)
+        .fill_random => {
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += 1; // stride
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+        },
+
+        // 5 varints + 1 byte (fill_expression: array_id, offset, count, stride, expr_data_id)
+        .fill_expression => {
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += 1; // stride
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+        },
+
+        // 1 varint + 1 byte + 1 varint (define_pass: pass_id, pass_type, desc_data_id)
+        .define_pass => {
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += 1;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+        },
+
+        // 1 byte + 1 varint + 1 byte (select_from_pool)
+        .select_from_pool => {
+            pc.* += 1;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += 1;
+        },
+
+        // Variable length (execute_bundles: count + count varints)
+        .execute_bundles => {
+            const bundle_count = opcodes_mod.decodeVarint(bytecode[pc.*..]);
+            pc.* += bundle_count.len;
+            for (0..bundle_count.value) |_| {
+                pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            }
+        },
+
+        // Variable length (create_shader_concat: shader_id, count, data_ids...)
+        .create_shader_concat => {
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len; // shader_id
+            const count = opcodes_mod.decodeVarint(bytecode[pc.*..]);
+            pc.* += count.len;
+            for (0..count.value) |_| {
+                pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            }
+        },
+
+        // 2 varints (copy_texture_to_texture)
+        .copy_texture_to_texture => {
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+        },
+
+        // 2 varints (init_wasm_module)
+        .init_wasm_module => {
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len;
+        },
+
+        // Variable length (call_wasm_func)
+        .call_wasm_func => {
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len; // call_id
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len; // module_id
+            pc.* += opcodes_mod.decodeVarint(bytecode[pc.*..]).len; // func_name_id
+            const arg_count = opcodes_mod.decodeVarint(bytecode[pc.*..]);
+            pc.* += arg_count.len;
+            // Skip arg_count * (type_byte + value)
+            for (0..arg_count.value) |_| {
+                const arg_type = bytecode[pc.*];
+                pc.* += 1;
+                // Arg types: 0=none, 1-4=sized values
+                if (arg_type == 1) pc.* += 1
+                else if (arg_type == 2) pc.* += 2
+                else if (arg_type == 3) pc.* += 4
+                else if (arg_type == 4) pc.* += 8;
+            }
+        },
+
+        // Unknown opcodes - shouldn't happen but handle gracefully
+        _ => {},
     }
 }
 

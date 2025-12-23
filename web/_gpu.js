@@ -7,6 +7,7 @@
 
 // Command opcodes (must match command_buffer.zig)
 const CMD = {
+  // Resource Creation (0x01-0x0F)
   CREATE_BUFFER: 0x01,
   CREATE_TEXTURE: 0x02,
   CREATE_SAMPLER: 0x03,
@@ -14,6 +15,14 @@ const CMD = {
   CREATE_RENDER_PIPELINE: 0x05,
   CREATE_COMPUTE_PIPELINE: 0x06,
   CREATE_BIND_GROUP: 0x07,
+  CREATE_TEXTURE_VIEW: 0x08,
+  CREATE_QUERY_SET: 0x09,
+  CREATE_BIND_GROUP_LAYOUT: 0x0a,
+  CREATE_IMAGE_BITMAP: 0x0b,
+  CREATE_PIPELINE_LAYOUT: 0x0c,
+  CREATE_RENDER_BUNDLE: 0x0d,
+
+  // Pass Operations (0x10-0x1F)
   BEGIN_RENDER_PASS: 0x10,
   BEGIN_COMPUTE_PASS: 0x11,
   SET_PIPELINE: 0x12,
@@ -24,8 +33,28 @@ const CMD = {
   END_PASS: 0x17,
   DISPATCH: 0x18,
   SET_INDEX_BUFFER: 0x19,
+  EXECUTE_BUNDLES: 0x1a,
+
+  // Queue Operations (0x20-0x2F)
   WRITE_BUFFER: 0x20,
   WRITE_TIME_UNIFORM: 0x21,
+  COPY_BUFFER_TO_BUFFER: 0x22,
+  COPY_TEXTURE_TO_TEXTURE: 0x23,
+  WRITE_BUFFER_FROM_WASM: 0x24,
+  COPY_EXTERNAL_IMAGE_TO_TEXTURE: 0x25,
+
+  // WASM Module Operations (0x30-0x3F)
+  INIT_WASM_MODULE: 0x30,
+  CALL_WASM_FUNC: 0x31,
+
+  // Utility Operations (0x40-0x4F)
+  CREATE_TYPED_ARRAY: 0x40,
+  FILL_RANDOM: 0x41,
+  FILL_EXPRESSION: 0x42,
+  FILL_CONSTANT: 0x43,
+  WRITE_BUFFER_FROM_ARRAY: 0x44,
+
+  // Control (0xF0-0xFF)
   SUBMIT: 0xf0,
   END: 0xff,
 };
@@ -53,11 +82,20 @@ export class CommandDispatcher {
     // Resource tables
     this.buffers = new Map();
     this.textures = new Map();
+    this.textureViews = new Map();
     this.samplers = new Map();
     this.shaders = new Map();
     this.pipelines = new Map();
     this.bindGroups = new Map();
     this.bindGroupLayouts = new Map();
+    this.pipelineLayouts = new Map();
+    this.querySets = new Map();
+    this.renderBundles = new Map();
+    this.imageBitmaps = new Map();  // ImageBitmap ID → ImageBitmap (or Promise)
+    this.wasmModules = new Map();   // Embedded WASM modules
+    this.typedArrays = new Map();   // TypedArrays for data manipulation
+    this.bindGroupDescriptors = new Map();  // For recreating bind groups after texture resize
+    this.textureDescriptors = new Map();  // For recreating textures with correct format/usage
 
     // Render state
     this.encoder = null;
@@ -83,18 +121,32 @@ export class CommandDispatcher {
   /**
    * Execute command buffer from WASM memory.
    * @param {number} ptr - Pointer to command buffer in WASM memory
+   * @returns {Promise<void>} Resolves when all commands (including async) complete
    */
-  execute(ptr) {
-    const view = new DataView(this.memory.buffer);
+  async execute(ptr) {
+    // Create fresh DataView - may need to recreate after async ops if memory grows
+    let view = new DataView(this.memory.buffer);
     const totalLen = view.getUint32(ptr, true);
     const cmdCount = view.getUint16(ptr + 4, true);
+
+    console.log(`[GPU] Execute: ${cmdCount} commands, ${totalLen} bytes`);
 
     let pos = ptr + 8; // Skip header
     const end = ptr + totalLen;
 
     for (let i = 0; i < cmdCount && pos < end; i++) {
       const cmd = view.getUint8(pos++);
-      pos = this._dispatch(cmd, view, pos);
+      console.log(`[GPU] Cmd ${i}: 0x${cmd.toString(16)}`);
+      const result = this._dispatch(cmd, view, pos);
+
+      // Handle async commands (returns Promise with new position)
+      if (result instanceof Promise) {
+        pos = await result;
+        // Recreate DataView after async - WASM memory may have grown/detached
+        view = new DataView(this.memory.buffer);
+      } else {
+        pos = result;
+      }
     }
   }
 
@@ -157,6 +209,47 @@ export class CommandDispatcher {
         return pos + 10;
       }
 
+      case CMD.CREATE_TEXTURE_VIEW: {
+        const id = view.getUint16(pos, true);
+        const textureId = view.getUint16(pos + 2, true);
+        const descPtr = view.getUint32(pos + 4, true);
+        const descLen = view.getUint32(pos + 8, true);
+        this._createTextureView(id, textureId, descPtr, descLen);
+        return pos + 12;
+      }
+
+      case CMD.CREATE_QUERY_SET: {
+        const id = view.getUint16(pos, true);
+        const descPtr = view.getUint32(pos + 2, true);
+        const descLen = view.getUint32(pos + 6, true);
+        this._createQuerySet(id, descPtr, descLen);
+        return pos + 10;
+      }
+
+      case CMD.CREATE_BIND_GROUP_LAYOUT: {
+        const id = view.getUint16(pos, true);
+        const descPtr = view.getUint32(pos + 2, true);
+        const descLen = view.getUint32(pos + 6, true);
+        this._createBindGroupLayout(id, descPtr, descLen);
+        return pos + 10;
+      }
+
+      case CMD.CREATE_PIPELINE_LAYOUT: {
+        const id = view.getUint16(pos, true);
+        const descPtr = view.getUint32(pos + 2, true);
+        const descLen = view.getUint32(pos + 6, true);
+        this._createPipelineLayout(id, descPtr, descLen);
+        return pos + 10;
+      }
+
+      case CMD.CREATE_RENDER_BUNDLE: {
+        const id = view.getUint16(pos, true);
+        const descPtr = view.getUint32(pos + 2, true);
+        const descLen = view.getUint32(pos + 6, true);
+        this._createRenderBundle(id, descPtr, descLen);
+        return pos + 10;
+      }
+
       case CMD.BEGIN_RENDER_PASS: {
         const colorId = view.getUint16(pos, true);
         const loadOp = view.getUint8(pos + 2);
@@ -199,11 +292,24 @@ export class CommandDispatcher {
         return pos + 3;
       }
 
+      case CMD.EXECUTE_BUNDLES: {
+        const count = view.getUint8(pos);
+        const bundles = [];
+        for (let i = 0; i < count; i++) {
+          const bundleId = view.getUint16(pos + 1 + i * 2, true);
+          const bundle = this.renderBundles.get(bundleId);
+          if (bundle) bundles.push(bundle);
+        }
+        this.pass?.executeBundles(bundles);
+        return pos + 1 + count * 2;
+      }
+
       case CMD.DRAW: {
         const vtx = view.getUint32(pos, true);
         const inst = view.getUint32(pos + 4, true);
         const firstVtx = view.getUint32(pos + 8, true);
         const firstInst = view.getUint32(pos + 12, true);
+        console.log(`[GPU] draw(vtx=${vtx}, inst=${inst}, firstVtx=${firstVtx}, firstInst=${firstInst})`);
         this.pass?.draw(vtx, inst, firstVtx, firstInst);
         return pos + 16;
       }
@@ -222,6 +328,7 @@ export class CommandDispatcher {
         const x = view.getUint32(pos, true);
         const y = view.getUint32(pos + 4, true);
         const z = view.getUint32(pos + 8, true);
+        console.log(`[GPU] dispatch(${x}, ${y}, ${z})`);
         this.pass?.dispatchWorkgroups(x, y, z);
         return pos + 12;
       }
@@ -246,6 +353,126 @@ export class CommandDispatcher {
         const offset = view.getUint32(pos + 2, true);
         const size = view.getUint16(pos + 6, true);
         this._writeTimeUniform(id, offset, size);
+        return pos + 8;
+      }
+
+      case CMD.CREATE_IMAGE_BITMAP: {
+        const id = view.getUint16(pos, true);
+        const dataPtr = view.getUint32(pos + 2, true);
+        const dataLen = view.getUint32(pos + 6, true);
+        this._createImageBitmap(id, dataPtr, dataLen);
+        return pos + 10;
+      }
+
+      case CMD.COPY_EXTERNAL_IMAGE_TO_TEXTURE: {
+        const bitmapId = view.getUint16(pos, true);
+        const textureId = view.getUint16(pos + 2, true);
+        const mipLevel = view.getUint8(pos + 4);
+        const originX = view.getUint16(pos + 5, true);
+        const originY = view.getUint16(pos + 7, true);
+        const nextPos = pos + 9;
+        // Return Promise that resolves to next position after async op completes
+        return this._copyExternalImageToTexture(
+          bitmapId,
+          textureId,
+          mipLevel,
+          originX,
+          originY
+        ).then(() => nextPos);
+      }
+
+      case CMD.COPY_BUFFER_TO_BUFFER: {
+        const srcId = view.getUint16(pos, true);
+        const srcOffset = view.getUint32(pos + 2, true);
+        const dstId = view.getUint16(pos + 6, true);
+        const dstOffset = view.getUint32(pos + 8, true);
+        const size = view.getUint32(pos + 12, true);
+        this._copyBufferToBuffer(srcId, srcOffset, dstId, dstOffset, size);
+        return pos + 16;
+      }
+
+      case CMD.COPY_TEXTURE_TO_TEXTURE: {
+        const srcId = view.getUint16(pos, true);
+        const dstId = view.getUint16(pos + 2, true);
+        const width = view.getUint16(pos + 4, true);
+        const height = view.getUint16(pos + 6, true);
+        this._copyTextureToTexture(srcId, dstId, width, height);
+        return pos + 8;
+      }
+
+      case CMD.WRITE_BUFFER_FROM_WASM: {
+        const bufferId = view.getUint16(pos, true);
+        const bufferOffset = view.getUint32(pos + 2, true);
+        const wasmPtr = view.getUint32(pos + 6, true);
+        const size = view.getUint32(pos + 10, true);
+        this._writeBufferFromWasm(bufferId, bufferOffset, wasmPtr, size);
+        return pos + 14;
+      }
+
+      case CMD.INIT_WASM_MODULE: {
+        const moduleId = view.getUint16(pos, true);
+        const dataPtr = view.getUint32(pos + 2, true);
+        const dataLen = view.getUint32(pos + 6, true);
+        this._initWasmModule(moduleId, dataPtr, dataLen);
+        return pos + 10;
+      }
+
+      case CMD.CALL_WASM_FUNC: {
+        const callId = view.getUint16(pos, true);
+        const moduleId = view.getUint16(pos + 2, true);
+        const namePtr = view.getUint32(pos + 4, true);
+        const nameLen = view.getUint32(pos + 8, true);
+        const argsPtr = view.getUint32(pos + 12, true);
+        const argsLen = view.getUint32(pos + 16, true);
+        this._callWasmFunc(callId, moduleId, namePtr, nameLen, argsPtr, argsLen);
+        return pos + 20;
+      }
+
+      case CMD.CREATE_TYPED_ARRAY: {
+        const id = view.getUint16(pos, true);
+        const arrayType = view.getUint8(pos + 2);
+        const size = view.getUint32(pos + 3, true);
+        this._createTypedArray(id, arrayType, size);
+        return pos + 7;
+      }
+
+      case CMD.FILL_RANDOM: {
+        const bufferId = view.getUint16(pos, true);
+        const offset = view.getUint32(pos + 2, true);
+        const size = view.getUint32(pos + 6, true);
+        const valueType = view.getUint8(pos + 10);
+        const min = view.getUint16(pos + 11, true);
+        const max = view.getUint16(pos + 13, true);
+        this._fillRandom(bufferId, offset, size, valueType, min, max);
+        return pos + 15;
+      }
+
+      case CMD.FILL_EXPRESSION: {
+        const arrayId = view.getUint16(pos, true);
+        const offset = view.getUint32(pos + 2, true);
+        const count = view.getUint32(pos + 6, true);
+        const stride = view.getUint8(pos + 10);
+        const exprPtr = view.getUint32(pos + 11, true);
+        const exprLen = view.getUint16(pos + 15, true);
+        this._fillExpression(arrayId, offset, count, stride, exprPtr, exprLen);
+        return pos + 17;
+      }
+
+      case CMD.FILL_CONSTANT: {
+        const arrayId = view.getUint16(pos, true);
+        const offset = view.getUint32(pos + 2, true);
+        const count = view.getUint32(pos + 6, true);
+        const stride = view.getUint8(pos + 10);
+        const valuePtr = view.getUint32(pos + 11, true);
+        this._fillConstant(arrayId, offset, count, stride, valuePtr);
+        return pos + 15;
+      }
+
+      case CMD.WRITE_BUFFER_FROM_ARRAY: {
+        const bufferId = view.getUint16(pos, true);
+        const bufferOffset = view.getUint32(pos + 2, true);
+        const arrayId = view.getUint16(pos + 6, true);
+        this._writeBufferFromArray(bufferId, bufferOffset, arrayId);
         return pos + 8;
       }
 
@@ -338,15 +565,20 @@ export class CommandDispatcher {
       return;
     }
     const desc = JSON.parse(json);
+    // Determine layout: "auto", explicit pipeline layout, or default to "auto"
+    let layout = "auto";
+    if (desc.layout && desc.layout !== "auto") {
+      layout = this.pipelineLayouts.get(desc.layout) ?? "auto";
+    }
     const pipeline = this.device.createComputePipeline({
-      layout: desc.layout === "auto" ? "auto" : undefined,
+      layout,
       compute: {
         module: this.shaders.get(desc.compute?.shader ?? 0),
         entryPoint: desc.compute?.entryPoint ?? "main",
       },
     });
     this.pipelines.set(id, pipeline);
-    if (desc.layout === "auto") {
+    if (layout === "auto") {
       this.bindGroupLayouts.set(id, pipeline.getBindGroupLayout(0));
     }
   }
@@ -355,6 +587,10 @@ export class CommandDispatcher {
     if (this.bindGroups.has(id)) return;
     const bytes = new Uint8Array(this.memory.buffer, entriesPtr, entriesLen);
     const desc = this._decodeBindGroupDescriptor(bytes);
+
+    // Store descriptor for later recreation if textures are resized
+    desc.layoutId = layoutId;
+    this.bindGroupDescriptors.set(id, desc);
 
     // Get layout from pipeline (layoutId is pipeline ID in this context)
     const pipeline = this.pipelines.get(layoutId);
@@ -436,6 +672,8 @@ export class CommandDispatcher {
     if (this.textures.has(id)) return;
     const bytes = new Uint8Array(this.memory.buffer, descPtr, descLen);
     const desc = this._decodeTextureDescriptor(bytes);
+    // Store descriptor for potential recreation with correct format/usage
+    this.textureDescriptors.set(id, { format: desc.format, usage: desc.usage });
     this.textures.set(id, this.device.createTexture(desc));
   }
 
@@ -467,7 +705,8 @@ export class CommandDispatcher {
 
     const FIELD_WIDTH = 0x01, FIELD_HEIGHT = 0x02, FIELD_SAMPLE_COUNT = 0x05;
     const FIELD_FORMAT = 0x07, FIELD_USAGE = 0x08;
-    const VALUE_U32 = 0x00, VALUE_ENUM = 0x07;
+    const FIELD_SIZE_FROM_IMAGE_BITMAP = 0x0a;
+    const VALUE_U32 = 0x00, VALUE_U16 = 0x06, VALUE_ENUM = 0x07;
 
     for (let i = 0; i < fieldCount; i++) {
       const fieldId = bytes[offset++];
@@ -479,6 +718,15 @@ export class CommandDispatcher {
         if (fieldId === FIELD_WIDTH) desc.size[0] = value;
         else if (fieldId === FIELD_HEIGHT) desc.size[1] = value;
         else if (fieldId === FIELD_SAMPLE_COUNT) desc.sampleCount = value;
+      } else if (valueType === VALUE_U16) {
+        const value = view.getUint16(offset, true);
+        offset += 2;
+        if (fieldId === FIELD_SIZE_FROM_IMAGE_BITMAP) {
+          // Size will be determined from ImageBitmap when copyExternalImageToTexture runs
+          // Use placeholder size (1x1) - will be resized when bitmap is decoded
+          desc.size = [1, 1];
+          desc.imageBitmapId = value;
+        }
       } else if (valueType === VALUE_ENUM) {
         const value = bytes[offset++];
         if (fieldId === FIELD_FORMAT) desc.format = this._decodeTextureFormat(value);
@@ -618,16 +866,348 @@ export class CommandDispatcher {
     return new TextDecoder().decode(bytes);
   }
 
+  /**
+   * Create ImageBitmap from blob data.
+   * Format: [mime_len:u8][mime:bytes][data:bytes]
+   */
+  _createImageBitmap(id, dataPtr, dataLen) {
+    if (this.imageBitmaps.has(id)) return;
+
+    const bytes = new Uint8Array(this.memory.buffer, dataPtr, dataLen);
+
+    // Parse blob format: [mime_len:u8][mime:bytes][data:bytes]
+    const mimeLen = bytes[0];
+    const mimeBytes = bytes.slice(1, 1 + mimeLen);
+    const mimeType = new TextDecoder().decode(mimeBytes);
+    const imageData = bytes.slice(1 + mimeLen);
+
+    // Create Blob and decode to ImageBitmap (async)
+    const blob = new Blob([imageData], { type: mimeType });
+    const bitmapPromise = globalThis.createImageBitmap(blob);
+
+    // Store the promise - will be awaited when copying to texture
+    this.imageBitmaps.set(id, bitmapPromise);
+  }
+
+  /**
+   * Copy ImageBitmap to texture.
+   * Handles async bitmap resolution and texture resizing.
+   */
+  async _copyExternalImageToTexture(bitmapId, textureId, mipLevel, originX, originY) {
+    // Get the ImageBitmap (may need to await promise)
+    let bitmap = this.imageBitmaps.get(bitmapId);
+    if (!bitmap) {
+      console.error(`[GPU] ImageBitmap ${bitmapId} not found`);
+      return;
+    }
+
+    // If it's a promise, await it
+    if (bitmap instanceof Promise) {
+      bitmap = await bitmap;
+      this.imageBitmaps.set(bitmapId, bitmap);
+    }
+
+    let texture = this.textures.get(textureId);
+    if (!texture) {
+      console.error(`[GPU] Texture ${textureId} not found`);
+      return;
+    }
+
+    // Check if texture needs to be recreated with correct dimensions
+    if (texture.width !== bitmap.width || texture.height !== bitmap.height) {
+      // Destroy old texture
+      texture.destroy();
+
+      // Get original format/usage from stored descriptor
+      const texDesc = this.textureDescriptors.get(textureId) || {
+        format: "rgba8unorm",
+        usage:
+          GPUTextureUsage.TEXTURE_BINDING |
+          GPUTextureUsage.COPY_DST |
+          GPUTextureUsage.RENDER_ATTACHMENT,
+      };
+
+      // Create new texture with correct dimensions and original format/usage
+      texture = this.device.createTexture({
+        size: [bitmap.width, bitmap.height],
+        format: texDesc.format,
+        usage: texDesc.usage,
+      });
+      this.textures.set(textureId, texture);
+
+      // Recreate any bind groups that reference this texture
+      this._recreateBindGroupsForTexture(textureId);
+    }
+
+    // Copy ImageBitmap to texture
+    this.device.queue.copyExternalImageToTexture(
+      { source: bitmap },
+      { texture, mipLevel, origin: { x: originX, y: originY } },
+      { width: bitmap.width, height: bitmap.height }
+    );
+  }
+
+  /**
+   * Recreate bind groups that reference a resized texture.
+   */
+  _recreateBindGroupsForTexture(textureId) {
+    for (const [bindGroupId, desc] of this.bindGroupDescriptors.entries()) {
+      // Check if any entry references this texture
+      const referencesTexture = desc.entries.some(
+        (e) => e.resourceType === 1 && e.resourceId === textureId
+      );
+      if (referencesTexture) {
+        // Delete old bind group and recreate
+        this.bindGroups.delete(bindGroupId);
+        this._recreateBindGroup(bindGroupId, desc);
+      }
+    }
+  }
+
+  /**
+   * Recreate a bind group from stored descriptor.
+   */
+  _recreateBindGroup(id, desc) {
+    const pipeline = this.pipelines.get(desc.layoutId);
+    if (!pipeline) return;
+
+    const gpuEntries = desc.entries.map((e) => {
+      const entry = { binding: e.binding };
+      if (e.resourceType === 0) {
+        const bufRes = { buffer: this.buffers.get(e.resourceId) };
+        if (e.offset) bufRes.offset = e.offset;
+        if (e.size) bufRes.size = e.size;
+        entry.resource = bufRes;
+      } else if (e.resourceType === 1) {
+        entry.resource = this.textures.get(e.resourceId)?.createView();
+      } else if (e.resourceType === 2) {
+        entry.resource = this.samplers.get(e.resourceId);
+      }
+      return entry;
+    });
+
+    this.bindGroups.set(
+      id,
+      this.device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(desc.groupIndex),
+        entries: gpuEntries,
+      })
+    );
+  }
+
+  // New resource creation methods
+  _createTextureView(id, textureId, descPtr, descLen) {
+    if (this.textureViews.has(id)) return;
+    const texture = this.textures.get(textureId);
+    if (!texture) return;
+    // TODO: decode descriptor for view options
+    this.textureViews.set(id, texture.createView());
+  }
+
+  _createQuerySet(id, descPtr, descLen) {
+    if (this.querySets.has(id)) return;
+    // TODO: decode descriptor
+    // const bytes = new Uint8Array(this.memory.buffer, descPtr, descLen);
+    // this.querySets.set(id, this.device.createQuerySet({...}));
+  }
+
+  _createBindGroupLayout(id, descPtr, descLen) {
+    if (this.bindGroupLayouts.has(id)) return;
+    // TODO: decode descriptor
+    // const bytes = new Uint8Array(this.memory.buffer, descPtr, descLen);
+    // this.bindGroupLayouts.set(id, this.device.createBindGroupLayout({...}));
+  }
+
+  _createPipelineLayout(id, descPtr, descLen) {
+    if (this.pipelineLayouts.has(id)) return;
+    // TODO: decode descriptor
+    // const bytes = new Uint8Array(this.memory.buffer, descPtr, descLen);
+    // this.pipelineLayouts.set(id, this.device.createPipelineLayout({...}));
+  }
+
+  _createRenderBundle(id, descPtr, descLen) {
+    if (this.renderBundles.has(id)) return;
+    // TODO: decode descriptor and record bundle
+    // const bytes = new Uint8Array(this.memory.buffer, descPtr, descLen);
+  }
+
+  // Copy operations
+  _copyBufferToBuffer(srcId, srcOffset, dstId, dstOffset, size) {
+    const src = this.buffers.get(srcId);
+    const dst = this.buffers.get(dstId);
+    if (!src || !dst) return;
+
+    const encoder = this.encoder || this.device.createCommandEncoder();
+    encoder.copyBufferToBuffer(src, srcOffset, dst, dstOffset, size);
+    if (!this.encoder) {
+      this.device.queue.submit([encoder.finish()]);
+    }
+  }
+
+  _copyTextureToTexture(srcId, dstId, width, height) {
+    const src = this.textures.get(srcId);
+    const dst = this.textures.get(dstId);
+    if (!src || !dst) return;
+
+    const encoder = this.encoder || this.device.createCommandEncoder();
+    encoder.copyTextureToTexture(
+      { texture: src },
+      { texture: dst },
+      { width, height }
+    );
+    if (!this.encoder) {
+      this.device.queue.submit([encoder.finish()]);
+    }
+  }
+
+  _writeBufferFromWasm(bufferId, bufferOffset, wasmPtr, size) {
+    const buffer = this.buffers.get(bufferId);
+    if (!buffer) return;
+    const data = new Uint8Array(this.memory.buffer, wasmPtr, size);
+    this.device.queue.writeBuffer(buffer, bufferOffset, data);
+  }
+
+  // WASM module operations
+  _initWasmModule(moduleId, dataPtr, dataLen) {
+    // TODO: Implement embedded WASM module initialization
+    // const wasmBytes = new Uint8Array(this.memory.buffer, dataPtr, dataLen);
+    // WebAssembly.instantiate(wasmBytes, imports).then(instance => {
+    //   this.wasmModules.set(moduleId, instance);
+    // });
+  }
+
+  _callWasmFunc(callId, moduleId, namePtr, nameLen, argsPtr, argsLen) {
+    // TODO: Implement WASM function call
+    // const module = this.wasmModules.get(moduleId);
+    // const funcName = this._readString(namePtr, nameLen);
+    // const args = this._decodeArgs(argsPtr, argsLen);
+    // module.exports[funcName](...args);
+  }
+
+  // Utility operations
+  _createTypedArray(id, arrayType, size) {
+    if (this.typedArrays.has(id)) return;
+    const ArrayTypes = [
+      Int8Array, Uint8Array, Int16Array, Uint16Array,
+      Int32Array, Uint32Array, Float32Array, Float64Array
+    ];
+    const ArrayType = ArrayTypes[arrayType] || Float32Array;
+    const array = new ArrayType(size);
+    console.log(`[GPU] createTypedArray(id=${id}, type=${arrayType}/${ArrayType.name}, size=${size}, byteLength=${array.byteLength})`);
+    this.typedArrays.set(id, array);
+  }
+
+  _fillRandom(bufferId, offset, size, valueType, min, max) {
+    const buffer = this.buffers.get(bufferId);
+    if (!buffer) return;
+
+    // Create random data based on value type
+    let data;
+    const range = max - min;
+    if (valueType === 6) { // float32
+      data = new Float32Array(size / 4);
+      for (let i = 0; i < data.length; i++) {
+        data[i] = min + Math.random() * range;
+      }
+    } else { // integers
+      data = new Uint8Array(size);
+      for (let i = 0; i < data.length; i++) {
+        data[i] = min + Math.floor(Math.random() * range);
+      }
+    }
+    this.device.queue.writeBuffer(buffer, offset, data);
+  }
+
+  _fillExpression(arrayId, offset, count, stride, exprPtr, exprLen) {
+    const entry = this.typedArrays.get(arrayId);
+    if (!entry) {
+      console.error(`[GPU] fillExpression: array ${arrayId} not found`);
+      return;
+    }
+
+    // Read expression string from WASM memory
+    const expr = this._readString(exprPtr, exprLen);
+    console.log(`[GPU] fillExpression(array=${arrayId}, offset=${offset}, count=${count}, stride=${stride}, expr="${expr}")`);
+    if (!expr) return;
+
+    try {
+      // Transform expression into JS function body
+      const jsExpr = expr
+        .replace(/NUM_PARTICLES/g, String(count))
+        .replace(/PI/g, 'Math.PI')
+        .replace(/random\(\)/g, 'Math.random()')
+        .replace(/sin\(/g, 'Math.sin(')
+        .replace(/cos\(/g, 'Math.cos(')
+        .replace(/sqrt\(/g, 'Math.sqrt(')
+        .replace(/ceil\(/g, 'Math.ceil(')
+        .replace(/floor\(/g, 'Math.floor(')
+        .replace(/abs\(/g, 'Math.abs(');
+
+      // Compile the expression into a function
+      const fn = new Function('ELEMENT_ID', `return ${jsExpr};`);
+
+      // Execute for each element
+      for (let i = 0; i < count; i++) {
+        const idx = i * stride + offset;
+        entry[idx] = fn(i);
+      }
+    } catch (e) {
+      console.error(`[GPU] Error evaluating expression "${expr}":`, e);
+    }
+  }
+
+  _fillConstant(arrayId, offset, count, stride, valuePtr) {
+    const entry = this.typedArrays.get(arrayId);
+    if (!entry) return;
+
+    // Read f32 value from WASM memory
+    const valueView = new Float32Array(this.memory.buffer, valuePtr, 1);
+    const value = valueView[0];
+
+    for (let i = 0; i < count; i++) {
+      const idx = i * stride + offset;
+      entry[idx] = value;
+    }
+  }
+
+  _writeBufferFromArray(bufferId, bufferOffset, arrayId) {
+    const array = this.typedArrays.get(arrayId);
+    const buffer = this.buffers.get(bufferId);
+
+    if (!array || !buffer) {
+      console.error(`[GPU] writeBufferFromArray: missing array ${arrayId} or buffer ${bufferId}`);
+      return;
+    }
+
+    console.log(`[GPU] writeBufferFromArray(buffer=${bufferId}, offset=${bufferOffset}, array=${arrayId}, type=${array.constructor.name}, byteLen=${array.byteLength})`);
+    // Debug: show first few values
+    const view = array instanceof Float32Array ? array : new Float32Array(array.buffer, array.byteOffset, Math.min(8, array.byteLength / 4));
+    console.log(`[GPU]   first values: [${Array.from(view.slice(0, 8)).join(', ')}]`);
+    this.device.queue.writeBuffer(buffer, bufferOffset, array);
+  }
+
   // Clean up resources
   destroy() {
     for (const buf of this.buffers.values()) buf.destroy?.();
     for (const tex of this.textures.values()) tex.destroy?.();
+    for (const bitmap of this.imageBitmaps.values()) {
+      if (bitmap instanceof ImageBitmap) bitmap.close?.();
+    }
     this.buffers.clear();
     this.textures.clear();
+    this.textureViews.clear();
     this.samplers.clear();
     this.shaders.clear();
     this.pipelines.clear();
     this.bindGroups.clear();
     this.bindGroupLayouts.clear();
+    this.pipelineLayouts.clear();
+    this.querySets.clear();
+    this.renderBundles.clear();
+    this.imageBitmaps.clear();
+    this.wasmModules.clear();
+    this.typedArrays.clear();
+    this.bindGroupDescriptors.clear();
+    this.textureDescriptors.clear();
   }
 }

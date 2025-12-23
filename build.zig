@@ -162,6 +162,12 @@ pub fn build(b: *std.Build) void {
     });
     web_step.dependOn(&install_wasm.step);
 
+    // Also copy WASM to npm package directory
+    const install_npm_wasm = b.addInstallArtifact(wasm, .{
+        .dest_dir = .{ .override = .{ .custom = "../npm/pngine/wasm" } },
+    });
+    web_step.dependOn(&install_npm_wasm.step);
+
     // Copy JS files to web output
     const web_files = [_][]const u8{
         "web/index.html",

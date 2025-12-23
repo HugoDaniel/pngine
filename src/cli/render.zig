@@ -40,6 +40,8 @@ pub const Options = struct {
     render_frame: bool,
     /// true to embed WASM runtime in PNG (pNGr chunk) - creates self-contained executable
     embed_runtime: bool,
+    /// Optional scene/frame name to render (null = render all frames)
+    scene_name: ?[]const u8,
 };
 
 /// Execute the render command.
@@ -58,6 +60,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         .embed_explicit = false,
         .render_frame = false, // 1x1 transparent pixel by default
         .embed_runtime = true, // Embed WASM runtime by default for self-contained PNG
+        .scene_name = null, // Render all frames by default
     };
 
     const parse_result = parseArgs(args, &opts);
@@ -76,7 +79,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     defer if (opts.output_path == null) allocator.free(output);
 
     // Execute render pipeline
-    return executePipeline(allocator, opts.input_path, output, opts.width, opts.height, opts.time, opts.embed_bytecode, opts.render_frame, opts.embed_runtime);
+    return executePipeline(allocator, opts.input_path, output, opts.width, opts.height, opts.time, opts.embed_bytecode, opts.render_frame, opts.embed_runtime, opts.scene_name);
 }
 
 /// Parse render command arguments.
@@ -132,6 +135,13 @@ fn parseArgs(args: []const []const u8, opts: *Options) u8 {
             opts.embed_explicit = true;
         } else if (std.mem.eql(u8, arg, "--no-runtime")) {
             opts.embed_runtime = false;
+        } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--scene")) {
+            if (i + 1 >= args_len) {
+                std.debug.print("Error: -n requires a scene/frame name\n", .{});
+                return 1;
+            }
+            opts.scene_name = args[i + 1];
+            skip_count = 1;
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             printUsage();
             return 255;
@@ -203,6 +213,7 @@ fn executePipeline(
     embed_bytecode: bool,
     render_frame: bool,
     embed_runtime: bool,
+    scene_name: ?[]const u8,
 ) !u8 {
     // Pre-conditions
     std.debug.assert(input.len > 0);
@@ -220,7 +231,7 @@ fn executePipeline(
     }
 
     // Generate PNG (either rendered frame or 1x1 transparent pixel)
-    const png_result = generatePng(allocator, bytecode, width, height, time, render_frame);
+    const png_result = generatePng(allocator, bytecode, width, height, time, render_frame, scene_name);
     if (png_result.exit_code != 0) return png_result.exit_code;
 
     var png_data = png_result.png_data;
@@ -292,9 +303,10 @@ fn generatePng(
     height: u32,
     time: f32,
     render_frame: bool,
+    scene_name: ?[]const u8,
 ) PngResult {
     if (render_frame) {
-        return renderWithGpu(allocator, bytecode, width, height, time);
+        return renderWithGpu(allocator, bytecode, width, height, time, scene_name);
     }
     // 1x1 transparent pixel - minimal PNG container for bytecode
     const png_data = createTransparentPixel(allocator) catch |err| {
@@ -402,7 +414,7 @@ fn printSuccessMessage(
 }
 
 /// Render bytecode using GPU and return PNG data.
-fn renderWithGpu(allocator: std.mem.Allocator, bytecode: []const u8, width: u32, height: u32, time: f32) PngResult {
+fn renderWithGpu(allocator: std.mem.Allocator, bytecode: []const u8, width: u32, height: u32, time: f32, scene_name: ?[]const u8) PngResult {
     const NativeGPU = pngine.gpu_backends.NativeGPU;
 
     // Pre-conditions
@@ -425,10 +437,21 @@ fn renderWithGpu(allocator: std.mem.Allocator, bytecode: []const u8, width: u32,
     gpu.setTime(time);
 
     var dispatcher = pngine.Dispatcher(NativeGPU).init(allocator, &gpu, &module);
-    dispatcher.executeAll(allocator) catch |err| {
-        std.debug.print("Error: execution failed: {}\n", .{err});
-        return .{ .png_data = undefined, .exit_code = 5 };
-    };
+    defer dispatcher.deinit();
+
+    if (scene_name) |name| {
+        // Execute specific scene/frame by name
+        const exec_result = executeFrameByName(&dispatcher, &module, name, allocator);
+        if (exec_result != 0) {
+            return .{ .png_data = undefined, .exit_code = exec_result };
+        }
+    } else {
+        // Execute all frames
+        dispatcher.executeAll(allocator) catch |err| {
+            std.debug.print("Error: execution failed: {}\n", .{err});
+            return .{ .png_data = undefined, .exit_code = 5 };
+        };
+    }
 
     const pixels = gpu.readPixels(allocator) catch |err| {
         std.debug.print("Error: failed to read pixels: {}\n", .{err});
@@ -444,6 +467,105 @@ fn renderWithGpu(allocator: std.mem.Allocator, bytecode: []const u8, width: u32,
     // Post-condition
     std.debug.assert(png_data.len > 0);
     return .{ .png_data = png_data, .exit_code = 0 };
+}
+
+/// Execute a specific frame by name.
+/// Returns 0 on success, error code on failure.
+fn executeFrameByName(dispatcher: anytype, module: *const format.Module, name: []const u8, allocator: std.mem.Allocator) u8 {
+    const opcodes = pngine.opcodes;
+
+    // Find string ID for the name
+    var target_string_id: ?u16 = null;
+    for (0..module.strings.count()) |i| {
+        const str = module.strings.get(@enumFromInt(@as(u16, @intCast(i))));
+        if (std.mem.eql(u8, str, name)) {
+            target_string_id = @intCast(i);
+            break;
+        }
+    }
+
+    const string_id = target_string_id orelse {
+        std.debug.print("Error: scene '{s}' not found in module\n", .{name});
+        return 6;
+    };
+
+    // Scan bytecode to find frame with this name
+    const frame_range = scanForFrameByNameId(module.bytecode, string_id) orelse {
+        std.debug.print("Error: frame definition for '{s}' not found\n", .{name});
+        return 6;
+    };
+
+    // Scan for pass definitions before executing - exec_pass needs pass_ranges
+    dispatcher.scanPassDefinitions();
+
+    // Execute only the specified frame
+    dispatcher.pc = frame_range.start;
+    const max_iterations: usize = 10000;
+    for (0..max_iterations) |_| {
+        if (dispatcher.pc >= frame_range.end) break;
+        dispatcher.step(allocator) catch |err| {
+            std.debug.print("Error: execution failed: {}\n", .{err});
+            return 5;
+        };
+    }
+
+    _ = opcodes; // Used in scanForFrameByNameId
+    return 0;
+}
+
+const FrameRange = struct {
+    start: usize,
+    end: usize,
+};
+
+/// Scan bytecode to find frame definition by name string ID.
+fn scanForFrameByNameId(bytecode: []const u8, target_name_id: u16) ?FrameRange {
+    const opcodes = pngine.opcodes;
+    const OpCode = opcodes.OpCode;
+    var pc: usize = 0;
+    const max_scan: usize = 10000;
+
+    for (0..max_scan) |_| {
+        if (pc >= bytecode.len) break;
+
+        const op: OpCode = @enumFromInt(bytecode[pc]);
+        pc += 1;
+
+        if (op == .define_frame) {
+            const frame_id_result = opcodes.decodeVarint(bytecode[pc..]);
+            pc += frame_id_result.len;
+            const name_result = opcodes.decodeVarint(bytecode[pc..]);
+            pc += name_result.len;
+
+            // Scan for end_frame to find frame boundaries
+            const frame_start = pc;
+            for (0..max_scan) |_| {
+                if (pc >= bytecode.len) break;
+                const scan_op: OpCode = @enumFromInt(bytecode[pc]);
+                if (scan_op == .end_frame) {
+                    if (name_result.value == target_name_id) {
+                        // This is the frame we're looking for
+                        return .{ .start = frame_start, .end = pc + 1 }; // Include end_frame
+                    }
+                    // Skip past end_frame for the outer loop
+                    pc += 1;
+                    break;
+                }
+                pc += 1;
+                skipOpcodeParamsAt(bytecode, &pc, scan_op);
+            }
+        } else {
+            skipOpcodeParamsAt(bytecode, &pc, op);
+        }
+    }
+
+    return null;
+}
+
+/// Skip opcode parameters (mirrors dispatcher.skipOpcodeParamsAt).
+fn skipOpcodeParamsAt(bytecode: []const u8, pc: *usize, op: pngine.opcodes.OpCode) void {
+    // Delegate to dispatcher's implementation
+    pngine.Dispatcher(pngine.gpu_backends.NativeGPU).skipOpcodeParamsAt(bytecode, pc, op);
 }
 
 /// Create a 1x1 transparent PNG image.
@@ -471,6 +593,7 @@ pub fn printUsage() void {
         \\  -f, --frame               Render actual frame via GPU (default: 1x1 transparent)
         \\  -s, --size <WxH>          Output dimensions when using --frame (default: 512x512)
         \\  -t, --time <seconds>      Time value for animation (default: 0.0)
+        \\  -n, --scene <name>        Render specific scene/frame by name (default: all frames)
         \\  -e, --embed               Embed bytecode in output PNG (default: on)
         \\  --no-embed                Do not embed bytecode
         \\  --no-runtime              Do not embed WASM runtime (smaller PNG, requires external pngine.wasm)
@@ -486,6 +609,7 @@ pub fn printUsage() void {
         \\  pngine shader.pngine --frame               # Render 512x512 preview with runtime
         \\  pngine shader.pngine --frame -s 1920x1080  # Render at 1080p
         \\  pngine shader.pngine --frame -t 2.5        # Render at t=2.5 seconds
+        \\  pngine shader.pngine --frame -n sceneE     # Render specific scene
         \\  pngine shader.pngine --no-embed            # 1x1 PNG without bytecode
         \\
     , .{});
@@ -602,6 +726,7 @@ test "parseArgs: input file only" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .scene_name = null,
     };
 
     const args = [_][]const u8{"shader.pngine"};
@@ -624,6 +749,7 @@ test "parseArgs: with output path" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .scene_name = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "-o", "output.png" };
@@ -645,6 +771,7 @@ test "parseArgs: with size" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .scene_name = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "--size", "1920x1080" };
@@ -666,6 +793,7 @@ test "parseArgs: with time" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .scene_name = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "-t", "2.5" };
@@ -686,6 +814,7 @@ test "parseArgs: embed flag" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .scene_name = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "--embed" };
@@ -707,6 +836,7 @@ test "parseArgs: no-embed flag" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .scene_name = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "--no-embed" };
@@ -728,6 +858,7 @@ test "parseArgs: missing input file" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .scene_name = null,
     };
 
     const args = [_][]const u8{};
@@ -747,6 +878,7 @@ test "parseArgs: invalid size format" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .scene_name = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "-s", "invalid" };
@@ -766,6 +898,7 @@ test "parseArgs: zero size rejected" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .scene_name = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "-s", "0x512" };
@@ -785,6 +918,7 @@ test "parseArgs: help returns 255" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .scene_name = null,
     };
 
     const args = [_][]const u8{"--help"};
@@ -804,6 +938,7 @@ test "parseArgs: unknown option rejected" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .scene_name = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "--unknown" };
@@ -823,6 +958,7 @@ test "parseArgs: multiple input files rejected" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .scene_name = null,
     };
 
     const args = [_][]const u8{ "shader1.pngine", "shader2.pngine" };
@@ -842,6 +978,7 @@ test "parseArgs: frame flag" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .scene_name = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "--frame" };
@@ -862,6 +999,7 @@ test "parseArgs: frame flag short" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .scene_name = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "-f" };
@@ -882,6 +1020,7 @@ test "parseArgs: frame with size" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .scene_name = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "--frame", "-s", "1920x1080" };
@@ -904,6 +1043,7 @@ test "parseArgs: no-runtime flag" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .scene_name = null,
     };
 
     const args = [_][]const u8{ "shader.pngine", "--no-runtime" };

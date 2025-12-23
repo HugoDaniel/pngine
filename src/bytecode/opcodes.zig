@@ -357,15 +357,16 @@ pub const PassType = enum(u8) {
 };
 
 /// Element type for typed arrays.
+/// Values match JavaScript TypedArray constructor indices for direct use in JS.
 pub const ElementType = enum(u8) {
-    f32 = 0,
-    i32 = 1,
-    u32 = 2,
-    f16 = 3,
-    vec2f = 4,
-    vec3f = 5,
-    vec4f = 6,
-    mat4x4f = 7,
+    i8 = 0,   // Int8Array
+    u8 = 1,   // Uint8Array
+    i16 = 2,  // Int16Array
+    u16 = 3,  // Uint16Array
+    i32 = 4,  // Int32Array
+    u32 = 5,  // Uint32Array
+    f32 = 6,  // Float32Array
+    f64 = 7,  // Float64Array
 };
 
 /// WASM function argument types for call_wasm_func opcode.

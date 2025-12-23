@@ -156,7 +156,7 @@
 #imageBitmap cubeImage { image=d3Image }
 
 #texture cubeTexture {
-  size=[imageBitmaps.cubeImage.width imageBitmaps.cubeImage.height]
+  size=[cubeImage.width cubeImage.height]
   format=rgba8unorm
   usage=[TEXTURE_BINDING, COPY_DST, RENDER_ATTACHMENT]
 }
@@ -168,7 +168,7 @@
     destination={
       texture=cubeTexture
     }
-    copySize=[imageBitmaps.cubeImage.width imageBitmaps.cubeImage.height]
+    copySize=[cubeImage.width cubeImage.height]
   }
 }
 

@@ -1182,6 +1182,30 @@ pub const Analyzer = struct {
             const module_name = self.getTokenSlice(module_token);
             const var_name = self.getTokenSlice(var_token);
 
+            // First check if this is an imageBitmap property access (cubeImage.width)
+            if (self.symbols.image_bitmap.get(module_name)) |_| {
+                // Valid imageBitmap properties: width, height
+                if (std.mem.eql(u8, var_name, "width") or std.mem.eql(u8, var_name, "height")) {
+                    // Store as imageBitmap property access (no uniform metadata needed)
+                    // The emitter will handle this specially
+                    try self.resolved_uniforms.put(self.gpa, @intCast(i), .{
+                        .size = 0, // Not a uniform buffer
+                        .bind_group = 0,
+                        .binding = 0,
+                        .module_name = module_name,
+                        .var_name = var_name,
+                    });
+                    continue;
+                } else {
+                    try self.errors.append(self.gpa, .{
+                        .kind = .undefined_reference,
+                        .node = node_idx,
+                        .message = "invalid imageBitmap property (use .width or .height)",
+                    });
+                    continue;
+                }
+            }
+
             // Find shader module (check both shader_module and wgsl namespaces)
             const shader_node: ?Node.Index = blk: {
                 if (self.symbols.shader_module.get(module_name)) |info| break :blk info.node;

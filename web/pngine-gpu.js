@@ -42,6 +42,7 @@ export class PNGineGPU {
         this.shaders = new Map();
         this.pipelines = new Map();
         this.bindGroups = new Map();
+        this.bindGroupDescriptors = new Map();  // BindGroup ID → { layoutId, entries } for recreation
         this.bindGroupLayouts = new Map();  // BindGroupLayout ID → GPUBindGroupLayout
         this.pipelineLayouts = new Map();   // PipelineLayout ID → GPUPipelineLayout
         this.querySets = new Map();         // QuerySet ID → GPUQuerySet
@@ -953,10 +954,25 @@ export class PNGineGPU {
             this.imageBitmaps.set(bitmapId, bitmap);  // Cache resolved bitmap
         }
 
-        const texture = this.textures.get(textureId);
+        let texture = this.textures.get(textureId);
         if (!texture) {
             console.error(`[GPU] Texture ${textureId} not found`);
             return;
+        }
+
+        // Check if texture needs to be recreated with correct dimensions
+        // This handles the case where texture was created before ImageBitmap was decoded
+        if (texture.width !== bitmap.width || texture.height !== bitmap.height) {
+            console.log(`[GPU] Recreating texture ${textureId} with bitmap dimensions: ${bitmap.width}x${bitmap.height}`);
+            // Destroy old texture
+            texture.destroy();
+            // Create new texture with correct dimensions
+            texture = this.device.createTexture({
+                size: [bitmap.width, bitmap.height],
+                format: 'rgba8unorm',  // Standard format for image textures
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+            });
+            this.textures.set(textureId, texture);
         }
 
         // Copy ImageBitmap to texture
@@ -1282,9 +1298,11 @@ export class PNGineGPU {
         const FIELD_SAMPLE_COUNT = 0x05;
         const FIELD_FORMAT = 0x07;
         const FIELD_USAGE = 0x08;
+        const FIELD_SIZE_FROM_IMAGE_BITMAP = 0x0A;
 
         // Value types
         const VALUE_U32 = 0x00;
+        const VALUE_U16 = 0x06;
         const VALUE_ENUM = 0x07;
 
         for (let i = 0; i < fieldCount; i++) {
@@ -1298,6 +1316,21 @@ export class PNGineGPU {
                 if (fieldId === FIELD_WIDTH) desc.size[0] = value;
                 else if (fieldId === FIELD_HEIGHT) desc.size[1] = value;
                 else if (fieldId === FIELD_SAMPLE_COUNT) desc.sampleCount = value;
+            } else if (valueType === VALUE_U16) {
+                const value = view.getUint16(offset, true); // little endian
+                offset += 2;
+
+                if (fieldId === FIELD_SIZE_FROM_IMAGE_BITMAP) {
+                    // Look up ImageBitmap dimensions
+                    const bitmap = this.imageBitmaps.get(value);
+                    if (bitmap) {
+                        desc.size[0] = bitmap.width;
+                        desc.size[1] = bitmap.height;
+                        console.log(`[GPU] Texture size from ImageBitmap ${value}: ${bitmap.width}x${bitmap.height}`);
+                    } else {
+                        console.warn(`[GPU] ImageBitmap ${value} not found for texture size, using canvas size`);
+                    }
+                }
             } else if (valueType === VALUE_ENUM) {
                 const value = bytes[offset++];
 

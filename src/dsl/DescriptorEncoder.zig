@@ -79,6 +79,7 @@ pub const DescriptorEncoder = struct {
         format = 0x07, // TextureFormat enum
         usage = 0x08, // TextureUsage flags
         view_formats = 0x09, // Array of formats
+        size_from_image_bitmap = 0x0A, // ImageBitmap ID for runtime size resolution
     };
 
     // ========================================================================
@@ -392,6 +393,53 @@ pub const DescriptorEncoder = struct {
         var field_count: u8 = 0;
 
         // No width/height fields - runtime will use canvas size by default
+
+        try encoder.writeEnumField(allocator, @intFromEnum(TextureField.format), @intFromEnum(format));
+        field_count += 1;
+
+        try encoder.writeByte(allocator, @intFromEnum(TextureField.usage));
+        try encoder.writeByte(allocator, @intFromEnum(ValueType.enum_val));
+        try encoder.writeByte(allocator, @bitCast(usage));
+        field_count += 1;
+
+        if (sample_count > 1) {
+            try encoder.writeU32Field(allocator, @intFromEnum(TextureField.sample_count), sample_count);
+            field_count += 1;
+        }
+
+        encoder.endDescriptor(field_count_pos, field_count);
+
+        const result = try encoder.toOwnedSlice(allocator);
+
+        // Post-condition: output starts with correct type tag.
+        assert(result[0] == @intFromEnum(DescriptorType.texture));
+
+        return result;
+    }
+
+    /// Encode a texture descriptor with size from an ImageBitmap.
+    /// Runtime will use the ImageBitmap dimensions after it's decoded.
+    /// Used for textures with size=[imageBitmap.width imageBitmap.height].
+    ///
+    /// Memory: Caller owns returned slice.
+    pub fn encodeTextureImageBitmapSize(
+        allocator: Allocator,
+        image_bitmap_id: u16,
+        format: TextureFormat,
+        usage: TextureUsage,
+        sample_count: u32,
+    ) ![]u8 {
+        var encoder = Self.init();
+        errdefer encoder.deinit(allocator);
+
+        const field_count_pos = try encoder.beginDescriptor(allocator, .texture);
+        var field_count: u8 = 0;
+
+        // ImageBitmap reference for size - runtime resolves dimensions
+        try encoder.writeByte(allocator, @intFromEnum(TextureField.size_from_image_bitmap));
+        try encoder.writeByte(allocator, @intFromEnum(ValueType.u16_val));
+        try encoder.writeU16(allocator, image_bitmap_id);
+        field_count += 1;
 
         try encoder.writeEnumField(allocator, @intFromEnum(TextureField.format), @intFromEnum(format));
         field_count += 1;

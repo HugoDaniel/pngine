@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Test NPM Bundle</title>
+  <style>
+    body { margin: 0; background: #1a1a2e; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; font-family: monospace; color: #eee; }
+    canvas { border: 1px solid #333; }
+    .info { margin: 20px; text-align: center; }
+    .status { color: #0f0; }
+    .error { color: #f44; }
+  </style>
+</head>
+<body>
+  <div class="info">
+    <h2>NPM Bundle Test</h2>
+    <p>Testing: <code>npm/pngine/dist/browser.mjs</code></p>
+    <p id="status" class="status">Loading...</p>
+  </div>
+  <canvas id="canvas" width="512" height="512"></canvas>
+
+  <script type="module">
+    // Import from npm bundle
+    import { pngine, play } from '../npm/pngine/dist/browser.mjs';
+
+    const status = document.getElementById('status');
+    const canvas = document.getElementById('canvas');
+
+    async function run() {
+      try {
+        status.textContent = 'Initializing PNGine...';
+
+        // pngine() takes source (URL or data) + options with canvas
+        // Pass URL directly with canvas in options
+        const engine = await pngine('rotating_cube.png', {
+          canvas: canvas,
+          wasmUrl: '../npm/pngine/wasm/pngine.wasm',
+          debug: true
+        });
+
+        status.textContent = 'Starting animation...';
+
+        // Start animation
+        play(engine);
+
+        status.textContent = `Running! (36KB bundle, ${engine.frameCount} frames)`;
+      } catch (err) {
+        console.error(err);
+        status.textContent = `Error: ${err.message}`;
+        status.className = 'error';
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>

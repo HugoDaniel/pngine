@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Boids Test</title>
+  <style>
+    body { margin: 0; background: #1a1a2e; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; font-family: monospace; color: #eee; }
+    canvas { border: 1px solid #333; }
+    .info { margin: 20px; text-align: center; }
+    .status { color: #0f0; }
+    .error { color: #f44; }
+  </style>
+</head>
+<body>
+  <div class="info">
+    <h2>Boids Test</h2>
+    <p>Compute shader flocking simulation</p>
+    <p id="status" class="status">Loading...</p>
+  </div>
+  <canvas id="canvas" width="512" height="512"></canvas>
+
+  <script type="module">
+    import { pngine, play } from '../npm/pngine/dist/browser.mjs';
+
+    const status = document.getElementById('status');
+    const canvas = document.getElementById('canvas');
+
+    async function run() {
+      try {
+        status.textContent = 'Initializing PNGine...';
+
+        const engine = await pngine('boids.png', {
+          canvas: canvas,
+          wasmUrl: '../npm/pngine/wasm/pngine.wasm',
+          debug: true
+        });
+
+        status.textContent = 'Starting animation...';
+
+        play(engine);
+
+        status.textContent = `Running! (${engine.frameCount} frames)`;
+      } catch (err) {
+        console.error(err);
+        status.textContent = `Error: ${err.message}`;
+        status.className = 'error';
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>
