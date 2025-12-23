@@ -78,6 +78,7 @@ export class CommandDispatcher {
     this.device = device;
     this.context = context;
     this.memory = null;
+    this.debug = false;
 
     // Resource tables
     this.buffers = new Map();
@@ -105,6 +106,10 @@ export class CommandDispatcher {
     this.canvasHeight = 0;
   }
 
+  setDebug(enabled) {
+    this.debug = enabled;
+  }
+
   setMemory(memory) {
     this.memory = memory;
   }
@@ -129,14 +134,14 @@ export class CommandDispatcher {
     const totalLen = view.getUint32(ptr, true);
     const cmdCount = view.getUint16(ptr + 4, true);
 
-    console.log(`[GPU] Execute: ${cmdCount} commands, ${totalLen} bytes`);
+    if (this.debug) console.log(`[GPU] Execute: ${cmdCount} commands, ${totalLen} bytes`);
 
     let pos = ptr + 8; // Skip header
     const end = ptr + totalLen;
 
     for (let i = 0; i < cmdCount && pos < end; i++) {
       const cmd = view.getUint8(pos++);
-      console.log(`[GPU] Cmd ${i}: 0x${cmd.toString(16)}`);
+      if (this.debug) console.log(`[GPU] Cmd ${i}: 0x${cmd.toString(16)}`);
       const result = this._dispatch(cmd, view, pos);
 
       // Handle async commands (returns Promise with new position)
@@ -309,7 +314,7 @@ export class CommandDispatcher {
         const inst = view.getUint32(pos + 4, true);
         const firstVtx = view.getUint32(pos + 8, true);
         const firstInst = view.getUint32(pos + 12, true);
-        console.log(`[GPU] draw(vtx=${vtx}, inst=${inst}, firstVtx=${firstVtx}, firstInst=${firstInst})`);
+        if (this.debug) console.log(`[GPU] draw(vtx=${vtx}, inst=${inst}, firstVtx=${firstVtx}, firstInst=${firstInst})`);
         this.pass?.draw(vtx, inst, firstVtx, firstInst);
         return pos + 16;
       }
@@ -328,7 +333,7 @@ export class CommandDispatcher {
         const x = view.getUint32(pos, true);
         const y = view.getUint32(pos + 4, true);
         const z = view.getUint32(pos + 8, true);
-        console.log(`[GPU] dispatch(${x}, ${y}, ${z})`);
+        if (this.debug) console.log(`[GPU] dispatch(${x}, ${y}, ${z})`);
         this.pass?.dispatchWorkgroups(x, y, z);
         return pos + 12;
       }
@@ -1093,7 +1098,7 @@ export class CommandDispatcher {
     ];
     const ArrayType = ArrayTypes[arrayType] || Float32Array;
     const array = new ArrayType(size);
-    console.log(`[GPU] createTypedArray(id=${id}, type=${arrayType}/${ArrayType.name}, size=${size}, byteLength=${array.byteLength})`);
+    if (this.debug) console.log(`[GPU] createTypedArray(id=${id}, type=${arrayType}/${ArrayType.name}, size=${size}, byteLength=${array.byteLength})`);
     this.typedArrays.set(id, array);
   }
 
@@ -1108,7 +1113,7 @@ export class CommandDispatcher {
     // Random generation happens in Zig using xoroshiro128 PRNG
     const wasmData = new Float32Array(this.memory.buffer, dataPtr, count);
 
-    console.log(`[GPU] fillRandom(array=${arrayId}, offset=${offset}, count=${count}, stride=${stride}, dataPtr=${dataPtr})`);
+    if (this.debug) console.log(`[GPU] fillRandom(array=${arrayId}, offset=${offset}, count=${count}, stride=${stride}, dataPtr=${dataPtr})`);
 
     // Copy values to array at offset with stride
     for (let i = 0; i < count; i++) {
@@ -1128,7 +1133,7 @@ export class CommandDispatcher {
 
     // Read expression string from WASM memory
     const expr = this._readString(exprPtr, exprLen);
-    console.log(`[GPU] fillExpression(array=${arrayId}, offset=${offset}, count=${count}, stride=${stride}, expr="${expr}")`);
+    if (this.debug) console.log(`[GPU] fillExpression(array=${arrayId}, offset=${offset}, count=${count}, stride=${stride}, expr="${expr}")`);
     if (!expr) return;
 
     try {
@@ -1180,10 +1185,11 @@ export class CommandDispatcher {
       return;
     }
 
-    console.log(`[GPU] writeBufferFromArray(buffer=${bufferId}, offset=${bufferOffset}, array=${arrayId}, type=${array.constructor.name}, byteLen=${array.byteLength})`);
-    // Debug: show first few values
-    const view = array instanceof Float32Array ? array : new Float32Array(array.buffer, array.byteOffset, Math.min(8, array.byteLength / 4));
-    console.log(`[GPU]   first values: [${Array.from(view.slice(0, 8)).join(', ')}]`);
+    if (this.debug) {
+      console.log(`[GPU] writeBufferFromArray(buffer=${bufferId}, offset=${bufferOffset}, array=${arrayId}, type=${array.constructor.name}, byteLen=${array.byteLength})`);
+      const view = array instanceof Float32Array ? array : new Float32Array(array.buffer, array.byteOffset, Math.min(8, array.byteLength / 4));
+      console.log(`[GPU]   first values: [${Array.from(view.slice(0, 8)).join(', ')}]`);
+    }
     this.device.queue.writeBuffer(buffer, bufferOffset, array);
   }
 

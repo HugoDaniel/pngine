@@ -65,6 +65,7 @@ async function handleInit(data) {
 
   // Create command dispatcher
   gpu = new CommandDispatcher(device, context);
+  gpu.setDebug(data.debug);
   gpu.setCanvasSize(canvas.width, canvas.height);
 
   // Load WASM
@@ -109,9 +110,11 @@ async function handleLoad(data) {
 async function loadBytecode(bytecode) {
   // Free previous module
   if (moduleLoaded) {
+    const wasDebug = gpu.debug;
     wasm.freeModule();
     gpu.destroy();
     gpu = new CommandDispatcher(device, context);
+    gpu.setDebug(wasDebug);
     gpu.setMemory(memory);
     gpu.setCanvasSize(canvas.width, canvas.height);
     moduleLoaded = false;
@@ -200,6 +203,7 @@ function getWasmImports() {
       gpuSetPipeline: stub,
       gpuSetBindGroup: stub,
       gpuSetVertexBuffer: stub,
+      gpuSetIndexBuffer: stub,
       gpuDraw: stub,
       gpuDrawIndexed: stub,
       gpuDispatch: stub,
