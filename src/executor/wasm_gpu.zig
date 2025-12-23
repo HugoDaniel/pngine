@@ -49,6 +49,7 @@ extern "env" fn gpuBeginComputePass() void;
 extern "env" fn gpuSetPipeline(pipeline_id: u16) void;
 extern "env" fn gpuSetBindGroup(slot: u8, group_id: u16) void;
 extern "env" fn gpuSetVertexBuffer(slot: u8, buffer_id: u16) void;
+extern "env" fn gpuSetIndexBuffer(buffer_id: u16, index_format: u8) void;
 extern "env" fn gpuDraw(vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) void;
 extern "env" fn gpuDrawIndexed(index_count: u32, instance_count: u32, first_index: u32, base_vertex: u32, first_instance: u32) void;
 extern "env" fn gpuDispatch(x: u32, y: u32, z: u32) void;
@@ -380,6 +381,13 @@ pub const WasmGPU = struct {
         _ = self;
         _ = allocator;
         gpuSetVertexBuffer(slot, buffer_id);
+    }
+
+    /// Set an index buffer.
+    pub fn setIndexBuffer(self: *Self, allocator: Allocator, buffer_id: u16, index_format: u8) !void {
+        _ = self;
+        _ = allocator;
+        gpuSetIndexBuffer(buffer_id, index_format);
     }
 
     /// Draw primitives.

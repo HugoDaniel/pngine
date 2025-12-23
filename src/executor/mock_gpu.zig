@@ -123,6 +123,10 @@ pub const Call = struct {
             slot: u8,
             buffer_id: u16,
         },
+        set_index_buffer: struct {
+            buffer_id: u16,
+            index_format: u8,
+        },
         draw: struct {
             vertex_count: u32,
             instance_count: u32,
@@ -559,6 +563,18 @@ pub const MockGPU = struct {
             .params = .{ .set_vertex_buffer = .{
                 .slot = slot,
                 .buffer_id = buffer_id,
+            } },
+        });
+    }
+
+    pub fn setIndexBuffer(self: *Self, allocator: Allocator, buffer_id: u16, index_format: u8) !void {
+        assert(self.in_render_pass);
+
+        try self.calls.append(allocator, .{
+            .call_type = .set_index_buffer,
+            .params = .{ .set_index_buffer = .{
+                .buffer_id = buffer_id,
+                .index_format = index_format,
             } },
         });
     }

@@ -560,6 +560,12 @@ pub fn Dispatcher(comptime BackendType: type) type {
                     try self.backend.setVertexBuffer(allocator, slot, @intCast(buffer_id));
                 },
 
+                .set_index_buffer => {
+                    const buffer_id = try self.readVarint();
+                    const index_format = try self.readByte();
+                    try self.backend.setIndexBuffer(allocator, @intCast(buffer_id), index_format);
+                },
+
                 .draw => {
                     const vertex_count = try self.readVarint();
                     const instance_count = try self.readVarint();
@@ -826,7 +832,6 @@ pub fn Dispatcher(comptime BackendType: type) type {
                 },
 
                 .create_shader_concat,
-                .set_index_buffer,
                 .write_uniform,
                 .copy_buffer_to_buffer,
                 .copy_texture_to_texture,
@@ -1814,6 +1819,7 @@ fn fuzzScanPassDefinitions(_: void, input: []const u8) !void {
     // Create a minimal valid module wrapper - dispatcher only uses bytecode field
     const StringTable = @import("../bytecode/string_table.zig").StringTable;
     const DataSection = @import("../bytecode/data_section.zig").DataSection;
+    const UniformTable = @import("../bytecode/uniform_table.zig").UniformTable;
 
     const mock_module = Module{
         .header = .{
@@ -1823,11 +1829,13 @@ fn fuzzScanPassDefinitions(_: void, input: []const u8) !void {
             .string_table_offset = 0,
             .data_section_offset = 0,
             .wgsl_table_offset = 0,
+            .uniform_table_offset = 0,
         },
         .bytecode = input,
         .strings = StringTable.empty,
         .data = DataSection.empty,
         .wgsl = format.WgslTable.empty,
+        .uniforms = UniformTable.empty,
     };
 
     var gpu: MockGPU = .empty;
