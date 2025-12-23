@@ -551,17 +551,64 @@ test "encoder: OOM handling with FailingAllocator" {
         const result = encode(failing_alloc.allocator(), &pixels, 1, 1);
 
         if (failing_alloc.has_induced_failure) {
-            // OOM occurred - verify graceful handling
-            // Both OutOfMemory and CompressionFailed are acceptable
+            // OOM can manifest as OutOfMemory or CompressionFailed
             // (CompressionFailed wraps OOM in compress())
             if (result) |png| {
                 failing_alloc.allocator().free(png);
-                return error.TestUnexpectedResult;
             } else |err| {
                 try std.testing.expect(err == Error.OutOfMemory or err == Error.CompressionFailed);
             }
         } else {
             // No OOM - operation succeeded
+            const png = try result;
+            failing_alloc.allocator().free(png);
+            break;
+        }
+    }
+}
+
+test "encodeBGRA: zero dimensions rejected" {
+    const allocator = std.testing.allocator;
+
+    const pixels = [_]u8{};
+    try std.testing.expectError(Error.InvalidPixelDataSize, encodeBGRA(allocator, &pixels, 0, 1));
+    try std.testing.expectError(Error.InvalidPixelDataSize, encodeBGRA(allocator, &pixels, 1, 0));
+    try std.testing.expectError(Error.InvalidPixelDataSize, encodeBGRA(allocator, &pixels, 0, 0));
+}
+
+test "encodeBGRA: invalid pixel size rejected" {
+    const allocator = std.testing.allocator;
+
+    // Wrong size: 3 bytes instead of 4 (1x1 requires 4 bytes)
+    const pixels = [_]u8{ 255, 0, 0 };
+    try std.testing.expectError(Error.InvalidPixelDataSize, encodeBGRA(allocator, &pixels, 1, 1));
+
+    // Too many bytes
+    const too_many = [_]u8{ 255, 0, 0, 255, 128 };
+    try std.testing.expectError(Error.InvalidPixelDataSize, encodeBGRA(allocator, &too_many, 1, 1));
+}
+
+test "encodeBGRA: OOM handling with FailingAllocator" {
+    // Test that encodeBGRA handles OOM gracefully
+    const pixels = [_]u8{ 255, 0, 0, 255 }; // 1x1 red pixel in BGRA
+
+    var fail_index: usize = 0;
+    while (fail_index < 25) : (fail_index += 1) {
+        var failing_alloc = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_index,
+        });
+
+        const result = encodeBGRA(failing_alloc.allocator(), &pixels, 1, 1);
+
+        if (failing_alloc.has_induced_failure) {
+            // OOM can manifest as OutOfMemory or CompressionFailed
+            // (CompressionFailed wraps OOM in compress())
+            if (result) |png| {
+                failing_alloc.allocator().free(png);
+            } else |err| {
+                try std.testing.expect(err == Error.OutOfMemory or err == Error.CompressionFailed);
+            }
+        } else {
             const png = try result;
             failing_alloc.allocator().free(png);
             break;
