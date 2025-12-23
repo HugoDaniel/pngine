@@ -22,6 +22,8 @@ const Emitter = @import("../Emitter.zig").Emitter;
 const Node = @import("../Ast.zig").Node;
 const DescriptorEncoder = @import("../DescriptorEncoder.zig").DescriptorEncoder;
 const utils = @import("utils.zig");
+const uniform_table = @import("../../bytecode/uniform_table.zig");
+const reflect = @import("../../reflect.zig");
 const fs = std.fs;
 
 /// Maximum resources of each type (prevents runaway iteration).
@@ -592,7 +594,11 @@ pub fn emitBuffers(e: *Emitter) Emitter.Error!void {
                 try emitBufferInitialization(e, buffer_id, mv);
             }
 
-            _ = i; // Used in loop counter
+            // Record uniform binding for runtime reflection (only for base buffer)
+            // This allows runtime to set uniforms by field name
+            if (i == 0) {
+                try recordUniformBinding(e, size_value, buffer_id);
+            }
         }
     }
 
@@ -609,21 +615,7 @@ fn resolveBufferSize(e: *Emitter, size_node: Node.Index) u32 {
 
     const size_tag = e.ast.nodes.items(.tag)[size_node.toInt()];
 
-    // Check for reference to WGSL binding (e.g., code.inputs)
-    if (size_tag == .reference) {
-        if (utils.getReference(e, size_node)) |ref| {
-            if (std.mem.eql(u8, ref.namespace, "wgsl")) {
-                // ref.name is "shaderName.bindingName"
-                if (e.getBindingSizeFromWgsl(ref.name)) |size| {
-                    return size;
-                }
-                std.log.warn("Could not resolve WGSL binding size for '{s}'", .{ref.name});
-                return 0;
-            }
-        }
-    }
-
-    // Check for uniform_access (shader.binding) - new bare identifier syntax
+    // Check for uniform_access (shader.binding) - bare identifier syntax
     if (size_tag == .uniform_access) {
         const data = e.ast.nodes.items(.data)[size_node.toInt()];
         const module_token = data.node_and_node[0];
@@ -669,6 +661,72 @@ fn resolveBufferSize(e: *Emitter, size_node: Node.Index) u32 {
 
     // Fall back to normal numeric resolution
     return utils.resolveNumericValueOrString(e, size_node) orelse 0;
+}
+
+/// Record uniform binding for runtime reflection.
+/// If size_node is a shader.binding reference (uniform_access), extracts
+/// the binding metadata from WGSL reflection and adds it to the uniform table.
+///
+/// Pre-condition: buffer_id is a valid buffer that was just created.
+/// Post-condition: If size comes from shader binding, uniform table is updated.
+fn recordUniformBinding(e: *Emitter, size_node: Node.Index, buffer_id: u16) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(size_node.toInt() < e.ast.nodes.len);
+
+    const size_tag = e.ast.nodes.items(.tag)[size_node.toInt()];
+
+    // Only process uniform_access (shader.binding) nodes
+    if (size_tag != .uniform_access) return;
+
+    const data = e.ast.nodes.items(.data)[size_node.toInt()];
+    const module_token = data.node_and_node[0];
+    const var_token = data.node_and_node[1];
+    const module_name = utils.getTokenSlice(e, module_token);
+    const binding_name = utils.getTokenSlice(e, var_token);
+
+    // Get reflection data for the shader
+    const reflection = e.getWgslReflection(module_name) orelse {
+        std.log.warn("No WGSL reflection data for '{s}'", .{module_name});
+        return;
+    };
+
+    // Find the binding by name
+    const binding = reflection.getBindingByName(binding_name) orelse {
+        std.log.warn("No binding '{s}' found in shader '{s}'", .{ binding_name, module_name });
+        return;
+    };
+
+    // Intern the binding name in string table
+    const binding_name_id = try e.builder.internString(e.gpa, binding.name);
+
+    // Convert reflection fields to uniform table fields
+    var fields_buf: [uniform_table.MAX_FIELDS]uniform_table.UniformField = undefined;
+    var field_count: usize = 0;
+
+    for (binding.layout.fields) |field| {
+        if (field_count >= uniform_table.MAX_FIELDS) break;
+
+        // Intern field name
+        const field_name_id = try e.builder.internString(e.gpa, field.name);
+
+        fields_buf[field_count] = .{
+            .name_string_id = field_name_id.toInt(),
+            .offset = @intCast(field.offset),
+            .size = @intCast(field.size),
+            .uniform_type = uniform_table.UniformType.fromWgslType(field.type),
+        };
+        field_count += 1;
+    }
+
+    // Add binding to uniform table
+    try e.builder.addUniformBinding(
+        e.gpa,
+        buffer_id,
+        binding_name_id.toInt(),
+        @intCast(binding.group),
+        @intCast(binding.binding),
+        fields_buf[0..field_count],
+    );
 }
 
 /// Emit write_buffer for buffer initialization from mappedAtCreation.
@@ -1152,13 +1210,6 @@ fn parseBindGroupEntryWithPingPong(e: *Emitter, entry_node: Node.Index) ?BindGro
                         if (e.buffer_ids.get(result.buffer_name)) |id| {
                             result.entry.resource_id = id;
                         }
-                    } else if (buf_tag == .reference) {
-                        if (utils.getReference(e, buf_node)) |ref| {
-                            result.buffer_name = ref.name;
-                            if (e.buffer_ids.get(ref.name)) |id| {
-                                result.entry.resource_id = id;
-                            }
-                        }
                     }
 
                     // Extract pingPong offset
@@ -1238,10 +1289,6 @@ pub fn emitImageBitmaps(e: *Emitter) Emitter.Error!void {
         if (image_tag == .identifier_value) {
             const token = e.ast.nodes.items(.main_token)[image_value.toInt()];
             data_name = utils.getTokenSlice(e, token);
-        } else if (image_tag == .reference) {
-            if (utils.getReference(e, image_value)) |ref| {
-                data_name = ref.name;
-            }
         }
 
         if (data_name.len == 0) continue;
@@ -1513,8 +1560,10 @@ pub fn emitPipelineLayouts(e: *Emitter) Emitter.Error!void {
 
         for (bgl_elements) |elem_idx| {
             const elem_node: Node.Index = @enumFromInt(elem_idx);
-            const ref = utils.getReference(e, elem_node) orelse continue;
-            const bgl_id = e.bind_group_layout_ids.get(ref.name) orelse continue;
+            const elem_tag = e.ast.nodes.items(.tag)[elem_node.toInt()];
+            if (elem_tag != .identifier_value) continue;
+            const bgl_name = utils.getNodeText(e, elem_node);
+            const bgl_id = e.bind_group_layout_ids.get(bgl_name) orelse continue;
             try desc_buf.append(e.gpa, @intCast(bgl_id & 0xFF));
             try desc_buf.append(e.gpa, @intCast(bgl_id >> 8));
         }
@@ -1602,11 +1651,13 @@ pub fn emitRenderBundles(e: *Emitter) Emitter.Error!void {
             1;
         try desc_buf.append(e.gpa, sample_count);
 
-        // pipeline reference
+        // pipeline identifier
         var pipeline_id: u16 = 0;
         if (utils.findPropertyValue(e, info.node, "pipeline")) |p_node| {
-            if (utils.getReference(e, p_node)) |ref| {
-                pipeline_id = e.pipeline_ids.get(ref.name) orelse 0;
+            const p_tag = e.ast.nodes.items(.tag)[p_node.toInt()];
+            if (p_tag == .identifier_value) {
+                const pipe_name = utils.getNodeText(e, p_node);
+                pipeline_id = e.pipeline_ids.get(pipe_name) orelse 0;
             }
         }
         try desc_buf.append(e.gpa, @intCast(pipeline_id & 0xFF));
@@ -1618,8 +1669,10 @@ pub fn emitRenderBundles(e: *Emitter) Emitter.Error!void {
             try desc_buf.append(e.gpa, @intCast(@min(groups.len, 255)));
             for (groups) |grp_idx| {
                 const grp_node: Node.Index = @enumFromInt(grp_idx);
-                if (utils.getReference(e, grp_node)) |ref| {
-                    const grp_id = e.bind_group_ids.get(ref.name) orelse 0;
+                const grp_tag = e.ast.nodes.items(.tag)[grp_node.toInt()];
+                if (grp_tag == .identifier_value) {
+                    const grp_name = utils.getNodeText(e, grp_node);
+                    const grp_id = e.bind_group_ids.get(grp_name) orelse 0;
                     try desc_buf.append(e.gpa, @intCast(grp_id & 0xFF));
                     try desc_buf.append(e.gpa, @intCast(grp_id >> 8));
                 }
@@ -1634,8 +1687,10 @@ pub fn emitRenderBundles(e: *Emitter) Emitter.Error!void {
             try desc_buf.append(e.gpa, @intCast(@min(buffers.len, 255)));
             for (buffers) |buf_idx| {
                 const buf_node: Node.Index = @enumFromInt(buf_idx);
-                if (utils.getReference(e, buf_node)) |ref| {
-                    const buf_id = e.buffer_ids.get(ref.name) orelse 0;
+                const buf_tag = e.ast.nodes.items(.tag)[buf_node.toInt()];
+                if (buf_tag == .identifier_value) {
+                    const buf_name = utils.getNodeText(e, buf_node);
+                    const buf_id = e.buffer_ids.get(buf_name) orelse 0;
                     try desc_buf.append(e.gpa, @intCast(buf_id & 0xFF));
                     try desc_buf.append(e.gpa, @intCast(buf_id >> 8));
                 }
@@ -1647,8 +1702,10 @@ pub fn emitRenderBundles(e: *Emitter) Emitter.Error!void {
         // indexBuffer
         if (utils.findPropertyValue(e, info.node, "indexBuffer")) |ib_node| {
             try desc_buf.append(e.gpa, 1); // has index buffer
-            if (utils.getReference(e, ib_node)) |ref| {
-                const buf_id = e.buffer_ids.get(ref.name) orelse 0;
+            const ib_tag = e.ast.nodes.items(.tag)[ib_node.toInt()];
+            if (ib_tag == .identifier_value) {
+                const ib_name = utils.getNodeText(e, ib_node);
+                const buf_id = e.buffer_ids.get(ib_name) orelse 0;
                 try desc_buf.append(e.gpa, @intCast(buf_id & 0xFF));
                 try desc_buf.append(e.gpa, @intCast(buf_id >> 8));
             } else {

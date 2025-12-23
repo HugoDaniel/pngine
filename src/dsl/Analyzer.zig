@@ -464,22 +464,19 @@ pub const Analyzer = struct {
         // Pass 2: Validate required properties
         try self.validateRequiredProperties();
 
-        // Pass 3: Resolve references
-        try self.resolveReferences();
-
-        // Pass 4: Resolve bare identifiers (e.g., module=code → $shaderModule.code)
+        // Pass 3: Resolve bare identifiers (e.g., module=code → $shaderModule.code)
         try self.resolveBareIdentifiers();
 
-        // Pass 5: Check for cycles
+        // Pass 4: Check for cycles
         try self.detectCycles();
 
-        // Pass 6: Deduplicate shader fragments
+        // Pass 5: Deduplicate shader fragments
         try self.deduplicateShaders();
 
-        // Pass 7: Resolve uniform access nodes (code.inputs → UniformInfo)
+        // Pass 6: Resolve uniform access nodes (code.inputs → UniformInfo)
         try self.resolveUniformAccess();
 
-        // Pass 8: Validate no deprecated $ syntax in strings
+        // Pass 7: Validate no deprecated $ syntax in strings
         try self.validateNoDeprecatedDollarSyntax();
 
         // Post-condition
@@ -679,71 +676,7 @@ pub const Analyzer = struct {
     }
 
     // ========================================================================
-    // Pass 3: Resolve References
-    // ========================================================================
-
-    fn resolveReferences(self: *Self) Error!void {
-        // Pre-condition: declarations collected first
-        // (symbols tables may be populated)
-
-        // Walk all nodes looking for references
-        const tags = self.ast.nodes.items(.tag);
-
-        for (tags, 0..) |tag, i| {
-            if (tag == .reference) {
-                try self.resolveReference(@enumFromInt(i));
-            }
-        }
-
-        // Post-condition: all references checked
-        // (errors may have been added)
-    }
-
-    fn resolveReference(self: *Self, node_idx: Node.Index) Error!void {
-        // Pre-condition: node is a reference
-        std.debug.assert(self.ast.nodes.items(.tag)[node_idx.toInt()] == .reference);
-
-        const data = self.ast.nodes.items(.data)[node_idx.toInt()];
-        const node_and_node = data.node_and_node;
-
-        const namespace_token = node_and_node[0];
-        const name_token = node_and_node[1];
-
-        const namespace_str = self.getTokenSlice(namespace_token);
-
-        // For multi-part references like wgsl.shader.inputs, we need to look up
-        // the first name part ("shader"), not the last ("inputs").
-        // For 2-part refs (namespace_token+2 == name_token), use name_token directly.
-        // For 3+ part refs (namespace_token+2 < name_token), use namespace_token+2.
-        const first_name_token = if (namespace_token + 2 < name_token)
-            namespace_token + 2
-        else
-            name_token;
-        const name_str = self.getTokenSlice(first_name_token);
-
-        // Parse namespace
-        const namespace = Namespace.fromString(namespace_str) orelse {
-            try self.errors.append(self.gpa, .{
-                .kind = .invalid_reference_namespace,
-                .node = node_idx,
-                .message = "invalid namespace in reference",
-            });
-            return;
-        };
-
-        // Look up symbol
-        const table = self.symbols.getNamespace(namespace);
-        if (table.get(name_str) == null) {
-            try self.errors.append(self.gpa, .{
-                .kind = .undefined_reference,
-                .node = node_idx,
-                .message = "undefined reference",
-            });
-        }
-    }
-
-    // ========================================================================
-    // Pass 4: Resolve Bare Identifiers
+    // Pass 3: Resolve Bare Identifiers
     // ========================================================================
 
     /// Resolve bare identifiers to their namespaces based on property context.
@@ -913,7 +846,7 @@ pub const Analyzer = struct {
     }
 
     // ========================================================================
-    // Pass 5: Cycle Detection
+    // Pass 4: Cycle Detection
     // ========================================================================
 
     fn detectCycles(self: *Self) Error!void {
@@ -1062,16 +995,10 @@ pub const Analyzer = struct {
                         const elem_node: Node.Index = @enumFromInt(elem_idx);
                         const elem_tag = self.ast.nodes.items(.tag)[elem_node.toInt()];
 
-                        // Handle bare identifiers (new syntax)
+                        // Handle bare identifiers
                         if (elem_tag == .identifier_value) {
                             const elem_token = self.ast.nodes.items(.main_token)[elem_node.toInt()];
                             const dep_name = self.getTokenSlice(elem_token);
-                            try deps.append(self.gpa, dep_name);
-                        } else if (elem_tag == .reference) {
-                            // Legacy reference syntax (deprecated)
-                            const ref_data = self.ast.nodes.items(.data)[elem_node.toInt()];
-                            const name_token = ref_data.node_and_node[1];
-                            const dep_name = self.getTokenSlice(name_token);
                             try deps.append(self.gpa, dep_name);
                         } else if (elem_tag == .string_value) {
                             // String-style references like imports=["name"]
@@ -1093,7 +1020,7 @@ pub const Analyzer = struct {
     }
 
     // ========================================================================
-    // Pass 6: Shader Deduplication
+    // Pass 5: Shader Deduplication
     // ========================================================================
 
     fn deduplicateShaders(self: *Self) Error!void {
@@ -1161,7 +1088,7 @@ pub const Analyzer = struct {
     }
 
     // ========================================================================
-    // Pass 7: Uniform Access Resolution
+    // Pass 6: Uniform Access Resolution
     // ========================================================================
 
     /// Resolve uniform_access nodes (code.inputs) to UniformInfo.
@@ -1631,7 +1558,7 @@ pub const Analyzer = struct {
     }
 
     // ========================================================================
-    // Pass 8: Validate No Deprecated $ Syntax
+    // Pass 7: Validate No Deprecated $ Syntax
     // ========================================================================
 
     /// Validate that no runtime_interpolation nodes exist in the AST.

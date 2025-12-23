@@ -18,12 +18,6 @@ const Node = @import("../Ast.zig").Node;
 const opcodes = @import("../../bytecode/opcodes.zig");
 const DescriptorEncoder = @import("../DescriptorEncoder.zig").DescriptorEncoder;
 
-/// Reference to a named resource in a namespace (e.g., $buffer.name).
-pub const Reference = struct {
-    namespace: []const u8,
-    name: []const u8,
-};
-
 // ============================================================================
 // Property Lookup
 // ============================================================================
@@ -94,31 +88,8 @@ pub fn getArrayFirstElement(e: *Emitter, array_node: Node.Index) ?Node.Index {
     return @enumFromInt(elements[0]);
 }
 
-/// Get a reference from a property node's value.
-pub fn findPropertyReference(e: *Emitter, prop_node: Node.Index) ?Reference {
-    // Pre-conditions
-    std.debug.assert(prop_node.toInt() < e.ast.nodes.len);
-    std.debug.assert(e.ast.nodes.len > 0);
-
-    const prop_data = e.ast.nodes.items(.data)[prop_node.toInt()];
-    const value_node = prop_data.node;
-    const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
-
-    if (value_tag == .reference) {
-        const result = getReference(e, value_node);
-        // Post-condition: if returning a reference, both parts are non-empty
-        if (result) |ref| {
-            std.debug.assert(ref.namespace.len > 0);
-        }
-        return result;
-    }
-    return null;
-}
-
-/// Get resource name from either a reference or identifier_value node.
-/// Returns the bare identifier name for both patterns:
-/// - $namespace.name (reference) -> "name"
-/// - name (identifier_value) -> "name"
+/// Get resource name from an identifier_value node.
+/// Returns the bare identifier name.
 pub fn getResourceName(e: *Emitter, node: Node.Index) ?[]const u8 {
     // Pre-conditions
     std.debug.assert(node.toInt() < e.ast.nodes.len);
@@ -126,76 +97,11 @@ pub fn getResourceName(e: *Emitter, node: Node.Index) ?[]const u8 {
     const tag = e.ast.nodes.items(.tag)[node.toInt()];
 
     if (tag == .identifier_value) {
-        // Bare identifier: main_token has the name
         const token = e.ast.nodes.items(.main_token)[node.toInt()];
         return getTokenSlice(e, token);
-    } else if (tag == .reference) {
-        // Reference: get the name part
-        if (getReference(e, node)) |ref| {
-            return ref.name;
-        }
     }
 
     return null;
-}
-
-/// Extract Reference from a reference node.
-/// Supports multi-part names like shader.binding (name="shader.binding").
-pub fn getReference(e: *Emitter, node: Node.Index) ?Reference {
-    // Pre-conditions
-    std.debug.assert(node.toInt() < e.ast.nodes.len);
-    std.debug.assert(e.ast.tokens.len > 0);
-
-    const data = e.ast.nodes.items(.data)[node.toInt()];
-    const namespace_token = data.node_and_node[0];
-    const name_token = data.node_and_node[1];
-
-    const namespace = getTokenSlice(e, namespace_token);
-
-    // For multi-part references, extract full name from source
-    // namespace_token + 2 is the first name token (after namespace and dot)
-    const name = if (name_token > namespace_token + 2)
-        getTokenRange(e, namespace_token + 2, name_token)
-    else
-        getTokenSlice(e, name_token);
-
-    const result = Reference{
-        .namespace = namespace,
-        .name = name,
-    };
-
-    // Post-condition: namespace is never empty for valid references
-    std.debug.assert(result.namespace.len > 0);
-
-    return result;
-}
-
-/// Get source text spanning from start_token to end_token (inclusive).
-fn getTokenRange(e: *Emitter, start_token: u32, end_token: u32) []const u8 {
-    // Pre-conditions
-    std.debug.assert(start_token < e.ast.tokens.len);
-    std.debug.assert(end_token < e.ast.tokens.len);
-    std.debug.assert(start_token <= end_token);
-
-    const starts = e.ast.tokens.items(.start);
-    const start = starts[start_token];
-
-    // End is the start of the token after end_token (or source end)
-    const end: u32 = if (end_token + 1 < starts.len)
-        starts[end_token + 1]
-    else
-        @intCast(e.ast.source.len);
-
-    // Trim trailing whitespace
-    var slice = e.ast.source[start..end];
-    for (0..32) |_| {
-        if (slice.len == 0) break;
-        const last = slice[slice.len - 1];
-        if (last != ' ' and last != '\n' and last != '\t' and last != '\r') break;
-        slice = slice[0 .. slice.len - 1];
-    }
-
-    return slice;
 }
 
 // ============================================================================
@@ -865,35 +771,30 @@ pub fn parseBindGroupEntry(e: *Emitter, entry_node: Node.Index) ?DescriptorEncod
     return bg_entry;
 }
 
-/// Resolve a resource reference to its ID.
+/// Resolve a resource identifier to its ID.
 pub fn resolveResourceId(e: *Emitter, value_node: Node.Index, resource_type: []const u8) ?u16 {
     const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
 
-    if (value_tag == .reference) {
-        if (getReference(e, value_node)) |ref| {
-            if (std.mem.eql(u8, resource_type, "buffer")) {
-                return e.buffer_ids.get(ref.name);
-            } else if (std.mem.eql(u8, resource_type, "texture")) {
-                return e.texture_ids.get(ref.name);
-            } else if (std.mem.eql(u8, resource_type, "sampler")) {
-                return e.sampler_ids.get(ref.name);
-            }
+    if (value_tag == .identifier_value) {
+        const name = getNodeText(e, value_node);
+        if (std.mem.eql(u8, resource_type, "buffer")) {
+            return e.buffer_ids.get(name);
+        } else if (std.mem.eql(u8, resource_type, "texture")) {
+            return e.texture_ids.get(name);
+        } else if (std.mem.eql(u8, resource_type, "sampler")) {
+            return e.sampler_ids.get(name);
         }
     }
     return null;
 }
 
-/// Resolve a buffer reference to its ID (handles both identifier and reference).
+/// Resolve a buffer identifier to its ID.
 pub fn resolveBufferId(e: *Emitter, node: Node.Index) ?u16 {
     const tag = e.ast.nodes.items(.tag)[node.toInt()];
 
     if (tag == .identifier_value) {
         const name = getNodeText(e, node);
         return e.buffer_ids.get(name);
-    } else if (tag == .reference) {
-        if (getReference(e, node)) |ref| {
-            return e.buffer_ids.get(ref.name);
-        }
     }
     return null;
 }
@@ -920,10 +821,6 @@ pub fn resolveBindGroupLayoutId(e: *Emitter, node: Node.Index) u16 {
                 if (prop_value_tag == .identifier_value) {
                     const pipeline_name = getNodeText(e, prop_value);
                     return e.pipeline_ids.get(pipeline_name) orelse 0;
-                } else if (prop_value_tag == .reference) {
-                    if (getReference(e, prop_value)) |ref| {
-                        return e.pipeline_ids.get(ref.name) orelse 0;
-                    }
                 }
             }
         }
@@ -953,17 +850,13 @@ pub fn getBindGroupIndex(e: *Emitter, node: Node.Index) u8 {
     return 0;
 }
 
-/// Resolve a bind group reference to its ID.
+/// Resolve a bind group identifier to its ID.
 pub fn resolveBindGroupId(e: *Emitter, node: Node.Index) ?u16 {
     const tag = e.ast.nodes.items(.tag)[node.toInt()];
 
     if (tag == .identifier_value) {
         const name = getNodeText(e, node);
         return e.bind_group_ids.get(name);
-    } else if (tag == .reference) {
-        if (getReference(e, node)) |ref| {
-            return e.bind_group_ids.get(ref.name);
-        }
     }
     return null;
 }

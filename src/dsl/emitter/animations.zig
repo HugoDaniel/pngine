@@ -168,17 +168,11 @@ fn parseScene(e: *Emitter, obj_node: Node.Index) ?Emitter.AnimationMetadata.Scen
     };
 }
 
-/// Resolve frame reference to name string.
+/// Resolve frame identifier to name string.
 fn resolveFrameName(e: *Emitter, node: Node.Index) []const u8 {
     const tag = e.ast.nodes.items(.tag)[node.toInt()];
 
-    if (tag == .reference) {
-        if (utils.getReference(e, node)) |ref| {
-            if (std.mem.eql(u8, ref.namespace, "frame")) {
-                return ref.name;
-            }
-        }
-    } else if (tag == .identifier_value) {
+    if (tag == .identifier_value) {
         const token = e.ast.nodes.items(.main_token)[node.toInt()];
         return utils.getTokenSlice(e, token);
     }

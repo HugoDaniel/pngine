@@ -122,7 +122,7 @@ fn emitDataFromSource(e: *Emitter, buffer_id: u16, offset: u32, data_from_node: 
 
     // Check for wasm={...} property
     if (utils.findPropertyValueInObject(e, data_from_node, "wasm")) |wasm_ref| {
-        const wasm_call_name = resolveIdentifierOrReference(e, wasm_ref) orelse return;
+        const wasm_call_name = resolveIdentifier(e, wasm_ref) orelse return;
         try wasm.emitWasmCallForBuffer(e, wasm_call_name, buffer_id, offset);
     }
 }
@@ -263,7 +263,7 @@ fn emitCopyExternalImageToTexture(e: *Emitter, obj_node: Node.Index) Emitter.Err
     if (source_tag != .object) return;
 
     const source_prop = utils.findPropertyValueInObject(e, source_obj, "source") orelse return;
-    const bitmap_name = resolveIdentifierOrReference(e, source_prop) orelse return;
+    const bitmap_name = resolveIdentifier(e, source_prop) orelse return;
 
     // Bitmap must exist - silently skip if not (analyzer should catch this)
     const bitmap_id = e.image_bitmap_ids.get(bitmap_name) orelse return;
@@ -274,7 +274,7 @@ fn emitCopyExternalImageToTexture(e: *Emitter, obj_node: Node.Index) Emitter.Err
     if (dest_tag != .object) return;
 
     const texture_prop = utils.findPropertyValueInObject(e, dest_obj, "texture") orelse return;
-    const texture_name = resolveIdentifierOrReference(e, texture_prop) orelse return;
+    const texture_name = resolveIdentifier(e, texture_prop) orelse return;
 
     // Texture must exist - silently skip if not (analyzer should catch this)
     const texture_id = e.texture_ids.get(texture_name) orelse return;
@@ -314,9 +314,9 @@ fn emitCopyExternalImageToTexture(e: *Emitter, obj_node: Node.Index) Emitter.Err
     );
 }
 
-/// Resolve an identifier or reference node to its name string.
+/// Resolve an identifier node to its name string.
 /// Used for looking up resources by name when parsing queue operations.
-fn resolveIdentifierOrReference(e: *Emitter, node: Node.Index) ?[]const u8 {
+fn resolveIdentifier(e: *Emitter, node: Node.Index) ?[]const u8 {
     // Pre-condition: node must be valid
     std.debug.assert(node.toInt() < e.ast.nodes.len);
 
@@ -325,10 +325,6 @@ fn resolveIdentifierOrReference(e: *Emitter, node: Node.Index) ?[]const u8 {
     if (tag == .identifier_value) {
         const token = e.ast.nodes.items(.main_token)[node.toInt()];
         return utils.getTokenSlice(e, token);
-    } else if (tag == .reference) {
-        if (utils.getReference(e, node)) |ref| {
-            return ref.name;
-        }
     }
 
     return null;
@@ -406,38 +402,15 @@ fn emitActionArray(e: *Emitter, array_node: Node.Index) Emitter.Error!void {
     }
 }
 
-/// Emit a single perform action (pass or queue reference).
+/// Emit a single perform action (pass or queue identifier).
 fn emitPerformAction(e: *Emitter, elem: Node.Index) Emitter.Error!void {
     // Pre-condition
     std.debug.assert(elem.toInt() < e.ast.nodes.len);
 
     const elem_tag = e.ast.nodes.items(.tag)[elem.toInt()];
 
-    if (elem_tag == .reference) {
-        try emitReferenceAction(e, elem);
-    } else if (elem_tag == .identifier_value) {
+    if (elem_tag == .identifier_value) {
         try emitIdentifierAction(e, elem);
-    }
-}
-
-/// Emit action from a reference node ($namespace.name).
-fn emitReferenceAction(e: *Emitter, elem: Node.Index) Emitter.Error!void {
-    // Pre-condition
-    std.debug.assert(elem.toInt() < e.ast.nodes.len);
-
-    const ref = utils.getReference(e, elem) orelse return;
-
-    // Check namespace to determine action type
-    if (std.mem.eql(u8, ref.namespace, "queue")) {
-        // Queue reference - inline the write_buffer commands
-        if (e.queue_ids.get(ref.name) != null) {
-            try emitQueueAction(e, ref.name);
-        }
-    } else {
-        // Pass reference (renderPass, computePass)
-        if (e.pass_ids.get(ref.name)) |pass_id| {
-            try e.builder.getEmitter().execPass(e.gpa, pass_id);
-        }
     }
 }
 

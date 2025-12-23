@@ -852,18 +852,13 @@ fn parseStageDescriptor(e: *Emitter, prop_node: Node.Index) StageDescriptor {
         const inner_name = utils.getTokenSlice(e, inner_token);
 
         if (std.mem.eql(u8, inner_name, "module")) {
-            if (utils.findPropertyReference(e, inner_prop)) |ref| {
-                // Reference: wgsl name or shaderModule name
-                result.shader_id = e.shader_ids.get(ref.name);
-            } else {
-                // Bare identifier: module=sceneE
-                const inner_data = e.ast.nodes.items(.data)[inner_prop.toInt()];
-                const value_node = inner_data.node;
-                const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
-                if (value_tag == .identifier_value) {
-                    const module_name = utils.getNodeText(e, value_node);
-                    result.shader_id = e.shader_ids.get(module_name);
-                }
+            // Bare identifier: module=sceneE
+            const inner_data = e.ast.nodes.items(.data)[inner_prop.toInt()];
+            const value_node = inner_data.node;
+            const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
+            if (value_tag == .identifier_value) {
+                const module_name = utils.getNodeText(e, value_node);
+                result.shader_id = e.shader_ids.get(module_name);
             }
         } else if (std.mem.eql(u8, inner_name, "entryPoint") or
             std.mem.eql(u8, inner_name, "entrypoint"))

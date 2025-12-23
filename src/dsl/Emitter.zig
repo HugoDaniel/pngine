@@ -256,9 +256,6 @@ pub const Emitter = struct {
         FileReadError,
     };
 
-    /// Re-export Reference from utils for backward compatibility.
-    pub const Reference = utils.Reference;
-
     pub fn init(gpa: Allocator, ast: *const Ast, analysis: *const Analyzer.AnalysisResult, options: Options) Self {
         return .{
             .gpa = gpa,
@@ -437,11 +434,6 @@ pub const Emitter = struct {
     /// Resolve numeric value including string expressions (delegated to utils).
     pub fn resolveNumericValueOrString(self: *Self, value_node: Node.Index) ?u32 {
         return utils.resolveNumericValueOrString(self, value_node);
-    }
-
-    /// Get reference from a node (delegated to utils).
-    pub fn getReference(self: *Self, node: Node.Index) ?Reference {
-        return utils.getReference(self, node);
     }
 
     /// Parse buffer usage flags (delegated to utils).

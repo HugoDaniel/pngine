@@ -124,7 +124,6 @@ pub fn getDepthTextureId(e: *Emitter, node: Node.Index) u16 {
     // Look for view property in the depth attachment object
     const view_value = utils.findPropertyValueInObject(e, depth_attachment, "view") orelse return 0xFFFF;
 
-    // view can be an identifier (depthTexture) or a reference ($texture.depthTexture)
     const view_tag = e.ast.nodes.items(.tag)[view_value.toInt()];
 
     if (view_tag == .identifier_value) {
@@ -132,12 +131,6 @@ pub fn getDepthTextureId(e: *Emitter, node: Node.Index) u16 {
         const texture_name = utils.getTokenSlice(e, token);
         if (e.texture_ids.get(texture_name)) |id| {
             return id;
-        }
-    } else if (view_tag == .reference) {
-        if (utils.getReference(e, view_value)) |ref| {
-            if (e.texture_ids.get(ref.name)) |id| {
-                return id;
-            }
         }
     }
 
@@ -185,12 +178,6 @@ pub fn getColorTextureId(e: *Emitter, node: Node.Index) u16 {
         // Look up the texture ID
         if (e.texture_ids.get(texture_name)) |id| {
             return id;
-        }
-    } else if (view_tag == .reference) {
-        if (utils.getReference(e, view_value)) |ref| {
-            if (e.texture_ids.get(ref.name)) |id| {
-                return id;
-            }
         }
     }
 
@@ -289,27 +276,19 @@ fn parsePoolOffsets(e: *Emitter, offsets_node: Node.Index, out: *[MAX_ARRAY_ELEM
     }
 }
 
-/// Emit set_pipeline command.
-/// Handles both reference ($renderPipeline.x) and identifier (pipelineName) syntax.
+/// Emit set_pipeline command with pipeline identifier.
 fn emitPipelineCommand(e: *Emitter, prop_node: Node.Index) Emitter.Error!void {
     // Pre-condition
     std.debug.assert(prop_node.toInt() < e.ast.nodes.len);
 
-    if (utils.findPropertyReference(e, prop_node)) |ref| {
-        if (e.pipeline_ids.get(ref.name)) |pipeline_id| {
-            try e.builder.getEmitter().setPipeline(e.gpa, pipeline_id);
-        }
-    } else {
-        // Fallback: identifier value (e.g., pipeline=myPipeline)
-        const prop_data = e.ast.nodes.items(.data)[prop_node.toInt()];
-        const value_node = prop_data.node;
-        const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
+    const prop_data = e.ast.nodes.items(.data)[prop_node.toInt()];
+    const value_node = prop_data.node;
+    const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
 
-        if (value_tag == .identifier_value) {
-            const name = utils.getNodeText(e, value_node);
-            if (e.pipeline_ids.get(name)) |pipeline_id| {
-                try e.builder.getEmitter().setPipeline(e.gpa, pipeline_id);
-            }
+    if (value_tag == .identifier_value) {
+        const name = utils.getNodeText(e, value_node);
+        if (e.pipeline_ids.get(name)) |pipeline_id| {
+            try e.builder.getEmitter().setPipeline(e.gpa, pipeline_id);
         }
     }
 }
@@ -542,19 +521,14 @@ fn emitBindGroupCommands(e: *Emitter, prop_node: Node.Index) Emitter.Error!void 
     }
 }
 
-/// Resolve a bind group reference to its ID.
-/// Handles both bare identifiers (inputsBinding) and references ($bindGroup.name).
+/// Resolve a bind group identifier to its ID.
 pub fn resolveBindGroupId(e: *Emitter, node: Node.Index) ?u16 {
     // Pre-condition
     std.debug.assert(node.toInt() < e.ast.nodes.len);
 
     const tag = e.ast.nodes.items(.tag)[node.toInt()];
 
-    if (tag == .reference) {
-        if (utils.getReference(e, node)) |ref| {
-            return e.bind_group_ids.get(ref.name);
-        }
-    } else if (tag == .identifier_value) {
+    if (tag == .identifier_value) {
         const name = utils.getNodeText(e, node);
         return e.bind_group_ids.get(name);
     }
@@ -562,8 +536,7 @@ pub fn resolveBindGroupId(e: *Emitter, node: Node.Index) ?u16 {
     return null;
 }
 
-/// Resolve a buffer reference to its ID.
-/// Handles both bare identifiers (myBuffer) and references ($buffer.name).
+/// Resolve a buffer identifier to its ID.
 pub fn resolveBufferId(e: *Emitter, node: Node.Index) ?u16 {
     // Pre-conditions: valid node index
     std.debug.assert(node.toInt() < e.ast.nodes.len);
@@ -571,11 +544,7 @@ pub fn resolveBufferId(e: *Emitter, node: Node.Index) ?u16 {
 
     const tag = e.ast.nodes.items(.tag)[node.toInt()];
 
-    if (tag == .reference) {
-        if (utils.getReference(e, node)) |ref| {
-            return e.buffer_ids.get(ref.name);
-        }
-    } else if (tag == .identifier_value) {
+    if (tag == .identifier_value) {
         const name = utils.getNodeText(e, node);
         return e.buffer_ids.get(name);
     }
@@ -584,7 +553,7 @@ pub fn resolveBufferId(e: *Emitter, node: Node.Index) ?u16 {
 }
 
 /// Emit set_vertex_buffer commands for vertex buffer bindings.
-/// Handles arrays of references/identifiers and single values.
+/// Handles arrays of identifiers and single values.
 fn emitVertexBufferCommands(e: *Emitter, prop_node: Node.Index) Emitter.Error!void {
     // Pre-condition
     std.debug.assert(prop_node.toInt() < e.ast.nodes.len);
@@ -627,12 +596,11 @@ fn emitIndexBufferCommand(e: *Emitter, prop_node: Node.Index) Emitter.Error!void
     const value_node = prop_data.node;
     const value_tag = e.ast.nodes.items(.tag)[value_node.toInt()];
 
-    if (value_tag == .reference) {
-        if (utils.getReference(e, value_node)) |ref| {
-            if (e.buffer_ids.get(ref.name)) |buffer_id| {
-                // Format 0 = uint16, 1 = uint32 (default to uint16)
-                try e.builder.getEmitter().setIndexBuffer(e.gpa, buffer_id, 0);
-            }
+    if (value_tag == .identifier_value) {
+        const name = utils.getNodeText(e, value_node);
+        if (e.buffer_ids.get(name)) |buffer_id| {
+            // Format 0 = uint16, 1 = uint32 (default to uint16)
+            try e.builder.getEmitter().setIndexBuffer(e.gpa, buffer_id, 0);
         }
     }
 }
@@ -773,10 +741,6 @@ fn getBufferName(e: *Emitter, node: Node.Index) []const u8 {
 
     if (tag == .identifier_value) {
         return utils.getNodeText(e, node);
-    } else if (tag == .reference) {
-        if (utils.getReference(e, node)) |ref| {
-            return ref.name;
-        }
     }
     return "";
 }
@@ -787,10 +751,6 @@ fn getBindGroupName(e: *Emitter, node: Node.Index) []const u8 {
 
     if (tag == .identifier_value) {
         return utils.getNodeText(e, node);
-    } else if (tag == .reference) {
-        if (utils.getReference(e, node)) |ref| {
-            return ref.name;
-        }
     }
     return "";
 }
@@ -855,19 +815,14 @@ fn emitExecuteBundlesCommand(e: *Emitter, prop_node: Node.Index) Emitter.Error!v
     }
 }
 
-/// Resolve a render bundle reference to its ID.
-/// Handles both bare identifiers (myBundle) and references ($renderBundle.name).
+/// Resolve a render bundle identifier to its ID.
 fn resolveRenderBundleId(e: *Emitter, node: Node.Index) ?u16 {
     // Pre-condition
     std.debug.assert(node.toInt() < e.ast.nodes.len);
 
     const tag = e.ast.nodes.items(.tag)[node.toInt()];
 
-    if (tag == .reference) {
-        if (utils.getReference(e, node)) |ref| {
-            return e.render_bundle_ids.get(ref.name);
-        }
-    } else if (tag == .identifier_value) {
+    if (tag == .identifier_value) {
         const name = utils.getNodeText(e, node);
         return e.render_bundle_ids.get(name);
     }

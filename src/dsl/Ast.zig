@@ -29,8 +29,7 @@
 //! file = macro*
 //! macro = "#" macro_name identifier "{" property* "}"
 //! property = identifier "=" value
-//! value = string | number | identifier | reference | array | object | expr
-//! reference = "$" identifier ("." identifier)*
+//! value = string | number | identifier | array | object | expr
 //! array = "[" value* "]"
 //! object = "{" property* "}"
 //! expr = term (('+' | '-') term)*
@@ -175,10 +174,8 @@ pub const Node = struct {
         number_value,
         /// true, false
         boolean_value,
-        /// identifier (bareword) - may be resolved to reference later
+        /// identifier (bareword) - unique resource name
         identifier_value,
-        /// $namespace.name - data.node_and_node = [namespace_token, name_token] (legacy PBSF)
-        reference,
         /// canvas.width, time.total - built-in runtime values
         /// No $ prefix needed for these special namespaces.
         /// Layout:
