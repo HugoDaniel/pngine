@@ -154,11 +154,11 @@ pub fn build(b: *std.Build) void {
     wasm_step.dependOn(&b.addInstallArtifact(wasm, .{}).step);
 
     // Web build: WASM + JS files for browser deployment
-    const web_step = b.step("web", "Build complete web bundle (WASM + JS)");
+    const web_step = b.step("web", "Build demo bundle (WASM + JS)");
 
-    // Install WASM to web directory
+    // Install WASM to demo directory
     const install_wasm = b.addInstallArtifact(wasm, .{
-        .dest_dir = .{ .override = .{ .custom = "web" } },
+        .dest_dir = .{ .override = .{ .custom = "demo" } },
     });
     web_step.dependOn(&install_wasm.step);
 
@@ -168,24 +168,24 @@ pub fn build(b: *std.Build) void {
     });
     web_step.dependOn(&install_npm_wasm.step);
 
-    // Copy web HTML files
+    // Copy demo HTML files
     const html_files = [_][]const u8{
-        "web/index.html",
+        "demo/index.html",
     };
     for (html_files) |file| {
-        const install_file = b.addInstallFile(b.path(file), b.fmt("web/{s}", .{std.fs.path.basename(file)}));
+        const install_file = b.addInstallFile(b.path(file), b.fmt("demo/{s}", .{std.fs.path.basename(file)}));
         web_step.dependOn(&install_file.step);
     }
 
-    // Copy JS source files from npm/pngine/src/ to web output for development
+    // Copy JS source files from npm/pngine/src/ to demo output for development
     const SrcFile = struct { src: []const u8, dest: []const u8 };
     const js_files = [_]SrcFile{
-        .{ .src = "npm/pngine/src/index.js", .dest = "web/pngine.js" },
-        .{ .src = "npm/pngine/src/init.js", .dest = "web/init.js" },
-        .{ .src = "npm/pngine/src/worker.js", .dest = "web/worker.js" },
-        .{ .src = "npm/pngine/src/gpu.js", .dest = "web/gpu.js" },
-        .{ .src = "npm/pngine/src/anim.js", .dest = "web/anim.js" },
-        .{ .src = "npm/pngine/src/extract.js", .dest = "web/extract.js" },
+        .{ .src = "npm/pngine/src/index.js", .dest = "demo/pngine.js" },
+        .{ .src = "npm/pngine/src/init.js", .dest = "demo/init.js" },
+        .{ .src = "npm/pngine/src/worker.js", .dest = "demo/worker.js" },
+        .{ .src = "npm/pngine/src/gpu.js", .dest = "demo/gpu.js" },
+        .{ .src = "npm/pngine/src/anim.js", .dest = "demo/anim.js" },
+        .{ .src = "npm/pngine/src/extract.js", .dest = "demo/extract.js" },
     };
     for (js_files) |file| {
         const install_file = b.addInstallFile(b.path(file.src), file.dest);
