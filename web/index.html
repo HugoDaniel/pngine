@@ -5,12 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PNGine - WebGPU Bytecode Demo</title>
     <style>
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-
+        * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             font-family: system-ui, -apple-system, sans-serif;
             background: #1a1a2e;
@@ -18,74 +13,22 @@
             min-height: 100vh;
             display: flex;
             flex-direction: column;
+            align-items: center;
+            padding: 2rem;
         }
-
-        header {
-            padding: 1rem;
+        h1 { font-size: 1.5rem; font-weight: 500; margin-bottom: 1rem; }
+        .container { display: flex; gap: 2rem; flex-wrap: wrap; justify-content: center; }
+        .panel {
             background: #16213e;
-            border-bottom: 1px solid #0f3460;
-        }
-
-        h1 {
-            font-size: 1.5rem;
-            font-weight: 500;
-        }
-
-        main {
-            flex: 1;
-            display: flex;
-            gap: 1rem;
+            border-radius: 8px;
             padding: 1rem;
-        }
-
-        .editor-panel {
-            flex: 1;
             display: flex;
             flex-direction: column;
             gap: 0.5rem;
         }
-
-        .canvas-panel {
-            width: 512px;
-            display: flex;
-            flex-direction: column;
-            gap: 0.5rem;
-        }
-
-        label {
-            font-size: 0.875rem;
-            color: #888;
-        }
-
-        textarea {
-            flex: 1;
-            background: #0f0f23;
-            color: #ccc;
-            border: 1px solid #333;
-            border-radius: 4px;
-            padding: 1rem;
-            font-family: 'SF Mono', 'Consolas', monospace;
-            font-size: 0.875rem;
-            resize: none;
-            line-height: 1.5;
-        }
-
-        textarea:focus {
-            outline: none;
-            border-color: #0f3460;
-        }
-
-        canvas {
-            background: #000;
-            border: 1px solid #333;
-            border-radius: 4px;
-        }
-
-        .controls {
-            display: flex;
-            gap: 0.5rem;
-        }
-
+        label { font-size: 0.875rem; color: #888; }
+        canvas { background: #000; border-radius: 4px; }
+        .controls { display: flex; gap: 0.5rem; flex-wrap: wrap; }
         button {
             padding: 0.5rem 1rem;
             background: #0f3460;
@@ -95,882 +38,89 @@
             cursor: pointer;
             font-size: 0.875rem;
         }
-
-        button:hover {
-            background: #1a4a7a;
-        }
-
-        button:disabled {
-            background: #333;
-            cursor: not-allowed;
-        }
-
-        button.playing {
-            background: #e94560;
-        }
-
-        button.playing:hover {
-            background: #ff6b8a;
-        }
-
-        .time-display {
-            font-family: 'SF Mono', 'Consolas', monospace;
-            font-size: 0.75rem;
-            color: #888;
-            margin-left: auto;
-        }
-
-        .scene-selector {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            margin-top: 0.5rem;
-        }
-
-        .scene-selector label {
-            font-size: 0.75rem;
-            color: #888;
-        }
-
-        .scene-selector select {
-            padding: 0.25rem 0.5rem;
-            background: #0f0f23;
-            color: #ccc;
-            border: 1px solid #333;
-            border-radius: 4px;
-            font-size: 0.75rem;
-            min-width: 150px;
-            max-width: 300px;
-        }
-
-        .scene-selector select:focus {
-            outline: none;
-            border-color: #0f3460;
-        }
-
-        .scene-selector .nav-btn {
-            padding: 0.2rem 0.5rem;
-            background: #1a1a2e;
-            color: #ccc;
-            border: 1px solid #333;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 0.7rem;
-        }
-
-        .scene-selector .nav-btn:hover:not(:disabled) {
-            background: #0f3460;
-            border-color: #0f3460;
-        }
-
-        .scene-selector .nav-btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-
-        .time-scrubber {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            margin-top: 0.5rem;
-            padding: 0.25rem 0;
-        }
-
-        .time-scrubber input[type="range"] {
-            flex: 1;
-            height: 4px;
-            background: #333;
-            border-radius: 2px;
-            cursor: pointer;
-            -webkit-appearance: none;
-        }
-
-        .time-scrubber input[type="range"]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            width: 12px;
-            height: 12px;
-            background: #e94560;
-            border-radius: 50%;
-            cursor: pointer;
-        }
-
-        .time-scrubber input[type="range"]:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-
-        .time-scrubber #time-label {
-            font-size: 0.7rem;
-            color: #888;
-            min-width: 45px;
-            text-align: right;
-        }
-
-        .scene-info {
-            font-size: 0.7rem;
-            color: #666;
-            margin-left: 0.5rem;
-        }
-
+        button:hover { background: #1a4a7a; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        button.playing { background: #e94560; }
         .status {
+            font-size: 0.75rem;
             padding: 0.5rem;
-            font-size: 0.75rem;
-            color: #888;
+            border-radius: 4px;
             background: #0f0f23;
-            border-radius: 4px;
-            font-family: monospace;
         }
-
-        .status.error {
-            color: #e94560;
-        }
-
-        .status.success {
-            color: #4ade80;
-        }
-
-        .file-upload {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }
-
-        .file-upload input[type="file"] {
-            display: none;
-        }
-
-        .file-upload label {
-            padding: 0.5rem 1rem;
-            background: #1a4a7a;
-            color: #fff;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 0.875rem;
-        }
-
-        .file-upload label:hover {
-            background: #2a5a8a;
-        }
-
-        .file-name {
-            font-size: 0.75rem;
-            color: #888;
-            max-width: 150px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-
+        .status.success { color: #4ade80; }
+        .status.error { color: #f87171; }
         .drop-zone {
             border: 2px dashed #333;
-            border-radius: 4px;
-            padding: 1rem;
+            border-radius: 8px;
+            padding: 2rem;
             text-align: center;
-            font-size: 0.75rem;
-            color: #666;
-            transition: border-color 0.2s, background 0.2s;
-        }
-
-        .drop-zone.dragover {
-            border-color: #0f3460;
-            background: rgba(15, 52, 96, 0.2);
-        }
-
-        .tabs {
-            display: flex;
-            gap: 0;
-            margin-bottom: 0.5rem;
-        }
-
-        .tab {
-            padding: 0.5rem 1rem;
-            background: #0f0f23;
-            color: #888;
-            border: 1px solid #333;
-            border-bottom: none;
             cursor: pointer;
-            font-size: 0.875rem;
+            transition: border-color 0.2s;
         }
-
-        .tab:first-child {
-            border-radius: 4px 0 0 0;
+        .drop-zone:hover, .drop-zone.dragover { border-color: #0f3460; }
+        .drop-zone input { display: none; }
+        .time { font-family: monospace; font-size: 0.875rem; }
+        .info { font-size: 0.75rem; color: #666; margin-top: 0.5rem; }
+        .examples { margin-top: 1rem; }
+        .examples a {
+            color: #60a5fa;
+            text-decoration: none;
+            margin-right: 1rem;
         }
-
-        .tab:last-child {
-            border-radius: 0 4px 0 0;
-        }
-
-        .tab.active {
-            background: #1a1a2e;
-            color: #fff;
-            border-color: #0f3460;
-        }
-
-        .tab-content {
-            display: none;
-            flex: 1;
-            flex-direction: column;
-        }
-
-        .tab-content.active {
-            display: flex;
-        }
-
-        .pngb-panel {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            gap: 1rem;
-            padding: 1rem;
-            background: #0f0f23;
-            border: 1px solid #333;
-            border-radius: 0 4px 4px 4px;
-        }
-
-        .bytecode-info {
-            font-family: 'SF Mono', 'Consolas', monospace;
-            font-size: 0.75rem;
-            color: #888;
-            background: #1a1a2e;
-            padding: 0.5rem;
-            border-radius: 4px;
-            max-height: 200px;
-            overflow-y: auto;
-        }
-
-        .bytecode-info pre {
-            margin: 0;
-            white-space: pre-wrap;
-        }
-
-        .png-preview-container {
-            display: flex;
-            gap: 1rem;
-            flex: 1;
-            min-height: 0;
-        }
-
-        .png-preview {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            gap: 0.5rem;
-            min-width: 0;
-        }
-
-        .png-image-wrapper {
-            flex: 1;
-            background: #1a1a2e;
-            border: 1px solid #333;
-            border-radius: 4px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            overflow: hidden;
-            min-height: 200px;
-        }
-
-        .png-image-wrapper img {
-            max-width: 100%;
-            max-height: 100%;
-            object-fit: contain;
-            image-rendering: pixelated;
-        }
-
-        .png-image-wrapper .placeholder {
-            color: #666;
-            font-size: 0.875rem;
-        }
-
-        .png-info-panel {
-            width: 280px;
-            display: flex;
-            flex-direction: column;
-            gap: 0.5rem;
-        }
-
-        .png-badge {
-            display: inline-block;
-            padding: 0.25rem 0.5rem;
-            border-radius: 4px;
-            font-size: 0.75rem;
-            font-weight: 500;
-        }
-
-        .png-badge.has-bytecode {
-            background: #1a4a2e;
-            color: #4ade80;
-        }
-
-        .png-badge.no-bytecode {
-            background: #4a3a1a;
-            color: #fbbf24;
-        }
-
-        #error-banner {
-            display: none;
-            padding: 1rem;
-            background: #2d1f1f;
-            border-bottom: 1px solid #e94560;
-            color: #e94560;
-        }
+        .examples a:hover { text-decoration: underline; }
     </style>
 </head>
 <body>
-    <div id="error-banner"></div>
-    <header>
-        <h1>PNGine WebGPU Demo (Worker Mode)</h1>
-    </header>
-    <main>
-        <div class="editor-panel">
-            <div class="tabs">
-                <button class="tab active" data-tab="source">Source</button>
-                <button class="tab" data-tab="pngb">PNGB Upload</button>
-                <button class="tab" data-tab="png">PNG Image</button>
+    <h1>PNGine - WebGPU Bytecode Engine</h1>
+
+    <div class="container">
+        <div class="panel">
+            <label>Drop PNG with embedded bytecode</label>
+            <div class="drop-zone" id="drop-zone">
+                <p>Drop .png file here</p>
+                <p style="font-size: 0.75rem; color: #666; margin-top: 0.5rem;">or click to browse</p>
+                <input type="file" id="file-input" accept=".png,.pngb">
             </div>
-
-            <div id="source-tab" class="tab-content active">
-                <label for="source">PBSF Source</label>
-                <textarea id="source" spellcheck="false">; Simple Triangle Demo
-; Renders a colored triangle using WebGPU
-
-(shader 0 "
-@vertex fn vertexMain(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
-    var pos = array<vec2f, 3>(
-        vec2f( 0.0,  0.5),
-        vec2f(-0.5, -0.5),
-        vec2f( 0.5, -0.5)
-    );
-    return vec4f(pos[i], 0.0, 1.0);
-}
-
-@fragment fn fragmentMain() -> @location(0) vec4f {
-    return vec4f(1.0, 0.5, 0.2, 1.0);
-}
-")
-
-(pipeline 0 (json "{\"vertex\":{\"shader\":0,\"entryPoint\":\"vertexMain\"},\"fragment\":{\"shader\":0,\"entryPoint\":\"fragmentMain\"}}"))
-
-(frame "main"
-    (begin-render-pass :texture 0 :load clear :store store)
-    (set-pipeline 0)
-    (draw 3 1)
-    (end-pass)
-    (submit)
-)</textarea>
-                <div class="controls">
-                    <button id="run-btn" disabled>Run</button>
-                    <button id="play-btn" disabled>Play</button>
-                    <button id="clear-btn">Clear</button>
-                    <span id="time-display" class="time-display"></span>
-                </div>
-            </div>
-
-            <div id="pngb-tab" class="tab-content">
-                <div class="pngb-panel">
-                    <div id="drop-zone" class="drop-zone">
-                        Drop .pngb file here or click to browse
-                    </div>
-                    <div class="file-upload">
-                        <input type="file" id="pngb-file" accept=".pngb">
-                        <label for="pngb-file">Choose File</label>
-                        <span id="file-name" class="file-name"></span>
-                    </div>
-                    <div class="controls">
-                        <button id="run-pngb-btn" disabled>Run PNGB</button>
-                        <button id="play-pngb-btn" disabled>Play</button>
-                        <button id="clear-btn-2">Clear</button>
-                        <span id="time-display-2" class="time-display"></span>
-                    </div>
-                    <div id="bytecode-info" class="bytecode-info">
-                        <pre>No file loaded</pre>
-                    </div>
-                </div>
-            </div>
-
-            <div id="png-tab" class="tab-content">
-                <div class="pngb-panel">
-                    <div id="png-drop-zone" class="drop-zone">
-                        Drop PNG image here or click to browse
-                    </div>
-                    <div class="file-upload">
-                        <input type="file" id="png-file" accept=".png,image/png">
-                        <label for="png-file">Choose PNG</label>
-                        <span id="png-file-name" class="file-name"></span>
-                    </div>
-                    <div class="png-preview-container">
-                        <div class="png-preview">
-                            <label>Preview</label>
-                            <div id="png-image-wrapper" class="png-image-wrapper">
-                                <span class="placeholder">No image loaded</span>
-                            </div>
-                        </div>
-                        <div class="png-info-panel">
-                            <label>Image Info</label>
-                            <div id="png-info" class="bytecode-info">
-                                <pre>No image loaded</pre>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="controls">
-                        <button id="run-png-btn" disabled>Run Embedded</button>
-                        <button id="play-png-btn" disabled>Play</button>
-                        <button id="clear-btn-3">Clear</button>
-                        <span id="time-display-3" class="time-display"></span>
-                    </div>
-                    <div class="scene-selector">
-                        <label for="scene-select">Scene:</label>
-                        <button id="prev-scene-btn" class="nav-btn" disabled title="Previous scene">&#9664;</button>
-                        <select id="scene-select" disabled>
-                            <option value="__all__">All (Animation)</option>
-                        </select>
-                        <button id="next-scene-btn" class="nav-btn" disabled title="Next scene">&#9654;</button>
-                        <span id="scene-info" class="scene-info"></span>
-                    </div>
-                    <div class="time-scrubber">
-                        <input type="range" id="time-slider" min="0" max="100" value="0" step="0.1" disabled>
-                        <span id="time-label">0.0s</span>
-                    </div>
-                </div>
+            <div id="file-info" class="info"></div>
+            <div class="examples">
+                <span style="color: #666; font-size: 0.75rem;">Examples: </span>
+                <a href="#" data-url="../examples/simple_triangle.png">Triangle</a>
+                <a href="#" data-url="../examples/rotating_cube.png">Cube</a>
+                <a href="#" data-url="boids.png">Boids</a>
             </div>
         </div>
-        <div class="canvas-panel">
+
+        <div class="panel">
             <label>Output (512x512)</label>
             <canvas id="canvas" width="512" height="512"></canvas>
-            <div id="status" class="status">Initializing WebGPU Worker...</div>
+            <div class="controls">
+                <button id="play-btn" disabled>Play</button>
+                <button id="stop-btn" disabled>Stop</button>
+                <span class="time" id="time">t = 0.00s</span>
+            </div>
+            <div id="status" class="status">Initializing...</div>
         </div>
-    </main>
+    </div>
 
     <script type="module">
-        import { initPNGine } from './pngine-loader.js';
-        import { hasPngb, getPngbInfo, extractPngb, hasPngm, extractPngm } from './pngine-png.js';
+        import { pngine, play, pause, stop, draw, destroy } from './pngine.js';
+        import { extractBytecode, isPng, isPngb } from './_extract.js';
 
-        // DOM elements
         const canvas = document.getElementById('canvas');
-        const source = document.getElementById('source');
-        const runBtn = document.getElementById('run-btn');
-        const playBtn = document.getElementById('play-btn');
-        const clearBtn = document.getElementById('clear-btn');
-        const clearBtn2 = document.getElementById('clear-btn-2');
-        const clearBtn3 = document.getElementById('clear-btn-3');
         const status = document.getElementById('status');
-        const errorBanner = document.getElementById('error-banner');
-        const timeDisplay = document.getElementById('time-display');
-
-        // PNGB upload elements
-        const tabs = document.querySelectorAll('.tab');
-        const tabContents = document.querySelectorAll('.tab-content');
+        const playBtn = document.getElementById('play-btn');
+        const stopBtn = document.getElementById('stop-btn');
+        const timeEl = document.getElementById('time');
         const dropZone = document.getElementById('drop-zone');
-        const pngbFileInput = document.getElementById('pngb-file');
-        const fileName = document.getElementById('file-name');
-        const runPngbBtn = document.getElementById('run-pngb-btn');
-        const playPngbBtn = document.getElementById('play-pngb-btn');
-        const bytecodeInfo = document.getElementById('bytecode-info');
-        const timeDisplay2 = document.getElementById('time-display-2');
+        const fileInput = document.getElementById('file-input');
+        const fileInfo = document.getElementById('file-info');
 
-        // PNG Image tab elements
-        const pngDropZone = document.getElementById('png-drop-zone');
-        const pngFileInput = document.getElementById('png-file');
-        const pngFileName = document.getElementById('png-file-name');
-        const pngImageWrapper = document.getElementById('png-image-wrapper');
-        const pngInfo = document.getElementById('png-info');
-        const runPngBtn = document.getElementById('run-png-btn');
-        const playPngBtn = document.getElementById('play-png-btn');
-        const timeDisplay3 = document.getElementById('time-display-3');
+        let engine = null;
 
-        // Scene selector elements
-        const sceneSelect = document.getElementById('scene-select');
-        const sceneInfo = document.getElementById('scene-info');
-        const prevSceneBtn = document.getElementById('prev-scene-btn');
-        const nextSceneBtn = document.getElementById('next-scene-btn');
-        const timeSlider = document.getElementById('time-slider');
-        const timeLabel = document.getElementById('time-label');
-
-        let pngine = null;
-        let loadedBytecode = null;
-        let loadedPngBytecode = null;
-        let loadedMetadata = null;  // Animation metadata from pNGm chunk
-        let detectedFrames = [];    // Frame names detected from bytecode
-
-        // Animation state (now managed by PNGine)
-        let isPlaying = false;
-        let animationStartTime = 0;
-        let currentTabType = 'source';
-        let selectedScene = '__all__';
-
-        // ====================================================================
-        // Scene detection and selection
-        // ====================================================================
-
-        /**
-         * Parse frame names from PNGB bytecode string table.
-         */
-        function parseFrameNames(bytecode) {
-            const frames = [];
-
-            if (bytecode.length < 16) return frames;
-            const magic = String.fromCharCode(bytecode[0], bytecode[1], bytecode[2], bytecode[3]);
-            if (magic !== 'PNGB') return frames;
-
-            const view = new DataView(bytecode.buffer, bytecode.byteOffset, bytecode.byteLength);
-            const stringTableOffset = view.getUint32(8, true);
-            const dataSectionOffset = view.getUint32(12, true);
-
-            // Parse string table
-            const strings = [];
-            let pos = stringTableOffset;
-            if (pos + 2 <= bytecode.length) {
-                const count = view.getUint16(pos, true);
-                pos += 2;
-
-                const offsets = [];
-                for (let i = 0; i < count && pos + 2 <= bytecode.length; i++) {
-                    offsets.push(view.getUint16(pos, true));
-                    pos += 2;
-                }
-
-                const lengths = [];
-                for (let i = 0; i < count && pos + 2 <= bytecode.length; i++) {
-                    lengths.push(view.getUint16(pos, true));
-                    pos += 2;
-                }
-
-                const dataStart = pos;
-
-                for (let i = 0; i < count; i++) {
-                    const strStart = dataStart + offsets[i];
-                    const strLen = lengths[i];
-                    if (strStart + strLen <= bytecode.length) {
-                        const str = new TextDecoder().decode(bytecode.slice(strStart, strStart + strLen));
-                        strings.push(str);
-                    } else {
-                        strings.push('');
-                    }
-                }
-            }
-
-            // Scan bytecode for define_frame opcodes (0x30)
-            const DEFINE_FRAME = 0x30;
-            let pc = 16;
-
-            function readVarint() {
-                if (pc >= stringTableOffset) return 0;
-                const first = bytecode[pc++];
-                if ((first & 0x80) === 0) {
-                    return first;
-                } else if ((first & 0xC0) === 0x80) {
-                    if (pc >= stringTableOffset) return 0;
-                    const high = first & 0x3F;
-                    const low = bytecode[pc++];
-                    return (high << 8) | low;
-                } else {
-                    if (pc + 2 >= stringTableOffset) return 0;
-                    const b0 = first & 0x3F;
-                    const b1 = bytecode[pc++];
-                    const b2 = bytecode[pc++];
-                    const b3 = bytecode[pc++];
-                    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
-                }
-            }
-
-            const validFrameName = /^[a-zA-Z][a-zA-Z0-9_]*$/;
-            const MAX_FRAMES = 50;
-
-            while (pc < stringTableOffset - 4 && frames.length < MAX_FRAMES) {
-                const op = bytecode[pc];
-                if (op === DEFINE_FRAME) {
-                    pc++;
-                    const frameId = readVarint();
-                    const nameId = readVarint();
-
-                    if (nameId < strings.length &&
-                        frameId < 1000 &&
-                        strings[nameId] &&
-                        strings[nameId].length > 0 &&
-                        strings[nameId].length < 100 &&
-                        validFrameName.test(strings[nameId])) {
-                        const existing = frames.find(f => f.name === strings[nameId]);
-                        if (!existing) {
-                            frames.push({ id: frameId, name: strings[nameId] });
-                        }
-                    }
-                } else {
-                    pc++;
-                }
-            }
-
-            return frames;
+        function setStatus(msg, type = '') {
+            status.textContent = msg;
+            status.className = 'status' + (type ? ' ' + type : '');
         }
-
-        /**
-         * Update the scene selector dropdown.
-         */
-        function updateSceneSelector(frames, metadata) {
-            sceneSelect.innerHTML = '';
-
-            const hasMetadataScenes = metadata?.animation?.scenes?.length > 0;
-
-            const allOpt = document.createElement('option');
-            allOpt.value = '__all__';
-            if (metadata?.animation) {
-                allOpt.textContent = `All (${metadata.animation.name || 'Animation'})`;
-            } else if (frames.length > 0) {
-                allOpt.textContent = 'All Frames';
-            } else {
-                allOpt.textContent = 'All';
-            }
-            sceneSelect.appendChild(allOpt);
-
-            if (hasMetadataScenes) {
-                for (const scene of metadata.animation.scenes) {
-                    if (!scene.frame || !scene.id) continue;
-                    const opt = document.createElement('option');
-                    opt.value = scene.frame;
-                    opt.textContent = `${scene.id} (${(scene.start || 0).toFixed(1)}s - ${(scene.end || 0).toFixed(1)}s)`;
-                    sceneSelect.appendChild(opt);
-                }
-            } else {
-                for (const frame of frames) {
-                    if (!frame.name || frame.name.trim().length === 0) continue;
-                    const opt = document.createElement('option');
-                    opt.value = frame.name;
-                    opt.textContent = frame.name;
-                    sceneSelect.appendChild(opt);
-                }
-            }
-
-            const hasOptions = hasMetadataScenes || frames.length > 0;
-            sceneSelect.disabled = !hasOptions;
-            selectedScene = '__all__';
-            sceneSelect.value = '__all__';
-
-            prevSceneBtn.disabled = true;
-            nextSceneBtn.disabled = !hasOptions || sceneSelect.options.length <= 1;
-
-            if (metadata?.animation) {
-                const duration = metadata.animation.duration || 30;
-                timeSlider.max = duration;
-                timeSlider.value = 0;
-                timeSlider.disabled = false;
-                timeLabel.textContent = '0.0s';
-                sceneInfo.textContent = `Duration: ${duration.toFixed(1)}s`;
-            } else if (frames.length > 0) {
-                timeSlider.max = 30;
-                timeSlider.value = 0;
-                timeSlider.disabled = true;
-                timeLabel.textContent = '0.0s';
-                sceneInfo.textContent = `${frames.length} frame(s)`;
-            } else {
-                timeSlider.disabled = true;
-                timeLabel.textContent = '';
-                sceneInfo.textContent = '';
-            }
-        }
-
-        // ====================================================================
-        // Tab switching
-        // ====================================================================
-
-        tabs.forEach(tab => {
-            tab.addEventListener('click', () => {
-                const tabId = tab.dataset.tab;
-
-                tabs.forEach(t => t.classList.remove('active'));
-                tab.classList.add('active');
-
-                tabContents.forEach(content => {
-                    content.classList.toggle('active', content.id === `${tabId}-tab`);
-                });
-            });
-        });
-
-        // ====================================================================
-        // Status and error handling
-        // ====================================================================
-
-        function setStatus(message, type = '') {
-            status.textContent = message;
-            status.className = 'status ' + type;
-        }
-
-        function showError(message) {
-            errorBanner.textContent = message;
-            errorBanner.style.display = 'block';
-        }
-
-        function hideError() {
-            errorBanner.style.display = 'none';
-        }
-
-        // ====================================================================
-        // Initialization
-        // ====================================================================
-
-        async function init() {
-            try {
-                // Check OffscreenCanvas support first
-                if (!canvas.transferControlToOffscreen) {
-                    throw new Error('OffscreenCanvas not supported - please use a modern browser (Chrome 69+, Firefox 105+, Safari 16.4+)');
-                }
-
-                setStatus('Loading WASM and initializing Worker...');
-                pngine = await initPNGine(canvas, 'pngine.wasm');
-                setStatus('Ready (Worker mode)', 'success');
-                runBtn.disabled = false;
-                playBtn.disabled = false;
-            } catch (err) {
-                setStatus('Initialization failed', 'error');
-                showError(err.message);
-                console.error('Init error:', err);
-            }
-        }
-
-        // ====================================================================
-        // Source compilation and execution
-        // ====================================================================
-
-        async function run() {
-            if (!pngine) return;
-            hideError();
-
-            try {
-                setStatus('Compiling...');
-                const start = performance.now();
-
-                await pngine.run(source.value);
-
-                const elapsed = (performance.now() - start).toFixed(2);
-                setStatus(`Done in ${elapsed}ms`, 'success');
-            } catch (err) {
-                setStatus('Error: ' + err.message, 'error');
-                console.error('Run error:', err);
-            }
-        }
-
-        async function clear() {
-            if (!pngine) return;
-            stopAnimation();
-            hideError();
-            await pngine.freeModule();
-            setStatus('Cleared', '');
-
-            loadedMetadata = null;
-            detectedFrames = [];
-            updateSceneSelector([], null);
-        }
-
-        // ====================================================================
-        // Animation loop (Play feature) - uses PNGine's built-in animation
-        // ====================================================================
-
-        async function startAnimation(tabType = 'source') {
-            if (isPlaying) return;
-
-            hideError();
-            currentTabType = tabType;
-
-            // First compile/load if needed
-            try {
-                if (tabType === 'source') {
-                    setStatus('Compiling...');
-                    await pngine.run(source.value);
-                } else if (tabType === 'pngb' && loadedBytecode) {
-                    setStatus('Loading PNGB...');
-                    await pngine.loadModule(loadedBytecode);
-                    await pngine.executeAll();
-                } else if (tabType === 'png' && loadedPngBytecode) {
-                    setStatus('Loading PNG bytecode...');
-                    await pngine.loadModule(loadedPngBytecode);
-                    await pngine.executeAll();
-                } else {
-                    setStatus('No bytecode loaded', 'error');
-                    return;
-                }
-            } catch (err) {
-                setStatus('Error: ' + err.message, 'error');
-                console.error('Compile/load error:', err);
-                return;
-            }
-
-            isPlaying = true;
-            animationStartTime = performance.now();
-
-            // Update button states
-            if (tabType === 'source') {
-                playBtn.textContent = 'Stop';
-                playBtn.classList.add('playing');
-            } else if (tabType === 'pngb') {
-                playPngbBtn.textContent = 'Stop';
-                playPngbBtn.classList.add('playing');
-            } else if (tabType === 'png') {
-                playPngBtn.textContent = 'Stop';
-                playPngBtn.classList.add('playing');
-            }
-
-            setStatus('Playing...', 'success');
-
-            // Set the frame to render (for PNG tab, use selected scene)
-            if (tabType === 'png') {
-                const frameName = selectedScene === '__all__' ? null : selectedScene;
-                pngine.setFrame(frameName);
-            } else {
-                pngine.setFrame(null);  // Render all frames for source/pngb
-            }
-
-            // Set up time update callback for slider and display
-            pngine.onTimeUpdate = (time) => {
-                let display;
-                if (currentTabType === 'source') display = timeDisplay;
-                else if (currentTabType === 'pngb') display = timeDisplay2;
-                else display = timeDisplay3;
-                display.textContent = `t = ${time.toFixed(2)}s`;
-
-                // Update slider if in PNG tab
-                if (currentTabType === 'png' && !timeSlider.disabled) {
-                    const maxTime = parseFloat(timeSlider.max);
-                    if (time <= maxTime) {
-                        timeSlider.value = time;
-                    }
-                }
-            };
-
-            // Start PNGine's built-in animation
-            pngine.startAnimation();
-        }
-
-        function stopAnimation() {
-            if (!isPlaying) return;
-
-            isPlaying = false;
-
-            // Stop PNGine's animation and clear callback
-            if (pngine) {
-                pngine.stopAnimation();
-                pngine.onTimeUpdate = null;
-            }
-
-            // Reset all button states
-            playBtn.textContent = 'Play';
-            playBtn.classList.remove('playing');
-            playPngbBtn.textContent = 'Play';
-            playPngbBtn.classList.remove('playing');
-            playPngBtn.textContent = 'Play';
-            playPngBtn.classList.remove('playing');
-
-            setStatus('Stopped', '');
-        }
-
-        function togglePlay(tabType = 'source') {
-            if (isPlaying) {
-                stopAnimation();
-            } else {
-                startAnimation(tabType);
-            }
-        }
-
-        // ====================================================================
-        // PNGB file handling
-        // ====================================================================
 
         function formatBytes(bytes) {
             if (bytes < 1024) return bytes + ' B';
@@ -978,417 +128,137 @@
             return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
         }
 
-        function parsePngbHeader(data) {
-            if (data.length < 16) {
-                return { error: 'File too small (< 16 bytes)' };
-            }
-
-            const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-            const magic = String.fromCharCode(data[0], data[1], data[2], data[3]);
-
-            if (magic !== 'PNGB') {
-                return { error: `Invalid magic: "${magic}" (expected "PNGB")` };
-            }
-
-            const version = view.getUint16(4, true);
-            const flags = view.getUint16(6, true);
-            const stringTableOffset = view.getUint32(8, true);
-            const dataSectionOffset = view.getUint32(12, true);
-
-            const bytecodeSize = stringTableOffset - 16;
-            const stringTableSize = dataSectionOffset - stringTableOffset;
-            const dataSectionSize = data.length - dataSectionOffset;
-
-            return {
-                magic,
-                version,
-                flags,
-                stringTableOffset,
-                dataSectionOffset,
-                bytecodeSize,
-                stringTableSize,
-                dataSectionSize,
-                totalSize: data.length,
-            };
-        }
-
-        function displayBytecodeInfo(data, filename) {
-            const info = parsePngbHeader(data);
-
-            if (info.error) {
-                bytecodeInfo.innerHTML = `<pre style="color: #e94560;">Error: ${info.error}</pre>`;
-                loadedBytecode = null;
-                runPngbBtn.disabled = true;
-                return;
-            }
-
-            bytecodeInfo.innerHTML = `<pre>File: ${filename}
-Size: ${formatBytes(info.totalSize)}
-
-Header:
-  Magic: ${info.magic}
-  Version: ${info.version}
-  Flags: 0x${info.flags.toString(16).padStart(4, '0')}
-
-Sections:
-  Bytecode:     ${formatBytes(info.bytecodeSize)} (offset 16)
-  String Table: ${formatBytes(info.stringTableSize)} (offset ${info.stringTableOffset})
-  Data Section: ${formatBytes(info.dataSectionSize)} (offset ${info.dataSectionOffset})</pre>`;
-
-            loadedBytecode = data;
-            runPngbBtn.disabled = !pngine;
-            playPngbBtn.disabled = !pngine;
-        }
-
-        async function handleFile(file) {
-            if (!file) return;
-
-            fileName.textContent = file.name;
-
+        // Initialize
+        async function init() {
             try {
-                const buffer = await file.arrayBuffer();
-                const data = new Uint8Array(buffer);
-                displayBytecodeInfo(data, file.name);
-            } catch (err) {
-                bytecodeInfo.innerHTML = `<pre style="color: #e94560;">Error reading file: ${err.message}</pre>`;
-                loadedBytecode = null;
-                runPngbBtn.disabled = true;
-            }
-        }
-
-        async function runPngb() {
-            if (!pngine || !loadedBytecode) return;
-            hideError();
-
-            try {
-                setStatus('Loading PNGB...');
-                const start = performance.now();
-
-                await pngine.loadModule(loadedBytecode);
-                await pngine.executeAll();
-
-                const elapsed = (performance.now() - start).toFixed(2);
-                setStatus(`Executed in ${elapsed}ms`, 'success');
+                if (!canvas.transferControlToOffscreen) {
+                    throw new Error('OffscreenCanvas not supported');
+                }
+                setStatus('Ready - drop a PNG file to start', 'success');
             } catch (err) {
                 setStatus('Error: ' + err.message, 'error');
-                console.error('PNGB execution error:', err);
             }
         }
 
-        // ====================================================================
-        // PNG Image handling
-        // ====================================================================
-
-        async function handlePngFile(file) {
-            if (!file) return;
-
-            pngFileName.textContent = file.name;
-
+        // Load file
+        async function loadFile(file) {
             try {
-                const buffer = await file.arrayBuffer();
-                const data = new Uint8Array(buffer);
+                setStatus('Loading...');
 
-                // Display the image preview
-                const blob = new Blob([data], { type: 'image/png' });
-                const url = URL.createObjectURL(blob);
-                const img = document.createElement('img');
-                img.src = url;
-                img.onload = () => {
-                    pngImageWrapper.innerHTML = '';
-                    pngImageWrapper.appendChild(img);
-                };
-
-                const hasEmbedded = hasPngb(data);
-                let infoHtml = `<pre>File: ${file.name}
-Size: ${formatBytes(data.length)}
-`;
-
-                if (hasEmbedded) {
-                    try {
-                        const info = getPngbInfo(data);
-                        const bytecode = await extractPngb(data);
-                        loadedPngBytecode = bytecode;
-
-                        detectedFrames = parseFrameNames(bytecode);
-
-                        loadedMetadata = null;
-                        if (hasPngm(data)) {
-                            try {
-                                loadedMetadata = await extractPngm(data);
-                            } catch (e) {
-                                console.warn('Failed to parse pNGm:', e);
-                            }
-                        }
-
-                        updateSceneSelector(detectedFrames, loadedMetadata);
-
-                        infoHtml += `
-<span class="png-badge has-bytecode">Has Embedded Bytecode</span>
-
-pNGb Chunk:
-  Version: ${info.version}
-  Compressed: ${info.compressed ? 'Yes' : 'No'}
-  Payload: ${formatBytes(info.payloadSize)}
-
-Bytecode Header:
-  Magic: ${String.fromCharCode(...bytecode.slice(0, 4))}
-  Size: ${formatBytes(bytecode.length)}
-  Frames: ${detectedFrames.length}`;
-
-                        if (loadedMetadata?.animation) {
-                            const anim = loadedMetadata.animation;
-                            infoHtml += `
-
-Animation:
-  Name: ${anim.name}
-  Duration: ${anim.duration}s
-  Loop: ${anim.loop}
-  Scenes: ${anim.scenes?.length || 0}`;
-                        }
-
-                        infoHtml += `</pre>`;
-
-                        runPngBtn.disabled = !pngine;
-                        playPngBtn.disabled = !pngine;
-                    } catch (err) {
-                        infoHtml += `
-<span class="png-badge no-bytecode">Extraction Error</span>
-
-Error: ${err.message}</pre>`;
-                        loadedPngBytecode = null;
-                        runPngBtn.disabled = true;
-                        playPngBtn.disabled = true;
-                    }
-                } else {
-                    infoHtml += `
-<span class="png-badge no-bytecode">No Embedded Bytecode</span>
-
-This PNG does not contain a pNGb chunk.
-Use the CLI to embed bytecode:
-
-  pngine embed image.png code.pngb</pre>`;
-                    loadedPngBytecode = null;
-                    loadedMetadata = null;
-                    detectedFrames = [];
-                    updateSceneSelector([], null);
-                    runPngBtn.disabled = true;
-                    playPngBtn.disabled = true;
+                // Clean up previous engine
+                if (engine) {
+                    destroy(engine);
+                    engine = null;
+                    // Need to recreate canvas since control was transferred
+                    const parent = canvas.parentElement;
+                    const newCanvas = document.createElement('canvas');
+                    newCanvas.id = 'canvas';
+                    newCanvas.width = 512;
+                    newCanvas.height = 512;
+                    parent.replaceChild(newCanvas, canvas);
+                    window.canvas = newCanvas;
                 }
 
-                pngInfo.innerHTML = infoHtml;
+                const data = new Uint8Array(await file.arrayBuffer());
+                fileInfo.textContent = `${file.name} (${formatBytes(data.length)})`;
 
-            } catch (err) {
-                pngInfo.innerHTML = `<pre style="color: #e94560;">Error reading file: ${err.message}</pre>`;
-                pngImageWrapper.innerHTML = '<span class="placeholder">Error loading image</span>';
-                loadedPngBytecode = null;
-                loadedMetadata = null;
-                detectedFrames = [];
-                updateSceneSelector([], null);
-                runPngBtn.disabled = true;
-                playPngBtn.disabled = true;
-            }
-        }
+                // Create new engine
+                const currentCanvas = document.getElementById('canvas');
+                engine = await pngine(data, {
+                    canvas: currentCanvas,
+                    debug: true,
+                    onError: (err) => setStatus('Error: ' + err.message, 'error'),
+                });
 
-        async function runPngBytecode() {
-            if (!pngine || !loadedPngBytecode) return;
-            hideError();
+                setStatus(`Loaded: ${engine.width}x${engine.height}, ${engine.frameCount} frames`, 'success');
+                playBtn.disabled = false;
+                stopBtn.disabled = false;
 
-            try {
-                setStatus('Loading embedded bytecode...');
-                const start = performance.now();
+                // Draw first frame
+                draw(engine, { time: 0 });
 
-                await pngine.loadModule(loadedPngBytecode);
-                await pngine.executeAll();
-
-                const elapsed = (performance.now() - start).toFixed(2);
-                const sceneLabel = selectedScene !== '__all__' ? ` (${selectedScene})` : '';
-                setStatus(`Executed in ${elapsed}ms${sceneLabel}`, 'success');
             } catch (err) {
                 setStatus('Error: ' + err.message, 'error');
-                console.error('PNG bytecode execution error:', err);
+                console.error(err);
             }
         }
 
-        // ====================================================================
-        // Event listeners
-        // ====================================================================
-
-        // Source tab
-        runBtn.addEventListener('click', run);
-        playBtn.addEventListener('click', () => togglePlay('source'));
-        clearBtn.addEventListener('click', clear);
-        clearBtn2.addEventListener('click', clear);
-        clearBtn3.addEventListener('click', clear);
-
-        source.addEventListener('keydown', (e) => {
-            if (e.ctrlKey && e.key === 'Enter') {
-                e.preventDefault();
-                run();
+        // Load from URL
+        async function loadUrl(url) {
+            try {
+                setStatus('Fetching ' + url + '...');
+                const resp = await fetch(url);
+                if (!resp.ok) throw new Error('Fetch failed: ' + resp.status);
+                const blob = await resp.blob();
+                const file = new File([blob], url.split('/').pop(), { type: 'image/png' });
+                await loadFile(file);
+            } catch (err) {
+                setStatus('Error: ' + err.message, 'error');
+                console.error(err);
             }
-        });
+        }
 
-        // PNGB tab - file input
-        pngbFileInput.addEventListener('change', (e) => {
-            handleFile(e.target.files[0]);
-        });
+        // Play/pause toggle
+        function togglePlay() {
+            if (!engine) return;
 
-        runPngbBtn.addEventListener('click', runPngb);
-        playPngbBtn.addEventListener('click', () => togglePlay('pngb'));
+            if (engine.isPlaying) {
+                pause(engine);
+                playBtn.textContent = 'Play';
+                playBtn.classList.remove('playing');
+            } else {
+                play(engine);
+                playBtn.textContent = 'Pause';
+                playBtn.classList.add('playing');
+                updateTime();
+            }
+        }
 
-        // PNGB tab - drag and drop
-        dropZone.addEventListener('click', () => pngbFileInput.click());
+        // Stop
+        function handleStop() {
+            if (!engine) return;
+            stop(engine);
+            playBtn.textContent = 'Play';
+            playBtn.classList.remove('playing');
+            timeEl.textContent = 't = 0.00s';
+        }
 
-        dropZone.addEventListener('dragover', (e) => {
+        // Update time display
+        function updateTime() {
+            if (!engine || !engine.isPlaying) return;
+            timeEl.textContent = `t = ${engine.time.toFixed(2)}s`;
+            requestAnimationFrame(updateTime);
+        }
+
+        // Event listeners
+        playBtn.onclick = togglePlay;
+        stopBtn.onclick = handleStop;
+
+        // File drop handling
+        dropZone.onclick = () => fileInput.click();
+        fileInput.onchange = (e) => {
+            if (e.target.files[0]) loadFile(e.target.files[0]);
+        };
+
+        dropZone.ondragover = (e) => {
             e.preventDefault();
             dropZone.classList.add('dragover');
-        });
-
-        dropZone.addEventListener('dragleave', () => {
-            dropZone.classList.remove('dragover');
-        });
-
-        dropZone.addEventListener('drop', (e) => {
+        };
+        dropZone.ondragleave = () => dropZone.classList.remove('dragover');
+        dropZone.ondrop = (e) => {
             e.preventDefault();
             dropZone.classList.remove('dragover');
+            if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
+        };
 
-            const file = e.dataTransfer.files[0];
-            if (file && file.name.endsWith('.pngb')) {
-                handleFile(file);
-            } else if (file) {
-                bytecodeInfo.innerHTML = `<pre style="color: #e94560;">Error: Expected .pngb file, got "${file.name}"</pre>`;
-            }
+        // Example links
+        document.querySelectorAll('.examples a').forEach(a => {
+            a.onclick = (e) => {
+                e.preventDefault();
+                loadUrl(a.dataset.url);
+            };
         });
 
-        // PNG tab - file input
-        pngFileInput.addEventListener('change', (e) => {
-            handlePngFile(e.target.files[0]);
-        });
-
-        runPngBtn.addEventListener('click', runPngBytecode);
-        playPngBtn.addEventListener('click', () => togglePlay('png'));
-
-        // Scene selector change handler
-        sceneSelect.addEventListener('change', async (e) => {
-            selectedScene = e.target.value;
-            updateSceneNavigation();
-
-            const frameName = selectedScene === '__all__' ? null : selectedScene;
-
-            // Update the frame being rendered (works during playback too)
-            if (pngine) {
-                pngine.setFrame(frameName);
-            }
-
-            // If not playing, render the selected scene at t=0
-            if (pngine && loadedPngBytecode && !isPlaying) {
-                await pngine.renderFrame(0, frameName);
-                timeDisplay3.textContent = '0.00s';
-                timeSlider.value = 0;
-            }
-        });
-
-        // Prev/Next scene navigation
-        prevSceneBtn.addEventListener('click', () => {
-            const options = Array.from(sceneSelect.options);
-            const currentIdx = options.findIndex(o => o.value === selectedScene);
-            if (currentIdx > 0) {
-                sceneSelect.selectedIndex = currentIdx - 1;
-                sceneSelect.dispatchEvent(new Event('change'));
-            }
-        });
-
-        nextSceneBtn.addEventListener('click', () => {
-            const options = Array.from(sceneSelect.options);
-            const currentIdx = options.findIndex(o => o.value === selectedScene);
-            if (currentIdx < options.length - 1) {
-                sceneSelect.selectedIndex = currentIdx + 1;
-                sceneSelect.dispatchEvent(new Event('change'));
-            }
-        });
-
-        // Time slider for scrubbing within a scene
-        let currentSceneTime = 0;
-        timeSlider.addEventListener('input', async (e) => {
-            currentSceneTime = parseFloat(e.target.value);
-            timeLabel.textContent = `${currentSceneTime.toFixed(1)}s`;
-
-            if (pngine && loadedPngBytecode && selectedScene && selectedScene !== '__all__') {
-                await drawSceneAtTime(selectedScene, currentSceneTime);
-            }
-        });
-
-        // Helper: update scene navigation buttons and info
-        function updateSceneNavigation() {
-            const options = Array.from(sceneSelect.options);
-            const currentIdx = options.findIndex(o => o.value === selectedScene);
-
-            prevSceneBtn.disabled = currentIdx <= 0 || sceneSelect.disabled;
-            nextSceneBtn.disabled = currentIdx >= options.length - 1 || sceneSelect.disabled;
-
-            if (loadedMetadata?.animation?.scenes) {
-                const scene = loadedMetadata.animation.scenes.find(s => s.frame === selectedScene);
-                if (scene) {
-                    const duration = scene.end - scene.start;
-                    sceneInfo.textContent = `${scene.id}: ${duration.toFixed(1)}s`;
-                    timeSlider.max = duration;
-                    timeSlider.disabled = false;
-                } else if (selectedScene === '__all__') {
-                    sceneInfo.textContent = `Duration: ${loadedMetadata.animation.duration}s`;
-                    timeSlider.max = loadedMetadata.animation.duration;
-                    timeSlider.disabled = false;
-                }
-            } else if (detectedFrames.length > 0) {
-                const frame = detectedFrames.find(f => f.name === selectedScene);
-                if (frame) {
-                    sceneInfo.textContent = frame.name;
-                    timeSlider.max = 30;
-                    timeSlider.disabled = false;
-                } else if (selectedScene === '__all__') {
-                    sceneInfo.textContent = `${detectedFrames.length} frame(s)`;
-                    timeSlider.max = 30;
-                    timeSlider.disabled = true;
-                }
-            }
-        }
-
-        // Helper: draw a specific scene at a specific time
-        async function drawSceneAtTime(sceneName, time) {
-            if (!pngine || !loadedPngBytecode) return;
-
-            try {
-                // Render with optional frame name (null = all frames)
-                await pngine.renderFrame(time, sceneName);
-                timeDisplay3.textContent = `${time.toFixed(2)}s`;
-            } catch (err) {
-                console.error(`Failed to draw scene '${sceneName}':`, err.message);
-            }
-        }
-
-        // PNG tab - drag and drop
-        pngDropZone.addEventListener('click', () => pngFileInput.click());
-
-        pngDropZone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            pngDropZone.classList.add('dragover');
-        });
-
-        pngDropZone.addEventListener('dragleave', () => {
-            pngDropZone.classList.remove('dragover');
-        });
-
-        pngDropZone.addEventListener('drop', (e) => {
-            e.preventDefault();
-            pngDropZone.classList.remove('dragover');
-
-            const file = e.dataTransfer.files[0];
-            if (file && (file.type === 'image/png' || file.name.endsWith('.png'))) {
-                handlePngFile(file);
-            } else if (file) {
-                pngInfo.innerHTML = `<pre style="color: #e94560;">Error: Expected PNG file, got "${file.name}"</pre>`;
-            }
-        });
-
-        // Initialize
         init();
     </script>
 </body>

@@ -168,16 +168,15 @@ pub fn build(b: *std.Build) void {
     });
     web_step.dependOn(&install_npm_wasm.step);
 
-    // Copy JS files to web output
+    // Copy JS files to web output (new API)
     const web_files = [_][]const u8{
         "web/index.html",
-        "web/pngine-gpu.js",
-        "web/pngine-loader.js",
-        "web/pngine-png.js",
-        "web/pngine-protocol.js",
-        "web/pngine-viewer.js",
-        "web/pngine-worker.js",
-        "web/pngine-zip.js",
+        "web/pngine.js",
+        "web/_init.js",
+        "web/_worker.js",
+        "web/_gpu.js",
+        "web/_anim.js",
+        "web/_extract.js",
     };
 
     for (web_files) |file| {

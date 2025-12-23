@@ -7,8 +7,7 @@ import { join } from 'path';
 /**
  * PNG Extraction Tests
  *
- * Tests the PNG bytecode extraction functionality to prevent regressions
- * in async handling and data processing.
+ * Tests the PNG bytecode extraction functionality using the new _extract.js API.
  */
 
 const PROJECT_ROOT = join(import.meta.dirname, '../..');
@@ -31,12 +30,12 @@ test.describe('PNG Bytecode Extraction', () => {
         }
     });
 
-    test('extractPngb returns a Promise that resolves to Uint8Array', async ({ page }) => {
+    test('extractBytecode returns a Promise that resolves to Uint8Array', async ({ page }) => {
         await page.goto('/');
 
-        // Test in browser context that extractPngb returns correct type
+        // Test in browser context that extractBytecode returns correct type
         const result = await page.evaluate(async () => {
-            const { extractPngb } = await import('./pngine-png.js');
+            const { extractBytecode } = await import('./_extract.js');
 
             // Create a minimal valid PNG with pNGb chunk for testing
             // PNG signature + IHDR + pNGb chunk + IEND
@@ -92,9 +91,9 @@ test.describe('PNG Bytecode Extraction', () => {
             ]);
 
             try {
-                const result = extractPngb(png);
+                const result = extractBytecode(png);
 
-                // CRITICAL: Verify extractPngb returns a Promise
+                // CRITICAL: Verify extractBytecode returns a Promise
                 const isPromise = result instanceof Promise;
 
                 // Wait for the result
@@ -126,14 +125,14 @@ test.describe('PNG Bytecode Extraction', () => {
         expect(result.magic).toBe('PNGB');
     });
 
-    test('hasPngb correctly detects embedded bytecode', async ({ page }) => {
+    test('isPng and isPngb correctly detect formats', async ({ page }) => {
         await page.goto('/');
 
         const result = await page.evaluate(async () => {
-            const { hasPngb } = await import('./pngine-png.js');
+            const { isPng, isPngb } = await import('./_extract.js');
 
             // PNG without pNGb chunk (just signature + IHDR + IEND)
-            const pngWithout = new Uint8Array([
+            const pngData = new Uint8Array([
                 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
                 0x00, 0x00, 0x00, 0x0D, // IHDR length
                 0x49, 0x48, 0x44, 0x52, // IHDR type
@@ -145,74 +144,78 @@ test.describe('PNG Bytecode Extraction', () => {
                 0xAE, 0x42, 0x60, 0x82, // CRC
             ]);
 
-            // PNG with pNGb chunk
-            const pngWith = new Uint8Array([
-                0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
-                0x00, 0x00, 0x00, 0x0D, // IHDR length
-                0x49, 0x48, 0x44, 0x52, // IHDR type
-                0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-                0x08, 0x06, 0x00, 0x00, 0x00,
-                0x1F, 0x15, 0xC4, 0x89,
-                0x00, 0x00, 0x00, 0x05, // pNGb length
-                0x70, 0x4E, 0x47, 0x62, // pNGb type
-                0x01, 0x00, 0x50, 0x4E, 0x47, // payload
-                0x00, 0x00, 0x00, 0x00, // CRC
-                0x00, 0x00, 0x00, 0x00,
-                0x49, 0x45, 0x4E, 0x44,
-                0xAE, 0x42, 0x60, 0x82,
+            // PNGB bytecode (raw)
+            const pngbData = new Uint8Array([
+                0x50, 0x4E, 0x47, 0x42, // magic "PNGB"
+                0x01, 0x00, 0x00, 0x00, // version, flags
+                0x10, 0x00, 0x00, 0x00, // string table offset
+                0x10, 0x00, 0x00, 0x00, // data section offset
             ]);
 
+            // Random data (neither)
+            const randomData = new Uint8Array([0x01, 0x02, 0x03, 0x04]);
+
             return {
-                withoutPngb: hasPngb(pngWithout),
-                withPngb: hasPngb(pngWith),
+                pngIsPng: isPng(pngData),
+                pngIsPngb: isPngb(pngData),
+                pngbIsPng: isPng(pngbData),
+                pngbIsPngb: isPngb(pngbData),
+                randomIsPng: isPng(randomData),
+                randomIsPngb: isPngb(randomData),
             };
         });
 
-        expect(result.withoutPngb).toBe(false);
-        expect(result.withPngb).toBe(true);
+        expect(result.pngIsPng).toBe(true);
+        expect(result.pngIsPngb).toBe(false);
+        expect(result.pngbIsPng).toBe(false);
+        expect(result.pngbIsPngb).toBe(true);
+        expect(result.randomIsPng).toBe(false);
+        expect(result.randomIsPngb).toBe(false);
     });
 
-    test('getPngbInfo returns correct metadata', async ({ page }) => {
+    test('detectFormat identifies file types correctly', async ({ page }) => {
         await page.goto('/');
 
         const result = await page.evaluate(async () => {
-            const { getPngbInfo } = await import('./pngine-png.js');
+            const { detectFormat } = await import('./_extract.js');
 
-            // PNG with pNGb chunk (uncompressed)
-            const png = new Uint8Array([
+            // PNG data
+            const pngData = new Uint8Array([
                 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
-                0x00, 0x00, 0x00, 0x0D, // IHDR
-                0x49, 0x48, 0x44, 0x52,
-                0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-                0x08, 0x06, 0x00, 0x00, 0x00,
-                0x1F, 0x15, 0xC4, 0x89,
-                0x00, 0x00, 0x00, 0x12, // pNGb length = 18
-                0x70, 0x4E, 0x47, 0x62, // pNGb type
-                0x01,                   // version = 1
-                0x00,                   // flags = 0 (uncompressed)
-                // 16 bytes of payload
-                0x50, 0x4E, 0x47, 0x42, 0x01, 0x00, 0x00, 0x00,
-                0x10, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00, // CRC
-                0x00, 0x00, 0x00, 0x00,
-                0x49, 0x45, 0x4E, 0x44,
-                0xAE, 0x42, 0x60, 0x82,
             ]);
 
-            return getPngbInfo(png);
+            // PNGB bytecode
+            const pngbData = new Uint8Array([
+                0x50, 0x4E, 0x47, 0x42, // PNGB magic
+            ]);
+
+            // ZIP data
+            const zipData = new Uint8Array([
+                0x50, 0x4B, 0x03, 0x04, // ZIP signature
+            ]);
+
+            // Random data
+            const randomData = new Uint8Array([0x01, 0x02, 0x03, 0x04]);
+
+            return {
+                png: detectFormat(pngData),
+                pngb: detectFormat(pngbData),
+                zip: detectFormat(zipData),
+                random: detectFormat(randomData),
+            };
         });
 
-        expect(result).not.toBeNull();
-        expect(result.version).toBe(1);
-        expect(result.compressed).toBe(false);
-        expect(result.payloadSize).toBe(16); // 18 - 2 (version + flags)
+        expect(result.png).toBe('png');
+        expect(result.pngb).toBe('pngb');
+        expect(result.zip).toBe('zip');
+        expect(result.random).toBe(null);
     });
 
-    test('extractPngb throws on PNG without pNGb chunk', async ({ page }) => {
+    test('extractBytecode throws on PNG without pNGb chunk', async ({ page }) => {
         await page.goto('/');
 
         const result = await page.evaluate(async () => {
-            const { extractPngb } = await import('./pngine-png.js');
+            const { extractBytecode } = await import('./_extract.js');
 
             const pngWithout = new Uint8Array([
                 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
@@ -227,7 +230,7 @@ test.describe('PNG Bytecode Extraction', () => {
             ]);
 
             try {
-                await extractPngb(pngWithout);
+                await extractBytecode(pngWithout);
                 return { threw: false };
             } catch (err) {
                 return { threw: true, message: err.message };
@@ -235,138 +238,69 @@ test.describe('PNG Bytecode Extraction', () => {
         });
 
         expect(result.threw).toBe(true);
-        expect(result.message).toContain('No pNGb chunk');
+        expect(result.message).toContain('pNGb');
+    });
+
+    test('extractBytecode passes through raw PNGB bytecode', async ({ page }) => {
+        await page.goto('/');
+
+        const result = await page.evaluate(async () => {
+            const { extractBytecode } = await import('./_extract.js');
+
+            // Raw PNGB bytecode (no PNG container)
+            const pngbData = new Uint8Array([
+                0x50, 0x4E, 0x47, 0x42, // magic "PNGB"
+                0x01, 0x00,             // version 1
+                0x00, 0x00,             // flags
+                0x10, 0x00, 0x00, 0x00, // string table offset = 16
+                0x10, 0x00, 0x00, 0x00, // data section offset = 16
+            ]);
+
+            try {
+                const result = await extractBytecode(pngbData);
+                return {
+                    length: result.length,
+                    magic: String.fromCharCode(...result.slice(0, 4)),
+                };
+            } catch (err) {
+                return { error: err.message };
+            }
+        });
+
+        expect(result.error).toBeUndefined();
+        expect(result.length).toBe(16);
+        expect(result.magic).toBe('PNGB');
     });
 
 });
 
-test.describe('PNG Tab UI', () => {
+test.describe('Demo Page UI', () => {
 
-    test.beforeAll(async () => {
-        // Ensure test PNG exists
-        if (!existsSync(TEST_PNG_OUTPUT)) {
-            try {
-                execSync(`./zig-out/bin/pngine ${TEST_PNGINE} -o ${TEST_PNG_OUTPUT}`, {
-                    cwd: PROJECT_ROOT,
-                    stdio: 'pipe',
-                });
-            } catch (err) {
-                console.warn('Could not generate test PNG:', err.message);
-            }
-        }
-    });
-
-    test('PNG tab shows correct info for PNG with bytecode', async ({ page }) => {
-        test.skip(!existsSync(TEST_PNG_OUTPUT), 'Test PNG not available');
-
+    test('page loads and shows ready status', async ({ page }) => {
         await page.goto('/');
 
-        // Switch to PNG tab
-        await page.click('.tab[data-tab="png"]');
-        await expect(page.locator('#png-tab')).toHaveClass(/active/);
-
-        // Upload the test PNG
-        const fileInput = page.locator('#png-file');
-        await fileInput.setInputFiles(TEST_PNG_OUTPUT);
-
-        // Wait for processing
-        await page.waitForFunction(() => {
-            const info = document.getElementById('png-info');
-            return info && info.textContent.includes('Bytecode');
-        }, { timeout: 5000 });
-
-        // Verify badge shows bytecode detected
-        const pngInfo = page.locator('#png-info');
-        await expect(pngInfo).toContainText('Has Embedded Bytecode');
-        await expect(pngInfo).toContainText('PNGB');
-
-        // Note: Run button may be disabled if WebGPU isn't available (headless mode)
-        // The important thing is that extraction worked and info is displayed correctly
+        // Check status shows ready
+        const status = page.locator('#status');
+        await expect(status).toContainText('Ready');
     });
 
-    test('PNG tab shows warning for PNG without bytecode', async ({ page }) => {
+    test('example links are present', async ({ page }) => {
         await page.goto('/');
 
-        // Switch to PNG tab
-        await page.click('.tab[data-tab="png"]');
+        // Check example links exist
+        const triangleLink = page.locator('a[data-url*="simple_triangle"]');
+        const cubeLink = page.locator('a[data-url*="rotating_cube"]');
 
-        // Create a minimal PNG without pNGb chunk in the browser
-        await page.evaluate(async () => {
-            const pngWithout = new Uint8Array([
-                0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
-                0x00, 0x00, 0x00, 0x0D,
-                0x49, 0x48, 0x44, 0x52,
-                0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-                0x08, 0x06, 0x00, 0x00, 0x00,
-                0x1F, 0x15, 0xC4, 0x89,
-                0x00, 0x00, 0x00, 0x0A, // IDAT
-                0x49, 0x44, 0x41, 0x54,
-                0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01,
-                0x0D, 0x0A, 0x2D, 0xB4,
-                0x00, 0x00, 0x00, 0x00,
-                0x49, 0x45, 0x4E, 0x44,
-                0xAE, 0x42, 0x60, 0x82,
-            ]);
-
-            // Create a file and trigger the file input
-            const blob = new Blob([pngWithout], { type: 'image/png' });
-            const file = new File([blob], 'test-no-bytecode.png', { type: 'image/png' });
-
-            const dataTransfer = new DataTransfer();
-            dataTransfer.items.add(file);
-
-            const fileInput = document.getElementById('png-file');
-            fileInput.files = dataTransfer.files;
-            fileInput.dispatchEvent(new Event('change', { bubbles: true }));
-        });
-
-        // Wait for processing
-        await page.waitForFunction(() => {
-            const info = document.getElementById('png-info');
-            return info && info.textContent.includes('No Embedded Bytecode');
-        }, { timeout: 5000 });
-
-        // Verify badge shows no bytecode
-        const pngInfo = page.locator('#png-info');
-        await expect(pngInfo).toContainText('No Embedded Bytecode');
-
-        // Verify Run button is disabled
-        await expect(page.locator('#run-png-btn')).toBeDisabled();
+        await expect(triangleLink).toBeVisible();
+        await expect(cubeLink).toBeVisible();
     });
 
-    test('extractPngb result is awaited correctly (regression test)', async ({ page }) => {
-        test.skip(!existsSync(TEST_PNG_OUTPUT), 'Test PNG not available');
-
+    test('drop zone accepts file input', async ({ page }) => {
         await page.goto('/');
 
-        // Switch to PNG tab
-        await page.click('.tab[data-tab="png"]');
-
-        // Upload the test PNG
-        const fileInput = page.locator('#png-file');
-        await fileInput.setInputFiles(TEST_PNG_OUTPUT);
-
-        // Wait for processing to complete
-        await page.waitForFunction(() => {
-            const info = document.getElementById('png-info');
-            return info && (
-                info.textContent.includes('Has Embedded Bytecode') ||
-                info.textContent.includes('Extraction Error')
-            );
-        }, { timeout: 5000 });
-
-        // CRITICAL: Verify no "slice is not a function" error
-        const pngInfo = page.locator('#png-info');
-        const infoText = await pngInfo.textContent();
-
-        // If there's an extraction error, it should NOT be about slice
-        if (infoText.includes('Extraction Error')) {
-            expect(infoText).not.toContain('slice is not a function');
-            expect(infoText).not.toContain('is not a function');
-        } else {
-            // Success case - verify bytecode info is displayed
-            expect(infoText).toContain('Magic: PNGB');
-        }
+        // Verify file input is present
+        const fileInput = page.locator('#file-input');
+        await expect(fileInput).toBeAttached();
     });
 
 });
