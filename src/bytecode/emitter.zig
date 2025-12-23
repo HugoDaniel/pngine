@@ -135,6 +135,27 @@ pub const Emitter = struct {
         try self.emitVarint(allocator, code_data_id);
     }
 
+    /// Emit create_shader_concat instruction.
+    /// Creates a shader module by concatenating multiple data sections (WGSL composition).
+    /// Params: shader_id, count, data_id_0, data_id_1, ...
+    pub fn createShaderConcat(
+        self: *Self,
+        allocator: Allocator,
+        shader_id: u16,
+        data_ids: []const u16,
+    ) !void {
+        // Pre-conditions
+        assert(data_ids.len > 0);
+        assert(data_ids.len <= 255);
+
+        try self.emitOpcode(allocator, .create_shader_concat);
+        try self.emitVarint(allocator, shader_id);
+        try self.emitByte(allocator, @intCast(data_ids.len));
+        for (data_ids) |data_id| {
+            try self.emitVarint(allocator, data_id);
+        }
+    }
+
     /// Emit create_render_pipeline instruction.
     /// Creates a render pipeline from descriptor data.
     pub fn createRenderPipeline(
@@ -478,6 +499,40 @@ pub const Emitter = struct {
         try self.emitOpcode(allocator, .submit);
     }
 
+    /// Emit copy_buffer_to_buffer instruction.
+    /// Copies data from source buffer to destination buffer.
+    /// Params: src_buffer, src_offset, dst_buffer, dst_offset, size
+    pub fn copyBufferToBuffer(
+        self: *Self,
+        allocator: Allocator,
+        src_buffer: u16,
+        src_offset: u32,
+        dst_buffer: u16,
+        dst_offset: u32,
+        size: u32,
+    ) !void {
+        try self.emitOpcode(allocator, .copy_buffer_to_buffer);
+        try self.emitVarint(allocator, src_buffer);
+        try self.emitVarint(allocator, src_offset);
+        try self.emitVarint(allocator, dst_buffer);
+        try self.emitVarint(allocator, dst_offset);
+        try self.emitVarint(allocator, size);
+    }
+
+    /// Emit copy_texture_to_texture instruction.
+    /// Copies pixels from source texture to destination texture.
+    /// Params: src_texture, dst_texture
+    pub fn copyTextureToTexture(
+        self: *Self,
+        allocator: Allocator,
+        src_texture: u16,
+        dst_texture: u16,
+    ) !void {
+        try self.emitOpcode(allocator, .copy_texture_to_texture);
+        try self.emitVarint(allocator, src_texture);
+        try self.emitVarint(allocator, dst_texture);
+    }
+
     /// Emit copy_external_image_to_texture instruction.
     /// Copies an ImageBitmap to a GPU texture.
     pub fn copyExternalImageToTexture(
@@ -653,6 +708,50 @@ pub const Emitter = struct {
         try self.emitByte(allocator, stride);
         try self.emitVarint(allocator, min_data_id);
         try self.emitVarint(allocator, max_data_id);
+    }
+
+    /// Emit fill_linear instruction.
+    /// Fills array elements with linear sequence: start, start+step, start+2*step, ...
+    /// Params: array_id, offset, count, stride, start_data_id, step_data_id
+    pub fn fillLinear(
+        self: *Self,
+        allocator: Allocator,
+        array_id: u16,
+        offset: u32,
+        count: u32,
+        stride: u8,
+        start_data_id: u16,
+        step_data_id: u16,
+    ) !void {
+        try self.emitOpcode(allocator, .fill_linear);
+        try self.emitVarint(allocator, array_id);
+        try self.emitVarint(allocator, offset);
+        try self.emitVarint(allocator, count);
+        try self.emitByte(allocator, stride);
+        try self.emitVarint(allocator, start_data_id);
+        try self.emitVarint(allocator, step_data_id);
+    }
+
+    /// Emit fill_element_index instruction.
+    /// Fills array elements with scaled/biased element index: index * scale + bias
+    /// Params: array_id, offset, count, stride, scale_data_id, bias_data_id
+    pub fn fillElementIndex(
+        self: *Self,
+        allocator: Allocator,
+        array_id: u16,
+        offset: u32,
+        count: u32,
+        stride: u8,
+        scale_data_id: u16,
+        bias_data_id: u16,
+    ) !void {
+        try self.emitOpcode(allocator, .fill_element_index);
+        try self.emitVarint(allocator, array_id);
+        try self.emitVarint(allocator, offset);
+        try self.emitVarint(allocator, count);
+        try self.emitByte(allocator, stride);
+        try self.emitVarint(allocator, scale_data_id);
+        try self.emitVarint(allocator, bias_data_id);
     }
 
     /// Emit fill_expression instruction.
@@ -1041,4 +1140,493 @@ test "pre-allocated emitter avoids reallocation for typical shader" {
     // Property: bytecode was actually emitted
     try testing.expect(emitter.len() > 0);
     try testing.expect(emitter.len() < Emitter.DEFAULT_CAPACITY);
+}
+
+// ============================================================================
+// createShaderConcat Tests
+// ============================================================================
+
+test "emit createShaderConcat with single data ID" {
+    var emitter: Emitter = .empty;
+    defer emitter.deinit(testing.allocator);
+
+    const data_ids = [_]u16{5};
+    try emitter.createShaderConcat(testing.allocator, 0, &data_ids);
+
+    const bc = emitter.bytecode();
+
+    // Property: first byte is the opcode
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.create_shader_concat)), bc[0]);
+
+    // Property: shader_id (0) as 1-byte varint
+    try testing.expectEqual(@as(u8, 0), bc[1]);
+
+    // Property: count (1) as single byte
+    try testing.expectEqual(@as(u8, 1), bc[2]);
+
+    // Property: data_id (5) as 1-byte varint
+    try testing.expectEqual(@as(u8, 5), bc[3]);
+
+    // Property: total length = opcode(1) + shader_id(1) + count(1) + data_id(1) = 4
+    try testing.expectEqual(@as(usize, 4), bc.len);
+}
+
+test "emit createShaderConcat with multiple data IDs" {
+    var emitter: Emitter = .empty;
+    defer emitter.deinit(testing.allocator);
+
+    const data_ids = [_]u16{ 0, 1, 2, 3 };
+    try emitter.createShaderConcat(testing.allocator, 10, &data_ids);
+
+    const bc = emitter.bytecode();
+
+    // Property: first byte is the opcode
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.create_shader_concat)), bc[0]);
+
+    // Decode and verify
+    var offset: usize = 1;
+
+    // shader_id
+    const shader_result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 10), shader_result.value);
+    offset += shader_result.len;
+
+    // count
+    try testing.expectEqual(@as(u8, 4), bc[offset]);
+    offset += 1;
+
+    // data_ids
+    for (0..4) |i| {
+        const data_result = opcodes.decodeVarint(bc[offset..]);
+        try testing.expectEqual(@as(u32, @intCast(i)), data_result.value);
+        offset += data_result.len;
+    }
+}
+
+test "emit createShaderConcat with large IDs" {
+    var emitter: Emitter = .empty;
+    defer emitter.deinit(testing.allocator);
+
+    // Use IDs that require 2-byte varint encoding
+    const data_ids = [_]u16{ 200, 300 };
+    try emitter.createShaderConcat(testing.allocator, 150, &data_ids);
+
+    const bc = emitter.bytecode();
+
+    // Property: first byte is the opcode
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.create_shader_concat)), bc[0]);
+
+    // Decode shader_id (150 requires 2 bytes)
+    const shader_result = opcodes.decodeVarint(bc[1..]);
+    try testing.expectEqual(@as(u32, 150), shader_result.value);
+    try testing.expectEqual(@as(u8, 2), shader_result.len);
+}
+
+// ============================================================================
+// copyBufferToBuffer Tests
+// ============================================================================
+
+test "emit copyBufferToBuffer basic" {
+    var emitter: Emitter = .empty;
+    defer emitter.deinit(testing.allocator);
+
+    try emitter.copyBufferToBuffer(testing.allocator, 0, 0, 1, 0, 1024);
+
+    const bc = emitter.bytecode();
+
+    // Property: first byte is the opcode
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.copy_buffer_to_buffer)), bc[0]);
+
+    // Decode and verify all parameters
+    var offset: usize = 1;
+
+    // src_buffer
+    var result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 0), result.value);
+    offset += result.len;
+
+    // src_offset
+    result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 0), result.value);
+    offset += result.len;
+
+    // dst_buffer
+    result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 1), result.value);
+    offset += result.len;
+
+    // dst_offset
+    result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 0), result.value);
+    offset += result.len;
+
+    // size
+    result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 1024), result.value);
+}
+
+test "emit copyBufferToBuffer with offsets" {
+    var emitter: Emitter = .empty;
+    defer emitter.deinit(testing.allocator);
+
+    try emitter.copyBufferToBuffer(testing.allocator, 5, 256, 10, 512, 2048);
+
+    const bc = emitter.bytecode();
+
+    var offset: usize = 1;
+
+    // src_buffer
+    var result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 5), result.value);
+    offset += result.len;
+
+    // src_offset (256 requires 2 bytes)
+    result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 256), result.value);
+    offset += result.len;
+
+    // dst_buffer
+    result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 10), result.value);
+    offset += result.len;
+
+    // dst_offset (512 requires 2 bytes)
+    result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 512), result.value);
+    offset += result.len;
+
+    // size (2048 requires 2 bytes)
+    result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 2048), result.value);
+}
+
+test "emit copyBufferToBuffer large size" {
+    var emitter: Emitter = .empty;
+    defer emitter.deinit(testing.allocator);
+
+    // Test with large size that requires 4-byte varint
+    try emitter.copyBufferToBuffer(testing.allocator, 0, 0, 1, 0, 1000000);
+
+    const bc = emitter.bytecode();
+
+    // Find size parameter (last one)
+    var offset: usize = 1;
+    for (0..4) |_| {
+        const result = opcodes.decodeVarint(bc[offset..]);
+        offset += result.len;
+    }
+
+    // size should be decoded correctly
+    const size_result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 1000000), size_result.value);
+    try testing.expectEqual(@as(u8, 4), size_result.len); // 4-byte varint
+}
+
+// ============================================================================
+// copyTextureToTexture Tests
+// ============================================================================
+
+test "emit copyTextureToTexture basic" {
+    var emitter: Emitter = .empty;
+    defer emitter.deinit(testing.allocator);
+
+    try emitter.copyTextureToTexture(testing.allocator, 0, 1);
+
+    const bc = emitter.bytecode();
+
+    // Property: first byte is the opcode
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.copy_texture_to_texture)), bc[0]);
+
+    // Property: src_texture (0) as 1-byte varint
+    try testing.expectEqual(@as(u8, 0), bc[1]);
+
+    // Property: dst_texture (1) as 1-byte varint
+    try testing.expectEqual(@as(u8, 1), bc[2]);
+
+    // Property: total length = opcode(1) + src(1) + dst(1) = 3
+    try testing.expectEqual(@as(usize, 3), bc.len);
+}
+
+test "emit copyTextureToTexture with large IDs" {
+    var emitter: Emitter = .empty;
+    defer emitter.deinit(testing.allocator);
+
+    try emitter.copyTextureToTexture(testing.allocator, 200, 300);
+
+    const bc = emitter.bytecode();
+
+    // Property: first byte is the opcode
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.copy_texture_to_texture)), bc[0]);
+
+    // Decode and verify
+    const src_result = opcodes.decodeVarint(bc[1..]);
+    try testing.expectEqual(@as(u32, 200), src_result.value);
+    try testing.expectEqual(@as(u8, 2), src_result.len);
+
+    const dst_result = opcodes.decodeVarint(bc[1 + src_result.len ..]);
+    try testing.expectEqual(@as(u32, 300), dst_result.value);
+    try testing.expectEqual(@as(u8, 2), dst_result.len);
+}
+
+test "emit copy sequence (buffer to buffer, texture to texture)" {
+    var emitter: Emitter = .empty;
+    defer emitter.deinit(testing.allocator);
+
+    // Emit both copy operations
+    try emitter.copyBufferToBuffer(testing.allocator, 0, 0, 1, 0, 512);
+    try emitter.copyTextureToTexture(testing.allocator, 0, 1);
+
+    const bc = emitter.bytecode();
+
+    // Property: first opcode is copy_buffer_to_buffer
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.copy_buffer_to_buffer)), bc[0]);
+
+    // Find second opcode
+    var offset: usize = 1;
+    for (0..5) |_| {
+        const result = opcodes.decodeVarint(bc[offset..]);
+        offset += result.len;
+    }
+
+    // Property: second opcode is copy_texture_to_texture
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.copy_texture_to_texture)), bc[offset]);
+}
+
+// ============================================================================
+// fillLinear Tests
+// ============================================================================
+
+test "emit fillLinear basic" {
+    var emitter: Emitter = .empty;
+    defer emitter.deinit(testing.allocator);
+
+    try emitter.fillLinear(testing.allocator, 0, 0, 100, 1, 10, 11);
+
+    const bc = emitter.bytecode();
+
+    // Property: first byte is the opcode
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.fill_linear)), bc[0]);
+
+    // Decode and verify
+    var offset: usize = 1;
+
+    // array_id
+    var result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 0), result.value);
+    offset += result.len;
+
+    // offset
+    result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 0), result.value);
+    offset += result.len;
+
+    // count
+    result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 100), result.value);
+    offset += result.len;
+
+    // stride (single byte)
+    try testing.expectEqual(@as(u8, 1), bc[offset]);
+    offset += 1;
+
+    // start_data_id
+    result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 10), result.value);
+    offset += result.len;
+
+    // step_data_id
+    result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 11), result.value);
+}
+
+test "emit fillLinear with stride" {
+    var emitter: Emitter = .empty;
+    defer emitter.deinit(testing.allocator);
+
+    // Fill every 4th element (vec4 stride)
+    try emitter.fillLinear(testing.allocator, 0, 0, 256, 4, 0, 1);
+
+    const bc = emitter.bytecode();
+
+    // Find stride byte (after array_id, offset, count)
+    var offset: usize = 1;
+    for (0..3) |_| {
+        const result = opcodes.decodeVarint(bc[offset..]);
+        offset += result.len;
+    }
+
+    // Property: stride is 4
+    try testing.expectEqual(@as(u8, 4), bc[offset]);
+}
+
+test "emit fillLinear large count" {
+    var emitter: Emitter = .empty;
+    defer emitter.deinit(testing.allocator);
+
+    // Large count for particle systems
+    try emitter.fillLinear(testing.allocator, 0, 0, 100000, 1, 0, 1);
+
+    const bc = emitter.bytecode();
+
+    // Find count varint (after array_id, offset)
+    var offset: usize = 1;
+    for (0..2) |_| {
+        const result = opcodes.decodeVarint(bc[offset..]);
+        offset += result.len;
+    }
+
+    const count_result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 100000), count_result.value);
+    try testing.expectEqual(@as(u8, 4), count_result.len); // 4-byte varint
+}
+
+// ============================================================================
+// fillElementIndex Tests
+// ============================================================================
+
+test "emit fillElementIndex basic" {
+    var emitter: Emitter = .empty;
+    defer emitter.deinit(testing.allocator);
+
+    try emitter.fillElementIndex(testing.allocator, 0, 0, 100, 1, 10, 11);
+
+    const bc = emitter.bytecode();
+
+    // Property: first byte is the opcode
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.fill_element_index)), bc[0]);
+
+    // Decode and verify
+    var offset: usize = 1;
+
+    // array_id
+    var result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 0), result.value);
+    offset += result.len;
+
+    // offset
+    result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 0), result.value);
+    offset += result.len;
+
+    // count
+    result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 100), result.value);
+    offset += result.len;
+
+    // stride (single byte)
+    try testing.expectEqual(@as(u8, 1), bc[offset]);
+    offset += 1;
+
+    // scale_data_id
+    result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 10), result.value);
+    offset += result.len;
+
+    // bias_data_id
+    result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 11), result.value);
+}
+
+test "emit fillElementIndex with stride" {
+    var emitter: Emitter = .empty;
+    defer emitter.deinit(testing.allocator);
+
+    // Fill x-component of vec3 with index
+    try emitter.fillElementIndex(testing.allocator, 0, 0, 256, 3, 0, 1);
+
+    const bc = emitter.bytecode();
+
+    // Find stride byte
+    var offset: usize = 1;
+    for (0..3) |_| {
+        const result = opcodes.decodeVarint(bc[offset..]);
+        offset += result.len;
+    }
+
+    // Property: stride is 3
+    try testing.expectEqual(@as(u8, 3), bc[offset]);
+}
+
+test "emit fillElementIndex for instance ID generation" {
+    // Common use: fill buffer with 0, 1, 2, 3, ... for instance IDs
+    var emitter: Emitter = .empty;
+    defer emitter.deinit(testing.allocator);
+
+    // scale=1, bias=0 gives pure index values
+    try emitter.fillElementIndex(testing.allocator, 0, 0, 1000, 1, 0, 0);
+
+    const bc = emitter.bytecode();
+
+    // Verify opcode
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.fill_element_index)), bc[0]);
+
+    // Verify count
+    var offset: usize = 1;
+    _ = opcodes.decodeVarint(bc[offset..]); // array_id
+    offset += 1;
+    _ = opcodes.decodeVarint(bc[offset..]); // offset
+    offset += 1;
+    const count_result = opcodes.decodeVarint(bc[offset..]);
+    try testing.expectEqual(@as(u32, 1000), count_result.value);
+}
+
+// ============================================================================
+// Data Generation Sequence Tests
+// ============================================================================
+
+test "emit data generation sequence for particles" {
+    // Typical particle system init: create array, fill with random positions
+    var emitter: Emitter = .empty;
+    defer emitter.deinit(testing.allocator);
+
+    // Create float32 array for 1000 particles, 3 components each
+    try emitter.createTypedArray(testing.allocator, 0, .f32, 3000);
+
+    // Fill x-coordinates with random [0, 1]
+    try emitter.fillRandom(testing.allocator, 0, 0, 1000, 3, 0, 1);
+
+    // Fill y-coordinates with linear 0 to 1
+    try emitter.fillLinear(testing.allocator, 0, 1, 1000, 3, 2, 3);
+
+    // Fill z-coordinates with element index (particle ID)
+    try emitter.fillElementIndex(testing.allocator, 0, 2, 1000, 3, 4, 5);
+
+    // Write to GPU buffer
+    try emitter.writeBufferFromArray(testing.allocator, 0, 0, 0);
+
+    const bc = emitter.bytecode();
+
+    // Verify sequence of opcodes
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.create_typed_array)), bc[0]);
+
+    // Find subsequent opcodes
+    var offset: usize = 1;
+    for (0..3) |_| {
+        const result = opcodes.decodeVarint(bc[offset..]);
+        offset += result.len;
+    }
+    try testing.expectEqual(@as(u8, @intFromEnum(OpCode.fill_random)), bc[offset]);
+}
+
+test "emit fill operations produce consistent encoding" {
+    // All fill operations have same parameter structure
+    var emitter_linear: Emitter = .empty;
+    defer emitter_linear.deinit(testing.allocator);
+
+    var emitter_index: Emitter = .empty;
+    defer emitter_index.deinit(testing.allocator);
+
+    // Same parameters except last two (different meanings but same encoding)
+    try emitter_linear.fillLinear(testing.allocator, 0, 0, 100, 1, 10, 11);
+    try emitter_index.fillElementIndex(testing.allocator, 0, 0, 100, 1, 10, 11);
+
+    const bc_linear = emitter_linear.bytecode();
+    const bc_index = emitter_index.bytecode();
+
+    // Property: same length (same parameter encoding)
+    try testing.expectEqual(bc_linear.len, bc_index.len);
+
+    // Property: only opcode differs
+    try testing.expect(bc_linear[0] != bc_index[0]);
+    try testing.expect(std.mem.eql(u8, bc_linear[1..], bc_index[1..]));
 }
