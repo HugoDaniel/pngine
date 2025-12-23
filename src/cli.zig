@@ -1383,11 +1383,46 @@ fn compileSource(allocator: std.mem.Allocator, path: []const u8, source: [:0]con
         // Pass base_dir for asset embedding and file_path for import resolution
         // Use "." when path has no directory component (e.g., "file.pngine")
         const base_dir = std.fs.path.dirname(path) orelse ".";
+
+        // Find miniray for WGSL reflection
+        const miniray_path = findMinirayPath();
+
         return pngine.dsl.compileWithOptions(allocator, source, .{
             .base_dir = base_dir,
             .file_path = path,
+            .miniray_path = miniray_path,
         });
     }
+}
+
+/// Find miniray binary for WGSL reflection.
+///
+/// Checks in order:
+/// 1. PNGINE_MINIRAY_PATH environment variable
+/// 2. Development path (../miniray/miniray relative to pngine repo)
+/// 3. Default: null (uses PATH lookup)
+fn findMinirayPath() ?[]const u8 {
+    // Check environment variable
+    if (std.posix.getenv("PNGINE_MINIRAY_PATH")) |path| {
+        if (path.len > 0) {
+            return path;
+        }
+    }
+
+    // Check common development paths
+    const dev_paths = [_][]const u8{
+        "/Users/hugo/Development/miniray/miniray",
+        "../miniray/miniray",
+    };
+
+    for (dev_paths) |dev_path| {
+        if (std.fs.cwd().access(dev_path, .{})) |_| {
+            return dev_path;
+        } else |_| {}
+    }
+
+    // Fall back to PATH lookup (may not work if miniray in PATH is minifier-only)
+    return null;
 }
 
 /// Read entire file into sentinel-terminated buffer.

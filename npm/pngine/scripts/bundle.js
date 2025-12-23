@@ -40,7 +40,7 @@ function esbuild(entry, outfile, opts = {}) {
 
   if (!DEBUG) {
     args.push('--minify');
-    args.push('--drop:console');
+    // Note: Don't drop console - debug logging is a feature (options.debug)
     args.push('--drop:debugger');
   } else {
     args.push('--sourcemap');
@@ -159,7 +159,7 @@ ${stripImports(stripExports(init))
 
 // === Exports ===
 export { pngine, destroy };
-export { draw, play, pause, stop, seek, setFrame };
+export { draw, play, pause, stop, seek, setFrame, setUniform, setUniforms };
 export { extractBytecode, detectFormat, isPng, isZip, isPngb };
 `;
 
@@ -216,7 +216,8 @@ const browserOnly = () => { throw new Error('PNGine requires browser with WebGPU
 module.exports = {
   pngine: browserOnly, destroy: browserOnly, draw: browserOnly,
   play: browserOnly, pause: browserOnly, stop: browserOnly,
-  seek: browserOnly, setFrame: browserOnly, extractBytecode: browserOnly,
+  seek: browserOnly, setFrame: browserOnly, setUniform: browserOnly,
+  setUniforms: browserOnly, extractBytecode: browserOnly,
   isPng, isZip, isPngb, detectFormat,
 };
 `;
@@ -244,7 +245,8 @@ export function detectFormat(d) {
 const browserOnly = () => { throw new Error('PNGine requires browser with WebGPU'); };
 export const pngine = browserOnly, destroy = browserOnly, draw = browserOnly;
 export const play = browserOnly, pause = browserOnly, stop = browserOnly;
-export const seek = browserOnly, setFrame = browserOnly, extractBytecode = browserOnly;
+export const seek = browserOnly, setFrame = browserOnly, setUniform = browserOnly;
+export const setUniforms = browserOnly, extractBytecode = browserOnly;
 `;
 
 fs.writeFileSync(path.join(DIST_DIR, 'index.js'), nodeStub);
@@ -261,9 +263,14 @@ export interface PngineOptions {
   onError?: (error: Error) => void;
 }
 
+/** Uniform value: number (f32), array (vecNf), or nested array (matNxMf) */
+export type UniformValue = number | number[] | number[][];
+
 export interface DrawOptions {
   time?: number;
   frame?: string;
+  /** Uniform values to set before drawing */
+  uniforms?: Record<string, UniformValue>;
 }
 
 export interface PngineInstance {
@@ -286,6 +293,21 @@ export function pause(instance: PngineInstance): PngineInstance;
 export function stop(instance: PngineInstance): PngineInstance;
 export function seek(instance: PngineInstance, time: number): PngineInstance;
 export function setFrame(instance: PngineInstance, frame: string | null): PngineInstance;
+
+/** Set a single uniform value */
+export function setUniform(
+  instance: PngineInstance,
+  name: string,
+  value: UniformValue,
+  redraw?: boolean
+): PngineInstance;
+
+/** Set multiple uniforms at once */
+export function setUniforms(
+  instance: PngineInstance,
+  uniforms: Record<string, UniformValue>,
+  redraw?: boolean
+): PngineInstance;
 
 export function extractBytecode(data: ArrayBuffer | Uint8Array): Promise<Uint8Array>;
 export function detectFormat(data: ArrayBuffer | Uint8Array): 'png' | 'zip' | 'pngb' | null;

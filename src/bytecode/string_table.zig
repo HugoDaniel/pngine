@@ -85,6 +85,16 @@ pub const StringTable = struct {
         return self.strings.items[id.toInt()];
     }
 
+    /// Find string ID by content.
+    /// Returns null if the string is not in the table.
+    /// Complexity: O(1) average (hash lookup).
+    ///
+    /// Note: This method is used for runtime uniform lookup by name.
+    /// The uniform table stores string IDs, so we need reverse lookup.
+    pub fn findId(self: *const Self, str: []const u8) ?StringId {
+        return self.map.get(str);
+    }
+
     /// Number of unique strings.
     pub fn count(self: *const Self) u16 {
         return @intCast(self.strings.items.len);

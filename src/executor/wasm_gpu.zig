@@ -55,7 +55,7 @@ extern "env" fn gpuDrawIndexed(index_count: u32, instance_count: u32, first_inde
 extern "env" fn gpuDispatch(x: u32, y: u32, z: u32) void;
 extern "env" fn gpuExecuteBundles(bundle_ids_ptr: [*]const u16, bundle_count: u16) void;
 extern "env" fn gpuEndPass() void;
-extern "env" fn gpuWriteBuffer(buffer_id: u16, offset: u32, data_ptr: [*]const u8, data_len: u32) void;
+pub extern "env" fn gpuWriteBuffer(buffer_id: u16, offset: u32, data_ptr: [*]const u8, data_len: u32) void;
 extern "env" fn gpuSubmit() void;
 extern "env" fn gpuCopyExternalImageToTexture(bitmap_id: u16, texture_id: u16, mip_level: u8, origin_x: u16, origin_y: u16) void;
 extern "env" fn gpuInitWasmModule(module_id: u16, data_ptr: [*]const u8, data_len: u32) void;

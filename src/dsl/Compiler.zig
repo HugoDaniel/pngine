@@ -74,6 +74,11 @@ pub const Compiler = struct {
         /// Whether to resolve #import directives.
         /// Defaults to true when base_dir is set.
         resolve_imports: bool = true,
+
+        /// Path to miniray binary for WGSL reflection.
+        /// If null, "miniray" is looked up in PATH.
+        /// Required for setUniform() API to work with custom uniforms.
+        miniray_path: ?[]const u8 = null,
     };
 
     pub const CompileResult = struct {
@@ -158,6 +163,7 @@ pub const Compiler = struct {
         // Phase 3: Emit PNGB
         const pngb = try Emitter.emitWithOptions(gpa, &ast, &analysis, .{
             .base_dir = options.base_dir,
+            .miniray_path = options.miniray_path,
         });
 
         // Post-condition: valid PNGB header

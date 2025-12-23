@@ -18,7 +18,9 @@
 //! * Blob files are read from base_dir + relative URL during compilation.
 
 const std = @import("std");
-const Emitter = @import("../Emitter.zig").Emitter;
+const emitter_mod = @import("../Emitter.zig");
+const Emitter = emitter_mod.Emitter;
+const UniformBindingKey = emitter_mod.UniformBindingKey;
 const Node = @import("../Ast.zig").Node;
 const DescriptorEncoder = @import("../DescriptorEncoder.zig").DescriptorEncoder;
 const utils = @import("utils.zig");
@@ -1074,6 +1076,17 @@ pub fn emitBindGroups(e: *Emitter) Emitter.Error!void {
                         const offset: u8 = @intCast((ewp.ping_pong + pool_idx) % buf_pool.pool_size);
                         adjusted_entry.resource_id = buf_pool.base_id + offset;
                     }
+
+                    // Track (group, binding) -> buffer_id for uniform table
+                    // Only track on first pool instance to avoid duplicates
+                    if (pool_idx == 0) {
+                        const buffer_id = e.buffer_ids.get(ewp.buffer_name) orelse continue;
+                        const key = UniformBindingKey{
+                            .group = group_index,
+                            .binding = adjusted_entry.binding,
+                        };
+                        e.uniform_bindings.put(e.gpa, key, buffer_id) catch {};
+                    }
                 }
 
                 entries_list.append(e.gpa, adjusted_entry) catch continue;
@@ -2066,4 +2079,81 @@ test "getTypeSize: all supported types" {
     // Unknown types return 0 (safe default)
     try std.testing.expectEqual(@as(u32, 0), getTypeSize("unknown"));
     try std.testing.expectEqual(@as(u32, 0), getTypeSize(""));
+}
+
+// ============================================================================
+// Uniform Table Population
+// ============================================================================
+
+/// Populate the uniform table from WGSL reflection data.
+///
+/// For each uniform binding in the shaders, finds the corresponding buffer
+/// and adds field metadata to enable runtime `setUniform()` by name.
+///
+/// Complexity: O(shaders × bindings × fields)
+pub fn populateUniformTable(e: *Emitter) Emitter.Error!void {
+    // First, trigger reflection for all #wgsl shaders to populate wgsl_reflections
+    var wgsl_it = e.analysis.symbols.wgsl.iterator();
+    for (0..MAX_RESOURCES) |_| {
+        const wgsl_entry = wgsl_it.next() orelse break;
+        const shader_name = wgsl_entry.key_ptr.*;
+        // Trigger reflection (result is cached)
+        _ = e.getWgslReflection(shader_name);
+    }
+
+    // Also trigger for #shaderModule shaders (they may have uniform bindings)
+    var sm_it = e.analysis.symbols.shader_module.iterator();
+    for (0..MAX_RESOURCES) |_| {
+        const sm_entry = sm_it.next() orelse break;
+        const shader_name = sm_entry.key_ptr.*;
+        _ = e.getWgslReflection(shader_name);
+    }
+
+    // Iterate through all WGSL reflections
+    var it = e.wgsl_reflections.iterator();
+    for (0..MAX_RESOURCES) |_| {
+        const entry = it.next() orelse break;
+        const reflection = entry.value_ptr.*;
+
+        // Process each uniform binding
+        for (reflection.bindings) |binding| {
+            if (binding.address_space != .uniform) continue;
+
+            // Look up buffer_id from (group, binding)
+            const key = UniformBindingKey{
+                .group = @intCast(binding.group),
+                .binding = @intCast(binding.binding),
+            };
+            const buffer_id = e.uniform_bindings.get(key) orelse continue;
+
+            // Convert reflection fields to uniform table fields
+            var fields: std.ArrayListUnmanaged(uniform_table.UniformField) = .{};
+            defer fields.deinit(e.gpa);
+
+            for (binding.layout.fields) |field| {
+                // Add field name to string table
+                const name_id = e.builder.internString(e.gpa, field.name) catch continue;
+
+                fields.append(e.gpa, .{
+                    .name_string_id = name_id.toInt(),
+                    .offset = @intCast(field.offset),
+                    .size = @intCast(field.size),
+                    .uniform_type = uniform_table.UniformType.fromWgslType(field.type),
+                }) catch continue;
+            }
+
+            // Add binding name to string table
+            const binding_name_id = e.builder.internString(e.gpa, binding.name) catch continue;
+
+            // Add to uniform table
+            e.builder.addUniformBinding(
+                e.gpa,
+                buffer_id,
+                binding_name_id.toInt(),
+                @intCast(binding.group),
+                @intCast(binding.binding),
+                fields.items,
+            ) catch continue;
+        }
+    }
 }

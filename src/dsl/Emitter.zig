@@ -52,6 +52,12 @@ const wasm = @import("emitter/wasm.zig");
 const animations = @import("emitter/animations.zig");
 const reflect = @import("../reflect.zig");
 
+/// Key for uniform binding lookup (group, binding) -> buffer_id.
+pub const UniformBindingKey = struct {
+    group: u8,
+    binding: u8,
+};
+
 pub const Emitter = struct {
     gpa: Allocator,
     ast: *const Ast,
@@ -102,6 +108,10 @@ pub const Emitter = struct {
     /// Cached WGSL reflection data for auto buffer sizing.
     /// Maps shader name -> reflection data.
     wgsl_reflections: std.StringHashMapUnmanaged(reflect.ReflectionData),
+
+    /// Maps (group, binding) -> buffer_id for uniform table population.
+    /// Populated during bind group emission.
+    uniform_bindings: std.AutoHashMapUnmanaged(UniformBindingKey, u16),
 
     /// Cache for resolved WGSL code (with imports prepended).
     /// Key is the #wgsl macro name, value is the resolved code.
@@ -287,6 +297,7 @@ pub const Emitter = struct {
             .buffer_pools = .{},
             .bind_group_pools = .{},
             .wgsl_reflections = .{},
+            .uniform_bindings = .{},
             .resolved_wgsl_cache = .{},
             .wgsl_name_to_id = .{},
         };
@@ -324,6 +335,7 @@ pub const Emitter = struct {
             ref_data.deinit();
         }
         self.wgsl_reflections.deinit(self.gpa);
+        self.uniform_bindings.deinit(self.gpa);
         // Free resolved WGSL cache
         var wgsl_it = self.resolved_wgsl_cache.valueIterator();
         while (wgsl_it.next()) |value_ptr| {
@@ -380,6 +392,9 @@ pub const Emitter = struct {
 
         // Pass 5: Extract animation metadata (stored for pNGm, not bytecode)
         try animations.extractAnimations(&self);
+
+        // Pass 6: Populate uniform table from WGSL reflection
+        try resources.populateUniformTable(&self);
 
         // Finalize and return PNGB bytes
         // Note: finalize() transfers ownership of bytecode to caller,

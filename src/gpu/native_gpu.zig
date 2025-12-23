@@ -398,6 +398,17 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Set actual GPU vertex buffer
     }
 
+    pub fn setIndexBuffer(self: *Self, allocator: Allocator, buffer_id: u16, index_format: u8) !void {
+        _ = allocator;
+        _ = buffer_id;
+        _ = index_format;
+
+        assert(self.in_render_pass);
+        assert(self.initialized);
+
+        // TODO(NativeGPU) Set actual GPU index buffer
+    }
+
     pub fn draw(self: *Self, allocator: Allocator, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) !void {
         _ = allocator;
         _ = vertex_count;

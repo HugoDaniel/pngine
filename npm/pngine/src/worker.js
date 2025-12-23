@@ -145,8 +145,101 @@ async function loadBytecode(bytecode) {
 
 function handleDraw(data) {
   if (!initialized || !moduleLoaded) return;
+
+  // Apply uniforms before rendering (if provided)
+  if (data.uniforms) {
+    applyUniforms(data.uniforms);
+  }
+
   // Note: frame name ignored for now - frame_id 0 executes all frames
   renderWithCommandBuffer(data.time ?? 0, 0);
+}
+
+/**
+ * Apply uniform values by calling WASM setUniform for each field.
+ *
+ * Why runtime uniform setting?
+ * - Multiplatform: Same WASM binary works on Web, iOS, Android, Desktop
+ * - No recompilation: Update values without regenerating bytecode
+ * - Dynamic UI: Tools can introspect uniform table and generate sliders/pickers
+ * - Decoupling: JS doesn't need to know buffer layouts, just field names
+ *
+ * @param {Object} uniforms - Map of uniform name -> value
+ *   Values can be: number (f32), [n] array (vecNf), [[4][4]] (mat4x4f)
+ */
+function applyUniforms(uniforms) {
+  const encoder = new TextEncoder();
+
+  for (const [name, value] of Object.entries(uniforms)) {
+    // Encode name as UTF-8 bytes
+    const nameBytes = encoder.encode(name);
+    const namePtr = wasm.alloc(nameBytes.length);
+    if (!namePtr) {
+      log(`Failed to allocate memory for uniform name: ${name}`);
+      continue;
+    }
+    new Uint8Array(memory.buffer, namePtr, nameBytes.length).set(nameBytes);
+
+    // Convert JS value to typed array bytes
+    const valueBytes = uniformValueToBytes(value);
+    if (!valueBytes) {
+      wasm.free(namePtr, nameBytes.length);
+      log(`Unsupported uniform value type for: ${name}`);
+      continue;
+    }
+
+    const valuePtr = wasm.alloc(valueBytes.length);
+    if (!valuePtr) {
+      wasm.free(namePtr, nameBytes.length);
+      log(`Failed to allocate memory for uniform value: ${name}`);
+      continue;
+    }
+    new Uint8Array(memory.buffer, valuePtr, valueBytes.length).set(valueBytes);
+
+    // Call WASM setUniform
+    const result = wasm.setUniform(namePtr, nameBytes.length, valuePtr, valueBytes.length);
+
+    // Free temporary allocations
+    wasm.free(namePtr, nameBytes.length);
+    wasm.free(valuePtr, valueBytes.length);
+
+    if (result !== 0) {
+      const errors = ["success", "field not found", "size mismatch", "no module"];
+      log(`setUniform(${name}) failed: ${errors[result] || `error ${result}`}`);
+    }
+  }
+}
+
+/**
+ * Convert JS value to raw bytes for GPU uniform.
+ *
+ * Supported types:
+ * - number → f32 (4 bytes)
+ * - [x, y] → vec2f (8 bytes)
+ * - [x, y, z] → vec3f (12 bytes)
+ * - [x, y, z, w] → vec4f (16 bytes)
+ * - [[4][4]] flattened 16 numbers → mat4x4f (64 bytes)
+ *
+ * @param {*} value - JS value
+ * @returns {Uint8Array|null} - Byte representation or null if unsupported
+ */
+function uniformValueToBytes(value) {
+  if (typeof value === "number") {
+    // f32
+    return new Uint8Array(new Float32Array([value]).buffer);
+  }
+
+  if (Array.isArray(value)) {
+    // Flatten nested arrays (for matrices)
+    const flat = value.flat(2);
+
+    if (flat.length === 2 || flat.length === 3 || flat.length === 4 ||
+        flat.length === 9 || flat.length === 16) {
+      return new Uint8Array(new Float32Array(flat).buffer);
+    }
+  }
+
+  return null;
 }
 
 function renderWithCommandBuffer(time, frameId) {
@@ -209,7 +302,21 @@ function getWasmImports() {
       gpuDispatch: stub,
       gpuExecuteBundles: stub,
       gpuEndPass: stub,
-      gpuWriteBuffer: stub,
+
+      // gpuWriteBuffer: Used by setUniform() to write uniform values directly
+      // This is called from WASM when JS calls wasm.setUniform()
+      gpuWriteBuffer: (bufferId, offset, dataPtr, dataLen) => {
+        const buffer = gpu?.buffers?.get(bufferId);
+        if (!buffer) {
+          log(`gpuWriteBuffer: buffer ${bufferId} not found`);
+          return;
+        }
+
+        // Copy data from WASM memory to GPU buffer
+        const data = new Uint8Array(memory.buffer, dataPtr, dataLen);
+        device.queue.writeBuffer(buffer, offset, data);
+      },
+
       gpuSubmit: stub,
       gpuCopyExternalImageToTexture: stub,
       gpuInitWasmModule: stub,

@@ -130,3 +130,79 @@ export function setFrame(p, frame) {
   draw(p, { time: i.time, frame });
   return p;
 }
+
+/**
+ * Set uniform value and redraw.
+ *
+ * Why use setUniform instead of draw({ uniforms })?
+ * - Cleaner API for single uniform updates
+ * - Stores uniforms for subsequent draws (e.g., animation loop)
+ * - Can set multiple uniforms before triggering a draw
+ *
+ * Supported value types:
+ * - number → f32
+ * - [x, y] → vec2f
+ * - [x, y, z] → vec3f
+ * - [x, y, z, w] → vec4f
+ * - 16-element array or 4x4 matrix → mat4x4f
+ *
+ * @param {Pngine} p - PNGine instance
+ * @param {string} name - Uniform field name (as declared in WGSL struct)
+ * @param {number|number[]} value - Value to set
+ * @param {boolean} [redraw=true] - Whether to trigger immediate redraw
+ * @returns {Pngine}
+ *
+ * @example
+ * // Set time and color uniforms
+ * setUniform(p, "time", 1.5);
+ * setUniform(p, "color", [1.0, 0.0, 0.0, 1.0]);
+ *
+ * // Batch updates without immediate redraw
+ * setUniform(p, "time", 1.5, false);
+ * setUniform(p, "color", [1, 0, 0, 1], false);
+ * draw(p);  // Single draw with both updates
+ */
+export function setUniform(p, name, value, redraw = true) {
+  const i = p._;
+  if (!i) return p;
+
+  // Store for future draws
+  if (!i.uniforms) i.uniforms = {};
+  i.uniforms[name] = value;
+
+  if (redraw) {
+    draw(p, { time: i.time, uniforms: { [name]: value } });
+  }
+
+  return p;
+}
+
+/**
+ * Set multiple uniforms at once.
+ *
+ * @param {Pngine} p - PNGine instance
+ * @param {Object} uniforms - Map of name -> value
+ * @param {boolean} [redraw=true] - Whether to trigger immediate redraw
+ * @returns {Pngine}
+ *
+ * @example
+ * setUniforms(p, {
+ *   time: 1.5,
+ *   color: [1.0, 0.0, 0.0, 1.0],
+ *   modelMatrix: [...16 floats...]
+ * });
+ */
+export function setUniforms(p, uniforms, redraw = true) {
+  const i = p._;
+  if (!i) return p;
+
+  // Store all for future draws
+  if (!i.uniforms) i.uniforms = {};
+  Object.assign(i.uniforms, uniforms);
+
+  if (redraw) {
+    draw(p, { time: i.time, uniforms });
+  }
+
+  return p;
+}

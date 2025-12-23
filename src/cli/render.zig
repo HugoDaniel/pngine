@@ -675,10 +675,34 @@ fn compileSource(allocator: std.mem.Allocator, path: []const u8, source: [:0]con
     } else {
         // Pass base_dir for asset embedding (e.g., blob={file={url="..."}} )
         const base_dir = std.fs.path.dirname(path);
+        const miniray_path = findMinirayPath();
         return pngine.dsl.compileWithOptions(allocator, source, .{
             .base_dir = base_dir,
+            .miniray_path = miniray_path,
         });
     }
+}
+
+/// Find miniray binary for WGSL reflection.
+fn findMinirayPath() ?[]const u8 {
+    // Check environment variable
+    if (std.posix.getenv("PNGINE_MINIRAY_PATH")) |path| {
+        if (path.len > 0) return path;
+    }
+
+    // Check common development paths
+    const dev_paths = [_][]const u8{
+        "/Users/hugo/Development/miniray/miniray",
+        "../miniray/miniray",
+    };
+
+    for (dev_paths) |dev_path| {
+        if (std.fs.cwd().access(dev_path, .{})) |_| {
+            return dev_path;
+        } else |_| {}
+    }
+
+    return null;
 }
 
 fn writeOutputFile(path: []const u8, data: []const u8) !void {

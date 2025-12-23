@@ -820,3 +820,231 @@ export fn memset(dest: ?[*]u8, c: c_int, n: usize) ?[*]u8 {
     @memset(dest.?[0..n], byte);
     return dest;
 }
+
+// ============================================================================
+// Uniform Table Exports (Runtime Reflection)
+// ============================================================================
+//
+// These exports enable runtime uniform setting by field name without recompilation.
+// The uniform table is embedded in PNGB bytecode at compile time (via miniray reflection)
+// and queried at runtime by platforms (Web, iOS, Android, Desktop).
+//
+// ## Why Runtime Reflection?
+//
+// 1. **Multiplatform**: Same Zig/WASM code works everywhere - platforms just call
+//    setUniform("time", data) without knowing buffer layouts or offsets.
+//
+// 2. **No Recompilation**: Uniform values can be changed frame-by-frame without
+//    regenerating bytecode. Only the shader code itself requires recompilation.
+//
+// 3. **Dynamic UI**: Platforms can enumerate all uniform fields at runtime to
+//    build sliders, color pickers, and other controls dynamically.
+//
+// 4. **Decoupling**: Platform code doesn't need to match shader struct layouts.
+//    The uniform table maps field names → (buffer_id, offset, size, type).
+//
+// ## Data Flow
+//
+// Compile Time:
+//   WGSL shader → miniray reflection → uniform table → PNGB bytecode
+//
+// Runtime:
+//   JS calls setUniform("time", [1.5]) → WASM looks up field → writes to GPU buffer
+//
+
+const uniform_table = @import("bytecode/uniform_table.zig");
+const UniformType = uniform_table.UniformType;
+
+/// Get total number of uniform fields across all bindings.
+///
+/// Use this to enumerate all uniforms for dynamic UI generation.
+/// Returns 0 if no module is loaded or module has no uniform bindings.
+///
+/// Example (JS):
+/// ```javascript
+/// const count = wasm.getUniformFieldCount();
+/// for (let i = 0; i < count; i++) {
+///     const name = getUniformFieldName(i);
+///     const info = getUniformFieldInfo(i);
+///     // Build UI control for this uniform
+/// }
+/// ```
+export fn getUniformFieldCount() u32 {
+    const module = &(current_module orelse return 0);
+    return module.uniforms.totalFieldCount();
+}
+
+/// Get uniform field name by index.
+///
+/// Writes the field name to the output buffer and returns the actual length.
+/// If the buffer is too small, returns the required length without writing.
+/// Returns 0 if index is out of bounds or no module is loaded.
+///
+/// Parameters:
+/// - index: Field index (0 to getUniformFieldCount()-1)
+/// - out_ptr: Buffer to write the name into
+/// - out_len: Size of the output buffer
+///
+/// Returns: Actual length of the name, or 0 if not found.
+///
+/// Example (JS):
+/// ```javascript
+/// const nameLen = wasm.getUniformFieldName(0, namePtr, 256);
+/// const name = readString(namePtr, nameLen);
+/// ```
+export fn getUniformFieldName(index: u32, out_ptr: [*]u8, out_len: u32) u32 {
+    const module = &(current_module orelse return 0);
+
+    // Look up field by flat index
+    const result = module.uniforms.getFieldByIndex(index) orelse return 0;
+
+    // Get name from string table using string ID
+    const name = module.strings.get(@enumFromInt(result.field.name_string_id));
+
+    // Check if buffer is large enough
+    if (name.len > out_len) {
+        // Return required length so caller can allocate bigger buffer
+        return @intCast(name.len);
+    }
+
+    // Copy name to output buffer
+    @memcpy(out_ptr[0..name.len], name);
+    return @intCast(name.len);
+}
+
+/// Get uniform field info by index.
+///
+/// Returns field metadata packed into a u64 for efficient transfer:
+/// - bits 0-15:  buffer_id (u16) - GPU buffer this field writes to
+/// - bits 16-31: offset (u16) - Byte offset within the buffer
+/// - bits 32-47: size (u16) - Byte size of the field
+/// - bits 48-55: type (u8) - UniformType enum value
+/// - bits 56-63: reserved (u8) - Always 0
+///
+/// Returns 0xFFFFFFFFFFFFFFFF if index is out of bounds.
+///
+/// UniformType values:
+/// - 0: f32 (4 bytes)
+/// - 1: i32 (4 bytes)
+/// - 2: u32 (4 bytes)
+/// - 3: vec2f (8 bytes)
+/// - 4: vec3f (12 bytes)
+/// - 5: vec4f (16 bytes)
+/// - 6: mat3x3f (48 bytes)
+/// - 7: mat4x4f (64 bytes)
+///
+/// Example (JS):
+/// ```javascript
+/// const info = wasm.getUniformFieldInfo(0);
+/// const bufferId = info & 0xFFFF;
+/// const offset = (info >> 16) & 0xFFFF;
+/// const size = (info >> 32) & 0xFFFF;
+/// const type = (info >> 48) & 0xFF;
+/// ```
+export fn getUniformFieldInfo(index: u32) u64 {
+    const module = &(current_module orelse return 0xFFFFFFFFFFFFFFFF);
+
+    const result = module.uniforms.getFieldByIndex(index) orelse return 0xFFFFFFFFFFFFFFFF;
+
+    // Pack into u64: buffer_id | offset | size | type | reserved
+    const buffer_id: u64 = result.binding.buffer_id;
+    const offset: u64 = result.field.offset;
+    const size: u64 = result.field.size;
+    const uniform_type: u64 = @intFromEnum(result.field.uniform_type);
+
+    return buffer_id |
+        (offset << 16) |
+        (size << 32) |
+        (uniform_type << 48);
+}
+
+/// Set uniform field value by name.
+///
+/// Looks up the field in the uniform table and writes the value to the
+/// corresponding GPU buffer at the correct offset. This is the primary
+/// API for runtime uniform setting.
+///
+/// Parameters:
+/// - name_ptr: Pointer to field name (UTF-8, not null-terminated)
+/// - name_len: Length of field name
+/// - value_ptr: Pointer to value data (raw bytes, correct size for type)
+/// - value_len: Length of value data in bytes
+///
+/// Returns:
+/// - 0: Success
+/// - 1: Field not found
+/// - 2: Size mismatch (value_len doesn't match field size)
+/// - 3: No module loaded
+///
+/// Example (JS):
+/// ```javascript
+/// // Set time uniform (f32)
+/// const timeData = new Float32Array([1.5]);
+/// const result = wasm.setUniform(
+///     namePtr, nameLen,           // "time"
+///     timeData.buffer, 4          // 4 bytes for f32
+/// );
+///
+/// // Set color uniform (vec4f)
+/// const colorData = new Float32Array([1.0, 0.0, 0.0, 1.0]);
+/// wasm.setUniform(namePtr, nameLen, colorData.buffer, 16);
+/// ```
+export fn setUniform(
+    name_ptr: [*]const u8,
+    name_len: u32,
+    value_ptr: [*]const u8,
+    value_len: u32,
+) u32 {
+    const module = &(current_module orelse return 3);
+
+    // Look up field name in string table to get string ID
+    const name = name_ptr[0..name_len];
+    const string_id = module.strings.findId(name) orelse return 1; // Not found
+
+    // Look up field by string ID in uniform table
+    const field_info = module.uniforms.findFieldByStringId(string_id.toInt()) orelse return 1;
+
+    // Verify size matches
+    if (value_len != field_info.size) return 2; // Size mismatch
+
+    // Write to GPU buffer via gpuWriteBuffer
+    // The buffer_id, offset, and value are passed to the GPU backend
+    const wasm_gpu = @import("executor/wasm_gpu.zig");
+    wasm_gpu.gpuWriteBuffer(
+        field_info.buffer_id,
+        field_info.offset,
+        value_ptr,
+        value_len,
+    );
+
+    return 0; // Success
+}
+
+/// Get uniform field type by index.
+///
+/// Returns the UniformType enum value for the field, or 255 (unknown) if
+/// index is out of bounds. Useful for type-specific UI generation.
+///
+/// Example (JS):
+/// ```javascript
+/// const type = wasm.getUniformFieldType(0);
+/// if (type === 5) { // vec4f
+///     // Show color picker
+/// } else if (type === 0) { // f32
+///     // Show slider
+/// }
+/// ```
+export fn getUniformFieldType(index: u32) u8 {
+    const module = &(current_module orelse return 255);
+    const result = module.uniforms.getFieldByIndex(index) orelse return 255;
+    return @intFromEnum(result.field.uniform_type);
+}
+
+/// Get uniform binding count.
+///
+/// Returns the number of uniform bindings (not fields). Each binding maps
+/// to a GPU buffer and may contain multiple fields.
+export fn getUniformBindingCount() u32 {
+    const module = &(current_module orelse return 0);
+    return @intCast(module.uniforms.bindings.items.len);
+}

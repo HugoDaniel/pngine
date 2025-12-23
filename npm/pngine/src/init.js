@@ -23,8 +23,8 @@ export async function pngine(source, options = {}) {
   let canvas, bytecode;
 
   if (typeof source === "string") {
-    // Check for CSS selector (# or . but not ../ which is a relative path)
-    const isSelector = source.startsWith("#") || (source.startsWith(".") && !source.startsWith(".."));
+    // Check for CSS selector (# or . but not relative paths like ./ or ../)
+    const isSelector = source.startsWith("#") || (source.startsWith(".") && !source.startsWith("./") && !source.startsWith(".."));
     if (isSelector) {
       // Query selector
       const el = document.querySelector(source);
