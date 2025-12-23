@@ -1821,6 +1821,8 @@ fn fuzzScanPassDefinitions(_: void, input: []const u8) !void {
     const DataSection = @import("../bytecode/data_section.zig").DataSection;
     const UniformTable = @import("../bytecode/uniform_table.zig").UniformTable;
 
+    const AnimationTable = @import("../bytecode/animation_table.zig").AnimationTable;
+
     const mock_module = Module{
         .header = .{
             .magic = format.MAGIC.*,
@@ -1830,12 +1832,14 @@ fn fuzzScanPassDefinitions(_: void, input: []const u8) !void {
             .data_section_offset = 0,
             .wgsl_table_offset = 0,
             .uniform_table_offset = 0,
+            .animation_table_offset = 0,
         },
         .bytecode = input,
         .strings = StringTable.empty,
         .data = DataSection.empty,
         .wgsl = format.WgslTable.empty,
         .uniforms = UniformTable.empty,
+        .animation = AnimationTable.empty,
     };
 
     var gpu: MockGPU = .empty;

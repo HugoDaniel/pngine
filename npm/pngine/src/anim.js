@@ -44,9 +44,49 @@ export function play(p) {
     if (!i.playing) return;
 
     const now = performance.now();
-    i.time = (now - i.startTime) / 1000;
+    let time = (now - i.startTime) / 1000;
 
-    draw(p, { time: i.time });
+    // Handle animation timeline if present
+    if (i.animation) {
+      const durationSec = i.animation.duration / 1000;
+
+      // Check if past duration
+      if (time >= durationSec) {
+        switch (i.animation.endBehavior) {
+          case "loop":
+          case "restart":
+            // Loop: reset time and continue
+            i.startTime = now;
+            time = 0;
+            break;
+          case "stop":
+            // Stop: pause at end
+            i.playing = false;
+            i.time = durationSec;
+            draw(p, { time: durationSec });
+            i.log?.("Animation ended (stop)");
+            return;
+          case "hold":
+          default:
+            // Hold: stay at last frame
+            time = durationSec;
+            break;
+        }
+      }
+
+      // Auto-scene switching based on time
+      const timeMs = time * 1000;
+      const newScene = findSceneAtTime(i.animation.scenes, timeMs);
+
+      if (newScene && newScene !== i.currentScene) {
+        i.currentScene = newScene;
+        i.currentFrame = newScene.frame;
+        i.log?.(`Scene: ${newScene.id} (frame: ${newScene.frame})`);
+      }
+    }
+
+    i.time = time;
+    draw(p, { time: i.time, frame: i.currentFrame });
 
     i.animationId = requestAnimationFrame(loop);
   };
@@ -54,6 +94,25 @@ export function play(p) {
   i.animationId = requestAnimationFrame(loop);
   i.log?.("Playing");
   return p;
+}
+
+/**
+ * Find scene at given time
+ * @param {Array} scenes - Array of scene objects
+ * @param {number} timeMs - Time in milliseconds
+ * @returns {Object|null} - Scene object or null
+ */
+function findSceneAtTime(scenes, timeMs) {
+  if (!scenes || scenes.length === 0) return null;
+
+  for (const scene of scenes) {
+    if (timeMs >= scene.startMs && timeMs < scene.endMs) {
+      return scene;
+    }
+  }
+
+  // If past all scenes, return last scene (for hold behavior)
+  return scenes[scenes.length - 1];
 }
 
 /**

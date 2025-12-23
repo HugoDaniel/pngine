@@ -21,4 +21,5 @@ export function detectFormat(d) {
 const browserOnly = () => { throw new Error('PNGine requires browser with WebGPU'); };
 export const pngine = browserOnly, destroy = browserOnly, draw = browserOnly;
 export const play = browserOnly, pause = browserOnly, stop = browserOnly;
-export const seek = browserOnly, setFrame = browserOnly, extractBytecode = browserOnly;
+export const seek = browserOnly, setFrame = browserOnly, setUniform = browserOnly;
+export const setUniforms = browserOnly, extractBytecode = browserOnly;

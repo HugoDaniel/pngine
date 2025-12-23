@@ -3892,8 +3892,8 @@ test "Emitter: uniform table with size=shader.binding" {
     // at compile time, but the code path should not error
     _ = module.uniforms;
 
-    // Verify bytecode header has correct version (v3 includes uniform table)
-    try testing.expectEqual(@as(u16, 3), module.header.version);
+    // Verify bytecode header has correct version (v4 includes animation table)
+    try testing.expectEqual(@as(u16, 4), module.header.version);
 }
 
 test "Emitter: uniform table empty when no shader.binding" {
@@ -3962,7 +3962,7 @@ test "Emitter: uniform table preserves field order" {
 
     // Note: This test primarily verifies the code path doesn't error.
     // Full field order verification requires miniray integration.
-    try testing.expectEqual(@as(u16, 3), module.header.version);
+    try testing.expectEqual(@as(u16, 4), module.header.version);
 }
 
 // ============================================================================
@@ -3992,7 +3992,7 @@ test "Emitter: buffer size from shader.binding syntax" {
     defer module.deinit(testing.allocator);
 
     // Verify compilation succeeded with shader.binding syntax
-    try testing.expectEqual(@as(u16, 3), module.header.version);
+    try testing.expectEqual(@as(u16, 4), module.header.version);
 }
 
 test "Emitter: buffer with pool and bind group adjustment" {

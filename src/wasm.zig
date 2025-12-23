@@ -1048,3 +1048,161 @@ export fn getUniformBindingCount() u32 {
     const module = &(current_module orelse return 0);
     return @intCast(module.uniforms.bindings.items.len);
 }
+
+// ============================================================================
+// Animation Table Exports (Timeline/Scene Support)
+// ============================================================================
+//
+// These exports enable auto-scene switching during playback. The animation
+// table is embedded in PNGB bytecode at compile time (from #animation macro)
+// and queried at runtime by the JS player.
+//
+// ## Data Flow
+//
+// Compile Time:
+//   #animation macro → DSL → AnimationTable → PNGB bytecode
+//
+// Runtime:
+//   JS calls getSceneAtTime(1500) → WASM looks up scene → returns scene index
+//   JS reads scene info → switches to scene's frame at appropriate time
+//
+
+const animation_table = @import("bytecode/animation_table.zig");
+
+/// Check if animation metadata is present.
+///
+/// Returns 1 if animation table has data, 0 otherwise.
+export fn hasAnimationInfo() u32 {
+    const module = &(current_module orelse return 0);
+    return if (module.animation.info != null) 1 else 0;
+}
+
+/// Get total animation duration in milliseconds.
+///
+/// Returns 0 if no animation is defined.
+export fn getAnimationDuration() u32 {
+    const module = &(current_module orelse return 0);
+    const info = module.animation.info orelse return 0;
+    return info.duration_ms;
+}
+
+/// Check if animation loops.
+///
+/// Returns 1 if loop is enabled, 0 otherwise.
+export fn getAnimationLoop() u32 {
+    const module = &(current_module orelse return 0);
+    const info = module.animation.info orelse return 0;
+    return if (info.loop) 1 else 0;
+}
+
+/// Get animation end behavior.
+///
+/// Returns:
+/// - 0: hold (stay on last frame)
+/// - 1: stop (pause playback)
+/// - 2: restart (loop from beginning)
+/// - 255: no animation
+export fn getAnimationEndBehavior() u8 {
+    const module = &(current_module orelse return 255);
+    const info = module.animation.info orelse return 255;
+    return @intFromEnum(info.end_behavior);
+}
+
+/// Get animation name.
+///
+/// Writes the animation name to the output buffer.
+/// Returns actual length, or 0 if no animation.
+export fn getAnimationName(out_ptr: [*]u8, out_len: u32) u32 {
+    const module = &(current_module orelse return 0);
+    const info = module.animation.info orelse return 0;
+
+    const name = module.strings.get(@enumFromInt(info.name_string_id));
+    if (name.len > out_len) return @intCast(name.len);
+
+    @memcpy(out_ptr[0..name.len], name);
+    return @intCast(name.len);
+}
+
+/// Get number of scenes in the animation.
+export fn getSceneCount() u32 {
+    const module = &(current_module orelse return 0);
+    const info = module.animation.info orelse return 0;
+    return @intCast(info.scenes.len);
+}
+
+/// Get scene info by index.
+///
+/// Returns scene metadata packed into a u64:
+/// - bits 0-31:  start_ms (u32) - Scene start time in ms
+/// - bits 32-63: end_ms (u32) - Scene end time in ms
+///
+/// Returns 0xFFFFFFFFFFFFFFFF if index is out of bounds.
+export fn getSceneInfo(index: u32) u64 {
+    const module = &(current_module orelse return 0xFFFFFFFFFFFFFFFF);
+    const info = module.animation.info orelse return 0xFFFFFFFFFFFFFFFF;
+
+    if (index >= info.scenes.len) return 0xFFFFFFFFFFFFFFFF;
+
+    const scene = info.scenes[index];
+    const start: u64 = scene.start_ms;
+    const end: u64 = scene.end_ms;
+
+    return start | (end << 32);
+}
+
+/// Get scene ID string by index.
+///
+/// Writes the scene ID to the output buffer.
+/// Returns actual length, or 0 if not found.
+export fn getSceneId(index: u32, out_ptr: [*]u8, out_len: u32) u32 {
+    const module = &(current_module orelse return 0);
+    const info = module.animation.info orelse return 0;
+
+    if (index >= info.scenes.len) return 0;
+
+    const scene = info.scenes[index];
+    const id = module.strings.get(@enumFromInt(scene.id_string_id));
+    if (id.len > out_len) return @intCast(id.len);
+
+    @memcpy(out_ptr[0..id.len], id);
+    return @intCast(id.len);
+}
+
+/// Get scene frame name by index.
+///
+/// Writes the frame name to the output buffer.
+/// Returns actual length, or 0 if not found.
+export fn getSceneFrame(index: u32, out_ptr: [*]u8, out_len: u32) u32 {
+    const module = &(current_module orelse return 0);
+    const info = module.animation.info orelse return 0;
+
+    if (index >= info.scenes.len) return 0;
+
+    const scene = info.scenes[index];
+    const name = module.strings.get(@enumFromInt(scene.frame_string_id));
+    if (name.len > out_len) return @intCast(name.len);
+
+    @memcpy(out_ptr[0..name.len], name);
+    return @intCast(name.len);
+}
+
+/// Find scene index at given time (in milliseconds).
+///
+/// Returns scene index, or 0xFFFFFFFF if no scene at this time.
+///
+/// Example (JS):
+/// ```javascript
+/// const sceneIdx = wasm.getSceneAtTime(1500); // Find scene at 1.5 seconds
+/// if (sceneIdx !== 0xFFFFFFFF) {
+///     const frameName = getSceneFrame(sceneIdx);
+///     executeFrameByName(frameName);
+/// }
+/// ```
+export fn getSceneAtTime(time_ms: u32) u32 {
+    const module = &(current_module orelse return 0xFFFFFFFF);
+    const info = module.animation.info orelse return 0xFFFFFFFF;
+
+    // Use animation_table's findSceneAtTime
+    const scene_idx = animation_table.AnimationTable.findSceneAtTimeStatic(info, time_ms);
+    return scene_idx orelse 0xFFFFFFFF;
+}

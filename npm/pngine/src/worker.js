@@ -7,6 +7,7 @@ let canvas, device, context, gpu, wasm, memory;
 let initialized = false;
 let moduleLoaded = false;
 let frameCount = 0;
+let animationInfo = null;  // Animation metadata from WASM
 let log = () => {};
 
 // Message types
@@ -98,13 +99,14 @@ async function handleInit(data) {
     width: canvas.width,
     height: canvas.height,
     frameCount,
+    animation: animationInfo,
   });
 }
 
 async function handleLoad(data) {
   if (!initialized) throw new Error("Not initialized");
   await loadBytecode(data.bytecode);
-  postMessage({ type: MSG.READY, frameCount });
+  postMessage({ type: MSG.READY, frameCount, animation: animationInfo });
 }
 
 async function loadBytecode(bytecode) {
@@ -118,6 +120,7 @@ async function loadBytecode(bytecode) {
     gpu.setMemory(memory);
     gpu.setCanvasSize(canvas.width, canvas.height);
     moduleLoaded = false;
+    animationInfo = null;
   }
 
   // Allocate and copy bytecode
@@ -137,10 +140,89 @@ async function loadBytecode(bytecode) {
   moduleLoaded = true;
   frameCount = wasm.getFrameCount();
 
+  // Read animation info from WASM
+  animationInfo = readAnimationInfo();
+
   // First render to create resources
   renderWithCommandBuffer(0, 0);
 
   log(`Loaded module: ${frameCount} frames`);
+  if (animationInfo) {
+    log(`Animation: ${animationInfo.name}, ${animationInfo.duration}ms, ${animationInfo.scenes.length} scenes`);
+  }
+}
+
+/**
+ * Read animation metadata from WASM module.
+ * Returns null if no animation is defined.
+ */
+function readAnimationInfo() {
+  // Check if animation exists
+  if (!wasm.hasAnimationInfo()) return null;
+
+  const duration = wasm.getAnimationDuration();
+  const loop = wasm.getAnimationLoop() === 1;
+  const endBehavior = wasm.getAnimationEndBehavior();
+  const sceneCount = wasm.getSceneCount();
+
+  // Read animation name
+  const name = readWasmString(wasm.getAnimationName);
+
+  // Read scenes
+  const scenes = [];
+  for (let i = 0; i < sceneCount; i++) {
+    const info = wasm.getSceneInfo(i);
+    if (info === 0xFFFFFFFFFFFFFFFFn) continue;
+
+    const startMs = Number(info & 0xFFFFFFFFn);
+    const endMs = Number((info >> 32n) & 0xFFFFFFFFn);
+    const id = readWasmStringByIndex(wasm.getSceneId, i);
+    const frame = readWasmStringByIndex(wasm.getSceneFrame, i);
+
+    scenes.push({ id, frame, startMs, endMs });
+  }
+
+  return {
+    name,
+    duration,
+    loop,
+    endBehavior: ["hold", "stop", "restart"][endBehavior] || "hold",
+    scenes,
+  };
+}
+
+/**
+ * Read a string from WASM using a getter function that takes (ptr, len).
+ */
+function readWasmString(getter) {
+  const bufLen = 256;
+  const ptr = wasm.alloc(bufLen);
+  if (!ptr) return "";
+
+  const len = getter(ptr, bufLen);
+  const str = len > 0 ? new TextDecoder().decode(
+    new Uint8Array(memory.buffer, ptr, len)
+  ) : "";
+
+  wasm.free(ptr, bufLen);
+  return str;
+}
+
+/**
+ * Read a string from WASM using a getter function that takes (index, ptr, len).
+ */
+function readWasmStringByIndex(getter, index) {
+  const bufLen = 256;
+  const ptr = wasm.alloc(bufLen);
+  if (!ptr) return "";
+
+  const len = getter(index, ptr, bufLen);
+  const str = len > 0 ? new TextDecoder().decode(
+    new Uint8Array(memory.buffer, ptr, len)
+  ) : "";
+
+  wasm.free(ptr, bufLen);
+  return str;
 }
 
 function handleDraw(data) {

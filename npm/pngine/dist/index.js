@@ -35,6 +35,7 @@ const browserOnly = () => { throw new Error('PNGine requires browser with WebGPU
 module.exports = {
   pngine: browserOnly, destroy: browserOnly, draw: browserOnly,
   play: browserOnly, pause: browserOnly, stop: browserOnly,
-  seek: browserOnly, setFrame: browserOnly, extractBytecode: browserOnly,
+  seek: browserOnly, setFrame: browserOnly, setUniform: browserOnly,
+  setUniforms: browserOnly, extractBytecode: browserOnly,
   isPng, isZip, isPngb, detectFormat,
 };

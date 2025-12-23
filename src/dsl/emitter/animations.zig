@@ -1,18 +1,19 @@
 //! Animation Emission Module
 //!
 //! Handles extraction of animation metadata from #animation macros.
-//! Animation metadata is serialized to pNGm chunk (not bytecode).
+//! Animation metadata is serialized to the animation table section in PNGB.
 //!
 //! ## Invariants
 //!
 //! * Only one #animation is allowed per module.
 //! * Scene references must point to existing #frame declarations.
-//! * Animation metadata is stored, not emitted as bytecode.
+//! * Animation metadata is converted to bytecode format and serialized.
 
 const std = @import("std");
 const Emitter = @import("../Emitter.zig").Emitter;
 const Node = @import("../Ast.zig").Node;
 const utils = @import("utils.zig");
+const animation_table = @import("../../bytecode/animation_table.zig");
 
 /// Maximum scenes per animation (prevents runaway iteration).
 const MAX_SCENES: u32 = 64;
@@ -178,6 +179,62 @@ fn resolveFrameName(e: *Emitter, node: Node.Index) []const u8 {
     }
 
     return "";
+}
+
+/// Populate the bytecode animation table from extracted DSL metadata.
+/// Must be called after extractAnimations() and after frame names are interned.
+pub fn populateAnimationTable(e: *Emitter) Emitter.Error!void {
+    const meta = e.animation_metadata orelse return; // No animation defined
+
+    // Intern animation name
+    const name_string_id = try e.builder.internString(e.gpa, meta.name);
+
+    // Convert duration from seconds to milliseconds
+    const duration_ms: u32 = @intFromFloat(meta.duration * 1000.0);
+
+    // Convert end behavior
+    const end_behavior: animation_table.EndBehavior = switch (meta.end_behavior) {
+        .hold => .hold,
+        .stop => .stop,
+        .restart => .restart,
+    };
+
+    // Convert scenes
+    var scenes = std.ArrayListUnmanaged(animation_table.Scene){};
+    errdefer scenes.deinit(e.gpa);
+
+    for (meta.scenes, 0..) |scene, i| {
+        if (i >= MAX_SCENES) break;
+
+        // Intern scene ID and frame name
+        const id_string_id = try e.builder.internString(e.gpa, scene.id);
+        const frame_string_id = try e.builder.internString(e.gpa, scene.frame_name);
+
+        // Convert times from seconds to milliseconds
+        const start_ms: u32 = @intFromFloat(scene.start * 1000.0);
+        const end_ms: u32 = @intFromFloat(scene.end * 1000.0);
+
+        try scenes.append(e.gpa, .{
+            .id_string_id = id_string_id.toInt(),
+            .frame_string_id = frame_string_id.toInt(),
+            .start_ms = start_ms,
+            .end_ms = end_ms,
+        });
+    }
+
+    // Set animation info on the builder's animation table
+    const anim_table = e.builder.getAnimationTable();
+    const scenes_slice = try scenes.toOwnedSlice(e.gpa);
+    anim_table.* = .{
+        .info = .{
+            .name_string_id = name_string_id.toInt(),
+            .duration_ms = duration_ms,
+            .loop = meta.loop,
+            .end_behavior = end_behavior,
+            .scenes = scenes_slice,
+        },
+        .owned_scenes = scenes_slice, // Builder owns the scenes slice
+    };
 }
 
 test "AnimationMetadata.toJson" {

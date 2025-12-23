@@ -390,10 +390,13 @@ pub const Emitter = struct {
         // Pass 4: Emit frames (queues inlined via emitQueueAction)
         try frames.emitFrames(&self);
 
-        // Pass 5: Extract animation metadata (stored for pNGm, not bytecode)
+        // Pass 5: Extract animation metadata
         try animations.extractAnimations(&self);
 
-        // Pass 6: Populate uniform table from WGSL reflection
+        // Pass 6: Populate animation table in bytecode format
+        try animations.populateAnimationTable(&self);
+
+        // Pass 7: Populate uniform table from WGSL reflection
         try resources.populateUniformTable(&self);
 
         // Finalize and return PNGB bytes

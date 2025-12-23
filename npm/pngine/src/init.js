@@ -119,6 +119,9 @@ export async function pngine(source, options = {}) {
   };
 
   log(`Ready: ${result.frameCount} frames`);
+  if (result.animation) {
+    log(`Animation: ${result.animation.name}, ${result.animation.duration}ms, ${result.animation.scenes.length} scenes`);
+  }
 
   // Create POJO
   return createPngine({
@@ -127,6 +130,9 @@ export async function pngine(source, options = {}) {
     width: result.width,
     height: result.height,
     frameCount: result.frameCount,
+    animation: result.animation || null,
+    currentScene: null,
+    currentFrame: null,
     ready: true,
     playing: false,
     time: 0,
@@ -205,6 +211,19 @@ function createPngine(internal) {
     },
     get frameCount() {
       return internal.frameCount;
+    },
+    get animation() {
+      return internal.animation;
+    },
+    get currentScene() {
+      return internal.currentScene;
+    },
+    get currentFrame() {
+      return internal.currentFrame;
+    },
+    get duration() {
+      // Animation duration in seconds, or 0 if no animation
+      return internal.animation ? internal.animation.duration / 1000 : 0;
     },
 
     // Internal state (for other functions)

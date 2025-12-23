@@ -6,9 +6,14 @@ export interface PngineOptions {
   onError?: (error: Error) => void;
 }
 
+/** Uniform value: number (f32), array (vecNf), or nested array (matNxMf) */
+export type UniformValue = number | number[] | number[][];
+
 export interface DrawOptions {
   time?: number;
   frame?: string;
+  /** Uniform values to set before drawing */
+  uniforms?: Record<string, UniformValue>;
 }
 
 export interface PngineInstance {
@@ -31,6 +36,21 @@ export function pause(instance: PngineInstance): PngineInstance;
 export function stop(instance: PngineInstance): PngineInstance;
 export function seek(instance: PngineInstance, time: number): PngineInstance;
 export function setFrame(instance: PngineInstance, frame: string | null): PngineInstance;
+
+/** Set a single uniform value */
+export function setUniform(
+  instance: PngineInstance,
+  name: string,
+  value: UniformValue,
+  redraw?: boolean
+): PngineInstance;
+
+/** Set multiple uniforms at once */
+export function setUniforms(
+  instance: PngineInstance,
+  uniforms: Record<string, UniformValue>,
+  redraw?: boolean
+): PngineInstance;
 
 export function extractBytecode(data: ArrayBuffer | Uint8Array): Promise<Uint8Array>;
 export function detectFormat(data: ArrayBuffer | Uint8Array): 'png' | 'zip' | 'pngb' | null;

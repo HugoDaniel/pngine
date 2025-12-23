@@ -39,11 +39,19 @@ fn compileSource(source: [:0]const u8) ![]u8 {
     return Compiler.compile(testing.allocator, source);
 }
 
-/// Count createShaderModule opcodes in bytecode
+/// Count createShaderModule opcodes in bytecode section only
+/// (not in string table, data section, or other sections which may contain matching bytes)
 fn countShaderOpcodes(bytecode: []const u8) u32 {
+    if (bytecode.len < format.HEADER_SIZE) return 0;
+
+    // Get string table offset from header to know where bytecode section ends
+    const string_table_offset = std.mem.readInt(u32, bytecode[8..12], .little);
+    const bytecode_end = @min(string_table_offset, bytecode.len);
+    const bytecode_section = bytecode[format.HEADER_SIZE..bytecode_end];
+
     var count: u32 = 0;
     const create_shader = @intFromEnum(opcodes.OpCode.create_shader_module);
-    for (bytecode) |byte| {
+    for (bytecode_section) |byte| {
         if (byte == create_shader) {
             count += 1;
         }

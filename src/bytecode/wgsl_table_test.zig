@@ -504,7 +504,7 @@ test "full module roundtrip with WGSL table" {
     // Verify header
     try testing.expectEqualStrings("PNGB", pngb[0..4]);
     const version = std.mem.readInt(u16, pngb[4..6], .little);
-    try testing.expectEqual(@as(u16, 3), version);
+    try testing.expectEqual(@as(u16, 4), version);
 
     // Deserialize
     var module = try format.deserialize(testing.allocator, pngb);
@@ -553,8 +553,8 @@ test "version 1 backward compatibility" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    // Even with v3 header, empty WGSL table should work
-    try testing.expectEqual(@as(u16, 3), module.header.version);
+    // Even with v4 header, empty WGSL table should work
+    try testing.expectEqual(@as(u16, 4), module.header.version);
     try testing.expectEqual(@as(u16, 0), module.wgsl.count());
 }
 
