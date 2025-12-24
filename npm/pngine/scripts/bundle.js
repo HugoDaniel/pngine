@@ -75,19 +75,21 @@ function sizeInfo(filepath) {
   return { raw, gzipped: parseInt(gzipped) };
 }
 
-// Step 1: Bundle worker code (_gpu.js + _worker.js)
+// Step 1: Bundle worker code (_gpu.js + _worker.js + _loader.js)
 console.log('1. Bundling worker code...');
 
-// Create a temporary entry that imports both worker modules
+// Create a temporary entry that imports worker modules
 const workerEntry = path.join(DIST_DIR, '_worker-entry.js');
 fs.writeFileSync(workerEntry, `
 import './gpu.js';
+import './loader.js';
 import './worker.js';
 `);
 
 // Copy worker source files to dist for bundling
 fs.copyFileSync(path.join(SRC_DIR, 'gpu.js'), path.join(DIST_DIR, 'gpu.js'));
 fs.copyFileSync(path.join(SRC_DIR, 'worker.js'), path.join(DIST_DIR, 'worker.js'));
+fs.copyFileSync(path.join(SRC_DIR, 'loader.js'), path.join(DIST_DIR, 'loader.js'));
 
 const workerOut = path.join(DIST_DIR, '_worker-bundle.js');
 if (!esbuild(workerEntry, workerOut)) {
@@ -101,6 +103,7 @@ const workerCode = fs.readFileSync(workerOut, 'utf-8');
 fs.unlinkSync(workerEntry);
 fs.unlinkSync(path.join(DIST_DIR, 'gpu.js'));
 fs.unlinkSync(path.join(DIST_DIR, 'worker.js'));
+fs.unlinkSync(path.join(DIST_DIR, 'loader.js'));
 fs.unlinkSync(workerOut);
 
 // Step 2: Create browser bundle with inlined worker
@@ -110,6 +113,7 @@ console.log('2. Creating browser bundle...');
 const extract = fs.readFileSync(path.join(SRC_DIR, 'extract.js'), 'utf-8');
 const anim = fs.readFileSync(path.join(SRC_DIR, 'anim.js'), 'utf-8');
 const init = fs.readFileSync(path.join(SRC_DIR, 'init.js'), 'utf-8');
+const loader = fs.readFileSync(path.join(SRC_DIR, 'loader.js'), 'utf-8');
 
 // Remove import/export statements
 function stripImports(code) {
@@ -142,6 +146,9 @@ function createWorkerBlobUrl() {
 // === _extract.js ===
 ${stripImports(stripExports(extract))}
 
+// === _loader.js ===
+${stripImports(stripExports(loader))}
+
 // === _anim.js ===
 ${stripImports(stripExports(anim))}
 
@@ -161,6 +168,7 @@ ${stripImports(stripExports(init))
 export { pngine, destroy };
 export { draw, play, pause, stop, seek, setFrame, setUniform, setUniforms };
 export { extractBytecode, detectFormat, isPng, isZip, isPngb };
+export { parsePayload, createExecutor, getExecutorImports, getExecutorVariantName };
 `;
 
 // Write unminified browser source
@@ -314,6 +322,61 @@ export function detectFormat(data: ArrayBuffer | Uint8Array): 'png' | 'zip' | 'p
 export function isPng(data: ArrayBuffer | Uint8Array): boolean;
 export function isZip(data: ArrayBuffer | Uint8Array): boolean;
 export function isPngb(data: ArrayBuffer | Uint8Array): boolean;
+
+// Embedded executor support (advanced)
+export interface PayloadInfo {
+  version: number;
+  hasEmbeddedExecutor: boolean;
+  hasAnimationTable: boolean;
+  plugins: {
+    core: boolean;
+    render: boolean;
+    compute: boolean;
+    wasm: boolean;
+    animation: boolean;
+    texture: boolean;
+  };
+  executor: Uint8Array | null;
+  bytecode: Uint8Array;
+  payload: Uint8Array;
+  offsets: {
+    executor: number;
+    executorLength: number;
+    bytecode: number;
+    bytecodeLength: number;
+    stringTable: number;
+    data: number;
+    wgsl: number;
+    uniform: number;
+    animation: number;
+  };
+}
+
+export interface ExecutorInstance {
+  instance: WebAssembly.Instance;
+  memory: WebAssembly.Memory;
+  exports: WebAssembly.Exports;
+  getBytecodePtr(): number;
+  setBytecodeLen(len: number): void;
+  getDataPtr(): number;
+  setDataLen(len: number): void;
+  init(): void;
+  frame(time: number, width: number, height: number): void;
+  getCommandPtr(): number;
+  getCommandLen(): number;
+}
+
+export interface ExecutorCallbacks {
+  log?: (ptr: number, len: number) => void;
+  wasmInstantiate?: (id: number, ptr: number, len: number) => void;
+  wasmCall?: (callId: number, modId: number, namePtr: number, nameLen: number, argsPtr: number, argsLen: number) => void;
+  wasmGetResult?: (callId: number, outPtr: number, outLen: number) => number;
+}
+
+export function parsePayload(pngb: Uint8Array): PayloadInfo;
+export function createExecutor(wasmBytes: Uint8Array, imports?: WebAssembly.Imports): Promise<ExecutorInstance>;
+export function getExecutorImports(callbacks?: ExecutorCallbacks): WebAssembly.Imports;
+export function getExecutorVariantName(plugins: PayloadInfo['plugins']): string;
 `;
 
 fs.writeFileSync(path.join(DIST_DIR, 'index.d.ts'), typeDefs);

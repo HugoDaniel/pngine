@@ -57,3 +57,58 @@ export function detectFormat(data: ArrayBuffer | Uint8Array): 'png' | 'zip' | 'p
 export function isPng(data: ArrayBuffer | Uint8Array): boolean;
 export function isZip(data: ArrayBuffer | Uint8Array): boolean;
 export function isPngb(data: ArrayBuffer | Uint8Array): boolean;
+
+// Embedded executor support (advanced)
+export interface PayloadInfo {
+  version: number;
+  hasEmbeddedExecutor: boolean;
+  hasAnimationTable: boolean;
+  plugins: {
+    core: boolean;
+    render: boolean;
+    compute: boolean;
+    wasm: boolean;
+    animation: boolean;
+    texture: boolean;
+  };
+  executor: Uint8Array | null;
+  bytecode: Uint8Array;
+  payload: Uint8Array;
+  offsets: {
+    executor: number;
+    executorLength: number;
+    bytecode: number;
+    bytecodeLength: number;
+    stringTable: number;
+    data: number;
+    wgsl: number;
+    uniform: number;
+    animation: number;
+  };
+}
+
+export interface ExecutorInstance {
+  instance: WebAssembly.Instance;
+  memory: WebAssembly.Memory;
+  exports: WebAssembly.Exports;
+  getBytecodePtr(): number;
+  setBytecodeLen(len: number): void;
+  getDataPtr(): number;
+  setDataLen(len: number): void;
+  init(): void;
+  frame(time: number, width: number, height: number): void;
+  getCommandPtr(): number;
+  getCommandLen(): number;
+}
+
+export interface ExecutorCallbacks {
+  log?: (ptr: number, len: number) => void;
+  wasmInstantiate?: (id: number, ptr: number, len: number) => void;
+  wasmCall?: (callId: number, modId: number, namePtr: number, nameLen: number, argsPtr: number, argsLen: number) => void;
+  wasmGetResult?: (callId: number, outPtr: number, outLen: number) => number;
+}
+
+export function parsePayload(pngb: Uint8Array): PayloadInfo;
+export function createExecutor(wasmBytes: Uint8Array, imports?: WebAssembly.Imports): Promise<ExecutorInstance>;
+export function getExecutorImports(callbacks?: ExecutorCallbacks): WebAssembly.Imports;
+export function getExecutorVariantName(plugins: PayloadInfo['plugins']): string;

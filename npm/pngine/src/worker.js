@@ -1,13 +1,16 @@
 // Worker thread - owns WebGPU, WASM, and resources
 // Uses command buffer approach for minimal bundle size
+// Supports both shared executor (wasmUrl) and embedded executor (in PNG payload)
 
 import { CommandDispatcher } from "./gpu.js";
+import { parsePayload, createExecutor, getExecutorImports } from "./loader.js";
 
 let canvas, device, context, gpu, wasm, memory;
 let initialized = false;
 let moduleLoaded = false;
 let frameCount = 0;
 let animationInfo = null;
+let useEmbeddedExecutor = false;
 
 // Message types
 const MSG = {
@@ -67,26 +70,75 @@ async function handleInit(data) {
   gpu.setDebug(data.debug);
   gpu.setCanvasSize(canvas.width, canvas.height);
 
-  // Load WASM
-  if (!data.wasmUrl) throw new Error("wasmUrl required");
-  const resp = await fetch(data.wasmUrl);
-  if (!resp.ok) throw new Error(`Failed to fetch WASM: ${resp.status}`);
+  // Check if bytecode has embedded executor
+  let hasEmbeddedExecutor = false;
+  let payloadInfo = null;
 
-  const { instance } = await WebAssembly.instantiateStreaming(
-    resp,
-    getWasmImports()
-  );
-  wasm = instance.exports;
-  memory = wasm.memory;
-  gpu.setMemory(memory);
-
-  // Initialize WASM
-  wasm.onInit();
-  initialized = true;
-
-  // If bytecode was provided, load it
   if (data.bytecode) {
-    await loadBytecode(data.bytecode);
+    try {
+      const bytecodeArray = new Uint8Array(data.bytecode);
+      payloadInfo = parsePayload(bytecodeArray);
+      hasEmbeddedExecutor = payloadInfo.hasEmbeddedExecutor;
+    } catch (e) {
+      // Not a PNGB payload, use shared executor
+      if (data.debug) console.log("[Worker] Bytecode parse failed, using shared executor:", e.message);
+    }
+  }
+
+  if (hasEmbeddedExecutor && payloadInfo.executor) {
+    // Use embedded executor from PNG payload
+    if (data.debug) console.log("[Worker] Using embedded executor from payload");
+    useEmbeddedExecutor = true;
+
+    const imports = getExecutorImports({
+      log: (ptr, len) => {
+        if (data.debug) {
+          const str = new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len));
+          console.log("[Executor]", str);
+        }
+      },
+    });
+
+    const { instance } = await WebAssembly.instantiate(payloadInfo.executor, imports);
+    wasm = instance.exports;
+    memory = wasm.memory;
+    gpu.setMemory(memory);
+
+    // Initialize embedded executor
+    if (wasm.init) {
+      wasm.init();
+    } else if (wasm.onInit) {
+      wasm.onInit();
+    }
+
+    initialized = true;
+
+    // Load bytecode into embedded executor
+    await loadBytecodeEmbedded(payloadInfo);
+  } else {
+    // Use shared executor from wasmUrl
+    if (!data.wasmUrl) throw new Error("wasmUrl required (no embedded executor)");
+    useEmbeddedExecutor = false;
+
+    const resp = await fetch(data.wasmUrl);
+    if (!resp.ok) throw new Error(`Failed to fetch WASM: ${resp.status}`);
+
+    const { instance } = await WebAssembly.instantiateStreaming(
+      resp,
+      getWasmImports()
+    );
+    wasm = instance.exports;
+    memory = wasm.memory;
+    gpu.setMemory(memory);
+
+    // Initialize WASM
+    wasm.onInit();
+    initialized = true;
+
+    // If bytecode was provided, load it
+    if (data.bytecode) {
+      await loadBytecode(data.bytecode);
+    }
   }
 
   // Report ready
@@ -101,7 +153,22 @@ async function handleInit(data) {
 
 async function handleLoad(data) {
   if (!initialized) throw new Error("Not initialized");
-  await loadBytecode(data.bytecode);
+
+  // Check if new bytecode has embedded executor
+  let payloadInfo = null;
+  try {
+    const bytecodeArray = new Uint8Array(data.bytecode);
+    payloadInfo = parsePayload(bytecodeArray);
+  } catch (e) {
+    // Not a PNGB payload, use regular loading
+  }
+
+  if (useEmbeddedExecutor && payloadInfo) {
+    await loadBytecodeEmbedded(payloadInfo);
+  } else {
+    await loadBytecode(data.bytecode);
+  }
+
   postMessage({ type: MSG.READY, frameCount, animation: animationInfo });
 }
 
@@ -137,6 +204,60 @@ async function loadBytecode(bytecode) {
   frameCount = wasm.getFrameCount();
 
   // Read animation info from WASM
+  animationInfo = readAnimationInfo();
+
+  // First render to create resources
+  renderWithCommandBuffer(0, 0);
+}
+
+/**
+ * Load bytecode into embedded executor.
+ *
+ * Embedded executors have a different interface:
+ * - getBytecodePtr() / setBytecodeLen() for bytecode
+ * - getDataPtr() / setDataLen() for data section
+ * - init() for initialization
+ * - frame(time, width, height) for rendering
+ * - getCommandPtr() / getCommandLen() for command buffer output
+ *
+ * @param {Object} payloadInfo - Parsed payload from loader.js
+ */
+async function loadBytecodeEmbedded(payloadInfo) {
+  // For embedded executor, bytecode is already in the payload
+  // We need to copy it to the executor's memory
+
+  if (wasm.getBytecodePtr && wasm.setBytecodeLen) {
+    // Copy bytecode to embedded executor memory
+    const bytecodePtr = wasm.getBytecodePtr();
+    const bytecodeData = payloadInfo.bytecode;
+    new Uint8Array(memory.buffer, bytecodePtr, bytecodeData.length).set(bytecodeData);
+    wasm.setBytecodeLen(bytecodeData.length);
+  }
+
+  // For now, we use the full payload for shared executor compatibility
+  // The embedded executor will parse its own bytecode section
+  if (wasm.alloc && wasm.loadModule) {
+    // Fallback to shared executor interface if present
+    const fullPayload = payloadInfo.payload;
+    const ptr = wasm.alloc(fullPayload.byteLength);
+    if (ptr) {
+      new Uint8Array(memory.buffer, ptr, fullPayload.byteLength).set(fullPayload);
+      const err = wasm.loadModule(ptr, fullPayload.byteLength);
+      wasm.free(ptr, fullPayload.byteLength);
+      if (err !== 0) throw new Error(`Load failed: ${err}`);
+    }
+  }
+
+  moduleLoaded = true;
+
+  // Get frame count if available
+  if (wasm.getFrameCount) {
+    frameCount = wasm.getFrameCount();
+  } else {
+    frameCount = 1;
+  }
+
+  // Read animation info if available
   animationInfo = readAnimationInfo();
 
   // First render to create resources
