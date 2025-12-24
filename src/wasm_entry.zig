@@ -682,17 +682,38 @@ fn execWasm(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) 
                 const call_id = readVarint(bytecode, pc);
                 const mod_id = readVarint(bytecode, pc);
                 const func_id = readVarint(bytecode, pc);
-                const arg_count = readVarint(bytecode, pc);
-                // Skip args for now (TODO: emit call_wasm_func command)
-                for (0..arg_count) |_| {
-                    const arg_type = bytecode[pc.*];
+                const arg_count_raw = bytecode[pc.*];
+                pc.* += 1;
+
+                // Get function name from string table
+                const func_name = getStringSlice(@intCast(func_id));
+
+                // Calculate args size for command buffer
+                // Args start at current pc, format: [arg_type:u8][value?:0-4 bytes]...
+                const args_start = pc.*;
+                for (0..arg_count_raw) |_| {
+                    const arg_type: opcodes.WasmArgType = @enumFromInt(bytecode[pc.*]);
                     pc.* += 1;
-                    if (arg_type == 1) pc.* += 1
-                    else if (arg_type == 2) pc.* += 2
-                    else if (arg_type == 3) pc.* += 4
-                    else if (arg_type == 4) pc.* += 8;
+                    pc.* += arg_type.valueByteSize();
                 }
-                _ = .{ call_id, mod_id, func_id };
+                const args_end = pc.*;
+
+                // Emit call_wasm_func command with args embedded
+                // Build args buffer: [arg_count][arg_type, value?]...
+                var args_buf: [257]u8 = undefined; // 1 + 16 args * max 5 bytes each
+                args_buf[0] = arg_count_raw;
+                const args_len = args_end - args_start;
+                if (args_len <= 256) {
+                    @memcpy(args_buf[1 .. 1 + args_len], bytecode[args_start..args_end]);
+                    cmds.callWasmFunc(
+                        @intCast(call_id),
+                        @intCast(mod_id),
+                        @intFromPtr(func_name.ptr),
+                        @intCast(func_name.len),
+                        @intFromPtr(&args_buf),
+                        @intCast(1 + args_len),
+                    );
+                }
             } else {
                 skipWasmCallParams(bytecode, pc);
             }
@@ -802,6 +823,41 @@ fn getDataSlice(data_id: u16) []const u8 {
 
     if (offset + len > data.len) return &[_]u8{};
     return data[offset..][0..len];
+}
+
+/// Get string slice from string table by string ID.
+/// String table format: count(u16) + offsets([count]u16) + lengths([count]u16) + data(bytes)
+fn getStringSlice(string_id: u16) []const u8 {
+    if (string_table_len == 0) return &[_]u8{};
+
+    // String table is in bytecode_buffer at string_table_offset
+    const table = bytecode_buffer[string_table_offset..][0..string_table_len];
+    if (table.len < 2) return &[_]u8{};
+
+    const count = std.mem.readInt(u16, table[0..2], .little);
+    if (string_id >= count) return &[_]u8{};
+
+    // Calculate offsets and lengths array positions
+    const offsets_start: usize = 2;
+    const lengths_start: usize = 2 + @as(usize, count) * 2;
+    const data_start: usize = 2 + @as(usize, count) * 4;
+
+    if (data_start > table.len) return &[_]u8{};
+
+    // Read this string's offset and length
+    const offset_pos = offsets_start + @as(usize, string_id) * 2;
+    const length_pos = lengths_start + @as(usize, string_id) * 2;
+
+    if (offset_pos + 2 > table.len or length_pos + 2 > table.len) return &[_]u8{};
+
+    const str_offset = std.mem.readInt(u16, table[offset_pos..][0..2], .little);
+    const str_len = std.mem.readInt(u16, table[length_pos..][0..2], .little);
+
+    // String offset is relative to data section start
+    const abs_offset = data_start + str_offset;
+    if (abs_offset + str_len > table.len) return &[_]u8{};
+
+    return table[abs_offset..][0..str_len];
 }
 
 /// Skip parameters for an opcode (for scanning without executing).

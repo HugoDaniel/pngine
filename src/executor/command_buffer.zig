@@ -934,3 +934,121 @@ test "CommandBuffer commands" {
     // Check size
     try std.testing.expectEqual(@as(u32, 1024), std.mem.readInt(u32, buffer[HEADER_SIZE + 3 ..][0..4], .little));
 }
+
+// ============================================================================
+// WASM Plugin Command Tests
+// ============================================================================
+
+test "CommandBuffer: initWasmModule encodes correctly" {
+    var buffer: [256]u8 = undefined;
+    var cmds = CommandBuffer.init(&buffer);
+
+    const module_id: u16 = 5;
+    const data_ptr: u32 = 0x1000;
+    const data_len: u32 = 256;
+    cmds.initWasmModule(module_id, data_ptr, data_len);
+    _ = cmds.finish();
+
+    // Expected: Header (8) + cmd(1) + module_id(2) + data_ptr(4) + data_len(4) = 19
+    try std.testing.expectEqual(@as(usize, 19), cmds.pos);
+
+    // Verify command byte
+    try std.testing.expectEqual(@as(u8, @intFromEnum(Cmd.init_wasm_module)), buffer[HEADER_SIZE]);
+
+    // Verify module_id
+    var pos: usize = HEADER_SIZE + 1;
+    try std.testing.expectEqual(module_id, std.mem.readInt(u16, buffer[pos..][0..2], .little));
+    pos += 2;
+
+    // Verify data_ptr
+    try std.testing.expectEqual(data_ptr, std.mem.readInt(u32, buffer[pos..][0..4], .little));
+    pos += 4;
+
+    // Verify data_len
+    try std.testing.expectEqual(data_len, std.mem.readInt(u32, buffer[pos..][0..4], .little));
+}
+
+test "CommandBuffer: callWasmFunc encodes correctly" {
+    var buffer: [256]u8 = undefined;
+    var cmds = CommandBuffer.init(&buffer);
+
+    const call_id: u16 = 1;
+    const module_id: u16 = 0;
+    const func_name_ptr: u32 = 0x2000;
+    const func_name_len: u32 = 10;
+    const args_ptr: u32 = 0x3000;
+    const args_len: u32 = 17;
+
+    cmds.callWasmFunc(call_id, module_id, func_name_ptr, func_name_len, args_ptr, args_len);
+    _ = cmds.finish();
+
+    // Expected: Header (8) + cmd(1) + call_id(2) + module_id(2) + func_name_ptr(4)
+    //           + func_name_len(4) + args_ptr(4) + args_len(4) = 29
+    try std.testing.expectEqual(@as(usize, 29), cmds.pos);
+
+    // Verify command byte
+    try std.testing.expectEqual(@as(u8, @intFromEnum(Cmd.call_wasm_func)), buffer[HEADER_SIZE]);
+
+    // Verify parameters
+    var pos: usize = HEADER_SIZE + 1;
+    try std.testing.expectEqual(call_id, std.mem.readInt(u16, buffer[pos..][0..2], .little));
+    pos += 2;
+    try std.testing.expectEqual(module_id, std.mem.readInt(u16, buffer[pos..][0..2], .little));
+    pos += 2;
+    try std.testing.expectEqual(func_name_ptr, std.mem.readInt(u32, buffer[pos..][0..4], .little));
+    pos += 4;
+    try std.testing.expectEqual(func_name_len, std.mem.readInt(u32, buffer[pos..][0..4], .little));
+    pos += 4;
+    try std.testing.expectEqual(args_ptr, std.mem.readInt(u32, buffer[pos..][0..4], .little));
+    pos += 4;
+    try std.testing.expectEqual(args_len, std.mem.readInt(u32, buffer[pos..][0..4], .little));
+}
+
+test "CommandBuffer: writeBufferFromWasm encodes correctly" {
+    var buffer: [256]u8 = undefined;
+    var cmds = CommandBuffer.init(&buffer);
+
+    const buffer_id: u16 = 3;
+    const buffer_offset: u32 = 64;
+    const wasm_ptr: u32 = 0x4000;
+    const size: u32 = 128;
+
+    cmds.writeBufferFromWasm(buffer_id, buffer_offset, wasm_ptr, size);
+    _ = cmds.finish();
+
+    // Expected: Header (8) + cmd(1) + buffer_id(2) + buffer_offset(4) + wasm_ptr(4) + size(4) = 23
+    try std.testing.expectEqual(@as(usize, 23), cmds.pos);
+
+    // Verify command byte
+    try std.testing.expectEqual(@as(u8, @intFromEnum(Cmd.write_buffer_from_wasm)), buffer[HEADER_SIZE]);
+
+    // Verify parameters
+    var pos: usize = HEADER_SIZE + 1;
+    try std.testing.expectEqual(buffer_id, std.mem.readInt(u16, buffer[pos..][0..2], .little));
+    pos += 2;
+    try std.testing.expectEqual(buffer_offset, std.mem.readInt(u32, buffer[pos..][0..4], .little));
+    pos += 4;
+    try std.testing.expectEqual(wasm_ptr, std.mem.readInt(u32, buffer[pos..][0..4], .little));
+    pos += 4;
+    try std.testing.expectEqual(size, std.mem.readInt(u32, buffer[pos..][0..4], .little));
+}
+
+test "CommandBuffer: WASM flow sequence" {
+    // Test a typical WASM call flow:
+    // 1. initWasmModule - load module
+    // 2. callWasmFunc - call function
+    // 3. writeBufferFromWasm - copy result to GPU
+    var buffer: [512]u8 = undefined;
+    var cmds = CommandBuffer.init(&buffer);
+
+    cmds.initWasmModule(0, 0x1000, 1024);
+    cmds.callWasmFunc(0, 0, 0x2000, 8, 0x3000, 5);
+    cmds.writeBufferFromWasm(1, 0, 0, 64);
+    cmds.end();
+
+    const result = cmds.finish();
+    const cmd_count = std.mem.readInt(u16, result[4..6], .little);
+
+    // 3 WASM commands + 1 end command
+    try std.testing.expectEqual(@as(u16, 4), cmd_count);
+}

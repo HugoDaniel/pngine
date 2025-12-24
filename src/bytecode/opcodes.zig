@@ -740,3 +740,119 @@ test "WasmReturnType byte sizes" {
     // Unknown type returns null
     try testing.expect(WasmReturnType.byteSize("unknown") == null);
 }
+
+test "WasmArgType encoding: all runtime types have zero bytes" {
+    // Property: all runtime types should have zero additional value bytes
+    // because they're resolved at execution time
+    const runtime_types = [_]WasmArgType{
+        .canvas_width,
+        .canvas_height,
+        .time_total,
+        .time_delta,
+    };
+
+    for (runtime_types) |arg_type| {
+        try testing.expectEqual(@as(u8, 0), arg_type.valueByteSize());
+    }
+}
+
+test "WasmArgType encoding: all literal types have 4 bytes" {
+    // Property: all literal types encode 4-byte values
+    const literal_types = [_]WasmArgType{
+        .literal_f32,
+        .literal_i32,
+        .literal_u32,
+    };
+
+    for (literal_types) |arg_type| {
+        try testing.expectEqual(@as(u8, 4), arg_type.valueByteSize());
+    }
+}
+
+test "WasmArgType encoding: calculate total args buffer size" {
+    // Test calculating the total buffer size needed for a list of args
+    // Format: [arg_count:u8] + for each arg: [type:u8][value:0-4]
+
+    // Test case 1: 2 runtime args (canvas_width, canvas_height)
+    // = 1 (count) + 2 * (1 type + 0 value) = 3 bytes
+    {
+        const args = [_]WasmArgType{ .canvas_width, .canvas_height };
+        var total: usize = 1; // arg count
+        for (args) |arg| {
+            total += 1 + arg.valueByteSize();
+        }
+        try testing.expectEqual(@as(usize, 3), total);
+    }
+
+    // Test case 2: 2 literal args (literal_f32 x 2)
+    // = 1 (count) + 2 * (1 type + 4 value) = 11 bytes
+    {
+        const args = [_]WasmArgType{ .literal_f32, .literal_f32 };
+        var total: usize = 1;
+        for (args) |arg| {
+            total += 1 + arg.valueByteSize();
+        }
+        try testing.expectEqual(@as(usize, 11), total);
+    }
+
+    // Test case 3: mixed args (runtime, literal, runtime)
+    // = 1 (count) + (1+0) + (1+4) + (1+0) = 8 bytes
+    {
+        const args = [_]WasmArgType{ .canvas_width, .literal_f32, .time_total };
+        var total: usize = 1;
+        for (args) |arg| {
+            total += 1 + arg.valueByteSize();
+        }
+        try testing.expectEqual(@as(usize, 8), total);
+    }
+}
+
+test "WasmArgType encoding: decode arg stream" {
+    // Simulate decoding an encoded arg stream
+    // Format: [arg_count:u8][type:u8][value?]...
+
+    // Encoded: 3 args - canvas_width, literal_f32(1.0), time_total
+    const encoded = [_]u8{
+        3, // arg count
+        0x01, // canvas_width (0 value bytes)
+        0x00, 0x00, 0x00, 0x80, 0x3F, // literal_f32 + 1.0f
+        0x03, // time_total (0 value bytes)
+    };
+
+    var pos: usize = 0;
+    const arg_count = encoded[pos];
+    pos += 1;
+    try testing.expectEqual(@as(u8, 3), arg_count);
+
+    // Decode arg 0: canvas_width
+    const arg0_type: WasmArgType = @enumFromInt(encoded[pos]);
+    pos += 1;
+    try testing.expectEqual(WasmArgType.canvas_width, arg0_type);
+    pos += arg0_type.valueByteSize();
+
+    // Decode arg 1: literal_f32
+    const arg1_type: WasmArgType = @enumFromInt(encoded[pos]);
+    pos += 1;
+    try testing.expectEqual(WasmArgType.literal_f32, arg1_type);
+    const value_bytes = encoded[pos..][0..4];
+    const f32_value: f32 = @bitCast(std.mem.readInt(u32, value_bytes, .little));
+    try testing.expectApproxEqAbs(@as(f32, 1.0), f32_value, 0.001);
+    pos += arg1_type.valueByteSize();
+
+    // Decode arg 2: time_total
+    const arg2_type: WasmArgType = @enumFromInt(encoded[pos]);
+    pos += 1;
+    try testing.expectEqual(WasmArgType.time_total, arg2_type);
+    pos += arg2_type.valueByteSize();
+
+    // Property: consumed entire buffer
+    try testing.expectEqual(encoded.len, pos);
+}
+
+test "WasmArgType encoding: empty args" {
+    // Encoded: 0 args
+    const encoded = [_]u8{0}; // just arg count
+
+    const arg_count = encoded[0];
+    try testing.expectEqual(@as(u8, 0), arg_count);
+}

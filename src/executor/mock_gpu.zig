@@ -1112,3 +1112,191 @@ test "mock gpu full rendering with texture upload" {
     }
     try testing.expect(create_bitmap_idx.? < copy_idx.?);
 }
+
+// ============================================================================
+// WASM Plugin Tests
+// ============================================================================
+
+test "mock gpu initWasmModule records call" {
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    try gpu.initWasmModule(testing.allocator, 0, 5);
+
+    // Property: call was recorded
+    try testing.expectEqual(@as(usize, 1), gpu.callCount());
+    try testing.expectEqual(CallType.init_wasm_module, gpu.getCall(0).call_type);
+
+    // Property: parameters match
+    const params = gpu.getCall(0).params.init_wasm_module;
+    try testing.expectEqual(@as(u16, 0), params.module_id);
+    try testing.expectEqual(@as(u16, 5), params.wasm_data_id);
+}
+
+test "mock gpu callWasmFunc records call" {
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    const args = [_]u8{ 0x01, 0x02 }; // canvas_width, canvas_height
+    try gpu.callWasmFunc(testing.allocator, 0, 0, 3, &args);
+
+    // Property: call was recorded
+    try testing.expectEqual(@as(usize, 1), gpu.callCount());
+    try testing.expectEqual(CallType.call_wasm_func, gpu.getCall(0).call_type);
+
+    // Property: parameters match
+    const params = gpu.getCall(0).params.call_wasm_func;
+    try testing.expectEqual(@as(u16, 0), params.call_id);
+    try testing.expectEqual(@as(u16, 0), params.module_id);
+    try testing.expectEqual(@as(u16, 3), params.func_name_id);
+}
+
+test "mock gpu writeBufferFromWasm records call" {
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    try gpu.writeBufferFromWasm(testing.allocator, 0, 1, 64, 256);
+
+    // Property: call was recorded
+    try testing.expectEqual(@as(usize, 1), gpu.callCount());
+    try testing.expectEqual(CallType.write_buffer_from_wasm, gpu.getCall(0).call_type);
+
+    // Property: parameters match
+    const params = gpu.getCall(0).params.write_buffer_from_wasm;
+    try testing.expectEqual(@as(u16, 0), params.call_id);
+    try testing.expectEqual(@as(u16, 1), params.buffer_id);
+    try testing.expectEqual(@as(u32, 64), params.offset);
+    try testing.expectEqual(@as(u32, 256), params.byte_len);
+}
+
+test "mock gpu WASM workflow sequence" {
+    // Test typical WASM call workflow:
+    // 1. Create buffer for result
+    // 2. Init WASM module
+    // 3. Call WASM function
+    // 4. Write result to buffer
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    try gpu.createBuffer(testing.allocator, 0, 256, 0x44);
+    try gpu.initWasmModule(testing.allocator, 0, 1);
+    try gpu.callWasmFunc(testing.allocator, 0, 0, 2, &.{});
+    try gpu.writeBufferFromWasm(testing.allocator, 0, 0, 0, 256);
+
+    const expected = [_]CallType{
+        .create_buffer,
+        .init_wasm_module,
+        .call_wasm_func,
+        .write_buffer_from_wasm,
+    };
+
+    try testing.expect(gpu.expectCallTypes(&expected));
+
+    // Property: buffer_id matches between create and write
+    const create_buffer_id = gpu.getCall(0).params.create_buffer.buffer_id;
+    const write_buffer_id = gpu.getCall(3).params.write_buffer_from_wasm.buffer_id;
+    try testing.expectEqual(create_buffer_id, write_buffer_id);
+
+    // Property: module_id matches between init and call
+    const init_module_id = gpu.getCall(1).params.init_wasm_module.module_id;
+    const call_module_id = gpu.getCall(2).params.call_wasm_func.module_id;
+    try testing.expectEqual(init_module_id, call_module_id);
+}
+
+test "mock gpu multiple WASM calls with different call_ids" {
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    try gpu.initWasmModule(testing.allocator, 0, 0);
+    try gpu.callWasmFunc(testing.allocator, 0, 0, 1, &.{});
+    try gpu.callWasmFunc(testing.allocator, 1, 0, 2, &.{});
+    try gpu.callWasmFunc(testing.allocator, 2, 0, 3, &.{});
+    try gpu.writeBufferFromWasm(testing.allocator, 0, 0, 0, 64);
+    try gpu.writeBufferFromWasm(testing.allocator, 1, 1, 0, 64);
+    try gpu.writeBufferFromWasm(testing.allocator, 2, 2, 0, 64);
+
+    // Property: correct number of calls
+    try testing.expectEqual(@as(usize, 7), gpu.callCount());
+
+    // Property: call_ids increment correctly
+    try testing.expectEqual(@as(u16, 0), gpu.getCall(1).params.call_wasm_func.call_id);
+    try testing.expectEqual(@as(u16, 1), gpu.getCall(2).params.call_wasm_func.call_id);
+    try testing.expectEqual(@as(u16, 2), gpu.getCall(3).params.call_wasm_func.call_id);
+
+    // Property: write_buffer_from_wasm call_ids match call_wasm_func call_ids
+    try testing.expectEqual(@as(u16, 0), gpu.getCall(4).params.write_buffer_from_wasm.call_id);
+    try testing.expectEqual(@as(u16, 1), gpu.getCall(5).params.write_buffer_from_wasm.call_id);
+    try testing.expectEqual(@as(u16, 2), gpu.getCall(6).params.write_buffer_from_wasm.call_id);
+}
+
+// ============================================================================
+// WASM OOM Tests
+// ============================================================================
+
+test "mock gpu initWasmModule handles OOM" {
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    // Test OOM on each allocation point
+    var fail_index: usize = 0;
+    while (fail_index < 10) : (fail_index += 1) {
+        var failing_alloc = std.testing.FailingAllocator.init(testing.allocator, .{
+            .fail_index = fail_index,
+        });
+
+        const result = gpu.initWasmModule(failing_alloc.allocator(), 0, 5);
+
+        if (failing_alloc.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            _ = try result;
+            break;
+        }
+        gpu.reset();
+    }
+}
+
+test "mock gpu callWasmFunc handles OOM" {
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    const args = [_]u8{ 0x01, 0x02 };
+    var fail_index: usize = 0;
+    while (fail_index < 10) : (fail_index += 1) {
+        var failing_alloc = std.testing.FailingAllocator.init(testing.allocator, .{
+            .fail_index = fail_index,
+        });
+
+        const result = gpu.callWasmFunc(failing_alloc.allocator(), 0, 0, 3, &args);
+
+        if (failing_alloc.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            _ = try result;
+            break;
+        }
+        gpu.reset();
+    }
+}
+
+test "mock gpu writeBufferFromWasm handles OOM" {
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var fail_index: usize = 0;
+    while (fail_index < 10) : (fail_index += 1) {
+        var failing_alloc = std.testing.FailingAllocator.init(testing.allocator, .{
+            .fail_index = fail_index,
+        });
+
+        const result = gpu.writeBufferFromWasm(failing_alloc.allocator(), 0, 1, 64, 256);
+
+        if (failing_alloc.has_induced_failure) {
+            try testing.expectError(error.OutOfMemory, result);
+        } else {
+            _ = try result;
+            break;
+        }
+        gpu.reset();
+    }
+}

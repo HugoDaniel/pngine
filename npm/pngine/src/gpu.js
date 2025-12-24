@@ -93,7 +93,8 @@ export class CommandDispatcher {
     this.querySets = new Map();
     this.renderBundles = new Map();
     this.imageBitmaps = new Map();  // ImageBitmap ID → ImageBitmap (or Promise)
-    this.wasmModules = new Map();   // Embedded WASM modules
+    this.wasmModules = new Map();   // Embedded WASM modules (moduleId → {instance, memory})
+    this.wasmCallResults = new Map(); // WASM call results (callId → Uint8Array)
     this.typedArrays = new Map();   // TypedArrays for data manipulation
     this.bindGroupDescriptors = new Map();  // For recreating bind groups after texture resize
     this.textureDescriptors = new Map();  // For recreating textures with correct format/usage
@@ -429,8 +430,10 @@ export class CommandDispatcher {
         const nameLen = view.getUint32(pos + 8, true);
         const argsPtr = view.getUint32(pos + 12, true);
         const argsLen = view.getUint32(pos + 16, true);
-        this._callWasmFunc(callId, moduleId, namePtr, nameLen, argsPtr, argsLen);
-        return pos + 20;
+        const nextPos = pos + 20;
+        // Return Promise that resolves to next position after async call completes
+        return this._callWasmFunc(callId, moduleId, namePtr, nameLen, argsPtr, argsLen)
+          .then(() => nextPos);
       }
 
       case CMD.CREATE_TYPED_ARRAY: {
@@ -1065,28 +1068,203 @@ export class CommandDispatcher {
     }
   }
 
+  /**
+   * Write data to a GPU buffer from WASM memory or call result.
+   *
+   * This function handles two cases:
+   * 1. Direct memory pointer: wasmPtr is a pointer in executor WASM memory
+   * 2. Call result: wasmPtr is a callId from a previous _callWasmFunc
+   *
+   * We check wasmCallResults first to see if this is a call result reference.
+   */
   _writeBufferFromWasm(bufferId, bufferOffset, wasmPtr, size) {
     const buffer = this.buffers.get(bufferId);
     if (!buffer) return;
+
+    // Check if wasmPtr is actually a callId with stored results
+    const callResult = this.wasmCallResults.get(wasmPtr);
+    if (callResult) {
+      if (this.debug) console.log(`[GPU] writeBufferFromWasm from call result ${wasmPtr}`);
+
+      // The result could be:
+      // 1. A pointer to the nested module's memory
+      // 2. A direct value (for simple return types)
+      const { memory, resultValue } = callResult;
+
+      if (typeof resultValue === 'number' && memory) {
+        // resultValue is a pointer into the nested module's memory
+        const data = new Uint8Array(memory.buffer, resultValue, size);
+        this.device.queue.writeBuffer(buffer, bufferOffset, data);
+      } else if (typeof resultValue === 'number') {
+        // Direct numeric return - convert to bytes
+        // Assume f32 for single value returns
+        const data = new Float32Array([resultValue]);
+        this.device.queue.writeBuffer(buffer, bufferOffset, new Uint8Array(data.buffer, 0, Math.min(size, 4)));
+      }
+
+      // Clear the result after use
+      this.wasmCallResults.delete(wasmPtr);
+      return;
+    }
+
+    // Fallback: wasmPtr is a direct pointer to executor memory
     const data = new Uint8Array(this.memory.buffer, wasmPtr, size);
     this.device.queue.writeBuffer(buffer, bufferOffset, data);
   }
 
   // WASM module operations
+
+  /**
+   * Initialize an embedded WASM module.
+   * Compiles and instantiates the WASM bytes, storing the instance for later calls.
+   *
+   * Note: This is synchronous but stores a Promise. The call will be awaited
+   * when the module is first used in _callWasmFunc.
+   */
   _initWasmModule(moduleId, dataPtr, dataLen) {
-    // TODO: Implement embedded WASM module initialization
-    // const wasmBytes = new Uint8Array(this.memory.buffer, dataPtr, dataLen);
-    // WebAssembly.instantiate(wasmBytes, imports).then(instance => {
-    //   this.wasmModules.set(moduleId, instance);
-    // });
+    if (this.wasmModules.has(moduleId)) return;
+
+    // Read WASM bytes from executor memory
+    const wasmBytes = new Uint8Array(this.memory.buffer, dataPtr, dataLen).slice();
+
+    if (this.debug) console.log(`[GPU] initWasmModule(id=${moduleId}, size=${dataLen})`);
+
+    // Create minimal imports for the nested WASM module
+    const imports = {
+      env: {
+        // Provide memory if the module doesn't have its own
+        // Note: Most modules export their own memory
+      }
+    };
+
+    // Start async compilation (store Promise, will be awaited on first use)
+    const modulePromise = WebAssembly.instantiate(wasmBytes, imports)
+      .then(result => {
+        const instance = result.instance;
+        const memory = instance.exports.memory;
+        if (this.debug) console.log(`[GPU] WASM module ${moduleId} loaded, exports:`, Object.keys(instance.exports));
+        return { instance, memory };
+      })
+      .catch(err => {
+        console.error(`[GPU] Failed to load WASM module ${moduleId}:`, err);
+        return null;
+      });
+
+    this.wasmModules.set(moduleId, modulePromise);
   }
 
-  _callWasmFunc(callId, moduleId, namePtr, nameLen, argsPtr, argsLen) {
-    // TODO: Implement WASM function call
-    // const module = this.wasmModules.get(moduleId);
-    // const funcName = this._readString(namePtr, nameLen);
-    // const args = this._decodeArgs(argsPtr, argsLen);
-    // module.exports[funcName](...args);
+  /**
+   * Call a function on an embedded WASM module.
+   * Decodes arguments and stores the result for later use by write_buffer_from_wasm.
+   *
+   * Argument encoding format (from opcodes.zig WasmArgType):
+   * - [arg_count:u8][arg_type:u8][value?:0-4 bytes]...
+   *
+   * Arg types:
+   * - 0x00: literal_f32 (4 bytes follow)
+   * - 0x01: canvas_width (runtime, 0 bytes)
+   * - 0x02: canvas_height (runtime, 0 bytes)
+   * - 0x03: time_total (runtime, 0 bytes)
+   * - 0x04: literal_i32 (4 bytes follow)
+   * - 0x05: literal_u32 (4 bytes follow)
+   * - 0x06: time_delta (runtime, 0 bytes)
+   */
+  async _callWasmFunc(callId, moduleId, namePtr, nameLen, argsPtr, argsLen) {
+    const funcName = this._readString(namePtr, nameLen);
+    if (this.debug) console.log(`[GPU] callWasmFunc(callId=${callId}, moduleId=${moduleId}, func="${funcName}")`);
+
+    // Get the module (may need to await if still loading)
+    let moduleData = this.wasmModules.get(moduleId);
+    if (!moduleData) {
+      console.error(`[GPU] WASM module ${moduleId} not found`);
+      return;
+    }
+
+    // Await if it's still a Promise
+    if (moduleData instanceof Promise) {
+      moduleData = await moduleData;
+      if (!moduleData) return; // Loading failed
+      this.wasmModules.set(moduleId, moduleData);
+    }
+
+    const { instance, memory } = moduleData;
+    const fn = instance.exports[funcName];
+    if (!fn) {
+      console.error(`[GPU] WASM function "${funcName}" not found in module ${moduleId}`);
+      return;
+    }
+
+    // Decode arguments
+    const args = this._decodeWasmArgs(argsPtr, argsLen);
+    if (this.debug) console.log(`[GPU]   args:`, args);
+
+    // Call the function
+    const result = fn(...args);
+    if (this.debug) console.log(`[GPU]   result:`, result);
+
+    // If the function returns data (e.g., a pointer to memory), store it
+    // For functions that write to their own memory, we store a reference to that memory region
+    // The result type handling depends on the function signature
+    if (result !== undefined && memory) {
+      // For functions that return a pointer, the bytes are in the module's memory
+      // Store a marker that this call has results in the module's memory
+      this.wasmCallResults.set(callId, {
+        moduleId,
+        memory,
+        resultValue: result
+      });
+    }
+  }
+
+  /**
+   * Decode WASM function arguments from encoded bytes.
+   * Format: [arg_count:u8][arg_type:u8][value?:0-4 bytes]...
+   */
+  _decodeWasmArgs(argsPtr, argsLen) {
+    if (argsLen === 0) return [];
+
+    const bytes = new Uint8Array(this.memory.buffer, argsPtr, argsLen);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const args = [];
+
+    let offset = 0;
+    const argCount = bytes[offset++];
+
+    for (let i = 0; i < argCount && offset < argsLen; i++) {
+      const argType = bytes[offset++];
+
+      switch (argType) {
+        case 0x00: // literal_f32
+          args.push(view.getFloat32(offset, true));
+          offset += 4;
+          break;
+        case 0x01: // canvas_width
+          args.push(this.canvasWidth);
+          break;
+        case 0x02: // canvas_height
+          args.push(this.canvasHeight);
+          break;
+        case 0x03: // time_total
+          args.push(this.time);
+          break;
+        case 0x04: // literal_i32
+          args.push(view.getInt32(offset, true));
+          offset += 4;
+          break;
+        case 0x05: // literal_u32
+          args.push(view.getUint32(offset, true));
+          offset += 4;
+          break;
+        case 0x06: // time_delta
+          // Delta time not tracked in gpu.js, default to 1/60
+          args.push(1/60);
+          break;
+        default:
+          console.warn(`[GPU] Unknown WASM arg type: 0x${argType.toString(16)}`);
+      }
+    }
+
+    return args;
   }
 
   // Utility operations
@@ -1213,6 +1391,7 @@ export class CommandDispatcher {
     this.renderBundles.clear();
     this.imageBitmaps.clear();
     this.wasmModules.clear();
+    this.wasmCallResults.clear();
     this.typedArrays.clear();
     this.bindGroupDescriptors.clear();
     this.textureDescriptors.clear();
