@@ -39,6 +39,7 @@ const embedded_wasm: []const u8 = @embedFile("embedded_wasm");
 
 // Subcommand modules
 const render_cmd = @import("cli/render.zig");
+const validate_cmd = @import("cli/validate.zig");
 
 /// Maximum input file size (16 MiB).
 /// Prevents DoS via memory exhaustion from malicious inputs.
@@ -95,6 +96,8 @@ fn run(allocator: std.mem.Allocator) !u8 {
         return runList(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "render")) {
         return render_cmd.run(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "validate")) {
+        return validate_cmd.run(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or
         std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h"))
     {
@@ -1599,6 +1602,7 @@ fn printUsage() void {
         \\  pngine <input.pngine> --frame [-s WxH] [-t time] Render actual frame
         \\  pngine compile <input> [-o <output.pngb>]        Compile to bytecode only
         \\  pngine check <input>                             Validate bytecode
+        \\  pngine validate <input> [--json]                 Runtime validation via wasm3
         \\  pngine embed <image.png> <bytecode.pngb>         Embed into existing PNG
         \\  pngine extract <file.png|file.zip>               Extract bytecode
         \\  pngine bundle <input.pngine> [-o <output.zip>]   Create ZIP bundle
@@ -1607,6 +1611,7 @@ fn printUsage() void {
         \\Commands:
         \\  compile     Compile source to PNGB bytecode
         \\  check       Validate bytecode (supports .pngine, .pngb, .png, .zip)
+        \\  validate    Runtime validation via wasm3 (JSON output for LLMs)
         \\  render      Create self-contained PNG with bytecode + WASM runtime
         \\  embed       Embed PNGB bytecode into a PNG image
         \\  extract     Extract PNGB bytecode from PNG or ZIP
