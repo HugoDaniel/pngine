@@ -34,6 +34,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Ast = @import("Ast.zig").Ast;
 const Node = @import("Ast.zig").Node;
+const PluginSet = @import("../bytecode/format.zig").PluginSet;
 
 pub const Analyzer = struct {
     /// General-purpose allocator for analysis structures.
@@ -424,6 +425,34 @@ pub const Analyzer = struct {
         /// Returns null if the node was not resolved (explicit reference or special value).
         pub fn getResolvedIdentifier(self: AnalysisResult, node_idx: u32) ?ResolvedIdentifier {
             return self.resolved_identifiers.get(node_idx);
+        }
+
+        /// Detect which plugins are required based on symbol table contents.
+        /// Scans the symbol tables to determine which features are used.
+        ///
+        /// Plugin detection rules:
+        /// - [render]: #renderPipeline, #renderPass, or #renderBundle used
+        /// - [compute]: #computePipeline or #computePass used
+        /// - [texture]: #texture, #textureView, or #imageBitmap used
+        /// - [wasm]: #wasmCall used
+        /// - [animation]: #animation used
+        /// - [core]: Always enabled
+        ///
+        /// Complexity: O(1) - just checks symbol table counts.
+        pub fn detectPlugins(self: *const AnalysisResult) PluginSet {
+            return .{
+                .core = true, // Always enabled
+                .render = self.symbols.render_pipeline.count() > 0 or
+                    self.symbols.render_pass.count() > 0 or
+                    self.symbols.render_bundle.count() > 0,
+                .compute = self.symbols.compute_pipeline.count() > 0 or
+                    self.symbols.compute_pass.count() > 0,
+                .texture = self.symbols.texture.count() > 0 or
+                    self.symbols.texture_view.count() > 0 or
+                    self.symbols.image_bitmap.count() > 0,
+                .wasm = self.symbols.wasm_call.count() > 0,
+                .animation = self.symbols.animation.count() > 0,
+            };
         }
     };
 

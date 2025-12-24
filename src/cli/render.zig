@@ -953,6 +953,7 @@ test "parseArgs: input file only" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .embed_executor = false,
         .scene_name = null,
     };
 
@@ -976,6 +977,7 @@ test "parseArgs: with output path" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .embed_executor = false,
         .scene_name = null,
     };
 
@@ -998,6 +1000,7 @@ test "parseArgs: with size" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .embed_executor = false,
         .scene_name = null,
     };
 
@@ -1020,6 +1023,7 @@ test "parseArgs: with time" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .embed_executor = false,
         .scene_name = null,
     };
 
@@ -1041,6 +1045,7 @@ test "parseArgs: embed flag" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .embed_executor = false,
         .scene_name = null,
     };
 
@@ -1063,6 +1068,7 @@ test "parseArgs: no-embed flag" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .embed_executor = false,
         .scene_name = null,
     };
 
@@ -1085,6 +1091,7 @@ test "parseArgs: missing input file" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .embed_executor = false,
         .scene_name = null,
     };
 
@@ -1105,6 +1112,7 @@ test "parseArgs: invalid size format" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .embed_executor = false,
         .scene_name = null,
     };
 
@@ -1125,6 +1133,7 @@ test "parseArgs: zero size rejected" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .embed_executor = false,
         .scene_name = null,
     };
 
@@ -1145,6 +1154,7 @@ test "parseArgs: help returns 255" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .embed_executor = false,
         .scene_name = null,
     };
 
@@ -1165,6 +1175,7 @@ test "parseArgs: unknown option rejected" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .embed_executor = false,
         .scene_name = null,
     };
 
@@ -1185,6 +1196,7 @@ test "parseArgs: multiple input files rejected" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .embed_executor = false,
         .scene_name = null,
     };
 
@@ -1205,6 +1217,7 @@ test "parseArgs: frame flag" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .embed_executor = false,
         .scene_name = null,
     };
 
@@ -1226,6 +1239,7 @@ test "parseArgs: frame flag short" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .embed_executor = false,
         .scene_name = null,
     };
 
@@ -1247,6 +1261,7 @@ test "parseArgs: frame with size" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .embed_executor = false,
         .scene_name = null,
     };
 
@@ -1270,6 +1285,7 @@ test "parseArgs: no-runtime flag" {
         .embed_explicit = false,
         .render_frame = false,
         .embed_runtime = true,
+        .embed_executor = false,
         .scene_name = null,
     };
 
@@ -1297,4 +1313,230 @@ test "deriveOutputPath: handles OOM gracefully" {
             break;
         }
     }
+}
+
+// ============================================================================
+// Phase 4 Tests: Executor Embedding
+// ============================================================================
+
+test "parseArgs: embed-executor flag" {
+    var opts = Options{
+        .input_path = "",
+        .output_path = null,
+        .width = 512,
+        .height = 512,
+        .time = 0.0,
+        .embed_bytecode = true,
+        .embed_explicit = false,
+        .render_frame = false,
+        .embed_runtime = true,
+        .embed_executor = false,
+        .scene_name = null,
+    };
+
+    const args = [_][]const u8{ "shader.pngine", "--embed-executor" };
+    const result = parseArgs(&args, &opts);
+
+    try std.testing.expectEqual(@as(u8, 0), result);
+    try std.testing.expect(opts.embed_executor);
+}
+
+test "parseArgs: embed-executor combined with other flags" {
+    var opts = Options{
+        .input_path = "",
+        .output_path = null,
+        .width = 512,
+        .height = 512,
+        .time = 0.0,
+        .embed_bytecode = true,
+        .embed_explicit = false,
+        .render_frame = false,
+        .embed_runtime = true,
+        .embed_executor = false,
+        .scene_name = null,
+    };
+
+    const args = [_][]const u8{ "shader.pngine", "--embed-executor", "--no-runtime", "-o", "out.png" };
+    const result = parseArgs(&args, &opts);
+
+    try std.testing.expectEqual(@as(u8, 0), result);
+    try std.testing.expect(opts.embed_executor);
+    try std.testing.expect(!opts.embed_runtime);
+    try std.testing.expectEqualStrings("out.png", opts.output_path.?);
+}
+
+test "getExecutorVariantName: core only (no plugins)" {
+    const plugins = pngine.dsl.PluginSet{
+        .core = true,
+        .render = false,
+        .compute = false,
+        .wasm = false,
+        .animation = false,
+        .texture = false,
+    };
+    try std.testing.expectEqualStrings("core", getExecutorVariantName(plugins));
+}
+
+test "getExecutorVariantName: render only" {
+    const plugins = pngine.dsl.PluginSet{
+        .core = true,
+        .render = true,
+        .compute = false,
+        .wasm = false,
+        .animation = false,
+        .texture = false,
+    };
+    try std.testing.expectEqualStrings("render", getExecutorVariantName(plugins));
+}
+
+test "getExecutorVariantName: compute only" {
+    const plugins = pngine.dsl.PluginSet{
+        .core = true,
+        .render = false,
+        .compute = true,
+        .wasm = false,
+        .animation = false,
+        .texture = false,
+    };
+    try std.testing.expectEqualStrings("compute", getExecutorVariantName(plugins));
+}
+
+test "getExecutorVariantName: render-compute" {
+    const plugins = pngine.dsl.PluginSet{
+        .core = true,
+        .render = true,
+        .compute = true,
+        .wasm = false,
+        .animation = false,
+        .texture = false,
+    };
+    try std.testing.expectEqualStrings("render-compute", getExecutorVariantName(plugins));
+}
+
+test "getExecutorVariantName: render-anim" {
+    const plugins = pngine.dsl.PluginSet{
+        .core = true,
+        .render = true,
+        .compute = false,
+        .wasm = false,
+        .animation = true,
+        .texture = false,
+    };
+    try std.testing.expectEqualStrings("render-anim", getExecutorVariantName(plugins));
+}
+
+test "getExecutorVariantName: render-compute-anim" {
+    const plugins = pngine.dsl.PluginSet{
+        .core = true,
+        .render = true,
+        .compute = true,
+        .wasm = false,
+        .animation = true,
+        .texture = false,
+    };
+    try std.testing.expectEqualStrings("render-compute-anim", getExecutorVariantName(plugins));
+}
+
+test "getExecutorVariantName: render-wasm" {
+    const plugins = pngine.dsl.PluginSet{
+        .core = true,
+        .render = true,
+        .compute = false,
+        .wasm = true,
+        .animation = false,
+        .texture = false,
+    };
+    try std.testing.expectEqualStrings("render-wasm", getExecutorVariantName(plugins));
+}
+
+test "getExecutorVariantName: full (all plugins)" {
+    const plugins = pngine.dsl.PluginSet{
+        .core = true,
+        .render = true,
+        .compute = true,
+        .wasm = true,
+        .animation = true,
+        .texture = true,
+    };
+    try std.testing.expectEqualStrings("full", getExecutorVariantName(plugins));
+}
+
+test "getExecutorVariantName: unknown combination falls back to full" {
+    // Texture only - not a pre-built variant
+    const plugins = pngine.dsl.PluginSet{
+        .core = true,
+        .render = false,
+        .compute = false,
+        .wasm = false,
+        .animation = false,
+        .texture = true,
+    };
+    try std.testing.expectEqualStrings("full", getExecutorVariantName(plugins));
+}
+
+test "getExecutorVariantName: deterministic for same input" {
+    // Property: same plugins always produce same variant name
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const random = prng.random();
+
+    for (0..100) |_| {
+        const plugins = pngine.dsl.PluginSet{
+            .core = true,
+            .render = random.boolean(),
+            .compute = random.boolean(),
+            .wasm = random.boolean(),
+            .animation = random.boolean(),
+            .texture = random.boolean(),
+        };
+
+        const name1 = getExecutorVariantName(plugins);
+        const name2 = getExecutorVariantName(plugins);
+
+        try std.testing.expectEqualStrings(name1, name2);
+    }
+}
+
+test "getExecutorVariantName: result is always a valid variant name" {
+    // Property: result is always one of the known variants
+    const valid_names = [_][]const u8{
+        "core",
+        "render",
+        "compute",
+        "render-compute",
+        "render-anim",
+        "render-compute-anim",
+        "render-wasm",
+        "full",
+    };
+
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const random = prng.random();
+
+    for (0..100) |_| {
+        const plugins = pngine.dsl.PluginSet{
+            .core = true,
+            .render = random.boolean(),
+            .compute = random.boolean(),
+            .wasm = random.boolean(),
+            .animation = random.boolean(),
+            .texture = random.boolean(),
+        };
+
+        const name = getExecutorVariantName(plugins);
+
+        var found = false;
+        for (valid_names) |valid| {
+            if (std.mem.eql(u8, name, valid)) {
+                found = true;
+                break;
+            }
+        }
+        try std.testing.expect(found);
+    }
+}
+
+test "loadExecutorWasm: returns error for missing file" {
+    // Property: missing executor file returns FileNotFound
+    const result = loadExecutorWasm(std.testing.allocator, "nonexistent-variant");
+    try std.testing.expectError(error.FileNotFound, result);
 }

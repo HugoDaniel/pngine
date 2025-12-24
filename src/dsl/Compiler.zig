@@ -954,3 +954,136 @@ test "E2E: compile with texture and sampler" {
     try testing.expect(has_sampler);
 }
 
+test "compileWithPlugins: returns valid bytecode and plugins" {
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); }" }
+        \\#shaderModule mod { code=shader }
+        \\#renderPipeline pipe {
+        \\  layout=auto
+        \\  vertex={ module=mod entryPoint="vs" }
+        \\}
+        \\#renderPass pass {
+        \\  colorAttachments=[{ view=contextCurrentTexture clearValue=[0 0 0 1] loadOp=clear storeOp=store }]
+        \\  pipeline=pipe
+        \\  draw=3
+        \\}
+        \\#frame main { perform=[pass] }
+    ;
+
+    var result = try Compiler.compileWithPlugins(testing.allocator, source, .{});
+    defer result.deinit(testing.allocator);
+
+    // Verify valid bytecode
+    try testing.expectEqualStrings("PNGB", result.pngb[0..4]);
+
+    // Verify render plugin detected
+    try testing.expect(result.plugins.render);
+}
+
+test "compileWithPlugins: detects compute plugin" {
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@compute @workgroup_size(64) fn main() {}" }
+        \\#shaderModule mod { code=shader }
+        \\#computePipeline pipe {
+        \\  layout=auto
+        \\  compute={ module=mod entryPoint="main" }
+        \\}
+        \\#computePass pass {
+        \\  pipeline=pipe
+        \\  dispatchWorkgroups=[1 1 1]
+        \\}
+        \\#frame main { perform=[pass] }
+    ;
+
+    var result = try Compiler.compileWithPlugins(testing.allocator, source, .{});
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("PNGB", result.pngb[0..4]);
+    try testing.expect(result.plugins.compute);
+}
+
+test "compileWithPlugins: detects animation plugin" {
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); }" }
+        \\#shaderModule mod { code=shader }
+        \\#renderPipeline pipe {
+        \\  layout=auto
+        \\  vertex={ module=mod entryPoint="vs" }
+        \\}
+        \\#renderPass pass {
+        \\  colorAttachments=[{ view=contextCurrentTexture clearValue=[0 0 0 1] loadOp=clear storeOp=store }]
+        \\  pipeline=pipe
+        \\  draw=3
+        \\}
+        \\#animation anim {
+        \\  duration=5.0
+        \\  timeline=[
+        \\    { at=0.0 scene=main }
+        \\  ]
+        \\}
+        \\#frame main { perform=[pass] }
+    ;
+
+    var result = try Compiler.compileWithPlugins(testing.allocator, source, .{});
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("PNGB", result.pngb[0..4]);
+    try testing.expect(result.plugins.animation);
+}
+
+test "compileWithPlugins: detects texture plugin" {
+    const source: [:0]const u8 =
+        \\#texture tex {
+        \\  width=256
+        \\  height=256
+        \\  format=rgba8unorm
+        \\  usage=[TEXTURE_BINDING]
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    var result = try Compiler.compileWithPlugins(testing.allocator, source, .{});
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("PNGB", result.pngb[0..4]);
+    try testing.expect(result.plugins.texture);
+}
+
+test "compileWithPlugins: minimal program has no plugins" {
+    const source: [:0]const u8 =
+        \\#frame main { perform=[] }
+    ;
+
+    var result = try Compiler.compileWithPlugins(testing.allocator, source, .{});
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("PNGB", result.pngb[0..4]);
+    try testing.expect(!result.plugins.render);
+    try testing.expect(!result.plugins.compute);
+    try testing.expect(!result.plugins.animation);
+    try testing.expect(!result.plugins.texture);
+    try testing.expect(!result.plugins.wasm);
+}
+
+test "compileWithPlugins: parse error is propagated" {
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="unclosed string
+    ;
+
+    const result = Compiler.compileWithPlugins(testing.allocator, source, .{});
+    try testing.expectError(error.ParseError, result);
+}
+
+test "compileWithPlugins: analysis error is propagated" {
+    // Referencing nonexistent shader module triggers undefined reference error
+    const source: [:0]const u8 =
+        \\#renderPipeline pipe {
+        \\  vertex={ module=nonexistent }
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const result = Compiler.compileWithPlugins(testing.allocator, source, .{});
+    try testing.expectError(error.AnalysisError, result);
+}
+

@@ -1294,3 +1294,106 @@ test "Analyzer: queue in perform resolves correctly" {
     }
     try testing.expect(found);
 }
+
+// ----------------------------------------------------------------------------
+// Plugin Detection Tests
+// ----------------------------------------------------------------------------
+
+test "Analyzer: detectPlugins - render only" {
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="fn vs() {}" }
+        \\#shaderModule mod { code=shader }
+        \\#renderPipeline pipe { vertex={ module=mod } }
+        \\#renderPass pass { pipeline=pipe colorAttachments=[{ view=contextCurrentTexture }] }
+        \\#frame main { perform=[pass] }
+    ;
+
+    var result = try parseAndAnalyze(source);
+    defer result.deinit(testing.allocator);
+
+    const plugins = result.detectPlugins();
+    try testing.expect(plugins.core);
+    try testing.expect(plugins.render);
+    try testing.expect(!plugins.compute);
+    try testing.expect(!plugins.texture);
+    try testing.expect(!plugins.wasm);
+    try testing.expect(!plugins.animation);
+}
+
+test "Analyzer: detectPlugins - compute only" {
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@compute fn main() {}" }
+        \\#shaderModule mod { code=shader }
+        \\#computePipeline pipe { compute={ module=mod } }
+        \\#computePass pass { pipeline=pipe dispatchWorkgroups=[1 1 1] }
+        \\#frame main { perform=[pass] }
+    ;
+
+    var result = try parseAndAnalyze(source);
+    defer result.deinit(testing.allocator);
+
+    const plugins = result.detectPlugins();
+    try testing.expect(plugins.core);
+    try testing.expect(!plugins.render);
+    try testing.expect(plugins.compute);
+    try testing.expect(!plugins.texture);
+    try testing.expect(!plugins.wasm);
+    try testing.expect(!plugins.animation);
+}
+
+test "Analyzer: detectPlugins - render and compute" {
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="fn main() {}" }
+        \\#shaderModule mod { code=shader }
+        \\#renderPipeline rpipe { vertex={ module=mod } }
+        \\#renderPass rpass { pipeline=rpipe colorAttachments=[{ view=contextCurrentTexture }] }
+        \\#computePipeline cpipe { compute={ module=mod } }
+        \\#computePass cpass { pipeline=cpipe dispatchWorkgroups=[1 1 1] }
+        \\#frame main { perform=[cpass rpass] }
+    ;
+
+    var result = try parseAndAnalyze(source);
+    defer result.deinit(testing.allocator);
+
+    const plugins = result.detectPlugins();
+    try testing.expect(plugins.core);
+    try testing.expect(plugins.render);
+    try testing.expect(plugins.compute);
+}
+
+test "Analyzer: detectPlugins - texture plugin" {
+    const source: [:0]const u8 =
+        \\#texture tex { size=[256 256] format=rgba8unorm }
+        \\#sampler samp {}
+        \\#wgsl shader { value="fn main() {}" }
+        \\#shaderModule mod { code=shader }
+        \\#renderPipeline pipe { vertex={ module=mod } }
+        \\#frame main { perform=[] }
+    ;
+
+    var result = try parseAndAnalyze(source);
+    defer result.deinit(testing.allocator);
+
+    const plugins = result.detectPlugins();
+    try testing.expect(plugins.core);
+    try testing.expect(plugins.render);
+    try testing.expect(plugins.texture);
+}
+
+test "Analyzer: detectPlugins - core only" {
+    const source: [:0]const u8 =
+        \\#buffer buf { size=64 usage=[uniform] }
+        \\#frame main { perform=[] }
+    ;
+
+    var result = try parseAndAnalyze(source);
+    defer result.deinit(testing.allocator);
+
+    const plugins = result.detectPlugins();
+    try testing.expect(plugins.core);
+    try testing.expect(!plugins.render);
+    try testing.expect(!plugins.compute);
+    try testing.expect(!plugins.texture);
+    try testing.expect(!plugins.wasm);
+    try testing.expect(!plugins.animation);
+}
