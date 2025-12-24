@@ -254,6 +254,7 @@ fn buildAndCacheResolvedCode(e: *Emitter, name: []const u8, code: []const u8, de
     if (deps.len == 0) {
         // No deps - just cache the code itself
         const cached = try e.gpa.dupe(u8, code);
+        errdefer e.gpa.free(cached); // Free if put fails
         try e.resolved_wgsl_cache.put(e.gpa, name, cached);
         return;
     }
@@ -314,6 +315,7 @@ fn buildAndCacheResolvedCode(e: *Emitter, name: []const u8, code: []const u8, de
     try result.appendSlice(e.gpa, code);
 
     const cached = try result.toOwnedSlice(e.gpa);
+    errdefer e.gpa.free(cached); // Free if put fails
     try e.resolved_wgsl_cache.put(e.gpa, name, cached);
 }
 
