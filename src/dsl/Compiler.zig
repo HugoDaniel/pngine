@@ -42,6 +42,8 @@ const Analyzer = @import("Analyzer.zig").Analyzer;
 const Emitter = @import("Emitter.zig").Emitter;
 const Ast = @import("Ast.zig").Ast;
 const ImportResolver = @import("ImportResolver.zig").ImportResolver;
+const format = @import("../bytecode/format.zig");
+pub const PluginSet = format.PluginSet;
 
 pub const Compiler = struct {
     const Self = @This();
@@ -88,6 +90,20 @@ pub const Compiler = struct {
         pub fn deinit(self: *CompileResult, gpa: Allocator) void {
             gpa.free(self.pngb);
             gpa.free(self.warnings);
+            self.* = undefined;
+        }
+    };
+
+    /// Result of compilation with plugin detection.
+    /// Used when embedding executor in payload.
+    pub const CompileWithPluginsResult = struct {
+        /// Compiled PNGB bytecode. Caller owns this memory.
+        pngb: []u8,
+        /// Detected plugin set based on DSL features used.
+        plugins: PluginSet,
+
+        pub fn deinit(self: *CompileWithPluginsResult, gpa: Allocator) void {
+            gpa.free(self.pngb);
             self.* = undefined;
         }
     };
@@ -171,6 +187,82 @@ pub const Compiler = struct {
         std.debug.assert(std.mem.eql(u8, pngb[0..4], "PNGB"));
 
         return pngb;
+    }
+
+    /// Compile DSL source and return bytecode with detected plugins.
+    ///
+    /// This is used when embedding executor in the payload, as the executor
+    /// variant is selected based on which plugins the DSL uses.
+    ///
+    /// Returns owned PNGB bytes and detected plugins.
+    pub fn compileWithPlugins(gpa: Allocator, source: [:0]const u8, options: Options) Error!CompileWithPluginsResult {
+        // Pre-condition
+        std.debug.assert(source.len == 0 or source[source.len] == 0);
+
+        // Phase 0: Resolve imports (if enabled and base_dir is set)
+        var resolved_source: ?[:0]u8 = null;
+        defer if (resolved_source) |s| gpa.free(s);
+
+        const actual_source = if (options.resolve_imports and options.base_dir != null) blk: {
+            var resolver = ImportResolver.init(gpa, options.base_dir.?);
+            defer resolver.deinit();
+
+            const file_path = options.file_path orelse "main.pngine";
+            resolved_source = resolver.resolve(source, file_path) catch |err| {
+                return switch (err) {
+                    error.ImportCycle => error.ImportCycle,
+                    error.ImportNotFound => error.ImportNotFound,
+                    error.InvalidImportPath => error.InvalidImportPath,
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.FileReadError => error.FileReadError,
+                };
+            };
+            break :blk resolved_source.?;
+        } else source;
+
+        // Phase 1: Parse
+        var ast = Parser.parse(gpa, actual_source) catch |err| {
+            return switch (err) {
+                error.ParseError => error.ParseError,
+                error.OutOfMemory => error.OutOfMemory,
+            };
+        };
+        defer ast.deinit(gpa);
+
+        // Phase 2: Analyze
+        var analysis = Analyzer.analyze(gpa, &ast) catch |err| {
+            return switch (err) {
+                error.AnalysisError => error.AnalysisError,
+                error.OutOfMemory => error.OutOfMemory,
+            };
+        };
+        defer analysis.deinit(gpa);
+
+        if (analysis.hasErrors()) {
+            std.debug.print("\nAnalysis errors ({d}):\n", .{analysis.errors.len});
+            for (analysis.errors) |err| {
+                std.debug.print("  - [{s}] {s}\n", .{ @tagName(err.kind), err.message });
+            }
+            return error.AnalysisError;
+        }
+
+        // Detect plugins BEFORE emitting (while analysis is still valid)
+        const plugins = analysis.detectPlugins();
+
+        // Phase 3: Emit PNGB
+        const pngb = try Emitter.emitWithOptions(gpa, &ast, &analysis, .{
+            .base_dir = options.base_dir,
+            .miniray_path = options.miniray_path,
+        });
+
+        // Post-condition: valid PNGB header
+        std.debug.assert(pngb.len >= 4);
+        std.debug.assert(std.mem.eql(u8, pngb[0..4], "PNGB"));
+
+        return .{
+            .pngb = pngb,
+            .plugins = plugins,
+        };
     }
 
     /// Compile DSL source from a non-sentinel-terminated slice.
@@ -796,7 +888,6 @@ test "E2E: compile simple_triangle to PNGB" {
     try testing.expectEqualStrings("PNGB", pngb[0..4]);
 
     // Property: bytecode section exists and contains expected opcodes.
-    const format = @import("../bytecode/format.zig");
     const opcodes = @import("../bytecode/opcodes.zig");
 
     var module = try format.deserialize(testing.allocator, pngb);
@@ -845,7 +936,6 @@ test "E2E: compile with texture and sampler" {
 
     try testing.expectEqualStrings("PNGB", pngb[0..4]);
 
-    const format = @import("../bytecode/format.zig");
     const opcodes = @import("../bytecode/opcodes.zig");
 
     var module = try format.deserialize(testing.allocator, pngb);

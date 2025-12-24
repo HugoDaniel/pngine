@@ -858,9 +858,7 @@ fn runBundle(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
                     defer allocator.free(asset_path);
 
                     // Read file content using the walker's directory handle
-                    const max_size = 10 * 1024 * 1024; // 10 MB
-                    const limit_opts: std.fs.File.OpenFlags.Lock = .limited(max_size);
-                    const content = dir.readFileAlloc(e.path, allocator, limit_opts) catch |err| {
+                    const content = dir.readFileAlloc(e.path, allocator, std.Io.Limit.limited(10 * 1024 * 1024)) catch |err| {
                         std.debug.print(
                             "Error: failed to read asset '{s}': {}\n",
                             .{ e.path, err },

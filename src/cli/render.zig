@@ -40,6 +40,8 @@ pub const Options = struct {
     render_frame: bool,
     /// true to embed WASM runtime in PNG (pNGr chunk) - creates self-contained executable
     embed_runtime: bool,
+    /// true to embed WASM executor in bytecode payload (v5 format)
+    embed_executor: bool,
     /// Optional scene/frame name to render (null = render all frames)
     scene_name: ?[]const u8,
 };
@@ -60,6 +62,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         .embed_explicit = false,
         .render_frame = false, // 1x1 transparent pixel by default
         .embed_runtime = true, // Embed WASM runtime by default for self-contained PNG
+        .embed_executor = false, // Don't embed executor in bytecode by default
         .scene_name = null, // Render all frames by default
     };
 
@@ -79,7 +82,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     defer if (opts.output_path == null) allocator.free(output);
 
     // Execute render pipeline
-    return executePipeline(allocator, opts.input_path, output, opts.width, opts.height, opts.time, opts.embed_bytecode, opts.render_frame, opts.embed_runtime, opts.scene_name);
+    return executePipeline(allocator, opts.input_path, output, opts.width, opts.height, opts.time, opts.embed_bytecode, opts.render_frame, opts.embed_runtime, opts.embed_executor, opts.scene_name);
 }
 
 /// Parse render command arguments.
@@ -135,6 +138,8 @@ fn parseArgs(args: []const []const u8, opts: *Options) u8 {
             opts.embed_explicit = true;
         } else if (std.mem.eql(u8, arg, "--no-runtime")) {
             opts.embed_runtime = false;
+        } else if (std.mem.eql(u8, arg, "--embed-executor")) {
+            opts.embed_executor = true;
         } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--scene")) {
             if (i + 1 >= args_len) {
                 std.debug.print("Error: -n requires a scene/frame name\n", .{});
@@ -213,16 +218,28 @@ fn executePipeline(
     embed_bytecode: bool,
     render_frame: bool,
     embed_runtime: bool,
+    embed_executor: bool,
     scene_name: ?[]const u8,
 ) !u8 {
     // Pre-conditions
     std.debug.assert(input.len > 0);
     std.debug.assert(output.len > 0);
 
-    // Read and compile source
-    const bytecode = compileFromFile(allocator, input) catch |compile_err| {
-        return handleCompileError(compile_err, input);
-    };
+    // Read and compile source (with plugin detection if embedding executor)
+    var bytecode: []u8 = undefined;
+    var plugins: ?pngine.dsl.PluginSet = null;
+
+    if (embed_executor) {
+        var result = compileFromFileWithPlugins(allocator, input) catch |compile_err| {
+            return handleCompileError(compile_err, input);
+        };
+        bytecode = result.pngb;
+        plugins = result.plugins;
+    } else {
+        bytecode = compileFromFile(allocator, input) catch |compile_err| {
+            return handleCompileError(compile_err, input);
+        };
+    }
     defer allocator.free(bytecode);
 
     if (bytecode.len < format.HEADER_SIZE or !std.mem.eql(u8, bytecode[0..4], format.MAGIC)) {
@@ -230,8 +247,22 @@ fn executePipeline(
         return 3;
     }
 
+    // Optionally embed executor WASM in bytecode (creates v5 format)
+    var final_bytecode = bytecode;
+    var executor_embedded = false;
+    if (embed_executor) {
+        if (plugins) |p| {
+            final_bytecode = embedExecutorInBytecode(allocator, bytecode, p) catch |err| {
+                std.debug.print("Error: failed to embed executor: {}\n", .{err});
+                return 4;
+            };
+            executor_embedded = true;
+        }
+    }
+    defer if (executor_embedded) allocator.free(final_bytecode);
+
     // Generate PNG (either rendered frame or 1x1 transparent pixel)
-    const png_result = generatePng(allocator, bytecode, width, height, time, render_frame, scene_name);
+    const png_result = generatePng(allocator, final_bytecode, width, height, time, render_frame, scene_name);
     if (png_result.exit_code != 0) return png_result.exit_code;
 
     var png_data = png_result.png_data;
@@ -239,7 +270,7 @@ fn executePipeline(
 
     // Optionally embed bytecode in PNG (pNGb chunk)
     if (embed_bytecode) {
-        png_data = embedBytecodeInPng(allocator, png_data, bytecode) catch |err| {
+        png_data = embedBytecodeInPng(allocator, png_data, final_bytecode) catch |err| {
             std.debug.print("Error: failed to embed bytecode: {}\n", .{err});
             return 4;
         };
@@ -264,7 +295,7 @@ fn executePipeline(
     };
 
     // Report success to user
-    printSuccessMessage(input, output, png_data.len, width, height, time, embed_bytecode, render_frame, embed_runtime and embedded_wasm.len > 0);
+    printSuccessMessage(input, output, png_data.len, width, height, time, embed_bytecode, render_frame, embed_runtime and embedded_wasm.len > 0, executor_embedded);
     return 0;
 }
 
@@ -273,6 +304,161 @@ fn compileFromFile(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     const source = try readSourceFile(allocator, input);
     defer allocator.free(source);
     return compileSource(allocator, input, source);
+}
+
+/// Compile source file and return bytecode with detected plugins.
+fn compileFromFileWithPlugins(allocator: std.mem.Allocator, input: []const u8) !pngine.dsl.Compiler.CompileWithPluginsResult {
+    const source = try readSourceFile(allocator, input);
+    defer allocator.free(source);
+
+    const base_dir = std.fs.path.dirname(input);
+    const miniray_path = findMinirayPath();
+
+    return pngine.dsl.Compiler.compileWithPlugins(allocator, source, .{
+        .base_dir = base_dir,
+        .miniray_path = miniray_path,
+    });
+}
+
+/// Embed executor WASM in bytecode, creating v5 format.
+///
+/// Loads the appropriate pre-built executor based on detected plugins,
+/// then re-serializes the bytecode with the executor embedded.
+fn embedExecutorInBytecode(allocator: std.mem.Allocator, bytecode: []const u8, plugins: pngine.dsl.PluginSet) ![]u8 {
+    // Pre-conditions
+    std.debug.assert(bytecode.len >= format.HEADER_SIZE);
+    std.debug.assert(std.mem.eql(u8, bytecode[0..4], format.MAGIC));
+
+    // Determine executor variant name based on plugins
+    const variant_name = getExecutorVariantName(plugins);
+
+    // Load executor WASM from filesystem
+    const executor_wasm = loadExecutorWasm(allocator, variant_name) catch |err| {
+        std.debug.print("Error: failed to load executor variant '{s}': {}\n", .{ variant_name, err });
+        std.debug.print("Hint: Run 'zig build executors' to build executor variants\n", .{});
+        return err;
+    };
+    defer allocator.free(executor_wasm);
+
+    // Validate WASM magic
+    if (executor_wasm.len < 8 or !std.mem.eql(u8, executor_wasm[0..4], &[_]u8{ 0x00, 0x61, 0x73, 0x6d })) {
+        std.debug.print("Error: invalid WASM file for executor '{s}'\n", .{variant_name});
+        return error.InvalidFormat;
+    }
+
+    // Deserialize original bytecode
+    var module = format.deserialize(allocator, bytecode) catch |err| {
+        std.debug.print("Error: failed to deserialize bytecode: {}\n", .{err});
+        return err;
+    };
+    defer module.deinit(allocator);
+
+    // Re-serialize with executor embedded
+    const result = format.serializeWithOptions(
+        allocator,
+        module.bytecode,
+        &module.strings,
+        &module.data,
+        &module.wgsl,
+        &module.uniforms,
+        &module.animation,
+        .{
+            .executor = executor_wasm,
+            .plugins = plugins,
+        },
+    ) catch |err| {
+        std.debug.print("Error: failed to serialize with executor: {}\n", .{err});
+        return err;
+    };
+
+    // Post-condition: result is v5 format with executor
+    std.debug.assert(result.len > bytecode.len);
+
+    return result;
+}
+
+/// Get executor variant name based on detected plugins.
+///
+/// Maps plugin combinations to pre-built executor variants.
+/// Falls back to "full" if no exact match is found.
+fn getExecutorVariantName(plugins: pngine.dsl.PluginSet) []const u8 {
+    // Check for exact matches against known variants
+    // Order matters: check more specific combinations first
+
+    if (plugins.render and plugins.compute and plugins.wasm and plugins.animation and plugins.texture) {
+        return "full";
+    }
+    if (plugins.render and plugins.compute and plugins.animation and !plugins.wasm and !plugins.texture) {
+        return "render-compute-anim";
+    }
+    if (plugins.render and plugins.animation and !plugins.compute and !plugins.wasm and !plugins.texture) {
+        return "render-anim";
+    }
+    if (plugins.render and plugins.wasm and !plugins.compute and !plugins.animation and !plugins.texture) {
+        return "render-wasm";
+    }
+    if (plugins.render and plugins.compute and !plugins.wasm and !plugins.animation and !plugins.texture) {
+        return "render-compute";
+    }
+    if (plugins.compute and !plugins.render and !plugins.wasm and !plugins.animation and !plugins.texture) {
+        return "compute";
+    }
+    if (plugins.render and !plugins.compute and !plugins.wasm and !plugins.animation and !plugins.texture) {
+        return "render";
+    }
+    if (!plugins.render and !plugins.compute and !plugins.wasm and !plugins.animation and !plugins.texture) {
+        return "core";
+    }
+
+    // No exact match - fall back to full variant
+    return "full";
+}
+
+/// Load executor WASM from filesystem.
+///
+/// Looks for pre-built executors in:
+/// 1. zig-out/executors/ (development)
+/// 2. Relative to CLI binary location
+fn loadExecutorWasm(allocator: std.mem.Allocator, variant_name: []const u8) ![]u8 {
+    // Pre-condition
+    std.debug.assert(variant_name.len > 0);
+
+    // Try development path first: zig-out/executors/pngine-{variant}.wasm
+    var path_buf: [256]u8 = undefined;
+    const dev_path = std.fmt.bufPrint(&path_buf, "zig-out/executors/pngine-{s}.wasm", .{variant_name}) catch {
+        return error.InvalidFormat;
+    };
+
+    const file = std.fs.cwd().openFile(dev_path, .{}) catch |err| {
+        // Try alternate paths if development path doesn't exist
+        if (err == error.FileNotFound) {
+            // Could add more search paths here (e.g., relative to binary)
+            return error.FileNotFound;
+        }
+        return err;
+    };
+    defer file.close();
+
+    const stat = try file.stat();
+    const size: u32 = if (stat.size > max_file_size)
+        return error.FileTooLarge
+    else
+        @intCast(stat.size);
+
+    const buffer = try allocator.alloc(u8, size);
+    errdefer allocator.free(buffer);
+
+    var bytes_read: u32 = 0;
+    for (0..size + 1) |_| {
+        if (bytes_read >= size) break;
+        const n: u32 = @intCast(try file.read(buffer[bytes_read..]));
+        if (n == 0) break;
+        bytes_read += n;
+    }
+
+    // Post-condition
+    std.debug.assert(buffer.len == size);
+    return buffer;
 }
 
 /// Handle compilation errors with appropriate messages.
@@ -382,6 +568,7 @@ fn printSuccessMessage(
     embed_bytecode: bool,
     render_frame: bool,
     runtime_embedded: bool,
+    executor_embedded: bool,
 ) void {
     // Build flags string
     var flags_buf: [64]u8 = undefined;
@@ -389,6 +576,15 @@ fn printSuccessMessage(
 
     if (embed_bytecode) {
         const text = "bytecode";
+        @memcpy(flags_buf[flags_len..][0..text.len], text);
+        flags_len += text.len;
+    }
+    if (executor_embedded) {
+        if (flags_len > 0) {
+            flags_buf[flags_len] = '+';
+            flags_len += 1;
+        }
+        const text = "executor";
         @memcpy(flags_buf[flags_len..][0..text.len], text);
         flags_len += text.len;
     }
@@ -597,15 +793,22 @@ pub fn printUsage() void {
         \\  -e, --embed               Embed bytecode in output PNG (default: on)
         \\  --no-embed                Do not embed bytecode
         \\  --no-runtime              Do not embed WASM runtime (smaller PNG, requires external pngine.wasm)
+        \\  --embed-executor          Embed minimal WASM executor in bytecode (v5 format)
         \\  -h, --help                Show this help
         \\
         \\By default, output PNG includes both bytecode (pNGb) and WASM runtime (pNGr),
         \\creating a self-contained executable image (~30KB). Use --no-runtime to create
         \\a smaller PNG (~500 bytes) that requires an external pngine.wasm file.
         \\
+        \\The --embed-executor option embeds a minimal WASM executor directly in the
+        \\bytecode payload. The executor variant is automatically selected based on
+        \\which DSL features are used (render, compute, etc.). This creates a fully
+        \\self-contained payload that doesn't require any external runtime.
+        \\
         \\Examples:
         \\  pngine shader.pngine                       # Self-contained PNG with runtime (~30KB)
         \\  pngine shader.pngine --no-runtime          # Smaller PNG, needs external WASM (~500 bytes)
+        \\  pngine shader.pngine --embed-executor      # Embed minimal executor in bytecode
         \\  pngine shader.pngine --frame               # Render 512x512 preview with runtime
         \\  pngine shader.pngine --frame -s 1920x1080  # Render at 1080p
         \\  pngine shader.pngine --frame -t 2.5        # Render at t=2.5 seconds
