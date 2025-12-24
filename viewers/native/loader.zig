@@ -81,9 +81,14 @@ pub const Payload = struct {
 
 /// Load PNG file and extract payload.
 ///
+/// Complexity: O(n) where n = file size.
+///
 /// Pre-condition: path points to valid PNG file
 /// Post-condition: Returns payload info, caller owns memory
 pub fn loadPNG(allocator: std.mem.Allocator, path: []const u8) Error!Payload {
+    // Pre-condition: path must be non-empty
+    std.debug.assert(path.len > 0);
+
     // Open file
     const file = std.fs.cwd().openFile(path, .{}) catch |err| {
         return switch (err) {
@@ -102,9 +107,10 @@ pub fn loadPNG(allocator: std.mem.Allocator, path: []const u8) Error!Payload {
     const png_data = allocator.alloc(u8, size) catch return Error.OutOfMemory;
     errdefer allocator.free(png_data);
 
-    // Read in a loop (standard pattern)
+    // Read in bounded loop (max iterations = size to prevent infinite loop)
     var bytes_read: usize = 0;
-    while (bytes_read < size) {
+    for (0..size + 1) |_| {
+        if (bytes_read >= size) break;
         const n = file.read(png_data[bytes_read..]) catch return Error.IoError;
         if (n == 0) break;
         bytes_read += n;
@@ -130,9 +136,14 @@ pub fn loadPNG(allocator: std.mem.Allocator, path: []const u8) Error!Payload {
 
 /// Parse PNGB payload data.
 ///
-/// Pre-condition: data is valid PNGB payload
-/// Post-condition: Returns parsed payload info
+/// Complexity: O(1) - just reads header fields.
+///
+/// Pre-condition: data contains PNGB payload bytes
+/// Post-condition: Returns parsed payload with valid slices into data
 pub fn parsePayload(data: []const u8) Error!Payload {
+    // Pre-condition: data length is bounded (can't parse empty data)
+    // Note: actual minimum size check happens below with proper error
+
     // Check minimum size
     if (data.len < HEADER_SIZE_V4) {
         return Error.InvalidPngbFormat;
@@ -146,17 +157,25 @@ pub fn parsePayload(data: []const u8) Error!Payload {
     // Read version
     const version = std.mem.readInt(u16, data[4..6], .little);
 
-    if (version == VERSION_V5) {
-        return parseV5Payload(data);
-    } else if (version == VERSION_V4) {
-        return parseV4Payload(data);
-    } else {
+    const result = if (version == VERSION_V5)
+        try parseV5Payload(data)
+    else if (version == VERSION_V4)
+        try parseV4Payload(data)
+    else
         return Error.InvalidPngbVersion;
-    }
+
+    // Post-condition: result refers to input data
+    std.debug.assert(result.raw_data.ptr == data.ptr);
+    std.debug.assert(result.raw_data.len == data.len);
+
+    return result;
 }
 
 /// Parse v5 payload (40-byte header with embedded executor support).
 fn parseV5Payload(data: []const u8) Error!Payload {
+    // Pre-condition: minimum size already checked by caller
+    std.debug.assert(data.len >= HEADER_SIZE_V4);
+
     if (data.len < HEADER_SIZE_V5) {
         return Error.InvalidPngbFormat;
     }
@@ -188,6 +207,10 @@ fn parseV5Payload(data: []const u8) Error!Payload {
     else
         &[0]u8{};
 
+    // Post-condition: bytecode slice is within bounds
+    std.debug.assert(bytecode_start <= bytecode_end);
+    std.debug.assert(bytecode_end <= data.len);
+
     return Payload{
         .version = VERSION_V5,
         .flags = flags,
@@ -203,6 +226,9 @@ fn parseV5Payload(data: []const u8) Error!Payload {
 
 /// Parse v4 payload (28-byte header, no embedded executor).
 fn parseV4Payload(data: []const u8) Error!Payload {
+    // Pre-condition: magic already verified by caller
+    std.debug.assert(std.mem.eql(u8, data[0..4], &PNGB_MAGIC));
+
     if (data.len < HEADER_SIZE_V4) {
         return Error.InvalidPngbFormat;
     }
@@ -217,6 +243,10 @@ fn parseV4Payload(data: []const u8) Error!Payload {
     if (bytecode_end > data.len or bytecode_start > bytecode_end) {
         return Error.InvalidPngbFormat;
     }
+
+    // Post-condition: bytecode slice is within bounds
+    std.debug.assert(bytecode_start <= bytecode_end);
+    std.debug.assert(bytecode_end <= data.len);
 
     return Payload{
         .version = VERSION_V4,

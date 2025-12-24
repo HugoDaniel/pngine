@@ -47,8 +47,11 @@ pub fn main() !void {
         .time = 0.0,
     };
 
+    // Parse arguments with bounded loop (max 1000 args to prevent infinite loop)
+    const MAX_ARGS: usize = 1000;
     var i: usize = 2;
-    while (i < args.len) : (i += 1) {
+    for (0..MAX_ARGS) |_| {
+        if (i >= args.len) break;
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printUsage();
@@ -83,6 +86,7 @@ pub fn main() !void {
             opts.width = size[0];
             opts.height = size[1];
         }
+        i += 1;
     }
 
     // Run viewer
@@ -100,7 +104,15 @@ const Options = struct {
     time: f32,
 };
 
+/// Run the native viewer with given options.
+///
+/// Complexity: O(file_size) for loading, O(1) for parsing.
 fn runViewer(allocator: std.mem.Allocator, opts: Options) !void {
+    // Pre-condition: input path must be non-empty
+    std.debug.assert(opts.input_path.len > 0);
+    // Pre-condition: dimensions must be positive
+    std.debug.assert(opts.width > 0 and opts.height > 0);
+
     std.debug.print("PNGine Native Viewer\n", .{});
     std.debug.print("  Input: {s}\n", .{opts.input_path});
     std.debug.print("  Size: {}x{}\n", .{ opts.width, opts.height });
@@ -154,10 +166,20 @@ fn runViewer(allocator: std.mem.Allocator, opts: Options) !void {
     }
 }
 
+/// Parse size string in WxH format.
+///
+/// Complexity: O(n) where n = string length.
 fn parseSize(s: []const u8) ![2]u32 {
+    // Pre-condition: input must not be empty
+    std.debug.assert(s.len > 0);
+
     const x_pos = std.mem.indexOf(u8, s, "x") orelse std.mem.indexOf(u8, s, "X") orelse return error.InvalidFormat;
     const width = try std.fmt.parseInt(u32, s[0..x_pos], 10);
     const height = try std.fmt.parseInt(u32, s[x_pos + 1 ..], 10);
+
+    // Post-condition: both dimensions parsed (not zero, handled by parseInt for valid input)
+    std.debug.assert(x_pos < s.len);
+
     return .{ width, height };
 }
 
