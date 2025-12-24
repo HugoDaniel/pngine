@@ -95,10 +95,14 @@ fn run(allocator: std.mem.Allocator) !u8 {
         return runList(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "render")) {
         return render_cmd.run(allocator, args[2..]);
-    } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
+    } else if (std.mem.eql(u8, command, "help") or
+        std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h"))
+    {
         printUsage();
         return 0;
-    } else if (std.mem.eql(u8, command, "version") or std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
+    } else if (std.mem.eql(u8, command, "version") or
+        std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v"))
+    {
         printVersion();
         return 0;
     } else {
@@ -414,8 +418,11 @@ fn printExecutionSummary(calls: []const Call, module: *const format.Module) u8 {
     // Validate bind group setup before draw calls
     const bind_group_warnings = validateBindGroupSetup(calls);
     if (bind_group_warnings > 0) {
-        std.debug.print("\nWarning: {d} draw call(s) may have missing bind groups\n", .{bind_group_warnings});
-        std.debug.print("  Ensure bindGroups=[...] is set in render pass definitions\n", .{});
+        std.debug.print(
+            "\nWarning: {d} draw call(s) may have missing bind groups\n",
+            .{bind_group_warnings},
+        );
+        std.debug.print("  Ensure bindGroups=[...] is set in render passes\n", .{});
     }
 
     return 0;
@@ -448,9 +455,10 @@ fn parseEmbedArgs(args: []const []const u8) ?EmbedArgs {
             output_path = args[i + 1];
         } else if (arg.len > 0 and arg[0] == '-') {
             // Skip -o's value (already processed above)
-            if (idx > 0 and (std.mem.eql(u8, args[idx - 1], "-o") or std.mem.eql(u8, args[idx - 1], "--output"))) {
-                continue;
-            }
+            const prev = if (idx > 0) args[idx - 1] else "";
+            const is_output_val = std.mem.eql(u8, prev, "-o") or
+                std.mem.eql(u8, prev, "--output");
+            if (is_output_val) continue;
             std.debug.print("Unknown option: {s}\n", .{arg});
             return null;
         } else {
@@ -482,7 +490,8 @@ fn runEmbed(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     const parsed = parseEmbedArgs(args) orelse return 1;
 
     // Derive output path if not specified
-    const output = parsed.output_path orelse deriveEmbedOutputPath(allocator, parsed.png_path) catch |err| {
+    const derived = deriveEmbedOutputPath(allocator, parsed.png_path);
+    const output = parsed.output_path orelse derived catch |err| {
         std.debug.print("Error: failed to derive output path: {}\n", .{err});
         return 2;
     };
@@ -493,7 +502,12 @@ fn runEmbed(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
 }
 
 /// Execute the embed operation after argument parsing.
-fn executeEmbed(allocator: std.mem.Allocator, png_input: []const u8, pngb_input: []const u8, output: []const u8) u8 {
+fn executeEmbed(
+    allocator: std.mem.Allocator,
+    png_input: []const u8,
+    pngb_input: []const u8,
+    output: []const u8,
+) u8 {
     // Pre-conditions
     std.debug.assert(png_input.len > 0);
     std.debug.assert(pngb_input.len > 0);
@@ -605,10 +619,15 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
                 std.debug.print("Error: failed to extract from ZIP: {}\n", .{err});
                 return 4;
             };
-        } else if (file_data.len >= 8 and std.mem.eql(u8, file_data[0..8], &pngine.png.PNG_SIGNATURE)) {
+        } else if (file_data.len >= 8 and
+            std.mem.eql(u8, file_data[0..8], &pngine.png.PNG_SIGNATURE))
+        {
             // Extract from PNG
             if (!pngine.png.hasPngb(file_data)) {
-                std.debug.print("Error: '{s}' does not contain embedded bytecode (no pNGb chunk)\n", .{input});
+                std.debug.print(
+                    "Error: '{s}' has no embedded bytecode (missing pNGb chunk)\n",
+                    .{input},
+                );
                 return 4;
             }
             break :blk pngine.png.extractBytecode(allocator, file_data) catch |err| {
@@ -750,7 +769,10 @@ fn runBundle(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
 
     if (input_path == null) {
         std.debug.print("Error: no input file specified\n\n", .{});
-        std.debug.print("Usage: pngine bundle <input.pngine> [-o output.zip] [--assets dir] [--no-runtime]\n", .{});
+        std.debug.print(
+            "Usage: pngine bundle <input> [-o output.zip] [--assets dir]\n",
+            .{},
+        );
         return 1;
     }
 
@@ -801,7 +823,10 @@ fn runBundle(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     var assets_count: u32 = 0;
     if (assets_dir) |dir_path| {
         var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| {
-            std.debug.print("Error: failed to open assets directory '{s}': {}\n", .{ dir_path, err });
+            std.debug.print(
+                "Error: failed to open assets directory '{s}': {}\n",
+                .{ dir_path, err },
+            );
             return 2;
         };
         defer dir.close();
@@ -822,21 +847,31 @@ fn runBundle(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
             if (entry) |e| {
                 if (e.kind == .file) {
                     // Build path: assets/<relative_path>
-                    const asset_path = std.fmt.allocPrint(allocator, "assets/{s}", .{e.path}) catch |err| {
+                    const asset_path = std.fmt.allocPrint(
+                        allocator,
+                        "assets/{s}",
+                        .{e.path},
+                    ) catch |err| {
                         std.debug.print("Error: out of memory: {}\n", .{err});
                         return 4;
                     };
                     defer allocator.free(asset_path);
 
                     // Read file content using the walker's directory handle
-                    const content = dir.readFileAlloc(e.path, allocator, .limited(10 * 1024 * 1024)) catch |err| {
-                        std.debug.print("Error: failed to read asset '{s}': {}\n", .{ e.path, err });
+                    const max_size = 10 * 1024 * 1024; // 10 MB
+                    const limit_opts: std.fs.File.OpenFlags.Lock = .limited(max_size);
+                    const content = dir.readFileAlloc(e.path, allocator, limit_opts) catch |err| {
+                        std.debug.print(
+                            "Error: failed to read asset '{s}': {}\n",
+                            .{ e.path, err },
+                        );
                         return 2;
                     };
                     defer allocator.free(content);
 
-                    // Add to ZIP (use store for already-compressed files, deflate otherwise)
-                    const method: zip.CompressionMethod = if (isCompressedExtension(e.basename)) .store else .deflate;
+                    // Add to ZIP (store for already-compressed files, deflate otherwise)
+                    const compressed = isCompressedExtension(e.basename);
+                    const method: zip.CompressionMethod = if (compressed) .store else .deflate;
                     writer.addFile(asset_path, content, method) catch |err| {
                         std.debug.print("Error: failed to add asset '{s}': {}\n", .{ e.path, err });
                         return 4;
@@ -876,9 +911,15 @@ fn runBundle(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     };
 
     if (assets_count > 0) {
-        std.debug.print("Bundled {s} -> {s} ({d} bytes, {d} assets)\n", .{ input, output, zip_data.len, assets_count });
+        std.debug.print(
+            "Bundled {s} -> {s} ({d} bytes, {d} assets)\n",
+            .{ input, output, zip_data.len, assets_count },
+        );
     } else {
-        std.debug.print("Bundled {s} -> {s} ({d} bytes)\n", .{ input, output, zip_data.len });
+        std.debug.print(
+            "Bundled {s} -> {s} ({d} bytes)\n",
+            .{ input, output, zip_data.len },
+        );
     }
     return 0;
 }
@@ -955,7 +996,10 @@ fn listZipContents(allocator: std.mem.Allocator, input: []const u8, data: []cons
 
     // Print totals
     std.debug.print("  {s:-<40} {s:->12} {s:->12}\n", .{ "", "", "" });
-    std.debug.print("  {s:<40} {d:>12} {d:>12}\n", .{ "Total", total_compressed, total_uncompressed });
+    std.debug.print(
+        "  {s:<40} {d:>12} {d:>12}\n",
+        .{ "Total", total_compressed, total_uncompressed },
+    );
 
     return 0;
 }
@@ -1075,17 +1119,22 @@ fn reportEntryPoints(calls: []const Call, module: *const format.Module) void {
                 // Parse JSON to find entry points
                 if (findJsonString(data, "\"vertex\"") != null) {
                     if (!reported_any) {
-                        std.debug.print("\nEntry points (verify these match shader functions):\n", .{});
+                        std.debug.print(
+                            "\nEntry points (verify these match shader functions):\n",
+                            .{},
+                        );
                         reported_any = true;
                     }
 
                     // Extract vertex entry point
                     if (findEntryPointVertex(data)) |ep| {
-                        std.debug.print("  Pipeline {d} vertex: {s}\n", .{ call.params.create_render_pipeline.pipeline_id, ep });
+                        const pid = call.params.create_render_pipeline.pipeline_id;
+                        std.debug.print("  Pipeline {d} vertex: {s}\n", .{ pid, ep });
                     }
                     // Extract fragment entry point
                     if (findEntryPointFragment(data)) |ep| {
-                        std.debug.print("  Pipeline {d} fragment: {s}\n", .{ call.params.create_render_pipeline.pipeline_id, ep });
+                        const pid = call.params.create_render_pipeline.pipeline_id;
+                        std.debug.print("  Pipeline {d} fragment: {s}\n", .{ pid, ep });
                     }
                 }
             },
@@ -1095,12 +1144,16 @@ fn reportEntryPoints(calls: []const Call, module: *const format.Module) void {
 
                 if (findJsonString(data, "\"compute\"") != null) {
                     if (!reported_any) {
-                        std.debug.print("\nEntry points (verify these match shader functions):\n", .{});
+                        std.debug.print(
+                            "\nEntry points (verify these match shader functions):\n",
+                            .{},
+                        );
                         reported_any = true;
                     }
 
                     if (findEntryPointCompute(data)) |ep| {
-                        std.debug.print("  Pipeline {d} compute: {s}\n", .{ call.params.create_compute_pipeline.pipeline_id, ep });
+                        const pid = call.params.create_compute_pipeline.pipeline_id;
+                        std.debug.print("  Pipeline {d} compute: {s}\n", .{ pid, ep });
                     }
                 }
             },
@@ -1220,7 +1273,10 @@ fn validateDescriptors(calls: []const Call, module: *const format.Module) u32 {
                 const data = module.data.get(@enumFromInt(data_id));
 
                 if (data.len < 2) {
-                    std.debug.print("  Error: texture descriptor too short ({d} bytes)\n", .{data.len});
+                    std.debug.print(
+                        "  Error: texture descriptor too short ({d} bytes)\n",
+                        .{data.len},
+                    );
                     error_count += 1;
                     continue;
                 }
@@ -1228,7 +1284,10 @@ fn validateDescriptors(calls: []const Call, module: *const format.Module) u32 {
                 // Validate type tag
                 const type_tag = data[0];
                 if (type_tag != @intFromEnum(DescriptorEncoder.DescriptorType.texture)) {
-                    std.debug.print("  Error: texture descriptor has invalid type tag 0x{X:0>2} (expected 0x01)\n", .{type_tag});
+                    std.debug.print(
+                        "  Error: texture descriptor has invalid type tag 0x{X:0>2}\n",
+                        .{type_tag},
+                    );
                     error_count += 1;
                 }
             },
@@ -1237,7 +1296,10 @@ fn validateDescriptors(calls: []const Call, module: *const format.Module) u32 {
                 const data = module.data.get(@enumFromInt(data_id));
 
                 if (data.len < 2) {
-                    std.debug.print("  Error: sampler descriptor too short ({d} bytes)\n", .{data.len});
+                    std.debug.print(
+                        "  Error: sampler descriptor too short ({d} bytes)\n",
+                        .{data.len},
+                    );
                     error_count += 1;
                     continue;
                 }
@@ -1245,7 +1307,10 @@ fn validateDescriptors(calls: []const Call, module: *const format.Module) u32 {
                 // Validate type tag
                 const type_tag = data[0];
                 if (type_tag != @intFromEnum(DescriptorEncoder.DescriptorType.sampler)) {
-                    std.debug.print("  Error: sampler descriptor has invalid type tag 0x{X:0>2} (expected 0x02)\n", .{type_tag});
+                    std.debug.print(
+                        "  Error: sampler descriptor has invalid type tag 0x{X:0>2}\n",
+                        .{type_tag},
+                    );
                     error_count += 1;
                 }
             },
@@ -1254,7 +1319,10 @@ fn validateDescriptors(calls: []const Call, module: *const format.Module) u32 {
                 const data = module.data.get(@enumFromInt(data_id));
 
                 if (data.len < 2) {
-                    std.debug.print("  Error: bind group descriptor too short ({d} bytes)\n", .{data.len});
+                    std.debug.print(
+                        "  Error: bind group descriptor too short ({d} bytes)\n",
+                        .{data.len},
+                    );
                     error_count += 1;
                     continue;
                 }
@@ -1262,7 +1330,10 @@ fn validateDescriptors(calls: []const Call, module: *const format.Module) u32 {
                 // Validate type tag
                 const type_tag = data[0];
                 if (type_tag != @intFromEnum(DescriptorEncoder.DescriptorType.bind_group)) {
-                    std.debug.print("  Error: bind group descriptor has invalid type tag 0x{X:0>2} (expected 0x03)\n", .{type_tag});
+                    std.debug.print(
+                        "  Error: bind group descriptor has invalid type tag 0x{X:0>2}\n",
+                        .{type_tag},
+                    );
                     error_count += 1;
                     continue;
                 }
@@ -1270,7 +1341,10 @@ fn validateDescriptors(calls: []const Call, module: *const format.Module) u32 {
                 // Validate field count is at least 2 (layout + entries)
                 const field_count = data[1];
                 if (field_count < 2) {
-                    std.debug.print("  Error: bind group descriptor has invalid field count {d} (expected >= 2)\n", .{field_count});
+                    std.debug.print(
+                        "  Error: bind group has invalid field count {d} (expected >= 2)\n",
+                        .{field_count},
+                    );
                     error_count += 1;
                 }
             },
@@ -1324,7 +1398,10 @@ fn validateBindGroupSetup(calls: []const Call) u32 {
                     // This is a heuristic - we warn but don't error since some
                     // pipelines legitimately don't use bind groups
                     warning_count += 1;
-                    std.debug.print("  Warning: draw call without set_bind_group (may be intentional)\n", .{});
+                    std.debug.print(
+                        "  Warning: draw call without set_bind_group\n",
+                        .{},
+                    );
                 }
             },
             else => {},

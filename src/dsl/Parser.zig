@@ -535,6 +535,62 @@ pub const Parser = struct {
         std.debug.assert(tasks.items.len == tasks_len_before + 1);
     }
 
+    /// Create property node and append to scratch. Common pattern in object parsing.
+    fn addPropertyToScratch(self: *Self, key_token: u32, value: Node.Index) Error!void {
+        const prop = try self.addNode(.{
+            .tag = .property,
+            .main_token = key_token,
+            .data = .{ .node = value },
+        });
+        try self.scratch.append(self.gpa, prop.toInt());
+    }
+
+    /// Parse identifier value, checking for math constants and special patterns.
+    /// Returns the parsed value node and its tag type.
+    fn parseIdentifierAsValue(self: *Self) Error!Node.Index {
+        // Check for builtin ref pattern (canvas.width, time.total)
+        if (self.isBuiltinRefPattern()) {
+            return try self.parseBuiltinRef();
+        }
+        // Check for uniform access pattern (module.varName)
+        if (self.isUniformAccessPattern()) {
+            return try self.parseUniformAccess();
+        }
+        // Check if identifier is a math constant (PI, E, TAU)
+        const token_start = self.tokens.items(.start)[self.tok_i];
+        const token_end = if (self.tok_i + 1 < self.tokens.len)
+            self.tokens.items(.start)[self.tok_i + 1]
+        else
+            @as(u32, @intCast(self.source.len));
+        const text = std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r");
+        const node_tag: Node.Tag = if (isMathConstant(text)) .number_value else .identifier_value;
+        return try self.parseSimpleValue(node_tag);
+    }
+
+    /// Parse unary negation in array context: -NUM or -(expr).
+    fn parseArrayNegation(self: *Self) Error!Node.Index {
+        const minus_token = self.tok_i;
+        self.tok_i += 1; // consume -
+        if (self.currentTag() == .number_literal) {
+            const operand = try self.parseSimpleValue(.number_value);
+            return try self.addNode(.{
+                .tag = .expr_negate,
+                .main_token = minus_token,
+                .data = .{ .node = operand },
+            });
+        } else if (self.currentTag() == .l_paren) {
+            // Allow -(expr) for explicit negated expressions
+            const expr = try self.parseExpression() orelse return error.ParseError;
+            return try self.addNode(.{
+                .tag = .expr_negate,
+                .main_token = minus_token,
+                .data = .{ .node = expr },
+            });
+        } else {
+            return error.ParseError;
+        }
+    }
+
     /// Process array task. Returns true when array is complete.
     fn processArrayTask(
         self: *Self,
@@ -597,57 +653,16 @@ pub const Parser = struct {
             .minus => {
                 // Unary negation in array: [-1, -2]
                 // Don't use parseExpression to avoid "-1 -2" becoming "-1 - 2"
-                const minus_token = self.tok_i;
-                self.tok_i += 1; // consume -
-                if (self.currentTag() == .number_literal) {
-                    const operand = try self.parseSimpleValue(.number_value);
-                    const elem = try self.addNode(.{
-                        .tag = .expr_negate,
-                        .main_token = minus_token,
-                        .data = .{ .node = operand },
-                    });
-                    try self.scratch.append(self.gpa, elem.toInt());
-                } else if (self.currentTag() == .l_paren) {
-                    // Allow -(expr) for explicit negated expressions
-                    if (try self.parseExpression()) |expr| {
-                        const elem = try self.addNode(.{
-                            .tag = .expr_negate,
-                            .main_token = minus_token,
-                            .data = .{ .node = expr },
-                        });
-                        try self.scratch.append(self.gpa, elem.toInt());
-                    } else {
-                        return error.ParseError;
-                    }
-                } else {
-                    return error.ParseError;
-                }
+                const elem = try self.parseArrayNegation();
+                try self.scratch.append(self.gpa, elem.toInt());
             },
             .boolean_literal => {
                 const elem = try self.parseSimpleValue(.boolean_value);
                 try self.scratch.append(self.gpa, elem.toInt());
             },
             .identifier => {
-                // Check for builtin ref pattern (canvas.width, time.total)
-                if (self.isBuiltinRefPattern()) {
-                    const elem = try self.parseBuiltinRef();
-                    try self.scratch.append(self.gpa, elem.toInt());
-                } else if (self.isUniformAccessPattern()) {
-                    // Check for uniform access pattern (module.varName)
-                    const elem = try self.parseUniformAccess();
-                    try self.scratch.append(self.gpa, elem.toInt());
-                } else {
-                    // Check if identifier is a math constant (PI, E, TAU)
-                    const token_start = self.tokens.items(.start)[self.tok_i];
-                    const token_end = if (self.tok_i + 1 < self.tokens.len)
-                        self.tokens.items(.start)[self.tok_i + 1]
-                    else
-                        @as(u32, @intCast(self.source.len));
-                    const text = std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r");
-                    const node_tag: Node.Tag = if (isMathConstant(text)) .number_value else .identifier_value;
-                    const elem = try self.parseSimpleValue(node_tag);
-                    try self.scratch.append(self.gpa, elem.toInt());
-                }
+                const elem = try self.parseIdentifierAsValue();
+                try self.scratch.append(self.gpa, elem.toInt());
             },
             .l_bracket, .l_brace => {
                 // Nested container - push task (result will come later)
@@ -700,17 +715,12 @@ pub const Parser = struct {
         if (self.currentTag() != .equals) return error.ParseError;
         self.tok_i += 1; // consume =
 
-        // Parse value
+        // Parse value and create property
         const value_tag = self.currentTag();
         switch (value_tag) {
             .string_literal => {
                 const value = try self.parseSimpleValue(.string_value);
-                const prop = try self.addNode(.{
-                    .tag = .property,
-                    .main_token = key_token,
-                    .data = .{ .node = value },
-                });
-                try self.scratch.append(self.gpa, prop.toInt());
+                try self.addPropertyToScratch(key_token, value);
             },
             .number_literal => {
                 // Try to parse as expression first (e.g., size=1+2)
@@ -718,66 +728,25 @@ pub const Parser = struct {
                     expr
                 else
                     try self.parseSimpleValue(.number_value);
-                const prop = try self.addNode(.{
-                    .tag = .property,
-                    .main_token = key_token,
-                    .data = .{ .node = value },
-                });
-                try self.scratch.append(self.gpa, prop.toInt());
+                try self.addPropertyToScratch(key_token, value);
             },
             .l_paren => {
                 // Grouped expression: size=(1+2)
                 const value = try self.parseExpression() orelse return error.ParseError;
-                const prop = try self.addNode(.{
-                    .tag = .property,
-                    .main_token = key_token,
-                    .data = .{ .node = value },
-                });
-                try self.scratch.append(self.gpa, prop.toInt());
+                try self.addPropertyToScratch(key_token, value);
             },
             .minus => {
                 // Unary negation: offset=-10
                 const value = try self.parseExpression() orelse return error.ParseError;
-                const prop = try self.addNode(.{
-                    .tag = .property,
-                    .main_token = key_token,
-                    .data = .{ .node = value },
-                });
-                try self.scratch.append(self.gpa, prop.toInt());
+                try self.addPropertyToScratch(key_token, value);
             },
             .boolean_literal => {
                 const value = try self.parseSimpleValue(.boolean_value);
-                const prop = try self.addNode(.{
-                    .tag = .property,
-                    .main_token = key_token,
-                    .data = .{ .node = value },
-                });
-                try self.scratch.append(self.gpa, prop.toInt());
+                try self.addPropertyToScratch(key_token, value);
             },
             .identifier => {
-                // Check for builtin ref pattern (canvas.width, time.total)
-                // or uniform access pattern (module.varName)
-                const value = if (self.isBuiltinRefPattern())
-                    try self.parseBuiltinRef()
-                else if (self.isUniformAccessPattern())
-                    try self.parseUniformAccess()
-                else blk: {
-                    // Check if identifier is a math constant (PI, E, TAU)
-                    const token_start = self.tokens.items(.start)[self.tok_i];
-                    const token_end = if (self.tok_i + 1 < self.tokens.len)
-                        self.tokens.items(.start)[self.tok_i + 1]
-                    else
-                        @as(u32, @intCast(self.source.len));
-                    const text = std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r");
-                    const node_tag: Node.Tag = if (isMathConstant(text)) .number_value else .identifier_value;
-                    break :blk try self.parseSimpleValue(node_tag);
-                };
-                const prop = try self.addNode(.{
-                    .tag = .property,
-                    .main_token = key_token,
-                    .data = .{ .node = value },
-                });
-                try self.scratch.append(self.gpa, prop.toInt());
+                const value = try self.parseIdentifierAsValue();
+                try self.addPropertyToScratch(key_token, value);
             },
             .l_bracket, .l_brace => {
                 // Nested container - push finish_property task, then container task
