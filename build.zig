@@ -316,6 +316,55 @@ pub fn build(b: *std.Build) void {
         .dest_dir = .{ .override = .{ .custom = "npm/pngine/wasm" } },
     });
     npm_step.dependOn(&npm_wasm.step);
+
+    // ========================================================================
+    // Native Viewer
+    // ========================================================================
+    //
+    // Standalone viewer for PNG files with embedded executors.
+    // See: docs/embedded-executor-plan.md Phase 7
+    //
+    // Usage: zig build viewer -- shader.png
+
+    const viewer_step = b.step("viewer", "Build native PNG viewer");
+
+    // Create viewer module
+    const viewer_module = b.createModule(.{
+        .root_source_file = b.path("viewers/native/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    viewer_module.addImport("pngine", lib_module);
+
+    const viewer = b.addExecutable(.{
+        .name = "pngine-viewer",
+        .root_module = viewer_module,
+    });
+
+    b.installArtifact(viewer);
+    viewer_step.dependOn(&b.addInstallArtifact(viewer, .{}).step);
+
+    // Run viewer step
+    const run_viewer = b.addRunArtifact(viewer);
+    run_viewer.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_viewer.addArgs(args);
+    }
+
+    const run_viewer_step = b.step("run-viewer", "Run the native viewer");
+    run_viewer_step.dependOn(&run_viewer.step);
+
+    // Viewer tests
+    const viewer_test_module = b.createModule(.{
+        .root_source_file = b.path("viewers/native/loader.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    viewer_test_module.addImport("pngine", lib_module);
+    const viewer_tests = b.addTest(.{
+        .root_module = viewer_test_module,
+    });
+    test_step.dependOn(&b.addRunArtifact(viewer_tests).step);
 }
 
 // Version check at comptime
