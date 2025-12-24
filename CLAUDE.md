@@ -22,10 +22,28 @@ This plan defines:
 | Plan | Purpose | Status |
 |------|---------|--------|
 | `docs/embedded-executor-plan.md` | **ACTIVE** - Embedded executor + plugins | In Progress |
+| `docs/llm-runtime-testing-plan.md` | LLM-friendly runtime validation via wasm3 | Planned |
 | `docs/multiplatform-command-buffer-plan.md` | Platform abstraction | Reference |
 | `docs/data-generation-plan.md` | Compute shader data gen | Reference |
 | `docs/command-buffer-refactor-plan.md` | JS bundle optimization | Reference |
 | `docs/remove-wasm-in-wasm-plan.md` | **SUPERSEDED** by embedded-executor-plan | Do Not Use |
+
+### LLM Runtime Testing (docs/llm-runtime-testing-plan.md)
+
+Enables LLMs to validate shaders without browser by running wasm3 and inspecting command buffer:
+
+```bash
+pngine validate shader.pngine --json              # Full validation
+pngine validate shader.pngine --json --phase init  # Only resource creation
+pngine validate shader.pngine --json --phase frame # Only first frame commands
+pngine validate shader.pngine --json --symptom black  # Symptom-based diagnosis
+```
+
+Key features:
+- **Phase inspection**: See init commands (CREATE_*) and frame commands (DRAW, DISPATCH) separately
+- **Symptom diagnosis**: Maps "black screen", "wrong colors", "flickering" to likely causes
+- **Multi-frame comparison**: `--frames 0,30,60` to detect animation issues
+- **JSON output**: Structured for LLM consumption with command analysis
 
 ---
 
@@ -843,6 +861,7 @@ Implementation phases:
 
 **Plans (read in order of priority)**:
 - `docs/embedded-executor-plan.md` - **ACTIVE** - Embedded executor + plugin architecture
+- `docs/llm-runtime-testing-plan.md` - LLM runtime validation via wasm3 (planned)
 - `docs/multiplatform-command-buffer-plan.md` - Platform abstraction (reference)
 - `docs/data-generation-plan.md` - Compute shader data generation (reference)
 
