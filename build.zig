@@ -31,7 +31,7 @@ pub fn build(b: *std.Build) void {
 
     // Create WASM entry module (separate from main library)
     const wasm_module = b.createModule(.{
-        .root_source_file = b.path("src/wasm.zig"),
+        .root_source_file = b.path("src/wasm_entry.zig"),
         .target = wasm_target,
         .optimize = .ReleaseSmall,
     });
@@ -152,6 +152,70 @@ pub fn build(b: *std.Build) void {
     // WASM build step (wasm artifact defined earlier for CLI embedding)
     const wasm_step = b.step("wasm", "Build WASM for browser");
     wasm_step.dependOn(&b.addInstallArtifact(wasm, .{}).step);
+
+    // ========================================================================
+    // Executor Variants (for embedded executor feature)
+    // ========================================================================
+    //
+    // Pre-built executor WASM modules with different plugin combinations.
+    // These are embedded in PNG payloads based on DSL feature analysis.
+    //
+    // See: docs/embedded-executor-plan.md for architecture details.
+
+    const executors_step = b.step("executors", "Build executor WASM variants");
+
+    // Plugin combinations to build (common cases)
+    const ExecutorVariant = struct {
+        name: []const u8,
+        render: bool,
+        compute: bool,
+        wasm: bool,
+        animation: bool,
+        texture: bool,
+    };
+
+    const executor_variants = [_]ExecutorVariant{
+        .{ .name = "core", .render = false, .compute = false, .wasm = false, .animation = false, .texture = false },
+        .{ .name = "render", .render = true, .compute = false, .wasm = false, .animation = false, .texture = false },
+        .{ .name = "compute", .render = false, .compute = true, .wasm = false, .animation = false, .texture = false },
+        .{ .name = "render-compute", .render = true, .compute = true, .wasm = false, .animation = false, .texture = false },
+        .{ .name = "render-anim", .render = true, .compute = false, .wasm = false, .animation = true, .texture = false },
+        .{ .name = "render-compute-anim", .render = true, .compute = true, .wasm = false, .animation = true, .texture = false },
+        .{ .name = "render-wasm", .render = true, .compute = false, .wasm = true, .animation = false, .texture = false },
+        .{ .name = "full", .render = true, .compute = true, .wasm = true, .animation = true, .texture = true },
+    };
+
+    for (executor_variants) |variant| {
+        // Create plugin options for this variant
+        const plugin_options = b.addOptions();
+        plugin_options.addOption(bool, "core", true); // Always enabled
+        plugin_options.addOption(bool, "render", variant.render);
+        plugin_options.addOption(bool, "compute", variant.compute);
+        plugin_options.addOption(bool, "wasm", variant.wasm);
+        plugin_options.addOption(bool, "animation", variant.animation);
+        plugin_options.addOption(bool, "texture", variant.texture);
+
+        // Create executor WASM module with plugin options
+        const executor_module = b.createModule(.{
+            .root_source_file = b.path("src/wasm_entry.zig"),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+        });
+        executor_module.addImport("plugins", plugin_options.createModule());
+
+        const executor = b.addExecutable(.{
+            .name = b.fmt("pngine-{s}", .{variant.name}),
+            .root_module = executor_module,
+        });
+        executor.rdynamic = true;
+        executor.entry = .disabled;
+
+        // Install to executors directory
+        const install_executor = b.addInstallArtifact(executor, .{
+            .dest_dir = .{ .override = .{ .custom = "executors" } },
+        });
+        executors_step.dependOn(&install_executor.step);
+    }
 
     // Web build: WASM + JS files for browser deployment
     const web_step = b.step("web", "Build demo bundle (WASM + JS)");

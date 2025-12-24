@@ -1,10 +1,39 @@
 # CLAUDE.md - PNGine Development Guide
 
+## CRITICAL: Active Implementation Plan
+
+**READ FIRST**: Before any implementation work, read the active plan:
+- **`docs/embedded-executor-plan.md`** - Embedded executor with plugin architecture
+
+This plan defines:
+- Plugin architecture: `[core]`, `[render]`, `[compute]`, `[wasm]`, `[animation]`, `[texture]`
+- WASM-in-WASM is KEPT as the `[wasm]` plugin (not removed)
+- Command buffer format is preserved (existing `src/executor/command_buffer.zig`)
+- Payload format v5 with embedded executor support
+- Multiplatform viewers via wasm3 interpreter
+
+**Zig Mastery Guidelines**: `/Users/hugo/Development/specs-llm/mastery/zig/`
+- Always follow bounded loops, no recursion, 2+ assertions per function
+- Functions ≤ 70 lines (exception: state machines with labeled switch)
+- Explicitly-sized types (u32, i64, not usize except for slice indexing)
+
+## Related Plans (Reference as Needed)
+
+| Plan | Purpose | Status |
+|------|---------|--------|
+| `docs/embedded-executor-plan.md` | **ACTIVE** - Embedded executor + plugins | In Progress |
+| `docs/multiplatform-command-buffer-plan.md` | Platform abstraction | Reference |
+| `docs/data-generation-plan.md` | Compute shader data gen | Reference |
+| `docs/command-buffer-refactor-plan.md` | JS bundle optimization | Reference |
+| `docs/remove-wasm-in-wasm-plan.md` | **SUPERSEDED** by embedded-executor-plan | Do Not Use |
+
+---
+
 ## Project Overview
 
 PNGine is a WebGPU bytecode engine that compiles high-level DSL into compact bytecode (PNGB) for embedding in PNGs and executing in browsers with a minimal WASM runtime.
 
-**Goal**: Shader art that fits in a PNG file, executable in any browser.
+**Goal**: Shader art that fits in a PNG file, executable in any browser AND any platform (iOS, Android, native) via embedded WASM executor.
 
 ## Environment
 
@@ -119,6 +148,175 @@ PBSF (S-expr)      ──► bytecode/assembler.zig ───►
 
 PNGB bytecode ──► executor/dispatcher.zig ──► GPU calls
 ```
+
+### Runtime Pipeline (Detailed)
+
+Understanding where code runs and what each component can do is critical for making
+architectural decisions (like where to put mesh generators).
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           BUILD TIME (once)                                  │
+│                                                                              │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │  Compiler (Zig)                                                      │   │
+│  │  - Parses DSL source (.pngine)                                       │   │
+│  │  - Resolves references, validates semantics                          │   │
+│  │  - CAN run arbitrary Zig code (mesh generators, etc.)                │   │
+│  │  - Emits bytecode opcodes + data section                             │   │
+│  │  - Complexity: unlimited (runs once on developer machine)            │   │
+│  └────────────────────────────┬─────────────────────────────────────────┘   │
+│                               │                                              │
+│                               ▼                                              │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │  Payload (.pngb embedded in PNG)                                     │   │
+│  │  - Declarative bytecode (WHAT to create, not HOW)                    │   │
+│  │  - WGSL shader code as strings                                       │   │
+│  │  - Static vertex data, textures, initial buffer values               │   │
+│  │  - Resource descriptors (sizes, formats, bindings)                   │   │
+│  │  - NO executable code (just data + opcodes)                          │   │
+│  │  - Size constraint: should be <50KB total for practical use          │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      │ Distributed (PNG file)
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          LOAD TIME (once per instance)                       │
+│                                                                              │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │  Executor (WASM, 57KB)                                               │   │
+│  │  - Parses bytecode header and opcodes                                │   │
+│  │  - Dispatches commands to gpu.js via extern functions                │   │
+│  │  - Manages frame loop and pass execution                             │   │
+│  │  - CANNOT generate data (no mesh generators, no math)                │   │
+│  │  - MUST stay tiny: goal is ~15KB                                     │   │
+│  │  - Static allocation only (no malloc after init)                     │   │
+│  └────────────────────────────┬─────────────────────────────────────────┘   │
+│                               │                                              │
+│                               │ extern "env" fn gpuCreateBuffer(...)        │
+│                               ▼                                              │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │  gpu.js (CommandDispatcher, ~1200 lines)                             │   │
+│  │  - Implements actual WebGPU API calls                                │   │
+│  │  - Creates GPUBuffer, GPUPipeline, GPUBindGroup, etc.                │   │
+│  │  - CAN run arbitrary JavaScript                                      │   │
+│  │  - CAN have helper functions (runtime mesh generators OK here)       │   │
+│  │  - Handles platform adaptation (canvas formats, device limits)       │   │
+│  │  - Already bundled with app, so +150 lines is marginal               │   │
+│  └────────────────────────────┬─────────────────────────────────────────┘   │
+│                               │                                              │
+│                               │ device.createBuffer(), etc.                  │
+│                               ▼                                              │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │  GPU Resources                                                       │   │
+│  │  - GPUBuffer, GPUTexture, GPUSampler                                 │   │
+│  │  - GPURenderPipeline, GPUComputePipeline                             │   │
+│  │  - GPUBindGroup, GPUBindGroupLayout                                  │   │
+│  │  - Ready for rendering                                               │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      │ Resources ready
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          FRAME TIME (60fps)                                  │
+│                                                                              │
+│  Executor → gpu.js → GPU                                                     │
+│                                                                              │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │  GPU (WGSL shaders)                                                  │   │
+│  │  - Vertex/Fragment shaders (every frame)                             │   │
+│  │  - Compute shaders (simulation, particles, etc.)                     │   │
+│  │  - Initialization compute (runOnce=true, first frame only)           │   │
+│  │  - Massively parallel, extremely fast                                │   │
+│  │  - CAN generate any data (noise, particles, transforms)              │   │
+│  │  - WGSL code compresses well (~150 bytes for particle init)          │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Component Responsibilities
+
+| Component | When | Can Generate Data? | Size Constraint | Complexity OK? |
+|-----------|------|-------------------|-----------------|----------------|
+| **Compiler** | Build | Yes (Zig code) | No limit | Yes |
+| **Payload** | Stored | No (just data) | <50KB | N/A |
+| **Executor** | Load | No | ~15KB goal | No |
+| **gpu.js** | Load | Yes (JS helpers) | ~50KB OK | Yes |
+| **GPU** | Frame | Yes (compute) | N/A | Yes (parallel) |
+
+### Data Flow for Resource Creation
+
+```
+Opcode in payload:  CREATE_BUFFER { id=5, size=32768, usage=VERTEX|STORAGE }
+        │
+        ▼
+Executor (WASM):    reads opcode, extracts params, calls extern fn
+        │
+        │  gpuCreateBuffer(5, 32768, 0xA0)
+        ▼
+gpu.js:             creates actual WebGPU resource
+        │
+        │  device.createBuffer({ size: 32768, usage: ... })
+        ▼
+GPU:                buffer exists, ready for use
+```
+
+### Where to Put Mesh Generators
+
+Given the architecture, there are 3 viable places for mesh generators:
+
+| Location | Payload Size | When Runs | Adds Code To |
+|----------|--------------|-----------|--------------|
+| **Compiler (Zig)** | ~400B (vertex data) | Build time | Compiler only |
+| **gpu.js (JS)** | ~10B (opcode+params) | Load time | JS bundle |
+| **GPU (WGSL)** | ~150B (shader code) | First frame | Payload |
+
+**Decision Framework:**
+
+1. **Standard meshes (cube, sphere, plane)** → gpu.js or Compiler
+   - gpu.js: smallest payload, runs at load time
+   - Compiler: simple, no runtime code changes
+
+2. **Large procedural data (particles, noise, heightmaps)** → GPU compute
+   - WGSL compresses well
+   - Runs in parallel
+   - Uses existing compute infrastructure
+
+3. **Small static data (<2KB)** → Compiler
+   - Inline in payload
+   - No runtime overhead
+
+### Key Insight: Payload is Data, Not Code
+
+The payload (.pngb) should be **declarative, not imperative**:
+
+- **YES**: "create a buffer with these bytes" (data)
+- **YES**: "run this WGSL shader" (GPU-executed code)
+- **NO**: "generate cube vertices using this algorithm" (CPU-executed code)
+
+The payload cannot contain executable code that runs on the CPU. It can only:
+1. Contain static data (vertices, textures, parameters)
+2. Reference WGSL code (executed by GPU, not payload)
+3. Describe resources and their relationships
+
+This means **compile-time generators cannot be "moved to the payload"** in a literal sense.
+Instead, the choice is where the generator *runs*:
+
+| Approach | Generator Runs In | Payload Contains |
+|----------|-------------------|------------------|
+| Compile-time | Compiler (Zig) | Generated bytes |
+| Runtime JS | gpu.js | Opcode + params |
+| Runtime GPU | GPU (WGSL) | WGSL source |
+
+For the **runtime JS** approach, we would:
+1. Add a new opcode like `FILL_CUBE_MESH { bufferId, size, format }`
+2. Implement `_fillCubeMesh()` in gpu.js
+3. Compiler emits the opcode instead of vertex bytes
+4. Payload shrinks from ~400B to ~10B
+
+This is viable because gpu.js already runs at load time and can have helper functions.
 
 ### Directory Structure
 
@@ -628,12 +826,30 @@ The `build.zig` npm step:
 - Uses `has_embedded_wasm = false` for cross-compiled builds (WASM not available at cross-compile time)
 - Outputs to `zig-out/npm/pngine-{platform}/bin/`
 
-## Future Work
+## Current Work: Embedded Executor
 
-1. **Real GPU Rendering** - Integrate zgpu/Dawn for actual shader execution
-2. **WASM Optimization** - Target ~15KB runtime (no std.fmt, static alloc)
+**Active Plan**: `docs/embedded-executor-plan.md`
+
+Implementation phases:
+1. Payload format extension (v5 header with executor section)
+2. Plugin infrastructure (detection in Analyzer, multi-variant builds)
+3. Executor refactor (clean exports, conditional compilation)
+4. Embedding integration (`--embed-executor` CLI flag)
+5. Complete [wasm] plugin (JS and native nested WASM execution)
+6. Browser loader refactor (minimal ~300 line loader)
+7. Native viewers (iOS/Android/Desktop via wasm3)
 
 ## Related Files
 
-- `/Users/hugo/.claude/plans/wondrous-puzzling-thacker.md` - Detailed implementation plan
-- `/Users/hugo/Development/specs-llm/mastery/zig/` - Zig coding guidelines
+**Plans (read in order of priority)**:
+- `docs/embedded-executor-plan.md` - **ACTIVE** - Embedded executor + plugin architecture
+- `docs/multiplatform-command-buffer-plan.md` - Platform abstraction (reference)
+- `docs/data-generation-plan.md` - Compute shader data generation (reference)
+
+**Zig Guidelines**:
+- `/Users/hugo/Development/specs-llm/mastery/zig/` - Zig coding conventions (MUST follow)
+
+**Key Implementation Files**:
+- `src/executor/command_buffer.zig` - Command buffer format (preserve)
+- `src/dsl/emitter/wasm.zig` - WASM-in-WASM emitter (keep as [wasm] plugin)
+- `src/bytecode/opcodes.zig` - Opcodes 0x30-0x31 for nested WASM (keep)

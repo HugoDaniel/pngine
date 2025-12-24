@@ -2083,8 +2083,9 @@ test "embedded_wasm: is valid WASM" {
 }
 
 test "embedded_wasm: reasonable size" {
-    // Property: WASM should be between 10KB and 200KB
-    try std.testing.expect(embedded_wasm.len >= 10 * 1024);
+    // Property: WASM should be between 1KB and 200KB
+    // Note: minimal executor can be quite small (~6KB for command-buffer mode)
+    try std.testing.expect(embedded_wasm.len >= 1024);
     try std.testing.expect(embedded_wasm.len <= 200 * 1024);
 }
 

@@ -1,21 +1,31 @@
-//! PNGB Binary Format (v4)
+//! PNGB Binary Format (v5)
 //!
 //! Serializes and deserializes the complete PNGB binary format.
+//! v5 adds embedded executor support with plugin architecture.
 //!
-//! File Structure (28 bytes header):
+//! File Structure (40 bytes header):
 //! ┌─────────────────────────────────────┐
-//! │ Header (28 bytes)                   │
+//! │ Header (40 bytes)                   │
 //! │   magic: "PNGB" (4 bytes)           │
-//! │   version: u16                      │
+//! │   version: u16 (5)                  │
 //! │   flags: u16                        │
+//! │     bit 0: has_embedded_executor    │
+//! │     bit 1: has_animation_table      │
+//! │   plugins: u8 (PluginSet bitfield)  │
+//! │   reserved: [3]u8 (alignment)       │
+//! │   executor_offset: u32 (0 if none)  │
+//! │   executor_length: u32              │
 //! │   string_table_offset: u32          │
 //! │   data_section_offset: u32          │
 //! │   wgsl_table_offset: u32            │
 //! │   uniform_table_offset: u32         │
 //! │   animation_table_offset: u32       │
 //! ├─────────────────────────────────────┤
+//! │ Executor Section (if embedded)      │
+//! │   (plugin-selected WASM module)     │
+//! ├─────────────────────────────────────┤
 //! │ Bytecode Section                    │
-//! │   (immediately after header)        │
+//! │   (immediately after executor)      │
 //! ├─────────────────────────────────────┤
 //! │ String Table                        │
 //! ├─────────────────────────────────────┤
@@ -33,8 +43,9 @@
 //!
 //! Invariants:
 //! - Magic must be "PNGB"
-//! - Version must be 4
+//! - Version must be 5 (or 4 for backward compat)
 //! - Offsets point to valid positions within the file
+//! - If has_embedded_executor, executor_offset and executor_length are valid
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -50,11 +61,17 @@ const AnimationTable = animation_table_mod.AnimationTable;
 /// Magic bytes identifying PNGB format.
 pub const MAGIC: *const [4]u8 = "PNGB";
 
-/// Current format version (v4 adds animation table for timeline/scenes).
-pub const VERSION: u16 = 4;
+/// Current format version (v5 adds embedded executor with plugin architecture).
+pub const VERSION: u16 = 5;
 
-/// Header size in bytes.
-pub const HEADER_SIZE: usize = 28;
+/// Previous version (for backward compatibility during deserialization).
+pub const VERSION_V4: u16 = 4;
+
+/// Header size in bytes (v5).
+pub const HEADER_SIZE: usize = 40;
+
+/// Header size for v4 format (backward compat).
+pub const HEADER_SIZE_V4: usize = 28;
 
 /// Maximum WGSL modules per file.
 pub const MAX_WGSL_MODULES: u16 = 1024;
@@ -62,25 +79,120 @@ pub const MAX_WGSL_MODULES: u16 = 1024;
 /// Maximum dependencies per WGSL module.
 pub const MAX_WGSL_DEPS: u16 = 64;
 
-/// Header flags.
-pub const Flags = packed struct(u16) {
+// ============================================================================
+// Plugin Architecture
+// ============================================================================
+
+/// Plugin set bitfield - determines which executor features are included.
+/// Compile-time selection based on DSL analysis.
+///
+/// See: docs/embedded-executor-plan.md for architecture details.
+pub const PluginSet = packed struct(u8) {
+    /// Core plugin (always included): bytecode parsing, command emission.
+    core: bool = true,
+    /// Render plugin: render pipelines, render passes, draw commands.
+    render: bool = false,
+    /// Compute plugin: compute pipelines, dispatch commands.
+    compute: bool = false,
+    /// WASM-in-WASM plugin: nested WASM execution for physics engines, etc.
+    wasm: bool = false,
+    /// Animation plugin: scene table, timeline, transitions.
+    animation: bool = false,
+    /// Texture plugin: image/video texture loading.
+    texture: bool = false,
     /// Reserved for future use.
-    reserved: u16 = 0,
+    reserved: u2 = 0,
+
+    /// Create empty plugin set (core only).
+    pub const core_only: PluginSet = .{};
+
+    /// Create full plugin set (all features).
+    pub const full: PluginSet = .{
+        .render = true,
+        .compute = true,
+        .wasm = true,
+        .animation = true,
+        .texture = true,
+    };
+
+    /// Convert to u8 for serialization.
+    pub fn toU8(self: PluginSet) u8 {
+        return @bitCast(self);
+    }
+
+    /// Create from u8 during deserialization.
+    pub fn fromU8(byte: u8) PluginSet {
+        return @bitCast(byte);
+    }
+
+    /// Check if this plugin set requires a specific plugin.
+    pub fn hasPlugin(self: PluginSet, plugin: Plugin) bool {
+        return switch (plugin) {
+            .core => self.core,
+            .render => self.render,
+            .compute => self.compute,
+            .wasm => self.wasm,
+            .animation => self.animation,
+            .texture => self.texture,
+        };
+    }
 };
 
-/// PNGB file header.
+/// Individual plugin types.
+pub const Plugin = enum(u3) {
+    core = 0,
+    render = 1,
+    compute = 2,
+    wasm = 3,
+    animation = 4,
+    texture = 5,
+};
+
+// ============================================================================
+// Header
+// ============================================================================
+
+/// Header flags.
+pub const Flags = packed struct(u16) {
+    /// Payload contains embedded WASM executor.
+    has_embedded_executor: bool = false,
+    /// Payload contains animation table.
+    has_animation_table: bool = false,
+    /// Reserved for future use.
+    reserved: u14 = 0,
+};
+
+/// PNGB file header (v5, 40 bytes).
+///
+/// Layout optimized for 4-byte alignment of all u32 fields.
 pub const Header = extern struct {
+    /// Magic bytes "PNGB".
     magic: [4]u8,
+    /// Format version (5).
     version: u16,
+    /// Feature flags.
     flags: Flags,
+    /// Plugin set bitfield.
+    plugins: PluginSet,
+    /// Reserved for alignment and future use.
+    reserved: [3]u8,
+    /// Offset to embedded executor WASM (0 if not embedded).
+    executor_offset: u32,
+    /// Length of embedded executor WASM (0 if not embedded).
+    executor_length: u32,
+    /// Offset to string table section.
     string_table_offset: u32,
+    /// Offset to data section.
     data_section_offset: u32,
+    /// Offset to WGSL module table.
     wgsl_table_offset: u32,
+    /// Offset to uniform binding table.
     uniform_table_offset: u32,
+    /// Offset to animation table.
     animation_table_offset: u32,
 
     comptime {
-        // Verify header is exactly 28 bytes
+        // Verify header is exactly 40 bytes
         assert(@sizeOf(Header) == HEADER_SIZE);
     }
 
@@ -89,9 +201,58 @@ pub const Header = extern struct {
         if (!std.mem.eql(u8, &self.magic, MAGIC)) {
             return error.InvalidMagic;
         }
-        if (self.version != VERSION) {
+        // Accept v5 (current) or v4 (backward compat)
+        if (self.version != VERSION and self.version != VERSION_V4) {
             return error.UnsupportedVersion;
         }
+    }
+
+    /// Check if this payload has an embedded executor.
+    pub fn hasEmbeddedExecutor(self: *const Header) bool {
+        return self.flags.has_embedded_executor and self.executor_length > 0;
+    }
+
+    /// Get bytecode start offset (after header and optional executor).
+    pub fn bytecodeOffset(self: *const Header) u32 {
+        if (self.hasEmbeddedExecutor()) {
+            return self.executor_offset + self.executor_length;
+        }
+        return HEADER_SIZE;
+    }
+};
+
+/// Header for v4 format (backward compatibility).
+/// Used only during deserialization of legacy payloads.
+pub const HeaderV4 = extern struct {
+    magic: [4]u8,
+    version: u16,
+    flags: u16,
+    string_table_offset: u32,
+    data_section_offset: u32,
+    wgsl_table_offset: u32,
+    uniform_table_offset: u32,
+    animation_table_offset: u32,
+
+    comptime {
+        assert(@sizeOf(HeaderV4) == HEADER_SIZE_V4);
+    }
+
+    /// Convert v4 header to v5 header.
+    pub fn toV5(self: *const HeaderV4) Header {
+        return Header{
+            .magic = self.magic,
+            .version = VERSION, // Upgrade to v5
+            .flags = .{},
+            .plugins = .{}, // Core only (no embedded executor)
+            .reserved = .{ 0, 0, 0 },
+            .executor_offset = 0,
+            .executor_length = 0,
+            .string_table_offset = self.string_table_offset,
+            .data_section_offset = self.data_section_offset,
+            .wgsl_table_offset = self.wgsl_table_offset,
+            .uniform_table_offset = self.uniform_table_offset,
+            .animation_table_offset = self.animation_table_offset,
+        };
     }
 };
 
@@ -270,6 +431,8 @@ pub fn deserializeWgslTable(allocator: Allocator, data: []const u8) !WgslTable {
 /// Complete PNGB module for execution.
 pub const Module = struct {
     header: Header,
+    /// Embedded WASM executor (empty if not embedded).
+    executor: []const u8,
     bytecode: []const u8,
     strings: StringTable,
     data: DataSection,
@@ -277,7 +440,20 @@ pub const Module = struct {
     uniforms: UniformTable,
     animation: AnimationTable,
 
+    /// Check if this module has an embedded executor.
+    pub fn hasEmbeddedExecutor(self: *const Module) bool {
+        return self.executor.len > 0;
+    }
+
+    /// Get the plugin set for this module.
+    pub fn plugins(self: *const Module) PluginSet {
+        return self.header.plugins;
+    }
+
     pub fn deinit(self: *Module, allocator: Allocator) void {
+        if (self.executor.len > 0) {
+            allocator.free(self.executor);
+        }
         self.strings.deinit(allocator);
         self.data.deinit(allocator);
         self.wgsl.deinit(allocator);
@@ -287,7 +463,23 @@ pub const Module = struct {
     }
 };
 
-/// Serialize components to PNGB format.
+/// Serialization options.
+pub const SerializeOptions = struct {
+    /// Executor WASM bytes to embed (empty = no embedded executor).
+    executor: []const u8 = &.{},
+    /// Plugin set (detected from DSL or explicitly set).
+    plugins: PluginSet = .{},
+};
+
+/// Serialize components to PNGB format (v5).
+///
+/// Pre-conditions:
+/// - All table pointers are valid
+/// - If options.executor is non-empty, it contains valid WASM
+///
+/// Post-conditions:
+/// - Returns valid PNGB v5 format
+/// - Caller owns returned slice
 pub fn serialize(
     allocator: Allocator,
     bytecode: []const u8,
@@ -296,6 +488,22 @@ pub fn serialize(
     wgsl: *const WgslTable,
     uniforms: *const UniformTable,
     animation: *const AnimationTable,
+) ![]u8 {
+    return serializeWithOptions(allocator, bytecode, strings, data, wgsl, uniforms, animation, .{});
+}
+
+/// Serialize components to PNGB format with options (v5).
+///
+/// Supports embedding executor WASM and setting plugin flags.
+pub fn serializeWithOptions(
+    allocator: Allocator,
+    bytecode: []const u8,
+    strings: *const StringTable,
+    data: *const DataSection,
+    wgsl: *const WgslTable,
+    uniforms: *const UniformTable,
+    animation: *const AnimationTable,
+    options: SerializeOptions,
 ) ![]u8 {
     // Serialize string table
     const string_bytes = try strings.serialize(allocator);
@@ -317,15 +525,21 @@ pub fn serialize(
     const animation_bytes = try animation.serialize(allocator);
     defer allocator.free(animation_bytes);
 
-    // Calculate offsets
-    const string_table_offset: u32 = @intCast(HEADER_SIZE + bytecode.len);
-    const data_section_offset: u32 = @intCast(HEADER_SIZE + bytecode.len + string_bytes.len);
-    const wgsl_table_offset: u32 = @intCast(HEADER_SIZE + bytecode.len + string_bytes.len + data_bytes.len);
-    const uniform_table_offset: u32 = @intCast(HEADER_SIZE + bytecode.len + string_bytes.len + data_bytes.len + wgsl_bytes.len);
-    const animation_table_offset: u32 = @intCast(HEADER_SIZE + bytecode.len + string_bytes.len + data_bytes.len + wgsl_bytes.len + uniform_bytes.len);
+    // Calculate section sizes
+    const has_executor = options.executor.len > 0;
+    const executor_len = options.executor.len;
+
+    // Calculate offsets (header → executor → bytecode → strings → data → wgsl → uniform → animation)
+    const executor_offset: u32 = if (has_executor) HEADER_SIZE else 0;
+    const bytecode_start: u32 = @intCast(HEADER_SIZE + executor_len);
+    const string_table_offset: u32 = @intCast(bytecode_start + bytecode.len);
+    const data_section_offset: u32 = @intCast(string_table_offset + string_bytes.len);
+    const wgsl_table_offset: u32 = @intCast(data_section_offset + data_bytes.len);
+    const uniform_table_offset: u32 = @intCast(wgsl_table_offset + wgsl_bytes.len);
+    const animation_table_offset: u32 = @intCast(uniform_table_offset + uniform_bytes.len);
 
     // Total size
-    const total_size = HEADER_SIZE + bytecode.len + string_bytes.len + data_bytes.len + wgsl_bytes.len + uniform_bytes.len + animation_bytes.len;
+    const total_size = HEADER_SIZE + executor_len + bytecode.len + string_bytes.len + data_bytes.len + wgsl_bytes.len + uniform_bytes.len + animation_bytes.len;
 
     // Allocate output buffer
     const output = try allocator.alloc(u8, total_size);
@@ -333,19 +547,34 @@ pub fn serialize(
 
     var offset: usize = 0;
 
-    // Write header
+    // Build header
     const header = Header{
         .magic = MAGIC.*,
         .version = VERSION,
-        .flags = .{},
+        .flags = .{
+            .has_embedded_executor = has_executor,
+            .has_animation_table = animation_bytes.len > 1, // Empty table is just count=0 (1 byte)
+        },
+        .plugins = options.plugins,
+        .reserved = .{ 0, 0, 0 },
+        .executor_offset = executor_offset,
+        .executor_length = @intCast(executor_len),
         .string_table_offset = string_table_offset,
         .data_section_offset = data_section_offset,
         .wgsl_table_offset = wgsl_table_offset,
         .uniform_table_offset = uniform_table_offset,
         .animation_table_offset = animation_table_offset,
     };
+
+    // Write header
     @memcpy(output[offset..][0..HEADER_SIZE], std.mem.asBytes(&header));
     offset += HEADER_SIZE;
+
+    // Write executor (if embedded)
+    if (has_executor) {
+        @memcpy(output[offset..][0..executor_len], options.executor);
+        offset += executor_len;
+    }
 
     // Write bytecode
     @memcpy(output[offset..][0..bytecode.len], bytecode);
@@ -378,14 +607,36 @@ pub fn serialize(
 }
 
 /// Deserialize PNGB format to module.
+/// Supports both v4 (28-byte header) and v5 (40-byte header) formats.
 /// Note: The returned module references the input data - caller must ensure data outlives module.
 pub fn deserialize(allocator: Allocator, data: []const u8) !Module {
-    // Pre-condition: at least header present
-    if (data.len < HEADER_SIZE) return error.InvalidFormat;
+    // Pre-condition: at least v4 header present
+    if (data.len < HEADER_SIZE_V4) return error.InvalidFormat;
 
-    // Read and validate header
-    const header: *const Header = @ptrCast(@alignCast(data[0..HEADER_SIZE]));
-    try header.validate();
+    // Check magic first
+    if (!std.mem.eql(u8, data[0..4], MAGIC)) {
+        return error.InvalidMagic;
+    }
+
+    // Read version to determine format
+    const version = std.mem.readInt(u16, data[4..6], .little);
+
+    // Handle v4 backward compatibility
+    const header: Header = switch (version) {
+        VERSION_V4 => blk: {
+            const header_v4: *const HeaderV4 = @ptrCast(@alignCast(data[0..HEADER_SIZE_V4]));
+            break :blk header_v4.toV5();
+        },
+        VERSION => blk: {
+            if (data.len < HEADER_SIZE) return error.InvalidFormat;
+            const h: *const Header = @ptrCast(@alignCast(data[0..HEADER_SIZE]));
+            break :blk h.*;
+        },
+        else => return error.UnsupportedVersion,
+    };
+
+    // Determine actual header size based on version
+    const actual_header_size: usize = if (version == VERSION_V4) HEADER_SIZE_V4 else HEADER_SIZE;
 
     // Validate offsets
     if (header.string_table_offset > data.len) return error.InvalidOffset;
@@ -393,11 +644,27 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !Module {
     if (header.wgsl_table_offset > data.len) return error.InvalidOffset;
     if (header.uniform_table_offset > data.len) return error.InvalidOffset;
     if (header.animation_table_offset > data.len) return error.InvalidOffset;
-    if (header.string_table_offset < HEADER_SIZE) return error.InvalidOffset;
+    if (header.string_table_offset < actual_header_size) return error.InvalidOffset;
 
-    // Extract bytecode (between header and string table)
-    const bytecode_len = header.string_table_offset - HEADER_SIZE;
-    const bytecode = data[HEADER_SIZE..][0..bytecode_len];
+    // Extract embedded executor if present (v5 only)
+    var executor: []const u8 = &.{};
+    if (version == VERSION and header.hasEmbeddedExecutor()) {
+        if (header.executor_offset + header.executor_length > data.len) {
+            return error.InvalidOffset;
+        }
+        executor = try allocator.dupe(u8, data[header.executor_offset..][0..header.executor_length]);
+    }
+    errdefer if (executor.len > 0) allocator.free(executor);
+
+    // Calculate bytecode start (after header + executor)
+    const bytecode_start: usize = if (version == VERSION and header.hasEmbeddedExecutor())
+        header.executor_offset + header.executor_length
+    else
+        actual_header_size;
+
+    // Extract bytecode (between header/executor and string table)
+    const bytecode_len = header.string_table_offset - bytecode_start;
+    const bytecode = data[bytecode_start..][0..bytecode_len];
 
     // Deserialize string table
     const string_data = data[header.string_table_offset..header.data_section_offset];
@@ -436,7 +703,8 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !Module {
     const animation = try animation_table_mod.deserialize(allocator, animation_data);
 
     return Module{
-        .header = header.*,
+        .header = header,
+        .executor = executor,
         .bytecode = bytecode,
         .strings = strings,
         .data = data_section,
@@ -544,6 +812,21 @@ pub const Builder = struct {
             &self.animation_table,
         );
     }
+
+    /// Finalize and serialize to PNGB format with options.
+    /// Supports embedding executor WASM and setting plugin flags.
+    pub fn finalizeWithOptions(self: *Self, allocator: Allocator, options: SerializeOptions) ![]u8 {
+        return serializeWithOptions(
+            allocator,
+            self.emitter.bytecode(),
+            &self.strings,
+            &self.data,
+            &self.wgsl_table,
+            &self.uniform_table,
+            &self.animation_table,
+            options,
+        );
+    }
 };
 
 // ============================================================================
@@ -553,7 +836,10 @@ pub const Builder = struct {
 const testing = std.testing;
 
 test "header size" {
-    try testing.expectEqual(@as(usize, 28), @sizeOf(Header));
+    // v5 header is 40 bytes
+    try testing.expectEqual(@as(usize, 40), @sizeOf(Header));
+    // v4 header was 28 bytes (backward compat)
+    try testing.expectEqual(@as(usize, 28), @sizeOf(HeaderV4));
 }
 
 test "empty module" {
@@ -644,7 +930,7 @@ test "roundtrip serialization" {
 }
 
 test "invalid magic" {
-    var data: [HEADER_SIZE]u8 = undefined;
+    var data: [HEADER_SIZE_V4]u8 = undefined;
     @memcpy(data[0..4], "XXXX"); // Invalid magic
 
     const result = deserialize(testing.allocator, &data);
@@ -652,7 +938,7 @@ test "invalid magic" {
 }
 
 test "invalid version" {
-    var data: [HEADER_SIZE]u8 = undefined;
+    var data: [HEADER_SIZE_V4]u8 = undefined;
     @memcpy(data[0..4], MAGIC);
     std.mem.writeInt(u16, data[4..6], 99, .little); // Invalid version
 
@@ -850,7 +1136,7 @@ test "full module with WGSL table" {
     // Verify header
     try testing.expectEqualStrings("PNGB", output[0..4]);
     const version = std.mem.readInt(u16, output[4..6], .little);
-    try testing.expectEqual(@as(u16, 4), version);
+    try testing.expectEqual(@as(u16, VERSION), version);
 
     // Deserialize
     var module = try deserialize(testing.allocator, output);
@@ -955,4 +1241,142 @@ test "deserialize: errdefer cleans up on WGSL table OOM" {
 
     // Verify we exercised the errdefer paths
     try testing.expect(hit_errdefer);
+}
+
+test "PluginSet bitfield" {
+    // Test core_only preset
+    const core_only = PluginSet.core_only;
+    try testing.expect(core_only.core);
+    try testing.expect(!core_only.render);
+    try testing.expect(!core_only.compute);
+    try testing.expect(!core_only.wasm);
+    try testing.expect(!core_only.animation);
+    try testing.expect(!core_only.texture);
+
+    // Test full preset
+    const full = PluginSet.full;
+    try testing.expect(full.core);
+    try testing.expect(full.render);
+    try testing.expect(full.compute);
+    try testing.expect(full.wasm);
+    try testing.expect(full.animation);
+    try testing.expect(full.texture);
+
+    // Test roundtrip through u8
+    const custom = PluginSet{ .render = true, .compute = true };
+    const as_byte = custom.toU8();
+    const restored = PluginSet.fromU8(as_byte);
+    try testing.expect(restored.core);
+    try testing.expect(restored.render);
+    try testing.expect(restored.compute);
+    try testing.expect(!restored.wasm);
+
+    // Test hasPlugin
+    try testing.expect(full.hasPlugin(.render));
+    try testing.expect(!core_only.hasPlugin(.render));
+}
+
+test "v5 format with embedded executor" {
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    // Build simple module
+    const frame_name = try builder.internString(testing.allocator, "main");
+    const shader = "@vertex fn vs() {}";
+    const shader_data = try builder.addData(testing.allocator, shader);
+
+    const emitter = builder.getEmitter();
+    try emitter.createShaderModule(testing.allocator, 0, shader_data.toInt());
+    try emitter.defineFrame(testing.allocator, 0, frame_name.toInt());
+    try emitter.endFrame(testing.allocator);
+
+    // Fake executor WASM bytes
+    const fake_executor = &[_]u8{ 0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00 };
+
+    // Serialize with embedded executor
+    const output = try builder.finalizeWithOptions(testing.allocator, .{
+        .executor = fake_executor,
+        .plugins = .{ .render = true, .compute = true },
+    });
+    defer testing.allocator.free(output);
+
+    // Verify header
+    try testing.expectEqualStrings("PNGB", output[0..4]);
+    const version = std.mem.readInt(u16, output[4..6], .little);
+    try testing.expectEqual(VERSION, version);
+
+    // Verify flags indicate embedded executor
+    const flags: Flags = @bitCast(std.mem.readInt(u16, output[6..8], .little));
+    try testing.expect(flags.has_embedded_executor);
+
+    // Verify plugins byte
+    const plugins = PluginSet.fromU8(output[8]);
+    try testing.expect(plugins.core);
+    try testing.expect(plugins.render);
+    try testing.expect(plugins.compute);
+    try testing.expect(!plugins.wasm);
+
+    // Deserialize
+    var module = try deserialize(testing.allocator, output);
+    defer module.deinit(testing.allocator);
+
+    // Verify embedded executor was extracted
+    try testing.expect(module.hasEmbeddedExecutor());
+    try testing.expectEqualSlices(u8, fake_executor, module.executor);
+
+    // Verify plugins preserved
+    try testing.expect(module.plugins().render);
+    try testing.expect(module.plugins().compute);
+
+    // Verify bytecode still accessible
+    const opcodes = @import("opcodes.zig");
+    try testing.expectEqual(@as(u8, @intFromEnum(opcodes.OpCode.create_shader_module)), module.bytecode[0]);
+}
+
+test "v4 backward compatibility" {
+    // Create a v4 format payload manually
+    var v4_data: [100]u8 = undefined;
+    @memset(&v4_data, 0);
+
+    // Write v4 header (28 bytes)
+    @memcpy(v4_data[0..4], MAGIC);
+    std.mem.writeInt(u16, v4_data[4..6], VERSION_V4, .little);
+    std.mem.writeInt(u16, v4_data[6..8], 0, .little); // flags
+
+    // Section offsets - string_table and data_section use u16 counts (2 bytes each)
+    // wgsl_table, uniform_table, animation_table use varint (1 byte for 0)
+    const string_off: u32 = HEADER_SIZE_V4;
+    const data_off: u32 = string_off + 2; // u16 count for string table = 0
+    const wgsl_off: u32 = data_off + 2; // u16 count for data section = 0
+    const uniform_off: u32 = wgsl_off + 1; // varint count for wgsl table = 0
+    const anim_off: u32 = uniform_off + 1; // varint count for uniform table = 0
+    const total_len: u32 = anim_off + 1; // +1 for animation table varint count
+
+    std.mem.writeInt(u32, v4_data[8..12], string_off, .little);
+    std.mem.writeInt(u32, v4_data[12..16], data_off, .little);
+    std.mem.writeInt(u32, v4_data[16..20], wgsl_off, .little);
+    std.mem.writeInt(u32, v4_data[20..24], uniform_off, .little);
+    std.mem.writeInt(u32, v4_data[24..28], anim_off, .little);
+
+    // Write empty sections
+    std.mem.writeInt(u16, v4_data[string_off..][0..2], 0, .little); // string table: u16 count = 0
+    std.mem.writeInt(u16, v4_data[data_off..][0..2], 0, .little); // data section: u16 count = 0
+    v4_data[wgsl_off] = 0; // wgsl table: varint count = 0
+    v4_data[uniform_off] = 0; // uniform table: varint count = 0
+    v4_data[anim_off] = 0; // animation table: varint count = 0
+
+    // Deserialize v4 format
+    var module = try deserialize(testing.allocator, v4_data[0..total_len]);
+    defer module.deinit(testing.allocator);
+
+    // Verify header was upgraded to v5 internally
+    try testing.expectEqual(VERSION, module.header.version);
+
+    // Verify no embedded executor
+    try testing.expect(!module.hasEmbeddedExecutor());
+    try testing.expectEqual(@as(usize, 0), module.executor.len);
+
+    // Verify plugins default to core only
+    try testing.expect(module.plugins().core);
+    try testing.expect(!module.plugins().render);
 }
