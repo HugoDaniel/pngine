@@ -58,15 +58,51 @@ pub fn build(b: *std.Build) void {
         cli_module.addImport("zgpu", dep.module("root"));
     }
 
-    // Note: wasm3 integration for actual WASM execution is deferred.
-    // The validate command currently works for static bytecode analysis.
-    // To enable WASM execution, wasm3 needs to be compiled as a C library
-    // and linked. See: https://github.com/wasm3/wasm3
+    // Add wasm3 C library for native WASM execution in validate command
+    const wasm3_dep = b.lazyDependency("wasm3", .{});
+    if (wasm3_dep) |dep| {
+        // wasm3 C source files (from source/ directory)
+        const wasm3_sources: []const []const u8 = &.{
+            "source/m3_api_libc.c",
+            "source/m3_api_meta_wasi.c",
+            "source/m3_api_tracer.c",
+            "source/m3_api_uvwasi.c",
+            "source/m3_api_wasi.c",
+            "source/m3_bind.c",
+            "source/m3_code.c",
+            "source/m3_compile.c",
+            "source/m3_core.c",
+            "source/m3_emit.c",
+            "source/m3_env.c",
+            "source/m3_exec.c",
+            "source/m3_function.c",
+            "source/m3_info.c",
+            "source/m3_module.c",
+            "source/m3_optimize.c",
+            "source/m3_parse.c",
+        };
+
+        // Add C sources directly to CLI module
+        cli_module.addCSourceFiles(.{
+            .root = dep.path("."),
+            .files = wasm3_sources,
+            .flags = &.{
+                "-std=gnu11",
+                "-fno-sanitize=undefined", // wasm3 uses some UB-ish patterns
+            },
+        });
+
+        // Add include path for wasm3 headers
+        cli_module.addIncludePath(dep.path("source"));
+
+        // Link libc (required by wasm3)
+        cli_module.link_libc = true;
+    }
 
     // Create build options with embedded WASM
     const build_options = b.addOptions();
     build_options.addOption(bool, "has_embedded_wasm", true);
-    build_options.addOption(bool, "has_wasm3", false); // TODO: Enable when wasm3 is integrated
+    build_options.addOption(bool, "has_wasm3", wasm3_dep != null);
     cli_module.addImport("build_options", build_options.createModule());
 
     // Embed WASM binary in CLI for bundle command

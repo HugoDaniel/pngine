@@ -39,6 +39,13 @@ pub const gpu_backends = struct {
     pub const NativeGPU = native_gpu.NativeGPU;
 };
 
+// Native WASM execution (wasm3)
+pub const wasm3_runtime = struct {
+    pub const wasm3 = @import("runtime/wasm3.zig");
+    pub const Wasm3Runtime = wasm3.Wasm3Runtime;
+    pub const Wasm3Error = wasm3.Wasm3Error;
+};
+
 // ZIP bundle support
 pub const zip = @import("zip.zig");
 
