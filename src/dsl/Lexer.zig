@@ -700,7 +700,8 @@ test "Lexer: full simpleTriangle example" {
     var last_tag: Token.Tag = .invalid;
 
     // Count tokens and ensure no invalid ones (except final eof)
-    while (true) {
+    // Bounded loop: at most source.len + 1 tokens
+    for (0..source.len + 1) |_| {
         const tok = lexer.next();
         if (tok.tag == .invalid) {
             std.debug.print("Invalid token at {d}-{d}: '{s}'\n", .{
@@ -716,7 +717,7 @@ test "Lexer: full simpleTriangle example" {
         token_count += 1;
         last_tag = tok.tag;
         if (tok.tag == .eof) break;
-    }
+    } else unreachable; // Source always ends with EOF
 
     try testing.expectEqual(Token.Tag.eof, last_tag);
     try testing.expect(token_count > 50);

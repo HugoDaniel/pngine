@@ -73,6 +73,12 @@ pub const Parser = struct {
     /// Current token index. Invariant: tok_i < tokens.len.
     tok_i: u32,
 
+    /// Current expression parsing depth. Used to bound recursion.
+    expr_depth: u32 = 0,
+
+    /// Maximum expression nesting depth (prevents stack overflow).
+    const MAX_EXPR_DEPTH: u32 = 64;
+
     const Self = @This();
 
     pub const Error = error{
@@ -94,7 +100,9 @@ pub const Parser = struct {
         try tokens.ensureTotalCapacity(gpa, estimated_tokens);
 
         var lexer = Lexer.init(source);
-        while (true) {
+        // Bounded loop: at most source.len + 1 tokens (one per byte plus EOF)
+        const max_tokens = source.len + 1;
+        for (0..max_tokens) |_| {
             const tok = lexer.next();
             // Use append with growth for robustness with random/small inputs
             try tokens.append(gpa, .{
@@ -102,7 +110,7 @@ pub const Parser = struct {
                 .start = tok.loc.start,
             });
             if (tok.tag == .eof) break;
-        }
+        } else unreachable; // Source should always end with EOF
 
         // Phase 2: Parse
         var parser = Self{
@@ -989,11 +997,17 @@ pub const Parser = struct {
     /// Grammar: factor = number | '(' expr ')' | '-' factor
     /// Handles atomic values and grouping (highest precedence).
     ///
+    /// Recursion is bounded by MAX_EXPR_DEPTH to prevent stack overflow.
     /// Returns null if current token can't start a factor.
     fn parseFactor(self: *Self) Error!?Node.Index {
         // Pre-conditions
         std.debug.assert(self.tok_i < self.tokens.len);
+        if (self.expr_depth >= MAX_EXPR_DEPTH) return error.ParseError;
         const start_tok = self.tok_i;
+
+        // Track depth for recursive calls
+        self.expr_depth += 1;
+        defer self.expr_depth -= 1;
 
         const result: ?Node.Index = switch (self.currentTag()) {
             .number_literal => {
@@ -1009,7 +1023,7 @@ pub const Parser = struct {
                 return inner;
             },
             .minus => {
-                // Unary negation: -factor
+                // Unary negation: -factor (recursive, but bounded by expr_depth)
                 const minus_token = self.tok_i;
                 self.tok_i += 1; // consume -
 
