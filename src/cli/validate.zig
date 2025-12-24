@@ -77,6 +77,20 @@ pub const ValidationIssue = struct {
     command_index: ?u32,
 };
 
+/// Bytecode module info for output.
+pub const ModuleInfo = struct {
+    version: u16,
+    has_executor: bool,
+    executor_size: u32,
+    bytecode_size: u32,
+    strings_count: u32,
+    data_blobs_count: u32,
+    wgsl_entries_count: u32,
+    uniform_entries_count: u32,
+    has_animation: bool,
+    scene_count: u32,
+};
+
 /// Complete validation result.
 pub const ValidationResult = struct {
     status: enum { ok, warning, err },
@@ -84,6 +98,7 @@ pub const ValidationResult = struct {
     frame_commands: std.ArrayListUnmanaged(CommandInfo),
     errors: std.ArrayListUnmanaged(ValidationIssue),
     warnings: std.ArrayListUnmanaged(ValidationIssue),
+    module_info: ?ModuleInfo,
 
     pub fn init() ValidationResult {
         return .{
@@ -92,6 +107,7 @@ pub const ValidationResult = struct {
             .frame_commands = .{},
             .errors = .{},
             .warnings = .{},
+            .module_info = null,
         };
     }
 
@@ -362,7 +378,7 @@ fn validateBytecode(
     opts: *const Options,
 ) !void {
     // Pre-condition: bytecode has minimum header size
-    if (bytecode.len < format.HEADER_SIZE) {
+    if (bytecode.len < format.HEADER_SIZE_V4) {
         try result.errors.append(allocator, .{
             .code = "E001",
             .severity = .err,
@@ -388,21 +404,81 @@ fn validateBytecode(
     // Read version
     const version = std.mem.readInt(u16, bytecode[4..6], .little);
 
-    // TODO: Full wasm3 integration for command buffer execution
-    // For now, just validate the bytecode header structure
+    // Validate version
+    if (version != format.VERSION and version != format.VERSION_V4) {
+        try result.errors.append(allocator, .{
+            .code = "E003",
+            .severity = .err,
+            .message = "Unsupported PNGB version",
+            .command_index = null,
+        });
+        result.status = .err;
+        return;
+    }
 
-    if (!opts.quiet) {
-        // This is a placeholder - real validation happens with wasm3
+    // Deserialize the full module for analysis
+    const module = format.deserialize(allocator, bytecode) catch |err| {
+        try result.errors.append(allocator, .{
+            .code = "E004",
+            .severity = .err,
+            .message = switch (err) {
+                error.InvalidMagic => "Invalid magic bytes",
+                error.InvalidFormat => "Invalid bytecode format",
+                error.OutOfMemory => "Out of memory during parsing",
+                else => "Failed to parse bytecode",
+            },
+            .command_index = null,
+        });
+        result.status = .err;
+        return;
+    };
+    defer @constCast(&module).deinit(allocator);
+
+    // Build module info for output
+    result.module_info = .{
+        .version = version,
+        .has_executor = module.hasEmbeddedExecutor(),
+        .executor_size = @intCast(module.executor.len),
+        .bytecode_size = @intCast(module.bytecode.len),
+        .strings_count = @intCast(module.strings.strings.items.len),
+        .data_blobs_count = @intCast(module.data.blobs.items.len),
+        .wgsl_entries_count = @intCast(module.wgsl.entries.items.len),
+        .uniform_entries_count = @intCast(module.uniforms.bindings.items.len),
+        .has_animation = module.animation.hasAnimation(),
+        .scene_count = if (module.animation.info) |info| @intCast(info.scenes.len) else 0,
+    };
+
+    // Validation checks
+    if (module.bytecode.len == 0) {
         try result.warnings.append(allocator, .{
-            .code = "W100",
+            .code = "W001",
             .severity = .warning,
-            .message = "wasm3 integration pending - only bytecode header validated",
+            .message = "Empty bytecode section",
             .command_index = null,
         });
         if (result.status == .ok) result.status = .warning;
     }
 
-    _ = version;
+    if (module.wgsl.entries.items.len == 0) {
+        try result.warnings.append(allocator, .{
+            .code = "W002",
+            .severity = .warning,
+            .message = "No WGSL shaders defined",
+            .command_index = null,
+        });
+        if (result.status == .ok) result.status = .warning;
+    }
+
+    // Note about wasm3 integration
+    if (!opts.quiet and opts.verbose) {
+        try result.warnings.append(allocator, .{
+            .code = "W100",
+            .severity = .warning,
+            .message = "wasm3 integration pending - command buffer execution not available",
+            .command_index = null,
+        });
+        if (result.status == .ok) result.status = .warning;
+    }
 }
 
 /// Output validation result as JSON.
@@ -412,6 +488,22 @@ fn outputJson(allocator: std.mem.Allocator, result: *const ValidationResult, opt
     std.debug.print("{{\n", .{});
     std.debug.print("  \"status\": \"{s}\",\n", .{@tagName(result.status)});
     std.debug.print("  \"input\": \"{s}\",\n", .{opts.input_path});
+
+    // Module info (if available)
+    if (result.module_info) |info| {
+        std.debug.print("  \"module\": {{\n", .{});
+        std.debug.print("    \"version\": {d},\n", .{info.version});
+        std.debug.print("    \"has_executor\": {s},\n", .{if (info.has_executor) "true" else "false"});
+        std.debug.print("    \"executor_size\": {d},\n", .{info.executor_size});
+        std.debug.print("    \"bytecode_size\": {d},\n", .{info.bytecode_size});
+        std.debug.print("    \"strings_count\": {d},\n", .{info.strings_count});
+        std.debug.print("    \"data_blobs_count\": {d},\n", .{info.data_blobs_count});
+        std.debug.print("    \"wgsl_entries_count\": {d},\n", .{info.wgsl_entries_count});
+        std.debug.print("    \"uniform_entries_count\": {d},\n", .{info.uniform_entries_count});
+        std.debug.print("    \"has_animation\": {s},\n", .{if (info.has_animation) "true" else "false"});
+        std.debug.print("    \"scene_count\": {d}\n", .{info.scene_count});
+        std.debug.print("  }},\n", .{});
+    }
 
     // Errors
     std.debug.print("  \"errors\": [", .{});
@@ -478,6 +570,24 @@ fn outputHuman(result: *const ValidationResult, opts: *const Options) !void {
     // Header
     std.debug.print("Validating: {s}\n", .{opts.input_path});
     std.debug.print("Canvas size: {d}x{d}, Time: {d:.2}s\n\n", .{ opts.width, opts.height, opts.time });
+
+    // Module info
+    if (result.module_info) |info| {
+        std.debug.print("Module Info:\n", .{});
+        std.debug.print("  Format version: v{d}\n", .{info.version});
+        std.debug.print("  Bytecode size: {d} bytes\n", .{info.bytecode_size});
+        std.debug.print("  WGSL entries: {d}\n", .{info.wgsl_entries_count});
+        std.debug.print("  Data blobs: {d}\n", .{info.data_blobs_count});
+        std.debug.print("  Strings: {d}\n", .{info.strings_count});
+        std.debug.print("  Uniforms: {d}\n", .{info.uniform_entries_count});
+        if (info.has_executor) {
+            std.debug.print("  Embedded executor: {d} bytes\n", .{info.executor_size});
+        }
+        if (info.has_animation) {
+            std.debug.print("  Animation scenes: {d}\n", .{info.scene_count});
+        }
+        std.debug.print("\n", .{});
+    }
 
     // Errors
     if (result.errors.items.len > 0) {

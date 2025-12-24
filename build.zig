@@ -58,9 +58,15 @@ pub fn build(b: *std.Build) void {
         cli_module.addImport("zgpu", dep.module("root"));
     }
 
+    // Note: wasm3 integration for actual WASM execution is deferred.
+    // The validate command currently works for static bytecode analysis.
+    // To enable WASM execution, wasm3 needs to be compiled as a C library
+    // and linked. See: https://github.com/wasm3/wasm3
+
     // Create build options with embedded WASM
     const build_options = b.addOptions();
     build_options.addOption(bool, "has_embedded_wasm", true);
+    build_options.addOption(bool, "has_wasm3", false); // TODO: Enable when wasm3 is integrated
     cli_module.addImport("build_options", build_options.createModule());
 
     // Embed WASM binary in CLI for bundle command
