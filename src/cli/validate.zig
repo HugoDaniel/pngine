@@ -24,6 +24,15 @@ const pngine = @import("pngine");
 const format = pngine.format;
 const command_buffer = pngine.command_buffer;
 const Cmd = command_buffer.Cmd;
+const build_options = @import("build_options");
+const wasm3 = @import("wasm3.zig");
+const Wasm3Runtime = wasm3.Wasm3Runtime;
+
+// Embedded WASM executor (from build)
+const embedded_wasm = if (build_options.has_embedded_wasm)
+    @embedFile("embedded_wasm")
+else
+    @as([]const u8, &.{});
 
 /// Maximum input file size (16 MiB).
 const max_file_size: u32 = 16 * 1024 * 1024;
@@ -469,16 +478,257 @@ fn validateBytecode(
         if (result.status == .ok) result.status = .warning;
     }
 
-    // Note about wasm3 integration
-    if (!opts.quiet and opts.verbose) {
+    // Execute WASM to capture command buffer
+    if (Wasm3Runtime.isAvailable() and embedded_wasm.len > 0) {
+        executeWasm(allocator, bytecode, result, opts) catch |err| {
+            try result.warnings.append(allocator, .{
+                .code = "W100",
+                .severity = .warning,
+                .message = switch (err) {
+                    error.InitFailed => "wasm3 init failed",
+                    error.ParseFailed => "WASM parse failed",
+                    error.LoadFailed => "WASM load failed",
+                    error.CompileFailed => "WASM compile failed",
+                    error.FunctionNotFound => "WASM function not found",
+                    error.CallFailed => "WASM call failed",
+                    error.MemoryAccessFailed => "WASM memory access failed",
+                    else => "WASM execution failed",
+                },
+                .command_index = null,
+            });
+            if (result.status == .ok) result.status = .warning;
+        };
+    } else if (!opts.quiet and opts.verbose) {
         try result.warnings.append(allocator, .{
             .code = "W100",
             .severity = .warning,
-            .message = "wasm3 integration pending - command buffer execution not available",
+            .message = if (!Wasm3Runtime.isAvailable())
+                "wasm3 not available at compile time"
+            else
+                "no embedded WASM executor",
             .command_index = null,
         });
         if (result.status == .ok) result.status = .warning;
     }
+}
+
+/// Execute WASM to capture command buffer output.
+fn executeWasm(
+    allocator: std.mem.Allocator,
+    bytecode: []const u8,
+    result: *ValidationResult,
+    opts: *const Options,
+) !void {
+    // Initialize wasm3 runtime with 1MB stack
+    var runtime = try Wasm3Runtime.init(allocator, 1024 * 1024);
+    defer runtime.deinit();
+
+    // Load the embedded WASM executor
+    try runtime.loadModule(embedded_wasm);
+
+    // Link host functions (log is optional)
+    runtime.linkLogFunction() catch {};
+
+    // Get memory pointers
+    const bytecode_ptr = try runtime.callGetPtr("getBytecodePtr");
+    const data_ptr = try runtime.callGetPtr("getDataPtr");
+
+    // Write bytecode to WASM memory
+    try runtime.writeMemory(bytecode_ptr, bytecode);
+    try runtime.callSetLen("setBytecodeLen", @intCast(bytecode.len));
+
+    // Parse bytecode to get data section
+    const module = try format.deserialize(allocator, bytecode);
+    defer @constCast(&module).deinit(allocator);
+
+    // Write data section to WASM memory
+    const data_offset = module.header.data_section_offset;
+    const data_end = if (module.header.wgsl_table_offset > 0)
+        module.header.wgsl_table_offset
+    else
+        @as(u32, @intCast(bytecode.len));
+
+    if (data_end > data_offset) {
+        const data_section = bytecode[data_offset..data_end];
+        try runtime.writeMemory(data_ptr, data_section);
+        try runtime.callSetLen("setDataLen", @intCast(data_section.len));
+    }
+
+    // Execute init phase
+    if (opts.phase == .init or opts.phase == .both) {
+        const init_result = try runtime.callInit();
+        if (init_result != 0) {
+            try result.errors.append(allocator, .{
+                .code = "E010",
+                .severity = .err,
+                .message = "WASM init() returned error",
+                .command_index = null,
+            });
+            result.status = .err;
+            return;
+        }
+
+        // Read command buffer
+        const cmd_ptr = try runtime.callGetPtr("getCommandPtr");
+        const cmd_len = try runtime.callGetPtr("getCommandLen");
+
+        if (cmd_len > 0) {
+            const cmd_data = try runtime.readMemory(cmd_ptr, cmd_len);
+            try parseCommandBuffer(allocator, cmd_data, &result.init_commands);
+        }
+    }
+
+    // Execute frame phase
+    if (opts.phase == .frame or opts.phase == .both) {
+        const frame_result = try runtime.callFrame(opts.time, opts.width, opts.height);
+        if (frame_result != 0) {
+            try result.errors.append(allocator, .{
+                .code = "E011",
+                .severity = .err,
+                .message = "WASM frame() returned error",
+                .command_index = null,
+            });
+            result.status = .err;
+            return;
+        }
+
+        // Read command buffer
+        const cmd_ptr = try runtime.callGetPtr("getCommandPtr");
+        const cmd_len = try runtime.callGetPtr("getCommandLen");
+
+        if (cmd_len > 0) {
+            const cmd_data = try runtime.readMemory(cmd_ptr, cmd_len);
+            try parseCommandBuffer(allocator, cmd_data, &result.frame_commands);
+        }
+    }
+}
+
+/// Parse command buffer into CommandInfo array.
+fn parseCommandBuffer(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    commands: *std.ArrayListUnmanaged(CommandInfo),
+) !void {
+    // Header is 8 bytes: total_len(u32) + cmd_count(u16) + flags(u16)
+    if (data.len < 8) return;
+
+    const total_len = std.mem.readInt(u32, data[0..4], .little);
+    const cmd_count = std.mem.readInt(u16, data[4..6], .little);
+    _ = cmd_count; // We'll count commands as we parse
+
+    if (total_len > data.len) return;
+
+    var pos: u32 = 8; // Skip header
+    var cmd_index: u32 = 0;
+    const max_iterations: u32 = 10000; // Safety bound
+
+    for (0..max_iterations) |_| {
+        if (pos >= total_len) break;
+
+        // Read command tag
+        const tag = data[pos];
+        pos += 1;
+
+        const cmd: Cmd = @enumFromInt(tag);
+        try commands.append(allocator, .{
+            .index = cmd_index,
+            .cmd = cmd,
+        });
+
+        cmd_index += 1;
+
+        // Skip command payload based on type
+        pos += getCommandPayloadSize(cmd, data[pos..]);
+
+        // Stop at end command
+        if (cmd == .end) break;
+    }
+}
+
+/// Get payload size for a command based on command_buffer.zig format.
+fn getCommandPayloadSize(cmd: Cmd, _: []const u8) u32 {
+    return switch (cmd) {
+        // Resource Creation
+        .create_buffer => 7, // id(u16) + size(u32) + usage(u8)
+        .create_texture => 10, // id(u16) + desc_ptr(u32) + desc_len(u32)
+        .create_sampler => 10, // id(u16) + desc_ptr(u32) + desc_len(u32)
+        .create_shader => 10, // id(u16) + code_ptr(u32) + code_len(u32)
+        .create_render_pipeline => 10, // id(u16) + desc_ptr(u32) + desc_len(u32)
+        .create_compute_pipeline => 10, // id(u16) + desc_ptr(u32) + desc_len(u32)
+        .create_bind_group => 12, // id(u16) + layout_id(u16) + entries_ptr(u32) + entries_len(u32)
+        .create_texture_view => 12, // id(u16) + texture_id(u16) + desc_ptr(u32) + desc_len(u32)
+        .create_query_set => 10, // id(u16) + desc_ptr(u32) + desc_len(u32)
+        .create_bind_group_layout => 10, // id(u16) + desc_ptr(u32) + desc_len(u32)
+        .create_image_bitmap => 10, // id(u16) + data_ptr(u32) + data_len(u32)
+        .create_pipeline_layout => 10, // id(u16) + desc_ptr(u32) + desc_len(u32)
+        .create_render_bundle => 10, // id(u16) + desc_ptr(u32) + desc_len(u32)
+
+        // Pass Operations
+        .begin_render_pass => 6, // color_id(u16) + load(u8) + store(u8) + depth_id(u16)
+        .begin_compute_pass => 0,
+        .set_pipeline => 2, // id(u16)
+        .set_bind_group => 3, // slot(u8) + id(u16)
+        .set_vertex_buffer => 3, // slot(u8) + id(u16)
+        .set_index_buffer => 3, // id(u16) + format(u8)
+        .draw => 16, // vtx(u32) + inst(u32) + first_vtx(u32) + first_inst(u32)
+        .draw_indexed => 20, // idx(u32) + inst(u32) + first_idx(u32) + base_vtx(u32) + first_inst(u32)
+        .dispatch => 12, // x(u32) + y(u32) + z(u32)
+        .end_pass => 0,
+        .execute_bundles => 1, // count(u8) + bundle_ids... (variable, handled separately)
+
+        // Queue Operations
+        .write_buffer => 14, // id(u16) + offset(u32) + data_ptr(u32) + data_len(u32)
+        .write_time_uniform => 8, // id(u16) + offset(u32) + size(u16)
+        .copy_buffer_to_buffer => 16, // src_id(u16) + src_offset(u32) + dst_id(u16) + dst_offset(u32) + size(u32)
+        .copy_texture_to_texture => 8, // src_id(u16) + dst_id(u16) + width(u16) + height(u16)
+        .write_buffer_from_wasm => 14, // buffer_id(u16) + buffer_offset(u32) + wasm_ptr(u32) + size(u32)
+        .copy_external_image_to_texture => 9, // bitmap_id(u16) + texture_id(u16) + mip_level(u8) + origin_x(u16) + origin_y(u16)
+
+        // WASM Module Operations
+        .init_wasm_module => 10, // module_id(u16) + data_ptr(u32) + data_len(u32)
+        .call_wasm_func => 20, // call_id(u16) + module_id(u16) + func_name_ptr(u32) + func_name_len(u32) + args_ptr(u32) + args_len(u32)
+
+        // Utility Operations
+        .create_typed_array => 7, // id(u16) + type(u8) + size(u32)
+        .fill_random => 15, // array_id(u16) + offset(u32) + count(u32) + stride(u8) + data_ptr(u32)
+        .fill_expression => 17, // array_id(u16) + offset(u32) + count(u32) + stride(u8) + expr_ptr(u32) + expr_len(u16)
+        .fill_constant => 15, // array_id(u16) + offset(u32) + count(u32) + stride(u8) + value_ptr(u32)
+        .write_buffer_from_array => 8, // buffer_id(u16) + buffer_offset(u32) + array_id(u16)
+
+        // Control
+        .submit => 0,
+        .end => 0,
+    };
+}
+
+/// Output command summary statistics (command counts by category).
+fn outputCommandSummary(commands: []const CommandInfo) void {
+    var resource_count: u32 = 0;
+    var pass_count: u32 = 0;
+    var queue_count: u32 = 0;
+    var draw_count: u32 = 0;
+    var compute_count: u32 = 0;
+
+    for (commands) |cmd_info| {
+        const tag: u8 = @intFromEnum(cmd_info.cmd);
+        if (tag >= 0x01 and tag <= 0x0F) {
+            resource_count += 1;
+        } else if (tag >= 0x10 and tag <= 0x1F) {
+            pass_count += 1;
+            if (cmd_info.cmd == .draw or cmd_info.cmd == .draw_indexed) {
+                draw_count += 1;
+            } else if (cmd_info.cmd == .dispatch) {
+                compute_count += 1;
+            }
+        } else if (tag >= 0x20 and tag <= 0x2F) {
+            queue_count += 1;
+        }
+    }
+
+    std.debug.print("      \"resources_created\": {d},\n", .{resource_count});
+    std.debug.print("      \"draw_calls\": {d},\n", .{draw_count});
+    std.debug.print("      \"compute_dispatches\": {d},\n", .{compute_count});
+    std.debug.print("      \"queue_operations\": {d}\n", .{queue_count});
 }
 
 /// Output validation result as JSON.
@@ -533,8 +783,17 @@ fn outputJson(allocator: std.mem.Allocator, result: *const ValidationResult, opt
     if (opts.verbose or opts.phase == .init or opts.phase == .both) {
         std.debug.print(",\n  \"initialization\": {{\n", .{});
         std.debug.print("    \"phase\": \"init\",\n", .{});
-        std.debug.print("    \"commands\": [],\n", .{}); // TODO: populate with wasm3
-        std.debug.print("    \"summary\": {{\"total_commands\": {d}}}\n", .{result.init_commands.items.len});
+        std.debug.print("    \"commands\": [", .{});
+        for (result.init_commands.items, 0..) |cmd_info, i| {
+            if (i > 0) std.debug.print(",", .{});
+            std.debug.print("\n      {{\"index\": {d}, \"cmd\": \"{s}\"}}", .{ cmd_info.index, @tagName(cmd_info.cmd) });
+        }
+        if (result.init_commands.items.len > 0) std.debug.print("\n    ", .{});
+        std.debug.print("],\n", .{});
+        std.debug.print("    \"summary\": {{\n", .{});
+        std.debug.print("      \"total_commands\": {d},\n", .{result.init_commands.items.len});
+        outputCommandSummary(result.init_commands.items);
+        std.debug.print("    }}\n", .{});
         std.debug.print("  }}", .{});
     }
 
@@ -544,8 +803,17 @@ fn outputJson(allocator: std.mem.Allocator, result: *const ValidationResult, opt
         std.debug.print("    \"phase\": \"frame\",\n", .{});
         std.debug.print("    \"time\": {d},\n", .{opts.time});
         std.debug.print("    \"canvas_size\": [{d}, {d}],\n", .{ opts.width, opts.height });
-        std.debug.print("    \"commands\": [],\n", .{}); // TODO: populate with wasm3
-        std.debug.print("    \"summary\": {{\"total_commands\": {d}}}\n", .{result.frame_commands.items.len});
+        std.debug.print("    \"commands\": [", .{});
+        for (result.frame_commands.items, 0..) |cmd_info, i| {
+            if (i > 0) std.debug.print(",", .{});
+            std.debug.print("\n      {{\"index\": {d}, \"cmd\": \"{s}\"}}", .{ cmd_info.index, @tagName(cmd_info.cmd) });
+        }
+        if (result.frame_commands.items.len > 0) std.debug.print("\n    ", .{});
+        std.debug.print("],\n", .{});
+        std.debug.print("    \"summary\": {{\n", .{});
+        std.debug.print("      \"total_commands\": {d},\n", .{result.frame_commands.items.len});
+        outputCommandSummary(result.frame_commands.items);
+        std.debug.print("    }}\n", .{});
         std.debug.print("  }}", .{});
     }
 
@@ -589,6 +857,20 @@ fn outputHuman(result: *const ValidationResult, opts: *const Options) !void {
         std.debug.print("\n", .{});
     }
 
+    // Init commands (if verbose or phase includes init)
+    if ((opts.verbose or opts.phase == .init or opts.phase == .both) and result.init_commands.items.len > 0) {
+        std.debug.print("Initialization ({d} commands):\n", .{result.init_commands.items.len});
+        outputHumanCommandList(result.init_commands.items, opts.verbose);
+        std.debug.print("\n", .{});
+    }
+
+    // Frame commands (if verbose or phase includes frame)
+    if ((opts.verbose or opts.phase == .frame or opts.phase == .both) and result.frame_commands.items.len > 0) {
+        std.debug.print("Frame ({d} commands):\n", .{result.frame_commands.items.len});
+        outputHumanCommandList(result.frame_commands.items, opts.verbose);
+        std.debug.print("\n", .{});
+    }
+
     // Errors
     if (result.errors.items.len > 0) {
         std.debug.print("Errors:\n", .{});
@@ -614,6 +896,34 @@ fn outputHuman(result: *const ValidationResult, opts: *const Options) !void {
         .err => "ERROR",
     };
     std.debug.print("Status: {s}\n", .{status_symbol});
+}
+
+/// Output human-readable command list.
+fn outputHumanCommandList(commands: []const CommandInfo, verbose: bool) void {
+    // Count commands by category
+    var resource_count: u32 = 0;
+    var draw_count: u32 = 0;
+    var compute_count: u32 = 0;
+
+    for (commands) |cmd_info| {
+        const tag: u8 = @intFromEnum(cmd_info.cmd);
+        if (tag >= 0x01 and tag <= 0x0F) {
+            resource_count += 1;
+        } else if (cmd_info.cmd == .draw or cmd_info.cmd == .draw_indexed) {
+            draw_count += 1;
+        } else if (cmd_info.cmd == .dispatch) {
+            compute_count += 1;
+        }
+    }
+
+    std.debug.print("  Resources: {d}, Draws: {d}, Computes: {d}\n", .{ resource_count, draw_count, compute_count });
+
+    // If verbose, list all commands
+    if (verbose) {
+        for (commands) |cmd_info| {
+            std.debug.print("  [{d:3}] {s}\n", .{ cmd_info.index, @tagName(cmd_info.cmd) });
+        }
+    }
 }
 
 fn printHelp() void {
