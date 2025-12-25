@@ -218,7 +218,6 @@ pub const Miniray = struct {
         const argv = [_][]const u8{
             self.miniray_path orelse "miniray",
             "reflect",
-            "--compact",
         };
 
         var child = std.process.Child.init(&argv, gpa);

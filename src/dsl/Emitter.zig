@@ -504,10 +504,21 @@ pub const Emitter = struct {
         const wgsl_code = utils.getStringContent(self, code_node);
         if (wgsl_code.len == 0) return null;
 
-        // Call miniray for reflection
+        // Call miniray for reflection - miniray is required for WGSL analysis
         const miniray = reflect.Miniray{ .miniray_path = self.options.miniray_path };
         const reflection = miniray.reflect(self.gpa, wgsl_code) catch |err| {
-            std.log.warn("WGSL reflection failed for '{s}': {}", .{ shader_name, err });
+            switch (err) {
+                error.MinirayNotFound => {
+                    std.log.err("miniray not found: install miniray or set miniray_path option", .{});
+                },
+                error.ProcessFailed, error.SpawnFailed, error.InvalidJson, error.OutOfMemory => {
+                    // WGSL parse errors and OOM are common during testing - use warn level
+                    std.log.warn("WGSL reflection failed for '{s}': {}", .{ shader_name, err });
+                },
+                else => {
+                    std.log.err("WGSL reflection failed for '{s}': {}", .{ shader_name, err });
+                },
+            }
             return null;
         };
 
