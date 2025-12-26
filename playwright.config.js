@@ -16,7 +16,7 @@ export default defineConfig({
     reporter: 'html',
 
     use: {
-        baseURL: 'http://localhost:8765',
+        baseURL: 'http://localhost:5173',
         trace: 'on-first-retry',
         screenshot: 'only-on-failure',
     },
@@ -38,10 +38,10 @@ export default defineConfig({
         },
     ],
 
-    // Start local web server before tests
+    // Start Vite dev server before tests
     webServer: {
-        command: 'python3 -m http.server 8765 -d zig-out/web',
-        url: 'http://localhost:8765',
+        command: 'npm run dev',
+        url: 'http://localhost:5173',
         reuseExistingServer: !process.env.CI,
         timeout: 30000,
     },
