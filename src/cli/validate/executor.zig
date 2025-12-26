@@ -220,6 +220,13 @@ fn executeWasm(
     var validator = Validator.init(allocator);
     defer validator.deinit();
 
+    // Get WASM memory size for bounds checking (E004)
+    if (runtime.getMemory()) |mem| {
+        validator.setWasmMemorySize(@intCast(mem.len));
+    } else |_| {
+        // Memory not available, bounds checking will be skipped
+    }
+
     // Execute init phase (always, resources must be created first)
     if (opts.phase == .init or opts.phase == .both) {
         const init_result = try runtime.callInit();

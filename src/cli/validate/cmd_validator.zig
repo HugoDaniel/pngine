@@ -12,6 +12,7 @@
 //!
 //! - E001: missing_resource - Reference to non-existent resource
 //! - E002: state_violation - Command in wrong state (draw outside pass)
+//! - E004: memory_bounds - Pointer + length exceeds WASM memory bounds
 //! - E005: duplicate_id - Resource ID already in use
 //! - E007: pass_mismatch - END_PASS without matching BEGIN
 //! - E008: nested_pass - BEGIN_PASS inside active pass
@@ -19,6 +20,7 @@
 //! ## Warning Codes
 //!
 //! - W003: zero_count - Draw/dispatch with zero work (nothing will render)
+//! - W004: null_pointer - Null pointer with non-zero length (suspicious)
 //!
 //! ## Invariants
 //!
@@ -205,6 +207,11 @@ pub const Validator = struct {
     /// Dispatch call count for statistics.
     dispatch_count: u32,
 
+    /// WASM linear memory size in bytes (for bounds checking).
+    /// When set, enables E004 memory bounds validation.
+    /// When null, bounds checking is skipped.
+    wasm_memory_size: ?u32,
+
     /// Per-pass bound vertex buffers (8 slots max).
     bound_vertex_buffers: [8]?u16,
 
@@ -252,6 +259,7 @@ pub const Validator = struct {
             .command_index = 0,
             .draw_count = 0,
             .dispatch_count = 0,
+            .wasm_memory_size = null,
             .bound_vertex_buffers = .{null} ** 8,
             .bound_bind_groups = .{null} ** 4,
             .buffers = .{},
@@ -300,6 +308,53 @@ pub const Validator = struct {
 
         // Post-condition: mark as undefined to catch use-after-free
         self.* = undefined;
+    }
+
+    /// Set WASM memory size for bounds checking.
+    ///
+    /// When set, enables E004 memory bounds validation for all commands
+    /// that reference WASM memory via pointer + length.
+    ///
+    /// Pre-condition: size > 0
+    /// Post-condition: wasm_memory_size is set, bounds checking enabled
+    pub fn setWasmMemorySize(self: *Self, size: u32) void {
+        std.debug.assert(size > 0);
+        self.wasm_memory_size = size;
+    }
+
+    /// Validate that ptr + len is within WASM memory bounds.
+    ///
+    /// Checks:
+    /// 1. ptr + len doesn't overflow u32
+    /// 2. If wasm_memory_size is set, ptr + len <= wasm_memory_size
+    /// 3. Warns if ptr == 0 but len > 0 (null pointer with data)
+    ///
+    /// Returns true if bounds are valid, false if error was added.
+    fn validateMemoryBounds(self: *Self, ptr: u32, len: u32, context: []const u8) !bool {
+        // Pre-condition: context describes the command
+        std.debug.assert(context.len > 0);
+
+        // Check for null pointer with non-zero length (suspicious)
+        if (ptr == 0 and len > 0) {
+            try self.addWarning("W004", context);
+        }
+
+        // Check for u32 overflow: ptr + len must not wrap
+        const end_addr = @addWithOverflow(ptr, len);
+        if (end_addr[1] != 0) {
+            try self.addError("E004", context);
+            return false;
+        }
+
+        // Check against WASM memory size if set
+        if (self.wasm_memory_size) |mem_size| {
+            if (end_addr[0] > mem_size) {
+                try self.addError("E004", context);
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// Validate a sequence of parsed commands.
@@ -420,6 +475,14 @@ pub const Validator = struct {
             try self.addErrorWithId("E005", "Shader ID already in use", params.id);
             return;
         }
+
+        // E004: Validate shader code pointer bounds
+        _ = try self.validateMemoryBounds(
+            params.code_ptr,
+            params.code_len,
+            "CREATE_SHADER code_ptr + code_len exceeds WASM memory",
+        );
+
         try self.shaders.put(self.allocator, params.id, .{ .created_at = self.command_index });
     }
 
@@ -450,6 +513,14 @@ pub const Validator = struct {
             try self.addErrorWithId("E005", "Bind group ID already in use", params.id);
             return;
         }
+
+        // E004: Validate entries pointer bounds
+        _ = try self.validateMemoryBounds(
+            params.entries_ptr,
+            params.entries_len,
+            "CREATE_BIND_GROUP entries_ptr + entries_len exceeds WASM memory",
+        );
+
         try self.bind_groups.put(self.allocator, params.id, .{ .created_at = self.command_index });
     }
 
@@ -486,6 +557,14 @@ pub const Validator = struct {
             try self.addErrorWithId("E005", "WASM module ID already in use", params.module_id);
             return;
         }
+
+        // E004: Validate WASM module data pointer bounds
+        _ = try self.validateMemoryBounds(
+            params.data_ptr,
+            params.data_len,
+            "INIT_WASM_MODULE data_ptr + data_len exceeds WASM memory",
+        );
+
         try self.wasm_modules.put(self.allocator, params.module_id, .{ .created_at = self.command_index });
     }
 
@@ -627,6 +706,13 @@ pub const Validator = struct {
         if (!self.buffers.contains(params.id)) {
             try self.addErrorWithId("E001", "WRITE_BUFFER references non-existent buffer", params.id);
         }
+
+        // E004: Validate data pointer bounds
+        _ = try self.validateMemoryBounds(
+            params.data_ptr,
+            params.data_len,
+            "WRITE_BUFFER data_ptr + data_len exceeds WASM memory",
+        );
     }
 
     fn validateWriteTimeUniform(self: *Self, params: WriteTimeUniformParams) !void {
@@ -658,6 +744,13 @@ pub const Validator = struct {
         if (!self.buffers.contains(params.buffer_id)) {
             try self.addErrorWithId("E001", "WRITE_BUFFER_FROM_WASM references non-existent buffer", params.buffer_id);
         }
+
+        // E004: Validate WASM memory source pointer bounds
+        _ = try self.validateMemoryBounds(
+            params.wasm_ptr,
+            params.size,
+            "WRITE_BUFFER_FROM_WASM wasm_ptr + size exceeds WASM memory",
+        );
     }
 
     fn validateCopyExternalImage(self: *Self, params: CopyExternalImageParams) !void {
@@ -673,6 +766,20 @@ pub const Validator = struct {
         if (!self.wasm_modules.contains(params.module_id)) {
             try self.addErrorWithId("E001", "CALL_WASM_FUNC references non-existent WASM module", params.module_id);
         }
+
+        // E004: Validate function name pointer bounds
+        _ = try self.validateMemoryBounds(
+            params.func_ptr,
+            params.func_len,
+            "CALL_WASM_FUNC func_ptr + func_len exceeds WASM memory",
+        );
+
+        // E004: Validate arguments pointer bounds
+        _ = try self.validateMemoryBounds(
+            params.args_ptr,
+            params.args_len,
+            "CALL_WASM_FUNC args_ptr + args_len exceeds WASM memory",
+        );
     }
 
     fn validateFillArray(self: *Self, params: FillArrayParams) !void {
@@ -685,6 +792,13 @@ pub const Validator = struct {
         if (!self.typed_arrays.contains(params.array_id)) {
             try self.addErrorWithId("E001", "FILL_EXPRESSION references non-existent typed array", params.array_id);
         }
+
+        // E004: Validate expression pointer bounds
+        _ = try self.validateMemoryBounds(
+            params.expr_ptr,
+            @as(u32, params.expr_len),
+            "FILL_EXPRESSION expr_ptr + expr_len exceeds WASM memory",
+        );
     }
 
     fn validateWriteBufferFromArray(self: *Self, params: WriteBufferFromArrayParams) !void {
@@ -1319,4 +1433,907 @@ test "parseCommands: preserves command sequence order" {
     try std.testing.expectEqual(Cmd.draw, parsed[2].cmd);
     try std.testing.expectEqual(Cmd.end_pass, parsed[3].cmd);
     try std.testing.expectEqual(Cmd.end, parsed[4].cmd);
+}
+
+// ============================================================================
+// E004 Memory Bounds Checking Tests
+// ============================================================================
+
+test "Validator: E004 detects ptr+len overflow" {
+    // Property: Pointer + length that overflows u32 triggers E004.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+
+    // Set a large memory size (won't matter since overflow happens first)
+    validator.setWasmMemorySize(0x1000_0000);
+
+    // Create shader command with ptr+len that overflows
+    const commands = [_]ParsedCommand{
+        .{
+            .index = 0,
+            .cmd = .create_shader,
+            .params = .{ .create_shader = .{
+                .id = 0,
+                .code_ptr = 0xFFFF_FFF0, // Near max u32
+                .code_len = 0x0000_0020, // Will overflow when added
+            } },
+        },
+    };
+
+    try validator.validate(&commands);
+
+    // Should have E004 error
+    try std.testing.expect(validator.hasErrors());
+    try std.testing.expectEqual(@as(usize, 1), validator.issues.items.len);
+    try std.testing.expectEqualStrings("E004", validator.issues.items[0].code);
+}
+
+test "Validator: E004 detects out-of-bounds access" {
+    // Property: Pointer + length exceeding memory size triggers E004.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+
+    // Set small memory size (64KB)
+    validator.setWasmMemorySize(65536);
+
+    // Create shader command that exceeds memory bounds
+    const commands = [_]ParsedCommand{
+        .{
+            .index = 0,
+            .cmd = .create_shader,
+            .params = .{ .create_shader = .{
+                .id = 0,
+                .code_ptr = 60000, // Within bounds
+                .code_len = 10000, // 60000 + 10000 = 70000 > 65536
+            } },
+        },
+    };
+
+    try validator.validate(&commands);
+
+    // Should have E004 error
+    try std.testing.expect(validator.hasErrors());
+    try std.testing.expectEqualStrings("E004", validator.issues.items[0].code);
+}
+
+test "Validator: E004 valid bounds produces no error" {
+    // Property: Valid pointer + length produces no E004 error.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+
+    // Set memory size (64KB)
+    validator.setWasmMemorySize(65536);
+
+    // Create shader command within bounds
+    const commands = [_]ParsedCommand{
+        .{
+            .index = 0,
+            .cmd = .create_shader,
+            .params = .{ .create_shader = .{
+                .id = 0,
+                .code_ptr = 1000,
+                .code_len = 500, // 1000 + 500 = 1500 < 65536
+            } },
+        },
+    };
+
+    try validator.validate(&commands);
+
+    // Should have no errors
+    try std.testing.expect(!validator.hasErrors());
+}
+
+test "Validator: W004 warns on null pointer with non-zero length" {
+    // Property: ptr=0 with len>0 is suspicious and triggers W004 warning.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+
+    validator.setWasmMemorySize(65536);
+
+    // Create shader command with null pointer but non-zero length
+    const commands = [_]ParsedCommand{
+        .{
+            .index = 0,
+            .cmd = .create_shader,
+            .params = .{ .create_shader = .{
+                .id = 0,
+                .code_ptr = 0, // Null pointer
+                .code_len = 100, // But claims 100 bytes
+            } },
+        },
+    };
+
+    try validator.validate(&commands);
+
+    // Should have W004 warning (not error)
+    try std.testing.expect(!validator.hasErrors());
+    try std.testing.expect(validator.warningCount() >= 1);
+}
+
+test "Validator: E004 checks multiple commands" {
+    // Property: E004 checking works for different command types.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+
+    validator.setWasmMemorySize(1024);
+
+    // Multiple commands with bounds issues
+    const commands = [_]ParsedCommand{
+        .{
+            .index = 0,
+            .cmd = .create_buffer,
+            .params = .{ .create_buffer = .{ .id = 0, .size = 64, .usage = 0x40 } },
+        },
+        .{
+            .index = 1,
+            .cmd = .write_buffer,
+            .params = .{ .write_buffer = .{
+                .id = 0,
+                .offset = 0,
+                .data_ptr = 500,
+                .data_len = 600, // 500 + 600 = 1100 > 1024
+            } },
+        },
+    };
+
+    try validator.validate(&commands);
+
+    // Should have E004 error for write_buffer
+    try std.testing.expect(validator.hasErrors());
+    var found_e004 = false;
+    for (validator.issues.items) |issue| {
+        if (std.mem.eql(u8, issue.code, "E004")) {
+            found_e004 = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_e004);
+}
+
+test "Validator: bounds checking skipped when memory size not set" {
+    // Property: When wasm_memory_size is null, bounds checking is skipped.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+
+    // Don't set memory size - bounds checking should be skipped
+
+    // Create shader command that would fail if bounds were checked
+    const commands = [_]ParsedCommand{
+        .{
+            .index = 0,
+            .cmd = .create_shader,
+            .params = .{ .create_shader = .{
+                .id = 0,
+                .code_ptr = 0x8000_0000, // Large address
+                .code_len = 0x1000_0000, // Large length (but no overflow)
+            } },
+        },
+    };
+
+    try validator.validate(&commands);
+
+    // Should have no E004 errors (bounds checking skipped)
+    for (validator.issues.items) |issue| {
+        if (std.mem.eql(u8, issue.code, "E004")) {
+            try std.testing.expect(false); // Fail if E004 found
+        }
+    }
+}
+
+// ============================================================================
+// E004 Boundary Edge Case Tests
+// ============================================================================
+
+test "Validator: E004 boundary - ptr=0 len=0 passes" {
+    // Property: Empty range at start of memory is valid.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(65536);
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 0,
+            .code_ptr = 0,
+            .code_len = 0,
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(!validator.hasErrors());
+}
+
+test "Validator: E004 boundary - ptr=mem_size len=0 passes" {
+    // Property: Empty range at exact end of memory is valid.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(65536);
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 0,
+            .code_ptr = 65536, // At boundary
+            .code_len = 0, // Zero length
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(!validator.hasErrors());
+}
+
+test "Validator: E004 boundary - exactly at limit passes" {
+    // Property: ptr + len == mem_size is valid (last byte).
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(65536);
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 0,
+            .code_ptr = 65535, // Last byte
+            .code_len = 1, // One byte: 65535 + 1 = 65536 <= 65536
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(!validator.hasErrors());
+}
+
+test "Validator: E004 boundary - one byte past limit fails" {
+    // Property: ptr + len == mem_size + 1 is invalid.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(65536);
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 0,
+            .code_ptr = 65535,
+            .code_len = 2, // 65535 + 2 = 65537 > 65536
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+    try std.testing.expectEqualStrings("E004", validator.issues.items[0].code);
+}
+
+test "Validator: E004 boundary - entire memory is valid" {
+    // Property: Using all of memory (ptr=0, len=mem_size) is valid.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(65536);
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 0,
+            .code_ptr = 0,
+            .code_len = 65536, // Entire memory
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(!validator.hasErrors());
+}
+
+test "Validator: E004 boundary - entire memory plus one fails" {
+    // Property: ptr=0, len=mem_size+1 exceeds bounds.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(65536);
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 0,
+            .code_ptr = 0,
+            .code_len = 65537, // One past entire memory
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+}
+
+test "Validator: E004 boundary - start past end fails" {
+    // Property: ptr >= mem_size with non-zero len fails.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(65536);
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 0,
+            .code_ptr = 65536, // At boundary
+            .code_len = 1, // Can't read even one byte
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+}
+
+// ============================================================================
+// E004 Overflow Edge Case Tests
+// ============================================================================
+
+test "Validator: E004 overflow - max ptr with zero len passes" {
+    // Property: ptr=MAX with len=0 doesn't overflow, and end_addr == mem_size is valid.
+    // This tests the boundary condition where end_addr equals memory size exactly.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(0xFFFFFFFF); // Max memory
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 0,
+            .code_ptr = 0xFFFFFFFF,
+            .code_len = 0,
+        } } },
+    };
+
+    try validator.validate(&commands);
+    // end_addr (0xFFFFFFFF) == mem_size (0xFFFFFFFF), so no E004 error
+    // (would only be error if end_addr > mem_size)
+    try std.testing.expect(!validator.hasErrors());
+}
+
+test "Validator: E004 overflow - half max values overflow" {
+    // Property: 0x80000000 + 0x80000000 = overflow.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(0xFFFFFFFF);
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 0,
+            .code_ptr = 0x80000000,
+            .code_len = 0x80000000, // Overflows to 0
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+    try std.testing.expectEqualStrings("E004", validator.issues.items[0].code);
+}
+
+test "Validator: E004 overflow - near max without overflow passes" {
+    // Property: 0x7FFFFFFF + 0x7FFFFFFF = 0xFFFFFFFE (no overflow).
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(0xFFFFFFFF);
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 0,
+            .code_ptr = 0x7FFFFFFF,
+            .code_len = 0x7FFFFFFF, // Sum = 0xFFFFFFFE, no overflow
+        } } },
+    };
+
+    try validator.validate(&commands);
+    // No overflow, and 0xFFFFFFFE < 0xFFFFFFFF, so valid
+    try std.testing.expect(!validator.hasErrors());
+}
+
+// ============================================================================
+// E004 Multi-Command Tests
+// ============================================================================
+
+test "Validator: E004 continues checking after first error" {
+    // Property: Validator doesn't short-circuit on first E004.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(1024);
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 0,
+            .code_ptr = 2000, // Exceeds 1024
+            .code_len = 100,
+        } } },
+        .{ .index = 1, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 1,
+            .code_ptr = 3000, // Also exceeds 1024
+            .code_len = 100,
+        } } },
+    };
+
+    try validator.validate(&commands);
+
+    // Should have 2 E004 errors
+    var e004_count: u32 = 0;
+    for (validator.issues.items) |issue| {
+        if (std.mem.eql(u8, issue.code, "E004")) e004_count += 1;
+    }
+    try std.testing.expectEqual(@as(u32, 2), e004_count);
+}
+
+test "Validator: E004 valid command between invalid ones" {
+    // Property: Valid commands aren't affected by invalid neighbors.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(1024);
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 0,
+            .code_ptr = 2000, // Invalid
+            .code_len = 100,
+        } } },
+        .{ .index = 1, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 1,
+            .code_ptr = 100, // Valid
+            .code_len = 100,
+        } } },
+        .{ .index = 2, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 2,
+            .code_ptr = 5000, // Invalid
+            .code_len = 100,
+        } } },
+    };
+
+    try validator.validate(&commands);
+
+    // Should have exactly 2 E004 errors (indices 0 and 2)
+    var e004_count: u32 = 0;
+    for (validator.issues.items) |issue| {
+        if (std.mem.eql(u8, issue.code, "E004")) e004_count += 1;
+    }
+    try std.testing.expectEqual(@as(u32, 2), e004_count);
+}
+
+// ============================================================================
+// E004 Different Command Types Tests
+// ============================================================================
+
+test "Validator: E004 checks WRITE_BUFFER bounds" {
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(1024);
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = 0x40,
+        } } },
+        .{ .index = 1, .cmd = .write_buffer, .params = .{ .write_buffer = .{
+            .id = 0,
+            .offset = 0,
+            .data_ptr = 2000, // Exceeds 1024
+            .data_len = 100,
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+}
+
+test "Validator: E004 checks WRITE_BUFFER_FROM_WASM bounds" {
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(1024);
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = 0x40,
+        } } },
+        .{ .index = 1, .cmd = .write_buffer_from_wasm, .params = .{ .write_buffer_from_wasm = .{
+            .buffer_id = 0,
+            .buffer_offset = 0,
+            .wasm_ptr = 500,
+            .size = 600, // 500 + 600 = 1100 > 1024
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+}
+
+test "Validator: E004 checks CREATE_BIND_GROUP bounds" {
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(1024);
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_bind_group, .params = .{ .create_bind_group = .{
+            .id = 0,
+            .layout_id = 0,
+            .entries_ptr = 900,
+            .entries_len = 200, // 900 + 200 = 1100 > 1024
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+}
+
+test "Validator: E004 checks CALL_WASM_FUNC both pointers" {
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(1024);
+
+    // Pre-create the WASM module
+    try validator.wasm_modules.put(validator.allocator, 0, .{ .created_at = 0 });
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .call_wasm_func, .params = .{ .call_wasm_func = .{
+            .call_id = 0,
+            .module_id = 0,
+            .func_ptr = 500,
+            .func_len = 600, // Invalid
+            .args_ptr = 100,
+            .args_len = 50, // Valid
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+}
+
+test "Validator: E004 checks FILL_EXPRESSION bounds" {
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(1024);
+
+    // Pre-create the typed array
+    try validator.typed_arrays.put(validator.allocator, 0, .{ .created_at = 0 });
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .fill_expression, .params = .{ .fill_expression = .{
+            .array_id = 0,
+            .offset = 0,
+            .count = 10,
+            .stride = 4,
+            .expr_ptr = 900,
+            .expr_len = 200, // 900 + 200 = 1100 > 1024
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+}
+
+// ============================================================================
+// E004 Fuzz Test
+// ============================================================================
+
+test "Validator: E004 fuzz - property: error iff overflow or exceeds bounds" {
+    // Property: E004 error occurs if and only if:
+    // 1. ptr + len overflows u32, OR
+    // 2. ptr + len > wasm_memory_size
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const random = prng.random();
+
+    // Test 1000 random cases
+    for (0..1000) |_| {
+        var validator = Validator.init(std.testing.allocator);
+        defer validator.deinit();
+
+        // Random memory size (at least 1 to avoid edge case)
+        const mem_size = random.intRangeAtMost(u32, 1, 0x10000000);
+        validator.setWasmMemorySize(mem_size);
+
+        // Random ptr and len
+        const ptr = random.int(u32);
+        const len = random.int(u32);
+
+        const commands = [_]ParsedCommand{
+            .{ .index = 0, .cmd = .create_shader, .params = .{ .create_shader = .{
+                .id = 0,
+                .code_ptr = ptr,
+                .code_len = len,
+            } } },
+        };
+
+        try validator.validate(&commands);
+
+        // Compute expected result
+        const overflow = @addWithOverflow(ptr, len);
+        const should_error = (overflow[1] != 0) or (overflow[0] > mem_size);
+
+        // Verify
+        var has_e004 = false;
+        for (validator.issues.items) |issue| {
+            if (std.mem.eql(u8, issue.code, "E004")) {
+                has_e004 = true;
+                break;
+            }
+        }
+
+        if (should_error != has_e004) {
+            std.debug.print(
+                "Fuzz failure: ptr=0x{X}, len=0x{X}, mem_size=0x{X}, overflow={}, expected_error={}, got_error={}\n",
+                .{ ptr, len, mem_size, overflow[1] != 0, should_error, has_e004 },
+            );
+            try std.testing.expect(false);
+        }
+    }
+}
+
+// ============================================================================
+// E004 Unusual Scenario Tests (Long Tail)
+// ============================================================================
+
+test "Validator: E004 minimal memory size of 1 byte" {
+    // Property: Memory size of 1 should work correctly.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(1);
+
+    // Valid: ptr=0, len=1
+    const valid = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 0,
+            .code_ptr = 0,
+            .code_len = 1,
+        } } },
+    };
+    try validator.validate(&valid);
+    try std.testing.expect(!validator.hasErrors());
+
+    // Reset
+    validator.issues.clearRetainingCapacity();
+
+    // Invalid: ptr=0, len=2
+    const invalid = [_]ParsedCommand{
+        .{ .index = 1, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 1,
+            .code_ptr = 0,
+            .code_len = 2,
+        } } },
+    };
+    try validator.validate(&invalid);
+    try std.testing.expect(validator.hasErrors());
+}
+
+test "Validator: E004 very large memory (near u32 max)" {
+    // Property: Large memory sizes near u32 max should work.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(0xFFFFFFFE); // Max minus 1
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 0,
+            .code_ptr = 0xFFFFFFF0,
+            .code_len = 0x0E, // Sum = 0xFFFFFFFE, exactly at limit
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(!validator.hasErrors());
+}
+
+test "Validator: E004 sparse allocations across memory" {
+    // Property: Multiple non-contiguous valid allocations.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(10000);
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 0,
+            .code_ptr = 0,
+            .code_len = 100,
+        } } },
+        .{ .index = 1, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 1,
+            .code_ptr = 5000,
+            .code_len = 100,
+        } } },
+        .{ .index = 2, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 2,
+            .code_ptr = 9900,
+            .code_len = 100, // Exactly at end
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(!validator.hasErrors());
+}
+
+test "Validator: E004 overlapping ranges are allowed" {
+    // Property: Overlapping memory ranges don't cause E004.
+    // (E004 only checks bounds, not overlaps)
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(10000);
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 0,
+            .code_ptr = 100,
+            .code_len = 200, // 100-300
+        } } },
+        .{ .index = 1, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 1,
+            .code_ptr = 150,
+            .code_len = 200, // 150-350, overlaps with first
+        } } },
+    };
+
+    try validator.validate(&commands);
+    // No E004 - bounds are valid even if ranges overlap
+    var has_e004 = false;
+    for (validator.issues.items) |issue| {
+        if (std.mem.eql(u8, issue.code, "E004")) has_e004 = true;
+    }
+    try std.testing.expect(!has_e004);
+}
+
+test "Validator: E004 null pointer with zero length is fine" {
+    // Property: ptr=0, len=0 should not trigger W004.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(65536);
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 0,
+            .code_ptr = 0,
+            .code_len = 0, // Null with zero length is OK
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(!validator.hasErrors());
+    try std.testing.expectEqual(@as(usize, 0), validator.warningCount());
+}
+
+test "Validator: E004 stress test with many commands" {
+    // Property: Validator handles many commands efficiently.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setWasmMemorySize(1_000_000);
+
+    // Create 500 valid shader commands
+    var commands: [500]ParsedCommand = undefined;
+    for (&commands, 0..) |*cmd, i| {
+        cmd.* = .{
+            .index = @intCast(i),
+            .cmd = .create_shader,
+            .params = .{ .create_shader = .{
+                .id = @intCast(i),
+                .code_ptr = @as(u32, @intCast(i)) * 1000,
+                .code_len = 500,
+            } },
+        };
+    }
+
+    try validator.validate(&commands);
+    try std.testing.expect(!validator.hasErrors());
+}
+
+// ============================================================================
+// OOM Resilience Tests (FailingAllocator)
+// ============================================================================
+
+test "Validator: OOM during init" {
+    // Property: Validator.init handles OOM gracefully.
+    var fail_index: usize = 0;
+    while (fail_index < 10) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_index,
+        });
+
+        var validator = Validator.init(failing.allocator());
+        defer validator.deinit();
+
+        // If we get here without OOM, init succeeded
+        if (!failing.has_induced_failure) {
+            // Validator initialized successfully, test complete
+            break;
+        }
+    }
+}
+
+test "Validator: OOM during validation with errors" {
+    // Property: validate() handles OOM when adding errors.
+    // Use a DRAW command outside of a pass to trigger E002 state violation
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .draw, .params = .{ .draw = .{
+            .vertex_count = 3,
+            .instance_count = 1,
+            .first_vertex = 0,
+            .first_instance = 0,
+        } } },
+    };
+
+    var fail_index: usize = 0;
+    while (fail_index < 20) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_index,
+        });
+
+        var validator = Validator.init(failing.allocator());
+        defer validator.deinit();
+
+        // This should try to add an error (draw outside pass)
+        const result = validator.validate(&commands);
+        if (result) |_| {
+            if (!failing.has_induced_failure) {
+                // Validation succeeded, OOM didn't affect this path
+                break;
+            }
+        } else |err| {
+            // Expected OOM or other error
+            try std.testing.expect(err == error.OutOfMemory);
+        }
+    }
+}
+
+test "Validator: OOM during resource tracking" {
+    // Property: Resource map insertions handle OOM.
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = 0x40,
+        } } },
+        .{ .index = 1, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 1,
+            .size = 64,
+            .usage = 0x40,
+        } } },
+        .{ .index = 2, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 2,
+            .size = 64,
+            .usage = 0x40,
+        } } },
+    };
+
+    var fail_index: usize = 0;
+    while (fail_index < 30) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_index,
+        });
+
+        var validator = Validator.init(failing.allocator());
+        defer validator.deinit();
+
+        const result = validator.validate(&commands);
+        if (result) |_| {
+            if (!failing.has_induced_failure) {
+                // All allocations succeeded
+                break;
+            }
+        } else |err| {
+            try std.testing.expect(err == error.OutOfMemory);
+        }
+    }
+}
+
+test "Validator: OOM during E004 error reporting" {
+    // Property: E004 bounds check error reporting handles OOM.
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_shader, .params = .{ .create_shader = .{
+            .id = 0,
+            .code_ptr = 5000, // Out of bounds
+            .code_len = 100,
+        } } },
+    };
+
+    var fail_index: usize = 0;
+    while (fail_index < 20) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_index,
+        });
+
+        var validator = Validator.init(failing.allocator());
+        defer validator.deinit();
+        validator.setWasmMemorySize(1024);
+
+        const result = validator.validate(&commands);
+        if (result) |_| {
+            if (!failing.has_induced_failure) {
+                // Should have E004 error
+                try std.testing.expect(validator.hasErrors());
+                break;
+            }
+        } else |err| {
+            try std.testing.expect(err == error.OutOfMemory);
+        }
+    }
 }
