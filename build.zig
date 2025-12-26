@@ -187,8 +187,9 @@ pub fn build(b: *std.Build) void {
     // | pbsf         | 35    | S-expression parser            |
     // | png          | 91    | PNG encoding/embedding         |
     // | dsl-frontend | 75    | Token, Lexer, Ast, Parser      |
-    // | dsl-backend  | 79    | Analyzer (semantic analysis)   |
-    // | Total        | 290   |                                |
+    // | dsl-backend  | 119   | Analyzer (semantic analysis)   |
+    // | bytecode     | 146   | Format, opcodes, emitter, etc. |
+    // | Total        | 476   |                                |
     //
     // Usage:
     //   zig build test-standalone   # Run all standalone modules (~3s)
@@ -197,6 +198,7 @@ pub fn build(b: *std.Build) void {
     //   zig build test-png          # Just png
     //   zig build test-dsl-frontend # Just dsl frontend
     //   zig build test-dsl-backend  # Just dsl analyzer
+    //   zig build test-bytecode     # Just bytecode
 
     const standalone_step = b.step("test-standalone", "Run standalone module tests in parallel (~2s)");
 
@@ -260,6 +262,19 @@ pub fn build(b: *std.Build) void {
     const run_dsl_backend_test = b.addRunArtifact(dsl_backend_test);
     dsl_backend_step.dependOn(&run_dsl_backend_test.step);
     standalone_step.dependOn(&run_dsl_backend_test.step);
+
+    // Bytecode module (format, opcodes, emitter, tables) - uses types module import
+    const bytecode_step = b.step("test-bytecode", "Run bytecode module tests");
+    const bytecode_mod = b.createModule(.{
+        .root_source_file = b.path("src/bytecode/standalone.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bytecode_mod.addImport("types", types_module);
+    const bytecode_test = b.addTest(.{ .name = "bytecode", .root_module = bytecode_mod });
+    const run_bytecode_test = b.addRunArtifact(bytecode_test);
+    bytecode_step.dependOn(&run_bytecode_test.step);
+    standalone_step.dependOn(&run_bytecode_test.step);
 
     // Coverage step (requires kcov installed)
     const coverage_step = b.step("coverage", "Run tests with coverage (requires kcov)");
