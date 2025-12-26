@@ -159,31 +159,76 @@ pub fn build(b: *std.Build) void {
     fast_test_step.dependOn(&run_tests.step);
 
     // ========================================================================
-    // Types Module Tests (standalone, zero-dependency)
+    // Standalone Test Modules (compile in parallel)
     // ========================================================================
     //
-    // The types/ module has no dependencies on other project modules, so it
-    // can be compiled and tested independently. This provides a fast smoke
-    // test and validates the core type definitions.
+    // These modules have zero external dependencies and can compile/run
+    // independently. Use `zig build test-standalone` to run all in parallel.
     //
-    // Note: Other modules (bytecode, dsl, executor) use relative imports and
-    // cannot be easily separated. The main benefit of extracting types/ is
-    // improved caching - the types module is compiled once and reused.
+    // | Module       | Tests | Description                    |
+    // |--------------|-------|--------------------------------|
+    // | types        | 6     | Core type definitions          |
+    // | pbsf         | 34    | S-expression parser            |
+    // | png          | 90    | PNG encoding/embedding         |
+    // | dsl-frontend | 74    | Token, Lexer, Ast, Parser      |
+    // | Total        | 204   |                                |
     //
-    // Usage: zig build test-types
+    // Usage:
+    //   zig build test-standalone  # Run all standalone modules (~2s)
+    //   zig build test-types       # Just types
+    //   zig build test-pbsf        # Just pbsf
+    //   zig build test-png         # Just png
+    //   zig build test-dsl-frontend # Just dsl frontend
 
-    const types_test_step = b.step("test-types", "Run types module tests (fast, standalone)");
+    const standalone_step = b.step("test-standalone", "Run standalone module tests in parallel (~2s)");
+
+    // Types module
+    const types_test_step = b.step("test-types", "Run types module tests");
     const types_test_mod = b.createModule(.{
         .root_source_file = b.path("src/types/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const types_test = b.addTest(.{
-        .name = "types",
-        .root_module = types_test_mod,
-    });
+    const types_test = b.addTest(.{ .name = "types", .root_module = types_test_mod });
     const run_types_test = b.addRunArtifact(types_test);
     types_test_step.dependOn(&run_types_test.step);
+    standalone_step.dependOn(&run_types_test.step);
+
+    // PBSF module (S-expression parser)
+    const pbsf_test_step = b.step("test-pbsf", "Run PBSF parser tests");
+    const pbsf_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/pbsf/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const pbsf_test = b.addTest(.{ .name = "pbsf", .root_module = pbsf_test_mod });
+    const run_pbsf_test = b.addRunArtifact(pbsf_test);
+    pbsf_test_step.dependOn(&run_pbsf_test.step);
+    standalone_step.dependOn(&run_pbsf_test.step);
+
+    // PNG module (encoding/embedding)
+    const png_test_step = b.step("test-png", "Run PNG module tests");
+    const png_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/png/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const png_test = b.addTest(.{ .name = "png", .root_module = png_test_mod });
+    const run_png_test = b.addRunArtifact(png_test);
+    png_test_step.dependOn(&run_png_test.step);
+    standalone_step.dependOn(&run_png_test.step);
+
+    // DSL Frontend module (Token, Lexer, Ast, Parser)
+    const dsl_frontend_step = b.step("test-dsl-frontend", "Run DSL frontend tests");
+    const dsl_frontend_mod = b.createModule(.{
+        .root_source_file = b.path("src/dsl/frontend.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const dsl_frontend_test = b.addTest(.{ .name = "dsl-frontend", .root_module = dsl_frontend_mod });
+    const run_dsl_frontend_test = b.addRunArtifact(dsl_frontend_test);
+    dsl_frontend_step.dependOn(&run_dsl_frontend_test.step);
+    standalone_step.dependOn(&run_dsl_frontend_test.step);
 
     // Coverage step (requires kcov installed)
     const coverage_step = b.step("coverage", "Run tests with coverage (requires kcov)");
