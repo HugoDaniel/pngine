@@ -169,6 +169,40 @@ pub fn build(b: *std.Build) void {
     cli_test_module.addAnonymousImport("embedded_wasm", .{
         .root_source_file = wasm.getEmittedBin(),
     });
+
+    // Add wasm3 to CLI test module (same as cli_module)
+    if (wasm3_dep) |dep| {
+        const wasm3_sources: []const []const u8 = &.{
+            "source/m3_api_libc.c",
+            "source/m3_api_meta_wasi.c",
+            "source/m3_api_tracer.c",
+            "source/m3_api_uvwasi.c",
+            "source/m3_api_wasi.c",
+            "source/m3_bind.c",
+            "source/m3_code.c",
+            "source/m3_compile.c",
+            "source/m3_core.c",
+            "source/m3_emit.c",
+            "source/m3_env.c",
+            "source/m3_exec.c",
+            "source/m3_function.c",
+            "source/m3_info.c",
+            "source/m3_module.c",
+            "source/m3_optimize.c",
+            "source/m3_parse.c",
+        };
+        cli_test_module.addCSourceFiles(.{
+            .root = dep.path("."),
+            .files = wasm3_sources,
+            .flags = &.{
+                "-std=gnu11",
+                "-fno-sanitize=undefined",
+            },
+        });
+        cli_test_module.addIncludePath(dep.path("source"));
+        cli_test_module.link_libc = true;
+    }
+
     const cli_tests = b.addTest(.{
         .root_module = cli_test_module,
     });

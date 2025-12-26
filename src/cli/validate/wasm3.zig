@@ -318,7 +318,8 @@ pub const Wasm3Runtime = struct {
         if (!build_options.has_wasm3) {
             return "not available";
         }
-        return std.mem.span(c.M3_VERSION);
+        // M3_VERSION is a pointer to a sentinel-terminated string
+        return c.M3_VERSION;
     }
 };
 
