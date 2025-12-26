@@ -11,12 +11,20 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Shared types module (zero dependencies, used by multiple modules)
+    const types_module = b.createModule(.{
+        .root_source_file = b.path("src/types/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Main library module (exposed for dependents)
     const lib_module = b.addModule("pngine", .{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
+    lib_module.addImport("types", types_module);
 
     // Add zgpu to library module if available (native targets only)
     if (zgpu_dep) |dep| {
@@ -29,12 +37,20 @@ pub fn build(b: *std.Build) void {
         .os_tag = .freestanding,
     });
 
+    // Types module for WASM target
+    const wasm_types_module = b.createModule(.{
+        .root_source_file = b.path("src/types/main.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+
     // Create WASM entry module (separate from main library)
     const wasm_module = b.createModule(.{
         .root_source_file = b.path("src/wasm_entry.zig"),
         .target = wasm_target,
         .optimize = .ReleaseSmall,
     });
+    wasm_module.addImport("types", wasm_types_module);
 
     const wasm = b.addExecutable(.{
         .name = "pngine",
@@ -171,10 +187,8 @@ pub fn build(b: *std.Build) void {
     // | pbsf         | 35    | S-expression parser            |
     // | png          | 91    | PNG encoding/embedding         |
     // | dsl-frontend | 75    | Token, Lexer, Ast, Parser      |
-    // | Total        | 211   |                                |
-    //
-    // Note: Analyzer (79 tests) depends on types/ so not standalone.
-    // However, PluginSet is in types/ for caching benefits.
+    // | dsl-backend  | 79    | Analyzer (semantic analysis)   |
+    // | Total        | 290   |                                |
     //
     // Usage:
     //   zig build test-standalone   # Run all standalone modules (~3s)
@@ -182,6 +196,7 @@ pub fn build(b: *std.Build) void {
     //   zig build test-pbsf         # Just pbsf
     //   zig build test-png          # Just png
     //   zig build test-dsl-frontend # Just dsl frontend
+    //   zig build test-dsl-backend  # Just dsl analyzer
 
     const standalone_step = b.step("test-standalone", "Run standalone module tests in parallel (~2s)");
 
@@ -233,6 +248,18 @@ pub fn build(b: *std.Build) void {
     dsl_frontend_step.dependOn(&run_dsl_frontend_test.step);
     standalone_step.dependOn(&run_dsl_frontend_test.step);
 
+    // DSL Backend module (Analyzer) - uses types module import
+    const dsl_backend_step = b.step("test-dsl-backend", "Run DSL analyzer tests");
+    const dsl_backend_mod = b.createModule(.{
+        .root_source_file = b.path("src/dsl/backend.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    dsl_backend_mod.addImport("types", types_module);
+    const dsl_backend_test = b.addTest(.{ .name = "dsl-backend", .root_module = dsl_backend_mod });
+    const run_dsl_backend_test = b.addRunArtifact(dsl_backend_test);
+    dsl_backend_step.dependOn(&run_dsl_backend_test.step);
+    standalone_step.dependOn(&run_dsl_backend_test.step);
 
     // Coverage step (requires kcov installed)
     const coverage_step = b.step("coverage", "Run tests with coverage (requires kcov)");

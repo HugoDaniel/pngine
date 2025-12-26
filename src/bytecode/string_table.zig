@@ -19,7 +19,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
 // Import StringId from shared types
-pub const StringId = @import("../types/ids.zig").StringId;
+pub const StringId = @import("types").StringId;
 
 /// String table builder with deduplication.
 pub const StringTable = struct {

@@ -13,7 +13,8 @@
 const std = @import("std");
 
 // Core types (zero-dependency, enables parallel compilation)
-pub const types = @import("types/main.zig");
+// Uses module import provided by build.zig
+pub const types = @import("types");
 
 // PBSF parsing
 pub const tokenizer = @import("pbsf/tokenizer.zig");
@@ -104,6 +105,9 @@ pub const dsl = struct {
 
 // Re-export DescriptorEncoder at top level for convenience
 pub const DescriptorEncoder = dsl.DescriptorEncoder;
+
+// Re-export PluginSet at top level (needed by Analyzer.zig via @import("root"))
+pub const PluginSet = types.PluginSet;
 
 // Re-export main types
 pub const Tokenizer = tokenizer.Tokenizer;

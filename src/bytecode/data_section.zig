@@ -18,7 +18,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
 // Import DataId from shared types
-pub const DataId = @import("../types/ids.zig").DataId;
+pub const DataId = @import("types").DataId;
 
 /// Data entry metadata.
 pub const Entry = struct {

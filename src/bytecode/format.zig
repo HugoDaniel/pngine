@@ -84,7 +84,7 @@ pub const MAX_WGSL_DEPS: u16 = 64;
 // ============================================================================
 
 // Import from types/ for zero-dependency sharing with Analyzer
-const plugins = @import("../types/plugins.zig");
+const plugins = @import("types").plugins;
 
 /// Plugin set bitfield - determines which executor features are included.
 /// Compile-time selection based on DSL analysis.

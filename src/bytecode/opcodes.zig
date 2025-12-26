@@ -9,7 +9,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 
 // Re-export all types from the types module
-const types = @import("../types/opcodes.zig");
+const types = @import("types").opcodes;
 pub const OpCode = types.OpCode;
 pub const BufferUsage = types.BufferUsage;
 pub const LoadOp = types.LoadOp;
