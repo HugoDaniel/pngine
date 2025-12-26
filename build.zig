@@ -138,6 +138,13 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // Fast tests: lib only (skips CLI and viewer which need wasm3/wasm compile)
+    // ~5s vs ~7min for full test suite
+    // Use: zig build test-fast
+    // Even faster: zig test src/main.zig --test-filter "Lexer"
+    const fast_test_step = b.step("test-fast", "Run lib tests only (~5s vs 7min)");
+    fast_test_step.dependOn(&run_tests.step);
+
     // Coverage step (requires kcov installed)
     const coverage_step = b.step("coverage", "Run tests with coverage (requires kcov)");
 

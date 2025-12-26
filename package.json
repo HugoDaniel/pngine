@@ -7,6 +7,8 @@
     "test": "playwright test",
     "test:headed": "playwright test --headed",
     "test:debug": "playwright test --debug",
+    "test:zig": "/Users/hugo/.zvm/bin/zig test src/main.zig",
+    "test:zig:full": "/Users/hugo/.zvm/bin/zig build test",
     "browser": "npx tsx test/browser.ts"
   },
   "devDependencies": {

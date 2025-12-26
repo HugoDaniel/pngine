@@ -3,34 +3,41 @@
 ## CRITICAL: Active Implementation Plan
 
 **READ FIRST**: Before any implementation work, read the active plan:
-- **`docs/embedded-executor-plan.md`** - Embedded executor with plugin architecture
+
+- **`docs/llm-runtime-testing-plan.md`** - LLM-friendly runtime validation via
+  wasm3
 
 This plan defines:
-- Plugin architecture: `[core]`, `[render]`, `[compute]`, `[wasm]`, `[animation]`, `[texture]`
+
+- Plugin architecture: `[core]`, `[render]`, `[compute]`, `[wasm]`,
+  `[animation]`, `[texture]`
 - WASM-in-WASM is KEPT as the `[wasm]` plugin (not removed)
-- Command buffer format is preserved (existing `src/executor/command_buffer.zig`)
+- Command buffer format is preserved (existing
+  `src/executor/command_buffer.zig`)
 - Payload format v5 with embedded executor support
 - Multiplatform viewers via wasm3 interpreter
 
 **Zig Mastery Guidelines**: `/Users/hugo/Development/specs-llm/mastery/zig/`
+
 - Always follow bounded loops, no recursion, 2+ assertions per function
 - Functions ≤ 70 lines (exception: state machines with labeled switch)
 - Explicitly-sized types (u32, i64, not usize except for slice indexing)
 
 ## Related Plans (Reference as Needed)
 
-| Plan | Purpose | Status |
-|------|---------|--------|
-| `docs/embedded-executor-plan.md` | **ACTIVE** - Embedded executor + plugins | In Progress |
-| `docs/llm-runtime-testing-plan.md` | LLM-friendly runtime validation via wasm3 | Planned |
-| `docs/multiplatform-command-buffer-plan.md` | Platform abstraction | Reference |
-| `docs/data-generation-plan.md` | Compute shader data gen | Reference |
-| `docs/command-buffer-refactor-plan.md` | JS bundle optimization | Reference |
-| `docs/remove-wasm-in-wasm-plan.md` | **SUPERSEDED** by embedded-executor-plan | Do Not Use |
+| Plan                                        | Purpose                                                | Status      |
+| ------------------------------------------- | ------------------------------------------------------ | ----------- |
+| `docs/embedded-executor-plan.md`            | Embedded executor + plugins                            | ALMOST DONE |
+| `docs/llm-runtime-testing-plan.md`          | **ACTIVE** - LLM-friendly runtime validation via wasm3 | In progress |
+| `docs/multiplatform-command-buffer-plan.md` | Platform abstraction                                   | Reference   |
+| `docs/data-generation-plan.md`              | Compute shader data gen                                | Reference   |
+| `docs/command-buffer-refactor-plan.md`      | JS bundle optimization                                 | Reference   |
+| `docs/remove-wasm-in-wasm-plan.md`          | **SUPERSEDED** by embedded-executor-plan               | Do Not Use  |
 
 ### LLM Runtime Testing (docs/llm-runtime-testing-plan.md)
 
-Enables LLMs to validate shaders without browser by running wasm3 and inspecting command buffer:
+Enables LLMs to validate shaders without browser by running wasm3 and inspecting
+command buffer:
 
 ```bash
 pngine validate shader.pngine --json              # Full validation
@@ -40,8 +47,11 @@ pngine validate shader.pngine --json --symptom black  # Symptom-based diagnosis
 ```
 
 Key features:
-- **Phase inspection**: See init commands (CREATE_*) and frame commands (DRAW, DISPATCH) separately
-- **Symptom diagnosis**: Maps "black screen", "wrong colors", "flickering" to likely causes
+
+- **Phase inspection**: See init commands (CREATE_*) and frame commands (DRAW,
+  DISPATCH) separately
+- **Symptom diagnosis**: Maps "black screen", "wrong colors", "flickering" to
+  likely causes
 - **Multi-frame comparison**: `--frames 0,30,60` to detect animation issues
 - **JSON output**: Structured for LLM consumption with command analysis
 
@@ -49,9 +59,12 @@ Key features:
 
 ## Project Overview
 
-PNGine is a WebGPU bytecode engine that compiles high-level DSL into compact bytecode (PNGB) for embedding in PNGs and executing in browsers with a minimal WASM runtime.
+PNGine is a WebGPU bytecode engine that compiles high-level DSL into compact
+bytecode (PNGB) for embedding in PNGs and executing in browsers with a minimal
+WASM runtime.
 
-**Goal**: Shader art that fits in a PNG file, executable in any browser AND any platform (iOS, Android, native) via embedded WASM executor.
+**Goal**: Shader art that fits in a PNG file, executable in any browser AND any
+platform (iOS, Android, native) via embedded WASM executor.
 
 ## Environment
 
@@ -63,7 +76,13 @@ ZIG=/Users/hugo/.zvm/bin/zig
 ## Quick Commands
 
 ```bash
-# Run all tests
+# Fast lib tests (uses cache, ~0.5s after first run)
+/Users/hugo/.zvm/bin/zig test src/main.zig
+
+# Fast filtered tests
+/Users/hugo/.zvm/bin/zig test src/main.zig --test-filter "Parser"
+
+# Full test suite including CLI (~7 min, before commit)
 /Users/hugo/.zvm/bin/zig build test
 
 # Run tests with summary
@@ -87,6 +106,90 @@ ZIG=/Users/hugo/.zvm/bin/zig
 # Run CLI - render actual frame
 ./zig-out/bin/pngine shader.pngine -o output.png --frame --size 512x512
 ```
+
+## Browser Testing (Playwright)
+
+Automated browser testing with structured JSON output for LLM-friendly iteration.
+
+### Dev Server
+
+```bash
+# Start Vite dev server (port 5173)
+npm run dev
+```
+
+### Console Capture Script
+
+Captures all console output, errors, and optionally screenshots:
+
+```bash
+# Basic test - see console logs and errors
+npm run browser http://localhost:5173/
+
+# With screenshot (base64 PNG in output)
+npm run browser http://localhost:5173/ -- --screenshot
+
+# Wait for specific log message
+npm run browser http://localhost:5173/ -- --wait-for "[GPU] Execute:"
+
+# Custom wait time (default 2000ms)
+npm run browser http://localhost:5173/ -- --wait 5000
+
+# Show browser window (not headless)
+npm run browser http://localhost:5173/ -- --no-headless
+```
+
+### Output Format
+
+```json
+{
+  "success": true,
+  "url": "http://localhost:5173/",
+  "duration_ms": 2341,
+  "webgpu_available": true,
+  "logs": [
+    { "time": 45, "level": "log", "prefix": "[GPU]", "message": "Execute: 12 commands" },
+    { "time": 50, "level": "log", "prefix": "[Worker]", "message": "Ready" }
+  ],
+  "errors": [
+    { "time": 30, "type": "console.error", "message": "Shader compilation failed..." }
+  ],
+  "warnings": [...],
+  "summary": {
+    "total_logs": 15,
+    "gpu_commands": 12,
+    "draw_calls": 1,
+    "dispatch_calls": 0,
+    "error_count": 0,
+    "warning_count": 1
+  },
+  "screenshot": "base64..."
+}
+```
+
+### Log Prefixes
+
+| Prefix | Source | Meaning |
+|--------|--------|---------|
+| `[GPU]` | gpu.js | WebGPU command execution |
+| `[Worker]` | worker.js | Worker thread events |
+| `[Executor]` | WASM | Bytecode executor logs |
+| `[vite]` | Vite | Dev server HMR events |
+| `[Video]` | gpu.js | Video texture errors |
+| `[PNGine]` | init.js | Main thread events |
+
+### Playwright E2E Tests
+
+Full Playwright test suite with WebGPU support:
+
+```bash
+npm test              # Run all E2E tests
+npm run test:headed   # Run with visible browser
+npm run test:debug    # Debug mode
+```
+
+Tests are in `tests/e2e/`. The Playwright config (`playwright.config.js`) auto-starts
+Vite and enables WebGPU Chrome flags.
 
 ## CLI Reference
 
@@ -115,14 +218,14 @@ pngine extract <image.png> [-o output.pngb]
 
 ### Render Options
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-o, --output <path>` | Output PNG path | `<input>.png` |
-| `-f, --frame` | Render actual frame via GPU | Off (1x1 transparent) |
-| `-s, --size <WxH>` | Output dimensions (with --frame) | `512x512` |
-| `-t, --time <seconds>` | Time value for animation | `0.0` |
-| `-e, --embed` | Embed bytecode in PNG | On |
-| `--no-embed` | Don't embed bytecode | Off |
+| Flag                   | Description                      | Default               |
+| ---------------------- | -------------------------------- | --------------------- |
+| `-o, --output <path>`  | Output PNG path                  | `<input>.png`         |
+| `-f, --frame`          | Render actual frame via GPU      | Off (1x1 transparent) |
+| `-s, --size <WxH>`     | Output dimensions (with --frame) | `512x512`             |
+| `-t, --time <seconds>` | Time value for animation         | `0.0`                 |
+| `-e, --embed`          | Embed bytecode in PNG            | On                    |
+| `--no-embed`           | Don't embed bytecode             | Off                   |
 
 ### Examples
 
@@ -148,12 +251,12 @@ pngine check output.png
 
 ### Supported File Formats
 
-| Extension | Description |
-|-----------|-------------|
-| `.pngine` | DSL source (macro-based syntax) |
-| `.pbsf` | Legacy PBSF source (S-expressions) |
-| `.pngb` | Compiled bytecode |
-| `.png` | PNG with optional embedded bytecode |
+| Extension | Description                         |
+| --------- | ----------------------------------- |
+| `.pngine` | DSL source (macro-based syntax)     |
+| `.pbsf`   | Legacy PBSF source (S-expressions)  |
+| `.pngb`   | Compiled bytecode                   |
+| `.png`    | PNG with optional embedded bytecode |
 
 ## Architecture
 
@@ -169,8 +272,8 @@ PNGB bytecode ──► executor/dispatcher.zig ──► GPU calls
 
 ### Runtime Pipeline (Detailed)
 
-Understanding where code runs and what each component can do is critical for making
-architectural decisions (like where to put mesh generators).
+Understanding where code runs and what each component can do is critical for
+making architectural decisions (like where to put mesh generators).
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -256,13 +359,13 @@ architectural decisions (like where to put mesh generators).
 
 ### Component Responsibilities
 
-| Component | When | Can Generate Data? | Size Constraint | Complexity OK? |
-|-----------|------|-------------------|-----------------|----------------|
-| **Compiler** | Build | Yes (Zig code) | No limit | Yes |
-| **Payload** | Stored | No (just data) | <50KB | N/A |
-| **Executor** | Load | No | ~15KB goal | No |
-| **gpu.js** | Load | Yes (JS helpers) | ~50KB OK | Yes |
-| **GPU** | Frame | Yes (compute) | N/A | Yes (parallel) |
+| Component    | When   | Can Generate Data? | Size Constraint | Complexity OK? |
+| ------------ | ------ | ------------------ | --------------- | -------------- |
+| **Compiler** | Build  | Yes (Zig code)     | No limit        | Yes            |
+| **Payload**  | Stored | No (just data)     | <50KB           | N/A            |
+| **Executor** | Load   | No                 | ~15KB goal      | No             |
+| **gpu.js**   | Load   | Yes (JS helpers)   | ~50KB OK        | Yes            |
+| **GPU**      | Frame  | Yes (compute)      | N/A             | Yes (parallel) |
 
 ### Data Flow for Resource Creation
 
@@ -285,11 +388,11 @@ GPU:                buffer exists, ready for use
 
 Given the architecture, there are 3 viable places for mesh generators:
 
-| Location | Payload Size | When Runs | Adds Code To |
-|----------|--------------|-----------|--------------|
-| **Compiler (Zig)** | ~400B (vertex data) | Build time | Compiler only |
-| **gpu.js (JS)** | ~10B (opcode+params) | Load time | JS bundle |
-| **GPU (WGSL)** | ~150B (shader code) | First frame | Payload |
+| Location           | Payload Size         | When Runs   | Adds Code To  |
+| ------------------ | -------------------- | ----------- | ------------- |
+| **Compiler (Zig)** | ~400B (vertex data)  | Build time  | Compiler only |
+| **gpu.js (JS)**    | ~10B (opcode+params) | Load time   | JS bundle     |
+| **GPU (WGSL)**     | ~150B (shader code)  | First frame | Payload       |
 
 **Decision Framework:**
 
@@ -315,26 +418,29 @@ The payload (.pngb) should be **declarative, not imperative**:
 - **NO**: "generate cube vertices using this algorithm" (CPU-executed code)
 
 The payload cannot contain executable code that runs on the CPU. It can only:
+
 1. Contain static data (vertices, textures, parameters)
 2. Reference WGSL code (executed by GPU, not payload)
 3. Describe resources and their relationships
 
-This means **compile-time generators cannot be "moved to the payload"** in a literal sense.
-Instead, the choice is where the generator *runs*:
+This means **compile-time generators cannot be "moved to the payload"** in a
+literal sense. Instead, the choice is where the generator _runs_:
 
-| Approach | Generator Runs In | Payload Contains |
-|----------|-------------------|------------------|
-| Compile-time | Compiler (Zig) | Generated bytes |
-| Runtime JS | gpu.js | Opcode + params |
-| Runtime GPU | GPU (WGSL) | WGSL source |
+| Approach     | Generator Runs In | Payload Contains |
+| ------------ | ----------------- | ---------------- |
+| Compile-time | Compiler (Zig)    | Generated bytes  |
+| Runtime JS   | gpu.js            | Opcode + params  |
+| Runtime GPU  | GPU (WGSL)        | WGSL source      |
 
 For the **runtime JS** approach, we would:
+
 1. Add a new opcode like `FILL_CUBE_MESH { bufferId, size, format }`
 2. Implement `_fillCubeMesh()` in gpu.js
 3. Compiler emits the opcode instead of vertex bytes
 4. Payload shrinks from ~400B to ~10B
 
-This is viable because gpu.js already runs at load time and can have helper functions.
+This is viable because gpu.js already runs at load time and can have helper
+functions.
 
 ### Directory Structure
 
@@ -471,11 +577,12 @@ npm/                      # NPM package
 
 ### Built-in Data Sources
 
-Runtime-provided uniform data that can be used in `#queue` writeBuffer operations:
+Runtime-provided uniform data that can be used in `#queue` writeBuffer
+operations:
 
-| Identifier | Size | Description |
-|------------|------|-------------|
-| `pngineInputs` | 16 bytes | time(f32), width(f32), height(f32), aspect(f32) |
+| Identifier        | Size     | Description                                             |
+| ----------------- | -------- | ------------------------------------------------------- |
+| `pngineInputs`    | 16 bytes | time(f32), width(f32), height(f32), aspect(f32)         |
 | `sceneTimeInputs` | 12 bytes | sceneTime(f32), sceneDuration(f32), normalizedTime(f32) |
 
 **Example: Writing runtime inputs to a uniform buffer**
@@ -541,6 +648,7 @@ For compute simulations (e.g., boids, particles), use pool buffers with offsets:
 ```
 
 The runtime selects the actual buffer using:
+
 ```
 actual_id = base_id + (frame_counter + offset) % pool_size
 ```
@@ -575,14 +683,16 @@ actual_id = base_id + (frame_counter + offset) % pool_size
 1. **No recursion** - Use explicit stacks for tree traversal
 2. **Bounded loops** - Always use `for (0..MAX_X) |_|` with `else unreachable`
 3. **2+ assertions per function** - Pre-conditions and post-conditions
-4. **Explicitly-sized types** - Use `u32`, `i64`, not `usize` (except slice indexing)
+4. **Explicitly-sized types** - Use `u32`, `i64`, not `usize` (except slice
+   indexing)
 5. **Static allocation** - No malloc after init in runtime
 6. **Functions ≤ 70 lines** - Exception: state machines with labeled switch
 
 ### Lexer/Parser Patterns
 
 - **Sentinel-terminated input**: `[:0]const u8` for safe EOF
-- **Labeled switch**: `state: switch (State.start) { ... continue :state .next; }`
+- **Labeled switch**:
+  `state: switch (State.start) { ... continue :state .next; }`
 - **StaticStringMap**: O(1) keyword lookup
 - **Token = tag + location**: No string copies
 - **Typed indices**: `enum(u32) { root = 0, _ }` not raw integers
@@ -685,9 +795,12 @@ pub fn example() void {}
 3. **DEFLATE Compression** - Real zlib compression for IDAT chunks
 4. **Render Command** - Default 1x1 transparent PNG, `--frame` for GPU rendering
 5. **Pool Operations** - Ping-pong buffer patterns for compute simulations
-6. **Test Organization** - Tests extracted to subdirectories (~500 lines per file)
-7. **WebWorker Runtime** - OffscreenCanvas + WebWorker architecture for GPU operations
-8. **NPM Package** - esbuild-style distribution with native binaries for 6 platforms
+6. **Test Organization** - Tests extracted to subdirectories (~500 lines per
+   file)
+7. **WebWorker Runtime** - OffscreenCanvas + WebWorker architecture for GPU
+   operations
+8. **NPM Package** - esbuild-style distribution with native binaries for 6
+   platforms
 
 ## Web Runtime
 
@@ -699,46 +812,49 @@ Enable debug logging via any of:
 
 ```javascript
 // URL parameter
-http://localhost:8000/?debug=true
+http:
+//localhost:8000/?debug=true
 
 // localStorage (persists across sessions)
-localStorage.setItem('pngine_debug', 'true')
+localStorage.setItem("pngine_debug", "true");
 
 // Runtime API
-pngine.setDebug(true)
+pngine.setDebug(true);
 ```
 
-Debug output uses `[PNGine]` prefix for main thread, `[Worker]` for worker thread.
+Debug output uses `[PNGine]` prefix for main thread, `[Worker]` for worker
+thread.
 
 ### Animation API
 
 ```javascript
-import { pngine, play, pause, stop, draw, destroy } from 'pngine';
+import { destroy, draw, pause, play, pngine, stop } from "pngine";
 
 // Initialize from PNG with embedded bytecode
-const p = await pngine('shader.png', {
-  canvas: document.getElementById('canvas'),
+const p = await pngine("shader.png", {
+  canvas: document.getElementById("canvas"),
   debug: true,
 });
 
 // Animation control (functional API)
-play(p);                 // Start animation loop
-pause(p);                // Pause (keeps time)
-stop(p);                 // Stop and reset to t=0
-draw(p, { time: 2.5 });  // Manual render at specific time
-destroy(p);              // Cleanup resources
+play(p); // Start animation loop
+pause(p); // Pause (keeps time)
+stop(p); // Stop and reset to t=0
+draw(p, { time: 2.5 }); // Manual render at specific time
+destroy(p); // Cleanup resources
 
 // Properties (read-only)
-p.width;      // Canvas width
-p.height;     // Canvas height
+p.width; // Canvas width
+p.height; // Canvas height
 p.frameCount; // Number of frames
-p.isPlaying;  // Animation state
-p.time;       // Current time in seconds
+p.isPlaying; // Animation state
+p.time; // Current time in seconds
 ```
 
 ## NPM Package
 
-PNGine is distributed as an npm package with native CLI binaries (similar to esbuild).
+PNGine is distributed as an npm package with native CLI binaries (similar to
+esbuild).
 
 ### Package Structure
 
@@ -787,15 +903,15 @@ node npm/pngine/scripts/bundle.js
 
 ### Binary Sizes
 
-| Platform | Size |
-|----------|------|
+| Platform     | Size |
+| ------------ | ---- |
 | darwin-arm64 | 927K |
-| darwin-x64 | 981K |
-| linux-x64 | 6.8M |
-| linux-arm64 | 7.0M |
-| win32-x64 | 1.2M |
-| win32-arm64 | 1.1M |
-| WASM | 57K |
+| darwin-x64   | 981K |
+| linux-x64    | 6.8M |
+| linux-arm64  | 7.0M |
+| win32-x64    | 1.2M |
+| win32-arm64  | 1.1M |
+| WASM         | 57K  |
 
 ### Publishing Workflow
 
@@ -830,18 +946,20 @@ npx pngine shader.pngine -o output.png --frame
 
 ```javascript
 // Browser usage
-import { pngine, play } from 'pngine';
+import { play, pngine } from "pngine";
 
-const canvas = document.getElementById('canvas');
-const p = await pngine('shader.png', { canvas });
+const canvas = document.getElementById("canvas");
+const p = await pngine("shader.png", { canvas });
 play(p);
 ```
 
 ### Build System Integration
 
 The `build.zig` npm step:
+
 - Cross-compiles CLI for 6 platforms using `b.resolveTargetQuery()`
-- Uses `has_embedded_wasm = false` for cross-compiled builds (WASM not available at cross-compile time)
+- Uses `has_embedded_wasm = false` for cross-compiled builds (WASM not available
+  at cross-compile time)
 - Outputs to `zig-out/npm/pngine-{platform}/bin/`
 
 ## Current Work: Embedded Executor
@@ -849,6 +967,7 @@ The `build.zig` npm step:
 **Active Plan**: `docs/embedded-executor-plan.md`
 
 Implementation phases:
+
 1. Payload format extension (v5 header with executor section)
 2. Plugin infrastructure (detection in Analyzer, multi-variant builds)
 3. Executor refactor (clean exports, conditional compilation)
@@ -860,15 +979,21 @@ Implementation phases:
 ## Related Files
 
 **Plans (read in order of priority)**:
-- `docs/embedded-executor-plan.md` - **ACTIVE** - Embedded executor + plugin architecture
-- `docs/llm-runtime-testing-plan.md` - LLM runtime validation via wasm3 (planned)
+
+- `docs/embedded-executor-plan.md` - **ACTIVE** - Embedded executor + plugin
+  architecture
+- `docs/llm-runtime-testing-plan.md` - LLM runtime validation via wasm3
+  (planned)
 - `docs/multiplatform-command-buffer-plan.md` - Platform abstraction (reference)
 - `docs/data-generation-plan.md` - Compute shader data generation (reference)
 
 **Zig Guidelines**:
-- `/Users/hugo/Development/specs-llm/mastery/zig/` - Zig coding conventions (MUST follow)
+
+- `/Users/hugo/Development/specs-llm/mastery/zig/` - Zig coding conventions
+  (MUST follow)
 
 **Key Implementation Files**:
+
 - `src/executor/command_buffer.zig` - Command buffer format (preserve)
 - `src/dsl/emitter/wasm.zig` - WASM-in-WASM emitter (keep as [wasm] plugin)
 - `src/bytecode/opcodes.zig` - Opcodes 0x30-0x31 for nested WASM (keep)
