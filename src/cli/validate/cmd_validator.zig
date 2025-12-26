@@ -14,6 +14,7 @@
 //! - E002: state_violation - Command in wrong state (draw outside pass)
 //! - E004: memory_bounds - Pointer + length exceeds WASM memory bounds
 //! - E005: duplicate_id - Resource ID already in use
+//! - E006: invalid_descriptor - Invalid resource descriptor (bad usage flags, format, etc)
 //! - E007: pass_mismatch - END_PASS without matching BEGIN
 //! - E008: nested_pass - BEGIN_PASS inside active pass
 //!
@@ -21,6 +22,7 @@
 //!
 //! - W003: zero_count - Draw/dispatch with zero work (nothing will render)
 //! - W004: null_pointer - Null pointer with non-zero length (suspicious)
+//! - W006: suspicious_descriptor - Suspicious but valid descriptor (unusual combinations)
 //!
 //! ## Invariants
 //!
@@ -41,12 +43,62 @@ const MAX_COMMANDS: u32 = 10000;
 /// WebGPU typically limits to 8192 bind groups, we use 1024 as practical limit.
 const MAX_RESOURCES: u32 = 1024;
 
+// ============================================================================
+// WebGPU Buffer Usage Flags (E006 validation)
+// Per WebGPU spec: https://www.w3.org/TR/webgpu/#buffer-usage
+// ============================================================================
+
+/// GPUBufferUsage flags (packed into u8 for command buffer efficiency).
+/// Note: INDIRECT (0x100) and QUERY_RESOLVE (0x200) exceed u8, not supported.
+pub const BufferUsage = struct {
+    pub const MAP_READ: u8 = 0x01;
+    pub const MAP_WRITE: u8 = 0x02;
+    pub const COPY_SRC: u8 = 0x04;
+    pub const COPY_DST: u8 = 0x08;
+    pub const INDEX: u8 = 0x10;
+    pub const VERTEX: u8 = 0x20;
+    pub const UNIFORM: u8 = 0x40;
+    pub const STORAGE: u8 = 0x80;
+
+    /// All valid usage flags combined.
+    pub const ALL_VALID: u8 = MAP_READ | MAP_WRITE | COPY_SRC | COPY_DST |
+        INDEX | VERTEX | UNIFORM | STORAGE;
+
+    /// Flags that MAP_READ may be combined with (only COPY_DST).
+    pub const MAP_READ_ALLOWED: u8 = COPY_DST;
+
+    /// Flags that MAP_WRITE may be combined with (only COPY_SRC).
+    pub const MAP_WRITE_ALLOWED: u8 = COPY_SRC;
+};
+
+// ============================================================================
+// WebGPU Texture Usage Flags (E006 validation)
+// Per WebGPU spec: https://www.w3.org/TR/webgpu/#texture-usage
+// ============================================================================
+
+/// GPUTextureUsage flags.
+pub const TextureUsage = struct {
+    pub const COPY_SRC: u8 = 0x01;
+    pub const COPY_DST: u8 = 0x02;
+    pub const TEXTURE_BINDING: u8 = 0x04;
+    pub const STORAGE_BINDING: u8 = 0x08;
+    pub const RENDER_ATTACHMENT: u8 = 0x10;
+
+    /// All valid usage flags combined.
+    pub const ALL_VALID: u8 = COPY_SRC | COPY_DST | TEXTURE_BINDING |
+        STORAGE_BINDING | RENDER_ATTACHMENT;
+};
+
 // Compile-time validation of constants
 comptime {
     // MAX_COMMANDS must fit in command_index field
     std.debug.assert(MAX_COMMANDS <= std.math.maxInt(u32));
     // MAX_RESOURCES must fit in resource ID type
     std.debug.assert(MAX_RESOURCES <= std.math.maxInt(u16));
+    // Buffer usage flags must not have overlapping invalid bits
+    std.debug.assert(BufferUsage.ALL_VALID == 0xFF);
+    // Texture usage flags must fit in 5 bits
+    std.debug.assert(TextureUsage.ALL_VALID == 0x1F);
 }
 
 /// Severity of validation issue.
@@ -443,10 +495,63 @@ pub const Validator = struct {
     // ========================================================================
 
     fn validateCreateBuffer(self: *Self, params: CreateBufferParams) !void {
+        // Pre-condition: params is valid struct
+        std.debug.assert(params.id <= std.math.maxInt(u16));
+
         if (self.buffers.contains(params.id)) {
             try self.addErrorWithId("E005", "Buffer ID already in use", params.id);
             return;
         }
+
+        // E006: Buffer size must be > 0
+        if (params.size == 0) {
+            try self.addErrorWithId("E006", "Buffer size must be > 0", params.id);
+        }
+
+        // E006: Buffer usage must not be 0 (must have at least one usage flag)
+        if (params.usage == 0) {
+            try self.addErrorWithId("E006", "Buffer usage must not be 0", params.id);
+        } else {
+            // E006: MAP_READ may only be combined with COPY_DST
+            // Per WebGPU spec: "If the MAP_READ bit is set, only the COPY_DST bit may be set"
+            if ((params.usage & BufferUsage.MAP_READ) != 0) {
+                const other_flags = params.usage & ~BufferUsage.MAP_READ;
+                if (other_flags != 0 and other_flags != BufferUsage.COPY_DST) {
+                    try self.addErrorWithId(
+                        "E006",
+                        "MAP_READ may only be combined with COPY_DST",
+                        params.id,
+                    );
+                }
+            }
+
+            // E006: MAP_WRITE may only be combined with COPY_SRC
+            // Per WebGPU spec: "If the MAP_WRITE bit is set, only the COPY_SRC bit may be set"
+            if ((params.usage & BufferUsage.MAP_WRITE) != 0) {
+                const other_flags = params.usage & ~BufferUsage.MAP_WRITE;
+                if (other_flags != 0 and other_flags != BufferUsage.COPY_SRC) {
+                    try self.addErrorWithId(
+                        "E006",
+                        "MAP_WRITE may only be combined with COPY_SRC",
+                        params.id,
+                    );
+                }
+            }
+
+            // E006: MAP_READ and MAP_WRITE cannot both be set
+            // Per WebGPU spec: These are mutually exclusive mapping modes
+            if ((params.usage & BufferUsage.MAP_READ) != 0 and
+                (params.usage & BufferUsage.MAP_WRITE) != 0)
+            {
+                try self.addErrorWithId(
+                    "E006",
+                    "MAP_READ and MAP_WRITE cannot both be set",
+                    params.id,
+                );
+            }
+        }
+
+        // Post-condition: buffer is tracked
         try self.buffers.put(self.allocator, params.id, .{
             .size = params.size,
             .usage = params.usage,
@@ -635,18 +740,40 @@ pub const Validator = struct {
     }
 
     fn validateSetVertexBuffer(self: *Self, params: SetVertexBufferParams) !void {
-        if (!self.buffers.contains(params.id)) {
+        const buffer_info = self.buffers.get(params.id);
+        if (buffer_info == null) {
             try self.addErrorWithId("E001", "SET_VERTEX_BUFFER references non-existent buffer", params.id);
             return;
         }
+
+        // E006: Buffer must have VERTEX usage flag
+        if ((buffer_info.?.usage & BufferUsage.VERTEX) == 0) {
+            try self.addErrorWithId(
+                "E006",
+                "SET_VERTEX_BUFFER buffer missing VERTEX usage flag",
+                params.id,
+            );
+        }
+
         if (params.slot < 8) {
             self.bound_vertex_buffers[params.slot] = params.id;
         }
     }
 
     fn validateSetIndexBuffer(self: *Self, params: SetIndexBufferParams) !void {
-        if (!self.buffers.contains(params.id)) {
+        const buffer_info = self.buffers.get(params.id);
+        if (buffer_info == null) {
             try self.addErrorWithId("E001", "SET_INDEX_BUFFER references non-existent buffer", params.id);
+            return;
+        }
+
+        // E006: Buffer must have INDEX usage flag
+        if ((buffer_info.?.usage & BufferUsage.INDEX) == 0) {
+            try self.addErrorWithId(
+                "E006",
+                "SET_INDEX_BUFFER buffer missing INDEX usage flag",
+                params.id,
+            );
         }
     }
 
@@ -703,8 +830,18 @@ pub const Validator = struct {
     // ========================================================================
 
     fn validateWriteBuffer(self: *Self, params: WriteBufferParams) !void {
-        if (!self.buffers.contains(params.id)) {
+        const buffer_info = self.buffers.get(params.id);
+        if (buffer_info == null) {
             try self.addErrorWithId("E001", "WRITE_BUFFER references non-existent buffer", params.id);
+        } else {
+            // E006: Buffer must have COPY_DST usage flag for writeBuffer
+            if ((buffer_info.?.usage & BufferUsage.COPY_DST) == 0) {
+                try self.addErrorWithId(
+                    "E006",
+                    "WRITE_BUFFER buffer missing COPY_DST usage flag",
+                    params.id,
+                );
+            }
         }
 
         // E004: Validate data pointer bounds
@@ -716,17 +853,58 @@ pub const Validator = struct {
     }
 
     fn validateWriteTimeUniform(self: *Self, params: WriteTimeUniformParams) !void {
-        if (!self.buffers.contains(params.id)) {
+        const buffer_info = self.buffers.get(params.id);
+        if (buffer_info == null) {
             try self.addErrorWithId("E001", "WRITE_TIME_UNIFORM references non-existent buffer", params.id);
+        } else {
+            // E006: Buffer must have COPY_DST usage flag for writeBuffer
+            if ((buffer_info.?.usage & BufferUsage.COPY_DST) == 0) {
+                try self.addErrorWithId(
+                    "E006",
+                    "WRITE_TIME_UNIFORM buffer missing COPY_DST usage flag",
+                    params.id,
+                );
+            }
         }
     }
 
     fn validateCopyBuffer(self: *Self, params: CopyBufferParams) !void {
-        if (!self.buffers.contains(params.src_id)) {
+        const src_info = self.buffers.get(params.src_id);
+        const dst_info = self.buffers.get(params.dst_id);
+
+        if (src_info == null) {
             try self.addErrorWithId("E001", "COPY_BUFFER_TO_BUFFER references non-existent source buffer", params.src_id);
+        } else {
+            // E006: Source buffer must have COPY_SRC usage flag
+            if ((src_info.?.usage & BufferUsage.COPY_SRC) == 0) {
+                try self.addErrorWithId(
+                    "E006",
+                    "COPY_BUFFER_TO_BUFFER source buffer missing COPY_SRC usage flag",
+                    params.src_id,
+                );
+            }
         }
-        if (!self.buffers.contains(params.dst_id)) {
+
+        if (dst_info == null) {
             try self.addErrorWithId("E001", "COPY_BUFFER_TO_BUFFER references non-existent destination buffer", params.dst_id);
+        } else {
+            // E006: Destination buffer must have COPY_DST usage flag
+            if ((dst_info.?.usage & BufferUsage.COPY_DST) == 0) {
+                try self.addErrorWithId(
+                    "E006",
+                    "COPY_BUFFER_TO_BUFFER destination buffer missing COPY_DST usage flag",
+                    params.dst_id,
+                );
+            }
+        }
+
+        // E006: Source and destination buffers must be different
+        if (params.src_id == params.dst_id) {
+            try self.addErrorWithId(
+                "E006",
+                "COPY_BUFFER_TO_BUFFER source and destination are the same buffer",
+                params.src_id,
+            );
         }
     }
 
@@ -741,8 +919,18 @@ pub const Validator = struct {
     }
 
     fn validateWriteBufferFromWasm(self: *Self, params: WriteBufferFromWasmParams) !void {
-        if (!self.buffers.contains(params.buffer_id)) {
+        const buffer_info = self.buffers.get(params.buffer_id);
+        if (buffer_info == null) {
             try self.addErrorWithId("E001", "WRITE_BUFFER_FROM_WASM references non-existent buffer", params.buffer_id);
+        } else {
+            // E006: Buffer must have COPY_DST usage flag for writeBuffer
+            if ((buffer_info.?.usage & BufferUsage.COPY_DST) == 0) {
+                try self.addErrorWithId(
+                    "E006",
+                    "WRITE_BUFFER_FROM_WASM buffer missing COPY_DST usage flag",
+                    params.buffer_id,
+                );
+            }
         }
 
         // E004: Validate WASM memory source pointer bounds
@@ -802,8 +990,18 @@ pub const Validator = struct {
     }
 
     fn validateWriteBufferFromArray(self: *Self, params: WriteBufferFromArrayParams) !void {
-        if (!self.buffers.contains(params.buffer_id)) {
+        const buffer_info = self.buffers.get(params.buffer_id);
+        if (buffer_info == null) {
             try self.addErrorWithId("E001", "WRITE_BUFFER_FROM_ARRAY references non-existent buffer", params.buffer_id);
+        } else {
+            // E006: Buffer must have COPY_DST usage flag for writeBuffer
+            if ((buffer_info.?.usage & BufferUsage.COPY_DST) == 0) {
+                try self.addErrorWithId(
+                    "E006",
+                    "WRITE_BUFFER_FROM_ARRAY buffer missing COPY_DST usage flag",
+                    params.buffer_id,
+                );
+            }
         }
         if (!self.typed_arrays.contains(params.array_id)) {
             try self.addErrorWithId("E001", "WRITE_BUFFER_FROM_ARRAY references non-existent typed array", params.array_id);
@@ -1282,9 +1480,10 @@ test "Validator: duplicate buffer ID produces E005" {
     var validator = Validator.init(std.testing.allocator);
     defer validator.deinit();
 
+    // Use VERTEX (0x20) - a valid single usage flag (0x21 was MAP_READ|VERTEX which is now E006)
     const cmds = [_]ParsedCommand{
-        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{ .id = 1, .size = 256, .usage = 0x21 } } },
-        .{ .index = 1, .cmd = .create_buffer, .params = .{ .create_buffer = .{ .id = 1, .size = 512, .usage = 0x21 } } },
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{ .id = 1, .size = 256, .usage = BufferUsage.VERTEX } } },
+        .{ .index = 1, .cmd = .create_buffer, .params = .{ .create_buffer = .{ .id = 1, .size = 512, .usage = BufferUsage.VERTEX } } },
     };
 
     try validator.validate(&cmds);
@@ -1354,8 +1553,9 @@ test "Validator: valid render sequence produces no errors" {
     var validator = Validator.init(std.testing.allocator);
     defer validator.deinit();
 
+    // Use VERTEX (0x20) - a valid single usage flag (0x21 was MAP_READ|VERTEX which is now E006)
     const cmds = [_]ParsedCommand{
-        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{ .id = 0, .size = 256, .usage = 0x21 } } },
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{ .id = 0, .size = 256, .usage = BufferUsage.VERTEX } } },
         .{ .index = 1, .cmd = .create_shader, .params = .{ .create_shader = .{ .id = 0, .code_ptr = 0, .code_len = 100 } } },
         .{ .index = 2, .cmd = .create_render_pipeline, .params = .{ .create_resource = .{ .id = 0, .desc_ptr = 0, .desc_len = 50 } } },
         .{ .index = 3, .cmd = .begin_render_pass, .params = .{ .begin_render_pass = .{ .color_id = 0xFFFF, .load_op = 1, .store_op = 1, .depth_id = 0xFFFF } } },
@@ -2336,4 +2536,848 @@ test "Validator: OOM during E004 error reporting" {
             try std.testing.expect(err == error.OutOfMemory);
         }
     }
+}
+
+// ============================================================================
+// E006 Descriptor Validation Tests
+// ============================================================================
+
+test "Validator: E006 buffer size must be > 0" {
+    // Property: Buffer with size=0 produces E006.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 0, // Invalid: size must be > 0
+            .usage = BufferUsage.VERTEX,
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+    try std.testing.expectEqual(@as(u32, 1), validator.errorCount());
+    try std.testing.expectEqualStrings("E006", validator.issues.items[0].code);
+}
+
+test "Validator: E006 buffer usage must not be 0" {
+    // Property: Buffer with usage=0 produces E006.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = 0, // Invalid: usage must not be 0
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+    try std.testing.expectEqual(@as(u32, 1), validator.errorCount());
+    try std.testing.expectEqualStrings("E006", validator.issues.items[0].code);
+}
+
+test "Validator: E006 MAP_READ only with COPY_DST" {
+    // Property: MAP_READ with flags other than COPY_DST produces E006.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    // MAP_READ + VERTEX is invalid
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = BufferUsage.MAP_READ | BufferUsage.VERTEX, // Invalid
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+    try std.testing.expectEqualStrings("E006", validator.issues.items[0].code);
+    try std.testing.expect(std.mem.indexOf(u8, validator.issues.items[0].message, "MAP_READ") != null);
+}
+
+test "Validator: E006 MAP_WRITE only with COPY_SRC" {
+    // Property: MAP_WRITE with flags other than COPY_SRC produces E006.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    // MAP_WRITE + UNIFORM is invalid
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = BufferUsage.MAP_WRITE | BufferUsage.UNIFORM, // Invalid
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+    try std.testing.expectEqualStrings("E006", validator.issues.items[0].code);
+    try std.testing.expect(std.mem.indexOf(u8, validator.issues.items[0].message, "MAP_WRITE") != null);
+}
+
+test "Validator: E006 MAP_READ and MAP_WRITE cannot both be set" {
+    // Property: Having both MAP_READ and MAP_WRITE produces E006.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = BufferUsage.MAP_READ | BufferUsage.MAP_WRITE, // Invalid
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+    // Should have multiple errors: both MAP_READ and MAP_WRITE violations
+    try std.testing.expect(validator.errorCount() >= 1);
+}
+
+test "Validator: E006 valid MAP_READ + COPY_DST" {
+    // Property: MAP_READ + COPY_DST is valid per WebGPU spec.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = BufferUsage.MAP_READ | BufferUsage.COPY_DST, // Valid
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(!validator.hasErrors());
+}
+
+test "Validator: E006 valid MAP_WRITE + COPY_SRC" {
+    // Property: MAP_WRITE + COPY_SRC is valid per WebGPU spec.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = BufferUsage.MAP_WRITE | BufferUsage.COPY_SRC, // Valid
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(!validator.hasErrors());
+}
+
+test "Validator: E006 valid MAP_READ alone" {
+    // Property: MAP_READ alone is valid (no other flags needed).
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = BufferUsage.MAP_READ, // Valid
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(!validator.hasErrors());
+}
+
+test "Validator: E006 valid MAP_WRITE alone" {
+    // Property: MAP_WRITE alone is valid.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = BufferUsage.MAP_WRITE, // Valid
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(!validator.hasErrors());
+}
+
+test "Validator: E006 all non-mapping usages are freely combinable" {
+    // Property: INDEX, VERTEX, UNIFORM, STORAGE, COPY_SRC, COPY_DST can combine.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    // Common real-world combination: VERTEX | STORAGE | COPY_DST for compute output
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = BufferUsage.VERTEX | BufferUsage.STORAGE | BufferUsage.COPY_DST,
+        } } },
+        .{ .index = 1, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 1,
+            .size = 128,
+            .usage = BufferUsage.UNIFORM | BufferUsage.COPY_DST, // Common uniform buffer
+        } } },
+        .{ .index = 2, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 2,
+            .size = 256,
+            .usage = BufferUsage.INDEX | BufferUsage.COPY_DST, // Index buffer
+        } } },
+        .{ .index = 3, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 3,
+            .size = 512,
+            .usage = BufferUsage.STORAGE | BufferUsage.COPY_SRC | BufferUsage.COPY_DST,
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(!validator.hasErrors());
+}
+
+test "Validator: E006 all single-flag usages are valid" {
+    // Property: Each individual usage flag alone is valid.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const all_flags = [_]u8{
+        BufferUsage.MAP_READ,
+        BufferUsage.MAP_WRITE,
+        BufferUsage.COPY_SRC,
+        BufferUsage.COPY_DST,
+        BufferUsage.INDEX,
+        BufferUsage.VERTEX,
+        BufferUsage.UNIFORM,
+        BufferUsage.STORAGE,
+    };
+
+    var commands: [8]ParsedCommand = undefined;
+    for (all_flags, 0..) |flag, i| {
+        commands[i] = .{ .index = @intCast(i), .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = @intCast(i),
+            .size = 64,
+            .usage = flag,
+        } } };
+    }
+
+    try validator.validate(&commands);
+    try std.testing.expect(!validator.hasErrors());
+}
+
+test "Validator: E006 MAP_READ with multiple invalid flags" {
+    // Property: MAP_READ with COPY_DST + VERTEX still fails (extra flag).
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = BufferUsage.MAP_READ | BufferUsage.COPY_DST | BufferUsage.VERTEX,
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+}
+
+test "Validator: E006 MAP_WRITE with COPY_SRC + STORAGE fails" {
+    // Property: MAP_WRITE + COPY_SRC + STORAGE fails (extra flag).
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = BufferUsage.MAP_WRITE | BufferUsage.COPY_SRC | BufferUsage.STORAGE,
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+}
+
+test "Validator: E006 buffer size and usage both invalid" {
+    // Property: Buffer with both size=0 and usage=0 produces multiple E006 errors.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 0, // Invalid
+            .usage = 0, // Also invalid
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+    try std.testing.expectEqual(@as(u32, 2), validator.errorCount());
+}
+
+test "Validator: E006 comprehensive invalid MAP combinations" {
+    // Property: All invalid MAP_READ combinations are caught.
+    const allocator = std.testing.allocator;
+
+    // MAP_READ with each invalid flag
+    const invalid_with_map_read = [_]u8{
+        BufferUsage.MAP_READ | BufferUsage.COPY_SRC, // Invalid
+        BufferUsage.MAP_READ | BufferUsage.INDEX, // Invalid
+        BufferUsage.MAP_READ | BufferUsage.VERTEX, // Invalid
+        BufferUsage.MAP_READ | BufferUsage.UNIFORM, // Invalid
+        BufferUsage.MAP_READ | BufferUsage.STORAGE, // Invalid
+    };
+
+    for (invalid_with_map_read) |usage| {
+        var validator = Validator.init(allocator);
+        defer validator.deinit();
+
+        const commands = [_]ParsedCommand{
+            .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+                .id = 0,
+                .size = 64,
+                .usage = usage,
+            } } },
+        };
+
+        try validator.validate(&commands);
+        try std.testing.expect(validator.hasErrors());
+    }
+}
+
+test "Validator: E006 comprehensive invalid MAP_WRITE combinations" {
+    // Property: All invalid MAP_WRITE combinations are caught.
+    const allocator = std.testing.allocator;
+
+    // MAP_WRITE with each invalid flag
+    const invalid_with_map_write = [_]u8{
+        BufferUsage.MAP_WRITE | BufferUsage.COPY_DST, // Invalid
+        BufferUsage.MAP_WRITE | BufferUsage.INDEX, // Invalid
+        BufferUsage.MAP_WRITE | BufferUsage.VERTEX, // Invalid
+        BufferUsage.MAP_WRITE | BufferUsage.UNIFORM, // Invalid
+        BufferUsage.MAP_WRITE | BufferUsage.STORAGE, // Invalid
+    };
+
+    for (invalid_with_map_write) |usage| {
+        var validator = Validator.init(allocator);
+        defer validator.deinit();
+
+        const commands = [_]ParsedCommand{
+            .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+                .id = 0,
+                .size = 64,
+                .usage = usage,
+            } } },
+        };
+
+        try validator.validate(&commands);
+        try std.testing.expect(validator.hasErrors());
+    }
+}
+
+test "Validator: E006 fuzz - random buffer usage validation" {
+    // Property: For any random usage value, validation correctly identifies
+    // valid vs invalid based on WebGPU rules.
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const random = prng.random();
+
+    for (0..100) |i| {
+        const usage = random.int(u8);
+        const size: u32 = if (random.boolean()) 64 else 0;
+
+        var validator = Validator.init(allocator);
+        defer validator.deinit();
+
+        const commands = [_]ParsedCommand{
+            .{ .index = @intCast(i), .cmd = .create_buffer, .params = .{ .create_buffer = .{
+                .id = 0,
+                .size = size,
+                .usage = usage,
+            } } },
+        };
+
+        // Should not crash
+        try validator.validate(&commands);
+
+        // Verify expected behavior
+        const has_map_read = (usage & BufferUsage.MAP_READ) != 0;
+        const has_map_write = (usage & BufferUsage.MAP_WRITE) != 0;
+        const other_than_map_read = usage & ~BufferUsage.MAP_READ;
+        const other_than_map_write = usage & ~BufferUsage.MAP_WRITE;
+
+        var should_have_error = false;
+
+        // Size = 0 is always an error
+        if (size == 0) should_have_error = true;
+
+        // Usage = 0 is always an error
+        if (usage == 0) should_have_error = true;
+
+        // MAP_READ + MAP_WRITE together is an error
+        if (has_map_read and has_map_write) should_have_error = true;
+
+        // MAP_READ with anything other than COPY_DST is an error
+        if (has_map_read and other_than_map_read != 0 and other_than_map_read != BufferUsage.COPY_DST) {
+            should_have_error = true;
+        }
+
+        // MAP_WRITE with anything other than COPY_SRC is an error
+        if (has_map_write and other_than_map_write != 0 and other_than_map_write != BufferUsage.COPY_SRC) {
+            should_have_error = true;
+        }
+
+        try std.testing.expectEqual(should_have_error, validator.hasErrors());
+    }
+}
+
+test "Validator: E006 OOM during buffer validation" {
+    // Property: Buffer usage validation handles OOM gracefully.
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 0, // Triggers E006
+            .usage = 0, // Triggers another E006
+        } } },
+    };
+
+    var fail_index: usize = 0;
+    while (fail_index < 20) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_index,
+        });
+
+        var validator = Validator.init(failing.allocator());
+        defer validator.deinit();
+
+        const result = validator.validate(&commands);
+        if (result) |_| {
+            if (!failing.has_induced_failure) {
+                // Should have E006 errors
+                try std.testing.expect(validator.hasErrors());
+                break;
+            }
+        } else |err| {
+            try std.testing.expect(err == error.OutOfMemory);
+        }
+    }
+}
+
+test "Validator: E006 edge case - max u32 size is valid" {
+    // Property: Maximum buffer size is valid (size validation only checks for 0).
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = std.math.maxInt(u32),
+            .usage = BufferUsage.STORAGE,
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(!validator.hasErrors());
+}
+
+test "Validator: E006 edge case - size=1 is valid" {
+    // Property: Minimum non-zero buffer size is valid.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 1,
+            .usage = BufferUsage.UNIFORM,
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(!validator.hasErrors());
+}
+
+test "Validator: E006 reports correct resource ID" {
+    // Property: E006 error includes the buffer ID for debugging.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 42,
+            .size = 0, // Triggers E006
+            .usage = BufferUsage.VERTEX,
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+    try std.testing.expectEqual(@as(?u16, 42), validator.issues.items[0].resource_id);
+}
+
+test "Validator: E006 multiple buffers with mixed validity" {
+    // Property: Validator correctly identifies errors in some buffers, not all.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        // Valid buffer
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = BufferUsage.VERTEX,
+        } } },
+        // Invalid: MAP_READ + VERTEX
+        .{ .index = 1, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 1,
+            .size = 64,
+            .usage = BufferUsage.MAP_READ | BufferUsage.VERTEX,
+        } } },
+        // Valid buffer
+        .{ .index = 2, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 2,
+            .size = 128,
+            .usage = BufferUsage.STORAGE | BufferUsage.COPY_DST,
+        } } },
+        // Invalid: size = 0
+        .{ .index = 3, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 3,
+            .size = 0,
+            .usage = BufferUsage.UNIFORM,
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+    try std.testing.expectEqual(@as(u32, 2), validator.errorCount());
+    // All buffers should still be tracked
+    try std.testing.expectEqual(@as(u32, 4), validator.getResourceCounts().buffers);
+}
+
+// ============================================================================
+// E006 Buffer Usage Context Validation Tests
+// ============================================================================
+
+test "Validator: E006 SET_VERTEX_BUFFER requires VERTEX usage" {
+    // Property: Using a buffer without VERTEX usage in SET_VERTEX_BUFFER produces E006.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        // Create buffer WITHOUT VERTEX usage
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = BufferUsage.UNIFORM, // Missing VERTEX
+        } } },
+        .{ .index = 1, .cmd = .begin_render_pass, .params = .{ .begin_render_pass = .{
+            .color_id = 0,
+            .load_op = 0,
+            .store_op = 0,
+            .depth_id = 0xFFFF,
+        } } },
+        // Try to use as vertex buffer - should fail
+        .{ .index = 2, .cmd = .set_vertex_buffer, .params = .{ .set_vertex_buffer = .{
+            .slot = 0,
+            .id = 0,
+        } } },
+        .{ .index = 3, .cmd = .end_pass, .params = .{ .none = {} } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+    try std.testing.expectEqualStrings("E006", validator.issues.items[0].code);
+    try std.testing.expect(std.mem.indexOf(u8, validator.issues.items[0].message, "VERTEX") != null);
+}
+
+test "Validator: E006 SET_VERTEX_BUFFER with VERTEX usage passes" {
+    // Property: Buffer with VERTEX usage in SET_VERTEX_BUFFER produces no error.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = BufferUsage.VERTEX,
+        } } },
+        .{ .index = 1, .cmd = .begin_render_pass, .params = .{ .begin_render_pass = .{
+            .color_id = 0,
+            .load_op = 0,
+            .store_op = 0,
+            .depth_id = 0xFFFF,
+        } } },
+        .{ .index = 2, .cmd = .set_vertex_buffer, .params = .{ .set_vertex_buffer = .{
+            .slot = 0,
+            .id = 0,
+        } } },
+        .{ .index = 3, .cmd = .end_pass, .params = .{ .none = {} } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(!validator.hasErrors());
+}
+
+test "Validator: E006 SET_INDEX_BUFFER requires INDEX usage" {
+    // Property: Using a buffer without INDEX usage in SET_INDEX_BUFFER produces E006.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        // Create buffer WITHOUT INDEX usage
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = BufferUsage.VERTEX, // Missing INDEX
+        } } },
+        .{ .index = 1, .cmd = .begin_render_pass, .params = .{ .begin_render_pass = .{
+            .color_id = 0,
+            .load_op = 0,
+            .store_op = 0,
+            .depth_id = 0xFFFF,
+        } } },
+        .{ .index = 2, .cmd = .set_index_buffer, .params = .{ .set_index_buffer = .{
+            .id = 0,
+            .format = 0,
+        } } },
+        .{ .index = 3, .cmd = .end_pass, .params = .{ .none = {} } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+    try std.testing.expectEqualStrings("E006", validator.issues.items[0].code);
+    try std.testing.expect(std.mem.indexOf(u8, validator.issues.items[0].message, "INDEX") != null);
+}
+
+test "Validator: E006 WRITE_BUFFER requires COPY_DST usage" {
+    // Property: Using a buffer without COPY_DST usage in WRITE_BUFFER produces E006.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        // Create buffer WITHOUT COPY_DST usage
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = BufferUsage.UNIFORM, // Missing COPY_DST
+        } } },
+        .{ .index = 1, .cmd = .write_buffer, .params = .{ .write_buffer = .{
+            .id = 0,
+            .offset = 0,
+            .data_ptr = 0,
+            .data_len = 16,
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+    try std.testing.expectEqualStrings("E006", validator.issues.items[0].code);
+    try std.testing.expect(std.mem.indexOf(u8, validator.issues.items[0].message, "COPY_DST") != null);
+}
+
+test "Validator: E006 WRITE_BUFFER with COPY_DST usage passes" {
+    // Property: Buffer with COPY_DST usage in WRITE_BUFFER produces no error.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = BufferUsage.UNIFORM | BufferUsage.COPY_DST,
+        } } },
+        .{ .index = 1, .cmd = .write_buffer, .params = .{ .write_buffer = .{
+            .id = 0,
+            .offset = 0,
+            .data_ptr = 0,
+            .data_len = 16,
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(!validator.hasErrors());
+}
+
+test "Validator: E006 COPY_BUFFER_TO_BUFFER requires COPY_SRC and COPY_DST" {
+    // Property: Source needs COPY_SRC, destination needs COPY_DST.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        // Source without COPY_SRC
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = BufferUsage.STORAGE, // Missing COPY_SRC
+        } } },
+        // Destination without COPY_DST
+        .{ .index = 1, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 1,
+            .size = 64,
+            .usage = BufferUsage.STORAGE, // Missing COPY_DST
+        } } },
+        .{ .index = 2, .cmd = .copy_buffer_to_buffer, .params = .{ .copy_buffer = .{
+            .src_id = 0,
+            .src_offset = 0,
+            .dst_id = 1,
+            .dst_offset = 0,
+            .size = 32,
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+    // Should have 2 errors: missing COPY_SRC and missing COPY_DST
+    try std.testing.expectEqual(@as(u32, 2), validator.errorCount());
+}
+
+test "Validator: E006 COPY_BUFFER_TO_BUFFER same buffer fails" {
+    // Property: Source and destination must be different buffers.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = BufferUsage.COPY_SRC | BufferUsage.COPY_DST,
+        } } },
+        // Copy to same buffer
+        .{ .index = 1, .cmd = .copy_buffer_to_buffer, .params = .{ .copy_buffer = .{
+            .src_id = 0,
+            .src_offset = 0,
+            .dst_id = 0, // Same as source!
+            .dst_offset = 32,
+            .size = 16,
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+    try std.testing.expect(std.mem.indexOf(u8, validator.issues.items[0].message, "same buffer") != null);
+}
+
+test "Validator: E006 COPY_BUFFER_TO_BUFFER valid copy passes" {
+    // Property: Valid copy operation with correct usage flags passes.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = BufferUsage.STORAGE | BufferUsage.COPY_SRC,
+        } } },
+        .{ .index = 1, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 1,
+            .size = 64,
+            .usage = BufferUsage.STORAGE | BufferUsage.COPY_DST,
+        } } },
+        .{ .index = 2, .cmd = .copy_buffer_to_buffer, .params = .{ .copy_buffer = .{
+            .src_id = 0,
+            .src_offset = 0,
+            .dst_id = 1,
+            .dst_offset = 0,
+            .size = 32,
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(!validator.hasErrors());
+}
+
+test "Validator: E006 WRITE_TIME_UNIFORM requires COPY_DST usage" {
+    // Property: Buffer for WRITE_TIME_UNIFORM must have COPY_DST.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 16,
+            .usage = BufferUsage.UNIFORM, // Missing COPY_DST
+        } } },
+        .{ .index = 1, .cmd = .write_time_uniform, .params = .{ .write_time_uniform = .{
+            .id = 0,
+            .offset = 0,
+            .size = 4,
+        } } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(validator.hasErrors());
+    try std.testing.expectEqualStrings("E006", validator.issues.items[0].code);
+}
+
+test "Validator: E006 buffer used with multiple correct usages" {
+    // Property: Buffer with multiple usage flags can be used in multiple contexts.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    // Buffer with VERTEX + INDEX + COPY_DST can be used in all three contexts
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 0,
+            .size = 64,
+            .usage = BufferUsage.VERTEX | BufferUsage.INDEX | BufferUsage.COPY_DST,
+        } } },
+        .{ .index = 1, .cmd = .write_buffer, .params = .{ .write_buffer = .{
+            .id = 0,
+            .offset = 0,
+            .data_ptr = 0,
+            .data_len = 16,
+        } } },
+        .{ .index = 2, .cmd = .begin_render_pass, .params = .{ .begin_render_pass = .{
+            .color_id = 0,
+            .load_op = 0,
+            .store_op = 0,
+            .depth_id = 0xFFFF,
+        } } },
+        .{ .index = 3, .cmd = .set_vertex_buffer, .params = .{ .set_vertex_buffer = .{
+            .slot = 0,
+            .id = 0,
+        } } },
+        .{ .index = 4, .cmd = .set_index_buffer, .params = .{ .set_index_buffer = .{
+            .id = 0,
+            .format = 0,
+        } } },
+        .{ .index = 5, .cmd = .end_pass, .params = .{ .none = {} } },
+    };
+
+    try validator.validate(&commands);
+    try std.testing.expect(!validator.hasErrors());
 }
