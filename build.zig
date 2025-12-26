@@ -59,9 +59,9 @@ pub fn build(b: *std.Build) void {
     }
 
     // Add wasm3 C library for native WASM execution in validate command
+    // Build as static library once, share between CLI and CLI tests
     const wasm3_dep = b.lazyDependency("wasm3", .{});
-    if (wasm3_dep) |dep| {
-        // wasm3 C source files (from source/ directory)
+    const wasm3_lib: ?*std.Build.Step.Compile = if (wasm3_dep) |dep| blk: {
         const wasm3_sources: []const []const u8 = &.{
             "source/m3_api_libc.c",
             "source/m3_api_meta_wasi.c",
@@ -82,8 +82,13 @@ pub fn build(b: *std.Build) void {
             "source/m3_parse.c",
         };
 
-        // Add C sources directly to CLI module
-        cli_module.addCSourceFiles(.{
+        // Build wasm3 as static library (compiled once, linked to CLI and CLI tests)
+        const wasm3_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        wasm3_module.addCSourceFiles(.{
             .root = dep.path("."),
             .files = wasm3_sources,
             .flags = &.{
@@ -91,13 +96,21 @@ pub fn build(b: *std.Build) void {
                 "-fno-sanitize=undefined", // wasm3 uses some UB-ish patterns
             },
         });
+        wasm3_module.addIncludePath(dep.path("source"));
 
-        // Add include path for wasm3 headers
+        const lib = b.addLibrary(.{
+            .name = "wasm3",
+            .root_module = wasm3_module,
+            .linkage = .static,
+        });
+
+        // Link wasm3 library to CLI module
+        cli_module.linkLibrary(lib);
         cli_module.addIncludePath(dep.path("source"));
-
-        // Link libc (required by wasm3)
         cli_module.link_libc = true;
-    }
+
+        break :blk lib;
+    } else null;
 
     // Create build options with embedded WASM
     const build_options = b.addOptions();
@@ -177,36 +190,12 @@ pub fn build(b: *std.Build) void {
         .root_source_file = wasm.getEmittedBin(),
     });
 
-    // Add wasm3 to CLI test module (same as cli_module)
-    if (wasm3_dep) |dep| {
-        const wasm3_sources: []const []const u8 = &.{
-            "source/m3_api_libc.c",
-            "source/m3_api_meta_wasi.c",
-            "source/m3_api_tracer.c",
-            "source/m3_api_uvwasi.c",
-            "source/m3_api_wasi.c",
-            "source/m3_bind.c",
-            "source/m3_code.c",
-            "source/m3_compile.c",
-            "source/m3_core.c",
-            "source/m3_emit.c",
-            "source/m3_env.c",
-            "source/m3_exec.c",
-            "source/m3_function.c",
-            "source/m3_info.c",
-            "source/m3_module.c",
-            "source/m3_optimize.c",
-            "source/m3_parse.c",
-        };
-        cli_test_module.addCSourceFiles(.{
-            .root = dep.path("."),
-            .files = wasm3_sources,
-            .flags = &.{
-                "-std=gnu11",
-                "-fno-sanitize=undefined",
-            },
-        });
-        cli_test_module.addIncludePath(dep.path("source"));
+    // Link shared wasm3 library to CLI test module (avoids recompiling C sources)
+    if (wasm3_lib) |lib| {
+        cli_test_module.linkLibrary(lib);
+        if (wasm3_dep) |dep| {
+            cli_test_module.addIncludePath(dep.path("source"));
+        }
         cli_test_module.link_libc = true;
     }
 
