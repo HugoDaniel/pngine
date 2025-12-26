@@ -18,14 +18,8 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
-/// Index into the string table.
-pub const StringId = enum(u16) {
-    _,
-
-    pub fn toInt(self: StringId) u16 {
-        return @intFromEnum(self);
-    }
-};
+// Import StringId from shared types
+pub const StringId = @import("../types/ids.zig").StringId;
 
 /// String table builder with deduplication.
 pub const StringTable = struct {

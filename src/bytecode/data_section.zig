@@ -17,14 +17,8 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
-/// Index into the data section.
-pub const DataId = enum(u16) {
-    _,
-
-    pub fn toInt(self: DataId) u16 {
-        return @intFromEnum(self);
-    }
-};
+// Import DataId from shared types
+pub const DataId = @import("../types/ids.zig").DataId;
 
 /// Data entry metadata.
 pub const Entry = struct {

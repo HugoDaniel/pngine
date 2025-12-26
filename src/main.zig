@@ -12,6 +12,9 @@
 
 const std = @import("std");
 
+// Core types (zero-dependency, enables parallel compilation)
+pub const types = @import("types/main.zig");
+
 // PBSF parsing
 pub const tokenizer = @import("pbsf/tokenizer.zig");
 pub const parser = @import("pbsf/parser.zig");
@@ -166,6 +169,8 @@ pub const fixtures = struct {
 
 test {
     std.testing.refAllDecls(@This());
+    // Run core types tests
+    _ = types;
     // Also run fixture tests
     _ = fixtures.simple_triangle;
     // Run executor tests

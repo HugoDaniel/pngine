@@ -158,6 +158,33 @@ pub fn build(b: *std.Build) void {
     const fast_test_step = b.step("test-fast", "Run lib tests only (~5s vs 7min)");
     fast_test_step.dependOn(&run_tests.step);
 
+    // ========================================================================
+    // Types Module Tests (standalone, zero-dependency)
+    // ========================================================================
+    //
+    // The types/ module has no dependencies on other project modules, so it
+    // can be compiled and tested independently. This provides a fast smoke
+    // test and validates the core type definitions.
+    //
+    // Note: Other modules (bytecode, dsl, executor) use relative imports and
+    // cannot be easily separated. The main benefit of extracting types/ is
+    // improved caching - the types module is compiled once and reused.
+    //
+    // Usage: zig build test-types
+
+    const types_test_step = b.step("test-types", "Run types module tests (fast, standalone)");
+    const types_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/types/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const types_test = b.addTest(.{
+        .name = "types",
+        .root_module = types_test_mod,
+    });
+    const run_types_test = b.addRunArtifact(types_test);
+    types_test_step.dependOn(&run_types_test.step);
+
     // Coverage step (requires kcov installed)
     const coverage_step = b.step("coverage", "Run tests with coverage (requires kcov)");
 
