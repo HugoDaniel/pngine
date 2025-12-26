@@ -83,70 +83,17 @@ pub const MAX_WGSL_DEPS: u16 = 64;
 // Plugin Architecture
 // ============================================================================
 
+// Import from types/ for zero-dependency sharing with Analyzer
+const plugins = @import("../types/plugins.zig");
+
 /// Plugin set bitfield - determines which executor features are included.
 /// Compile-time selection based on DSL analysis.
 ///
 /// See: docs/embedded-executor-plan.md for architecture details.
-pub const PluginSet = packed struct(u8) {
-    /// Core plugin (always included): bytecode parsing, command emission.
-    core: bool = true,
-    /// Render plugin: render pipelines, render passes, draw commands.
-    render: bool = false,
-    /// Compute plugin: compute pipelines, dispatch commands.
-    compute: bool = false,
-    /// WASM-in-WASM plugin: nested WASM execution for physics engines, etc.
-    wasm: bool = false,
-    /// Animation plugin: scene table, timeline, transitions.
-    animation: bool = false,
-    /// Texture plugin: image/video texture loading.
-    texture: bool = false,
-    /// Reserved for future use.
-    reserved: u2 = 0,
-
-    /// Create empty plugin set (core only).
-    pub const core_only: PluginSet = .{};
-
-    /// Create full plugin set (all features).
-    pub const full: PluginSet = .{
-        .render = true,
-        .compute = true,
-        .wasm = true,
-        .animation = true,
-        .texture = true,
-    };
-
-    /// Convert to u8 for serialization.
-    pub fn toU8(self: PluginSet) u8 {
-        return @bitCast(self);
-    }
-
-    /// Create from u8 during deserialization.
-    pub fn fromU8(byte: u8) PluginSet {
-        return @bitCast(byte);
-    }
-
-    /// Check if this plugin set requires a specific plugin.
-    pub fn hasPlugin(self: PluginSet, plugin: Plugin) bool {
-        return switch (plugin) {
-            .core => self.core,
-            .render => self.render,
-            .compute => self.compute,
-            .wasm => self.wasm,
-            .animation => self.animation,
-            .texture => self.texture,
-        };
-    }
-};
+pub const PluginSet = plugins.PluginSet;
 
 /// Individual plugin types.
-pub const Plugin = enum(u3) {
-    core = 0,
-    render = 1,
-    compute = 2,
-    wasm = 3,
-    animation = 4,
-    texture = 5,
-};
+pub const Plugin = plugins.Plugin;
 
 // ============================================================================
 // Header
@@ -1310,11 +1257,11 @@ test "v5 format with embedded executor" {
     try testing.expect(flags.has_embedded_executor);
 
     // Verify plugins byte
-    const plugins = PluginSet.fromU8(output[8]);
-    try testing.expect(plugins.core);
-    try testing.expect(plugins.render);
-    try testing.expect(plugins.compute);
-    try testing.expect(!plugins.wasm);
+    const plugin_set = PluginSet.fromU8(output[8]);
+    try testing.expect(plugin_set.core);
+    try testing.expect(plugin_set.render);
+    try testing.expect(plugin_set.compute);
+    try testing.expect(!plugin_set.wasm);
 
     // Deserialize
     var module = try deserialize(testing.allocator, output);

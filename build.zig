@@ -167,17 +167,20 @@ pub fn build(b: *std.Build) void {
     //
     // | Module       | Tests | Description                    |
     // |--------------|-------|--------------------------------|
-    // | types        | 6     | Core type definitions          |
-    // | pbsf         | 34    | S-expression parser            |
-    // | png          | 90    | PNG encoding/embedding         |
-    // | dsl-frontend | 74    | Token, Lexer, Ast, Parser      |
-    // | Total        | 204   |                                |
+    // | types        | 10    | Core type definitions          |
+    // | pbsf         | 35    | S-expression parser            |
+    // | png          | 91    | PNG encoding/embedding         |
+    // | dsl-frontend | 75    | Token, Lexer, Ast, Parser      |
+    // | Total        | 211   |                                |
+    //
+    // Note: Analyzer (79 tests) depends on types/ so not standalone.
+    // However, PluginSet is in types/ for caching benefits.
     //
     // Usage:
-    //   zig build test-standalone  # Run all standalone modules (~2s)
-    //   zig build test-types       # Just types
-    //   zig build test-pbsf        # Just pbsf
-    //   zig build test-png         # Just png
+    //   zig build test-standalone   # Run all standalone modules (~3s)
+    //   zig build test-types        # Just types
+    //   zig build test-pbsf         # Just pbsf
+    //   zig build test-png          # Just png
     //   zig build test-dsl-frontend # Just dsl frontend
 
     const standalone_step = b.step("test-standalone", "Run standalone module tests in parallel (~2s)");
@@ -229,6 +232,7 @@ pub fn build(b: *std.Build) void {
     const run_dsl_frontend_test = b.addRunArtifact(dsl_frontend_test);
     dsl_frontend_step.dependOn(&run_dsl_frontend_test.step);
     standalone_step.dependOn(&run_dsl_frontend_test.step);
+
 
     // Coverage step (requires kcov installed)
     const coverage_step = b.step("coverage", "Run tests with coverage (requires kcov)");

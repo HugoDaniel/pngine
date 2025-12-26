@@ -34,7 +34,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Ast = @import("Ast.zig").Ast;
 const Node = @import("Ast.zig").Node;
-const PluginSet = @import("../bytecode/format.zig").PluginSet;
+const PluginSet = @import("../types/plugins.zig").PluginSet;
 
 pub const Analyzer = struct {
     /// General-purpose allocator for analysis structures.

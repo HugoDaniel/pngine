@@ -11,6 +11,7 @@
 // Re-export all types
 pub const opcodes = @import("opcodes.zig");
 pub const ids = @import("ids.zig");
+pub const plugins = @import("plugins.zig");
 
 // Convenience re-exports
 pub const OpCode = opcodes.OpCode;
@@ -25,7 +26,11 @@ pub const WasmReturnType = opcodes.WasmReturnType;
 pub const StringId = ids.StringId;
 pub const DataId = ids.DataId;
 
+pub const PluginSet = plugins.PluginSet;
+pub const Plugin = plugins.Plugin;
+
 test {
     _ = opcodes;
     _ = ids;
+    _ = plugins;
 }
