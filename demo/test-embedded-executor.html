@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>PNGine Embedded Executor Test</title>
+  <style>
+    body { font-family: sans-serif; margin: 20px; background: #222; color: #fff; }
+    canvas { border: 1px solid #555; background: #000; }
+    .controls { margin: 10px 0; }
+    button { margin-right: 10px; padding: 5px 15px; }
+    .status { margin: 10px 0; padding: 10px; background: #333; border-radius: 4px; }
+    .info { color: #0f0; font-family: monospace; }
+  </style>
+</head>
+<body>
+  <h1>PNGine Embedded Executor Test</h1>
+  
+  <p>Testing PNG with embedded WASM executor in bytecode payload (v0 format)</p>
+
+  <canvas id="canvas" width="512" height="512"></canvas>
+
+  <div class="controls">
+    <button id="play">Play</button>
+    <button id="pause">Pause</button>
+    <button id="stop">Stop</button>
+    <span id="time">0.00s</span>
+  </div>
+
+  <div class="status" id="status">Loading...</div>
+  <div class="status info" id="info"></div>
+
+  <script type="module">
+    import { pngine, play, pause, stop, draw } from './pngine.js';
+    import { parsePayload } from './loader.js';
+    import { extractBytecode } from './extract.js';
+
+    const canvas = document.getElementById('canvas');
+    const status = document.getElementById('status');
+    const info = document.getElementById('info');
+    const timeEl = document.getElementById('time');
+
+    async function init() {
+      try {
+        // First, fetch and analyze the PNG to show info about embedded executor
+        const resp = await fetch('triangle-embedded.png');
+        const data = await resp.arrayBuffer();
+        const bytecode = await extractBytecode(data);
+        const payloadInfo = parsePayload(bytecode);
+        
+        info.innerHTML = `
+          <strong>Payload Info:</strong><br>
+          Version: ${payloadInfo.version}<br>
+          Has Embedded Executor: ${payloadInfo.hasEmbeddedExecutor}<br>
+          Executor Size: ${payloadInfo.executor?.length || 0} bytes<br>
+          Bytecode Size: ${payloadInfo.bytecode.length} bytes<br>
+          Plugins: ${Object.entries(payloadInfo.plugins)
+            .filter(([k, v]) => v)
+            .map(([k]) => k)
+            .join(', ') || 'none'}
+        `;
+
+        // Now initialize with the embedded executor
+        const p = await pngine('triangle-embedded.png', {
+          canvas,
+          debug: true,
+        });
+
+        status.textContent = `Loaded! ${p.width}x${p.height}, ${p.frameCount} frames`;
+
+        // Draw initial frame
+        draw(p, { time: 0 });
+
+        // Wire up controls
+        document.getElementById('play').onclick = () => {
+          play(p);
+          updateLoop(p);
+        };
+        document.getElementById('pause').onclick = () => pause(p);
+        document.getElementById('stop').onclick = () => stop(p);
+
+        function updateLoop(p) {
+          if (p.isPlaying) {
+            timeEl.textContent = `${p.time.toFixed(2)}s`;
+            requestAnimationFrame(() => updateLoop(p));
+          }
+        }
+
+      } catch (err) {
+        status.textContent = `Error: ${err.message}`;
+        console.error(err);
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

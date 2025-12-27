@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Command Buffer Test (No GPU)</title>
+  <style>
+    body { font-family: monospace; margin: 20px; background: #222; color: #0f0; }
+    pre { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>Command Buffer Test (No GPU Required)</h1>
+  <pre id="output">Loading...</pre>
+
+  <script type="module">
+    import { parsePayload, getExecutorImports } from './loader.js';
+    import { extractBytecode } from './extract.js';
+
+    const output = document.getElementById('output');
+
+    function log(msg) {
+      output.textContent += msg + '\n';
+      console.log(msg);
+    }
+
+    async function test() {
+      output.textContent = '';
+
+      try {
+        // Fetch the PNG with embedded executor
+        log('[Test] Fetching triangle-embedded.png...');
+        const resp = await fetch('triangle-embedded.png');
+        const data = await resp.arrayBuffer();
+
+        // Extract bytecode from PNG
+        log('[Test] Extracting bytecode...');
+        const bytecode = await extractBytecode(data);
+        log(`[Test] Bytecode size: ${bytecode.length} bytes`);
+
+        // Parse payload
+        log('[Test] Parsing payload...');
+        const payload = parsePayload(bytecode);
+        log(`[Test] Version: ${payload.version}`);
+        log(`[Test] Has embedded executor: ${payload.hasEmbeddedExecutor}`);
+        log(`[Test] Executor size: ${payload.executor?.length || 0} bytes`);
+        log(`[Test] Bytecode section size: ${payload.bytecode.length} bytes`);
+
+        if (!payload.hasEmbeddedExecutor || !payload.executor) {
+          throw new Error('No embedded executor found!');
+        }
+
+        // Create a memory buffer to track command output
+        let commandLog = [];
+
+        // Mock executor imports - record all commands
+        const imports = getExecutorImports({
+          log: (ptr, len) => log(`[Executor] log message`),
+        });
+
+        // Instantiate the embedded executor
+        log('[Test] Instantiating WASM executor...');
+        const { instance } = await WebAssembly.instantiate(payload.executor, imports);
+        const wasm = instance.exports;
+        const memory = wasm.memory;
+
+        log(`[Test] WASM memory: ${memory.buffer.byteLength} bytes`);
+        log(`[Test] Exports: ${Object.keys(wasm).join(', ')}`);
+
+        // Copy bytecode payload to executor's bytecode buffer
+        if (wasm.getBytecodePtr && wasm.setBytecodeLen) {
+          const bytecodePtr = wasm.getBytecodePtr();
+          log(`[Test] Bytecode ptr: ${bytecodePtr}`);
+
+          // Copy full payload to executor
+          const fullPayload = payload.payload;
+          new Uint8Array(memory.buffer, bytecodePtr, fullPayload.length).set(fullPayload);
+          wasm.setBytecodeLen(fullPayload.length);
+          log(`[Test] Copied ${fullPayload.length} bytes to bytecode buffer`);
+        }
+
+        // Call init
+        log('[Test] Calling init()...');
+        const initResult = wasm.init();
+        log(`[Test] init() returned: ${initResult}`);
+
+        if (initResult !== 0) {
+          throw new Error(`init() failed with code ${initResult}`);
+        }
+
+        // Get command buffer
+        const cmdPtr = wasm.getCommandPtr();
+        const cmdLen = wasm.getCommandLen();
+        log(`[Test] Command buffer: ptr=${cmdPtr}, len=${cmdLen}`);
+
+        if (cmdLen > 0) {
+          // Read command buffer
+          const cmdBuffer = new Uint8Array(memory.buffer, cmdPtr, cmdLen);
+          log(`[Test] First 50 bytes of command buffer:`);
+          log(formatHex(cmdBuffer.slice(0, 50)));
+
+          // Parse command buffer
+          parseCommands(cmdBuffer, log);
+        } else {
+          log('[Test] WARNING: Empty command buffer!');
+        }
+
+        // Call frame
+        log('[Test] Calling frame(0, 512, 512)...');
+        const frameResult = wasm.frame(0, 512, 512);
+        log(`[Test] frame() returned: ${frameResult}`);
+
+        // Get command buffer after frame
+        const frameCmdPtr = wasm.getCommandPtr();
+        const frameCmdLen = wasm.getCommandLen();
+        log(`[Test] Frame command buffer: ptr=${frameCmdPtr}, len=${frameCmdLen}`);
+
+        if (frameCmdLen > 0) {
+          const frameCmdBuffer = new Uint8Array(memory.buffer, frameCmdPtr, frameCmdLen);
+          log(`[Test] First 50 bytes:`);
+          log(formatHex(frameCmdBuffer.slice(0, 50)));
+          parseCommands(frameCmdBuffer, log);
+        }
+
+        log('[Test] SUCCESS!');
+
+      } catch (err) {
+        log(`[Test] ERROR: ${err.message}`);
+        console.error(err);
+      }
+    }
+
+    function formatHex(bytes) {
+      return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' ');
+    }
+
+    // Command buffer format:
+    // [len:u32] [cmd_count:u16] [flags:u16] [cmd:u8 params...]...
+    const CMD_NAMES = {
+      0x01: 'CREATE_BUFFER',
+      0x02: 'CREATE_TEXTURE',
+      0x03: 'CREATE_SAMPLER',
+      0x04: 'CREATE_SHADER',
+      0x05: 'CREATE_RENDER_PIPELINE',
+      0x06: 'CREATE_COMPUTE_PIPELINE',
+      0x07: 'CREATE_BIND_GROUP',
+      0x08: 'CREATE_TEXTURE_VIEW',
+      0x09: 'CREATE_QUERY_SET',
+      0x0a: 'CREATE_BIND_GROUP_LAYOUT',
+      0x0b: 'CREATE_IMAGE_BITMAP',
+      0x0c: 'CREATE_PIPELINE_LAYOUT',
+      0x0d: 'CREATE_RENDER_BUNDLE',
+      0x10: 'BEGIN_RENDER_PASS',
+      0x11: 'BEGIN_COMPUTE_PASS',
+      0x12: 'SET_PIPELINE',
+      0x13: 'SET_BIND_GROUP',
+      0x14: 'SET_VERTEX_BUFFER',
+      0x15: 'DRAW',
+      0x16: 'DRAW_INDEXED',
+      0x17: 'END_PASS',
+      0x18: 'DISPATCH',
+      0x19: 'SET_INDEX_BUFFER',
+      0x20: 'WRITE_BUFFER',
+      0xf0: 'SUBMIT',
+      0xff: 'END',
+    };
+
+    // Command sizes (cmd byte + params)
+    const CMD_SIZES = {
+      0x01: 1 + 2 + 4 + 1,  // CREATE_BUFFER: id(2) + size(4) + usage(1)
+      0x04: 1 + 2 + 4 + 4,  // CREATE_SHADER: id(2) + ptr(4) + len(4)
+      0x05: 1 + 2 + 4 + 4,  // CREATE_RENDER_PIPELINE: id(2) + ptr(4) + len(4)
+      0x06: 1 + 2 + 4 + 4,  // CREATE_COMPUTE_PIPELINE
+      0x07: 1 + 2 + 2 + 4 + 4, // CREATE_BIND_GROUP
+      0x10: 1 + 2 + 1 + 1 + 2, // BEGIN_RENDER_PASS: color_id(2) + load(1) + store(1) + depth_id(2)
+      0x11: 1,              // BEGIN_COMPUTE_PASS
+      0x12: 1 + 2,          // SET_PIPELINE: id(2)
+      0x13: 1 + 1 + 2,      // SET_BIND_GROUP: slot(1) + id(2)
+      0x14: 1 + 1 + 2,      // SET_VERTEX_BUFFER: slot(1) + id(2)
+      0x15: 1 + 4 + 4 + 4 + 4, // DRAW: vtx(4) + inst(4) + first_vtx(4) + first_inst(4)
+      0x17: 1,              // END_PASS
+      0x18: 1 + 4 + 4 + 4,  // DISPATCH: x(4) + y(4) + z(4)
+      0xf0: 1,              // SUBMIT
+      0xff: 1,              // END
+    };
+
+    function parseCommands(buffer, log) {
+      if (buffer.length < 8) {
+        log('[Parse] Buffer too short');
+        return;
+      }
+
+      const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+      const len = view.getUint32(0, true);
+      const cmdCount = view.getUint16(4, true);
+      const flags = view.getUint16(6, true);
+      log(`[Parse] Header: len=${len}, cmdCount=${cmdCount}, flags=${flags}`);
+
+      let offset = 8; // Skip header
+
+      for (let i = 0; i < cmdCount && offset < buffer.length; i++) {
+        const cmd = view.getUint8(offset);
+        const cmdName = CMD_NAMES[cmd] || `UNKNOWN(0x${cmd.toString(16)})`;
+        const cmdSize = CMD_SIZES[cmd] || 1;
+        log(`[Parse] Cmd ${i}: ${cmdName} (0x${cmd.toString(16)}) at offset ${offset}, size ${cmdSize}`);
+
+        offset += cmdSize;
+
+        // Stop at END or SUBMIT
+        if (cmd === 0xff || cmd === 0xf0) break;
+      }
+    }
+
+    test();
+  </script>
+</body>
+</html>
