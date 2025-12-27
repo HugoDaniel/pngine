@@ -1,12 +1,12 @@
 /**
  * Loader for embedded executor PNGs
  *
- * Parses PNGB v5 format to detect and extract embedded executor WASM.
+ * Parses PNGB v0 format to detect and extract embedded executor WASM.
  * Falls back to shared executor if not embedded.
  *
- * PNGB v5 Header (40 bytes):
+ * PNGB v0 Header (40 bytes):
  * - magic: "PNGB" (4 bytes)
- * - version: u16 (5)
+ * - version: u16 (0)
  * - flags: u16 (bit 0 = has_embedded_executor, bit 1 = has_animation_table)
  * - plugins: u8 (PluginSet bitfield)
  * - reserved: [3]u8
@@ -20,10 +20,8 @@
  */
 
 const PNGB_MAGIC = [0x50, 0x4e, 0x47, 0x42]; // "PNGB"
-const VERSION_V5 = 5;
-const VERSION_V4 = 4;
-const HEADER_SIZE_V5 = 40;
-const HEADER_SIZE_V4 = 28;
+const VERSION_V0 = 0;
+const HEADER_SIZE_V0 = 40;
 
 // Header flags
 const FLAG_HAS_EMBEDDED_EXECUTOR = 0x01;
@@ -44,7 +42,7 @@ const PLUGIN_TEXTURE = 0x20;
  * @returns {Object} Parsed payload info
  */
 export function parsePayload(pngb) {
-  if (pngb.length < HEADER_SIZE_V4) {
+  if (pngb.length < HEADER_SIZE_V0) {
     throw new Error("Invalid PNGB: too short");
   }
 
@@ -56,22 +54,17 @@ export function parsePayload(pngb) {
   const view = new DataView(pngb.buffer, pngb.byteOffset, pngb.byteLength);
   const version = view.getUint16(4, true);
 
-  if (version !== VERSION_V5 && version !== VERSION_V4) {
+  if (version !== VERSION_V0) {
     throw new Error(`Unsupported PNGB version: ${version}`);
   }
 
-  // Parse based on version
-  if (version === VERSION_V5) {
-    return parseV5Header(pngb, view);
-  } else {
-    return parseV4Header(pngb, view);
-  }
+  return parseV0Header(pngb, view);
 }
 
 /**
- * Parse v5 header (40 bytes)
+ * Parse v0 header (40 bytes)
  */
-function parseV5Header(pngb, view) {
+function parseV0Header(pngb, view) {
   const flags = view.getUint16(6, true);
   const plugins = pngb[8];
   const executorOffset = view.getUint32(12, true);
@@ -88,11 +81,11 @@ function parseV5Header(pngb, view) {
   // Calculate bytecode start (after header + executor)
   const bytecodeOffset = hasEmbeddedExecutor
     ? executorOffset + executorLength
-    : HEADER_SIZE_V5;
+    : HEADER_SIZE_V0;
   const bytecodeLength = stringTableOffset - bytecodeOffset;
 
   return {
-    version: VERSION_V5,
+    version: VERSION_V0,
     hasEmbeddedExecutor,
     hasAnimationTable,
     plugins: parsePlugins(plugins),
@@ -112,43 +105,6 @@ function parseV5Header(pngb, view) {
     offsets: {
       executor: hasEmbeddedExecutor ? executorOffset : 0,
       executorLength,
-      bytecode: bytecodeOffset,
-      bytecodeLength,
-      stringTable: stringTableOffset,
-      data: dataOffset,
-      wgsl: wgslOffset,
-      uniform: uniformOffset,
-      animation: animationOffset,
-    },
-  };
-}
-
-/**
- * Parse v4 header (28 bytes) - backward compatibility
- */
-function parseV4Header(pngb, view) {
-  const stringTableOffset = view.getUint32(8, true);
-  const dataOffset = view.getUint32(12, true);
-  const wgslOffset = view.getUint32(16, true);
-  const uniformOffset = view.getUint32(20, true);
-  const animationOffset = view.getUint32(24, true);
-
-  const bytecodeOffset = HEADER_SIZE_V4;
-  const bytecodeLength = stringTableOffset - bytecodeOffset;
-
-  return {
-    version: VERSION_V4,
-    hasEmbeddedExecutor: false,
-    hasAnimationTable: false,
-    plugins: { core: true, render: false, compute: false, wasm: false, animation: false, texture: false },
-
-    executor: null,
-    bytecode: pngb.subarray(bytecodeOffset, bytecodeOffset + bytecodeLength),
-    payload: pngb,
-
-    offsets: {
-      executor: 0,
-      executorLength: 0,
       bytecode: bytecodeOffset,
       bytecodeLength,
       stringTable: stringTableOffset,

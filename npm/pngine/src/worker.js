@@ -213,39 +213,35 @@ async function loadBytecode(bytecode) {
 /**
  * Load bytecode into embedded executor.
  *
- * Embedded executors have a different interface:
- * - getBytecodePtr() / setBytecodeLen() for bytecode
- * - getDataPtr() / setDataLen() for data section
- * - init() for initialization
+ * Embedded executors have a different interface than shared executors:
+ * - getBytecodePtr() / setBytecodeLen() for bytecode (full payload)
+ * - init() for initialization (parses bytecode, creates resources)
  * - frame(time, width, height) for rendering
  * - getCommandPtr() / getCommandLen() for command buffer output
  *
  * @param {Object} payloadInfo - Parsed payload from loader.js
  */
 async function loadBytecodeEmbedded(payloadInfo) {
-  // For embedded executor, bytecode is already in the payload
-  // We need to copy it to the executor's memory
-
+  // Copy the full payload to the executor's bytecode memory
+  // The embedded executor parses the entire PNGB payload
   if (wasm.getBytecodePtr && wasm.setBytecodeLen) {
-    // Copy bytecode to embedded executor memory
     const bytecodePtr = wasm.getBytecodePtr();
-    const bytecodeData = payloadInfo.bytecode;
-    new Uint8Array(memory.buffer, bytecodePtr, bytecodeData.length).set(bytecodeData);
-    wasm.setBytecodeLen(bytecodeData.length);
+    const fullPayload = payloadInfo.payload;
+    new Uint8Array(memory.buffer, bytecodePtr, fullPayload.length).set(fullPayload);
+    wasm.setBytecodeLen(fullPayload.length);
   }
 
-  // For now, we use the full payload for shared executor compatibility
-  // The embedded executor will parse its own bytecode section
-  if (wasm.alloc && wasm.loadModule) {
-    // Fallback to shared executor interface if present
-    const fullPayload = payloadInfo.payload;
-    const ptr = wasm.alloc(fullPayload.byteLength);
-    if (ptr) {
-      new Uint8Array(memory.buffer, ptr, fullPayload.byteLength).set(fullPayload);
-      const err = wasm.loadModule(ptr, fullPayload.byteLength);
-      wasm.free(ptr, fullPayload.byteLength);
-      if (err !== 0) throw new Error(`Load failed: ${err}`);
-    }
+  // Initialize the embedded executor (parses bytecode, emits resource creation commands)
+  const initResult = wasm.init();
+  if (initResult !== 0) {
+    throw new Error(`Embedded executor init failed: ${initResult}`);
+  }
+
+  // Execute the init command buffer (creates GPU resources)
+  const initPtr = wasm.getCommandPtr();
+  const initLen = wasm.getCommandLen();
+  if (initPtr && initLen > 0) {
+    gpu.execute(initPtr);
   }
 
   moduleLoaded = true;
@@ -257,11 +253,11 @@ async function loadBytecodeEmbedded(payloadInfo) {
     frameCount = 1;
   }
 
-  // Read animation info if available
-  animationInfo = readAnimationInfo();
+  // Animation info not yet supported in embedded executor
+  animationInfo = null;
 
-  // First render to create resources
-  renderWithCommandBuffer(0, 0);
+  // First frame render
+  renderEmbedded(0, canvas.width, canvas.height);
 }
 
 /**
@@ -340,13 +336,18 @@ function readWasmStringByIndex(getter, index) {
 function handleDraw(data) {
   if (!initialized || !moduleLoaded) return;
 
-  // Apply uniforms before rendering (if provided)
-  if (data.uniforms) {
+  // Apply uniforms before rendering (if provided, and if shared executor)
+  if (data.uniforms && !useEmbeddedExecutor) {
     applyUniforms(data.uniforms);
   }
 
-  // Note: frame name ignored for now - frame_id 0 executes all frames
-  renderWithCommandBuffer(data.time ?? 0, 0);
+  // Use the appropriate render function based on executor type
+  if (useEmbeddedExecutor) {
+    renderEmbedded(data.time ?? 0, canvas.width, canvas.height);
+  } else {
+    // Note: frame name ignored for now - frame_id 0 executes all frames
+    renderWithCommandBuffer(data.time ?? 0, 0);
+  }
 }
 
 /**
@@ -431,11 +432,38 @@ function renderWithCommandBuffer(time, frameId) {
   gpu.execute(ptr);
 }
 
-function handleDestroy() {
-  if (moduleLoaded) {
-    wasm.freeModule();
-    moduleLoaded = false;
+/**
+ * Render using embedded executor interface.
+ *
+ * Embedded executors use:
+ * - frame(time, width, height) instead of renderFrame(time, frameId)
+ * - getCommandPtr() / getCommandLen() to get command buffer
+ */
+function renderEmbedded(time, width, height) {
+  gpu.setTime(time);
+
+  // Call frame() which writes command buffer to memory
+  const result = wasm.frame(time, width, height);
+  if (result !== 0) {
+    console.warn('[Worker] Embedded frame() returned non-zero:', result);
+    return;
   }
+
+  // Get command buffer from embedded executor
+  const ptr = wasm.getCommandPtr();
+  const len = wasm.getCommandLen();
+  if (!ptr || len === 0) return;
+
+  // Execute the command buffer
+  gpu.execute(ptr);
+}
+
+function handleDestroy() {
+  if (moduleLoaded && !useEmbeddedExecutor) {
+    // freeModule only exists in shared executor
+    wasm.freeModule?.();
+  }
+  moduleLoaded = false;
   gpu?.destroy();
   if (device) {
     device.destroy();
