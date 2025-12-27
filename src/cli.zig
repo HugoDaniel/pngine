@@ -5,7 +5,7 @@
 //! | Command | Description |
 //! |---------|-------------|
 //! | compile | Compile DSL/PBSF source to PNGB bytecode |
-//! | check | Validate bytecode by running through MockGPU |
+//! | check | Validate bytecode by running through MockGPU (--verbose for trace) |
 //! | validate | Runtime validation via wasm3 command buffer inspection |
 //! | render | Create PNG with embedded bytecode (default command) |
 //! | embed | Embed PNGB bytecode into an existing PNG |
@@ -130,6 +130,7 @@ fn printUsage() void {
         \\Examples:
         \\  pngine shader.pngine                  Create PNG (implicit render)
         \\  pngine compile shader.pngine          Compile to .pngb
+        \\  pngine check shader.pngine --verbose  GPU call trace (like browser debug)
         \\  pngine validate shader.pngine --json  Runtime validation
         \\  pngine embed img.png shader.pngb      Embed into existing PNG
         \\

@@ -1,9 +1,10 @@
 //! Check command: validate bytecode by running through MockGPU.
 //!
 //! Usage:
-//!   pngine check input.pngine   # Compile and validate
-//!   pngine check input.pngb     # Validate existing bytecode
-//!   pngine check input.png      # Extract and validate from PNG
+//!   pngine check input.pngine            # Compile and validate (summary)
+//!   pngine check input.pngine --verbose  # Full GPU call trace
+//!   pngine check input.pngb              # Validate existing bytecode
+//!   pngine check input.png               # Extract and validate from PNG
 
 const std = @import("std");
 const pngine = @import("pngine");
@@ -17,6 +18,12 @@ const utils = @import("utils.zig");
 const bundle = @import("bundle.zig");
 const compile = @import("compile.zig");
 
+/// Command options parsed from arguments.
+const Options = struct {
+    input: []const u8 = "",
+    verbose: bool = false,
+};
+
 /// Execute the check command.
 ///
 /// Pre-condition: args is the slice after "check" command.
@@ -24,13 +31,29 @@ const compile = @import("compile.zig");
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     std.debug.assert(args.len <= 1024);
 
-    if (args.len == 0) {
+    // Parse arguments
+    var opts = Options{};
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
+            opts.verbose = true;
+        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            printHelp();
+            return 0;
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            opts.input = arg;
+        } else {
+            std.debug.print("Error: unknown option '{s}'\n", .{arg});
+            return 1;
+        }
+    }
+
+    if (opts.input.len == 0) {
         std.debug.print("Error: no input file specified\n\n", .{});
-        std.debug.print("Usage: pngine check <input>\n", .{});
+        printHelp();
         return 1;
     }
 
-    const input = args[0];
+    const input = opts.input;
 
     // Load or compile bytecode
     const bytecode = loadOrCompileBytecode(allocator, input) catch |err| {
@@ -44,8 +67,10 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     };
     defer module.deinit(allocator);
 
-    // Print module info
-    printModuleInfo(input, &module);
+    // Print module info (skip in verbose mode - we'll show call trace instead)
+    if (!opts.verbose) {
+        printModuleInfo(input, &module);
+    }
 
     // Execute with MockGPU to validate bytecode
     var gpu: MockGPU = .empty;
@@ -60,7 +85,50 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
 
     // Print execution summary and validate
     const calls = gpu.getCalls();
-    return printExecutionSummary(calls, &module);
+
+    // Verbose mode: print each GPU call with [GPU] prefix
+    if (opts.verbose) {
+        printVerboseTrace(calls);
+    }
+
+    return printExecutionSummary(calls, &module, opts.verbose);
+}
+
+/// Print help message.
+fn printHelp() void {
+    std.debug.print(
+        \\Usage: pngine check <input> [options]
+        \\
+        \\Validate bytecode by running through MockGPU.
+        \\
+        \\Options:
+        \\  -v, --verbose  Print full GPU call trace (like browser debug mode)
+        \\  -h, --help     Show this help message
+        \\
+        \\Supported formats:
+        \\  .pngine  DSL source (will be compiled)
+        \\  .pbsf    Legacy S-expression source
+        \\  .pngb    Compiled bytecode
+        \\  .png     PNG with embedded bytecode
+        \\  .zip     ZIP bundle with bytecode
+        \\
+        \\Examples:
+        \\  pngine check shader.pngine            # Summary output
+        \\  pngine check shader.pngine --verbose  # Full GPU call trace
+        \\  pngine check output.png               # Check embedded bytecode
+        \\
+    , .{});
+}
+
+/// Print verbose GPU call trace (matches gpu.js debug output format).
+fn printVerboseTrace(calls: []const Call) void {
+    std.debug.assert(calls.len <= 65536);
+
+    var buf: [256]u8 = undefined;
+    for (calls) |call| {
+        const desc = call.describe(&buf);
+        std.debug.print("[GPU] {s}\n", .{desc});
+    }
 }
 
 /// Load bytecode from file or compile from source.
@@ -192,8 +260,16 @@ fn printCallCounts(counts: CallCounts) void {
     if (counts.dispatch > 0) std.debug.print("  Dispatches:  {d}\n", .{counts.dispatch});
 }
 
-fn printExecutionSummary(calls: []const Call, module: *const format.Module) u8 {
-    std.debug.print("\nExecution OK: {d} GPU calls\n", .{calls.len});
+fn printExecutionSummary(calls: []const Call, module: *const format.Module, verbose: bool) u8 {
+    // In verbose mode, print a separator before summary
+    // In non-verbose mode, add newline after module info
+    if (verbose) {
+        std.debug.print("\n--- Summary ---\n", .{});
+    } else {
+        std.debug.print("\n", .{});
+    }
+
+    std.debug.print("Execution OK: {d} GPU calls\n", .{calls.len});
 
     const counts = countCallTypes(calls);
     printCallCounts(counts);
@@ -205,8 +281,11 @@ fn printExecutionSummary(calls: []const Call, module: *const format.Module) u8 {
         return 6;
     }
 
-    reportEntryPoints(calls, module);
-    reportBufferUsage(calls);
+    // Skip detailed reports in verbose mode (trace already shows everything)
+    if (!verbose) {
+        reportEntryPoints(calls, module);
+        reportBufferUsage(calls);
+    }
 
     const bind_group_warnings = validateBindGroupSetup(calls);
     if (bind_group_warnings > 0) {
