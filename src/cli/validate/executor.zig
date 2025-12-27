@@ -339,6 +339,9 @@ fn executeWasm(
     result.draw_count = validator.draw_count;
     result.dispatch_count = validator.dispatch_count;
 
+    // Analyze likely causes from state machine analysis
+    result.likely_causes = validator.analyzeLikelyCauses();
+
     // Run symptom-based diagnosis if symptom was specified
     if (opts.symptom != .none) {
         const symptom = switch (opts.symptom) {

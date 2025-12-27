@@ -128,6 +128,7 @@ pub const ValidationResult = struct {
     draw_count: u32,
     dispatch_count: u32,
     diagnosis: ?symptom_diagnosis.DiagnosisResult, // Symptom-based diagnosis (if --symptom used)
+    likely_causes: ?cmd_validator.Validator.LikelyCausesResult, // Likely causes from state machine analysis
 
     pub fn init() ValidationResult {
         return .{
@@ -143,12 +144,20 @@ pub const ValidationResult = struct {
             .draw_count = 0,
             .dispatch_count = 0,
             .diagnosis = null,
+            .likely_causes = null,
         };
     }
 
     pub fn deinit(self: *ValidationResult, allocator: std.mem.Allocator) void {
         if (self.init_commands.len > 0) allocator.free(self.init_commands);
-        if (self.frame_commands.len > 0) allocator.free(self.frame_commands);
+        // Free frame_commands only if it's not shared with frame_results[0]
+        const first_frame_cmd_ptr = if (self.frame_results.items.len > 0)
+            self.frame_results.items[0].commands.ptr
+        else
+            null;
+        if (self.frame_commands.len > 0 and self.frame_commands.ptr != first_frame_cmd_ptr) {
+            allocator.free(self.frame_commands);
+        }
         for (self.frame_results.items) |fr| {
             if (fr.commands.len > 0) allocator.free(fr.commands);
         }

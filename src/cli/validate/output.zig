@@ -158,6 +158,29 @@ pub fn outputJson(allocator: std.mem.Allocator, result: *const ValidationResult,
         std.debug.print("  }}", .{});
     }
 
+    // Likely causes from state machine analysis (always output if available)
+    if (result.likely_causes) |causes| {
+        if (causes.count > 0) {
+            std.debug.print(",\n  \"likely_causes\": [", .{});
+            const sorted = causes.sortedByProbability();
+            for (sorted[0..causes.count], 0..) |cause, i| {
+                if (i > 0) std.debug.print(",", .{});
+                std.debug.print("\n    {{\"name\": \"{s}\", \"probability\": {d}, \"description\": \"{s}\", \"category\": \"{s}\"", .{
+                    cause.name,
+                    cause.probability,
+                    cause.description,
+                    cause.category.toString(),
+                });
+                if (cause.related_code) |code| {
+                    std.debug.print(", \"related_code\": \"{s}\"", .{code});
+                }
+                std.debug.print("}}", .{});
+            }
+            if (causes.count > 0) std.debug.print("\n  ", .{});
+            std.debug.print("]", .{});
+        }
+    }
+
     std.debug.print("\n}}\n", .{});
 }
 
