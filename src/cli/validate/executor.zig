@@ -224,11 +224,11 @@ fn executeWasm(
     var validator = Validator.init(allocator);
     defer validator.deinit();
 
-    // Get WASM memory size for bounds checking (E004)
+    // Get WASM memory for bounds checking (E004) and descriptor parsing (E006)
     if (runtime.getMemory()) |mem| {
-        validator.setWasmMemorySize(@intCast(mem.len));
+        validator.setWasmMemory(mem);
     } else |_| {
-        // Memory not available, bounds checking will be skipped
+        // Memory not available, bounds checking and descriptor parsing will be skipped
     }
 
     // Execute init phase (always, resources must be created first)

@@ -231,8 +231,6 @@ test "e2e: simple_triangle.pngine module info is populated" {
 
 test "e2e: rotating_cube.pngine compiles and runs" {
     // Property: 3D example with uniforms should compile and produce valid structure.
-    // Note: May have E006 "Texture usage cannot be 0" for canvas texture - this is a
-    // validator limitation, not an actual bug.
     const allocator = std.testing.allocator;
 
     var result = try loadAndValidate(allocator, EXAMPLES_DIR ++ "rotating_cube.pngine", .{});
@@ -243,6 +241,11 @@ test "e2e: rotating_cube.pngine compiles and runs" {
 
     // Should have WGSL shaders
     try std.testing.expect(result.wgsl_shader_count > 0);
+
+    // Should have no E006 errors (texture descriptor parsing now works)
+    for (result.errors.items) |e| {
+        try std.testing.expect(!std.mem.eql(u8, e.code, "E006"));
+    }
 }
 
 test "e2e: rotating_cube.pngine has uniform bindings" {
@@ -379,7 +382,6 @@ test "e2e: boids.pngine has all three shader stages" {
 
 test "e2e: simple_triangle_msaa.pngine compiles and runs" {
     // Property: MSAA example should compile and produce valid structure.
-    // Note: May have E006 for canvas texture - validator limitation.
     const allocator = std.testing.allocator;
 
     var result = try loadAndValidate(allocator, EXAMPLES_DIR ++ "simple_triangle_msaa.pngine", .{});
@@ -390,6 +392,11 @@ test "e2e: simple_triangle_msaa.pngine compiles and runs" {
 
     // Should have WGSL shaders
     try std.testing.expect(result.wgsl_shader_count > 0);
+
+    // Should have no E006 errors
+    for (result.errors.items) |e| {
+        try std.testing.expect(!std.mem.eql(u8, e.code, "E006"));
+    }
 }
 
 // ============================================================================
@@ -398,7 +405,6 @@ test "e2e: simple_triangle_msaa.pngine compiles and runs" {
 
 test "e2e: moving_triangle.pngine compiles and runs" {
     // Property: Animation example should compile and produce valid structure.
-    // Note: May have E006 for canvas texture - validator limitation.
     const allocator = std.testing.allocator;
 
     var result = try loadAndValidate(allocator, EXAMPLES_DIR ++ "moving_triangle.pngine", .{});
@@ -409,6 +415,11 @@ test "e2e: moving_triangle.pngine compiles and runs" {
 
     // Should have WGSL shaders
     try std.testing.expect(result.wgsl_shader_count > 0);
+
+    // Should have no E006 errors
+    for (result.errors.items) |e| {
+        try std.testing.expect(!std.mem.eql(u8, e.code, "E006"));
+    }
 }
 
 // ============================================================================
@@ -529,9 +540,8 @@ test "e2e: nonexistent file returns error" {
 // ============================================================================
 
 test "e2e: all example files compile successfully" {
-    // Property: Every example in examples/ should compile and produce valid module info.
-    // Note: Some examples may have E006 "Texture usage cannot be 0" for canvas textures,
-    // which is a validator limitation. We check for successful compilation instead.
+    // Property: Every example in examples/ should compile, produce valid module info,
+    // and have no E006 errors (texture descriptor parsing now works).
     const allocator = std.testing.allocator;
 
     const examples = [_][]const u8{
@@ -555,5 +565,10 @@ test "e2e: all example files compile successfully" {
 
         // Should have WGSL shaders
         try std.testing.expect(result.wgsl_shader_count > 0);
+
+        // Should have no E006 errors (texture descriptor parsing works)
+        for (result.errors.items) |e| {
+            try std.testing.expect(!std.mem.eql(u8, e.code, "E006"));
+        }
     }
 }

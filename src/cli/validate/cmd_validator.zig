@@ -89,6 +89,18 @@ pub const TextureUsage = struct {
         STORAGE_BINDING | RENDER_ATTACHMENT;
 };
 
+// ============================================================================
+// Special Resource IDs
+// ============================================================================
+
+/// Special ID for canvas/surface texture (contextCurrentTexture).
+/// Uses 0xFFFE to distinguish from 0xFFFF (no depth texture).
+/// Canvas textures have usage=0 which is valid (browser manages them).
+pub const CANVAS_TEXTURE_ID: u16 = 0xFFFE;
+
+/// Special ID for "no depth texture" in render passes.
+pub const NO_DEPTH_TEXTURE_ID: u16 = 0xFFFF;
+
 // Compile-time validation of constants
 comptime {
     // MAX_COMMANDS must fit in command_index field
@@ -226,17 +238,16 @@ const ResourceInfo = struct {
 // ============================================================================
 
 /// Descriptor type tags (first byte of descriptor).
+/// MUST match DescriptorEncoder.zig exactly!
 const DescriptorType = enum(u8) {
-    sampler = 0x01,
-    texture = 0x02,
-    render_pass = 0x03,
-    render_pipeline = 0x04,
-    compute_pipeline = 0x05,
-    bind_group = 0x06,
-    texture_view = 0x07,
-    bind_group_layout = 0x08,
-    bind_group_layout_entry = 0x09,
-    pipeline_layout = 0x0A,
+    texture = 0x01,
+    sampler = 0x02,
+    bind_group = 0x03,
+    bind_group_layout = 0x04,
+    render_pipeline = 0x05,
+    compute_pipeline = 0x06,
+    render_pass = 0x07,
+    pipeline_layout = 0x08,
     _,
 };
 
@@ -396,6 +407,11 @@ pub const Validator = struct {
     /// When null, bounds checking is skipped.
     wasm_memory_size: ?u32,
 
+    /// WASM linear memory contents (for descriptor parsing).
+    /// When set, enables E006 texture/buffer descriptor validation.
+    /// When null, descriptor parsing is skipped.
+    wasm_memory: ?[]const u8,
+
     /// Per-pass bound vertex buffers (8 slots max).
     bound_vertex_buffers: [8]?u16,
 
@@ -444,6 +460,7 @@ pub const Validator = struct {
             .draw_count = 0,
             .dispatch_count = 0,
             .wasm_memory_size = null,
+            .wasm_memory = null,
             .bound_vertex_buffers = .{null} ** 8,
             .bound_bind_groups = .{null} ** 4,
             .buffers = .{},
@@ -504,6 +521,19 @@ pub const Validator = struct {
     pub fn setWasmMemorySize(self: *Self, size: u32) void {
         std.debug.assert(size > 0);
         self.wasm_memory_size = size;
+    }
+
+    /// Set WASM memory for descriptor parsing.
+    ///
+    /// When set, enables E006 texture/buffer descriptor validation by reading
+    /// descriptor contents from the provided memory.
+    ///
+    /// Pre-condition: memory is valid WASM linear memory
+    /// Post-condition: wasm_memory is set, also sets wasm_memory_size
+    pub fn setWasmMemory(self: *Self, memory: []const u8) void {
+        std.debug.assert(memory.len > 0);
+        self.wasm_memory = memory;
+        self.wasm_memory_size = @intCast(memory.len);
     }
 
     /// Validate that ptr + len is within WASM memory bounds.
@@ -734,19 +764,33 @@ pub const Validator = struct {
 
         // Parse texture descriptor and validate per WebGPU spec
         var texture_info = TextureInfo{ .created_at = self.command_index };
+        var descriptor_parsed = false;
 
         // Only parse if we can access the descriptor memory
-        if (bounds_valid and params.desc_len >= 2 and self.wasm_memory_size != null) {
-            // Note: In validation mode, we simulate descriptor parsing
-            // Real parsing would read from WASM memory at params.desc_ptr
-            // For now, we validate the descriptor length is reasonable
+        if (bounds_valid and params.desc_len >= 2 and self.wasm_memory != null) {
+            const mem = self.wasm_memory.?;
+            const desc_ptr = params.desc_ptr;
+            const desc_len = params.desc_len;
+
+            // Read descriptor from WASM memory
+            if (desc_ptr + desc_len <= mem.len) {
+                const desc_data = mem[desc_ptr .. desc_ptr + desc_len];
+                if (parseTextureDescriptor(desc_data)) |parsed| {
+                    texture_info = parsed;
+                    texture_info.created_at = self.command_index;
+                    descriptor_parsed = true;
+                }
+            }
+
+            // Warn on unusually large descriptors
             if (params.desc_len > 256) {
                 try self.addWarning("W006", "Texture descriptor unusually large (>256 bytes)");
             }
         }
 
         // E006: Validate texture properties per WebGPU spec
-        try self.validateTextureDescriptor(&texture_info, params.id);
+        // Skip usage=0 check if descriptor wasn't parsed (can't determine actual usage)
+        try self.validateTextureDescriptor(&texture_info, params.id, descriptor_parsed);
 
         // Post-condition: texture is tracked
         try self.textures.put(self.allocator, params.id, texture_info);
@@ -759,18 +803,22 @@ pub const Validator = struct {
     /// See: https://www.w3.org/TR/webgpu/#abstract-opdef-validating-gputexturedescriptor
     ///
     /// Validates:
-    /// - usage must not be 0
+    /// - usage must not be 0 (except CANVAS_TEXTURE_ID which has browser-managed usage)
     /// - sampleCount must be 1 or 4
     /// - 1D textures: height=1, depth=1, sampleCount=1, no depth-stencil formats
     /// - 3D textures: sampleCount=1
     /// - MSAA textures (sampleCount > 1): mipLevelCount=1, depth=1,
     ///   no STORAGE_BINDING, must have RENDER_ATTACHMENT
-    fn validateTextureDescriptor(self: *Self, info: *const TextureInfo, id: u16) !void {
+    ///
+    /// When descriptor_parsed is false, skip usage=0 check (can't determine actual usage).
+    fn validateTextureDescriptor(self: *Self, info: *const TextureInfo, id: u16, descriptor_parsed: bool) !void {
         // Pre-condition: info is valid
         std.debug.assert(info.sample_count >= 1);
 
-        // E006: usage must not be 0
-        if (info.usage == 0) {
+        // E006: usage must not be 0 (except for canvas texture or when descriptor not parsed)
+        // - CANVAS_TEXTURE_ID (0xFFFE): browser-managed, usage=0 is valid
+        // - descriptor not parsed: can't determine actual usage, skip check
+        if (info.usage == 0 and id != CANVAS_TEXTURE_ID and descriptor_parsed) {
             try self.addErrorWithId("E006", "Texture usage cannot be 0", id);
         }
 
@@ -913,7 +961,8 @@ pub const Validator = struct {
         }
 
         // Validate per WebGPU spec
-        try self.validateTextureDescriptor(&info, id);
+        // Pass true for descriptor_parsed since info is explicitly provided
+        try self.validateTextureDescriptor(&info, id, true);
 
         // Track texture
         try self.textures.put(self.allocator, id, info);
@@ -2175,8 +2224,10 @@ pub const Validator = struct {
             try self.addErrorWithId("E005", "Texture view ID already in use", params.id);
             return;
         }
-        // Check that texture exists (unless it's the special canvas texture ID 0xFFFF)
-        if (params.texture_id != 0xFFFF and !self.textures.contains(params.texture_id)) {
+        // Check that texture exists (unless it's a special texture: canvas or "no depth")
+        const is_special_texture = params.texture_id == CANVAS_TEXTURE_ID or
+            params.texture_id == NO_DEPTH_TEXTURE_ID;
+        if (!is_special_texture and !self.textures.contains(params.texture_id)) {
             try self.addErrorWithId("E001", "Texture view references non-existent texture", params.texture_id);
         }
         try self.texture_views.put(self.allocator, params.id, .{ .created_at = self.command_index });
@@ -2469,11 +2520,14 @@ pub const Validator = struct {
     }
 
     fn validateCopyTexture(self: *Self, params: CopyTextureParams) !void {
-        // 0xFFFF is special canvas texture
-        if (params.src_id != 0xFFFF and !self.textures.contains(params.src_id)) {
+        // Special texture IDs (canvas, no-depth) don't need to be tracked
+        const src_is_special = params.src_id == CANVAS_TEXTURE_ID or params.src_id == NO_DEPTH_TEXTURE_ID;
+        const dst_is_special = params.dst_id == CANVAS_TEXTURE_ID or params.dst_id == NO_DEPTH_TEXTURE_ID;
+
+        if (!src_is_special and !self.textures.contains(params.src_id)) {
             try self.addErrorWithId("E001", "COPY_TEXTURE_TO_TEXTURE references non-existent source texture", params.src_id);
         }
-        if (params.dst_id != 0xFFFF and !self.textures.contains(params.dst_id)) {
+        if (!dst_is_special and !self.textures.contains(params.dst_id)) {
             try self.addErrorWithId("E001", "COPY_TEXTURE_TO_TEXTURE references non-existent destination texture", params.dst_id);
         }
     }
@@ -4997,14 +5051,14 @@ test "Validator: parseTextureDescriptor single byte returns null" {
 }
 
 test "Validator: parseTextureDescriptor wrong type returns null" {
-    // Property: First byte must be texture type (0x02).
-    const result = Validator.parseTextureDescriptor(&.{ 0x01, 0x00 }); // sampler type
+    // Property: First byte must be texture type (0x01).
+    const result = Validator.parseTextureDescriptor(&.{ @intFromEnum(DescriptorType.sampler), 0x00 }); // sampler type
     try std.testing.expect(result == null);
 }
 
 test "Validator: parseTextureDescriptor minimal valid descriptor" {
     // Property: Type + zero fields is a valid minimal descriptor.
-    const data = [_]u8{ 0x02, 0x00 }; // texture type, 0 fields
+    const data = [_]u8{ @intFromEnum(DescriptorType.texture), 0x00 }; // texture type, 0 fields
     const result = Validator.parseTextureDescriptor(&data);
     try std.testing.expect(result != null);
     const info = result.?;
@@ -5017,10 +5071,10 @@ test "Validator: parseTextureDescriptor minimal valid descriptor" {
 }
 
 test "Validator: parseTextureDescriptor with width field" {
-    // Property: Width field (0x01) with u32 value (0x01) is parsed correctly.
+    // Property: Width field (0x01) with u32 value (0x00) is parsed correctly.
     const data = [_]u8{
-        0x02,       0x01, // texture type, 1 field
-        0x01,       0x01, // field: width, type: u32
+        @intFromEnum(DescriptorType.texture), 0x01, // texture type, 1 field
+        @intFromEnum(TextureField.width), @intFromEnum(ValueType.u32_val), // field: width, type: u32
         0x00, 0x02, 0x00, 0x00, // value: 512 (little endian)
     };
     const result = Validator.parseTextureDescriptor(&data);
@@ -5031,8 +5085,8 @@ test "Validator: parseTextureDescriptor with width field" {
 test "Validator: parseTextureDescriptor with usage field" {
     // Property: Usage field (0x08) with enum value (0x07) is parsed correctly.
     const data = [_]u8{
-        0x02, 0x01, // texture type, 1 field
-        0x08, 0x07, // field: usage, type: enum
+        @intFromEnum(DescriptorType.texture), 0x01, // texture type, 1 field
+        @intFromEnum(TextureField.usage), @intFromEnum(ValueType.enum_val), // field: usage, type: enum
         0x14, // value: RENDER_ATTACHMENT | TEXTURE_BINDING (0x10 | 0x04)
     };
     const result = Validator.parseTextureDescriptor(&data);
@@ -5043,12 +5097,12 @@ test "Validator: parseTextureDescriptor with usage field" {
 test "Validator: parseTextureDescriptor with multiple fields" {
     // Property: Multiple fields are all parsed correctly.
     const data = [_]u8{
-        0x02,       0x03, // texture type, 3 fields
-        0x01,       0x01, // field: width, type: u32
+        @intFromEnum(DescriptorType.texture), 0x03, // texture type, 3 fields
+        @intFromEnum(TextureField.width), @intFromEnum(ValueType.u32_val), // field: width, type: u32
         0x00, 0x01, 0x00, 0x00, // value: 256
-        0x02,       0x01, // field: height, type: u32
+        @intFromEnum(TextureField.height), @intFromEnum(ValueType.u32_val), // field: height, type: u32
         0x00, 0x01, 0x00, 0x00, // value: 256
-        0x08,       0x07, // field: usage, type: enum
+        @intFromEnum(TextureField.usage), @intFromEnum(ValueType.enum_val), // field: usage, type: enum
         0x10, // value: RENDER_ATTACHMENT
     };
     const result = Validator.parseTextureDescriptor(&data);
