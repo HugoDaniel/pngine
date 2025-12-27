@@ -1001,47 +1001,87 @@ Output includes diff analysis:
 
 ## Implementation Phases
 
-### Phase 1: wasm3 Integration (2-3 days)
-- [ ] Add wasm3 as build dependency (C library via build.zig.zon)
-- [ ] Create `Wasm3Runner` wrapper in Zig (`src/runtime/wasm3.zig`)
-- [ ] Implement memory read/write helpers
-- [ ] Load embedded executor WASM
-- [ ] Implement host functions for command buffer (no-op stubs)
-- [ ] Test: call init(), verify no crash
+### Phase 1: wasm3 Integration (2-3 days) ✅ COMPLETE
+- [x] Add wasm3 as build dependency (C library via build.zig.zon)
+- [x] Create `Wasm3Runtime` wrapper in Zig (`src/cli/wasm3.zig`)
+- [x] Implement memory read/write helpers
+- [x] Load embedded executor WASM
+- [x] Implement host functions for command buffer (log stub)
+- [x] Test: call init(), verify no crash
 
-### Phase 2: Command Buffer Parser (2 days)
-- [ ] Port command definitions from `command_buffer.zig`
-- [ ] Implement parser with all 53 commands
-- [ ] Add offset tracking for error reporting
-- [ ] Resource ID tracking (created/used)
-- [ ] Unit tests with known command sequences
+**Implementation Notes:**
+- `Wasm3Runtime` struct wraps wasm3 C API
+- Supports `callInit()`, `callFrame(time, width, height)`
+- Memory access via `getMemory()`, `writeMemory()`, `readMemory()`
+- Build option `has_wasm3` controls availability
 
-### Phase 3: Phase Output (1-2 days)
-- [ ] Separate init commands from frame commands
-- [ ] Add `--phase init|frame|both` flag
-- [ ] JSON output for initialization phase
-- [ ] JSON output for first frame phase
-- [ ] Multi-frame support (`--frames 0,1,2`)
+### Phase 2: Command Buffer Parser (2 days) ✅ COMPLETE
+- [x] Port command definitions from `command_buffer.zig`
+- [x] Implement parser with all 53 commands (`parseCommands()`)
+- [x] Add offset tracking for error reporting (command_index)
+- [x] Resource ID tracking (created/used)
+- [x] Unit tests with known command sequences
 
-### Phase 4: Validator Core (2-3 days)
-- [ ] State machine (pass nesting, pipeline state)
-- [ ] Reference validation (all IDs exist)
-- [ ] Memory bounds checking
-- [ ] Symptom-based diagnosis (`--symptom`)
-- [ ] Comprehensive test suite
+**Implementation Notes:**
+- `cmd_validator.parseCommands()` extracts typed parameters
+- `ParsedCommand` struct with `Params` union for all command types
+- 25 parameter struct types defined
+- Bounded loop with MAX_COMMANDS (10000)
 
-### Phase 5: WGSL Analysis (1-2 days)
+### Phase 3: Phase Output (1-2 days) ✅ COMPLETE
+- [x] Separate init commands from frame commands
+- [x] Add `--phase init|frame|both` flag
+- [x] JSON output for initialization phase
+- [x] JSON output for first frame phase
+- [x] Multi-frame support (`--frames 0,1,2`)
+- [x] Frame comparison / diff analysis
+- [x] `--time-step` integration
+
+**Implementation Notes:**
+- `--frames 0,1,10,60` runs specified frame indices
+- `--time-step 0.5` sets time between frames (default: 1/60s)
+- `FrameResult` struct captures per-frame commands and statistics
+- `FrameDiff` analysis detects:
+  - `time_is_varying`: animation working if times differ
+  - `draw_counts_consistent`: conditional rendering issues if counts vary
+- JSON output includes `"frames"` array and `"frame_diff"` object
+
+### Phase 4: Validator Core (2-3 days) 🔄 MOSTLY COMPLETE
+- [x] State machine (pass nesting, pipeline state)
+- [x] Reference validation (all IDs exist)
+- [x] Error codes: E001, E002, E005, E007, E008
+- [x] Warning code: W003 (zero counts)
+- [x] Symptom-based diagnosis (`--symptom`)
+- [ ] Memory bounds checking (E004)
+- [ ] Descriptor validation (E006)
+- [ ] Missing operations detection
+- [ ] Parameter validation
+- [ ] Pattern detection
+
+**Implementation Notes:**
+- `Validator` struct tracks resources in hash maps
+- `PassState` enum: none, render, compute
+- Validates: duplicate IDs, nested passes, draw outside pass, missing pipeline
+- `symptom_diagnosis.zig` implements targeted diagnosis for 5 symptoms:
+  - **black**: Missing draw, pipeline, render pass, submit; zero vertices
+  - **colors**: Load op configuration, uniform writes
+  - **blend**: Pipeline blend state configuration
+  - **flicker**: Multiple submits, ping-pong buffer patterns
+  - **geometry**: Vertex buffer binding, buffer sizes, uniform buffers
+- JSON output includes `"diagnosis"` object with `likely_causes` and `checks`
+
+### Phase 5: WGSL Analysis (1-2 days) ❌ NOT STARTED
 - [ ] Extract WGSL from memory pointers
 - [ ] Parse entry point declarations
 - [ ] Parse binding declarations
 - [ ] Add to command analysis output
 
-### Phase 6: CLI & Polish (1 day)
-- [ ] Add `validate` subcommand to CLI
-- [ ] Human-readable formatter (default)
-- [ ] All flags (--json, --verbose, --phase, --strict, etc.)
+### Phase 6: CLI & Polish (1 day) 🔄 PARTIAL
+- [x] Add `validate` subcommand to CLI
+- [x] Human-readable formatter (default)
+- [x] Most flags (--json, --verbose, --phase, --strict, --quiet)
 - [ ] End-to-end tests with real .pngine files
-- [ ] Documentation and examples
+- [ ] Comprehensive documentation
 
 ## Example LLM Workflow
 
