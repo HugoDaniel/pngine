@@ -32,199 +32,33 @@ const assert = std.debug.assert;
 const Ast = @import("Ast.zig").Ast;
 const Node = @import("Ast.zig").Node;
 
+// Import shared descriptor types from types module
+const types = @import("types");
+
 pub const DescriptorEncoder = struct {
     const Self = @This();
 
     // ========================================================================
-    // Descriptor Type Tags
+    // Re-export shared descriptor types for backwards compatibility
+    // These types are defined in src/types/descriptors.zig
     // ========================================================================
 
-    pub const DescriptorType = enum(u8) {
-        texture = 0x01,
-        sampler = 0x02,
-        bind_group = 0x03,
-        bind_group_layout = 0x04,
-        render_pipeline = 0x05,
-        compute_pipeline = 0x06,
-        render_pass = 0x07,
-        pipeline_layout = 0x08,
-    };
-
-    // ========================================================================
-    // Value Type Tags
-    // ========================================================================
-
-    pub const ValueType = enum(u8) {
-        u32_val = 0x00,
-        f32_val = 0x01,
-        string_id = 0x02, // Reference to string/data section
-        array = 0x03, // Array of values
-        nested = 0x04, // Nested descriptor
-        bool_val = 0x05,
-        u16_val = 0x06, // For resource IDs
-        enum_val = 0x07, // Enum as u8
-    };
-
-    // ========================================================================
-    // Texture Field IDs (matches WebGPU GPUTextureDescriptor)
-    // ========================================================================
-
-    pub const TextureField = enum(u8) {
-        width = 0x01,
-        height = 0x02,
-        depth = 0x03,
-        mip_level_count = 0x04,
-        sample_count = 0x05,
-        dimension = 0x06, // "1d", "2d", "3d"
-        format = 0x07, // TextureFormat enum
-        usage = 0x08, // TextureUsage flags
-        view_formats = 0x09, // Array of formats
-        size_from_image_bitmap = 0x0A, // ImageBitmap ID for runtime size resolution
-    };
-
-    // ========================================================================
-    // Sampler Field IDs (matches WebGPU GPUSamplerDescriptor)
-    // ========================================================================
-
-    pub const SamplerField = enum(u8) {
-        address_mode_u = 0x01,
-        address_mode_v = 0x02,
-        address_mode_w = 0x03,
-        mag_filter = 0x04,
-        min_filter = 0x05,
-        mipmap_filter = 0x06,
-        lod_min_clamp = 0x07,
-        lod_max_clamp = 0x08,
-        compare = 0x09,
-        max_anisotropy = 0x0A,
-    };
-
-    // ========================================================================
-    // Bind Group Field IDs
-    // ========================================================================
-
-    pub const BindGroupField = enum(u8) {
-        layout = 0x01, // layout_id reference
-        entries = 0x02, // Array of bind group entries
-    };
-
-    pub const BindGroupEntryField = enum(u8) {
-        binding = 0x01,
-        resource_type = 0x02, // buffer, texture, sampler
-        resource_id = 0x03,
-        offset = 0x04, // For buffer bindings
-        size = 0x05, // For buffer bindings
-    };
-
-    // ========================================================================
-    // Render Pass Field IDs
-    // ========================================================================
-
-    pub const RenderPassField = enum(u8) {
-        color_attachments = 0x01,
-        depth_stencil_attachment = 0x02,
-    };
-
-    pub const ColorAttachmentField = enum(u8) {
-        view = 0x01, // texture_id for view
-        resolve_target = 0x02,
-        load_op = 0x03,
-        store_op = 0x04,
-        clear_value = 0x05, // [r, g, b, a]
-    };
-
-    // ========================================================================
-    // Pipeline Field IDs
-    // ========================================================================
-
-    pub const RenderPipelineField = enum(u8) {
-        layout = 0x01,
-        vertex_shader = 0x02, // shader_id
-        vertex_entry_point = 0x03, // string_id
-        fragment_shader = 0x04,
-        fragment_entry_point = 0x05,
-        vertex_buffers = 0x06, // Array of buffer layouts
-        primitive_topology = 0x07,
-        front_face = 0x08,
-        cull_mode = 0x09,
-        depth_stencil = 0x0A,
-        multisample = 0x0B,
-        targets = 0x0C, // Color targets
-    };
-
-    // ========================================================================
-    // Enum Values (WebGPU enums encoded as u8)
-    // ========================================================================
-
-    pub const TextureFormat = enum(u8) {
-        rgba8unorm = 0x00,
-        rgba8snorm = 0x01,
-        rgba8uint = 0x02,
-        rgba8sint = 0x03,
-        bgra8unorm = 0x04,
-        rgba16float = 0x05,
-        rgba32float = 0x06,
-        depth24plus = 0x10,
-        depth24plus_stencil8 = 0x11,
-        depth32float = 0x12,
-        _,
-
-        pub fn fromString(s: []const u8) TextureFormat {
-            const map = std.StaticStringMap(TextureFormat).initComptime(.{
-                .{ "rgba8unorm", .rgba8unorm },
-                .{ "rgba8snorm", .rgba8snorm },
-                .{ "rgba8uint", .rgba8uint },
-                .{ "rgba8sint", .rgba8sint },
-                .{ "bgra8unorm", .bgra8unorm },
-                .{ "rgba16float", .rgba16float },
-                .{ "rgba32float", .rgba32float },
-                .{ "depth24plus", .depth24plus },
-                .{ "depth24plus-stencil8", .depth24plus_stencil8 },
-                .{ "depth32float", .depth32float },
-            });
-            return map.get(s) orelse .rgba8unorm;
-        }
-    };
-
-    pub const FilterMode = enum(u8) {
-        nearest = 0x00,
-        linear = 0x01,
-    };
-
-    pub const AddressMode = enum(u8) {
-        clamp_to_edge = 0x00,
-        repeat = 0x01,
-        mirror_repeat = 0x02,
-    };
-
-    pub const LoadOp = enum(u8) {
-        load = 0x00,
-        clear = 0x01,
-    };
-
-    pub const StoreOp = enum(u8) {
-        store = 0x00,
-        discard = 0x01,
-    };
-
-    pub const ResourceType = enum(u8) {
-        buffer = 0x00,
-        texture_view = 0x01,
-        sampler = 0x02,
-        external_texture = 0x03,
-    };
-
-    pub const TextureUsage = packed struct(u8) {
-        copy_src: bool = false,
-        copy_dst: bool = false,
-        texture_binding: bool = false,
-        storage_binding: bool = false,
-        render_attachment: bool = false,
-        _padding: u3 = 0,
-
-        pub const render_attachment_val: TextureUsage = .{ .render_attachment = true };
-        pub const texture_binding_val: TextureUsage = .{ .texture_binding = true };
-    };
+    pub const DescriptorType = types.DescriptorType;
+    pub const ValueType = types.ValueType;
+    pub const TextureField = types.TextureField;
+    pub const SamplerField = types.SamplerField;
+    pub const BindGroupField = types.BindGroupField;
+    pub const BindGroupEntryField = types.BindGroupEntryField;
+    pub const RenderPassField = types.RenderPassField;
+    pub const ColorAttachmentField = types.ColorAttachmentField;
+    pub const RenderPipelineField = types.RenderPipelineField;
+    pub const TextureFormat = types.TextureFormat;
+    pub const FilterMode = types.FilterMode;
+    pub const AddressMode = types.AddressMode;
+    pub const LoadOp = types.LoadOp;
+    pub const StoreOp = types.StoreOp;
+    pub const ResourceType = types.ResourceType;
+    pub const TextureUsage = types.TextureUsage;
 
     // ========================================================================
     // Encoding Buffer

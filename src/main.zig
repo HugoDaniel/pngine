@@ -39,11 +39,14 @@ pub const mock_gpu = executor_mod.mock_gpu;
 pub const dispatcher = executor_mod.dispatcher;
 pub const command_buffer = executor_mod.command_buffer;
 pub const plugins = executor_mod.plugins;
+pub const variant = executor_mod.variant;
 
 // Executor types for backward compatibility
 pub const MockGPU = executor_mod.MockGPU;
 pub const Dispatcher = executor_mod.Dispatcher;
 pub const MockDispatcher = executor_mod.MockDispatcher;
+pub const Variant = executor_mod.Variant;
+pub const selectVariant = executor_mod.selectVariant;
 
 // executor_test depends on DSL, imported separately
 pub const executor_test = @import("executor/executor_test.zig");

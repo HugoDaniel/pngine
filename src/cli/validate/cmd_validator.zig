@@ -35,6 +35,9 @@ const std = @import("std");
 const pngine = @import("pngine");
 const Cmd = pngine.command_buffer.Cmd;
 
+// Import shared descriptor types
+const desc = pngine.types.descriptors;
+
 /// Maximum commands to process (safety bound).
 /// Chosen to be large enough for complex scenes but bounded for safety.
 const MAX_COMMANDS: u32 = 10000;
@@ -234,49 +237,17 @@ const ResourceInfo = struct {
 };
 
 // ============================================================================
-// Descriptor Parsing Constants (matching DescriptorEncoder.zig)
+// Descriptor Parsing Types (from shared types module)
 // ============================================================================
 
-/// Descriptor type tags (first byte of descriptor).
-/// MUST match DescriptorEncoder.zig exactly!
-const DescriptorType = enum(u8) {
-    texture = 0x01,
-    sampler = 0x02,
-    bind_group = 0x03,
-    bind_group_layout = 0x04,
-    render_pipeline = 0x05,
-    compute_pipeline = 0x06,
-    render_pass = 0x07,
-    pipeline_layout = 0x08,
-    _,
-};
+/// Descriptor type tags - imported from src/types/descriptors.zig
+const DescriptorType = desc.DescriptorType;
 
-/// Texture field IDs (matching DescriptorEncoder.TextureField).
-const TextureField = enum(u8) {
-    width = 0x01,
-    height = 0x02,
-    depth = 0x03,
-    mip_level_count = 0x04,
-    sample_count = 0x05,
-    dimension = 0x06,
-    format = 0x07,
-    usage = 0x08,
-    view_formats = 0x09,
-    size_from_image_bitmap = 0x0A,
-    _,
-};
+/// Texture field IDs - imported from src/types/descriptors.zig
+const TextureField = desc.TextureField;
 
-/// Value type tags for TLV encoding.
-const ValueType = enum(u8) {
-    u32_val = 0x01,
-    string_id = 0x02,
-    array = 0x03,
-    nested = 0x04,
-    bool_val = 0x05,
-    u16_val = 0x06,
-    enum_val = 0x07,
-    _,
-};
+/// Value type tags for TLV encoding - imported from src/types/descriptors.zig
+const ValueType = desc.ValueType;
 
 /// Pipeline info.
 const PipelineInfo = struct {
