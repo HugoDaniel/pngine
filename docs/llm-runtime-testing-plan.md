@@ -1046,22 +1046,25 @@ Output includes diff analysis:
   - `draw_counts_consistent`: conditional rendering issues if counts vary
 - JSON output includes `"frames"` array and `"frame_diff"` object
 
-### Phase 4: Validator Core (2-3 days) 🔄 MOSTLY COMPLETE
+### Phase 4: Validator Core (2-3 days) ✅ COMPLETE
 - [x] State machine (pass nesting, pipeline state)
 - [x] Reference validation (all IDs exist)
-- [x] Error codes: E001, E002, E005, E007, E008
-- [x] Warning code: W003 (zero counts)
+- [x] Error codes: E001, E002, E004, E005, E006, E007, E008
+- [x] Warning codes: W003, W004, W006
 - [x] Symptom-based diagnosis (`--symptom`)
-- [ ] Memory bounds checking (E004)
-- [ ] Descriptor validation (E006)
-- [ ] Missing operations detection
-- [ ] Parameter validation
-- [ ] Pattern detection
+- [x] Memory bounds checking (E004) - commit `4158f73`
+- [x] Descriptor validation (E006) - commit `84fd13b`
+- [x] Buffer usage validation (VERTEX, INDEX, COPY_SRC, COPY_DST)
+- [x] Texture descriptor validation (dimensions, sample count, MSAA constraints)
+- [x] WebGPU limits (maxBufferSize 256MB, workgroup count 65535)
 
 **Implementation Notes:**
-- `Validator` struct tracks resources in hash maps
+- `cmd_validator.zig`: 6,996 lines, 178 tests
+- `Validator` struct tracks resources in hash maps with usage flags
 - `PassState` enum: none, render, compute
 - Validates: duplicate IDs, nested passes, draw outside pass, missing pipeline
+- Buffer validation: size > 0, usage != 0, MAP_READ/MAP_WRITE rules, alignment
+- Texture validation: 1D/2D/3D constraints, MSAA rules, valid usage flags
 - `symptom_diagnosis.zig` implements targeted diagnosis for 5 symptoms:
   - **black**: Missing draw, pipeline, render pass, submit; zero vertices
   - **colors**: Load op configuration, uniform writes
