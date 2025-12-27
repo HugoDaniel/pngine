@@ -123,4 +123,6 @@ test {
     _ = @import("validate/wasm3.zig");
     _ = @import("validate/cmd_validator.zig");
     _ = @import("validate/symptom_diagnosis.zig");
+    _ = @import("validate/wgsl_parser.zig");
+    _ = @import("validate/e2e_test.zig");
 }
