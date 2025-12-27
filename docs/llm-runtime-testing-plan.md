@@ -1099,12 +1099,14 @@ Output includes diff analysis:
 - [x] Most flags (--json, --verbose, --phase, --strict, --quiet)
 - [x] End-to-end tests with real .pngine files - commit `c7e7629`
 - [x] Documentation in CLAUDE.md and this plan
+- [x] Fix E006 canvas texture false positive - commit `354862e`
 
 **Implementation Notes:**
 - `e2e_test.zig` tests all major examples (21 tests)
-- Tests verify: compilation, WGSL extraction, entry points, bindings
-- Note: E006 "Texture usage cannot be 0" is expected for canvas textures
-  (validator limitation, not example bug)
+- Tests verify: compilation, WGSL extraction, entry points, bindings, no E006 errors
+- E006 fix: Fixed DescriptorType enum mismatch (texture was 0x02 vs 0x01),
+  added WASM memory access for descriptor parsing, skip usage=0 check when
+  descriptor not parsed or for CANVAS_TEXTURE_ID (0xFFFE)
 
 ## Example LLM Workflow
 
