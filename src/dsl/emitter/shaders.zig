@@ -84,19 +84,21 @@ pub fn emitShaders(e: *Emitter) Emitter.Error!void {
         // Check if code references a #wgsl macro
         const wgsl_ref = getWgslReference(e, code_value);
         if (wgsl_ref) |ref_name| {
-            // Reference to #wgsl - use existing wgsl_id
+            // Reference to #wgsl - look up data_id from WGSL table
             const ref_wgsl_id = e.wgsl_name_to_id.get(ref_name) orelse continue;
+            const wgsl_entry = e.builder.wgsl_table.get(ref_wgsl_id) orelse continue;
 
             // Assign shader_id for this #shaderModule
             const shader_id = e.next_shader_id;
             e.next_shader_id += 1;
             try e.shader_ids.put(e.gpa, name, shader_id);
 
-            // Emit create_shader_module with the referenced wgsl_id
+            // NOTE: Emit data_id (not wgsl_id) because wasm_entry.zig uses
+            // getDataSlice() directly on the data section, not the WGSL table.
             try e.builder.getEmitter().createShaderModule(
                 e.gpa,
                 shader_id,
-                ref_wgsl_id,
+                wgsl_entry.data_id,
             );
         } else {
             // Inline code - store directly
@@ -114,10 +116,12 @@ pub fn emitShaders(e: *Emitter) Emitter.Error!void {
             const wgsl_id = try e.builder.addWgsl(e.gpa, data_id.toInt(), &[_]u16{});
             try e.wgsl_name_to_id.put(e.gpa, name, wgsl_id);
 
+            // NOTE: Emit data_id (not wgsl_id) because wasm_entry.zig uses
+            // getDataSlice() directly on the data section, not the WGSL table.
             try e.builder.getEmitter().createShaderModule(
                 e.gpa,
                 shader_id,
-                wgsl_id,
+                data_id.toInt(),
             );
         }
     }
@@ -228,7 +232,7 @@ fn emitWgslModule(e: *Emitter, name: []const u8, macro_node: Node.Index) Emitter
         // Note: missing deps are silently ignored (analyzer should have caught this)
     }
 
-    // Add to WGSL table
+    // Add to WGSL table (for import resolution tracking)
     const wgsl_id = try e.builder.addWgsl(e.gpa, data_id.toInt(), deps.items);
     try e.wgsl_name_to_id.put(e.gpa, name, wgsl_id);
 
@@ -237,10 +241,12 @@ fn emitWgslModule(e: *Emitter, name: []const u8, macro_node: Node.Index) Emitter
     e.next_shader_id += 1;
     try e.shader_ids.put(e.gpa, name, shader_id);
 
+    // NOTE: Emit data_id (not wgsl_id) because wasm_entry.zig uses
+    // getDataSlice() directly on the data section, not the WGSL table.
     try e.builder.getEmitter().createShaderModule(
         e.gpa,
         shader_id,
-        wgsl_id,
+        data_id.toInt(),
     );
 
     // Also cache the resolved code for #shaderModule backward compat

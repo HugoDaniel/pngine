@@ -754,3 +754,176 @@ test "ShaderID: compute pipeline after skipped shaders" {
     }
     try testing.expect(pipeline_created);
 }
+
+// ============================================================================
+// Data Section ID Bug Regression Tests
+// ============================================================================
+// Bug: When #data blocks with expressions exist, the shader was getting
+// data_id 0 (expression string) instead of its actual data_id in the data section.
+// The bytecode emitter was passing wgsl_id (WGSL table index) but wasm_entry.zig
+// expects data_id (data section index).
+//
+// Without #data blocks: data_id == wgsl_id (coincidentally same)
+// With #data blocks: expressions get data_ids 0,1,2...; WGSL code comes later
+
+test "ShaderID: shader with data blocks gets correct WGSL code" {
+    // Regression test: #data blocks should not affect shader code resolution.
+    // The shader should receive actual WGSL code, not expression strings from #data.
+    const source: [:0]const u8 =
+        \\#define NUM=4
+        \\#data particleData {
+        \\  float32Array={
+        \\    numberOfElements=NUM
+        \\    initEachElementWith=["cos(ELEMENT_ID)" "sin(ELEMENT_ID)"]
+        \\  }
+        \\}
+        \\#shaderModule code {
+        \\  code="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); }"
+        \\}
+        \\#renderPipeline pipe { vertex={ module=code } }
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+
+    // Execute - this would fail with the bug because pipeline creation
+    // would receive expression string instead of WGSL code
+    try dispatcher.executeAll(testing.allocator);
+
+    // Verify shader was created and get the data_id
+    const types_mod = @import("types");
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_shader_module) {
+            const raw_data_id = call.params.create_shader_module.code_data_id;
+            const data_id: types_mod.DataId = @enumFromInt(raw_data_id);
+            // Look up the actual data in the module's data section
+            const code = module.data.get(data_id);
+            // The shader code should start with '@vertex', not 'cos(ELEMENT_ID)'
+            try testing.expect(code.len > 10);
+            try testing.expect(std.mem.startsWith(u8, code, "@vertex"));
+        }
+    }
+}
+
+test "ShaderID: multiple data blocks before shader" {
+    // More complex case: multiple #data blocks with expressions, then shader
+    const source: [:0]const u8 =
+        \\#data posData { float32Array=["1.0" "2.0"] }
+        \\#data velData { float32Array=["3.0" "4.0"] }
+        \\#data colorData { float32Array=["0.5" "0.5" "0.5"] }
+        \\#shaderModule shader {
+        \\  code="@fragment fn fs() -> @location(0) vec4f { return vec4f(1); }"
+        \\}
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+
+    try dispatcher.executeAll(testing.allocator);
+
+    // Verify shader code is WGSL, not expression strings
+    const types_mod = @import("types");
+    var found_shader = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_shader_module) {
+            found_shader = true;
+            const raw_data_id = call.params.create_shader_module.code_data_id;
+            const data_id: types_mod.DataId = @enumFromInt(raw_data_id);
+            const code = module.data.get(data_id);
+            try testing.expect(std.mem.startsWith(u8, code, "@fragment"));
+        }
+    }
+    try testing.expect(found_shader);
+}
+
+test "ShaderID: data with buffer and shader combined" {
+    // Full integration: #data + #buffer + #shaderModule
+    const source: [:0]const u8 =
+        \\#define N=8
+        \\#data initData {
+        \\  float32Array={
+        \\    numberOfElements=N
+        \\    initEachElementWith=["random()" "0.0"]
+        \\  }
+        \\}
+        \\#buffer particles {
+        \\  size=initData
+        \\  usage=[STORAGE]
+        \\  mappedAtCreation=initData
+        \\}
+        \\#shaderModule render {
+        \\  code="@vertex fn main() -> @builtin(position) vec4f { return vec4f(0); }"
+        \\}
+        \\#renderPipeline pipe { vertex={ module=render } }
+        \\#renderPass pass {
+        \\  colorAttachments=[{
+        \\    view=contextCurrentTexture
+        \\    clearValue=[0 0 0 1]
+        \\    loadOp=clear
+        \\    storeOp=store
+        \\  }]
+        \\  pipeline=pipe
+        \\  draw=3
+        \\}
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+
+    try dispatcher.executeAll(testing.allocator);
+
+    // Verify all resources created correctly
+    const types_mod = @import("types");
+    var shader_ok = false;
+    var buffer_ok = false;
+    var pipeline_ok = false;
+
+    for (gpu.getCalls()) |call| {
+        switch (call.call_type) {
+            .create_shader_module => {
+                const raw_data_id = call.params.create_shader_module.code_data_id;
+                const data_id: types_mod.DataId = @enumFromInt(raw_data_id);
+                const code = module.data.get(data_id);
+                // Must be WGSL, not expression like "random()"
+                shader_ok = std.mem.startsWith(u8, code, "@vertex");
+            },
+            .create_buffer => buffer_ok = true,
+            .create_render_pipeline => pipeline_ok = true,
+            else => {},
+        }
+    }
+
+    try testing.expect(shader_ok);
+    try testing.expect(buffer_ok);
+    try testing.expect(pipeline_ok);
+}
