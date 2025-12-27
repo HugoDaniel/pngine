@@ -76,13 +76,13 @@ ZIG=/Users/hugo/.zvm/bin/zig
 ## Quick Commands
 
 ```bash
-# Fast lib tests (uses cache, ~0.5s after first run)
-/Users/hugo/.zvm/bin/zig test src/main.zig
+# Standalone tests (1,114 tests, parallel compilation)
+/Users/hugo/.zvm/bin/zig build test-standalone --summary all
 
 # Fast filtered tests
 /Users/hugo/.zvm/bin/zig test src/main.zig --test-filter "Parser"
 
-# Full test suite including CLI (~7 min, before commit)
+# Full test suite including CLI (~5 min)
 /Users/hugo/.zvm/bin/zig build test
 
 # Run tests with summary
@@ -106,6 +106,66 @@ ZIG=/Users/hugo/.zvm/bin/zig
 # Run CLI - render actual frame
 ./zig-out/bin/pngine shader.pngine -o output.png --frame --size 512x512
 ```
+
+## Standalone Test Modules
+
+The codebase is organized into standalone modules that compile and test in
+parallel. This enables faster iteration when working on specific areas.
+
+### Test Commands
+
+```bash
+# Run all standalone modules in parallel (~3s compile, varies for execution)
+/Users/hugo/.zvm/bin/zig build test-standalone
+
+# Run individual modules
+/Users/hugo/.zvm/bin/zig build test-types        # 10 tests - Core type definitions
+/Users/hugo/.zvm/bin/zig build test-pbsf         # 35 tests - S-expression parser
+/Users/hugo/.zvm/bin/zig build test-png          # 91 tests - PNG encoding/embedding
+/Users/hugo/.zvm/bin/zig build test-dsl-frontend # 75 tests - Token, Lexer, Ast, Parser
+/Users/hugo/.zvm/bin/zig build test-dsl-backend  # 119 tests - Analyzer (semantic analysis)
+/Users/hugo/.zvm/bin/zig build test-bytecode     # 147 tests - Format, opcodes, emitter
+/Users/hugo/.zvm/bin/zig build test-reflect      # 9 tests - WGSL shader reflection
+/Users/hugo/.zvm/bin/zig build test-executor     # 114 tests - Dispatcher, mock_gpu
+/Users/hugo/.zvm/bin/zig build test-dsl-complete # 514 tests - Emitter + full DSL chain
+
+# Full test suite (main lib + CLI, ~5min)
+/Users/hugo/.zvm/bin/zig build test
+```
+
+### Module Dependency Graph
+
+```
+types (0 deps)
+  ↓
+bytecode (types)
+  ↓
+executor (bytecode)
+  ↓
+dsl-complete (types, bytecode, reflect, executor)
+```
+
+### Test Count Summary
+
+| Module       | Tests | Description                    |
+| ------------ | ----- | ------------------------------ |
+| types        | 10    | Core type definitions          |
+| pbsf         | 35    | S-expression parser            |
+| png          | 91    | PNG encoding/embedding         |
+| dsl-frontend | 75    | Token, Lexer, Ast, Parser      |
+| dsl-backend  | 119   | Analyzer (semantic analysis)   |
+| bytecode     | 147   | Format, opcodes, emitter, etc. |
+| reflect      | 9     | WGSL shader reflection         |
+| executor     | 114   | Dispatcher, mock_gpu, etc.     |
+| dsl-complete | 514   | Emitter + full compilation     |
+| **Total**    | 1,114 | Standalone tests               |
+
+### When to Use Standalone Tests
+
+- **Quick iteration**: `test-dsl-complete` for emitter work (~3min vs 5min full)
+- **Focused development**: Test only the module you're changing
+- **CI optimization**: Run standalone in parallel, then full suite
+- **Debugging**: Isolate failures to specific modules
 
 ## Browser Testing (Playwright)
 
