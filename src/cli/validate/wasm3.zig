@@ -157,8 +157,27 @@ pub const Wasm3Runtime = struct {
     }
 
     /// Link a void function that takes (ptr, len) for logging.
+    /// The executor imports: extern "env" fn log(ptr: u32, len: u32) void;
     pub fn linkLogFunction(self: *Wasm3Runtime) Wasm3Error!void {
-        return self.linkFunction("env", "log", logStub);
+        if (!build_options.has_wasm3) {
+            return Wasm3Error.NotAvailable;
+        }
+
+        const module = self.module orelse return Wasm3Error.LoadFailed;
+
+        // Signature: v(ii) = void return, two i32 params
+        const result = c.m3_LinkRawFunction(
+            module,
+            "env",
+            "log",
+            "v(ii)",
+            &logStub,
+        );
+
+        // Ignore "function lookup failed" - module might not import log
+        if (result != null and !std.mem.eql(u8, std.mem.span(result.?), "function lookup failed")) {
+            return Wasm3Error.LinkFailed;
+        }
     }
 
     /// Compile all functions in the module.
@@ -324,7 +343,8 @@ pub const Wasm3Runtime = struct {
 };
 
 /// Stub log function for WASM imports.
-fn logStub(_: c.IM3Runtime, _: c.IM3ImportContext, _: [*]u64, _: ?*anyopaque) callconv(.c) ?*anyopaque {
+/// Matches M3RawCall signature: fn(runtime, ctx, stack, userdata) -> result
+fn logStub(_: c.IM3Runtime, _: c.IM3ImportContext, _: [*c]u64, _: ?*anyopaque) callconv(.c) ?*const anyopaque {
     // Silent stub - we could capture logs here if needed
     return null;
 }
