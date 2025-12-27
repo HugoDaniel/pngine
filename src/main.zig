@@ -20,13 +20,16 @@ pub const types = @import("types");
 pub const tokenizer = @import("pbsf/tokenizer.zig");
 pub const parser = @import("pbsf/parser.zig");
 
-// Bytecode
-pub const string_table = @import("bytecode/string_table.zig");
-pub const data_section = @import("bytecode/data_section.zig");
-pub const opcodes = @import("bytecode/opcodes.zig");
-pub const emitter = @import("bytecode/emitter.zig");
-pub const format = @import("bytecode/format.zig");
-pub const uniform_table = @import("bytecode/uniform_table.zig");
+// Bytecode (module import to avoid conflict with bytecode/standalone.zig)
+const bytecode_mod = @import("bytecode");
+pub const string_table = bytecode_mod.string_table;
+pub const data_section = bytecode_mod.data_section;
+pub const opcodes = bytecode_mod.opcodes;
+pub const emitter = bytecode_mod.emitter;
+pub const format = bytecode_mod.format;
+pub const uniform_table = bytecode_mod.uniform_table;
+
+// Assembler is separate (depends on pbsf, not part of bytecode module)
 pub const assembler = @import("bytecode/assembler.zig");
 pub const assembler_test = @import("bytecode/assembler_test.zig");
 
@@ -201,8 +204,8 @@ test {
     _ = @import("dsl/emitter/module_reference_test.zig");
     _ = @import("dsl/emitter/builtin_inputs_test.zig");
     _ = @import("dsl/Compiler.zig");
-    // Run WGSL table tests
-    _ = @import("bytecode/wgsl_table_test.zig");
+    // Bytecode tests run via bytecode standalone module
+    _ = bytecode_mod;
     // Run PNG embedding/encoding tests
     _ = @import("png/crc32.zig");
     _ = @import("png/chunk.zig");

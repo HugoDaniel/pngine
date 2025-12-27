@@ -22,10 +22,13 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
-const format = @import("../bytecode/format.zig");
+
+// Use bytecode module import
+const bytecode_mod = @import("bytecode");
+const format = bytecode_mod.format;
 const Module = format.Module;
-const DataSection = @import("../bytecode/data_section.zig").DataSection;
-const DataId = @import("../bytecode/data_section.zig").DataId;
+const DataSection = bytecode_mod.DataSection;
+const DataId = bytecode_mod.DataId;
 
 // ============================================================================
 // JS Extern Declarations (imported from JavaScript)

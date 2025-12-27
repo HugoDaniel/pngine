@@ -29,10 +29,14 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
-const opcodes = @import("../bytecode/opcodes.zig");
+
+// Use bytecode module import (named bytecode_mod to avoid conflict with local vars)
+const bytecode_mod = @import("bytecode");
+const opcodes = bytecode_mod.opcodes;
 const OpCode = opcodes.OpCode;
-const format = @import("../bytecode/format.zig");
+const format = bytecode_mod.format;
 const Module = format.Module;
+
 const MockGPU = @import("mock_gpu.zig").MockGPU;
 
 /// Execution error types.
@@ -1817,11 +1821,10 @@ fn fuzzScanPassDefinitions(_: void, input: []const u8) !void {
     if (input.len < 4) return;
 
     // Create a minimal valid module wrapper - dispatcher only uses bytecode field
-    const StringTable = @import("../bytecode/string_table.zig").StringTable;
-    const DataSection = @import("../bytecode/data_section.zig").DataSection;
-    const UniformTable = @import("../bytecode/uniform_table.zig").UniformTable;
-
-    const AnimationTable = @import("../bytecode/animation_table.zig").AnimationTable;
+    const StringTable = bytecode_mod.StringTable;
+    const DataSection = bytecode_mod.DataSection;
+    const UniformTable = bytecode_mod.UniformTable;
+    const AnimationTable = bytecode_mod.AnimationTable;
 
     const mock_module = Module{
         .header = .{
@@ -2403,7 +2406,7 @@ test "scanPassDefinitions: deeply nested opcode sequence" {
 // INVARIANT: If skipOpcodeParamsAt skips fewer bytes than emitted, the scanner
 // will desync and misinterpret data as opcodes, causing missed pass definitions.
 
-const Emitter = @import("../bytecode/emitter.zig").Emitter;
+const Emitter = bytecode_mod.Emitter;
 
 /// Helper to measure emitted bytes for an opcode (excluding the opcode byte itself).
 fn measureEmittedParams(bytecode: []const u8) usize {

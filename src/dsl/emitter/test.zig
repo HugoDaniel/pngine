@@ -14,11 +14,12 @@ const Analyzer = @import("../Analyzer.zig").Analyzer;
 const Emitter = @import("../Emitter.zig").Emitter;
 const DescriptorEncoder = @import("../DescriptorEncoder.zig").DescriptorEncoder;
 
-// Bytecode imports
-const format = @import("../../bytecode/format.zig");
-const opcodes = @import("../../bytecode/opcodes.zig");
-const bytecode_emitter = @import("../../bytecode/emitter.zig").Emitter;
-const uniform_table = @import("../../bytecode/uniform_table.zig");
+// Use bytecode module import
+const bytecode_mod = @import("bytecode");
+const format = bytecode_mod.format;
+const opcodes = bytecode_mod.opcodes;
+const bytecode_emitter = bytecode_mod.emitter.Emitter;
+const uniform_table = bytecode_mod.uniform_table;
 
 /// Helper: compile DSL source to PNGB bytecode.
 fn compileSource(source: [:0]const u8) ![]u8 {

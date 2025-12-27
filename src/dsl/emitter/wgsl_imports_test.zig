@@ -12,7 +12,10 @@
 const std = @import("std");
 const testing = std.testing;
 const Compiler = @import("../Compiler.zig").Compiler;
-const format = @import("../../bytecode/format.zig");
+
+// Use bytecode module import
+const bytecode_mod = @import("bytecode");
+const format = bytecode_mod.format;
 
 // ============================================================================
 // Test Helpers

@@ -17,11 +17,14 @@ const parser = @import("../pbsf/parser.zig");
 const Ast = parser.Ast;
 const Node = parser.Node;
 const NodeIndex = parser.NodeIndex;
-const format = @import("format.zig");
+
+// Use bytecode module for sibling imports to avoid module conflicts
+const bytecode_mod = @import("bytecode");
+const format = bytecode_mod.format;
 const Builder = format.Builder;
-const opcodes = @import("opcodes.zig");
-const StringId = @import("string_table.zig").StringId;
-const DataId = @import("data_section.zig").DataId;
+const opcodes = bytecode_mod.opcodes;
+const StringId = bytecode_mod.StringId;
+const DataId = bytecode_mod.DataId;
 
 /// Assembler errors.
 pub const AssembleError = error{

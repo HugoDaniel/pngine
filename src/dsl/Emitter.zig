@@ -39,8 +39,11 @@ const Allocator = std.mem.Allocator;
 const Ast = @import("Ast.zig").Ast;
 const Node = @import("Ast.zig").Node;
 const Analyzer = @import("Analyzer.zig").Analyzer;
-const format = @import("../bytecode/format.zig");
-const opcodes = @import("../bytecode/opcodes.zig");
+
+// Use bytecode module import
+const bytecode_mod = @import("bytecode");
+const format = bytecode_mod.format;
+const opcodes = bytecode_mod.opcodes;
 const DescriptorEncoder = @import("DescriptorEncoder.zig").DescriptorEncoder;
 const utils = @import("emitter/utils.zig");
 const shaders = @import("emitter/shaders.zig");

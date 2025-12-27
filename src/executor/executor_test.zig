@@ -5,8 +5,12 @@
 
 const std = @import("std");
 const testing = std.testing;
-const format = @import("../bytecode/format.zig");
-const opcodes = @import("../bytecode/opcodes.zig");
+
+// Use bytecode module import
+const bytecode_mod = @import("bytecode");
+const format = bytecode_mod.format;
+const opcodes = bytecode_mod.opcodes;
+
 const mock_gpu = @import("mock_gpu.zig");
 const dispatcher = @import("dispatcher.zig");
 const DescriptorEncoder = @import("../dsl/DescriptorEncoder.zig").DescriptorEncoder;

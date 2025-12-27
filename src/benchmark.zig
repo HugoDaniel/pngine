@@ -9,7 +9,10 @@
 
 const std = @import("std");
 const pngine = @import("main.zig");
-const format = @import("bytecode/format.zig");
+
+// Use bytecode module import
+const bytecode_mod = @import("bytecode");
+const format = bytecode_mod.format;
 const Module = format.Module;
 const MockGPU = @import("executor/mock_gpu.zig").MockGPU;
 const Dispatcher = @import("executor/dispatcher.zig").Dispatcher;

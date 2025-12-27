@@ -1,21 +1,10 @@
 //! Bytecode Standalone Module
 //!
 //! Entry point for standalone bytecode tests. Includes all bytecode
-//! components that only depend on the types module.
+//! components. Note: assembler depends on pbsf but is included for
+//! module boundary consistency (it can still run standalone tests).
 //!
-//! Excludes:
-//! - assembler.zig (depends on pbsf/parser.zig)
-//! - assembler_test.zig (depends on pbsf + fixtures)
-//!
-//! Test count: 146 tests
-//! - string_table: 7
-//! - data_section: 12
-//! - opcodes: 25
-//! - uniform_table: 9
-//! - animation_table: 5
-//! - emitter: 44
-//! - format: 16
-//! - wgsl_table_test: 28
+//! Test count: ~170 tests total
 
 const types = @import("types");
 
@@ -26,14 +15,21 @@ pub const OpCode = types.opcodes.OpCode;
 pub const PluginSet = types.PluginSet;
 pub const Plugin = types.Plugin;
 
-// Re-export bytecode components
-pub const StringTable = @import("string_table.zig").StringTable;
-pub const DataSection = @import("data_section.zig").DataSection;
+// Re-export bytecode modules (for code using bytecode_mod.module.Type pattern)
+pub const string_table = @import("string_table.zig");
+pub const data_section = @import("data_section.zig");
 pub const opcodes = @import("opcodes.zig");
-pub const Emitter = @import("emitter.zig").Emitter;
-pub const UniformTable = @import("uniform_table.zig").UniformTable;
-pub const AnimationTable = @import("animation_table.zig").AnimationTable;
+pub const emitter = @import("emitter.zig");
+pub const uniform_table = @import("uniform_table.zig");
+pub const animation_table = @import("animation_table.zig");
 pub const format = @import("format.zig");
+
+// Re-export main types directly (for code using bytecode_mod.Type pattern)
+pub const StringTable = string_table.StringTable;
+pub const DataSection = data_section.DataSection;
+pub const Emitter = emitter.Emitter;
+pub const UniformTable = uniform_table.UniformTable;
+pub const AnimationTable = animation_table.AnimationTable;
 
 // Include all tests
 test {

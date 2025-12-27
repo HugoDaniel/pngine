@@ -21,9 +21,12 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Cmd = @import("command_buffer.zig").Cmd;
 
-// Re-export types from format.zig for convenience
-pub const PluginSet = @import("../bytecode/format.zig").PluginSet;
-pub const Plugin = @import("../bytecode/format.zig").Plugin;
+// Use bytecode module import
+const bytecode_mod = @import("bytecode");
+
+// Re-export types from bytecode module for convenience
+pub const PluginSet = bytecode_mod.PluginSet;
+pub const Plugin = bytecode_mod.Plugin;
 
 // ============================================================================
 // Build-time Plugin Configuration

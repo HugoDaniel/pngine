@@ -17,7 +17,10 @@
 const std = @import("std");
 const Emitter = @import("../Emitter.zig").Emitter;
 const Node = @import("../Ast.zig").Node;
-const opcodes = @import("../../bytecode/opcodes.zig");
+
+// Use bytecode module import
+const bytecode_mod = @import("bytecode");
+const opcodes = bytecode_mod.opcodes;
 const utils = @import("utils.zig");
 const resources = @import("resources.zig");
 

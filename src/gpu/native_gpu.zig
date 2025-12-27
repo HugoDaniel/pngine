@@ -16,6 +16,10 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
+// Use bytecode module import
+const bytecode_mod = @import("bytecode");
+const format = bytecode_mod.format;
+
 // Conditional zgpu import (only available on native targets)
 const has_zgpu = @hasDecl(@import("root"), "zgpu");
 
@@ -45,7 +49,7 @@ pub const NativeGPU = struct {
     height: u32,
 
     /// Module reference for data lookups.
-    module: ?*const @import("../bytecode/format.zig").Module,
+    module: ?*const format.Module,
 
     /// Time uniform for animations.
     time: f32,
@@ -127,7 +131,7 @@ pub const NativeGPU = struct {
     }
 
     /// Set module reference for data lookups.
-    pub fn setModule(self: *Self, module: *const @import("../bytecode/format.zig").Module) void {
+    pub fn setModule(self: *Self, module: *const format.Module) void {
         // Pre-conditions
         assert(self.initialized);
         assert(module.bytecode.len > 0);

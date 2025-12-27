@@ -42,7 +42,10 @@ const Analyzer = @import("Analyzer.zig").Analyzer;
 const Emitter = @import("Emitter.zig").Emitter;
 const Ast = @import("Ast.zig").Ast;
 const ImportResolver = @import("ImportResolver.zig").ImportResolver;
-const format = @import("../bytecode/format.zig");
+
+// Use bytecode module import
+const bytecode_mod = @import("bytecode");
+const format = bytecode_mod.format;
 pub const PluginSet = format.PluginSet;
 
 pub const Compiler = struct {
@@ -888,7 +891,7 @@ test "E2E: compile simple_triangle to PNGB" {
     try testing.expectEqualStrings("PNGB", pngb[0..4]);
 
     // Property: bytecode section exists and contains expected opcodes.
-    const opcodes = @import("../bytecode/opcodes.zig");
+    const opcodes = bytecode_mod.opcodes;
 
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
@@ -936,7 +939,7 @@ test "E2E: compile with texture and sampler" {
 
     try testing.expectEqualStrings("PNGB", pngb[0..4]);
 
-    const opcodes = @import("../bytecode/opcodes.zig");
+    const opcodes = bytecode_mod.opcodes;
 
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);

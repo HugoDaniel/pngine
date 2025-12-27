@@ -9,8 +9,12 @@
 const std = @import("std");
 const testing = std.testing;
 const parser = @import("../pbsf/parser.zig");
-const format = @import("format.zig");
-const opcodes = @import("opcodes.zig");
+
+// Use bytecode module for sibling imports to avoid module conflicts
+const bytecode_mod = @import("bytecode");
+const format = bytecode_mod.format;
+const opcodes = bytecode_mod.opcodes;
+
 const simple_triangle = @import("../fixtures/simple_triangle.zig");
 
 test "manual simpleTriangle AST to PNGB" {

@@ -35,7 +35,10 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const pngine = @import("main.zig");
-const format = @import("bytecode/format.zig");
+
+// Use bytecode module import
+const bytecode_mod = @import("bytecode");
+const format = bytecode_mod.format;
 const Module = format.Module;
 const WasmGPU = @import("executor/wasm_gpu.zig").WasmGPU;
 const Dispatcher = @import("executor/dispatcher.zig").Dispatcher;
@@ -437,7 +440,7 @@ fn finishFrame(cmds: *CommandBuffer, dispatcher: *Dispatcher(CommandGPU)) ?[*]co
 
 /// Find the bytecode offset of the first define_frame opcode.
 fn findFirstFrameStart(bytecode: []const u8) ?usize {
-    const opcodes_mod = @import("bytecode/opcodes.zig");
+    const opcodes_mod = bytecode_mod.opcodes;
     var pc: usize = 0;
     const max_scan: usize = 10000;
 
@@ -469,7 +472,7 @@ const FrameRange = struct {
 
 /// Scan bytecode to find frame definition by frame ID.
 fn scanForFrame(bytecode: []const u8, target_frame_id: u32) ?FrameRange {
-    const opcodes_mod = @import("bytecode/opcodes.zig");
+    const opcodes_mod = bytecode_mod.opcodes;
     var pc: usize = 0;
     const max_scan: usize = 10000;
 
@@ -509,7 +512,7 @@ fn scanForFrame(bytecode: []const u8, target_frame_id: u32) ?FrameRange {
 
 /// Scan bytecode to find frame definition by name string ID.
 fn scanForFrameByNameId(bytecode: []const u8, target_name_id: u16) ?FrameRange {
-    const opcodes_mod = @import("bytecode/opcodes.zig");
+    const opcodes_mod = bytecode_mod.opcodes;
     var pc: usize = 0;
     const max_scan: usize = 10000;
 
@@ -548,8 +551,8 @@ fn scanForFrameByNameId(bytecode: []const u8, target_name_id: u16) ?FrameRange {
 
 /// Skip opcode parameters at current position (modifies pc).
 /// This must handle ALL opcodes that can appear before define_frame in bytecode.
-fn skipOpcodeParamsAt(bytecode: []const u8, pc: *usize, op: @import("bytecode/opcodes.zig").OpCode) void {
-    const opcodes_mod = @import("bytecode/opcodes.zig");
+fn skipOpcodeParamsAt(bytecode: []const u8, pc: *usize, op: bytecode_mod.opcodes.OpCode) void {
+    const opcodes_mod = bytecode_mod.opcodes;
     switch (op) {
         // No parameters
         .end_pass, .submit, .end_frame, .nop, .begin_compute_pass, .end_pass_def => {},
@@ -756,7 +759,7 @@ fn skipOpcodeParamsAt(bytecode: []const u8, pc: *usize, op: @import("bytecode/op
 /// Get frame count in loaded module.
 export fn getFrameCount() u32 {
     const module = &(current_module orelse return 0);
-    const opcodes_mod = @import("bytecode/opcodes.zig");
+    const opcodes_mod = bytecode_mod.opcodes;
     var count: u32 = 0;
     var pc: usize = 0;
     const max_scan: usize = 10000;
@@ -852,7 +855,7 @@ export fn memset(dest: ?[*]u8, c: c_int, n: usize) ?[*]u8 {
 //   JS calls setUniform("time", [1.5]) → WASM looks up field → writes to GPU buffer
 //
 
-const uniform_table = @import("bytecode/uniform_table.zig");
+const uniform_table = bytecode_mod.uniform_table;
 const UniformType = uniform_table.UniformType;
 
 /// Get total number of uniform fields across all bindings.
@@ -1067,7 +1070,7 @@ export fn getUniformBindingCount() u32 {
 //   JS reads scene info → switches to scene's frame at appropriate time
 //
 
-const animation_table = @import("bytecode/animation_table.zig");
+const animation_table = bytecode_mod.animation_table;
 
 /// Check if animation metadata is present.
 ///

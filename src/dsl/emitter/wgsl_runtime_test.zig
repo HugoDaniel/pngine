@@ -11,7 +11,10 @@ const testing = std.testing;
 const Emitter = @import("../Emitter.zig").Emitter;
 const Analyzer = @import("../Analyzer.zig").Analyzer;
 const Parser = @import("../Parser.zig").Parser;
-const format = @import("../../bytecode/format.zig");
+
+// Use bytecode module import
+const bytecode_mod = @import("bytecode");
+const format = bytecode_mod.format;
 
 // ============================================================================
 // Helper Functions
@@ -569,7 +572,7 @@ test "#shaderModule referencing wgsl with imports" {
 
     // Simple recursive simulation (ok for test)
     const WgslTable = format.WgslTable;
-    const DataSection = @import("../../bytecode/data_section.zig").DataSection;
+    const DataSection = bytecode_mod.data_section.DataSection;
     const visitFn = struct {
         fn visit(allocator: std.mem.Allocator, wgsl: *const WgslTable, data: *const DataSection, id: u16, v: *std.AutoHashMap(u16, void), parts: *std.ArrayListUnmanaged([]const u8)) !void {
             if (v.contains(id)) return;

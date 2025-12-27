@@ -45,8 +45,11 @@ const plugins = @import("executor/plugins.zig");
 const command_buffer = @import("executor/command_buffer.zig");
 const CommandBuffer = command_buffer.CommandBuffer;
 const Cmd = command_buffer.Cmd;
-const format = @import("bytecode/format.zig");
-const opcodes = @import("bytecode/opcodes.zig");
+
+// Use bytecode module import
+const bytecode_mod = @import("bytecode");
+const format = bytecode_mod.format;
+const opcodes = bytecode_mod.opcodes;
 const OpCode = opcodes.OpCode;
 
 // ============================================================================

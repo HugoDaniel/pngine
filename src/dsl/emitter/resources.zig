@@ -24,7 +24,10 @@ const UniformBindingKey = emitter_mod.UniformBindingKey;
 const Node = @import("../Ast.zig").Node;
 const DescriptorEncoder = @import("../DescriptorEncoder.zig").DescriptorEncoder;
 const utils = @import("utils.zig");
-const uniform_table = @import("../../bytecode/uniform_table.zig");
+
+// Use bytecode module import
+const bytecode_mod = @import("bytecode");
+const uniform_table = bytecode_mod.uniform_table;
 const reflect = @import("../../reflect.zig");
 const fs = std.fs;
 

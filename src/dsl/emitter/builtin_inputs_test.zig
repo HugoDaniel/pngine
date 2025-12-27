@@ -21,8 +21,12 @@ const Ast = @import("../Ast.zig").Ast;
 const Parser = @import("../Parser.zig").Parser;
 const Analyzer = @import("../Analyzer.zig").Analyzer;
 const Emitter = @import("../Emitter.zig").Emitter;
-const format = @import("../../bytecode/format.zig");
-const opcodes = @import("../../bytecode/opcodes.zig");
+
+// Use bytecode module import
+const bytecode_mod = @import("bytecode");
+const format = bytecode_mod.format;
+const opcodes = bytecode_mod.opcodes;
+
 const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
 const MockGPU = @import("../../executor/mock_gpu.zig").MockGPU;
 

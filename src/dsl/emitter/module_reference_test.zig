@@ -17,8 +17,12 @@
 const std = @import("std");
 const testing = std.testing;
 const Compiler = @import("../Compiler.zig").Compiler;
-const format = @import("../../bytecode/format.zig");
-const opcodes = @import("../../bytecode/opcodes.zig");
+
+// Use bytecode module import
+const bytecode_mod = @import("bytecode");
+const format = bytecode_mod.format;
+const opcodes = bytecode_mod.opcodes;
+
 const mock_gpu = @import("../../executor/mock_gpu.zig");
 const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
 

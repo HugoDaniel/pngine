@@ -13,7 +13,10 @@ const std = @import("std");
 const Emitter = @import("../Emitter.zig").Emitter;
 const Node = @import("../Ast.zig").Node;
 const utils = @import("utils.zig");
-const animation_table = @import("../../bytecode/animation_table.zig");
+
+// Use bytecode module import
+const bytecode_mod = @import("bytecode");
+const animation_table = bytecode_mod.animation_table;
 
 /// Maximum scenes per animation (prevents runaway iteration).
 const MAX_SCENES: u32 = 64;

@@ -18,6 +18,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Bytecode module (depends on types, used by executor)
+    const bytecode_module = b.createModule(.{
+        .root_source_file = b.path("src/bytecode/standalone.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bytecode_module.addImport("types", types_module);
+
     // Main library module (exposed for dependents)
     const lib_module = b.addModule("pngine", .{
         .root_source_file = b.path("src/main.zig"),
@@ -25,6 +33,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     lib_module.addImport("types", types_module);
+    lib_module.addImport("bytecode", bytecode_module);
 
     // Add zgpu to library module if available (native targets only)
     if (zgpu_dep) |dep| {
@@ -44,6 +53,14 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSmall,
     });
 
+    // Bytecode module for WASM target
+    const wasm_bytecode_module = b.createModule(.{
+        .root_source_file = b.path("src/bytecode/standalone.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    wasm_bytecode_module.addImport("types", wasm_types_module);
+
     // Create WASM entry module (separate from main library)
     const wasm_module = b.createModule(.{
         .root_source_file = b.path("src/wasm_entry.zig"),
@@ -51,6 +68,7 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSmall,
     });
     wasm_module.addImport("types", wasm_types_module);
+    wasm_module.addImport("bytecode", wasm_bytecode_module);
 
     const wasm = b.addExecutable(.{
         .name = "pngine",
@@ -189,11 +207,12 @@ pub fn build(b: *std.Build) void {
     // | dsl-frontend | 75    | Token, Lexer, Ast, Parser      |
     // | dsl-backend  | 119   | Analyzer (semantic analysis)   |
     // | bytecode     | 147   | Format, opcodes, emitter, etc. |
-    // | reflect      | 8     | WGSL shader reflection         |
-    // | Total        | 485   |                                |
+    // | reflect      | 9     | WGSL shader reflection         |
+    // | executor     | 113   | Dispatcher, mock_gpu, etc.     |
+    // | Total        | 599   |                                |
     //
-    // Note: executor (114 tests) and emitter (375 tests) depend on bytecode
-    // via relative imports and cannot easily be made standalone.
+    // Note: emitter (375 tests) depends on both DSL and executor and
+    // cannot easily be made standalone without further refactoring.
     //
     // Usage:
     //   zig build test-standalone   # Run all standalone modules (~3s)
@@ -204,6 +223,7 @@ pub fn build(b: *std.Build) void {
     //   zig build test-dsl-backend  # Just dsl analyzer
     //   zig build test-bytecode     # Just bytecode
     //   zig build test-reflect      # Just reflect
+    //   zig build test-executor     # Just executor
 
     const standalone_step = b.step("test-standalone", "Run standalone module tests in parallel (~2s)");
 
@@ -292,6 +312,19 @@ pub fn build(b: *std.Build) void {
     const run_reflect_test = b.addRunArtifact(reflect_test);
     reflect_step.dependOn(&run_reflect_test.step);
     standalone_step.dependOn(&run_reflect_test.step);
+
+    // Executor module (dispatcher, mock_gpu, command_buffer) - uses bytecode module import
+    const executor_step = b.step("test-executor", "Run executor module tests");
+    const executor_mod = b.createModule(.{
+        .root_source_file = b.path("src/executor/standalone.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    executor_mod.addImport("bytecode", bytecode_mod);
+    const executor_test = b.addTest(.{ .name = "executor", .root_module = executor_mod });
+    const run_executor_test = b.addRunArtifact(executor_test);
+    executor_step.dependOn(&run_executor_test.step);
+    standalone_step.dependOn(&run_executor_test.step);
 
     // Coverage step (requires kcov installed)
     const coverage_step = b.step("coverage", "Run tests with coverage (requires kcov)");

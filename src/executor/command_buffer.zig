@@ -28,9 +28,13 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
-const format = @import("../bytecode/format.zig");
+
+// Use bytecode module import
+const bytecode_mod = @import("bytecode");
+const format = bytecode_mod.format;
 const Module = format.Module;
-const DataId = @import("../bytecode/data_section.zig").DataId;
+const DataId = bytecode_mod.DataId;
+const StringId = bytecode_mod.StringId;
 
 /// Command opcodes for JS dispatcher.
 /// Grouped by category, matching the plan's command set.
@@ -738,7 +742,7 @@ pub const CommandGPU = struct {
     pub fn callWasmFunc(self: *Self, allocator: Allocator, call_id: u16, module_id: u16, func_name_id: u16, args: []const u8) !void {
         _ = allocator;
         const module = self.module orelse return;
-        const string_id: @import("../bytecode/string_table.zig").StringId = @enumFromInt(func_name_id);
+        const string_id: StringId = @enumFromInt(func_name_id);
         const func_name = module.strings.get(string_id);
         self.cmds.callWasmFunc(call_id, module_id, @intFromPtr(func_name.ptr), @intCast(func_name.len), @intFromPtr(args.ptr), @intCast(args.len));
     }
