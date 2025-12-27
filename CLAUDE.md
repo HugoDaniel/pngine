@@ -23,16 +23,19 @@ This plan defines:
 - Explicitly-sized types (u32, i64, not usize except for slice indexing)
 - Read TESTING_AND_FUZZING.md before writing tests
 
+**If you discover of find anything relevant for other developers write it down
+in CONTRIBUTING.md to help out further developments with compounded knowledge**
+
 ## Related Plans (Reference as Needed)
 
-| Plan                                        | Purpose                                  | Status       |
-| ------------------------------------------- | ---------------------------------------- | ------------ |
-| `docs/embedded-executor-plan.md`            | **ACTIVE** - Embedded executor + plugins | In Progress  |
-| `docs/llm-runtime-testing-plan.md`          | LLM-friendly validation via wasm3        | Complete     |
-| `docs/multiplatform-command-buffer-plan.md` | Platform abstraction                     | Reference    |
-| `docs/data-generation-plan.md`              | Compute shader data gen                  | Reference    |
-| `docs/command-buffer-refactor-plan.md`      | JS bundle optimization                   | Reference    |
-| `docs/remove-wasm-in-wasm-plan.md`          | **SUPERSEDED** - Do not use              | Archived     |
+| Plan                                        | Purpose                                  | Status      |
+| ------------------------------------------- | ---------------------------------------- | ----------- |
+| `docs/embedded-executor-plan.md`            | **ACTIVE** - Embedded executor + plugins | In Progress |
+| `docs/llm-runtime-testing-plan.md`          | LLM-friendly validation via wasm3        | Complete    |
+| `docs/multiplatform-command-buffer-plan.md` | Platform abstraction                     | Reference   |
+| `docs/data-generation-plan.md`              | Compute shader data gen                  | Reference   |
+| `docs/command-buffer-refactor-plan.md`      | JS bundle optimization                   | Reference   |
+| `docs/remove-wasm-in-wasm-plan.md`          | **SUPERSEDED** - Do not use              | Archived    |
 
 ### Embedded Executor (docs/embedded-executor-plan.md)
 
@@ -164,7 +167,8 @@ dsl-complete (types, bytecode, reflect, executor)
 
 ## Browser Testing (Playwright)
 
-Automated browser testing with structured JSON output for LLM-friendly iteration.
+Automated browser testing with structured JSON output for LLM-friendly
+iteration.
 
 ### Dev Server
 
@@ -224,14 +228,14 @@ npm run browser http://localhost:5173/ -- --no-headless
 
 ### Log Prefixes
 
-| Prefix | Source | Meaning |
-|--------|--------|---------|
-| `[GPU]` | gpu.js | WebGPU command execution |
-| `[Worker]` | worker.js | Worker thread events |
-| `[Executor]` | WASM | Bytecode executor logs |
-| `[vite]` | Vite | Dev server HMR events |
-| `[Video]` | gpu.js | Video texture errors |
-| `[PNGine]` | init.js | Main thread events |
+| Prefix       | Source    | Meaning                  |
+| ------------ | --------- | ------------------------ |
+| `[GPU]`      | gpu.js    | WebGPU command execution |
+| `[Worker]`   | worker.js | Worker thread events     |
+| `[Executor]` | WASM      | Bytecode executor logs   |
+| `[vite]`     | Vite      | Dev server HMR events    |
+| `[Video]`    | gpu.js    | Video texture errors     |
+| `[PNGine]`   | init.js   | Main thread events       |
 
 ### Playwright E2E Tests
 
@@ -243,13 +247,14 @@ npm run test:headed   # Run with visible browser
 npm run test:debug    # Debug mode
 ```
 
-Tests are in `tests/e2e/`. The Playwright config (`playwright.config.js`) auto-starts
-Vite and enables WebGPU Chrome flags.
+Tests are in `tests/e2e/`. The Playwright config (`playwright.config.js`)
+auto-starts Vite and enables WebGPU Chrome flags.
 
 ### Chrome DevTools MCP (Recommended for WebGPU)
 
-**IMPORTANT**: Headless Playwright/Chromium often fails to get a WebGPU adapter even
-with flags enabled. For reliable WebGPU testing, use Chrome with DevTools MCP:
+**IMPORTANT**: Headless Playwright/Chromium often fails to get a WebGPU adapter
+even with flags enabled. For reliable WebGPU testing, use Chrome with DevTools
+MCP:
 
 ```bash
 # 1. Launch Chrome with remote debugging (run in background)
@@ -268,17 +273,22 @@ npm run dev
 ```
 
 **Test URLs:**
+
 - `http://localhost:5173/` - Main demo
 - `http://localhost:5173/test-embedded-executor.html` - Embedded executor test
-- `http://localhost:5173/test-cmd-buffer-only.html` - Command buffer test (no GPU)
+- `http://localhost:5173/test-cmd-buffer-only.html` - Command buffer test (no
+  GPU)
 
 **Example MCP workflow:**
+
 1. `mcp__chrome-devtools__navigate_page` to test page
 2. Wait 2-3 seconds for WebGPU initialization
-3. `mcp__chrome-devtools__list_console_messages` to see `[GPU]` and `[Worker]` logs
+3. `mcp__chrome-devtools__list_console_messages` to see `[GPU]` and `[Worker]`
+   logs
 4. `mcp__chrome-devtools__take_screenshot` to verify rendering
 
 **Why Chrome DevTools MCP?**
+
 - Real Chrome = real WebGPU support (Metal on macOS, Vulkan on Linux)
 - Console messages show full GPU command execution
 - Screenshots verify actual rendering output
@@ -293,7 +303,7 @@ npm run dev
 pngine compile <input.pngine> [-o output.pngb]
 
 # Validate bytecode (works with .pngine, .pbsf, .pngb, or .png with embedded bytecode)
-pngine check <input>
+pngine check <input> [--verbose]
 
 # Create PNG with embedded bytecode (default: 1x1 transparent pixel)
 pngine <input.pngine> [-o output.png]
@@ -320,6 +330,13 @@ pngine extract <image.png> [-o output.pngb]
 | `-e, --embed`          | Embed bytecode in PNG            | On                    |
 | `--no-embed`           | Don't embed bytecode             | Off                   |
 
+### Check Options
+
+| Flag           | Description                                      | Default |
+| -------------- | ------------------------------------------------ | ------- |
+| `-v, --verbose` | Print full GPU call trace (like browser debug)  | Off     |
+| `-h, --help`   | Show help message                                | -       |
+
 ### Examples
 
 ```bash
@@ -340,6 +357,9 @@ pngine shader.pngine --no-embed
 
 # Check bytecode in a PNG file
 pngine check output.png
+
+# Check with full GPU call trace (like browser debug mode)
+pngine check shader.pngine --verbose
 ```
 
 ### Supported File Formats
