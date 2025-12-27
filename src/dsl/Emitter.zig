@@ -53,7 +53,9 @@ const passes = @import("emitter/passes.zig");
 const frames = @import("emitter/frames.zig");
 const wasm = @import("emitter/wasm.zig");
 const animations = @import("emitter/animations.zig");
-const reflect = @import("../reflect.zig");
+
+// Use reflect module import
+const reflect = @import("reflect");
 
 /// Key for uniform binding lookup (group, binding) -> buffer_id.
 pub const UniformBindingKey = struct {

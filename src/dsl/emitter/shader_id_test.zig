@@ -31,8 +31,10 @@ const bytecode_mod = @import("bytecode");
 const format = bytecode_mod.format;
 const opcodes = bytecode_mod.opcodes;
 
-const mock_gpu = @import("../../executor/mock_gpu.zig");
-const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+// Use executor module import
+const executor_mod = @import("executor");
+const mock_gpu = executor_mod.mock_gpu;
+const Dispatcher = executor_mod.Dispatcher;
 
 // ============================================================================
 // Test Helpers

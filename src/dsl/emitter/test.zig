@@ -21,6 +21,12 @@ const opcodes = bytecode_mod.opcodes;
 const bytecode_emitter = bytecode_mod.emitter.Emitter;
 const uniform_table = bytecode_mod.uniform_table;
 
+// Use executor module import for execution tests
+const executor_mod = @import("executor");
+const mock_gpu = executor_mod.mock_gpu;
+const MockGPU = mock_gpu.MockGPU;
+const Dispatcher = executor_mod.Dispatcher;
+
 /// Helper: compile DSL source to PNGB bytecode.
 fn compileSource(source: [:0]const u8) ![]u8 {
     var ast = try Parser.parse(testing.allocator, source);
@@ -113,8 +119,7 @@ test "Emitter: buffer size from data reference" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -148,8 +153,7 @@ test "Emitter: buffer size from string arithmetic expression" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -184,8 +188,7 @@ test "Emitter: buffer size from define with expression" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -557,8 +560,7 @@ test "Emitter: bind group selects correct buffer from multiple" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -682,8 +684,7 @@ test "Emitter: bind group selects second buffer correctly" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -1360,8 +1361,7 @@ test "Emitter: draw with #define identifier resolves to numeric value" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -1464,8 +1464,7 @@ test "Emitter: vertexBuffers with bare identifier executes correctly" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -1519,8 +1518,7 @@ test "Emitter: rotating_cube style render pass with all commands" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -1592,8 +1590,7 @@ test "Emitter: multiple vertex buffers with bare identifiers" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -2077,8 +2074,7 @@ test "Emitter: rotating_cube style wgsl + shaderModule pattern" {
     defer module.deinit(testing.allocator);
 
     // Execute to verify the full pipeline works
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -2188,8 +2184,7 @@ test "Emitter: data with float32Array still works alongside wasm feature" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -2488,8 +2483,7 @@ test "Emitter: buffer with pool=2 creates pooled resources" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -2557,8 +2551,7 @@ test "Emitter: buffer size from WGSL binding reference" {
     defer module.deinit(testing.allocator);
 
     // Execute to verify buffer creation
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -2606,8 +2599,7 @@ test "Emitter: define with string multiplication expression in instanceCount" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -2643,8 +2635,7 @@ test "Emitter: define with string addition expression" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -2678,8 +2669,7 @@ test "Emitter: define with string division expression" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -2715,8 +2705,7 @@ test "Emitter: define with nested define reference in string" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -2750,8 +2739,7 @@ test "Emitter: define with ceil function in string" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -2786,8 +2774,7 @@ test "Emitter: define with plain number string" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -2823,8 +2810,7 @@ test "Emitter: define with complex chained expression" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -2859,8 +2845,7 @@ test "Emitter: define number literal (not string) still works" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -2895,8 +2880,7 @@ test "Emitter: drawIndexed with string define instanceCount" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -2934,8 +2918,7 @@ test "Emitter: multiple draw params from string defines" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
@@ -3823,8 +3806,7 @@ test "Emitter: draw with object params execution" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    const mock_gpu = @import("../../executor/mock_gpu.zig");
-    const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
+    // Using executor module imports from file top
 
     var gpu: mock_gpu.MockGPU = .empty;
     defer gpu.deinit(testing.allocator);

@@ -28,7 +28,9 @@ const utils = @import("utils.zig");
 // Use bytecode module import
 const bytecode_mod = @import("bytecode");
 const uniform_table = bytecode_mod.uniform_table;
-const reflect = @import("../../reflect.zig");
+
+// Use reflect module import
+const reflect = @import("reflect");
 const fs = std.fs;
 
 /// Maximum resources of each type (prevents runaway iteration).

@@ -32,12 +32,17 @@ pub const PluginSet = bytecode.PluginSet;
 pub const Plugin = bytecode.Plugin;
 
 // Re-export executor components
-pub const Dispatcher = @import("dispatcher.zig").Dispatcher;
-pub const MockDispatcher = @import("dispatcher.zig").MockDispatcher;
-pub const MockGPU = @import("mock_gpu.zig").MockGPU;
-pub const CommandBuffer = @import("command_buffer.zig").CommandBuffer;
-pub const Cmd = @import("command_buffer.zig").Cmd;
+pub const dispatcher = @import("dispatcher.zig");
+pub const mock_gpu = @import("mock_gpu.zig");
+pub const command_buffer = @import("command_buffer.zig");
 pub const plugins = @import("plugins.zig");
+
+// Re-export main types directly (for common patterns)
+pub const Dispatcher = dispatcher.Dispatcher;
+pub const MockDispatcher = dispatcher.MockDispatcher;
+pub const MockGPU = mock_gpu.MockGPU;
+pub const CommandBuffer = command_buffer.CommandBuffer;
+pub const Cmd = command_buffer.Cmd;
 
 // Include tests (excluding executor_test.zig which needs DSL)
 test {

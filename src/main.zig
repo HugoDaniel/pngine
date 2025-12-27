@@ -33,11 +33,19 @@ pub const uniform_table = bytecode_mod.uniform_table;
 pub const assembler = @import("bytecode/assembler.zig");
 pub const assembler_test = @import("bytecode/assembler_test.zig");
 
-// Executor
-pub const mock_gpu = @import("executor/mock_gpu.zig");
-pub const dispatcher = @import("executor/dispatcher.zig");
-pub const command_buffer = @import("executor/command_buffer.zig");
-pub const plugins = @import("executor/plugins.zig");
+// Executor (use module import)
+const executor_mod = @import("executor");
+pub const mock_gpu = executor_mod.mock_gpu;
+pub const dispatcher = executor_mod.dispatcher;
+pub const command_buffer = executor_mod.command_buffer;
+pub const plugins = executor_mod.plugins;
+
+// Executor types for backward compatibility
+pub const MockGPU = executor_mod.MockGPU;
+pub const Dispatcher = executor_mod.Dispatcher;
+pub const MockDispatcher = executor_mod.MockDispatcher;
+
+// executor_test depends on DSL, imported separately
 pub const executor_test = @import("executor/executor_test.zig");
 
 // GPU backends
@@ -51,8 +59,8 @@ pub const gpu_backends = struct {
 // ZIP bundle support
 pub const zip = @import("zip.zig");
 
-// WGSL Reflection (via miniray)
-pub const reflect = @import("reflect.zig");
+// WGSL Reflection (via miniray) - use module import
+pub const reflect = @import("reflect");
 
 // PNG embedding/extraction/encoding
 pub const png = struct {
@@ -129,9 +137,7 @@ pub const Module = format.Module;
 pub const Assembler = assembler.Assembler;
 pub const assemble = assembler.assemble;
 
-pub const MockGPU = mock_gpu.MockGPU;
-pub const Dispatcher = dispatcher.Dispatcher;
-pub const MockDispatcher = dispatcher.MockDispatcher;
+// MockGPU, Dispatcher, MockDispatcher are exported above with executor imports
 
 // ============================================================================
 // High-level Pipeline Functions
@@ -216,8 +222,8 @@ test {
     _ = @import("gpu/native_gpu.zig");
     // Run ZIP tests
     _ = @import("zip.zig");
-    // Run WGSL reflection tests
-    _ = @import("reflect.zig");
+    // Run WGSL reflection tests (uses module import)
+    _ = @import("reflect");
 }
 
 test "compile PBSF to PNGB" {

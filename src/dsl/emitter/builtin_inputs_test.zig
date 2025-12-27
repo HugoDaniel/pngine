@@ -27,8 +27,10 @@ const bytecode_mod = @import("bytecode");
 const format = bytecode_mod.format;
 const opcodes = bytecode_mod.opcodes;
 
-const Dispatcher = @import("../../executor/dispatcher.zig").Dispatcher;
-const MockGPU = @import("../../executor/mock_gpu.zig").MockGPU;
+// Use executor module import
+const executor_mod = @import("executor");
+const Dispatcher = executor_mod.Dispatcher;
+const MockGPU = executor_mod.MockGPU;
 
 /// Helper: compile DSL source to PNGB bytecode.
 fn compileSource(source: [:0]const u8) ![]u8 {

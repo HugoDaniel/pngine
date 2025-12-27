@@ -26,6 +26,21 @@ pub fn build(b: *std.Build) void {
     });
     bytecode_module.addImport("types", types_module);
 
+    // Reflect module (for main lib, WGSL reflection via miniray)
+    const reflect_module = b.createModule(.{
+        .root_source_file = b.path("src/reflect.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Executor module (for main lib, bytecode dispatch)
+    const lib_executor_module = b.createModule(.{
+        .root_source_file = b.path("src/executor/standalone.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lib_executor_module.addImport("bytecode", bytecode_module);
+
     // Main library module (exposed for dependents)
     const lib_module = b.addModule("pngine", .{
         .root_source_file = b.path("src/main.zig"),
@@ -34,6 +49,8 @@ pub fn build(b: *std.Build) void {
     });
     lib_module.addImport("types", types_module);
     lib_module.addImport("bytecode", bytecode_module);
+    lib_module.addImport("reflect", reflect_module);
+    lib_module.addImport("executor", lib_executor_module);
 
     // Add zgpu to library module if available (native targets only)
     if (zgpu_dep) |dep| {
@@ -208,11 +225,9 @@ pub fn build(b: *std.Build) void {
     // | dsl-backend  | 119   | Analyzer (semantic analysis)   |
     // | bytecode     | 147   | Format, opcodes, emitter, etc. |
     // | reflect      | 9     | WGSL shader reflection         |
-    // | executor     | 113   | Dispatcher, mock_gpu, etc.     |
-    // | Total        | 599   |                                |
-    //
-    // Note: emitter (375 tests) depends on both DSL and executor and
-    // cannot easily be made standalone without further refactoring.
+    // | executor     | 114   | Dispatcher, mock_gpu, etc.     |
+    // | dsl-complete | 361   | Emitter + full compilation     |
+    // | Total        | 960   |                                |
     //
     // Usage:
     //   zig build test-standalone   # Run all standalone modules (~3s)
@@ -222,6 +237,7 @@ pub fn build(b: *std.Build) void {
     //   zig build test-dsl-frontend # Just dsl frontend
     //   zig build test-dsl-backend  # Just dsl analyzer
     //   zig build test-bytecode     # Just bytecode
+    //   zig build test-dsl-complete # Just dsl emitter (full chain)
     //   zig build test-reflect      # Just reflect
     //   zig build test-executor     # Just executor
 
@@ -325,6 +341,22 @@ pub fn build(b: *std.Build) void {
     const run_executor_test = b.addRunArtifact(executor_test);
     executor_step.dependOn(&run_executor_test.step);
     standalone_step.dependOn(&run_executor_test.step);
+
+    // DSL Complete module (emitter + full DSL chain) - uses all external modules
+    const dsl_complete_step = b.step("test-dsl-complete", "Run DSL emitter tests");
+    const dsl_complete_mod = b.createModule(.{
+        .root_source_file = b.path("src/dsl/complete.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    dsl_complete_mod.addImport("types", types_module);
+    dsl_complete_mod.addImport("bytecode", bytecode_mod);
+    dsl_complete_mod.addImport("reflect", reflect_mod);
+    dsl_complete_mod.addImport("executor", executor_mod);
+    const dsl_complete_test = b.addTest(.{ .name = "dsl-complete", .root_module = dsl_complete_mod });
+    const run_dsl_complete_test = b.addRunArtifact(dsl_complete_test);
+    dsl_complete_step.dependOn(&run_dsl_complete_test.step);
+    standalone_step.dependOn(&run_dsl_complete_test.step);
 
     // Coverage step (requires kcov installed)
     const coverage_step = b.step("coverage", "Run tests with coverage (requires kcov)");
