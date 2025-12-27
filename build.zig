@@ -26,12 +26,60 @@ pub fn build(b: *std.Build) void {
     });
     bytecode_module.addImport("types", types_module);
 
+    // ========================================================================
+    // Miniray FFI Integration (optional)
+    // ========================================================================
+    //
+    // When libminiray.a is available, link it for faster WGSL reflection.
+    // Otherwise, falls back to subprocess spawning.
+    //
+    // Build library: cd ../../miniray && make lib
+    // Use: zig build -Dminiray-lib=../../miniray/build/libminiray.a
+
+    const miniray_lib_path = b.option(
+        []const u8,
+        "miniray-lib",
+        "Path to libminiray.a (Go C-archive) for faster WGSL reflection",
+    );
+
+    // Check if miniray library exists at default location
+    const has_miniray_lib = if (miniray_lib_path) |_| true else blk: {
+        // Try default development path (compute-initialization is nested in pngine)
+        const default_path = "../../miniray/build/libminiray.a";
+        if (std.fs.cwd().access(default_path, .{})) |_| {
+            break :blk true;
+        } else |_| {
+            break :blk false;
+        }
+    };
+
+    const effective_miniray_path: ?[]const u8 = if (miniray_lib_path) |p| p else if (has_miniray_lib) "../../miniray/build/libminiray.a" else null;
+
+    // Build options for reflect module
+    const reflect_build_options = b.addOptions();
+    reflect_build_options.addOption(bool, "has_miniray_lib", has_miniray_lib);
+
     // Reflect module (for main lib, WGSL reflection via miniray)
     const reflect_module = b.createModule(.{
         .root_source_file = b.path("src/reflect.zig"),
         .target = target,
         .optimize = optimize,
     });
+    reflect_module.addImport("build_options", reflect_build_options.createModule());
+
+    // Add miniray library linking if available
+    if (effective_miniray_path) |lib_path| {
+        reflect_module.addObjectFile(.{ .cwd_relative = lib_path });
+        reflect_module.addIncludePath(.{ .cwd_relative = "../../miniray/build" });
+        reflect_module.link_libc = true;
+
+        // Link required system frameworks on macOS
+        if (target.result.os.tag == .macos) {
+            reflect_module.linkFramework("CoreFoundation", .{});
+            reflect_module.linkFramework("Security", .{});
+        }
+        reflect_module.linkSystemLibrary("pthread", .{});
+    }
 
     // Executor module (for main lib, bytecode dispatch)
     const lib_executor_module = b.createModule(.{
@@ -317,17 +365,37 @@ pub fn build(b: *std.Build) void {
     bytecode_step.dependOn(&run_bytecode_test.step);
     standalone_step.dependOn(&run_bytecode_test.step);
 
-    // Reflect module (WGSL shader reflection) - no external dependencies
+    // Reflect module (WGSL shader reflection) - needs build_options for FFI
     const reflect_step = b.step("test-reflect", "Run reflect module tests");
-    const reflect_mod = b.createModule(.{
+    const reflect_standalone_mod = b.createModule(.{
         .root_source_file = b.path("src/reflect/standalone.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const reflect_test = b.addTest(.{ .name = "reflect", .root_module = reflect_mod });
+    // Standalone tests run without FFI (no library linking in parallel compile)
+    const reflect_standalone_options = b.addOptions();
+    reflect_standalone_options.addOption(bool, "has_miniray_lib", false);
+    reflect_standalone_mod.addImport("build_options", reflect_standalone_options.createModule());
+    const reflect_test = b.addTest(.{ .name = "reflect", .root_module = reflect_standalone_mod });
     const run_reflect_test = b.addRunArtifact(reflect_test);
     reflect_step.dependOn(&run_reflect_test.step);
     standalone_step.dependOn(&run_reflect_test.step);
+
+    // FFI test: reflect module with libminiray.a linked
+    // Use: zig build test-ffi
+    const ffi_step = b.step("test-ffi", "Run reflect tests with FFI (requires libminiray.a)");
+    if (effective_miniray_path) |_| {
+        const ffi_test = b.addTest(.{ .name = "reflect-ffi", .root_module = reflect_module });
+        const run_ffi_test = b.addRunArtifact(ffi_test);
+        ffi_step.dependOn(&run_ffi_test.step);
+    } else {
+        // If no library, add a failing step with helpful message
+        const fail_msg = b.addSystemCommand(&.{
+            "sh", "-c",
+            "echo 'Error: libminiray.a not found. Build with: cd ../../miniray && make lib' && exit 1",
+        });
+        ffi_step.dependOn(&fail_msg.step);
+    }
 
     // Executor module (dispatcher, mock_gpu, command_buffer) - uses bytecode module import
     const executor_step = b.step("test-executor", "Run executor module tests");
@@ -351,8 +419,10 @@ pub fn build(b: *std.Build) void {
     });
     dsl_complete_mod.addImport("types", types_module);
     dsl_complete_mod.addImport("bytecode", bytecode_mod);
-    dsl_complete_mod.addImport("reflect", reflect_mod);
+    dsl_complete_mod.addImport("reflect", reflect_module);
     dsl_complete_mod.addImport("executor", executor_mod);
+    // dsl_complete also needs build_options for FFI status
+    dsl_complete_mod.addImport("build_options", reflect_build_options.createModule());
     const dsl_complete_test = b.addTest(.{ .name = "dsl-complete", .root_module = dsl_complete_mod });
     const run_dsl_complete_test = b.addRunArtifact(dsl_complete_test);
     dsl_complete_step.dependOn(&run_dsl_complete_test.step);
