@@ -4,56 +4,51 @@
 
 **READ FIRST**: Before any implementation work, read the active plan:
 
-- **`docs/llm-runtime-testing-plan.md`** - LLM-friendly runtime validation via
-  wasm3
+- **`docs/embedded-executor-plan.md`** - Embedded executor with plugin
+  architecture (v0)
 
 This plan defines:
 
 - Plugin architecture: `[core]`, `[render]`, `[compute]`, `[wasm]`,
   `[animation]`, `[texture]`
-- WASM-in-WASM is KEPT as the `[wasm]` plugin (not removed)
-- Command buffer format is preserved (existing
-  `src/executor/command_buffer.zig`)
-- Payload format v5 with embedded executor support
-- Multiplatform viewers via wasm3 interpreter
+- Tailored WASM executor embedded in each payload
+- Command buffer format preserved (`src/executor/command_buffer.zig`)
+- Native viewers via Dawn/Mach + wasm3
+- **Work log at bottom of plan** - Check for current progress
 
 **Zig Mastery Guidelines**: `/Users/hugo/Development/specs-llm/mastery/zig/`
 
 - Always follow bounded loops, no recursion, 2+ assertions per function
 - Functions ≤ 70 lines (exception: state machines with labeled switch)
 - Explicitly-sized types (u32, i64, not usize except for slice indexing)
+- Read TESTING_AND_FUZZING.md before writing tests
 
 ## Related Plans (Reference as Needed)
 
-| Plan                                        | Purpose                                                | Status      |
-| ------------------------------------------- | ------------------------------------------------------ | ----------- |
-| `docs/embedded-executor-plan.md`            | Embedded executor + plugins                            | ALMOST DONE |
-| `docs/llm-runtime-testing-plan.md`          | **ACTIVE** - LLM-friendly runtime validation via wasm3 | In progress |
-| `docs/multiplatform-command-buffer-plan.md` | Platform abstraction                                   | Reference   |
-| `docs/data-generation-plan.md`              | Compute shader data gen                                | Reference   |
-| `docs/command-buffer-refactor-plan.md`      | JS bundle optimization                                 | Reference   |
-| `docs/remove-wasm-in-wasm-plan.md`          | **SUPERSEDED** by embedded-executor-plan               | Do Not Use  |
+| Plan                                        | Purpose                                  | Status       |
+| ------------------------------------------- | ---------------------------------------- | ------------ |
+| `docs/embedded-executor-plan.md`            | **ACTIVE** - Embedded executor + plugins | In Progress  |
+| `docs/llm-runtime-testing-plan.md`          | LLM-friendly validation via wasm3        | Complete     |
+| `docs/multiplatform-command-buffer-plan.md` | Platform abstraction                     | Reference    |
+| `docs/data-generation-plan.md`              | Compute shader data gen                  | Reference    |
+| `docs/command-buffer-refactor-plan.md`      | JS bundle optimization                   | Reference    |
+| `docs/remove-wasm-in-wasm-plan.md`          | **SUPERSEDED** - Do not use              | Archived     |
 
-### LLM Runtime Testing (docs/llm-runtime-testing-plan.md)
+### Embedded Executor (docs/embedded-executor-plan.md)
 
-Enables LLMs to validate shaders without browser by running wasm3 and inspecting
-command buffer:
+Self-contained PNG payloads with tailored WASM executors:
 
 ```bash
-pngine validate shader.pngine --json              # Full validation
-pngine validate shader.pngine --json --phase init  # Only resource creation
-pngine validate shader.pngine --json --phase frame # Only first frame commands
-pngine validate shader.pngine --json --symptom black  # Symptom-based diagnosis
+pngine compile shader.pngine -o output.png   # Embeds tailored executor
+pngine validate output.png --json            # Validate command buffer
 ```
 
 Key features:
 
-- **Phase inspection**: See init commands (CREATE_*) and frame commands (DRAW,
-  DISPATCH) separately
-- **Symptom diagnosis**: Maps "black screen", "wrong colors", "flickering" to
-  likely causes
-- **Multi-frame comparison**: `--frames 0,30,60` to detect animation issues
-- **JSON output**: Structured for LLM consumption with command analysis
+- **Plugin selection**: Compiler analyzes DSL to include only needed code
+- **Command buffer contract**: Stable interface between executor and hosts
+- **Compile-time validation**: Resource dependencies checked before runtime
+- **WebGPU everywhere**: Dawn/Mach for native, browser WebGPU for web
 
 ---
 
@@ -250,6 +245,44 @@ npm run test:debug    # Debug mode
 
 Tests are in `tests/e2e/`. The Playwright config (`playwright.config.js`) auto-starts
 Vite and enables WebGPU Chrome flags.
+
+### Chrome DevTools MCP (Recommended for WebGPU)
+
+**IMPORTANT**: Headless Playwright/Chromium often fails to get a WebGPU adapter even
+with flags enabled. For reliable WebGPU testing, use Chrome with DevTools MCP:
+
+```bash
+# 1. Launch Chrome with remote debugging (run in background)
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+  --remote-debugging-port=9222 \
+  --user-data-dir=/tmp/chrome-debug-profile &
+
+# 2. Make sure dev server is running
+npm run dev
+
+# 3. Use MCP tools to interact with Chrome:
+#    - mcp__chrome-devtools__navigate_page: Navigate to test URL
+#    - mcp__chrome-devtools__list_console_messages: Check logs/errors
+#    - mcp__chrome-devtools__take_screenshot: Visual verification
+#    - mcp__chrome-devtools__list_pages: List open pages
+```
+
+**Test URLs:**
+- `http://localhost:5173/` - Main demo
+- `http://localhost:5173/test-embedded-executor.html` - Embedded executor test
+- `http://localhost:5173/test-cmd-buffer-only.html` - Command buffer test (no GPU)
+
+**Example MCP workflow:**
+1. `mcp__chrome-devtools__navigate_page` to test page
+2. Wait 2-3 seconds for WebGPU initialization
+3. `mcp__chrome-devtools__list_console_messages` to see `[GPU]` and `[Worker]` logs
+4. `mcp__chrome-devtools__take_screenshot` to verify rendering
+
+**Why Chrome DevTools MCP?**
+- Real Chrome = real WebGPU support (Metal on macOS, Vulkan on Linux)
+- Console messages show full GPU command execution
+- Screenshots verify actual rendering output
+- No adapter/GPU availability issues like in headless mode
 
 ## CLI Reference
 
