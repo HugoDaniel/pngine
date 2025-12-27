@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const types = @import("types.zig");
+const wgsl_parser = @import("wgsl_parser.zig");
 const Options = types.Options;
 const ValidationResult = types.ValidationResult;
 const CommandInfo = types.CommandInfo;
@@ -179,6 +180,81 @@ pub fn outputJson(allocator: std.mem.Allocator, result: *const ValidationResult,
             if (causes.count > 0) std.debug.print("\n  ", .{});
             std.debug.print("]", .{});
         }
+    }
+
+    // WGSL shader info (if any shaders extracted)
+    const wgsl_shaders = result.getWgslShaders();
+    if (wgsl_shaders.len > 0) {
+        std.debug.print(",\n  \"wgsl_shaders\": [", .{});
+        for (wgsl_shaders, 0..) |shader, i| {
+            if (i > 0) std.debug.print(",", .{});
+            std.debug.print("\n    {{\n", .{});
+            std.debug.print("      \"shader_id\": {d},\n", .{shader.shader_id});
+
+            // Entry points
+            std.debug.print("      \"entry_points\": [", .{});
+            const entry_points = shader.getEntryPoints();
+            for (entry_points, 0..) |ep, j| {
+                if (j > 0) std.debug.print(",", .{});
+                std.debug.print("\n        {{\"name\": \"{s}\", \"stage\": \"{s}\"", .{
+                    ep.getName(),
+                    @tagName(ep.stage),
+                });
+                // Include workgroup_size for compute shaders
+                if (ep.stage == .compute and (ep.workgroup_size[0] > 0 or ep.workgroup_size[1] > 0 or ep.workgroup_size[2] > 0)) {
+                    std.debug.print(", \"workgroup_size\": [{d}, {d}, {d}]", .{
+                        ep.workgroup_size[0],
+                        ep.workgroup_size[1],
+                        ep.workgroup_size[2],
+                    });
+                }
+                std.debug.print("}}", .{});
+            }
+            if (entry_points.len > 0) std.debug.print("\n      ", .{});
+            std.debug.print("],\n", .{});
+
+            // Bindings
+            std.debug.print("      \"bindings\": [", .{});
+            const bindings = shader.getBindings();
+            for (bindings, 0..) |binding, j| {
+                if (j > 0) std.debug.print(",", .{});
+                std.debug.print("\n        {{\"group\": {d}, \"binding\": {d}, \"address_space\": \"{s}\"", .{
+                    binding.group,
+                    binding.binding,
+                    @tagName(binding.address_space),
+                });
+                const type_name = binding.getTypeName();
+                if (type_name.len > 0) {
+                    std.debug.print(", \"type\": \"{s}\"", .{type_name});
+                }
+                std.debug.print("}}", .{});
+            }
+            if (bindings.len > 0) std.debug.print("\n      ", .{});
+            std.debug.print("]", .{});
+
+            // Include source if extracted (via --extract-wgsl)
+            if (shader.source) |src| {
+                std.debug.print(",\n      \"source_length\": {d}", .{src.len});
+                // Only include actual source if reasonably short for JSON
+                if (src.len <= 4096) {
+                    std.debug.print(",\n      \"source\": \"", .{});
+                    // Escape the source for JSON
+                    for (src) |c| {
+                        switch (c) {
+                            '"' => std.debug.print("\\\"", .{}),
+                            '\\' => std.debug.print("\\\\", .{}),
+                            '\n' => std.debug.print("\\n", .{}),
+                            '\r' => std.debug.print("\\r", .{}),
+                            '\t' => std.debug.print("\\t", .{}),
+                            else => std.debug.print("{c}", .{c}),
+                        }
+                    }
+                    std.debug.print("\"", .{});
+                }
+            }
+            std.debug.print("\n    }}", .{});
+        }
+        std.debug.print("\n  ]", .{});
     }
 
     std.debug.print("\n}}\n", .{});

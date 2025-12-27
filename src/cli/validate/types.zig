@@ -5,6 +5,7 @@
 const std = @import("std");
 const cmd_validator = @import("cmd_validator.zig");
 const symptom_diagnosis = @import("symptom_diagnosis.zig");
+const wgsl_parser = @import("wgsl_parser.zig");
 
 /// Maximum input file size (16 MiB).
 pub const max_file_size: u32 = 16 * 1024 * 1024;
@@ -100,6 +101,34 @@ pub const ModuleInfo = struct {
     scene_count: u32,
 };
 
+/// Extracted WGSL shader information.
+pub const WgslShaderInfo = struct {
+    /// Shader ID from CREATE_SHADER command.
+    shader_id: u16,
+    /// Parsed entry points and bindings.
+    parse_result: wgsl_parser.ParseResult,
+    /// Raw WGSL source code (if extract_wgsl enabled).
+    source: ?[]const u8 = null,
+
+    /// Get entry points from this shader.
+    pub fn getEntryPoints(self: *const WgslShaderInfo) []const wgsl_parser.EntryPoint {
+        return self.parse_result.getEntryPoints();
+    }
+
+    /// Get bindings from this shader.
+    pub fn getBindings(self: *const WgslShaderInfo) []const wgsl_parser.Binding {
+        return self.parse_result.getBindings();
+    }
+
+    /// Check if shader has a specific entry point.
+    pub fn hasEntryPoint(self: *const WgslShaderInfo, name: []const u8, stage: wgsl_parser.Stage) bool {
+        return self.parse_result.hasEntryPoint(name, stage);
+    }
+};
+
+/// Maximum number of shaders we track.
+pub const MAX_SHADERS: u8 = 32;
+
 /// Frame diff analysis for detecting animation issues.
 pub const FrameDiff = struct {
     /// Commands that are identical across all frames.
@@ -129,6 +158,8 @@ pub const ValidationResult = struct {
     dispatch_count: u32,
     diagnosis: ?symptom_diagnosis.DiagnosisResult, // Symptom-based diagnosis (if --symptom used)
     likely_causes: ?cmd_validator.Validator.LikelyCausesResult, // Likely causes from state machine analysis
+    wgsl_shaders: [MAX_SHADERS]WgslShaderInfo = undefined, // Extracted WGSL shader info
+    wgsl_shader_count: u8 = 0,
 
     pub fn init() ValidationResult {
         return .{
@@ -145,7 +176,31 @@ pub const ValidationResult = struct {
             .dispatch_count = 0,
             .diagnosis = null,
             .likely_causes = null,
+            .wgsl_shader_count = 0,
         };
+    }
+
+    /// Get extracted WGSL shader info as slice.
+    pub fn getWgslShaders(self: *const ValidationResult) []const WgslShaderInfo {
+        return self.wgsl_shaders[0..self.wgsl_shader_count];
+    }
+
+    /// Add a WGSL shader info entry.
+    pub fn addWgslShader(self: *ValidationResult, info: WgslShaderInfo) void {
+        if (self.wgsl_shader_count < MAX_SHADERS) {
+            self.wgsl_shaders[self.wgsl_shader_count] = info;
+            self.wgsl_shader_count += 1;
+        }
+    }
+
+    /// Find shader by ID.
+    pub fn findShader(self: *const ValidationResult, shader_id: u16) ?*const WgslShaderInfo {
+        for (self.wgsl_shaders[0..self.wgsl_shader_count]) |*shader| {
+            if (shader.shader_id == shader_id) {
+                return shader;
+            }
+        }
+        return null;
     }
 
     pub fn deinit(self: *ValidationResult, allocator: std.mem.Allocator) void {
@@ -164,5 +219,11 @@ pub const ValidationResult = struct {
         self.frame_results.deinit(allocator);
         self.errors.deinit(allocator);
         self.warnings.deinit(allocator);
+        // Free WGSL source strings if allocated
+        for (self.wgsl_shaders[0..self.wgsl_shader_count]) |shader| {
+            if (shader.source) |src| {
+                allocator.free(src);
+            }
+        }
     }
 };

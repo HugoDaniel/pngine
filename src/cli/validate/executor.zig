@@ -17,6 +17,7 @@ const Wasm3Runtime = wasm3.Wasm3Runtime;
 const cmd_validator = @import("cmd_validator.zig");
 const Validator = cmd_validator.Validator;
 const symptom_diagnosis = @import("symptom_diagnosis.zig");
+const wgsl_parser = @import("wgsl_parser.zig");
 
 // Embedded WASM executor (from build)
 const embedded_wasm = if (build_options.has_embedded_wasm)
@@ -92,6 +93,9 @@ pub fn validateBytecode(
         return;
     };
     defer @constCast(&module).deinit(allocator);
+
+    // Extract WGSL from module structure (WGSL Table → Data Section)
+    try extractWgslFromModule(allocator, result, &module, opts.extract_wgsl);
 
     // Build module info for output
     result.module_info = .{
@@ -249,6 +253,9 @@ fn executeWasm(
             const cmd_data = try runtime.readMemory(cmd_ptr, cmd_len);
             result.init_commands = try cmd_validator.parseCommands(allocator, cmd_data);
             try validator.validate(result.init_commands);
+
+            // Cross-validate WGSL entry points against pipelines
+            try crossValidateWgslPipelines(allocator, result);
         }
     }
 
@@ -485,6 +492,163 @@ pub fn analyzeFrameDiff(frames: []const FrameResult) FrameDiff {
     std.debug.assert(result.static_command_count + result.varying_command_count <= max_cmds + 1);
 
     return result;
+}
+
+/// Extract WGSL source from the PNGB module structure.
+///
+/// Reads shader code from the WGSL Table → Data Section mapping in the module,
+/// not from WASM memory. This is more reliable because the WASM executor may
+/// use wgsl_id (table index) vs data_id (section index) differently.
+///
+/// Complexity: O(wgsl_count * source_size) for parsing
+///
+/// Pre-condition: module has been deserialized
+/// Post-condition: result.wgsl_shaders populated with parsed info
+fn extractWgslFromModule(
+    allocator: std.mem.Allocator,
+    result: *ValidationResult,
+    module: *const format.Module,
+    extract_source: bool,
+) !void {
+    // Pre-conditions
+    std.debug.assert(result.wgsl_shader_count == 0); // Fresh start
+
+    // Iterate through WGSL table entries
+    const wgsl_count = module.wgsl.count();
+    for (0..wgsl_count) |wgsl_id_usize| {
+        const wgsl_id: u16 = @intCast(wgsl_id_usize);
+
+        // Get WGSL table entry
+        const entry = module.wgsl.get(wgsl_id) orelse continue;
+
+        // Get data from data section using data_id from WGSL table
+        const data_id = pngine.data_section.DataId.fromInt(entry.data_id);
+        const wgsl_source = module.data.get(data_id);
+        if (wgsl_source.len == 0) continue;
+
+        // Parse the WGSL for entry points and bindings
+        const parse_result = wgsl_parser.parse(wgsl_source);
+
+        // Store source if requested (for --extract-wgsl flag)
+        var source_copy: ?[]const u8 = null;
+        if (extract_source) {
+            source_copy = allocator.dupe(u8, wgsl_source) catch null;
+        }
+
+        // Add to result (bounded by MAX_SHADERS)
+        // Use wgsl_id as shader_id for now (they may differ in actual use)
+        result.addWgslShader(.{
+            .shader_id = wgsl_id,
+            .parse_result = parse_result,
+            .source = source_copy,
+        });
+
+        // Safety: stop if we've hit the shader limit
+        if (result.wgsl_shader_count >= types.MAX_SHADERS) break;
+    }
+
+    // Post-condition: shader count is bounded
+    std.debug.assert(result.wgsl_shader_count <= types.MAX_SHADERS);
+}
+
+/// Cross-validate WGSL shaders against pipeline commands.
+///
+/// Detects:
+/// - Shaders with no entry points (empty or parse failed)
+/// - Render pipelines without vertex/fragment shaders available
+/// - Compute pipelines without compute shaders available
+///
+/// Complexity: O(shaders * commands)
+///
+/// Pre-condition: extractWgslShaders has been called
+/// Post-condition: warnings added to result.warnings if issues found
+fn crossValidateWgslPipelines(
+    allocator: std.mem.Allocator,
+    result: *ValidationResult,
+) !void {
+    const wgsl_shaders = result.getWgslShaders();
+
+    // Early exit if no shaders
+    if (wgsl_shaders.len == 0) return;
+
+    // Track available stages across all shaders
+    var has_vertex = false;
+    var has_fragment = false;
+    var has_compute = false;
+
+    // Check each shader
+    for (wgsl_shaders) |shader| {
+        const entry_points = shader.getEntryPoints();
+
+        // Warn if shader has no entry points
+        if (entry_points.len == 0) {
+            try result.warnings.append(allocator, .{
+                .code = "W201",
+                .severity = .warning,
+                .message = "Shader has no entry points - may not be valid WGSL",
+                .command_index = null,
+            });
+            if (result.status == .ok) result.status = .warning;
+            continue;
+        }
+
+        // Track available stages
+        for (entry_points) |ep| {
+            switch (ep.stage) {
+                .vertex => has_vertex = true,
+                .fragment => has_fragment = true,
+                .compute => has_compute = true,
+            }
+        }
+    }
+
+    // Count pipeline types in init commands
+    var render_pipeline_count: u32 = 0;
+    var compute_pipeline_count: u32 = 0;
+
+    // Bounded loop
+    const max_iter: u32 = @min(@as(u32, @intCast(result.init_commands.len)), 10000);
+    for (0..max_iter) |i| {
+        const cmd = result.init_commands[i];
+        if (cmd.cmd == .create_render_pipeline) {
+            render_pipeline_count += 1;
+        } else if (cmd.cmd == .create_compute_pipeline) {
+            compute_pipeline_count += 1;
+        }
+    }
+
+    // Cross-validate: render pipelines need vertex+fragment
+    if (render_pipeline_count > 0) {
+        if (!has_vertex) {
+            try result.warnings.append(allocator, .{
+                .code = "W202",
+                .severity = .warning,
+                .message = "Render pipeline exists but no @vertex entry point found in shaders",
+                .command_index = null,
+            });
+            if (result.status == .ok) result.status = .warning;
+        }
+        if (!has_fragment) {
+            try result.warnings.append(allocator, .{
+                .code = "W203",
+                .severity = .warning,
+                .message = "Render pipeline exists but no @fragment entry point found in shaders",
+                .command_index = null,
+            });
+            if (result.status == .ok) result.status = .warning;
+        }
+    }
+
+    // Cross-validate: compute pipelines need compute entry point
+    if (compute_pipeline_count > 0 and !has_compute) {
+        try result.warnings.append(allocator, .{
+            .code = "W204",
+            .severity = .warning,
+            .message = "Compute pipeline exists but no @compute entry point found in shaders",
+            .command_index = null,
+        });
+        if (result.status == .ok) result.status = .warning;
+    }
 }
 
 // ============================================================================
