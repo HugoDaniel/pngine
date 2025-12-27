@@ -1070,11 +1070,25 @@ Output includes diff analysis:
   - **geometry**: Vertex buffer binding, buffer sizes, uniform buffers
 - JSON output includes `"diagnosis"` object with `likely_causes` and `checks`
 
-### Phase 5: WGSL Analysis (1-2 days) ❌ NOT STARTED
-- [ ] Extract WGSL from memory pointers
-- [ ] Parse entry point declarations
-- [ ] Parse binding declarations
-- [ ] Add to command analysis output
+### Phase 5: WGSL Analysis (1-2 days) ✅ COMPLETE
+- [x] Extract WGSL from PNGB module structure (WGSL Table → Data Section)
+- [x] Parse @vertex/@fragment/@compute entry points with workgroup_size
+- [x] Parse @group/@binding declarations with address space detection
+- [x] Cross-validate pipelines vs WGSL entry points (W201-W204)
+- [x] Add wgsl_shaders array to JSON output
+- [x] Support --extract-wgsl flag for full source inclusion
+
+**Implementation Notes:**
+- `wgsl_parser.zig` implements lightweight WGSL parsing (11 tests)
+- `extractWgslFromModule()` reads from WGSL Table → Data Section mapping
+  (more reliable than WASM memory - avoids wgsl_id vs data_id mismatch)
+- `crossValidateWgslPipelines()` validates:
+  - W201: Shader has no entry points (parse failed or empty)
+  - W202: Render pipeline but no @vertex found
+  - W203: Render pipeline but no @fragment found
+  - W204: Compute pipeline but no @compute found
+- JSON output includes entry_points (name, stage, workgroup_size) and
+  bindings (group, binding, address_space, type)
 
 ### Phase 6: CLI & Polish (1 day) 🔄 PARTIAL
 - [x] Add `validate` subcommand to CLI
