@@ -9,6 +9,7 @@
 //! - **Two-phase execution**: Pass definitions are recorded, then executed via exec_pass
 //! - **Ping-pong support**: frame_counter enables double-buffering via pool operations
 //! - **Bounded execution**: All loops have explicit max iterations (10000 for main, 1000 for passes)
+//! - **Plugin-aware**: Commands are grouped by plugin (core/render/compute/texture/wasm)
 //!
 //! ## Architecture
 //!
@@ -17,6 +18,13 @@
 //!                     ↓
 //!              pass_ranges map (for deferred exec_pass)
 //! ```
+//!
+//! ## Plugin Compilation
+//!
+//! For tailored WASM executors, plugins can be conditionally compiled:
+//! - Build options determine which plugins are included
+//! - Disabled plugin commands cause compile-time errors if reached
+//! - See `plugins.zig` for plugin definitions and command mapping
 //!
 //! ## Invariants
 //!
@@ -39,6 +47,9 @@ const Module = format.Module;
 
 const MockGPU = @import("mock_gpu.zig").MockGPU;
 
+// Plugin infrastructure
+const plugins = @import("plugins.zig");
+
 /// Execution error types.
 pub const ExecuteError = error{
     InvalidOpcode,
@@ -47,6 +58,8 @@ pub const ExecuteError = error{
     PassNotEnded,
     NotInPass,
     OutOfMemory,
+    /// Command requires a plugin that is not enabled.
+    PluginDisabled,
 };
 
 /// GPU backend interface.
