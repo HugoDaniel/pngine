@@ -1,5 +1,3 @@
-#define SAMPLE_COUNT=4
-
 #renderPipeline pipeline {
   layout=auto
   vertex={ entrypoint=vertexMain module=code }
@@ -9,23 +7,14 @@
     targets=[{ format=preferredCanvasFormat }]
   }
   primitive={ topology=triangle-list }
-  multisample=SAMPLE_COUNT
-}
-
-#texture tex {
-  size=[canvas.width canvas.height]
-  sampleCount=SAMPLE_COUNT
-  format=preferredCanvasFormat
-  usage=[RENDER_ATTACHMENT]
 }
 
 #renderPass drawTriangle {
   colorAttachments=[{
-    view=tex
-    resolveTarget=contextCurrentTexture
+    view=contextCurrentTexture
     clearValue=[0 0 0 0]
     loadOp=clear
-    storeOp=discard
+    storeOp=store
   }]
   pipeline=pipeline
   bindGroups=[inputsBinding]
@@ -40,7 +29,7 @@
 }
 
 #buffer uniformInputsBuffer {
-  size=4
+  size=16
   usage=[UNIFORM COPY_DST]
 }
 
@@ -48,7 +37,7 @@
   writeBuffer={
     buffer=uniformInputsBuffer
     bufferOffset=0
-    data=code.inputs
+    data=pngineInputs
   }
 }
 

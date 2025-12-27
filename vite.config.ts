@@ -6,7 +6,14 @@ export default defineConfig({
   server: {
     port: 5173,
     open: false,
+    headers: {
+      // Serve WASM with correct MIME type
+      '*.wasm': {
+        'Content-Type': 'application/wasm',
+      },
+    },
   },
+  assetsInclude: ['**/*.wasm'],
   build: {
     outDir: '../../dist-demo',
   },
@@ -20,6 +27,8 @@ export default defineConfig({
       './anim.js': resolve(__dirname, 'npm/pngine/src/anim.js'),
       './extract.js': resolve(__dirname, 'npm/pngine/src/extract.js'),
       './loader.js': resolve(__dirname, 'npm/pngine/src/loader.js'),
+      // WASM file - resolve to built demo output
+      'pngine.wasm': resolve(__dirname, 'zig-out/demo/pngine.wasm'),
     }
   }
 })

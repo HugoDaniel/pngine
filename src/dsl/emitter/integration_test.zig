@@ -933,3 +933,122 @@ test "Integration: render bundle with multiple bundles" {
     }
     try testing.expect(false); // Should have found execute_bundles
 }
+
+// ============================================================================
+// Moving Triangle Example - Animated Triangle with pngineInputs
+// Tests: uniform time updates, bind groups, basic animation pattern
+// ============================================================================
+
+test "Integration: moving_triangle example - animated with pngineInputs" {
+    // This test verifies the moving_triangle.pngine example pattern:
+    // - Uses pngineInputs for time-based animation
+    // - 16-byte uniform buffer for time/width/height/aspect
+    // - Shader reads inputs.time for animation
+    const source: [:0]const u8 =
+        \\#renderPipeline pipeline {
+        \\  layout=auto
+        \\  vertex={ entrypoint=vertexMain module=code }
+        \\  fragment={
+        \\    entrypoint=fragMain
+        \\    module=code
+        \\    targets=[{ format=preferredCanvasFormat }]
+        \\  }
+        \\  primitive={ topology=triangle-list }
+        \\}
+        \\
+        \\#renderPass drawTriangle {
+        \\  colorAttachments=[{
+        \\    view=contextCurrentTexture
+        \\    clearValue=[0 0 0 0]
+        \\    loadOp=clear
+        \\    storeOp=store
+        \\  }]
+        \\  pipeline=pipeline
+        \\  bindGroups=[inputsBinding]
+        \\  draw=3
+        \\}
+        \\
+        \\#frame main {
+        \\  perform=[
+        \\    writeInputUniforms
+        \\    drawTriangle
+        \\  ]
+        \\}
+        \\
+        \\#buffer uniformInputsBuffer {
+        \\  size=16
+        \\  usage=[UNIFORM COPY_DST]
+        \\}
+        \\
+        \\#queue writeInputUniforms {
+        \\  writeBuffer={
+        \\    buffer=uniformInputsBuffer
+        \\    bufferOffset=0
+        \\    data=pngineInputs
+        \\  }
+        \\}
+        \\
+        \\#bindGroup inputsBinding {
+        \\  layout={ pipeline=pipeline index=0 }
+        \\  entries=[
+        \\    { binding=0 resource={ buffer=uniformInputsBuffer }}
+        \\  ]
+        \\}
+        \\
+        \\#shaderModule code {
+        \\  code="
+        \\struct PngineInputs {
+        \\  time: f32,
+        \\};
+        \\@binding(0) @group(0) var<uniform> inputs : PngineInputs;
+        \\
+        \\@vertex
+        \\fn vertexMain(
+        \\  @builtin(vertex_index) VertexIndex : u32
+        \\) -> @builtin(position) vec4f {
+        \\  var pos = array<vec2f, 3>(
+        \\    vec2(sin(inputs.time * 8.0) * 0.25, 0.5),
+        \\    vec2(-0.5, -0.5),
+        \\    vec2(0.5, -0.5)
+        \\  );
+        \\  return vec4f(pos[VertexIndex], 0.0, 1.0);
+        \\}
+        \\
+        \\@fragment
+        \\fn fragMain() -> @location(0) vec4f {
+        \\  return vec4(abs(sin(inputs.time)), abs(cos(inputs.time)), 0.0, 1.0);
+        \\}
+        \\"
+        \\}
+    ;
+
+    // Compile to bytecode (fast validation, no mock_gpu)
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    // Verify valid PNGB header
+    try testing.expectEqualStrings("PNGB", pngb[0..4]);
+
+    // Deserialize to check bytecode contents
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Verify critical opcodes are present in bytecode
+    var found_write_time = false;
+    var found_create_buffer = false;
+    var found_create_pipeline = false;
+    var found_draw = false;
+
+    for (module.bytecode) |byte| {
+        if (byte == @intFromEnum(opcodes.OpCode.write_time_uniform)) found_write_time = true;
+        if (byte == @intFromEnum(opcodes.OpCode.create_buffer)) found_create_buffer = true;
+        if (byte == @intFromEnum(opcodes.OpCode.create_render_pipeline)) found_create_pipeline = true;
+        if (byte == @intFromEnum(opcodes.OpCode.draw)) found_draw = true;
+    }
+
+    // pngineInputs must generate write_time_uniform - this is the key test
+    try testing.expect(found_write_time);
+    try testing.expect(found_create_buffer);
+    try testing.expect(found_create_pipeline);
+    try testing.expect(found_draw);
+}

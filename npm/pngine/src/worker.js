@@ -1,16 +1,13 @@
 // Worker thread - owns WebGPU, WASM, and resources
 // Uses command buffer approach for minimal bundle size
-// Supports both shared executor (wasmUrl) and embedded executor (in PNG payload)
 
 import { CommandDispatcher } from "./gpu.js";
-import { parsePayload, createExecutor, getExecutorImports } from "./loader.js";
+import { parsePayload, getExecutorImports } from "./loader.js";
 
 let canvas, device, context, gpu, wasm, memory;
 let initialized = false;
 let moduleLoaded = false;
 let frameCount = 0;
-let animationInfo = null;
-let useEmbeddedExecutor = false;
 
 // Message types
 const MSG = {
@@ -88,7 +85,6 @@ async function handleInit(data) {
   if (hasEmbeddedExecutor && payloadInfo.executor) {
     // Use embedded executor from PNG payload
     if (data.debug) console.log("[Worker] Using embedded executor from payload");
-    useEmbeddedExecutor = true;
 
     const imports = getExecutorImports({
       log: (ptr, len) => {
@@ -103,36 +99,21 @@ async function handleInit(data) {
     wasm = instance.exports;
     memory = wasm.memory;
     gpu.setMemory(memory);
-
-    // Initialize embedded executor
-    if (wasm.init) {
-      wasm.init();
-    } else if (wasm.onInit) {
-      wasm.onInit();
-    }
-
     initialized = true;
 
-    // Load bytecode into embedded executor
-    await loadBytecodeEmbedded(payloadInfo);
+    // Load bytecode into executor
+    await loadBytecode(payloadInfo.payload);
   } else {
     // Use shared executor from wasmUrl
     if (!data.wasmUrl) throw new Error("wasmUrl required (no embedded executor)");
-    useEmbeddedExecutor = false;
 
     const resp = await fetch(data.wasmUrl);
     if (!resp.ok) throw new Error(`Failed to fetch WASM: ${resp.status}`);
 
-    const { instance } = await WebAssembly.instantiateStreaming(
-      resp,
-      getWasmImports()
-    );
+    const { instance } = await WebAssembly.instantiateStreaming(resp, getWasmImports());
     wasm = instance.exports;
     memory = wasm.memory;
     gpu.setMemory(memory);
-
-    // Initialize WASM
-    wasm.onInit();
     initialized = true;
 
     // If bytecode was provided, load it
@@ -147,94 +128,48 @@ async function handleInit(data) {
     width: canvas.width,
     height: canvas.height,
     frameCount,
-    animation: animationInfo,
   });
 }
 
 async function handleLoad(data) {
   if (!initialized) throw new Error("Not initialized");
-
-  // Check if new bytecode has embedded executor
-  let payloadInfo = null;
-  try {
-    const bytecodeArray = new Uint8Array(data.bytecode);
-    payloadInfo = parsePayload(bytecodeArray);
-  } catch (e) {
-    // Not a PNGB payload, use regular loading
-  }
-
-  if (useEmbeddedExecutor && payloadInfo) {
-    await loadBytecodeEmbedded(payloadInfo);
-  } else {
-    await loadBytecode(data.bytecode);
-  }
-
-  postMessage({ type: MSG.READY, frameCount, animation: animationInfo });
+  await loadBytecode(data.bytecode);
+  postMessage({ type: MSG.READY, frameCount });
 }
 
+/**
+ * Load bytecode using the wasm_entry.zig interface.
+ *
+ * Interface:
+ * - getBytecodePtr() / setBytecodeLen() for bytecode input
+ * - init() to parse bytecode and emit resource creation commands
+ * - frame(time, width, height) for rendering
+ * - getCommandPtr() / getCommandLen() for command buffer output
+ *
+ * @param {ArrayBuffer|Uint8Array} bytecode - Raw bytecode
+ */
 async function loadBytecode(bytecode) {
-  // Free previous module
+  // Reset GPU state if reloading
   if (moduleLoaded) {
     const wasDebug = gpu.debug;
-    wasm.freeModule();
     gpu.destroy();
     gpu = new CommandDispatcher(device, context);
     gpu.setDebug(wasDebug);
     gpu.setMemory(memory);
     gpu.setCanvasSize(canvas.width, canvas.height);
     moduleLoaded = false;
-    animationInfo = null;
   }
 
-  // Allocate and copy bytecode
-  const ptr = wasm.alloc(bytecode.byteLength);
-  if (!ptr) throw new Error("Failed to allocate memory");
+  // Copy bytecode to WASM memory
+  const bytecodePtr = wasm.getBytecodePtr();
+  const bytecodeArray = bytecode instanceof Uint8Array ? bytecode : new Uint8Array(bytecode);
+  new Uint8Array(memory.buffer, bytecodePtr, bytecodeArray.length).set(bytecodeArray);
+  wasm.setBytecodeLen(bytecodeArray.length);
 
-  new Uint8Array(memory.buffer, ptr, bytecode.byteLength).set(
-    new Uint8Array(bytecode)
-  );
-
-  // Load module
-  const err = wasm.loadModule(ptr, bytecode.byteLength);
-  wasm.free(ptr, bytecode.byteLength);
-
-  if (err !== 0) throw new Error(`Load failed: ${err}`);
-
-  moduleLoaded = true;
-  frameCount = wasm.getFrameCount();
-
-  // Read animation info from WASM
-  animationInfo = readAnimationInfo();
-
-  // First render to create resources
-  renderWithCommandBuffer(0, 0);
-}
-
-/**
- * Load bytecode into embedded executor.
- *
- * Embedded executors have a different interface than shared executors:
- * - getBytecodePtr() / setBytecodeLen() for bytecode (full payload)
- * - init() for initialization (parses bytecode, creates resources)
- * - frame(time, width, height) for rendering
- * - getCommandPtr() / getCommandLen() for command buffer output
- *
- * @param {Object} payloadInfo - Parsed payload from loader.js
- */
-async function loadBytecodeEmbedded(payloadInfo) {
-  // Copy the full payload to the executor's bytecode memory
-  // The embedded executor parses the entire PNGB payload
-  if (wasm.getBytecodePtr && wasm.setBytecodeLen) {
-    const bytecodePtr = wasm.getBytecodePtr();
-    const fullPayload = payloadInfo.payload;
-    new Uint8Array(memory.buffer, bytecodePtr, fullPayload.length).set(fullPayload);
-    wasm.setBytecodeLen(fullPayload.length);
-  }
-
-  // Initialize the embedded executor (parses bytecode, emits resource creation commands)
+  // Initialize: parse bytecode and emit resource creation commands
   const initResult = wasm.init();
   if (initResult !== 0) {
-    throw new Error(`Embedded executor init failed: ${initResult}`);
+    throw new Error(`Init failed: ${initResult}`);
   }
 
   // Execute the init command buffer (creates GPU resources)
@@ -245,224 +180,37 @@ async function loadBytecodeEmbedded(payloadInfo) {
   }
 
   moduleLoaded = true;
-
-  // Get frame count if available
-  if (wasm.getFrameCount) {
-    frameCount = wasm.getFrameCount();
-  } else {
-    frameCount = 1;
-  }
-
-  // Animation info not yet supported in embedded executor
-  animationInfo = null;
+  frameCount = 1;
 
   // First frame render
-  renderEmbedded(0, canvas.width, canvas.height);
+  render(0, canvas.width, canvas.height);
 }
 
 /**
- * Read animation metadata from WASM module.
- * Returns null if no animation is defined.
+ * Render a frame using wasm_entry.zig interface.
  */
-function readAnimationInfo() {
-  // Check if animation exists
-  if (!wasm.hasAnimationInfo()) return null;
-
-  const duration = wasm.getAnimationDuration();
-  const loop = wasm.getAnimationLoop() === 1;
-  const endBehavior = wasm.getAnimationEndBehavior();
-  const sceneCount = wasm.getSceneCount();
-
-  // Read animation name
-  const name = readWasmString(wasm.getAnimationName);
-
-  // Read scenes
-  const scenes = [];
-  for (let i = 0; i < sceneCount; i++) {
-    const info = wasm.getSceneInfo(i);
-    if (info === 0xFFFFFFFFFFFFFFFFn) continue;
-
-    const startMs = Number(info & 0xFFFFFFFFn);
-    const endMs = Number((info >> 32n) & 0xFFFFFFFFn);
-    const id = readWasmStringByIndex(wasm.getSceneId, i);
-    const frame = readWasmStringByIndex(wasm.getSceneFrame, i);
-
-    scenes.push({ id, frame, startMs, endMs });
-  }
-
-  return {
-    name,
-    duration,
-    loop,
-    endBehavior: ["hold", "stop", "restart"][endBehavior] || "hold",
-    scenes,
-  };
-}
-
-/**
- * Read a string from WASM using a getter function that takes (ptr, len).
- */
-function readWasmString(getter) {
-  const bufLen = 256;
-  const ptr = wasm.alloc(bufLen);
-  if (!ptr) return "";
-
-  const len = getter(ptr, bufLen);
-  const str = len > 0 ? new TextDecoder().decode(
-    new Uint8Array(memory.buffer, ptr, len)
-  ) : "";
-
-  wasm.free(ptr, bufLen);
-  return str;
-}
-
-/**
- * Read a string from WASM using a getter function that takes (index, ptr, len).
- */
-function readWasmStringByIndex(getter, index) {
-  const bufLen = 256;
-  const ptr = wasm.alloc(bufLen);
-  if (!ptr) return "";
-
-  const len = getter(index, ptr, bufLen);
-  const str = len > 0 ? new TextDecoder().decode(
-    new Uint8Array(memory.buffer, ptr, len)
-  ) : "";
-
-  wasm.free(ptr, bufLen);
-  return str;
-}
-
-function handleDraw(data) {
-  if (!initialized || !moduleLoaded) return;
-
-  // Apply uniforms before rendering (if provided, and if shared executor)
-  if (data.uniforms && !useEmbeddedExecutor) {
-    applyUniforms(data.uniforms);
-  }
-
-  // Use the appropriate render function based on executor type
-  if (useEmbeddedExecutor) {
-    renderEmbedded(data.time ?? 0, canvas.width, canvas.height);
-  } else {
-    // Note: frame name ignored for now - frame_id 0 executes all frames
-    renderWithCommandBuffer(data.time ?? 0, 0);
-  }
-}
-
-/**
- * Apply uniform values by calling WASM setUniform for each field.
- *
- * Why runtime uniform setting?
- * - Multiplatform: Same WASM binary works on Web, iOS, Android, Desktop
- * - No recompilation: Update values without regenerating bytecode
- * - Dynamic UI: Tools can introspect uniform table and generate sliders/pickers
- * - Decoupling: JS doesn't need to know buffer layouts, just field names
- *
- * @param {Object} uniforms - Map of uniform name -> value
- *   Values can be: number (f32), [n] array (vecNf), [[4][4]] (mat4x4f)
- */
-function applyUniforms(uniforms) {
-  const encoder = new TextEncoder();
-
-  for (const [name, value] of Object.entries(uniforms)) {
-    const nameBytes = encoder.encode(name);
-    const namePtr = wasm.alloc(nameBytes.length);
-    if (!namePtr) continue;
-    new Uint8Array(memory.buffer, namePtr, nameBytes.length).set(nameBytes);
-
-    const valueBytes = uniformValueToBytes(value);
-    if (!valueBytes) {
-      wasm.free(namePtr, nameBytes.length);
-      continue;
-    }
-
-    const valuePtr = wasm.alloc(valueBytes.length);
-    if (!valuePtr) {
-      wasm.free(namePtr, nameBytes.length);
-      continue;
-    }
-    new Uint8Array(memory.buffer, valuePtr, valueBytes.length).set(valueBytes);
-
-    wasm.setUniform(namePtr, nameBytes.length, valuePtr, valueBytes.length);
-
-    wasm.free(namePtr, nameBytes.length);
-    wasm.free(valuePtr, valueBytes.length);
-  }
-}
-
-/**
- * Convert JS value to raw bytes for GPU uniform.
- *
- * Supported types:
- * - number → f32 (4 bytes)
- * - [x, y] → vec2f (8 bytes)
- * - [x, y, z] → vec3f (12 bytes)
- * - [x, y, z, w] → vec4f (16 bytes)
- * - [[4][4]] flattened 16 numbers → mat4x4f (64 bytes)
- *
- * @param {*} value - JS value
- * @returns {Uint8Array|null} - Byte representation or null if unsupported
- */
-function uniformValueToBytes(value) {
-  if (typeof value === "number") {
-    // f32
-    return new Uint8Array(new Float32Array([value]).buffer);
-  }
-
-  if (Array.isArray(value)) {
-    // Flatten nested arrays (for matrices)
-    const flat = value.flat(2);
-
-    if (flat.length === 2 || flat.length === 3 || flat.length === 4 ||
-        flat.length === 9 || flat.length === 16) {
-      return new Uint8Array(new Float32Array(flat).buffer);
-    }
-  }
-
-  return null;
-}
-
-function renderWithCommandBuffer(time, frameId) {
+function render(time, width, height) {
   gpu.setTime(time);
 
-  const ptr = wasm.renderFrame(time, frameId);
-  if (!ptr) return;
-
-  gpu.execute(ptr);
-}
-
-/**
- * Render using embedded executor interface.
- *
- * Embedded executors use:
- * - frame(time, width, height) instead of renderFrame(time, frameId)
- * - getCommandPtr() / getCommandLen() to get command buffer
- */
-function renderEmbedded(time, width, height) {
-  gpu.setTime(time);
-
-  // Call frame() which writes command buffer to memory
   const result = wasm.frame(time, width, height);
   if (result !== 0) {
-    console.warn('[Worker] Embedded frame() returned non-zero:', result);
+    console.warn('[Worker] frame() returned non-zero:', result);
     return;
   }
 
-  // Get command buffer from embedded executor
   const ptr = wasm.getCommandPtr();
   const len = wasm.getCommandLen();
   if (!ptr || len === 0) return;
 
-  // Execute the command buffer
   gpu.execute(ptr);
 }
 
+function handleDraw(data) {
+  if (!initialized || !moduleLoaded) return;
+  render(data.time ?? 0, canvas.width, canvas.height);
+}
+
 function handleDestroy() {
-  if (moduleLoaded && !useEmbeddedExecutor) {
-    // freeModule only exists in shared executor
-    wasm.freeModule?.();
-  }
   moduleLoaded = false;
   gpu?.destroy();
   if (device) {
@@ -472,61 +220,17 @@ function handleDestroy() {
   initialized = false;
 }
 
-// WASM imports - mostly stubs since command buffer doesn't need them
+/**
+ * WASM imports for wasm_entry.zig.
+ * Only requires the log function for debug output.
+ */
 function getWasmImports() {
-  // Stub for all the old gpu* extern functions
-  const stub = () => {};
-
   return {
     env: {
-      // Old GPU functions (not used with command buffer, but WASM still imports them)
-      gpuCreateBuffer: stub,
-      gpuCreateTexture: stub,
-      gpuCreateSampler: stub,
-      gpuCreateShaderModule: stub,
-      gpuCreateRenderPipeline: stub,
-      gpuCreateComputePipeline: stub,
-      gpuCreateBindGroup: stub,
-      gpuCreateImageBitmap: stub,
-      gpuCreateTextureView: stub,
-      gpuCreateQuerySet: stub,
-      gpuCreateBindGroupLayout: stub,
-      gpuCreatePipelineLayout: stub,
-      gpuCreateRenderBundle: stub,
-      gpuBeginRenderPass: stub,
-      gpuBeginComputePass: stub,
-      gpuSetPipeline: stub,
-      gpuSetBindGroup: stub,
-      gpuSetVertexBuffer: stub,
-      gpuSetIndexBuffer: stub,
-      gpuDraw: stub,
-      gpuDrawIndexed: stub,
-      gpuDispatch: stub,
-      gpuExecuteBundles: stub,
-      gpuEndPass: stub,
-
-      // gpuWriteBuffer: Used by setUniform() to write uniform values
-      gpuWriteBuffer: (bufferId, offset, dataPtr, dataLen) => {
-        const buffer = gpu?.buffers?.get(bufferId);
-        if (!buffer) return;
-        const data = new Uint8Array(memory.buffer, dataPtr, dataLen);
-        device.queue.writeBuffer(buffer, offset, data);
+      log: (ptr, len) => {
+        const str = new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len));
+        console.log("[Executor]", str);
       },
-
-      gpuSubmit: stub,
-      gpuCopyExternalImageToTexture: stub,
-      gpuInitWasmModule: stub,
-      gpuCallWasmFunc: stub,
-      gpuWriteBufferFromWasm: stub,
-      gpuCreateTypedArray: stub,
-      gpuFillRandomData: stub,
-      gpuFillExpression: stub,
-      gpuFillConstant: stub,
-      gpuWriteBufferFromArray: stub,
-      gpuWriteTimeUniform: stub,
-      gpuDebugLog: stub,
-      jsConsoleLog: stub,
-      jsConsoleLogInt: stub,
     },
   };
 }

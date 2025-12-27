@@ -68,6 +68,9 @@ const COMMAND_BUFFER_SIZE: u32 = 64 * 1024;
 /// Maximum WGSL modules for resolution.
 const MAX_WGSL_MODULES: u32 = 64;
 
+/// Maximum passes that can be defined.
+const MAX_PASSES: u32 = 64;
+
 /// Maximum iterations for bytecode execution (safety bound).
 /// Must be >= bytecode size to handle 1-byte opcodes worst case.
 const MAX_EXEC_ITERATIONS: u32 = MAX_BYTECODE_SIZE;
@@ -104,6 +107,16 @@ var cmd_buffer: [COMMAND_BUFFER_SIZE]u8 = undefined;
 var initialized: bool = false;
 var frame_counter: u32 = 0;
 var resources_created: bool = false;
+
+/// Pass definition storage.
+/// Stores bytecode ranges for pass bodies (between define_pass and end_pass_def).
+/// pass_ranges[pass_id] = { start_pc, end_pc } relative to bytecode_start.
+const PassRange = struct {
+    start: u32,
+    end: u32,
+};
+var pass_ranges: [MAX_PASSES]PassRange = [_]PassRange{.{ .start = 0, .end = 0 }} ** MAX_PASSES;
+var pass_count: u32 = 0;
 
 // Parsed module info (cached after init)
 var string_table_offset: u32 = 0;
@@ -179,6 +192,7 @@ export fn init() u32 {
     // Reset state
     frame_counter = 0;
     resources_created = false;
+    pass_count = 0;
 
     // Validate bytecode - need at least v0 header size
     if (bytecode_len < format.HEADER_SIZE) {
@@ -206,14 +220,13 @@ export fn init() u32 {
         const executor_offset = std.mem.readInt(u32, header[12..16], .little);
         const executor_length = std.mem.readInt(u32, header[16..20], .little);
         bytecode_start = executor_offset + executor_length;
-        // Data section is embedded in bytecode_buffer for embedded executor
-        data_in_bytecode = true;
     } else {
         // No embedded executor: bytecode starts right after header
         bytecode_start = format.HEADER_SIZE;
-        // Data section is in separate data_buffer for shared executor
-        data_in_bytecode = false;
     }
+    // Data section is always in bytecode_buffer for PNGBs loaded as a single payload.
+    // The separate data_buffer is for future use when host provides bytecode and data separately.
+    data_in_bytecode = true;
     string_table_offset = std.mem.readInt(u32, header[20..24], .little);
     data_section_offset = std.mem.readInt(u32, header[24..28], .little);
     bytecode_end = string_table_offset;
@@ -289,6 +302,7 @@ export fn getFrameCounter() u32 {
 // ============================================================================
 
 /// Execute resource creation opcodes (everything before first define_frame).
+/// Also stores pass bytecode ranges for later replay via exec_pass.
 fn executeResourceCreation(cmds: *CommandBuffer) void {
     const bytecode = bytecode_buffer[bytecode_start..bytecode_end];
     var pc: usize = 0;
@@ -310,6 +324,46 @@ fn executeResourceCreation(cmds: *CommandBuffer) void {
 
         // Stop at first frame definition
         if (op == .define_frame) break;
+
+        // Handle define_pass: store range and skip to end_pass_def
+        if (op == .define_pass) {
+            const pass_id = readVarint(bytecode, &pc);
+            _ = bytecode[pc]; // pass_type
+            pc += 1;
+            _ = readVarint(bytecode, &pc); // desc_id
+
+            // Store pass body start (after define_pass params)
+            const pass_start: u32 = @intCast(pc);
+
+            // Scan for end_pass_def to find pass body end
+            for (0..MAX_EXEC_ITERATIONS) |_| {
+                if (pc >= bytecode.len) break;
+                const inner_op: OpCode = @enumFromInt(bytecode[pc]);
+                pc += 1;
+                if (inner_op == .end_pass_def) break;
+                skipOpcodeParams(bytecode, &pc, inner_op);
+            }
+
+            // Store pass range
+            if (pass_id < MAX_PASSES) {
+                pass_ranges[pass_id] = .{
+                    .start = pass_start,
+                    .end = @intCast(pc - 1), // Before end_pass_def opcode
+                };
+                if (pass_id >= pass_count) {
+                    pass_count = pass_id + 1;
+                }
+
+                // Debug: log pass range
+                var pass_msg: [48]u8 = undefined;
+                const pass_written = std.fmt.bufPrint(&pass_msg, "pass[{d}] range={d}-{d}", .{
+                    pass_id, pass_start, pc - 1,
+                }) catch &pass_msg;
+                log(pass_written.ptr, @intCast(pass_written.len));
+            }
+
+            continue;
+        }
 
         executeOpcode(cmds, bytecode, &pc, op);
     }
@@ -351,6 +405,16 @@ fn executeFrame(cmds: *CommandBuffer, time: f32, width: u32, height: u32) void {
 
         if (op == .end_frame) break;
 
+        // Handle exec_pass: replay stored pass bytecode
+        if (op == .exec_pass) {
+            const pass_id = readVarint(bytecode, &pc);
+            if (pass_id < pass_count) {
+                const range = pass_ranges[pass_id];
+                executePassBody(cmds, bytecode, range.start, range.end);
+            }
+            continue;
+        }
+
         // Handle time uniform specially
         if (op == .write_time_uniform) {
             const buffer_id = readVarint(bytecode, &pc);
@@ -367,6 +431,24 @@ fn executeFrame(cmds: *CommandBuffer, time: f32, width: u32, height: u32) void {
             cmds.writeTimeUniform(@intCast(buffer_id), @intCast(offset), 16);
             continue;
         }
+
+        executeOpcode(cmds, bytecode, &pc, op);
+    }
+}
+
+/// Execute a stored pass body (between define_pass params and end_pass_def).
+fn executePassBody(cmds: *CommandBuffer, bytecode: []const u8, start: u32, end: u32) void {
+    var pc: usize = start;
+    const end_pc: usize = end;
+
+    for (0..MAX_EXEC_ITERATIONS) |_| {
+        if (pc >= end_pc or pc >= bytecode.len) break;
+
+        const op: OpCode = @enumFromInt(bytecode[pc]);
+        pc += 1;
+
+        // Skip pass structure opcodes (we're inside the pass body)
+        if (op == .end_pass_def) break;
 
         executeOpcode(cmds, bytecode, &pc, op);
     }
