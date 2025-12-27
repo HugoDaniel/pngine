@@ -109,8 +109,13 @@ var resources_created: bool = false;
 var string_table_offset: u32 = 0;
 var string_table_len: u32 = 0;
 var data_section_offset: u32 = 0;
+var data_section_len: u32 = 0;
 var bytecode_start: u32 = 0;
 var bytecode_end: u32 = 0;
+
+/// True if data section is in bytecode_buffer (embedded executor mode).
+/// False if data section is in separate data_buffer (shared executor mode).
+var data_in_bytecode: bool = false;
 
 // ============================================================================
 // Host Imports (Minimal)
@@ -175,41 +180,54 @@ export fn init() u32 {
     frame_counter = 0;
     resources_created = false;
 
-    // Validate bytecode - need at least v4 header size
-    if (bytecode_len < format.HEADER_SIZE_V4) {
+    // Validate bytecode - need at least v0 header size
+    if (bytecode_len < format.HEADER_SIZE) {
         return 1; // Invalid bytecode
     }
 
-    // Parse header (first 8 bytes are common to all versions)
+    // Parse header
     const header = bytecode_buffer[0..bytecode_len];
     if (!std.mem.eql(u8, header[0..4], "PNGB")) {
         return 2; // Invalid magic
     }
 
     const version = std.mem.readInt(u16, header[4..6], .little);
-    if (version < 4 or version > 5) {
-        return 3; // Unsupported version
+    if (version != format.VERSION) {
+        return 3; // Unsupported version (only v0 supported)
     }
 
-    // Cache offsets based on version
-    if (version == 5) {
-        // V5: 40-byte header
-        if (bytecode_len < format.HEADER_SIZE) {
-            return 1; // Invalid bytecode for v5
-        }
-        bytecode_start = format.HEADER_SIZE;
-        string_table_offset = std.mem.readInt(u32, header[24..28], .little);
-        string_table_len = std.mem.readInt(u32, header[28..32], .little);
-        data_section_offset = std.mem.readInt(u32, header[32..36], .little);
-        bytecode_end = string_table_offset;
+    // Check if payload has embedded executor (v0 format, flag bit 0)
+    const flags = std.mem.readInt(u16, header[6..8], .little);
+    const has_embedded_executor = (flags & 0x01) != 0;
+
+    // Cache offsets for v0 format (40-byte header)
+    if (has_embedded_executor) {
+        // Embedded executor: bytecode starts after header + executor WASM
+        const executor_offset = std.mem.readInt(u32, header[12..16], .little);
+        const executor_length = std.mem.readInt(u32, header[16..20], .little);
+        bytecode_start = executor_offset + executor_length;
+        // Data section is embedded in bytecode_buffer for embedded executor
+        data_in_bytecode = true;
     } else {
-        // V4: 28-byte header
-        bytecode_start = format.HEADER_SIZE_V4;
-        string_table_offset = std.mem.readInt(u32, header[12..16], .little);
-        string_table_len = std.mem.readInt(u32, header[16..20], .little);
-        data_section_offset = std.mem.readInt(u32, header[20..24], .little);
-        bytecode_end = string_table_offset;
+        // No embedded executor: bytecode starts right after header
+        bytecode_start = format.HEADER_SIZE;
+        // Data section is in separate data_buffer for shared executor
+        data_in_bytecode = false;
     }
+    string_table_offset = std.mem.readInt(u32, header[20..24], .little);
+    data_section_offset = std.mem.readInt(u32, header[24..28], .little);
+    bytecode_end = string_table_offset;
+    string_table_len = data_section_offset - string_table_offset;
+    data_section_len = bytecode_len - data_section_offset;
+
+    // Debug: log bytecode info
+    var debug_msg: [64]u8 = undefined;
+    const bc_len = bytecode_end -| bytecode_start;
+    const first_byte: u8 = if (bc_len > 0) bytecode_buffer[bytecode_start] else 0;
+    const written = std.fmt.bufPrint(&debug_msg, "bc_start={d} bc_end={d} len={d} first=0x{x:0>2}", .{
+        bytecode_start, bytecode_end, bc_len, first_byte,
+    }) catch &debug_msg;
+    log(written.ptr, @intCast(written.len));
 
     // Execute resource creation phase
     var cmds = CommandBuffer.init(&cmd_buffer);
@@ -274,18 +292,32 @@ export fn getFrameCounter() u32 {
 fn executeResourceCreation(cmds: *CommandBuffer) void {
     const bytecode = bytecode_buffer[bytecode_start..bytecode_end];
     var pc: usize = 0;
+    var op_count: u32 = 0;
 
     for (0..MAX_EXEC_ITERATIONS) |_| {
         if (pc >= bytecode.len) break;
 
         const op: OpCode = @enumFromInt(bytecode[pc]);
         pc += 1;
+        op_count += 1;
+
+        // Debug: log each opcode
+        var op_msg: [32]u8 = undefined;
+        const op_written = std.fmt.bufPrint(&op_msg, "op[{d}]=0x{x:0>2} pc={d}", .{
+            op_count, @intFromEnum(op), pc,
+        }) catch &op_msg;
+        log(op_written.ptr, @intCast(op_written.len));
 
         // Stop at first frame definition
         if (op == .define_frame) break;
 
         executeOpcode(cmds, bytecode, &pc, op);
     }
+
+    // Log final command count
+    var final_msg: [32]u8 = undefined;
+    const final_written = std.fmt.bufPrint(&final_msg, "cmds={d}", .{cmds.cmd_count}) catch &final_msg;
+    log(final_written.ptr, @intCast(final_written.len));
 }
 
 /// Execute frame opcodes.
@@ -807,25 +839,45 @@ fn readVarint(bytecode: []const u8, pc: *usize) u32 {
 }
 
 /// Get slice from data section by data ID.
+/// Data section is in bytecode_buffer (embedded mode) or data_buffer (shared mode).
+///
+/// Data section format:
+///   count: u16
+///   entries: [count]{offset: u32, len: u32}  // offsets relative to data portion
+///   data: raw bytes
 fn getDataSlice(data_id: u16) []const u8 {
-    // Data section format: count (u16) + entries (offset, len pairs)
-    if (data_len == 0) return &[_]u8{};
+    // Determine source buffer based on mode
+    const data: []const u8 = blk: {
+        if (data_in_bytecode) {
+            // Embedded mode: data section is in bytecode_buffer
+            if (data_section_len == 0) break :blk &[_]u8{};
+            break :blk bytecode_buffer[data_section_offset..][0..data_section_len];
+        } else {
+            // Shared mode: data section is in separate data_buffer
+            if (data_len == 0) break :blk &[_]u8{};
+            break :blk data_buffer[0..data_len];
+        }
+    };
 
-    const data = data_buffer[0..data_len];
     if (data.len < 2) return &[_]u8{};
 
     const count = std.mem.readInt(u16, data[0..2], .little);
     if (data_id >= count) return &[_]u8{};
 
-    // Each entry is 8 bytes: offset (u32) + length (u32)
+    // Entry table starts at offset 2, each entry is 8 bytes
     const entry_offset: usize = 2 + @as(usize, data_id) * 8;
     if (entry_offset + 8 > data.len) return &[_]u8{};
 
-    const offset = std.mem.readInt(u32, data[entry_offset..][0..4], .little);
-    const len = std.mem.readInt(u32, data[entry_offset + 4 ..][0..4], .little);
+    // Offsets in entries are relative to the data portion (after entry table)
+    const blob_offset = std.mem.readInt(u32, data[entry_offset..][0..4], .little);
+    const blob_len = std.mem.readInt(u32, data[entry_offset + 4 ..][0..4], .little);
 
-    if (offset + len > data.len) return &[_]u8{};
-    return data[offset..][0..len];
+    // Data portion starts after: count (2) + entries (count * 8)
+    const data_start: usize = 2 + @as(usize, count) * 8;
+    const abs_offset = data_start + blob_offset;
+
+    if (abs_offset + blob_len > data.len) return &[_]u8{};
+    return data[abs_offset..][0..blob_len];
 }
 
 /// Get string slice from string table by string ID.

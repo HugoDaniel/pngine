@@ -48,22 +48,19 @@ fn compileSource(source: [:0]const u8) ![]u8 {
 /// Count createShaderModule opcodes in bytecode section only
 /// (not in string table, data section, or other sections which may contain matching bytes)
 fn countShaderOpcodes(bytecode: []const u8) u32 {
-    // Need at least v4 header to read version
-    if (bytecode.len < format.HEADER_SIZE_V4) return 0;
+    // Need at least v0 header
+    if (bytecode.len < format.HEADER_SIZE) return 0;
 
-    // Read version to determine header size and string_table_offset location
+    // Read version (should be 0)
     const version = std.mem.readInt(u16, bytecode[4..6], .little);
-    const header_size: usize = if (version == format.VERSION_V4) format.HEADER_SIZE_V4 else format.HEADER_SIZE;
-
-    if (bytecode.len < header_size) return 0;
+    if (version != format.VERSION) return 0;
 
     // Get string table offset from header to know where bytecode section ends
-    // v4: offset at byte 8, v5: offset at byte 20
-    const string_table_offset_pos: usize = if (version == format.VERSION_V4) 8 else 20;
-    const string_table_offset = std.mem.readInt(u32, bytecode[string_table_offset_pos..][0..4], .little);
+    // v0: offset at byte 20 (string_table_offset field)
+    const string_table_offset = std.mem.readInt(u32, bytecode[20..24], .little);
     const bytecode_end = @min(string_table_offset, bytecode.len);
-    if (bytecode_end < header_size) return 0;
-    const bytecode_section = bytecode[header_size..bytecode_end];
+    if (bytecode_end < format.HEADER_SIZE) return 0;
+    const bytecode_section = bytecode[format.HEADER_SIZE..bytecode_end];
 
     var count: u32 = 0;
     const create_shader = @intFromEnum(opcodes.OpCode.create_shader_module);

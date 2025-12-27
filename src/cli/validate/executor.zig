@@ -37,8 +37,8 @@ pub fn validateBytecode(
     result: *ValidationResult,
     opts: *const Options,
 ) !void {
-    // Pre-condition: bytecode has minimum header size
-    if (bytecode.len < format.HEADER_SIZE_V4) {
+    // Pre-condition: bytecode has minimum header size (v0)
+    if (bytecode.len < format.HEADER_SIZE) {
         try result.errors.append(allocator, .{
             .code = "E001",
             .severity = .err,
@@ -64,8 +64,8 @@ pub fn validateBytecode(
     // Read version
     const version = std.mem.readInt(u16, bytecode[4..6], .little);
 
-    // Validate version
-    if (version != format.VERSION and version != format.VERSION_V4) {
+    // Validate version (only v0 supported)
+    if (version != format.VERSION) {
         try result.errors.append(allocator, .{
             .code = "E003",
             .severity = .err,
@@ -182,7 +182,7 @@ fn executeWasm(
     opts: *const Options,
 ) !void {
     // Pre-conditions
-    std.debug.assert(bytecode.len >= format.HEADER_SIZE_V4);
+    std.debug.assert(bytecode.len >= format.HEADER_SIZE);
     std.debug.assert(opts.frame_indices.len > 0);
 
     // Initialize wasm3 runtime with 1MB stack

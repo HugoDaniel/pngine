@@ -214,8 +214,8 @@ test "e2e: simple_triangle.pngine module info is populated" {
 
     // Module info should be populated
     if (result.module_info) |info| {
-        // Should have version 4 or 5 (current versions)
-        try std.testing.expect(info.version >= 4);
+        // Should have version 0 (current version)
+        try std.testing.expectEqual(@as(u16, 0), info.version);
 
         // Should have WGSL entries
         try std.testing.expect(info.wgsl_entries_count > 0);
