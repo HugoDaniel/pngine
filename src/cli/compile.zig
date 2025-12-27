@@ -3,10 +3,21 @@
 //! Usage:
 //!   pngine compile input.pngine [-o output.pngb]
 //!   pngine compile input.pbsf [-o output.pngb]
+//!
+//! When compiling .pngine files, shows detected plugins and selected
+//! executor variant for embedded executor feature.
 
 const std = @import("std");
 const pngine = @import("pngine");
 const utils = @import("utils.zig");
+
+/// Compile result with optional plugin/variant info for DSL files.
+pub const CompileOutput = struct {
+    bytecode: []u8,
+    variant_name: ?[]const u8 = null,
+    variant_size: u32 = 0,
+    plugins: ?pngine.PluginSet = null,
+};
 
 /// Execute the compile command.
 ///
@@ -15,6 +26,8 @@ const utils = @import("utils.zig");
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     var input_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
+    var embed_executor: bool = false;
+    var executors_dir: ?[]const u8 = null;
 
     // Parse arguments with bounded iteration
     const args_len: u32 = @intCast(args.len);
@@ -34,6 +47,15 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
             }
             output_path = args[i + 1];
             skip_next = true;
+        } else if (std.mem.eql(u8, arg, "--embed-executor")) {
+            embed_executor = true;
+        } else if (std.mem.eql(u8, arg, "--executors-dir")) {
+            if (i + 1 >= args_len) {
+                std.debug.print("Error: --executors-dir requires a path\n", .{});
+                return 1;
+            }
+            executors_dir = args[i + 1];
+            skip_next = true;
         } else if (arg.len > 0 and arg[0] == '-') {
             std.debug.print("Unknown option: {s}\n", .{arg});
             return 1;
@@ -48,8 +70,13 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
 
     if (input_path == null) {
         std.debug.print("Error: no input file specified\n\n", .{});
-        std.debug.print("Usage: pngine compile <input.pngine> [-o output.pngb]\n", .{});
+        std.debug.print("Usage: pngine compile <input.pngine> [-o output.pngb] [--embed-executor]\n", .{});
         return 1;
+    }
+
+    // Default executors dir for development
+    if (embed_executor and executors_dir == null) {
+        executors_dir = "zig-out/executors";
     }
 
     const input = input_path.?;
@@ -69,45 +96,94 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     defer allocator.free(source);
 
     // Compile using appropriate compiler based on file extension
-    const bytecode = compileSource(allocator, input, source) catch |err| {
+    const result = compileSourceWithPlugins(allocator, input, source, .{
+        .embed_executor = embed_executor,
+        .executors_dir = executors_dir,
+    }) catch |err| {
         std.debug.print("Error: compilation failed: {}\n", .{err});
         return 3;
     };
-    defer allocator.free(bytecode);
+    defer allocator.free(result.bytecode);
 
     // Post-condition: valid PNGB output
-    std.debug.assert(bytecode.len >= pngine.format.HEADER_SIZE);
-    std.debug.assert(std.mem.eql(u8, bytecode[0..4], pngine.format.MAGIC));
+    std.debug.assert(result.bytecode.len >= pngine.format.HEADER_SIZE);
+    std.debug.assert(std.mem.eql(u8, result.bytecode[0..4], pngine.format.MAGIC));
 
     // Write output file
-    utils.writeOutputFile(output, bytecode) catch |err| {
+    utils.writeOutputFile(output, result.bytecode) catch |err| {
         std.debug.print("Error: failed to write '{s}': {}\n", .{ output, err });
         return 2;
     };
 
-    std.debug.print("Compiled {s} -> {s} ({d} bytes)\n", .{ input, output, bytecode.len });
+    // Print compilation result with variant info
+    if (result.variant_name) |variant| {
+        var plugins_buf: [128]u8 = undefined;
+        const plugins_desc = if (result.plugins) |p|
+            pngine.variant.describePlugins(p, &plugins_buf)
+        else
+            "(none)";
+
+        std.debug.print("Compiled {s} -> {s} ({d} bytes)\n", .{ input, output, result.bytecode.len });
+        std.debug.print("  Plugins: {s}\n", .{plugins_desc});
+        if (embed_executor) {
+            std.debug.print("  Executor: pngine-{s}.wasm (embedded)\n", .{variant});
+        } else {
+            std.debug.print("  Executor: pngine-{s}.wasm (~{d}KB)\n", .{ variant, result.variant_size / 1024 });
+        }
+    } else {
+        std.debug.print("Compiled {s} -> {s} ({d} bytes)\n", .{ input, output, result.bytecode.len });
+    }
     return 0;
 }
 
+/// Options for compiling with plugins.
+pub const CompileOptions = struct {
+    embed_executor: bool = false,
+    executors_dir: ?[]const u8 = null,
+};
+
 /// Compile source using appropriate compiler based on file extension.
 ///
-/// - `.pngine` files use the DSL compiler (macro-based syntax)
+/// - `.pngine` files use the DSL compiler (macro-based syntax) with plugin detection
 /// - `.pbsf` files use the legacy PBSF compiler (S-expression syntax)
-pub fn compileSource(allocator: std.mem.Allocator, path: []const u8, source: [:0]const u8) ![]u8 {
+pub fn compileSourceWithPlugins(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    source: [:0]const u8,
+    options: CompileOptions,
+) !CompileOutput {
     const extension = std.fs.path.extension(path);
 
     if (std.mem.eql(u8, extension, ".pbsf")) {
-        return pngine.compile(allocator, source);
+        // Legacy format - no plugin detection
+        const bytecode = try pngine.compile(allocator, source);
+        return .{ .bytecode = bytecode };
     } else {
+        // DSL format - use compileWithPlugins for variant selection
         const base_dir = std.fs.path.dirname(path) orelse ".";
         const miniray_path = findMinirayPath();
 
-        return pngine.dsl.compileWithOptions(allocator, source, .{
+        var result = try pngine.dsl.compileWithPlugins(allocator, source, .{
             .base_dir = base_dir,
             .file_path = path,
             .miniray_path = miniray_path,
+            .embed_executor = options.embed_executor,
+            .executors_dir = options.executors_dir,
         });
+
+        return .{
+            .bytecode = result.pngb,
+            .variant_name = result.variant_name,
+            .variant_size = result.variant_size,
+            .plugins = result.plugins,
+        };
     }
+}
+
+/// Legacy compile function for backwards compatibility.
+pub fn compileSource(allocator: std.mem.Allocator, path: []const u8, source: [:0]const u8) ![]u8 {
+    const result = try compileSourceWithPlugins(allocator, path, source, .{});
+    return result.bytecode;
 }
 
 /// Find miniray binary for WGSL reflection.

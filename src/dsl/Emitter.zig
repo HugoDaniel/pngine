@@ -260,6 +260,11 @@ pub const Emitter = struct {
         /// Path to miniray binary for WGSL reflection.
         /// If null, uses "miniray" from PATH.
         miniray_path: ?[]const u8 = null,
+        /// Executor WASM bytes to embed in payload.
+        /// If provided, the PNGB will include embedded executor.
+        executor_wasm: ?[]const u8 = null,
+        /// Plugin set for the executor (required when executor_wasm is provided).
+        plugins: ?format.PluginSet = null,
     };
 
     pub const Error = error{
@@ -407,7 +412,15 @@ pub const Emitter = struct {
         // Finalize and return PNGB bytes
         // Note: finalize() transfers ownership of bytecode to caller,
         // deinit() in defer will clean up remaining resources
-        return try self.builder.finalize(gpa);
+        if (self.options.executor_wasm) |executor| {
+            // Embed executor WASM in payload
+            return try self.builder.finalizeWithOptions(gpa, .{
+                .executor = executor,
+                .plugins = self.options.plugins orelse format.PluginSet{},
+            });
+        } else {
+            return try self.builder.finalize(gpa);
+        }
     }
 
     // ========================================================================

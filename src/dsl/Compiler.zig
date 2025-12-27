@@ -48,6 +48,11 @@ const bytecode_mod = @import("bytecode");
 const format = bytecode_mod.format;
 pub const PluginSet = format.PluginSet;
 
+// Use executor module import for variant selection
+const executor_mod = @import("executor");
+const variant_mod = executor_mod.variant;
+pub const Variant = variant_mod.Variant;
+
 pub const Compiler = struct {
     const Self = @This();
 
@@ -84,6 +89,16 @@ pub const Compiler = struct {
         /// If null, "miniray" is looked up in PATH.
         /// Required for setUniform() API to work with custom uniforms.
         miniray_path: ?[]const u8 = null,
+
+        /// Directory containing pre-built executor WASM files.
+        /// Files should be named pngine-{variant}.wasm.
+        /// If null, executor embedding is disabled.
+        executors_dir: ?[]const u8 = null,
+
+        /// Whether to embed the executor WASM in the payload.
+        /// Requires executors_dir to be set.
+        /// Defaults to false for backwards compatibility.
+        embed_executor: bool = false,
     };
 
     pub const CompileResult = struct {
@@ -97,13 +112,18 @@ pub const Compiler = struct {
         }
     };
 
-    /// Result of compilation with plugin detection.
+    /// Result of compilation with plugin detection and variant selection.
     /// Used when embedding executor in payload.
     pub const CompileWithPluginsResult = struct {
         /// Compiled PNGB bytecode. Caller owns this memory.
         pngb: []u8,
         /// Detected plugin set based on DSL features used.
         plugins: PluginSet,
+        /// Selected executor variant name (e.g., "render", "render-compute", "full").
+        /// Points to static string in variant.VARIANTS, no need to free.
+        variant_name: []const u8,
+        /// Estimated executor WASM size in bytes.
+        variant_size: u32,
 
         pub fn deinit(self: *CompileWithPluginsResult, gpa: Allocator) void {
             gpa.free(self.pngb);
@@ -252,10 +272,25 @@ pub const Compiler = struct {
         // Detect plugins BEFORE emitting (while analysis is still valid)
         const plugins = analysis.detectPlugins();
 
-        // Phase 3: Emit PNGB
+        // Select executor variant based on detected plugins
+        const selected_variant = variant_mod.selectVariant(plugins);
+
+        // Phase 3: Read executor WASM if embedding is enabled
+        var executor_wasm: ?[]u8 = null;
+        defer if (executor_wasm) |e| gpa.free(e);
+
+        if (options.embed_executor) {
+            if (options.executors_dir) |executors_dir| {
+                executor_wasm = try readExecutorWasm(gpa, executors_dir, selected_variant.name);
+            }
+        }
+
+        // Phase 4: Emit PNGB
         const pngb = try Emitter.emitWithOptions(gpa, &ast, &analysis, .{
             .base_dir = options.base_dir,
             .miniray_path = options.miniray_path,
+            .executor_wasm = executor_wasm,
+            .plugins = plugins,
         });
 
         // Post-condition: valid PNGB header
@@ -265,7 +300,64 @@ pub const Compiler = struct {
         return .{
             .pngb = pngb,
             .plugins = plugins,
+            .variant_name = selected_variant.name,
+            .variant_size = selected_variant.estimated_size,
         };
+    }
+
+    /// Read executor WASM file for a given variant.
+    ///
+    /// Pre-conditions:
+    /// - executors_dir is a valid directory path
+    /// - variant_name is a valid variant (e.g., "render", "compute", "full")
+    ///
+    /// Post-conditions:
+    /// - Returns owned WASM bytes
+    /// - Returns error.FileReadError if file not found
+    fn readExecutorWasm(gpa: Allocator, executors_dir: []const u8, variant_name: []const u8) Error![]u8 {
+        // Build path: {executors_dir}/pngine-{variant}.wasm
+        var path_buf: [512]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "{s}/pngine-{s}.wasm", .{ executors_dir, variant_name }) catch {
+            return error.FileReadError;
+        };
+
+        // Read file
+        const file = std.fs.cwd().openFile(path, .{}) catch {
+            return error.FileReadError;
+        };
+        defer file.close();
+
+        const stat = file.stat() catch {
+            return error.FileReadError;
+        };
+
+        // Sanity check: executor should be < 1MB
+        const max_executor_size: u64 = 1024 * 1024;
+        if (stat.size > max_executor_size) {
+            return error.FileReadError;
+        }
+
+        const size: u32 = @intCast(stat.size);
+        const wasm = gpa.alloc(u8, size) catch {
+            return error.OutOfMemory;
+        };
+        errdefer gpa.free(wasm);
+
+        // Bounded read loop (following Zig mastery principles)
+        var bytes_read: u32 = 0;
+        for (0..size + 1) |_| {
+            if (bytes_read >= size) break;
+            const n: u32 = @intCast(file.read(wasm[bytes_read..]) catch {
+                return error.FileReadError;
+            });
+            if (n == 0) break;
+            bytes_read += n;
+        }
+
+        // Post-condition: read complete file
+        std.debug.assert(bytes_read == size);
+
+        return wasm;
     }
 
     /// Compile DSL source from a non-sentinel-terminated slice.
@@ -981,6 +1073,10 @@ test "compileWithPlugins: returns valid bytecode and plugins" {
 
     // Verify render plugin detected
     try testing.expect(result.plugins.render);
+
+    // Verify correct variant selected
+    try testing.expectEqualStrings("render", result.variant_name);
+    try testing.expect(result.variant_size > 0);
 }
 
 test "compileWithPlugins: detects compute plugin" {
@@ -1003,6 +1099,7 @@ test "compileWithPlugins: detects compute plugin" {
 
     try testing.expectEqualStrings("PNGB", result.pngb[0..4]);
     try testing.expect(result.plugins.compute);
+    try testing.expectEqualStrings("compute", result.variant_name);
 }
 
 test "compileWithPlugins: detects animation plugin" {
@@ -1032,6 +1129,9 @@ test "compileWithPlugins: detects animation plugin" {
 
     try testing.expectEqualStrings("PNGB", result.pngb[0..4]);
     try testing.expect(result.plugins.animation);
+    try testing.expect(result.plugins.render);
+    // render + animation = render-anim variant
+    try testing.expectEqualStrings("render-anim", result.variant_name);
 }
 
 test "compileWithPlugins: detects texture plugin" {
@@ -1066,6 +1166,8 @@ test "compileWithPlugins: minimal program has no plugins" {
     try testing.expect(!result.plugins.animation);
     try testing.expect(!result.plugins.texture);
     try testing.expect(!result.plugins.wasm);
+    // Core only = "core" variant
+    try testing.expectEqualStrings("core", result.variant_name);
 }
 
 test "compileWithPlugins: parse error is propagated" {

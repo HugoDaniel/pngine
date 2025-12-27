@@ -523,6 +523,19 @@ pub fn build(b: *std.Build) void {
         .{ .name = "full", .render = true, .compute = true, .wasm = true, .animation = true, .texture = true },
     };
 
+    // Create bytecode module for WASM target (shared across all executor variants)
+    const types_wasm = b.createModule(.{
+        .root_source_file = b.path("src/types/main.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    const bytecode_wasm = b.createModule(.{
+        .root_source_file = b.path("src/bytecode/standalone.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    bytecode_wasm.addImport("types", types_wasm);
+
     for (executor_variants) |variant| {
         // Create plugin options for this variant
         const plugin_options = b.addOptions();
@@ -540,6 +553,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSmall,
         });
         executor_module.addImport("plugins", plugin_options.createModule());
+        executor_module.addImport("bytecode", bytecode_wasm);
 
         const executor = b.addExecutable(.{
             .name = b.fmt("pngine-{s}", .{variant.name}),
@@ -588,6 +602,7 @@ pub fn build(b: *std.Build) void {
         .{ .src = "npm/pngine/src/gpu.js", .dest = "demo/gpu.js" },
         .{ .src = "npm/pngine/src/anim.js", .dest = "demo/anim.js" },
         .{ .src = "npm/pngine/src/extract.js", .dest = "demo/extract.js" },
+        .{ .src = "npm/pngine/src/loader.js", .dest = "demo/loader.js" },
     };
     for (js_files) |file| {
         const install_file = b.addInstallFile(b.path(file.src), file.dest);
@@ -656,53 +671,63 @@ pub fn build(b: *std.Build) void {
     npm_step.dependOn(&npm_wasm.step);
 
     // ========================================================================
-    // Native Viewer
+    // Desktop Viewer (wasm3 + trace mode)
     // ========================================================================
     //
     // Standalone viewer for PNG files with embedded executors.
+    // Uses wasm3 to run embedded WASM executor and traces command buffers.
     // See: docs/embedded-executor-plan.md Phase 7
     //
-    // Usage: zig build viewer -- shader.png
+    // Usage: zig build desktop-viewer -- triangle-embedded.png
 
-    const viewer_step = b.step("viewer", "Build native PNG viewer");
+    const desktop_viewer_step = b.step("desktop-viewer", "Build desktop PNG viewer with wasm3");
 
-    // Create viewer module
-    const viewer_module = b.createModule(.{
-        .root_source_file = b.path("viewers/native/main.zig"),
+    // Create wasm3 wrapper module (reuses CLI's wasm3 wrapper)
+    const wasm3_wrapper_options = b.addOptions();
+    wasm3_wrapper_options.addOption(bool, "has_wasm3", wasm3_dep != null);
+
+    const wasm3_wrapper_module = b.createModule(.{
+        .root_source_file = b.path("src/cli/validate/wasm3.zig"),
         .target = target,
         .optimize = optimize,
     });
-    viewer_module.addImport("pngine", lib_module);
+    wasm3_wrapper_module.addImport("build_options", wasm3_wrapper_options.createModule());
 
-    const viewer = b.addExecutable(.{
-        .name = "pngine-viewer",
-        .root_module = viewer_module,
-    });
-
-    b.installArtifact(viewer);
-    viewer_step.dependOn(&b.addInstallArtifact(viewer, .{}).step);
-
-    // Run viewer step
-    const run_viewer = b.addRunArtifact(viewer);
-    run_viewer.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_viewer.addArgs(args);
+    // Link wasm3 library to wrapper module
+    if (wasm3_lib) |lib| {
+        wasm3_wrapper_module.linkLibrary(lib);
+        if (wasm3_dep) |dep| {
+            wasm3_wrapper_module.addIncludePath(dep.path("source"));
+        }
+        wasm3_wrapper_module.link_libc = true;
     }
 
-    const run_viewer_step = b.step("run-viewer", "Run the native viewer");
-    run_viewer_step.dependOn(&run_viewer.step);
-
-    // Viewer tests
-    const viewer_test_module = b.createModule(.{
-        .root_source_file = b.path("viewers/native/loader.zig"),
+    // Create desktop viewer module
+    const desktop_viewer_module = b.createModule(.{
+        .root_source_file = b.path("viewers/desktop/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    viewer_test_module.addImport("pngine", lib_module);
-    const viewer_tests = b.addTest(.{
-        .root_module = viewer_test_module,
+    desktop_viewer_module.addImport("pngine", lib_module);
+    desktop_viewer_module.addImport("wasm3", wasm3_wrapper_module);
+
+    const desktop_viewer = b.addExecutable(.{
+        .name = "desktop-viewer",
+        .root_module = desktop_viewer_module,
     });
-    test_step.dependOn(&b.addRunArtifact(viewer_tests).step);
+
+    b.installArtifact(desktop_viewer);
+    desktop_viewer_step.dependOn(&b.addInstallArtifact(desktop_viewer, .{}).step);
+
+    // Run desktop viewer step
+    const run_desktop_viewer = b.addRunArtifact(desktop_viewer);
+    run_desktop_viewer.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_desktop_viewer.addArgs(args);
+    }
+
+    const run_desktop_viewer_step = b.step("run-desktop-viewer", "Run the desktop viewer");
+    run_desktop_viewer_step.dependOn(&run_desktop_viewer.step);
 }
 
 // Version check at comptime
