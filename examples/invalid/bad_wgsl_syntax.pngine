@@ -1,0 +1,54 @@
+// Invalid example: WGSL syntax error (missing semicolon, wrong types)
+// Detection: WebGPU runtime (device.createShaderModule fails)
+// Validator: Passes - WGSL parsing happens in browser/GPU, not bytecode validator
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={ entryPoint=vertexMain module=code }
+  fragment={
+    entryPoint=fragMain
+    module=code
+    targets=[{ format=preferredCanvasFormat }]
+  }
+  primitive={ topology=triangle-list }
+}
+
+#renderPass renderPipeline {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0, 0, 0, 0]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=pipeline
+  draw=3
+}
+
+#frame badSyntax {
+  perform=[renderPipeline]
+}
+
+#shaderModule code {
+  code="
+    @vertex
+    fn vertexMain(
+      @builtin(vertex_index) VertexIndex : u32
+    ) -> @builtin(position) vec4f {
+      // ERROR: Missing semicolon and wrong type
+      var pos = array<vec2f, 3>(
+        vec2(0.0, 0.5),
+        vec2(-0.5, -0.5),
+        vec2(0.5, -0.5)
+      )
+
+      // ERROR: undeclared identifier 'undefined_var'
+      return vec4f(pos[undefined_var], 0.0, 1.0);
+    }
+
+    @fragment
+    fn fragMain() -> @location(0) vec4f {
+      // ERROR: wrong return type (vec3 instead of vec4)
+      return vec3(1.0, 0.0, 0.0);
+    }
+  "
+}

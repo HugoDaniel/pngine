@@ -1,0 +1,61 @@
+// Invalid example: Buffer size is smaller than the data being written
+// Detection: Compile-time (analyzer should catch size mismatch)
+// Note: Currently truncates data silently - this could be improved
+
+#data largeData {
+  float32Array=[
+    // 16 floats = 64 bytes
+    1.0 2.0 3.0 4.0
+    5.0 6.0 7.0 8.0
+    9.0 10.0 11.0 12.0
+    13.0 14.0 15.0 16.0
+  ]
+}
+
+#buffer tinyBuffer {
+  // ERROR: Buffer is only 16 bytes but data is 64 bytes
+  size = 16
+  usage = [VERTEX COPY_DST]
+  mappedAtCreation = largeData
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={ entryPoint=vertexMain module=code }
+  fragment={
+    entryPoint=fragMain
+    module=code
+    targets=[{ format=preferredCanvasFormat }]
+  }
+  primitive={ topology=triangle-list }
+}
+
+#renderPass render {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0, 0, 0, 0]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=pipeline
+  vertexBuffers=[tinyBuffer]
+  draw=3
+}
+
+#frame bufferTooSmall {
+  perform=[render]
+}
+
+#shaderModule code {
+  code="
+    @vertex
+    fn vertexMain(@location(0) pos: vec4f) -> @builtin(position) vec4f {
+      return pos;
+    }
+
+    @fragment
+    fn fragMain() -> @location(0) vec4f {
+      return vec4(1.0, 0.0, 0.0, 1.0);
+    }
+  "
+}
