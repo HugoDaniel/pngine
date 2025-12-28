@@ -1618,6 +1618,52 @@ test "Emitter: multiple vertex buffers with bare identifiers" {
     try testing.expect(slot_2_set);
 }
 
+test "Emitter: mixed pool and non-pool vertex buffers (boids pattern)" {
+    // Test that a pooled vertex buffer + non-pooled vertex buffer both emit correctly.
+    // This is the boids pattern: particleBuffers (pool=2) + spriteVertexBuffer (no pool).
+    const source: [:0]const u8 =
+        \\#wgsl shader { value="@vertex fn vs() {}" }
+        \\#buffer particleBuffer { size=1024 usage=[VERTEX STORAGE] pool=2 }
+        \\#buffer spriteBuffer { size=24 usage=[VERTEX] }
+        \\#renderPipeline pipe { vertex={ module=shader } }
+        \\#renderPass pass {
+        \\  pipeline=pipe
+        \\  vertexBuffers=[particleBuffer spriteBuffer]
+        \\  vertexBuffersPoolOffsets=[1 0]
+        \\  draw=3
+        \\}
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    // Verify both vertex buffers are set at slots 0 and 1
+    var slot_0_set = false;
+    var slot_1_set = false;
+
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .set_vertex_buffer) {
+            const slot = call.params.set_vertex_buffer.slot;
+            if (slot == 0) slot_0_set = true;
+            if (slot == 1) slot_1_set = true;
+        }
+    }
+
+    try testing.expect(slot_0_set); // particleBuffer at slot 0
+    try testing.expect(slot_1_set); // spriteBuffer at slot 1
+}
+
 test "Emitter: textureUsesCanvasSize detects builtin_ref nodes" {
     // Test that size=[canvas.width canvas.height] is properly detected as canvas-dependent.
     // Uses builtin_ref nodes (bare identifiers like canvas.width).

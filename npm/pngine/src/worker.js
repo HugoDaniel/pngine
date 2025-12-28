@@ -176,7 +176,7 @@ async function loadBytecode(bytecode) {
   const initPtr = wasm.getCommandPtr();
   const initLen = wasm.getCommandLen();
   if (initPtr && initLen > 0) {
-    gpu.execute(initPtr);
+    await gpu.execute(initPtr);
   }
 
   moduleLoaded = true;

@@ -145,6 +145,19 @@ pub fn build(b: *std.Build) void {
     // No main() - use exported functions
     wasm.entry = .disabled;
 
+    // Ancillary WASM modules (mvp.wasm for matrix generation)
+    const mvp_wasm_module = b.createModule(.{
+        .root_source_file = b.path("src/ancillary/mvp.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    const mvp_wasm = b.addExecutable(.{
+        .name = "mvp",
+        .root_module = mvp_wasm_module,
+    });
+    mvp_wasm.rdynamic = true;
+    mvp_wasm.entry = .disabled;
+
     // CLI executable
     const cli_module = b.createModule(.{
         .root_source_file = b.path("src/cli.zig"),
@@ -424,6 +437,18 @@ pub fn build(b: *std.Build) void {
     dsl_complete_step.dependOn(&run_dsl_complete_test.step);
     standalone_step.dependOn(&run_dsl_complete_test.step);
 
+    // Ancillary module (MVP matrix generator for WASM)
+    const ancillary_step = b.step("test-ancillary", "Run ancillary WASM module tests");
+    const ancillary_mod = b.createModule(.{
+        .root_source_file = b.path("src/ancillary/mvp.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const ancillary_test = b.addTest(.{ .name = "ancillary", .root_module = ancillary_mod });
+    const run_ancillary_test = b.addRunArtifact(ancillary_test);
+    ancillary_step.dependOn(&run_ancillary_test.step);
+    standalone_step.dependOn(&run_ancillary_test.step);
+
     // Coverage step (requires kcov installed)
     const coverage_step = b.step("coverage", "Run tests with coverage (requires kcov)");
 
@@ -577,6 +602,12 @@ pub fn build(b: *std.Build) void {
         .dest_dir = .{ .override = .{ .custom = "demo" } },
     });
     web_step.dependOn(&install_wasm.step);
+
+    // Install ancillary mvp.wasm to demo/assets directory
+    const install_mvp_wasm = b.addInstallArtifact(mvp_wasm, .{
+        .dest_dir = .{ .override = .{ .custom = "demo/assets" } },
+    });
+    web_step.dependOn(&install_mvp_wasm.step);
 
     // Also copy WASM to npm package directory
     const install_npm_wasm = b.addInstallArtifact(wasm, .{

@@ -98,7 +98,7 @@ async function main() {
   let waitForResolved = !opts.waitFor;
 
   const browser = await chromium.launch({
-    headless: opts.headless ? 'shell' : false,  // 'shell' is more compatible than 'new'
+    headless: opts.headless,
     args: [
       '--enable-unsafe-webgpu',
       '--enable-features=Vulkan,UseSkiaRenderer',
