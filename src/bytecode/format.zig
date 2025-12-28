@@ -399,9 +399,200 @@ pub fn serialize(
     return serializeWithOptions(allocator, bytecode, strings, data, wgsl, uniforms, animation, .{});
 }
 
-/// Serialize components to PNGB format with options (v5).
+/// Serialized section data for assembly.
+const SerializedSections = struct {
+    string_bytes: []u8,
+    data_bytes: []u8,
+    wgsl_bytes: []u8,
+    uniform_bytes: []u8,
+    animation_bytes: []u8,
+
+    fn deinit(self: *SerializedSections, allocator: Allocator) void {
+        allocator.free(self.string_bytes);
+        allocator.free(self.data_bytes);
+        allocator.free(self.wgsl_bytes);
+        allocator.free(self.uniform_bytes);
+        allocator.free(self.animation_bytes);
+    }
+};
+
+/// Section offset calculations for header.
+const SectionOffsets = struct {
+    executor_offset: u32,
+    string_table_offset: u32,
+    data_section_offset: u32,
+    wgsl_table_offset: u32,
+    uniform_table_offset: u32,
+    animation_table_offset: u32,
+    total_size: usize,
+};
+
+/// Serialize all tables to bytes.
+/// Caller owns returned sections and must call deinit.
+fn serializeAllSections(
+    allocator: Allocator,
+    strings: *const StringTable,
+    data: *const DataSection,
+    wgsl: *const WgslTable,
+    uniforms: *const UniformTable,
+    animation: *const AnimationTable,
+) !SerializedSections {
+    // Pre-condition: all table pointers are valid (non-null)
+    assert(@intFromPtr(strings) != 0);
+    assert(@intFromPtr(data) != 0);
+
+    const string_bytes = try strings.serialize(allocator);
+    errdefer allocator.free(string_bytes);
+
+    const data_bytes = try data.serialize(allocator);
+    errdefer allocator.free(data_bytes);
+
+    const wgsl_bytes = try wgsl.serialize(allocator);
+    errdefer allocator.free(wgsl_bytes);
+
+    const uniform_bytes = try uniforms.serialize(allocator);
+    errdefer allocator.free(uniform_bytes);
+
+    const animation_bytes = try animation.serialize(allocator);
+
+    // Post-condition: all sections serialized
+    assert(string_bytes.len > 0 or strings.count() == 0);
+
+    return .{
+        .string_bytes = string_bytes,
+        .data_bytes = data_bytes,
+        .wgsl_bytes = wgsl_bytes,
+        .uniform_bytes = uniform_bytes,
+        .animation_bytes = animation_bytes,
+    };
+}
+
+/// Calculate section offsets for header.
+fn calculateSectionOffsets(
+    bytecode_len: usize,
+    executor_len: usize,
+    sections: *const SerializedSections,
+) SectionOffsets {
+    // Pre-condition: valid section data
+    assert(sections.string_bytes.len > 0 or sections.string_bytes.len == 0);
+
+    const has_executor = executor_len > 0;
+    const executor_offset: u32 = if (has_executor) HEADER_SIZE else 0;
+    const bytecode_start: u32 = @intCast(HEADER_SIZE + executor_len);
+    const string_table_offset: u32 = @intCast(bytecode_start + bytecode_len);
+    const data_section_offset: u32 = @intCast(string_table_offset + sections.string_bytes.len);
+    const wgsl_table_offset: u32 = @intCast(data_section_offset + sections.data_bytes.len);
+    const uniform_table_offset: u32 = @intCast(wgsl_table_offset + sections.wgsl_bytes.len);
+    const animation_table_offset: u32 = @intCast(uniform_table_offset + sections.uniform_bytes.len);
+
+    const total_size = HEADER_SIZE + executor_len + bytecode_len +
+        sections.string_bytes.len + sections.data_bytes.len +
+        sections.wgsl_bytes.len + sections.uniform_bytes.len +
+        sections.animation_bytes.len;
+
+    // Post-condition: offsets are in ascending order
+    assert(string_table_offset >= HEADER_SIZE);
+    assert(data_section_offset >= string_table_offset);
+
+    return .{
+        .executor_offset = executor_offset,
+        .string_table_offset = string_table_offset,
+        .data_section_offset = data_section_offset,
+        .wgsl_table_offset = wgsl_table_offset,
+        .uniform_table_offset = uniform_table_offset,
+        .animation_table_offset = animation_table_offset,
+        .total_size = total_size,
+    };
+}
+
+/// Build PNGB header from offsets and options.
+fn buildHeader(offsets: *const SectionOffsets, options: SerializeOptions, animation_bytes_len: usize) Header {
+    // Pre-condition: offsets are valid
+    assert(offsets.string_table_offset >= HEADER_SIZE);
+    assert(offsets.total_size > HEADER_SIZE);
+
+    const has_executor = options.executor.len > 0;
+
+    return Header{
+        .magic = MAGIC.*,
+        .version = VERSION,
+        .flags = .{
+            .has_embedded_executor = has_executor,
+            .has_animation_table = animation_bytes_len > 1, // Empty table is just count=0 (1 byte)
+        },
+        .plugins = options.plugins,
+        .reserved = .{ 0, 0, 0 },
+        .executor_offset = offsets.executor_offset,
+        .executor_length = @intCast(options.executor.len),
+        .string_table_offset = offsets.string_table_offset,
+        .data_section_offset = offsets.data_section_offset,
+        .wgsl_table_offset = offsets.wgsl_table_offset,
+        .uniform_table_offset = offsets.uniform_table_offset,
+        .animation_table_offset = offsets.animation_table_offset,
+    };
+}
+
+/// Write all sections to output buffer.
+/// Returns final offset (should equal total_size).
+fn writeSectionsToOutput(
+    output: []u8,
+    header: *const Header,
+    bytecode: []const u8,
+    sections: *const SerializedSections,
+    executor: []const u8,
+) usize {
+    // Pre-condition: output buffer is large enough
+    assert(output.len >= HEADER_SIZE);
+
+    var offset: usize = 0;
+
+    // Write header
+    @memcpy(output[offset..][0..HEADER_SIZE], std.mem.asBytes(header));
+    offset += HEADER_SIZE;
+
+    // Write executor (if embedded)
+    if (executor.len > 0) {
+        @memcpy(output[offset..][0..executor.len], executor);
+        offset += executor.len;
+    }
+
+    // Write bytecode
+    @memcpy(output[offset..][0..bytecode.len], bytecode);
+    offset += bytecode.len;
+
+    // Write all table sections
+    @memcpy(output[offset..][0..sections.string_bytes.len], sections.string_bytes);
+    offset += sections.string_bytes.len;
+
+    @memcpy(output[offset..][0..sections.data_bytes.len], sections.data_bytes);
+    offset += sections.data_bytes.len;
+
+    @memcpy(output[offset..][0..sections.wgsl_bytes.len], sections.wgsl_bytes);
+    offset += sections.wgsl_bytes.len;
+
+    @memcpy(output[offset..][0..sections.uniform_bytes.len], sections.uniform_bytes);
+    offset += sections.uniform_bytes.len;
+
+    @memcpy(output[offset..][0..sections.animation_bytes.len], sections.animation_bytes);
+    offset += sections.animation_bytes.len;
+
+    // Post-condition: wrote to valid range
+    assert(offset <= output.len);
+
+    return offset;
+}
+
+/// Serialize components to PNGB format with options (v0).
 ///
 /// Supports embedding executor WASM and setting plugin flags.
+///
+/// Pre-conditions:
+/// - All table pointers are valid
+/// - If options.executor is non-empty, it contains valid WASM
+///
+/// Post-conditions:
+/// - Returns valid PNGB v0 format
+/// - Caller owns returned slice
 pub fn serializeWithOptions(
     allocator: Allocator,
     bytecode: []const u8,
@@ -412,131 +603,54 @@ pub fn serializeWithOptions(
     animation: *const AnimationTable,
     options: SerializeOptions,
 ) ![]u8 {
-    // Serialize string table
-    const string_bytes = try strings.serialize(allocator);
-    defer allocator.free(string_bytes);
+    // Pre-condition: valid inputs
+    assert(@intFromPtr(strings) != 0);
 
-    // Serialize data section
-    const data_bytes = try data.serialize(allocator);
-    defer allocator.free(data_bytes);
+    // Serialize all tables
+    var sections = try serializeAllSections(allocator, strings, data, wgsl, uniforms, animation);
+    defer sections.deinit(allocator);
 
-    // Serialize WGSL table
-    const wgsl_bytes = try wgsl.serialize(allocator);
-    defer allocator.free(wgsl_bytes);
-
-    // Serialize uniform table
-    const uniform_bytes = try uniforms.serialize(allocator);
-    defer allocator.free(uniform_bytes);
-
-    // Serialize animation table
-    const animation_bytes = try animation.serialize(allocator);
-    defer allocator.free(animation_bytes);
-
-    // Calculate section sizes
-    const has_executor = options.executor.len > 0;
-    const executor_len = options.executor.len;
-
-    // Calculate offsets (header → executor → bytecode → strings → data → wgsl → uniform → animation)
-    const executor_offset: u32 = if (has_executor) HEADER_SIZE else 0;
-    const bytecode_start: u32 = @intCast(HEADER_SIZE + executor_len);
-    const string_table_offset: u32 = @intCast(bytecode_start + bytecode.len);
-    const data_section_offset: u32 = @intCast(string_table_offset + string_bytes.len);
-    const wgsl_table_offset: u32 = @intCast(data_section_offset + data_bytes.len);
-    const uniform_table_offset: u32 = @intCast(wgsl_table_offset + wgsl_bytes.len);
-    const animation_table_offset: u32 = @intCast(uniform_table_offset + uniform_bytes.len);
-
-    // Total size
-    const total_size = HEADER_SIZE + executor_len + bytecode.len + string_bytes.len + data_bytes.len + wgsl_bytes.len + uniform_bytes.len + animation_bytes.len;
-
-    // Allocate output buffer
-    const output = try allocator.alloc(u8, total_size);
-    errdefer allocator.free(output);
-
-    var offset: usize = 0;
+    // Calculate offsets
+    const offsets = calculateSectionOffsets(bytecode.len, options.executor.len, &sections);
 
     // Build header
-    const header = Header{
-        .magic = MAGIC.*,
-        .version = VERSION,
-        .flags = .{
-            .has_embedded_executor = has_executor,
-            .has_animation_table = animation_bytes.len > 1, // Empty table is just count=0 (1 byte)
-        },
-        .plugins = options.plugins,
-        .reserved = .{ 0, 0, 0 },
-        .executor_offset = executor_offset,
-        .executor_length = @intCast(executor_len),
-        .string_table_offset = string_table_offset,
-        .data_section_offset = data_section_offset,
-        .wgsl_table_offset = wgsl_table_offset,
-        .uniform_table_offset = uniform_table_offset,
-        .animation_table_offset = animation_table_offset,
-    };
+    const header = buildHeader(&offsets, options, sections.animation_bytes.len);
 
-    // Write header
-    @memcpy(output[offset..][0..HEADER_SIZE], std.mem.asBytes(&header));
-    offset += HEADER_SIZE;
+    // Allocate output buffer
+    const output = try allocator.alloc(u8, offsets.total_size);
+    errdefer allocator.free(output);
 
-    // Write executor (if embedded)
-    if (has_executor) {
-        @memcpy(output[offset..][0..executor_len], options.executor);
-        offset += executor_len;
-    }
-
-    // Write bytecode
-    @memcpy(output[offset..][0..bytecode.len], bytecode);
-    offset += bytecode.len;
-
-    // Write string table
-    @memcpy(output[offset..][0..string_bytes.len], string_bytes);
-    offset += string_bytes.len;
-
-    // Write data section
-    @memcpy(output[offset..][0..data_bytes.len], data_bytes);
-    offset += data_bytes.len;
-
-    // Write WGSL table
-    @memcpy(output[offset..][0..wgsl_bytes.len], wgsl_bytes);
-    offset += wgsl_bytes.len;
-
-    // Write uniform table
-    @memcpy(output[offset..][0..uniform_bytes.len], uniform_bytes);
-    offset += uniform_bytes.len;
-
-    // Write animation table
-    @memcpy(output[offset..][0..animation_bytes.len], animation_bytes);
-    offset += animation_bytes.len;
+    // Write all sections
+    const final_offset = writeSectionsToOutput(output, &header, bytecode, &sections, options.executor);
 
     // Post-condition: wrote exactly total_size
-    assert(offset == total_size);
+    assert(final_offset == offsets.total_size);
 
     return output;
 }
 
-/// Deserialize PNGB format to module (v0 only).
-/// Note: The returned module references the input data - caller must ensure data outlives module.
-pub fn deserialize(allocator: Allocator, data: []const u8) !Module {
-    // Pre-condition: at least v0 header present
-    if (data.len < HEADER_SIZE) return error.InvalidFormat;
+/// Validate header magic, version, and all section offsets.
+/// Returns the parsed header on success.
+fn validateHeaderAndOffsets(data: []const u8) !*const Header {
+    // Pre-condition: minimum data length
+    assert(data.len >= HEADER_SIZE);
 
-    // Check magic first
+    // Check magic
     if (!std.mem.eql(u8, data[0..4], MAGIC)) {
         return error.InvalidMagic;
     }
 
-    // Read version and validate
+    // Check version
     const version = std.mem.readInt(u16, data[4..6], .little);
     if (version != VERSION) {
         return error.UnsupportedVersion;
     }
 
-    // Parse v0 header
+    // Parse header
     const header: *const Header = @ptrCast(@alignCast(data[0..HEADER_SIZE]));
-
-    // Validate header
     try header.validate();
 
-    // Validate offsets
+    // Validate all offsets are within bounds
     if (header.string_table_offset > data.len) return error.InvalidOffset;
     if (header.data_section_offset > data.len) return error.InvalidOffset;
     if (header.wgsl_table_offset > data.len) return error.InvalidOffset;
@@ -544,7 +658,23 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !Module {
     if (header.animation_table_offset > data.len) return error.InvalidOffset;
     if (header.string_table_offset < HEADER_SIZE) return error.InvalidOffset;
 
-    // Extract embedded executor if present
+    // Post-condition: header is valid
+    assert(std.mem.eql(u8, &header.magic, MAGIC));
+
+    return header;
+}
+
+/// Extract executor and bytecode slices from data.
+/// Returns executor (owned, caller must free) and bytecode (slice into data).
+fn extractExecutorAndBytecode(
+    allocator: Allocator,
+    data: []const u8,
+    header: *const Header,
+) !struct { executor: []const u8, bytecode: []const u8 } {
+    // Pre-condition: header is valid
+    assert(std.mem.eql(u8, &header.magic, MAGIC));
+
+    // Extract executor if present
     var executor: []const u8 = &.{};
     if (header.hasEmbeddedExecutor()) {
         if (header.executor_offset + header.executor_length > data.len) {
@@ -552,17 +682,35 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !Module {
         }
         executor = try allocator.dupe(u8, data[header.executor_offset..][0..header.executor_length]);
     }
-    errdefer if (executor.len > 0) allocator.free(executor);
 
-    // Calculate bytecode start (after header + executor)
+    // Calculate bytecode bounds
     const bytecode_start: usize = if (header.hasEmbeddedExecutor())
         header.executor_offset + header.executor_length
     else
         HEADER_SIZE;
-
-    // Extract bytecode (between header/executor and string table)
     const bytecode_len = header.string_table_offset - bytecode_start;
     const bytecode = data[bytecode_start..][0..bytecode_len];
+
+    // Post-condition: bytecode is within data bounds
+    assert(bytecode_start + bytecode_len <= data.len);
+
+    return .{ .executor = executor, .bytecode = bytecode };
+}
+
+/// Deserialized tables result.
+const DeserializedTables = struct {
+    strings: StringTable,
+    data_section: DataSection,
+    wgsl: WgslTable,
+    uniforms: UniformTable,
+    animation: AnimationTable,
+};
+
+/// Deserialize all tables from data using header offsets.
+fn deserializeAllTables(allocator: Allocator, data: []const u8, header: *const Header) !DeserializedTables {
+    // Pre-condition: header offsets are valid
+    assert(header.string_table_offset <= data.len);
+    assert(header.data_section_offset <= data.len);
 
     // Deserialize string table
     const string_data = data[header.string_table_offset..header.data_section_offset];
@@ -572,7 +720,7 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !Module {
         s.deinit(allocator);
     }
 
-    // Deserialize data section (between data_section_offset and wgsl_table_offset)
+    // Deserialize data section
     const data_section_data = data[header.data_section_offset..header.wgsl_table_offset];
     const data_section = try @import("data_section.zig").deserialize(allocator, data_section_data);
     errdefer {
@@ -580,7 +728,7 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !Module {
         ds.deinit(allocator);
     }
 
-    // Deserialize WGSL table (between wgsl_table_offset and uniform_table_offset)
+    // Deserialize WGSL table
     const wgsl_data = data[header.wgsl_table_offset..header.uniform_table_offset];
     const wgsl = try deserializeWgslTable(allocator, wgsl_data);
     errdefer {
@@ -588,7 +736,7 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !Module {
         w.deinit(allocator);
     }
 
-    // Deserialize uniform table (between uniform_table_offset and animation_table_offset)
+    // Deserialize uniform table
     const uniform_data = data[header.uniform_table_offset..header.animation_table_offset];
     const uniforms = try uniform_table_mod.deserialize(allocator, uniform_data);
     errdefer {
@@ -596,19 +744,60 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !Module {
         u.deinit(allocator);
     }
 
-    // Deserialize animation table (from animation_table_offset to end)
+    // Deserialize animation table
     const animation_data = data[header.animation_table_offset..];
     const animation = try animation_table_mod.deserialize(allocator, animation_data);
 
-    return Module{
-        .header = header.*,
-        .executor = executor,
-        .bytecode = bytecode,
+    // Post-condition: all tables deserialized
+    assert(@intFromPtr(&strings) != 0);
+
+    return .{
         .strings = strings,
-        .data = data_section,
+        .data_section = data_section,
         .wgsl = wgsl,
         .uniforms = uniforms,
         .animation = animation,
+    };
+}
+
+/// Deserialize PNGB format to module (v0 only).
+///
+/// Pre-conditions:
+/// - data contains valid PNGB v0 format
+/// - data.len >= HEADER_SIZE
+///
+/// Post-conditions:
+/// - Returns valid Module
+/// - Caller owns executor slice (if present)
+/// - Bytecode slice references input data
+///
+/// Note: The returned module references the input data - caller must ensure data outlives module.
+pub fn deserialize(allocator: Allocator, data: []const u8) !Module {
+    // Pre-condition: at least header present
+    if (data.len < HEADER_SIZE) return error.InvalidFormat;
+
+    // Validate header and offsets
+    const header = try validateHeaderAndOffsets(data);
+
+    // Extract executor and bytecode
+    const extracted = try extractExecutorAndBytecode(allocator, data, header);
+    errdefer if (extracted.executor.len > 0) allocator.free(extracted.executor);
+
+    // Deserialize all tables
+    const tables = try deserializeAllTables(allocator, data, header);
+
+    // Post-condition: valid module constructed
+    assert(std.mem.eql(u8, &header.magic, MAGIC));
+
+    return Module{
+        .header = header.*,
+        .executor = extracted.executor,
+        .bytecode = extracted.bytecode,
+        .strings = tables.strings,
+        .data = tables.data_section,
+        .wgsl = tables.wgsl,
+        .uniforms = tables.uniforms,
+        .animation = tables.animation,
     };
 }
 

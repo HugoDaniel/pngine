@@ -757,54 +757,223 @@ pub const Assembler = struct {
 
     /// Emit frame definition.
     /// Supports two formats:
+    /// Frame header parsing result.
+    const FrameHeader = struct {
+        frame_id: u16,
+        name_id: u16,
+        cmd_start_idx: usize,
+    };
+
+    /// Parse frame header from shorthand format: (frame "name" ...commands...)
+    /// Auto-assigns next available frame ID.
+    fn parseFrameHeaderShorthand(self: *Self, children: []const NodeIndex) AssembleError!FrameHeader {
+        // Pre-condition: at least 2 children (frame keyword + name)
+        assert(children.len >= 2);
+
+        // Find next available frame ID
+        var frame_id: u16 = 0;
+        while (self.defined_frames.isSet(frame_id) and frame_id < MAX_RESOURCES) {
+            frame_id += 1;
+        }
+        if (frame_id >= MAX_RESOURCES) return error.TooManyResources;
+        self.defined_frames.set(frame_id);
+
+        // Parse name string
+        const name_raw = self.ast.tokenSlice(self.ast.nodeMainToken(children[1]));
+        const name = self.stripQuotes(name_raw);
+        const str_id = try self.internString(name);
+
+        // Post-condition: valid frame ID assigned
+        assert(self.defined_frames.isSet(frame_id));
+
+        return .{ .frame_id = frame_id, .name_id = str_id.toInt(), .cmd_start_idx = 2 };
+    }
+
+    /// Parse frame header from semantic format: (frame $frm:N "name" ...)
+    fn parseFrameHeaderSemantic(self: *Self, children: []const NodeIndex) AssembleError!FrameHeader {
+        // Pre-condition: at least 3 children (frame keyword + id + name)
+        assert(children.len >= 3);
+
+        const frame_id = try self.parseResourceIndex(children[1], .frame);
+        if (self.defined_frames.isSet(frame_id)) return error.DuplicateResource;
+        self.defined_frames.set(frame_id);
+
+        var name_id: u16 = 0;
+        var cmd_start_idx: usize = 2;
+
+        if (self.ast.nodeTag(children[2]) == .string) {
+            const name_raw = self.ast.tokenSlice(self.ast.nodeMainToken(children[2]));
+            const name = self.stripQuotes(name_raw);
+            const str_id = try self.internString(name);
+            name_id = str_id.toInt();
+            cmd_start_idx = 3;
+        }
+
+        // Post-condition: valid frame ID assigned
+        assert(self.defined_frames.isSet(frame_id));
+
+        return .{ .frame_id = frame_id, .name_id = name_id, .cmd_start_idx = cmd_start_idx };
+    }
+
+    /// Parse begin-render-pass keyword arguments.
+    /// Format: (begin-render-pass :texture N :load clear :store store)
+    fn parseBeginRenderPassArgs(self: *Self, cmd_children: []const NodeIndex) AssembleError!struct {
+        texture_id: u16,
+        load_op: opcodes.LoadOp,
+        store_op: opcodes.StoreOp,
+    } {
+        // Pre-condition: at least 1 child (the keyword)
+        assert(cmd_children.len >= 1);
+
+        var texture_id: u16 = 0;
+        var load_op: opcodes.LoadOp = .clear;
+        var store_op: opcodes.StoreOp = .store;
+
+        var i: usize = 1;
+        while (i < cmd_children.len) : (i += 1) {
+            const tag = self.ast.nodeTag(cmd_children[i]);
+            if (tag != .atom) continue;
+            const arg = self.ast.tokenSlice(self.ast.nodeMainToken(cmd_children[i]));
+
+            if (std.mem.eql(u8, arg, ":texture")) {
+                i += 1;
+                if (i < cmd_children.len and self.ast.nodeTag(cmd_children[i]) == .number) {
+                    texture_id = @intCast(try self.parseNumber(cmd_children[i]));
+                }
+            } else if (std.mem.eql(u8, arg, ":load")) {
+                i += 1;
+                if (i < cmd_children.len and self.ast.nodeTag(cmd_children[i]) == .atom) {
+                    const val = self.ast.tokenSlice(self.ast.nodeMainToken(cmd_children[i]));
+                    load_op = if (std.mem.eql(u8, val, "load")) .load else .clear;
+                }
+            } else if (std.mem.eql(u8, arg, ":store")) {
+                i += 1;
+                if (i < cmd_children.len and self.ast.nodeTag(cmd_children[i]) == .atom) {
+                    const val = self.ast.tokenSlice(self.ast.nodeMainToken(cmd_children[i]));
+                    store_op = if (std.mem.eql(u8, val, "discard")) .discard else .store;
+                }
+            }
+        }
+
+        return .{ .texture_id = texture_id, .load_op = load_op, .store_op = store_op };
+    }
+
+    /// Emit a single frame command.
+    /// Handles both semantic (exec-pass, submit) and shorthand commands.
+    fn emitFrameCommand(
+        self: *Self,
+        emitter: *bytecode_mod.Emitter,
+        form_type: FormType,
+        cmd_children: []const NodeIndex,
+    ) AssembleError!void {
+        // Pre-condition: cmd_children has at least the keyword
+        assert(cmd_children.len >= 1);
+
+        switch (form_type) {
+            .exec_pass => {
+                if (cmd_children.len < 2) return;
+                const pass_id = try self.parseResourceIndex(cmd_children[1], .pass);
+                emitter.execPass(self.gpa, pass_id) catch return error.OutOfMemory;
+            },
+            .submit => {
+                emitter.submit(self.gpa) catch return error.OutOfMemory;
+            },
+            .begin_render_pass => {
+                const args = try self.parseBeginRenderPassArgs(cmd_children);
+                emitter.beginRenderPass(self.gpa, args.texture_id, args.load_op, args.store_op, 0xFFFF) catch return error.OutOfMemory;
+            },
+            .begin_compute_pass => {
+                emitter.beginComputePass(self.gpa) catch return error.OutOfMemory;
+            },
+            .end_pass => {
+                emitter.endPass(self.gpa) catch return error.OutOfMemory;
+            },
+            .set_pipeline => {
+                if (cmd_children.len < 2) return;
+                const pipe_id = try self.parsePipelineId(cmd_children[1]);
+                emitter.setPipeline(self.gpa, pipe_id) catch return error.OutOfMemory;
+            },
+            .draw => {
+                if (cmd_children.len < 3) return;
+                try self.emitDrawCommand(emitter, cmd_children);
+            },
+            .draw_indexed => {
+                if (cmd_children.len < 3) return;
+                try self.emitDrawIndexedCommand(emitter, cmd_children);
+            },
+            .dispatch => {
+                if (cmd_children.len < 4) return;
+                const x = try self.parseNumber(cmd_children[1]);
+                const y = try self.parseNumber(cmd_children[2]);
+                const z = try self.parseNumber(cmd_children[3]);
+                emitter.dispatch(self.gpa, x, y, z) catch return error.OutOfMemory;
+            },
+            else => {},
+        }
+    }
+
+    /// Parse pipeline ID from number or resource reference.
+    fn parsePipelineId(self: *Self, node: NodeIndex) AssembleError!u16 {
+        const tag = self.ast.nodeTag(node);
+        if (tag == .number) {
+            const id_str = self.ast.tokenSlice(self.ast.nodeMainToken(node));
+            return std.fmt.parseInt(u16, id_str, 10) catch return error.ExpectedNumber;
+        } else if (tag == .atom) {
+            return self.parseResourceIndex(node, .pipeline);
+        }
+        return error.ExpectedNumber;
+    }
+
+    /// Emit draw command with optional parameters.
+    fn emitDrawCommand(self: *Self, emitter: *bytecode_mod.Emitter, cmd_children: []const NodeIndex) AssembleError!void {
+        // Pre-condition: at least 3 children (keyword + vertex_count + instance_count)
+        assert(cmd_children.len >= 3);
+
+        const vertex_count = try self.parseNumber(cmd_children[1]);
+        const instance_count = try self.parseNumber(cmd_children[2]);
+        const first_vertex: u32 = if (cmd_children.len > 3) try self.parseNumber(cmd_children[3]) else 0;
+        const first_instance: u32 = if (cmd_children.len > 4) try self.parseNumber(cmd_children[4]) else 0;
+
+        emitter.draw(self.gpa, vertex_count, instance_count, first_vertex, first_instance) catch return error.OutOfMemory;
+    }
+
+    /// Emit draw-indexed command with optional parameters.
+    fn emitDrawIndexedCommand(self: *Self, emitter: *bytecode_mod.Emitter, cmd_children: []const NodeIndex) AssembleError!void {
+        // Pre-condition: at least 3 children
+        assert(cmd_children.len >= 3);
+
+        const index_count = try self.parseNumber(cmd_children[1]);
+        const instance_count = try self.parseNumber(cmd_children[2]);
+        const first_index: u32 = if (cmd_children.len > 3) try self.parseNumber(cmd_children[3]) else 0;
+        const base_vertex: u32 = if (cmd_children.len > 4) try self.parseNumber(cmd_children[4]) else 0;
+        const first_instance: u32 = if (cmd_children.len > 5) try self.parseNumber(cmd_children[5]) else 0;
+
+        emitter.drawIndexed(self.gpa, index_count, instance_count, first_index, base_vertex, first_instance) catch return error.OutOfMemory;
+    }
+
+    /// Emit frame definition.
+    /// Supports two formats:
     /// - Semantic: (frame $frm:N "name" (exec-pass $pass:N) (submit))
     /// - Shorthand: (frame "name" (begin-render-pass ...) (set-pipeline N) (draw ...) (end-pass) (submit))
     fn emitFrame(self: *Self, children: []const NodeIndex) AssembleError!void {
+        // Pre-condition: at least 2 children (frame keyword + something)
         if (children.len < 2) return error.InvalidFormStructure;
 
         const emitter = self.builder.getEmitter();
 
-        // Detect format: if children[1] is a string, it's shorthand format
+        // Parse header based on format
         const is_shorthand = self.ast.nodeTag(children[1]) == .string;
-
-        var frame_id: u16 = 0;
-        var name_id: u16 = 0;
-        var cmd_start_idx: usize = 2;
-
-        if (is_shorthand) {
-            // Shorthand format: (frame "name" ...commands...)
-            // Auto-assign frame ID 0 (or next available)
-            while (self.defined_frames.isSet(frame_id) and frame_id < MAX_RESOURCES) {
-                frame_id += 1;
-            }
-            if (frame_id >= MAX_RESOURCES) return error.TooManyResources;
-            self.defined_frames.set(frame_id);
-
-            const name_raw = self.ast.tokenSlice(self.ast.nodeMainToken(children[1]));
-            const name = self.stripQuotes(name_raw);
-            const str_id = try self.internString(name);
-            name_id = str_id.toInt();
-            cmd_start_idx = 2;
-        } else {
-            // Semantic format: (frame $frm:N "name" ...)
+        const header = if (is_shorthand)
+            try self.parseFrameHeaderShorthand(children)
+        else blk: {
             if (children.len < 3) return error.InvalidFormStructure;
-            frame_id = try self.parseResourceIndex(children[1], .frame);
-            if (self.defined_frames.isSet(frame_id)) return error.DuplicateResource;
-            self.defined_frames.set(frame_id);
+            break :blk try self.parseFrameHeaderSemantic(children);
+        };
 
-            if (self.ast.nodeTag(children[2]) == .string) {
-                const name_raw = self.ast.tokenSlice(self.ast.nodeMainToken(children[2]));
-                const name = self.stripQuotes(name_raw);
-                const str_id = try self.internString(name);
-                name_id = str_id.toInt();
-                cmd_start_idx = 3;
-            }
-        }
-
-        emitter.defineFrame(self.gpa, frame_id, name_id) catch return error.OutOfMemory;
+        emitter.defineFrame(self.gpa, header.frame_id, header.name_id) catch return error.OutOfMemory;
 
         // Process frame commands
-        for (children[cmd_start_idx..]) |child| {
+        for (children[header.cmd_start_idx..]) |child| {
             if (self.ast.nodeTag(child) != .list) continue;
 
             const cmd_children = self.ast.children(child);
@@ -813,100 +982,11 @@ pub const Assembler = struct {
 
             const cmd_kw = self.ast.tokenSlice(self.ast.nodeMainToken(cmd_children[0]));
             const form_type = FormType.fromKeyword(cmd_kw);
-
-            switch (form_type) {
-                .exec_pass => {
-                    if (cmd_children.len < 2) continue;
-                    const pass_id = try self.parseResourceIndex(cmd_children[1], .pass);
-                    emitter.execPass(self.gpa, pass_id) catch return error.OutOfMemory;
-                },
-                .submit => {
-                    emitter.submit(self.gpa) catch return error.OutOfMemory;
-                },
-                // Shorthand frame-level commands
-                .begin_render_pass => {
-                    // Parse (begin-render-pass :texture N :load clear :store store)
-                    var texture_id: u16 = 0;
-                    var load_op: opcodes.LoadOp = .clear;
-                    var store_op: opcodes.StoreOp = .store;
-
-                    var i: usize = 1;
-                    while (i < cmd_children.len) : (i += 1) {
-                        const tag = self.ast.nodeTag(cmd_children[i]);
-                        // Keywords like :texture, :load, :store are atoms
-                        if (tag != .atom) continue;
-                        const arg = self.ast.tokenSlice(self.ast.nodeMainToken(cmd_children[i]));
-
-                        if (std.mem.eql(u8, arg, ":texture")) {
-                            i += 1;
-                            if (i < cmd_children.len and self.ast.nodeTag(cmd_children[i]) == .number) {
-                                texture_id = @intCast(try self.parseNumber(cmd_children[i]));
-                            }
-                        } else if (std.mem.eql(u8, arg, ":load")) {
-                            i += 1;
-                            if (i < cmd_children.len and self.ast.nodeTag(cmd_children[i]) == .atom) {
-                                const val = self.ast.tokenSlice(self.ast.nodeMainToken(cmd_children[i]));
-                                load_op = if (std.mem.eql(u8, val, "load")) .load else .clear;
-                            }
-                        } else if (std.mem.eql(u8, arg, ":store")) {
-                            i += 1;
-                            if (i < cmd_children.len and self.ast.nodeTag(cmd_children[i]) == .atom) {
-                                const val = self.ast.tokenSlice(self.ast.nodeMainToken(cmd_children[i]));
-                                store_op = if (std.mem.eql(u8, val, "discard")) .discard else .store;
-                            }
-                        }
-                    }
-                    emitter.beginRenderPass(self.gpa, texture_id, load_op, store_op, 0xFFFF) catch return error.OutOfMemory;
-                },
-                .begin_compute_pass => {
-                    emitter.beginComputePass(self.gpa) catch return error.OutOfMemory;
-                },
-                .end_pass => {
-                    emitter.endPass(self.gpa) catch return error.OutOfMemory;
-                },
-                .set_pipeline => {
-                    // Shorthand: (set-pipeline N) where N is numeric
-                    if (cmd_children.len < 2) continue;
-                    const pipe_tag = self.ast.nodeTag(cmd_children[1]);
-                    if (pipe_tag == .number) {
-                        // Numeric ID
-                        const id_str = self.ast.tokenSlice(self.ast.nodeMainToken(cmd_children[1]));
-                        const pipe_id = std.fmt.parseInt(u16, id_str, 10) catch continue;
-                        emitter.setPipeline(self.gpa, pipe_id) catch return error.OutOfMemory;
-                    } else if (pipe_tag == .atom) {
-                        // Resource ID like $pipe:0
-                        const pipe_id = try self.parseResourceIndex(cmd_children[1], .pipeline);
-                        emitter.setPipeline(self.gpa, pipe_id) catch return error.OutOfMemory;
-                    }
-                },
-                .draw => {
-                    // (draw N M [first_vertex first_instance]) where N=vertex_count, M=instance_count
-                    if (cmd_children.len < 3) continue;
-                    const vertex_count = try self.parseNumber(cmd_children[1]);
-                    const instance_count = try self.parseNumber(cmd_children[2]);
-                    const first_vertex: u32 = if (cmd_children.len > 3) try self.parseNumber(cmd_children[3]) else 0;
-                    const first_instance: u32 = if (cmd_children.len > 4) try self.parseNumber(cmd_children[4]) else 0;
-                    emitter.draw(self.gpa, vertex_count, instance_count, first_vertex, first_instance) catch return error.OutOfMemory;
-                },
-                .draw_indexed => {
-                    if (cmd_children.len < 3) continue;
-                    const index_count = try self.parseNumber(cmd_children[1]);
-                    const instance_count = try self.parseNumber(cmd_children[2]);
-                    const first_index: u32 = if (cmd_children.len > 3) try self.parseNumber(cmd_children[3]) else 0;
-                    const base_vertex: u32 = if (cmd_children.len > 4) try self.parseNumber(cmd_children[4]) else 0;
-                    const first_instance: u32 = if (cmd_children.len > 5) try self.parseNumber(cmd_children[5]) else 0;
-                    emitter.drawIndexed(self.gpa, index_count, instance_count, first_index, base_vertex, first_instance) catch return error.OutOfMemory;
-                },
-                .dispatch => {
-                    if (cmd_children.len < 4) continue;
-                    const x = try self.parseNumber(cmd_children[1]);
-                    const y = try self.parseNumber(cmd_children[2]);
-                    const z = try self.parseNumber(cmd_children[3]);
-                    emitter.dispatch(self.gpa, x, y, z) catch return error.OutOfMemory;
-                },
-                else => {},
-            }
+            try self.emitFrameCommand(emitter, form_type, cmd_children);
         }
+
+        // Post-condition: frame was defined
+        assert(self.defined_frames.isSet(header.frame_id));
 
         emitter.endFrame(self.gpa) catch return error.OutOfMemory;
     }
