@@ -192,6 +192,11 @@ pub const OpCode = enum(u8) {
     /// End pass definition.
     end_pass_def = 0x34,
 
+    /// Execute a pass once (run-once semantics for init passes).
+    /// Params: pass_id
+    /// The executor tracks which passes have been executed and skips duplicates.
+    exec_pass_once = 0x35,
+
     // ========================================================================
     // Pool Operations (0x40-0x4F)
     // ========================================================================
@@ -256,6 +261,7 @@ pub const OpCode = enum(u8) {
             .define_frame,
             .end_frame,
             .exec_pass,
+            .exec_pass_once,
             .define_pass,
             .end_pass_def,
             .select_from_pool,

@@ -1397,3 +1397,70 @@ test "Analyzer: detectPlugins - core only" {
     try testing.expect(!plugins.wasm);
     try testing.expect(!plugins.animation);
 }
+
+// ----------------------------------------------------------------------------
+// #init macro tests
+// ----------------------------------------------------------------------------
+
+test "Analyzer: init macro with valid references" {
+    const source: [:0]const u8 =
+        \\#wgsl initParticles { value="@compute @workgroup_size(64) fn main() {}" }
+        \\#buffer particles { size=1000 usage=[storage vertex] }
+        \\#init resetParticles {
+        \\  buffer=particles
+        \\  shader=initParticles
+        \\  params=[12345]
+        \\}
+    ;
+
+    var result = try parseAndAnalyze(source);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "Analyzer: init macro missing required buffer property" {
+    const source: [:0]const u8 =
+        \\#wgsl initParticles { value="@compute @workgroup_size(64) fn main() {}" }
+        \\#init resetParticles {
+        \\  shader=initParticles
+        \\}
+    ;
+
+    var result = try parseAndAnalyze(source);
+    defer result.deinit(testing.allocator);
+
+    // Should have error for missing 'buffer' property
+    try testing.expect(result.errors.len > 0);
+    var found_missing_prop = false;
+    for (result.errors) |err| {
+        if (err.kind == .missing_required_property) {
+            found_missing_prop = true;
+            break;
+        }
+    }
+    try testing.expect(found_missing_prop);
+}
+
+test "Analyzer: init macro missing required shader property" {
+    const source: [:0]const u8 =
+        \\#buffer particles { size=1000 usage=[storage vertex] }
+        \\#init resetParticles {
+        \\  buffer=particles
+        \\}
+    ;
+
+    var result = try parseAndAnalyze(source);
+    defer result.deinit(testing.allocator);
+
+    // Should have error for missing 'shader' property
+    try testing.expect(result.errors.len > 0);
+    var found_missing_prop = false;
+    for (result.errors) |err| {
+        if (err.kind == .missing_required_property) {
+            found_missing_prop = true;
+            break;
+        }
+    }
+    try testing.expect(found_missing_prop);
+}

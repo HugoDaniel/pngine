@@ -241,6 +241,34 @@ test "Parser: wasmCall macro" {
     try testing.expectEqual(Node.Tag.macro_wasm_call, macro_tag);
 }
 
+test "Parser: init macro" {
+    const source: [:0]const u8 =
+        \\#init resetParticles {
+        \\  buffer=particles
+        \\  shader=initParticles
+        \\  params=[12345]
+        \\}
+    ;
+
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    // Verify root has one child (the init macro)
+    const root_data = ast.nodes.items(.data)[0];
+    const children = ast.extraData(root_data.extra_range);
+    try testing.expectEqual(@as(usize, 1), children.len);
+
+    // Verify macro node
+    const macro_idx = children[0];
+    const macro_tag = ast.nodes.items(.tag)[macro_idx];
+    try testing.expectEqual(Node.Tag.macro_init, macro_tag);
+
+    // Verify properties exist
+    const macro_data = ast.nodes.items(.data)[macro_idx];
+    const props = ast.extraData(macro_data.extra_range);
+    try testing.expectEqual(@as(usize, 3), props.len); // buffer, shader, params
+}
+
 test "Parser: builtin refs - canvas.width, time.total without dollar" {
     const source: [:0]const u8 =
         \\#wasmCall mvpMatrix {

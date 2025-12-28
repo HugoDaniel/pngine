@@ -717,6 +717,13 @@ pub const Emitter = struct {
         try self.emitVarint(allocator, pass_id);
     }
 
+    /// Emit exec_pass_once instruction (run-once semantics for init passes).
+    /// The executor tracks which passes have been executed and skips duplicates.
+    pub fn execPassOnce(self: *Self, allocator: Allocator, pass_id: u16) !void {
+        try self.emitOpcode(allocator, .exec_pass_once);
+        try self.emitVarint(allocator, pass_id);
+    }
+
     /// Emit define_pass instruction.
     pub fn definePass(
         self: *Self,

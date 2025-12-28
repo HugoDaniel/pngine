@@ -130,6 +130,9 @@ pub fn Dispatcher(comptime BackendType: type) type {
         /// Pass bytecode ranges for exec_pass.
         pass_ranges: std.AutoHashMap(u16, PassRange),
 
+        /// Passes executed via exec_pass_once (run-once tracking).
+        executed_once: std.AutoHashMap(u16, void),
+
         /// Current pass ID being defined (for tracking range).
         current_pass_id: ?u16,
 
@@ -167,6 +170,7 @@ pub fn Dispatcher(comptime BackendType: type) type {
                 .in_pass_def = false,
                 .in_frame_def = false,
                 .pass_ranges = std.AutoHashMap(u16, PassRange).init(allocator),
+                .executed_once = std.AutoHashMap(u16, void).init(allocator),
                 .current_pass_id = null,
                 .current_pass_start = 0,
                 .frame_counter = initial_frame,
@@ -174,9 +178,10 @@ pub fn Dispatcher(comptime BackendType: type) type {
             };
         }
 
-        /// Clean up pass ranges map.
+        /// Clean up dispatcher state.
         pub fn deinit(self: *Self) void {
             self.pass_ranges.deinit();
+            self.executed_once.deinit();
         }
 
         /// Scan bytecode for pass definitions and populate pass_ranges.

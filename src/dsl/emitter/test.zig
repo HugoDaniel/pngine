@@ -4590,3 +4590,221 @@ test "Emitter: cube with normal3 format" {
     }
     try testing.expect(found_buffer);
 }
+
+// ============================================================================
+// #init Macro Tests
+// ============================================================================
+
+test "Emitter: init macro creates synthetic resources" {
+    // #init macro should expand to:
+    // - Compute pipeline using the specified shader
+    // - Bind group with the buffer at binding 0
+    // - Compute pass that dispatches workgroups
+    const source: [:0]const u8 =
+        \\#wgsl initShader { value="@compute @workgroup_size(64) fn main() {}" }
+        \\#buffer particles { size=4096 usage=[STORAGE] }
+        \\#init resetParticles { buffer=particles shader=initShader }
+        \\#frame main { perform=[resetParticles] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    // Verify valid bytecode
+    try testing.expectEqualStrings("PNGB", pngb[0..4]);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    // Count synthetic resources created by #init expansion
+    var pipeline_count: u32 = 0;
+    var bind_group_count: u32 = 0;
+    var dispatch_count: u32 = 0;
+
+    for (gpu.getCalls()) |call| {
+        switch (call.call_type) {
+            .create_compute_pipeline => pipeline_count += 1,
+            .create_bind_group => bind_group_count += 1,
+            .dispatch => dispatch_count += 1,
+            else => {},
+        }
+    }
+
+    // #init should create at least 1 compute pipeline
+    try testing.expect(pipeline_count >= 1);
+    // #init should create at least 1 bind group
+    try testing.expect(bind_group_count >= 1);
+    // #init should dispatch at least once
+    try testing.expect(dispatch_count >= 1);
+}
+
+test "Emitter: init macro calculates workgroup count from buffer size" {
+    // Buffer size = 4096 bytes
+    // Default workgroup size = 64
+    // Expected workgroups = ceil(4096 / 64) = 64
+    const source: [:0]const u8 =
+        \\#wgsl initShader { value="@compute @workgroup_size(64) fn main() {}" }
+        \\#buffer data { size=4096 usage=[STORAGE] }
+        \\#init initData { buffer=data shader=initShader }
+        \\#frame main { perform=[initData] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    // Find dispatch call and verify workgroup count
+    var found_dispatch = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .dispatch) {
+            // Expected: ceil(4096 / 64) = 64 workgroups
+            try testing.expectEqual(@as(u32, 64), call.params.dispatch.x);
+            try testing.expectEqual(@as(u32, 1), call.params.dispatch.y);
+            try testing.expectEqual(@as(u32, 1), call.params.dispatch.z);
+            found_dispatch = true;
+            break;
+        }
+    }
+    try testing.expect(found_dispatch);
+}
+
+test "Emitter: frame init= runs passes once" {
+    // Test that init= property uses run-once semantics:
+    // - First frame execution: init pass runs
+    // - Second frame execution: init pass skipped
+    const source: [:0]const u8 =
+        \\#wgsl initShader { value="@compute @workgroup_size(64) fn main() {}" }
+        \\#buffer data { size=1024 usage=[STORAGE] }
+        \\#init initData { buffer=data shader=initShader }
+        \\#frame main { init=[initData] perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+
+    // Execute first frame - init pass should run
+    try dispatcher.executeAll(testing.allocator);
+    const first_dispatch_count = countDispatchCalls(&gpu);
+    try testing.expect(first_dispatch_count >= 1);
+
+    // Reset GPU call log
+    gpu.deinit(testing.allocator);
+    gpu = .empty;
+
+    // Execute second frame - init pass should be skipped (run-once)
+    dispatcher.pc = 0; // Reset PC to start
+    try dispatcher.executeAll(testing.allocator);
+    const second_dispatch_count = countDispatchCalls(&gpu);
+
+    // Init pass should NOT run on second execution
+    try testing.expectEqual(@as(u32, 0), second_dispatch_count);
+}
+
+test "Emitter: multiple frames with different init= lists" {
+    // Test multiple frames each with their own init= passes
+    // Simulates animation scenes where each scene has different initialization
+    const source: [:0]const u8 =
+        \\#wgsl initA { value="@compute @workgroup_size(64) fn main() {}" }
+        \\#wgsl initB { value="@compute @workgroup_size(64) fn main() {}" }
+        \\#buffer bufA { size=1024 usage=[STORAGE] }
+        \\#buffer bufB { size=1024 usage=[STORAGE] }
+        \\#init setupA { buffer=bufA shader=initA }
+        \\#init setupB { buffer=bufB shader=initB }
+        \\#frame sceneA { init=[setupA] perform=[] }
+        \\#frame sceneB { init=[setupB] perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    // Verify bytecode is valid
+    try testing.expectEqualStrings("PNGB", pngb[0..4]);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    // Both init passes should have executed (once each)
+    const dispatch_count = countDispatchCalls(&gpu);
+    try testing.expectEqual(@as(u32, 2), dispatch_count);
+}
+
+test "Emitter: init= with multiple passes in single frame" {
+    // Test that multiple init passes in a single frame all use run-once semantics
+    const source: [:0]const u8 =
+        \\#wgsl initA { value="@compute @workgroup_size(64) fn main() {}" }
+        \\#wgsl initB { value="@compute @workgroup_size(64) fn main() {}" }
+        \\#buffer bufA { size=512 usage=[STORAGE] }
+        \\#buffer bufB { size=512 usage=[STORAGE] }
+        \\#init setupA { buffer=bufA shader=initA }
+        \\#init setupB { buffer=bufB shader=initB }
+        \\#frame main { init=[setupA setupB] perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+
+    // First execution: both init passes run
+    try dispatcher.executeAll(testing.allocator);
+    const first_count = countDispatchCalls(&gpu);
+    try testing.expectEqual(@as(u32, 2), first_count);
+
+    // Reset and execute again
+    gpu.deinit(testing.allocator);
+    gpu = .empty;
+    dispatcher.pc = 0;
+    try dispatcher.executeAll(testing.allocator);
+    const second_count = countDispatchCalls(&gpu);
+
+    // Second execution: no init passes run (all skipped)
+    try testing.expectEqual(@as(u32, 0), second_count);
+}
+
+/// Helper to count dispatch calls in mock GPU log.
+fn countDispatchCalls(gpu: *mock_gpu.MockGPU) u32 {
+    var count: u32 = 0;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .dispatch) count += 1;
+    }
+    return count;
+}

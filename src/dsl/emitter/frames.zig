@@ -369,6 +369,11 @@ fn emitFrameBody(e: *Emitter, node: Node.Index) Emitter.Error!void {
     // Pre-condition
     std.debug.assert(node.toInt() < e.ast.nodes.len);
 
+    // Emit 'init' array (run-once passes, executed before first frame)
+    if (utils.findPropertyValue(e, node, "init")) |init_value| {
+        try emitInitArray(e, init_value);
+    }
+
     // Emit 'before' array (queue actions before passes)
     if (utils.findPropertyValue(e, node, "before")) |before_value| {
         try emitActionArray(e, before_value);
@@ -382,6 +387,42 @@ fn emitFrameBody(e: *Emitter, node: Node.Index) Emitter.Error!void {
     // Emit 'after' array (queue actions after passes)
     if (utils.findPropertyValue(e, node, "after")) |after_value| {
         try emitActionArray(e, after_value);
+    }
+}
+
+/// Emit an array of init actions (run-once passes).
+/// Uses execPassOnce opcode for run-once semantics.
+fn emitInitArray(e: *Emitter, array_node: Node.Index) Emitter.Error!void {
+    const value_tag = e.ast.nodes.items(.tag)[array_node.toInt()];
+    if (value_tag != .array) return;
+
+    const array_data = e.ast.nodes.items(.data)[array_node.toInt()];
+    const elements = e.ast.extraData(array_data.extra_range);
+
+    // Bounded iteration over init passes
+    const max_elements = @min(elements.len, MAX_PERFORM_ACTIONS);
+    for (0..max_elements) |i| {
+        const elem_idx = elements[i];
+        const elem: Node.Index = @enumFromInt(elem_idx);
+        try emitInitAction(e, elem);
+    }
+}
+
+/// Emit a single init action (run-once pass).
+fn emitInitAction(e: *Emitter, elem: Node.Index) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(elem.toInt() < e.ast.nodes.len);
+
+    const elem_tag = e.ast.nodes.items(.tag)[elem.toInt()];
+
+    if (elem_tag == .identifier_value) {
+        const name_token = e.ast.nodes.items(.main_token)[elem.toInt()];
+        const action_name = utils.getTokenSlice(e, name_token);
+
+        if (e.pass_ids.get(action_name)) |pass_id| {
+            // Use execPassOnce for run-once semantics
+            try e.builder.getEmitter().execPassOnce(e.gpa, pass_id);
+        }
     }
 }
 

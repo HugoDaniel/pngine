@@ -61,6 +61,15 @@ pub fn handle(
             try executePass(Self, self, pass_id, allocator);
         },
 
+        .exec_pass_once => {
+            const pass_id: u16 = @intCast(try self.readVarint());
+            // Only execute if not already executed
+            if (self.executed_once.get(pass_id) == null) {
+                try executePass(Self, self, pass_id, allocator);
+                try self.executed_once.put(pass_id, {});
+            }
+        },
+
         .define_pass => {
             const pass_id: u16 = @intCast(try self.readVarint());
             _ = try self.readByte(); // pass_type
@@ -155,6 +164,7 @@ pub fn isFrameOpcode(op: OpCode) bool {
         .define_pass,
         .end_pass_def,
         .exec_pass,
+        .exec_pass_once,
         => true,
         else => false,
     };

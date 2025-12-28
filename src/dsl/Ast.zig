@@ -123,6 +123,14 @@ pub const Node = struct {
         macro_render_pass,
         /// #computePass name { ... }
         macro_compute_pass,
+        /// #init name { buffer=... shader=... params=[...] }
+        /// Compute shader initialization for buffers.
+        /// Expands to: compute pipeline + params buffer + bind group + compute pass.
+        /// Properties:
+        /// - buffer: target buffer reference
+        /// - shader: WGSL shader module reference
+        /// - params: optional array of uniform values
+        macro_init,
         /// #renderBundle name { ... }
         /// Pre-recorded draw commands for efficient replay.
         /// Properties:

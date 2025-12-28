@@ -129,6 +129,7 @@ pub const Analyzer = struct {
         compute_pipeline: std.StringHashMapUnmanaged(SymbolInfo),
         render_pass: std.StringHashMapUnmanaged(SymbolInfo),
         compute_pass: std.StringHashMapUnmanaged(SymbolInfo),
+        buffer_init: std.StringHashMapUnmanaged(SymbolInfo),
         render_bundle: std.StringHashMapUnmanaged(SymbolInfo),
         frame: std.StringHashMapUnmanaged(SymbolInfo),
         shader_module: std.StringHashMapUnmanaged(SymbolInfo),
@@ -155,6 +156,7 @@ pub const Analyzer = struct {
                 .compute_pipeline = .{},
                 .render_pass = .{},
                 .compute_pass = .{},
+                .buffer_init = .{},
                 .render_bundle = .{},
                 .frame = .{},
                 .shader_module = .{},
@@ -182,6 +184,7 @@ pub const Analyzer = struct {
             self.compute_pipeline.deinit(gpa);
             self.render_pass.deinit(gpa);
             self.compute_pass.deinit(gpa);
+            self.buffer_init.deinit(gpa);
             self.render_bundle.deinit(gpa);
             self.frame.deinit(gpa);
             self.shader_module.deinit(gpa);
@@ -208,6 +211,7 @@ pub const Analyzer = struct {
                 .compute_pipeline => &self.compute_pipeline,
                 .render_pass => &self.render_pass,
                 .compute_pass => &self.compute_pass,
+                .buffer_init => &self.buffer_init,
                 .render_bundle => &self.render_bundle,
                 .frame => &self.frame,
                 .shader_module => &self.shader_module,
@@ -247,6 +251,7 @@ pub const Analyzer = struct {
         compute_pipeline,
         render_pass,
         compute_pass,
+        buffer_init,
         render_bundle,
         frame,
         shader_module,
@@ -272,6 +277,7 @@ pub const Analyzer = struct {
                 .{ "computePipeline", .compute_pipeline },
                 .{ "renderPass", .render_pass },
                 .{ "computePass", .compute_pass },
+                .{ "init", .buffer_init },
                 .{ "renderBundle", .render_bundle },
                 .{ "frame", .frame },
                 .{ "shaderModule", .shader_module },
@@ -348,7 +354,7 @@ pub const Analyzer = struct {
         const layout_ns: []const Namespace = &.{ .pipeline_layout, .bind_group_layout };
         const sampler_ns: []const Namespace = &.{.sampler};
         // Array property namespaces
-        const pass_ns: []const Namespace = &.{ .render_pass, .compute_pass, .queue };
+        const pass_ns: []const Namespace = &.{ .render_pass, .compute_pass, .queue, .buffer_init };
         const render_bundle_ns: []const Namespace = &.{.render_bundle};
         const bind_group_ns: []const Namespace = &.{.bind_group};
         const wgsl_ns: []const Namespace = &.{ .wgsl, .shader_module };
@@ -367,6 +373,7 @@ pub const Analyzer = struct {
             .{ "layout", PropertyContext{ .namespaces = layout_ns } },
             .{ "sampler", PropertyContext{ .namespaces = sampler_ns } },
             // Array properties
+            .{ "init", PropertyContext{ .namespaces = pass_ns } },
             .{ "perform", PropertyContext{ .namespaces = pass_ns } },
             .{ "before", PropertyContext{ .namespaces = pass_ns } },
             .{ "after", PropertyContext{ .namespaces = pass_ns } },
@@ -561,6 +568,7 @@ pub const Analyzer = struct {
             .macro_compute_pipeline => .compute_pipeline,
             .macro_render_pass => .render_pass,
             .macro_compute_pass => .compute_pass,
+            .macro_init => .buffer_init,
             .macro_render_bundle => .render_bundle,
             .macro_frame => .frame,
             .macro_shader_module => .shader_module,
@@ -637,6 +645,8 @@ pub const Analyzer = struct {
         .{ "wgsl", RequiredProperties{ .required = &.{"value"}, .name = "#wgsl" } },
         // GPUBindGroupLayoutDescriptor: entries define the binding slots
         .{ "bind_group_layout", RequiredProperties{ .required = &.{"entries"}, .name = "#bindGroupLayout" } },
+        // #init macro: buffer and shader are required, params is optional
+        .{ "buffer_init", RequiredProperties{ .required = &.{ "buffer", "shader" }, .name = "#init" } },
     });
 
     /// Validate that all declarations have their required properties.
@@ -663,6 +673,7 @@ pub const Analyzer = struct {
                 .macro_shader_module => "shader_module",
                 .macro_wgsl => "wgsl",
                 .macro_bind_group_layout => "bind_group_layout",
+                .macro_init => "buffer_init",
                 else => null,
             };
 

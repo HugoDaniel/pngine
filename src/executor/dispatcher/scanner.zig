@@ -94,7 +94,7 @@ pub const OpcodeScanner = struct {
             .end_pass, .submit, .end_frame, .nop, .begin_compute_pass, .end_pass_def => {},
 
             // 1 varint
-            .set_pipeline, .exec_pass => self.skipVarint(),
+            .set_pipeline, .exec_pass, .exec_pass_once => self.skipVarint(),
 
             // 2 varints
             .define_frame,

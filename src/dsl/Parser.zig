@@ -209,6 +209,7 @@ pub const Parser = struct {
             .macro_pipeline_layout => .macro_pipeline_layout,
             .macro_render_pass => .macro_render_pass,
             .macro_compute_pass => .macro_compute_pass,
+            .macro_init => .macro_init,
             .macro_render_bundle => .macro_render_bundle,
             .macro_frame => .macro_frame,
             .macro_wgsl => .macro_wgsl,

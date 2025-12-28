@@ -1,6 +1,6 @@
 # Buffer Initialization Plan
 
-> **Status**: Active - Phase 6 (fill opcode removal) complete.
+> **Status**: Complete - All phases implemented.
 >
 > **Context**:
 > - Main project guide: `CLAUDE.md`
@@ -327,9 +327,19 @@ The `#init` macro expands to:
 ## Phase Checklist
 
 - [x] Phase 1: Built-in shapes (`cube=`, `plane=`) - DONE
-- [ ] Phase 2: Auto-sizing via reflection (`size=shader.var`)
-- [ ] Phase 3: `#init` macro
-- [ ] Phase 4: Frame `init=` support
+- [x] Phase 2: Auto-sizing via reflection (`size=shader.var`) - ALREADY IMPLEMENTED
+- [x] Phase 3: `#init` macro - DONE
+  - Token/Parser: `macro_init` keyword added
+  - Analyzer: `buffer_init` symbol table, references resolve in `perform=[]` and `init=[]`
+  - Emitter: Expands to synthetic compute pipeline + bind group + pass
+  - Tests: 2 tests for init macro emission
+- [x] Phase 4: Frame `init=` support - DONE
+  - Added `exec_pass_once` opcode (0x35) for run-once semantics
+  - Analyzer: `init` property resolves to pass namespaces
+  - Emitter: `init=[]` uses `execPassOnce` opcode
+  - Dispatcher: Tracks executed-once passes, skips duplicates
+  - Tests: 3 tests for init= with run-once verification
+  - Multiple frames can have different `init=[]` lists (for animation scenes)
 - [x] Phase 6: Remove data-gen opcodes (DONE)
 
 ---

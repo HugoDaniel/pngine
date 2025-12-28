@@ -53,6 +53,7 @@ const passes = @import("emitter/passes.zig");
 const frames = @import("emitter/frames.zig");
 const wasm = @import("emitter/wasm.zig");
 const animations = @import("emitter/animations.zig");
+const buffer_init = @import("emitter/init.zig");
 
 // Use reflect module import
 const reflect = @import("reflect");
@@ -385,22 +386,25 @@ pub const Emitter = struct {
         try resources.emitBindGroups(&self);
         try resources.emitRenderBundles(&self);
 
-        // Pass 2: Collect queues (no bytecode emitted, just ID tracking)
+        // Pass 2: Emit #init macros (creates synthetic pipelines, bind groups, passes)
+        try buffer_init.emitInitMacros(&self);
+
+        // Pass 3: Collect queues (no bytecode emitted, just ID tracking)
         try frames.collectQueues(&self);
 
-        // Pass 3: Emit passes
+        // Pass 4: Emit passes
         try passes.emitPasses(&self);
 
-        // Pass 4: Emit frames (queues inlined via emitQueueAction)
+        // Pass 5: Emit frames (queues inlined via emitQueueAction)
         try frames.emitFrames(&self);
 
-        // Pass 5: Extract animation metadata
+        // Pass 6: Extract animation metadata
         try animations.extractAnimations(&self);
 
-        // Pass 6: Populate animation table in bytecode format
+        // Pass 7: Populate animation table in bytecode format
         try animations.populateAnimationTable(&self);
 
-        // Pass 7: Populate uniform table from WGSL reflection
+        // Pass 8: Populate uniform table from WGSL reflection
         try resources.populateUniformTable(&self);
 
         // Finalize and return PNGB bytes
