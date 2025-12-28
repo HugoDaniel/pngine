@@ -2,7 +2,7 @@
 //!
 //! Tests the complete validation pipeline with real .pngine example files:
 //! - Bytecode loading and compilation
-//! - WASM execution via wasm3
+//! - WASM execution via WAMR
 //! - Command buffer validation
 //! - WGSL extraction and cross-validation
 //!
@@ -106,7 +106,7 @@ fn errorCount(result: *const ValidationResult) usize {
 fn warningCount(result: *const ValidationResult) usize {
     var count: usize = 0;
     for (result.warnings.items) |w| {
-        // W100 is "wasm3 not available" which is expected in some test builds
+        // W100 is "WASM runtime not available" which is expected in some test builds
         if (!std.mem.eql(u8, w.code, "W100")) {
             count += 1;
         }
@@ -176,7 +176,7 @@ test "e2e: simple_triangle.pngine validates without errors" {
     // Should have no errors
     try std.testing.expectEqual(@as(usize, 0), errorCount(&result));
 
-    // Should have valid status (ok or warning for wasm3 unavailable)
+    // Should have valid status (ok or warning for WASM runtime unavailable)
     try std.testing.expect(result.status != .err);
 }
 
@@ -221,7 +221,7 @@ test "e2e: simple_triangle.pngine module info is populated" {
         try std.testing.expect(info.wgsl_entries_count > 0);
     } else {
         // If module_info is null, that's also an indicator of an issue
-        // but we don't fail here since it may be due to wasm3 unavailability
+        // but we don't fail here since it may be due to WASM runtime unavailability
     }
 }
 

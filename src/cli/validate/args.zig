@@ -200,7 +200,7 @@ pub fn parseFrameIndices(allocator: std.mem.Allocator, s: []const u8) ![]u32 {
 
 pub fn printHelp() void {
     std.debug.print(
-        \\PNGine Validate - Runtime validation via wasm3
+        \\PNGine Validate - Runtime validation via WAMR
         \\
         \\Usage: pngine validate <input> [options]
         \\

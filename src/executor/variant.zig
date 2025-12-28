@@ -127,7 +127,7 @@ pub const VARIANTS = [_]Variant{
             .animation = false,
             .texture = false,
         },
-        .estimated_size = 30 * 1024, // ~30KB (wasm3 adds size)
+        .estimated_size = 30 * 1024, // ~30KB (WASM with nested runtime)
     },
     .{
         .name = "full",

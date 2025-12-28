@@ -1,6 +1,6 @@
 //! WASM execution and validation for validate command.
 //!
-//! Uses wasm3 to execute bytecode and capture command buffer output.
+//! Uses WAMR with AOT-compiled executor for native performance.
 
 const std = @import("std");
 const pngine = @import("pngine");
@@ -12,14 +12,19 @@ const ValidationResult = types.ValidationResult;
 const FrameResult = types.FrameResult;
 const FrameDiff = types.FrameDiff;
 const CommandInfo = types.CommandInfo;
-const wasm3 = @import("wasm3.zig");
-const Wasm3Runtime = wasm3.Wasm3Runtime;
+
+// WAMR runtime for native WASM/AOT execution
+const wamr = @import("wamr.zig");
+const WamrRuntime = wamr.WamrRuntime;
+
 const cmd_validator = @import("cmd_validator.zig");
 const Validator = cmd_validator.Validator;
 const symptom_diagnosis = @import("symptom_diagnosis.zig");
 const wgsl_parser = @import("wgsl_parser.zig");
 
-// Embedded WASM executor (from build)
+// Embedded WASM executor for WAMR interpreter
+// Note: AOT is not used for embedded scenarios because @embedFile puts data
+// in read-only memory which can't be properly mmap'd for execution
 const embedded_wasm = if (build_options.has_embedded_wasm)
     @embedFile("embedded_wasm")
 else
@@ -27,7 +32,7 @@ else
 
 /// Check if WASM execution is available.
 pub fn isAvailable() bool {
-    return Wasm3Runtime.isAvailable() and embedded_wasm.len > 0;
+    return WamrRuntime.isAvailable() and embedded_wasm.len > 0;
 }
 
 /// Validate bytecode structure and content.
@@ -139,13 +144,14 @@ pub fn validateBytecode(
                 .code = "W100",
                 .severity = .warning,
                 .message = switch (err) {
-                    error.InitFailed => "wasm3 init failed",
+                    error.InitFailed => "WASM runtime init failed",
                     error.ParseFailed => "WASM parse failed",
                     error.LoadFailed => "WASM load failed",
-                    error.CompileFailed => "WASM compile failed",
+                    error.InstantiateFailed => "WASM instantiate failed",
                     error.FunctionNotFound => "WASM function not found",
                     error.CallFailed => "WASM call failed",
                     error.MemoryAccessFailed => "WASM memory access failed",
+                    error.NotAvailable => "WASM runtime not available",
                     else => "WASM execution failed",
                 },
                 .command_index = null,
@@ -156,10 +162,10 @@ pub fn validateBytecode(
         try result.warnings.append(allocator, .{
             .code = "W100",
             .severity = .warning,
-            .message = if (!Wasm3Runtime.isAvailable())
-                "wasm3 not available at compile time"
+            .message = if (!WamrRuntime.isAvailable())
+                "WAMR not available at compile time"
             else
-                "no embedded WASM executor",
+                "No embedded WASM executor",
             .command_index = null,
         });
         if (result.status == .ok) result.status = .warning;
@@ -185,11 +191,11 @@ fn executeWasm(
     std.debug.assert(bytecode.len >= format.HEADER_SIZE);
     std.debug.assert(opts.frame_indices.len > 0);
 
-    // Initialize wasm3 runtime with 1MB stack
-    var runtime = try Wasm3Runtime.init(allocator, 1024 * 1024);
+    // Initialize WAMR runtime with 1MB stack and 1MB heap
+    var runtime = try WamrRuntime.init(allocator, 1024 * 1024, 1024 * 1024);
     defer runtime.deinit();
 
-    // Load the embedded WASM executor
+    // Load WASM executor using interpreter
     try runtime.loadModule(embedded_wasm);
 
     // Link host functions (log is optional)

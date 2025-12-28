@@ -378,6 +378,61 @@ pub const WasmReturnType = struct {
     }
 };
 
+/// Expression opcodes for fill_expression data generation.
+/// These opcodes are used in the expression bytecode stored in the data section.
+///
+/// Binary format:
+/// - Nullary ops (index, count, random, etc.): just the opcode byte
+/// - Unary ops (sin, cos, sqrt): opcode + child expression bytes
+/// - Binary ops (add, sub, mul, div): opcode + left expression + right expression
+/// - Literals: opcode + 4 bytes value
+pub const ExpressionOp = enum(u8) {
+    // Literals (0x00-0x0F) - followed by 4-byte value
+    literal_f32 = 0x00, // followed by f32 (4 bytes, little-endian)
+    canvas_width = 0x01, // runtime canvas width
+    canvas_height = 0x02, // runtime canvas height
+    time = 0x03, // runtime time in seconds
+    literal_i32 = 0x04, // followed by i32 (4 bytes)
+    literal_u32 = 0x05, // followed by u32 (4 bytes)
+
+    // Binary operators (0x10-0x1F) - left operand + right operand follow
+    add = 0x10,
+    sub = 0x11,
+    mul = 0x12,
+    div = 0x13,
+
+    // Unary functions (0x20-0x2F) - operand follows
+    sin = 0x20,
+    cos = 0x21,
+    sqrt = 0x22,
+
+    // Variables (0x30-0x3F) - no additional bytes
+    element_index = 0x30, // ELEMENT_ID - current element index
+    element_count = 0x31, // NUM_PARTICLES - total element count
+    random = 0x32, // random() - random value [0, 1)
+    pi = 0x33, // PI constant
+
+    /// Get the size of the fixed data following this opcode (not including children).
+    pub fn immediateSize(self: ExpressionOp) u8 {
+        return switch (self) {
+            .literal_f32, .literal_i32, .literal_u32 => 4,
+            else => 0,
+        };
+    }
+
+    /// Get the number of child expressions this opcode expects.
+    pub fn childCount(self: ExpressionOp) u8 {
+        return switch (self) {
+            // Binary operators
+            .add, .sub, .mul, .div => 2,
+            // Unary functions
+            .sin, .cos, .sqrt => 1,
+            // Nullary (literals and variables)
+            else => 0,
+        };
+    }
+};
+
 // ============================================================================
 // Tests
 // ============================================================================

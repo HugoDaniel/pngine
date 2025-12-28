@@ -1,4 +1,4 @@
-//! Validate command: runtime validation via wasm3 command buffer inspection.
+//! Validate command: runtime validation via WAMR command buffer inspection.
 //!
 //! ## Usage
 //! ```
@@ -10,9 +10,9 @@
 //! ```
 //!
 //! ## Design
-//! Uses wasm3 to execute the WASM executor, captures command buffer output,
-//! and validates it for correctness. Provides structured JSON output for
-//! LLM-based debugging workflows.
+//! Uses WAMR (WebAssembly Micro Runtime) to execute the WASM executor, captures
+//! command buffer output, and validates it for correctness. Provides structured
+//! JSON output for LLM-based debugging workflows.
 //!
 //! ## Module Organization
 //!
@@ -21,7 +21,7 @@
 //! - `validate/loader.zig` - Bytecode loading from various formats
 //! - `validate/executor.zig` - WASM execution and validation
 //! - `validate/output.zig` - JSON and human-readable output
-//! - `validate/wasm3.zig` - wasm3 runtime wrapper
+//! - `validate/wamr.zig` - WAMR runtime wrapper
 //! - `validate/cmd_validator.zig` - Command buffer state machine
 //! - `validate/symptom_diagnosis.zig` - Symptom-based diagnosis
 
@@ -120,7 +120,7 @@ test {
     _ = @import("validate/loader.zig");
     _ = @import("validate/executor.zig");
     _ = @import("validate/output.zig");
-    _ = @import("validate/wasm3.zig");
+    _ = @import("validate/wamr.zig");
     _ = @import("validate/cmd_validator.zig");
     _ = @import("validate/symptom_diagnosis.zig");
     _ = @import("validate/wgsl_parser.zig");

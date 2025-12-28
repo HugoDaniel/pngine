@@ -18,6 +18,7 @@ pub const PassType = types.PassType;
 pub const ElementType = types.ElementType;
 pub const WasmArgType = types.WasmArgType;
 pub const WasmReturnType = types.WasmReturnType;
+pub const ExpressionOp = types.ExpressionOp;
 
 // ============================================================================
 // Variable-Length Integer Encoding (LEB128-style)

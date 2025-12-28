@@ -6,7 +6,7 @@
 //! |---------|-------------|
 //! | compile | Compile DSL/PBSF source to PNGB bytecode |
 //! | check | Validate bytecode by running through MockGPU (--verbose for trace) |
-//! | validate | Runtime validation via wasm3 command buffer inspection |
+//! | validate | Runtime validation via WAMR command buffer inspection |
 //! | render | Create PNG with embedded bytecode (default command) |
 //! | embed | Embed PNGB bytecode into an existing PNG |
 //! | extract | Extract PNGB bytecode from a PNG or ZIP file |
@@ -29,7 +29,7 @@
 //!
 //! - `cli/compile.zig` - Compile command
 //! - `cli/check.zig` - Check command (MockGPU validation)
-//! - `cli/validate.zig` - Validate command (wasm3 runtime)
+//! - `cli/validate.zig` - Validate command (WAMR runtime)
 //! - `cli/render.zig` - Render command
 //! - `cli/embed.zig` - Embed/extract commands
 //! - `cli/bundle.zig` - Bundle/list commands
@@ -118,7 +118,7 @@ fn printUsage() void {
         \\Commands:
         \\  compile   Compile source to bytecode
         \\  check     Validate bytecode (MockGPU)
-        \\  validate  Runtime validation (wasm3)
+        \\  validate  Runtime validation (WAMR)
         \\  render    Create PNG with bytecode (default)
         \\  embed     Embed bytecode into PNG
         \\  extract   Extract bytecode from PNG/ZIP

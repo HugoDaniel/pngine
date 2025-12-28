@@ -1,16 +1,7 @@
 //! PNGine Desktop Viewer
 //!
 //! A native viewer for PNGine payloads that runs embedded WASM executors
-//! via wasm3 and traces command buffers. GPU rendering via Dawn/Mach is TODO.
-//!
-//! ## Known Limitations
-//!
-//! wasm3 0.5.0 has an LEB128 decoding issue with Zig-generated WASM.
-//! For now, use Node.js for testing embedded executors:
-//!
-//! ```bash
-//! node scripts/test-executor.js payload.pngb
-//! ```
+//! via WAMR and traces command buffers. GPU rendering via Dawn/Mach is TODO.
 //!
 //! ## Architecture
 //!
@@ -21,7 +12,7 @@
 //! [Extract Payload]  -- pngine.format + pngine.png.extract
 //!     |
 //!     v
-//! [Load Executor]    -- wasm3 runtime
+//! [Load Executor]    -- WAMR runtime (interpreter or AOT)
 //!     |
 //!     v
 //! [Copy Bytecode]    -- executor.getBytecodePtr()
@@ -51,10 +42,10 @@ const builtin = @import("builtin");
 const pngine = @import("pngine");
 const format = pngine.format;
 
-// Import wasm3 wrapper
-const wasm3 = @import("wasm3");
-const Wasm3Runtime = wasm3.Wasm3Runtime;
-const Wasm3Error = wasm3.Wasm3Error;
+// Import WAMR wrapper
+const wamr = @import("wamr");
+const WamrRuntime = wamr.WamrRuntime;
+const WamrError = wamr.WamrError;
 
 // Command buffer runner (local)
 const Runner = @import("runner.zig").Runner;
@@ -84,12 +75,12 @@ pub fn main() !void {
         return;
     }
 
-    // Check wasm3 availability
-    if (!Wasm3Runtime.isAvailable()) {
-        std.debug.print("Error: wasm3 not available. Rebuild with wasm3 support.\n", .{});
+    // Check WAMR availability
+    if (!WamrRuntime.isAvailable()) {
+        std.debug.print("Error: WAMR not available. Rebuild with WAMR support.\n", .{});
         std.process.exit(1);
     }
-    std.debug.print("wasm3 version: {s}\n", .{Wasm3Runtime.version()});
+    std.debug.print("WAMR version: {s}\n", .{WamrRuntime.version()});
 
     // Run the viewer
     run(allocator, opts) catch |err| {
@@ -132,8 +123,8 @@ fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // Extract executor WASM
     const executor_wasm = bytecode[header.executor_offset..][0..header.executor_length];
 
-    // Initialize wasm3 runtime
-    var runtime = try Wasm3Runtime.init(allocator, 256 * 1024); // 256KB stack
+    // Initialize WAMR runtime (256KB stack, 256KB heap)
+    var runtime = try WamrRuntime.init(allocator, 256 * 1024, 256 * 1024);
     defer runtime.deinit();
 
     // Load executor WASM

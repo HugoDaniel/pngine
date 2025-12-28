@@ -57,8 +57,6 @@ pub const gpu_backends = struct {
     pub const NativeGPU = native_gpu.NativeGPU;
 };
 
-// Note: wasm3 runtime is available in CLI only (src/cli/wasm3.zig)
-
 // ZIP bundle support
 pub const zip = @import("zip.zig");
 

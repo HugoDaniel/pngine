@@ -145,6 +145,13 @@ pub fn build(b: *std.Build) void {
     // No main() - use exported functions
     wasm.entry = .disabled;
 
+    // Note: AOT compilation is available via wamrc but doesn't work well for
+    // embedded scenarios because @embedFile puts data in read-only memory which
+    // can't be properly mmap'd for execution. The WASM interpreter is used instead.
+    // AOT can be used for loading WASM files from disk (future feature).
+    //
+    // If you need AOT, use: ./tools/wamrc --target=x86_64 -o file.aot file.wasm
+
     // Ancillary WASM modules (mvp.wasm for matrix generation)
     const mvp_wasm_module = b.createModule(.{
         .root_source_file = b.path("src/ancillary/mvp.zig"),
@@ -171,67 +178,210 @@ pub fn build(b: *std.Build) void {
         cli_module.addImport("zgpu", dep.module("root"));
     }
 
-    // Add wasm3 C library for native WASM execution in validate command
-    // Build as static library once, share between CLI and CLI tests
-    const wasm3_dep = b.lazyDependency("wasm3", .{});
-    const wasm3_lib: ?*std.Build.Step.Compile = if (wasm3_dep) |dep| blk: {
-        const wasm3_sources: []const []const u8 = &.{
-            "source/m3_api_libc.c",
-            "source/m3_api_meta_wasi.c",
-            "source/m3_api_tracer.c",
-            "source/m3_api_uvwasi.c",
-            "source/m3_api_wasi.c",
-            "source/m3_bind.c",
-            "source/m3_code.c",
-            "source/m3_compile.c",
-            "source/m3_core.c",
-            "source/m3_emit.c",
-            "source/m3_env.c",
-            "source/m3_exec.c",
-            "source/m3_function.c",
-            "source/m3_info.c",
-            "source/m3_module.c",
-            "source/m3_optimize.c",
-            "source/m3_parse.c",
+    // Add WAMR C library for native WASM execution
+    // WAMR provides interpreter + AOT loader support
+    const wamr_dep = b.lazyDependency("wamr", .{});
+    const wamr_lib: ?*std.Build.Step.Compile = if (wamr_dep) |dep| blk: {
+        // Detect target architecture for AOT relocation
+        const is_aarch64 = target.result.cpu.arch == .aarch64;
+        const is_x86_64 = target.result.cpu.arch == .x86_64;
+        const is_darwin = target.result.os.tag == .macos;
+
+        // Core interpreter sources
+        const interp_sources: []const []const u8 = &.{
+            "core/iwasm/interpreter/wasm_loader.c",
+            "core/iwasm/interpreter/wasm_runtime.c",
+            "core/iwasm/interpreter/wasm_interp_classic.c",
         };
 
-        // Build wasm3 as static library (compiled once, linked to CLI and CLI tests)
-        const wasm3_module = b.createModule(.{
+        // Common runtime sources (without invokeNative - added separately per platform)
+        const common_sources: []const []const u8 = &.{
+            "core/iwasm/common/wasm_runtime_common.c",
+            "core/iwasm/common/wasm_native.c",
+            "core/iwasm/common/wasm_exec_env.c",
+            "core/iwasm/common/wasm_memory.c",
+            "core/iwasm/common/wasm_application.c",
+            "core/iwasm/common/wasm_loader_common.c",
+            "core/iwasm/common/wasm_c_api.c",
+        };
+
+        // Platform-specific invokeNative (handles 64-bit pointer passing correctly)
+        const invoke_native_source: []const u8 = if (is_darwin)
+            "core/iwasm/common/arch/invokeNative_osx_universal.s"
+        else if (target.result.cpu.arch == .x86_64)
+            "core/iwasm/common/arch/invokeNative_em64.s"
+        else if (target.result.cpu.arch == .aarch64)
+            "core/iwasm/common/arch/invokeNative_aarch64.s"
+        else
+            "core/iwasm/common/arch/invokeNative_general.c";
+
+        // AOT loader sources (not compiler - just loading pre-compiled AOT)
+        const aot_sources: []const []const u8 = &.{
+            "core/iwasm/aot/aot_loader.c",
+            "core/iwasm/aot/aot_runtime.c",
+            "core/iwasm/aot/aot_intrinsic.c",
+        };
+
+        // Shared utility sources
+        const utils_sources: []const []const u8 = &.{
+            "core/shared/utils/bh_assert.c",
+            "core/shared/utils/bh_bitmap.c", // Required for bulk memory
+            "core/shared/utils/bh_common.c",
+            "core/shared/utils/bh_hashmap.c",
+            "core/shared/utils/bh_list.c",
+            "core/shared/utils/bh_log.c",
+            "core/shared/utils/bh_queue.c",
+            "core/shared/utils/bh_vector.c",
+            "core/shared/utils/bh_leb128.c",
+            "core/shared/utils/runtime_timer.c",
+            "core/shared/utils/uncommon/bh_read_file.c",
+        };
+
+        // Memory allocator sources
+        const mem_sources: []const []const u8 = &.{
+            "core/shared/mem-alloc/mem_alloc.c",
+            "core/shared/mem-alloc/ems/ems_alloc.c",
+            "core/shared/mem-alloc/ems/ems_hmu.c",
+            "core/shared/mem-alloc/ems/ems_kfc.c",
+        };
+
+        // POSIX platform sources (for Darwin/macOS and Linux)
+        const posix_sources: []const []const u8 = &.{
+            "core/shared/platform/common/posix/posix_thread.c",
+            "core/shared/platform/common/posix/posix_time.c",
+            "core/shared/platform/common/posix/posix_malloc.c",
+            "core/shared/platform/common/posix/posix_memmap.c",
+            "core/shared/platform/common/posix/posix_clock.c",
+            "core/shared/platform/common/posix/posix_blocking_op.c",
+            "core/shared/platform/common/memory/mremap.c", // Fallback os_mremap for Darwin
+        };
+
+        // Common compile flags for all WAMR sources
+        // Note: -fno-sanitize=alignment disables alignment sanitizer which catches
+        // misaligned accesses in WAMR's internal table instantiation code
+        const wamr_common_flags: []const []const u8 = &.{
+            "-std=gnu11",
+            "-fno-sanitize=alignment", // WAMR has misaligned table accesses
+            "-DWASM_ENABLE_INTERP=1",
+            "-DWASM_ENABLE_FAST_INTERP=0", // Classic interpreter
+            "-DWASM_ENABLE_AOT=1",
+            "-DWASM_ENABLE_BULK_MEMORY=1", // Required for AOT modules
+            "-DWASM_ENABLE_REF_TYPES=1", // Required for Zig-produced WASM
+            "-DBH_MALLOC=wasm_runtime_malloc",
+            "-DBH_FREE=wasm_runtime_free",
+            "-DBH_PLATFORM_DARWIN", // For macOS
+            "-DBUILD_TARGET_X86_64", // Will be overridden by arch detection
+        };
+
+        // Build WAMR as static library
+        const wamr_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
             .link_libc = true,
         });
-        wasm3_module.addCSourceFiles(.{
+
+        // Add all source files with common flags
+        wamr_module.addCSourceFiles(.{
             .root = dep.path("."),
-            .files = wasm3_sources,
-            .flags = &.{
-                "-std=gnu11",
-                "-fno-sanitize=undefined", // wasm3 uses some UB-ish patterns
-            },
+            .files = interp_sources,
+            .flags = wamr_common_flags,
         });
-        wasm3_module.addIncludePath(dep.path("source"));
+        wamr_module.addCSourceFiles(.{
+            .root = dep.path("."),
+            .files = common_sources,
+            .flags = wamr_common_flags,
+        });
+        // Platform-specific invokeNative (assembly for proper 64-bit ABI)
+        wamr_module.addCSourceFiles(.{
+            .root = dep.path("."),
+            .files = &.{invoke_native_source},
+            .flags = wamr_common_flags,
+        });
+        wamr_module.addCSourceFiles(.{
+            .root = dep.path("."),
+            .files = aot_sources,
+            .flags = wamr_common_flags,
+        });
+        wamr_module.addCSourceFiles(.{
+            .root = dep.path("."),
+            .files = utils_sources,
+            .flags = wamr_common_flags,
+        });
+        wamr_module.addCSourceFiles(.{
+            .root = dep.path("."),
+            .files = mem_sources,
+            .flags = wamr_common_flags,
+        });
+        wamr_module.addCSourceFiles(.{
+            .root = dep.path("."),
+            .files = posix_sources,
+            .flags = wamr_common_flags,
+        });
+
+        // Platform-specific init
+        if (is_darwin) {
+            wamr_module.addCSourceFiles(.{
+                .root = dep.path("."),
+                .files = &.{"core/shared/platform/darwin/platform_init.c"},
+                .flags = wamr_common_flags,
+            });
+        }
+
+        // Architecture-specific AOT relocation
+        if (is_aarch64) {
+            wamr_module.addCSourceFiles(.{
+                .root = dep.path("."),
+                .files = &.{"core/iwasm/aot/arch/aot_reloc_aarch64.c"},
+                .flags = wamr_common_flags,
+            });
+        } else if (is_x86_64) {
+            wamr_module.addCSourceFiles(.{
+                .root = dep.path("."),
+                .files = &.{"core/iwasm/aot/arch/aot_reloc_x86_64.c"},
+                .flags = wamr_common_flags,
+            });
+        }
+
+        // Include paths
+        wamr_module.addIncludePath(dep.path("core"));
+        wamr_module.addIncludePath(dep.path("core/iwasm/include"));
+        wamr_module.addIncludePath(dep.path("core/iwasm/common"));
+        wamr_module.addIncludePath(dep.path("core/iwasm/interpreter"));
+        wamr_module.addIncludePath(dep.path("core/iwasm/aot"));
+        wamr_module.addIncludePath(dep.path("core/shared/utils"));
+        wamr_module.addIncludePath(dep.path("core/shared/utils/uncommon"));
+        wamr_module.addIncludePath(dep.path("core/shared/mem-alloc"));
+        wamr_module.addIncludePath(dep.path("core/shared/mem-alloc/ems"));
+        wamr_module.addIncludePath(dep.path("core/shared/platform/include"));
+        wamr_module.addIncludePath(dep.path("core/shared/platform/common/libc-util"));
+        if (is_darwin) {
+            wamr_module.addIncludePath(dep.path("core/shared/platform/darwin"));
+        }
 
         const lib = b.addLibrary(.{
-            .name = "wasm3",
-            .root_module = wasm3_module,
+            .name = "wamr",
+            .root_module = wamr_module,
             .linkage = .static,
         });
 
-        // Link wasm3 library to CLI module
+        // Link WAMR library to CLI module
         cli_module.linkLibrary(lib);
-        cli_module.addIncludePath(dep.path("source"));
+        cli_module.addIncludePath(dep.path("core/iwasm/include"));
         cli_module.link_libc = true;
 
         break :blk lib;
     } else null;
 
     // Create build options with embedded WASM
+    // Note: AOT is disabled because embedded AOT doesn't work well
+    // (read-only memory can't be mmap'd for execution)
     const build_options = b.addOptions();
     build_options.addOption(bool, "has_embedded_wasm", true);
-    build_options.addOption(bool, "has_wasm3", wasm3_dep != null);
+    build_options.addOption(bool, "has_embedded_aot", false);
+    build_options.addOption(bool, "has_wamr", wamr_dep != null);
     cli_module.addImport("build_options", build_options.createModule());
 
-    // Embed WASM binary in CLI for bundle command
+    // Embed WASM binary in CLI for bundle command (browser use) and WAMR interpreter
     cli_module.addAnonymousImport("embedded_wasm", .{
         .root_source_file = wasm.getEmittedBin(),
     });
@@ -240,9 +390,6 @@ pub fn build(b: *std.Build) void {
         .name = "pngine",
         .root_module = cli_module,
     });
-
-    // CLI depends on WASM being built first
-    cli.step.dependOn(&wasm.step);
 
     b.installArtifact(cli);
 
@@ -264,7 +411,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
-    // Fast tests: lib only (skips CLI and viewer which need wasm3/wasm compile)
+    // Fast tests: lib only (skips CLI and viewer which need WASM compile)
     // ~5s vs ~7min for full test suite
     // Use: zig build test-fast
     // Even faster: zig test src/main.zig --test-filter "Lexer"
@@ -481,11 +628,11 @@ pub fn build(b: *std.Build) void {
         .root_source_file = wasm.getEmittedBin(),
     });
 
-    // Link shared wasm3 library to CLI test module (avoids recompiling C sources)
-    if (wasm3_lib) |lib| {
+    // Link WAMR library to CLI test module
+    if (wamr_lib) |lib| {
         cli_test_module.linkLibrary(lib);
-        if (wasm3_dep) |dep| {
-            cli_test_module.addIncludePath(dep.path("source"));
+        if (wamr_dep) |dep| {
+            cli_test_module.addIncludePath(dep.path("core/iwasm/include"));
         }
         cli_test_module.link_libc = true;
     }
@@ -595,6 +742,8 @@ pub fn build(b: *std.Build) void {
     }
 
     // Web build: WASM + JS files for browser deployment
+    // Uses source JS files for development (works with Vite dev server)
+    // For production bundles, use: node npm/pngine/scripts/bundle.js
     const web_step = b.step("web", "Build demo bundle (WASM + JS)");
 
     // Install WASM to demo directory
@@ -625,6 +774,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // Copy JS source files from npm/pngine/src/ to demo output for development
+    // Note: gpu.js uses closure pattern for better minification (58% smaller)
     const SrcFile = struct { src: []const u8, dest: []const u8 };
     const js_files = [_]SrcFile{
         .{ .src = "npm/pngine/src/index.js", .dest = "demo/pngine.js" },
@@ -709,35 +859,35 @@ pub fn build(b: *std.Build) void {
     npm_step.dependOn(&npm_wasm.step);
 
     // ========================================================================
-    // Desktop Viewer (wasm3 + trace mode)
+    // Desktop Viewer (WAMR + trace mode)
     // ========================================================================
     //
     // Standalone viewer for PNG files with embedded executors.
-    // Uses wasm3 to run embedded WASM executor and traces command buffers.
+    // Uses WAMR to run embedded WASM executor and traces command buffers.
     // See: docs/embedded-executor-plan.md Phase 7
     //
     // Usage: zig build desktop-viewer -- triangle-embedded.png
 
-    const desktop_viewer_step = b.step("desktop-viewer", "Build desktop PNG viewer with wasm3");
+    const desktop_viewer_step = b.step("desktop-viewer", "Build desktop PNG viewer with WAMR");
 
-    // Create wasm3 wrapper module (reuses CLI's wasm3 wrapper)
-    const wasm3_wrapper_options = b.addOptions();
-    wasm3_wrapper_options.addOption(bool, "has_wasm3", wasm3_dep != null);
+    // Create WAMR wrapper module (reuses CLI's WAMR wrapper)
+    const wamr_wrapper_options = b.addOptions();
+    wamr_wrapper_options.addOption(bool, "has_wamr", wamr_dep != null);
 
-    const wasm3_wrapper_module = b.createModule(.{
-        .root_source_file = b.path("src/cli/validate/wasm3.zig"),
+    const wamr_wrapper_module = b.createModule(.{
+        .root_source_file = b.path("src/cli/validate/wamr.zig"),
         .target = target,
         .optimize = optimize,
     });
-    wasm3_wrapper_module.addImport("build_options", wasm3_wrapper_options.createModule());
+    wamr_wrapper_module.addImport("build_options", wamr_wrapper_options.createModule());
 
-    // Link wasm3 library to wrapper module
-    if (wasm3_lib) |lib| {
-        wasm3_wrapper_module.linkLibrary(lib);
-        if (wasm3_dep) |dep| {
-            wasm3_wrapper_module.addIncludePath(dep.path("source"));
+    // Link WAMR library to wrapper module
+    if (wamr_lib) |lib| {
+        wamr_wrapper_module.linkLibrary(lib);
+        if (wamr_dep) |dep| {
+            wamr_wrapper_module.addIncludePath(dep.path("core/iwasm/include"));
         }
-        wasm3_wrapper_module.link_libc = true;
+        wamr_wrapper_module.link_libc = true;
     }
 
     // Create desktop viewer module
@@ -747,7 +897,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     desktop_viewer_module.addImport("pngine", lib_module);
-    desktop_viewer_module.addImport("wasm3", wasm3_wrapper_module);
+    desktop_viewer_module.addImport("wamr", wamr_wrapper_module);
 
     const desktop_viewer = b.addExecutable(.{
         .name = "desktop-viewer",
