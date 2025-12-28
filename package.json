@@ -13,6 +13,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.40.0",
+    "esbuild": "^0.24.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vite": "^7.3.0"

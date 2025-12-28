@@ -92,6 +92,9 @@ ZIG=/Users/hugo/.zvm/bin/zig
 # Build WASM + JS for demo (outputs to zig-out/demo/)
 /Users/hugo/.zvm/bin/zig build web
 
+# Build minified production JS bundle (requires npm install)
+/Users/hugo/.zvm/bin/zig build web-bundle
+
 # Build npm package (cross-compile for all platforms)
 /Users/hugo/.zvm/bin/zig build npm
 
@@ -1004,14 +1007,50 @@ npm/
 ### Build Commands
 
 ```bash
+# Build WASM + copy JS sources for development (outputs to zig-out/demo/)
+/Users/hugo/.zvm/bin/zig build web
+
+# Build minified production bundle (runs zig build web + esbuild)
+/Users/hugo/.zvm/bin/zig build web-bundle
+
 # Build all platform binaries (cross-compilation)
 /Users/hugo/.zvm/bin/zig build npm
 
-# Bundle JavaScript (creates dist/ files)
-node npm/pngine/scripts/bundle.js
+# Bundle JavaScript manually (creates dist/ files)
+node npm/pngine/scripts/bundle.js          # Production (minified)
+node npm/pngine/scripts/bundle.js --debug  # Debug (source maps, no minify)
 
 # Prepare for publishing (copies binaries from zig-out to npm/)
 ./npm/pngine/scripts/prepare-publish.sh
+```
+
+### JavaScript Build System
+
+The JS runtime uses esbuild for bundling with two build modes:
+
+| Mode       | Command                              | Features                                    |
+| ---------- | ------------------------------------ | ------------------------------------------- |
+| Production | `node scripts/bundle.js`             | Minified, `DEBUG=false`, strips debug logs  |
+| Debug      | `node scripts/bundle.js --debug`     | Source maps, `DEBUG=true`, preserves logs   |
+
+**Bundle sizes** (production):
+- `browser.mjs`: 23.7 KB (8.1 KB gzipped)
+- `index.js`: 1.2 KB (Node.js stubs)
+
+**Key optimization**: The `gpu.js` uses a closure pattern instead of classes, enabling better minification:
+```javascript
+// Closure pattern: private vars renamed by minifier
+export function createCommandDispatcher(device, ctx) {
+  let debug = false;  // Becomes single-letter var
+  const setDebug = (v) => { debug = v; };
+  return { setDebug, execute, destroy };
+}
+```
+
+**DEBUG flag usage in gpu.js**:
+```javascript
+// Stripped in production (DEBUG=false)
+if (DEBUG) console.log('[GPU] Execute:', commands.length, 'commands');
 ```
 
 ### Binary Sizes

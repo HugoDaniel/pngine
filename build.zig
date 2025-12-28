@@ -640,6 +640,13 @@ pub fn build(b: *std.Build) void {
         web_step.dependOn(&install_file.step);
     }
 
+    // Web bundle: minified production bundle (requires Node.js + esbuild)
+    // Produces npm/pngine/dist/browser.mjs with DEBUG=false (strips debug logging)
+    const web_bundle_step = b.step("web-bundle", "Build minified production JS bundle");
+    web_bundle_step.dependOn(web_step);
+    const bundle_cmd = b.addSystemCommand(&.{ "node", "npm/pngine/scripts/bundle.js" });
+    web_bundle_step.dependOn(&bundle_cmd.step);
+
     // NPM package build: cross-compile CLI for all platforms
     const npm_step = b.step("npm", "Build npm package binaries for all platforms");
 

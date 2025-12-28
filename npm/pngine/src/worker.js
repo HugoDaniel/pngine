@@ -1,13 +1,14 @@
 // Worker thread - owns WebGPU, WASM, and resources
 // Uses command buffer approach for minimal bundle size
 
-import { CommandDispatcher } from "./gpu.js";
+import { createCommandDispatcher } from "./gpu.js";
 import { parsePayload, getExecutorImports } from "./loader.js";
 
 let canvas, device, context, gpu, wasm, memory;
 let initialized = false;
 let moduleLoaded = false;
 let frameCount = 0;
+let debugMode = false;
 
 // Message types
 const MSG = {
@@ -52,6 +53,7 @@ async function handleInit(data) {
   if (initialized) throw new Error("Already initialized");
 
   canvas = data.canvas;
+  debugMode = data.debug;
 
   // Initialize WebGPU
   const adapter = await navigator.gpu?.requestAdapter();
@@ -62,9 +64,9 @@ async function handleInit(data) {
   const format = navigator.gpu.getPreferredCanvasFormat();
   context.configure({ device, format, alphaMode: "premultiplied" });
 
-  // Create command dispatcher
-  gpu = new CommandDispatcher(device, context);
-  gpu.setDebug(data.debug);
+  // Create command dispatcher (closure-based API for minification)
+  gpu = createCommandDispatcher(device, context);
+  gpu.setDebug(debugMode);
   gpu.setCanvasSize(canvas.width, canvas.height);
 
   // Check if bytecode has embedded executor
@@ -151,10 +153,9 @@ async function handleLoad(data) {
 async function loadBytecode(bytecode) {
   // Reset GPU state if reloading
   if (moduleLoaded) {
-    const wasDebug = gpu.debug;
     gpu.destroy();
-    gpu = new CommandDispatcher(device, context);
-    gpu.setDebug(wasDebug);
+    gpu = createCommandDispatcher(device, context);
+    gpu.setDebug(debugMode);
     gpu.setMemory(memory);
     gpu.setCanvasSize(canvas.width, canvas.height);
     moduleLoaded = false;

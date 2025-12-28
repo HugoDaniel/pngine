@@ -40,10 +40,13 @@ function esbuild(entry, outfile, opts = {}) {
 
   if (!DEBUG) {
     args.push('--minify');
-    // Note: Don't drop console - debug logging is a feature (options.debug)
+    // Strip DEBUG logging code in gpu.js
+    args.push('--define:DEBUG=false');
     args.push('--drop:debugger');
   } else {
     args.push('--sourcemap');
+    // Keep DEBUG logging in development
+    args.push('--define:DEBUG=true');
   }
 
   if (opts.external) {
