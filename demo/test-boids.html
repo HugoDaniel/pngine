@@ -20,7 +20,7 @@
   <canvas id="canvas" width="512" height="512"></canvas>
 
   <script type="module">
-    import { pngine, play } from '../npm/pngine/dist/browser.mjs';
+    import { pngine, play } from './pngine.js';
 
     const status = document.getElementById('status');
     const canvas = document.getElementById('canvas');
@@ -29,9 +29,8 @@
       try {
         status.textContent = 'Initializing PNGine...';
 
-        const engine = await pngine('boids_minimal.png', {
+        const engine = await pngine('boids.png', {
           canvas: canvas,
-          wasmUrl: '../npm/pngine/wasm/pngine.wasm',
           debug: true
         });
 
