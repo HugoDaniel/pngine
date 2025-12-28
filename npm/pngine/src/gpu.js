@@ -16,6 +16,115 @@ const DEBUG = true;
 // Usage flags (must match opcodes.zig)
 const U_COPY_DST = 0x08, U_INDEX = 0x10, U_VERTEX = 0x20, U_UNIFORM = 0x40, U_STORAGE = 0x80;
 
+// UniformType enum values (must match uniform_table.zig)
+const UT_F32 = 0, UT_I32 = 1, UT_U32 = 2;
+const UT_VEC2F = 3, UT_VEC3F = 4, UT_VEC4F = 5;
+const UT_MAT3X3F = 6, UT_MAT4X4F = 7;
+const UT_VEC2I = 8, UT_VEC3I = 9, UT_VEC4I = 10;
+const UT_VEC2U = 11, UT_VEC3U = 12, UT_VEC4U = 13;
+
+// PNGB header constants (must match format.zig)
+const PNGB_HEADER_SIZE = 40;
+const PNGB_MAGIC = 0x42474e50; // "PNGB" little-endian
+
+/**
+ * Parse uniform table from PNGB bytecode.
+ * Returns: { uniforms: Map<string, {bufferId, offset, size, type}>, strings: string[] }
+ */
+export function parseUniformTable(bytecode) {
+  const view = new DataView(bytecode.buffer, bytecode.byteOffset, bytecode.byteLength);
+
+  // Validate PNGB magic
+  if (view.getUint32(0, true) !== PNGB_MAGIC) {
+    return { uniforms: new Map(), strings: [] };
+  }
+
+  // Read header offsets
+  const stringTableOffset = view.getUint32(20, true);
+  const uniformTableOffset = view.getUint32(32, true);
+
+  // Parse string table first
+  const strings = parseStringTable(bytecode, stringTableOffset);
+
+  // Parse uniform table
+  const uniforms = new Map();
+  if (uniformTableOffset === 0 || uniformTableOffset >= bytecode.length) {
+    return { uniforms, strings };
+  }
+
+  let pos = uniformTableOffset;
+  const bindingCount = view.getUint16(pos, true);
+  pos += 2;
+
+  for (let b = 0; b < bindingCount && pos + 8 <= bytecode.length; b++) {
+    const bufferId = view.getUint16(pos, true);
+    pos += 2;
+    // Skip name_string_id (u16), group (u8), binding_index (u8)
+    pos += 4;
+    const fieldCount = view.getUint16(pos, true);
+    pos += 2;
+
+    // Parse fields (10 bytes each)
+    for (let f = 0; f < fieldCount && pos + 10 <= bytecode.length; f++) {
+      // Skip slot (u16)
+      pos += 2;
+      const nameStringId = view.getUint16(pos, true);
+      pos += 2;
+      const offset = view.getUint16(pos, true);
+      pos += 2;
+      const size = view.getUint16(pos, true);
+      pos += 2;
+      const uniformType = view.getUint8(pos);
+      pos += 2; // type + padding
+
+      // Get field name from string table
+      const fieldName = strings[nameStringId] || `field_${nameStringId}`;
+      uniforms.set(fieldName, { bufferId, offset, size, type: uniformType });
+    }
+  }
+
+  return { uniforms, strings };
+}
+
+/**
+ * Parse string table from PNGB bytecode.
+ * Format: [count: u16] [offsets: count*u16] [lengths: count*u16] [data: UTF-8]
+ */
+function parseStringTable(bytecode, offset) {
+  if (offset === 0 || offset >= bytecode.length - 2) {
+    return [];
+  }
+
+  const view = new DataView(bytecode.buffer, bytecode.byteOffset, bytecode.byteLength);
+  const decoder = new TextDecoder();
+  const strings = [];
+
+  const count = view.getUint16(offset, true);
+  if (count === 0) return strings;
+
+  // Calculate positions
+  const offsetsStart = offset + 2;
+  const lengthsStart = offsetsStart + count * 2;
+  const dataStart = lengthsStart + count * 2;
+
+  // Bounds check
+  if (dataStart > bytecode.length) return strings;
+
+  for (let i = 0; i < count; i++) {
+    const strOffset = view.getUint16(offsetsStart + i * 2, true);
+    const strLen = view.getUint16(lengthsStart + i * 2, true);
+    const strStart = dataStart + strOffset;
+
+    if (strStart + strLen <= bytecode.length) {
+      strings.push(decoder.decode(bytecode.subarray(strStart, strStart + strLen)));
+    } else {
+      strings.push(`string_${i}`); // Fallback for out-of-bounds
+    }
+  }
+
+  return strings;
+}
+
 /**
  * Create a command dispatcher.
  * Returns object with only public methods - everything else is minifiable.
@@ -445,15 +554,141 @@ export function createCommandDispatcher(device, ctx) {
     wcr.length = bgd.length = txd.length = 0;
   }
 
+  // Uniform table: Map<string, {bufferId, offset, size, type}>
+  let uniformMap = null;
+
+  /**
+   * Set uniform table from parsed bytecode.
+   * @param {Map<string, {bufferId, offset, size, type}>} map
+   */
+  function setUniformTable(map) {
+    uniformMap = map;
+    DEBUG && dbg && console.log(`[GPU] setUniformTable: ${map.size} uniforms`);
+  }
+
+  /**
+   * Set a uniform value by name.
+   * @param {string} name - Uniform field name
+   * @param {number|number[]} value - Value to set
+   * @returns {boolean} - true if uniform was found and written
+   */
+  function setUniform(name, value) {
+    if (!uniformMap) return false;
+    const info = uniformMap.get(name);
+    if (!info) {
+      DEBUG && dbg && console.warn(`[GPU] setUniform: unknown uniform '${name}'`);
+      return false;
+    }
+
+    const buffer = buf[info.bufferId];
+    if (!buffer) {
+      DEBUG && dbg && console.warn(`[GPU] setUniform: buffer ${info.bufferId} not found`);
+      return false;
+    }
+
+    // Convert value to typed array based on uniform type
+    const data = uniformToTypedArray(value, info.type, info.size);
+    if (!data) {
+      DEBUG && dbg && console.warn(`[GPU] setUniform: failed to convert value for '${name}'`);
+      return false;
+    }
+
+    // Write to GPU buffer
+    device.queue.writeBuffer(buffer, info.offset, data);
+    DEBUG && dbg && console.log(`[GPU] setUniform: ${name} = ${Array.isArray(value) ? `[${value.join(',')}]` : value} @ buffer[${info.bufferId}]+${info.offset}`);
+    return true;
+  }
+
+  /**
+   * Set multiple uniforms at once.
+   * @param {Object} uniforms - Map of name -> value
+   * @returns {number} - Number of uniforms successfully written
+   */
+  function setUniforms(uniforms) {
+    let count = 0;
+    for (const [name, value] of Object.entries(uniforms)) {
+      if (setUniform(name, value)) count++;
+    }
+    return count;
+  }
+
   // Return public interface only - these names stay, everything else minifies
   return {
     setDebug(v) { dbg = v; },
     setMemory(m) { mem = m; },
     setTime(t) { time = t; },
     setCanvasSize(w, h) { cw = w; ch = h; },
+    setUniformTable,
+    setUniform,
+    setUniforms,
     execute,
     destroy,
   };
+}
+
+/**
+ * Convert JS value to TypedArray based on UniformType.
+ * @param {number|number[]} value
+ * @param {number} uniformType - UniformType enum value
+ * @param {number} size - Expected byte size
+ * @returns {Uint8Array|null}
+ */
+function uniformToTypedArray(value, uniformType, size) {
+  // Normalize to array
+  const arr = Array.isArray(value) ? value : [value];
+
+  switch (uniformType) {
+    case UT_F32:
+    case UT_VEC2F:
+    case UT_VEC3F:
+    case UT_VEC4F: {
+      const f32 = new Float32Array(arr);
+      return new Uint8Array(f32.buffer, 0, Math.min(f32.byteLength, size));
+    }
+
+    case UT_I32:
+    case UT_VEC2I:
+    case UT_VEC3I:
+    case UT_VEC4I: {
+      const i32 = new Int32Array(arr);
+      return new Uint8Array(i32.buffer, 0, Math.min(i32.byteLength, size));
+    }
+
+    case UT_U32:
+    case UT_VEC2U:
+    case UT_VEC3U:
+    case UT_VEC4U: {
+      const u32 = new Uint32Array(arr);
+      return new Uint8Array(u32.buffer, 0, Math.min(u32.byteLength, size));
+    }
+
+    case UT_MAT3X3F: {
+      // mat3x3 in WGSL is 3 vec4 columns (48 bytes with padding)
+      // Input: 9 floats (row-major), output: 3 vec4 columns (column-major with padding)
+      const f32 = new Float32Array(12); // 3 columns × 4 floats
+      if (arr.length >= 9) {
+        // Column 0
+        f32[0] = arr[0]; f32[1] = arr[3]; f32[2] = arr[6]; f32[3] = 0;
+        // Column 1
+        f32[4] = arr[1]; f32[5] = arr[4]; f32[6] = arr[7]; f32[7] = 0;
+        // Column 2
+        f32[8] = arr[2]; f32[9] = arr[5]; f32[10] = arr[8]; f32[11] = 0;
+      }
+      return new Uint8Array(f32.buffer, 0, Math.min(48, size));
+    }
+
+    case UT_MAT4X4F: {
+      // mat4x4 in WGSL is 4 vec4 columns (64 bytes)
+      // Assume input is column-major (WebGPU convention)
+      const f32 = new Float32Array(arr.length >= 16 ? arr : [...arr, ...Array(16 - arr.length).fill(0)]);
+      return new Uint8Array(f32.buffer, 0, Math.min(64, size));
+    }
+
+    default:
+      // Unknown type - try as f32
+      const f32 = new Float32Array(arr);
+      return new Uint8Array(f32.buffer, 0, Math.min(f32.byteLength, size));
+  }
 }
 
 // Compatibility alias

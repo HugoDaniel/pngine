@@ -239,3 +239,28 @@ export function setUniforms(p, uniforms, redraw = true) {
 
   return p;
 }
+
+/**
+ * Get available uniform names from the loaded shader.
+ * Returns a promise that resolves to an object with uniform metadata.
+ *
+ * @param {Pngine} p - PNGine instance
+ * @returns {Promise<Object>} - Map of name -> {type, size, bufferId, offset}
+ */
+export function getUniforms(p) {
+  const i = p._;
+  if (!i || !i.ready) {
+    return Promise.resolve({});
+  }
+
+  return new Promise((resolve) => {
+    const handler = (e) => {
+      if (e.data.type === "uniforms") {
+        i.worker.removeEventListener("message", handler);
+        resolve(e.data.uniforms || {});
+      }
+    };
+    i.worker.addEventListener("message", handler);
+    i.worker.postMessage({ type: "getUniforms" });
+  });
+}

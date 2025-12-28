@@ -31,20 +31,30 @@ pub const StringTable = struct {
     strings: std.ArrayListUnmanaged([]const u8),
     /// Total size of string data in bytes.
     total_size: usize,
+    /// Whether this table owns its strings (true for intern(), false for deserialize()).
+    owns_strings: bool,
 
     pub const empty: Self = .{
         .map = .{},
         .strings = .{},
         .total_size = 0,
+        .owns_strings = true,
     };
 
     pub fn deinit(self: *Self, allocator: Allocator) void {
+        // Free string copies only if we own them (intern() copies, deserialize() borrows)
+        if (self.owns_strings) {
+            for (self.strings.items) |str| {
+                allocator.free(str);
+            }
+        }
         self.map.deinit(allocator);
         self.strings.deinit(allocator);
         self.* = undefined;
     }
 
     /// Intern a string, returning its ID. Deduplicates identical strings.
+    /// The string is copied, so caller can free their copy after this returns.
     /// Complexity: O(1) average, O(n) on hash collision.
     pub fn intern(self: *Self, allocator: Allocator, str: []const u8) !StringId {
         // Pre-condition: string data fits in u16 range
@@ -52,17 +62,21 @@ pub const StringTable = struct {
             return error.StringTableOverflow;
         }
 
-        // Check for existing entry
-        const result = try self.map.getOrPut(allocator, str);
-        if (result.found_existing) {
-            return result.value_ptr.*;
+        // Check for existing entry first
+        if (self.map.get(str)) |existing_id| {
+            return existing_id;
         }
+
+        // Copy the string so we own it
+        const owned_str = try allocator.dupe(u8, str);
+        errdefer allocator.free(owned_str);
 
         // New string - allocate ID
         const id: StringId = @enumFromInt(@as(u16, @intCast(self.strings.items.len)));
-        result.value_ptr.* = id;
 
-        try self.strings.append(allocator, str);
+        // Insert with owned key
+        try self.map.put(allocator, owned_str, id);
+        try self.strings.append(allocator, owned_str);
         self.total_size += str.len;
 
         // Post-condition: ID is valid
@@ -157,6 +171,7 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !StringTable {
     if (data.len < metadata_size) return error.InvalidStringTable;
 
     var table: StringTable = .empty;
+    table.owns_strings = false; // Deserialize borrows slices from input data
     errdefer table.deinit(allocator);
 
     try table.strings.ensureTotalCapacity(allocator, str_count);

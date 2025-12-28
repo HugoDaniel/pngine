@@ -52,6 +52,23 @@ export function setUniforms(
   redraw?: boolean
 ): PngineInstance;
 
+/** Uniform metadata returned by getUniforms */
+export interface UniformInfo {
+  /** UniformType enum value (0=f32, 3=vec2f, 5=vec4f, 7=mat4x4f, etc.) */
+  type: number;
+  /** Byte size of the uniform */
+  size: number;
+  /** GPU buffer ID */
+  bufferId: number;
+  /** Byte offset within the buffer */
+  offset: number;
+}
+
+/** Get available uniforms from the loaded shader */
+export function getUniforms(
+  instance: PngineInstance
+): Promise<Record<string, UniformInfo>>;
+
 export function extractBytecode(data: ArrayBuffer | Uint8Array): Promise<Uint8Array>;
 export function detectFormat(data: ArrayBuffer | Uint8Array): 'png' | 'zip' | 'pngb' | null;
 export function isPng(data: ArrayBuffer | Uint8Array): boolean;

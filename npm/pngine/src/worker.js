@@ -1,7 +1,7 @@
 // Worker thread - owns WebGPU, WASM, and resources
 // Uses command buffer approach for minimal bundle size
 
-import { createCommandDispatcher } from "./gpu.js";
+import { createCommandDispatcher, parseUniformTable } from "./gpu.js";
 import { parsePayload, getExecutorImports } from "./loader.js";
 
 let canvas, device, context, gpu, wasm, memory;
@@ -9,6 +9,8 @@ let initialized = false;
 let moduleLoaded = false;
 let frameCount = 0;
 let debugMode = false;
+// Cached uniform map from bytecode parsing
+let uniformMap = null;
 
 // Message types
 const MSG = {
@@ -16,8 +18,11 @@ const MSG = {
   DRAW: "draw",
   LOAD: "load",
   DESTROY: "destroy",
+  SET_UNIFORM: "setUniform",
+  GET_UNIFORMS: "getUniforms",
   READY: "ready",
   ERROR: "error",
+  UNIFORMS: "uniforms",
 };
 
 onmessage = async (e) => {
@@ -39,6 +44,14 @@ onmessage = async (e) => {
 
       case MSG.DESTROY:
         handleDestroy();
+        break;
+
+      case MSG.SET_UNIFORM:
+        handleSetUniform(data);
+        break;
+
+      case MSG.GET_UNIFORMS:
+        handleGetUniforms();
         break;
 
       default:
@@ -159,6 +172,7 @@ async function loadBytecode(bytecode) {
     gpu.setMemory(memory);
     gpu.setCanvasSize(canvas.width, canvas.height);
     moduleLoaded = false;
+    uniformMap = null;
   }
 
   // Copy bytecode to WASM memory
@@ -166,6 +180,13 @@ async function loadBytecode(bytecode) {
   const bytecodeArray = bytecode instanceof Uint8Array ? bytecode : new Uint8Array(bytecode);
   new Uint8Array(memory.buffer, bytecodePtr, bytecodeArray.length).set(bytecodeArray);
   wasm.setBytecodeLen(bytecodeArray.length);
+
+  // Parse uniform table from bytecode before init (for runtime reflection)
+  const { uniforms } = parseUniformTable(bytecodeArray);
+  uniformMap = uniforms;
+  if (debugMode && uniforms.size > 0) {
+    console.log(`[Worker] Parsed ${uniforms.size} uniform fields:`, [...uniforms.keys()]);
+  }
 
   // Initialize: parse bytecode and emit resource creation commands
   const initResult = wasm.init();
@@ -179,6 +200,9 @@ async function loadBytecode(bytecode) {
   if (initPtr && initLen > 0) {
     await gpu.execute(initPtr);
   }
+
+  // Set uniform table after resources are created (buffers exist now)
+  gpu.setUniformTable(uniformMap);
 
   moduleLoaded = true;
   frameCount = 1;
@@ -208,17 +232,62 @@ function render(time, width, height) {
 
 function handleDraw(data) {
   if (!initialized || !moduleLoaded) return;
+
+  // Apply uniforms before rendering (if provided)
+  if (data.uniforms && typeof data.uniforms === 'object') {
+    const count = gpu.setUniforms(data.uniforms);
+    if (debugMode && count > 0) {
+      console.log(`[Worker] Set ${count} uniforms`);
+    }
+  }
+
   render(data.time ?? 0, canvas.width, canvas.height);
 }
 
 function handleDestroy() {
   moduleLoaded = false;
+  uniformMap = null;
   gpu?.destroy();
   if (device) {
     device.destroy();
     device = null;
   }
   initialized = false;
+}
+
+/**
+ * Handle setUniform message - set uniform value without triggering draw.
+ */
+function handleSetUniform(data) {
+  if (!initialized || !moduleLoaded) return;
+
+  if (data.uniforms && typeof data.uniforms === 'object') {
+    gpu.setUniforms(data.uniforms);
+  } else if (data.name !== undefined && data.value !== undefined) {
+    gpu.setUniform(data.name, data.value);
+  }
+}
+
+/**
+ * Handle getUniforms message - return available uniform names and types.
+ */
+function handleGetUniforms() {
+  if (!uniformMap) {
+    postMessage({ type: MSG.UNIFORMS, uniforms: {} });
+    return;
+  }
+
+  // Convert Map to plain object for postMessage
+  const uniforms = {};
+  for (const [name, info] of uniformMap) {
+    uniforms[name] = {
+      type: info.type,
+      size: info.size,
+      bufferId: info.bufferId,
+      offset: info.offset,
+    };
+  }
+  postMessage({ type: MSG.UNIFORMS, uniforms });
 }
 
 /**

@@ -22,6 +22,7 @@
 const std = @import("std");
 const pngine = @import("pngine");
 const format = pngine.format;
+const types_gen = @import("types_gen.zig");
 
 // Build-time embedded WASM runtime
 const embedded_wasm: []const u8 = @embedFile("embedded_wasm");
@@ -44,6 +45,8 @@ pub const Options = struct {
     embed_executor: bool,
     /// Optional scene/frame name to render (null = render all frames)
     scene_name: ?[]const u8,
+    /// true to generate TypeScript type definitions (.d.ts file)
+    generate_types: bool = false,
 };
 
 /// Execute the render command.
@@ -64,6 +67,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         .embed_runtime = true, // Embed WASM runtime by default for self-contained PNG
         .embed_executor = false, // Don't embed executor in bytecode by default
         .scene_name = null, // Render all frames by default
+        .generate_types = false, // Don't generate TypeScript types by default
     };
 
     const parse_result = parseArgs(args, &opts);
@@ -82,7 +86,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     defer if (opts.output_path == null) allocator.free(output);
 
     // Execute render pipeline
-    return executePipeline(allocator, opts.input_path, output, opts.width, opts.height, opts.time, opts.embed_bytecode, opts.render_frame, opts.embed_runtime, opts.embed_executor, opts.scene_name);
+    return executePipeline(allocator, opts.input_path, output, opts.width, opts.height, opts.time, opts.embed_bytecode, opts.render_frame, opts.embed_runtime, opts.embed_executor, opts.scene_name, opts.generate_types);
 }
 
 /// Parse render command arguments.
@@ -140,6 +144,8 @@ fn parseArgs(args: []const []const u8, opts: *Options) u8 {
             opts.embed_runtime = false;
         } else if (std.mem.eql(u8, arg, "--embed-executor")) {
             opts.embed_executor = true;
+        } else if (std.mem.eql(u8, arg, "--types")) {
+            opts.generate_types = true;
         } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--scene")) {
             if (i + 1 >= args_len) {
                 std.debug.print("Error: -n requires a scene/frame name\n", .{});
@@ -220,6 +226,7 @@ fn executePipeline(
     embed_runtime: bool,
     embed_executor: bool,
     scene_name: ?[]const u8,
+    generate_types: bool,
 ) !u8 {
     // Pre-conditions
     std.debug.assert(input.len > 0);
@@ -293,6 +300,28 @@ fn executePipeline(
         std.debug.print("Error: failed to write '{s}': {}\n", .{ output, err });
         return 2;
     };
+
+    // Generate TypeScript type definitions if requested
+    if (generate_types) {
+        const types_path = types_gen.deriveTypesPath(allocator, output) catch |err| {
+            std.debug.print("Error: failed to derive types path: {}\n", .{err});
+            return 5;
+        };
+        defer allocator.free(types_path);
+
+        const types_content = types_gen.generateFromBytecode(allocator, final_bytecode) catch |err| {
+            std.debug.print("Error: failed to generate TypeScript types: {}\n", .{err});
+            return 5;
+        };
+        defer allocator.free(types_content);
+
+        types_gen.writeToFile(types_path, types_content) catch |err| {
+            std.debug.print("Error: failed to write '{s}': {}\n", .{ types_path, err });
+            return 5;
+        };
+
+        std.debug.print("Generated: {s}\n", .{types_path});
+    }
 
     // Report success to user
     printSuccessMessage(input, output, png_data.len, width, height, time, embed_bytecode, render_frame, embed_runtime and embedded_wasm.len > 0, executor_embedded);
@@ -794,6 +823,7 @@ pub fn printUsage() void {
         \\  --no-embed                Do not embed bytecode
         \\  --no-runtime              Do not embed WASM runtime (smaller PNG, requires external pngine.wasm)
         \\  --embed-executor          Embed minimal WASM executor in bytecode (v5 format)
+        \\  --types                   Generate TypeScript type definitions (.d.ts) for uniforms
         \\  -h, --help                Show this help
         \\
         \\By default, output PNG includes both bytecode (pNGb) and WASM runtime (pNGr),
@@ -814,6 +844,7 @@ pub fn printUsage() void {
         \\  pngine shader.pngine --frame -t 2.5        # Render at t=2.5 seconds
         \\  pngine shader.pngine --frame -n sceneE     # Render specific scene
         \\  pngine shader.pngine --no-embed            # 1x1 PNG without bytecode
+        \\  pngine shader.pngine --types               # Generate shader.d.ts for TypeScript
         \\
     , .{});
 }

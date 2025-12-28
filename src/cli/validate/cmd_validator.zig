@@ -23,6 +23,7 @@
 //! - W003: zero_count - Draw/dispatch with zero work (nothing will render)
 //! - W004: null_pointer - Null pointer with non-zero length (suspicious)
 //! - W006: suspicious_descriptor - Suspicious but valid descriptor (unusual combinations)
+//! - W009: uniform_conflict - Bytecode writes to buffer with uniform fields (may override setUniform)
 //!
 //! ## Invariants
 //!
@@ -395,6 +396,11 @@ pub const Validator = struct {
     /// Collected validation issues (errors and warnings).
     issues: std.ArrayListUnmanaged(Issue),
 
+    /// Uniform buffer IDs for conflict detection (W009).
+    /// Buffers in this set have uniform fields and may be written via setUniform().
+    /// WRITE_BUFFER to these buffers triggers a conflict warning.
+    uniform_buffer_ids: std.AutoHashMapUnmanaged(u16, void),
+
     // ========================================================================
     // Types
     // ========================================================================
@@ -435,6 +441,7 @@ pub const Validator = struct {
             .image_bitmaps = .{},
             .wasm_modules = .{},
             .issues = .{},
+            .uniform_buffer_ids = .{},
         };
 
         // Post-conditions: verify initial state
@@ -465,6 +472,7 @@ pub const Validator = struct {
         self.image_bitmaps.deinit(self.allocator);
         self.wasm_modules.deinit(self.allocator);
         self.issues.deinit(self.allocator);
+        self.uniform_buffer_ids.deinit(self.allocator);
 
         // Post-condition: mark as undefined to catch use-after-free
         self.* = undefined;
@@ -493,6 +501,20 @@ pub const Validator = struct {
         std.debug.assert(memory.len > 0);
         self.wasm_memory = memory;
         self.wasm_memory_size = @intCast(memory.len);
+    }
+
+    /// Set uniform buffer IDs for conflict detection (W009).
+    ///
+    /// Buffers in this set have uniform fields in the uniform table.
+    /// WRITE_BUFFER to these buffers triggers a conflict warning because
+    /// the setUniform() API may also write to the same buffer.
+    ///
+    /// Pre-condition: buffer_ids contains valid buffer IDs from uniform table
+    /// Post-condition: uniform_buffer_ids is populated
+    pub fn setUniformBufferIds(self: *Self, buffer_ids: []const u16) !void {
+        for (buffer_ids) |id| {
+            try self.uniform_buffer_ids.put(self.allocator, id, {});
+        }
     }
 
     /// Validate that ptr + len is within WASM memory bounds.
@@ -2406,6 +2428,16 @@ pub const Validator = struct {
             params.data_len,
             "WRITE_BUFFER data_ptr + data_len exceeds WASM memory",
         );
+
+        // W009: Warn if writing to a buffer with uniform fields
+        // Bytecode writes may conflict with setUniform() API calls
+        if (self.uniform_buffer_ids.contains(params.id)) {
+            try self.addWarningWithContext(
+                "W009",
+                "WRITE_BUFFER targets buffer with uniform fields - may conflict with setUniform() API",
+                params.id,
+            );
+        }
     }
 
     fn validateWriteTimeUniform(self: *Self, params: WriteTimeUniformParams) !void {
@@ -2498,6 +2530,16 @@ pub const Validator = struct {
             params.size,
             "WRITE_BUFFER_FROM_WASM wasm_ptr + size exceeds WASM memory",
         );
+
+        // W009: Warn if writing to a buffer with uniform fields
+        // Bytecode writes may conflict with setUniform() API calls
+        if (self.uniform_buffer_ids.contains(params.buffer_id)) {
+            try self.addWarningWithContext(
+                "W009",
+                "WRITE_BUFFER_FROM_WASM targets buffer with uniform fields - may conflict with setUniform() API",
+                params.buffer_id,
+            );
+        }
     }
 
     fn validateCopyExternalImage(self: *Self, params: CopyExternalImageParams) !void {
@@ -6044,6 +6086,77 @@ test "Validator: storage buffer alignment warning W004" {
         }
     }
     try std.testing.expect(found_w004);
+}
+
+test "Validator: W009 uniform buffer conflict warning" {
+    // Property: WRITE_BUFFER to a buffer with uniform fields triggers W009.
+    // This warns that bytecode writes may conflict with setUniform() API.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    // Mark buffer 1 as having uniform fields
+    try validator.setUniformBufferIds(&[_]u16{1});
+
+    // Create buffer and write to it
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 1,
+            .size = 64,
+            .usage = BufferUsage.UNIFORM | BufferUsage.COPY_DST,
+        } } },
+        .{ .index = 1, .cmd = .write_buffer, .params = .{ .write_buffer = .{
+            .id = 1,
+            .offset = 0,
+            .data_ptr = 0,
+            .data_len = 0,
+        } } },
+    };
+    try validator.validate(&commands);
+
+    // Should have W009 warning
+    var found_w009 = false;
+    for (validator.issues.items) |issue| {
+        if (std.mem.eql(u8, issue.code, "W009")) {
+            found_w009 = true;
+            try std.testing.expect(issue.severity == .warning);
+            try std.testing.expect(std.mem.indexOf(u8, issue.message, "uniform fields") != null);
+            break;
+        }
+    }
+    try std.testing.expect(found_w009);
+}
+
+test "Validator: no W009 for non-uniform buffer" {
+    // Property: WRITE_BUFFER to a regular buffer does not trigger W009.
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    // Buffer 1 is NOT marked as uniform
+    // Only buffer 2 is a uniform buffer
+    try validator.setUniformBufferIds(&[_]u16{2});
+
+    // Create buffer and write to it
+    const commands = [_]ParsedCommand{
+        .{ .index = 0, .cmd = .create_buffer, .params = .{ .create_buffer = .{
+            .id = 1,
+            .size = 64,
+            .usage = BufferUsage.VERTEX | BufferUsage.COPY_DST,
+        } } },
+        .{ .index = 1, .cmd = .write_buffer, .params = .{ .write_buffer = .{
+            .id = 1,
+            .offset = 0,
+            .data_ptr = 0,
+            .data_len = 0,
+        } } },
+    };
+    try validator.validate(&commands);
+
+    // Should NOT have W009 warning
+    for (validator.issues.items) |issue| {
+        try std.testing.expect(!std.mem.eql(u8, issue.code, "W009"));
+    }
 }
 
 test "Validator: validateParameterValues empty buffer no issues" {

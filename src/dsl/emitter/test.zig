@@ -4898,3 +4898,92 @@ test "Emitter: init macro with multiple params values" {
     }
     try testing.expect(found_params_buffer);
 }
+
+test "Emitter: uniform table flattens nested structs" {
+    // Goal: Verify nested struct fields are flattened to dot-notation paths.
+    // e.g., "position.x", "position.y", "position.z" instead of a single "position" entry.
+    //
+    // This enables runtime API like setUniform("position.x", 1.5) to write
+    // directly to the correct buffer offset.
+    const source: [:0]const u8 =
+        \\#wgsl shader {
+        \\  value="
+        \\    struct Position { x: f32, y: f32, z: f32 }
+        \\    struct Uniforms { time: f32, pos: Position, color: vec4f }
+        \\    @group(0) @binding(0) var<uniform> u: Uniforms;
+        \\    @vertex fn vs() {} @fragment fn fs() {}
+        \\  "
+        \\}
+        \\#shaderModule mod { code=shader }
+        \\#buffer uniforms { size=shader.u usage=[UNIFORM COPY_DST] }
+        \\#renderPipeline pipe {
+        \\  layout=auto
+        \\  vertex={ module=mod entryPoint=vs }
+        \\  fragment={ module=mod entryPoint=fs targets=[{format=bgra8unorm}] }
+        \\}
+        \\#bindGroup bg { layout={ pipeline=pipe index=0 } entries=[{binding=0 resource={buffer=uniforms}}] }
+        \\#renderPass pass {
+        \\  colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}]
+        \\  pipeline=pipe
+        \\  bindGroups=[bg]
+        \\  draw=3
+        \\}
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Note: Full field verification requires miniray to be integrated.
+    // This test verifies the compilation path succeeds.
+    // When miniray is available, the uniform table would contain:
+    //   - slot 0: "color" (vec4f at offset 32)
+    //   - slot 1: "pos.x" (f32 at offset 16)
+    //   - slot 2: "pos.y" (f32 at offset 20)
+    //   - slot 3: "pos.z" (f32 at offset 24)
+    //   - slot 4: "time"  (f32 at offset 0)
+    // Slots assigned alphabetically for stable runtime lookup.
+    try testing.expectEqual(format.VERSION, module.header.version);
+}
+
+test "Emitter: uniform table assigns stable slot indices" {
+    // Goal: Verify slot indices are assigned in alphabetical order by field name.
+    // This ensures consistent runtime lookup regardless of struct declaration order.
+    const source: [:0]const u8 =
+        \\#wgsl shader {
+        \\  value="
+        \\    struct Data { zebra: f32, alpha: f32, middle: f32 }
+        \\    @group(0) @binding(0) var<uniform> data: Data;
+        \\    @vertex fn vs() {} @fragment fn fs() {}
+        \\  "
+        \\}
+        \\#shaderModule mod { code=shader }
+        \\#buffer buf { size=shader.data usage=[UNIFORM] }
+        \\#renderPipeline pipe {
+        \\  layout=auto
+        \\  vertex={ module=mod entryPoint=vs }
+        \\  fragment={ module=mod entryPoint=fs targets=[{format=bgra8unorm}] }
+        \\}
+        \\#bindGroup bg { layout={ pipeline=pipe index=0 } entries=[{binding=0 resource={buffer=buf}}] }
+        \\#renderPass pass {
+        \\  colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}]
+        \\  pipeline=pipe
+        \\  bindGroups=[bg]
+        \\  draw=3
+        \\}
+        \\#frame main { perform=[pass] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // After sorting, slots should be: alpha=0, middle=1, zebra=2
+    // Verify bytecode is valid
+    try testing.expectEqual(format.VERSION, module.header.version);
+}

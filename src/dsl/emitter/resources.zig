@@ -42,6 +42,7 @@ const uniform_table = bytecode_mod.uniform_table;
 
 // Use reflect module import
 const reflect = @import("reflect");
+const miniray = reflect.miniray;
 const fs = std.fs;
 
 /// Maximum resources of each type (prevents runaway iteration).
@@ -704,27 +705,47 @@ fn recordUniformBinding(e: *Emitter, size_node: Node.Index, buffer_id: u16) Emit
         return;
     };
 
-    // Intern the binding name in string table
-    const binding_name_id = try e.builder.internString(e.gpa, binding.name);
+    // Step 1: Flatten nested structs with dot-notation paths
+    var flattened: std.ArrayListUnmanaged(FlattenedField) = .{};
+    defer freeFlattenedFields(e.gpa, &flattened);
 
-    // Convert reflection fields to uniform table fields
+    flattenFields(
+        e.gpa,
+        reflection,
+        binding.layout.fields,
+        0, // base_offset
+        "", // prefix (empty for top-level)
+        0, // depth
+        &flattened,
+    ) catch return;
+
+    if (flattened.items.len == 0) return;
+
+    // Step 2: Sort by path for stable slot assignment
+    std.mem.sort(FlattenedField, flattened.items, {}, compareFlattenedFields);
+
+    // Step 3: Convert to UniformField with slot indices
     var fields_buf: [uniform_table.MAX_FIELDS]uniform_table.UniformField = undefined;
     var field_count: usize = 0;
 
-    for (binding.layout.fields) |field| {
+    for (flattened.items, 0..) |flat, slot| {
         if (field_count >= uniform_table.MAX_FIELDS) break;
 
-        // Intern field name
-        const field_name_id = try e.builder.internString(e.gpa, field.name);
+        // Intern field path in string table
+        const name_id = e.builder.internString(e.gpa, flat.path) catch continue;
 
         fields_buf[field_count] = .{
-            .name_string_id = field_name_id.toInt(),
-            .offset = @intCast(field.offset),
-            .size = @intCast(field.size),
-            .uniform_type = uniform_table.UniformType.fromWgslType(field.type),
+            .slot = @intCast(slot),
+            .name_string_id = name_id.toInt(),
+            .offset = flat.offset,
+            .size = flat.size,
+            .uniform_type = flat.uniform_type,
         };
         field_count += 1;
     }
+
+    // Intern the binding name in string table
+    const binding_name_id = try e.builder.internString(e.gpa, binding.name);
 
     // Add binding to uniform table
     try e.builder.addUniformBinding(
@@ -762,19 +783,6 @@ fn validateBufferDataSize(e: *Emitter, buffer_name: []const u8, buffer_size: u32
                 buffer_size,
                 data_name,
                 data_size,
-            });
-            return Emitter.Error.EmitError;
-        }
-    }
-
-    // Check for generated arrays
-    if (e.generated_arrays.get(data_name)) |gen_array| {
-        if (buffer_size < gen_array.byte_size) {
-            std.log.warn("buffer '{s}' size ({d} bytes) is smaller than generated array '{s}' ({d} bytes)", .{
-                buffer_name,
-                buffer_size,
-                data_name,
-                gen_array.byte_size,
             });
             return Emitter.Error.EmitError;
         }
@@ -2139,12 +2147,111 @@ test "getTypeSize: all supported types" {
 // Uniform Table Population
 // ============================================================================
 
+/// Maximum recursion depth for nested struct flattening.
+const MAX_FLATTEN_DEPTH: u8 = 8;
+
+/// Temporary struct for collecting flattened fields before slot assignment.
+const FlattenedField = struct {
+    /// Full field path with dots (e.g., "position.x")
+    path: []const u8,
+    /// Absolute byte offset from buffer start
+    offset: u16,
+    /// Size in bytes
+    size: u16,
+    /// WGSL type
+    uniform_type: uniform_table.UniformType,
+};
+
+/// Compare FlattenedField by path for sorting (stable slot assignment).
+fn compareFlattenedFields(_: void, a: FlattenedField, b: FlattenedField) bool {
+    return std.mem.lessThan(u8, a.path, b.path);
+}
+
+/// Flatten nested struct fields recursively with dot-notation paths.
+///
+/// For a struct like:
+///   struct Position { x: f32, y: f32, z: f32 }
+///   struct Inputs { time: f32, pos: Position, color: vec4f }
+///
+/// Produces:
+///   color       → offset=48, size=16, type=vec4f
+///   pos.x       → offset=16, size=4,  type=f32
+///   pos.y       → offset=20, size=4,  type=f32
+///   pos.z       → offset=24, size=4,  type=f32
+///   time        → offset=0,  size=4,  type=f32
+///
+/// Pre-condition: fields is empty or has capacity for additional fields.
+/// Post-condition: all nested fields are appended with absolute offsets.
+fn flattenFields(
+    gpa: std.mem.Allocator,
+    reflection: *const miniray.ReflectionData,
+    layout_fields: []const miniray.Field,
+    base_offset: u32,
+    prefix: []const u8,
+    depth: u8,
+    out_fields: *std.ArrayListUnmanaged(FlattenedField),
+) std.mem.Allocator.Error!void {
+    // Pre-condition: bounded recursion
+    std.debug.assert(depth <= MAX_FLATTEN_DEPTH);
+
+    if (depth > MAX_FLATTEN_DEPTH) return; // Safety bound
+
+    for (layout_fields) |field| {
+        if (out_fields.items.len >= uniform_table.MAX_FIELDS) break;
+
+        // Build full path: prefix + field.name
+        const path = if (prefix.len > 0)
+            try std.fmt.allocPrint(gpa, "{s}.{s}", .{ prefix, field.name })
+        else
+            try gpa.dupe(u8, field.name);
+        errdefer gpa.free(path);
+
+        // Calculate absolute offset
+        const absolute_offset: u32 = base_offset + field.offset;
+
+        // Check if this field is a nested struct
+        if (reflection.structs.getPtr(field.type)) |nested_layout| {
+            // Recursively flatten nested struct
+            try flattenFields(
+                gpa,
+                reflection,
+                nested_layout.fields,
+                absolute_offset,
+                path,
+                depth + 1,
+                out_fields,
+            );
+            // Free the intermediate path since we used it as prefix
+            gpa.free(path);
+        } else {
+            // Leaf field - add to output
+            try out_fields.append(gpa, .{
+                .path = path,
+                .offset = @intCast(absolute_offset),
+                .size = @intCast(field.size),
+                .uniform_type = uniform_table.UniformType.fromWgslType(field.type),
+            });
+        }
+    }
+}
+
+/// Free FlattenedField paths.
+fn freeFlattenedFields(gpa: std.mem.Allocator, fields: *std.ArrayListUnmanaged(FlattenedField)) void {
+    for (fields.items) |f| {
+        gpa.free(f.path);
+    }
+    fields.deinit(gpa);
+}
+
 /// Populate the uniform table from WGSL reflection data.
 ///
 /// For each uniform binding in the shaders, finds the corresponding buffer
 /// and adds field metadata to enable runtime `setUniform()` by name.
 ///
-/// Complexity: O(shaders × bindings × fields)
+/// Fields are flattened (nested structs become dot-notation paths like "pos.x")
+/// and sorted by name for stable compile-time slot assignment.
+///
+/// Complexity: O(shaders × bindings × fields × log(fields))
 pub fn populateUniformTable(e: *Emitter) Emitter.Error!void {
     // First, trigger reflection for all #wgsl shaders to populate wgsl_reflections
     var wgsl_it = e.analysis.symbols.wgsl.iterator();
@@ -2167,10 +2274,10 @@ pub fn populateUniformTable(e: *Emitter) Emitter.Error!void {
     var it = e.wgsl_reflections.iterator();
     for (0..MAX_RESOURCES) |_| {
         const entry = it.next() orelse break;
-        const reflection = entry.value_ptr.*;
+        const reflection_ptr = entry.value_ptr;
 
         // Process each uniform binding
-        for (reflection.bindings) |binding| {
+        for (reflection_ptr.bindings) |binding| {
             if (binding.address_space != .uniform) continue;
 
             // Look up buffer_id from (group, binding)
@@ -2180,19 +2287,39 @@ pub fn populateUniformTable(e: *Emitter) Emitter.Error!void {
             };
             const buffer_id = e.uniform_bindings.get(key) orelse continue;
 
-            // Convert reflection fields to uniform table fields
+            // Step 1: Flatten nested structs with dot-notation paths
+            var flattened: std.ArrayListUnmanaged(FlattenedField) = .{};
+            defer freeFlattenedFields(e.gpa, &flattened);
+
+            flattenFields(
+                e.gpa,
+                reflection_ptr,
+                binding.layout.fields,
+                0, // base_offset
+                "", // prefix (empty for top-level)
+                0, // depth
+                &flattened,
+            ) catch continue;
+
+            if (flattened.items.len == 0) continue;
+
+            // Step 2: Sort by path for stable slot assignment
+            std.mem.sort(FlattenedField, flattened.items, {}, compareFlattenedFields);
+
+            // Step 3: Convert to UniformField with slot indices
             var fields: std.ArrayListUnmanaged(uniform_table.UniformField) = .{};
             defer fields.deinit(e.gpa);
 
-            for (binding.layout.fields) |field| {
-                // Add field name to string table
-                const name_id = e.builder.internString(e.gpa, field.name) catch continue;
+            for (flattened.items, 0..) |flat, slot| {
+                // Intern field path in string table
+                const name_id = e.builder.internString(e.gpa, flat.path) catch continue;
 
                 fields.append(e.gpa, .{
+                    .slot = @intCast(slot),
                     .name_string_id = name_id.toInt(),
-                    .offset = @intCast(field.offset),
-                    .size = @intCast(field.size),
-                    .uniform_type = uniform_table.UniformType.fromWgslType(field.type),
+                    .offset = flat.offset,
+                    .size = flat.size,
+                    .uniform_type = flat.uniform_type,
                 }) catch continue;
             }
 

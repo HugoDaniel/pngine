@@ -240,6 +240,17 @@ fn executeWasm(
         // Memory not available, bounds checking and descriptor parsing will be skipped
     }
 
+    // Set uniform buffer IDs for conflict detection (W009)
+    // Buffers with uniform fields may conflict with setUniform() API
+    if (module.uniforms.bindings.items.len > 0) {
+        var buffer_ids: [64]u16 = undefined;
+        const count = @min(module.uniforms.bindings.items.len, 64);
+        for (module.uniforms.bindings.items[0..count], 0..) |binding, i| {
+            buffer_ids[i] = binding.buffer_id;
+        }
+        try validator.setUniformBufferIds(buffer_ids[0..count]);
+    }
+
     // Execute init phase (always, resources must be created first)
     if (opts.phase == .init or opts.phase == .both) {
         const init_result = try runtime.callInit();

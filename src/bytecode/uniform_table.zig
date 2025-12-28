@@ -14,8 +14,9 @@
 //!   [binding_index: u8]      // @binding(n)
 //!   [field_count: u16]
 //!   For each field:
-//!     [name_string_id: u16]  // Field name in string table
-//!     [offset: u16]          // Byte offset in buffer
+//!     [slot: u16]            // Compile-time slot index (sorted by name)
+//!     [name_string_id: u16]  // Field name in string table (may have dots)
+//!     [offset: u16]          // Byte offset in buffer (absolute)
 //!     [size: u16]            // Byte size
 //!     [type: u8]             // UniformType enum
 //!     [_pad: u8]             // Alignment padding
@@ -104,10 +105,15 @@ pub const UniformType = enum(u8) {
 };
 
 /// A uniform field within a binding.
+/// Fields are flattened at compile time - nested structs become dot-notation paths.
+/// Example: "position.x" for struct field access.
 pub const UniformField = struct {
-    /// Field name string ID.
+    /// Compile-time assigned slot index for O(1) runtime lookup.
+    /// Slots are assigned in sorted order by field name for stability.
+    slot: u16,
+    /// Field name string ID (may contain dots for nested fields).
     name_string_id: u16,
-    /// Byte offset from buffer start.
+    /// Byte offset from buffer start (absolute, after flattening).
     offset: u16,
     /// Byte size of field.
     size: u16,
@@ -258,8 +264,10 @@ pub const UniformTable = struct {
             const field_count: u16 = @intCast(binding.fields.len);
             try result.appendSlice(allocator, &std.mem.toBytes(field_count));
 
-            // Fields
+            // Fields (10 bytes each: slot + name_string_id + offset + size + type + pad)
             for (binding.fields) |field| {
+                // slot (u16 LE)
+                try result.appendSlice(allocator, &std.mem.toBytes(field.slot));
                 // name_string_id (u16 LE)
                 try result.appendSlice(allocator, &std.mem.toBytes(field.name_string_id));
                 // offset (u16 LE)
@@ -319,20 +327,21 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !UniformTable {
         const field_count = std.mem.readInt(u16, data[pos..][0..2], .little);
         pos += 2;
 
-        // Read fields
+        // Read fields (10 bytes each: slot + name_string_id + offset + size + type + pad)
         var fields = try alloc.alloc(UniformField, @min(field_count, MAX_FIELDS));
         var actual_field_count: usize = 0;
 
         for (0..@min(field_count, MAX_FIELDS)) |i| {
-            if (pos + 8 > data.len) break; // Need 8 bytes per field
+            if (pos + 10 > data.len) break; // Need 10 bytes per field
 
             fields[i] = .{
-                .name_string_id = std.mem.readInt(u16, data[pos..][0..2], .little),
-                .offset = std.mem.readInt(u16, data[pos + 2 ..][0..2], .little),
-                .size = std.mem.readInt(u16, data[pos + 4 ..][0..2], .little),
-                .uniform_type = @enumFromInt(data[pos + 6]),
+                .slot = std.mem.readInt(u16, data[pos..][0..2], .little),
+                .name_string_id = std.mem.readInt(u16, data[pos + 2 ..][0..2], .little),
+                .offset = std.mem.readInt(u16, data[pos + 4 ..][0..2], .little),
+                .size = std.mem.readInt(u16, data[pos + 6 ..][0..2], .little),
+                .uniform_type = @enumFromInt(data[pos + 8]),
             };
-            pos += 8; // 6 bytes data + 1 type + 1 padding
+            pos += 10; // 8 bytes data + 1 type + 1 padding
             actual_field_count += 1;
         }
 
@@ -391,8 +400,8 @@ test "UniformTable: add binding with fields" {
     defer table.deinit(testing.allocator);
 
     const fields = [_]UniformField{
-        .{ .name_string_id = 1, .offset = 0, .size = 4, .uniform_type = .f32 },
-        .{ .name_string_id = 2, .offset = 16, .size = 16, .uniform_type = .vec4f },
+        .{ .slot = 0, .name_string_id = 1, .offset = 0, .size = 4, .uniform_type = .f32 },
+        .{ .slot = 1, .name_string_id = 2, .offset = 16, .size = 16, .uniform_type = .vec4f },
     };
 
     try table.addBinding(testing.allocator, 0, 0, 0, 0, &fields);
@@ -406,8 +415,8 @@ test "UniformTable: find field by string ID" {
     defer table.deinit(testing.allocator);
 
     const fields = [_]UniformField{
-        .{ .name_string_id = 10, .offset = 0, .size = 4, .uniform_type = .f32 },
-        .{ .name_string_id = 11, .offset = 16, .size = 16, .uniform_type = .vec4f },
+        .{ .slot = 0, .name_string_id = 10, .offset = 0, .size = 4, .uniform_type = .f32 },
+        .{ .slot = 1, .name_string_id = 11, .offset = 16, .size = 16, .uniform_type = .vec4f },
     };
 
     try table.addBinding(testing.allocator, 5, 0, 0, 0, &fields);
@@ -436,14 +445,14 @@ test "UniformTable: serialize and deserialize roundtrip" {
 
     // Add two bindings
     const fields1 = [_]UniformField{
-        .{ .name_string_id = 1, .offset = 0, .size = 4, .uniform_type = .f32 },
-        .{ .name_string_id = 2, .offset = 4, .size = 4, .uniform_type = .f32 },
-        .{ .name_string_id = 3, .offset = 16, .size = 16, .uniform_type = .vec4f },
+        .{ .slot = 0, .name_string_id = 1, .offset = 0, .size = 4, .uniform_type = .f32 },
+        .{ .slot = 1, .name_string_id = 2, .offset = 4, .size = 4, .uniform_type = .f32 },
+        .{ .slot = 2, .name_string_id = 3, .offset = 16, .size = 16, .uniform_type = .vec4f },
     };
     try table.addBinding(testing.allocator, 0, 10, 0, 0, &fields1);
 
     const fields2 = [_]UniformField{
-        .{ .name_string_id = 4, .offset = 0, .size = 64, .uniform_type = .mat4x4f },
+        .{ .slot = 3, .name_string_id = 4, .offset = 0, .size = 64, .uniform_type = .mat4x4f },
     };
     try table.addBinding(testing.allocator, 1, 11, 0, 1, &fields2);
 
@@ -466,19 +475,22 @@ test "UniformTable: serialize and deserialize roundtrip" {
     try testing.expectEqual(@as(u8, 0), b0.binding_index);
     try testing.expectEqual(@as(usize, 3), b0.fields.len);
 
-    // Verify first binding fields
+    // Verify first binding fields (including slot)
+    try testing.expectEqual(@as(u16, 0), b0.fields[0].slot);
     try testing.expectEqual(@as(u16, 1), b0.fields[0].name_string_id);
     try testing.expectEqual(@as(u16, 0), b0.fields[0].offset);
     try testing.expectEqual(UniformType.f32, b0.fields[0].uniform_type);
 
+    try testing.expectEqual(@as(u16, 2), b0.fields[2].slot);
     try testing.expectEqual(@as(u16, 3), b0.fields[2].name_string_id);
     try testing.expectEqual(@as(u16, 16), b0.fields[2].offset);
     try testing.expectEqual(UniformType.vec4f, b0.fields[2].uniform_type);
 
-    // Verify second binding
+    // Verify second binding (including slot)
     const b1 = restored.bindings.items[1];
     try testing.expectEqual(@as(u16, 1), b1.buffer_id);
     try testing.expectEqual(@as(usize, 1), b1.fields.len);
+    try testing.expectEqual(@as(u16, 3), b1.fields[0].slot);
     try testing.expectEqual(UniformType.mat4x4f, b1.fields[0].uniform_type);
 
     // Test field lookup on restored table
@@ -493,13 +505,13 @@ test "UniformTable: get field by index" {
     defer table.deinit(testing.allocator);
 
     const fields1 = [_]UniformField{
-        .{ .name_string_id = 1, .offset = 0, .size = 4, .uniform_type = .f32 },
-        .{ .name_string_id = 2, .offset = 4, .size = 4, .uniform_type = .i32 },
+        .{ .slot = 0, .name_string_id = 1, .offset = 0, .size = 4, .uniform_type = .f32 },
+        .{ .slot = 1, .name_string_id = 2, .offset = 4, .size = 4, .uniform_type = .i32 },
     };
     try table.addBinding(testing.allocator, 0, 10, 0, 0, &fields1);
 
     const fields2 = [_]UniformField{
-        .{ .name_string_id = 3, .offset = 0, .size = 64, .uniform_type = .mat4x4f },
+        .{ .slot = 2, .name_string_id = 3, .offset = 0, .size = 64, .uniform_type = .mat4x4f },
     };
     try table.addBinding(testing.allocator, 1, 11, 0, 1, &fields2);
 
@@ -540,7 +552,7 @@ test "UniformTable: OOM handling" {
         defer table.deinit(alloc);
 
         const fields = [_]UniformField{
-            .{ .name_string_id = 1, .offset = 0, .size = 4, .uniform_type = .f32 },
+            .{ .slot = 0, .name_string_id = 1, .offset = 0, .size = 4, .uniform_type = .f32 },
         };
 
         const result = table.addBinding(alloc, 0, 0, 0, 0, &fields);
@@ -563,19 +575,19 @@ test "UniformTable: multiple bindings different groups" {
 
     // Group 0
     const fields0 = [_]UniformField{
-        .{ .name_string_id = 1, .offset = 0, .size = 4, .uniform_type = .f32 },
+        .{ .slot = 0, .name_string_id = 1, .offset = 0, .size = 4, .uniform_type = .f32 },
     };
     try table.addBinding(testing.allocator, 0, 10, 0, 0, &fields0);
 
     // Group 1
     const fields1 = [_]UniformField{
-        .{ .name_string_id = 2, .offset = 0, .size = 16, .uniform_type = .vec4f },
+        .{ .slot = 1, .name_string_id = 2, .offset = 0, .size = 16, .uniform_type = .vec4f },
     };
     try table.addBinding(testing.allocator, 1, 11, 1, 0, &fields1);
 
     // Group 2
     const fields2 = [_]UniformField{
-        .{ .name_string_id = 3, .offset = 0, .size = 64, .uniform_type = .mat4x4f },
+        .{ .slot = 2, .name_string_id = 3, .offset = 0, .size = 64, .uniform_type = .mat4x4f },
     };
     try table.addBinding(testing.allocator, 2, 12, 2, 0, &fields2);
 
