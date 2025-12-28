@@ -87,22 +87,20 @@ pub const WasmPlugin = struct {
     ///   module_id: Target module ID
     ///   func_name_ptr: Pointer to function name string
     ///   func_name_len: Function name length
-    ///   args_ptr: Pointer to serialized arguments
-    ///   args_len: Arguments length
+    ///   args: Serialized arguments (copied inline into command buffer)
     pub fn callWasmFunc(
         self: *Self,
         call_id: u16,
         module_id: u16,
         func_name_ptr: u32,
         func_name_len: u32,
-        args_ptr: u32,
-        args_len: u32,
+        args: []const u8,
     ) void {
         // Pre-conditions
         assert(module_id < MAX_WASM_MODULES);
         assert(func_name_len > 0);
 
-        self.cmd_buffer.callWasmFunc(call_id, module_id, func_name_ptr, func_name_len, args_ptr, args_len);
+        self.cmd_buffer.callWasmFunc(call_id, module_id, func_name_ptr, func_name_len, args);
     }
 
     /// Write WASM call result to a GPU buffer.
@@ -161,7 +159,9 @@ test "WasmPlugin: call function" {
     var cmd_buffer = CommandBuffer.init(&buffer);
     var wasm_plugin = WasmPlugin.init(&cmd_buffer);
 
-    wasm_plugin.callWasmFunc(0, 0, 0x2000, 8, 0x3000, 12);
+    // Args: [count=3][canvas_width][canvas_height][time_total]
+    const args = [_]u8{ 3, 0x01, 0x02, 0x03 };
+    wasm_plugin.callWasmFunc(0, 0, 0x2000, 8, &args);
 
     const result = cmd_buffer.finish();
     try testing.expect(result.len > 8);
@@ -188,8 +188,10 @@ test "WasmPlugin: full workflow" {
     // 1. Initialize module
     wasm_plugin.initWasmModule(0, 0x1000, 1024);
 
-    // 2. Call function
-    wasm_plugin.callWasmFunc(0, 0, 0x2000, 8, 0x3000, 16);
+    // 2. Call function with inline args
+    // Args: [count=3][canvas_width][canvas_height][time_total]
+    const args = [_]u8{ 3, 0x01, 0x02, 0x03 };
+    wasm_plugin.callWasmFunc(0, 0, 0x2000, 8, &args);
 
     // 3. Copy result to GPU buffer
     wasm_plugin.writeBufferFromWasm(1, 0, 0x4000, 64);

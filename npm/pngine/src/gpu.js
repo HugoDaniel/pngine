@@ -272,21 +272,27 @@ export class CommandDispatcher {
 
       case CMD.SET_PIPELINE: {
         const id = view.getUint16(pos, true);
-        this.pass?.setPipeline(this.pipelines.get(id));
+        const pipeline = this.pipelines.get(id);
+        if (this.debug) console.log(`[GPU] setPipeline(id=${id}, pipeline=${pipeline ? 'OK' : 'MISSING'})`);
+        this.pass?.setPipeline(pipeline);
         return pos + 2;
       }
 
       case CMD.SET_BIND_GROUP: {
         const slot = view.getUint8(pos);
         const id = view.getUint16(pos + 1, true);
-        this.pass?.setBindGroup(slot, this.bindGroups.get(id));
+        const bg = this.bindGroups.get(id);
+        if (this.debug) console.log(`[GPU] setBindGroup(slot=${slot}, id=${id}, bg=${bg ? 'OK' : 'MISSING'})`);
+        this.pass?.setBindGroup(slot, bg);
         return pos + 3;
       }
 
       case CMD.SET_VERTEX_BUFFER: {
         const slot = view.getUint8(pos);
         const id = view.getUint16(pos + 1, true);
-        this.pass?.setVertexBuffer(slot, this.buffers.get(id));
+        const buf = this.buffers.get(id);
+        if (this.debug) console.log(`[GPU] setVertexBuffer(slot=${slot}, id=${id}, buf=${buf ? 'OK' : 'MISSING'})`);
+        this.pass?.setVertexBuffer(slot, buf);
         return pos + 3;
       }
 
@@ -340,6 +346,7 @@ export class CommandDispatcher {
       }
 
       case CMD.END_PASS: {
+        if (this.debug) console.log(`[GPU] endPass(pass=${this.pass ? 'OK' : 'NULL'})`);
         this.pass?.end();
         this.pass = null;
         return pos;
@@ -428,11 +435,13 @@ export class CommandDispatcher {
         const moduleId = view.getUint16(pos + 2, true);
         const namePtr = view.getUint32(pos + 4, true);
         const nameLen = view.getUint32(pos + 8, true);
-        const argsPtr = view.getUint32(pos + 12, true);
-        const argsLen = view.getUint32(pos + 16, true);
-        const nextPos = pos + 20;
+        const argsLen = view.getUint8(pos + 12);
+        // Args are inline in the command buffer (not a WASM memory pointer)
+        // Copy them to avoid issues if memory detaches during async call
+        const argsBytes = new Uint8Array(this.memory.buffer, pos + 13, argsLen).slice();
+        const nextPos = pos + 13 + argsLen;
         // Return Promise that resolves to next position after async call completes
-        return this._callWasmFunc(callId, moduleId, namePtr, nameLen, argsPtr, argsLen)
+        return this._callWasmFunc(callId, moduleId, namePtr, nameLen, argsBytes)
           .then(() => nextPos);
       }
 
@@ -485,6 +494,7 @@ export class CommandDispatcher {
       }
 
       case CMD.SUBMIT: {
+        if (this.debug) console.log(`[GPU] submit(encoder=${this.encoder ? 'OK' : 'NULL'})`);
         if (this.encoder) {
           this.device.queue.submit([this.encoder.finish()]);
           this.encoder = null;
@@ -506,6 +516,7 @@ export class CommandDispatcher {
   _createBuffer(id, size, usage) {
     if (this.buffers.has(id)) return;
     const gpuUsage = this._translateUsage(usage);
+    if (this.debug) console.log(`[GPU] createBuffer(id=${id}, size=${size}, usage=0x${usage.toString(16)})`);
     this.buffers.set(
       id,
       this.device.createBuffer({ size, usage: gpuUsage })
@@ -528,6 +539,7 @@ export class CommandDispatcher {
   _createShader(id, codePtr, codeLen) {
     if (this.shaders.has(id)) return;
     const code = this._readString(codePtr, codeLen);
+    if (this.debug) console.log(`[GPU] createShader(id=${id}, len=${codeLen}, first50chars="${code.slice(0, 50)}")`);
     this.shaders.set(id, this.device.createShaderModule({ code }));
   }
 
@@ -539,6 +551,14 @@ export class CommandDispatcher {
       return;
     }
     const desc = JSON.parse(json);
+    if (this.debug) {
+      console.log(`[GPU] createRenderPipeline(id=${id})`);
+      console.log(`[GPU]   vertex=`, JSON.stringify(desc.vertex));
+      console.log(`[GPU]   fragment=`, JSON.stringify(desc.fragment));
+      console.log(`[GPU]   primitive=`, JSON.stringify(desc.primitive));
+      console.log(`[GPU]   depthStencil=`, JSON.stringify(desc.depthStencil));
+      console.log(`[GPU]   full json=`, json);
+    }
     const pipeline = this._buildRenderPipeline(desc);
     this.pipelines.set(id, pipeline);
     // Store layout for bind group creation
@@ -596,6 +616,14 @@ export class CommandDispatcher {
     const bytes = new Uint8Array(this.memory.buffer, entriesPtr, entriesLen);
     const desc = this._decodeBindGroupDescriptor(bytes);
 
+    if (this.debug) {
+      console.log(`[GPU] createBindGroup(id=${id}, layoutId=${layoutId})`);
+      console.log(`[GPU]   groupIndex=${desc.groupIndex}, entries=${desc.entries.length}`);
+      for (const e of desc.entries) {
+        console.log(`[GPU]   entry: binding=${e.binding}, resourceType=${e.resourceType}, resourceId=${e.resourceId}, offset=${e.offset}, size=${e.size}`);
+      }
+    }
+
     // Store descriptor for later recreation if textures are resized
     desc.layoutId = layoutId;
     this.bindGroupDescriptors.set(id, desc);
@@ -610,7 +638,9 @@ export class CommandDispatcher {
     const gpuEntries = desc.entries.map((e) => {
       const entry = { binding: e.binding };
       if (e.resourceType === 0) { // buffer
-        const bufRes = { buffer: this.buffers.get(e.resourceId) };
+        const buf = this.buffers.get(e.resourceId);
+        if (this.debug) console.log(`[GPU]   resolving buffer resourceId=${e.resourceId} -> ${buf ? 'OK' : 'MISSING'}`);
+        const bufRes = { buffer: buf };
         if (e.offset) bufRes.offset = e.offset;
         if (e.size) bufRes.size = e.size;
         entry.resource = bufRes;
@@ -622,13 +652,24 @@ export class CommandDispatcher {
       return entry;
     });
 
-    this.bindGroups.set(
-      id,
-      this.device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(desc.groupIndex),
-        entries: gpuEntries,
-      })
-    );
+    if (this.debug) {
+      console.log(`[GPU]   gpuEntries:`, JSON.stringify(gpuEntries.map(e => ({binding: e.binding, hasResource: !!e.resource}))));
+    }
+
+    try {
+      const layout = pipeline.getBindGroupLayout(desc.groupIndex);
+      if (this.debug) console.log(`[GPU]   layout from pipeline.getBindGroupLayout(${desc.groupIndex}): ${layout ? 'OK' : 'NULL'}`);
+      this.bindGroups.set(
+        id,
+        this.device.createBindGroup({
+          layout,
+          entries: gpuEntries,
+        })
+      );
+      if (this.debug) console.log(`[GPU]   bind group created successfully`);
+    } catch (err) {
+      console.error(`[GPU] Failed to create bind group ${id}:`, err);
+    }
   }
 
   _decodeBindGroupDescriptor(bytes) {
@@ -680,6 +721,7 @@ export class CommandDispatcher {
     if (this.textures.has(id)) return;
     const bytes = new Uint8Array(this.memory.buffer, descPtr, descLen);
     const desc = this._decodeTextureDescriptor(bytes);
+    if (this.debug) console.log(`[GPU] createTexture(id=${id}, format=${desc.format}, size=${desc.size}, usage=${desc.usage})`);
     // Store descriptor for potential recreation with correct format/usage
     this.textureDescriptors.set(id, { format: desc.format, usage: desc.usage });
     this.textures.set(id, this.device.createTexture(desc));
@@ -805,10 +847,15 @@ export class CommandDispatcher {
 
     // 0xFFFE (65534) = use canvas, else use texture
     const CANVAS_TEXTURE_ID = 0xfffe;
-    const colorView =
-      colorId === CANVAS_TEXTURE_ID
-        ? this.context.getCurrentTexture().createView()
-        : this.textures.get(colorId)?.createView();
+    let colorView;
+    if (colorId === CANVAS_TEXTURE_ID) {
+      const tex = this.context.getCurrentTexture();
+      colorView = tex.createView();
+      if (this.debug) console.log(`[GPU] canvas texture: ${tex.width}x${tex.height}, format=${tex.format}`);
+    } else {
+      colorView = this.textures.get(colorId)?.createView();
+    }
+    if (this.debug) console.log(`[GPU] beginRenderPass(colorId=${colorId}, canvas=${colorId === CANVAS_TEXTURE_ID}, view=${colorView ? 'OK' : 'MISSING'}, depthId=${depthId})`);
 
     // loadOp: 0=load, 1=clear
     // storeOp: 0=store, 1=discard
@@ -827,7 +874,9 @@ export class CommandDispatcher {
     };
 
     if (depthId !== 0xffff) {
-      const depthView = this.textures.get(depthId)?.createView();
+      const depthTex = this.textures.get(depthId);
+      if (this.debug) console.log(`[GPU] depthTexture(id=${depthId}, tex=${depthTex ? 'OK' : 'MISSING'})`);
+      const depthView = depthTex?.createView();
       if (depthView) {
         passDesc.depthStencilAttachment = {
           view: depthView,
@@ -835,6 +884,8 @@ export class CommandDispatcher {
           depthStoreOp: "store",
           depthClearValue: 1.0,
         };
+      } else if (this.debug) {
+        console.log(`[GPU] WARNING: depth texture ${depthId} not found, skipping depth attachment`);
       }
     }
 
@@ -850,8 +901,13 @@ export class CommandDispatcher {
 
   _writeBuffer(id, offset, dataPtr, dataLen) {
     const buffer = this.buffers.get(id);
+    if (this.debug) console.log(`[GPU] writeBuffer(id=${id}, offset=${offset}, len=${dataLen}, buffer=${buffer ? 'OK' : 'MISSING'})`);
     if (!buffer) return;
     const data = new Uint8Array(this.memory.buffer, dataPtr, dataLen);
+    if (this.debug && dataLen <= 48) {
+      const floats = new Float32Array(data.buffer, data.byteOffset, dataLen / 4);
+      console.log(`[GPU]   data floats:`, Array.from(floats));
+    }
     this.device.queue.writeBuffer(buffer, offset, data);
   }
 
@@ -865,7 +921,10 @@ export class CommandDispatcher {
       this.canvasHeight,
       this.canvasWidth / (this.canvasHeight || 1),
     ]);
-    const bytes = new Uint8Array(data.buffer, 0, Math.min(size, 16));
+    const writeSize = Math.min(size, 16);
+    if (this.debug) console.log(`[GPU] writeTimeUniform(id=${id}, time=${this.time}, w=${this.canvasWidth}, h=${this.canvasHeight}, size=${size}, writeSize=${writeSize})`);
+    if (this.debug) console.log(`[GPU]   actual floats:`, Array.from(data.slice(0, Math.ceil(writeSize/4))));
+    const bytes = new Uint8Array(data.buffer, 0, writeSize);
     this.device.queue.writeBuffer(buffer, offset, bytes);
   }
 
@@ -1094,6 +1153,10 @@ export class CommandDispatcher {
       if (typeof resultValue === 'number' && memory) {
         // resultValue is a pointer into the nested module's memory
         const data = new Uint8Array(memory.buffer, resultValue, size);
+        if (this.debug && size === 64) {
+          const floats = new Float32Array(memory.buffer, resultValue, 16);
+          console.log(`[GPU]   matrix values:`, Array.from(floats));
+        }
         this.device.queue.writeBuffer(buffer, bufferOffset, data);
       } else if (typeof resultValue === 'number') {
         // Direct numeric return - convert to bytes
@@ -1132,8 +1195,10 @@ export class CommandDispatcher {
     // Create minimal imports for the nested WASM module
     const imports = {
       env: {
-        // Provide memory if the module doesn't have its own
-        // Note: Most modules export their own memory
+        // Required by AssemblyScript-compiled modules
+        abort: (msg, file, line, col) => {
+          console.error(`[GPU] WASM abort at ${file}:${line}:${col}: ${msg}`);
+        },
       }
     };
 
@@ -1169,7 +1234,7 @@ export class CommandDispatcher {
    * - 0x05: literal_u32 (4 bytes follow)
    * - 0x06: time_delta (runtime, 0 bytes)
    */
-  async _callWasmFunc(callId, moduleId, namePtr, nameLen, argsPtr, argsLen) {
+  async _callWasmFunc(callId, moduleId, namePtr, nameLen, argsBytes) {
     const funcName = this._readString(namePtr, nameLen);
     if (this.debug) console.log(`[GPU] callWasmFunc(callId=${callId}, moduleId=${moduleId}, func="${funcName}")`);
 
@@ -1194,13 +1259,27 @@ export class CommandDispatcher {
       return;
     }
 
-    // Decode arguments
-    const args = this._decodeWasmArgs(argsPtr, argsLen);
-    if (this.debug) console.log(`[GPU]   args:`, args);
+    // Decode arguments (argsBytes is already a Uint8Array with inline data)
+    if (this.debug) console.log(`[GPU]   argsBytes.length=${argsBytes.length}`);
+    if (this.debug && argsBytes.length > 0) {
+      console.log(`[GPU]   raw args bytes:`, Array.from(argsBytes));
+    }
+    const args = this._decodeWasmArgs(argsBytes);
+    if (this.debug) console.log(`[GPU]   decoded args:`, args);
 
     // Call the function
     const result = fn(...args);
-    if (this.debug) console.log(`[GPU]   result:`, result);
+    if (this.debug) console.log(`[GPU]   result (pointer):`, result);
+
+    // Debug: dump first 64 bytes at result pointer
+    if (this.debug && typeof result === 'number' && memory) {
+      try {
+        const floats = new Float32Array(memory.buffer, result, 16);
+        console.log(`[GPU]   matrix at ptr ${result}:`, Array.from(floats).map(v => v.toFixed(4)));
+      } catch (e) {
+        console.log(`[GPU]   failed to read matrix:`, e.message);
+      }
+    }
 
     // If the function returns data (e.g., a pointer to memory), store it
     // For functions that write to their own memory, we store a reference to that memory region
@@ -1219,13 +1298,15 @@ export class CommandDispatcher {
   /**
    * Decode WASM function arguments from encoded bytes.
    * Format: [arg_count:u8][arg_type:u8][value?:0-4 bytes]...
+   * @param {Uint8Array} argsBytes - Inline args bytes from command buffer
    */
-  _decodeWasmArgs(argsPtr, argsLen) {
-    if (argsLen === 0) return [];
+  _decodeWasmArgs(argsBytes) {
+    if (argsBytes.length === 0) return [];
 
-    const bytes = new Uint8Array(this.memory.buffer, argsPtr, argsLen);
+    const bytes = argsBytes;
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const args = [];
+    const argsLen = bytes.length;
 
     let offset = 0;
     const argCount = bytes[offset++];

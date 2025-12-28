@@ -488,11 +488,15 @@ fn executeOpcode(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpC
         .fill_expression, .write_buffer_from_array,
         => execUtility(cmds, bytecode, pc, op),
 
+        // Pool operations (render/compute - use frame_counter for selection)
+        .set_vertex_buffer_pool, .set_bind_group_pool,
+        => execPool(cmds, bytecode, pc, op),
+
         // Pass/Frame structure and ignored opcodes
         .define_pass, .define_frame, .end_pass_def, .end_frame, .exec_pass,
         .nop, .create_query_set, .execute_bundles, .create_shader_concat,
-        .write_uniform, .write_time_uniform, .set_bind_group_pool,
-        .set_vertex_buffer_pool, .select_from_pool, .fill_linear, .fill_element_index,
+        .write_uniform, .write_time_uniform,
+        .select_from_pool, .fill_linear, .fill_element_index,
         => skipOpcodeParams(bytecode, pc, op),
 
         _ => {}, // Unknown opcode
@@ -822,13 +826,13 @@ fn execWasm(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) 
                 const args_len = args_end - args_start;
                 if (args_len <= 256) {
                     @memcpy(args_buf[1 .. 1 + args_len], bytecode[args_start..args_end]);
+                    // Pass args slice directly - command buffer copies inline
                     cmds.callWasmFunc(
                         @intCast(call_id),
                         @intCast(mod_id),
                         @intFromPtr(func_name.ptr),
                         @intCast(func_name.len),
-                        @intFromPtr(&args_buf),
-                        @intCast(1 + args_len),
+                        args_buf[0 .. 1 + args_len],
                     );
                 }
             } else {
@@ -904,6 +908,44 @@ fn execUtility(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCod
             const offset = readVarint(bytecode, pc);
             const arr_id = readVarint(bytecode, pc);
             cmds.writeBufferFromArray(@intCast(buffer_id), @intCast(offset), @intCast(arr_id));
+        },
+        else => {},
+    }
+}
+
+// ============================================================================
+// Plugin Handlers - Pool Operations
+// ============================================================================
+
+/// Handle pool opcodes: set_vertex_buffer_pool, set_bind_group_pool.
+/// Calculates actual resource ID based on frame_counter.
+fn execPool(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) void {
+    switch (op) {
+        .set_vertex_buffer_pool => {
+            const slot = bytecode[pc.*];
+            pc.* += 1;
+            const base_id = readVarint(bytecode, pc);
+            const pool_size = bytecode[pc.*];
+            pc.* += 1;
+            const offset = bytecode[pc.*];
+            pc.* += 1;
+
+            // Calculate actual buffer ID: base_id + (frame_counter + offset) % pool_size
+            const actual_id: u16 = @intCast(base_id + (frame_counter + offset) % pool_size);
+            cmds.setVertexBuffer(slot, actual_id);
+        },
+        .set_bind_group_pool => {
+            const slot = bytecode[pc.*];
+            pc.* += 1;
+            const base_id = readVarint(bytecode, pc);
+            const pool_size = bytecode[pc.*];
+            pc.* += 1;
+            const offset = bytecode[pc.*];
+            pc.* += 1;
+
+            // Calculate actual bind group ID: base_id + (frame_counter + offset) % pool_size
+            const actual_id: u16 = @intCast(base_id + (frame_counter + offset) % pool_size);
+            cmds.setBindGroup(slot, actual_id);
         },
         else => {},
     }

@@ -166,6 +166,14 @@ pub const CommandBuffer = struct {
         self.cmd_count += 1;
     }
 
+    fn writeSlice(self: *Self, data: []const u8) void {
+        const max_to_write = @min(data.len, self.buffer.len -| self.pos);
+        if (max_to_write > 0) {
+            @memcpy(self.buffer[self.pos..][0..max_to_write], data[0..max_to_write]);
+            self.pos += max_to_write;
+        }
+    }
+
     // ========================================================================
     // Command emission methods
     // ========================================================================
@@ -421,15 +429,16 @@ pub const CommandBuffer = struct {
         self.writeU32(data_len);
     }
 
-    /// CALL_WASM_FUNC: [call_id:u16] [module_id:u16] [func_name_ptr:u32] [func_name_len:u32] [args_ptr:u32] [args_len:u32]
-    pub fn callWasmFunc(self: *Self, call_id: u16, module_id: u16, func_name_ptr: u32, func_name_len: u32, args_ptr: u32, args_len: u32) void {
+    /// CALL_WASM_FUNC: [call_id:u16] [module_id:u16] [func_name_ptr:u32] [func_name_len:u32] [args_len:u8] [args bytes...]
+    /// Note: args are copied inline to avoid dangling stack pointers.
+    pub fn callWasmFunc(self: *Self, call_id: u16, module_id: u16, func_name_ptr: u32, func_name_len: u32, args: []const u8) void {
         self.writeCmd(.call_wasm_func);
         self.writeU16(call_id);
         self.writeU16(module_id);
         self.writeU32(func_name_ptr);
         self.writeU32(func_name_len);
-        self.writeU32(args_ptr);
-        self.writeU32(args_len);
+        self.writeU8(@intCast(@min(args.len, 255)));
+        self.writeSlice(args);
     }
 
     /// CREATE_TYPED_ARRAY: [id:u16] [type:u8] [size:u32]
@@ -744,7 +753,8 @@ pub const CommandGPU = struct {
         const module = self.module orelse return;
         const string_id: StringId = @enumFromInt(func_name_id);
         const func_name = module.strings.get(string_id);
-        self.cmds.callWasmFunc(call_id, module_id, @intFromPtr(func_name.ptr), @intCast(func_name.len), @intFromPtr(args.ptr), @intCast(args.len));
+        // Pass args slice directly - they are copied inline into the command buffer
+        self.cmds.callWasmFunc(call_id, module_id, @intFromPtr(func_name.ptr), @intCast(func_name.len), args);
     }
 
     pub fn writeBufferFromWasm(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u16, wasm_ptr: u32, size: u32) !void {
@@ -972,7 +982,7 @@ test "CommandBuffer: initWasmModule encodes correctly" {
     try std.testing.expectEqual(data_len, std.mem.readInt(u32, buffer[pos..][0..4], .little));
 }
 
-test "CommandBuffer: callWasmFunc encodes correctly" {
+test "CommandBuffer: callWasmFunc encodes correctly with inline args" {
     var buffer: [256]u8 = undefined;
     var cmds = CommandBuffer.init(&buffer);
 
@@ -980,15 +990,15 @@ test "CommandBuffer: callWasmFunc encodes correctly" {
     const module_id: u16 = 0;
     const func_name_ptr: u32 = 0x2000;
     const func_name_len: u32 = 10;
-    const args_ptr: u32 = 0x3000;
-    const args_len: u32 = 17;
+    // Inline args: [count=3, type=1, type=2, type=3]
+    const args = [_]u8{ 3, 0x01, 0x02, 0x03 };
 
-    cmds.callWasmFunc(call_id, module_id, func_name_ptr, func_name_len, args_ptr, args_len);
+    cmds.callWasmFunc(call_id, module_id, func_name_ptr, func_name_len, &args);
     _ = cmds.finish();
 
     // Expected: Header (8) + cmd(1) + call_id(2) + module_id(2) + func_name_ptr(4)
-    //           + func_name_len(4) + args_ptr(4) + args_len(4) = 29
-    try std.testing.expectEqual(@as(usize, 29), cmds.pos);
+    //           + func_name_len(4) + args_len(1) + args(4) = 26
+    try std.testing.expectEqual(@as(usize, 26), cmds.pos);
 
     // Verify command byte
     try std.testing.expectEqual(@as(u8, @intFromEnum(Cmd.call_wasm_func)), buffer[HEADER_SIZE]);
@@ -1003,9 +1013,11 @@ test "CommandBuffer: callWasmFunc encodes correctly" {
     pos += 4;
     try std.testing.expectEqual(func_name_len, std.mem.readInt(u32, buffer[pos..][0..4], .little));
     pos += 4;
-    try std.testing.expectEqual(args_ptr, std.mem.readInt(u32, buffer[pos..][0..4], .little));
-    pos += 4;
-    try std.testing.expectEqual(args_len, std.mem.readInt(u32, buffer[pos..][0..4], .little));
+    // Args length (u8)
+    try std.testing.expectEqual(@as(u8, 4), buffer[pos]);
+    pos += 1;
+    // Inline args bytes
+    try std.testing.expectEqualSlices(u8, &args, buffer[pos..][0..4]);
 }
 
 test "CommandBuffer: writeBufferFromWasm encodes correctly" {
@@ -1040,13 +1052,15 @@ test "CommandBuffer: writeBufferFromWasm encodes correctly" {
 test "CommandBuffer: WASM flow sequence" {
     // Test a typical WASM call flow:
     // 1. initWasmModule - load module
-    // 2. callWasmFunc - call function
+    // 2. callWasmFunc - call function with inline args
     // 3. writeBufferFromWasm - copy result to GPU
     var buffer: [512]u8 = undefined;
     var cmds = CommandBuffer.init(&buffer);
 
+    // Args: [count=2][arg1_type=canvas_width][arg2_type=time_total]
+    const args = [_]u8{ 2, 0x01, 0x03 };
     cmds.initWasmModule(0, 0x1000, 1024);
-    cmds.callWasmFunc(0, 0, 0x2000, 8, 0x3000, 5);
+    cmds.callWasmFunc(0, 0, 0x2000, 8, &args);
     cmds.writeBufferFromWasm(1, 0, 0, 64);
     cmds.end();
 

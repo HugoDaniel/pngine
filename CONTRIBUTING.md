@@ -99,6 +99,129 @@ consecutive. Test with empty `#wgsl` blocks mixed with valid ones.
 
 **Testing**: Use `#buffer { pool=2 }` and verify alternation with debug logging.
 
+### 4. pngineInputs Buffer Size Mismatch (Silent Failure)
+
+**Symptom**: Animation doesn't animate, shader receives stale/zero time values,
+or cube renders but doesn't rotate.
+
+**Cause**: `pngineInputs` is always 16 bytes (4 x f32), but uniform buffer was
+sized smaller. Writing 16 bytes to a 12-byte buffer causes WebGPU to silently
+fail or produce undefined behavior.
+
+**pngineInputs layout (16 bytes total)**:
+| Field | Type | Offset | Description |
+|-------|------|--------|-------------|
+| `time` | f32 | 0 | Elapsed seconds since start |
+| `canvasW` | f32 | 4 | Canvas width in pixels |
+| `canvasH` | f32 | 8 | Canvas height in pixels |
+| `aspect` | f32 | 12 | width / height |
+
+**Wrong** (causes silent buffer overflow):
+```
+#buffer uniformInputsBuffer {
+  size="4+4+4"              // 12 bytes - TOO SMALL!
+  usage=[UNIFORM COPY_DST]
+}
+```
+
+**Correct**:
+```
+#buffer uniformInputsBuffer {
+  size="4+4+4+4"            // 16 bytes - matches pngineInputs
+  usage=[UNIFORM COPY_DST]
+}
+```
+
+**Also check**: The WGSL shader struct must match exactly:
+```wgsl
+struct PngineInputs {
+  time: f32,
+  canvasW: f32,    // NOT u32!
+  canvasH: f32,    // NOT u32!
+  aspect: f32,     // Must include this field
+};
+```
+
+### 5. Wrong Data Source for Time Uniform
+
+**Symptom**: `writeBuffer` creates buffer but shader gets wrong/zero values.
+
+**Cause**: Using `data=code.inputs` or similar instead of the built-in
+`pngineInputs` identifier.
+
+**Wrong**:
+```
+#queue writeInputUniforms {
+  writeBuffer={
+    buffer=uniformInputsBuffer
+    data=code.inputs          // WRONG - doesn't exist
+  }
+}
+```
+
+**Correct**:
+```
+#queue writeInputUniforms {
+  writeBuffer={
+    buffer=uniformInputsBuffer
+    data=pngineInputs         // Built-in: runtime provides time/canvas data
+  }
+}
+```
+
+### 6. WASM Module Import Missing (env.abort)
+
+**Symptom**: `Failed to load WASM module: {}` when using `#wasmCall`.
+
+**Cause**: AssemblyScript-compiled WASM modules require `env.abort` import.
+The error object is empty because the import validation fails silently.
+
+**Fix**: Ensure gpu.js `_initWasmModule` provides the abort function:
+```javascript
+const imports = {
+  env: {
+    abort: (msg, file, line, col) => {
+      console.error(`WASM abort at ${file}:${line}:${col}: ${msg}`);
+    },
+  }
+};
+```
+
+### 7. WASM Call Args Receive Zeros (Stack Pointer Bug)
+
+**Symptom**: `#wasmCall` function receives zeros instead of canvas.width/height/time.
+Console shows `raw args bytes: [0, 0, 0, 0]` but should be `[3, 1, 2, 3]`.
+
+**Cause**: The WASM executor was passing a pointer to a stack-allocated buffer
+(`args_buf`) to the command buffer. When the command buffer was later executed
+by JavaScript, the stack memory was stale/overwritten.
+
+**Root Cause Chain**:
+1. Dispatcher reads args from bytecode into stack buffer `args_buf[256]`
+2. `callWasmFunc()` was called with `@intFromPtr(&args_buf)` + `args.len`
+3. Command buffer stored just the pointer and length (8 bytes)
+4. JS later reads from that pointer, but stack is long gone → zeros
+
+**Fix**: Args are now copied **inline** into the command buffer:
+- `command_buffer.zig`: Changed `callWasmFunc` to take `args: []const u8` and
+  write bytes inline using `writeSlice(args)`
+- `gpu.js`: Changed decoder to read `argsLen: u8` at pos+12, then read that many
+  bytes directly from command buffer (not from a memory pointer)
+
+**Command buffer format changed from**:
+```
+[call_id:u16][module_id:u16][name_ptr:u32][name_len:u32][args_ptr:u32][args_len:u32]
+```
+**To**:
+```
+[call_id:u16][module_id:u16][name_ptr:u32][name_len:u32][args_len:u8][args bytes...]
+```
+
+**Files Modified**:
+- `src/executor/command_buffer.zig` - Added `writeSlice`, changed `callWasmFunc`
+- `src/wasm_entry.zig` - Updated call to pass slice directly
+- `npm/pngine/src/gpu.js` - Updated decoder and `_callWasmFunc`, `_decodeWasmArgs`
+
 ## Debugging Strategies
 
 ### 1. Browser Console Logging
