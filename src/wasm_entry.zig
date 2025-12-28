@@ -489,8 +489,8 @@ fn executeOpcode(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpC
 
         // Pass/Frame structure and ignored opcodes
         .define_pass, .define_frame, .end_pass_def, .end_frame, .exec_pass,
-        .nop, .create_query_set, .execute_bundles, .create_shader_concat,
-        .write_uniform, .write_time_uniform,
+        .exec_pass_once, .nop, .create_query_set, .execute_bundles,
+        .create_shader_concat, .write_uniform, .write_time_uniform,
         .select_from_pool,
         => skipOpcodeParams(bytecode, pc, op),
 
@@ -982,7 +982,7 @@ fn getStringSlice(string_id: u16) []const u8 {
 fn skipOpcodeParams(bytecode: []const u8, pc: *usize, op: OpCode) void {
     switch (op) {
         .end_pass, .submit, .end_frame, .nop, .begin_compute_pass, .end_pass_def => {},
-        .set_pipeline, .exec_pass => _ = readVarint(bytecode, pc),
+        .set_pipeline, .exec_pass, .exec_pass_once => _ = readVarint(bytecode, pc),
         .define_frame, .create_shader_module, .write_buffer, .write_uniform,
         .create_texture, .create_render_pipeline, .create_compute_pipeline,
         .create_sampler, .create_bind_group_layout, .create_pipeline_layout,
