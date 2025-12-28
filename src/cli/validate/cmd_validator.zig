@@ -277,11 +277,6 @@ pub const CopyExternalImageParams = struct { bitmap_id: u16, texture_id: u16, mi
 pub const InitWasmModuleParams = struct { module_id: u16, data_ptr: u32, data_len: u32 };
 pub const CallWasmFuncParams = struct { call_id: u16, module_id: u16, func_ptr: u32, func_len: u32, args_ptr: u32, args_len: u32 };
 pub const WriteBufferFromWasmParams = struct { buffer_id: u16, buffer_offset: u32, wasm_ptr: u32, size: u32 };
-pub const CreateTypedArrayParams = struct { id: u16, array_type: u8, size: u32 };
-pub const FillArrayParams = struct { array_id: u16, offset: u32, count: u32, stride: u8, data_ptr: u32 };
-pub const FillExpressionParams = struct { array_id: u16, offset: u32, count: u32, stride: u8, expr_ptr: u32, expr_len: u16 };
-pub const WriteBufferFromArrayParams = struct { buffer_id: u16, buffer_offset: u32, array_id: u16 };
-
 /// Parsed command with extracted parameters.
 pub const ParsedCommand = struct {
     index: u32,
@@ -311,10 +306,6 @@ pub const ParsedCommand = struct {
         init_wasm_module: InitWasmModuleParams,
         call_wasm_func: CallWasmFuncParams,
         write_buffer_from_wasm: WriteBufferFromWasmParams,
-        create_typed_array: CreateTypedArrayParams,
-        fill_array: FillArrayParams,
-        fill_expression: FillExpressionParams,
-        write_buffer_from_array: WriteBufferFromArrayParams,
     };
 };
 
@@ -399,7 +390,6 @@ pub const Validator = struct {
     bind_groups: std.AutoHashMapUnmanaged(u16, ResourceInfo),
     texture_views: std.AutoHashMapUnmanaged(u16, ResourceInfo),
     image_bitmaps: std.AutoHashMapUnmanaged(u16, ResourceInfo),
-    typed_arrays: std.AutoHashMapUnmanaged(u16, ResourceInfo),
     wasm_modules: std.AutoHashMapUnmanaged(u16, ResourceInfo),
 
     /// Collected validation issues (errors and warnings).
@@ -443,7 +433,6 @@ pub const Validator = struct {
             .bind_groups = .{},
             .texture_views = .{},
             .image_bitmaps = .{},
-            .typed_arrays = .{},
             .wasm_modules = .{},
             .issues = .{},
         };
@@ -474,7 +463,6 @@ pub const Validator = struct {
         self.bind_groups.deinit(self.allocator);
         self.texture_views.deinit(self.allocator);
         self.image_bitmaps.deinit(self.allocator);
-        self.typed_arrays.deinit(self.allocator);
         self.wasm_modules.deinit(self.allocator);
         self.issues.deinit(self.allocator);
 
@@ -610,12 +598,6 @@ pub const Validator = struct {
             // WASM operations
             .init_wasm_module => try self.validateInitWasmModule(cmd.params.init_wasm_module),
             .call_wasm_func => try self.validateCallWasmFunc(cmd.params.call_wasm_func),
-
-            // Typed array operations
-            .create_typed_array => try self.validateCreateTypedArray(cmd.params.create_typed_array),
-            .fill_random, .fill_constant => try self.validateFillArray(cmd.params.fill_array),
-            .fill_expression => try self.validateFillExpression(cmd.params.fill_expression),
-            .write_buffer_from_array => try self.validateWriteBufferFromArray(cmd.params.write_buffer_from_array),
 
             // Control
             .submit => self.resetFrameState(),
@@ -2212,14 +2194,6 @@ pub const Validator = struct {
         try self.image_bitmaps.put(self.allocator, params.id, .{ .created_at = self.command_index });
     }
 
-    fn validateCreateTypedArray(self: *Self, params: CreateTypedArrayParams) !void {
-        if (self.typed_arrays.contains(params.id)) {
-            try self.addErrorWithId("E005", "Typed array ID already in use", params.id);
-            return;
-        }
-        try self.typed_arrays.put(self.allocator, params.id, .{ .created_at = self.command_index });
-    }
-
     fn validateInitWasmModule(self: *Self, params: InitWasmModuleParams) !void {
         if (self.wasm_modules.contains(params.module_id)) {
             try self.addErrorWithId("E005", "WASM module ID already in use", params.module_id);
@@ -2553,44 +2527,6 @@ pub const Validator = struct {
             params.args_len,
             "CALL_WASM_FUNC args_ptr + args_len exceeds WASM memory",
         );
-    }
-
-    fn validateFillArray(self: *Self, params: FillArrayParams) !void {
-        if (!self.typed_arrays.contains(params.array_id)) {
-            try self.addErrorWithId("E001", "FILL operation references non-existent typed array", params.array_id);
-        }
-    }
-
-    fn validateFillExpression(self: *Self, params: FillExpressionParams) !void {
-        if (!self.typed_arrays.contains(params.array_id)) {
-            try self.addErrorWithId("E001", "FILL_EXPRESSION references non-existent typed array", params.array_id);
-        }
-
-        // E004: Validate expression pointer bounds
-        _ = try self.validateMemoryBounds(
-            params.expr_ptr,
-            @as(u32, params.expr_len),
-            "FILL_EXPRESSION expr_ptr + expr_len exceeds WASM memory",
-        );
-    }
-
-    fn validateWriteBufferFromArray(self: *Self, params: WriteBufferFromArrayParams) !void {
-        const buffer_info = self.buffers.get(params.buffer_id);
-        if (buffer_info == null) {
-            try self.addErrorWithId("E001", "WRITE_BUFFER_FROM_ARRAY references non-existent buffer", params.buffer_id);
-        } else {
-            // E006: Buffer must have COPY_DST usage flag for writeBuffer
-            if ((buffer_info.?.usage & BufferUsage.COPY_DST) == 0) {
-                try self.addErrorWithId(
-                    "E006",
-                    "WRITE_BUFFER_FROM_ARRAY buffer missing COPY_DST usage flag",
-                    params.buffer_id,
-                );
-            }
-        }
-        if (!self.typed_arrays.contains(params.array_id)) {
-            try self.addErrorWithId("E001", "WRITE_BUFFER_FROM_ARRAY references non-existent typed array", params.array_id);
-        }
     }
 
     // ========================================================================
@@ -3018,47 +2954,6 @@ fn parseParams(cmd: Cmd, data: []const u8, pos: *u32) !ParsedCommand.Params {
                 .func_len = readU32(data, p + 8),
                 .args_ptr = readU32(data, p + 12),
                 .args_len = readU32(data, p + 16),
-            } };
-        },
-        .create_typed_array => blk: {
-            if (remaining < 7) return error.Truncated;
-            pos.* += 7;
-            break :blk .{ .create_typed_array = .{
-                .id = readU16(data, p),
-                .array_type = data[p + 2],
-                .size = readU32(data, p + 3),
-            } };
-        },
-        .fill_random, .fill_constant => blk: {
-            if (remaining < 15) return error.Truncated;
-            pos.* += 15;
-            break :blk .{ .fill_array = .{
-                .array_id = readU16(data, p),
-                .offset = readU32(data, p + 2),
-                .count = readU32(data, p + 6),
-                .stride = data[p + 10],
-                .data_ptr = readU32(data, p + 11),
-            } };
-        },
-        .fill_expression => blk: {
-            if (remaining < 17) return error.Truncated;
-            pos.* += 17;
-            break :blk .{ .fill_expression = .{
-                .array_id = readU16(data, p),
-                .offset = readU32(data, p + 2),
-                .count = readU32(data, p + 6),
-                .stride = data[p + 10],
-                .expr_ptr = readU32(data, p + 11),
-                .expr_len = readU16(data, p + 15),
-            } };
-        },
-        .write_buffer_from_array => blk: {
-            if (remaining < 8) return error.Truncated;
-            pos.* += 8;
-            break :blk .{ .write_buffer_from_array = .{
-                .buffer_id = readU16(data, p),
-                .buffer_offset = readU32(data, p + 2),
-                .array_id = readU16(data, p + 6),
             } };
         },
         .submit, .end => .{ .none = {} },
@@ -3786,29 +3681,6 @@ test "Validator: E004 checks CALL_WASM_FUNC both pointers" {
             .func_len = 600, // Invalid
             .args_ptr = 100,
             .args_len = 50, // Valid
-        } } },
-    };
-
-    try validator.validate(&commands);
-    try std.testing.expect(validator.hasErrors());
-}
-
-test "Validator: E004 checks FILL_EXPRESSION bounds" {
-    var validator = Validator.init(std.testing.allocator);
-    defer validator.deinit();
-    validator.setWasmMemorySize(1024);
-
-    // Pre-create the typed array
-    try validator.typed_arrays.put(validator.allocator, 0, .{ .created_at = 0 });
-
-    const commands = [_]ParsedCommand{
-        .{ .index = 0, .cmd = .fill_expression, .params = .{ .fill_expression = .{
-            .array_id = 0,
-            .offset = 0,
-            .count = 10,
-            .stride = 4,
-            .expr_ptr = 900,
-            .expr_len = 200, // 900 + 200 = 1100 > 1024
         } } },
     };
 

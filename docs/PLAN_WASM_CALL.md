@@ -13,7 +13,7 @@ The `#wasmCall` macro enables calling external WASM modules from PNGine at runti
   }
   func=buildMVPMatrix
   returns="mat4x4"
-  args=[ "$canvas.width", "$canvas.height", "$t.total" ]
+  args=[ canvas.width, canvas.height, time.total ]
 }
 
 #queue writeCameraUniform {
@@ -51,7 +51,7 @@ The `#wasmCall` macro enables calling external WASM modules from PNGine at runti
 │   1. init_wasm_module opcode → instantiate WASM                 │
 │                                                                 │
 │ Per-frame (in queue execution):                                 │
-│   1. Resolve dynamic args ($canvas.width, $t.total, etc.)       │
+│   1. Resolve dynamic args (canvas.width, time.total, etc.)      │
 │   2. call_wasm_func opcode → call function, get pointer         │
 │   3. write_buffer_from_wasm opcode → copy WASM mem → GPU buffer │
 └─────────────────────────────────────────────────────────────────┘
@@ -130,14 +130,14 @@ WASM function arguments need special encoding for dynamic values:
 ```
 ArgType (1 byte):
   0x00 = literal f32
-  0x01 = $canvas.width (u32)
-  0x02 = $canvas.height (u32)
-  0x03 = $t.total (f32 - time in seconds)
+  0x01 = canvas.width (u32)
+  0x02 = canvas.height (u32)
+  0x03 = time.total (f32 - time in seconds)
   0x04 = literal i32
   0x05 = literal u32
 ```
 
-For example, `args=[ "$canvas.width", "$canvas.height", "$t.total" ]` encodes as:
+For example, `args=[ canvas.width, canvas.height, time.total ]` encodes as:
 ```
 [arg_count=3][0x01][0x02][0x03]
 ```
@@ -318,13 +318,13 @@ class PNGineGPU {
                     resolved.push(new DataView(encodedArgs.buffer, i + 1, 4).getFloat32(0, true));
                     i += 4;
                     break;
-                case 0x01: // $canvas.width
+                case 0x01: // canvas.width
                     resolved.push(this.context.canvas.width);
                     break;
-                case 0x02: // $canvas.height
+                case 0x02: // canvas.height
                     resolved.push(this.context.canvas.height);
                     break;
-                case 0x03: // $t.total
+                case 0x03: // time.total
                     resolved.push(this.currentTime || 0);
                     break;
                 // ... more arg types

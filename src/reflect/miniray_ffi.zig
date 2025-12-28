@@ -116,6 +116,94 @@ pub fn reflectFfi(source: []const u8) Error!FfiResult {
     };
 }
 
+/// Result of FFI minify+reflect call
+pub const MinifyAndReflectResult = struct {
+    /// Minified WGSL code (C-allocated, must free with deinit)
+    code: []const u8,
+    /// JSON reflection data with mapped names (C-allocated, must free with deinit)
+    json: []const u8,
+
+    /// Free all allocated memory
+    pub fn deinit(self: *MinifyAndReflectResult) void {
+        if (comptime has_miniray_lib) {
+            c.miniray_free(@ptrCast(@constCast(self.code.ptr)));
+            c.miniray_free(@ptrCast(@constCast(self.json.ptr)));
+        }
+        self.* = undefined;
+    }
+};
+
+/// Minify WGSL source and return reflection data with mapped names.
+///
+/// This combines minification with reflection, returning both the minified code
+/// and reflection JSON where `nameMapped`, `typeMapped`, `elementTypeMapped` fields
+/// contain the actual minified identifier names.
+///
+/// Returns minified code and JSON string in C-allocated memory.
+/// Caller MUST call result.deinit() to free the memory.
+///
+/// ## Example
+///
+/// ```zig
+/// var result = try miniray_ffi.minifyAndReflectFfi(wgsl_source, null);
+/// defer result.deinit();
+/// // result.code = minified WGSL
+/// // result.json = reflection with mapped names
+/// ```
+///
+/// ## Compile-time
+///
+/// If `has_miniray_lib` is false, this function will not compile.
+pub fn minifyAndReflectFfi(source: []const u8, options_json: ?[]const u8) Error!MinifyAndReflectResult {
+    if (comptime !has_miniray_lib) {
+        @compileError("miniray_ffi.minifyAndReflectFfi called but has_miniray_lib is false. " ++
+            "Link libminiray.a or use subprocess fallback.");
+    }
+
+    // Pre-conditions
+    std.debug.assert(source.len > 0);
+    std.debug.assert(source.len <= std.math.maxInt(c_int));
+
+    var out_code: [*c]u8 = undefined;
+    var out_code_len: c_int = 0;
+    var out_json: [*c]u8 = undefined;
+    var out_json_len: c_int = 0;
+
+    const result = if (options_json) |opts|
+        c.miniray_minify_and_reflect(
+            @ptrCast(@constCast(source.ptr)),
+            @intCast(source.len),
+            @ptrCast(@constCast(opts.ptr)),
+            @intCast(opts.len),
+            &out_code,
+            &out_code_len,
+            &out_json,
+            &out_json_len,
+        )
+    else
+        c.miniray_minify_and_reflect(
+            @ptrCast(@constCast(source.ptr)),
+            @intCast(source.len),
+            null,
+            0,
+            &out_code,
+            &out_code_len,
+            &out_json,
+            &out_json_len,
+        );
+
+    // Post-condition: check error codes
+    return switch (result) {
+        0 => MinifyAndReflectResult{
+            .code = out_code[0..@intCast(out_code_len)],
+            .json = out_json[0..@intCast(out_json_len)],
+        },
+        1 => error.JsonEncodeFailed,
+        2 => error.NullInput,
+        else => error.UnknownError,
+    };
+}
+
 /// Get the library version string.
 /// Returns null if library not linked.
 pub fn getVersion() ?[]const u8 {
@@ -180,4 +268,34 @@ test "FFI: getVersion returns version string" {
     const version = getVersion();
     try std.testing.expect(version != null);
     try std.testing.expect(version.?.len > 0);
+}
+
+test "FFI: minifyAndReflectFfi returns minified code and reflection" {
+    if (comptime !has_miniray_lib) {
+        // Skip test if library not linked
+        return error.SkipZigTest;
+    }
+
+    const wgsl =
+        \\struct Particle { position: vec3f, velocity: vec3f }
+        \\@group(0) @binding(0) var<storage, read_write> particles: array<Particle, 1000>;
+        \\@compute @workgroup_size(64) fn main() {}
+    ;
+
+    var result = try minifyAndReflectFfi(wgsl, null);
+    defer result.deinit();
+
+    // Verify minified code is smaller
+    try std.testing.expect(result.code.len > 0);
+    try std.testing.expect(result.code.len < wgsl.len);
+
+    // Verify JSON is valid and contains reflection fields
+    try std.testing.expect(result.json.len > 0);
+    try std.testing.expect(result.json[0] == '{');
+    try std.testing.expect(std.mem.indexOf(u8, result.json, "\"bindings\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.json, "\"entryPoints\"") != null);
+
+    // Verify array metadata is present (new in 0.3.0)
+    try std.testing.expect(std.mem.indexOf(u8, result.json, "\"elementStride\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.json, "\"elementType\"") != null);
 }

@@ -1,12 +1,22 @@
 //! Resource Emission Module
 //!
 //! Handles emission of resource declarations:
-//! - #data (float32Array data to data section, or blob file to data section)
+//! - #data (float32Array, shapes like cube/plane, blob files, WASM data)
 //! - #imageBitmap (create ImageBitmap from blob data)
 //! - #buffer (GPU buffers)
 //! - #texture (GPU textures)
 //! - #sampler (GPU samplers)
 //! - #bindGroup (bind groups)
+//!
+//! ## Shape Generators
+//!
+//! Compile-time vertex data generation for common shapes:
+//! ```
+//! #data cubeVertices {
+//!   cube={ format=[position4 color4 uv2] }
+//! }
+//! ```
+//! Supported shapes: cube, plane (sphere coming soon)
 //!
 //! ## Invariants
 //!
@@ -24,6 +34,7 @@ const UniformBindingKey = emitter_mod.UniformBindingKey;
 const Node = @import("../Ast.zig").Node;
 const DescriptorEncoder = @import("../DescriptorEncoder.zig").DescriptorEncoder;
 const utils = @import("utils.zig");
+const shapes = @import("shapes.zig");
 
 // Use bytecode module import
 const bytecode_mod = @import("bytecode");
@@ -105,6 +116,16 @@ pub fn emitData(e: *Emitter) Emitter.Error!void {
             continue;
         }
 
+        // Try shape generators (cube, plane, sphere)
+        if (utils.findPropertyValue(e, info.node, "cube")) |shape_node| {
+            try emitShapeData(e, name, shape_node, .cube);
+            continue;
+        }
+        if (utils.findPropertyValue(e, info.node, "plane")) |shape_node| {
+            try emitShapeData(e, name, shape_node, .plane);
+            continue;
+        }
+
         // Try blob property (file embedding)
         if (utils.findPropertyValue(e, info.node, "blob")) |blob_node| {
             try emitBlobData(e, name, blob_node, info.node);
@@ -155,6 +176,69 @@ fn emitFloat32ArrayData(e: *Emitter, name: []const u8, float_array: Node.Index) 
 
     // Object syntax (numberOfElements + initEachElementWith) is no longer supported
     // Use WASM calls or compute shaders for buffer initialization instead
+}
+
+/// Shape type enumeration
+const ShapeType = enum { cube, plane };
+
+/// Emit shape data to data section using compile-time shape generators.
+/// Parses format array from shape property and generates vertices.
+fn emitShapeData(e: *Emitter, name: []const u8, shape_node: Node.Index, shape_type: ShapeType) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(shape_node.toInt() < e.ast.nodes.len);
+
+    // Parse format array from shape config (shape_node is an object: { format=[...] })
+    var format_buf: [8]shapes.Format = undefined;
+    var format_count: usize = 0;
+
+    if (utils.findPropertyValueInObject(e, shape_node, "format")) |format_node| {
+        const format_tag = e.ast.nodes.items(.tag)[format_node.toInt()];
+        if (format_tag == .array) {
+            const array_data = e.ast.nodes.items(.data)[format_node.toInt()];
+            const elements = e.ast.extraData(array_data.extra_range);
+
+            for (0..@min(elements.len, 8)) |i| {
+                const elem: Node.Index = @enumFromInt(elements[i]);
+                const elem_tag = e.ast.nodes.items(.tag)[elem.toInt()];
+
+                if (elem_tag == .identifier_value) {
+                    const token = e.ast.nodes.items(.main_token)[elem.toInt()];
+                    const fmt_name = utils.getTokenSlice(e, token);
+
+                    if (shapes.Format.fromString(fmt_name)) |fmt| {
+                        format_buf[format_count] = fmt;
+                        format_count += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Default format if none specified
+    if (format_count == 0) {
+        format_buf[0] = .position4;
+        format_buf[1] = .color4;
+        format_buf[2] = .uv2;
+        format_count = 3;
+    }
+
+    const config = shapes.ShapeConfig{
+        .formats = format_buf[0..format_count],
+    };
+
+    // Generate shape vertices
+    const bytes = switch (shape_type) {
+        .cube => shapes.generateCube(e.gpa, config) catch return error.OutOfMemory,
+        .plane => shapes.generatePlane(e.gpa, config) catch return error.OutOfMemory,
+    };
+    defer e.gpa.free(bytes);
+
+    // Add to data section
+    const data_id = try e.builder.addData(e.gpa, bytes);
+    try e.data_ids.put(e.gpa, name, data_id.toInt());
+
+    // Post-condition
+    std.debug.assert(e.data_ids.get(name) != null);
 }
 
 /// Emit inline float32Array to data section (original behavior).

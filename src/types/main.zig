@@ -20,7 +20,6 @@ pub const BufferUsage = opcodes.BufferUsage;
 pub const LoadOp = opcodes.LoadOp;
 pub const StoreOp = opcodes.StoreOp;
 pub const PassType = opcodes.PassType;
-pub const ElementType = opcodes.ElementType;
 pub const WasmArgType = opcodes.WasmArgType;
 pub const WasmReturnType = opcodes.WasmReturnType;
 

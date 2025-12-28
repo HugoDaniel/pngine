@@ -326,7 +326,7 @@ The `#init` macro expands to:
 
 ## Phase Checklist
 
-- [ ] Phase 1: Built-in shapes (`cube=`, `plane=`, `sphere=`)
+- [x] Phase 1: Built-in shapes (`cube=`, `plane=`) - DONE
 - [ ] Phase 2: Auto-sizing via reflection (`size=shader.var`)
 - [ ] Phase 3: `#init` macro
 - [ ] Phase 4: Frame `init=` support

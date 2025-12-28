@@ -4402,3 +4402,191 @@ test "Emitter: fragment target with blend state" {
     }
     try testing.expect(found_pipeline);
 }
+
+// ============================================================================
+// Built-in Shape Generator Tests
+// ============================================================================
+
+test "Emitter: cube shape with position4 color4 uv2 format" {
+    // Test compile-time cube generation with format=[position4 color4 uv2]
+    // Cube has 36 vertices (6 faces × 2 triangles × 3 vertices)
+    // Stride: 16 (pos4) + 16 (color4) + 8 (uv2) = 40 bytes
+    // Total: 36 × 40 = 1440 bytes
+    const source: [:0]const u8 =
+        \\#data cubeVertices { cube={ format=[position4 color4 uv2] } }
+        \\#buffer vb { size=cubeVertices usage=[VERTEX] }
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    // Verify data section contains cube vertex data
+    try testing.expect(module.data.count() >= 1);
+
+    // Execute and verify buffer size
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    // Verify buffer was created with correct size: 36 vertices × 40 bytes = 1440 bytes
+    var found_buffer = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_buffer) {
+            try testing.expectEqual(@as(u32, 1440), call.params.create_buffer.size);
+            found_buffer = true;
+            break;
+        }
+    }
+    try testing.expect(found_buffer);
+}
+
+test "Emitter: cube shape with minimal position3 format" {
+    // Cube with position3 only: 36 vertices × 12 bytes = 432 bytes
+    const source: [:0]const u8 =
+        \\#data cubeVertices { cube={ format=[position3] } }
+        \\#buffer vb { size=cubeVertices usage=[VERTEX] }
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    // Verify buffer size: 36 vertices × 12 bytes = 432 bytes
+    var found_buffer = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_buffer) {
+            try testing.expectEqual(@as(u32, 432), call.params.create_buffer.size);
+            found_buffer = true;
+            break;
+        }
+    }
+    try testing.expect(found_buffer);
+}
+
+test "Emitter: plane shape with position3 uv2 format" {
+    // Plane has 6 vertices (2 triangles × 3 vertices)
+    // Stride: 12 (pos3) + 8 (uv2) = 20 bytes
+    // Total: 6 × 20 = 120 bytes
+    const source: [:0]const u8 =
+        \\#data planeVertices { plane={ format=[position3 uv2] } }
+        \\#buffer vb { size=planeVertices usage=[VERTEX] }
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    // Verify buffer size: 6 vertices × 20 bytes = 120 bytes
+    var found_buffer = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_buffer) {
+            try testing.expectEqual(@as(u32, 120), call.params.create_buffer.size);
+            found_buffer = true;
+            break;
+        }
+    }
+    try testing.expect(found_buffer);
+}
+
+test "Emitter: cube shape with mappedAtCreation" {
+    // Test that cube data can be used for both size and mappedAtCreation
+    const source: [:0]const u8 =
+        \\#data cubeVertices { cube={ format=[position4] } }
+        \\#buffer vb { size=cubeVertices usage=[VERTEX] mappedAtCreation=cubeVertices }
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    // Verify buffer size: 36 vertices × 16 bytes = 576 bytes
+    var found_buffer = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_buffer) {
+            try testing.expectEqual(@as(u32, 576), call.params.create_buffer.size);
+            found_buffer = true;
+            break;
+        }
+    }
+    try testing.expect(found_buffer);
+
+    // Verify write_buffer was called (mappedAtCreation)
+    var found_write = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .write_buffer) {
+            found_write = true;
+            break;
+        }
+    }
+    try testing.expect(found_write);
+}
+
+test "Emitter: cube with normal3 format" {
+    // Test normals generation: 36 vertices × (12 + 12) = 864 bytes
+    const source: [:0]const u8 =
+        \\#data cubeVertices { cube={ format=[position3 normal3] } }
+        \\#buffer vb { size=cubeVertices usage=[VERTEX] }
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    // Verify buffer size: 36 vertices × 24 bytes = 864 bytes
+    var found_buffer = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_buffer) {
+            try testing.expectEqual(@as(u32, 864), call.params.create_buffer.size);
+            found_buffer = true;
+            break;
+        }
+    }
+    try testing.expect(found_buffer);
+}

@@ -491,7 +491,7 @@ fn executeOpcode(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpC
         .define_pass, .define_frame, .end_pass_def, .end_frame, .exec_pass,
         .nop, .create_query_set, .execute_bundles, .create_shader_concat,
         .write_uniform, .write_time_uniform,
-        .select_from_pool, .fill_linear, .fill_element_index,
+        .select_from_pool,
         => skipOpcodeParams(bytecode, pc, op),
 
         _ => {}, // Unknown opcode

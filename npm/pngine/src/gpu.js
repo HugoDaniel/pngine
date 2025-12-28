@@ -42,7 +42,6 @@ export function createCommandDispatcher(device, ctx) {
   const bmp = [];      // image bitmaps
   const wm = [];       // wasm modules
   const wcr = [];      // wasm call results
-  const ta = [];       // typed arrays
   const bgd = [];      // bind group descriptors (for recreation)
   const txd = [];      // texture descriptors
 
@@ -404,45 +403,6 @@ export function createCommandDispatcher(device, ctx) {
         if (fn) wcr[cid] = fn(...args);
         return pos + 13 + ac;
       }
-      case 0x40: { // CREATE_TYPED_ARRAY
-        const id = view.getUint16(pos, true), at = view.getUint8(pos + 2), sz = view.getUint32(pos + 3, true);
-        const T = [Float32Array, Int32Array, Uint32Array, Uint8Array][at] || Float32Array;
-        ta[id] = new T(sz);
-        return pos + 7;
-      }
-      case 0x41: { // FILL_RANDOM
-        const aid = view.getUint16(pos, true), off = view.getUint32(pos + 2, true);
-        const cnt = view.getUint32(pos + 6, true), stride = view.getUint8(pos + 10);
-        const dp = view.getUint32(pos + 11, true);
-        const arr = ta[aid], src = new Float32Array(mem.buffer, dp, cnt);
-        if (arr) for (let i = 0; i < cnt; i++) arr[off + i * stride] = src[i];
-        return pos + 15;
-      }
-      case 0x42: { // FILL_EXPRESSION
-        const aid = view.getUint16(pos, true), off = view.getUint32(pos + 2, true);
-        const cnt = view.getUint32(pos + 6, true), stride = view.getUint8(pos + 10);
-        const ep = view.getUint32(pos + 11, true), el = view.getUint16(pos + 15, true);
-        const expr = rs(ep, el), arr = ta[aid];
-        if (arr) {
-          const ev = new DataView(new Uint8Array(mem.buffer, ep, el).slice().buffer);
-          for (let i = 0; i < cnt; i++) arr[off + i * stride] = evalExpr(ev, 0, i, time, cw, ch);
-        }
-        return pos + 17;
-      }
-      case 0x43: { // FILL_CONSTANT
-        const aid = view.getUint16(pos, true), off = view.getUint32(pos + 2, true);
-        const cnt = view.getUint32(pos + 6, true), stride = view.getUint8(pos + 10);
-        const vp = view.getUint32(pos + 11, true);
-        const v = new DataView(mem.buffer).getFloat32(vp, true), arr = ta[aid];
-        if (arr) for (let i = 0; i < cnt; i++) arr[off + i * stride] = v;
-        return pos + 15;
-      }
-      case 0x44: { // WRITE_BUFFER_FROM_ARRAY
-        const bid = view.getUint16(pos, true), off = view.getUint32(pos + 2, true);
-        const aid = view.getUint16(pos + 6, true);
-        if (buf[bid] && ta[aid]) device.queue.writeBuffer(buf[bid], off, ta[aid]);
-        return pos + 8;
-      }
       case 0xf0: { // SUBMIT
         if (enc) { device.queue.submit([enc.finish()]); enc = null; }
         return pos;
@@ -453,31 +413,6 @@ export function createCommandDispatcher(device, ctx) {
         DEBUG && console.warn(`Unknown cmd: 0x${cmd.toString(16)}`);
         return pos;
     }
-  }
-
-  // Mini expression evaluator (for FILL_EXPRESSION)
-  function evalExpr(v, p, i, t, w, h) {
-    const op = v.getUint8(p);
-    switch (op) {
-      case 0x00: return v.getFloat32(p + 1, true); // literal_f32
-      case 0x01: return w; case 0x02: return h; case 0x03: return t;
-      case 0x04: return v.getInt32(p + 1, true); case 0x05: return v.getUint32(p + 1, true);
-      case 0x10: return evalExpr(v, p + 1, i, t, w, h) + evalExpr(v, p + 1 + exprSize(v, p + 1), i, t, w, h);
-      case 0x11: return evalExpr(v, p + 1, i, t, w, h) - evalExpr(v, p + 1 + exprSize(v, p + 1), i, t, w, h);
-      case 0x12: return evalExpr(v, p + 1, i, t, w, h) * evalExpr(v, p + 1 + exprSize(v, p + 1), i, t, w, h);
-      case 0x13: { const d = evalExpr(v, p + 1 + exprSize(v, p + 1), i, t, w, h); return d ? evalExpr(v, p + 1, i, t, w, h) / d : 0; }
-      case 0x20: return Math.sin(evalExpr(v, p + 1, i, t, w, h));
-      case 0x21: return Math.cos(evalExpr(v, p + 1, i, t, w, h));
-      case 0x30: return i; // index
-      default: return 0;
-    }
-  }
-  function exprSize(v, p) {
-    const op = v.getUint8(p);
-    if (op <= 0x05) return 5; // literals
-    if (op >= 0x10 && op <= 0x13) return 1 + exprSize(v, p + 1) + exprSize(v, p + 1 + exprSize(v, p + 1));
-    if (op >= 0x20 && op <= 0x21) return 1 + exprSize(v, p + 1);
-    return 1;
   }
 
   // Execute command buffer
@@ -507,7 +442,7 @@ export function createCommandDispatcher(device, ctx) {
     tex.forEach(t => t?.destroy?.());
     buf.length = tex.length = txv.length = smp.length = shd.length = pip.length = 0;
     bg.length = bgl.length = ppl.length = bmp.length = wm.length = 0;
-    wcr.length = ta.length = bgd.length = txd.length = 0;
+    wcr.length = bgd.length = txd.length = 0;
   }
 
   // Return public interface only - these names stay, everything else minifies

@@ -4,17 +4,16 @@
 
 **READ FIRST**: Before any implementation work, read the active plan:
 
-- **`docs/embedded-executor-plan.md`** - Embedded executor with plugin
-  architecture (v0)
+- **`docs/cpu-wasm-data-initialization-plan.md`** - Buffer initialization with
+  compile-time shapes and compute shader `#init`
 
 This plan defines:
 
-- Plugin architecture: `[core]`, `[render]`, `[compute]`, `[wasm]`,
-  `[animation]`, `[texture]`
-- Tailored WASM executor embedded in each payload
-- Command buffer format preserved (`src/executor/command_buffer.zig`)
-- Native viewers via Dawn/Mach + wasm3
-- **Work log at bottom of plan** - Check for current progress
+- Compile-time `#data` shape generators: `cube=`, `plane=`, `sphere=`
+- Compute shader `#init` macro for GPU-generated procedural data
+- Auto-sizing via shader reflection: `size=shader.varName`
+- Frame `init=` support for one-time initialization
+- **Phase 6 complete**: Fill opcodes removed, two approaches remain
 
 **Zig Mastery Guidelines**: `/Users/hugo/Development/specs-llm/mastery/zig/`
 
@@ -30,28 +29,40 @@ in CONTRIBUTING.md to help out further developments with compounded knowledge**
 
 | Plan                                        | Purpose                                  | Status      |
 | ------------------------------------------- | ---------------------------------------- | ----------- |
-| `docs/embedded-executor-plan.md`            | **ACTIVE** - Embedded executor + plugins | In Progress |
+| `docs/cpu-wasm-data-initialization-plan.md` | **ACTIVE** - Buffer init + shapes        | In Progress |
+| `docs/embedded-executor-plan.md`            | Embedded executor + plugins              | Reference   |
 | `docs/llm-runtime-testing-plan.md`          | LLM-friendly validation via wasm3        | Complete    |
 | `docs/multiplatform-command-buffer-plan.md` | Platform abstraction                     | Reference   |
-| `docs/data-generation-plan.md`              | Compute shader data gen                  | Reference   |
+| `docs/data-generation-plan.md`              | Compute shader data gen (superseded)     | Archived    |
 | `docs/command-buffer-refactor-plan.md`      | JS bundle optimization                   | Reference   |
 | `docs/remove-wasm-in-wasm-plan.md`          | **SUPERSEDED** - Do not use              | Archived    |
 
-### Embedded Executor (docs/embedded-executor-plan.md)
+### Buffer Initialization (docs/cpu-wasm-data-initialization-plan.md)
 
-Self-contained PNG payloads with tailored WASM executors:
+Two approaches for buffer initialization:
 
-```bash
-pngine compile shader.pngine -o output.png   # Embeds tailored executor
-pngine validate output.png --json            # Validate command buffer
+**1. Compile-time shapes** (static meshes):
+```
+#data cubeVertexArray {
+  cube={ format=[position4 color4 uv2] }
+}
+```
+
+**2. Compute shader #init** (procedural data):
+```
+#init resetParticles {
+  buffer=particles
+  shader=initParticles
+  params=[42]
+}
 ```
 
 Key features:
 
-- **Plugin selection**: Compiler analyzes DSL to include only needed code
-- **Command buffer contract**: Stable interface between executor and hosts
-- **Compile-time validation**: Resource dependencies checked before runtime
-- **WebGPU everywhere**: Dawn/Mach for native, browser WebGPU for web
+- **Built-in shapes**: `cube=`, `plane=`, `sphere=` with format specifiers
+- **Auto-sizing**: `size=shader.varName` uses reflection
+- **One-time init**: `#frame { init=[...] }` runs before first frame
+- **GPU-native**: Compute shaders for procedural data
 
 ---
 

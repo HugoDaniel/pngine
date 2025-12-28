@@ -67,7 +67,7 @@ label=<string>
 
 **Attributes** (from `parsePipelineLayout.ts`):
 ```
-bindGroupLayouts=[$bindGroupLayout.layout0 $bindGroupLayout.layout1]
+bindGroupLayouts=[layout0 layout1]
 label=<string>
 ```
 
@@ -110,7 +110,7 @@ label=<string>
 
 **Attributes** (from `parseView.ts` + WebGPU spec):
 ```
-texture=$texture.name
+texture=myTextureName
 format=<GPUTextureFormat>  // optional, defaults to texture's format
 dimension="1d"|"2d"|"2d-array"|"cube"|"cube-array"|"3d"
 aspect="all"|"stencil-only"|"depth-only"
@@ -146,7 +146,7 @@ arrayLayerCount=<number>
 **Syntax**:
 ```
 #textureView name {
-  texture=$texture.myTexture
+  texture=myTexture
   dimension="cube"
   baseMipLevel=0
   mipLevelCount=4

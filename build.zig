@@ -34,6 +34,10 @@ pub fn build(b: *std.Build) void {
     // Auto-detected at: ../../miniray/build/libminiray.a
     // Falls back to subprocess spawning when library not found.
     //
+    // REQUIRED VERSION: miniray 0.3.0+
+    // Features used: miniray_reflect() with WGSL-spec memory layout computation
+    // (struct sizes, array strides, field offsets with proper alignment)
+    //
     // Build library: cd ../../miniray && make lib
     // Override path: zig build -Dminiray-lib=/path/to/libminiray.a
 

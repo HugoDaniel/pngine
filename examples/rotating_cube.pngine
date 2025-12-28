@@ -1,54 +1,14 @@
-#define CUBE_VERTEX_SIZE=4 * 10 // Byte size of one cube vertex.
+// Cube: 36 vertices, stride=40 bytes (position4 + color4 + uv2)
+#define CUBE_VERTEX_SIZE=4 * 10
 #define CUBE_POSITION_OFFSET=0
-#define CUBE_COLOR_OFFSET=4 * 4 // Byte offset of cube vertex color attribute.
+#define CUBE_COLOR_OFFSET=4 * 4
 #define CUBE_UV_OFFSET=4 * 8
 #define CUBE_VERTEX_COUNT=36
 
+// Built-in shape generator: replaces 36 lines of vertex data
 #data cubeVertexArray {
-  float32Array=[
-  // float4 position, float4 color, float2 uv,
-  1 -1 1 1   1 0 1 1  0 1
-  -1 -1 1 1  0 0 1 1  1 1
-  -1 -1 -1 1 0 0 0 1  1 0
-  1 -1 -1 1  1 0 0 1  0 0
-  1 -1 1 1   1 0 1 1  0 1
-  -1 -1 -1 1 0 0 0 1  1 0
-
-  1 1 1 1    1 1 1 1  0 1
-  1 -1 1 1   1 0 1 1  1 1
-  1 -1 -1 1  1 0 0 1  1 0
-  1 1 -1 1   1 1 0 1  0 0
-  1 1 1 1    1 1 1 1  0 1
-  1 -1 -1 1  1 0 0 1  1 0
-
-  -1 1 1 1   0 1 1 1  0 1
-  1 1 1 1    1 1 1 1  1 1
-  1 1 -1 1   1 1 0 1  1 0
-  -1 1 -1 1  0 1 0 1  0 0
-  -1 1 1 1   0 1 1 1  0 1
-  1 1 -1 1   1 1 0 1  1 0
-
-  -1 -1 1 1  0 0 1 1  0 1
-  -1 1 1 1   0 1 1 1  1 1
-  -1 1 -1 1  0 1 0 1  1 0
-  -1 -1 -1 1 0 0 0 1  0 0
-  -1 -1 1 1  0 0 1 1  0 1
-  -1 1 -1 1  0 1 0 1  1 0
-
-  1 1 1 1    1 1 1 1  0 1
-  -1 1 1 1   0 1 1 1  1 1
-  -1 -1 1 1  0 0 1 1  1 0
-  -1 -1 1 1  0 0 1 1  1 0
-  1 -1 1 1   1 0 1 1  0 0
-  1 1 1 1    1 1 1 1  0 1
-
-  1 -1 -1 1  1 0 0 1  0 1
-  -1 -1 -1 1 0 0 0 1  1 1
-  -1 1 -1 1  0 1 0 1  1 0
-  1 1 -1 1   1 1 0 1  0 0
-  1 -1 -1 1  1 0 0 1  0 1
-  -1 1 -1 1  0 1 0 1  1 0
-]}
+  cube={ format=[position4 color4 uv2] }
+}
 
 #buffer verticesBuffer {
   size  = cubeVertexArray

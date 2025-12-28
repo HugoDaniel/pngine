@@ -41,6 +41,27 @@ JS Host (gpu.js)
 GPU (renders to canvas)
 ```
 
+### Key Insight: Two Opcode Sets
+
+PNGine has **two separate opcode enumerations** that can be confusing:
+
+| Opcode Set | File | Purpose | Example Range |
+|------------|------|---------|---------------|
+| PNGB Bytecode | `src/types/opcodes.zig` | Stored in compiled `.pngb` files | Data-gen: `0x50-0x55` |
+| Command Buffer | `src/executor/command_buffer.zig` | Runtime JS communication | Data-gen: `0x40-0x44` |
+
+**How they relate**:
+1. Compiler emits **PNGB opcodes** into the `.pngb` bytecode file
+2. WASM executor reads PNGB opcodes and translates them to **Command Buffer** format
+3. JS `gpu.js` processes **Command Buffer opcodes** (NOT PNGB opcodes)
+
+**Why this matters**: When adding data-generation features or debugging opcode issues,
+you must identify which opcode set is relevant. The JS runtime (`gpu.js`) will never
+see PNGB opcodes directly—it only sees Command Buffer opcodes.
+
+**Common confusion**: Documentation may reference "opcode 0x50" (PNGB) but the JS
+sees "opcode 0x40" (Command Buffer) for the same logical operation.
+
 ### Key Insight: Multiple ID Systems
 
 PNGine uses several distinct ID systems that can be confusing:
@@ -363,6 +384,68 @@ Create test HTML files in `demo/` directory:
 </html>
 ```
 
+## Built-in Shape Generators
+
+### Overview
+
+The DSL supports built-in shape generators that create vertex data at compile time.
+This replaces manual vertex data entry for common shapes like cubes and planes.
+
+### Usage
+
+```
+#data cubeVertices {
+  cube={ format=[position4 color4 uv2] }
+}
+
+#buffer vb {
+  size=cubeVertices
+  usage=[VERTEX]
+  mappedAtCreation=cubeVertices
+}
+```
+
+### Supported Shapes
+
+| Shape | Vertices | Description |
+|-------|----------|-------------|
+| `cube` | 36 | Unit cube (-1 to 1), per-face colors |
+| `plane` | 6 | XY plane quad (-1 to 1) |
+
+### Format Specifiers
+
+| Format | Size | Description |
+|--------|------|-------------|
+| `position3` | 12B | vec3f position (x, y, z) |
+| `position4` | 16B | vec4f position (x, y, z, 1) |
+| `normal3` | 12B | vec3f face normal |
+| `color3` | 12B | vec3f RGB color |
+| `color4` | 16B | vec4f RGBA color |
+| `uv2` | 8B | vec2f texture coordinates |
+
+### Key Implementation Details
+
+1. **Shape generators run at compile time** - No runtime CPU cost
+2. **Format order matters** - Stride = sum of format sizes in order
+3. **Use `findPropertyValueInObject`** - Shape config is an object node, not macro node
+4. **Data stored in data_ids** - Size lookup via `e.builder.getDataSize(data_id)`
+
+### Example: Cube Vertex Count Calculation
+
+```
+format=[position4 color4 uv2]
+stride = 16 + 16 + 8 = 40 bytes
+cube_vertices = 36 (6 faces × 2 triangles × 3 vertices)
+total_size = 36 × 40 = 1440 bytes
+```
+
+### Adding New Shapes
+
+1. Add generator function in `src/dsl/emitter/shapes.zig`
+2. Add shape type to `ShapeType` enum in `resources.zig`
+3. Add property check in `emitData()` function
+4. Add tests in `src/dsl/emitter/test.zig`
+
 ## Code Organization
 
 ### Where to Add Features
@@ -372,6 +455,7 @@ Create test HTML files in `demo/` directory:
 | New DSL macro | `Token.zig` → `Parser.zig` → `Analyzer.zig` → `Emitter.zig` |
 | New opcode | `opcodes.zig` → `emitter.zig` → `dispatcher.zig` → `mock_gpu.zig` |
 | New GPU command | `command_buffer.zig` → `gpu.js` |
+| New shape generator | `shapes.zig` → `resources.zig` (emitData) |
 | New test | Appropriate `*_test.zig` file |
 
 ### File Size Guidelines
