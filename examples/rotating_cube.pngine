@@ -60,27 +60,23 @@
   layout=auto
   vertex={
     entrypoint=vertexMain
-    module=code 
-    buffers = [
-      {
-        arrayStride=CUBE_VERTEX_SIZE
-        attributes=[
-          { shaderLocation=0 offset=CUBE_POSITION_OFFSET format=float32x4 }
-          { shaderLocation=1 offset=CUBE_UV_OFFSET format=float32x2 }
-        ]
-      }
-    ]
+    module=code
+    buffers=[{
+      arrayStride=CUBE_VERTEX_SIZE
+      attributes=[
+        { shaderLocation=0 offset=CUBE_POSITION_OFFSET format=float32x4 }
+        { shaderLocation=1 offset=CUBE_COLOR_OFFSET format=float32x4 }
+        { shaderLocation=2 offset=CUBE_UV_OFFSET format=float32x2 }
+      ]
+    }]
   }
   fragment = {
     entrypoint=fragMain
-    module=code 
+    module=code
     targets=[{ format=preferredCanvasFormat }]
   }
   primitive={
     topology = triangle-list
-    // Backface culling since the cube is solid piece of geometry.
-    // Faces pointing away from the camera will be occluded by faces
-    // pointing toward the camera.
     cullMode = back
   }
   depthStencil={
@@ -98,7 +94,7 @@
 }
 
 #buffer uniformInputsBuffer {
-  size="4+4+4"
+  size="4+4+4+4"
   usage=[UNIFORM COPY_DST]
 }
 
@@ -106,7 +102,7 @@
   writeBuffer={
     buffer=uniformInputsBuffer
     bufferOffset=0
-    data=code.inputs
+    data=pngineInputs
   }
 }
 
@@ -131,8 +127,8 @@
     depthStoreOp=store
   }
   pipeline=renderCube
-  bindGroups=[inputsBinding]
   vertexBuffers=[verticesBuffer]
+  bindGroups=[inputsBinding]
   draw=CUBE_VERTEX_COUNT
 }
 
@@ -148,16 +144,12 @@
   code="
 struct PngineInputs {
   time: f32,
-  canvasW: u32,
-  canvasH: u32,
+  canvasW: f32,
+  canvasH: f32,
+  aspect: f32,
 };
 @group(0) @binding(0) var<uniform> inputs : PngineInputs;
 
-struct VertexOutput {
-  @builtin(position) Position : vec4f,
-  @location(0) fragUV : vec2f,
-  @location(1) fragPosition: vec4f,
-}
 
 fn perspective(fieldOfViewY: f32, aspect: f32, zNear: f32, zFar: f32) -> mat4x4<f32> {
     // Compute f = tan(π/2 - fieldOfViewY/2) which is equivalent to 1/tan(fieldOfViewY/2)
@@ -230,26 +222,54 @@ fn getTransformationMatrix(now: f32, projectionMatrix: mat4x4<f32>) -> mat4x4<f3
     return modelViewProjectionMatrix;
 }
 
+struct VertexOutput {
+  @builtin(position) Position : vec4f,
+  @location(0) fragColor : vec4f,
+  @location(1) fragUV : vec2f,
+};
+
 @vertex
 fn vertexMain(
   @location(0) position : vec4f,
-  @location(1) uv : vec2f
+  @location(1) color : vec4f,
+  @location(2) uv : vec2f
 ) -> VertexOutput {
-
-  let projectionMatrix = perspective(FOV, f32(inputs.canvasW) / f32(inputs.canvasH), 1.0, 100.0);
   var output : VertexOutput;
-  output.Position = getTransformationMatrix(inputs.time, projectionMatrix) * position;
+
+  // Simple rotation around Y axis
+  let t = inputs.time;
+  let cosT = cos(t);
+  let sinT = sin(t);
+
+  // Rotate X and Z
+  let rotX = position.x * cosT - position.z * sinT;
+  let rotZ = position.x * sinT + position.z * cosT;
+  let rotY = position.y;
+
+  // Simple perspective: scale by distance from camera
+  // Camera at z=4 looking at origin
+  let viewZ = rotZ - 4.0;  // Move cube back from camera
+  let perspScale = 1.0 / (-viewZ);  // Perspective divide (viewZ is negative)
+
+  // Map to clip space
+  // WebGPU NDC: x,y in [-1,1], z in [0,1]
+  let clipX = rotX * perspScale;
+  let clipY = rotY * perspScale;
+  // Map viewZ from [-5, -3] to z [0.3, 0.7] approximately
+  let clipZ = (-viewZ - 1.0) / 10.0;  // Simple linear mapping
+
+  output.Position = vec4f(clipX, clipY, clipZ, 1.0);
+  output.fragColor = color;
   output.fragUV = uv;
-  output.fragPosition = 0.5 * (position + vec4(1.0, 1.0, 1.0, 1.0));
   return output;
 }
 
 @fragment
 fn fragMain(
-  @location(0) fragUV: vec2f,
-  @location(1) fragPosition: vec4f
+  @location(0) fragColor : vec4f,
+  @location(1) fragUV : vec2f
 ) -> @location(0) vec4f {
-  return fragPosition;
+  return fragColor;
 }
 
 "

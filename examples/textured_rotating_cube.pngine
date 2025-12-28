@@ -97,7 +97,7 @@
 }
 
 #buffer uniformInputsBuffer {
-  size="4+4+4"
+  size="4+4+4+4"
   usage=[UNIFORM COPY_DST]
 }
 
@@ -105,7 +105,7 @@
   writeBuffer={
     buffer=uniformInputsBuffer
     bufferOffset=0
-    data=code.inputs
+    data=pngineInputs
   }
 }
 
@@ -192,8 +192,9 @@
   code="
 struct PngineInputs {
   time: f32,
-  canvasW: u32,
-  canvasH: u32,
+  canvasW: f32,
+  canvasH: f32,
+  aspect: f32,
 };
 @group(0) @binding(0) var<uniform> inputs : PngineInputs;
 
@@ -280,7 +281,7 @@ fn vertexMain(
   @location(1) uv : vec2f
 ) -> VertexOutput {
 
-  let projectionMatrix = perspective(FOV, f32(inputs.canvasW) / f32(inputs.canvasH), 1.0, 100.0);
+  let projectionMatrix = perspective(FOV, inputs.aspect, 1.0, 100.0);
   var output : VertexOutput;
   output.Position = getTransformationMatrix(inputs.time, projectionMatrix) * position;
   output.fragUV = uv;
