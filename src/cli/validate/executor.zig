@@ -191,6 +191,9 @@ fn executeWasm(
     std.debug.assert(bytecode.len >= format.HEADER_SIZE);
     std.debug.assert(opts.frame_indices.len > 0);
 
+    // Set verbose mode for WASM log output
+    wamr.WamrRuntime.setVerbose(opts.verbose);
+
     // Initialize WAMR runtime with 1MB stack and 1MB heap
     var runtime = try WamrRuntime.init(allocator, 1024 * 1024, 1024 * 1024);
     defer runtime.deinit();

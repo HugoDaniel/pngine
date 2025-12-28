@@ -91,10 +91,21 @@ pub const WamrRuntime = struct {
 
     // Native function implementations for WASM imports
 
+    /// Global flag to control verbose WASM log output.
+    /// Set via setVerbose() before calling WASM functions.
+    var verbose_logging: bool = false;
+
+    /// Enable or disable verbose WASM log output.
+    pub fn setVerbose(verbose: bool) void {
+        verbose_logging = verbose;
+    }
+
     /// Native log function that prints to stderr (called from WASM).
     /// Uses "(ii)" signature - WAMR passes raw WASM i32 values.
     /// We manually convert WASM linear memory address to native pointer.
+    /// Only prints when verbose_logging is enabled.
     fn nativeLog(exec_env: c.wasm_exec_env_t, wasm_ptr: u32, len: u32) callconv(.c) void {
+        if (!verbose_logging) return;
         if (len == 0 or len > 4096) return;
 
         // Get the module instance to convert WASM address to native
