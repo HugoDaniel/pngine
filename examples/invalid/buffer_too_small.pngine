@@ -1,6 +1,6 @@
 // Invalid example: Buffer size is smaller than the data being written
-// Detection: Compile-time (analyzer should catch size mismatch)
-// Note: Currently truncates data silently - this could be improved
+// Detection: Compile-time (emitter validates buffer size >= data size)
+// Error: "buffer 'tinyBuffer' size (16 bytes) is smaller than data 'largeData' (64 bytes)"
 
 #data largeData {
   float32Array=[

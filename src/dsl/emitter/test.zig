@@ -209,6 +209,52 @@ test "Emitter: buffer size from define with expression" {
     try testing.expect(found_buffer);
 }
 
+test "Emitter: buffer size validation - rejects buffer smaller than data" {
+    // Goal: Test that buffer with size < data size fails at compile time.
+    // Method: Define data with 6 floats (24 bytes) but buffer with only 16 bytes.
+    // Property: Compile should fail with EmitError.
+    const source: [:0]const u8 =
+        \\#data largeData { float32Array=[1 2 3 4 5 6] }
+        \\#buffer tinyBuffer { size=16 usage=[VERTEX] mappedAtCreation=largeData }
+        \\#frame main { perform=[] }
+    ;
+
+    const result = compileSource(source);
+    try testing.expectError(error.EmitError, result);
+}
+
+test "Emitter: buffer size validation - accepts buffer same size as data" {
+    // Goal: Ensure exact match passes (boundary case).
+    // Method: Data has 6 floats (24 bytes), buffer has 24 bytes.
+    const source: [:0]const u8 =
+        \\#data exactData { float32Array=[1 2 3 4 5 6] }
+        \\#buffer exactBuffer { size=24 usage=[VERTEX] mappedAtCreation=exactData }
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    // Verify compilation succeeded
+    try testing.expect(pngb.len > 0);
+}
+
+test "Emitter: buffer size validation - accepts buffer larger than data" {
+    // Goal: Ensure larger buffer passes (common case).
+    // Method: Data has 4 floats (16 bytes), buffer has 32 bytes.
+    const source: [:0]const u8 =
+        \\#data smallData { float32Array=[1 2 3 4] }
+        \\#buffer largeBuffer { size=32 usage=[VERTEX] mappedAtCreation=smallData }
+        \\#frame main { perform=[] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    // Verify compilation succeeded
+    try testing.expect(pngb.len > 0);
+}
+
 test "Emitter: render pass with draw" {
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {}" }

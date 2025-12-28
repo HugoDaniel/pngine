@@ -582,6 +582,9 @@ pub fn emitBuffers(e: *Emitter) Emitter.Error!void {
         const mapped_value = utils.findPropertyValue(e, info.node, "mappedAtCreation");
         if (mapped_value != null) {
             usage.copy_dst = true;
+
+            // Validate buffer size >= data size
+            try validateBufferDataSize(e, name, size, mapped_value.?);
         }
 
         // Create pool_size buffers with sequential IDs
@@ -734,6 +737,65 @@ fn recordUniformBinding(e: *Emitter, size_node: Node.Index, buffer_id: u16) Emit
         @intCast(binding.binding),
         fields_buf[0..field_count],
     );
+}
+
+/// Validate that buffer size is sufficient for the data being written.
+/// Returns EmitError if buffer size < data size.
+///
+/// Pre-condition: mapped_value is a valid AST node index
+/// Post-condition: Returns error if buffer too small, ok otherwise
+fn validateBufferDataSize(e: *Emitter, buffer_name: []const u8, buffer_size: u32, mapped_value: Node.Index) Emitter.Error!void {
+    // Pre-condition
+    std.debug.assert(mapped_value.toInt() < e.ast.nodes.len);
+
+    const value_tag = e.ast.nodes.items(.tag)[mapped_value.toInt()];
+    if (value_tag != .identifier_value) return; // Not a data reference
+
+    const token = e.ast.nodes.items(.main_token)[mapped_value.toInt()];
+    const data_name = utils.getTokenSlice(e, token);
+
+    // Check for regular data declaration
+    if (e.data_ids.get(data_name)) |data_id| {
+        const data_size = e.builder.getDataSize(data_id);
+        if (buffer_size < data_size) {
+            // Log at warn level (err causes test framework to fail)
+            std.log.warn("buffer '{s}' size ({d} bytes) is smaller than data '{s}' ({d} bytes)", .{
+                buffer_name,
+                buffer_size,
+                data_name,
+                data_size,
+            });
+            return Emitter.Error.EmitError;
+        }
+    }
+
+    // Check for generated arrays
+    if (e.generated_arrays.get(data_name)) |gen_array| {
+        if (buffer_size < gen_array.byte_size) {
+            std.log.warn("buffer '{s}' size ({d} bytes) is smaller than generated array '{s}' ({d} bytes)", .{
+                buffer_name,
+                buffer_size,
+                data_name,
+                gen_array.byte_size,
+            });
+            return Emitter.Error.EmitError;
+        }
+    }
+
+    // Check for WASM data entries
+    if (e.wasm_data_entries.get(data_name)) |wasm_entry| {
+        if (buffer_size < wasm_entry.byte_size) {
+            std.log.warn("buffer '{s}' size ({d} bytes) is smaller than WASM data '{s}' ({d} bytes)", .{
+                buffer_name,
+                buffer_size,
+                data_name,
+                wasm_entry.byte_size,
+            });
+            return Emitter.Error.EmitError;
+        }
+    }
+
+    // Post-condition: if we reach here, validation passed
 }
 
 /// Emit write_buffer for buffer initialization from mappedAtCreation.
