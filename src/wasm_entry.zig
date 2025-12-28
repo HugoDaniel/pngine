@@ -483,11 +483,6 @@ fn executeOpcode(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpC
         .init_wasm_module, .call_wasm_func, .write_buffer_from_wasm,
         => execWasm(cmds, bytecode, pc, op),
 
-        // Utility operations
-        .create_typed_array, .fill_random, .fill_constant,
-        .fill_expression, .write_buffer_from_array,
-        => execUtility(cmds, bytecode, pc, op),
-
         // Pool operations (render/compute - use frame_counter for selection)
         .set_vertex_buffer_pool, .set_bind_group_pool,
         => execPool(cmds, bytecode, pc, op),
@@ -858,62 +853,6 @@ fn execWasm(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) 
 }
 
 // ============================================================================
-// Plugin Handlers - Utility
-// ============================================================================
-
-/// Handle utility opcodes: typed arrays, fill operations.
-fn execUtility(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) void {
-    switch (op) {
-        .create_typed_array => {
-            const id = readVarint(bytecode, pc);
-            const arr_type = bytecode[pc.*];
-            pc.* += 1;
-            const count = readVarint(bytecode, pc);
-            cmds.createTypedArray(@intCast(id), arr_type, @intCast(count));
-        },
-        .fill_random => {
-            const arr_id = readVarint(bytecode, pc);
-            const offset = readVarint(bytecode, pc);
-            const count = readVarint(bytecode, pc);
-            const stride = bytecode[pc.*];
-            pc.* += 1;
-            // Skip seed, min, max IDs - JS generates random data
-            _ = readVarint(bytecode, pc);
-            _ = readVarint(bytecode, pc);
-            _ = readVarint(bytecode, pc);
-            cmds.fillRandom(@intCast(arr_id), @intCast(offset), @intCast(count), stride, 0);
-        },
-        .fill_constant => {
-            const arr_id = readVarint(bytecode, pc);
-            const offset = readVarint(bytecode, pc);
-            const count = readVarint(bytecode, pc);
-            const stride = bytecode[pc.*];
-            pc.* += 1;
-            const value_id = readVarint(bytecode, pc);
-            const data = getDataSlice(@intCast(value_id));
-            cmds.fillConstant(@intCast(arr_id), @intCast(offset), @intCast(count), stride, @intFromPtr(data.ptr));
-        },
-        .fill_expression => {
-            const arr_id = readVarint(bytecode, pc);
-            const offset = readVarint(bytecode, pc);
-            const count = readVarint(bytecode, pc);
-            const stride = bytecode[pc.*];
-            pc.* += 1;
-            const expr_id = readVarint(bytecode, pc);
-            const data = getDataSlice(@intCast(expr_id));
-            cmds.fillExpression(@intCast(arr_id), @intCast(offset), @intCast(count), stride, @intFromPtr(data.ptr), @intCast(data.len));
-        },
-        .write_buffer_from_array => {
-            const buffer_id = readVarint(bytecode, pc);
-            const offset = readVarint(bytecode, pc);
-            const arr_id = readVarint(bytecode, pc);
-            cmds.writeBufferFromArray(@intCast(buffer_id), @intCast(offset), @intCast(arr_id));
-        },
-        else => {},
-    }
-}
-
-// ============================================================================
 // Plugin Handlers - Pool Operations
 // ============================================================================
 
@@ -1057,8 +996,7 @@ fn skipOpcodeParams(bytecode: []const u8, pc: *usize, op: OpCode) void {
             _ = readVarint(bytecode, pc);
             pc.* += 1;
         },
-        .dispatch, .write_buffer_from_array, .write_time_uniform, .create_bind_group,
-        .create_texture_view => {
+        .dispatch, .write_time_uniform, .create_bind_group, .create_texture_view => {
             _ = readVarint(bytecode, pc);
             _ = readVarint(bytecode, pc);
             _ = readVarint(bytecode, pc);
@@ -1089,33 +1027,9 @@ fn skipOpcodeParams(bytecode: []const u8, pc: *usize, op: OpCode) void {
             _ = readVarint(bytecode, pc);
             pc.* += 1;
         },
-        .define_pass, .create_typed_array => {
+        .define_pass => {
             _ = readVarint(bytecode, pc);
             pc.* += 1;
-            _ = readVarint(bytecode, pc);
-        },
-        .fill_constant, .fill_expression => {
-            _ = readVarint(bytecode, pc);
-            _ = readVarint(bytecode, pc);
-            _ = readVarint(bytecode, pc);
-            pc.* += 1;
-            _ = readVarint(bytecode, pc);
-        },
-        .fill_linear, .fill_element_index => {
-            _ = readVarint(bytecode, pc);
-            _ = readVarint(bytecode, pc);
-            _ = readVarint(bytecode, pc);
-            pc.* += 1;
-            _ = readVarint(bytecode, pc);
-            _ = readVarint(bytecode, pc);
-        },
-        .fill_random => {
-            _ = readVarint(bytecode, pc);
-            _ = readVarint(bytecode, pc);
-            _ = readVarint(bytecode, pc);
-            pc.* += 1;
-            _ = readVarint(bytecode, pc);
-            _ = readVarint(bytecode, pc);
             _ = readVarint(bytecode, pc);
         },
         .set_bind_group_pool, .set_vertex_buffer_pool => {

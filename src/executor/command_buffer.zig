@@ -79,12 +79,7 @@ pub const Cmd = enum(u8) {
     init_wasm_module = 0x30,
     call_wasm_func = 0x31,
 
-    // Utility Operations (0x40-0x4F)
-    create_typed_array = 0x40,
-    fill_random = 0x41,
-    fill_expression = 0x42,
-    fill_constant = 0x43,
-    write_buffer_from_array = 0x44,
+    // Reserved (0x40-0x4F) - formerly data-gen, now use compute shaders
 
     // Control (0xF0-0xFF)
     submit = 0xF0,
@@ -441,54 +436,6 @@ pub const CommandBuffer = struct {
         self.writeSlice(args);
     }
 
-    /// CREATE_TYPED_ARRAY: [id:u16] [type:u8] [size:u32]
-    pub fn createTypedArray(self: *Self, id: u16, array_type: u8, size: u32) void {
-        self.writeCmd(.create_typed_array);
-        self.writeU16(id);
-        self.writeU8(array_type);
-        self.writeU32(size);
-    }
-
-    /// FILL_RANDOM: [array_id:u16] [offset:u32] [count:u32] [stride:u8] [data_ptr:u32]
-    /// data_ptr points to pre-generated f32 values in WASM memory
-    pub fn fillRandom(self: *Self, array_id: u16, offset: u32, count: u32, stride: u8, data_ptr: u32) void {
-        self.writeCmd(.fill_random);
-        self.writeU16(array_id);
-        self.writeU32(offset);
-        self.writeU32(count);
-        self.writeU8(stride);
-        self.writeU32(data_ptr);
-    }
-
-    /// FILL_EXPRESSION: [array_id:u16] [offset:u32] [count:u32] [stride:u8] [expr_ptr:u32] [expr_len:u16]
-    pub fn fillExpression(self: *Self, array_id: u16, offset: u32, count: u32, stride: u8, expr_ptr: u32, expr_len: u16) void {
-        self.writeCmd(.fill_expression);
-        self.writeU16(array_id);
-        self.writeU32(offset);
-        self.writeU32(count);
-        self.writeU8(stride);
-        self.writeU32(expr_ptr);
-        self.writeU16(expr_len);
-    }
-
-    /// FILL_CONSTANT: [array_id:u16] [offset:u32] [count:u32] [stride:u8] [value_ptr:u32]
-    pub fn fillConstant(self: *Self, array_id: u16, offset: u32, count: u32, stride: u8, value_ptr: u32) void {
-        self.writeCmd(.fill_constant);
-        self.writeU16(array_id);
-        self.writeU32(offset);
-        self.writeU32(count);
-        self.writeU8(stride);
-        self.writeU32(value_ptr);
-    }
-
-    /// WRITE_BUFFER_FROM_ARRAY: [buffer_id:u16] [buffer_offset:u32] [array_id:u16]
-    pub fn writeBufferFromArray(self: *Self, buffer_id: u16, buffer_offset: u32, array_id: u16) void {
-        self.writeCmd(.write_buffer_from_array);
-        self.writeU16(buffer_id);
-        self.writeU32(buffer_offset);
-        self.writeU16(array_id);
-    }
-
     /// SUBMIT: (no args)
     pub fn submit(self: *Self) void {
         self.writeCmd(.submit);
@@ -523,11 +470,7 @@ pub const CommandGPU = struct {
     /// Freed in deinit().
     resolved_wgsl: std.ArrayListUnmanaged([]const u8),
 
-    /// Random data buffers that must be kept alive until command buffer is consumed.
-    /// Freed in deinit().
-    random_data: std.ArrayListUnmanaged([]f32),
-
-    /// Allocator used for resolved_wgsl and random_data.
+    /// Allocator used for resolved_wgsl.
     alloc: ?Allocator,
 
     pub fn init(cmds: *CommandBuffer) Self {
@@ -535,22 +478,17 @@ pub const CommandGPU = struct {
             .cmds = cmds,
             .module = null,
             .resolved_wgsl = .{},
-            .random_data = .{},
             .alloc = null,
         };
     }
 
-    /// Free all resolved WGSL and random data allocations.
+    /// Free all resolved WGSL allocations.
     pub fn deinit(self: *Self) void {
         if (self.alloc) |a| {
             for (self.resolved_wgsl.items) |code| {
                 a.free(code);
             }
             self.resolved_wgsl.deinit(a);
-            for (self.random_data.items) |data| {
-                a.free(data);
-            }
-            self.random_data.deinit(a);
         }
     }
 
@@ -760,62 +698,6 @@ pub const CommandGPU = struct {
     pub fn writeBufferFromWasm(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u16, wasm_ptr: u32, size: u32) !void {
         _ = allocator;
         self.cmds.writeBufferFromWasm(buffer_id, buffer_offset, wasm_ptr, size);
-    }
-
-    pub fn createTypedArray(self: *Self, allocator: Allocator, id: u16, array_type: u8, size: u32) !void {
-        _ = allocator;
-        self.cmds.createTypedArray(id, array_type, size);
-    }
-
-    pub fn fillRandom(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, seed_data_id: u16, min_data_id: u16, max_data_id: u16) !void {
-        const seed_data = self.getData(seed_data_id) orelse return;
-        const min_data = self.getData(min_data_id) orelse return;
-        const max_data = self.getData(max_data_id) orelse return;
-
-        // Parse values (stored as little-endian in data section)
-        const seed = std.mem.readInt(u32, seed_data[0..4], .little);
-        const min_val = @as(f32, @bitCast(std.mem.readInt(u32, min_data[0..4], .little)));
-        const max_val = @as(f32, @bitCast(std.mem.readInt(u32, max_data[0..4], .little)));
-        const range = max_val - min_val;
-
-        // Allocate buffer for random values (persists until deinit)
-        const values = try allocator.alloc(f32, count);
-        errdefer allocator.free(values);
-
-        // Generate random values using seeded PRNG (xoshiro256)
-        const seed64: u64 = @as(u64, seed) | (@as(u64, seed ^ 0x6D2B79F5) << 32);
-        var prng = std.Random.DefaultPrng.init(seed64);
-        const random = prng.random();
-
-        for (values) |*v| {
-            v.* = min_val + random.float(f32) * range;
-        }
-
-        // Track allocation for cleanup
-        self.alloc = allocator;
-        try self.random_data.append(allocator, values);
-
-        // Pass pointer to generated data
-        self.cmds.fillRandom(array_id, offset, count, stride, @truncate(@intFromPtr(values.ptr)));
-    }
-
-    pub fn fillExpression(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, total_count: u32, expr_data_id: u16) !void {
-        _ = allocator;
-        _ = total_count; // total_count is implicit in the iteration
-        const expr_data = self.getData(expr_data_id) orelse return;
-        self.cmds.fillExpression(array_id, offset, count, stride, @truncate(@intFromPtr(expr_data.ptr)), @intCast(expr_data.len));
-    }
-
-    pub fn fillConstant(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, value_data_id: u16) !void {
-        _ = allocator;
-        const value_data = self.getData(value_data_id) orelse return;
-        // value_ptr is a pointer to f32 value in data section
-        self.cmds.fillConstant(array_id, offset, count, stride, @truncate(@intFromPtr(value_data.ptr)));
-    }
-
-    pub fn writeBufferFromArray(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, array_id: u16) !void {
-        _ = allocator;
-        self.cmds.writeBufferFromArray(buffer_id, buffer_offset, array_id);
     }
 
     pub fn consoleLog(self: *Self, _: []const u8, _: []const u8) void {

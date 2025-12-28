@@ -99,10 +99,6 @@ pub const Emitter = struct {
     /// These are initialized at runtime by calling WASM functions.
     wasm_data_entries: std.StringHashMapUnmanaged(WasmDataEntry),
 
-    /// Generated arrays for runtime data generation.
-    /// Used when float32Array={numberOfElements=N initEachElementWith=[...]}.
-    generated_arrays: std.StringHashMapUnmanaged(resources.GeneratedArrayInfo),
-
     /// Buffer pool info for ping-pong buffers.
     /// Maps buffer name -> PoolInfo (base_id, pool_size).
     buffer_pools: std.StringHashMapUnmanaged(resources.PoolInfo),
@@ -303,7 +299,6 @@ pub const Emitter = struct {
             .render_bundle_ids = .{},
             .animation_ids = .{},
             .wasm_data_entries = .{},
-            .generated_arrays = .{},
             .buffer_pools = .{},
             .bind_group_pools = .{},
             .wgsl_reflections = .{},
@@ -335,7 +330,6 @@ pub const Emitter = struct {
         self.render_bundle_ids.deinit(self.gpa);
         self.animation_ids.deinit(self.gpa);
         self.wasm_data_entries.deinit(self.gpa);
-        self.generated_arrays.deinit(self.gpa);
         self.buffer_pools.deinit(self.gpa);
         self.bind_group_pools.deinit(self.gpa);
         // Free all cached reflection data

@@ -748,60 +748,6 @@ pub const MockGPU = struct {
         });
     }
 
-    // ========================================================================
-    // Data Generation (stubs for testing - actual implementation in JS)
-    // ========================================================================
-
-    pub fn createTypedArray(self: *Self, allocator: Allocator, array_id: u16, element_type: u8, element_count: u32) !void {
-        _ = self;
-        _ = allocator;
-        _ = array_id;
-        _ = element_type;
-        _ = element_count;
-        // Mock: no-op, data generation happens in JS runtime
-    }
-
-    pub fn fillRandom(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, seed_data_id: u16, min_data_id: u16, max_data_id: u16) !void {
-        _ = self;
-        _ = allocator;
-        _ = array_id;
-        _ = offset;
-        _ = count;
-        _ = stride;
-        _ = seed_data_id;
-        _ = min_data_id;
-        _ = max_data_id;
-    }
-
-    pub fn fillExpression(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, total_count: u32, expr_data_id: u16) !void {
-        _ = self;
-        _ = allocator;
-        _ = array_id;
-        _ = offset;
-        _ = count;
-        _ = stride;
-        _ = total_count;
-        _ = expr_data_id;
-    }
-
-    pub fn fillConstant(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, value_data_id: u16) !void {
-        _ = self;
-        _ = allocator;
-        _ = array_id;
-        _ = offset;
-        _ = count;
-        _ = stride;
-        _ = value_data_id;
-    }
-
-    pub fn writeBufferFromArray(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, array_id: u16) !void {
-        _ = self;
-        _ = allocator;
-        _ = buffer_id;
-        _ = buffer_offset;
-        _ = array_id;
-    }
-
     pub fn writeTimeUniform(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
         _ = self;
         _ = allocator;

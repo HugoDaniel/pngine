@@ -1,5 +1,9 @@
 # Declarative Data Generation Plan
 
+> **Status**: Partially superseded by `cpu-wasm-data-initialization-plan.md`.
+> The `fill=` syntax was never implemented. Use `#init` macro with compute
+> shaders instead. The compute-first principle remains valid.
+
 ## Overview
 
 This document describes how to enable CPU-side procedural data generation in

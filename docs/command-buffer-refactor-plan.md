@@ -1,5 +1,8 @@
 # Command Buffer Protocol Refactor Plan
 
+> **Note**: TypedArray/fill operations (0x50-0x55) have been removed.
+> Use `#init` macro with compute shaders for buffer initialization.
+
 ## Executive Summary
 
 Refactor the JS command dispatcher (gpu.js) from 1,221 lines to ~200-600 lines, reducing bundle size from 9.3KB gzip to <5KB gzip while maintaining full functionality.

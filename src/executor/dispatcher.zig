@@ -26,7 +26,6 @@
 //! - pass.zig: begin_render_pass, draw, dispatch, end_pass
 //! - queue.zig: write_buffer, submit
 //! - frame.zig: define_frame, exec_pass, define_pass
-//! - data_gen.zig: create_typed_array, fill_*
 //! - pool.zig: set_*_pool operations
 //! - wasm_ops.zig: init_wasm_module, call_wasm_func
 //! - scanner.zig: OpcodeScanner for pass definition discovery
@@ -277,12 +276,6 @@ pub fn Dispatcher(comptime BackendType: type) type {
             // Frame control
             if (handlers.frame.isFrameOpcode(op)) {
                 _ = try handlers.frame.handle(Self, self, op, allocator);
-                return;
-            }
-
-            // Data generation
-            if (handlers.data_gen.isDataGenOpcode(op)) {
-                _ = try handlers.data_gen.handle(Self, self, op, allocator);
                 return;
             }
 

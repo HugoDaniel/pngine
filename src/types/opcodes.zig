@@ -9,7 +9,7 @@
 //! - 0x20-0x2F: Queue Operations (write, copy, submit)
 //! - 0x30-0x3F: Frame Control (frame/pass definitions)
 //! - 0x40-0x4F: Pool Operations (resource pooling)
-//! - 0x50-0x7F: Data Generation (runtime array generation)
+//! - 0x50-0x7F: Reserved (formerly data generation, use compute shaders)
 //!
 //! Invariants:
 //! - Opcode 0x00 is reserved (invalid/nop)
@@ -166,10 +166,6 @@ pub const OpCode = enum(u8) {
     /// Params: call_id, buffer_id, offset, byte_len
     write_buffer_from_wasm = 0x28,
 
-    /// Write runtime-generated array to GPU buffer.
-    /// Params: buffer_id, buffer_offset, array_id
-    write_buffer_from_array = 0x29,
-
     /// Write time/canvas uniform data to buffer.
     /// Params: buffer_id, offset, size
     write_time_uniform = 0x2A,
@@ -213,27 +209,9 @@ pub const OpCode = enum(u8) {
     set_bind_group_pool = 0x42,
 
     // ========================================================================
-    // Data Generation (0x50-0x7F)
+    // Reserved (0x50-0x7F) - formerly data generation
+    // Use compute shaders or WASM calls for buffer initialization
     // ========================================================================
-
-    /// Create typed array.
-    /// Params: array_id, element_type, element_count
-    create_typed_array = 0x50,
-
-    /// Fill with constant value.
-    fill_constant = 0x51,
-
-    /// Fill with random values.
-    fill_random = 0x52,
-
-    /// Fill with linear sequence.
-    fill_linear = 0x53,
-
-    /// Fill with element index.
-    fill_element_index = 0x54,
-
-    /// Fill with expression result.
-    fill_expression = 0x55,
 
     _,
 
@@ -275,7 +253,6 @@ pub const OpCode = enum(u8) {
             .init_wasm_module,
             .call_wasm_func,
             .write_buffer_from_wasm,
-            .write_buffer_from_array,
             .define_frame,
             .end_frame,
             .exec_pass,
@@ -284,12 +261,6 @@ pub const OpCode = enum(u8) {
             .select_from_pool,
             .set_vertex_buffer_pool,
             .set_bind_group_pool,
-            .create_typed_array,
-            .fill_constant,
-            .fill_random,
-            .fill_linear,
-            .fill_element_index,
-            .fill_expression,
             .write_time_uniform,
             => true,
             _ => false,
@@ -331,18 +302,6 @@ pub const PassType = enum(u8) {
     compute = 1,
 };
 
-/// Element type for typed arrays.
-pub const ElementType = enum(u8) {
-    i8 = 0,
-    u8 = 1,
-    i16 = 2,
-    u16 = 3,
-    i32 = 4,
-    u32 = 5,
-    f32 = 6,
-    f64 = 7,
-};
-
 /// WASM function argument types for call_wasm_func opcode.
 pub const WasmArgType = enum(u8) {
     literal_f32 = 0x00,
@@ -375,61 +334,6 @@ pub const WasmReturnType = struct {
             .{ "mat4x4", 64 },
         });
         return map.get(type_name);
-    }
-};
-
-/// Expression opcodes for fill_expression data generation.
-/// These opcodes are used in the expression bytecode stored in the data section.
-///
-/// Binary format:
-/// - Nullary ops (index, count, random, etc.): just the opcode byte
-/// - Unary ops (sin, cos, sqrt): opcode + child expression bytes
-/// - Binary ops (add, sub, mul, div): opcode + left expression + right expression
-/// - Literals: opcode + 4 bytes value
-pub const ExpressionOp = enum(u8) {
-    // Literals (0x00-0x0F) - followed by 4-byte value
-    literal_f32 = 0x00, // followed by f32 (4 bytes, little-endian)
-    canvas_width = 0x01, // runtime canvas width
-    canvas_height = 0x02, // runtime canvas height
-    time = 0x03, // runtime time in seconds
-    literal_i32 = 0x04, // followed by i32 (4 bytes)
-    literal_u32 = 0x05, // followed by u32 (4 bytes)
-
-    // Binary operators (0x10-0x1F) - left operand + right operand follow
-    add = 0x10,
-    sub = 0x11,
-    mul = 0x12,
-    div = 0x13,
-
-    // Unary functions (0x20-0x2F) - operand follows
-    sin = 0x20,
-    cos = 0x21,
-    sqrt = 0x22,
-
-    // Variables (0x30-0x3F) - no additional bytes
-    element_index = 0x30, // ELEMENT_ID - current element index
-    element_count = 0x31, // NUM_PARTICLES - total element count
-    random = 0x32, // random() - random value [0, 1)
-    pi = 0x33, // PI constant
-
-    /// Get the size of the fixed data following this opcode (not including children).
-    pub fn immediateSize(self: ExpressionOp) u8 {
-        return switch (self) {
-            .literal_f32, .literal_i32, .literal_u32 => 4,
-            else => 0,
-        };
-    }
-
-    /// Get the number of child expressions this opcode expects.
-    pub fn childCount(self: ExpressionOp) u8 {
-        return switch (self) {
-            // Binary operators
-            .add, .sub, .mul, .div => 2,
-            // Unary functions
-            .sin, .cos, .sqrt => 1,
-            // Nullary (literals and variables)
-            else => 0,
-        };
     }
 };
 

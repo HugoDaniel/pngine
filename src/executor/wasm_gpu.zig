@@ -65,12 +65,6 @@ extern "env" fn gpuInitWasmModule(module_id: u16, data_ptr: [*]const u8, data_le
 extern "env" fn gpuCallWasmFunc(call_id: u16, module_id: u16, func_name_ptr: [*]const u8, func_name_len: u32, args_ptr: [*]const u8, args_len: u32) void;
 extern "env" fn gpuWriteBufferFromWasm(call_id: u16, buffer_id: u16, offset: u32, byte_len: u32) void;
 
-// Data generation extern functions
-extern "env" fn gpuCreateTypedArray(array_id: u16, element_type: u8, element_count: u32) void;
-extern "env" fn gpuFillRandomData(array_id: u16, offset: u32, count: u32, stride: u8, data_ptr: [*]const f32) void;
-extern "env" fn gpuFillExpression(array_id: u16, offset: u32, count: u32, stride: u8, total_count: u32, expr_ptr: [*]const u8, expr_len: u32) void;
-extern "env" fn gpuFillConstant(array_id: u16, offset: u32, count: u32, stride: u8, value_ptr: [*]const u8) void;
-extern "env" fn gpuWriteBufferFromArray(buffer_id: u16, buffer_offset: u32, array_id: u16) void;
 extern "env" fn gpuWriteTimeUniform(buffer_id: u16, buffer_offset: u32, size: u16) void;
 
 // Debug logging
@@ -486,75 +480,6 @@ pub const WasmGPU = struct {
         _ = self;
         _ = allocator;
         gpuWriteBufferFromWasm(call_id, buffer_id, offset, byte_len);
-    }
-
-    // ========================================================================
-    // Data Generation Operations
-    // ========================================================================
-
-    /// Create a typed array for runtime data generation.
-    pub fn createTypedArray(self: *Self, allocator: Allocator, array_id: u16, element_type: u8, element_count: u32) !void {
-        _ = self;
-        _ = allocator;
-        gpuCreateTypedArray(array_id, element_type, element_count);
-    }
-
-    /// Fill array with random values using seeded PRNG.
-    /// Random generation happens in Zig using a high-quality PRNG (xoroshiro128).
-    /// The seed enables deterministic random generation (same seed = same output).
-    pub fn fillRandom(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, seed_data_id: u16, min_data_id: u16, max_data_id: u16) !void {
-        assert(self.module != null);
-
-        // Read seed, min, max from data section
-        const seed_data = self.getDataOrPanic(seed_data_id);
-        const min_data = self.getDataOrPanic(min_data_id);
-        const max_data = self.getDataOrPanic(max_data_id);
-
-        // Parse values (stored as little-endian in data section)
-        const seed = std.mem.readInt(u32, seed_data[0..4], .little);
-        const min_val = @as(f32, @bitCast(std.mem.readInt(u32, min_data[0..4], .little)));
-        const max_val = @as(f32, @bitCast(std.mem.readInt(u32, max_data[0..4], .little)));
-        const range = max_val - min_val;
-
-        // Allocate buffer for random values
-        const values = try allocator.alloc(f32, count);
-        defer allocator.free(values);
-
-        // Generate random values using seeded PRNG
-        // Use DefaultPrng (xoshiro256) with seed expanded to 64-bit
-        const seed64: u64 = @as(u64, seed) | (@as(u64, seed ^ 0x6D2B79F5) << 32);
-        var prng = std.Random.DefaultPrng.init(seed64);
-        const random = prng.random();
-
-        for (values) |*v| {
-            v.* = min_val + random.float(f32) * range;
-        }
-
-        // Pass pre-generated data to JS
-        gpuFillRandomData(array_id, offset, count, stride, values.ptr);
-    }
-
-    /// Fill array by evaluating expression for each element.
-    pub fn fillExpression(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, total_count: u32, expr_data_id: u16) !void {
-        _ = allocator;
-        assert(self.module != null);
-        const expr_data = self.getDataOrPanic(expr_data_id);
-        gpuFillExpression(array_id, offset, count, stride, total_count, expr_data.ptr, @intCast(expr_data.len));
-    }
-
-    /// Fill array with constant value.
-    pub fn fillConstant(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, value_data_id: u16) !void {
-        _ = allocator;
-        assert(self.module != null);
-        const value_data = self.getDataOrPanic(value_data_id);
-        gpuFillConstant(array_id, offset, count, stride, value_data.ptr);
-    }
-
-    /// Write generated array data to GPU buffer.
-    pub fn writeBufferFromArray(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, array_id: u16) !void {
-        _ = self;
-        _ = allocator;
-        gpuWriteBufferFromArray(buffer_id, buffer_offset, array_id);
     }
 
     /// Write time/canvas uniform data to GPU buffer.

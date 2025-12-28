@@ -558,59 +558,6 @@ pub const NativeGPU = struct {
         // WASM calls are only meaningful in browser context
     }
 
-    // ========================================================================
-    // Data Generation (stubs - actual implementation in JS runtime)
-    // ========================================================================
-
-    pub fn createTypedArray(self: *Self, allocator: Allocator, array_id: u16, element_type: u8, element_count: u32) !void {
-        _ = allocator;
-        _ = array_id;
-        _ = element_type;
-        _ = element_count;
-        assert(self.initialized);
-    }
-
-    pub fn fillRandom(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, seed_data_id: u16, min_data_id: u16, max_data_id: u16) !void {
-        _ = allocator;
-        _ = array_id;
-        _ = offset;
-        _ = count;
-        _ = stride;
-        _ = seed_data_id;
-        _ = min_data_id;
-        _ = max_data_id;
-        assert(self.initialized);
-    }
-
-    pub fn fillExpression(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, total_count: u32, expr_data_id: u16) !void {
-        _ = allocator;
-        _ = array_id;
-        _ = offset;
-        _ = count;
-        _ = stride;
-        _ = total_count;
-        _ = expr_data_id;
-        assert(self.initialized);
-    }
-
-    pub fn fillConstant(self: *Self, allocator: Allocator, array_id: u16, offset: u32, count: u32, stride: u8, value_data_id: u16) !void {
-        _ = allocator;
-        _ = array_id;
-        _ = offset;
-        _ = count;
-        _ = stride;
-        _ = value_data_id;
-        assert(self.initialized);
-    }
-
-    pub fn writeBufferFromArray(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, array_id: u16) !void {
-        _ = allocator;
-        _ = buffer_id;
-        _ = buffer_offset;
-        _ = array_id;
-        assert(self.initialized);
-    }
-
     /// Write time/canvas uniform data to GPU buffer.
     /// Runtime provides f32 values: time, canvas_width, canvas_height[, aspect_ratio].
     pub fn writeTimeUniform(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {

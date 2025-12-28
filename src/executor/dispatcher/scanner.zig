@@ -117,7 +117,6 @@ pub const OpcodeScanner = struct {
             .create_bind_group,
             .write_buffer,
             .write_time_uniform,
-            .write_buffer_from_array,
             .create_texture_view,
             .dispatch,
             => self.skipVarints(3),
@@ -146,45 +145,10 @@ pub const OpcodeScanner = struct {
                 self.skipByte();
             },
 
-            // varint + byte + varint (create_typed_array)
-            .create_typed_array => {
-                self.skipVarint();
-                self.skipByte();
-                self.skipVarint();
-            },
-
             // varint + 2 bytes + varint (begin_render_pass)
             .begin_render_pass => {
                 self.skipVarint();
                 self.skipByte();
-                self.skipByte();
-                self.skipVarint();
-            },
-
-            // 3 varints + byte + varint (fill_constant)
-            .fill_constant => {
-                self.skipVarints(3);
-                self.skipByte();
-                self.skipVarint();
-            },
-
-            // 3 varints + byte + 2 varints (fill_linear, fill_element_index)
-            .fill_linear, .fill_element_index => {
-                self.skipVarints(3);
-                self.skipByte();
-                self.skipVarints(2);
-            },
-
-            // 3 varints + byte + 3 varints (fill_random)
-            .fill_random => {
-                self.skipVarints(3);
-                self.skipByte();
-                self.skipVarints(3);
-            },
-
-            // 3 varints + byte + varint (fill_expression)
-            .fill_expression => {
-                self.skipVarints(3);
                 self.skipByte();
                 self.skipVarint();
             },

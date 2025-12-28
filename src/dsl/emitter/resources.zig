@@ -122,19 +122,6 @@ pub fn emitData(e: *Emitter) Emitter.Error!void {
     std.debug.assert(e.data_ids.count() >= initial_count);
 }
 
-/// Generated array info for runtime data generation.
-/// Used when float32Array={numberOfElements=N initEachElementWith=[...]}
-pub const GeneratedArrayInfo = struct {
-    /// Runtime array ID (for create_typed_array opcode).
-    array_id: u16,
-    /// Number of elements in the array.
-    element_count: u32,
-    /// Number of floats per element (from initEachElementWith length).
-    floats_per_element: u8,
-    /// Total byte size of the array.
-    byte_size: u32,
-};
-
 /// Pool info for ping-pong resources (buffers, bind groups).
 /// Used when pool=N is specified on a resource.
 pub const PoolInfo = struct {
@@ -155,21 +142,19 @@ pub const BindGroupEntryWithPingPong = struct {
     buffer_name: []const u8,
 };
 
-/// Emit float32Array data to data section or as runtime-generated array.
+/// Emit float32Array data to data section (inline array only).
+/// Generated arrays via runtime opcodes have been removed - use WASM calls or compute shaders.
 fn emitFloat32ArrayData(e: *Emitter, name: []const u8, float_array: Node.Index) Emitter.Error!void {
     const array_tag = e.ast.nodes.items(.tag)[float_array.toInt()];
 
-    // Case 1: Simple inline array - embed directly in data section
+    // Only inline arrays are supported
     if (array_tag == .array) {
         try emitInlineFloat32Array(e, name, float_array);
         return;
     }
 
-    // Case 2: Generated array object - emit runtime generation opcodes
-    if (array_tag == .object) {
-        try emitGeneratedFloat32Array(e, name, float_array);
-        return;
-    }
+    // Object syntax (numberOfElements + initEachElementWith) is no longer supported
+    // Use WASM calls or compute shaders for buffer initialization instead
 }
 
 /// Emit inline float32Array to data section (original behavior).
@@ -197,72 +182,6 @@ fn emitInlineFloat32Array(e: *Emitter, name: []const u8, float_array: Node.Index
     // Add to data section
     const data_id = try e.builder.addData(e.gpa, bytes.items);
     try e.data_ids.put(e.gpa, name, data_id.toInt());
-}
-
-/// Emit runtime-generated float32Array using opcodes.
-/// Format: float32Array={numberOfElements=N initEachElementWith=[expr1, expr2, ...]}
-fn emitGeneratedFloat32Array(e: *Emitter, name: []const u8, obj_node: Node.Index) Emitter.Error!void {
-    // Pre-condition: obj_node is an object
-    std.debug.assert(e.ast.nodes.items(.tag)[obj_node.toInt()] == .object);
-
-    // Parse numberOfElements - can be literal or #define reference
-    const num_elements_node = utils.findPropertyValueInObject(e, obj_node, "numberOfElements") orelse return;
-    const element_count = resolveElementCount(e, num_elements_node);
-    if (element_count == 0) return;
-
-    // Parse initEachElementWith array
-    const init_array_node = utils.findPropertyValueInObject(e, obj_node, "initEachElementWith") orelse return;
-    const init_tag = e.ast.nodes.items(.tag)[init_array_node.toInt()];
-    if (init_tag != .array) return;
-
-    const init_data = e.ast.nodes.items(.data)[init_array_node.toInt()];
-    const expr_elements = e.ast.extraData(init_data.extra_range);
-    const floats_per_element: u8 = @intCast(@min(expr_elements.len, 255));
-    if (floats_per_element == 0) return;
-
-    // Assign runtime array ID
-    const array_id = e.next_data_id;
-    e.next_data_id += 1;
-
-    // Emit create_typed_array opcode
-    try e.builder.getEmitter().createTypedArray(
-        e.gpa,
-        array_id,
-        .f32, // ElementType.f32
-        element_count * floats_per_element,
-    );
-
-    // For each expression in initEachElementWith, emit fill_expression
-    for (0..floats_per_element) |i| {
-        const expr_node: Node.Index = @enumFromInt(expr_elements[i]);
-        const expr_str = getExpressionString(e, expr_node);
-        if (expr_str.len == 0) continue;
-
-        // Add expression string to data section
-        const expr_data_id = try e.builder.addData(e.gpa, expr_str);
-
-        // Emit fill_expression: fills element_count values at offset i with stride floats_per_element
-        try e.builder.getEmitter().fillExpression(
-            e.gpa,
-            array_id,
-            @intCast(i), // offset (which float in the element)
-            element_count, // count (number of elements)
-            floats_per_element, // stride
-            expr_data_id.toInt(),
-        );
-    }
-
-    // Store generated array info for buffer initialization
-    const byte_size = element_count * @as(u32, floats_per_element) * 4;
-    try e.generated_arrays.put(e.gpa, name, .{
-        .array_id = array_id,
-        .element_count = element_count,
-        .floats_per_element = floats_per_element,
-        .byte_size = byte_size,
-    });
-
-    // Post-condition: array was registered
-    std.debug.assert(e.generated_arrays.get(name) != null);
 }
 
 /// Resolve element count from numberOfElements property.
@@ -647,15 +566,10 @@ fn resolveBufferSize(e: *Emitter, size_node: Node.Index) u32 {
         return 0;
     }
 
-    // Check for identifier reference to #data (including WASM data and generated arrays)
+    // Check for identifier reference to #data (including WASM data)
     if (size_tag == .identifier_value) {
         const token = e.ast.nodes.items(.main_token)[size_node.toInt()];
         const data_name = utils.getTokenSlice(e, token);
-
-        // Check generated arrays first (runtime-generated data)
-        if (e.generated_arrays.get(data_name)) |gen_array| {
-            return gen_array.byte_size;
-        }
 
         // Check WASM data entries (they store byte size)
         if (e.wasm_data_entries.get(data_name)) |wasm_entry| {
@@ -799,7 +713,8 @@ fn validateBufferDataSize(e: *Emitter, buffer_name: []const u8, buffer_size: u32
 }
 
 /// Emit write_buffer for buffer initialization from mappedAtCreation.
-/// Handles: inline data, WASM-generated data, and runtime-generated arrays.
+/// Handles: inline data and WASM-generated data.
+/// For runtime buffer initialization, use compute shaders via #init macro.
 fn emitBufferInitialization(e: *Emitter, buffer_id: u16, mapped_value: Node.Index) Emitter.Error!void {
     // Pre-condition
     std.debug.assert(mapped_value.toInt() < e.ast.nodes.len);
@@ -809,18 +724,6 @@ fn emitBufferInitialization(e: *Emitter, buffer_id: u16, mapped_value: Node.Inde
 
     const token = e.ast.nodes.items(.main_token)[mapped_value.toInt()];
     const data_name = utils.getTokenSlice(e, token);
-
-    // Check generated arrays first (runtime-generated data)
-    if (e.generated_arrays.get(data_name)) |gen_array| {
-        // Emit write_buffer_from_array to copy runtime-generated array to buffer
-        try e.builder.getEmitter().writeBufferFromArray(
-            e.gpa,
-            buffer_id,
-            0, // offset
-            gen_array.array_id,
-        );
-        return;
-    }
 
     // Check WASM data entries
     if (e.wasm_data_entries.get(data_name)) |wasm_entry| {
