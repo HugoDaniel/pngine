@@ -2,7 +2,8 @@
 //!
 //! Handles emission of #init declarations by expanding them into:
 //! - Synthetic compute pipeline
-//! - Synthetic bind group
+//! - Synthetic bind group (with optional params buffer at binding 1)
+//! - Synthetic params buffer (when params=[] is specified)
 //! - Synthetic compute pass (registered as a regular pass for frame reference)
 //!
 //! ## Example Expansion
@@ -16,8 +17,9 @@
 //! ```
 //!
 //! Expands to bytecode equivalent of:
+//! - Buffer for params with UNIFORM + COPY_DST usage
 //! - Compute pipeline using initParticles shader
-//! - Bind group with particles buffer at binding 0
+//! - Bind group with particles buffer at binding 0, params at binding 1
 //! - Compute pass that dispatches the shader
 //!
 //! ## Invariants
@@ -25,6 +27,7 @@
 //! * Init macros are emitted after pipelines but before regular passes.
 //! * Each #init registers a pass ID so it can be referenced in #frame { init=[...] }.
 //! * Workgroup count is calculated from buffer size and workgroup size (default 64).
+//! * Params buffer uses UNIFORM + COPY_DST usage for shader access.
 
 const std = @import("std");
 const Emitter = @import("../Emitter.zig").Emitter;
@@ -34,6 +37,7 @@ const DescriptorEncoder = @import("../DescriptorEncoder.zig").DescriptorEncoder;
 // Use bytecode module import
 const bytecode_mod = @import("bytecode");
 const opcodes = bytecode_mod.opcodes;
+const BufferUsage = opcodes.BufferUsage;
 const utils = @import("utils.zig");
 
 /// Maximum #init macros to emit.
@@ -41,6 +45,9 @@ const MAX_INIT_MACROS: u32 = 64;
 
 /// Default workgroup size for init shaders.
 const DEFAULT_WORKGROUP_SIZE: u32 = 64;
+
+/// Maximum params elements in #init params=[] array.
+const MAX_PARAMS_ELEMENTS: u32 = 64;
 
 /// Emit all #init macro declarations.
 /// Creates synthetic pipelines, bind groups, and passes for each #init.
@@ -79,6 +86,36 @@ fn emitInitMacro(e: *Emitter, name: []const u8, node: Node.Index) Emitter.Error!
     // Ensure at least 1 workgroup (ceil division, min 1)
     const workgroup_count = @max(1, (buffer_size + DEFAULT_WORKGROUP_SIZE - 1) / DEFAULT_WORKGROUP_SIZE);
 
+    // Check for optional params
+    const params_data = try getParamsData(e, node);
+    defer if (params_data) |data| e.gpa.free(data);
+    var params_buffer_id: ?u16 = null;
+
+    // 0. Create params buffer if params specified
+    if (params_data) |data| {
+        params_buffer_id = e.next_buffer_id;
+        e.next_buffer_id += 1;
+
+        // Create buffer with UNIFORM + COPY_DST usage
+        try e.builder.getEmitter().createBuffer(
+            e.gpa,
+            params_buffer_id.?,
+            @intCast(data.len),
+            BufferUsage.uniform_copy_dst,
+        );
+
+        // Add data to data section
+        const params_data_id = try e.builder.addData(e.gpa, data);
+
+        // Write data to buffer
+        try e.builder.getEmitter().writeBuffer(
+            e.gpa,
+            params_buffer_id.?,
+            0, // offset
+            params_data_id.toInt(),
+        );
+    }
+
     // 1. Create synthetic compute pipeline
     const pipeline_id = e.next_pipeline_id;
     e.next_pipeline_id += 1;
@@ -99,22 +136,37 @@ fn emitInitMacro(e: *Emitter, name: []const u8, node: Node.Index) Emitter.Error!
         desc_id.toInt(),
     );
 
-    // 2. Create synthetic bind group with buffer at binding 0
+    // 2. Create synthetic bind group
     const bind_group_id = e.next_bind_group_id;
     e.next_bind_group_id += 1;
 
-    // Create bind group entry for buffer
-    const entry = DescriptorEncoder.BindGroupEntry{
+    // Create bind group entries
+    var entries_buf: [2]DescriptorEncoder.BindGroupEntry = undefined;
+    var entry_count: usize = 1;
+
+    // Binding 0: target buffer (storage)
+    entries_buf[0] = DescriptorEncoder.BindGroupEntry{
         .binding = 0,
         .resource_type = .buffer,
         .resource_id = buffer_id,
         .offset = 0,
         .size = 0, // 0 = whole buffer
     };
-    const entries = [_]DescriptorEncoder.BindGroupEntry{entry};
+
+    // Binding 1: params buffer (uniform) - if params specified
+    if (params_buffer_id) |pid| {
+        entries_buf[1] = DescriptorEncoder.BindGroupEntry{
+            .binding = 1,
+            .resource_type = .buffer,
+            .resource_id = pid,
+            .offset = 0,
+            .size = 0, // 0 = whole buffer
+        };
+        entry_count = 2;
+    }
 
     // Encode bind group descriptor
-    const bg_desc = try DescriptorEncoder.encodeBindGroupDescriptor(e.gpa, 0, &entries);
+    const bg_desc = try DescriptorEncoder.encodeBindGroupDescriptor(e.gpa, 0, entries_buf[0..entry_count]);
     defer e.gpa.free(bg_desc);
 
     const bg_desc_id = try e.builder.addData(e.gpa, bg_desc);
@@ -210,4 +262,44 @@ fn getBufferSize(e: *Emitter, buffer_name: []const u8) u32 {
 
     // Size could be a reference or expression - default to reasonable size
     return DEFAULT_WORKGROUP_SIZE * 16; // 1024 elements
+}
+
+/// Get params data from #init macro's params property.
+/// Parses params=[] array and returns f32 bytes, or null if no params.
+///
+/// Memory: Returns allocated slice that caller must free.
+fn getParamsData(e: *Emitter, node: Node.Index) Emitter.Error!?[]const u8 {
+    // Pre-condition
+    std.debug.assert(node.toInt() < e.ast.nodes.len);
+
+    const params_node = utils.findPropertyValue(e, node, "params") orelse return null;
+    const tags = e.ast.nodes.items(.tag);
+
+    if (tags[params_node.toInt()] != .array) return null;
+
+    var data_bytes: std.ArrayListUnmanaged(u8) = .{};
+
+    const array_data = e.ast.nodes.items(.data)[params_node.toInt()];
+    const elements = e.ast.extraData(array_data.extra_range);
+
+    // Bounded iteration over array elements
+    const max_elements = @min(elements.len, MAX_PARAMS_ELEMENTS);
+    for (0..max_elements) |i| {
+        const elem_idx = elements[i];
+        const elem: Node.Index = @enumFromInt(elem_idx);
+        if (utils.parseFloatNumber(e, elem)) |num| {
+            // Write as f32
+            const f: f32 = @floatCast(num);
+            const bytes = std.mem.asBytes(&f);
+            data_bytes.appendSlice(e.gpa, bytes) catch continue;
+        }
+    }
+
+    if (data_bytes.items.len > 0) {
+        // Return the slice - caller owns the memory
+        return data_bytes.toOwnedSlice(e.gpa) catch return null;
+    }
+
+    data_bytes.deinit(e.gpa);
+    return null;
 }

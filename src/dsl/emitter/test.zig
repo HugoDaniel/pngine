@@ -4808,3 +4808,93 @@ fn countDispatchCalls(gpu: *mock_gpu.MockGPU) u32 {
     }
     return count;
 }
+
+test "Emitter: init macro with params creates uniform buffer" {
+    // #init with params= should expand to:
+    // - An additional uniform buffer for the params
+    // - writeBuffer to initialize the params buffer
+    // - Bind group with params buffer at binding 1
+    const source: [:0]const u8 =
+        \\#wgsl initShader { value="@compute @workgroup_size(64) fn main() {}" }
+        \\#buffer particles { size=4096 usage=[STORAGE] }
+        \\#init resetParticles { buffer=particles shader=initShader params=[42] }
+        \\#frame main { perform=[resetParticles] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    try testing.expectEqualStrings("PNGB", pngb[0..4]);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    // Count resources created
+    var buffer_count: u32 = 0;
+    var write_buffer_count: u32 = 0;
+    var bind_group_count: u32 = 0;
+
+    for (gpu.getCalls()) |call| {
+        switch (call.call_type) {
+            .create_buffer => buffer_count += 1,
+            .write_buffer => write_buffer_count += 1,
+            .create_bind_group => bind_group_count += 1,
+            else => {},
+        }
+    }
+
+    // Should have 2 buffers: particles + params
+    try testing.expectEqual(@as(u32, 2), buffer_count);
+    // Should have at least 1 writeBuffer for params initialization
+    try testing.expect(write_buffer_count >= 1);
+    // Should have at least 1 bind group
+    try testing.expect(bind_group_count >= 1);
+}
+
+test "Emitter: init macro with multiple params values" {
+    // Test multiple params values (e.g., seed + other configuration)
+    const source: [:0]const u8 =
+        \\#wgsl initShader { value="@compute @workgroup_size(64) fn main() {}" }
+        \\#buffer data { size=1024 usage=[STORAGE] }
+        \\#init setup { buffer=data shader=initShader params=[12345 2.5 0.1] }
+        \\#frame main { perform=[setup] }
+    ;
+
+    const pngb = try compileSource(source);
+    defer testing.allocator.free(pngb);
+
+    try testing.expectEqualStrings("PNGB", pngb[0..4]);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: mock_gpu.MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+    try dispatcher.executeAll(testing.allocator);
+
+    // Find the params buffer creation - should be 12 bytes (3 x f32)
+    var found_params_buffer = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .create_buffer) {
+            // Look for a 12-byte buffer (3 params x 4 bytes each)
+            if (call.params.create_buffer.size == 12) {
+                found_params_buffer = true;
+                // Verify UNIFORM usage (bit 6 = 0x40) is set
+                const usage = call.params.create_buffer.usage;
+                try testing.expect((usage & 0x40) != 0); // uniform bit
+                break;
+            }
+        }
+    }
+    try testing.expect(found_params_buffer);
+}

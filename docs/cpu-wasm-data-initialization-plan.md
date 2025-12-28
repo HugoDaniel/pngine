@@ -332,7 +332,8 @@ The `#init` macro expands to:
   - Token/Parser: `macro_init` keyword added
   - Analyzer: `buffer_init` symbol table, references resolve in `perform=[]` and `init=[]`
   - Emitter: Expands to synthetic compute pipeline + bind group + pass
-  - Tests: 2 tests for init macro emission
+  - Params: `params=[]` creates UNIFORM buffer at binding 1 with f32 values
+  - Tests: 4 tests for init macro emission (including params)
 - [x] Phase 4: Frame `init=` support - DONE
   - Added `exec_pass_once` opcode (0x35) for run-once semantics
   - Analyzer: `init` property resolves to pass namespaces
