@@ -1,0 +1,388 @@
+// 21 - Flocking Variations
+// Multiple flocking behaviors: predator-prey, schools, swarms
+// Demonstrates: varied AI behaviors, color-coded groups, emergent patterns
+
+#define NUM_BOIDS=512
+#define NUM_PREDATORS=8
+
+// Boid: pos(2) + vel(2) + type(1) + pad(3) = 8 floats
+#buffer boidBuffer {
+  size="(NUM_BOIDS + NUM_PREDATORS) * 8 * 4"
+  usage=[VERTEX STORAGE]
+  pool=2
+}
+
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+#init initBoids {
+  buffer=boidBuffer
+  shader=initShader
+  workgroups=9
+}
+
+#shaderModule initShader {
+  code="
+    struct Boid {
+      pos: vec2f,
+      vel: vec2f,
+      boidType: f32,
+      size: f32,
+      hue: f32,
+      pad: f32,
+    }
+    struct Boids { data: array<Boid> }
+
+    @binding(0) @group(0) var<storage, read_write> boids: Boids;
+
+    fn hash(n: u32) -> f32 {
+      var x = n;
+      x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+      x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+      x = (x >> 16u) ^ x;
+      return f32(x) / f32(0xffffffffu);
+    }
+
+    const PI: f32 = 3.14159265359;
+    const NUM_BOIDS: u32 = 512u;
+    const NUM_PREDATORS: u32 = 8u;
+    const TOTAL: u32 = 520u;
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+      let i = id.x;
+      if (i >= TOTAL) { return; }
+
+      let angle = hash(i * 7u) * PI * 2.0;
+      let speed = 0.1 + hash(i * 11u) * 0.1;
+
+      boids.data[i].pos = vec2f(
+        hash(i * 13u) * 1.6 - 0.8,
+        hash(i * 17u) * 1.6 - 0.8
+      );
+      boids.data[i].vel = vec2f(cos(angle), sin(angle)) * speed;
+
+      // Last 8 are predators
+      if (i >= NUM_BOIDS) {
+        boids.data[i].boidType = 1.0;  // Predator
+        boids.data[i].size = 0.04;
+        boids.data[i].hue = 0.0;  // Red
+      } else {
+        // Assign to 3 schools based on position
+        let school = i % 3u;
+        boids.data[i].boidType = 0.0;  // Prey
+        boids.data[i].size = 0.015;
+        boids.data[i].hue = f32(school) / 3.0 + 0.15;  // Green, Cyan, Blue
+      }
+    }
+  "
+}
+
+#shaderModule stepShader {
+  code="
+    struct Boid {
+      pos: vec2f,
+      vel: vec2f,
+      boidType: f32,
+      size: f32,
+      hue: f32,
+      pad: f32,
+    }
+    struct Boids { data: array<Boid> }
+
+    @group(0) @binding(0) var<storage, read> boidsIn: Boids;
+    @group(0) @binding(1) var<storage, read_write> boidsOut: Boids;
+
+    const NUM_BOIDS: u32 = 512u;
+    const NUM_PREDATORS: u32 = 8u;
+    const TOTAL: u32 = 520u;
+
+    const PERCEPTION: f32 = 0.15;
+    const SEPARATION_DIST: f32 = 0.05;
+    const MAX_SPEED: f32 = 0.4;
+    const MAX_FORCE: f32 = 0.02;
+    const PREDATOR_PERCEPTION: f32 = 0.3;
+    const FLEE_DIST: f32 = 0.2;
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+      let i = id.x;
+      if (i >= TOTAL) { return; }
+
+      var boid = boidsIn.data[i];
+      let isPredator = boid.boidType > 0.5;
+
+      var separation = vec2f(0.0);
+      var alignment = vec2f(0.0);
+      var cohesion = vec2f(0.0);
+      var flee = vec2f(0.0);
+      var chase = vec2f(0.0);
+
+      var sepCount = 0u;
+      var flockCount = 0u;
+      var fleeCount = 0u;
+
+      for (var j = 0u; j < TOTAL; j++) {
+        if (i == j) { continue; }
+
+        let other = boidsIn.data[j];
+        let diff = boid.pos - other.pos;
+        let dist = length(diff);
+
+        if (isPredator) {
+          // Predator behavior: chase prey
+          if (other.boidType < 0.5 && dist < PREDATOR_PERCEPTION) {
+            chase -= diff / dist;
+            flockCount++;
+          }
+          // Avoid other predators
+          if (other.boidType > 0.5 && dist < SEPARATION_DIST * 2.0) {
+            separation += diff / (dist + 0.001);
+            sepCount++;
+          }
+        } else {
+          // Prey behavior
+          let sameSchool = abs(boid.hue - other.hue) < 0.1;
+
+          // Flee from predators
+          if (other.boidType > 0.5 && dist < FLEE_DIST) {
+            flee += diff / (dist + 0.001) * 2.0;
+            fleeCount++;
+          }
+
+          // Flock with same school
+          if (other.boidType < 0.5 && sameSchool && dist < PERCEPTION) {
+            alignment += other.vel;
+            cohesion += other.pos;
+            flockCount++;
+
+            if (dist < SEPARATION_DIST) {
+              separation += diff / (dist + 0.001);
+              sepCount++;
+            }
+          }
+        }
+      }
+
+      var steer = vec2f(0.0);
+
+      if (isPredator) {
+        // Predator steering
+        if (flockCount > 0u) {
+          chase /= f32(flockCount);
+          chase = normalize(chase) * MAX_SPEED - boid.vel;
+          steer += chase * 1.5;
+        }
+        if (sepCount > 0u) {
+          separation /= f32(sepCount);
+          steer += separation * 0.5;
+        }
+      } else {
+        // Prey steering
+        if (fleeCount > 0u) {
+          flee /= f32(fleeCount);
+          steer += flee * 3.0;  // Strong flee response
+        }
+        if (flockCount > 0u) {
+          alignment /= f32(flockCount);
+          cohesion = cohesion / f32(flockCount) - boid.pos;
+          steer += alignment * 0.5 + cohesion * 0.3;
+        }
+        if (sepCount > 0u) {
+          separation /= f32(sepCount);
+          steer += separation * 1.0;
+        }
+      }
+
+      // Limit force
+      if (length(steer) > MAX_FORCE) {
+        steer = normalize(steer) * MAX_FORCE;
+      }
+
+      boid.vel += steer;
+
+      // Limit speed
+      let currentSpeed = length(boid.vel);
+      let maxSpd = select(MAX_SPEED, MAX_SPEED * 1.3, isPredator);
+      if (currentSpeed > maxSpd) {
+        boid.vel = boid.vel / currentSpeed * maxSpd;
+      }
+
+      boid.pos += boid.vel * 0.016;
+
+      // Wrap around edges
+      if (boid.pos.x < -1.0) { boid.pos.x += 2.0; }
+      if (boid.pos.x > 1.0) { boid.pos.x -= 2.0; }
+      if (boid.pos.y < -1.0) { boid.pos.y += 2.0; }
+      if (boid.pos.y > 1.0) { boid.pos.y -= 2.0; }
+
+      boidsOut.data[i] = boid;
+    }
+  "
+}
+
+#computePipeline stepPipeline {
+  layout=auto
+  compute={ entryPoint=main module=stepShader }
+}
+
+#bindGroup stepBindGroup {
+  layout={ pipeline=stepPipeline index=0 }
+  entries=[
+    { binding=0 resource={ buffer=boidBuffer pingPong=0 } }
+    { binding=1 resource={ buffer=boidBuffer pingPong=1 } }
+  ]
+  pool=2
+}
+
+#computePass stepPass {
+  pipeline=stepPipeline
+  bindGroups=[stepBindGroup]
+  bindGroupsPoolOffsets=[0]
+  dispatchWorkgroups=9
+}
+
+#shaderModule renderShader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    struct VertexOutput {
+      @builtin(position) pos: vec4f,
+      @location(0) localPos: vec2f,
+      @location(1) hue: f32,
+      @location(2) boidType: f32,
+    }
+
+    fn hsv2rgb(h: f32, s: f32, v: f32) -> vec3f {
+      let c = v * s;
+      let x = c * (1.0 - abs(fract(h * 6.0) * 2.0 - 1.0));
+      let m = v - c;
+
+      var rgb = vec3f(0.0);
+      let hi = u32(h * 6.0) % 6u;
+      if (hi == 0u) { rgb = vec3f(c, x, 0.0); }
+      else if (hi == 1u) { rgb = vec3f(x, c, 0.0); }
+      else if (hi == 2u) { rgb = vec3f(0.0, c, x); }
+      else if (hi == 3u) { rgb = vec3f(0.0, x, c); }
+      else if (hi == 4u) { rgb = vec3f(x, 0.0, c); }
+      else { rgb = vec3f(c, 0.0, x); }
+
+      return rgb + vec3f(m);
+    }
+
+    @vertex
+    fn vs(
+      @builtin(vertex_index) vertIdx: u32,
+      @location(0) pos: vec2f,
+      @location(1) vel: vec2f,
+      @location(2) boidType: f32,
+      @location(3) size: f32,
+      @location(4) hue: f32
+    ) -> VertexOutput {
+      // Triangle vertices
+      let angle = atan2(vel.y, vel.x);
+      let c = cos(angle);
+      let s = sin(angle);
+
+      var localPos: vec2f;
+      if (vertIdx == 0u) {
+        localPos = vec2f(1.0, 0.0);
+      } else if (vertIdx == 1u) {
+        localPos = vec2f(-0.5, 0.6);
+      } else {
+        localPos = vec2f(-0.5, -0.6);
+      }
+
+      // Rotate and scale
+      let rotated = vec2f(
+        localPos.x * c - localPos.y * s,
+        localPos.x * s + localPos.y * c
+      ) * size;
+
+      var out: VertexOutput;
+      out.pos = vec4f((pos.x + rotated.x) / u.aspect, pos.y + rotated.y, 0.0, 1.0);
+      out.localPos = localPos;
+      out.hue = hue;
+      out.boidType = boidType;
+      return out;
+    }
+
+    @fragment
+    fn fs(in: VertexOutput) -> @location(0) vec4f {
+      var color: vec3f;
+
+      if (in.boidType > 0.5) {
+        // Predator: red with glowing edge
+        color = vec3f(1.0, 0.2, 0.1);
+      } else {
+        // Prey: school color
+        color = hsv2rgb(in.hue, 0.7, 0.9);
+      }
+
+      return vec4f(color, 1.0);
+    }
+  "
+}
+
+#renderPipeline renderPipeline {
+  layout=auto
+  vertex={
+    entryPoint=vs
+    module=renderShader
+    buffers=[{
+      arrayStride=32
+      stepMode=instance
+      attributes=[
+        { shaderLocation=0 offset=0 format=float32x2 }
+        { shaderLocation=1 offset=8 format=float32x2 }
+        { shaderLocation=2 offset=16 format=float32 }
+        { shaderLocation=3 offset=20 format=float32 }
+        { shaderLocation=4 offset=24 format=float32 }
+      ]
+    }]
+  }
+  fragment={
+    entryPoint=fs
+    module=renderShader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#bindGroup renderBindGroup {
+  layout={ pipeline=renderPipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=uniforms } }]
+}
+
+#renderPass drawPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.02 0.03 0.08 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=renderPipeline
+  vertexBuffers=[{ buffer=boidBuffer pingPong=1 }]
+  bindGroups=[renderBindGroup]
+  bindGroupsPoolOffsets=[0]
+  draw={
+    vertexCount=3
+    instanceCount=520
+  }
+}
+
+#frame main {
+  init=[initBoids]
+  perform=[writeUniforms stepPass drawPass]
+}

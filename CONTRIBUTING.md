@@ -190,7 +190,89 @@ struct PngineInputs {
 }
 ```
 
-### 6. WASM Module Import Missing (env.abort)
+### 6. Missing COPY_DST for writeBuffer (Silent Failure)
+
+**Symptom**: Render pass executes but screen is BLACK. No WebGPU errors shown.
+Console logs show `writeBuffer` call appears successful, but buffer data is empty.
+
+**Cause**: Buffer was created with `usage=[VERTEX]` but `writeBuffer` requires
+`COPY_DST` flag. WebGPU silently fails to write data - the buffer remains empty.
+
+**Wrong**:
+```
+#buffer boidBuffer {
+  size=320
+  usage=[VERTEX]           // Missing COPY_DST!
+}
+
+#queue initBuffer {
+  writeBuffer={ buffer=boidBuffer data=boidData }  // Silently fails!
+}
+```
+
+**Correct**:
+```
+#buffer boidBuffer {
+  size=320
+  usage=[VERTEX COPY_DST]  // Required for writeBuffer
+}
+```
+
+**Debug hint**: Check console for `createBuffer(id, size, 0x20)` - if you see
+`0x20` (VERTEX only) but later see `writeBuffer(id=...)`, that's the bug.
+Correct usage shows `0x28` (VERTEX | COPY_DST).
+
+### 7. Unused Shader Binding with layout=auto (Silent Failure)
+
+**Symptom**: Render/compute pass executes but screen is BLACK. No WebGPU errors.
+Bind groups appear to be created correctly in logs.
+
+**Cause**: When using `layout=auto`, WebGPU generates bind group layouts that
+only include **actually used** bindings. If a shader declares a binding but
+never reads from it, that binding is optimized out. The bind group you create
+(with all declared bindings) then doesn't match the auto-generated layout.
+
+**Example scenario** (from 21_flocking_variations.pngine):
+```wgsl
+// Step shader declares uniforms but NEVER USES them
+@group(0) @binding(0) var<uniform> u: Uniforms;  // DECLARED
+@group(0) @binding(1) var<storage, read> boidsIn: Boids;
+@group(0) @binding(2) var<storage, read_write> boidsOut: Boids;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  boidsOut.data[id.x] = boidsIn.data[id.x];  // Never reads u!
+}
+```
+
+**What happens**:
+1. Auto-layout sees uniforms is unused → generates layout with bindings [1, 2]
+2. DSL creates bind group with entries for bindings [0, 1, 2]
+3. Layout mismatch → bind group silently fails → BLACK screen
+
+**Fix options**:
+1. **Remove unused binding** from shader AND bind group (recommended):
+```wgsl
+@group(0) @binding(0) var<storage, read> boidsIn: Boids;
+@group(0) @binding(1) var<storage, read_write> boidsOut: Boids;
+```
+
+2. **Actually use the binding** (if you need it):
+```wgsl
+@group(0) @binding(0) var<uniform> u: Uniforms;
+// ... in main():
+let t = u.time;  // Force the binding to be "used"
+```
+
+**Debug hints**:
+- Compare working vs broken: If same shader works without a binding, that binding was unused
+- Check if a passthrough version (just copying data) works but full logic fails
+- Look for bind groups with 3 entries where layout expects 2
+
+**Key lesson**: With `layout=auto`, every declared `@binding` MUST be read in
+the shader code. Unused declarations cause silent bind group layout mismatches.
+
+### 8. WASM Module Import Missing (env.abort)
 
 **Symptom**: `Failed to load WASM module: {}` when using `#wasmCall`.
 
