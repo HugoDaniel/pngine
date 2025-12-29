@@ -106,36 +106,76 @@
   }
 }
 
-#data initialParticleData {
-  float32Array={
-    numberOfElements=NUM_PARTICLES
-    initEachElementWith=[
-      "cos((ELEMENT_ID / NUM_PARTICLES) * PI * 2) * sqrt(ELEMENT_ID / NUM_PARTICLES)"
-      "sin((ELEMENT_ID / NUM_PARTICLES) * PI * 2) * sqrt(ELEMENT_ID / NUM_PARTICLES)"
-      "random()"
-      "random()"
-    ]
-  }
+// Particle buffer: NUM_PARTICLES * 4 floats (pos.x, pos.y, vel.x, vel.y) * 4 bytes
+#buffer particleBuffers {
+  size="NUM_PARTICLES * 4 * 4"
+  usage=[VERTEX STORAGE]
+  pool=2
 }
 
-#buffer particleBuffers {
-  size=initialParticleData
-  usage=[VERTEX STORAGE]
-  mappedAtCreation=initialParticleData
-  pool=2
+// Initialize particles using compute shader
+#init initParticles {
+  buffer=particleBuffers
+  shader=initShader
+  workgroups="ceil(NUM_PARTICLES / 64)"
+}
+
+#shaderModule initShader {
+  code="
+struct Particle {
+  pos : vec2f,
+  vel : vec2f,
+}
+
+struct Particles {
+  particles : array<Particle>,
+}
+
+@binding(0) @group(0) var<storage, read_write> data : Particles;
+
+// Simple hash for pseudo-random numbers
+fn hash(n: u32) -> f32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return f32(x) / f32(0xffffffffu);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id : vec3u) {
+  let i = id.x;
+  let total = arrayLength(&data.particles);
+  if (i >= total) { return; }
+
+  let t = f32(i) / f32(total);
+  let angle = t * 6.283185;  // 2 * PI
+  let radius = sqrt(t);
+
+  // Spiral pattern for initial positions
+  data.particles[i].pos = vec2f(cos(angle) * radius, sin(angle) * radius);
+
+  // Random velocities
+  data.particles[i].vel = vec2f(
+    (hash(i * 2u) - 0.5) * 0.1,
+    (hash(i * 2u + 1u) - 0.5) * 0.1
+  );
+}
+"
 }
 
 #bindGroup particleBindGroups {
   layout={ pipeline=computeBoids index=0 }
   entries=[
     { binding=0 resource={ buffer=simParamBuffer } }
-    { binding=1 resource={ buffer=particleBuffers size=initialParticleData pingPong=0 } }
-    { binding=2 resource={ buffer=particleBuffers size=initialParticleData pingPong=1 } }
+    { binding=1 resource={ buffer=particleBuffers pingPong=0 } }
+    { binding=2 resource={ buffer=particleBuffers pingPong=1 } }
   ]
   pool=2
 }
 
 #frame boids {
+  init=[initParticles]
   before=[updateSimParams]
   perform=[
     computeBoidsPass

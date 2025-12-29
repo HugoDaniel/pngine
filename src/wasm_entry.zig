@@ -415,6 +415,16 @@ fn executeFrame(cmds: *CommandBuffer, time: f32, width: u32, height: u32) void {
             continue;
         }
 
+        // Handle exec_pass_once: replay pass only on frame 0 (for initialization)
+        if (op == .exec_pass_once) {
+            const pass_id = readVarint(bytecode, &pc);
+            if (frame_counter == 0 and pass_id < pass_count) {
+                const range = pass_ranges[pass_id];
+                executePassBody(cmds, bytecode, range.start, range.end);
+            }
+            continue;
+        }
+
         // Handle time uniform specially
         if (op == .write_time_uniform) {
             const buffer_id = readVarint(bytecode, &pc);
