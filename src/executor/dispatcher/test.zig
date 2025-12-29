@@ -1267,3 +1267,553 @@ test "scanPassDefinitions: boids-like pattern with bind_group + write_buffer" {
     try testing.expect(dispatcher.pass_ranges.get(0) != null); // render pass
     try testing.expect(dispatcher.pass_ranges.get(1) != null); // compute pass
 }
+
+// ============================================================================
+// exec_pass_once Tests - Run-once Initialization Pattern
+// ============================================================================
+//
+// These tests verify the exec_pass_once opcode behavior which is critical for
+// initialization passes (e.g., particle system init via compute shader).
+//
+// Key invariants:
+// 1. exec_pass_once executes only the first time it's encountered
+// 2. Subsequent calls to exec_pass_once for the same pass_id are skipped
+// 3. exec_pass_once and exec_pass can be mixed - exec_pass always runs
+// 4. Invalid pass_id should be handled gracefully (no crash)
+// 5. State from init pass persists to subsequent frames
+
+test "exec_pass_once: basic execution on first frame" {
+    // Test: exec_pass_once executes the pass body on first invocation
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    const name_id = try builder.internString(testing.allocator, "main");
+    const emitter = builder.getEmitter();
+
+    // Define an init pass (pass_id = 0)
+    try emitter.definePass(testing.allocator, 0, .compute, 0);
+    try emitter.beginComputePass(testing.allocator);
+    try emitter.dispatch(testing.allocator, 64, 1, 1);
+    try emitter.endPass(testing.allocator);
+    try emitter.endPassDef(testing.allocator);
+
+    // Frame that uses exec_pass_once
+    try emitter.defineFrame(testing.allocator, 0, name_id.toInt());
+    try emitter.execPassOnce(testing.allocator, 0);
+    try emitter.submit(testing.allocator);
+    try emitter.endFrame(testing.allocator);
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+
+    try dispatcher.executeAll(testing.allocator);
+
+    // Verify dispatch was called (pass executed)
+    var dispatch_found = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .dispatch) {
+            dispatch_found = true;
+            try testing.expectEqual(@as(u32, 64), call.params.dispatch.x);
+            break;
+        }
+    }
+    try testing.expect(dispatch_found);
+}
+
+test "exec_pass_once: skipped on subsequent executions" {
+    // Test: exec_pass_once runs only once, even when called multiple times
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    const name_id = try builder.internString(testing.allocator, "main");
+    const emitter = builder.getEmitter();
+
+    // Define pass
+    try emitter.definePass(testing.allocator, 0, .compute, 0);
+    try emitter.beginComputePass(testing.allocator);
+    try emitter.dispatch(testing.allocator, 42, 1, 1);
+    try emitter.endPass(testing.allocator);
+    try emitter.endPassDef(testing.allocator);
+
+    // Frame with multiple exec_pass_once for same pass
+    try emitter.defineFrame(testing.allocator, 0, name_id.toInt());
+    try emitter.execPassOnce(testing.allocator, 0); // First call - should execute
+    try emitter.execPassOnce(testing.allocator, 0); // Second call - should skip
+    try emitter.execPassOnce(testing.allocator, 0); // Third call - should skip
+    try emitter.submit(testing.allocator);
+    try emitter.endFrame(testing.allocator);
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+
+    try dispatcher.executeAll(testing.allocator);
+
+    // Count dispatch calls - should only have 1 even though exec_pass_once was called 3 times
+    var dispatch_count: usize = 0;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .dispatch) dispatch_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), dispatch_count);
+}
+
+test "exec_pass_once: multiple different passes each run once" {
+    // Test: Multiple distinct init passes, each runs exactly once
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    const name_id = try builder.internString(testing.allocator, "main");
+    const emitter = builder.getEmitter();
+
+    // Define 3 different init passes with unique dispatch values
+    try emitter.definePass(testing.allocator, 0, .compute, 0);
+    try emitter.beginComputePass(testing.allocator);
+    try emitter.dispatch(testing.allocator, 10, 1, 1); // Pass 0: x=10
+    try emitter.endPass(testing.allocator);
+    try emitter.endPassDef(testing.allocator);
+
+    try emitter.definePass(testing.allocator, 1, .compute, 0);
+    try emitter.beginComputePass(testing.allocator);
+    try emitter.dispatch(testing.allocator, 20, 1, 1); // Pass 1: x=20
+    try emitter.endPass(testing.allocator);
+    try emitter.endPassDef(testing.allocator);
+
+    try emitter.definePass(testing.allocator, 2, .compute, 0);
+    try emitter.beginComputePass(testing.allocator);
+    try emitter.dispatch(testing.allocator, 30, 1, 1); // Pass 2: x=30
+    try emitter.endPass(testing.allocator);
+    try emitter.endPassDef(testing.allocator);
+
+    // Frame with all three passes called via exec_pass_once
+    try emitter.defineFrame(testing.allocator, 0, name_id.toInt());
+    try emitter.execPassOnce(testing.allocator, 0);
+    try emitter.execPassOnce(testing.allocator, 1);
+    try emitter.execPassOnce(testing.allocator, 2);
+    // Call them again - should all be skipped
+    try emitter.execPassOnce(testing.allocator, 0);
+    try emitter.execPassOnce(testing.allocator, 1);
+    try emitter.execPassOnce(testing.allocator, 2);
+    try emitter.submit(testing.allocator);
+    try emitter.endFrame(testing.allocator);
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+
+    try dispatcher.executeAll(testing.allocator);
+
+    // Count dispatches - should be exactly 3 (one per unique pass)
+    var dispatch_count: usize = 0;
+    var x_values: [3]u32 = undefined;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .dispatch) {
+            if (dispatch_count < 3) {
+                x_values[dispatch_count] = call.params.dispatch.x;
+            }
+            dispatch_count += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 3), dispatch_count);
+    // Verify each pass ran with correct x value
+    try testing.expectEqual(@as(u32, 10), x_values[0]);
+    try testing.expectEqual(@as(u32, 20), x_values[1]);
+    try testing.expectEqual(@as(u32, 30), x_values[2]);
+}
+
+test "exec_pass_once: mixed with exec_pass - both work correctly" {
+    // Test: exec_pass always runs, exec_pass_once runs only once
+    // This is the boids pattern: init runs once, update runs every frame
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    const name_id = try builder.internString(testing.allocator, "main");
+    const emitter = builder.getEmitter();
+
+    // Pass 0: init (run once)
+    try emitter.definePass(testing.allocator, 0, .compute, 0);
+    try emitter.beginComputePass(testing.allocator);
+    try emitter.dispatch(testing.allocator, 100, 1, 1); // Init: x=100
+    try emitter.endPass(testing.allocator);
+    try emitter.endPassDef(testing.allocator);
+
+    // Pass 1: update (run every frame)
+    try emitter.definePass(testing.allocator, 1, .compute, 0);
+    try emitter.beginComputePass(testing.allocator);
+    try emitter.dispatch(testing.allocator, 64, 1, 1); // Update: x=64
+    try emitter.endPass(testing.allocator);
+    try emitter.endPassDef(testing.allocator);
+
+    // Frame: init once, update always
+    try emitter.defineFrame(testing.allocator, 0, name_id.toInt());
+    try emitter.execPassOnce(testing.allocator, 0); // Init - once
+    try emitter.execPass(testing.allocator, 1); // Update - always
+    try emitter.submit(testing.allocator);
+    try emitter.endFrame(testing.allocator);
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+
+    // Execute frame once
+    try dispatcher.executeAll(testing.allocator);
+
+    // First frame: both passes should execute
+    var dispatch_count: usize = 0;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .dispatch) dispatch_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), dispatch_count);
+
+    // Reset GPU calls and pc for second frame
+    gpu.reset();
+    dispatcher.pc = 0; // Reset pc to simulate new frame
+
+    // On second frame, only exec_pass should run (exec_pass_once is skipped)
+    try dispatcher.executeAll(testing.allocator);
+
+    dispatch_count = 0;
+    var found_update = false;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .dispatch) {
+            dispatch_count += 1;
+            if (call.params.dispatch.x == 64) found_update = true;
+        }
+    }
+    // Only the update pass (x=64) should have run
+    try testing.expectEqual(@as(usize, 1), dispatch_count);
+    try testing.expect(found_update);
+}
+
+test "exec_pass_once: invalid pass_id does not crash" {
+    // Test: Referencing non-existent pass should be handled gracefully
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    const name_id = try builder.internString(testing.allocator, "main");
+    const emitter = builder.getEmitter();
+
+    // No passes defined - just a frame referencing non-existent pass
+    try emitter.defineFrame(testing.allocator, 0, name_id.toInt());
+    try emitter.execPassOnce(testing.allocator, 99); // Pass 99 doesn't exist
+    try emitter.submit(testing.allocator);
+    try emitter.endFrame(testing.allocator);
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+
+    // Should not crash
+    try dispatcher.executeAll(testing.allocator);
+
+    // Only submit should be called (exec_pass_once 99 finds nothing)
+    try testing.expectEqual(@as(usize, 1), gpu.callCount());
+    try testing.expectEqual(CallType.submit, gpu.getCall(0).call_type);
+}
+
+test "exec_pass_once: order preserved - init before update" {
+    // Test: exec_pass_once runs in order relative to other passes
+    // Critical for init patterns where init must complete before update reads
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    const name_id = try builder.internString(testing.allocator, "main");
+    const emitter = builder.getEmitter();
+
+    // Pass 0: init (sets up data)
+    try emitter.definePass(testing.allocator, 0, .compute, 0);
+    try emitter.beginComputePass(testing.allocator);
+    try emitter.dispatch(testing.allocator, 1, 1, 1); // Init marker: x=1
+    try emitter.endPass(testing.allocator);
+    try emitter.endPassDef(testing.allocator);
+
+    // Pass 1: update (reads data)
+    try emitter.definePass(testing.allocator, 1, .compute, 0);
+    try emitter.beginComputePass(testing.allocator);
+    try emitter.dispatch(testing.allocator, 2, 1, 1); // Update marker: x=2
+    try emitter.endPass(testing.allocator);
+    try emitter.endPassDef(testing.allocator);
+
+    // Pass 2: render
+    try emitter.definePass(testing.allocator, 2, .render, 0);
+    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store, 0xFFFF);
+    try emitter.draw(testing.allocator, 3, 1, 0, 0); // Draw marker
+    try emitter.endPass(testing.allocator);
+    try emitter.endPassDef(testing.allocator);
+
+    // Frame: init, update, render - must execute in this order
+    try emitter.defineFrame(testing.allocator, 0, name_id.toInt());
+    try emitter.execPassOnce(testing.allocator, 0); // Init
+    try emitter.execPass(testing.allocator, 1); // Update
+    try emitter.execPass(testing.allocator, 2); // Render
+    try emitter.submit(testing.allocator);
+    try emitter.endFrame(testing.allocator);
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+
+    try dispatcher.executeAll(testing.allocator);
+
+    // Verify order: dispatch(1), dispatch(2), begin_render_pass, draw
+    var dispatch_order: [2]u32 = undefined;
+    var dispatch_idx: usize = 0;
+    var draw_after_dispatches = false;
+    var dispatches_before_draw: usize = 0;
+
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .dispatch) {
+            if (dispatch_idx < 2) {
+                dispatch_order[dispatch_idx] = call.params.dispatch.x;
+            }
+            dispatch_idx += 1;
+            dispatches_before_draw += 1;
+        }
+        if (call.call_type == .draw) {
+            draw_after_dispatches = dispatches_before_draw >= 2;
+        }
+    }
+
+    // Init (x=1) should come before update (x=2)
+    try testing.expectEqual(@as(u32, 1), dispatch_order[0]);
+    try testing.expectEqual(@as(u32, 2), dispatch_order[1]);
+    // Draw should come after both dispatches
+    try testing.expect(draw_after_dispatches);
+}
+
+test "exec_pass_once: persistence across multiple executeAll calls" {
+    // Test: exec_pass_once state persists when dispatcher is reused
+    // This simulates animation loop behavior
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    const name_id = try builder.internString(testing.allocator, "main");
+    const emitter = builder.getEmitter();
+
+    // Init pass
+    try emitter.definePass(testing.allocator, 0, .compute, 0);
+    try emitter.beginComputePass(testing.allocator);
+    try emitter.dispatch(testing.allocator, 99, 1, 1);
+    try emitter.endPass(testing.allocator);
+    try emitter.endPassDef(testing.allocator);
+
+    // Frame
+    try emitter.defineFrame(testing.allocator, 0, name_id.toInt());
+    try emitter.execPassOnce(testing.allocator, 0);
+    try emitter.submit(testing.allocator);
+    try emitter.endFrame(testing.allocator);
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+
+    // Simulate 5 animation frames
+    var total_dispatches: usize = 0;
+    for (0..5) |_| {
+        gpu.reset();
+        dispatcher.pc = 0; // Reset pc to simulate new frame
+        try dispatcher.executeAll(testing.allocator);
+
+        for (gpu.getCalls()) |call| {
+            if (call.call_type == .dispatch) total_dispatches += 1;
+        }
+    }
+
+    // exec_pass_once should have run exactly once across all 5 frames
+    try testing.expectEqual(@as(usize, 1), total_dispatches);
+}
+
+test "exec_pass_once: interleaved with regular opcodes" {
+    // Test: exec_pass_once works correctly when mixed with other opcodes
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    const name_id = try builder.internString(testing.allocator, "main");
+    const emitter = builder.getEmitter();
+
+    // Create a buffer first
+    try emitter.createBuffer(testing.allocator, 0, 1024, .{ .storage = true });
+
+    // Init pass
+    try emitter.definePass(testing.allocator, 0, .compute, 0);
+    try emitter.beginComputePass(testing.allocator);
+    try emitter.dispatch(testing.allocator, 32, 1, 1);
+    try emitter.endPass(testing.allocator);
+    try emitter.endPassDef(testing.allocator);
+
+    // Frame with mixed opcodes
+    try emitter.defineFrame(testing.allocator, 0, name_id.toInt());
+    try emitter.writeBuffer(testing.allocator, 0, 0, 0); // Regular opcode
+    try emitter.execPassOnce(testing.allocator, 0); // Init pass
+    try emitter.writeBuffer(testing.allocator, 0, 0, 0); // Another regular opcode
+    try emitter.submit(testing.allocator);
+    try emitter.endFrame(testing.allocator);
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+
+    try dispatcher.executeAll(testing.allocator);
+
+    // Verify: create_buffer, write_buffer, dispatch, write_buffer, submit
+    var found_dispatch = false;
+    var write_buffer_count: usize = 0;
+    var create_buffer_count: usize = 0;
+
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .dispatch) found_dispatch = true;
+        if (call.call_type == .write_buffer) write_buffer_count += 1;
+        if (call.call_type == .create_buffer) create_buffer_count += 1;
+    }
+
+    try testing.expect(found_dispatch);
+    try testing.expectEqual(@as(usize, 2), write_buffer_count);
+    try testing.expectEqual(@as(usize, 1), create_buffer_count);
+}
+
+test "exec_pass_once: boids-like pattern - init + compute + render" {
+    // Full boids simulation pattern: init particles once, then compute + render every frame
+    var builder = Builder.init();
+    defer builder.deinit(testing.allocator);
+
+    const name_id = try builder.internString(testing.allocator, "boids");
+    const emitter = builder.getEmitter();
+
+    // Create particle buffers (pool of 2 for ping-pong)
+    try emitter.createBuffer(testing.allocator, 0, 32768, .{ .vertex = true, .storage = true });
+    try emitter.createBuffer(testing.allocator, 1, 32768, .{ .vertex = true, .storage = true });
+
+    // Pass 0: Init particles (run once)
+    try emitter.definePass(testing.allocator, 0, .compute, 0);
+    try emitter.beginComputePass(testing.allocator);
+    try emitter.dispatch(testing.allocator, 32, 1, 1); // Initialize 2048 particles
+    try emitter.endPass(testing.allocator);
+    try emitter.endPassDef(testing.allocator);
+
+    // Pass 1: Compute simulation (run every frame)
+    try emitter.definePass(testing.allocator, 1, .compute, 0);
+    try emitter.beginComputePass(testing.allocator);
+    try emitter.dispatch(testing.allocator, 32, 1, 1); // Update particles
+    try emitter.endPass(testing.allocator);
+    try emitter.endPassDef(testing.allocator);
+
+    // Pass 2: Render particles (run every frame)
+    try emitter.definePass(testing.allocator, 2, .render, 0);
+    try emitter.beginRenderPass(testing.allocator, 0, .clear, .store, 0xFFFF);
+    try emitter.draw(testing.allocator, 3, 2048, 0, 0); // Draw 2048 instances
+    try emitter.endPass(testing.allocator);
+    try emitter.endPassDef(testing.allocator);
+
+    // Frame: init once, then compute + render every frame
+    try emitter.defineFrame(testing.allocator, 0, name_id.toInt());
+    try emitter.execPassOnce(testing.allocator, 0); // Init (first frame only)
+    try emitter.execPass(testing.allocator, 1); // Compute (every frame)
+    try emitter.execPass(testing.allocator, 2); // Render (every frame)
+    try emitter.submit(testing.allocator);
+    try emitter.endFrame(testing.allocator);
+
+    const pngb = try builder.finalize(testing.allocator);
+    defer testing.allocator.free(pngb);
+
+    var module = try format.deserialize(testing.allocator, pngb);
+    defer module.deinit(testing.allocator);
+
+    var gpu: MockGPU = .empty;
+    defer gpu.deinit(testing.allocator);
+
+    var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
+    defer dispatcher.deinit();
+
+    // Frame 1: init + compute + render = 2 dispatches + 1 draw
+    try dispatcher.executeAll(testing.allocator);
+
+    var frame1_dispatches: usize = 0;
+    var frame1_draws: usize = 0;
+    for (gpu.getCalls()) |call| {
+        if (call.call_type == .dispatch) frame1_dispatches += 1;
+        if (call.call_type == .draw) frame1_draws += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), frame1_dispatches); // init + compute
+    try testing.expectEqual(@as(usize, 1), frame1_draws);
+
+    // Frame 2-5: compute + render = 1 dispatch + 1 draw per frame
+    for (0..4) |frame_idx| {
+        _ = frame_idx;
+        gpu.reset();
+        dispatcher.pc = 0; // Reset pc to simulate new frame
+        try dispatcher.executeAll(testing.allocator);
+
+        var dispatches: usize = 0;
+        var draws: usize = 0;
+        for (gpu.getCalls()) |call| {
+            if (call.call_type == .dispatch) dispatches += 1;
+            if (call.call_type == .draw) draws += 1;
+        }
+        try testing.expectEqual(@as(usize, 1), dispatches); // only compute
+        try testing.expectEqual(@as(usize, 1), draws);
+    }
+}
