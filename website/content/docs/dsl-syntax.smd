@@ -2,7 +2,7 @@
 .title = "DSL Syntax",
 .description = "Quick language overview",
 .author = "PNGine Team",
-.date = @date("2024-12-18"),
+.date = @date("2024-12-30"),
 .layout = "docs.shtml",
 ---
 
@@ -12,7 +12,7 @@ This page provides a quick overview of PNGine DSL syntax. For complete documenta
 
 A `.pngine` file contains macro declarations. Each macro starts with `#` followed by the macro type and name:
 
-```zig
+```
 #macroType name {
   property=value
   array=[item1 item2]
@@ -34,27 +34,53 @@ A `.pngine` file contains macro declarations. Each macro starts with `#` followe
 
 ## Quick Reference
 
+**Shaders**
+
 | Macro | Purpose | Details |
 |-------|---------|---------|
-| `#wgsl` | Shader fragment | [Full docs](/docs/dsl/wgsl/) |
-| `#shaderModule` | Shader module | [Full docs](/docs/dsl/shader-module/) |
-| `#buffer` | GPU buffer | [Full docs](/docs/dsl/buffer/) |
+| `#wgsl` | Shader fragment with imports | [Full docs](/docs/dsl/wgsl/) |
+| `#shaderModule` | Named shader module | [Full docs](/docs/dsl/shader-module/) |
+
+**Resources**
+
+| Macro | Purpose | Details |
+|-------|---------|---------|
+| `#buffer` | GPU buffer (vertex, uniform, storage) | [Full docs](/docs/dsl/buffer/) |
 | `#texture` | GPU texture | [Full docs](/docs/dsl/texture/) |
 | `#sampler` | Texture sampler | [Full docs](/docs/dsl/sampler/) |
-| `#bindGroup` | Resource binding | [Full docs](/docs/dsl/bind-group/) |
+| `#textureView` | View into a texture | [Full docs](/docs/dsl/texture-view/) |
+| `#data` | Embedded data and shape generators | [Full docs](/docs/dsl/data/) |
+
+**Pipelines**
+
+| Macro | Purpose | Details |
+|-------|---------|---------|
 | `#renderPipeline` | Render pipeline | [Full docs](/docs/dsl/render-pipeline/) |
 | `#computePipeline` | Compute pipeline | [Full docs](/docs/dsl/compute-pipeline/) |
-| `#renderPass` | Render pass | [Full docs](/docs/dsl/render-pass/) |
-| `#computePass` | Compute pass | [Full docs](/docs/dsl/compute-pass/) |
-| `#frame` | Frame execution | [Full docs](/docs/dsl/frame/) |
-| `#data` | Embedded data | [Full docs](/docs/dsl/data/) |
-| `#queue` | Queue operations | [Full docs](/docs/dsl/queue/) |
-| `#define` | Constants | [Full docs](/docs/dsl/define/) |
-| `#animation` | Scene animation | [Full docs](/docs/dsl/animation/) |
+| `#bindGroup` | Resource bindings | [Full docs](/docs/dsl/bind-group/) |
+| `#bindGroupLayout` | Bind group layout | [Full docs](/docs/dsl/bind-group-layout/) |
+| `#pipelineLayout` | Pipeline layout | [Full docs](/docs/dsl/pipeline-layout/) |
+
+**Execution**
+
+| Macro | Purpose | Details |
+|-------|---------|---------|
+| `#renderPass` | Render pass with draw commands | [Full docs](/docs/dsl/render-pass/) |
+| `#computePass` | Compute pass with dispatch | [Full docs](/docs/dsl/compute-pass/) |
+| `#queue` | Buffer writes and texture copies | [Full docs](/docs/dsl/queue/) |
+| `#frame` | Frame execution order | [Full docs](/docs/dsl/frame/) |
+
+**Advanced**
+
+| Macro | Purpose | Details |
+|-------|---------|---------|
+| `#animation` | Timeline-based scene animation | [Full docs](/docs/dsl/animation/) |
+| `#define` | Compile-time constants | [Full docs](/docs/dsl/define/) |
+| `#import` | File imports | [Full docs](/docs/dsl/import/) |
 
 ## Minimal Example
 
-```zig
+```
 #shaderModule code {
   code="
     @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
@@ -98,19 +124,19 @@ A `.pngine` file contains macro declarations. Each macro starts with `#` followe
 
 Resources reference each other using bare identifiers. The analyzer resolves them based on context:
 
-```zig
+```
 pipeline=myPipeline       // Resolves to #renderPipeline or #computePipeline
 module=shader             // Resolves to #shaderModule or #wgsl
 buffer=vertices           // Resolves to #buffer
 ```
 
-See [References](/docs/dsl/references/) for complete documentation.
+See [References](/docs/dsl/references/) for details.
 
 ## Expressions
 
 Numeric fields support compile-time expressions:
 
-```zig
+```
 #define NUM_PARTICLES=2048
 
 size="NUM_PARTICLES * 16"
@@ -119,10 +145,89 @@ dispatchWorkgroups="ceil(NUM_PARTICLES / 64)"
 
 Available: `+`, `-`, `*`, `/`, `PI`, `E`, `TAU`, `ceil()`, `floor()`
 
-See [Expressions](/docs/dsl/expressions/) for complete documentation.
+See [Expressions](/docs/dsl/expressions/) for details.
 
-## Next Steps
+## Shape Generators
+
+Generate vertex data at compile time instead of writing arrays manually:
+
+```
+#data cubeVertices {
+  cube={ format=[position4 color4 uv2] }
+}
+
+#data planeVertices {
+  plane={ format=[position3 uv2] }
+}
+```
+
+Format specifiers:
+- `position3`, `position4` - Vertex position (vec3f or vec4f)
+- `normal3` - Surface normal (vec3f)
+- `color3`, `color4` - Vertex color (vec3f or vec4f)
+- `uv2` - Texture coordinates (vec2f)
+
+See [`#data`](/docs/dsl/data/) for details.
+
+## Built-in Uniforms
+
+Write runtime data (time, canvas size) to uniform buffers using `pngineInputs`:
+
+```
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeTime {
+  writeBuffer={
+    buffer=uniforms
+    bufferOffset=0
+    data=pngineInputs
+  }
+}
+```
+
+`pngineInputs` provides 16 bytes:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `time` | f32 | Elapsed seconds |
+| `width` | f32 | Canvas width |
+| `height` | f32 | Canvas height |
+| `aspect` | f32 | width / height |
+
+See [`#queue`](/docs/dsl/queue/) for details.
+
+## Initialization Passes
+
+Run passes once on first frame using `init=`:
+
+```
+#frame main {
+  init=[setupCompute]      // Runs once
+  perform=[updateCompute renderPass]  // Runs every frame
+}
+```
+
+See [`#frame`](/docs/dsl/frame/) for details.
+
+## Ping-Pong Buffers
+
+For compute simulations requiring double-buffering:
+
+```
+#buffer particles {
+  size=32768
+  usage=[VERTEX STORAGE]
+  pool=2
+}
+```
+
+With `pool=2`, the runtime creates two buffer instances and alternates between them each frame. See [`#buffer`](/docs/dsl/buffer/) for details.
+
+## Related
 
 - [DSL Reference](/docs/dsl/) - Complete macro documentation
-- [Getting Started](/docs/getting-started/) - Build your first PNGine program
+- [Getting Started](/docs/getting-started/) - First program tutorial
 - [CLI Reference](/docs/cli/) - Command-line tools

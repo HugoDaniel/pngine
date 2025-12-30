@@ -2,185 +2,313 @@
 .title = "JavaScript API",
 .description = "Browser runtime API reference",
 .author = "PNGine Team",
-.date = @date("2024-12-18"),
+.date = @date("2024-12-30"),
 .layout = "docs.shtml",
 ---
 
-## Overview
+PNGine uses a functional API for browser runtime. All functions are tree-shakeable ESM exports.
 
-The JavaScript runtime consists of three modules:
+## Installation
 
-| Module | Purpose |
-|--------|---------|
-| `pngine-loader.js` | High-level API for loading and running PNGine content |
-| `pngine-gpu.js` | WebGPU backend that executes bytecode |
-| `pngine-png.js` | PNG parsing and bytecode extraction |
-
-## PNGineLoader
-
-Main entry point for loading PNGine content.
-
-### Constructor
+```bash
+npm install pngine
+```
 
 ```javascript
-const loader = new PNGineLoader(canvas);
+import { pngine, play, pause, stop, draw, seek, destroy } from 'pngine';
 ```
+
+## Initialization
+
+### pngine(source, options)
+
+Initialize PNGine from various sources. Returns a Promise that resolves to a Pngine instance.
+
+```javascript
+const p = await pngine(source, options);
+```
+
+**Parameters:**
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `canvas` | HTMLCanvasElement | Target canvas for rendering |
+| `source` | string \| HTMLImageElement \| ArrayBuffer \| Uint8Array \| Blob | Source of bytecode |
+| `options` | object | Configuration options |
 
-### Methods
-
-#### loadFromPNG(url)
-
-Load bytecode from a PNG file.
+**Source types:**
 
 ```javascript
-await loader.loadFromPNG('shader.png');
+// URL to PNG file (requires canvas option)
+await pngine('shader.png', { canvas });
+
+// CSS selector for image element
+await pngine('#shader-img');
+
+// Direct element reference
+await pngine(document.getElementById('shader-img'));
+
+// Raw bytecode (requires canvas option)
+await pngine(uint8Array, { canvas });
+
+// Blob (requires canvas option)
+await pngine(blob, { canvas });
 ```
 
-#### loadFromBytecode(bytes)
+**Options:**
 
-Load raw PNGB bytecode.
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `canvas` | HTMLCanvasElement | - | Target canvas (required for URL/data sources) |
+| `debug` | boolean | `false` | Enable debug logging |
+| `wasmUrl` | string | auto | Custom WASM runtime URL |
+| `onError` | function | - | Error callback |
+
+**Example:**
 
 ```javascript
-const response = await fetch('shader.pngb');
-const bytes = new Uint8Array(await response.arrayBuffer());
-await loader.loadFromBytecode(bytes);
+const p = await pngine('shader.png', {
+  canvas: document.getElementById('canvas'),
+  debug: true,
+  onError: (err) => console.error('PNGine error:', err)
+});
 ```
 
-#### renderFrame()
+### Image Element Initialization
 
-Execute one frame.
+When passing an image element or selector, PNGine automatically:
+1. Creates a canvas sized to the image
+2. Positions it over the image
+3. Extracts bytecode from the image's PNG
 
 ```javascript
-loader.renderFrame();
+// CSS selector
+const p = await pngine('#shader');
+
+// Direct element
+const img = document.querySelector('img.pngine');
+const p = await pngine(img);
 ```
 
-#### setTime(seconds)
+## Playback Control
 
-Set the time uniform for animations.
+### play(p)
+
+Start the animation loop. Calls `requestAnimationFrame` internally.
 
 ```javascript
-loader.setTime(performance.now() / 1000);
+play(p);
 ```
 
-#### setResolution(width, height)
+Returns the Pngine instance for chaining.
 
-Update canvas resolution.
+### pause(p)
+
+Pause animation. Preserves current time position.
 
 ```javascript
-loader.setResolution(1920, 1080);
+pause(p);
 ```
 
-#### dispose()
+### stop(p)
 
-Release GPU resources.
+Stop animation and reset time to 0.
 
 ```javascript
-loader.dispose();
+stop(p);
 ```
 
-## PNGineGPU
+### seek(p, time)
 
-Low-level WebGPU backend. Used internally by PNGineLoader.
-
-### Constructor
+Jump to specific time position.
 
 ```javascript
-const gpu = new PNGineGPU(device, context);
+seek(p, 2.5);  // Jump to 2.5 seconds
 ```
 
-### Resource Creation
+### draw(p, options)
 
-These methods create GPU resources from binary descriptors passed by the WASM runtime.
-
-| Method | Parameters | Description |
-|--------|------------|-------------|
-| `createBuffer(id, ptr, len)` | Buffer ID, descriptor pointer, length | Create GPUBuffer |
-| `createTexture(id, ptr, len)` | Texture ID, descriptor pointer, length | Create GPUTexture |
-| `createTextureView(viewId, textureId, ptr, len)` | View ID, source texture ID, descriptor | Create GPUTextureView |
-| `createSampler(id, ptr, len)` | Sampler ID, descriptor pointer, length | Create GPUSampler |
-| `createShaderModule(id, ptr, len)` | Shader ID, code pointer, length | Create GPUShaderModule |
-| `createRenderPipeline(id, ptr, len)` | Pipeline ID, descriptor pointer, length | Create GPURenderPipeline |
-| `createComputePipeline(id, ptr, len)` | Pipeline ID, descriptor pointer, length | Create GPUComputePipeline |
-| `createBindGroup(id, layoutId, ptr, len)` | Group ID, layout ID, descriptor | Create GPUBindGroup |
-| `createBindGroupLayout(id, ptr, len)` | Layout ID, descriptor pointer, length | Create GPUBindGroupLayout |
-| `createPipelineLayout(id, ptr, len)` | Layout ID, descriptor pointer, length | Create GPUPipelineLayout |
-| `createQuerySet(id, ptr, len)` | Query set ID, descriptor pointer, length | Create GPUQuerySet |
-
-### Render Pass
-
-| Method | Parameters | Description |
-|--------|------------|-------------|
-| `beginRenderPass(texture, load, store, depth)` | Target texture, load/store ops | Begin render pass |
-| `setPipeline(id)` | Pipeline ID | Bind render/compute pipeline |
-| `setBindGroup(slot, id)` | Slot index, group ID | Bind resources |
-| `setVertexBuffer(slot, id)` | Slot index, buffer ID | Bind vertex buffer |
-| `draw(vertexCount, instanceCount, first, firstInstance)` | Draw parameters | Issue draw call |
-| `drawIndexed(indexCount, instanceCount, first, baseVertex, firstInstance)` | Draw parameters | Indexed draw |
-| `endRenderPass()` | None | End current pass |
-
-### Compute Pass
-
-| Method | Parameters | Description |
-|--------|------------|-------------|
-| `beginComputePass()` | None | Begin compute pass |
-| `dispatchWorkgroups(x, y, z)` | Workgroup counts | Dispatch compute |
-| `endComputePass()` | None | End compute pass |
-
-### Execution
-
-| Method | Description |
-|--------|-------------|
-| `submit()` | Submit command buffer to GPU |
-| `reset()` | Clear all resources |
-
-## PNGinePNG
-
-PNG parsing utilities.
-
-### extractBytecode(pngBytes)
-
-Extract PNGB bytecode from PNG file.
+Render a single frame manually.
 
 ```javascript
-const pngBytes = new Uint8Array(await fetch('shader.png').then(r => r.arrayBuffer()));
-const bytecode = PNGinePNG.extractBytecode(pngBytes);
-if (bytecode) {
-  console.log('Extracted', bytecode.length, 'bytes');
+draw(p);                        // Render at current time
+draw(p, { time: 1.5 });         // Render at specific time
+draw(p, { frame: 'intro' });    // Render specific frame
+draw(p, { uniforms: { brightness: 0.8 } });  // With uniform overrides
+```
+
+**Options:**
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `time` | number | Time in seconds |
+| `frame` | string | Specific frame name (bypasses animation timeline) |
+| `uniforms` | object | Uniform values to override |
+
+### destroy(p)
+
+Cleanup resources and terminate the WebWorker.
+
+```javascript
+destroy(p);
+```
+
+Always call this when removing a PNGine instance to prevent memory leaks.
+
+## Properties
+
+The Pngine instance exposes read-only properties:
+
+```javascript
+p.width        // Canvas width in pixels
+p.height       // Canvas height in pixels
+p.time         // Current time in seconds
+p.isPlaying    // true if animation is running
+p.duration     // Total animation duration (seconds), or 0
+p.frameCount   // Number of #frame definitions
+p.animation    // Animation metadata (if defined)
+p.currentScene // Current scene object (if using animation)
+p.currentFrame // Current frame name
+```
+
+## Uniform Control
+
+### setUniform(p, name, value, redraw)
+
+Set a single uniform value.
+
+```javascript
+setUniform(p, 'brightness', 0.5);
+setUniform(p, 'color', [1.0, 0.5, 0.0]);
+
+// Without immediate redraw
+setUniform(p, 'brightness', 0.5, false);
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `p` | Pngine | - | Pngine instance |
+| `name` | string | - | Uniform field name (as in WGSL struct) |
+| `value` | number \| number[] | - | Value to set |
+| `redraw` | boolean | `true` | Trigger immediate redraw |
+
+### setUniforms(p, uniforms, redraw)
+
+Set multiple uniforms at once.
+
+```javascript
+setUniforms(p, {
+  brightness: 0.8,
+  contrast: 1.2,
+  color: [1.0, 0.5, 0.0]
+});
+```
+
+### getUniforms(p)
+
+Get available uniform metadata. Returns a Promise.
+
+```javascript
+const uniforms = await getUniforms(p);
+console.log(uniforms);
+// {
+//   time: { type: 'f32', size: 4, bufferId: 0, offset: 0 },
+//   brightness: { type: 'f32', size: 4, bufferId: 0, offset: 4 },
+//   ...
+// }
+```
+
+## Animation Timeline
+
+If your shader defines `#animation`, playback automatically follows the timeline:
+
+```
+#animation demo {
+  duration=30.0
+  scenes=[
+    { id="intro" frame=introFrame start=0.0 end=10.0 }
+    { id="main" frame=mainFrame start=10.0 end=25.0 }
+    { id="outro" frame=outroFrame start=25.0 end=30.0 }
+  ]
+  endBehavior=loop
 }
 ```
 
-Returns `Uint8Array` or `null` if no bytecode found.
+**End behaviors:**
+- `loop` / `restart` - Loop from beginning
+- `stop` - Stop at last frame
+- `hold` - Hold last frame (default)
 
-### findChunk(pngBytes, chunkType)
-
-Find a specific PNG chunk.
+Access animation info:
 
 ```javascript
-const chunk = PNGinePNG.findChunk(pngBytes, 'pNGb');
+p.animation.duration    // Total duration in ms
+p.animation.scenes      // Array of scene objects
+p.animation.endBehavior // End behavior string
+
+p.currentScene          // Current scene object
+p.currentScene.id       // Scene ID
+p.currentScene.frame    // Frame name
 ```
 
-## Animation Example
+## Frame Selection
+
+### setFrame(p, frame)
+
+Manually set which frame to render, bypassing animation timeline.
 
 ```javascript
-import { PNGineLoader } from './pngine-loader.js';
+setFrame(p, 'introFrame');   // Render specific frame
+setFrame(p, null);           // Return to timeline control
+```
+
+## Complete Example
+
+```javascript
+import {
+  pngine,
+  play,
+  pause,
+  stop,
+  seek,
+  draw,
+  destroy,
+  setUniform,
+  getUniforms
+} from 'pngine';
 
 async function main() {
-  const canvas = document.getElementById('canvas');
-  const loader = new PNGineLoader(canvas);
+  // Initialize
+  const p = await pngine('demo.png', {
+    canvas: document.getElementById('canvas'),
+    debug: true
+  });
 
-  await loader.loadFromPNG('animation.png');
+  // Start animation
+  play(p);
 
-  function animate(timestamp) {
-    loader.setTime(timestamp / 1000);
-    loader.renderFrame();
-    requestAnimationFrame(animate);
-  }
+  // UI controls
+  document.getElementById('play').onclick = () => play(p);
+  document.getElementById('pause').onclick = () => pause(p);
+  document.getElementById('stop').onclick = () => stop(p);
 
-  requestAnimationFrame(animate);
+  // Seek slider
+  document.getElementById('seek').oninput = (e) => {
+    seek(p, parseFloat(e.target.value));
+  };
+
+  // Uniform control
+  document.getElementById('brightness').oninput = (e) => {
+    setUniform(p, 'brightness', parseFloat(e.target.value));
+  };
+
+  // Log available uniforms
+  const uniforms = await getUniforms(p);
+  console.log('Available uniforms:', Object.keys(uniforms));
+
+  // Cleanup on page unload
+  window.addEventListener('beforeunload', () => destroy(p));
 }
 
 main();
@@ -188,34 +316,108 @@ main();
 
 ## Resize Handling
 
+PNGine automatically uses the canvas dimensions. To handle resize:
+
 ```javascript
 function handleResize() {
   const dpr = window.devicePixelRatio || 1;
-  const width = canvas.clientWidth * dpr;
-  const height = canvas.clientHeight * dpr;
+  canvas.width = canvas.clientWidth * dpr;
+  canvas.height = canvas.clientHeight * dpr;
 
-  canvas.width = width;
-  canvas.height = height;
-
-  loader.setResolution(width, height);
+  // Redraw at new size
+  draw(p);
 }
 
 window.addEventListener('resize', handleResize);
-handleResize();
 ```
 
 ## Error Handling
 
 ```javascript
 try {
-  await loader.loadFromPNG('shader.png');
+  const p = await pngine('shader.png', { canvas });
 } catch (error) {
-  if (error.message.includes('No bytecode')) {
-    console.error('PNG does not contain embedded bytecode');
-  } else if (error.message.includes('WebGPU')) {
-    console.error('WebGPU not supported');
+  if (error.message.includes('WebGPU')) {
+    console.error('WebGPU not supported in this browser');
+  } else if (error.message.includes('bytecode')) {
+    console.error('PNG does not contain PNGine bytecode');
   } else {
-    console.error('Failed to load:', error);
+    console.error('Failed to initialize:', error);
   }
 }
+
+// Runtime errors via callback
+const p = await pngine('shader.png', {
+  canvas,
+  onError: (err) => {
+    console.error('Runtime error:', err);
+  }
+});
 ```
+
+## Advanced: Embedded Executor
+
+For PNGs with embedded executor (self-contained), additional exports are available:
+
+```javascript
+import {
+  parsePayload,
+  createExecutor,
+  getExecutorImports,
+  getExecutorVariantName
+} from 'pngine';
+
+// Parse payload to extract executor and bytecode
+const { executor, bytecode, plugins } = parsePayload(pngbBytes);
+
+// Get executor variant name
+const variant = getExecutorVariantName(plugins);
+console.log('Executor variant:', variant);  // e.g., "render_compute"
+
+// Create executor instance
+const wasmInstance = await createExecutor(executor, imports);
+```
+
+## Module Exports
+
+```javascript
+// Core functions
+export { pngine, destroy } from "./init.js";
+
+// Playback control
+export {
+  draw,
+  play,
+  pause,
+  stop,
+  seek,
+  setFrame,
+  setUniform,
+  setUniforms,
+  getUniforms
+} from "./anim.js";
+
+// Utilities
+export {
+  extractBytecode,
+  detectFormat,
+  isPng,
+  isZip,
+  isPngb
+} from "./extract.js";
+
+// Advanced (embedded executor)
+export {
+  parsePayload,
+  createExecutor,
+  getExecutorImports,
+  getExecutorVariantName
+} from "./loader.js";
+```
+
+## Related
+
+- [Getting Started](/docs/getting-started/) - Quick start guide
+- [`#frame`](/docs/dsl/frame/) - Frame definitions
+- [`#animation`](/docs/dsl/animation/) - Animation timeline
+- [CLI Reference](/docs/cli/) - Compile and embed bytecode

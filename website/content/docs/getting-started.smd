@@ -1,17 +1,24 @@
 ---
 .title = "Getting Started",
-.description = "Installation and first program",
+.description = "Installation, first program, and browser setup",
 .author = "PNGine Team",
-.date = @date("2024-12-18"),
+.date = @date("2024-12-30"),
 .layout = "docs.shtml",
 ---
 
-## Requirements
+## Installation
 
-- Zig 0.14.0 or later
-- WebGPU-capable browser for runtime execution
+### Via npm (Recommended)
 
-## Building
+```bash
+npm install pngine
+```
+
+This installs both the CLI compiler and the browser runtime.
+
+### From Source
+
+Requirements: Zig 0.14.0 or later
 
 ```bash
 git clone https://github.com/pngine/pngine
@@ -20,7 +27,7 @@ cd pngine
 # Build CLI
 zig build
 
-# Build WASM runtime
+# Build WASM runtime for browser
 zig build web
 
 # Run tests
@@ -29,7 +36,8 @@ zig build test
 
 Output files:
 - `zig-out/bin/pngine` - CLI executable
-- `zig-out/lib/pngine.wasm` - Browser runtime
+- `zig-out/demo/pngine.wasm` - Browser runtime
+- `zig-out/demo/pngine.js` - Browser JavaScript
 
 ## First Program
 
@@ -80,56 +88,231 @@ Create `triangle.pngine`:
 }
 ```
 
-## Compile and Embed
+## Compile
 
 ```bash
-# Create PNG with embedded bytecode
-pngine triangle.pngine -o triangle.png
+# Create PNG with embedded bytecode (1x1 transparent pixel)
+npx pngine triangle.pngine -o triangle.png
 
-# Verify bytecode
-pngine check triangle.png
+# Verify the bytecode
+npx pngine check triangle.png
+```
+
+Output:
+```
+Valid PNGB bytecode
+  Version: 0
+  Shaders: 1
+  Frames: 1
+  Size: 487 bytes
+```
+
+### Render a Preview
+
+```bash
+# Render actual 512x512 frame
+npx pngine triangle.pngine --frame -o triangle.png
+
+# Render at specific size
+npx pngine triangle.pngine --frame -s 1920x1080 -o triangle.png
 ```
 
 ## Run in Browser
+
+### Basic Setup
 
 ```html
 <!DOCTYPE html>
 <html>
 <head>
-  <script type="module">
-    import { PNGineLoader } from './pngine-loader.js';
-
-    const canvas = document.getElementById('canvas');
-    const loader = new PNGineLoader(canvas);
-
-    // Load PNG with embedded bytecode
-    await loader.loadFromPNG('triangle.png');
-
-    // Render frame
-    loader.renderFrame();
-  </script>
+  <title>PNGine Triangle</title>
 </head>
 <body>
   <canvas id="canvas" width="512" height="512"></canvas>
+
+  <script type="module">
+    import { pngine, play } from 'pngine';
+
+    const p = await pngine('triangle.png', {
+      canvas: document.getElementById('canvas')
+    });
+
+    play(p);
+  </script>
 </body>
 </html>
 ```
 
-## Animation Loop
+### From Image Element
 
-For animated content, call `renderFrame` in a loop:
+PNGine can initialize directly from an `<img>` element:
+
+```html
+<img id="shader" src="triangle.png" />
+
+<script type="module">
+  import { pngine, play } from 'pngine';
+
+  // Pass CSS selector or element directly
+  const p = await pngine('#shader');
+  play(p);
+</script>
+```
+
+The canvas is automatically created and positioned over the image.
+
+### Animation Control
 
 ```javascript
-function animate(time) {
-  loader.setTime(time / 1000);  // Convert to seconds
-  loader.renderFrame();
-  requestAnimationFrame(animate);
+import { pngine, play, pause, stop, draw, seek, destroy } from 'pngine';
+
+const p = await pngine('shader.png', { canvas });
+
+play(p);           // Start animation loop
+pause(p);          // Pause (keeps current time)
+stop(p);           // Stop and reset to t=0
+seek(p, 2.5);      // Jump to specific time
+draw(p, { time: 1.0 });  // Render single frame
+destroy(p);        // Cleanup resources
+```
+
+### Properties
+
+```javascript
+p.width        // Canvas width
+p.height       // Canvas height
+p.time         // Current time in seconds
+p.isPlaying    // Animation state
+p.duration     // Total duration (if animation defined)
+p.frameCount   // Number of #frame definitions
+```
+
+## Adding Animation
+
+Make the triangle rotate by adding time-based uniforms:
+
+```
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
 }
-requestAnimationFrame(animate);
+
+#queue writeTime {
+  writeBuffer={
+    buffer=uniforms
+    bufferOffset=0
+    data=pngineInputs
+  }
+}
+
+#shaderModule code {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      var pos = array<vec2f, 3>(
+        vec2f(0.0, 0.5),
+        vec2f(-0.5, -0.5),
+        vec2f(0.5, -0.5)
+      );
+
+      let angle = u.time;
+      let c = cos(angle);
+      let s = sin(angle);
+      let p = pos[i];
+      let rotated = vec2f(p.x * c - p.y * s, p.x * s + p.y * c);
+
+      return vec4f(rotated, 0.0, 1.0);
+    }
+
+    @fragment fn fs() -> @location(0) vec4f {
+      return vec4f(1.0, 0.0, 0.0, 1.0);
+    }
+  "
+}
+
+#bindGroup uniformsGroup {
+  layout={ pipeline=pipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=uniforms } }]
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={ entryPoint=vs module=code }
+  fragment={
+    entryPoint=fs
+    module=code
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#renderPass pass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0 0 0 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=pipeline
+  bindGroups=[uniformsGroup]
+  draw=3
+}
+
+#frame main {
+  perform=[writeTime pass]
+}
+```
+
+### Built-in Uniforms
+
+`pngineInputs` provides 16 bytes of runtime data:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `time` | f32 | Elapsed seconds since start |
+| `width` | f32 | Canvas width in pixels |
+| `height` | f32 | Canvas height in pixels |
+| `aspect` | f32 | width / height |
+
+Your WGSL struct must match this layout exactly.
+
+## Debug Mode
+
+Enable debug logging to see GPU commands:
+
+```javascript
+const p = await pngine('shader.png', {
+  canvas,
+  debug: true
+});
+```
+
+Or via URL parameter:
+```
+http://localhost:8000/?debug=true
+```
+
+Console output:
+```
+[Worker] Ready
+[GPU] Execute: 5 commands
+[GPU] createShaderModule id=0
+[GPU] createRenderPipeline id=0
+[GPU] beginRenderPass
+[GPU] draw vertices=3
+[GPU] submit
 ```
 
 ## Next Steps
 
-- [DSL Syntax](/docs/dsl-syntax/) - Complete language reference
+- [DSL Syntax](/docs/dsl-syntax/) - Complete language overview
 - [CLI Reference](/docs/cli/) - All command options
-- [JavaScript API](/docs/js-api/) - Browser runtime details
+- [JavaScript API](/docs/js-api/) - Full runtime API
+- [`#buffer`](/docs/dsl/buffer/) - Vertex and uniform buffers
+- [`#frame`](/docs/dsl/frame/) - Frame execution and init passes

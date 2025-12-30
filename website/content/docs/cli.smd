@@ -2,9 +2,23 @@
 .title = "CLI Reference",
 .description = "Command-line interface",
 .author = "PNGine Team",
-.date = @date("2024-12-18"),
+.date = @date("2024-12-30"),
 .layout = "docs.shtml",
 ---
+
+## Installation
+
+```bash
+npm install pngine
+```
+
+Or build from source:
+
+```bash
+git clone https://github.com/pngine/pngine
+cd pngine
+zig build
+```
 
 ## Synopsis
 
@@ -34,13 +48,47 @@ pngine compile <input.pngine> [-o output.pngb]
 
 ### check
 
-Validate bytecode. Accepts `.pngine`, `.pngb`, or `.png` files.
+Validate bytecode and optionally trace GPU commands.
 
 ```bash
-pngine check <input>
+pngine check <input> [--verbose]
 ```
 
-Returns exit code 0 if valid, non-zero otherwise.
+Accepts `.pngine`, `.pngb`, or `.png` files.
+
+**Output:**
+```
+Valid PNGB bytecode
+  Version: 0
+  Plugins: render
+  Shaders: 2
+  Frames: 1
+  Size: 1,247 bytes
+```
+
+With `--verbose`, prints full GPU call trace:
+
+```
+Valid PNGB bytecode
+  Version: 0
+  Plugins: render compute
+  Shaders: 3
+  Frames: 1
+  Size: 4,821 bytes
+
+GPU Call Trace:
+  createShaderModule(id=0, codeLen=892)
+  createShaderModule(id=1, codeLen=456)
+  createBuffer(id=0, size=32768, usage=VERTEX|STORAGE)
+  createBuffer(id=1, size=16, usage=UNIFORM|COPY_DST)
+  createComputePipeline(id=0, shader=1)
+  createRenderPipeline(id=0, shader=0)
+  createBindGroup(id=0, layout=auto)
+  defineFrame(id=0, name="main")
+    execPass(id=0)  // compute
+    execPass(id=1)  // render
+  endFrame
+```
 
 ### embed
 
@@ -81,7 +129,15 @@ pngine extract <image.png> [-o output.pngb]
 | `-e, --embed` | Embed bytecode in output PNG (default: on) |
 | `--no-embed` | Don't embed bytecode |
 
+### Validation
+
+| Option | Description |
+|--------|-------------|
+| `-v, --verbose` | Print full GPU call trace (check command) |
+
 ## Examples
+
+### Basic Compilation
 
 ```bash
 # Compile and embed in 1x1 PNG
@@ -90,6 +146,13 @@ pngine shader.pngine
 # Compile with custom output path
 pngine shader.pngine -o build/shader.png
 
+# Compile to raw bytecode only
+pngine compile shader.pngine -o shader.pngb
+```
+
+### GPU Rendering
+
+```bash
 # Render 512x512 frame with embedded bytecode
 pngine shader.pngine --frame
 
@@ -101,14 +164,23 @@ pngine shader.pngine --frame -t 2.5
 
 # Render without embedding bytecode
 pngine shader.pngine --frame --no-embed
+```
 
-# Compile to raw bytecode
-pngine compile shader.pngine -o shader.pngb
+### Validation
 
-# Validate a file
+```bash
+# Validate bytecode
 pngine check shader.pngb
 pngine check output.png
+pngine check shader.pngine
 
+# Validate with GPU call trace
+pngine check shader.pngine --verbose
+```
+
+### PNG Manipulation
+
+```bash
 # Embed bytecode into existing artwork
 pngine embed artwork.png shader.pngb -o final.png
 
@@ -139,3 +211,29 @@ pngine extract final.png -o extracted.pngb
 ## Environment
 
 The CLI reads no environment variables. All configuration is via command-line arguments.
+
+## NPM Integration
+
+When installed via npm, use `npx`:
+
+```bash
+npx pngine shader.pngine -o shader.png
+npx pngine check shader.png --verbose
+```
+
+Or add to package.json scripts:
+
+```json
+{
+  "scripts": {
+    "build:shader": "pngine src/shader.pngine -o dist/shader.png",
+    "build:preview": "pngine src/shader.pngine --frame -o preview.png"
+  }
+}
+```
+
+## Related
+
+- [Getting Started](/docs/getting-started/) - First program tutorial
+- [DSL Syntax](/docs/dsl-syntax/) - Language overview
+- [Bytecode Format](/docs/bytecode/) - PNGB specification

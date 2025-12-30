@@ -2,7 +2,7 @@
 .title = "#frame",
 .description = "Frame execution with pass ordering",
 .author = "PNGine Team",
-.date = @date("2024-12-21"),
+.date = @date("2024-12-30"),
 .layout = "docs.shtml",
 ---
 
@@ -10,13 +10,10 @@ Defines a frame that orchestrates the execution of passes and queue operations.
 
 ## Syntax
 
-```zig
+```
 #frame name {
-  before=[queueOp1 queueOp2]
+  init=[initPass1 initPass2]
   perform=[pass1 pass2 pass3]
-  after=[queueOp3]
-  onLoad=[initOp]
-  onUnload=[cleanupOp]
 }
 ```
 
@@ -24,11 +21,8 @@ Defines a frame that orchestrates the execution of passes and queue operations.
 
 | Attribute | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `perform` | array | Yes | - | Main pass sequence |
-| `before` | array | No | `[]` | Pre-frame operations |
-| `after` | array | No | `[]` | Post-frame operations |
-| `onLoad` | array | No | `[]` | Initialization (first frame) |
-| `onUnload` | array | No | `[]` | Cleanup (scene switch) |
+| `perform` | array | Yes | - | Passes to run every frame |
+| `init` | array | No | `[]` | Passes to run once (first frame only) |
 
 ### perform
 
@@ -36,60 +30,32 @@ Defines a frame that orchestrates the execution of passes and queue operations.
 
 The main sequence of passes to execute each frame. Order matters - passes execute left to right.
 
-```zig
-perform=[shadowPass mainPass postProcess uiPass]
+```
+perform=[writeUniforms computePass renderPass]
 ```
 
 Can reference:
 - `#renderPass` - Render passes
 - `#computePass` - Compute passes
-- `#queue` - Queue operations
+- `#queue` - Queue operations (buffer writes)
 
-### before
-
-**Type:** `array` of references
-
-Operations executed before the main pass sequence. Typically queue operations to update uniforms.
-
-```zig
-before=[writeUniforms writeTransforms]
-```
-
-### after
+### init
 
 **Type:** `array` of references
 
-Operations executed after the main pass sequence. Useful for readback or cleanup.
+Passes to run once on the first frame only. Used for one-time initialization like resetting particle buffers or loading initial data.
 
-```zig
-after=[copyResults]
+```
+init=[resetParticles loadInitialData]
 ```
 
-### onLoad
-
-**Type:** `array` of references
-
-Operations executed once when the frame is first activated (scene load). Used for initialization.
-
-```zig
-onLoad=[loadTextures initParticles]
-```
-
-### onUnload
-
-**Type:** `array` of references
-
-Operations executed when switching away from this frame (scene unload). Used for cleanup.
-
-```zig
-onUnload=[saveState]
-```
+The `init=` passes use the `execPassOnce` opcode, which runs only on the first frame and skips on subsequent frames.
 
 ## Examples
 
 ### Simple Frame
 
-```zig
+```
 #frame main {
   perform=[renderPass]
 }
@@ -97,11 +63,19 @@ onUnload=[saveState]
 
 ### With Uniform Updates
 
-```zig
+Include `#queue` operations in `perform=` to update uniforms each frame:
+
+```
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
 #queue writeTime {
   writeBuffer={
     buffer=uniforms
-    data=shader.inputs
+    bufferOffset=0
+    data=pngineInputs
   }
 }
 
@@ -112,66 +86,73 @@ onUnload=[saveState]
 }
 
 #frame main {
-  before=[writeTime]
-  perform=[render]
+  perform=[writeTime render]
+}
+```
+
+### With Initialization
+
+Use `init=` for one-time setup that runs before the first frame:
+
+```
+#computePass resetParticles {
+  pipeline=initPipeline
+  dispatchWorkgroups=[64 1 1]
+}
+
+#computePass updateParticles {
+  pipeline=simPipeline
+  dispatchWorkgroups=[64 1 1]
+}
+
+#renderPass drawParticles {
+  pipeline=renderPipeline
+  draw=2048
+}
+
+#frame particles {
+  init=[resetParticles]
+  perform=[updateParticles drawParticles]
 }
 ```
 
 ### Multi-Pass Rendering
 
-```zig
+```
 #frame deferred {
-  before=[updateCamera updateLights]
   perform=[
     geometryPass
     lightingPass
     postProcess
-    uiPass
   ]
 }
 ```
 
 ### Compute + Render
 
-```zig
+```
 #frame simulation {
-  before=[writeParams]
+  init=[initBuffers]
   perform=[
+    writeUniforms
     physicsCompute
-    collisionCompute
     renderParticles
   ]
 }
 ```
 
-### With Initialization
-
-```zig
-#queue loadTexture {
-  copyExternalImageToTexture={
-    source={ source=textureImage }
-    destination={ texture=diffuseMap }
-    copySize=[1024 1024]
-  }
-}
-
-#frame game {
-  onLoad=[loadTexture initBuffers]
-  before=[updateUniforms]
-  perform=[shadowPass mainPass]
-}
-```
-
 ### Scene-Based Animation
 
-```zig
+Multiple frames for different scenes:
+
+```
 #frame sceneA {
-  before=[updateSceneA]
+  init=[setupSceneA]
   perform=[renderSceneA]
 }
 
 #frame sceneB {
-  before=[updateSceneB]
+  init=[setupSceneB]
   perform=[renderSceneB]
 }
 
@@ -182,24 +163,30 @@ onUnload=[saveState]
     { id="main" frame=sceneB start=10.0 end=50.0 }
     { id="outro" frame=sceneA start=50.0 end=60.0 }
   ]
+  endBehavior=loop
 }
 ```
+
+Each frame's `init=` runs once when that scene becomes active.
 
 ## Execution Order
 
 Each frame execution follows this order:
 
-1. `onLoad` (first frame only, or on scene transition)
-2. `before` (every frame)
-3. `perform` (every frame, in order)
-4. `after` (every frame)
-5. `onUnload` (on scene transition away)
+1. `init` passes (first frame only, uses `execPassOnce`)
+2. `perform` passes (every frame, uses `execPass`)
 
 ## Ping-Pong Pattern
 
-For double-buffered compute:
+For double-buffered compute simulations:
 
-```zig
+```
+#buffer particles {
+  size=32768
+  usage=[VERTEX STORAGE]
+  pool=2
+}
+
 #computePass simulate {
   pipeline=simPipeline
   bindGroups=[simGroup]
@@ -211,7 +198,7 @@ For double-buffered compute:
   pipeline=renderPipeline
   vertexBuffers=[particles]
   vertexBuffersPoolOffsets=[0]
-  draw={ vertexCount=6 instanceCount=2048 }
+  draw=2048
 }
 
 #frame boids {
@@ -225,8 +212,8 @@ The runtime automatically alternates pool offsets each frame.
 
 | Rule | Error |
 |------|-------|
-| Name must be unique across all namespaces | `duplicate_definition` |
-| `perform` attribute is required | `missing_required_property` |
+| Name must be unique | `duplicate_definition` |
+| `perform` required | `missing_required_property` |
 | Referenced passes must exist | `undefined_reference` |
 
 ## WebGPU Mapping
@@ -236,22 +223,16 @@ Each frame creates a command encoder and submits to queue:
 ```javascript
 const encoder = device.createCommandEncoder();
 
-// Execute before operations
-for (const op of frame.before) {
-  executeQueueOp(op);
+// Execute init passes (first frame only)
+if (isFirstFrame) {
+  for (const pass of frame.init) {
+    executePass(pass, encoder);
+  }
 }
 
-// Execute passes
+// Execute perform passes (every frame)
 for (const pass of frame.perform) {
-  if (pass.type === 'render') {
-    const passEncoder = encoder.beginRenderPass(descriptor);
-    // ... draw commands
-    passEncoder.end();
-  } else if (pass.type === 'compute') {
-    const passEncoder = encoder.beginComputePass();
-    // ... dispatch commands
-    passEncoder.end();
-  }
+  executePass(pass, encoder);
 }
 
 device.queue.submit([encoder.finish()]);
@@ -261,5 +242,5 @@ device.queue.submit([encoder.finish()]);
 
 - [`#renderPass`](/docs/dsl/render-pass/) - Render passes
 - [`#computePass`](/docs/dsl/compute-pass/) - Compute passes
-- [`#queue`](/docs/dsl/queue/) - Queue operations
+- [`#queue`](/docs/dsl/queue/) - Buffer writes with pngineInputs
 - [`#animation`](/docs/dsl/animation/) - Scene-based animation

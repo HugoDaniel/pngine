@@ -2,7 +2,7 @@
 .title = "#queue",
 .description = "Queue operations for buffer and texture updates",
 .author = "PNGine Team",
-.date = @date("2024-12-21"),
+.date = @date("2024-12-30"),
 .layout = "docs.shtml",
 ---
 
@@ -10,7 +10,7 @@ Defines queue operations for writing data to buffers and copying images to textu
 
 ## Syntax
 
-```zig
+```
 #queue name {
   writeBuffer={
     buffer=bufferName
@@ -49,23 +49,23 @@ Writes data to a GPU buffer.
 |----------|------|----------|-------------|
 | `buffer` | reference | Yes | Target buffer |
 | `bufferOffset` | number | No | Byte offset (default: 0) |
-| `data` | reference/string | Yes | Data source |
+| `data` | reference/identifier | Yes | Data source |
 | `dataOffset` | number | No | Source data offset |
 | `size` | number | No | Bytes to write |
 
 **Data sources:**
 
-Static data reference:
-```zig
+Static data reference (from `#data`):
+```
 data=vertexData
 ```
 
-Runtime uniform data (from shader module):
-```zig
-data=shader.inputs
+Runtime uniform data (built-in):
+```
+data=pngineInputs
 ```
 
-This syntax references the uniform inputs defined in a shader module.
+The `pngineInputs` identifier provides 16 bytes of runtime data that the executor writes each frame.
 
 ### copyExternalImageToTexture
 
@@ -121,11 +121,59 @@ Copies between buffers.
 | `destinationOffset` | number | No | Dest byte offset |
 | `size` | number | Yes | Bytes to copy |
 
+## Built-in Data Sources
+
+### pngineInputs
+
+The `pngineInputs` identifier provides runtime data that updates every frame. It writes 16 bytes:
+
+| Field | Type | Offset | Description |
+|-------|------|--------|-------------|
+| `time` | f32 | 0 | Elapsed seconds since start |
+| `width` | f32 | 4 | Canvas width in pixels |
+| `height` | f32 | 8 | Canvas height in pixels |
+| `aspect` | f32 | 12 | width / height |
+
+Your uniform buffer must be at least 16 bytes when using `pngineInputs`.
+
+Your WGSL struct must match this layout:
+
+```
+struct PngineInputs {
+  time: f32,
+  canvasWidth: f32,
+  canvasHeight: f32,
+  aspect: f32,
+}
+@group(0) @binding(0) var<uniform> inputs: PngineInputs;
+```
+
 ## Examples
+
+### Write Runtime Uniforms (pngineInputs)
+
+```
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeTime {
+  writeBuffer={
+    buffer=uniforms
+    bufferOffset=0
+    data=pngineInputs
+  }
+}
+
+#frame main {
+  perform=[writeTime renderPass]
+}
+```
 
 ### Write Static Data
 
-```zig
+```
 #data vertexData {
   float32Array=[0 0.5 -0.5 -0.5 0.5 -0.5]
 }
@@ -143,37 +191,9 @@ Copies between buffers.
 }
 ```
 
-### Write Uniform Data
-
-```zig
-#shaderModule shader {
-  code="
-    struct Inputs {
-      time: f32,
-      resolution: vec2f,
-    }
-    @group(0) @binding(0) var<uniform> inputs: Inputs;
-  "
-}
-
-#buffer uniformBuffer {
-  size=12
-  usage=[UNIFORM COPY_DST]
-}
-
-#queue writeUniforms {
-  writeBuffer={
-    buffer=uniformBuffer
-    data=shader.inputs
-  }
-}
-```
-
-The runtime automatically populates uniform data with values like time and canvas dimensions based on the shader's uniform struct.
-
 ### Load Texture from Image
 
-```zig
+```
 #data imageFile {
   blob={ file={ url="texture.png" } }
 }
@@ -196,14 +216,15 @@ The runtime automatically populates uniform data with values like time and canva
   }
 }
 
-#frame init {
-  perform=[loadTexture]
+#frame main {
+  init=[loadTexture]
+  perform=[renderPass]
 }
 ```
 
 ### Partial Buffer Update
 
-```zig
+```
 #queue updateTransform {
   writeBuffer={
     buffer=uniformBuffer
@@ -216,7 +237,7 @@ The runtime automatically populates uniform data with values like time and canva
 
 ### Buffer Copy
 
-```zig
+```
 #queue copyResults {
   copyBufferToBuffer={
     source=gpuBuffer
@@ -232,18 +253,18 @@ The runtime automatically populates uniform data with values like time and canva
 
 Queue operations are executed when included in `#frame`:
 
-```zig
+```
 #frame main {
   perform=[writeUniforms renderPass]
 }
 ```
 
-Or in initialization:
+Or in initialization (runs once):
 
-```zig
-#frame init {
-  before=[loadTexture]
-  perform=[renderPass]
+```
+#frame main {
+  init=[loadTexture]
+  perform=[writeUniforms renderPass]
 }
 ```
 
@@ -251,7 +272,7 @@ Or in initialization:
 
 | Rule | Error |
 |------|-------|
-| Name must be unique across all namespaces | `duplicate_definition` |
+| Name must be unique | `duplicate_definition` |
 | Referenced buffers/textures must exist | `undefined_reference` |
 | At least one operation required | `missing_required_property` |
 
@@ -260,8 +281,12 @@ Or in initialization:
 Maps to queue operations:
 
 ```javascript
-// writeBuffer
+// writeBuffer (static data)
 device.queue.writeBuffer(buffer, offset, data);
+
+// writeBuffer (pngineInputs) - runtime provides data
+device.queue.writeBuffer(buffer, offset,
+  new Float32Array([time, width, height, aspect]));
 
 // copyExternalImageToTexture
 device.queue.copyExternalImageToTexture(
@@ -273,8 +298,7 @@ device.queue.copyExternalImageToTexture(
 
 ## Related
 
-- [`#data`](/docs/dsl/data/) - Define data to write
+- [`#data`](/docs/dsl/data/) - Define static data to write
 - [`#buffer`](/docs/dsl/buffer/) - Target buffers
 - [`#texture`](/docs/dsl/texture/) - Target textures
-- [`#imageBitmap`](/docs/dsl/image-bitmap/) - Image sources
 - [`#frame`](/docs/dsl/frame/) - Execute queue operations

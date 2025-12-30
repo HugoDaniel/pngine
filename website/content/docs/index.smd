@@ -2,20 +2,75 @@
 .title = "Documentation",
 .description = "PNGine reference documentation",
 .author = "PNGine Team",
-.date = @date("2024-12-18"),
+.date = @date("2024-12-30"),
 .layout = "docs.shtml",
 ---
 
-## Getting Started
+PNGine is a WebGPU bytecode engine that embeds interactive shader art in PNG files. Write high-level DSL, compile to compact bytecode, and run anywhere with WebGPU support.
 
-- [Getting Started](/docs/getting-started/) - Installation and first program
+## Quick Start
+
+```bash
+# Install via npm
+npm install pngine
+
+# Compile shader to PNG
+npx pngine shader.pngine -o shader.png
+
+# Or build from source
+git clone https://github.com/pngine/pngine
+cd pngine && zig build
+```
+
+```javascript
+import { pngine, play } from 'pngine';
+
+const p = await pngine('shader.png', {
+  canvas: document.getElementById('canvas')
+});
+play(p);
+```
+
+## Guides
+
+- [Getting Started](/docs/getting-started/) - Installation, first program, browser setup
 - [DSL Syntax](/docs/dsl-syntax/) - Quick language overview
 
 ## DSL Reference
 
-Complete reference for all 22 macro types:
+Complete reference for all macro types:
 
-- [DSL Reference](/docs/dsl/) - Full macro documentation
+**Shaders**
+- [`#shaderModule`](/docs/dsl/shader-module/) - Named shader module
+- [`#wgsl`](/docs/dsl/wgsl/) - Shader code fragment with imports
+
+**Resources**
+- [`#buffer`](/docs/dsl/buffer/) - GPU buffer (vertex, uniform, storage)
+- [`#texture`](/docs/dsl/texture/) - GPU texture
+- [`#sampler`](/docs/dsl/sampler/) - Texture sampler
+- [`#textureView`](/docs/dsl/texture-view/) - View into a texture
+- [`#data`](/docs/dsl/data/) - Embedded data arrays and shapes
+
+**Pipelines**
+- [`#renderPipeline`](/docs/dsl/render-pipeline/) - Render pipeline
+- [`#computePipeline`](/docs/dsl/compute-pipeline/) - Compute pipeline
+- [`#bindGroup`](/docs/dsl/bind-group/) - Resource bindings
+- [`#bindGroupLayout`](/docs/dsl/bind-group-layout/) - Bind group layout
+- [`#pipelineLayout`](/docs/dsl/pipeline-layout/) - Pipeline layout
+
+**Execution**
+- [`#renderPass`](/docs/dsl/render-pass/) - Render pass with draw commands
+- [`#computePass`](/docs/dsl/compute-pass/) - Compute pass with dispatch
+- [`#queue`](/docs/dsl/queue/) - Buffer writes and texture copies
+- [`#frame`](/docs/dsl/frame/) - Frame execution order
+
+**Advanced**
+- [`#animation`](/docs/dsl/animation/) - Timeline-based scene animation
+- [`#wasmCall`](/docs/dsl/wasm-call/) - Nested WASM module calls
+- [`#define`](/docs/dsl/define/) - Compile-time constants
+- [`#import`](/docs/dsl/import/) - File imports
+
+**Concepts**
 - [References](/docs/dsl/references/) - Bare identifier resolution
 - [Expressions](/docs/dsl/expressions/) - Compile-time arithmetic
 
@@ -24,33 +79,32 @@ Complete reference for all 22 macro types:
 - [CLI Reference](/docs/cli/) - Command-line interface
 - [JavaScript API](/docs/js-api/) - Browser runtime API
 - [Bytecode Format](/docs/bytecode/) - PNGB binary specification
-- [WASM API](/docs/wasm-api/) - WebAssembly exports
 
 ## Architecture
 
 ```
 Source (.pngine)
-    │
-    ▼
-┌─────────────────┐
-│  DSL Compiler   │  Lexer → Parser → Analyzer → Emitter
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  PNGB Bytecode  │  Header + Opcodes + Strings + Data
-└────────┬────────┘
-         │
-    ┌────┴────┐
-    ▼         ▼
-┌───────┐  ┌───────┐
-│  PNG  │  │ WASM  │
-│ Embed │  │Runtime│
-└───────┘  └───┬───┘
-               ▼
-         ┌──────────┐
-         │  WebGPU  │
-         └──────────┘
+    |
+    v
++------------------+
+|   DSL Compiler   |  Lexer -> Parser -> Analyzer -> Emitter
++--------+---------+
+         |
+         v
++------------------+
+|  PNGB Bytecode   |  Header + Opcodes + Strings + Data
++--------+---------+
+         |
+    +----+----+
+    v         v
++-------+  +--------+
+|  PNG  |  |  WASM  |
+| Embed |  | Runtime|
++-------+  +----+---+
+               v
+         +----------+
+         |  WebGPU  |
+         +----------+
 ```
 
 ## File Formats
@@ -59,4 +113,22 @@ Source (.pngine)
 |-----------|-------------|
 | `.pngine` | DSL source file |
 | `.pngb` | Compiled bytecode |
-| `.png` | PNG with optional embedded bytecode in `pNGb` chunk |
+| `.png` | PNG with embedded bytecode in `pNGb` chunk |
+
+## Key Features
+
+**Compile-time optimization**
+- Shape generators (`cube=`, `plane=`) create vertex data at compile time
+- Expression evaluation for buffer sizes and dispatch counts
+- Shader deduplication and DEFLATE compression
+
+**Runtime features**
+- Built-in uniforms (`pngineInputs`: time, width, height, aspect)
+- Ping-pong buffers for compute simulations
+- Animation timeline with scene switching
+- Runtime uniform control via JavaScript API
+
+**Size efficiency**
+- Simple triangle: ~500 bytes
+- Rotating cube: ~2 KB
+- Boids simulation: ~8 KB (with compute)

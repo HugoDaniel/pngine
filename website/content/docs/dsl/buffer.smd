@@ -2,7 +2,7 @@
 .title = "#buffer",
 .description = "GPU buffer for vertex, uniform, or storage data",
 .author = "PNGine Team",
-.date = @date("2024-12-21"),
+.date = @date("2024-12-30"),
 .layout = "docs.shtml",
 ---
 
@@ -10,7 +10,7 @@ Creates a GPU buffer for storing vertex data, uniforms, storage data, or indices
 
 ## Syntax
 
-```zig
+```
 #buffer name {
   size=1024
   usage=[VERTEX STORAGE]
@@ -39,7 +39,7 @@ Buffer size in bytes. Can be:
 - **Reference:** `size=vertexData` (uses size of referenced `#data`)
 - **Define:** `size=BUFFER_SIZE` (uses `#define` value)
 
-```zig
+```
 #define VERTEX_SIZE=40
 #define VERTEX_COUNT=100
 
@@ -68,7 +68,7 @@ GPU buffer usage flags. At least one required.
 | `INDIRECT` | Indirect draw/dispatch |
 | `QUERY_RESOLVE` | Query result destination |
 
-```zig
+```
 #buffer storageBuffer {
   size=4096
   usage=[STORAGE COPY_DST]
@@ -81,13 +81,9 @@ GPU buffer usage flags. At least one required.
 
 Reference to a `#data` macro for initial buffer contents. Buffer is created with data already mapped.
 
-```zig
+```
 #data cubeVertices {
-  float32Array=[
-    -1 -1 -1  1 0 0
-     1 -1 -1  1 0 0
-     1  1 -1  1 0 0
-  ]
+  cube={ format=[position4 color4 uv2] }
 }
 
 #buffer vertexBuffer {
@@ -103,7 +99,7 @@ Reference to a `#data` macro for initial buffer contents. Buffer is created with
 
 Creates multiple buffer instances for ping-pong patterns. Used in compute simulations where you read from one buffer and write to another.
 
-```zig
+```
 #buffer particles {
   size=32768
   usage=[VERTEX STORAGE]
@@ -111,7 +107,7 @@ Creates multiple buffer instances for ping-pong patterns. Used in compute simula
 }
 ```
 
-With `pool=2`, the runtime creates `particles_0` and `particles_1`. Selection uses:
+With `pool=2`, the runtime creates two buffer instances. Selection uses:
 
 ```
 actual_id = base_id + (frame_counter + pool_offset) % pool_size
@@ -123,7 +119,7 @@ See [Ping-Pong Pattern](#ping-pong-pattern) below.
 
 ### Simple Vertex Buffer
 
-```zig
+```
 #buffer positions {
   size=48
   usage=[VERTEX]
@@ -132,16 +128,34 @@ See [Ping-Pong Pattern](#ping-pong-pattern) below.
 
 ### Uniform Buffer with Copy
 
-```zig
+```
 #buffer uniforms {
-  size=64
+  size=16
   usage=[UNIFORM COPY_DST]
 }
 ```
 
-### Data-Initialized Buffer
+### Shape Generator Buffer
 
-```zig
+Use compile-time shape generators for mesh data:
+
+```
+#data cubeVertices {
+  cube={ format=[position4 color4 uv2] }
+}
+
+#buffer vertexBuffer {
+  size=cubeVertices
+  usage=[VERTEX]
+  mappedAtCreation=cubeVertices
+}
+```
+
+The `size=cubeVertices` automatically uses the byte size of the generated shape data.
+
+### Manual Data Buffer
+
+```
 #data triangleVerts {
   float32Array=[
     0.0  0.5  1 0 0
@@ -159,7 +173,7 @@ See [Ping-Pong Pattern](#ping-pong-pattern) below.
 
 ### Compute Storage Buffer
 
-```zig
+```
 #define NUM_PARTICLES=2048
 #define PARTICLE_SIZE=16
 
@@ -174,7 +188,7 @@ See [Ping-Pong Pattern](#ping-pong-pattern) below.
 
 For compute simulations requiring double-buffering:
 
-```zig
+```
 #buffer particles {
   size=32768
   usage=[VERTEX STORAGE]
@@ -184,10 +198,11 @@ For compute simulations requiring double-buffering:
 #bindGroup simBindGroup {
   layout={ pipeline=simPipeline index=0 }
   entries=[
-    { binding=0 resource={ buffer=particles pingPong=0 } }
-    { binding=1 resource={ buffer=particles pingPong=1 } }
+    { binding=0 resource={ buffer=particles } }
+    { binding=1 resource={ buffer=particles } }
   ]
   pool=2
+  bindGroupsPoolOffsets=[0 1]
 }
 
 #computePass simulate {
@@ -204,14 +219,14 @@ Each frame alternates which buffer is read vs written.
 
 | Rule | Error |
 |------|-------|
-| Name must be unique across all namespaces | `duplicate_definition` |
-| `size` attribute is required | `missing_required_property` |
-| `usage` attribute is required | `missing_required_property` |
+| Name must be unique | `duplicate_definition` |
+| `size` required | `missing_required_property` |
+| `usage` required | `missing_required_property` |
 | `mappedAtCreation` must reference valid `#data` | `undefined_reference` |
 
 ## WebGPU Mapping
 
-Maps to `GPUBuffer` via:
+Maps to `GPUBuffer`:
 
 ```javascript
 device.createBuffer({
@@ -223,7 +238,7 @@ device.createBuffer({
 
 ## Related
 
-- [`#data`](/docs/dsl/data/) - Define initial buffer data
+- [`#data`](/docs/dsl/data/) - Define buffer data and shape generators
 - [`#bindGroup`](/docs/dsl/bind-group/) - Bind buffers to shaders
 - [`#renderPass`](/docs/dsl/render-pass/) - Use as vertex buffer
-- [`#queue`](/docs/dsl/queue/) - Write data to buffer
+- [`#queue`](/docs/dsl/queue/) - Write data to buffer at runtime

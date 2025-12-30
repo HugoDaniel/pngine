@@ -2,53 +2,96 @@
 .title = "Bytecode Format",
 .description = "PNGB binary specification",
 .author = "PNGine Team",
-.date = @date("2024-12-18"),
+.date = @date("2024-12-30"),
 .layout = "docs.shtml",
 ---
 
 ## File Structure
 
 ```
-┌──────────────────────────────┐
-│ Header (16 bytes)            │
-├──────────────────────────────┤
-│ Bytecode Section             │
-│ (variable length)            │
-├──────────────────────────────┤
-│ String Table                 │
-│ (variable length)            │
-├──────────────────────────────┤
-│ Data Section                 │
-│ (variable length)            │
-└──────────────────────────────┘
++--------------------------------------+
+| Header (40 bytes)                    |
++--------------------------------------+
+| Executor WASM (if embedded)          |
+| (variable length)                    |
++--------------------------------------+
+| Bytecode Section                     |
+| (variable length)                    |
++--------------------------------------+
+| String Table                         |
+| (variable length)                    |
++--------------------------------------+
+| Data Section                         |
+| (variable length)                    |
++--------------------------------------+
+| WGSL Table                           |
+| (variable length)                    |
++--------------------------------------+
+| Uniform Table                        |
+| (variable length)                    |
++--------------------------------------+
+| Animation Table                      |
+| (variable length)                    |
++--------------------------------------+
 ```
 
-## Header
+## Header (v0)
 
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
 | 0 | 4 | magic | `PNGB` (0x50 0x4E 0x47 0x42) |
-| 4 | 2 | version | Format version (currently 1) |
-| 6 | 2 | flags | Reserved, must be 0 |
-| 8 | 4 | string_table_offset | Byte offset to string table |
-| 12 | 4 | data_section_offset | Byte offset to data section |
+| 4 | 2 | version | Format version (currently 0) |
+| 6 | 2 | flags | Bitfield (see below) |
+| 8 | 1 | plugins | Plugin set bitfield |
+| 9 | 3 | reserved | Alignment padding |
+| 12 | 4 | executor_offset | Byte offset to embedded executor |
+| 16 | 4 | executor_length | Executor WASM size in bytes |
+| 20 | 4 | string_table_offset | Byte offset to string table |
+| 24 | 4 | data_section_offset | Byte offset to data section |
+| 28 | 4 | wgsl_table_offset | Byte offset to WGSL table |
+| 32 | 4 | uniform_table_offset | Byte offset to uniform table |
+| 36 | 4 | animation_table_offset | Byte offset to animation table |
+
+### Flags
+
+| Bit | Name | Description |
+|-----|------|-------------|
+| 0 | has_embedded_executor | Executor WASM is embedded in payload |
+| 1 | has_animation_table | Animation table is present |
+| 2-15 | reserved | Must be 0 |
+
+### Plugin Set
+
+Plugin requirements are packed into a single byte:
+
+| Bit | Plugin | Description |
+|-----|--------|-------------|
+| 0 | core | Always enabled |
+| 1 | render | Render pipelines and passes |
+| 2 | compute | Compute pipelines and passes |
+| 3 | wasm | Nested WASM execution |
+| 4 | animation | Scene timeline |
+| 5 | texture | External texture loading |
+| 6-7 | reserved | Must be 0 |
 
 ## Bytecode Section
 
-Bytecode starts at offset 16 and extends to `string_table_offset`.
+Bytecode starts at offset 40 (after header) and extends to `string_table_offset`.
 
 ### Instruction Encoding
 
-Instructions use variable-length encoding with a 1-byte opcode followed by operands.
+Instructions use variable-length encoding:
 
 ```
-┌────────┬─────────────┐
-│ Opcode │ Operands... │
-│ (1B)   │ (variable)  │
-└────────┴─────────────┘
++--------+---------------+
+| Opcode | Operands...   |
+| (1B)   | (variable)    |
++--------+---------------+
 ```
 
 ### Opcodes
+
+**Resource Creation (0x00-0x0F)**
 
 | Code | Name | Operands | Description |
 |------|------|----------|-------------|
@@ -62,90 +105,211 @@ Instructions use variable-length encoding with a 1-byte opcode followed by opera
 | 0x07 | CREATE_PIPELINE_LAYOUT | id:u16, desc:varint | Create pipeline layout |
 | 0x08 | CREATE_RENDER_PIPELINE | id:u16, desc:varint | Create render pipeline |
 | 0x09 | CREATE_COMPUTE_PIPELINE | id:u16, desc:varint | Create compute pipeline |
-| 0x0A | WRITE_BUFFER | buf:u16, offset:u32, data:varint | Write data to buffer |
-| 0x0B | COPY_BUFFER_TO_BUFFER | src:u16, dst:u16, size:u32 | Copy between buffers |
 | 0x0C | CREATE_TEXTURE_VIEW | id:u16, tex:u16, desc:varint | Create texture view |
 | 0x0D | CREATE_QUERY_SET | id:u16, desc:varint | Create query set |
-| 0x10 | BEGIN_FRAME | id:u16, name:string_id | Begin frame definition |
-| 0x11 | END_FRAME | none | End frame definition |
-| 0x20 | BEGIN_RENDER_PASS | desc:varint | Begin render pass |
-| 0x21 | END_RENDER_PASS | none | End render pass |
-| 0x22 | SET_PIPELINE | id:u16 | Bind pipeline |
-| 0x23 | SET_BIND_GROUP | slot:u8, id:u16 | Bind resources |
-| 0x24 | SET_VERTEX_BUFFER | slot:u8, id:u16 | Bind vertex buffer |
-| 0x25 | SET_INDEX_BUFFER | id:u16, format:u8 | Bind index buffer |
-| 0x26 | DRAW | vertices:u32, instances:u32 | Draw call |
-| 0x27 | DRAW_INDEXED | indices:u32, instances:u32 | Indexed draw |
-| 0x30 | BEGIN_COMPUTE_PASS | none | Begin compute pass |
-| 0x31 | END_COMPUTE_PASS | none | End compute pass |
-| 0x32 | DISPATCH | x:u32, y:u32, z:u32 | Dispatch workgroups |
-| 0x40 | SUBMIT | none | Submit command buffer |
+
+**Pass Operations (0x10-0x1F)**
+
+| Code | Name | Operands | Description |
+|------|------|----------|-------------|
+| 0x10 | BEGIN_RENDER_PASS | desc:varint | Begin render pass |
+| 0x11 | END_RENDER_PASS | none | End render pass |
+| 0x12 | SET_PIPELINE | id:u16 | Bind pipeline |
+| 0x13 | SET_BIND_GROUP | slot:u8, id:u16 | Bind resources |
+| 0x14 | SET_VERTEX_BUFFER | slot:u8, id:u16 | Bind vertex buffer |
+| 0x15 | SET_INDEX_BUFFER | id:u16, format:u8 | Bind index buffer |
+| 0x16 | DRAW | vertices:u32, instances:u32 | Draw call |
+| 0x17 | DRAW_INDEXED | indices:u32, instances:u32 | Indexed draw |
+| 0x18 | DISPATCH | x:u32, y:u32, z:u32 | Dispatch workgroups |
+| 0x19 | END_PASS | none | End any pass |
+| 0x1A | BEGIN_COMPUTE_PASS | none | Begin compute pass |
+
+**Queue Operations (0x20-0x2F)**
+
+| Code | Name | Operands | Description |
+|------|------|----------|-------------|
+| 0x20 | WRITE_BUFFER | buf:u16, offset:u32, data:varint | Write data to buffer |
+| 0x21 | COPY_BUFFER | src:u16, dst:u16, size:u32 | Copy between buffers |
+| 0x24 | SUBMIT | none | Submit command buffer |
+| 0x2A | WRITE_TIME_UNIFORM | buf:u16, offset:u32 | Write pngineInputs |
+
+**Frame Control (0x30-0x3F)**
+
+| Code | Name | Operands | Description |
+|------|------|----------|-------------|
+| 0x30 | DEFINE_FRAME | id:u16, name:string_id | Begin frame definition |
+| 0x31 | END_FRAME | none | End frame definition |
+| 0x32 | EXEC_PASS | id:u16 | Execute pass every frame |
+| 0x35 | EXEC_PASS_ONCE | id:u16 | Execute pass first frame only |
+
+**Pool Operations (0x40-0x4F)**
+
+| Code | Name | Operands | Description |
+|------|------|----------|-------------|
+| 0x41 | SET_VERTEX_BUFFER_POOL | slot:u8, base:u16, pool:u8, offset:u8 | Pool vertex buffer |
+| 0x42 | SET_BIND_GROUP_POOL | slot:u8, base:u16, pool:u8, offset:u8 | Pool bind group |
 
 ### Varint Encoding
 
-Variable-length integers use LEB128 encoding:
-- Values 0-127: 1 byte
-- Values 128-16383: 2 bytes
-- And so on
+Variable-length integers save space:
+
+| Value Range | Encoding | Bytes |
+|-------------|----------|-------|
+| 0-127 | `0xxxxxxx` | 1 |
+| 128-16383 | `10xxxxxx xxxxxxxx` | 2 |
+| 16384+ | `11xxxxxx xxxxxxxx xxxxxxxx xxxxxxxx` | 4 |
 
 ## String Table
 
 Interned strings for entry point names and identifiers.
 
 ```
-┌────────────────────┐
-│ count (u16)        │
-├────────────────────┤
-│ offsets[count] u16 │ Offset from table start
-├────────────────────┤
-│ string data        │ Null-terminated UTF-8
-└────────────────────┘
++--------------------+
+| count (u16)        |
++--------------------+
+| offsets[count] u16 | Offset from table start
++--------------------+
+| lengths[count] u16 | String length
++--------------------+
+| string data        | UTF-8 bytes (not null-terminated)
++--------------------+
 ```
 
 ## Data Section
 
-Binary data referenced by opcodes (shader code, vertex data, etc.).
+Binary data referenced by opcodes (shader code, vertex data, descriptors).
 
 ```
-┌────────────────────┐
-│ count (u16)        │
-├────────────────────┤
-│ entries[count]     │
-│  ├─ offset (u32)   │ Offset from section start
-│  └─ length (u32)   │ Data length in bytes
-├────────────────────┤
-│ data bytes         │
-└────────────────────┘
++--------------------+
+| count (u16)        |
++--------------------+
+| entries[count]     |
+|  +- offset (u32)   | Offset from section start
+|  +- length (u32)   | Data length in bytes
++--------------------+
+| data bytes         |
++--------------------+
+```
+
+## WGSL Table
+
+Maps WGSL module IDs to data section entries with dependency information.
+
+```
++--------------------+
+| count (u16)        |
++--------------------+
+| entries[count]     |
+|  +- data_id (u16)  | Index into data section
+|  +- dep_count (u8) | Number of dependencies
+|  +- deps[dep_count]| Dependency WGSL IDs
++--------------------+
+```
+
+## Uniform Table
+
+Maps uniform fields to buffer bindings for runtime modification.
+
+```
++--------------------+
+| count (u16)        |
++--------------------+
+| entries[count]     |
+|  +- name_id (u16)  | String table index
+|  +- buffer_id (u16)| Target buffer ID
+|  +- offset (u16)   | Byte offset in buffer
+|  +- type (u8)      | WGSL type code
+|  +- size (u8)      | Size in bytes
++--------------------+
+```
+
+## Animation Table
+
+Scene timeline for multi-frame animations.
+
+```
++--------------------+
+| duration (u32)     | Total duration in ms
++--------------------+
+| end_behavior (u8)  | 0=hold, 1=loop, 2=stop
++--------------------+
+| scene_count (u16)  |
++--------------------+
+| scenes[count]      |
+|  +- name_id (u16)  | String table index
+|  +- frame_id (u16) | Frame definition ID
+|  +- start_ms (u32) | Start time in ms
+|  +- end_ms (u32)   | End time in ms
++--------------------+
 ```
 
 ## PNG Embedding
 
-PNGB bytecode is embedded in PNG files using a custom ancillary chunk:
+PNGB bytecode is embedded in PNG files using custom ancillary chunks:
+
+### pNGb Chunk (Bytecode)
 
 ```
-┌────────────────────┐
-│ length (4B BE)     │ Chunk data length
-├────────────────────┤
-│ type: "pNGb"       │ Chunk type (4 bytes)
-├────────────────────┤
-│ compressed data    │ DEFLATE-compressed PNGB
-├────────────────────┤
-│ CRC32 (4B BE)      │ Chunk checksum
-└────────────────────┘
++--------------------+
+| length (4B BE)     | Chunk data length
++--------------------+
+| type: "pNGb"       | Chunk type (4 bytes)
++--------------------+
+| version (1B)       | Embedding version
++--------------------+
+| flags (1B)         | Reserved
++--------------------+
+| compressed data    | DEFLATE-compressed PNGB
++--------------------+
+| CRC32 (4B BE)      | Chunk checksum
++--------------------+
 ```
 
-The chunk type `pNGb` follows PNG naming conventions:
-- Lowercase first letter: ancillary (not critical)
-- Uppercase second letter: public (registered)
-- Lowercase third letter: reserved
-- Lowercase fourth letter: safe to copy
+### pNGr Chunk (Embedded Runtime)
 
-## Size Comparison
+When executor is embedded separately from bytecode:
+
+```
++--------------------+
+| length (4B BE)     | Chunk data length
++--------------------+
+| type: "pNGr"       | Chunk type (4 bytes)
++--------------------+
+| compressed data    | DEFLATE-compressed WASM
++--------------------+
+| CRC32 (4B BE)      | Chunk checksum
++--------------------+
+```
+
+### Chunk Type Naming
+
+Chunk type `pNGb` follows PNG naming conventions:
+- **p** (lowercase): Ancillary chunk (not critical for display)
+- **N** (uppercase): Public chunk (registered)
+- **G** (uppercase): Reserved (must match)
+- **b** (lowercase): Safe to copy (doesn't affect image data)
+
+## Size Metrics
 
 Typical compression ratios:
 
-| Content | Source | PNGB | Ratio |
-|---------|--------|------|-------|
+| Content | Uncompressed | Compressed | Ratio |
+|---------|--------------|------------|-------|
 | Simple triangle | ~500B | ~180B | 2.8x |
 | Rotating cube | ~2KB | ~600B | 3.3x |
 | Boids simulation | ~8KB | ~2.5KB | 3.2x |
+
+With embedded executor:
+
+| Configuration | Size |
+|---------------|------|
+| Core only | ~8 KB |
+| Core + render | ~12 KB |
+| Core + render + compute | ~16 KB |
+| Full (all plugins) | ~20 KB |
+
+## Related
+
+- [CLI Reference](/docs/cli/) - Compile and validate bytecode
+- [DSL Syntax](/docs/dsl-syntax/) - Source language
+- [JavaScript API](/docs/js-api/) - Runtime that executes bytecode
