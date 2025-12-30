@@ -996,9 +996,36 @@ Control (0xF0, 0xFF):
 
 ### Current Status
 
-**Phase**: 7 Complete - Desktop Native Viewer (with limitation)
+**Plan Status**: ✅ COMPLETE
+
+Core embedded executor functionality is complete. PNGs now embed their executor
+by default, creating self-contained payloads that work in browser without
+external `pngine.wasm`. Optional future work: native viewer wasm3 fix.
 
 ### Log Entries
+
+#### 2025-12-30: Plan Complete - pNGr Removal & Default Embedded Executor
+
+Final cleanup and default changes:
+
+**Completed:**
+- Removed pNGr chunk completely (was intended for WASM runtime embedding)
+- Made `--embed-executor` the default behavior (now `--no-executor` to opt out)
+- Removed `pngine.wasm` from demo output (no longer needed)
+- Updated all demo files with embedded executors (~5KB for simple shader)
+- Verified browser loads embedded executor from PNG payload:
+  - Console: `[Worker] Using embedded executor from payload`
+  - No network request for `pngine.wasm`
+- Updated CLAUDE.md documentation to reflect new defaults
+- JS loader detects and uses embedded executor automatically
+- Fallback to external `pngine.wasm` for old PNGs without embedded executor
+
+**Files changed:**
+- `src/png/embed.zig` - Removed pNGr chunk code
+- `src/png/chunk.zig` - Removed pNGr chunk type
+- `src/cli/render.zig` - Default `embed_executor = true`
+- `build.zig` - Removed pngine.wasm from demo output
+- `CLAUDE.md` - Updated CLI docs, marked plan complete
 
 #### 2025-12-27: Phase 7 Complete (Desktop Viewer)
 

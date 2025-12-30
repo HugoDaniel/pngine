@@ -30,7 +30,7 @@ in CONTRIBUTING.md to help out further developments with compounded knowledge**
 | Plan                                        | Purpose                                  | Status      |
 | ------------------------------------------- | ---------------------------------------- | ----------- |
 | `docs/cpu-wasm-data-initialization-plan.md` | **ACTIVE** - Buffer init + shapes        | In Progress |
-| `docs/embedded-executor-plan.md`            | Embedded executor + plugins              | Reference   |
+| `docs/embedded-executor-plan.md`            | Embedded executor + plugins              | Complete    |
 | `docs/llm-runtime-testing-plan.md`          | LLM-friendly validation via wasm3        | Complete    |
 | `docs/multiplatform-command-buffer-plan.md` | Platform abstraction                     | Reference   |
 | `docs/data-generation-plan.md`              | Compute shader data gen (superseded)     | Archived    |
@@ -379,14 +379,16 @@ pngine extract <image.png> [-o output.pngb]
 | ----------------- | ------------------------------------------------ | ------- |
 | `-o, --output`    | Output .pngb path                                | `<input>.pngb` |
 | `-m, --minify`    | Minify WGSL shaders (reduces payload 30-50%)     | Off     |
-| `--embed-executor`| Embed executor WASM in payload                   | Off     |
+| `--no-executor`   | Don't embed executor WASM in payload             | Off     |
 
-**Note**: `--minify` requires libminiray.a to be linked at build time.
+**Notes**:
+- `--minify` requires libminiray.a to be linked at build time.
+- Executor WASM (~12KB) is embedded by default, creating self-contained payloads.
 
 ### Examples
 
 ```bash
-# Create minimal PNG with embedded bytecode (~500 bytes)
+# Create self-contained PNG with embedded bytecode + executor (~5KB for simple shader)
 pngine shader.pngine
 
 # Compile with minified shaders (30-50% smaller payload)
@@ -403,6 +405,9 @@ pngine shader.pngine --frame -t 2.5
 
 # Create PNG without embedded bytecode
 pngine shader.pngine --no-embed
+
+# Compile bytecode only (no executor, for development)
+pngine compile shader.pngine -o output.pngb --no-executor
 
 # Check bytecode in a PNG file
 pngine check output.png
@@ -1036,7 +1041,7 @@ npm/
 │   │   ├── index.mjs            # Node.js ESM entry (stubs)
 │   │   ├── index.js             # Node.js CJS entry (stubs)
 │   │   └── index.d.ts           # TypeScript definitions
-│   ├── wasm/pngine.wasm         # WASM runtime (57K)
+│   ├── wasm/pngine.wasm         # WASM runtime fallback (57K, used when PNG lacks embedded executor)
 │   ├── scripts/bundle.js        # esbuild bundler script
 │   ├── package.json
 │   └── README.md
@@ -1160,25 +1165,22 @@ The `build.zig` npm step:
   at cross-compile time)
 - Outputs to `zig-out/npm/pngine-{platform}/bin/`
 
-## Current Work: Embedded Executor
+## Embedded Executor (Complete)
 
-**Active Plan**: `docs/embedded-executor-plan.md`
+PNGs now embed their executor WASM by default, creating fully self-contained payloads:
 
-Implementation phases:
+- **Default behavior**: `pngine shader.pngine` produces PNG with bytecode + executor (~5KB for simple shader)
+- **Opt-out**: Use `--no-executor` flag for development builds
+- **Runtime detection**: JS loader auto-detects embedded executor and uses it instead of external `pngine.wasm`
+- **Backward compatible**: Old PNGs without embedded executor still work (falls back to `pngine.wasm`)
 
-1. Payload format extension (v5 header with executor section)
-2. Plugin infrastructure (detection in Analyzer, multi-variant builds)
-3. Executor refactor (clean exports, conditional compilation)
-4. Embedding integration (`--embed-executor` CLI flag)
-5. Complete [wasm] plugin (JS and native nested WASM execution)
-6. Browser loader refactor (minimal ~300 line loader)
-7. Native viewers (iOS/Android/Desktop via wasm3)
+See `docs/embedded-executor-plan.md` for implementation details.
 
 ## Related Files
 
 **Plans (read in order of priority)**:
 
-- `docs/embedded-executor-plan.md` - **ACTIVE** - Embedded executor + plugin
+- `docs/embedded-executor-plan.md` - **COMPLETE** - Embedded executor + plugin
   architecture
 - `docs/llm-runtime-testing-plan.md` - LLM runtime validation via wasm3
   (planned)
