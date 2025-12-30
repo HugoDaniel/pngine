@@ -106,7 +106,7 @@
     <script type="module">
         import { pngine, play, pause, stop, draw, destroy, extractBytecode, isPng, isPngb } from './pngine.js';
 
-        const canvas = document.getElementById('canvas');
+        let canvas = document.getElementById('canvas');
         const status = document.getElementById('status');
         const playBtn = document.getElementById('play-btn');
         const stopBtn = document.getElementById('stop-btn');
@@ -156,16 +156,15 @@
                     newCanvas.width = 512;
                     newCanvas.height = 512;
                     parent.replaceChild(newCanvas, canvas);
-                    window.canvas = newCanvas;
+                    canvas = newCanvas;
                 }
 
                 const data = new Uint8Array(await file.arrayBuffer());
                 fileInfo.textContent = `${file.name} (${formatBytes(data.length)})`;
 
                 // Create new engine
-                const currentCanvas = document.getElementById('canvas');
                 engine = await pngine(data, {
-                    canvas: currentCanvas,
+                    canvas: canvas,
                     debug: true,
                     onError: (err) => setStatus('Error: ' + err.message, 'error'),
                 });
