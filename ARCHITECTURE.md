@@ -89,17 +89,28 @@ everything needed to render except the executor and GPU driver.
 ```
 
 **Source files:**
-- `src/bytecode/format.zig` - Header and serialization (1,400 lines)
+- `src/bytecode/format.zig` - Header and serialization (~1,400 lines)
 - `src/bytecode/opcodes.zig` - PNGB opcode definitions
 - `src/bytecode/data_section.zig` - Data blob storage
 - `src/bytecode/string_table.zig` - Interned strings
+- `src/png/embed.zig` - Embed bytecode as pNGb chunk
+- `src/png/runtime.zig` - Embed WASM runtime as pNGr chunk
 
 ### 2. The Executor
 
 The **executor** is a WASM module that interprets PNGB bytecode and emits GPU
-commands. It can be:
-- **Shared**: External `pngine.wasm` loaded at runtime (~57KB current)
-- **Embedded**: Tailored executor in payload (~15KB goal)
+commands. There are three delivery mechanisms:
+
+**Delivery Options:**
+| Method | When Used | Location | Notes |
+|--------|-----------|----------|-------|
+| **Shared** | Default JS runtime | External `pngine.wasm` file | ~57KB, loaded via fetch |
+| **pNGr chunk** | CLI default (`--embed-runtime`) | Separate PNG chunk | DEFLATE-compressed, self-contained |
+| **In payload** | CLI `--embed-executor` flag | Inside PNGB bytecode | v0 format, for native viewers |
+
+**Current state**: The CLI embeds runtime in pNGr chunk by default, but the JS
+runtime doesn't extract pNGr yet—it loads WASM from a file URL. The pNGr
+extraction is planned but not implemented in the browser viewer.
 
 **Key Properties:**
 - **Statically allocated**: No malloc after init (WASM linear memory)
@@ -207,17 +218,26 @@ because the executor handles interpretation.
 
 **Browser Viewer (npm/pngine):**
 ```
-PNG file ─► extract.js ─► loader.js ─► worker.js ─► gpu.js ─► WebGPU
-              │              │            │           │
-           Extract       Load WASM     Run WASM   Execute
-           bytecode      executor      per-frame  commands
+PNG file ─► init.js ─► extract.js ─► worker.js ─► gpu.js ─► WebGPU
+              │            │             │           │
+           Spawn       Extract       Run WASM    Execute
+           worker      pNGb chunk    per-frame   commands
+              │
+              └──► Fetch pngine.wasm (shared executor)
 ```
 
+**PNG Chunks:**
+| Chunk | Contents | When Created | When Used |
+|-------|----------|--------------|-----------|
+| `pNGb` | PNGB bytecode (DEFLATE) | Always | Browser extracts for executor |
+| `pNGr` | WASM runtime (DEFLATE) | `--embed-runtime` (default) | *Not yet extracted by JS* |
+
 **Key JS files:**
-- `npm/pngine/src/init.js` - Main thread initialization (250 lines)
-- `npm/pngine/src/worker.js` - WebWorker entry point (306 lines)
-- `npm/pngine/src/gpu.js` - Command dispatcher (697 lines)
-- `npm/pngine/src/loader.js` - Embedded executor support (254 lines)
+- `npm/pngine/src/init.js` - Main thread initialization (~250 lines)
+- `npm/pngine/src/extract.js` - Extract pNGb from PNG/ZIP (~230 lines)
+- `npm/pngine/src/worker.js` - WebWorker entry point (~300 lines)
+- `npm/pngine/src/gpu.js` - Command dispatcher (~700 lines)
+- `npm/pngine/src/loader.js` - Parse v0 header, extract embedded executor (~255 lines)
 
 **Native Viewers (future):**
 - Desktop: Zig + wasm3 + Dawn
@@ -614,7 +634,8 @@ zig build test-standalone --summary all
 | JS command executor | `npm/pngine/src/gpu.js` | 697 |
 | | | |
 | **Embedding** | | |
-| PNG embedding | `src/png/embed.zig` | ~200 |
+| PNG bytecode embed (pNGb) | `src/png/embed.zig` | ~200 |
+| PNG runtime embed (pNGr) | `src/png/runtime.zig` | ~200 |
 | PNG extraction | `src/png/extract.zig` | ~200 |
 
 ---
