@@ -926,6 +926,109 @@ pub fn build(b: *std.Build) void {
 
     const run_desktop_viewer_step = b.step("run-desktop-viewer", "Run the desktop viewer");
     run_desktop_viewer_step.dependOn(&run_desktop_viewer.step);
+
+    // ========================================================================
+    // Website Build (Zine static site generator)
+    // ========================================================================
+    //
+    // Builds the pngine.dev website using Zine SSG.
+    // Automatically compiles example shaders and bundles JS runtime.
+    //
+    // Usage:
+    //   zig build website       # Build website to zig-out/website/
+    //   zig build website-serve # Start dev server with live reload
+    //
+    // The website step:
+    // 1. Compiles pngine_logo.pngine to PNG for the interactive hero
+    // 2. Copies pngine.js runtime to website assets
+    // 3. Runs Zine to generate static HTML
+
+    const website_step = b.step("website", "Build the pngine.dev website");
+    const website_serve_step = b.step("website-serve", "Start website dev server");
+
+    // Step 1: Compile shaders to PNG for website
+    // Shaders go to website/assets/ so Zine includes them in the build
+    // Logo shader - interactive hero element
+    const compile_logo = b.addRunArtifact(cli);
+    compile_logo.addArgs(&.{
+        "examples/pngine_logo.pngine",
+        "-o",
+        "website/assets/pngine_logo.png",
+    });
+    compile_logo.step.dependOn(&cli.step);
+
+    // Background shader - ambient particle system
+    const compile_background = b.addRunArtifact(cli);
+    compile_background.addArgs(&.{
+        "examples/pngine_background.pngine",
+        "-o",
+        "website/assets/pngine_background.png",
+    });
+    compile_background.step.dependOn(&cli.step);
+
+    // Step 2: Copy JS runtime files to website/assets/
+    // These are copied directly to the source assets dir so Zine includes them
+    const WebsiteFile = struct { src: []const u8, dest: []const u8 };
+    const website_js_files = [_]WebsiteFile{
+        .{ .src = "npm/pngine/src/index.js", .dest = "pngine.js" },
+        .{ .src = "npm/pngine/src/init.js", .dest = "init.js" },
+        .{ .src = "npm/pngine/src/worker.js", .dest = "worker.js" },
+        .{ .src = "npm/pngine/src/gpu.js", .dest = "gpu.js" },
+        .{ .src = "npm/pngine/src/anim.js", .dest = "anim.js" },
+        .{ .src = "npm/pngine/src/extract.js", .dest = "extract.js" },
+        .{ .src = "npm/pngine/src/loader.js", .dest = "loader.js" },
+    };
+    for (website_js_files) |file| {
+        const copy_js = b.addSystemCommand(&.{ "cp", file.src });
+        copy_js.addArg(b.fmt("website/assets/{s}", .{file.dest}));
+        website_step.dependOn(&copy_js.step);
+    }
+
+    // Note: WASM runtime not needed - PNGs embed their executor by default
+    // See docs/embedded-executor-plan.md for details
+
+    // Step 3: Run Zine to build the website
+    // Zine uses `release` for production builds, no command for dev server
+    // Output goes to website/public/ by default
+    const zine_build = b.addSystemCommand(&.{
+        "zine",
+        "release",
+        "--force",
+    });
+    zine_build.setCwd(b.path("website"));
+    zine_build.step.dependOn(&compile_logo.step);
+    zine_build.step.dependOn(&compile_background.step);
+    website_step.dependOn(&zine_build.step);
+
+    // Step 4: Copy JS runtime and shader PNGs to public output
+    // Zine doesn't auto-copy JS modules, so we do it manually
+    const runtime_files = [_][]const u8{
+        "pngine.js",
+        "init.js",
+        "worker.js",
+        "gpu.js",
+        "anim.js",
+        "extract.js",
+        "loader.js",
+        "pngine_logo.png",
+        "pngine_background.png",
+    };
+    for (runtime_files) |file| {
+        const copy_asset = b.addSystemCommand(&.{
+            "cp",
+            b.fmt("website/assets/{s}", .{file}),
+            b.fmt("website/public/{s}", .{file}),
+        });
+        copy_asset.step.dependOn(&zine_build.step);
+        website_step.dependOn(&copy_asset.step);
+    }
+
+    // Dev server with live reload (runs from website directory)
+    const zine_serve = b.addSystemCommand(&.{
+        "zine",
+    });
+    zine_serve.setCwd(b.path("website"));
+    website_serve_step.dependOn(&zine_serve.step);
 }
 
 // Version check at comptime
