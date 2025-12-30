@@ -1,0 +1,141 @@
+// 03 - Spinning 2D Shapes
+// Procedural 2D shapes with rotation
+// Demonstrates: procedural shapes in shader, time animation
+
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+#shaderModule shader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    const PI: f32 = 3.14159265359;
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let x = f32(i & 1u) * 4.0 - 1.0;
+      let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+      return vec4f(x, y, 0.0, 1.0);
+    }
+
+    // SDF for regular polygon
+    fn sdPolygon(p: vec2f, r: f32, n: f32) -> f32 {
+      let an = PI / n;
+      let en = PI / n;
+      let acs = vec2f(cos(an), sin(an));
+      let bn = (atan2(p.x, p.y) % (2.0 * an)) - an;
+      let pp = length(p) * vec2f(cos(bn), abs(sin(bn)));
+      return pp.x * acs.x + pp.y * acs.y - r;
+    }
+
+    // SDF for star
+    fn sdStar(p: vec2f, r: f32, n: u32, m: f32) -> f32 {
+      let an = PI / f32(n);
+      let en = PI / m;
+      let acs = vec2f(cos(an), sin(an));
+      let ecs = vec2f(cos(en), sin(en));
+      let bn = (atan2(p.x, p.y) % (2.0 * an)) - an;
+      var pp = length(p) * vec2f(cos(bn), abs(sin(bn)));
+      pp -= r * acs;
+      pp += ecs * clamp(-dot(pp, ecs), 0.0, r * acs.y / ecs.y);
+      return length(pp) * sign(pp.x);
+    }
+
+    @fragment
+    fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = vec2f(pos.x / u.width, pos.y / u.height);
+      var p = (uv - 0.5) * 2.0;
+      p.x *= u.aspect;
+
+      let t = u.time;
+      var color = vec3f(0.05, 0.05, 0.1);
+
+      // Draw multiple spinning shapes
+      for (var i = 0; i < 5; i++) {
+        let fi = f32(i);
+        let angle = t * (0.3 + fi * 0.1) + fi * PI * 0.4;
+        let orbitRadius = 0.3 + fi * 0.12;
+        let center = vec2f(cos(angle * 0.7), sin(angle)) * orbitRadius;
+
+        // Rotate local coordinates
+        let localAngle = t * (1.0 - fi * 0.15);
+        let c = cos(localAngle);
+        let s = sin(localAngle);
+        let localP = p - center;
+        let rotatedP = vec2f(localP.x * c - localP.y * s, localP.x * s + localP.y * c);
+
+        var d = 1000.0;
+        let shapeType = i % 3;
+        let size = 0.08 + fi * 0.015;
+
+        if (shapeType == 0) {
+          d = sdPolygon(rotatedP, size, 3.0 + fi);  // Polygon
+        } else if (shapeType == 1) {
+          d = sdStar(rotatedP, size, 5u, 2.5);  // Star
+        } else {
+          d = length(rotatedP) - size;  // Circle
+        }
+
+        // Color based on index
+        let hue = fract(fi * 0.2 + t * 0.05);
+        let shapeColor = vec3f(
+          0.5 + 0.5 * cos(hue * 6.28),
+          0.5 + 0.5 * cos(hue * 6.28 + 2.09),
+          0.5 + 0.5 * cos(hue * 6.28 + 4.19)
+        );
+
+        // Smooth edge with glow
+        let edge = smoothstep(0.02, 0.0, d);
+        let glow = 0.01 / (abs(d) + 0.01);
+
+        color = mix(color, shapeColor, edge);
+        color += shapeColor * glow * 0.15;
+      }
+
+      return vec4f(color, 1.0);
+    }
+  "
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={ entryPoint=vs module=shader }
+  fragment={
+    entryPoint=fs
+    module=shader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#bindGroup uniformsBindGroup {
+  layout={ pipeline=pipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=uniforms } }]
+}
+
+#renderPass mainPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.05 0.05 0.1 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=pipeline
+  bindGroups=[uniformsBindGroup]
+  draw=3
+}
+
+#frame main {
+  perform=[writeUniforms mainPass]
+}

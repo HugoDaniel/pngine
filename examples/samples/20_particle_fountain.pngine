@@ -1,0 +1,274 @@
+// 20 - Particle Fountain
+// GPU-driven particle system with gravity and respawning
+// Demonstrates: particle lifetime, physics simulation, point rendering
+
+#define NUM_PARTICLES=2048
+
+// Particle: pos(3) + vel(3) + life(1) + maxLife(1) = 8 floats
+#buffer particleBuffer {
+  size="NUM_PARTICLES * 8 * 4"
+  usage=[VERTEX STORAGE]
+  pool=2
+}
+
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+#init initParticles {
+  buffer=particleBuffer
+  shader=initShader
+  workgroups=32
+}
+
+#shaderModule initShader {
+  code="
+    struct Particle {
+      pos: vec3f,
+      life: f32,
+      vel: vec3f,
+      maxLife: f32,
+    }
+    struct Particles { data: array<Particle> }
+
+    @binding(0) @group(0) var<storage, read_write> particles: Particles;
+
+    fn hash(n: u32) -> f32 {
+      var x = n;
+      x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+      x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+      x = (x >> 16u) ^ x;
+      return f32(x) / f32(0xffffffffu);
+    }
+
+    const NUM: u32 = 2048u;
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+      let i = id.x;
+      if (i >= NUM) { return; }
+
+      // Stagger initial lifetimes
+      particles.data[i].life = -hash(i * 13u) * 3.0;
+      particles.data[i].maxLife = 1.5 + hash(i * 17u) * 1.5;
+      particles.data[i].pos = vec3f(0.0, -0.5, 0.0);
+      particles.data[i].vel = vec3f(0.0);
+    }
+  "
+}
+
+#shaderModule stepShader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    struct Particle {
+      pos: vec3f,
+      life: f32,
+      vel: vec3f,
+      maxLife: f32,
+    }
+    struct Particles { data: array<Particle> }
+
+    @group(0) @binding(1) var<storage, read> particlesIn: Particles;
+    @group(0) @binding(2) var<storage, read_write> particlesOut: Particles;
+
+    fn hash(n: u32) -> f32 {
+      var x = n;
+      x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+      x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+      x = (x >> 16u) ^ x;
+      return f32(x) / f32(0xffffffffu);
+    }
+
+    const PI: f32 = 3.14159265359;
+    const DT: f32 = 0.016;
+    const GRAVITY: f32 = -1.5;
+    const NUM: u32 = 2048u;
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+      let i = id.x;
+      if (i >= NUM) { return; }
+
+      var p = particlesIn.data[i];
+      p.life += DT;
+
+      if (p.life <= 0.0 || p.life > p.maxLife) {
+        // Respawn at fountain source
+        p.pos = vec3f(0.0, -0.5, 0.0);
+
+        let seed = u32(u.time * 1000.0) + i;
+        let angle = hash(seed * 7u) * PI * 2.0;
+        let spread = hash(seed * 11u) * 0.3;
+        let upSpeed = 1.8 + hash(seed * 13u) * 0.8;
+
+        p.vel = vec3f(
+          cos(angle) * spread,
+          upSpeed,
+          sin(angle) * spread
+        );
+
+        p.life = 0.001;
+        p.maxLife = 1.2 + hash(seed * 17u) * 1.0;
+      } else {
+        // Physics
+        p.vel.y += GRAVITY * DT;
+        p.pos += p.vel * DT;
+      }
+
+      particlesOut.data[i] = p;
+    }
+  "
+}
+
+#computePipeline stepPipeline {
+  layout=auto
+  compute={ entryPoint=main module=stepShader }
+}
+
+#bindGroup stepBindGroup {
+  layout={ pipeline=stepPipeline index=0 }
+  entries=[
+    { binding=0 resource={ buffer=uniforms } }
+    { binding=1 resource={ buffer=particleBuffer pingPong=0 } }
+    { binding=2 resource={ buffer=particleBuffer pingPong=1 } }
+  ]
+  pool=2
+}
+
+#computePass stepPass {
+  pipeline=stepPipeline
+  bindGroups=[stepBindGroup]
+  bindGroupsPoolOffsets=[0]
+  dispatchWorkgroups=32
+}
+
+#shaderModule renderShader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    struct VertexOutput {
+      @builtin(position) pos: vec4f,
+      @location(0) life: f32,
+      @location(1) maxLife: f32,
+    }
+
+    @vertex
+    fn vs(
+      @location(0) position: vec3f,
+      @location(1) life: f32,
+      @location(2) velocity: vec3f,
+      @location(3) maxLife: f32
+    ) -> VertexOutput {
+      var out: VertexOutput;
+
+      // Hide waiting particles
+      var pos = position;
+      if (life <= 0.0) {
+        pos = vec3f(100.0);
+      }
+
+      // Simple perspective
+      let z = pos.z + 2.5;
+      let projX = pos.x / z / u.aspect;
+      let projY = pos.y / z;
+
+      out.pos = vec4f(projX, projY, 0.5, 1.0);
+      out.life = life;
+      out.maxLife = maxLife;
+      return out;
+    }
+
+    @fragment
+    fn fs(in: VertexOutput) -> @location(0) vec4f {
+      let t = clamp(in.life / in.maxLife, 0.0, 1.0);
+
+      // Yellow -> Orange -> Red -> Dark red
+      var color = mix(
+        vec3f(1.0, 0.9, 0.3),
+        vec3f(1.0, 0.4, 0.1),
+        t
+      );
+      color = mix(color, vec3f(0.3, 0.0, 0.0), smoothstep(0.7, 1.0, t));
+
+      // Fade out
+      let alpha = 1.0 - smoothstep(0.6, 1.0, t);
+
+      return vec4f(color * alpha, alpha);
+    }
+  "
+}
+
+#renderPipeline renderPipeline {
+  layout=auto
+  vertex={
+    entryPoint=vs
+    module=renderShader
+    buffers=[{
+      arrayStride=32
+      stepMode=instance
+      attributes=[
+        { shaderLocation=0 offset=0 format=float32x3 }
+        { shaderLocation=1 offset=12 format=float32 }
+        { shaderLocation=2 offset=16 format=float32x3 }
+        { shaderLocation=3 offset=28 format=float32 }
+      ]
+    }]
+  }
+  fragment={
+    entryPoint=fs
+    module=renderShader
+    targets=[{
+      format=preferredCanvasFormat
+      blend={
+        color={ srcFactor=src-alpha dstFactor=one }
+        alpha={ srcFactor=one dstFactor=one }
+      }
+    }]
+  }
+  primitive={ topology=point-list }
+}
+
+#bindGroup renderBindGroup {
+  layout={ pipeline=renderPipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=uniforms } }]
+}
+
+#renderPass drawPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.02 0.02 0.05 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=renderPipeline
+  vertexBuffers=[{ buffer=particleBuffer pingPong=1 }]
+  bindGroups=[renderBindGroup]
+  bindGroupsPoolOffsets=[0]
+  draw={
+    vertexCount=1
+    instanceCount=NUM_PARTICLES
+  }
+}
+
+#frame main {
+  init=[initParticles]
+  perform=[writeUniforms stepPass drawPass]
+}

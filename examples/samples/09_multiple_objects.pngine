@@ -1,0 +1,246 @@
+// 09 - Multiple 3D Objects
+// Multiple cubes with instanced rendering
+// Demonstrates: instanced 3D rendering, per-instance transforms, depth testing
+
+#define NUM_OBJECTS=8
+
+#data cubeVertices {
+  cube={ format=[position3 normal3] }
+}
+
+#buffer vertexBuffer {
+  size=cubeVertices
+  usage=[VERTEX]
+  mappedAtCreation=cubeVertices
+}
+
+#buffer instanceBuffer {
+  size="NUM_OBJECTS * 8 * 4"
+  usage=[VERTEX STORAGE]
+}
+
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+#init initObjects {
+  buffer=instanceBuffer
+  shader=initShader
+  workgroups=1
+}
+
+#shaderModule initShader {
+  code="
+    struct Instance {
+      position: vec3f,
+      scale: f32,
+      rotationOffset: f32,
+      colorR: f32,
+      colorG: f32,
+      colorB: f32,
+    }
+    struct Instances { data: array<Instance> }
+
+    @binding(0) @group(0) var<storage, read_write> instances: Instances;
+
+    fn hash(n: u32) -> f32 {
+      var x = n;
+      x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+      x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+      x = (x >> 16u) ^ x;
+      return f32(x) / f32(0xffffffffu);
+    }
+
+    const PI: f32 = 3.14159265359;
+    const NUM: u32 = 8u;
+
+    @compute @workgroup_size(8)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+      let i = id.x;
+      if (i >= NUM) { return; }
+
+      let fi = f32(i);
+
+      // Arrange in a circle
+      let angle = fi * PI * 2.0 / f32(NUM);
+      let radius = 0.8;
+
+      instances.data[i].position = vec3f(
+        cos(angle) * radius,
+        sin(angle * 2.0) * 0.2,
+        sin(angle) * radius - 1.5
+      );
+      instances.data[i].scale = 0.15 + hash(i * 7u) * 0.1;
+      instances.data[i].rotationOffset = fi * 0.5;
+
+      // Rainbow colors
+      let hue = fi / f32(NUM);
+      instances.data[i].colorR = 0.5 + 0.5 * cos(hue * 6.28);
+      instances.data[i].colorG = 0.5 + 0.5 * cos(hue * 6.28 + 2.09);
+      instances.data[i].colorB = 0.5 + 0.5 * cos(hue * 6.28 + 4.19);
+    }
+  "
+}
+
+#shaderModule renderShader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    struct VertexOutput {
+      @builtin(position) pos: vec4f,
+      @location(0) normal: vec3f,
+      @location(1) color: vec3f,
+    }
+
+    fn rotateY(p: vec3f, angle: f32) -> vec3f {
+      let c = cos(angle);
+      let s = sin(angle);
+      return vec3f(p.x * c + p.z * s, p.y, -p.x * s + p.z * c);
+    }
+
+    fn rotateX(p: vec3f, angle: f32) -> vec3f {
+      let c = cos(angle);
+      let s = sin(angle);
+      return vec3f(p.x, p.y * c - p.z * s, p.y * s + p.z * c);
+    }
+
+    @vertex
+    fn vs(
+      @location(0) position: vec3f,
+      @location(1) normal: vec3f,
+      @location(2) instPos: vec3f,
+      @location(3) instScale: f32,
+      @location(4) rotOffset: f32,
+      @location(5) color: vec3f
+    ) -> VertexOutput {
+      let t = u.time;
+
+      // Apply instance transform
+      var pos = position * instScale;
+      var norm = normal;
+
+      // Rotate each cube
+      let rotAngle = t * 0.5 + rotOffset;
+      pos = rotateY(pos, rotAngle);
+      pos = rotateX(pos, rotAngle * 0.7);
+      norm = rotateY(norm, rotAngle);
+      norm = rotateX(norm, rotAngle * 0.7);
+
+      // Add instance position with orbiting motion
+      let orbitAngle = t * 0.3;
+      var worldPos = pos + instPos;
+      worldPos = rotateY(worldPos, orbitAngle);
+
+      // Simple perspective
+      let z = worldPos.z + 3.0;
+      let projX = worldPos.x / z / u.aspect;
+      let projY = worldPos.y / z;
+      let depth = 1.0 - (z / 6.0);
+
+      var out: VertexOutput;
+      out.pos = vec4f(projX, projY, depth, 1.0);
+      out.normal = norm;
+      out.color = color;
+      return out;
+    }
+
+    @fragment
+    fn fs(in: VertexOutput) -> @location(0) vec4f {
+      // Simple lighting
+      let lightDir = normalize(vec3f(0.5, 1.0, 0.3));
+      let diffuse = max(dot(normalize(in.normal), lightDir), 0.0);
+      let ambient = 0.2;
+
+      let lit = in.color * (ambient + diffuse * 0.8);
+      return vec4f(lit, 1.0);
+    }
+  "
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={
+    entryPoint=vs
+    module=renderShader
+    buffers=[
+      {
+        arrayStride=24
+        stepMode=vertex
+        attributes=[
+          { shaderLocation=0 offset=0 format=float32x3 }
+          { shaderLocation=1 offset=12 format=float32x3 }
+        ]
+      }
+      {
+        arrayStride=32
+        stepMode=instance
+        attributes=[
+          { shaderLocation=2 offset=0 format=float32x3 }
+          { shaderLocation=3 offset=12 format=float32 }
+          { shaderLocation=4 offset=16 format=float32 }
+          { shaderLocation=5 offset=20 format=float32x3 }
+        ]
+      }
+    ]
+  }
+  fragment={
+    entryPoint=fs
+    module=renderShader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+  primitive={ cullMode=back }
+  depthStencil={
+    format=depth24plus
+    depthWriteEnabled=true
+    depthCompare=less
+  }
+}
+
+#texture depthTexture {
+  size=[canvasWidth canvasHeight]
+  format=depth24plus
+  usage=[RENDER_ATTACHMENT]
+}
+
+#bindGroup bindings {
+  layout={ pipeline=pipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=uniforms } }]
+}
+
+#renderPass mainPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.05 0.05 0.1 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  depthStencilAttachment={
+    view=depthTexture
+    depthClearValue=1.0
+    depthLoadOp=clear
+    depthStoreOp=store
+  }
+  pipeline=pipeline
+  vertexBuffers=[vertexBuffer instanceBuffer]
+  bindGroups=[bindings]
+  draw={
+    vertexCount=36
+    instanceCount=NUM_OBJECTS
+  }
+}
+
+#frame main {
+  init=[initObjects]
+  perform=[writeUniforms mainPass]
+}

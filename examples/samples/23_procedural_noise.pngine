@@ -1,0 +1,190 @@
+// 23 - Procedural Noise
+// Multiple noise types: Perlin, Worley, FBM
+// Demonstrates: GPU noise generation, procedural textures
+
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+#shaderModule shader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    const PI: f32 = 3.14159265359;
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let x = f32(i & 1u) * 4.0 - 1.0;
+      let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+      return vec4f(x, y, 0.0, 1.0);
+    }
+
+    // Hash functions
+    fn hash2(p: vec2f) -> f32 {
+      var p3 = fract(vec3f(p.x, p.y, p.x) * 0.13);
+      p3 += dot(p3, p3.yzx + 3.333);
+      return fract((p3.x + p3.y) * p3.z);
+    }
+
+    fn hash2v(p: vec2f) -> vec2f {
+      let k = vec2f(0.3183099, 0.3678794);
+      var pp = p * k + k.yx;
+      return -1.0 + 2.0 * fract(16.0 * k * fract(pp.x * pp.y * (pp.x + pp.y)));
+    }
+
+    // Value noise
+    fn valueNoise(p: vec2f) -> f32 {
+      let i = floor(p);
+      let f = fract(p);
+      let u = f * f * (3.0 - 2.0 * f);
+
+      return mix(
+        mix(hash2(i + vec2f(0.0, 0.0)), hash2(i + vec2f(1.0, 0.0)), u.x),
+        mix(hash2(i + vec2f(0.0, 1.0)), hash2(i + vec2f(1.0, 1.0)), u.x),
+        u.y
+      );
+    }
+
+    // Gradient noise (Perlin-like)
+    fn gradientNoise(p: vec2f) -> f32 {
+      let i = floor(p);
+      let f = fract(p);
+      let u = f * f * (3.0 - 2.0 * f);
+
+      return mix(
+        mix(dot(hash2v(i + vec2f(0.0, 0.0)), f - vec2f(0.0, 0.0)),
+            dot(hash2v(i + vec2f(1.0, 0.0)), f - vec2f(1.0, 0.0)), u.x),
+        mix(dot(hash2v(i + vec2f(0.0, 1.0)), f - vec2f(0.0, 1.0)),
+            dot(hash2v(i + vec2f(1.0, 1.0)), f - vec2f(1.0, 1.0)), u.x),
+        u.y
+      ) * 0.5 + 0.5;
+    }
+
+    // Worley (cellular) noise
+    fn worleyNoise(p: vec2f) -> f32 {
+      let n = floor(p);
+      let f = fract(p);
+
+      var minDist = 1.0;
+
+      for (var j = -1; j <= 1; j++) {
+        for (var i = -1; i <= 1; i++) {
+          let g = vec2f(f32(i), f32(j));
+          let cellHash = n + g;
+          let o = vec2f(hash2(cellHash), hash2(cellHash + vec2f(7.0, 13.0)));
+          let r = g + o - f;
+          minDist = min(minDist, dot(r, r));
+        }
+      }
+
+      return sqrt(minDist);
+    }
+
+    // FBM
+    fn fbm(p: vec2f, octaves: i32) -> f32 {
+      var value = 0.0;
+      var amplitude = 0.5;
+      var frequency = 1.0;
+      var pp = p;
+
+      for (var i = 0; i < 6; i++) {
+        if (i >= octaves) { break; }
+        value += amplitude * gradientNoise(pp * frequency);
+        amplitude *= 0.5;
+        frequency *= 2.0;
+      }
+
+      return value;
+    }
+
+    @fragment
+    fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = vec2f(pos.x / u.width, pos.y / u.height);
+      let t = u.time * 0.2;
+
+      // Divide screen into 4 quadrants showing different noise types
+      let quadX = select(0, 1, uv.x > 0.5);
+      let quadY = select(0, 1, uv.y > 0.5);
+      let quad = quadY * 2 + quadX;
+
+      let localUV = fract(uv * 2.0) * 4.0 + vec2f(t * 0.5, t * 0.3);
+
+      var value = 0.0;
+      var color = vec3f(0.0);
+
+      if (quad == 0) {
+        // Value noise FBM
+        value = fbm(localUV, 5);
+        color = vec3f(value);
+      } else if (quad == 1) {
+        // Gradient noise
+        value = gradientNoise(localUV * 2.0);
+        color = vec3f(value * 0.8, value * 0.9, value);
+      } else if (quad == 2) {
+        // Worley noise
+        value = worleyNoise(localUV * 1.5);
+        color = vec3f(value * 0.9, value * 0.7, value * 0.5);
+      } else {
+        // Combined: turbulent marble
+        let marble = sin((uv.x * 20.0 + fbm(localUV, 5) * 8.0) * PI);
+        let worley = worleyNoise(localUV * 2.0);
+
+        color = vec3f(
+          marble * 0.5 + 0.5,
+          marble * 0.4 + 0.3 + worley * 0.3,
+          marble * 0.3 + 0.2 + (1.0 - worley) * 0.4
+        );
+      }
+
+      // Add subtle borders between quadrants
+      let borderX = smoothstep(0.498, 0.5, abs(uv.x - 0.5));
+      let borderY = smoothstep(0.498, 0.5, abs(uv.y - 0.5));
+      let border = max(borderX, borderY);
+      color = mix(color, vec3f(0.3), border);
+
+      return vec4f(color, 1.0);
+    }
+  "
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={ entryPoint=vs module=shader }
+  fragment={
+    entryPoint=fs
+    module=shader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#bindGroup bindings {
+  layout={ pipeline=pipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=uniforms } }]
+}
+
+#renderPass mainPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0 0 0 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=pipeline
+  bindGroups=[bindings]
+  draw=3
+}
+
+#frame main {
+  perform=[writeUniforms mainPass]
+}

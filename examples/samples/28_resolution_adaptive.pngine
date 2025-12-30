@@ -1,0 +1,144 @@
+// 28 - Resolution Adaptive Rendering
+// Effects that adapt to different canvas sizes and aspect ratios
+// Demonstrates: aspect ratio correction, resolution-independent coordinates
+
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+#shaderModule shader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    const PI: f32 = 3.14159265359;
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let x = f32(i & 1u) * 4.0 - 1.0;
+      let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+      return vec4f(x, y, 0.0, 1.0);
+    }
+
+    fn sdCircle(p: vec2f, r: f32) -> f32 {
+      return length(p) - r;
+    }
+
+    @fragment
+    fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      // Normalized device coordinates (-1 to 1)
+      let ndc = vec2f(
+        (pos.x / u.width) * 2.0 - 1.0,
+        1.0 - (pos.y / u.height) * 2.0
+      );
+
+      // Aspect-corrected coordinates (circles stay circular)
+      var p = ndc;
+      if (u.aspect > 1.0) {
+        p.x *= u.aspect;
+      } else {
+        p.y /= u.aspect;
+      }
+
+      let t = u.time;
+
+      // Background gradient
+      var color = vec3f(0.05 + ndc.y * 0.03, 0.05, 0.08 + ndc.x * 0.02);
+
+      // Adaptive grid (line width scales with resolution)
+      let minDim = min(u.width, u.height);
+      let gridSize = 0.15;
+      let lineWidth = 2.0 / minDim;
+
+      let gx = abs(fract(p.x / gridSize + 0.5) - 0.5);
+      let gy = abs(fract(p.y / gridSize + 0.5) - 0.5);
+      let gridDist = min(gx, gy) - lineWidth;
+      let gridColor = vec3f(0.15, 0.18, 0.22);
+      color = mix(gridColor, color, smoothstep(0.0, lineWidth, gridDist));
+
+      // Animated circles (always circular regardless of aspect)
+      for (var i = 0; i < 5; i++) {
+        let fi = f32(i);
+        let angle = t * (0.4 + fi * 0.1) + fi * PI * 0.4;
+        let orbRadius = 0.2 + fi * 0.1;
+        let center = vec2f(cos(angle), sin(angle)) * orbRadius;
+
+        let circleRadius = 0.06 + sin(t * 2.0 + fi) * 0.02;
+        let d = sdCircle(p - center, circleRadius);
+
+        // Glow effect
+        let glow = 0.015 / (abs(d) + 0.008);
+        let hue = fract(fi * 0.2 + t * 0.05);
+
+        // Simple HSV approximation
+        let c = clamp(vec3f(
+          abs(hue * 6.0 - 3.0) - 1.0,
+          2.0 - abs(hue * 6.0 - 2.0),
+          2.0 - abs(hue * 6.0 - 4.0)
+        ), vec3f(0.0), vec3f(1.0));
+
+        if (d < 0.0) {
+          color = c;
+        }
+        color += c * glow * 0.25;
+      }
+
+      // Corner indicators showing aspect ratio
+      let corner = max(abs(ndc.x), abs(ndc.y));
+      if (corner > 0.92) {
+        var indicator = vec3f(0.2, 0.6, 0.2);  // Green: square-ish
+        if (abs(u.aspect - 1.0) > 0.1) {
+          if (u.aspect > 1.0) {
+            indicator = vec3f(0.6, 0.3, 0.1);  // Orange: wide
+          } else {
+            indicator = vec3f(0.1, 0.3, 0.6);  // Blue: tall
+          }
+        }
+        color = mix(color, indicator, 0.4);
+      }
+
+      return vec4f(color, 1.0);
+    }
+  "
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={ entryPoint=vs module=shader }
+  fragment={
+    entryPoint=fs
+    module=shader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#bindGroup uniformsBindGroup {
+  layout={ pipeline=pipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=uniforms } }]
+}
+
+#renderPass mainPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0 0 0 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=pipeline
+  bindGroups=[uniformsBindGroup]
+  draw=3
+}
+
+#frame main {
+  perform=[writeUniforms mainPass]
+}

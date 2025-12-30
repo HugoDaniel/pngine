@@ -1,0 +1,221 @@
+// 07 - Sprite Rendering
+// Simulated sprites using procedural textures
+// Demonstrates: instanced rendering, procedural sprites, per-instance data
+
+#define NUM_SPRITES=64
+
+#buffer instanceBuffer {
+  size="NUM_SPRITES * 4 * 4"
+  usage=[VERTEX STORAGE]
+}
+
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+#init initSprites {
+  buffer=instanceBuffer
+  shader=initShader
+  workgroups=1
+}
+
+#shaderModule initShader {
+  code="
+    struct Instances {
+      data: array<vec4f>,
+    }
+    @binding(0) @group(0) var<storage, read_write> instances: Instances;
+
+    fn hash(n: u32) -> f32 {
+      var x = n;
+      x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+      x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+      x = (x >> 16u) ^ x;
+      return f32(x) / f32(0xffffffffu);
+    }
+
+    const NUM: u32 = 64u;
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+      let i = id.x;
+      if (i >= NUM) { return; }
+
+      let x = hash(i * 7u) * 1.8 - 0.9;
+      let y = hash(i * 11u) * 1.8 - 0.9;
+      let scale = hash(i * 13u) * 0.12 + 0.04;
+      let spriteType = hash(i * 17u);  // 0-1 for sprite variety
+
+      instances.data[i] = vec4f(x, y, scale, spriteType);
+    }
+  "
+}
+
+#data quadVertices {
+  float32Array=[
+    -0.5 -0.5
+     0.5 -0.5
+    -0.5  0.5
+     0.5 -0.5
+     0.5  0.5
+    -0.5  0.5
+  ]
+}
+
+#buffer quadBuffer {
+  size=quadVertices
+  usage=[VERTEX]
+  mappedAtCreation=quadVertices
+}
+
+#shaderModule renderShader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    struct VertexOutput {
+      @builtin(position) pos: vec4f,
+      @location(0) localUV: vec2f,
+      @location(1) spriteType: f32,
+    }
+
+    @vertex
+    fn vs(
+      @location(0) quadPos: vec2f,
+      @location(1) instanceData: vec4f
+    ) -> VertexOutput {
+      let pos = instanceData.xy;
+      let scale = instanceData.z;
+      let spriteType = instanceData.w;
+
+      // Gentle floating animation
+      let floatY = sin(u.time * 2.0 + pos.x * 5.0) * 0.02;
+
+      let scaledPos = quadPos * scale;
+
+      var out: VertexOutput;
+      out.pos = vec4f(scaledPos.x / u.aspect + pos.x, scaledPos.y + pos.y + floatY, 0.0, 1.0);
+      out.localUV = quadPos + 0.5;  // Convert to 0-1 range
+      out.spriteType = spriteType;
+      return out;
+    }
+
+    fn sdCircle(p: vec2f, r: f32) -> f32 {
+      return length(p) - r;
+    }
+
+    fn sdStar(p: vec2f, r: f32, n: u32) -> f32 {
+      let an = 3.14159 / f32(n);
+      let en = 3.14159 / 2.5;
+      let acs = vec2f(cos(an), sin(an));
+      let ecs = vec2f(cos(en), sin(en));
+      let bn = (atan2(p.x, p.y) % (2.0 * an)) - an;
+      var pp = length(p) * vec2f(cos(bn), abs(sin(bn)));
+      pp -= r * acs;
+      pp += ecs * clamp(-dot(pp, ecs), 0.0, r * acs.y / ecs.y);
+      return length(pp) * sign(pp.x);
+    }
+
+    @fragment
+    fn fs(in: VertexOutput) -> @location(0) vec4f {
+      let uv = in.localUV * 2.0 - 1.0;  // -1 to 1
+
+      var d: f32;
+      var color: vec3f;
+
+      // Different sprite types based on spriteType value
+      if (in.spriteType < 0.25) {
+        // Circle sprite
+        d = sdCircle(uv, 0.6);
+        color = vec3f(1.0, 0.4, 0.4);
+      } else if (in.spriteType < 0.5) {
+        // Star sprite
+        d = sdStar(uv, 0.4, 5u);
+        color = vec3f(1.0, 0.9, 0.3);
+      } else if (in.spriteType < 0.75) {
+        // Ring sprite
+        d = abs(sdCircle(uv, 0.5)) - 0.1;
+        color = vec3f(0.4, 0.8, 1.0);
+      } else {
+        // Diamond sprite
+        d = (abs(uv.x) + abs(uv.y)) - 0.6;
+        color = vec3f(0.6, 1.0, 0.6);
+      }
+
+      // Smooth edge with glow
+      let alpha = 1.0 - smoothstep(0.0, 0.1, d);
+      let glow = 0.05 / (abs(d) + 0.05);
+
+      if (alpha < 0.01) { discard; }
+
+      return vec4f(color * (alpha + glow * 0.3), alpha);
+    }
+  "
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={
+    entryPoint=vs
+    module=renderShader
+    buffers=[
+      {
+        arrayStride=8
+        stepMode=vertex
+        attributes=[{ shaderLocation=0 offset=0 format=float32x2 }]
+      }
+      {
+        arrayStride=16
+        stepMode=instance
+        attributes=[{ shaderLocation=1 offset=0 format=float32x4 }]
+      }
+    ]
+  }
+  fragment={
+    entryPoint=fs
+    module=renderShader
+    targets=[{
+      format=preferredCanvasFormat
+      blend={
+        color={ srcFactor=src-alpha dstFactor=one-minus-src-alpha }
+        alpha={ srcFactor=one dstFactor=one-minus-src-alpha }
+      }
+    }]
+  }
+}
+
+#bindGroup bindings {
+  layout={ pipeline=pipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=uniforms } }]
+}
+
+#renderPass drawPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.1 0.1 0.2 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=pipeline
+  vertexBuffers=[quadBuffer instanceBuffer]
+  bindGroups=[bindings]
+  draw={
+    vertexCount=6
+    instanceCount=NUM_SPRITES
+  }
+}
+
+#frame main {
+  init=[initSprites]
+  perform=[writeUniforms drawPass]
+}

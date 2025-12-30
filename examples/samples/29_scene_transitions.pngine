@@ -1,0 +1,222 @@
+// 29 - Scene Transitions
+// Multiple scenes with different transition effects
+// Demonstrates: time-based state management, compositing, transition shaders
+
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+#shaderModule shader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    const PI: f32 = 3.14159265359;
+    const SCENE_DURATION: f32 = 5.0;
+    const TRANSITION_DURATION: f32 = 1.0;
+    const NUM_SCENES: u32 = 4u;
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let x = f32(i & 1u) * 4.0 - 1.0;
+      let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+      return vec4f(x, y, 0.0, 1.0);
+    }
+
+    // Scene 0: Plasma
+    fn scene0(uv: vec2f, t: f32) -> vec3f {
+      let p = uv * 10.0;
+      let v1 = sin(p.x + t);
+      let v2 = sin(p.y + t * 0.7);
+      let v3 = sin(p.x + p.y + t * 0.5);
+      let v4 = sin(sqrt(p.x * p.x + p.y * p.y) + t);
+      let v = (v1 + v2 + v3 + v4) * 0.25;
+
+      return vec3f(
+        sin(v * PI) * 0.5 + 0.5,
+        sin(v * PI + PI * 0.666) * 0.5 + 0.5,
+        sin(v * PI + PI * 1.333) * 0.5 + 0.5
+      );
+    }
+
+    // Scene 1: Tunnel
+    fn scene1(uv: vec2f, t: f32) -> vec3f {
+      let centered = uv - 0.5;
+      let dist = length(centered);
+      let angle = atan2(centered.y, centered.x);
+
+      let tunnel = fract(1.0 / (dist + 0.1) - t * 0.5);
+      let stripes = abs(fract(angle / PI * 4.0 + t) - 0.5) * 2.0;
+
+      let intensity = tunnel * stripes;
+      return vec3f(
+        intensity * 0.2,
+        intensity * 0.8,
+        intensity * 1.0
+      );
+    }
+
+    // Scene 2: Metaballs
+    fn scene2(uv: vec2f, t: f32) -> vec3f {
+      let p = (uv - 0.5) * 4.0;
+      var sum = 0.0;
+
+      for (var i = 0; i < 5; i++) {
+        let fi = f32(i);
+        let center = vec2f(
+          sin(t * (1.0 + fi * 0.3) + fi * 1.2) * 1.5,
+          cos(t * (0.8 + fi * 0.2) + fi * 0.8) * 1.5
+        );
+        let d = length(p - center);
+        sum += 0.5 / (d + 0.1);
+      }
+
+      let edge = smoothstep(1.8, 2.0, sum);
+      let fill = smoothstep(2.0, 2.5, sum);
+
+      return mix(
+        vec3f(0.1, 0.0, 0.2),
+        mix(vec3f(1.0, 0.3, 0.5), vec3f(1.0, 0.9, 0.7), fill),
+        edge
+      );
+    }
+
+    // Scene 3: Starfield
+    fn scene3(uv: vec2f, t: f32) -> vec3f {
+      var color = vec3f(0.0, 0.0, 0.05);
+
+      for (var layer = 0; layer < 3; layer++) {
+        let fl = f32(layer);
+        let speed = 0.2 + fl * 0.15;
+        let scale = 20.0 + fl * 10.0;
+
+        let p = uv * scale + vec2f(0.0, t * speed);
+        let cell = floor(p);
+        let local = fract(p) - 0.5;
+
+        // Pseudo-random star position
+        let hash = fract(sin(dot(cell, vec2f(12.9898, 78.233))) * 43758.5453);
+        let starPos = vec2f(hash, fract(hash * 13.37)) - 0.5;
+        let d = length(local - starPos * 0.8);
+
+        let brightness = 0.02 / (d + 0.01);
+        let twinkle = sin(t * 5.0 + hash * 100.0) * 0.5 + 0.5;
+
+        color += vec3f(brightness * (0.5 + twinkle * 0.5)) * (0.3 + fl * 0.3);
+      }
+
+      return min(color, vec3f(1.0));
+    }
+
+    // Transition effects
+    fn transitionFade(progress: f32) -> f32 {
+      return progress;
+    }
+
+    fn transitionWipe(uv: vec2f, progress: f32) -> f32 {
+      return step(uv.x, progress);
+    }
+
+    fn transitionDissolve(uv: vec2f, progress: f32) -> f32 {
+      let noise = fract(sin(dot(uv * 100.0, vec2f(12.9898, 78.233))) * 43758.5453);
+      return step(noise, progress);
+    }
+
+    fn transitionCircle(uv: vec2f, progress: f32) -> f32 {
+      let centered = uv - 0.5;
+      let dist = length(centered);
+      return step(dist, progress * 0.8);
+    }
+
+    @fragment
+    fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = vec2f(pos.x / u.width, pos.y / u.height);
+      let t = u.time;
+
+      // Calculate current and next scene
+      let totalCycle = SCENE_DURATION * f32(NUM_SCENES);
+      let cycleTime = fract(t / totalCycle) * totalCycle;
+
+      let currentScene = u32(cycleTime / SCENE_DURATION) % NUM_SCENES;
+      let nextScene = (currentScene + 1u) % NUM_SCENES;
+
+      let sceneProgress = fract(cycleTime / SCENE_DURATION);
+      let transitionProgress = smoothstep(
+        1.0 - TRANSITION_DURATION / SCENE_DURATION,
+        1.0,
+        sceneProgress
+      );
+
+      // Render both scenes
+      var currentColor = vec3f(0.0);
+      var nextColor = vec3f(0.0);
+
+      if (currentScene == 0u) { currentColor = scene0(uv, t); }
+      else if (currentScene == 1u) { currentColor = scene1(uv, t); }
+      else if (currentScene == 2u) { currentColor = scene2(uv, t); }
+      else { currentColor = scene3(uv, t); }
+
+      if (nextScene == 0u) { nextColor = scene0(uv, t); }
+      else if (nextScene == 1u) { nextColor = scene1(uv, t); }
+      else if (nextScene == 2u) { nextColor = scene2(uv, t); }
+      else { nextColor = scene3(uv, t); }
+
+      // Apply transition based on scene
+      var blend = 0.0;
+      if (currentScene == 0u) {
+        blend = transitionFade(transitionProgress);
+      } else if (currentScene == 1u) {
+        blend = transitionWipe(uv, transitionProgress);
+      } else if (currentScene == 2u) {
+        blend = transitionDissolve(uv, transitionProgress);
+      } else {
+        blend = transitionCircle(uv, transitionProgress);
+      }
+
+      let color = mix(currentColor, nextColor, blend);
+
+      return vec4f(color, 1.0);
+    }
+  "
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={ entryPoint=vs module=shader }
+  fragment={
+    entryPoint=fs
+    module=shader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#bindGroup bindings {
+  layout={ pipeline=pipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=uniforms } }]
+}
+
+#renderPass mainPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0 0 0 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=pipeline
+  bindGroups=[bindings]
+  draw=3
+}
+
+#frame main {
+  perform=[writeUniforms mainPass]
+}

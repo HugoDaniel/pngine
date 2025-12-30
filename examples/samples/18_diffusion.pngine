@@ -1,0 +1,211 @@
+// 18 - Diffusion Simulation
+// Heat diffusion using Laplacian
+// Demonstrates: diffusion equation, continuous values, heat map
+
+#define GRID_SIZE=128
+
+#buffer heatBuffer {
+  size="GRID_SIZE * GRID_SIZE * 4"
+  usage=[STORAGE]
+  pool=2
+}
+
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+#init initHeat {
+  buffer=heatBuffer
+  shader=initShader
+  workgroups=[8 8 1]
+}
+
+#shaderModule initShader {
+  code="
+    struct Heat { data: array<f32> }
+    @binding(0) @group(0) var<storage, read_write> heat: Heat;
+
+    const SIZE: u32 = 128u;
+
+    @compute @workgroup_size(16, 16)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+      if (id.x >= SIZE || id.y >= SIZE) { return; }
+      let idx = id.y * SIZE + id.x;
+      heat.data[idx] = 0.0;
+    }
+  "
+}
+
+#shaderModule stepShader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    struct Heat { data: array<f32> }
+    @group(0) @binding(1) var<storage, read> heatIn: Heat;
+    @group(0) @binding(2) var<storage, read_write> heatOut: Heat;
+
+    const SIZE: u32 = 128u;
+    const DIFFUSION: f32 = 0.2;
+    const DECAY: f32 = 0.995;
+
+    fn getHeat(x: i32, y: i32) -> f32 {
+      if (x < 0 || x >= i32(SIZE) || y < 0 || y >= i32(SIZE)) {
+        return 0.0;
+      }
+      return heatIn.data[u32(y) * SIZE + u32(x)];
+    }
+
+    @compute @workgroup_size(16, 16)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+      if (id.x >= SIZE || id.y >= SIZE) { return; }
+
+      let x = i32(id.x);
+      let y = i32(id.y);
+      let idx = id.y * SIZE + id.x;
+
+      // Laplacian (heat diffusion)
+      let center = getHeat(x, y);
+      let neighbors = getHeat(x-1, y) + getHeat(x+1, y) +
+                      getHeat(x, y-1) + getHeat(x, y+1);
+      let laplacian = neighbors - 4.0 * center;
+
+      var newHeat = center + DIFFUSION * laplacian;
+
+      // Add heat source (moving circle)
+      let cx = f32(SIZE) / 2.0 + sin(u.time) * f32(SIZE) * 0.3;
+      let cy = f32(SIZE) / 2.0 + cos(u.time * 0.7) * f32(SIZE) * 0.3;
+      let dist = length(vec2f(f32(id.x) - cx, f32(id.y) - cy));
+      if (dist < 8.0) {
+        newHeat += 0.5;
+      }
+
+      // Second source
+      let cx2 = f32(SIZE) / 2.0 + sin(u.time * 1.3 + 2.0) * f32(SIZE) * 0.25;
+      let cy2 = f32(SIZE) / 2.0 + cos(u.time * 0.9 + 1.0) * f32(SIZE) * 0.25;
+      let dist2 = length(vec2f(f32(id.x) - cx2, f32(id.y) - cy2));
+      if (dist2 < 6.0) {
+        newHeat += 0.3;
+      }
+
+      newHeat *= DECAY;
+      heatOut.data[idx] = clamp(newHeat, 0.0, 1.0);
+    }
+  "
+}
+
+#computePipeline stepPipeline {
+  layout=auto
+  compute={ entryPoint=main module=stepShader }
+}
+
+#bindGroup stepBindGroup {
+  layout={ pipeline=stepPipeline index=0 }
+  entries=[
+    { binding=0 resource={ buffer=uniforms } }
+    { binding=1 resource={ buffer=heatBuffer pingPong=0 } }
+    { binding=2 resource={ buffer=heatBuffer pingPong=1 } }
+  ]
+  pool=2
+}
+
+#computePass stepPass {
+  pipeline=stepPipeline
+  bindGroups=[stepBindGroup]
+  bindGroupsPoolOffsets=[0]
+  dispatch=[8 8 1]
+}
+
+#shaderModule renderShader {
+  code="
+    struct Heat { data: array<f32> }
+    @group(0) @binding(0) var<storage, read> heat: Heat;
+
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(1) var<uniform> u: Uniforms;
+
+    const SIZE: f32 = 128.0;
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let x = f32(i & 1u) * 4.0 - 1.0;
+      let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+      return vec4f(x, y, 0.0, 1.0);
+    }
+
+    fn heatColor(t: f32) -> vec3f {
+      // Black -> Blue -> Cyan -> Green -> Yellow -> Red
+      if (t < 0.2) { return mix(vec3f(0.0, 0.0, 0.0), vec3f(0.0, 0.0, 1.0), t / 0.2); }
+      if (t < 0.4) { return mix(vec3f(0.0, 0.0, 1.0), vec3f(0.0, 1.0, 1.0), (t - 0.2) / 0.2); }
+      if (t < 0.6) { return mix(vec3f(0.0, 1.0, 1.0), vec3f(0.0, 1.0, 0.0), (t - 0.4) / 0.2); }
+      if (t < 0.8) { return mix(vec3f(0.0, 1.0, 0.0), vec3f(1.0, 1.0, 0.0), (t - 0.6) / 0.2); }
+      return mix(vec3f(1.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), (t - 0.8) / 0.2);
+    }
+
+    @fragment
+    fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let cellX = u32(pos.x * SIZE / u.width);
+      let cellY = u32(pos.y * SIZE / u.height);
+      let idx = cellY * u32(SIZE) + cellX;
+
+      if (idx >= u32(SIZE * SIZE)) {
+        return vec4f(0.0, 0.0, 0.0, 1.0);
+      }
+
+      let h = heat.data[idx];
+      return vec4f(heatColor(h), 1.0);
+    }
+  "
+}
+
+#renderPipeline renderPipeline {
+  layout=auto
+  vertex={ entryPoint=vs module=renderShader }
+  fragment={
+    entryPoint=fs
+    module=renderShader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#bindGroup renderBindGroup {
+  layout={ pipeline=renderPipeline index=0 }
+  entries=[
+    { binding=0 resource={ buffer=heatBuffer pingPong=1 } }
+    { binding=1 resource={ buffer=uniforms } }
+  ]
+  pool=2
+}
+
+#renderPass drawPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0 0 0 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=renderPipeline
+  bindGroups=[renderBindGroup]
+  bindGroupsPoolOffsets=[0]
+  draw=3
+}
+
+#frame main {
+  init=[initHeat]
+  perform=[writeUniforms stepPass drawPass]
+}

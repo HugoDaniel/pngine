@@ -1,0 +1,174 @@
+// 11 - Simple Lighting
+// Phong shading with diffuse and specular
+// Demonstrates: 3D transforms, normal vectors, lighting calculation
+
+#data cubeVertices {
+  cube={ format=[position3 normal3 color3] }
+}
+
+#buffer vertexBuffer {
+  size=cubeVertices
+  usage=[VERTEX]
+  mappedAtCreation=cubeVertices
+}
+
+#buffer uniforms {
+  size=128
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+#shaderModule shader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    struct VertexInput {
+      @location(0) pos: vec3f,
+      @location(1) normal: vec3f,
+      @location(2) color: vec3f,
+    }
+
+    struct VertexOutput {
+      @builtin(position) pos: vec4f,
+      @location(0) worldPos: vec3f,
+      @location(1) normal: vec3f,
+      @location(2) color: vec3f,
+    }
+
+    const PI: f32 = 3.14159265359;
+
+    fn rotateY(p: vec3f, angle: f32) -> vec3f {
+      let c = cos(angle);
+      let s = sin(angle);
+      return vec3f(p.x * c + p.z * s, p.y, -p.x * s + p.z * c);
+    }
+
+    fn rotateX(p: vec3f, angle: f32) -> vec3f {
+      let c = cos(angle);
+      let s = sin(angle);
+      return vec3f(p.x, p.y * c - p.z * s, p.y * s + p.z * c);
+    }
+
+    @vertex
+    fn vs(in: VertexInput) -> VertexOutput {
+      let t = u.time;
+
+      // Rotate cube
+      var pos = in.pos * 0.4;
+      var normal = in.normal;
+
+      pos = rotateY(pos, t * 0.5);
+      pos = rotateX(pos, t * 0.3);
+      normal = rotateY(normal, t * 0.5);
+      normal = rotateX(normal, t * 0.3);
+
+      // Simple perspective
+      let z = pos.z + 2.0;
+      let projX = pos.x / z / u.aspect;
+      let projY = pos.y / z;
+
+      var out: VertexOutput;
+      out.pos = vec4f(projX, projY, pos.z * 0.1 + 0.5, 1.0);
+      out.worldPos = pos;
+      out.normal = normal;
+      out.color = in.color;
+      return out;
+    }
+
+    @fragment
+    fn fs(in: VertexOutput) -> @location(0) vec4f {
+      // Light direction (animated)
+      let lightAngle = u.time * 0.7;
+      let lightDir = normalize(vec3f(sin(lightAngle), 0.7, cos(lightAngle)));
+
+      // View direction (from camera at z=-2)
+      let viewDir = normalize(vec3f(0.0, 0.0, -1.0) - in.worldPos);
+
+      // Normal
+      let N = normalize(in.normal);
+
+      // Phong lighting
+      let ambient = 0.15;
+      let diffuse = max(dot(N, lightDir), 0.0);
+
+      // Specular (Blinn-Phong)
+      let halfDir = normalize(lightDir + viewDir);
+      let specular = pow(max(dot(N, halfDir), 0.0), 32.0);
+
+      let lighting = ambient + diffuse * 0.7 + specular * 0.5;
+      let color = in.color * lighting;
+
+      return vec4f(color, 1.0);
+    }
+  "
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={
+    entryPoint=vs
+    module=shader
+    buffers=[{
+      arrayStride=36
+      attributes=[
+        { shaderLocation=0 offset=0 format=float32x3 }
+        { shaderLocation=1 offset=12 format=float32x3 }
+        { shaderLocation=2 offset=24 format=float32x3 }
+      ]
+    }]
+  }
+  fragment={
+    entryPoint=fs
+    module=shader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+  primitive={ cullMode=back }
+  depthStencil={
+    format=depth24plus
+    depthWriteEnabled=true
+    depthCompare=less
+  }
+}
+
+#texture depthTexture {
+  size=[canvasWidth canvasHeight]
+  format=depth24plus
+  usage=[RENDER_ATTACHMENT]
+}
+
+#bindGroup uniformsBindGroup {
+  layout={ pipeline=pipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=uniforms } }]
+}
+
+#renderPass mainPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.1 0.1 0.15 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  depthStencilAttachment={
+    view=depthTexture
+    depthClearValue=1.0
+    depthLoadOp=clear
+    depthStoreOp=store
+  }
+  pipeline=pipeline
+  vertexBuffers=[vertexBuffer]
+  bindGroups=[uniformsBindGroup]
+  draw=36
+}
+
+#frame main {
+  perform=[writeUniforms mainPass]
+}

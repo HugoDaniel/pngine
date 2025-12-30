@@ -1,0 +1,173 @@
+// 14 - Procedural Skybox
+// Animated sky with sun, clouds, and atmosphere
+// Demonstrates: procedural environment, gradient sky, volumetric clouds
+
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+#shaderModule shader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    const PI: f32 = 3.14159265359;
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let x = f32(i & 1u) * 4.0 - 1.0;
+      let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+      return vec4f(x, y, 0.0, 1.0);
+    }
+
+    fn hash(p: vec3f) -> f32 {
+      var p3 = fract(p * 0.1031);
+      p3 += dot(p3, p3.yzx + 33.33);
+      return fract((p3.x + p3.y) * p3.z);
+    }
+
+    fn noise(p: vec3f) -> f32 {
+      let i = floor(p);
+      let f = fract(p);
+      let u = f * f * (3.0 - 2.0 * f);
+
+      return mix(
+        mix(
+          mix(hash(i + vec3f(0.0, 0.0, 0.0)), hash(i + vec3f(1.0, 0.0, 0.0)), u.x),
+          mix(hash(i + vec3f(0.0, 1.0, 0.0)), hash(i + vec3f(1.0, 1.0, 0.0)), u.x),
+          u.y
+        ),
+        mix(
+          mix(hash(i + vec3f(0.0, 0.0, 1.0)), hash(i + vec3f(1.0, 0.0, 1.0)), u.x),
+          mix(hash(i + vec3f(0.0, 1.0, 1.0)), hash(i + vec3f(1.0, 1.0, 1.0)), u.x),
+          u.y
+        ),
+        u.z
+      );
+    }
+
+    fn fbm(p: vec3f) -> f32 {
+      var value = 0.0;
+      var amplitude = 0.5;
+      var freq = 1.0;
+      var pos = p;
+      for (var i = 0u; i < 4u; i++) {
+        value += amplitude * noise(pos * freq);
+        amplitude *= 0.5;
+        freq *= 2.0;
+      }
+      return value;
+    }
+
+    @fragment
+    fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = vec2f(pos.x / u.width, 1.0 - pos.y / u.height);
+
+      // Create ray direction (simple spherical projection)
+      let phi = uv.x * PI * 2.0;
+      let theta = uv.y * PI;
+      let dir = vec3f(
+        sin(theta) * cos(phi),
+        cos(theta),
+        sin(theta) * sin(phi)
+      );
+
+      // Animated rotation
+      let angle = u.time * 0.05;
+      let c = cos(angle);
+      let s = sin(angle);
+      let rotDir = vec3f(
+        dir.x * c - dir.z * s,
+        dir.y,
+        dir.x * s + dir.z * c
+      );
+
+      // Sun position
+      let sunAngle = u.time * 0.1;
+      let sunDir = normalize(vec3f(cos(sunAngle) * 0.5, 0.4 + sin(sunAngle * 0.3) * 0.2, sin(sunAngle) * 0.5));
+
+      // Sky gradient
+      let horizon = 1.0 - abs(rotDir.y);
+      let skyColor = mix(
+        vec3f(0.2, 0.4, 0.8),  // Zenith blue
+        vec3f(0.7, 0.8, 0.95), // Horizon light
+        pow(horizon, 0.5)
+      );
+
+      // Sun
+      let sunDist = length(rotDir - sunDir);
+      let sun = exp(-sunDist * 8.0) * 1.5;
+      let sunGlow = exp(-sunDist * 2.0) * 0.5;
+
+      // Clouds
+      let cloudPos = rotDir * 2.0 + vec3f(u.time * 0.02, 0.0, u.time * 0.01);
+      let cloudDensity = fbm(cloudPos * 3.0);
+      let cloudShape = smoothstep(0.4, 0.7, cloudDensity);
+
+      // Cloud color (lit by sun)
+      let cloudSunDot = max(dot(rotDir, sunDir), 0.0);
+      let cloudColor = mix(
+        vec3f(0.8, 0.85, 0.9),
+        vec3f(1.0, 0.95, 0.9),
+        cloudSunDot
+      );
+
+      // Atmosphere scattering (sunset colors near horizon)
+      let sunset = pow(horizon, 2.0) * max(dot(normalize(vec3f(rotDir.x, 0.0, rotDir.z)), sunDir), 0.0);
+      let sunsetColor = vec3f(1.0, 0.5, 0.2) * sunset * 0.5;
+
+      // Combine
+      var color = skyColor;
+      color += sunsetColor;
+      color = mix(color, cloudColor, cloudShape * 0.8);
+      color += vec3f(1.0, 0.95, 0.8) * sun;
+      color += vec3f(1.0, 0.8, 0.5) * sunGlow;
+
+      // Tone mapping
+      color = color / (color + vec3f(1.0));
+
+      return vec4f(color, 1.0);
+    }
+  "
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={ entryPoint=vs module=shader }
+  fragment={
+    entryPoint=fs
+    module=shader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#bindGroup bindings {
+  layout={ pipeline=pipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=uniforms } }]
+}
+
+#renderPass mainPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0 0 0 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=pipeline
+  bindGroups=[bindings]
+  draw=3
+}
+
+#frame main {
+  perform=[writeUniforms mainPass]
+}

@@ -1,0 +1,294 @@
+// 19 - Fluid Simulation
+// 2D fluid with velocity advection and density transport
+// Demonstrates: multi-buffer simulation, semi-Lagrangian advection, ping-pong
+
+#define GRID_SIZE=96
+
+// Velocity field (vec2 per cell) - stored as 2 floats
+#buffer velocityBuffer {
+  size="GRID_SIZE * GRID_SIZE * 2 * 4"
+  usage=[STORAGE]
+  pool=2
+}
+
+// Density field (f32 per cell)
+#buffer densityBuffer {
+  size="GRID_SIZE * GRID_SIZE * 4"
+  usage=[STORAGE]
+  pool=2
+}
+
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+#init initFluid {
+  buffer=velocityBuffer
+  shader=initShader
+  workgroups=[6 6 1]
+}
+
+#shaderModule initShader {
+  code="
+    struct Velocity { data: array<vec2f> }
+    struct Density { data: array<f32> }
+
+    @binding(0) @group(0) var<storage, read_write> velocity: Velocity;
+
+    const SIZE: u32 = 96u;
+
+    @compute @workgroup_size(16, 16)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+      if (id.x >= SIZE || id.y >= SIZE) { return; }
+      let idx = id.y * SIZE + id.x;
+      velocity.data[idx] = vec2f(0.0);
+    }
+  "
+}
+
+#shaderModule stepShader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    struct Velocity { data: array<vec2f> }
+    struct Density { data: array<f32> }
+
+    @group(0) @binding(1) var<storage, read> velIn: Velocity;
+    @group(0) @binding(2) var<storage, read_write> velOut: Velocity;
+    @group(0) @binding(3) var<storage, read> denIn: Density;
+    @group(0) @binding(4) var<storage, read_write> denOut: Density;
+
+    const SIZE: u32 = 96u;
+    const SIZEF: f32 = 96.0;
+    const DT: f32 = 0.5;
+    const DECAY: f32 = 0.995;
+
+    fn sampleVelBilinear(x: f32, y: f32) -> vec2f {
+      let x0 = clamp(i32(floor(x)), 0, i32(SIZE) - 1);
+      let y0 = clamp(i32(floor(y)), 0, i32(SIZE) - 1);
+      let x1 = min(x0 + 1, i32(SIZE) - 1);
+      let y1 = min(y0 + 1, i32(SIZE) - 1);
+
+      let fx = fract(x);
+      let fy = fract(y);
+
+      let v00 = velIn.data[u32(y0) * SIZE + u32(x0)];
+      let v10 = velIn.data[u32(y0) * SIZE + u32(x1)];
+      let v01 = velIn.data[u32(y1) * SIZE + u32(x0)];
+      let v11 = velIn.data[u32(y1) * SIZE + u32(x1)];
+
+      return mix(mix(v00, v10, fx), mix(v01, v11, fx), fy);
+    }
+
+    fn sampleDenBilinear(x: f32, y: f32) -> f32 {
+      let x0 = clamp(i32(floor(x)), 0, i32(SIZE) - 1);
+      let y0 = clamp(i32(floor(y)), 0, i32(SIZE) - 1);
+      let x1 = min(x0 + 1, i32(SIZE) - 1);
+      let y1 = min(y0 + 1, i32(SIZE) - 1);
+
+      let fx = fract(x);
+      let fy = fract(y);
+
+      let d00 = denIn.data[u32(y0) * SIZE + u32(x0)];
+      let d10 = denIn.data[u32(y0) * SIZE + u32(x1)];
+      let d01 = denIn.data[u32(y1) * SIZE + u32(x0)];
+      let d11 = denIn.data[u32(y1) * SIZE + u32(x1)];
+
+      return mix(mix(d00, d10, fx), mix(d01, d11, fx), fy);
+    }
+
+    @compute @workgroup_size(16, 16)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+      if (id.x >= SIZE || id.y >= SIZE) { return; }
+
+      let x = f32(id.x);
+      let y = f32(id.y);
+      let idx = id.y * SIZE + id.x;
+
+      let vel = velIn.data[idx];
+
+      // Semi-Lagrangian advection: trace backward
+      let prevX = x - vel.x * DT;
+      let prevY = y - vel.y * DT;
+
+      var newVel = sampleVelBilinear(prevX, prevY);
+      var newDen = sampleDenBilinear(prevX, prevY);
+
+      // Add rotating force sources
+      let t = u.time;
+
+      // Source 1 - red
+      let cx1 = SIZEF * 0.5 + sin(t * 0.7) * SIZEF * 0.3;
+      let cy1 = SIZEF * 0.5 + cos(t * 0.5) * SIZEF * 0.3;
+      let d1 = length(vec2f(x - cx1, y - cy1));
+      if (d1 < 6.0) {
+        let force = vec2f(cos(t * 2.0), sin(t * 2.0)) * 8.0;
+        newVel += force * (1.0 - d1 / 6.0);
+        newDen += 2.0 * (1.0 - d1 / 6.0);
+      }
+
+      // Source 2 - blue
+      let cx2 = SIZEF * 0.5 + sin(t * 0.9 + 2.0) * SIZEF * 0.25;
+      let cy2 = SIZEF * 0.5 + cos(t * 0.6 + 1.0) * SIZEF * 0.25;
+      let d2 = length(vec2f(x - cx2, y - cy2));
+      if (d2 < 5.0) {
+        let force = vec2f(sin(t * 1.5), -cos(t * 1.5)) * 6.0;
+        newVel += force * (1.0 - d2 / 5.0);
+        newDen += 1.5 * (1.0 - d2 / 5.0);
+      }
+
+      // Boundary conditions
+      if (id.x < 2u || id.x >= SIZE - 2u || id.y < 2u || id.y >= SIZE - 2u) {
+        newVel *= 0.5;
+      }
+
+      velOut.data[idx] = newVel * DECAY;
+      denOut.data[idx] = clamp(newDen * DECAY, 0.0, 3.0);
+    }
+  "
+}
+
+#computePipeline stepPipeline {
+  layout=auto
+  compute={ entryPoint=main module=stepShader }
+}
+
+#bindGroup stepBindGroup {
+  layout={ pipeline=stepPipeline index=0 }
+  entries=[
+    { binding=0 resource={ buffer=uniforms } }
+    { binding=1 resource={ buffer=velocityBuffer pingPong=0 } }
+    { binding=2 resource={ buffer=velocityBuffer pingPong=1 } }
+    { binding=3 resource={ buffer=densityBuffer pingPong=0 } }
+    { binding=4 resource={ buffer=densityBuffer pingPong=1 } }
+  ]
+  pool=2
+}
+
+#computePass stepPass {
+  pipeline=stepPipeline
+  bindGroups=[stepBindGroup]
+  bindGroupsPoolOffsets=[0]
+  dispatch=[6 6 1]
+}
+
+#shaderModule renderShader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    struct Density { data: array<f32> }
+    struct Velocity { data: array<vec2f> }
+
+    @group(0) @binding(1) var<storage, read> density: Density;
+    @group(0) @binding(2) var<storage, read> velocity: Velocity;
+
+    const SIZE: f32 = 96.0;
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let x = f32(i & 1u) * 4.0 - 1.0;
+      let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+      return vec4f(x, y, 0.0, 1.0);
+    }
+
+    fn hsv2rgb(h: f32, s: f32, v: f32) -> vec3f {
+      let c = v * s;
+      let x = c * (1.0 - abs(fract(h * 6.0) * 2.0 - 1.0));
+      let m = v - c;
+
+      var rgb = vec3f(0.0);
+      let hi = u32(h * 6.0) % 6u;
+      if (hi == 0u) { rgb = vec3f(c, x, 0.0); }
+      else if (hi == 1u) { rgb = vec3f(x, c, 0.0); }
+      else if (hi == 2u) { rgb = vec3f(0.0, c, x); }
+      else if (hi == 3u) { rgb = vec3f(0.0, x, c); }
+      else if (hi == 4u) { rgb = vec3f(x, 0.0, c); }
+      else { rgb = vec3f(c, 0.0, x); }
+
+      return rgb + vec3f(m);
+    }
+
+    @fragment
+    fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let cellX = u32(pos.x * SIZE / u.width);
+      let cellY = u32(pos.y * SIZE / u.height);
+
+      if (cellX >= u32(SIZE) || cellY >= u32(SIZE)) {
+        return vec4f(0.0, 0.0, 0.0, 1.0);
+      }
+
+      let idx = cellY * u32(SIZE) + cellX;
+
+      let den = density.data[idx];
+      let vel = velocity.data[idx];
+
+      // Color from velocity direction
+      let speed = length(vel);
+      let hue = atan2(vel.y, vel.x) / 6.283 + 0.5;
+
+      let velocityColor = hsv2rgb(hue, 0.8, min(speed * 0.15, 1.0));
+
+      // Combine velocity color with density brightness
+      let densityBrightness = clamp(den * 0.4, 0.0, 1.0);
+
+      let color = velocityColor * 0.6 + vec3f(densityBrightness);
+
+      return vec4f(color, 1.0);
+    }
+  "
+}
+
+#renderPipeline renderPipeline {
+  layout=auto
+  vertex={ entryPoint=vs module=renderShader }
+  fragment={
+    entryPoint=fs
+    module=renderShader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#bindGroup renderBindGroup {
+  layout={ pipeline=renderPipeline index=0 }
+  entries=[
+    { binding=0 resource={ buffer=uniforms } }
+    { binding=1 resource={ buffer=densityBuffer pingPong=1 } }
+    { binding=2 resource={ buffer=velocityBuffer pingPong=1 } }
+  ]
+  pool=2
+}
+
+#renderPass drawPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0 0 0 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=renderPipeline
+  bindGroups=[renderBindGroup]
+  bindGroupsPoolOffsets=[0]
+  draw=3
+}
+
+#frame main {
+  init=[initFluid]
+  perform=[writeUniforms stepPass drawPass]
+}

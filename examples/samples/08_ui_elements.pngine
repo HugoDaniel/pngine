@@ -1,0 +1,240 @@
+// 08 - UI Elements
+// Simple UI components with instanced rendering
+// Demonstrates: instanced quads, alpha blending, resolution-independent UI
+
+#define NUM_UI_ELEMENTS=12
+
+#data quadVertices {
+  float32Array=[
+    0.0 0.0
+    1.0 0.0
+    0.0 1.0
+    1.0 0.0
+    1.0 1.0
+    0.0 1.0
+  ]
+}
+
+#buffer quadBuffer {
+  size=quadVertices
+  usage=[VERTEX]
+  mappedAtCreation=quadVertices
+}
+
+// UI element data: x, y, width, height, r, g, b, a (normalized coords)
+#data uiData {
+  float32Array=[
+    // Background panel
+    0.05 0.1 0.35 0.5 0.15 0.15 0.2 0.9
+    // Title bar
+    0.05 0.52 0.35 0.06 0.3 0.3 0.4 1.0
+    // Button 1 (green)
+    0.08 0.38 0.12 0.06 0.2 0.5 0.2 1.0
+    // Button 2 (red)
+    0.24 0.38 0.12 0.06 0.5 0.2 0.2 1.0
+    // Progress bar background
+    0.08 0.26 0.28 0.04 0.1 0.1 0.12 1.0
+    // Progress bar fill (animated via shader)
+    0.08 0.26 0.14 0.04 0.3 0.7 0.3 1.0
+    // Text line 1 placeholder
+    0.08 0.46 0.2 0.025 0.7 0.7 0.7 1.0
+    // Text line 2 placeholder
+    0.08 0.32 0.15 0.02 0.6 0.6 0.6 1.0
+    // Icon placeholder
+    0.32 0.14 0.05 0.05 0.5 0.5 0.8 1.0
+    // Border accent (bottom)
+    0.05 0.1 0.35 0.005 0.4 0.7 0.4 1.0
+    // Mini status dot
+    0.36 0.55 0.02 0.02 0.3 0.8 0.3 1.0
+    // Separator line
+    0.08 0.24 0.28 0.003 0.3 0.3 0.35 1.0
+  ]
+}
+
+#buffer uiBuffer {
+  size=uiData
+  usage=[VERTEX]
+  mappedAtCreation=uiData
+}
+
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+#shaderModule shader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    struct VertexOutput {
+      @builtin(position) pos: vec4f,
+      @location(0) color: vec4f,
+      @location(1) localUV: vec2f,
+      @location(2) @interpolate(flat) elementIdx: u32,
+    }
+
+    @vertex
+    fn vs(
+      @builtin(instance_index) instIdx: u32,
+      @location(0) quadPos: vec2f,
+      @location(1) rect: vec4f,
+      @location(2) color: vec4f
+    ) -> VertexOutput {
+      var r = rect;
+
+      // Animate progress bar (element 5)
+      if (instIdx == 5u) {
+        r.z = 0.05 + (sin(u.time * 0.5) * 0.5 + 0.5) * 0.23;
+      }
+
+      // Animate status dot (element 10) - pulsing
+      if (instIdx == 10u) {
+        let pulse = 1.0 + sin(u.time * 3.0) * 0.2;
+        r.z *= pulse;
+        r.w *= pulse;
+      }
+
+      // Convert from normalized [0,1] to clip space [-1,1]
+      let x = (r.x + quadPos.x * r.z) * 2.0 - 1.0;
+      let y = (r.y + quadPos.y * r.w) * 2.0 - 1.0;
+
+      var out: VertexOutput;
+      out.pos = vec4f(x, y, 0.0, 1.0);
+      out.color = color;
+      out.localUV = quadPos;
+      out.elementIdx = instIdx;
+      return out;
+    }
+
+    @fragment
+    fn fs(in: VertexOutput) -> @location(0) vec4f {
+      var color = in.color;
+
+      // Add rounded corners for buttons (elements 2, 3)
+      if (in.elementIdx == 2u || in.elementIdx == 3u) {
+        let cornerRadius = 0.15;
+        let uv = in.localUV;
+
+        // Check corners
+        var d = 0.0;
+        if (uv.x < cornerRadius && uv.y < cornerRadius) {
+          d = length(uv - vec2f(cornerRadius)) - cornerRadius;
+        } else if (uv.x > 1.0 - cornerRadius && uv.y < cornerRadius) {
+          d = length(uv - vec2f(1.0 - cornerRadius, cornerRadius)) - cornerRadius;
+        } else if (uv.x < cornerRadius && uv.y > 1.0 - cornerRadius) {
+          d = length(uv - vec2f(cornerRadius, 1.0 - cornerRadius)) - cornerRadius;
+        } else if (uv.x > 1.0 - cornerRadius && uv.y > 1.0 - cornerRadius) {
+          d = length(uv - vec2f(1.0 - cornerRadius)) - cornerRadius;
+        }
+
+        if (d > 0.0) {
+          color.a = 0.0;
+        }
+
+        // Add highlight at top
+        if (in.localUV.y > 0.7) {
+          color = mix(color, vec4f(1.0, 1.0, 1.0, color.a), 0.2);
+        }
+      }
+
+      // Add subtle border to panel (element 0)
+      if (in.elementIdx == 0u) {
+        let borderWidth = 0.008;
+        let isEdge = in.localUV.x < borderWidth || in.localUV.x > 1.0 - borderWidth ||
+                     in.localUV.y < borderWidth || in.localUV.y > 1.0 - borderWidth;
+        if (isEdge) {
+          color = mix(color, vec4f(0.4, 0.4, 0.5, color.a), 0.5);
+        }
+      }
+
+      // Round the icon (element 8)
+      if (in.elementIdx == 8u) {
+        let uv = in.localUV * 2.0 - 1.0;
+        if (length(uv) > 1.0) {
+          color.a = 0.0;
+        }
+      }
+
+      // Round the status dot (element 10)
+      if (in.elementIdx == 10u) {
+        let uv = in.localUV * 2.0 - 1.0;
+        if (length(uv) > 1.0) {
+          color.a = 0.0;
+        }
+      }
+
+      if (color.a < 0.01) { discard; }
+
+      return color;
+    }
+  "
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={
+    entryPoint=vs
+    module=shader
+    buffers=[
+      {
+        arrayStride=8
+        stepMode=vertex
+        attributes=[{ shaderLocation=0 offset=0 format=float32x2 }]
+      }
+      {
+        arrayStride=32
+        stepMode=instance
+        attributes=[
+          { shaderLocation=1 offset=0 format=float32x4 }
+          { shaderLocation=2 offset=16 format=float32x4 }
+        ]
+      }
+    ]
+  }
+  fragment={
+    entryPoint=fs
+    module=shader
+    targets=[{
+      format=preferredCanvasFormat
+      blend={
+        color={ srcFactor=src-alpha dstFactor=one-minus-src-alpha }
+        alpha={ srcFactor=one dstFactor=one-minus-src-alpha }
+      }
+    }]
+  }
+}
+
+#bindGroup bindings {
+  layout={ pipeline=pipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=uniforms } }]
+}
+
+#renderPass drawPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.08 0.08 0.12 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=pipeline
+  vertexBuffers=[quadBuffer uiBuffer]
+  bindGroups=[bindings]
+  draw={
+    vertexCount=6
+    instanceCount=NUM_UI_ELEMENTS
+  }
+}
+
+#frame main {
+  perform=[writeUniforms drawPass]
+}

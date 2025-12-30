@@ -1,0 +1,215 @@
+// 06 - Multiple Triangles
+// Procedural geometry with compute shader initialization
+// Demonstrates: compute init, instancing, procedural positions
+
+#define NUM_TRIANGLES=64
+
+// Triangle instance data: pos(2) + scale(1) + rotation(1) + color(3) + pad(1) = 8 floats
+#buffer instanceBuffer {
+  size="NUM_TRIANGLES * 8 * 4"
+  usage=[VERTEX STORAGE]
+}
+
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+// Initialize triangles with compute shader
+#init initTriangles {
+  buffer=instanceBuffer
+  shader=initShader
+  workgroups=1
+}
+
+#shaderModule initShader {
+  code="
+    struct Triangle {
+      pos: vec2f,
+      scale: f32,
+      rotation: f32,
+      color: vec3f,
+      pad: f32,
+    }
+    struct Triangles { data: array<Triangle> }
+
+    @binding(0) @group(0) var<storage, read_write> triangles: Triangles;
+
+    fn hash(n: u32) -> f32 {
+      var x = n;
+      x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+      x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+      x = (x >> 16u) ^ x;
+      return f32(x) / f32(0xffffffffu);
+    }
+
+    const NUM: u32 = 64u;
+    const PI: f32 = 3.14159265359;
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+      let i = id.x;
+      if (i >= NUM) { return; }
+
+      // Grid layout with jitter
+      let cols = 8u;
+      let row = i / cols;
+      let col = i % cols;
+
+      let baseX = (f32(col) / f32(cols - 1u)) * 1.6 - 0.8;
+      let baseY = (f32(row) / f32(cols - 1u)) * 1.6 - 0.8;
+
+      triangles.data[i].pos = vec2f(
+        baseX + (hash(i * 7u) - 0.5) * 0.1,
+        baseY + (hash(i * 11u) - 0.5) * 0.1
+      );
+      triangles.data[i].scale = 0.05 + hash(i * 13u) * 0.05;
+      triangles.data[i].rotation = hash(i * 17u) * PI * 2.0;
+
+      // Rainbow colors
+      let hue = f32(i) / f32(NUM);
+      let h = hue * 6.0;
+      let c = 0.8;
+      let x = c * (1.0 - abs(fract(h / 2.0) * 2.0 - 1.0));
+
+      var rgb = vec3f(0.0);
+      let hi = u32(h) % 6u;
+      if (hi == 0u) { rgb = vec3f(c, x, 0.0); }
+      else if (hi == 1u) { rgb = vec3f(x, c, 0.0); }
+      else if (hi == 2u) { rgb = vec3f(0.0, c, x); }
+      else if (hi == 3u) { rgb = vec3f(0.0, x, c); }
+      else if (hi == 4u) { rgb = vec3f(x, 0.0, c); }
+      else { rgb = vec3f(c, 0.0, x); }
+
+      triangles.data[i].color = rgb + 0.2;
+      triangles.data[i].pad = 0.0;
+    }
+  "
+}
+
+// Triangle vertices
+#data vertexData {
+  float32Array=[
+    0.0 1.0
+    -0.866 -0.5
+    0.866 -0.5
+  ]
+}
+
+#buffer vertexBuffer {
+  size=vertexData
+  usage=[VERTEX]
+  mappedAtCreation=vertexData
+}
+
+#shaderModule renderShader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    struct VertexOutput {
+      @builtin(position) pos: vec4f,
+      @location(0) color: vec3f,
+    }
+
+    @vertex
+    fn vs(
+      @location(0) vertex: vec2f,
+      @location(1) instPos: vec2f,
+      @location(2) instScale: f32,
+      @location(3) instRotation: f32,
+      @location(4) instColor: vec3f,
+      @location(5) pad: f32
+    ) -> VertexOutput {
+      // Animate rotation
+      let angle = instRotation + u.time * (0.5 + instScale * 2.0);
+      let c = cos(angle);
+      let s = sin(angle);
+
+      var pos = vertex * instScale;
+      pos = vec2f(pos.x * c - pos.y * s, pos.x * s + pos.y * c);
+      pos += instPos;
+
+      // Aspect ratio correction
+      pos.x /= u.aspect;
+
+      var out: VertexOutput;
+      out.pos = vec4f(pos, 0.0, 1.0);
+      out.color = instColor;
+      return out;
+    }
+
+    @fragment
+    fn fs(in: VertexOutput) -> @location(0) vec4f {
+      return vec4f(in.color, 1.0);
+    }
+  "
+}
+
+#renderPipeline renderPipeline {
+  layout=auto
+  vertex={
+    entryPoint=vs
+    module=renderShader
+    buffers=[
+      {
+        arrayStride=8
+        stepMode=vertex
+        attributes=[
+          { shaderLocation=0 offset=0 format=float32x2 }
+        ]
+      }
+      {
+        arrayStride=32
+        stepMode=instance
+        attributes=[
+          { shaderLocation=1 offset=0 format=float32x2 }
+          { shaderLocation=2 offset=8 format=float32 }
+          { shaderLocation=3 offset=12 format=float32 }
+          { shaderLocation=4 offset=16 format=float32x3 }
+          { shaderLocation=5 offset=28 format=float32 }
+        ]
+      }
+    ]
+  }
+  fragment={
+    entryPoint=fs
+    module=renderShader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#bindGroup uniformsBindGroup {
+  layout={ pipeline=renderPipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=uniforms } }]
+}
+
+#renderPass mainPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.08 0.08 0.12 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=renderPipeline
+  vertexBuffers=[vertexBuffer instanceBuffer]
+  bindGroups=[uniformsBindGroup]
+  draw={
+    vertexCount=3
+    instanceCount=NUM_TRIANGLES
+  }
+}
+
+#frame main {
+  init=[initTriangles]
+  perform=[writeUniforms mainPass]
+}

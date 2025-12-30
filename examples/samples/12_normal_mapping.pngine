@@ -1,0 +1,155 @@
+// 12 - Normal Mapping (Procedural)
+// Per-pixel bump mapping with procedural normals
+// Demonstrates: tangent space, procedural normal generation, specular lighting
+
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+#shaderModule shader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    const PI: f32 = 3.14159265359;
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let x = f32(i & 1u) * 4.0 - 1.0;
+      let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+      return vec4f(x, y, 0.0, 1.0);
+    }
+
+    // Hash function for noise
+    fn hash(p: vec2f) -> f32 {
+      return fract(sin(dot(p, vec2f(127.1, 311.7))) * 43758.5453);
+    }
+
+    fn noise(p: vec2f) -> f32 {
+      let i = floor(p);
+      let f = fract(p);
+      let u = f * f * (3.0 - 2.0 * f);
+
+      return mix(
+        mix(hash(i + vec2f(0.0, 0.0)), hash(i + vec2f(1.0, 0.0)), u.x),
+        mix(hash(i + vec2f(0.0, 1.0)), hash(i + vec2f(1.0, 1.0)), u.x),
+        u.y
+      );
+    }
+
+    fn fbm(p: vec2f) -> f32 {
+      var value = 0.0;
+      var amplitude = 0.5;
+      var freq = 1.0;
+      for (var i = 0u; i < 5u; i++) {
+        value += amplitude * noise(p * freq);
+        amplitude *= 0.5;
+        freq *= 2.0;
+      }
+      return value;
+    }
+
+    // Get normal from height map gradient
+    fn getNormal(uv: vec2f) -> vec3f {
+      let eps = 0.005;
+      let h = fbm(uv * 8.0);
+      let hL = fbm((uv + vec2f(-eps, 0.0)) * 8.0);
+      let hR = fbm((uv + vec2f(eps, 0.0)) * 8.0);
+      let hD = fbm((uv + vec2f(0.0, -eps)) * 8.0);
+      let hU = fbm((uv + vec2f(0.0, eps)) * 8.0);
+
+      return normalize(vec3f(hL - hR, hD - hU, 0.1));
+    }
+
+    @fragment
+    fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = vec2f(pos.x / u.width, pos.y / u.height);
+      var p = (uv - 0.5) * 2.0;
+      p.x *= u.aspect;
+
+      // Check if inside the bumped surface area
+      if (length(p) > 0.8) {
+        return vec4f(0.1, 0.1, 0.15, 1.0);
+      }
+
+      // Surface UV (animate slowly)
+      let surfUV = uv + vec2f(u.time * 0.02, u.time * 0.01);
+
+      // Get procedural normal
+      let normal = getNormal(surfUV);
+
+      // Transform normal from tangent space to view space
+      // Base surface normal is (0, 0, 1), tangent is (1, 0, 0), bitangent is (0, 1, 0)
+      let worldNormal = normalize(vec3f(normal.x, normal.y, 1.0 - abs(normal.x) - abs(normal.y)));
+
+      // Animated light position
+      let lightAngle = u.time * 0.5;
+      let lightPos = vec3f(cos(lightAngle) * 0.5, sin(lightAngle) * 0.5, 1.0);
+      let lightDir = normalize(lightPos);
+
+      // View direction (from camera looking at surface)
+      let viewDir = vec3f(0.0, 0.0, 1.0);
+
+      // Phong lighting
+      let ambient = 0.1;
+      let diffuse = max(dot(worldNormal, lightDir), 0.0);
+
+      // Specular
+      let halfDir = normalize(lightDir + viewDir);
+      let specular = pow(max(dot(worldNormal, halfDir), 0.0), 64.0);
+
+      // Base color
+      let height = fbm(surfUV * 8.0);
+      let baseColor = mix(
+        vec3f(0.4, 0.3, 0.2),
+        vec3f(0.6, 0.5, 0.4),
+        height
+      );
+
+      let finalColor = baseColor * (ambient + diffuse * 0.8) + vec3f(1.0, 0.9, 0.8) * specular * 0.5;
+
+      return vec4f(finalColor, 1.0);
+    }
+  "
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={ entryPoint=vs module=shader }
+  fragment={
+    entryPoint=fs
+    module=shader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#bindGroup bindings {
+  layout={ pipeline=pipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=uniforms } }]
+}
+
+#renderPass mainPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.1 0.1 0.15 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=pipeline
+  bindGroups=[bindings]
+  draw=3
+}
+
+#frame main {
+  perform=[writeUniforms mainPass]
+}

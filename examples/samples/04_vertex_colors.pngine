@@ -1,0 +1,113 @@
+// 04 - Vertex Colors
+// Per-vertex color interpolation
+// Demonstrates: vertex buffers, color interpolation, basic 2D
+
+#data vertexData {
+  // Triangle with colored vertices: pos(x,y) + color(r,g,b)
+  float32Array=[
+    0.0 0.5 1.0 0.0 0.0
+    -0.5 -0.5 0.0 1.0 0.0
+    0.5 -0.5 0.0 0.0 1.0
+  ]
+}
+
+#buffer vertexBuffer {
+  size=vertexData
+  usage=[VERTEX]
+  mappedAtCreation=vertexData
+}
+
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+#shaderModule shader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    struct VertexInput {
+      @location(0) pos: vec2f,
+      @location(1) color: vec3f,
+    }
+
+    struct VertexOutput {
+      @builtin(position) pos: vec4f,
+      @location(0) color: vec3f,
+    }
+
+    @vertex
+    fn vs(in: VertexInput) -> VertexOutput {
+      // Rotate based on time
+      let angle = u.time * 0.5;
+      let c = cos(angle);
+      let s = sin(angle);
+      let rotated = vec2f(
+        in.pos.x * c - in.pos.y * s,
+        in.pos.x * s + in.pos.y * c
+      );
+
+      var out: VertexOutput;
+      out.pos = vec4f(rotated, 0.0, 1.0);
+      out.color = in.color;
+      return out;
+    }
+
+    @fragment
+    fn fs(in: VertexOutput) -> @location(0) vec4f {
+      return vec4f(in.color, 1.0);
+    }
+  "
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={
+    entryPoint=vs
+    module=shader
+    buffers=[{
+      arrayStride=20
+      attributes=[
+        { shaderLocation=0 offset=0 format=float32x2 }
+        { shaderLocation=1 offset=8 format=float32x3 }
+      ]
+    }]
+  }
+  fragment={
+    entryPoint=fs
+    module=shader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#bindGroup uniformsBindGroup {
+  layout={ pipeline=pipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=uniforms } }]
+}
+
+#renderPass mainPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.1 0.1 0.1 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=pipeline
+  vertexBuffers=[vertexBuffer]
+  bindGroups=[uniformsBindGroup]
+  draw=3
+}
+
+#frame main {
+  perform=[writeUniforms mainPass]
+}

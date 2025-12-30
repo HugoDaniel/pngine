@@ -1,0 +1,98 @@
+// 01 - Gradient Background
+// Fullscreen shader with UV-based coloring
+// Demonstrates: fullscreen triangle, UV coordinates, time animation
+
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+#shaderModule shader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    struct VertexOutput {
+      @builtin(position) pos: vec4f,
+      @location(0) uv: vec2f,
+    }
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> VertexOutput {
+      // Fullscreen triangle (covers entire screen with single triangle)
+      let x = f32(i & 1u) * 4.0 - 1.0;
+      let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+      var out: VertexOutput;
+      out.pos = vec4f(x, y, 0.0, 1.0);
+      out.uv = vec2f((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+      return out;
+    }
+
+    @fragment
+    fn fs(in: VertexOutput) -> @location(0) vec4f {
+      let t = u.time;
+
+      // Animated gradient
+      let angle = t * 0.3;
+      let c = cos(angle);
+      let s = sin(angle);
+
+      // Rotate UV coordinates
+      let centered = in.uv - 0.5;
+      let rotated = vec2f(
+        centered.x * c - centered.y * s,
+        centered.x * s + centered.y * c
+      );
+
+      // Create gradient based on rotated position
+      let gradient = rotated.x + rotated.y + 0.5;
+
+      // Color palette with time-based shift
+      let r = sin(gradient * 3.14159 + t) * 0.5 + 0.5;
+      let g = sin(gradient * 3.14159 + t + 2.094) * 0.5 + 0.5;
+      let b = sin(gradient * 3.14159 + t + 4.188) * 0.5 + 0.5;
+
+      return vec4f(r, g, b, 1.0);
+    }
+  "
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={ entryPoint=vs module=shader }
+  fragment={
+    entryPoint=fs
+    module=shader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#bindGroup uniformsBindGroup {
+  layout={ pipeline=pipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=uniforms } }]
+}
+
+#renderPass mainPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0 0 0 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=pipeline
+  bindGroups=[uniformsBindGroup]
+  draw=3
+}
+
+#frame main {
+  perform=[writeUniforms mainPass]
+}

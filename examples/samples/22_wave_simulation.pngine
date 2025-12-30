@@ -1,0 +1,262 @@
+// 22 - Wave Simulation
+// 2D wave equation with ripples and interference
+// Demonstrates: finite difference physics, ping-pong, height field
+
+#define GRID_SIZE=128
+
+// Wave state: current height + previous height
+#buffer waveBuffer {
+  size="GRID_SIZE * GRID_SIZE * 2 * 4"
+  usage=[STORAGE]
+  pool=2
+}
+
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+#init initWave {
+  buffer=waveBuffer
+  shader=initShader
+  workgroups=[8 8 1]
+}
+
+#shaderModule initShader {
+  code="
+    struct Wave { data: array<vec2f> }
+
+    @binding(0) @group(0) var<storage, read_write> wave: Wave;
+
+    const SIZE: u32 = 128u;
+
+    @compute @workgroup_size(16, 16)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+      if (id.x >= SIZE || id.y >= SIZE) { return; }
+      let idx = id.y * SIZE + id.x;
+      wave.data[idx] = vec2f(0.0, 0.0);  // current, previous
+    }
+  "
+}
+
+#shaderModule stepShader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    struct Wave { data: array<vec2f> }
+
+    @group(0) @binding(1) var<storage, read> waveIn: Wave;
+    @group(0) @binding(2) var<storage, read_write> waveOut: Wave;
+
+    const SIZE: u32 = 128u;
+    const SIZEF: f32 = 128.0;
+    const C: f32 = 0.3;
+    const DAMPING: f32 = 0.998;
+
+    fn getHeight(x: i32, y: i32) -> f32 {
+      if (x < 0 || x >= i32(SIZE) || y < 0 || y >= i32(SIZE)) {
+        return 0.0;
+      }
+      return waveIn.data[u32(y) * SIZE + u32(x)].x;
+    }
+
+    @compute @workgroup_size(16, 16)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+      if (id.x >= SIZE || id.y >= SIZE) { return; }
+
+      let x = i32(id.x);
+      let y = i32(id.y);
+      let idx = id.y * SIZE + id.x;
+
+      let state = waveIn.data[idx];
+      let h = state.x;       // current
+      let hPrev = state.y;   // previous
+
+      // Wave equation with Laplacian
+      let laplacian = getHeight(x-1, y) + getHeight(x+1, y) +
+                      getHeight(x, y-1) + getHeight(x, y+1) - 4.0 * h;
+
+      var hNew = 2.0 * h - hPrev + C * C * laplacian;
+
+      // Add wave sources
+      let fx = f32(id.x);
+      let fy = f32(id.y);
+
+      // Source 1: oscillating position
+      let cx1 = SIZEF * 0.5 + sin(u.time * 1.2) * SIZEF * 0.3;
+      let cy1 = SIZEF * 0.5 + cos(u.time * 0.9) * SIZEF * 0.3;
+      let d1 = length(vec2f(fx - cx1, fy - cy1));
+      if (d1 < 2.5) {
+        hNew += sin(u.time * 15.0) * 0.3;
+      }
+
+      // Source 2: different frequency
+      let cx2 = SIZEF * 0.3 + sin(u.time * 0.8 + 2.0) * SIZEF * 0.2;
+      let cy2 = SIZEF * 0.7 + cos(u.time * 1.1 + 1.0) * SIZEF * 0.2;
+      let d2 = length(vec2f(fx - cx2, fy - cy2));
+      if (d2 < 2.5) {
+        hNew += sin(u.time * 12.0 + 1.5) * 0.25;
+      }
+
+      // Source 3: slower, larger waves
+      let cx3 = SIZEF * 0.7 + sin(u.time * 0.5) * SIZEF * 0.15;
+      let cy3 = SIZEF * 0.3 + cos(u.time * 0.7) * SIZEF * 0.15;
+      let d3 = length(vec2f(fx - cx3, fy - cy3));
+      if (d3 < 3.0) {
+        hNew += sin(u.time * 8.0) * 0.2;
+      }
+
+      // Damping and clamping
+      hNew *= DAMPING;
+      hNew = clamp(hNew, -1.0, 1.0);
+
+      // Store: new becomes current, current becomes previous
+      waveOut.data[idx] = vec2f(hNew, h);
+    }
+  "
+}
+
+#computePipeline stepPipeline {
+  layout=auto
+  compute={ entryPoint=main module=stepShader }
+}
+
+#bindGroup stepBindGroup {
+  layout={ pipeline=stepPipeline index=0 }
+  entries=[
+    { binding=0 resource={ buffer=uniforms } }
+    { binding=1 resource={ buffer=waveBuffer pingPong=0 } }
+    { binding=2 resource={ buffer=waveBuffer pingPong=1 } }
+  ]
+  pool=2
+}
+
+#computePass stepPass {
+  pipeline=stepPipeline
+  bindGroups=[stepBindGroup]
+  bindGroupsPoolOffsets=[0]
+  dispatch=[8 8 1]
+}
+
+#shaderModule renderShader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    struct Wave { data: array<vec2f> }
+    @group(0) @binding(1) var<storage, read> wave: Wave;
+
+    const SIZE: f32 = 128.0;
+    const SIZEI: u32 = 128u;
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let x = f32(i & 1u) * 4.0 - 1.0;
+      let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+      return vec4f(x, y, 0.0, 1.0);
+    }
+
+    fn getH(x: u32, y: u32) -> f32 {
+      if (x >= SIZEI || y >= SIZEI) { return 0.0; }
+      return wave.data[y * SIZEI + x].x;
+    }
+
+    @fragment
+    fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let cellX = u32(pos.x * SIZE / u.width);
+      let cellY = u32(pos.y * SIZE / u.height);
+
+      if (cellX >= SIZEI || cellY >= SIZEI) {
+        return vec4f(0.0, 0.05, 0.1, 1.0);
+      }
+
+      let h = getH(cellX, cellY);
+
+      // Compute gradient for lighting
+      let hL = getH(max(0u, cellX - 1u), cellY);
+      let hR = getH(min(SIZEI - 1u, cellX + 1u), cellY);
+      let hD = getH(cellX, max(0u, cellY - 1u));
+      let hU = getH(cellX, min(SIZEI - 1u, cellY + 1u));
+
+      let gradX = (hR - hL) * 0.5;
+      let gradY = (hU - hD) * 0.5;
+
+      // Simple normal and lighting
+      let normal = normalize(vec3f(-gradX * 3.0, -gradY * 3.0, 1.0));
+      let lightDir = normalize(vec3f(0.3, 0.4, 1.0));
+      let diff = max(dot(normal, lightDir), 0.2);
+
+      // Specular
+      let viewDir = vec3f(0.0, 0.0, 1.0);
+      let halfDir = normalize(lightDir + viewDir);
+      let spec = pow(max(dot(normal, halfDir), 0.0), 32.0);
+
+      // Water color based on height
+      let waterDeep = vec3f(0.0, 0.1, 0.25);
+      let waterMid = vec3f(0.1, 0.35, 0.5);
+      let waterLight = vec3f(0.3, 0.6, 0.8);
+      let foam = vec3f(0.8, 0.9, 1.0);
+
+      let t = h * 0.5 + 0.5;
+      var color = mix(waterDeep, waterMid, smoothstep(0.3, 0.5, t));
+      color = mix(color, waterLight, smoothstep(0.5, 0.7, t));
+      color = mix(color, foam, smoothstep(0.75, 0.95, t));
+
+      color = color * diff + vec3f(1.0, 0.95, 0.9) * spec * 0.4;
+
+      return vec4f(color, 1.0);
+    }
+  "
+}
+
+#renderPipeline renderPipeline {
+  layout=auto
+  vertex={ entryPoint=vs module=renderShader }
+  fragment={
+    entryPoint=fs
+    module=renderShader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#bindGroup renderBindGroup {
+  layout={ pipeline=renderPipeline index=0 }
+  entries=[
+    { binding=0 resource={ buffer=uniforms } }
+    { binding=1 resource={ buffer=waveBuffer pingPong=1 } }
+  ]
+  pool=2
+}
+
+#renderPass drawPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0 0.05 0.1 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=renderPipeline
+  bindGroups=[renderBindGroup]
+  bindGroupsPoolOffsets=[0]
+  draw=3
+}
+
+#frame main {
+  init=[initWave]
+  perform=[writeUniforms stepPass drawPass]
+}

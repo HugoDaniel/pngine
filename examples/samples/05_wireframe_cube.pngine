@@ -1,0 +1,138 @@
+// 05 - Wireframe Cube
+// 3D cube rendered as lines
+// Demonstrates: line primitives, 3D transforms
+
+#data lineVertices {
+  // Cube edges (24 lines = 48 vertices) - each edge as a line segment
+  float32Array=[
+    // Bottom face edges
+    -1 -1 -1   1 -1 -1
+    1 -1 -1    1 -1 1
+    1 -1 1     -1 -1 1
+    -1 -1 1    -1 -1 -1
+    // Top face edges
+    -1 1 -1    1 1 -1
+    1 1 -1     1 1 1
+    1 1 1      -1 1 1
+    -1 1 1     -1 1 -1
+    // Vertical edges
+    -1 -1 -1   -1 1 -1
+    1 -1 -1    1 1 -1
+    1 -1 1     1 1 1
+    -1 -1 1    -1 1 1
+  ]
+}
+
+#buffer vertexBuffer {
+  size=lineVertices
+  usage=[VERTEX]
+  mappedAtCreation=lineVertices
+}
+
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+#shaderModule shader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    struct VertexOutput {
+      @builtin(position) pos: vec4f,
+      @location(0) depth: f32,
+    }
+
+    fn rotateY(p: vec3f, angle: f32) -> vec3f {
+      let c = cos(angle);
+      let s = sin(angle);
+      return vec3f(p.x * c + p.z * s, p.y, -p.x * s + p.z * c);
+    }
+
+    fn rotateX(p: vec3f, angle: f32) -> vec3f {
+      let c = cos(angle);
+      let s = sin(angle);
+      return vec3f(p.x, p.y * c - p.z * s, p.y * s + p.z * c);
+    }
+
+    @vertex
+    fn vs(@location(0) pos: vec3f) -> VertexOutput {
+      let t = u.time;
+
+      // Scale and rotate
+      var p = pos * 0.3;
+      p = rotateY(p, t * 0.5);
+      p = rotateX(p, t * 0.3);
+
+      // Simple perspective
+      let z = p.z + 2.5;
+      let projX = p.x / z / u.aspect;
+      let projY = p.y / z;
+
+      var out: VertexOutput;
+      out.pos = vec4f(projX, projY, 0.5, 1.0);
+      out.depth = z;
+      return out;
+    }
+
+    @fragment
+    fn fs(in: VertexOutput) -> @location(0) vec4f {
+      // Depth-based brightness
+      let brightness = 1.0 - (in.depth - 2.0) * 0.3;
+      let color = vec3f(0.2, 0.8, 1.0) * brightness;
+      return vec4f(color, 1.0);
+    }
+  "
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={
+    entryPoint=vs
+    module=shader
+    buffers=[{
+      arrayStride=12
+      attributes=[
+        { shaderLocation=0 offset=0 format=float32x3 }
+      ]
+    }]
+  }
+  fragment={
+    entryPoint=fs
+    module=shader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+  primitive={ topology=line-list }
+}
+
+#bindGroup uniformsBindGroup {
+  layout={ pipeline=pipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=uniforms } }]
+}
+
+#renderPass mainPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.05 0.05 0.1 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=pipeline
+  vertexBuffers=[vertexBuffer]
+  bindGroups=[uniformsBindGroup]
+  draw=24
+}
+
+#frame main {
+  perform=[writeUniforms mainPass]
+}
