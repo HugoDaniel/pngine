@@ -2,13 +2,16 @@
     .fingerprint = 0xbbb389a5602568d0,
     .name = .pngine,
     .version = "0.1.0",
-    .minimum_zig_version = "0.14.0",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        .zgpu = .{
-            .url = "https://github.com/zig-gamedev/zgpu/archive/refs/heads/main.tar.gz",
-            .hash = "zgpu-0.12.0-dev-nqFT5IChCACWEis11EjrBQGaA0QXEqXfsi1e6cF3_AL3",
-            .lazy = true,
-        },
+        // zgpu disabled: zpool dependency uses deprecated @Type (incompatible with Zig 0.16)
+        // Use browser-based rendering via: npm run render-frame
+        // Re-enable when zgpu updates zpool for Zig 0.16 compatibility
+        // .zgpu = .{
+        //     .url = "https://github.com/zig-gamedev/zgpu/archive/refs/heads/main.tar.gz",
+        //     .hash = "zgpu-0.12.0-dev-nqFT5IChCACWEis11EjrBQGaA0QXEqXfsi1e6cF3_AL3",
+        //     .lazy = true,
+        // },
         .wamr = .{
             .url = "https://github.com/bytecodealliance/wasm-micro-runtime/archive/refs/tags/WAMR-2.2.0.tar.gz",
             .hash = "N-V-__8AAN1-KAFc0Vf-GoFEuhZWQxeT9pledJd5zBNtyrIE",

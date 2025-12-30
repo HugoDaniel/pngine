@@ -5,11 +5,13 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Add zgpu dependency for native GPU rendering (lazy - only fetched if needed)
-    const zgpu_dep = b.lazyDependency("zgpu", .{
-        .target = target,
-        .optimize = optimize,
-    });
+    // zgpu disabled: zpool dependency uses deprecated @Type (incompatible with Zig 0.16)
+    // Re-enable when zgpu updates zpool for Zig 0.16 compatibility
+    // const zgpu_dep = b.lazyDependency("zgpu", .{
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
+    const zgpu_dep: ?*std.Build.Dependency = null;
 
     // Shared types module (zero dependencies, used by multiple modules)
     const types_module = b.createModule(.{
@@ -106,6 +108,11 @@ pub fn build(b: *std.Build) void {
     lib_module.addImport("bytecode", bytecode_module);
     lib_module.addImport("reflect", reflect_module);
     lib_module.addImport("executor", lib_executor_module);
+
+    // Build options for GPU module (zgpu availability)
+    const gpu_build_options = b.addOptions();
+    gpu_build_options.addOption(bool, "has_zgpu", zgpu_dep != null);
+    lib_module.addImport("gpu_build_options", gpu_build_options.createModule());
 
     // Add zgpu to library module if available (native targets only)
     if (zgpu_dep) |dep| {
