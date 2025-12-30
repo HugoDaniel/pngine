@@ -131,6 +131,43 @@ var bytecode_end: u32 = 0;
 var data_in_bytecode: bool = false;
 
 // ============================================================================
+// Animation State (Static Allocation)
+// ============================================================================
+
+/// Maximum scenes per animation.
+const MAX_SCENES: u32 = 256;
+
+/// Maximum frames that can be defined in bytecode.
+const MAX_FRAMES: u32 = 64;
+
+/// Scene data (without string table lookup - just IDs and time ranges).
+const SceneEntry = struct {
+    frame_string_id: u16,
+    start_ms: u32,
+    end_ms: u32,
+};
+
+/// Frame definition entry: maps frame name string ID to bytecode PC offset.
+const FrameEntry = struct {
+    name_string_id: u16,
+    pc_offset: u32, // PC offset relative to bytecode_start (after define_frame params)
+};
+
+/// Animation metadata.
+var anim_duration_ms: u32 = 0;
+var anim_loop: bool = false;
+var anim_end_behavior: u8 = 0; // 0=hold, 1=stop, 2=restart
+var anim_scene_count: u32 = 0;
+var anim_scenes: [MAX_SCENES]SceneEntry = undefined;
+
+/// Frame definition table: maps frame_string_id to PC offset.
+var frame_entries: [MAX_FRAMES]FrameEntry = undefined;
+var frame_count: u32 = 0;
+
+/// Whether animation table was successfully parsed.
+var has_animation: bool = false;
+
+// ============================================================================
 // Host Imports (Minimal)
 // ============================================================================
 
@@ -193,6 +230,9 @@ export fn init() u32 {
     frame_counter = 0;
     resources_created = false;
     pass_count = 0;
+    frame_count = 0;
+    has_animation = false;
+    anim_scene_count = 0;
 
     // Validate bytecode - need at least v0 header size
     if (bytecode_len < format.HEADER_SIZE) {
@@ -233,6 +273,10 @@ export fn init() u32 {
     string_table_len = data_section_offset - string_table_offset;
     data_section_len = bytecode_len - data_section_offset;
 
+    // Parse animation table (v0 header has animation_table_offset at byte 36)
+    const animation_table_offset = std.mem.readInt(u32, header[36..40], .little);
+    parseAnimationTable(animation_table_offset);
+
     // Debug: log bytecode info
     var debug_msg: [64]u8 = undefined;
     const bc_len = bytecode_end -| bytecode_start;
@@ -246,6 +290,9 @@ export fn init() u32 {
     var cmds = CommandBuffer.init(&cmd_buffer);
     executeResourceCreation(&cmds);
     _ = cmds.finish();
+
+    // Build frame name → PC offset mapping for animation scene selection
+    scanFrameDefinitions();
 
     // Post-condition: state is consistent.
     assert(bytecode_start <= bytecode_end);
@@ -375,25 +422,53 @@ fn executeResourceCreation(cmds: *CommandBuffer) void {
 }
 
 /// Execute frame opcodes.
+/// If animation is defined, selects the appropriate scene based on time.
 fn executeFrame(cmds: *CommandBuffer, time: f32, width: u32, height: u32) void {
     const bytecode = bytecode_buffer[bytecode_start..bytecode_end];
 
-    // Find first frame
+    // Convert time to milliseconds for scene lookup
+    const time_ms: u32 = @intFromFloat(@max(0.0, time * 1000.0));
+
+    // Try to find the appropriate frame for this time
     var pc: usize = 0;
-    for (0..MAX_EXEC_ITERATIONS) |_| {
-        if (pc >= bytecode.len) break;
+    var found_frame = false;
 
-        const op: OpCode = @enumFromInt(bytecode[pc]);
-        pc += 1;
+    // If animation is defined, select scene by time
+    if (has_animation) {
+        if (findSceneAtTime(time_ms)) |scene_idx| {
+            const scene = anim_scenes[scene_idx];
+            if (findFramePcByStringId(scene.frame_string_id)) |frame_pc| {
+                // Found the frame for this scene
+                pc = frame_pc;
+                found_frame = true;
 
-        if (op == .define_frame) {
-            // Skip frame_id and name_id
-            _ = readVarint(bytecode, &pc);
-            _ = readVarint(bytecode, &pc);
-            break;
+                // Debug: log scene selection
+                var scene_msg: [64]u8 = undefined;
+                const scene_written = std.fmt.bufPrint(&scene_msg, "t={d}ms scene={d} frame_id={d} pc={d}", .{
+                    time_ms, scene_idx, scene.frame_string_id, pc,
+                }) catch &scene_msg;
+                log(scene_written.ptr, @intCast(scene_written.len));
+            }
         }
+    }
 
-        skipOpcodeParams(bytecode, &pc, op);
+    // Fallback: find first frame if no animation or scene not found
+    if (!found_frame) {
+        for (0..MAX_EXEC_ITERATIONS) |_| {
+            if (pc >= bytecode.len) break;
+
+            const op: OpCode = @enumFromInt(bytecode[pc]);
+            pc += 1;
+
+            if (op == .define_frame) {
+                // Skip frame_id and name_id
+                _ = readVarint(bytecode, &pc);
+                _ = readVarint(bytecode, &pc);
+                break;
+            }
+
+            skipOpcodeParams(bytecode, &pc, op);
+        }
     }
 
     // Execute frame body
@@ -433,9 +508,9 @@ fn executeFrame(cmds: *CommandBuffer, time: f32, width: u32, height: u32) void {
             _ = size;
 
             // Write time uniform data (time, width, height, aspect)
-            const aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
-            _ = aspect;
-            _ = time;
+            // Note: time, width, height are used by the command buffer system
+            _ = width;
+            _ = height;
 
             // For now just emit the command - host will fill in actual values
             cmds.writeTimeUniform(@intCast(buffer_id), @intCast(offset), 16);
@@ -898,6 +973,203 @@ fn execPool(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) 
         },
         else => {},
     }
+}
+
+// ============================================================================
+// Internal - Animation Table Parsing
+// ============================================================================
+
+/// Parse animation table from bytecode buffer at given offset.
+/// Format: flags(u8), [name_string_id(varint), duration_ms(u32), end_behavior(u8),
+///         scene_count(varint), scenes[scene_count]{id_varint, frame_varint, start_u32, end_u32}]
+fn parseAnimationTable(offset: u32) void {
+    // Pre-conditions
+    const assert = std.debug.assert;
+    assert(offset <= bytecode_len);
+
+    if (offset >= bytecode_len) {
+        has_animation = false;
+        return;
+    }
+
+    const data = bytecode_buffer[offset..bytecode_len];
+    if (data.len == 0) {
+        has_animation = false;
+        return;
+    }
+
+    var pos: usize = 0;
+
+    // Read flags
+    const flags = data[pos];
+    pos += 1;
+
+    const has_anim_flag = (flags & 1) != 0;
+    if (!has_anim_flag) {
+        has_animation = false;
+        return;
+    }
+
+    anim_loop = (flags & 2) != 0;
+
+    // Read name_string_id (skip - we don't need the name)
+    if (pos >= data.len) return;
+    const name_result = opcodes.decodeVarint(data[pos..]);
+    pos += name_result.len;
+
+    // Read duration_ms
+    if (pos + 4 > data.len) return;
+    anim_duration_ms = std.mem.readInt(u32, data[pos..][0..4], .little);
+    pos += 4;
+
+    // Read end_behavior
+    if (pos >= data.len) return;
+    anim_end_behavior = data[pos];
+    pos += 1;
+
+    // Read scene_count
+    if (pos >= data.len) return;
+    const count_result = opcodes.decodeVarint(data[pos..]);
+    pos += count_result.len;
+    anim_scene_count = @min(count_result.value, MAX_SCENES);
+
+    // Read scenes (bounded loop)
+    for (0..anim_scene_count) |i| {
+        // id_string_id (skip - we don't need scene ID)
+        if (pos >= data.len) break;
+        pos += opcodes.decodeVarint(data[pos..]).len;
+
+        // frame_string_id (this maps to a #frame name)
+        if (pos >= data.len) break;
+        const frame_result = opcodes.decodeVarint(data[pos..]);
+        pos += frame_result.len;
+
+        // start_ms
+        if (pos + 4 > data.len) break;
+        const start_ms = std.mem.readInt(u32, data[pos..][0..4], .little);
+        pos += 4;
+
+        // end_ms
+        if (pos + 4 > data.len) break;
+        const end_ms = std.mem.readInt(u32, data[pos..][0..4], .little);
+        pos += 4;
+
+        anim_scenes[i] = .{
+            .frame_string_id = @intCast(frame_result.value),
+            .start_ms = start_ms,
+            .end_ms = end_ms,
+        };
+
+        // Debug: log each scene
+        var scene_msg: [64]u8 = undefined;
+        const scene_written = std.fmt.bufPrint(&scene_msg, "scene[{d}] frame_id={d} {d}-{d}ms", .{
+            i, frame_result.value, start_ms, end_ms,
+        }) catch &scene_msg;
+        log(scene_written.ptr, @intCast(scene_written.len));
+    }
+
+    has_animation = anim_scene_count > 0;
+
+    // Debug: log animation info
+    var anim_msg: [64]u8 = undefined;
+    const anim_written = std.fmt.bufPrint(&anim_msg, "anim: scenes={d} dur={d}ms loop={}", .{
+        anim_scene_count, anim_duration_ms, anim_loop,
+    }) catch &anim_msg;
+    log(anim_written.ptr, @intCast(anim_written.len));
+
+    // Post-condition
+    assert(anim_scene_count <= MAX_SCENES);
+}
+
+/// Find scene index for a given time (in milliseconds).
+/// Returns scene index or null if no matching scene.
+fn findSceneAtTime(time_ms: u32) ?u32 {
+    if (!has_animation or anim_scene_count == 0) return null;
+
+    // Handle looping: wrap time to duration
+    var effective_time = time_ms;
+    if (anim_loop and anim_duration_ms > 0) {
+        effective_time = time_ms % anim_duration_ms;
+    }
+
+    // Find scene containing this time
+    for (0..anim_scene_count) |i| {
+        const scene = anim_scenes[i];
+        if (effective_time >= scene.start_ms and effective_time < scene.end_ms) {
+            return @intCast(i);
+        }
+    }
+
+    // Past all scenes: return last scene if hold behavior (0)
+    if (anim_end_behavior == 0 and anim_scene_count > 0) {
+        return anim_scene_count - 1;
+    }
+
+    return null;
+}
+
+/// Find PC offset for a frame by its string ID.
+/// Returns PC offset relative to bytecode_start, or null if not found.
+fn findFramePcByStringId(frame_string_id: u16) ?u32 {
+    for (0..frame_count) |i| {
+        if (frame_entries[i].name_string_id == frame_string_id) {
+            return frame_entries[i].pc_offset;
+        }
+    }
+    return null;
+}
+
+/// Scan bytecode for all define_frame opcodes and build frame_entries table.
+/// Must be called after executeResourceCreation() to build frame name → PC mapping.
+fn scanFrameDefinitions() void {
+    const bytecode = bytecode_buffer[bytecode_start..bytecode_end];
+    var pc: usize = 0;
+    frame_count = 0;
+
+    for (0..MAX_EXEC_ITERATIONS) |_| {
+        if (pc >= bytecode.len) break;
+        if (frame_count >= MAX_FRAMES) break;
+
+        const op: OpCode = @enumFromInt(bytecode[pc]);
+        pc += 1;
+
+        if (op == .define_frame) {
+            // Read frame_id (skip)
+            _ = readVarint(bytecode, &pc);
+            // Read name_string_id (we need this for matching)
+            const name_id = readVarint(bytecode, &pc);
+
+            // Store frame entry: name_string_id → current PC (after params)
+            frame_entries[frame_count] = .{
+                .name_string_id = @intCast(name_id),
+                .pc_offset = @intCast(pc), // Points to first opcode inside frame body
+            };
+            frame_count += 1;
+
+            // Debug: log frame definition
+            var frame_msg: [48]u8 = undefined;
+            const frame_written = std.fmt.bufPrint(&frame_msg, "frame[{d}] name_id={d} pc={d}", .{
+                frame_count - 1, name_id, pc,
+            }) catch &frame_msg;
+            log(frame_written.ptr, @intCast(frame_written.len));
+
+            // Continue scanning - skip frame body to find next frame
+            for (0..MAX_EXEC_ITERATIONS) |_| {
+                if (pc >= bytecode.len) break;
+                const inner_op: OpCode = @enumFromInt(bytecode[pc]);
+                pc += 1;
+                if (inner_op == .end_frame) break;
+                skipOpcodeParams(bytecode, &pc, inner_op);
+            }
+        } else {
+            skipOpcodeParams(bytecode, &pc, op);
+        }
+    }
+
+    // Debug: log total frame count
+    var count_msg: [32]u8 = undefined;
+    const count_written = std.fmt.bufPrint(&count_msg, "total frames={d}", .{frame_count}) catch &count_msg;
+    log(count_written.ptr, @intCast(count_written.len));
 }
 
 // ============================================================================
