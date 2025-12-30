@@ -254,9 +254,10 @@ pub const Emitter = struct {
     pub const Options = struct {
         /// Base directory for resolving relative file paths.
         base_dir: ?[]const u8 = null,
-        /// Path to miniray binary for WGSL reflection.
-        /// If null, uses "miniray" from PATH.
-        miniray_path: ?[]const u8 = null,
+        /// Minify WGSL shaders using miniray.
+        /// When true, shader identifiers are minified and reflection uses mapped names.
+        /// Requires libminiray.a to be linked at compile time.
+        minify_shaders: bool = false,
         /// Executor WASM bytes to embed in payload.
         /// If provided, the PNGB will include embedded executor.
         executor_wasm: ?[]const u8 = null,
@@ -495,56 +496,19 @@ pub const Emitter = struct {
     // ========================================================================
 
     /// Get WGSL reflection data for a shader.
-    /// Caches results so reflection is only performed once per shader.
     ///
-    /// Complexity: O(1) cache lookup, O(n) on first call (miniray subprocess).
+    /// Returns cached reflection data populated during shader emission.
+    /// Reflection is performed at emission time (after define substitution)
+    /// to ensure reflection matches the actual emitted code.
+    ///
+    /// Complexity: O(1) cache lookup.
     pub fn getWgslReflection(self: *Self, shader_name: []const u8) ?*const reflect.ReflectionData {
         // Pre-condition: shader_name is not empty
         std.debug.assert(shader_name.len > 0);
 
-        // Check cache first
-        if (self.wgsl_reflections.getPtr(shader_name)) |cached| {
-            return cached;
-        }
-
-        // Get shader code from symbol table
-        const shader_info = self.analysis.symbols.wgsl.get(shader_name) orelse
-            self.analysis.symbols.shader_module.get(shader_name) orelse
-            return null;
-
-        // Get the WGSL code
-        const code_node = utils.findPropertyValue(self, shader_info.node, "value") orelse
-            utils.findPropertyValue(self, shader_info.node, "code") orelse
-            return null;
-
-        const wgsl_code = utils.getStringContent(self, code_node);
-        if (wgsl_code.len == 0) return null;
-
-        // Call miniray for reflection - miniray is required for WGSL analysis
-        const miniray = reflect.Miniray{ .miniray_path = self.options.miniray_path };
-        const reflection = miniray.reflect(self.gpa, wgsl_code) catch |err| {
-            switch (err) {
-                error.MinirayNotFound => {
-                    std.log.err("miniray not found: install miniray or set miniray_path option", .{});
-                },
-                error.ProcessFailed, error.SpawnFailed, error.InvalidJson, error.OutOfMemory => {
-                    // WGSL parse errors and OOM are common during testing - use warn level
-                    std.log.warn("WGSL reflection failed for '{s}': {}", .{ shader_name, err });
-                },
-                else => {
-                    std.log.err("WGSL reflection failed for '{s}': {}", .{ shader_name, err });
-                },
-            }
-            return null;
-        };
-
-        // Cache the result
-        self.wgsl_reflections.put(self.gpa, shader_name, reflection) catch {
-            var ref_copy = reflection;
-            ref_copy.deinit();
-            return null;
-        };
-
+        // Return cached data (populated during emitWgslModule in shaders.zig)
+        // Note: Reflection is done at emission time to use substituted code,
+        // not the original AST source. This fixes the timing mismatch bug.
         return self.wgsl_reflections.getPtr(shader_name);
     }
 

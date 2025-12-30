@@ -40,6 +40,11 @@ const Emitter = @import("../Emitter.zig").Emitter;
 const Node = @import("../Ast.zig").Node;
 const utils = @import("utils.zig");
 
+// Reflection modules for emission-time WGSL analysis
+const reflect = @import("reflect");
+const miniray_ffi = reflect.miniray_ffi;
+const json = std.json;
+
 /// Maximum nesting depth for define substitution (prevents infinite loops).
 const MAX_SUBSTITUTION_DEPTH: u8 = 16;
 
@@ -101,18 +106,33 @@ pub fn emitShaders(e: *Emitter) Emitter.Error!void {
                 wgsl_entry.data_id,
             );
         } else {
-            // Inline code - store directly
+            // Inline code - apply minification if enabled
             const raw_code = resolveShaderCode(e, code_value);
             if (raw_code.len == 0) continue;
 
-            const code = try substituteDefines(e, raw_code);
-            defer if (code.ptr != raw_code.ptr) e.gpa.free(code);
+            const substituted = try substituteDefines(e, raw_code);
+            defer if (substituted.ptr != raw_code.ptr) e.gpa.free(substituted);
+
+            // Minify if requested, otherwise use substituted code
+            const code_to_store: []const u8 = if (e.options.minify_shaders)
+                minifyAndCache(e, name, substituted) orelse substituted
+            else blk: {
+                // Perform reflection on substituted code (no minification)
+                reflectAndCache(e, name, substituted);
+                break :blk substituted;
+            };
 
             const shader_id = e.next_shader_id;
             e.next_shader_id += 1;
             try e.shader_ids.put(e.gpa, name, shader_id);
 
-            const data_id = try e.builder.addData(e.gpa, code);
+            const data_id = try e.builder.addData(e.gpa, code_to_store);
+
+            // Free minified code if it was allocated
+            if (e.options.minify_shaders and code_to_store.ptr != substituted.ptr) {
+                e.gpa.free(@constCast(code_to_store));
+            }
+
             const wgsl_id = try e.builder.addWgsl(e.gpa, data_id.toInt(), &[_]u16{});
             try e.wgsl_name_to_id.put(e.gpa, name, wgsl_id);
 
@@ -194,6 +214,7 @@ fn emitWgslModulesInOrder(e: *Emitter) Emitter.Error!void {
 
 /// Emit a single #wgsl module.
 /// Stores raw code in data section and adds entry to WGSL table with deps.
+/// If minify_shaders option is enabled, minifies the code and uses mapped reflection.
 fn emitWgslModule(e: *Emitter, name: []const u8, macro_node: Node.Index) Emitter.Error!void {
     // Pre-conditions
     std.debug.assert(name.len > 0);
@@ -214,11 +235,26 @@ fn emitWgslModule(e: *Emitter, name: []const u8, macro_node: Node.Index) Emitter
     if (raw_code.len == 0) return;
 
     // Apply define substitution
-    const code = try substituteDefines(e, raw_code);
-    defer if (code.ptr != raw_code.ptr) e.gpa.free(code);
+    const substituted = try substituteDefines(e, raw_code);
+    defer if (substituted.ptr != raw_code.ptr) e.gpa.free(substituted);
+
+    // Minify if requested (stores minified code, caches reflection with mapped names)
+    // Otherwise store original and reflect on substituted code
+    const code_to_store: []const u8 = if (e.options.minify_shaders)
+        minifyAndCache(e, name, substituted) orelse substituted
+    else blk: {
+        // Perform reflection on substituted code (no minification)
+        reflectAndCache(e, name, substituted);
+        break :blk substituted;
+    };
 
     // Store in data section
-    const data_id = try e.builder.addData(e.gpa, code);
+    const data_id = try e.builder.addData(e.gpa, code_to_store);
+
+    // Free minified code if it was allocated
+    if (e.options.minify_shaders and code_to_store.ptr != substituted.ptr) {
+        e.gpa.free(@constCast(code_to_store));
+    }
 
     // Get direct dependencies (imports)
     const import_names = getWgslImports(e, macro_node);
@@ -251,7 +287,102 @@ fn emitWgslModule(e: *Emitter, name: []const u8, macro_node: Node.Index) Emitter
 
     // Also cache the resolved code for #shaderModule backward compat
     // Build resolved code by concatenating deps + this module's code
-    try buildAndCacheResolvedCode(e, name, code, deps.items);
+    try buildAndCacheResolvedCode(e, name, code_to_store, deps.items);
+}
+
+/// Perform WGSL reflection on substituted code and cache the result.
+///
+/// This is called during emission to ensure reflection data matches
+/// the actual emitted code (after define substitution).
+///
+/// Requires libminiray.a to be linked at build time.
+/// If not available, reflection is skipped with a warning.
+fn reflectAndCache(e: *Emitter, name: []const u8, code: []const u8) void {
+    // Pre-conditions
+    std.debug.assert(name.len > 0);
+    std.debug.assert(code.len > 0);
+
+    // Skip if already cached (shouldn't happen, but be safe)
+    if (e.wgsl_reflections.contains(name)) return;
+
+    // FFI is mandatory - no subprocess fallback
+    if (comptime !miniray_ffi.has_miniray_lib) {
+        std.log.warn("WGSL reflection skipped for '{s}': libminiray.a not linked", .{name});
+        return;
+    }
+
+    reflectViaFfi(e, name, code);
+}
+
+/// Reflect via FFI (libminiray.a linked).
+fn reflectViaFfi(e: *Emitter, name: []const u8, code: []const u8) void {
+    var result = miniray_ffi.reflectFfi(code) catch |err| {
+        std.log.warn("WGSL reflection (FFI) failed for '{s}': {}", .{ name, err });
+        return;
+    };
+    defer result.deinit();
+
+    // Parse JSON into ReflectionData
+    const parsed = reflect.Miniray.parseJson(e.gpa, result.json) catch |err| {
+        std.log.warn("WGSL reflection JSON parse failed for '{s}': {}", .{ name, err });
+        return;
+    };
+
+    // Cache the result
+    e.wgsl_reflections.put(e.gpa, name, parsed) catch {
+        var ref_copy = parsed;
+        ref_copy.deinit();
+        std.log.warn("WGSL reflection cache put failed for '{s}': OutOfMemory", .{name});
+    };
+}
+
+/// Minify WGSL code and cache reflection data with mapped names.
+///
+/// Returns the minified code (caller owns) or null if minification failed.
+/// The reflection data with mapped identifiers is cached automatically.
+///
+/// Requires libminiray.a to be linked (FFI path).
+fn minifyAndCache(e: *Emitter, name: []const u8, code: []const u8) ?[]const u8 {
+    // Pre-conditions
+    std.debug.assert(name.len > 0);
+    std.debug.assert(code.len > 0);
+
+    // Skip if already cached
+    if (e.wgsl_reflections.contains(name)) return null;
+
+    // Minification requires FFI (no subprocess fallback for minify+reflect)
+    if (comptime !miniray_ffi.has_miniray_lib) {
+        std.log.warn("minify_shaders requires libminiray.a: '{s}' not minified", .{name});
+        // Fall back to reflection-only
+        reflectAndCache(e, name, code);
+        return null;
+    }
+
+    // Call minifyAndReflectFfi
+    var result = miniray_ffi.minifyAndReflectFfi(code, null) catch |err| {
+        std.log.warn("WGSL minification failed for '{s}': {}", .{ name, err });
+        // Fall back to reflection-only
+        reflectAndCache(e, name, code);
+        return null;
+    };
+    defer result.deinit();
+
+    // Parse reflection JSON with mapped names
+    const parsed = reflect.Miniray.parseJson(e.gpa, result.json) catch |err| {
+        std.log.warn("WGSL minify reflection parse failed for '{s}': {}", .{ name, err });
+        return null;
+    };
+
+    // Cache the reflection with mapped names
+    e.wgsl_reflections.put(e.gpa, name, parsed) catch {
+        var ref_copy = parsed;
+        ref_copy.deinit();
+        std.log.warn("WGSL reflection cache put failed for '{s}': OutOfMemory", .{name});
+        return null;
+    };
+
+    // Return a copy of the minified code (caller owns)
+    return e.gpa.dupe(u8, result.code) catch null;
 }
 
 /// Build and cache the fully resolved code for #shaderModule backward compatibility.

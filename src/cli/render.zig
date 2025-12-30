@@ -47,6 +47,8 @@ pub const Options = struct {
     scene_name: ?[]const u8,
     /// true to generate TypeScript type definitions (.d.ts file)
     generate_types: bool = false,
+    /// true to minify WGSL shaders for smaller payload
+    minify_shaders: bool = false,
 };
 
 /// Execute the render command.
@@ -86,7 +88,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     defer if (opts.output_path == null) allocator.free(output);
 
     // Execute render pipeline
-    return executePipeline(allocator, opts.input_path, output, opts.width, opts.height, opts.time, opts.embed_bytecode, opts.render_frame, opts.embed_runtime, opts.embed_executor, opts.scene_name, opts.generate_types);
+    return executePipeline(allocator, opts.input_path, output, opts.width, opts.height, opts.time, opts.embed_bytecode, opts.render_frame, opts.embed_runtime, opts.embed_executor, opts.scene_name, opts.generate_types, opts.minify_shaders);
 }
 
 /// Parse render command arguments.
@@ -144,6 +146,8 @@ fn parseArgs(args: []const []const u8, opts: *Options) u8 {
             opts.embed_runtime = false;
         } else if (std.mem.eql(u8, arg, "--embed-executor")) {
             opts.embed_executor = true;
+        } else if (std.mem.eql(u8, arg, "--minify") or std.mem.eql(u8, arg, "-m")) {
+            opts.minify_shaders = true;
         } else if (std.mem.eql(u8, arg, "--types")) {
             opts.generate_types = true;
         } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--scene")) {
@@ -227,6 +231,7 @@ fn executePipeline(
     embed_executor: bool,
     scene_name: ?[]const u8,
     generate_types: bool,
+    minify_shaders: bool,
 ) !u8 {
     // Pre-conditions
     std.debug.assert(input.len > 0);
@@ -237,13 +242,13 @@ fn executePipeline(
     var plugins: ?pngine.dsl.PluginSet = null;
 
     if (embed_executor) {
-        var result = compileFromFileWithPlugins(allocator, input) catch |compile_err| {
+        var result = compileFromFileWithPlugins(allocator, input, minify_shaders) catch |compile_err| {
             return handleCompileError(compile_err, input);
         };
         bytecode = result.pngb;
         plugins = result.plugins;
     } else {
-        bytecode = compileFromFile(allocator, input) catch |compile_err| {
+        bytecode = compileFromFile(allocator, input, minify_shaders) catch |compile_err| {
             return handleCompileError(compile_err, input);
         };
     }
@@ -329,23 +334,22 @@ fn executePipeline(
 }
 
 /// Compile source file to bytecode.
-fn compileFromFile(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+fn compileFromFile(allocator: std.mem.Allocator, input: []const u8, minify_shaders: bool) ![]u8 {
     const source = try readSourceFile(allocator, input);
     defer allocator.free(source);
-    return compileSource(allocator, input, source);
+    return compileSource(allocator, input, source, minify_shaders);
 }
 
 /// Compile source file and return bytecode with detected plugins.
-fn compileFromFileWithPlugins(allocator: std.mem.Allocator, input: []const u8) !pngine.dsl.Compiler.CompileWithPluginsResult {
+fn compileFromFileWithPlugins(allocator: std.mem.Allocator, input: []const u8, minify_shaders: bool) !pngine.dsl.Compiler.CompileWithPluginsResult {
     const source = try readSourceFile(allocator, input);
     defer allocator.free(source);
 
     const base_dir = std.fs.path.dirname(input);
-    const miniray_path = findMinirayPath();
 
     return pngine.dsl.Compiler.compileWithPlugins(allocator, source, .{
         .base_dir = base_dir,
-        .miniray_path = miniray_path,
+        .minify_shaders = minify_shaders,
     });
 }
 
@@ -901,7 +905,7 @@ fn readSourceFile(allocator: std.mem.Allocator, path: []const u8) ![:0]const u8 
     return buffer;
 }
 
-fn compileSource(allocator: std.mem.Allocator, path: []const u8, source: [:0]const u8) ![]u8 {
+fn compileSource(allocator: std.mem.Allocator, path: []const u8, source: [:0]const u8, minify_shaders: bool) ![]u8 {
     const extension = std.fs.path.extension(path);
 
     if (std.mem.eql(u8, extension, ".pbsf")) {
@@ -909,34 +913,11 @@ fn compileSource(allocator: std.mem.Allocator, path: []const u8, source: [:0]con
     } else {
         // Pass base_dir for asset embedding (e.g., blob={file={url="..."}} )
         const base_dir = std.fs.path.dirname(path);
-        const miniray_path = findMinirayPath();
         return pngine.dsl.compileWithOptions(allocator, source, .{
             .base_dir = base_dir,
-            .miniray_path = miniray_path,
+            .minify_shaders = minify_shaders,
         });
     }
-}
-
-/// Find miniray binary for WGSL reflection.
-fn findMinirayPath() ?[]const u8 {
-    // Check environment variable
-    if (std.posix.getenv("PNGINE_MINIRAY_PATH")) |path| {
-        if (path.len > 0) return path;
-    }
-
-    // Check common development paths
-    const dev_paths = [_][]const u8{
-        "/Users/hugo/Development/miniray/miniray",
-        "../miniray/miniray",
-    };
-
-    for (dev_paths) |dev_path| {
-        if (std.fs.cwd().access(dev_path, .{})) |_| {
-            return dev_path;
-        } else |_| {}
-    }
-
-    return null;
 }
 
 fn writeOutputFile(path: []const u8, data: []const u8) !void {

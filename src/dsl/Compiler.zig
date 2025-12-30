@@ -85,10 +85,10 @@ pub const Compiler = struct {
         /// Defaults to true when base_dir is set.
         resolve_imports: bool = true,
 
-        /// Path to miniray binary for WGSL reflection.
-        /// If null, "miniray" is looked up in PATH.
-        /// Required for setUniform() API to work with custom uniforms.
-        miniray_path: ?[]const u8 = null,
+        /// Minify WGSL shaders using miniray.
+        /// When true, shader identifiers are minified for smaller payload size.
+        /// Requires libminiray.a to be linked at compile time.
+        minify_shaders: bool = false,
 
         /// Directory containing pre-built executor WASM files.
         /// Files should be named pngine-{variant}.wasm.
@@ -202,7 +202,7 @@ pub const Compiler = struct {
         // Phase 3: Emit PNGB
         const pngb = try Emitter.emitWithOptions(gpa, &ast, &analysis, .{
             .base_dir = options.base_dir,
-            .miniray_path = options.miniray_path,
+            .minify_shaders = options.minify_shaders,
         });
 
         // Post-condition: valid PNGB header
@@ -288,7 +288,7 @@ pub const Compiler = struct {
         // Phase 4: Emit PNGB
         const pngb = try Emitter.emitWithOptions(gpa, &ast, &analysis, .{
             .base_dir = options.base_dir,
-            .miniray_path = options.miniray_path,
+            .minify_shaders = options.minify_shaders,
             .executor_wasm = executor_wasm,
             .plugins = plugins,
         });

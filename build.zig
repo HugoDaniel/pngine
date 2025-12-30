@@ -27,16 +27,18 @@ pub fn build(b: *std.Build) void {
     bytecode_module.addImport("types", types_module);
 
     // ========================================================================
-    // Miniray FFI Integration (default when available)
+    // Miniray FFI Integration (required for WGSL reflection/minification)
     // ========================================================================
     //
-    // All tests use FFI by default when libminiray.a is available (~40x faster).
+    // libminiray.a is required for:
+    // - WGSL shader reflection (buffer sizes, struct layouts)
+    // - Shader minification (--minify flag)
+    //
     // Auto-detected at: ../../miniray/build/libminiray.a
-    // Falls back to subprocess spawning when library not found.
+    // If not found, reflection/minification features are disabled.
     //
     // REQUIRED VERSION: miniray 0.3.0+
-    // Features used: miniray_reflect() with WGSL-spec memory layout computation
-    // (struct sizes, array strides, field offsets with proper alignment)
+    // Features used: miniray_reflect(), miniray_minify_and_reflect()
     //
     // Build library: cd ../../miniray && make lib
     // Override path: zig build -Dminiray-lib=/path/to/libminiray.a
@@ -44,7 +46,7 @@ pub fn build(b: *std.Build) void {
     const miniray_lib_path = b.option(
         []const u8,
         "miniray-lib",
-        "Path to libminiray.a (Go C-archive) for faster WGSL reflection",
+        "Path to libminiray.a (required for WGSL reflection/minification)",
     );
 
     // Check if miniray library exists at default location

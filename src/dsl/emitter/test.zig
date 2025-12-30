@@ -2629,11 +2629,9 @@ test "Emitter: buffer size from WGSL binding reference" {
         return error.EmitError;
     }
 
-    // Emit with miniray path
-    const pngb = Emitter.emitWithOptions(testing.allocator, &ast, &analysis, .{
-        .miniray_path = "/Users/hugo/Development/miniray/miniray",
-    }) catch |err| {
-        // If miniray isn't available or reflection fails, skip this test
+    // Emit (requires libminiray.a to be linked for reflection)
+    const pngb = Emitter.emitWithOptions(testing.allocator, &ast, &analysis, .{}) catch |err| {
+        // If miniray isn't linked or reflection fails, skip this test
         std.debug.print("Skipping test: {}\n", .{err});
         return;
     };

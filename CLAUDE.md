@@ -82,6 +82,28 @@ platform (iOS, Android, native) via embedded WASM executor.
 ZIG=/Users/hugo/.zvm/bin/zig
 ```
 
+## Build Dependencies
+
+### libminiray.a (Required for WGSL Reflection)
+
+The compiler requires `libminiray.a` (Go C-archive) for:
+- WGSL shader reflection (buffer sizes, struct layouts)
+- Shader minification (`--minify` flag)
+
+```bash
+# Build miniray library (from miniray repo)
+cd ../../miniray && make lib
+
+# Or specify custom path
+zig build -Dminiray-lib=/path/to/libminiray.a
+```
+
+**Default location**: `../../miniray/build/libminiray.a`
+
+If libminiray.a is not linked:
+- `size=shader.binding` references will fail
+- `--minify` flag will have no effect (warning logged)
+
 ## Quick Commands
 
 ```bash
@@ -351,11 +373,24 @@ pngine extract <image.png> [-o output.pngb]
 | `-v, --verbose` | Print full GPU call trace (like browser debug)  | Off     |
 | `-h, --help`   | Show help message                                | -       |
 
+### Compile Options
+
+| Flag              | Description                                      | Default |
+| ----------------- | ------------------------------------------------ | ------- |
+| `-o, --output`    | Output .pngb path                                | `<input>.pngb` |
+| `-m, --minify`    | Minify WGSL shaders (reduces payload 30-50%)     | Off     |
+| `--embed-executor`| Embed executor WASM in payload                   | Off     |
+
+**Note**: `--minify` requires libminiray.a to be linked at build time.
+
 ### Examples
 
 ```bash
 # Create minimal PNG with embedded bytecode (~500 bytes)
 pngine shader.pngine
+
+# Compile with minified shaders (30-50% smaller payload)
+pngine compile shader.pngine -o output.pngb --minify
 
 # Render 512x512 preview with embedded bytecode
 pngine shader.pngine --frame

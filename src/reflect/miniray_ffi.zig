@@ -1,23 +1,107 @@
 //! Miniray FFI Bindings
 //!
-//! Direct C function calls to libminiray.a for WGSL reflection.
-//! Provides zero-overhead reflection when the library is linked.
+//! Direct C function calls to libminiray.a (Go C-archive) for WGSL reflection
+//! and minification. Provides ~50x faster reflection than subprocess spawning.
+//!
+//! ## C API Contract (libminiray.h)
+//!
+//! The library exports these C functions:
+//!
+//! ```c
+//! // Reflect on WGSL source, returns JSON with bindings/structs/entryPoints
+//! // Returns: 0=success, 1=json_encode_failed, 2=null_input
+//! int miniray_reflect(
+//!     const char* source,      // WGSL source code (not null-terminated required)
+//!     int source_len,          // Length of source in bytes
+//!     char** out_json,         // Output: JSON string (caller must free)
+//!     int* out_json_len        // Output: Length of JSON
+//! );
+//!
+//! // Minify WGSL and return reflection with mapped identifiers
+//! // Returns: 0=success, 1=json_encode_failed, 2=null_input
+//! int miniray_minify_and_reflect(
+//!     const char* source,      // WGSL source code
+//!     int source_len,          // Length of source
+//!     const char* options,     // JSON options (nullable)
+//!     int options_len,         // Length of options (0 if null)
+//!     char** out_code,         // Output: Minified WGSL (caller must free)
+//!     int* out_code_len,       // Output: Length of minified code
+//!     char** out_json,         // Output: Reflection JSON (caller must free)
+//!     int* out_json_len        // Output: Length of JSON
+//! );
+//!
+//! // Free memory allocated by miniray functions
+//! void miniray_free(void* ptr);
+//!
+//! // Get library version string (static, do not free)
+//! const char* miniray_version(void);
+//! ```
+//!
+//! ## JSON Response Format
+//!
+//! The reflection JSON has this structure:
+//!
+//! ```json
+//! {
+//!   "bindings": [{
+//!     "group": 0,
+//!     "binding": 0,
+//!     "name": "uniforms",
+//!     "nameMapped": "a",           // Only with minify_and_reflect
+//!     "addressSpace": "uniform",
+//!     "type": "Uniforms",
+//!     "typeMapped": "b",           // Only with minify_and_reflect
+//!     "layout": {
+//!       "size": 16,
+//!       "alignment": 16,
+//!       "fields": [{
+//!         "name": "time",
+//!         "type": "f32",
+//!         "offset": 0,
+//!         "size": 4,
+//!         "alignment": 4
+//!       }]
+//!     }
+//!   }],
+//!   "structs": {
+//!     "Uniforms": { "size": 16, "alignment": 16, "fields": [...] }
+//!   },
+//!   "entryPoints": [{
+//!     "name": "main",
+//!     "stage": "compute"           // "vertex", "fragment", or "compute"
+//!   }],
+//!   "errors": [{                   // Parse errors (if any)
+//!     "message": "unexpected token",
+//!     "line": 5,
+//!     "column": 12
+//!   }]
+//! }
+//! ```
 //!
 //! ## Compile-time Configuration
 //!
-//! When `has_miniray_lib` is true (library linked), FFI functions are available.
-//! When false, calling FFI functions is a compile error.
+//! - `has_miniray_lib = true`: Library linked, FFI functions available
+//! - `has_miniray_lib = false`: Library not linked, FFI calls are compile errors
+//!
+//! Build with: `zig build -Dminiray-lib=/path/to/libminiray.a`
 //!
 //! ## Memory Ownership
 //!
-//! - `reflectFfi` returns a slice pointing to C-allocated memory
-//! - Caller MUST call `freeResult` to free the memory
+//! - FFI results contain C-allocated memory (Go runtime heap)
+//! - Caller MUST call `result.deinit()` to free the memory
 //! - Do NOT use Zig allocators to free FFI results
+//! - Do NOT access result data after calling deinit()
 //!
 //! ## Thread Safety
 //!
-//! The Go runtime is thread-safe. Multiple concurrent calls to `reflectFfi`
-//! are allowed from different threads.
+//! The Go runtime is thread-safe. Multiple concurrent calls are allowed.
+//!
+//! ## Required Version
+//!
+//! miniray 0.3.0+ required for:
+//! - WGSL-spec memory layout computation
+//! - Array element stride/type metadata
+//! - Minification with identifier mapping
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -37,24 +121,55 @@ const c = if (has_miniray_lib) @cImport({
     @cInclude("libminiray.h");
 }) else struct {};
 
-/// Error codes from miniray
+/// Error codes from miniray C API.
+///
+/// These map to the integer return codes from C functions:
+/// - 0 = success (no error)
+/// - 1 = JsonEncodeFailed (Go JSON marshaling failed)
+/// - 2 = NullInput (source pointer was null)
+/// - Other = UnknownError
 pub const Error = error{
-    /// JSON encoding failed in Go
+    /// C API returned 1: JSON encoding failed in Go runtime.
+    /// This can happen if reflection produces non-serializable data.
     JsonEncodeFailed,
-    /// Null input pointer
+    /// C API returned 2: Source pointer was null.
+    /// This should never happen from Zig (assertions catch it).
     NullInput,
-    /// Unknown error from library
+    /// C API returned unexpected error code.
+    /// Check miniray version compatibility.
     UnknownError,
-    /// Library not linked (compile-time)
+    /// Library not linked at compile time.
+    /// Build with: zig build -Dminiray-lib=/path/to/libminiray.a
     LibraryNotLinked,
 };
 
-/// Result of FFI reflection call
+/// Result of FFI reflection call.
+///
+/// Contains C-allocated memory that MUST be freed by calling deinit().
+///
+/// ## Lifecycle
+///
+/// ```zig
+/// var result = try reflectFfi(source);
+/// defer result.deinit();  // REQUIRED: frees C memory
+///
+/// // Use result.json while result is valid
+/// const data = try parseJson(allocator, result.json);
+/// // data is Zig-allocated, independent of result
+/// ```
+///
+/// ## Memory Layout
+///
+/// The `json` slice points directly into Go runtime heap memory.
+/// Do not store references to this memory after deinit().
 pub const FfiResult = struct {
-    /// JSON data (C-allocated, must free with freeResult)
+    /// JSON reflection data as UTF-8 string.
+    /// Points to C-allocated memory (Go heap).
+    /// Valid until deinit() is called.
     json: []const u8,
 
-    /// Free the result memory
+    /// Free the C-allocated memory.
+    /// After calling, this struct is undefined and must not be used.
     pub fn deinit(self: *FfiResult) void {
         if (comptime has_miniray_lib) {
             c.miniray_free(@ptrCast(@constCast(self.json.ptr)));
@@ -116,14 +231,41 @@ pub fn reflectFfi(source: []const u8) Error!FfiResult {
     };
 }
 
-/// Result of FFI minify+reflect call
+/// Result of FFI minify+reflect call.
+///
+/// Contains two C-allocated buffers that MUST be freed by calling deinit().
+///
+/// ## Lifecycle
+///
+/// ```zig
+/// var result = try minifyAndReflectFfi(source, null);
+/// defer result.deinit();  // REQUIRED: frees both buffers
+///
+/// // Copy minified code if needed beyond this scope
+/// const minified = try allocator.dupe(u8, result.code);
+/// ```
+///
+/// ## Mapped Identifiers
+///
+/// When minification renames identifiers, the JSON includes mapping fields:
+/// - `nameMapped`: minified binding variable name
+/// - `typeMapped`: minified struct type name
+/// - `elementTypeMapped`: minified array element type name
+///
+/// Entry points and struct field names are NEVER renamed.
 pub const MinifyAndReflectResult = struct {
-    /// Minified WGSL code (C-allocated, must free with deinit)
+    /// Minified WGSL code as UTF-8 string.
+    /// Contains the same shader logic with shorter identifiers.
+    /// Points to C-allocated memory (Go heap).
     code: []const u8,
-    /// JSON reflection data with mapped names (C-allocated, must free with deinit)
+
+    /// JSON reflection data with mapped identifier names.
+    /// Contains both original names (for API) and mapped names (in shader).
+    /// Points to C-allocated memory (Go heap).
     json: []const u8,
 
-    /// Free all allocated memory
+    /// Free all C-allocated memory.
+    /// After calling, this struct is undefined and must not be used.
     pub fn deinit(self: *MinifyAndReflectResult) void {
         if (comptime has_miniray_lib) {
             c.miniray_free(@ptrCast(@constCast(self.code.ptr)));
@@ -139,16 +281,45 @@ pub const MinifyAndReflectResult = struct {
 /// and reflection JSON where `nameMapped`, `typeMapped`, `elementTypeMapped` fields
 /// contain the actual minified identifier names.
 ///
-/// Returns minified code and JSON string in C-allocated memory.
-/// Caller MUST call result.deinit() to free the memory.
+/// ## What Gets Minified
+///
+/// | Category          | Example               | Minified? |
+/// |-------------------|-----------------------|-----------|
+/// | Struct type names | `struct Uniforms`     | Yes → `a` |
+/// | Local variables   | `let myValue = 1.0`   | Yes → `b` |
+/// | Helper functions  | `fn computeNormal()`  | Yes → `c` |
+/// | Function params   | `fn calc(input: f32)` | Yes       |
+/// | Entry points      | `@vertex fn vs()`     | NO        |
+/// | Struct fields     | `.time`, `.position`  | NO        |
+/// | Binding vars*     | `var<uniform> u`      | NO*       |
+///
+/// *Binding variable names preserved by default. Pass `{"mangleBindings":true}`
+/// in options_json to enable mangling (requires name mapping in uniform table).
+///
+/// ## Parameters
+///
+/// - `source`: WGSL source code to minify
+/// - `options_json`: Optional JSON configuration, or null for defaults
+///
+/// ## Options JSON Format
+///
+/// ```json
+/// {
+///   "mangleBindings": false,  // If true, also rename binding variables
+///   "preserveNames": []       // List of identifiers to never rename
+/// }
+/// ```
 ///
 /// ## Example
 ///
 /// ```zig
-/// var result = try miniray_ffi.minifyAndReflectFfi(wgsl_source, null);
+/// // Basic usage (recommended)
+/// var result = try minifyAndReflectFfi(wgsl_source, null);
 /// defer result.deinit();
-/// // result.code = minified WGSL
-/// // result.json = reflection with mapped names
+///
+/// // With options
+/// var result = try minifyAndReflectFfi(wgsl_source, "{\"mangleBindings\":true}");
+/// defer result.deinit();
 /// ```
 ///
 /// ## Compile-time

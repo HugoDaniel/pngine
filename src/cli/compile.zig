@@ -28,6 +28,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     var output_path: ?[]const u8 = null;
     var embed_executor: bool = false;
     var executors_dir: ?[]const u8 = null;
+    var minify_shaders: bool = false;
 
     // Parse arguments with bounded iteration
     const args_len: u32 = @intCast(args.len);
@@ -56,6 +57,8 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
             }
             executors_dir = args[i + 1];
             skip_next = true;
+        } else if (std.mem.eql(u8, arg, "--minify") or std.mem.eql(u8, arg, "-m")) {
+            minify_shaders = true;
         } else if (arg.len > 0 and arg[0] == '-') {
             std.debug.print("Unknown option: {s}\n", .{arg});
             return 1;
@@ -99,6 +102,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     const result = compileSourceWithPlugins(allocator, input, source, .{
         .embed_executor = embed_executor,
         .executors_dir = executors_dir,
+        .minify_shaders = minify_shaders,
     }) catch |err| {
         std.debug.print("Error: compilation failed: {}\n", .{err});
         return 3;
@@ -140,6 +144,9 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
 pub const CompileOptions = struct {
     embed_executor: bool = false,
     executors_dir: ?[]const u8 = null,
+    /// Minify WGSL shaders for smaller payload size.
+    /// Requires libminiray.a to be linked.
+    minify_shaders: bool = false,
 };
 
 /// Compile source using appropriate compiler based on file extension.
@@ -161,12 +168,11 @@ pub fn compileSourceWithPlugins(
     } else {
         // DSL format - use compileWithPlugins for variant selection
         const base_dir = std.fs.path.dirname(path) orelse ".";
-        const miniray_path = findMinirayPath();
 
         var result = try pngine.dsl.compileWithPlugins(allocator, source, .{
             .base_dir = base_dir,
             .file_path = path,
-            .miniray_path = miniray_path,
+            .minify_shaders = options.minify_shaders,
             .embed_executor = options.embed_executor,
             .executors_dir = options.executors_dir,
         });
@@ -186,22 +192,3 @@ pub fn compileSource(allocator: std.mem.Allocator, path: []const u8, source: [:0
     return result.bytecode;
 }
 
-/// Find miniray binary for WGSL reflection.
-fn findMinirayPath() ?[]const u8 {
-    if (std.posix.getenv("PNGINE_MINIRAY_PATH")) |path| {
-        if (path.len > 0) return path;
-    }
-
-    const dev_paths = [_][]const u8{
-        "/Users/hugo/Development/miniray/miniray",
-        "../miniray/miniray",
-    };
-
-    for (dev_paths) |dev_path| {
-        if (std.fs.cwd().access(dev_path, .{})) |_| {
-            return dev_path;
-        } else |_| {}
-    }
-
-    return null;
-}

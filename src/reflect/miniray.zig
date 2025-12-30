@@ -1,10 +1,7 @@
 //! Miniray WGSL Reflection Integration
 //!
-//! Provides WGSL shader reflection for the DSL compiler.
-//! Supports two backends:
-//!
-//! 1. **FFI (fast)**: Direct C calls to libminiray.a when linked
-//! 2. **Subprocess (fallback)**: Spawns miniray CLI process
+//! Provides WGSL shader reflection for the DSL compiler via FFI calls
+//! to libminiray.a (Go C-archive library).
 //!
 //! ## Usage
 //!
@@ -18,17 +15,17 @@
 //! }
 //! ```
 //!
-//! ## FFI Mode
+//! ## Build Requirements
 //!
-//! When libminiray.a is linked (build option `has_miniray_lib=true`),
-//! reflection uses direct C function calls for ~10-50x speedup.
+//! libminiray.a must be linked at build time. Use:
 //!
-//! Build: `zig build -Dminiray-lib=../miniray/build/libminiray.a`
+//!     zig build -Dminiray-lib=../miniray/build/libminiray.a
+//!
+//! If not linked, reflection operations return MinirayNotFound.
 //!
 //! ## Invariants
 //!
-//! - FFI mode: requires libminiray.a linked at build time
-//! - Subprocess mode: requires `miniray` binary in PATH or specified path
+//! - Requires libminiray.a linked at build time
 //! - WGSL source must be valid (parse errors returned in result.errors)
 //! - Field offsets follow WGSL memory layout specification
 //! - All allocations owned by ReflectionData, freed on deinit
@@ -209,18 +206,13 @@ pub const ReflectionData = struct {
 pub const has_ffi = miniray_ffi.has_miniray_lib;
 
 /// Miniray reflection interface.
+///
+/// Requires libminiray.a to be linked at build time.
 pub const Miniray = struct {
-    /// Path to miniray binary. If null, uses "miniray" from PATH.
-    /// Only used in subprocess mode (when FFI not available).
-    miniray_path: ?[]const u8 = null,
-
     pub const Error = error{
         OutOfMemory,
-        SpawnFailed,
         MinirayNotFound,
-        ProcessFailed,
         InvalidJson,
-        Timeout,
     };
 
     /// Reflect on WGSL source code.
@@ -228,29 +220,22 @@ pub const Miniray = struct {
     /// Returns reflection data with bindings, structs, and entry points.
     /// Caller owns the returned data and must call deinit().
     ///
-    /// Uses FFI (direct C calls) when libminiray.a is linked,
-    /// otherwise falls back to subprocess spawning.
+    /// Requires libminiray.a to be linked. Returns MinirayNotFound if not.
     pub fn reflect(self: *const Miniray, gpa: Allocator, wgsl_source: []const u8) Error!ReflectionData {
+        _ = self;
         // Pre-conditions
         std.debug.assert(wgsl_source.len > 0);
 
-        // Use FFI when available (compile-time dispatch)
-        if (comptime has_ffi) {
-            return self.reflectViaFfi(gpa, wgsl_source);
-        } else {
-            return self.reflectViaSubprocess(gpa, wgsl_source);
+        // FFI is mandatory - no subprocess fallback
+        if (comptime !has_ffi) {
+            return error.MinirayNotFound;
         }
-    }
-
-    /// Fast path: direct C function call to libminiray.a
-    fn reflectViaFfi(self: *const Miniray, gpa: Allocator, wgsl_source: []const u8) Error!ReflectionData {
-        _ = self; // miniray_path not used in FFI mode
 
         var ffi_result = miniray_ffi.reflectFfi(wgsl_source) catch |err| {
             return switch (err) {
                 error.JsonEncodeFailed => error.InvalidJson,
-                error.NullInput => error.ProcessFailed,
-                error.UnknownError => error.ProcessFailed,
+                error.NullInput => error.MinirayNotFound,
+                error.UnknownError => error.MinirayNotFound,
                 error.LibraryNotLinked => error.MinirayNotFound,
             };
         };
@@ -260,58 +245,9 @@ pub const Miniray = struct {
         return parseJson(gpa, ffi_result.json);
     }
 
-    /// Fallback path: spawn miniray subprocess
-    fn reflectViaSubprocess(self: *const Miniray, gpa: Allocator, wgsl_source: []const u8) Error!ReflectionData {
-        // Spawn miniray reflect subprocess
-        const argv = [_][]const u8{
-            self.miniray_path orelse "miniray",
-            "reflect",
-        };
-
-        var child = std.process.Child.init(&argv, gpa);
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-
-        child.spawn() catch |err| {
-            return switch (err) {
-                error.FileNotFound => error.MinirayNotFound,
-                else => error.SpawnFailed,
-            };
-        };
-
-        // Write WGSL to stdin
-        if (child.stdin) |stdin| {
-            stdin.writeAll(wgsl_source) catch return error.ProcessFailed;
-            stdin.close();
-            child.stdin = null;
-        }
-
-        // Read stdout into buffer
-        const stdout = child.stdout orelse return error.ProcessFailed;
-        const max_output: u32 = 10 * 1024 * 1024; // 10MB max
-        var output = std.ArrayListUnmanaged(u8){};
-        defer output.deinit(gpa);
-
-        var buf: [4096]u8 = undefined;
-        for (0..max_output / 4096 + 1) |_| {
-            const n = stdout.read(&buf) catch break;
-            if (n == 0) break;
-            output.appendSlice(gpa, buf[0..n]) catch return error.OutOfMemory;
-        }
-
-        // Wait for process
-        const term = child.wait() catch return error.ProcessFailed;
-        if (term.Exited != 0) {
-            return error.ProcessFailed;
-        }
-
-        // Parse JSON output
-        return parseJson(gpa, output.items);
-    }
-
     /// Parse JSON reflection output into ReflectionData.
-    fn parseJson(gpa: Allocator, json_data: []const u8) Error!ReflectionData {
+    /// Public for use by FFI path in shaders.zig.
+    pub fn parseJson(gpa: Allocator, json_data: []const u8) Error!ReflectionData {
         var arena = std.heap.ArenaAllocator.init(gpa);
         errdefer arena.deinit();
         const alloc = arena.allocator();
@@ -566,9 +502,14 @@ test "Miniray: empty object parses successfully" {
     try std.testing.expect(!reflection.hasErrors());
 }
 
-test "Miniray: integration test with real binary" {
-    // Use explicit path to miniray in development
-    const miniray = Miniray{ .miniray_path = "/Users/hugo/Development/miniray/miniray" };
+test "Miniray: integration test with FFI" {
+    // This test only runs when FFI is available
+    if (comptime !has_ffi) {
+        std.debug.print("\n[FFI] Skipping integration test - library not linked\n", .{});
+        return error.SkipZigTest;
+    }
+
+    const miniray = Miniray{};
     const wgsl =
         \\struct Uniforms {
         \\    time: f32,
@@ -581,13 +522,7 @@ test "Miniray: integration test with real binary" {
         \\}
     ;
 
-    var reflection = miniray.reflect(std.testing.allocator, wgsl) catch |err| {
-        if (err == error.MinirayNotFound) {
-            // Skip test if miniray is not installed
-            return;
-        }
-        return err;
-    };
+    var reflection = try miniray.reflect(std.testing.allocator, wgsl);
     defer reflection.deinit();
 
     // Verify binding was parsed
@@ -613,41 +548,9 @@ test "Miniray: has_ffi reports FFI availability" {
     const ffi_available = has_ffi;
     // Log which mode we're in for debugging
     if (ffi_available) {
-        std.debug.print("\n[FFI] libminiray.a is linked - using fast path\n", .{});
+        std.debug.print("\n[FFI] libminiray.a is linked\n", .{});
     } else {
-        std.debug.print("\n[FFI] libminiray.a not linked - using subprocess fallback\n", .{});
+        std.debug.print("\n[FFI] libminiray.a not linked - reflection will fail\n", .{});
     }
 }
 
-test "Miniray: FFI mode integration test" {
-    // This test only runs when FFI is available
-    if (comptime !has_ffi) {
-        std.debug.print("\n[FFI] Skipping FFI test - library not linked\n", .{});
-        return error.SkipZigTest;
-    }
-
-    const miniray = Miniray{};
-    const wgsl =
-        \\struct U { time: f32, scale: vec2<f32>, }
-        \\@group(0) @binding(0) var<uniform> u: U;
-        \\@fragment fn fs() -> @location(0) vec4<f32> { return vec4f(1.0); }
-    ;
-
-    var reflection = try miniray.reflect(std.testing.allocator, wgsl);
-    defer reflection.deinit();
-
-    // Verify FFI produced correct results
-    try std.testing.expectEqual(@as(usize, 1), reflection.bindings.len);
-    try std.testing.expectEqualStrings("u", reflection.bindings[0].name);
-    try std.testing.expectEqual(Binding.AddressSpace.uniform, reflection.bindings[0].address_space);
-
-    // Verify layout: time(4) + padding(4) + scale(8) = 16 bytes
-    try std.testing.expectEqual(@as(u32, 16), reflection.bindings[0].layout.size);
-
-    // Verify entry point
-    try std.testing.expectEqual(@as(usize, 1), reflection.entry_points.len);
-    try std.testing.expectEqualStrings("fs", reflection.entry_points[0].name);
-    try std.testing.expectEqual(EntryPoint.Stage.fragment, reflection.entry_points[0].stage);
-
-    std.debug.print("\n[FFI] Integration test PASSED\n", .{});
-}
