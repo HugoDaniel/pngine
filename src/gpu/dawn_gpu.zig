@@ -22,8 +22,9 @@ const Allocator = std.mem.Allocator;
 const bytecode_mod = @import("bytecode");
 const format = bytecode_mod.format;
 
-// Check if zgpu is available at comptime
-pub const has_zgpu = @hasDecl(@import("root"), "zgpu");
+// Check if zgpu is available via build options
+const gpu_build_options = @import("gpu_build_options");
+pub const has_zgpu = gpu_build_options.has_zgpu;
 
 pub const Error = error{
     GpuNotAvailable,

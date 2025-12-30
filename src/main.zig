@@ -55,8 +55,9 @@ pub const executor_test = @import("executor/executor_test.zig");
 pub const gpu_backends = struct {
     pub const native_gpu = @import("gpu/native_gpu.zig");
     pub const NativeGPU = native_gpu.NativeGPU;
-    // Note: DawnGPU (dawn_gpu.zig) exists but requires zgpu 0.15+ which
-    // needs Zig 0.15. For now, use browser-based rendering via `npm run browser`.
+    pub const dawn_gpu = @import("gpu/dawn_gpu.zig");
+    pub const DawnGPU = dawn_gpu.DawnGPU;
+    pub const has_dawn = dawn_gpu.has_zgpu;
 };
 
 // ZIP bundle support
