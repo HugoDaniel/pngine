@@ -752,11 +752,8 @@ pub fn build(b: *std.Build) void {
     // For production bundles, use: node npm/pngine/scripts/bundle.js
     const web_step = b.step("web", "Build demo bundle (WASM + JS)");
 
-    // Install WASM to demo directory
-    const install_wasm = b.addInstallArtifact(wasm, .{
-        .dest_dir = .{ .override = .{ .custom = "demo" } },
-    });
-    web_step.dependOn(&install_wasm.step);
+    // Note: pngine.wasm is no longer copied to demo/ because PNGs now embed their executor.
+    // The embedded executor is extracted from the bytecode payload at runtime.
 
     // Install ancillary mvp.wasm to demo/assets directory
     const install_mvp_wasm = b.addInstallArtifact(mvp_wasm, .{
