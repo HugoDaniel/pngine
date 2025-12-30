@@ -251,19 +251,6 @@ fn listPngContents(input: []const u8, data: []const u8) u8 {
         std.debug.print("  Embedded bytecode (pNGb): no\n", .{});
     }
 
-    if (pngine.png.hasPngr(data)) {
-        const info = pngine.png.getPngrInfo(data) catch |err| {
-            std.debug.print("  Error reading pNGr chunk: {}\n", .{err});
-            return 4;
-        };
-        std.debug.print("  Embedded runtime (pNGr): yes\n", .{});
-        std.debug.print("    Version: {d}\n", .{info.version});
-        std.debug.print("    Compressed: {s}\n", .{if (info.compressed) "yes" else "no"});
-        std.debug.print("    Payload size: {d} bytes\n", .{info.payload_bytes});
-    } else {
-        std.debug.print("  Embedded runtime (pNGr): no\n", .{});
-    }
-
     return 0;
 }
 

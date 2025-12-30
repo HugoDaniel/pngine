@@ -70,7 +70,6 @@ pub const png = struct {
     pub const embed = @import("png/embed.zig");
     pub const extract = @import("png/extract.zig");
     pub const encoder = @import("png/encoder.zig");
-    pub const runtime = @import("png/runtime.zig");
 
     // Re-export main types
     pub const Chunk = chunk.Chunk;
@@ -82,12 +81,6 @@ pub const png = struct {
     pub const extractBytecode = extract.extract;
     pub const hasPngb = extract.hasPngb;
     pub const getPngbInfo = extract.getPngbInfo;
-
-    // Re-export runtime functions
-    pub const embedRuntime = runtime.embedRuntime;
-    pub const extractRuntime = runtime.extractRuntime;
-    pub const hasPngr = runtime.hasPngr;
-    pub const getPngrInfo = runtime.getPngrInfo;
 
     // Re-export encoder functions
     pub const encode = encoder.encode;

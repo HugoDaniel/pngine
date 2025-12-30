@@ -8,7 +8,6 @@ pub const chunk = @import("chunk.zig");
 pub const embed = @import("embed.zig");
 pub const extract = @import("extract.zig");
 pub const encoder = @import("encoder.zig");
-pub const runtime = @import("runtime.zig");
 
 pub const Chunk = chunk.Chunk;
 pub const ChunkType = chunk.ChunkType;
@@ -20,5 +19,4 @@ test {
     _ = embed;
     _ = extract;
     _ = encoder;
-    _ = runtime;
 }

@@ -2,22 +2,22 @@
 //!
 //! ## Usage
 //! ```
-//! pngine shader.pngine -o output.png           # PNG with bytecode + WASM runtime
+//! pngine shader.pngine -o output.png           # Self-contained PNG with executor
 //! pngine shader.pngine --frame --size 512x512  # Render actual frame at 512x512
-//! pngine shader.pngine --no-runtime            # PNG without embedded WASM
+//! pngine shader.pngine --no-executor           # PNG without embedded executor
 //! ```
 //!
 //! ## Design
 //! By default, output is a 1x1 transparent pixel PNG with embedded bytecode
-//! AND the WASM runtime (pNGb + pNGr chunks). This creates a self-contained
-//! executable image that can run in any browser without external dependencies.
+//! AND a tailored WASM executor. This creates a self-contained executable
+//! image that can run in any browser without external dependencies.
 //! Use --frame to render an actual preview image at the specified size.
-//! Use --no-runtime to create a smaller PNG without the WASM interpreter.
+//! Use --no-executor for dev builds that use a shared pngine.wasm file.
 //!
 //! ## Invariants
 //! - Input must be valid .pngine or .pbsf source
 //! - Output is always a valid PNG file
-//! - Embedded bytecode (--embed) creates self-contained executable images
+//! - Embedded bytecode + executor creates self-contained executable images
 
 const std = @import("std");
 const pngine = @import("pngine");
@@ -39,9 +39,7 @@ pub const Options = struct {
     embed_explicit: bool,
     /// true to render actual frame via GPU, false for 1x1 transparent pixel
     render_frame: bool,
-    /// true to embed WASM runtime in PNG (pNGr chunk) - creates self-contained executable
-    embed_runtime: bool,
-    /// true to embed WASM executor in bytecode payload (v5 format)
+    /// true to embed WASM executor in bytecode payload (default: true for self-contained PNGs)
     embed_executor: bool,
     /// Optional scene/frame name to render (null = render all frames)
     scene_name: ?[]const u8,
@@ -66,8 +64,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         .embed_bytecode = true, // Embed bytecode by default
         .embed_explicit = false,
         .render_frame = false, // 1x1 transparent pixel by default
-        .embed_runtime = true, // Embed WASM runtime by default for self-contained PNG
-        .embed_executor = false, // Don't embed executor in bytecode by default
+        .embed_executor = true, // Embed executor by default for self-contained PNG
         .scene_name = null, // Render all frames by default
         .generate_types = false, // Don't generate TypeScript types by default
     };
@@ -88,7 +85,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     defer if (opts.output_path == null) allocator.free(output);
 
     // Execute render pipeline
-    return executePipeline(allocator, opts.input_path, output, opts.width, opts.height, opts.time, opts.embed_bytecode, opts.render_frame, opts.embed_runtime, opts.embed_executor, opts.scene_name, opts.generate_types, opts.minify_shaders);
+    return executePipeline(allocator, opts.input_path, output, opts.width, opts.height, opts.time, opts.embed_bytecode, opts.render_frame, opts.embed_executor, opts.scene_name, opts.generate_types, opts.minify_shaders);
 }
 
 /// Parse render command arguments.
@@ -142,10 +139,8 @@ fn parseArgs(args: []const []const u8, opts: *Options) u8 {
         } else if (std.mem.eql(u8, arg, "--no-embed")) {
             opts.embed_bytecode = false;
             opts.embed_explicit = true;
-        } else if (std.mem.eql(u8, arg, "--no-runtime")) {
-            opts.embed_runtime = false;
-        } else if (std.mem.eql(u8, arg, "--embed-executor")) {
-            opts.embed_executor = true;
+        } else if (std.mem.eql(u8, arg, "--no-executor")) {
+            opts.embed_executor = false;
         } else if (std.mem.eql(u8, arg, "--minify") or std.mem.eql(u8, arg, "-m")) {
             opts.minify_shaders = true;
         } else if (std.mem.eql(u8, arg, "--types")) {
@@ -227,7 +222,6 @@ fn executePipeline(
     time: f32,
     embed_bytecode: bool,
     render_frame: bool,
-    embed_runtime: bool,
     embed_executor: bool,
     scene_name: ?[]const u8,
     generate_types: bool,
@@ -288,18 +282,6 @@ fn executePipeline(
         };
     }
 
-    // Optionally embed WASM runtime in PNG (pNGr chunk) using build-time embedded WASM
-    if (embed_runtime) {
-        if (embedded_wasm.len == 0) {
-            std.debug.print("Warning: WASM runtime not available in this build\n", .{});
-        } else {
-            png_data = embedRuntimeData(allocator, png_data, embedded_wasm) catch |err| {
-                std.debug.print("Error: failed to embed runtime: {}\n", .{err});
-                return 4;
-            };
-        }
-    }
-
     // Write final output
     writeOutputFile(output, png_data) catch |err| {
         std.debug.print("Error: failed to write '{s}': {}\n", .{ output, err });
@@ -329,7 +311,7 @@ fn executePipeline(
     }
 
     // Report success to user
-    printSuccessMessage(input, output, png_data.len, width, height, time, embed_bytecode, render_frame, embed_runtime and embedded_wasm.len > 0, executor_embedded);
+    printSuccessMessage(input, output, png_data.len, width, height, time, embed_bytecode, render_frame, executor_embedded);
     return 0;
 }
 
@@ -542,27 +524,6 @@ fn embedBytecodeInPng(allocator: std.mem.Allocator, png_data: []u8, bytecode: []
     return embedded;
 }
 
-/// Embed WASM runtime data in PNG, freeing original PNG data.
-fn embedRuntimeData(allocator: std.mem.Allocator, png_data: []u8, runtime: []const u8) ![]u8 {
-    // Pre-condition: runtime is valid WASM
-    std.debug.assert(runtime.len >= 8);
-    std.debug.assert(std.mem.eql(u8, runtime[0..4], &[_]u8{ 0x00, 0x61, 0x73, 0x6d })); // WASM magic
-
-    const original_len = png_data.len;
-
-    // Embed runtime in PNG (pNGr chunk)
-    const embedded = pngine.png.embedRuntime(allocator, png_data, runtime) catch |err| {
-        std.debug.print("Error: failed to embed runtime: {}\n", .{err});
-        return err;
-    };
-    allocator.free(png_data);
-
-    // Post-condition: result is larger
-    std.debug.assert(embedded.len > original_len);
-
-    return embedded;
-}
-
 /// Read binary file into buffer.
 fn readBinaryFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     std.debug.assert(path.len > 0);
@@ -600,7 +561,6 @@ fn printSuccessMessage(
     time: f32,
     embed_bytecode: bool,
     render_frame: bool,
-    runtime_embedded: bool,
     executor_embedded: bool,
 ) void {
     // Build flags string
@@ -618,15 +578,6 @@ fn printSuccessMessage(
             flags_len += 1;
         }
         const text = "executor";
-        @memcpy(flags_buf[flags_len..][0..text.len], text);
-        flags_len += text.len;
-    }
-    if (runtime_embedded) {
-        if (flags_len > 0) {
-            flags_buf[flags_len] = '+';
-            flags_len += 1;
-        }
-        const text = "runtime";
         @memcpy(flags_buf[flags_len..][0..text.len], text);
         flags_len += text.len;
     }
@@ -825,25 +776,21 @@ pub fn printUsage() void {
         \\  -n, --scene <name>        Render specific scene/frame by name (default: all frames)
         \\  -e, --embed               Embed bytecode in output PNG (default: on)
         \\  --no-embed                Do not embed bytecode
-        \\  --no-runtime              Do not embed WASM runtime (smaller PNG, requires external pngine.wasm)
-        \\  --embed-executor          Embed minimal WASM executor in bytecode (v5 format)
+        \\  --no-executor             Do not embed WASM executor (smaller PNG, requires external pngine.wasm)
+        \\  -m, --minify              Minify WGSL shaders for smaller payload
         \\  --types                   Generate TypeScript type definitions (.d.ts) for uniforms
         \\  -h, --help                Show this help
         \\
-        \\By default, output PNG includes both bytecode (pNGb) and WASM runtime (pNGr),
-        \\creating a self-contained executable image (~30KB). Use --no-runtime to create
-        \\a smaller PNG (~500 bytes) that requires an external pngine.wasm file.
+        \\By default, output PNG is self-contained with embedded bytecode and WASM executor.
+        \\The executor variant is automatically selected based on DSL features used
+        \\(render, compute, etc.), creating minimal payloads (~15-20KB).
         \\
-        \\The --embed-executor option embeds a minimal WASM executor directly in the
-        \\bytecode payload. The executor variant is automatically selected based on
-        \\which DSL features are used (render, compute, etc.). This creates a fully
-        \\self-contained payload that doesn't require any external runtime.
+        \\Use --no-executor for development builds that use a shared pngine.wasm file.
         \\
         \\Examples:
-        \\  pngine shader.pngine                       # Self-contained PNG with runtime (~30KB)
-        \\  pngine shader.pngine --no-runtime          # Smaller PNG, needs external WASM (~500 bytes)
-        \\  pngine shader.pngine --embed-executor      # Embed minimal executor in bytecode
-        \\  pngine shader.pngine --frame               # Render 512x512 preview with runtime
+        \\  pngine shader.pngine                       # Self-contained PNG with executor (~17KB)
+        \\  pngine shader.pngine --no-executor         # Smaller PNG, needs pngine.wasm (~2KB)
+        \\  pngine shader.pngine --frame               # Render 512x512 preview
         \\  pngine shader.pngine --frame -s 1920x1080  # Render at 1080p
         \\  pngine shader.pngine --frame -t 2.5        # Render at t=2.5 seconds
         \\  pngine shader.pngine --frame -n sceneE     # Render specific scene
@@ -964,8 +911,7 @@ test "parseArgs: input file only" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
-        .embed_runtime = true,
-        .embed_executor = false,
+        .embed_executor = true,
         .scene_name = null,
     };
 
@@ -988,8 +934,7 @@ test "parseArgs: with output path" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
-        .embed_runtime = true,
-        .embed_executor = false,
+        .embed_executor = true,
         .scene_name = null,
     };
 
@@ -1011,8 +956,7 @@ test "parseArgs: with size" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
-        .embed_runtime = true,
-        .embed_executor = false,
+        .embed_executor = true,
         .scene_name = null,
     };
 
@@ -1034,8 +978,7 @@ test "parseArgs: with time" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
-        .embed_runtime = true,
-        .embed_executor = false,
+        .embed_executor = true,
         .scene_name = null,
     };
 
@@ -1056,8 +999,7 @@ test "parseArgs: embed flag" {
         .embed_bytecode = false,
         .embed_explicit = false,
         .render_frame = false,
-        .embed_runtime = true,
-        .embed_executor = false,
+        .embed_executor = true,
         .scene_name = null,
     };
 
@@ -1079,8 +1021,7 @@ test "parseArgs: no-embed flag" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
-        .embed_runtime = true,
-        .embed_executor = false,
+        .embed_executor = true,
         .scene_name = null,
     };
 
@@ -1102,8 +1043,7 @@ test "parseArgs: missing input file" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
-        .embed_runtime = true,
-        .embed_executor = false,
+        .embed_executor = true,
         .scene_name = null,
     };
 
@@ -1123,8 +1063,7 @@ test "parseArgs: invalid size format" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
-        .embed_runtime = true,
-        .embed_executor = false,
+        .embed_executor = true,
         .scene_name = null,
     };
 
@@ -1144,8 +1083,7 @@ test "parseArgs: zero size rejected" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
-        .embed_runtime = true,
-        .embed_executor = false,
+        .embed_executor = true,
         .scene_name = null,
     };
 
@@ -1165,8 +1103,7 @@ test "parseArgs: help returns 255" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
-        .embed_runtime = true,
-        .embed_executor = false,
+        .embed_executor = true,
         .scene_name = null,
     };
 
@@ -1186,8 +1123,7 @@ test "parseArgs: unknown option rejected" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
-        .embed_runtime = true,
-        .embed_executor = false,
+        .embed_executor = true,
         .scene_name = null,
     };
 
@@ -1207,8 +1143,7 @@ test "parseArgs: multiple input files rejected" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
-        .embed_runtime = true,
-        .embed_executor = false,
+        .embed_executor = true,
         .scene_name = null,
     };
 
@@ -1228,8 +1163,7 @@ test "parseArgs: frame flag" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
-        .embed_runtime = true,
-        .embed_executor = false,
+        .embed_executor = true,
         .scene_name = null,
     };
 
@@ -1250,8 +1184,7 @@ test "parseArgs: frame flag short" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
-        .embed_runtime = true,
-        .embed_executor = false,
+        .embed_executor = true,
         .scene_name = null,
     };
 
@@ -1272,8 +1205,7 @@ test "parseArgs: frame with size" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
-        .embed_runtime = true,
-        .embed_executor = false,
+        .embed_executor = true,
         .scene_name = null,
     };
 
@@ -1286,7 +1218,7 @@ test "parseArgs: frame with size" {
     try std.testing.expectEqual(@as(u32, 1080), opts.height);
 }
 
-test "parseArgs: no-runtime flag" {
+test "parseArgs: no-executor flag" {
     var opts = Options{
         .input_path = "",
         .output_path = null,
@@ -1296,16 +1228,15 @@ test "parseArgs: no-runtime flag" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
-        .embed_runtime = true,
-        .embed_executor = false,
+        .embed_executor = true,
         .scene_name = null,
     };
 
-    const args = [_][]const u8{ "shader.pngine", "--no-runtime" };
+    const args = [_][]const u8{ "shader.pngine", "--no-executor" };
     const result = parseArgs(&args, &opts);
 
     try std.testing.expectEqual(@as(u8, 0), result);
-    try std.testing.expect(!opts.embed_runtime);
+    try std.testing.expect(!opts.embed_executor);
 }
 
 test "deriveOutputPath: handles OOM gracefully" {
@@ -1331,7 +1262,7 @@ test "deriveOutputPath: handles OOM gracefully" {
 // Phase 4 Tests: Executor Embedding
 // ============================================================================
 
-test "parseArgs: embed-executor flag" {
+test "parseArgs: embed_executor default is true" {
     var opts = Options{
         .input_path = "",
         .output_path = null,
@@ -1341,19 +1272,18 @@ test "parseArgs: embed-executor flag" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
-        .embed_runtime = true,
-        .embed_executor = false,
+        .embed_executor = true, // Default
         .scene_name = null,
     };
 
-    const args = [_][]const u8{ "shader.pngine", "--embed-executor" };
+    const args = [_][]const u8{"shader.pngine"};
     const result = parseArgs(&args, &opts);
 
     try std.testing.expectEqual(@as(u8, 0), result);
-    try std.testing.expect(opts.embed_executor);
+    try std.testing.expect(opts.embed_executor); // Should remain true (default)
 }
 
-test "parseArgs: embed-executor combined with other flags" {
+test "parseArgs: no-executor combined with other flags" {
     var opts = Options{
         .input_path = "",
         .output_path = null,
@@ -1363,17 +1293,15 @@ test "parseArgs: embed-executor combined with other flags" {
         .embed_bytecode = true,
         .embed_explicit = false,
         .render_frame = false,
-        .embed_runtime = true,
-        .embed_executor = false,
+        .embed_executor = true,
         .scene_name = null,
     };
 
-    const args = [_][]const u8{ "shader.pngine", "--embed-executor", "--no-runtime", "-o", "out.png" };
+    const args = [_][]const u8{ "shader.pngine", "--no-executor", "-o", "out.png" };
     const result = parseArgs(&args, &opts);
 
     try std.testing.expectEqual(@as(u8, 0), result);
-    try std.testing.expect(opts.embed_executor);
-    try std.testing.expect(!opts.embed_runtime);
+    try std.testing.expect(!opts.embed_executor);
     try std.testing.expectEqualStrings("out.png", opts.output_path.?);
 }
 
