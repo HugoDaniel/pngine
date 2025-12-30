@@ -9,7 +9,8 @@
     "test:debug": "playwright test --debug",
     "test:zig": "/Users/hugo/.zvm/bin/zig test src/main.zig",
     "test:zig:full": "/Users/hugo/.zvm/bin/zig build test",
-    "browser": "npx tsx test/browser.ts"
+    "browser": "npx tsx test/browser.ts",
+    "render-frame": "npx tsx test/render-frame.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.40.0",

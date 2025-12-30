@@ -594,12 +594,21 @@ fn printSuccessMessage(
 }
 
 /// Render bytecode using GPU and return PNG data.
+///
+/// Note: The native GPU backend is a stub that produces placeholder output.
+/// For accurate shader rendering, use browser-based testing:
+///   npm run dev && npm run browser http://localhost:5173/ -- --screenshot
 fn renderWithGpu(allocator: std.mem.Allocator, bytecode: []const u8, width: u32, height: u32, time: f32, scene_name: ?[]const u8) PngResult {
     const NativeGPU = pngine.gpu_backends.NativeGPU;
 
     // Pre-conditions
     std.debug.assert(bytecode.len >= format.HEADER_SIZE);
     std.debug.assert(width > 0 and height > 0);
+
+    // Warn that native rendering is limited
+    std.debug.print("Warning: Native GPU rendering produces placeholder output.\n", .{});
+    std.debug.print("         For accurate rendering, use browser testing:\n", .{});
+    std.debug.print("         npm run dev && npm run browser http://localhost:5173/\n", .{});
 
     var module = format.deserialize(allocator, bytecode) catch |err| {
         std.debug.print("Error: failed to load bytecode: {}\n", .{err});
