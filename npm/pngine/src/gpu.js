@@ -385,7 +385,9 @@ export function createCommandDispatcher(device, ctx) {
     }
     DEBUG && dbg && console.log(`[GPU] beginRenderPass colorId=${colorId === CANVAS ? 'CANVAS' : colorId} loadOp=${loadOp} storeOp=${storeOp} depthId=${depthId}`);
     DEBUG && dbg && console.log(`[GPU]   tex[${colorId}]=${tex[colorId] ? 'exists' : 'MISSING'} view=${cv ? 'valid' : 'NULL'}`);
-    const pd = { colorAttachments: [{ view: cv, loadOp: loadOp === 1 ? "clear" : "load", storeOp: storeOp === 0 ? "store" : "discard", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] };
+    // Clear to transparent so CSS background shows through (alphaMode: "premultiplied")
+    // TODO: Pass actual clearValue from bytecode once command buffer format is extended
+    const pd = { colorAttachments: [{ view: cv, loadOp: loadOp === 1 ? "clear" : "load", storeOp: storeOp === 0 ? "store" : "discard", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] };
     if (depthId !== 0xffff && tex[depthId]) {
       pd.depthStencilAttachment = { view: tex[depthId].createView(), depthLoadOp: "clear", depthStoreOp: "store", depthClearValue: 1.0 };
     }

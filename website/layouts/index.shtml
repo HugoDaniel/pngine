@@ -1,15 +1,113 @@
 <extend template="base.shtml">
 <head id="head">
+  <script type="module">
+    // PNGine shaders for homepage
+    // Assets are served from the site root
+    import { pngine, play, setUniform } from './pngine.js';
+
+    document.addEventListener('DOMContentLoaded', async () => {
+      // ========================================
+      // Background Particle Shader
+      // ========================================
+      const bgCanvas = document.getElementById('bg-canvas');
+      if (bgCanvas) {
+        try {
+          // Set canvas size to window dimensions
+          const resize = () => {
+            bgCanvas.width = window.innerWidth;
+            bgCanvas.height = window.innerHeight;
+          };
+          resize();
+          window.addEventListener('resize', resize);
+
+          const bgShader = await pngine('./pngine_background.png', {
+            canvas: bgCanvas,
+            debug: false
+          });
+          play(bgShader);
+        } catch (err) {
+          console.warn('Background shader not available:', err.message);
+          // Silent fail - just show solid background color
+          bgCanvas.style.display = 'none';
+        }
+      }
+
+      // ========================================
+      // Interactive Logo Shader
+      // ========================================
+      const canvas = document.getElementById('logo-canvas');
+      const fallback = document.querySelector('.logo-fallback');
+      if (!canvas) return;
+
+      try {
+        const p = await pngine('./pngine_logo.png', {
+          canvas,
+          debug: false
+        });
+
+        // Mark as loaded - hides fallback
+        canvas.dataset.loaded = 'true';
+        if (fallback) fallback.style.display = 'none';
+
+        // Mouse interaction for logo
+        canvas.addEventListener('mousemove', (e) => {
+          const rect = canvas.getBoundingClientRect();
+          const x = (e.clientX - rect.left) / rect.width;
+          const y = (e.clientY - rect.top) / rect.height;
+
+          // X controls wave phase, Y controls color shift
+          setUniform(p, 'C', x * 8.0);
+          setUniform(p, 'colorShift', y * 2.0);
+        });
+
+        canvas.addEventListener('mouseleave', () => {
+          // Reset to time-based animation
+          setUniform(p, 'C', 0.0);
+          setUniform(p, 'colorShift', 0.0);
+        });
+
+        // Touch support for mobile
+        canvas.addEventListener('touchmove', (e) => {
+          e.preventDefault();
+          const touch = e.touches[0];
+          const rect = canvas.getBoundingClientRect();
+          const x = (touch.clientX - rect.left) / rect.width;
+          const y = (touch.clientY - rect.top) / rect.height;
+
+          setUniform(p, 'C', x * 8.0);
+          setUniform(p, 'colorShift', y * 2.0);
+        }, { passive: false });
+
+        canvas.addEventListener('touchend', () => {
+          setUniform(p, 'C', 0.0);
+          setUniform(p, 'colorShift', 0.0);
+        });
+
+        play(p);
+      } catch (err) {
+        console.warn('Logo shader not available:', err.message);
+        // Show fallback text
+        canvas.style.display = 'none';
+        if (fallback) fallback.style.opacity = '1';
+      }
+    });
+  </script>
 </head>
 <main id="main">
+  <div class="bg-wrapper">
+    <canvas id="bg-canvas" class="bg-canvas"></canvas>
+  </div>
+
   <div class="hero">
-    <div class="hero-canvas" id="hero-shader">
-      <!-- Interactive shader background goes here -->
-    </div>
     <div class="hero-content">
-      <h1>PNGine</h1>
+      <div class="logo-container">
+        <canvas id="logo-canvas" width="400" height="400"></canvas>
+        <div class="logo-fallback">
+          <h1>PNG<span>ine</span></h1>
+        </div>
+      </div>
       <p class="tagline">GPU apps in a single file.</p>
-      <p class="tagline-sub">Write shaders. Compile to bytecode. Run on Web, iOS, and Android.</p>
+      <p class="tagline-sub">Write shaders. Compile to bytecode. Run everywhere.</p>
       <div class="cta">
         <a href="/docs/getting-started/" class="btn primary">Get Started</a>
         <a href="#playground" class="btn secondary">Try It Live</a>
