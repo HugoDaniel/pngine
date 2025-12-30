@@ -1,0 +1,137 @@
+// Example: Uniform Access with Multiple Bindings
+//
+// This example demonstrates proper uniform buffer access with:
+// - Multiple struct fields (time, resolution, color)
+// - Multiple binding points (camera, lighting)
+// - Field access patterns that must survive minification
+//
+// Test: Compile with --minify and verify uniforms still work
+//   pngine compile examples/uniform_access.pngine --minify -o /tmp/test.pngb
+
+#wgsl shader {
+  value="
+struct Camera {
+    viewPos: vec3f,
+    aspectRatio: f32,
+    fov: f32,
+    near: f32,
+    far: f32,
+}
+
+struct Light {
+    position: vec3f,
+    intensity: f32,
+    color: vec3f,
+}
+
+struct Scene {
+    time: f32,
+    resolution: vec2f,
+    mousePos: vec2f,
+}
+
+@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(1) var<uniform> light: Light;
+@group(0) @binding(2) var<uniform> scene: Scene;
+
+// Helper function (can be renamed by minifier)
+fn calculateLighting(normal: vec3f, viewDir: vec3f) -> vec3f {
+    let lightDir = normalize(light.position - viewDir);
+    let diff = max(dot(normal, lightDir), 0.0);
+    return light.color * diff * light.intensity;
+}
+
+@vertex fn vertexMain(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+    // Field accesses that must be preserved
+    let aspect = camera.aspectRatio;
+    let t = scene.time;
+
+    // Simple fullscreen triangle
+    let x = f32(i & 1u) * 4.0 - 1.0;
+    let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+    return vec4f(x, y, 0.0, 1.0);
+}
+
+@fragment fn fragmentMain(@builtin(position) fragCoord: vec4f) -> @location(0) vec4f {
+    // Normalized coords using uniform field access
+    let uv = fragCoord.xy / scene.resolution;
+
+    // Camera uniform field access
+    let viewDir = normalize(camera.viewPos);
+
+    // Light uniform field access
+    let lightPos = light.position;
+    let lightColor = light.color;
+    let intensity = light.intensity;
+
+    // Scene uniform field access
+    let time = scene.time;
+    let mouse = scene.mousePos;
+
+    // Animated gradient
+    let color = vec3f(
+        sin(time + uv.x * 3.14159) * 0.5 + 0.5,
+        cos(time + uv.y * 3.14159) * 0.5 + 0.5,
+        sin(time * 0.5) * 0.5 + 0.5
+    );
+
+    // Mix with light color
+    return vec4f(color * lightColor * intensity, 1.0);
+}
+"
+}
+
+#shaderModule shaderMod { code=shader }
+
+// Camera uniform buffer (32 bytes: vec3 + 4 floats + padding)
+#buffer cameraBuffer {
+  size=32
+  usage=[UNIFORM COPY_DST]
+}
+
+// Light uniform buffer (32 bytes: vec3 + float + vec3 + padding)
+#buffer lightBuffer {
+  size=32
+  usage=[UNIFORM COPY_DST]
+}
+
+// Scene uniform buffer (24 bytes: float + vec2 + vec2 + padding)
+#buffer sceneBuffer {
+  size=24
+  usage=[UNIFORM COPY_DST]
+}
+
+#bindGroupLayout layout0 {
+  entries=[
+    { binding=0 visibility=[VERTEX FRAGMENT] buffer={ type=uniform } }
+    { binding=1 visibility=[FRAGMENT] buffer={ type=uniform } }
+    { binding=2 visibility=[VERTEX FRAGMENT] buffer={ type=uniform } }
+  ]
+}
+
+#bindGroup group0 {
+  layout=layout0
+  entries=[
+    { binding=0 resource={ buffer=cameraBuffer } }
+    { binding=1 resource={ buffer=lightBuffer } }
+    { binding=2 resource={ buffer=sceneBuffer } }
+  ]
+}
+
+#renderPipeline pipeline {
+  vertex={ module=shaderMod entryPoint=vertexMain }
+  fragment={
+    module=shaderMod
+    entryPoint=fragmentMain
+    targets=[{ format=bgra8unorm }]
+  }
+}
+
+#renderPass mainPass {
+  colorAttachments=[{ clearValue=[0.1 0.1 0.15 1] loadOp=clear storeOp=store }]
+  pipeline=pipeline
+  bindGroups=[group0]
+  draw=3
+}
+
+#frame main { perform=[mainPass] }

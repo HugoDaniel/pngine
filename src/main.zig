@@ -203,6 +203,7 @@ test {
     _ = @import("dsl/emitter/wgsl_runtime_test.zig");
     _ = @import("dsl/emitter/module_reference_test.zig");
     _ = @import("dsl/emitter/builtin_inputs_test.zig");
+    _ = @import("dsl/emitter/minify_uniforms_test.zig");
     _ = @import("dsl/Compiler.zig");
     // Bytecode tests run via bytecode standalone module
     _ = bytecode_mod;

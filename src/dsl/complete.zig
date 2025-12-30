@@ -9,7 +9,7 @@
 //! - reflect: WGSL shader reflection (miniray)
 //! - executor: Mock GPU and dispatcher for execution tests
 //!
-//! Test count: ~361 tests (emitter only, frontend/backend tested separately)
+//! Test count: ~369 tests (emitter only, frontend/backend tested separately)
 //! - test.zig: 120
 //! - integration_test.zig: 19
 //! - wgsl_imports_test.zig: 25
@@ -20,6 +20,7 @@
 //! - wgsl_runtime_test.zig: 13
 //! - module_reference_test.zig: 26
 //! - builtin_inputs_test.zig: 12
+//! - minify_uniforms_test.zig: 12 (requires libminiray.a)
 
 // ============================================================================
 // Module Imports (provided by build.zig)
@@ -80,4 +81,5 @@ test {
     _ = @import("emitter/wgsl_runtime_test.zig");
     _ = @import("emitter/module_reference_test.zig");
     _ = @import("emitter/builtin_inputs_test.zig");
+    _ = @import("emitter/minify_uniforms_test.zig");
 }
