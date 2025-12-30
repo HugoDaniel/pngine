@@ -488,8 +488,10 @@ export function createCommandDispatcher(device, ctx) {
       case 0x30: { // INIT_WASM_MODULE (async)
         const id = view.getUint16(pos, true), ptr = view.getUint32(pos + 2, true), len = view.getUint32(pos + 6, true);
         const bytes = new Uint8Array(mem.buffer, ptr, len).slice();
+        // Provide minimal env imports for AssemblyScript/C runtime (abort, memory)
+        const wasmImports = { env: { abort: () => { throw new Error('WASM abort'); }, memory: new WebAssembly.Memory({ initial: 1 }) } };
         return WebAssembly.compile(bytes).then(mod =>
-          WebAssembly.instantiate(mod, {}).then(inst => { wm[id] = inst; return pos + 10; })
+          WebAssembly.instantiate(mod, wasmImports).then(inst => { wm[id] = inst; return pos + 10; })
         );
       }
       case 0x31: { // CALL_WASM_FUNC (async)
