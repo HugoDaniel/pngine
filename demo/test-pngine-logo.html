@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PNGine Logo Test</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: system-ui, sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+    }
+    h1 { margin-bottom: 10px; }
+    .info {
+      margin-bottom: 20px;
+      text-align: center;
+      opacity: 0.8;
+    }
+    #canvas {
+      border: 2px solid #444;
+      border-radius: 8px;
+      cursor: crosshair;
+    }
+    .controls {
+      margin-top: 20px;
+      display: flex;
+      gap: 10px;
+    }
+    button {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 5px;
+      background: #4a4a6a;
+      color: #fff;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    button:hover { background: #5a5a7a; }
+    button:active { background: #3a3a5a; }
+    .status {
+      margin-top: 15px;
+      font-size: 14px;
+      opacity: 0.7;
+    }
+  </style>
+</head>
+<body>
+  <h1>PNGine Logo</h1>
+  <div class="info">
+    Move mouse over canvas to control animation<br>
+    Left edge = slow, Right edge = fast
+  </div>
+
+  <canvas id="canvas" width="512" height="512"></canvas>
+
+  <div class="controls">
+    <button id="playBtn">Play</button>
+    <button id="pauseBtn">Pause</button>
+    <button id="stopBtn">Stop</button>
+  </div>
+
+  <div class="status" id="status">Loading...</div>
+
+  <script type="module">
+    import { pngine, play, pause, stop, setUniform } from './pngine.js';
+
+    const canvas = document.getElementById('canvas');
+    const status = document.getElementById('status');
+
+    let p = null;
+    let mouseControlled = false;
+
+    async function init() {
+      try {
+        p = await pngine('pngine_logo.png', {
+          canvas,
+          debug: true
+        });
+
+        status.textContent = `Ready: ${p.width}x${p.height}`;
+
+        // Mouse interaction - X controls wave phase, Y controls color
+        canvas.addEventListener('mousemove', (e) => {
+          if (!p) return;
+
+          const rect = canvas.getBoundingClientRect();
+          const x = (e.clientX - rect.left) / rect.width;
+          const y = (e.clientY - rect.top) / rect.height;
+
+          // Map x (0-1) to C for wave phase control
+          const C = x * 8.0;
+          // Map y (0-1) to colorShift for palette shift
+          const colorShift = y * 2.0;
+
+          setUniform(p, 'C', C);
+          setUniform(p, 'colorShift', colorShift);
+          mouseControlled = true;
+
+          status.textContent = `Wave: ${C.toFixed(1)} | Color: ${colorShift.toFixed(2)}`;
+        });
+
+        canvas.addEventListener('mouseleave', () => {
+          // Reset to time-based animation when mouse leaves
+          setUniform(p, 'C', 0.0);
+          setUniform(p, 'colorShift', 0.0);
+          mouseControlled = false;
+          status.textContent = 'Auto animation (mouse left)';
+        });
+
+        // Button controls
+        document.getElementById('playBtn').onclick = () => {
+          play(p);
+          status.textContent = 'Playing';
+        };
+
+        document.getElementById('pauseBtn').onclick = () => {
+          pause(p);
+          status.textContent = 'Paused';
+        };
+
+        document.getElementById('stopBtn').onclick = () => {
+          stop(p);
+          status.textContent = 'Stopped';
+        };
+
+        // Auto-play
+        play(p);
+        status.textContent = 'Playing - move mouse to control';
+
+      } catch (err) {
+        console.error(err);
+        status.textContent = `Error: ${err.message}`;
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>
