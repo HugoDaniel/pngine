@@ -290,7 +290,80 @@ const imports = {
 };
 ```
 
-### 7. WASM Call Args Receive Zeros (Stack Pointer Bug)
+### 9. Deprecated `numberOfElements + initEachElementWith` Syntax (Size=0 Buffer)
+
+**Symptom**: Buffers created with `size=0` in `pngine check` output. The buffer
+intended to hold compute-generated data is empty.
+
+**Cause**: The old `#data` syntax with `numberOfElements` and `initEachElementWith`
+is no longer supported:
+
+```
+// DEPRECATED - No longer works!
+#data particleData {
+  float32Array={
+    numberOfElements=1024
+    initEachElementWith=[
+      "(random() * 2) - 1"
+      "(random() * 2) - 1"
+      "0.0"
+      "1.0"
+    ]
+  }
+}
+
+#buffer particles {
+  size=particleData                    // Results in size=0!
+  usage=[VERTEX STORAGE]
+  mappedAtCreation=particleData        // Data never written!
+}
+```
+
+**Fix**: Use `#init` with a compute shader for initialization:
+
+```
+#define NUM_PARTICLES="1024"
+
+#buffer particles {
+  size="NUM_PARTICLES * 4 * 4"         // Explicit size calculation
+  usage=[VERTEX STORAGE]
+  pool=2
+}
+
+#shaderModule initParticlesShader {
+  code="
+    struct Particle { pos: vec4f }
+    struct Particles { data: array<Particle> }
+    @binding(0) @group(0) var<storage, read_write> p: Particles;
+
+    fn hash(n: u32) -> f32 { /* deterministic hash */ }
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+      let i = id.x;
+      if (i >= 1024u) { return; }
+      p.data[i].pos = vec4f(
+        hash(i * 7u) * 2.0 - 1.0,
+        hash(i * 11u) * 2.0 - 1.0,
+        0.0, 1.0
+      );
+    }
+  "
+}
+
+#init initParticles {
+  buffer=particles
+  shader=initParticlesShader
+  workgroups="ceil(NUM_PARTICLES / 64)"
+}
+```
+
+**Key lesson**: For procedural buffer initialization, always use `#init` with a
+compute shader. The `numberOfElements + initEachElementWith` syntax was removed
+because compute shaders are more flexible and the expressions ran at compile-time
+which limited functionality.
+
+### 10. WASM Call Args Receive Zeros (Stack Pointer Bug)
 
 **Symptom**: `#wasmCall` function receives zeros instead of canvas.width/height/time.
 Console shows `raw args bytes: [0, 0, 0, 0]` but should be `[3, 1, 2, 3]`.

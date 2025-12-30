@@ -1,33 +1,12 @@
 #define NUM_STARS_PARTICLES="64*64"
 
-#data initialStarsParticlesData {
-  float32Array={
-    numberOfElements=NUM_STARS_PARTICLES 
-    initEachElementWith=[
-    // position xyz:
-      // "cos((ELEMENT_ID / NUM_STARS_PARTICLES) * PI * 2) * sqrt(ELEMENT_ID / NUM_STARS_PARTICLES)"
-      // "sin((ELEMENT_ID / NUM_STARS_PARTICLES) * PI * 2) * sqrt(ELEMENT_ID / NUM_STARS_PARTICLES)"
-      // "(random() * 20) - 10"
-      "(random() * 20) - 10"
-      "(random() * 20) - 10"
-      "(random() * 20) - 10"
-      // padding / homogeneous coord so the buffer lines up with vec4f
-      "1.0"
-    // velocity:
-      "random()"
-      "random()"
-      "random()"
-      // padding lane for vec4f used as a channel for random positions:
-      "(random() * 20) - 10"
-    ]
-  }
-}
+// Buffer size: 4096 particles * 8 floats (pos.xyzw + vel.xyzw) * 4 bytes
+#define STARS_BUFFER_SIZE="NUM_STARS_PARTICLES * 8 * 4"
 
-// Pooled 2 buffers
+// Pooled 2 buffers for ping-pong simulation
 #buffer starsParticlesBuffers {
-  size = initialStarsParticlesData
-  usage = [VERTEX STORAGE]
-  mappedAtCreation = initialStarsParticlesData
+  size=STARS_BUFFER_SIZE
+  usage=[VERTEX STORAGE]
   pool=2
 }
 
@@ -64,11 +43,62 @@
   }
 }
 
+// Initialization shader for star particles
+#shaderModule initStarsShader {
+  code="
+    struct Particle {
+      pos: vec4f,
+      vel: vec4f,
+    }
+    struct Particles { data: array<Particle> }
+
+    @binding(0) @group(0) var<storage, read_write> particles: Particles;
+
+    fn hash(n: u32) -> f32 {
+      var x = n;
+      x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+      x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+      x = (x >> 16u) ^ x;
+      return f32(x) / f32(0xffffffffu);
+    }
+
+    const TOTAL: u32 = 4096u;
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+      let i = id.x;
+      if (i >= TOTAL) { return; }
+
+      // Position: random in [-10, 10]
+      particles.data[i].pos = vec4f(
+        hash(i * 7u) * 20.0 - 10.0,
+        hash(i * 11u) * 20.0 - 10.0,
+        hash(i * 13u) * 20.0 - 10.0,
+        1.0  // homogeneous coord
+      );
+
+      // Velocity: random in [0, 1] with random position in w
+      particles.data[i].vel = vec4f(
+        hash(i * 17u),
+        hash(i * 19u),
+        hash(i * 23u),
+        hash(i * 29u) * 20.0 - 10.0  // random position for variety
+      );
+    }
+  "
+}
+
+#init initStarsParticles {
+  buffer=starsParticlesBuffers
+  shader=initStarsShader
+  workgroups="ceil(NUM_STARS_PARTICLES / 64)"
+}
+
 #bindGroup starsParticlesBindGroups {
   layout={ pipeline=computeStarsParticles index=0 }
   entries=[
-    { binding=0 resource={ buffer=starsParticlesBuffers size=initialStarsParticlesData pingPong=0 }}
-    { binding=1 resource={ buffer=starsParticlesBuffers size=initialStarsParticlesData pingPong=1 }}
+    { binding=0 resource={ buffer=starsParticlesBuffers pingPong=0 }}
+    { binding=1 resource={ buffer=starsParticlesBuffers pingPong=1 }}
     { binding=2 resource={ buffer=starsSimParamBuffer }}
     { binding=3 resource={ buffer=sceneQInputsBuffer }}
     { binding=4 resource={ buffer=uniformPngineInputsBuffer } }
@@ -87,8 +117,6 @@
 #computePass computeStarsParticlesPass {
   pipeline=computeStarsParticles
   bindGroups=[starsParticlesBindGroups]
-  // Optionally set the pool offset at each bind group: bindGroupsPoolOffsets=[0]
-  // non pooled bind groups will be left as is regardless of the value set
   dispatchWorkgroups="ceil(NUM_STARS_PARTICLES / 64)"
 }
 
