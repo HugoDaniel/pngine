@@ -73,6 +73,12 @@ async function handleInit(data) {
   if (!adapter) throw new Error("WebGPU not supported");
 
   device = await adapter.requestDevice();
+
+  // Add error handling to catch WebGPU validation errors
+  device.onuncapturederror = (event) => {
+    console.error('[Worker] WebGPU uncaptured error:', event.error.message);
+  };
+
   context = canvas.getContext("webgpu");
   const format = navigator.gpu.getPreferredCanvasFormat();
   context.configure({ device, format, alphaMode: "premultiplied" });

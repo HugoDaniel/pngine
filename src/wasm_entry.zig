@@ -269,9 +269,11 @@ export fn init() u32 {
     data_in_bytecode = true;
     string_table_offset = std.mem.readInt(u32, header[20..24], .little);
     data_section_offset = std.mem.readInt(u32, header[24..28], .little);
+    const wgsl_table_offset = std.mem.readInt(u32, header[28..32], .little);
     bytecode_end = string_table_offset;
     string_table_len = data_section_offset - string_table_offset;
-    data_section_len = bytecode_len - data_section_offset;
+    // Data section ends where WGSL table begins (not at end of file)
+    data_section_len = wgsl_table_offset - data_section_offset;
 
     // Parse animation table (v0 header has animation_table_offset at byte 36)
     const animation_table_offset = std.mem.readInt(u32, header[36..40], .little);
@@ -1265,7 +1267,7 @@ fn skipOpcodeParams(bytecode: []const u8, pc: *usize, op: OpCode) void {
     switch (op) {
         .end_pass, .submit, .end_frame, .nop, .begin_compute_pass, .end_pass_def => {},
         .set_pipeline, .exec_pass, .exec_pass_once => _ = readVarint(bytecode, pc),
-        .define_frame, .create_shader_module, .write_buffer, .write_uniform,
+        .define_frame, .create_shader_module, .write_uniform,
         .create_texture, .create_render_pipeline, .create_compute_pipeline,
         .create_sampler, .create_bind_group_layout, .create_pipeline_layout,
         .create_query_set, .create_render_bundle, .create_image_bitmap,
@@ -1278,7 +1280,8 @@ fn skipOpcodeParams(bytecode: []const u8, pc: *usize, op: OpCode) void {
             _ = readVarint(bytecode, pc);
             pc.* += 1;
         },
-        .dispatch, .write_time_uniform, .create_bind_group, .create_texture_view => {
+        // write_buffer has 3 params: buffer_id, offset, data_id
+        .dispatch, .write_time_uniform, .create_bind_group, .create_texture_view, .write_buffer => {
             _ = readVarint(bytecode, pc);
             _ = readVarint(bytecode, pc);
             _ = readVarint(bytecode, pc);
@@ -1370,16 +1373,14 @@ fn skipDrawIndexedParams(bytecode: []const u8, pc: *usize) void {
 }
 
 fn skipWasmCallParams(bytecode: []const u8, pc: *usize) void {
-    _ = readVarint(bytecode, pc);
-    _ = readVarint(bytecode, pc);
-    _ = readVarint(bytecode, pc);
+    _ = readVarint(bytecode, pc); // call_id
+    _ = readVarint(bytecode, pc); // module_id
+    _ = readVarint(bytecode, pc); // func_name_id
     const arg_count = readVarint(bytecode, pc);
     for (0..arg_count) |_| {
         const arg_type = bytecode[pc.*];
         pc.* += 1;
-        if (arg_type == 1) pc.* += 1
-        else if (arg_type == 2) pc.* += 2
-        else if (arg_type == 3) pc.* += 4
-        else if (arg_type == 4) pc.* += 8;
+        // WasmArgType byte sizes: literals (0,4,5) = 4 bytes, runtime values (1,2,3,6) = 0 bytes
+        if (arg_type == 0 or arg_type == 4 or arg_type == 5) pc.* += 4;
     }
 }

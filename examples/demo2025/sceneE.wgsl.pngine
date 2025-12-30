@@ -6,7 +6,7 @@
 }
 
 #buffer sceneEInputsBuffer {
-  size="4+4+4+4"
+  size=16
   usage=[UNIFORM COPY_DST]
 }
 

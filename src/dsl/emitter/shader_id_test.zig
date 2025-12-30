@@ -124,16 +124,18 @@ fn getCreatedShaderIds(allocator: std.mem.Allocator, pngb: []const u8) ![]u16 {
 // ============================================================================
 
 test "ShaderID: empty WGSL value produces no shader (no orphan ID)" {
+    // Only #shaderModule creates shader modules now, not #wgsl
     const source: [:0]const u8 =
         \\#wgsl empty { value="" }
         \\#wgsl valid { value="fn main() {}" }
+        \\#shaderModule mod { code=valid }
         \\#frame main { perform=[] }
     ;
 
     const pngb = try compileSource(source);
     defer testing.allocator.free(pngb);
 
-    // Should only create shader for 'valid', not 'empty'
+    // Should only create shaderModule for 'valid', not 'empty'
     const shader_count = try executeAndCountShaders(pngb);
     try testing.expectEqual(@as(u32, 1), shader_count);
 }
@@ -141,10 +143,13 @@ test "ShaderID: empty WGSL value produces no shader (no orphan ID)" {
 test "ShaderID: first shader empty - no ID 0 orphan" {
     // Critical edge case: if first shader is empty and ID 0 is orphaned,
     // any pipeline referencing the first valid shader would fail
+    // Only #shaderModule creates shader modules now, not #wgsl
     const source: [:0]const u8 =
         \\#wgsl first { value="" }
         \\#wgsl second { value="fn vs() {}" }
         \\#wgsl third { value="fn fs() {}" }
+        \\#shaderModule modSecond { code=second }
+        \\#shaderModule modThird { code=third }
         \\#frame main { perform=[] }
     ;
 
@@ -154,17 +159,20 @@ test "ShaderID: first shader empty - no ID 0 orphan" {
     const ids = try getCreatedShaderIds(testing.allocator, pngb);
     defer testing.allocator.free(ids);
 
-    // Two valid shaders, IDs start at 0 (no gap)
+    // Two shaderModules, IDs start at 0 (no gap)
     try testing.expectEqual(@as(usize, 2), ids.len);
     try testing.expectEqual(@as(u16, 0), ids[0]);
     try testing.expectEqual(@as(u16, 1), ids[1]);
 }
 
 test "ShaderID: last shader empty - no trailing orphan" {
+    // Only #shaderModule creates shader modules now, not #wgsl
     const source: [:0]const u8 =
         \\#wgsl first { value="fn a() {}" }
         \\#wgsl second { value="fn b() {}" }
         \\#wgsl last { value="" }
+        \\#shaderModule modFirst { code=first }
+        \\#shaderModule modSecond { code=second }
         \\#frame main { perform=[] }
     ;
 
@@ -180,10 +188,13 @@ test "ShaderID: last shader empty - no trailing orphan" {
 }
 
 test "ShaderID: middle shader empty - no gap in IDs" {
+    // Only #shaderModule creates shader modules now, not #wgsl
     const source: [:0]const u8 =
         \\#wgsl first { value="fn a() {}" }
         \\#wgsl middle { value="" }
         \\#wgsl last { value="fn b() {}" }
+        \\#shaderModule modFirst { code=first }
+        \\#shaderModule modLast { code=last }
         \\#frame main { perform=[] }
     ;
 
@@ -215,12 +226,16 @@ test "ShaderID: all shaders empty - no shaders created" {
 }
 
 test "ShaderID: alternating valid/empty shaders" {
+    // Only #shaderModule creates shader modules now, not #wgsl
     const source: [:0]const u8 =
         \\#wgsl a { value="// A" }
         \\#wgsl b { value="" }
         \\#wgsl c { value="// C" }
         \\#wgsl d { value="" }
         \\#wgsl e { value="// E" }
+        \\#shaderModule modA { code=a }
+        \\#shaderModule modC { code=c }
+        \\#shaderModule modE { code=e }
         \\#frame main { perform=[] }
     ;
 
@@ -230,7 +245,7 @@ test "ShaderID: alternating valid/empty shaders" {
     const ids = try getCreatedShaderIds(testing.allocator, pngb);
     defer testing.allocator.free(ids);
 
-    // Only 3 valid shaders (a, c, e), IDs should be 0, 1, 2
+    // 3 shaderModules, IDs should be 0, 1, 2
     try testing.expectEqual(@as(usize, 3), ids.len);
     for (ids, 0..) |id, i| {
         try testing.expectEqual(@as(u16, @intCast(i)), id);
@@ -242,9 +257,8 @@ test "ShaderID: alternating valid/empty shaders" {
 // ============================================================================
 
 test "ShaderID: shaderModule referencing valid wgsl" {
-    // When #shaderModule references a #wgsl via identifier (bare name),
-    // it creates its own shader using the resolved code from cache.
-    // This test verifies both #wgsl and #shaderModule create shaders.
+    // Only #shaderModule creates shader modules now, not #wgsl
+    // This test verifies that #shaderModule with inline code works
     const source: [:0]const u8 =
         \\#wgsl valid { value="fn main() {}" }
         \\#shaderModule mod { code="fn other() {}" }
@@ -254,9 +268,9 @@ test "ShaderID: shaderModule referencing valid wgsl" {
     const pngb = try compileSource(source);
     defer testing.allocator.free(pngb);
 
-    // Both #wgsl and #shaderModule with valid code should create shaders
+    // Only #shaderModule creates a shader module (1, not 2)
     const shader_count = try executeAndCountShaders(pngb);
-    try testing.expectEqual(@as(u32, 2), shader_count);
+    try testing.expectEqual(@as(u32, 1), shader_count);
 }
 
 test "ShaderID: shaderModule with inline code alongside empty wgsl" {
@@ -287,26 +301,25 @@ test "ShaderID: shaderModule with inline code alongside empty wgsl" {
 // ============================================================================
 
 test "ShaderID: import chain with empty base" {
+    // Only #shaderModule creates shader modules now, not #wgsl
     const source: [:0]const u8 =
         \\#wgsl empty { value="" }
         \\#wgsl main {
         \\  value="fn main() {}"
         \\  imports=[empty]
         \\}
+        \\#shaderModule mod { code=main }
         \\#frame f { perform=[] }
     ;
 
     const pngb = try compileSource(source);
     defer testing.allocator.free(pngb);
 
-    // Both empty (skipped) and main (valid) - only main should be created
-    // But wait: the import is empty, so main's resolved code is "fn main() {}"
-    // which is still valid. So we should have 1 shader.
+    // Only #shaderModule creates a shader module
     const ids = try getCreatedShaderIds(testing.allocator, pngb);
     defer testing.allocator.free(ids);
 
-    // The empty import is resolved (empty string prepended) but main has valid code
-    try testing.expect(ids.len >= 1);
+    try testing.expectEqual(@as(usize, 1), ids.len);
 }
 
 // ============================================================================
@@ -314,13 +327,13 @@ test "ShaderID: import chain with empty base" {
 // ============================================================================
 
 test "ShaderID: pipeline references valid shader after empty ones" {
-    // This is the critical integration test - if orphan IDs existed,
-    // the pipeline would reference a non-existent shader
+    // Only #shaderModule creates shader modules now, not #wgsl
     const source: [:0]const u8 =
         \\#wgsl empty1 { value="" }
         \\#wgsl empty2 { value="" }
         \\#wgsl valid { value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); }" }
-        \\#renderPipeline pipe { vertex={ module=valid } }
+        \\#shaderModule mod { code=valid }
+        \\#renderPipeline pipe { vertex={ module=mod } }
         \\#frame main { perform=[] }
     ;
 
@@ -416,18 +429,19 @@ test "ShaderID: property - IDs are consecutive (no gaps)" {
 // ============================================================================
 
 test "ShaderID: many empty shaders" {
+    // Only #shaderModule creates shader modules now, not #wgsl
     var source_buf: [8192]u8 = undefined;
     @memset(&source_buf, 0);
     var pos: usize = 0;
 
-    // 50 empty shaders
+    // 50 empty wgsl (won't create shader modules)
     for (0..50) |i| {
         const line = std.fmt.bufPrint(source_buf[pos..], "#wgsl empty{d} {{ value=\"\" }}\n", .{i}) catch break;
         pos += line.len;
     }
 
-    // One valid shader
-    const valid = "#wgsl valid { value=\"fn main() {}\" }\n#frame f { perform=[] }\n";
+    // One valid wgsl + one shaderModule
+    const valid = "#wgsl valid { value=\"fn main() {}\" }\n#shaderModule mod { code=valid }\n#frame f { perform=[] }\n";
     @memcpy(source_buf[pos..][0..valid.len], valid);
     pos += valid.len;
 
@@ -435,7 +449,7 @@ test "ShaderID: many empty shaders" {
     const pngb = try compileSource(source_z);
     defer testing.allocator.free(pngb);
 
-    // Only one shader should be created
+    // Only one shaderModule, so one shader
     const shader_count = try executeAndCountShaders(pngb);
     try testing.expectEqual(@as(u32, 1), shader_count);
 
@@ -447,13 +461,20 @@ test "ShaderID: many empty shaders" {
 }
 
 test "ShaderID: many valid shaders" {
-    var source_buf: [16384]u8 = undefined;
+    // Only #shaderModule creates shader modules now, not #wgsl
+    var source_buf: [32768]u8 = undefined;
     @memset(&source_buf, 0);
     var pos: usize = 0;
 
-    // 30 valid shaders
+    // 30 valid wgsl code fragments
     for (0..30) |i| {
         const line = std.fmt.bufPrint(source_buf[pos..], "#wgsl s{d} {{ value=\"// shader {d}\" }}\n", .{ i, i }) catch break;
+        pos += line.len;
+    }
+
+    // 30 shaderModules
+    for (0..30) |i| {
+        const line = std.fmt.bufPrint(source_buf[pos..], "#shaderModule m{d} {{ code=s{d} }}\n", .{ i, i }) catch break;
         pos += line.len;
     }
 
@@ -468,7 +489,7 @@ test "ShaderID: many valid shaders" {
     const ids = try getCreatedShaderIds(testing.allocator, pngb);
     defer testing.allocator.free(ids);
 
-    // All 30 shaders created with consecutive IDs
+    // All 30 shaderModules created with consecutive IDs
     try testing.expectEqual(@as(usize, 30), ids.len);
     for (ids, 0..) |id, i| {
         try testing.expectEqual(@as(u16, @intCast(i)), id);
@@ -481,22 +502,26 @@ test "ShaderID: many valid shaders" {
 
 test "ShaderID: whitespace-only value treated as non-empty" {
     // Note: whitespace-only is technically not empty, so shader should be created
+    // Only #shaderModule creates shader modules now, not #wgsl
     const source: [:0]const u8 =
         \\#wgsl ws { value="   " }
+        \\#shaderModule mod { code=ws }
         \\#frame f { perform=[] }
     ;
 
     const pngb = try compileSource(source);
     defer testing.allocator.free(pngb);
 
-    // Whitespace-only is valid (not empty), shader should be created
+    // Whitespace-only is valid (not empty), shaderModule should be created
     const shader_count = try executeAndCountShaders(pngb);
     try testing.expectEqual(@as(u32, 1), shader_count);
 }
 
 test "ShaderID: comment-only shader is valid" {
+    // Only #shaderModule creates shader modules now, not #wgsl
     const source: [:0]const u8 =
         \\#wgsl comment { value="// just a comment" }
+        \\#shaderModule mod { code=comment }
         \\#frame f { perform=[] }
     ;
 
@@ -587,10 +612,13 @@ test "ShaderID: fuzz test" {
 // ============================================================================
 
 test "ShaderID: OOM during shader emission" {
+    // Only #shaderModule creates shader modules now, not #wgsl
     const source: [:0]const u8 =
         \\#wgsl a { value="fn a() {}" }
         \\#wgsl b { value="" }
         \\#wgsl c { value="fn c() {}" }
+        \\#shaderModule modA { code=a }
+        \\#shaderModule modC { code=c }
         \\#frame f { perform=[] }
     ;
 
@@ -601,7 +629,7 @@ test "ShaderID: OOM during shader emission" {
     const ids = try getCreatedShaderIds(testing.allocator, pngb);
     defer testing.allocator.free(ids);
 
-    // Verify baseline: 2 shaders with consecutive IDs
+    // Verify baseline: 2 shaderModules with consecutive IDs
     try testing.expectEqual(@as(usize, 2), ids.len);
     try testing.expectEqual(@as(u16, 0), ids[0]);
     try testing.expectEqual(@as(u16, 1), ids[1]);
@@ -625,8 +653,10 @@ test "ShaderID: single empty shader only" {
 }
 
 test "ShaderID: single valid shader only" {
+    // Only #shaderModule creates shader modules now, not #wgsl
     const source: [:0]const u8 =
         \\#wgsl only { value="fn only() {}" }
+        \\#shaderModule mod { code=only }
         \\#frame f { perform=[] }
     ;
 
@@ -641,19 +671,27 @@ test "ShaderID: single valid shader only" {
 }
 
 test "ShaderID: empty followed by many valid" {
+    // Only #shaderModule creates shader modules now, not #wgsl
+    // This test verifies that shaderModules get consecutive IDs
     var source_buf: [8192]u8 = undefined;
     @memset(&source_buf, 0);
     var pos: usize = 0;
 
-    // First 10 shaders are empty
+    // First 10 wgsl are empty (won't create shader modules)
     for (0..10) |i| {
         const line = std.fmt.bufPrint(source_buf[pos..], "#wgsl empty{d} {{ value=\"\" }}\n", .{i}) catch break;
         pos += line.len;
     }
 
-    // Next 10 shaders are valid
+    // Next 10 wgsl are valid code fragments
     for (0..10) |i| {
         const line = std.fmt.bufPrint(source_buf[pos..], "#wgsl valid{d} {{ value=\"// {d}\" }}\n", .{ i, i }) catch break;
+        pos += line.len;
+    }
+
+    // Create 10 shader modules from the valid wgsl
+    for (0..10) |i| {
+        const line = std.fmt.bufPrint(source_buf[pos..], "#shaderModule mod{d} {{ code=valid{d} }}\n", .{ i, i }) catch break;
         pos += line.len;
     }
 
@@ -668,7 +706,7 @@ test "ShaderID: empty followed by many valid" {
     const ids = try getCreatedShaderIds(testing.allocator, pngb);
     defer testing.allocator.free(ids);
 
-    // Only 10 valid shaders
+    // 10 shaderModules = 10 shader modules
     try testing.expectEqual(@as(usize, 10), ids.len);
 
     // IDs must be consecutive starting from 0
@@ -678,14 +716,15 @@ test "ShaderID: empty followed by many valid" {
 }
 
 test "ShaderID: pipeline after skipped shaders uses correct ID" {
-    // Critical regression test: pipeline referencing a shader that comes
-    // after several empty shaders must use the correct (re-numbered) ID
+    // Only #shaderModule creates shader modules now, not #wgsl
+    // Test that pipeline correctly references the shaderModule
     const source: [:0]const u8 =
         \\#wgsl skip1 { value="" }
         \\#wgsl skip2 { value="" }
         \\#wgsl skip3 { value="" }
         \\#wgsl actualShader { value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); }" }
-        \\#renderPipeline pipe { vertex={ module=actualShader } }
+        \\#shaderModule mod { code=actualShader }
+        \\#renderPipeline pipe { vertex={ module=mod } }
         \\#frame main { perform=[] }
     ;
 
@@ -721,12 +760,13 @@ test "ShaderID: pipeline after skipped shaders uses correct ID" {
 }
 
 test "ShaderID: compute pipeline after skipped shaders" {
-    // Same test but for compute pipelines
+    // Only #shaderModule creates shader modules now, not #wgsl
     const source: [:0]const u8 =
         \\#wgsl skip1 { value="" }
         \\#wgsl skip2 { value="" }
         \\#wgsl compute { value="@compute @workgroup_size(1) fn main() {}" }
-        \\#computePipeline pipe { compute={ module=compute } }
+        \\#shaderModule computeMod { code=compute }
+        \\#computePipeline pipe { compute={ module=computeMod } }
         \\#frame main { perform=[] }
     ;
 

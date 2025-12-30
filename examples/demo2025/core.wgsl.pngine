@@ -16,7 +16,7 @@
 }
 
 #buffer uniformPngineInputsBuffer {
-  size="4+4+4+4" // time, canvasW, canvasH, canvasRatio
+  size=16 // time, canvasW, canvasH, canvasRatio (4 floats * 4 bytes)
   usage=[UNIFORM COPY_DST]
 }
 

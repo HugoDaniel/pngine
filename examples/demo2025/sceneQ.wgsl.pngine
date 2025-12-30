@@ -4,12 +4,12 @@
 #import "./procedural_data/stars.wgsl.pngine"
 
 #buffer cameraInput {
-  size="4*4*4"
+  size=64 // 4x4 matrix (16 floats * 4 bytes)
   usage=[UNIFORM COPY_DST]
 }
 
 #buffer sceneQInputsBuffer {
-  size="8"
+  size=8
   usage=[UNIFORM COPY_DST]
 }
 

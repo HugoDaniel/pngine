@@ -1,0 +1,3 @@
+// Minimal test - just sceneU frame with no animation
+#import "./core.wgsl.pngine"
+#import "./sceneU.wgsl.pngine"

@@ -69,16 +69,19 @@ fn compileAndExecute(source: [:0]const u8) !mock_gpu.MockGPU {
 // ============================================================================
 
 test "Integration: triangle example - basic render pipeline" {
+    // Only #shaderModule creates shader modules now, not #wgsl
     const source: [:0]const u8 =
         \\#wgsl shader {
         \\  value="@vertex fn vertexMain() -> @builtin(position) vec4f { return vec4f(0.0); }
         \\@fragment fn fragmentMain() -> @location(0) vec4f { return vec4f(1.0); }"
         \\}
         \\
+        \\#shaderModule shaderMod { code=shader }
+        \\
         \\#renderPipeline triangle {
-        \\  vertex={ module=shader entryPoint=vertexMain }
+        \\  vertex={ module=shaderMod entryPoint=vertexMain }
         \\  fragment={
-        \\    module=shader
+        \\    module=shaderMod
         \\    entryPoint=fragmentMain
         \\    targets=[{ format=bgra8unorm }]
         \\  }

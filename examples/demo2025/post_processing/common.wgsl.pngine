@@ -1,5 +1,5 @@
 #buffer postProcessCommonInputsBuffer {
-  size="4*8" // vec2 + vec2 + 4 floats
+  size=32 // vec2 + vec2 + 4 floats (8 floats * 4 bytes)
   usage=[UNIFORM COPY_DST]
 }
 
@@ -27,6 +27,7 @@
 #renderPass postProcessCommonRenderPass {
   colorAttachments=[{
     view=contextCurrentTexture
+    clearValue=[0.0 1.0 1.0 1.0]
     loadOp=clear
     storeOp=store
   }]

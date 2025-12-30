@@ -71,9 +71,9 @@ fn scene_sdf(p: vec2f, transform: Transform2D) -> SDFResult {
 
 fn renderMT(uv: vec2f, transform: Transform2D) -> vec3f {
     let q = transform_to_local(uv, transform);
-   
-    // Use union operation for better blending
-    var result = SDFResult(1e10, vec3f(0.0));
+
+    // Start with bright magenta background (gamma correction will darken it)
+    var result = SDFResult(1e10, vec3f(1.0, 0.0, 1.0));
 
     let boxColors = array<vec3f, 8>(
         vec3f(1.0),
@@ -87,8 +87,9 @@ fn renderMT(uv: vec2f, transform: Transform2D) -> vec3f {
     );
 
     // Orange: vec3<f32>(1.000, 0.341, 0.200)
-    const ratio = 1.777; // Fix this
-    const boxSize = vec2f(ratio / 8.0, 1.0);
+    // Use actual canvas aspect ratio instead of hardcoded 16:9
+    let ratio = max(pngine.canvasRatio, 1.0);
+    let boxSize = vec2f(ratio / 8.0, 1.0);
     for (var i = 0u; i < 8u; i++) {
         let boxD = transformedBox(q, boxSize, Transform2D(vec2f(-ratio + boxSize.x + 2.0 * ratio * f32(i)/ 8.0, 1.0 - boxSize.y), 0.0, vec2f(1.0), vec2f())) - 0.001;
         if (boxD < 0.0) {
@@ -157,7 +158,7 @@ fn renderMT(uv: vec2f, transform: Transform2D) -> vec3f {
     let catScale = 1.2;
     let catD = catFaceLogo(uv, 5.0, 0.0, Transform2D(vec2f(0.0, -0.2), 0.0, vec2f(catScale, -catScale), vec2f()));
     if (catD < 0.0) {
-      result.color = vec3f();
+      result.color = vec3f(1.0);  // White cat logo (was black, invisible on black background)
     }
     
     return result.color;

@@ -7,7 +7,7 @@
 }
 
 #buffer sceneYInputsBuffer {
-  size="4+4+4"
+  size=12
   usage=[UNIFORM COPY_DST]
 }
 

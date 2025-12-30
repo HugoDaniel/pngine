@@ -28,7 +28,7 @@
 }
 
 #buffer sceneWInputsBuffer {
-  size="4+4+4+4+4+4+4"
+  size=28 // 7 floats * 4 bytes
   usage=[UNIFORM COPY_DST]
 }
 

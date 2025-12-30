@@ -63,7 +63,8 @@ test "Emitter: simple shader" {
 test "Emitter: shader and pipeline" {
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {}" }
-        \\#renderPipeline pipe { vertex={ module=shader } }
+        \\#shaderModule shaderMod { code=shader }
+        \\#renderPipeline pipe { vertex={ module=shaderMod } }
         \\#frame main { perform=[] }
     ;
 
@@ -258,7 +259,8 @@ test "Emitter: buffer size validation - accepts buffer larger than data" {
 test "Emitter: render pass with draw" {
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {}" }
-        \\#renderPipeline pipe { vertex={ module=shader } }
+        \\#shaderModule shaderMod { code=shader }
+        \\#renderPipeline pipe { vertex={ module=shaderMod } }
         \\#renderPass pass { pipeline=pipe draw=3 }
         \\#frame main { perform=[pass] }
     ;
@@ -287,10 +289,11 @@ test "Emitter: render pass with draw" {
 test "Emitter: simpleTriangle example" {
     const source: [:0]const u8 =
         \\#wgsl triangleShader { value="@vertex fn vs() { } @fragment fn fs() { }" }
+        \\#shaderModule triangleMod { code=triangleShader }
         \\#renderPipeline pipeline {
         \\  layout=auto
-        \\  vertex={ entryPoint=vs module=triangleShader }
-        \\  fragment={ entryPoint=fs module=triangleShader }
+        \\  vertex={ entryPoint=vs module=triangleMod }
+        \\  fragment={ entryPoint=fs module=triangleMod }
         \\}
         \\#renderPass drawPass {
         \\  pipeline=pipeline
@@ -322,7 +325,8 @@ test "Emitter: simpleTriangle example" {
 test "Emitter: compute pipeline" {
     const source: [:0]const u8 =
         \\#wgsl computeShader { value="@compute fn main() { }" }
-        \\#computePipeline pipe { compute={ module=computeShader } }
+        \\#shaderModule computeMod { code=computeShader }
+        \\#computePipeline pipe { compute={ module=computeMod } }
         \\#computePass pass { pipeline=pipe dispatch=[8 8 1] }
         \\#frame main { perform=[pass] }
     ;
@@ -349,10 +353,11 @@ test "Emitter: entrypoint case insensitivity" {
     // This is a regression test for the case sensitivity bug
     const source: [:0]const u8 =
         \\#wgsl triangleShader { value="@vertex fn vs() { } @fragment fn fs() { }" }
+        \\#shaderModule triangleMod { code=triangleShader }
         \\#renderPipeline pipeline {
         \\  layout=auto
-        \\  vertex={ entrypoint=vs module=triangleShader }
-        \\  fragment={ entrypoint=fs module=triangleShader }
+        \\  vertex={ entrypoint=vs module=triangleMod }
+        \\  fragment={ entrypoint=fs module=triangleMod }
         \\}
         \\#renderPass drawPass {
         \\  pipeline=pipeline
@@ -388,10 +393,11 @@ test "Emitter: entryPoint camelCase also works" {
     // Verify camelCase still works (backwards compatibility)
     const source: [:0]const u8 =
         \\#wgsl triangleShader { value="@vertex fn vs() { } @fragment fn fs() { }" }
+        \\#shaderModule triangleMod { code=triangleShader }
         \\#renderPipeline pipeline {
         \\  layout=auto
-        \\  vertex={ entryPoint=myVertex module=triangleShader }
-        \\  fragment={ entryPoint=myFragment module=triangleShader }
+        \\  vertex={ entryPoint=myVertex module=triangleMod }
+        \\  fragment={ entryPoint=myFragment module=triangleMod }
         \\}
         \\#renderPass drawPass {
         \\  pipeline=pipeline
@@ -459,7 +465,8 @@ test "Emitter: setPipeline with identifier value" {
     // Regression test: pipeline=pipelineName should emit set_pipeline
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {}" }
-        \\#renderPipeline myPipeline { vertex={ module=shader } }
+        \\#shaderModule shaderMod { code=shader }
+        \\#renderPipeline myPipeline { vertex={ module=shaderMod } }
         \\#renderPass pass { pipeline=myPipeline draw=3 }
         \\#frame main { perform=[pass] }
     ;
@@ -485,7 +492,8 @@ test "Emitter: setPipeline with bare identifier syntax" {
     // Bare identifier syntax for pipeline reference
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {}" }
-        \\#renderPipeline myPipeline { vertex={ module=shader } }
+        \\#shaderModule shaderMod { code=shader }
+        \\#renderPipeline myPipeline { vertex={ module=shaderMod } }
         \\#renderPass pass { pipeline=myPipeline draw=3 }
         \\#frame main { perform=[pass] }
     ;
@@ -512,7 +520,8 @@ test "Emitter: render pass emits begin/setPipeline/draw/end sequence" {
     // This catches missing begin_render_pass or end_pass.
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {}" }
-        \\#renderPipeline pipe { vertex={ module=shader } }
+        \\#shaderModule shaderMod { code=shader }
+        \\#renderPipeline pipe { vertex={ module=shaderMod } }
         \\#renderPass pass { pipeline=pipe draw=3 }
         \\#frame main { perform=[pass] }
     ;
@@ -562,8 +571,9 @@ test "Emitter: render pass with bind group emits set_bind_group" {
     // Regression test: bindGroups=[name] should emit set_bind_group opcode.
     const source: [:0]const u8 =
         \\#wgsl shader { value="@group(0) @binding(0) var<uniform> u: f32; @vertex fn vs() { } @fragment fn fs() { }" }
+        \\#shaderModule shaderMod { code=shader }
         \\#buffer uniformBuf { size=4 usage=[UNIFORM COPY_DST] }
-        \\#renderPipeline pipe { layout=auto vertex={ module=shader } fragment={ module=shader } }
+        \\#renderPipeline pipe { layout=auto vertex={ module=shaderMod } fragment={ module=shaderMod } }
         \\#bindGroup bg { layout={ pipeline=pipe index=0 } entries=[{ binding=0 resource={ buffer=uniformBuf } }] }
         \\#renderPass pass { pipeline=pipe bindGroups=[bg] draw=3 }
         \\#frame main { perform=[pass] }
@@ -591,9 +601,10 @@ test "Emitter: bind group selects correct buffer from multiple" {
     // Verifies resource={ buffer=name } syntax resolves to correct buffer ID
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() { }" }
+        \\#shaderModule shaderMod { code=shader }
         \\#buffer verticesBuffer { size=64 usage=[VERTEX] }
         \\#buffer uniformInputsBuffer { size=16 usage=[UNIFORM] }
-        \\#renderPipeline pipe { layout=auto vertex={ module=shader } }
+        \\#renderPipeline pipe { layout=auto vertex={ module=shaderMod } }
         \\#bindGroup myBindGroup { layout={ pipeline=pipe index=0 } entries=[{ binding=0 resource={ buffer=uniformInputsBuffer } }] }
         \\#renderPass pass { pipeline=pipe bindGroups=[myBindGroup] draw=3 }
         \\#frame main { perform=[pass] }
@@ -640,8 +651,9 @@ test "Emitter: bind group with bare identifier reference" {
     // Tests that bindGroups=[name] works.
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() { }" }
+        \\#shaderModule shaderMod { code=shader }
         \\#buffer buf { size=16 usage=[UNIFORM] }
-        \\#renderPipeline pipe { layout=auto vertex={ module=shader } }
+        \\#renderPipeline pipe { layout=auto vertex={ module=shaderMod } }
         \\#bindGroup myBindGroup { layout={ pipeline=pipe index=0 } entries=[{ binding=0 resource={ buffer=buf } }] }
         \\#renderPass pass { pipeline=pipe bindGroups=[myBindGroup] draw=3 }
         \\#frame main { perform=[pass] }
@@ -686,8 +698,9 @@ test "Emitter: bind group with buffer reference" {
     // Tests that entries=[{ binding=0 resource={ buffer=name } }] works
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() { }" }
+        \\#shaderModule shaderMod { code=shader }
         \\#buffer uniformBuf { size=16 usage=[UNIFORM] }
-        \\#renderPipeline pipe { layout=auto vertex={ module=shader } }
+        \\#renderPipeline pipe { layout=auto vertex={ module=shaderMod } }
         \\#bindGroup myBindGroup { layout={ pipeline=pipe index=0 } entries=[{ binding=0 resource={ buffer=uniformBuf } }] }
         \\#renderPass pass { pipeline=pipe bindGroups=[myBindGroup] draw=3 }
         \\#frame main { perform=[pass] }
@@ -715,10 +728,11 @@ test "Emitter: bind group selects second buffer correctly" {
     // This catches bugs where buffer_ids.get() might return wrong ID
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() { }" }
+        \\#shaderModule shaderMod { code=shader }
         \\#buffer firstBuffer { size=100 usage=[VERTEX] }
         \\#buffer secondBuffer { size=200 usage=[UNIFORM] }
         \\#buffer thirdBuffer { size=300 usage=[STORAGE] }
-        \\#renderPipeline pipe { layout=auto vertex={ module=shader } }
+        \\#renderPipeline pipe { layout=auto vertex={ module=shaderMod } }
         \\#bindGroup myBindGroup { layout={ pipeline=pipe index=0 } entries=[{ binding=0 resource={ buffer=secondBuffer } }] }
         \\#renderPass pass { pipeline=pipe bindGroups=[myBindGroup] draw=3 }
         \\#frame main { perform=[pass] }
@@ -760,8 +774,9 @@ test "Emitter: bind group direct buffer syntax (alternative)" {
     // (without nested resource={})
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() { }" }
+        \\#shaderModule shaderMod { code=shader }
         \\#buffer buf { size=16 usage=[UNIFORM] }
-        \\#renderPipeline pipe { layout=auto vertex={ module=shader } }
+        \\#renderPipeline pipe { layout=auto vertex={ module=shaderMod } }
         \\#bindGroup myBindGroup { layout={ pipeline=pipe index=0 } entries=[{ binding=0 buffer=buf }] }
         \\#renderPass pass { pipeline=pipe bindGroups=[myBindGroup] draw=3 }
         \\#frame main { perform=[pass] }
@@ -842,8 +857,9 @@ test "Emitter: queue invoked alongside render pass" {
     // Test that queues can be invoked in perform array alongside passes
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {}" }
+        \\#shaderModule shaderMod { code=shader }
         \\#buffer uniformBuf { size=4 usage=[UNIFORM COPY_DST] }
-        \\#renderPipeline pipe { vertex={ module=shader } }
+        \\#renderPipeline pipe { vertex={ module=shaderMod } }
         \\#renderPass pass { pipeline=pipe draw=3 }
         \\#queue writeUniforms { writeBuffer={ buffer=uniformBuf data=[0.5] } }
         \\#frame main { perform=[writeUniforms pass] }
@@ -1396,7 +1412,8 @@ test "Emitter: draw with #define identifier resolves to numeric value" {
     const source: [:0]const u8 =
         \\#define CUBE_VERTEX_COUNT=36
         \\#wgsl shader { value="@vertex fn vs() {}" }
-        \\#renderPipeline pipe { vertex={ module=shader } }
+        \\#shaderModule shaderMod { code=shader }
+        \\#renderPipeline pipe { vertex={ module=shaderMod } }
         \\#renderPass pass { pipeline=pipe draw=CUBE_VERTEX_COUNT }
         \\#frame main { perform=[pass] }
     ;
@@ -1435,7 +1452,8 @@ test "Emitter: drawIndexed with #define identifier emits correct bytecode" {
     const source: [:0]const u8 =
         \\#define MESH_INDEX_COUNT=72
         \\#wgsl shader { value="@vertex fn vs() {}" }
-        \\#renderPipeline pipe { vertex={ module=shader } }
+        \\#shaderModule shaderMod { code=shader }
+        \\#renderPipeline pipe { vertex={ module=shaderMod } }
         \\#renderPass pass { pipeline=pipe drawIndexed=MESH_INDEX_COUNT }
         \\#frame main { perform=[pass] }
     ;
@@ -1471,8 +1489,9 @@ test "Emitter: vertexBuffers with bare identifier emits set_vertex_buffer" {
     // Regression test: vertexBuffers=[verticesBuffer] with bare identifier
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {}" }
+        \\#shaderModule shaderMod { code=shader }
         \\#buffer verticesBuffer { size=1440 usage=[VERTEX] }
-        \\#renderPipeline pipe { vertex={ module=shader } }
+        \\#renderPipeline pipe { vertex={ module=shaderMod } }
         \\#renderPass pass { pipeline=pipe vertexBuffers=[verticesBuffer] draw=36 }
         \\#frame main { perform=[pass] }
     ;
@@ -1498,8 +1517,9 @@ test "Emitter: vertexBuffers with bare identifier executes correctly" {
     // Regression test: verify set_vertex_buffer is actually called with correct buffer ID
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {}" }
+        \\#shaderModule shaderMod { code=shader }
         \\#buffer verticesBuffer { size=1440 usage=[VERTEX] }
-        \\#renderPipeline pipe { vertex={ module=shader } }
+        \\#renderPipeline pipe { vertex={ module=shaderMod } }
         \\#renderPass pass { pipeline=pipe vertexBuffers=[verticesBuffer] draw=36 }
         \\#frame main { perform=[pass] }
     ;
@@ -1538,12 +1558,13 @@ test "Emitter: rotating_cube style render pass with all commands" {
     const source: [:0]const u8 =
         \\#define CUBE_VERTEX_COUNT=36
         \\#wgsl cubeShader { value="@group(0) @binding(0) var<uniform> u: f32; @vertex fn vs() { } @fragment fn fs() { }" }
+        \\#shaderModule cubeMod { code=cubeShader }
         \\#buffer verticesBuffer { size=1440 usage=[VERTEX COPY_DST] }
         \\#buffer inputsBuffer { size=12 usage=[UNIFORM COPY_DST] }
         \\#renderPipeline renderCube {
         \\  layout=auto
-        \\  vertex={ module=cubeShader }
-        \\  fragment={ module=cubeShader }
+        \\  vertex={ module=cubeMod }
+        \\  fragment={ module=cubeMod }
         \\}
         \\#bindGroup inputsBinding {
         \\  layout={ pipeline=renderCube index=0 }
@@ -1622,10 +1643,11 @@ test "Emitter: multiple vertex buffers with bare identifiers" {
     // Test that multiple vertex buffers at different slots are emitted correctly
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {}" }
+        \\#shaderModule shaderMod { code=shader }
         \\#buffer positionBuffer { size=1024 usage=[VERTEX] }
         \\#buffer normalBuffer { size=1024 usage=[VERTEX] }
         \\#buffer uvBuffer { size=512 usage=[VERTEX] }
-        \\#renderPipeline pipe { vertex={ module=shader } }
+        \\#renderPipeline pipe { vertex={ module=shaderMod } }
         \\#renderPass pass { pipeline=pipe vertexBuffers=[positionBuffer normalBuffer uvBuffer] draw=36 }
         \\#frame main { perform=[pass] }
     ;
@@ -1669,9 +1691,10 @@ test "Emitter: mixed pool and non-pool vertex buffers (boids pattern)" {
     // This is the boids pattern: particleBuffers (pool=2) + spriteVertexBuffer (no pool).
     const source: [:0]const u8 =
         \\#wgsl shader { value="@vertex fn vs() {}" }
+        \\#shaderModule shaderMod { code=shader }
         \\#buffer particleBuffer { size=1024 usage=[VERTEX STORAGE] pool=2 }
         \\#buffer spriteBuffer { size=24 usage=[VERTEX] }
-        \\#renderPipeline pipe { vertex={ module=shader } }
+        \\#renderPipeline pipe { vertex={ module=shaderMod } }
         \\#renderPass pass {
         \\  pipeline=pipe
         \\  vertexBuffers=[particleBuffer spriteBuffer]
@@ -2058,15 +2081,15 @@ test "Emitter: shaderModule with code=wgslMacroName resolves shader" {
     }
     try testing.expect(found_shader_code);
 
-    // Verify only ONE shader module created (the #wgsl and #shaderModule share code)
+    // Verify only ONE shader module created (only #shaderModule creates modules now)
     var shader_module_count: u32 = 0;
     for (module.bytecode) |byte| {
         if (byte == @intFromEnum(opcodes.OpCode.create_shader_module)) {
             shader_module_count += 1;
         }
     }
-    // Both #wgsl and #shaderModule create shader modules
-    try testing.expectEqual(@as(u32, 2), shader_module_count);
+    // Only #shaderModule creates shader modules, not #wgsl
+    try testing.expectEqual(@as(u32, 1), shader_module_count);
 }
 
 test "Emitter: shaderModule with code=string works" {
@@ -4598,10 +4621,12 @@ test "Emitter: init macro creates synthetic resources" {
     // - Compute pipeline using the specified shader
     // - Bind group with the buffer at binding 0
     // - Compute pass that dispatches workgroups
+    // Only #shaderModule creates shader modules now, not #wgsl
     const source: [:0]const u8 =
         \\#wgsl initShader { value="@compute @workgroup_size(64) fn main() {}" }
+        \\#shaderModule initShaderMod { code=initShader }
         \\#buffer particles { size=4096 usage=[STORAGE] }
-        \\#init resetParticles { buffer=particles shader=initShader }
+        \\#init resetParticles { buffer=particles shader=initShaderMod }
         \\#frame main { perform=[resetParticles] }
     ;
 
@@ -4647,10 +4672,12 @@ test "Emitter: init macro calculates workgroup count from buffer size" {
     // Buffer size = 4096 bytes
     // Default workgroup size = 64
     // Expected workgroups = ceil(4096 / 64) = 64
+    // Only #shaderModule creates shader modules now, not #wgsl
     const source: [:0]const u8 =
         \\#wgsl initShader { value="@compute @workgroup_size(64) fn main() {}" }
+        \\#shaderModule initShaderMod { code=initShader }
         \\#buffer data { size=4096 usage=[STORAGE] }
-        \\#init initData { buffer=data shader=initShader }
+        \\#init initData { buffer=data shader=initShaderMod }
         \\#frame main { perform=[initData] }
     ;
 
@@ -4686,10 +4713,12 @@ test "Emitter: frame init= runs passes once" {
     // Test that init= property uses run-once semantics:
     // - First frame execution: init pass runs
     // - Second frame execution: init pass skipped
+    // Only #shaderModule creates shader modules now, not #wgsl
     const source: [:0]const u8 =
         \\#wgsl initShader { value="@compute @workgroup_size(64) fn main() {}" }
+        \\#shaderModule initShaderMod { code=initShader }
         \\#buffer data { size=1024 usage=[STORAGE] }
-        \\#init initData { buffer=data shader=initShader }
+        \\#init initData { buffer=data shader=initShaderMod }
         \\#frame main { init=[initData] perform=[] }
     ;
 
@@ -4726,13 +4755,16 @@ test "Emitter: frame init= runs passes once" {
 test "Emitter: multiple frames with different init= lists" {
     // Test multiple frames each with their own init= passes
     // Simulates animation scenes where each scene has different initialization
+    // Only #shaderModule creates shader modules now, not #wgsl
     const source: [:0]const u8 =
         \\#wgsl initA { value="@compute @workgroup_size(64) fn main() {}" }
         \\#wgsl initB { value="@compute @workgroup_size(64) fn main() {}" }
+        \\#shaderModule initAMod { code=initA }
+        \\#shaderModule initBMod { code=initB }
         \\#buffer bufA { size=1024 usage=[STORAGE] }
         \\#buffer bufB { size=1024 usage=[STORAGE] }
-        \\#init setupA { buffer=bufA shader=initA }
-        \\#init setupB { buffer=bufB shader=initB }
+        \\#init setupA { buffer=bufA shader=initAMod }
+        \\#init setupB { buffer=bufB shader=initBMod }
         \\#frame sceneA { init=[setupA] perform=[] }
         \\#frame sceneB { init=[setupB] perform=[] }
     ;
@@ -4760,13 +4792,16 @@ test "Emitter: multiple frames with different init= lists" {
 
 test "Emitter: init= with multiple passes in single frame" {
     // Test that multiple init passes in a single frame all use run-once semantics
+    // Only #shaderModule creates shader modules now, not #wgsl
     const source: [:0]const u8 =
         \\#wgsl initA { value="@compute @workgroup_size(64) fn main() {}" }
         \\#wgsl initB { value="@compute @workgroup_size(64) fn main() {}" }
+        \\#shaderModule initAMod { code=initA }
+        \\#shaderModule initBMod { code=initB }
         \\#buffer bufA { size=512 usage=[STORAGE] }
         \\#buffer bufB { size=512 usage=[STORAGE] }
-        \\#init setupA { buffer=bufA shader=initA }
-        \\#init setupB { buffer=bufB shader=initB }
+        \\#init setupA { buffer=bufA shader=initAMod }
+        \\#init setupB { buffer=bufB shader=initBMod }
         \\#frame main { init=[setupA setupB] perform=[] }
     ;
 
@@ -4812,10 +4847,12 @@ test "Emitter: init macro with params creates uniform buffer" {
     // - An additional uniform buffer for the params
     // - writeBuffer to initialize the params buffer
     // - Bind group with params buffer at binding 1
+    // Only #shaderModule creates shader modules now, not #wgsl
     const source: [:0]const u8 =
         \\#wgsl initShader { value="@compute @workgroup_size(64) fn main() {}" }
+        \\#shaderModule initShaderMod { code=initShader }
         \\#buffer particles { size=4096 usage=[STORAGE] }
-        \\#init resetParticles { buffer=particles shader=initShader params=[42] }
+        \\#init resetParticles { buffer=particles shader=initShaderMod params=[42] }
         \\#frame main { perform=[resetParticles] }
     ;
 
@@ -4858,10 +4895,12 @@ test "Emitter: init macro with params creates uniform buffer" {
 
 test "Emitter: init macro with multiple params values" {
     // Test multiple params values (e.g., seed + other configuration)
+    // Only #shaderModule creates shader modules now, not #wgsl
     const source: [:0]const u8 =
         \\#wgsl initShader { value="@compute @workgroup_size(64) fn main() {}" }
+        \\#shaderModule initShaderMod { code=initShader }
         \\#buffer data { size=1024 usage=[STORAGE] }
-        \\#init setup { buffer=data shader=initShader params=[12345 2.5 0.1] }
+        \\#init setup { buffer=data shader=initShaderMod params=[12345 2.5 0.1] }
         \\#frame main { perform=[setup] }
     ;
 

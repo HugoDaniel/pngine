@@ -11,7 +11,7 @@
 }
 
 #buffer starsSimParamBuffer {
-  size="8*4" // deltaT + simId + vec3 + vec3
+  size=32 // deltaT + simId + vec3 + vec3 (8 floats * 4 bytes)
   usage=[UNIFORM COPY_DST]
 }
 

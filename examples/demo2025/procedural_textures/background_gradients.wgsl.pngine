@@ -1,5 +1,5 @@
 #buffer uniformSceneTimeBuffer {
-  size="4+4+4" // time, duration, normalizedTime
+  size=12 // time, duration, normalizedTime (3 floats * 4 bytes)
   usage=[UNIFORM COPY_DST]
 }
 

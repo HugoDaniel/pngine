@@ -89,21 +89,24 @@ pub fn emitShaders(e: *Emitter) Emitter.Error!void {
         // Check if code references a #wgsl macro
         const wgsl_ref = getWgslReference(e, code_value);
         if (wgsl_ref) |ref_name| {
-            // Reference to #wgsl - look up data_id from WGSL table
-            const ref_wgsl_id = e.wgsl_name_to_id.get(ref_name) orelse continue;
-            const wgsl_entry = e.builder.wgsl_table.get(ref_wgsl_id) orelse continue;
+            // Reference to #wgsl - use resolved code with all imports concatenated
+            const resolved_code = e.resolved_wgsl_cache.get(ref_name) orelse {
+                std.debug.print("WARN: resolved_wgsl_cache miss for '{s}'\n", .{ref_name});
+                continue;
+            };
+            std.debug.print("DEBUG: #shaderModule '{s}' using resolved code for '{s}' ({} bytes)\n", .{ name, ref_name, resolved_code.len });
 
             // Assign shader_id for this #shaderModule
             const shader_id = e.next_shader_id;
             e.next_shader_id += 1;
             try e.shader_ids.put(e.gpa, name, shader_id);
 
-            // NOTE: Emit data_id (not wgsl_id) because wasm_entry.zig uses
-            // getDataSlice() directly on the data section, not the WGSL table.
+            // Store resolved code (with imports) in data section and emit
+            const data_id = try e.builder.addData(e.gpa, resolved_code);
             try e.builder.getEmitter().createShaderModule(
                 e.gpa,
                 shader_id,
-                wgsl_entry.data_id,
+                data_id.toInt(),
             );
         } else {
             // Inline code - apply minification if enabled
@@ -272,20 +275,11 @@ fn emitWgslModule(e: *Emitter, name: []const u8, macro_node: Node.Index) Emitter
     const wgsl_id = try e.builder.addWgsl(e.gpa, data_id.toInt(), deps.items);
     try e.wgsl_name_to_id.put(e.gpa, name, wgsl_id);
 
-    // Assign shader_id and emit create_shader_module
-    const shader_id = e.next_shader_id;
-    e.next_shader_id += 1;
-    try e.shader_ids.put(e.gpa, name, shader_id);
+    // NOTE: We do NOT create a shader module here for #wgsl declarations.
+    // #wgsl is a reusable code fragment - it may be incomplete (missing imports).
+    // Only #shaderModule creates actual GPU shader modules with fully resolved code.
 
-    // NOTE: Emit data_id (not wgsl_id) because wasm_entry.zig uses
-    // getDataSlice() directly on the data section, not the WGSL table.
-    try e.builder.getEmitter().createShaderModule(
-        e.gpa,
-        shader_id,
-        data_id.toInt(),
-    );
-
-    // Also cache the resolved code for #shaderModule backward compat
+    // Cache the resolved code for #shaderModule to use later
     // Build resolved code by concatenating deps + this module's code
     try buildAndCacheResolvedCode(e, name, code_to_store, deps.items);
 }

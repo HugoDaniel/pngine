@@ -167,9 +167,11 @@ test "ModuleRef: wgsl reference in shaderModule code" {
 }
 
 test "ModuleRef: bare identifier module reference in pipeline" {
-    // Bare identifier reference to wgsl from pipeline
+    // Bare identifier reference to shaderModule from pipeline
+    // Note: #wgsl alone does NOT create a shader module - must use #shaderModule
     const source: [:0]const u8 =
-        \\#wgsl shader { value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); }" }
+        \\#wgsl shaderCode { value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); }" }
+        \\#shaderModule shader { code=shaderCode }
         \\#renderPipeline pipe {
         \\  layout=auto
         \\  vertex={ module=shader entryPoint=vs }
@@ -362,8 +364,9 @@ test "ModuleRef: demo pattern - wgsl with imports, shaderModule ref" {
         }
     }
 
-    // Should have shaders for: constants, transform2D, sceneEShader, sceneE (referencing sceneEShader)
-    try testing.expect(shader_count >= 3);
+    // Only #shaderModule creates a shader module now (not #wgsl)
+    // sceneE is the only #shaderModule, so shader_count = 1
+    try testing.expectEqual(@as(u32, 1), shader_count);
     try testing.expectEqual(@as(u32, 1), pipeline_count);
 }
 
@@ -888,12 +891,13 @@ test "ModuleRef: chained wgsl references with shaderModule" {
     defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
-    // Should have at least 2 shaders (base, derived)
+    // Only #shaderModule creates a shader module now (not #wgsl)
+    // 'final' is the only #shaderModule, so shader_count = 1
     var shader_count: u32 = 0;
     for (gpu.getCalls()) |call| {
         if (call.call_type == .create_shader_module) shader_count += 1;
     }
-    try testing.expect(shader_count >= 2);
+    try testing.expectEqual(@as(u32, 1), shader_count);
 }
 
 test "ModuleRef: vertex-only pipeline with bare identifier" {
