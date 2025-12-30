@@ -398,6 +398,54 @@ by JavaScript, the stack memory was stale/overwritten.
 - `src/wasm_entry.zig` - Updated call to pass slice directly
 - `npm/pngine/src/gpu.js` - Updated decoder and `_callWasmFunc`, `_decodeWasmArgs`
 
+### 11. Animation Scene Selection Not Implemented (Black Screen for Multi-Scene Demos)
+
+**Symptom**: Demo with `#animation` timeline shows black screen even though
+`pngine check` validates successfully and shows multiple draw calls.
+
+**Cause**: The WASM executor's `executeFrame()` function in `wasm_entry.zig`
+does not implement animation scene selection. It always executes the **first**
+`define_frame` opcode found, regardless of the current time or animation table.
+
+**Technical Details**:
+```zig
+// Current behavior (wasm_entry.zig executeFrame):
+// 1. Scans bytecode for first define_frame
+// 2. Executes that frame's body
+// 3. Ignores animation_table and time parameter
+```
+
+**Example**: demo2025 defines:
+```
+#animation inercia2025 {
+  scenes=[
+    { id="intro" frame=sceneU start=0 end=2 }
+    { id="boxes" frame=sceneE start=2 end=14 }
+    ...
+  ]
+}
+```
+
+At time t=10s, it should show sceneE (boxes), but it always shows sceneU (intro)
+because that's the first frame in bytecode order.
+
+**Workaround**: For now, demos with `#animation` will only show the first scene.
+Single-frame demos work correctly.
+
+**Proper Fix Required**: Implement animation scene selection in `wasm_entry.zig`:
+1. Load animation table during `init()`
+2. In `executeFrame(time, ...)`, look up active scene from animation table
+3. Find that scene's frame by name/ID
+4. Execute that specific frame instead of first one
+
+**Files Affected**:
+- `src/wasm_entry.zig` - Add animation table parsing and scene lookup
+- `src/bytecode/animation_table.zig` - May need WASM-friendly deserialization
+
+**Key lesson**: The PNGB format supports multi-scene animations, but the WASM
+runtime doesn't yet implement scene selection. This is tracked as a future
+enhancement.
+
 ## Debugging Strategies
 
 ### 1. Browser Console Logging
