@@ -1,0 +1,213 @@
+// PNGine Logo - Animated tangram grid
+// Based on compute.toys shader, adapted for PNGine fragment shader
+//
+// Usage with viewer API:
+//   import { pngine, play, setUniform } from 'pngine';
+//   const p = await pngine('pngine_logo.png', { canvas });
+//   play(p);
+//
+//   // Set C uniform from mouse (normalized 0-1 to 2-6 range)
+//   canvas.addEventListener('mousemove', (e) => {
+//     const rect = canvas.getBoundingClientRect();
+//     const x = (e.clientX - rect.left) / rect.width;
+//     setUniform(p, 'C', 2.0 + x * 4.0);
+//   });
+
+// Uniform buffer: 16 bytes pngineInputs + 16 bytes custom (C + padding)
+#buffer uniforms {
+  size=32
+  usage=[UNIFORM COPY_DST]
+}
+
+// Write pngineInputs (time, width, height, aspect)
+#queue writeInputs {
+  writeBuffer={
+    buffer=uniforms
+    bufferOffset=0
+    data=pngineInputs
+  }
+}
+
+#bindGroup mainBindGroup {
+  layout={ pipeline=pipeline index=0 }
+  entries=[
+    { binding=0 resource={ buffer=uniforms }}
+  ]
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={ entryPoint=vs module=shader }
+  fragment={
+    entryPoint=fs
+    module=shader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#renderPass render {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.9 0.8 0.7 1.0]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=pipeline
+  bindGroups=[mainBindGroup]
+  draw=3
+}
+
+#frame pngineLogo {
+  perform=[writeInputs render]
+}
+
+#shaderModule shader {
+  code="
+// ============================================================================
+// Uniforms: pngineInputs (16 bytes) + custom C (16 bytes with padding)
+// ============================================================================
+struct Uniforms {
+    time: f32,
+    width: f32,
+    height: f32,
+    aspect: f32,
+    C: f32,           // Mouse X - wave phase control
+    colorShift: f32,  // Mouse Y - color palette shift
+    _pad2: f32,
+    _pad3: f32,
+}
+
+@group(0) @binding(0) var<uniform> u: Uniforms;
+
+// ============================================================================
+// Constants
+// ============================================================================
+const PI: f32 = 3.14159265359;
+const bg_col = vec3f(0.9, 0.8, 0.7);
+
+const grid_w = 13.0;
+const grid_h = 15.0;
+const grid_x = (grid_w - 1.0) / 2.0;
+const grid_y = (grid_h - 1.0) / 2.0;
+const min_grid = vec2f(-grid_x, -grid_y);
+const max_grid = vec2f( grid_x,  grid_y);
+
+// ============================================================================
+// Color palette (from compute.toys)
+// ============================================================================
+fn palette(t: f32) -> vec3f {
+    let a = vec3f(0.5, 0.5, 0.5);
+    let b = vec3f(0.5, 0.5, 0.5);
+    let c = vec3f(1.0, 1.0, 1.0);
+    let d = vec3f(0.263, 0.416, 0.557);
+    return a + b * cos(6.28318 * (c * t + d));
+}
+
+fn map_range(v: f32, in_min: f32, in_max: f32, out_min: f32, out_max: f32) -> f32 {
+    return out_min + (v - in_min) * (out_max - out_min) / (in_max - in_min);
+}
+
+// ============================================================================
+// Box SDF
+// ============================================================================
+fn box_sdf(p: vec2f, b: vec2f) -> f32 {
+    let d = abs(p) - b;
+    return length(max(d, vec2f(0.0))) + min(max(d.x, d.y), 0.0);
+}
+
+// ============================================================================
+// P mask - defines the PNGine logo shape (returns true for P cells)
+// ============================================================================
+fn is_cell_masked(pos: vec2f) -> bool {
+    if (pos.y == 3.0 && pos.x >= 3.0 && pos.x <= 8.0) { return true; }
+    if (pos.y == 4.0 && ((pos.x >= 3.0 && pos.x <= 4.0) || (pos.x >= 8.0 && pos.x <= 9.0))) { return true; }
+    if (pos.y == 5.0 && ((pos.x >= 3.0 && pos.x <= 4.0) || (pos.x >= 8.0 && pos.x <= 9.0))) { return true; }
+    if (pos.y == 6.0 && ((pos.x >= 3.0 && pos.x <= 4.0) || (pos.x >= 8.0 && pos.x <= 9.0))) { return true; }
+    if (pos.y == 7.0 && ((pos.x >= 3.0 && pos.x <= 4.0) || pos.x == 8.0)) { return true; }
+    if (pos.y == 8.0 && (pos.x >= 3.0 && pos.x <= 7.0)) { return true; }
+    if (pos.y == 9.0 && (pos.x >= 3.0 && pos.x <= 4.0)) { return true; }
+    if (pos.y == 10.0 && (pos.x >= 3.0 && pos.x <= 4.0)) { return true; }
+    if (pos.y == 11.0 && (pos.x >= 3.0 && pos.x <= 4.0)) { return true; }
+    return false;
+}
+
+// ============================================================================
+// Vertex shader - fullscreen triangle
+// ============================================================================
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+    // Oversized triangle that covers the screen with 3 vertices
+    let x = f32(i & 1u) * 4.0 - 1.0;
+    let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+    return vec4f(x, y, 0.0, 1.0);
+}
+
+// ============================================================================
+// Fragment shader
+// ============================================================================
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    // Normalized UV (0 to 1)
+    let uv01 = vec2f(pos.x / u.width, pos.y / u.height);
+
+    // Center at origin, y-up, normalized by height (like compute.toys)
+    // flip y: (1 - uv01.y) makes y=0 at bottom
+    let uv = vec2f(
+        (uv01.x - 0.5) * u.aspect * 2.0,
+        (1.0 - uv01.y - 0.5) * 2.0
+    );
+
+    // Scale to grid space (0.1 = see ~10 units of grid)
+    let scale = 0.1;
+    let grid_pos = uv / scale;
+
+    let cell_id = floor(grid_pos);
+    let cell_uv = fract(grid_pos) - 0.5;  // -0.5 to 0.5 within cell
+
+    let inside_x = cell_id.x >= min_grid.x && cell_id.x <= max_grid.x;
+    let inside_y = cell_id.y >= min_grid.y && cell_id.y <= max_grid.y;
+
+    // Default: background
+    var color = bg_col;
+
+    if (inside_x && inside_y) {
+        // Convert to 0-indexed grid coordinates (0,0 at top-left of P)
+        let local_grid_pos = vec2f(
+            cell_id.x - min_grid.x,
+            max_grid.y - cell_id.y
+        );
+
+        // Only draw boxes in non-masked cells
+        if (!is_cell_masked(local_grid_pos)) {
+            // Wave phase: use C if set (mouse X), otherwise time-based
+            var phase = u.C;
+            if (phase < 0.1) {
+                phase = u.time * 2.0;  // Auto-animate with time
+            }
+
+            // Wave animation for box size
+            let wave = sin(local_grid_pos.x * 0.5 + local_grid_pos.y * 0.3 + phase);
+            let size_anim = map_range(wave, -1.0, 1.0, 0.1, 0.5);
+            let half_size = size_anim * 0.5;
+
+            // Box SDF
+            let d = box_sdf(cell_uv, vec2f(half_size));
+
+            // Color: position-based + mouse Y shift + time animation
+            let color_t = length(local_grid_pos) * 0.08 + u.colorShift - u.time * 0.1;
+            let box_color = palette(color_t);
+
+            // Anti-aliased edge (smooth transition)
+            let aa = 0.02;
+            let blend = smoothstep(aa, -aa, d);
+            color = mix(bg_col, box_color, blend);
+        }
+    }
+
+    // Gamma correction
+    color = pow(color, vec3f(1.0/2.2));
+
+    return vec4f(color, 1.0);
+}
+"
+}
