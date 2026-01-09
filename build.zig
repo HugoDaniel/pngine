@@ -269,6 +269,23 @@ pub fn build(b: *std.Build) void {
             "core/shared/platform/common/memory/mremap.c", // Fallback os_mremap for Darwin
         };
 
+        // Architecture-specific BUILD_TARGET defines for WAMR AOT relocation
+        // WAMR needs both BUILD_TARGET_* (preprocessor check) and BUILD_TARGET (string literal)
+        const build_target_flag: []const u8 = if (is_aarch64)
+            "-DBUILD_TARGET_AARCH64"
+        else if (is_x86_64)
+            "-DBUILD_TARGET_X86_64"
+        else
+            "-DBUILD_TARGET_X86_64"; // Fallback
+
+        // BUILD_TARGET must be a string literal for get_current_target() in aot_reloc_*.c
+        const build_target_str: []const u8 = if (is_aarch64)
+            "-DBUILD_TARGET=\"AARCH64\""
+        else if (is_x86_64)
+            "-DBUILD_TARGET=\"X86_64\""
+        else
+            "-DBUILD_TARGET=\"X86_64\""; // Fallback
+
         // Common compile flags for all WAMR sources
         // Note: -fno-sanitize=alignment disables alignment sanitizer which catches
         // misaligned accesses in WAMR's internal table instantiation code
@@ -283,7 +300,8 @@ pub fn build(b: *std.Build) void {
             "-DBH_MALLOC=wasm_runtime_malloc",
             "-DBH_FREE=wasm_runtime_free",
             "-DBH_PLATFORM_DARWIN", // For macOS
-            "-DBUILD_TARGET_X86_64", // Will be overridden by arch detection
+            build_target_flag,
+            build_target_str, // String literal for get_current_target()
         };
 
         // Build WAMR as static library
