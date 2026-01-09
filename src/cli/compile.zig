@@ -169,7 +169,7 @@ pub fn compileSourceWithPlugins(
         // DSL format - use compileWithPlugins for variant selection
         const base_dir = std.fs.path.dirname(path) orelse ".";
 
-        var result = try pngine.dsl.compileWithPlugins(allocator, source, .{
+        const result = try pngine.dsl.compileWithPlugins(allocator, source, .{
             .base_dir = base_dir,
             .file_path = path,
             .minify_shaders = options.minify_shaders,

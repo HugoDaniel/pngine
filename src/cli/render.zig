@@ -236,7 +236,7 @@ fn executePipeline(
     var plugins: ?pngine.dsl.PluginSet = null;
 
     if (embed_executor) {
-        var result = compileFromFileWithPlugins(allocator, input, minify_shaders) catch |compile_err| {
+        const result = compileFromFileWithPlugins(allocator, input, minify_shaders) catch |compile_err| {
             return handleCompileError(compile_err, input);
         };
         bytecode = result.pngb;

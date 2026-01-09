@@ -308,11 +308,8 @@ fn compressDeflateRaw(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     var compressor = flate.Compress.init(
         &output_writer,
         &window_buf,
-        .raw,
-        flate.Compress.Options.level_6,
-    ) catch {
-        return error.CompressionFailed;
-    };
+        .{ .container = .raw, .level = .level_6 },
+    );
 
     // Stream all input through LZ77+Huffman encoder.
     compressor.writer.writeAll(data) catch {
