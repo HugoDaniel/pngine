@@ -1,0 +1,130 @@
+// Scene 4: Stars
+// Flying through a starfield
+
+#buffer starsUniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue starsWriteUniforms {
+  writeBuffer={ buffer=starsUniforms bufferOffset=0 data=pngineInputs }
+}
+
+#shaderModule starsShader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    fn hash21(p: vec2f) -> f32 {
+      var p3 = fract(vec3f(p.xyx) * 0.1031);
+      p3 += dot(p3, p3.yzx + 33.33);
+      return fract((p3.x + p3.y) * p3.z);
+    }
+
+    fn hash22(p: vec2f) -> vec2f {
+      let n = sin(dot(p, vec2f(41.0, 289.0)));
+      return fract(vec2f(262144.0, 32768.0) * n);
+    }
+
+    fn star(uv: vec2f, flare: f32) -> f32 {
+      var d = length(uv);
+      var m = 0.02 / d;
+
+      let rays = max(0.0, 1.0 - abs(uv.x * uv.y * 1000.0));
+      m += rays * flare;
+
+      m *= smoothstep(0.5, 0.1, d);
+      return m;
+    }
+
+    fn starLayer(uv: vec2f, t: f32) -> vec3f {
+      var col = vec3f(0.0);
+
+      let gv = fract(uv) - 0.5;
+      let id = floor(uv);
+
+      for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+          let offs = vec2f(f32(x), f32(y));
+          let n = hash22(id + offs);
+          let size = fract(n.x * 345.32);
+          let s = star(gv - offs - n + 0.5, smoothstep(0.8, 1.0, size));
+
+          let starCol = sin(vec3f(0.2, 0.3, 0.9) * fract(n.y * 2345.2) * 123.2) * 0.5 + 0.5;
+          col += s * size * starCol;
+        }
+      }
+
+      return col;
+    }
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let x = f32(i & 1u) * 4.0 - 1.0;
+      let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+      return vec4f(x, y, 0.0, 1.0);
+    }
+
+    @fragment
+    fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = vec2f(pos.x / u.width, pos.y / u.height);
+      var p = (uv - 0.5) * 2.0;
+      p.x *= u.aspect;
+
+      let t = u.time * 0.2;
+
+      var col = vec3f(0.0);
+
+      // Multiple star layers at different depths
+      for (var i = 0; i < 4; i++) {
+        let fi = f32(i);
+        let depth = fract(fi * 0.25 + t);
+        let scale = mix(20.0, 0.5, depth);
+        let fade = depth * smoothstep(1.0, 0.9, depth);
+
+        col += starLayer(p * scale + fi * 453.2, t) * fade;
+      }
+
+      // Add slight blue tint to background
+      col += vec3f(0.0, 0.0, 0.02);
+
+      return vec4f(col, 1.0);
+    }
+  "
+}
+
+#renderPipeline starsPipeline {
+  layout=auto
+  vertex={ entryPoint=vs module=starsShader }
+  fragment={
+    entryPoint=fs
+    module=starsShader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#bindGroup starsUniformsBindGroup {
+  layout={ pipeline=starsPipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=starsUniforms } }]
+}
+
+#renderPass starsPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0 0 0 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=starsPipeline
+  bindGroups=[starsUniformsBindGroup]
+  draw=3
+}
+
+#frame stars {
+  perform=[starsWriteUniforms starsPass]
+}

@@ -1,0 +1,108 @@
+// Scene 2: Tunnel
+// Infinite tunnel zoom effect
+
+#buffer tunnelUniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue tunnelWriteUniforms {
+  writeBuffer={ buffer=tunnelUniforms bufferOffset=0 data=pngineInputs }
+}
+
+#shaderModule tunnelShader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    const PI: f32 = 3.14159265359;
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let x = f32(i & 1u) * 4.0 - 1.0;
+      let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+      return vec4f(x, y, 0.0, 1.0);
+    }
+
+    @fragment
+    fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = vec2f(pos.x / u.width, pos.y / u.height);
+      var p = (uv - 0.5) * 2.0;
+      p.x *= u.aspect;
+
+      let t = u.time * 0.8;
+
+      // Polar coordinates
+      let r = length(p);
+      let a = atan2(p.y, p.x);
+
+      // Tunnel effect
+      let tunnelDist = 1.0 / (r + 0.1);
+      let tunnelAngle = a / PI;
+
+      // Moving texture coordinates
+      let tx = tunnelAngle * 4.0;
+      let ty = tunnelDist + t;
+
+      // Checkerboard pattern
+      let checker = step(0.5, fract(tx)) * step(0.5, fract(ty)) +
+                    step(0.5, 1.0 - fract(tx)) * step(0.5, 1.0 - fract(ty));
+
+      // Rings
+      let rings = sin(tunnelDist * 8.0 - t * 4.0) * 0.5 + 0.5;
+
+      // Color based on angle and distance
+      let hue = fract(a / (2.0 * PI) + t * 0.1);
+      let col = vec3f(
+        0.5 + 0.5 * cos(hue * 6.28),
+        0.5 + 0.5 * cos(hue * 6.28 + 2.09),
+        0.5 + 0.5 * cos(hue * 6.28 + 4.19)
+      );
+
+      // Combine effects
+      var finalColor = col * (checker * 0.5 + rings * 0.5);
+
+      // Fade to black at center and edges
+      let vignette = smoothstep(0.0, 0.3, r) * smoothstep(2.0, 0.5, r);
+      finalColor *= vignette;
+
+      return vec4f(finalColor, 1.0);
+    }
+  "
+}
+
+#renderPipeline tunnelPipeline {
+  layout=auto
+  vertex={ entryPoint=vs module=tunnelShader }
+  fragment={
+    entryPoint=fs
+    module=tunnelShader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#bindGroup tunnelUniformsBindGroup {
+  layout={ pipeline=tunnelPipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=tunnelUniforms } }]
+}
+
+#renderPass tunnelPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0 0 0 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=tunnelPipeline
+  bindGroups=[tunnelUniformsBindGroup]
+  draw=3
+}
+
+#frame tunnel {
+  perform=[tunnelWriteUniforms tunnelPass]
+}

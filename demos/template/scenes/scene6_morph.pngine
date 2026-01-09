@@ -1,0 +1,168 @@
+// Scene 6: Morph
+// Morphing geometric shapes with SDF
+
+#buffer morphUniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue morphWriteUniforms {
+  writeBuffer={ buffer=morphUniforms bufferOffset=0 data=pngineInputs }
+}
+
+#shaderModule morphShader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    const PI: f32 = 3.14159265359;
+
+    fn sdCircle(p: vec2f, r: f32) -> f32 {
+      return length(p) - r;
+    }
+
+    fn sdBox(p: vec2f, b: vec2f) -> f32 {
+      let d = abs(p) - b;
+      return length(max(d, vec2f(0.0))) + min(max(d.x, d.y), 0.0);
+    }
+
+    fn sdTriangle(p: vec2f, r: f32) -> f32 {
+      let k = sqrt(3.0);
+      var pp = p;
+      pp.x = abs(pp.x) - r;
+      pp.y = pp.y + r / k;
+      if (pp.x + k * pp.y > 0.0) {
+        pp = vec2f(pp.x - k * pp.y, -k * pp.x - pp.y) / 2.0;
+      }
+      pp.x -= clamp(pp.x, -2.0 * r, 0.0);
+      return -length(pp) * sign(pp.y);
+    }
+
+    fn sdStar5(p: vec2f, r: f32, rf: f32) -> f32 {
+      let an = PI / 5.0;
+      let en = PI / 2.0;
+      let acs = vec2f(cos(an), sin(an));
+      let ecs = vec2f(cos(en), sin(en));
+
+      let bn = (atan2(p.x, p.y) % (2.0 * an)) - an;
+      var pp = length(p) * vec2f(cos(bn), abs(sin(bn)));
+      pp -= r * acs;
+      pp += ecs * clamp(-dot(pp, ecs), 0.0, r * acs.y / ecs.y * rf);
+      return length(pp) * sign(pp.x);
+    }
+
+    fn rot2(a: f32) -> mat2x2f {
+      let c = cos(a);
+      let s = sin(a);
+      return mat2x2f(c, -s, s, c);
+    }
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let x = f32(i & 1u) * 4.0 - 1.0;
+      let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+      return vec4f(x, y, 0.0, 1.0);
+    }
+
+    @fragment
+    fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = vec2f(pos.x / u.width, pos.y / u.height);
+      var p = (uv - 0.5) * 2.0;
+      p.x *= u.aspect;
+
+      let t = u.time;
+
+      // Rotate space
+      p = rot2(t * 0.2) * p;
+
+      // Morph parameter cycles through 4 shapes
+      let morphT = fract(t * 0.15);
+      let morphPhase = floor(t * 0.15) % 4.0;
+
+      // Calculate all shape distances
+      let dCircle = sdCircle(p, 0.5);
+      let dBox = sdBox(p, vec2f(0.4));
+      let dTriangle = sdTriangle(p, 0.5);
+      let dStar = sdStar5(p, 0.5, 0.5);
+
+      // Smooth morph between shapes
+      var d = 1000.0;
+      let morphBlend = smoothstep(0.0, 1.0, morphT);
+
+      if (morphPhase < 1.0) {
+        d = mix(dCircle, dBox, morphBlend);
+      } else if (morphPhase < 2.0) {
+        d = mix(dBox, dTriangle, morphBlend);
+      } else if (morphPhase < 3.0) {
+        d = mix(dTriangle, dStar, morphBlend);
+      } else {
+        d = mix(dStar, dCircle, morphBlend);
+      }
+
+      // Add pulsing
+      d -= sin(t * 3.0) * 0.05;
+
+      // Color
+      let edge = smoothstep(0.02, 0.0, abs(d));
+      let glow = 0.02 / (abs(d) + 0.02);
+
+      let hue = fract(t * 0.1 + morphPhase * 0.25);
+      let baseCol = vec3f(
+        0.5 + 0.5 * cos(hue * 6.28),
+        0.5 + 0.5 * cos(hue * 6.28 + 2.09),
+        0.5 + 0.5 * cos(hue * 6.28 + 4.19)
+      );
+
+      var col = vec3f(0.02, 0.02, 0.05);
+
+      // Inner fill
+      if (d < 0.0) {
+        col = baseCol * 0.3;
+      }
+
+      // Glow
+      col += baseCol * glow * 0.3;
+
+      // Edge
+      col = mix(col, baseCol, edge);
+
+      return vec4f(col, 1.0);
+    }
+  "
+}
+
+#renderPipeline morphPipeline {
+  layout=auto
+  vertex={ entryPoint=vs module=morphShader }
+  fragment={
+    entryPoint=fs
+    module=morphShader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#bindGroup morphUniformsBindGroup {
+  layout={ pipeline=morphPipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=morphUniforms } }]
+}
+
+#renderPass morphPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.02 0.02 0.05 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=morphPipeline
+  bindGroups=[morphUniformsBindGroup]
+  draw=3
+}
+
+#frame morph {
+  perform=[morphWriteUniforms morphPass]
+}

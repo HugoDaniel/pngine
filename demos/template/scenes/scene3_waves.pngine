@@ -1,0 +1,131 @@
+// Scene 3: Waves
+// Ocean-like wave pattern
+
+#buffer wavesUniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue wavesWriteUniforms {
+  writeBuffer={ buffer=wavesUniforms bufferOffset=0 data=pngineInputs }
+}
+
+#shaderModule wavesShader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    const PI: f32 = 3.14159265359;
+
+    fn hash(p: vec2f) -> f32 {
+      let h = dot(p, vec2f(127.1, 311.7));
+      return fract(sin(h) * 43758.5453);
+    }
+
+    fn noise(p: vec2f) -> f32 {
+      let i = floor(p);
+      let f = fract(p);
+      let uf = f * f * (3.0 - 2.0 * f);
+
+      return mix(
+        mix(hash(i + vec2f(0.0, 0.0)), hash(i + vec2f(1.0, 0.0)), uf.x),
+        mix(hash(i + vec2f(0.0, 1.0)), hash(i + vec2f(1.0, 1.0)), uf.x),
+        uf.y
+      );
+    }
+
+    fn fbm(p: vec2f) -> f32 {
+      var v = 0.0;
+      var a = 0.5;
+      var pp = p;
+      let rot = mat2x2f(cos(0.5), sin(0.5), -sin(0.5), cos(0.5));
+      for (var i = 0; i < 5; i++) {
+        v += a * noise(pp);
+        pp = rot * pp * 2.0;
+        a *= 0.5;
+      }
+      return v;
+    }
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let x = f32(i & 1u) * 4.0 - 1.0;
+      let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+      return vec4f(x, y, 0.0, 1.0);
+    }
+
+    @fragment
+    fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = vec2f(pos.x / u.width, pos.y / u.height);
+      var p = (uv - 0.5) * 4.0;
+      p.x *= u.aspect;
+
+      let t = u.time * 0.3;
+
+      // Wave layers
+      var wave = 0.0;
+      wave += sin(p.x * 2.0 + t * 2.0) * 0.3;
+      wave += sin(p.x * 3.0 - t * 1.5 + p.y * 0.5) * 0.2;
+      wave += sin(p.x * 5.0 + t * 3.0 - p.y * 0.3) * 0.1;
+
+      // Add noise for foam
+      let n = fbm(p * 2.0 + vec2f(t, t * 0.5));
+      wave += n * 0.3;
+
+      // Height-based coloring
+      let height = wave + p.y * 0.3;
+
+      // Ocean colors
+      let deep = vec3f(0.0, 0.1, 0.3);
+      let mid = vec3f(0.0, 0.3, 0.5);
+      let surface = vec3f(0.2, 0.6, 0.8);
+      let foam = vec3f(0.9, 0.95, 1.0);
+
+      var col = mix(deep, mid, smoothstep(-1.0, 0.0, height));
+      col = mix(col, surface, smoothstep(0.0, 0.5, height));
+      col = mix(col, foam, smoothstep(0.5, 0.8, height) * n);
+
+      // Specular highlight
+      let spec = pow(max(0.0, sin(p.x * 10.0 + t * 5.0)), 20.0) * 0.5;
+      col += vec3f(spec) * smoothstep(0.2, 0.6, height);
+
+      return vec4f(col, 1.0);
+    }
+  "
+}
+
+#renderPipeline wavesPipeline {
+  layout=auto
+  vertex={ entryPoint=vs module=wavesShader }
+  fragment={
+    entryPoint=fs
+    module=wavesShader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#bindGroup wavesUniformsBindGroup {
+  layout={ pipeline=wavesPipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=wavesUniforms } }]
+}
+
+#renderPass wavesPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.0 0.05 0.15 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=wavesPipeline
+  bindGroups=[wavesUniformsBindGroup]
+  draw=3
+}
+
+#frame waves {
+  perform=[wavesWriteUniforms wavesPass]
+}

@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PNGine Demo Template</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'SF Mono', 'Consolas', monospace;
+      background: #0a0a0f;
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      padding: 1rem 2rem;
+      background: #111118;
+      border-bottom: 1px solid #222;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    h1 {
+      font-size: 1rem;
+      font-weight: 400;
+      color: #888;
+    }
+
+    h1 span { color: #fff; }
+
+    .status {
+      font-size: 0.75rem;
+      color: #666;
+    }
+
+    .status.connected { color: #4ade80; }
+    .status.error { color: #f87171; }
+
+    main {
+      flex: 1;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 2rem;
+    }
+
+    .canvas-container {
+      position: relative;
+      background: #000;
+      border-radius: 4px;
+      overflow: hidden;
+      box-shadow: 0 0 60px rgba(0, 100, 255, 0.1);
+    }
+
+    canvas {
+      display: block;
+    }
+
+    .scene-indicator {
+      position: absolute;
+      top: 1rem;
+      left: 1rem;
+      font-size: 0.75rem;
+      color: rgba(255, 255, 255, 0.6);
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+      pointer-events: none;
+    }
+
+    .time-indicator {
+      position: absolute;
+      top: 1rem;
+      right: 1rem;
+      font-size: 0.75rem;
+      color: rgba(255, 255, 255, 0.4);
+      font-variant-numeric: tabular-nums;
+      pointer-events: none;
+    }
+
+    footer {
+      padding: 1rem 2rem;
+      background: #111118;
+      border-top: 1px solid #222;
+    }
+
+    .controls {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      justify-content: center;
+      margin-bottom: 1rem;
+    }
+
+    .scene-btn {
+      padding: 0.5rem 1rem;
+      background: #1a1a24;
+      color: #888;
+      border: 1px solid #333;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.8rem;
+      transition: all 0.15s;
+    }
+
+    .scene-btn:hover {
+      background: #252530;
+      color: #fff;
+      border-color: #444;
+    }
+
+    .scene-btn.active {
+      background: #0066ff;
+      color: #fff;
+      border-color: #0066ff;
+    }
+
+    .scene-btn kbd {
+      display: inline-block;
+      padding: 0.1rem 0.3rem;
+      background: rgba(0, 0, 0, 0.3);
+      border-radius: 2px;
+      font-size: 0.7rem;
+      margin-right: 0.3rem;
+    }
+
+    .playback {
+      display: flex;
+      gap: 0.5rem;
+      justify-content: center;
+      align-items: center;
+    }
+
+    .play-btn {
+      padding: 0.5rem 1.5rem;
+      background: #0066ff;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.8rem;
+    }
+
+    .play-btn:hover { background: #0055dd; }
+    .play-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .play-btn.playing { background: #ff3366; }
+
+    .help {
+      text-align: center;
+      font-size: 0.7rem;
+      color: #444;
+      margin-top: 1rem;
+    }
+
+    .help kbd {
+      display: inline-block;
+      padding: 0.1rem 0.4rem;
+      background: #1a1a24;
+      border: 1px solid #333;
+      border-radius: 2px;
+      margin: 0 0.1rem;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><span>PNGine</span> Demo Template</h1>
+    <div id="status" class="status">Initializing...</div>
+  </header>
+
+  <main>
+    <div class="canvas-container">
+      <canvas id="canvas" width="640" height="640"></canvas>
+      <div id="scene-indicator" class="scene-indicator">Scene: -</div>
+      <div id="time-indicator" class="time-indicator">0.00s</div>
+    </div>
+  </main>
+
+  <footer>
+    <div class="controls">
+      <button class="scene-btn" data-scene="plasma" data-key="1">
+        <kbd>1</kbd> Plasma
+      </button>
+      <button class="scene-btn" data-scene="tunnel" data-key="2">
+        <kbd>2</kbd> Tunnel
+      </button>
+      <button class="scene-btn" data-scene="waves" data-key="3">
+        <kbd>3</kbd> Waves
+      </button>
+      <button class="scene-btn" data-scene="stars" data-key="4">
+        <kbd>4</kbd> Stars
+      </button>
+      <button class="scene-btn" data-scene="rings" data-key="5">
+        <kbd>5</kbd> Rings
+      </button>
+      <button class="scene-btn" data-scene="morph" data-key="6">
+        <kbd>6</kbd> Morph
+      </button>
+    </div>
+
+    <div class="playback">
+      <button id="play-btn" class="play-btn" disabled>Play</button>
+    </div>
+
+    <div class="help">
+      <kbd>1</kbd>-<kbd>6</kbd> Switch scenes |
+      <kbd>Space</kbd> Play/Pause |
+      <kbd>R</kbd> Reload bytecode
+    </div>
+  </footer>
+
+  <script type="module">
+    // Import PNGine from the monorepo
+    import { pngine, play, pause, stop, draw, destroy } from '../../npm/pngine/src/index.js';
+
+    const canvas = document.getElementById('canvas');
+    const statusEl = document.getElementById('status');
+    const sceneIndicator = document.getElementById('scene-indicator');
+    const timeIndicator = document.getElementById('time-indicator');
+    const playBtn = document.getElementById('play-btn');
+    const sceneBtns = document.querySelectorAll('.scene-btn');
+
+    let engine = null;
+    let currentScene = 'plasma';
+    let animationId = null;
+    let startTime = 0;
+    let pausedTime = 0;
+    let isPlaying = false;
+
+    const SCENES = ['plasma', 'tunnel', 'waves', 'stars', 'rings', 'morph'];
+    const BYTECODE_URL = './dist/demo.pngb';
+
+    // Scene time offsets (animation table: each scene is 10s, total 60s loop)
+    const SCENE_TIME_OFFSETS = {
+      plasma: 0,
+      tunnel: 10,
+      waves: 20,
+      stars: 30,
+      rings: 40,
+      morph: 50,
+    };
+
+    function setStatus(msg, type = '') {
+      statusEl.textContent = msg;
+      statusEl.className = 'status' + (type ? ' ' + type : '');
+    }
+
+    function updateSceneUI(scene) {
+      currentScene = scene;
+      sceneIndicator.textContent = `Scene: ${scene}`;
+      sceneBtns.forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.scene === scene);
+      });
+    }
+
+    function updateTime() {
+      if (!isPlaying) return;
+      const elapsed = (performance.now() - startTime) / 1000;
+      timeIndicator.textContent = elapsed.toFixed(2) + 's';
+    }
+
+    async function loadBytecode() {
+      try {
+        setStatus('Loading bytecode...');
+
+        // Cleanup previous engine
+        if (engine) {
+          if (animationId) cancelAnimationFrame(animationId);
+          destroy(engine);
+          engine = null;
+
+          // Recreate canvas (control was transferred)
+          const container = canvas.parentElement;
+          const newCanvas = document.createElement('canvas');
+          newCanvas.id = 'canvas';
+          newCanvas.width = 640;
+          newCanvas.height = 640;
+          container.replaceChild(newCanvas, document.getElementById('canvas'));
+        }
+
+        const resp = await fetch(BYTECODE_URL);
+        if (!resp.ok) throw new Error(`Failed to load: ${resp.status}`);
+
+        const data = new Uint8Array(await resp.arrayBuffer());
+
+        engine = await pngine(data, {
+          canvas: document.getElementById('canvas'),
+          debug: true,
+          onError: (err) => setStatus('Error: ' + err.message, 'error'),
+        });
+
+        setStatus(`Loaded (${engine.frameCount} frames)`, 'connected');
+        playBtn.disabled = false;
+
+        // Draw initial frame at scene's time offset
+        const sceneOffset = SCENE_TIME_OFFSETS[currentScene] || 0;
+        draw(engine, { time: sceneOffset });
+        updateSceneUI(currentScene);
+
+      } catch (err) {
+        setStatus('Error: ' + err.message, 'error');
+        console.error(err);
+      }
+    }
+
+    function animate() {
+      if (!isPlaying || !engine) return;
+
+      const elapsed = (performance.now() - startTime) / 1000;
+      // Add scene offset to position time within the correct scene in the animation table
+      const sceneOffset = SCENE_TIME_OFFSETS[currentScene] || 0;
+      const time = sceneOffset + elapsed;
+
+      timeIndicator.textContent = elapsed.toFixed(2) + 's';
+
+      draw(engine, { time });
+      animationId = requestAnimationFrame(animate);
+    }
+
+    function togglePlay() {
+      if (!engine) return;
+
+      if (isPlaying) {
+        // Pause
+        isPlaying = false;
+        pausedTime = performance.now() - startTime;
+        if (animationId) cancelAnimationFrame(animationId);
+        playBtn.textContent = 'Play';
+        playBtn.classList.remove('playing');
+      } else {
+        // Play
+        isPlaying = true;
+        startTime = performance.now() - pausedTime;
+        playBtn.textContent = 'Pause';
+        playBtn.classList.add('playing');
+        animate();
+      }
+    }
+
+    function switchScene(scene) {
+      if (!engine || !SCENES.includes(scene)) return;
+
+      updateSceneUI(scene);
+      pausedTime = 0;
+      startTime = performance.now();
+
+      // Draw at scene's time offset to show the correct scene
+      const sceneOffset = SCENE_TIME_OFFSETS[scene] || 0;
+      if (!isPlaying) {
+        draw(engine, { time: sceneOffset });
+      }
+    }
+
+    // Event listeners
+    playBtn.onclick = togglePlay;
+
+    sceneBtns.forEach(btn => {
+      btn.onclick = () => switchScene(btn.dataset.scene);
+    });
+
+    document.addEventListener('keydown', (e) => {
+      // Number keys 1-6 for scenes
+      if (e.key >= '1' && e.key <= '6') {
+        const index = parseInt(e.key) - 1;
+        if (index < SCENES.length) {
+          switchScene(SCENES[index]);
+        }
+      }
+
+      // Space for play/pause
+      if (e.key === ' ') {
+        e.preventDefault();
+        togglePlay();
+      }
+
+      // R for reload
+      if (e.key === 'r' || e.key === 'R') {
+        loadBytecode();
+      }
+    });
+
+    // HMR support - reload when bytecode changes
+    if (import.meta.hot) {
+      import.meta.hot.on('vite:beforeUpdate', () => {
+        console.log('[HMR] Reloading...');
+      });
+    }
+
+    // Vite file change detection for .pngb files
+    const checkForUpdates = async () => {
+      try {
+        const resp = await fetch(BYTECODE_URL, { method: 'HEAD' });
+        const lastModified = resp.headers.get('last-modified');
+        if (window._lastModified && window._lastModified !== lastModified) {
+          console.log('[Watch] Bytecode changed, reloading...');
+          await loadBytecode();
+        }
+        window._lastModified = lastModified;
+      } catch (e) {}
+    };
+
+    // Poll for bytecode changes every 2 seconds
+    setInterval(checkForUpdates, 2000);
+
+    // Initial load
+    loadBytecode();
+  </script>
+</body>
+</html>

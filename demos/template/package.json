@@ -1,0 +1,15 @@
+{
+  "name": "pngine-demo-template",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --open",
+    "build": "npm run compile && vite build",
+    "compile": "pngine compile scenes/main.pngine -o dist/demo.pngb --embed-executor",
+    "watch": "find scenes -type f -name '*.pngine' | entr -c npm run compile",
+    "setup": "cd ../.. && zig build web && cp zig-out/bin/pngine.wasm zig-out/demo/"
+  },
+  "devDependencies": {
+    "vite": "^7.3.0"
+  }
+}

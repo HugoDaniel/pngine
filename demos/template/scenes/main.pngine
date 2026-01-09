@@ -1,0 +1,26 @@
+// Demo Template - Main Orchestrator
+// Imports all 6 scenes into a single bytecode file
+// Each scene is accessible via its frame name
+
+#import "./scene1_plasma.pngine"
+#import "./scene2_tunnel.pngine"
+#import "./scene3_waves.pngine"
+#import "./scene4_stars.pngine"
+#import "./scene5_rings.pngine"
+#import "./scene6_morph.pngine"
+
+// Animation table maps frame names to time ranges
+// This allows scene selection by time: t=5s -> plasma, t=15s -> tunnel, etc.
+#animation demo {
+  duration=60
+  loop=true
+  endBehavior=hold
+  scenes=[
+    { id="scene1" frame=plasma start=0 end=10 }
+    { id="scene2" frame=tunnel start=10 end=20 }
+    { id="scene3" frame=waves start=20 end=30 }
+    { id="scene4" frame=stars start=30 end=40 }
+    { id="scene5" frame=rings start=40 end=50 }
+    { id="scene6" frame=morph start=50 end=60 }
+  ]
+}
