@@ -887,6 +887,159 @@ pub fn build(b: *std.Build) void {
     npm_step.dependOn(&npm_wasm.step);
 
     // ========================================================================
+    // Native Platform Builds (iOS, macOS, Android)
+    // ========================================================================
+    //
+    // Native static libraries using wgpu-native for GPU operations.
+    // These reuse the same Zig code with different backends.
+    //
+    // Usage:
+    //   zig build native           # Build for host platform (macOS)
+    //   zig build native-ios       # Build for iOS (device + simulator)
+    //
+    // Prerequisites:
+    //   - wgpu-native libraries in vendor/wgpu-native/
+    //   - For iOS: device + simulator libs in vendor/wgpu-native/ios/
+
+    // macOS native library (for development/testing)
+    const native_step = b.step("native", "Build native library for macOS");
+    {
+        const native_types = b.createModule(.{
+            .root_source_file = b.path("src/types/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+
+        const native_bytecode = b.createModule(.{
+            .root_source_file = b.path("src/bytecode/standalone.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        native_bytecode.addImport("types", native_types);
+
+        const native_module = b.createModule(.{
+            .root_source_file = b.path("src/native_api.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        native_module.addImport("bytecode", native_bytecode);
+
+        // Add wgpu-native headers
+        native_module.addIncludePath(b.path("vendor/wgpu-native/include"));
+        native_module.addLibraryPath(b.path("vendor/wgpu-native/lib"));
+        native_module.linkSystemLibrary("wgpu_native", .{});
+        native_module.link_libc = true;
+
+        // Link required frameworks on macOS
+        if (target.result.os.tag == .macos) {
+            native_module.linkFramework("Metal", .{});
+            native_module.linkFramework("MetalKit", .{});
+            native_module.linkFramework("QuartzCore", .{});
+        }
+
+        const native_lib = b.addLibrary(.{
+            .name = "pngine",
+            .root_module = native_module,
+            .linkage = .dynamic,
+        });
+
+        b.installArtifact(native_lib);
+        native_step.dependOn(&b.addInstallArtifact(native_lib, .{}).step);
+    }
+
+    // iOS native static libraries
+    const ios_step = b.step("native-ios", "Build iOS static libraries (device + simulator)");
+    {
+        const IosTarget = struct {
+            query: std.Target.Query,
+            name: []const u8,
+            lib_subdir: []const u8,
+            sdk_name: []const u8,
+        };
+
+        // Note: x86_64 iOS simulator target removed - wgpu-native only provides arm64 simulator libs
+        // Modern Apple Silicon Macs use arm64 simulators, so x86_64 is no longer needed
+        const ios_targets = [_]IosTarget{
+            .{
+                .query = .{ .cpu_arch = .aarch64, .os_tag = .ios },
+                .name = "aarch64-ios",
+                .lib_subdir = "ios/device",
+                .sdk_name = "iphoneos",
+            },
+            .{
+                .query = .{ .cpu_arch = .aarch64, .os_tag = .ios, .abi = .simulator },
+                .name = "aarch64-ios-simulator",
+                .lib_subdir = "ios/simulator",
+                .sdk_name = "iphonesimulator",
+            },
+        };
+
+        for (ios_targets) |ios_target| {
+            const ios_resolved = b.resolveTargetQuery(ios_target.query);
+
+            // Types module for iOS target
+            const ios_types = b.createModule(.{
+                .root_source_file = b.path("src/types/main.zig"),
+                .target = ios_resolved,
+                .optimize = .ReleaseFast,
+            });
+
+            // Bytecode module for iOS target
+            const ios_bytecode = b.createModule(.{
+                .root_source_file = b.path("src/bytecode/standalone.zig"),
+                .target = ios_resolved,
+                .optimize = .ReleaseFast,
+            });
+            ios_bytecode.addImport("types", ios_types);
+
+            // Native API module for iOS target
+            const ios_module = b.createModule(.{
+                .root_source_file = b.path("src/native_api.zig"),
+                .target = ios_resolved,
+                .optimize = .ReleaseFast,
+            });
+            ios_module.addImport("bytecode", ios_bytecode);
+
+            // Add wgpu-native headers and iOS library
+            ios_module.addIncludePath(b.path("vendor/wgpu-native/include"));
+            ios_module.addLibraryPath(b.path(b.fmt("vendor/wgpu-native/{s}/lib", .{ios_target.lib_subdir})));
+
+            // Add iOS SDK system include path for @cImport to work
+            // This is needed because Zig's bundled libc headers don't have iOS-specific macros
+            const sdk_path_result = std.process.Child.run(.{
+                .allocator = b.allocator,
+                .argv = &.{ "xcrun", "--sdk", ios_target.sdk_name, "--show-sdk-path" },
+            }) catch |err| {
+                std.log.warn("Failed to get iOS SDK path for {s}: {}", .{ ios_target.sdk_name, err });
+                continue;
+            };
+            if (sdk_path_result.term.Exited == 0) {
+                const sdk_path = std.mem.trimRight(u8, sdk_path_result.stdout, "\n\r");
+                ios_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{sdk_path}) });
+            }
+
+            // Link wgpu_native static library
+            ios_module.addObjectFile(b.path(b.fmt("vendor/wgpu-native/{s}/lib/libwgpu_native.a", .{ios_target.lib_subdir})));
+
+            // Note: Frameworks (Metal, MetalKit, etc.) are NOT linked here.
+            // They will be linked by the final iOS app when it uses PngineCore.xcframework.
+            // Static libraries don't link frameworks directly.
+
+            const ios_lib = b.addLibrary(.{
+                .name = "pngine",
+                .root_module = ios_module,
+                .linkage = .static,
+            });
+
+            // Install to platform-specific directory
+            const install_ios = b.addInstallArtifact(ios_lib, .{
+                .dest_dir = .{ .override = .{ .custom = b.fmt("lib/{s}", .{ios_target.name}) } },
+            });
+            ios_step.dependOn(&install_ios.step);
+        }
+    }
+
+    // ========================================================================
     // Desktop Viewer (WAMR + trace mode)
     // ========================================================================
     //

@@ -1,0 +1,24 @@
+# Build artifacts
+build/
+*.xcframework/
+
+# iOS
+ios/PngineKit/.build/
+ios/PngineKit/Package.resolved
+
+# Android
+android/pngine-android/build/
+android/pngine-android/.gradle/
+android/pngine-android/src/main/jniLibs/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# macOS
+.DS_Store
+
+# Zig
+zig-cache/
+zig-out/

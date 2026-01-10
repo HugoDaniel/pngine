@@ -16,3 +16,6 @@ demo/*.pngb
 
 # Coverage reports
 coverage/
+
+# Downloaded vendor libraries
+vendor/

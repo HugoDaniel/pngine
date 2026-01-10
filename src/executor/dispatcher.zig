@@ -66,6 +66,14 @@ pub const ExecuteError = error{
     OutOfMemory,
     /// Command requires a plugin that is not enabled.
     PluginDisabled,
+    /// Module not set on backend.
+    ModuleNotSet,
+    /// Surface texture unavailable for rendering.
+    SurfaceTextureUnavailable,
+    /// No surface configured for presentation.
+    NoSurfaceConfigured,
+    /// Texture not found in resource table.
+    TextureNotFound,
 };
 
 /// GPU backend interface.
