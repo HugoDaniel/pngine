@@ -273,14 +273,18 @@
           if (animationId) cancelAnimationFrame(animationId);
           destroy(engine);
           engine = null;
+          isPlaying = false;
+          playBtn.textContent = 'Play';
+          playBtn.classList.remove('playing');
 
-          // Recreate canvas (control was transferred)
-          const container = canvas.parentElement;
+          // Recreate canvas (control was transferred to OffscreenCanvas)
+          const oldCanvas = document.getElementById('canvas');
+          const container = oldCanvas.parentElement;
           const newCanvas = document.createElement('canvas');
           newCanvas.id = 'canvas';
           newCanvas.width = 640;
           newCanvas.height = 640;
-          container.replaceChild(newCanvas, document.getElementById('canvas'));
+          container.replaceChild(newCanvas, oldCanvas);
         }
 
         const resp = await fetch(BYTECODE_URL);
