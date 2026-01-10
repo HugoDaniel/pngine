@@ -254,8 +254,11 @@ fn compress(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     var compressor = flate.Compress.init(
         &output_writer,
         &window_buf,
-        .{ .container = .zlib, .level = .level_6 },
-    );
+        .zlib,
+        .level_6,
+    ) catch {
+        return error.CompressionFailed;
+    };
 
     // Write all data through the compressor
     compressor.writer.writeAll(data) catch {

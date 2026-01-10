@@ -162,7 +162,7 @@ fn addAssetsFromDir(allocator: std.mem.Allocator, writer: *zip.ZipWriter, dir_pa
                 };
                 defer allocator.free(asset_path);
 
-                const content = dir.readFileAlloc(allocator, e.path, 10 * 1024 * 1024) catch {
+                const content = dir.readFileAlloc(e.path, allocator, .limited(10 * 1024 * 1024)) catch {
                     return error.FailedToReadAsset;
                 };
                 defer allocator.free(content);

@@ -210,8 +210,11 @@ pub const ZipWriter = struct {
         var compressor = flate.Compress.init(
             &output_writer,
             &window_buf,
-            .{ .container = .raw, .level = .level_6 },
-        );
+            .raw,
+            .level_6,
+        ) catch {
+            return error.CompressionFailed;
+        };
 
         // Write all data through the compressor
         compressor.writer.writeAll(data) catch {

@@ -91,7 +91,7 @@ pub fn main() !void {
 
 fn run(allocator: std.mem.Allocator, opts: Options) !void {
     // Load input file
-    const file_data = try std.fs.cwd().readFileAlloc(allocator, opts.input_path, 16 * 1024 * 1024);
+    const file_data = try std.fs.cwd().readFileAlloc(opts.input_path, allocator, .limited(16 * 1024 * 1024));
     defer allocator.free(file_data);
 
     std.debug.print("Loaded {s}: {} bytes\n", .{ opts.input_path, file_data.len });
