@@ -165,11 +165,81 @@
       border-radius: 2px;
       margin: 0 0.1rem;
     }
+
+    .mode-toggle {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.75rem;
+    }
+
+    .mode-toggle label {
+      color: #666;
+      cursor: pointer;
+    }
+
+    .mode-toggle label.active {
+      color: #fff;
+    }
+
+    .toggle-switch {
+      position: relative;
+      width: 44px;
+      height: 22px;
+      background: #1a1a24;
+      border: 1px solid #333;
+      border-radius: 11px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .toggle-switch::after {
+      content: '';
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 16px;
+      height: 16px;
+      background: #666;
+      border-radius: 50%;
+      transition: all 0.2s;
+    }
+
+    .toggle-switch.prod {
+      background: #0066ff;
+      border-color: #0066ff;
+    }
+
+    .toggle-switch.prod::after {
+      left: 24px;
+      background: #fff;
+    }
+
+    .mode-indicator {
+      font-size: 0.65rem;
+      padding: 0.2rem 0.5rem;
+      background: #1a1a24;
+      border: 1px solid #333;
+      border-radius: 3px;
+      color: #888;
+    }
+
+    .mode-indicator.prod {
+      background: #0066ff22;
+      border-color: #0066ff;
+      color: #4d9fff;
+    }
   </style>
 </head>
 <body>
   <header>
     <h1><span>PNGine</span> Demo Template</h1>
+    <div class="mode-toggle">
+      <label id="dev-label" class="active">Dev</label>
+      <div id="mode-toggle" class="toggle-switch" title="Toggle Dev/Prod mode (P)"></div>
+      <label id="prod-label">Prod</label>
+      <span id="mode-indicator" class="mode-indicator">dev</span>
+    </div>
     <div id="status" class="status">Initializing...</div>
   </header>
 
@@ -210,7 +280,8 @@
     <div class="help">
       <kbd>1</kbd>-<kbd>6</kbd> Switch scenes |
       <kbd>Space</kbd> Play/Pause |
-      <kbd>R</kbd> Reload bytecode
+      <kbd>R</kbd> Reload |
+      <kbd>P</kbd> Dev/Prod
     </div>
   </footer>
 
@@ -224,6 +295,10 @@
     const timeIndicator = document.getElementById('time-indicator');
     const playBtn = document.getElementById('play-btn');
     const sceneBtns = document.querySelectorAll('.scene-btn');
+    const modeToggle = document.getElementById('mode-toggle');
+    const devLabel = document.getElementById('dev-label');
+    const prodLabel = document.getElementById('prod-label');
+    const modeIndicator = document.getElementById('mode-indicator');
 
     let engine = null;
     let currentScene = 'plasma';
@@ -232,8 +307,36 @@
     let pausedTime = 0;
     let isPlaying = false;
 
+    // Mode: 'dev' (.pngb with hot reload) or 'prod' (single .png)
+    let mode = localStorage.getItem('pngine_mode') || 'dev';
+
     const SCENES = ['plasma', 'tunnel', 'waves', 'stars', 'rings', 'morph'];
-    const BYTECODE_URL = './dist/demo.pngb';
+    const DEV_URL = './dist/demo.pngb';
+    const PROD_URL = './dist/demo.png';
+    const SCENE_DURATION = 10; // Each scene is 10 seconds
+
+    function getBytecodeUrl() {
+      return mode === 'prod' ? PROD_URL : DEV_URL;
+    }
+
+    function updateModeUI() {
+      const isProd = mode === 'prod';
+      modeToggle.classList.toggle('prod', isProd);
+      devLabel.classList.toggle('active', !isProd);
+      prodLabel.classList.toggle('active', isProd);
+      modeIndicator.textContent = isProd ? '.png' : '.pngb';
+      modeIndicator.classList.toggle('prod', isProd);
+    }
+
+    function toggleMode() {
+      mode = mode === 'prod' ? 'dev' : 'prod';
+      localStorage.setItem('pngine_mode', mode);
+      updateModeUI();
+      loadBytecode(); // Reload with new mode
+    }
+
+    // Initialize mode UI
+    updateModeUI();
 
     // Scene time offsets (animation table: each scene is 10s, total 60s loop)
     const SCENE_TIME_OFFSETS = {
@@ -266,7 +369,9 @@
 
     async function loadBytecode() {
       try {
-        setStatus('Loading bytecode...');
+        const url = getBytecodeUrl();
+        const isProd = mode === 'prod';
+        setStatus(`Loading ${isProd ? 'PNG' : 'bytecode'}...`);
 
         // Cleanup previous engine
         if (engine) {
@@ -287,8 +392,8 @@
           container.replaceChild(newCanvas, oldCanvas);
         }
 
-        const resp = await fetch(BYTECODE_URL);
-        if (!resp.ok) throw new Error(`Failed to load: ${resp.status}`);
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`Failed to load ${url}: ${resp.status}`);
 
         const data = new Uint8Array(await resp.arrayBuffer());
 
@@ -298,12 +403,13 @@
           onError: (err) => setStatus('Error: ' + err.message, 'error'),
         });
 
-        setStatus(`Loaded (${engine.frameCount} frames)`, 'connected');
+        const sizeKB = (data.length / 1024).toFixed(1);
+        setStatus(`${isProd ? 'Prod' : 'Dev'}: ${engine.frameCount} frames (${sizeKB}KB)`, 'connected');
         playBtn.disabled = false;
 
         // Draw initial frame at scene's time offset
         const sceneOffset = SCENE_TIME_OFFSETS[currentScene] || 0;
-        draw(engine, { time: sceneOffset });
+        draw(engine, { time: sceneOffset, sceneTime: 0, sceneDuration: SCENE_DURATION });
         updateSceneUI(currentScene);
 
       } catch (err) {
@@ -316,13 +422,16 @@
       if (!isPlaying || !engine) return;
 
       const elapsed = (performance.now() - startTime) / 1000;
-      // Add scene offset to position time within the correct scene in the animation table
+      // Wrap elapsed time within scene duration to keep visuals in sync
+      const wrappedSceneTime = elapsed % SCENE_DURATION;
+      // Add scene offset so time stays within the correct scene's range in the animation table
+      // e.g., tunnel (offset=10) will have time in range [10, 20)
       const sceneOffset = SCENE_TIME_OFFSETS[currentScene] || 0;
-      const time = sceneOffset + elapsed;
+      const time = sceneOffset + wrappedSceneTime;
 
       timeIndicator.textContent = elapsed.toFixed(2) + 's';
 
-      draw(engine, { time });
+      draw(engine, { time, sceneTime: wrappedSceneTime, sceneDuration: SCENE_DURATION });
       animationId = requestAnimationFrame(animate);
     }
 
@@ -356,12 +465,15 @@
       // Draw at scene's time offset to show the correct scene
       const sceneOffset = SCENE_TIME_OFFSETS[scene] || 0;
       if (!isPlaying) {
-        draw(engine, { time: sceneOffset });
+        draw(engine, { time: sceneOffset, sceneTime: 0, sceneDuration: SCENE_DURATION });
       }
     }
 
     // Event listeners
     playBtn.onclick = togglePlay;
+    modeToggle.onclick = toggleMode;
+    devLabel.onclick = () => { if (mode !== 'dev') toggleMode(); };
+    prodLabel.onclick = () => { if (mode !== 'prod') toggleMode(); };
 
     sceneBtns.forEach(btn => {
       btn.onclick = () => switchScene(btn.dataset.scene);
@@ -386,6 +498,11 @@
       if (e.key === 'r' || e.key === 'R') {
         loadBytecode();
       }
+
+      // P for prod/dev toggle
+      if (e.key === 'p' || e.key === 'P') {
+        toggleMode();
+      }
     });
 
     // HMR support - reload when bytecode changes
@@ -395,10 +512,11 @@
       });
     }
 
-    // Vite file change detection for .pngb files
+    // Vite file change detection for .pngb files (dev mode only)
     const checkForUpdates = async () => {
+      if (mode !== 'dev') return; // Skip polling in prod mode
       try {
-        const resp = await fetch(BYTECODE_URL, { method: 'HEAD' });
+        const resp = await fetch(DEV_URL, { method: 'HEAD' });
         const lastModified = resp.headers.get('last-modified');
         if (window._lastModified && window._lastModified !== lastModified) {
           console.log('[Watch] Bytecode changed, reloading...');
@@ -408,7 +526,7 @@
       } catch (e) {}
     };
 
-    // Poll for bytecode changes every 2 seconds
+    // Poll for bytecode changes every 2 seconds (dev mode only)
     setInterval(checkForUpdates, 2000);
 
     // Initial load

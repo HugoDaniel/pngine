@@ -13,7 +13,7 @@ A simple 6-scene demo template using PNGine. No audio, just visuals.
 
 ## Prerequisites
 
-- **pngine CLI**: Must be in PATH. Build from pngine repo: `zig build` (requires Zig 0.15+)
+- **pngine CLI**: Must be in PATH. Build from pngine repo: `zig build` (requires Zig 0.16+)
 - **Node.js**: For Vite dev server
 - **entr**: For file watching (optional, `brew install entr` on macOS)
 
@@ -51,6 +51,33 @@ Auto-recompiles bytecode when .pngine files change.
 
 The browser will poll for bytecode changes and auto-reload.
 
+## Dev/Prod Mode Toggle
+
+The demo supports two modes for different workflows:
+
+### Dev Mode (`.pngb`)
+- Loads `dist/demo.pngb` - bytecode only (~14KB)
+- Requires external `pngine.wasm` executor
+- Supports hot reload via file watching
+- Best for development iteration
+
+### Prod Mode (`.png`)
+- Loads `dist/demo.png` - self-contained PNG (~8.5KB)
+- Embedded bytecode + WASM executor
+- No external dependencies
+- Single file distribution
+
+Toggle between modes:
+- Click the **Dev/Prod toggle switch** in the header
+- Press **P** key
+- Mode persists in localStorage
+
+Build commands:
+```bash
+npm run compile       # Dev: creates dist/demo.pngb
+npm run compile:prod  # Prod: creates dist/demo.png (with embedded executor)
+```
+
 ## Keyboard Shortcuts
 
 | Key | Action |
@@ -58,6 +85,7 @@ The browser will poll for bytecode changes and auto-reload.
 | `1`-`6` | Switch to scene 1-6 |
 | `Space` | Play/Pause |
 | `R` | Reload bytecode |
+| `P` | Toggle Dev/Prod mode |
 
 ## File Structure
 
@@ -75,7 +103,8 @@ demos/template/
 │   ├── scene5_rings.pngine
 │   └── scene6_morph.pngine
 └── dist/
-    └── demo.pngb       # Compiled bytecode (generated)
+    ├── demo.pngb       # Dev bytecode (generated)
+    └── demo.png        # Prod PNG with embedded executor (generated)
 ```
 
 ## Adding New Scenes
