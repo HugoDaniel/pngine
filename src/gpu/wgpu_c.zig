@@ -128,32 +128,44 @@ fn adapterCallback(
 }
 
 /// Request adapter synchronously (blocks until callback fires)
-/// Uses wgpu-native v27+ callback info API with WGPUFuture
+/// Uses wgpu-native v27+ callback info API with polling
 pub fn requestAdapterSync(instance: Instance, options: ?*const c.WGPURequestAdapterOptions) AdapterRequestResult {
     adapter_ready = false;
 
     // Create callback info struct for v27+ API
+    // Use AllowProcessEvents mode - compatible with iOS simulator
     const callback_info = c.WGPURequestAdapterCallbackInfo{
         .nextInChain = null,
-        .mode = c.WGPUCallbackMode_WaitAnyOnly,
+        .mode = c.WGPUCallbackMode_AllowProcessEvents,
         .callback = adapterCallback,
         .userdata1 = null,
         .userdata2 = null,
     };
 
     // Request adapter - returns a future
-    const future = c.wgpuInstanceRequestAdapter(instance, options, callback_info);
+    _ = c.wgpuInstanceRequestAdapter(instance, options, callback_info);
 
-    // Wait for the future to complete (with 5 second timeout)
-    // WGPUBool is uint32_t, so use 0 for false
-    var wait_info = c.WGPUFutureWaitInfo{
-        .future = future,
-        .completed = 0,
+    // Poll until callback fires (with timeout)
+    // This approach works on iOS simulator where WaitAny is not implemented
+    const max_iterations: u32 = 5000; // ~5 seconds at 1ms per iteration
+    for (0..max_iterations) |_| {
+        // Process events which may trigger callbacks
+        c.wgpuInstanceProcessEvents(instance);
+
+        if (adapter_ready) {
+            return adapter_result;
+        }
+
+        // Small sleep to avoid busy-waiting (1ms)
+        std.posix.nanosleep(0, 1_000_000);
+    }
+
+    // Timeout - return error result
+    return .{
+        .adapter = null,
+        .status = c.WGPURequestAdapterStatus_Error,
+        .message = "Adapter request timed out",
     };
-    const wait_status = c.wgpuInstanceWaitAny(instance, 1, &wait_info, 5_000_000_000); // 5 seconds in nanoseconds
-    _ = wait_status;
-
-    return adapter_result;
 }
 
 // ============================================================================
@@ -186,34 +198,46 @@ fn deviceCallback(
 }
 
 /// Request device synchronously (blocks until callback fires)
-/// Uses wgpu-native v27+ callback info API with WGPUFuture
-/// Note: Requires instance for wait operation
+/// Uses wgpu-native v27+ callback info API with polling
+/// Note: Requires instance for polling
 pub fn requestDeviceSync(instance: Instance, adapter: Adapter, descriptor: ?*const c.WGPUDeviceDescriptor) DeviceRequestResult {
     device_ready = false;
     device_instance = instance;
 
     // Create callback info struct for v27+ API
+    // Use AllowProcessEvents mode - compatible with iOS simulator
     const callback_info = c.WGPURequestDeviceCallbackInfo{
         .nextInChain = null,
-        .mode = c.WGPUCallbackMode_WaitAnyOnly,
+        .mode = c.WGPUCallbackMode_AllowProcessEvents,
         .callback = deviceCallback,
         .userdata1 = null,
         .userdata2 = null,
     };
 
     // Request device - returns a future
-    const future = c.wgpuAdapterRequestDevice(adapter, descriptor, callback_info);
+    _ = c.wgpuAdapterRequestDevice(adapter, descriptor, callback_info);
 
-    // Wait for the future to complete (with 5 second timeout)
-    // WGPUBool is uint32_t, so use 0 for false
-    var wait_info = c.WGPUFutureWaitInfo{
-        .future = future,
-        .completed = 0,
+    // Poll until callback fires (with timeout)
+    // This approach works on iOS simulator where WaitAny is not implemented
+    const max_iterations: u32 = 5000; // ~5 seconds at 1ms per iteration
+    for (0..max_iterations) |_| {
+        // Process events which may trigger callbacks
+        c.wgpuInstanceProcessEvents(instance);
+
+        if (device_ready) {
+            return device_result;
+        }
+
+        // Small sleep to avoid busy-waiting (1ms)
+        std.posix.nanosleep(0, 1_000_000);
+    }
+
+    // Timeout - return error result
+    return .{
+        .device = null,
+        .status = c.WGPURequestDeviceStatus_Error,
+        .message = "Device request timed out",
     };
-    const wait_status = c.wgpuInstanceWaitAny(instance, 1, &wait_info, 5_000_000_000); // 5 seconds in nanoseconds
-    _ = wait_status;
-
-    return device_result;
 }
 
 // ============================================================================
