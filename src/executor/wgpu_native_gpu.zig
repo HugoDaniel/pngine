@@ -891,7 +891,7 @@ pub const WgpuNativeGPU = struct {
         desc.entries = &entries;
 
         self.bind_groups[group_id] = wgpu.deviceCreateBindGroup(self.ctx.device, &desc);
-        _ = allocator;
+        _ = allocator; // Interface requirement - native backend doesn't need allocator
     }
 
     pub fn createBindGroupLayout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {

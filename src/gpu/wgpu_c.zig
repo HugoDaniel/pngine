@@ -109,8 +109,10 @@ pub const AdapterRequestResult = struct {
     message: ?[]const u8,
 };
 
-var adapter_result: AdapterRequestResult = undefined;
-var adapter_ready: bool = false;
+// Thread-local storage for async callback results
+// Ensures thread-safety when multiple threads initialize adapters
+threadlocal var adapter_result: AdapterRequestResult = undefined;
+threadlocal var adapter_ready: bool = false;
 
 fn adapterCallback(
     status: c.WGPURequestAdapterStatus,
@@ -178,9 +180,10 @@ pub const DeviceRequestResult = struct {
     message: ?[]const u8,
 };
 
-var device_result: DeviceRequestResult = undefined;
-var device_ready: bool = false;
-var device_instance: Instance = null; // Store instance for wait call
+// Thread-local storage for async callback results
+threadlocal var device_result: DeviceRequestResult = undefined;
+threadlocal var device_ready: bool = false;
+threadlocal var device_instance: Instance = null; // Store instance for polling
 
 fn deviceCallback(
     status: c.WGPURequestDeviceStatus,
