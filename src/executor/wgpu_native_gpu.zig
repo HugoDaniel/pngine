@@ -141,6 +141,9 @@ pub const WgpuNativeGPU = struct {
     render_pass: ?wgpu.RenderPassEncoder,
     compute_pass: ?wgpu.ComputePassEncoder,
 
+    /// Current depth view (released after submit)
+    current_depth_view: ?wgpu.TextureView,
+
     /// Bytecode module reference
     module: ?*const Module,
 
@@ -176,6 +179,7 @@ pub const WgpuNativeGPU = struct {
             .encoder = null,
             .render_pass = null,
             .compute_pass = null,
+            .current_depth_view = null,
             .module = null,
             .width = width,
             .height = height,
@@ -248,6 +252,9 @@ pub const WgpuNativeGPU = struct {
         }
 
         if (self.current_surface_view) |v| {
+            wgpu.textureViewRelease(v);
+        }
+        if (self.current_depth_view) |v| {
             wgpu.textureViewRelease(v);
         }
 
@@ -832,29 +839,40 @@ pub const WgpuNativeGPU = struct {
                         const buf_size = std.mem.readInt(u32, data[off + 4 ..][0..4], .little);
                         off += 8;
 
-                        if (self.buffers[rid]) |buffer| {
-                            entry.buffer = buffer;
-                            entry.offset = buf_offset;
-                            entry.size = if (buf_size == 0) wgpu.bufferGetSize(buffer) else buf_size;
+                        if (rid < MAX_BUFFERS) {
+                            if (self.buffers[rid]) |buffer| {
+                                entry.buffer = buffer;
+                                entry.offset = buf_offset;
+                                entry.size = if (buf_size == 0) wgpu.bufferGetSize(buffer) else buf_size;
+                            }
                         }
                     } else if (rt == 1) {
-                        // Texture binding - create view with correct format
-                        if (self.textures[rid]) |texture| {
-                            // Create view with the texture's format
-                            var view_desc = std.mem.zeroes(c.WGPUTextureViewDescriptor);
-                            view_desc.format = self.texture_formats[rid];
-                            view_desc.dimension = c.WGPUTextureViewDimension_2D;
-                            view_desc.baseMipLevel = 0;
-                            view_desc.mipLevelCount = 1;
-                            view_desc.baseArrayLayer = 0;
-                            view_desc.arrayLayerCount = 1;
-                            view_desc.aspect = c.WGPUTextureAspect_All;
-                            entry.textureView = wgpu.textureCreateView(texture, &view_desc);
+                        // Texture binding - reuse or create view
+                        if (rid < MAX_TEXTURE_VIEWS) {
+                            if (self.texture_views[rid]) |existing_view| {
+                                // Reuse existing view
+                                entry.textureView = existing_view;
+                            } else if (self.textures[rid]) |texture| {
+                                // Create view and store for reuse
+                                var view_desc = std.mem.zeroes(c.WGPUTextureViewDescriptor);
+                                view_desc.format = self.texture_formats[rid];
+                                view_desc.dimension = c.WGPUTextureViewDimension_2D;
+                                view_desc.baseMipLevel = 0;
+                                view_desc.mipLevelCount = 1;
+                                view_desc.baseArrayLayer = 0;
+                                view_desc.arrayLayerCount = 1;
+                                view_desc.aspect = c.WGPUTextureAspect_All;
+                                const new_view = wgpu.textureCreateView(texture, &view_desc);
+                                self.texture_views[rid] = new_view;
+                                entry.textureView = new_view;
+                            }
                         }
                     } else if (rt == 2) {
                         // Sampler binding
-                        if (self.samplers[rid]) |sampler| {
-                            entry.sampler = sampler;
+                        if (rid < MAX_SAMPLERS) {
+                            if (self.samplers[rid]) |sampler| {
+                                entry.sampler = sampler;
+                            }
                         }
                     }
 
@@ -1002,6 +1020,12 @@ pub const WgpuNativeGPU = struct {
 
         if (depth_texture_id != 0xFFFF and depth_texture_id < MAX_TEXTURES) {
             if (self.textures[depth_texture_id]) |depth_tex| {
+                // Release previous depth view if any
+                if (self.current_depth_view) |old_view| {
+                    wgpu.textureViewRelease(old_view);
+                    self.current_depth_view = null;
+                }
+
                 // Create view for depth texture with correct aspect
                 var depth_view_desc = std.mem.zeroes(c.WGPUTextureViewDescriptor);
                 depth_view_desc.format = self.texture_formats[depth_texture_id];
@@ -1014,6 +1038,7 @@ pub const WgpuNativeGPU = struct {
 
                 const depth_view = wgpu.textureCreateView(depth_tex, &depth_view_desc);
                 if (depth_view != null) {
+                    self.current_depth_view = depth_view; // Track for release in submit()
                     has_depth = true;
                     depth_attachment = std.mem.zeroes(c.WGPURenderPassDepthStencilAttachment);
                     depth_attachment.view = depth_view;
@@ -1171,6 +1196,12 @@ pub const WgpuNativeGPU = struct {
         if (self.current_surface_view) |view| {
             wgpu.textureViewRelease(view);
             self.current_surface_view = null;
+        }
+
+        // Release depth view
+        if (self.current_depth_view) |view| {
+            wgpu.textureViewRelease(view);
+            self.current_depth_view = null;
         }
     }
 
