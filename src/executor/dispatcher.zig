@@ -74,6 +74,10 @@ pub const ExecuteError = error{
     NoSurfaceConfigured,
     /// Texture not found in resource table.
     TextureNotFound,
+    /// Shader compilation failed.
+    ShaderCompilationFailed,
+    /// Pipeline creation failed.
+    PipelineCreationFailed,
 };
 
 /// GPU backend interface.

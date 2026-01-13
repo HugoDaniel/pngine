@@ -74,6 +74,9 @@ public class PngineAnimationView: PlatformView {
     private var displayLink: CADisplayLink?
     private var startTime: CFTimeInterval = 0
     private var isPlaying = false
+    private var pendingBytecode: Data?
+    private var shouldAutoPlay = false
+    private var hasLoadedAnimation = false
 
     // MARK: - Initialization
 
@@ -104,7 +107,7 @@ public class PngineAnimationView: PlatformView {
         if !pngine_is_initialized() {
             let result = pngine_init()
             if result != 0 {
-                print("[PngineKit] Failed to initialize PNGine runtime")
+                NSLog("[PngineKit] Failed to initialize PNGine runtime")
             }
         }
     }
@@ -130,6 +133,13 @@ public class PngineAnimationView: PlatformView {
 
         metalLayer.drawableSize = CGSize(width: Int(width), height: Int(height))
 
+        // Load pending bytecode now that we have a valid size
+        if let bytecode = pendingBytecode, width > 0, height > 0, !hasLoadedAnimation {
+            NSLog("[PngineKit] Layout complete - loading deferred bytecode, size: \(width)x\(height)")
+            pendingBytecode = nil
+            loadBytecodeInternal(bytecode, width: width, height: height)
+        }
+
         if let anim = animation, width > 0, height > 0 {
             pngine_resize(anim, width, height)
         }
@@ -139,23 +149,32 @@ public class PngineAnimationView: PlatformView {
 
     /// Load animation from bytecode data.
     public func load(bytecode: Data) {
+        let scale = metalLayer.contentsScale
+        let width = UInt32(bounds.width * scale)
+        let height = UInt32(bounds.height * scale)
+
+        NSLog("[PngineKit] load() called - size: \(width)x\(height), bytecode: \(bytecode.count) bytes")
+
+        // If view has zero size, defer loading until layout
+        guard width > 0, height > 0 else {
+            NSLog("[PngineKit] Deferring load until layout (zero size)")
+            pendingBytecode = bytecode
+            return
+        }
+
+        loadBytecodeInternal(bytecode, width: width, height: height)
+    }
+
+    private func loadBytecodeInternal(_ bytecode: Data, width: UInt32, height: UInt32) {
         // Destroy existing animation
         if let existing = animation {
             pngine_destroy(existing)
             animation = nil
         }
 
-        let scale = metalLayer.contentsScale
-        let width = UInt32(bounds.width * scale)
-        let height = UInt32(bounds.height * scale)
-
-        guard width > 0, height > 0 else {
-            print("[PngineKit] Cannot load: view has zero size")
-            return
-        }
-
         bytecode.withUnsafeBytes { ptr in
             let layerPtr = Unmanaged.passUnretained(metalLayer).toOpaque()
+            NSLog("[PngineKit] Calling pngine_create with layer: \(layerPtr), size: \(width)x\(height)")
             animation = pngine_create(
                 ptr.baseAddress?.assumingMemoryBound(to: UInt8.self),
                 ptr.count,
@@ -166,19 +185,42 @@ public class PngineAnimationView: PlatformView {
         }
 
         if animation == nil {
-            print("[PngineKit] Failed to create animation")
+            let error = pngineLastError() ?? "Unknown error"
+            NSLog("[PngineKit] Failed to create animation: \(error)")
+        } else {
+            NSLog("[PngineKit] Animation created successfully: \(animation!)")
+            hasLoadedAnimation = true
+
+            // Start playing if we were waiting
+            if shouldAutoPlay {
+                shouldAutoPlay = false
+                play()
+            }
         }
     }
 
     /// Start animation playback.
     public func play() {
-        guard animation != nil, !isPlaying else { return }
+        NSLog("[PngineKit] play() called - animation: \(String(describing: animation)), isPlaying: \(isPlaying)")
+
+        // If animation not loaded yet, defer play until it is
+        guard animation != nil else {
+            NSLog("[PngineKit] play() deferred - animation not loaded yet")
+            shouldAutoPlay = true
+            return
+        }
+
+        guard !isPlaying else {
+            NSLog("[PngineKit] play() - already playing")
+            return
+        }
 
         isPlaying = true
         startTime = CACurrentMediaTime()
 
         displayLink = CADisplayLink(target: self, selector: #selector(render(_:)))
         displayLink?.add(to: .main, forMode: .common)
+        NSLog("[PngineKit] Display link started")
     }
 
     /// Pause animation playback.
@@ -208,11 +250,24 @@ public class PngineAnimationView: PlatformView {
 
     // MARK: - Display Link
 
+    private var renderCount = 0
+
     @objc private func render(_ link: CADisplayLink) {
         guard let anim = animation else { return }
 
         let elapsed = Float(link.timestamp - startTime)
-        pngine_render(anim, elapsed)
+
+        // Log first few renders
+        if renderCount < 3 {
+            NSLog("[PngineKit] render() #\(renderCount) - time: \(elapsed)")
+
+            // Use debug function to check status
+            let status = pngine_debug_frame(anim, elapsed)
+            NSLog("[PngineKit] debug_frame returned: \(status)")
+            renderCount += 1
+        } else {
+            pngine_render(anim, elapsed)
+        }
     }
 
     // MARK: - Cleanup

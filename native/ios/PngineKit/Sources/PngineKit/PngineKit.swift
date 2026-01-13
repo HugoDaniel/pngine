@@ -52,6 +52,15 @@ public func pngine_get_height(_ anim: OpaquePointer?) -> UInt32
 @_silgen_name("pngine_version")
 public func pngine_version() -> UnsafePointer<CChar>
 
+@_silgen_name("pngine_debug_status")
+public func pngine_debug_status(_ anim: OpaquePointer?) -> Int32
+
+@_silgen_name("pngine_debug_frame")
+public func pngine_debug_frame(_ anim: OpaquePointer?, _ time: Float) -> Int32
+
+@_silgen_name("pngine_debug_render_pass_status")
+public func pngine_debug_render_pass_status(_ anim: OpaquePointer?) -> Int32
+
 // MARK: - Convenience Functions
 
 /// Get PNGine version as a Swift string.

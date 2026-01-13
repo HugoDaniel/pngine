@@ -164,7 +164,7 @@ export fn pngine_render(anim: ?*PngineAnimation, time: f32) callconv(.c) void {
     a.dispatcher.pc = 0;
     a.dispatcher.frame_counter +%= 1; // Increment for ping-pong buffers
     a.dispatcher.executeFromPC(global_allocator) catch {
-        // Log error but don't crash
+        // Execution failed - triangle won't render
         return;
     };
 }
@@ -214,11 +214,72 @@ export fn pngine_destroy(anim: ?*PngineAnimation) callconv(.c) void {
     global_allocator.destroy(a);
 }
 
+// Global error state for debugging
+var last_error: ?[]const u8 = null;
+
 /// Get the last error message.
 /// Returns NULL if no error.
 export fn pngine_get_error() callconv(.c) ?[*:0]const u8 {
-    // TODO: Implement error message storage
+    if (last_error) |err| {
+        // Find null terminator or return the slice
+        for (err, 0..) |ch, i| {
+            if (ch == 0) return @ptrCast(err.ptr);
+            _ = i;
+        }
+    }
     return null;
+}
+
+/// Debug: Get animation status
+export fn pngine_debug_status(anim: ?*PngineAnimation) callconv(.c) c_int {
+    const a = anim orelse return -1; // No animation
+
+    if (a.gpu.surface == null) return -2; // No surface
+    if (a.gpu.ctx.device == null) return -3; // No device
+
+    // Check if pipeline was created
+    if (a.gpu.render_pipelines[0] == null) return -4; // No pipeline
+
+    // Check if shader was created
+    if (a.gpu.shaders[0] == null) return -5; // No shader
+
+    return 0; // All good
+}
+
+/// Debug: Execute one frame and return status
+export fn pngine_debug_frame(anim: ?*PngineAnimation, time: f32) callconv(.c) c_int {
+    const a = anim orelse return -1;
+
+    a.gpu.setTime(time);
+
+    // Reset PC and execute
+    a.dispatcher.pc = 0;
+    a.dispatcher.frame_counter +%= 1;
+
+    a.dispatcher.executeFromPC(global_allocator) catch |err| {
+        return switch (err) {
+            error.SurfaceTextureUnavailable => -10,
+            error.NoSurfaceConfigured => -11,
+            error.TextureNotFound => -12,
+            error.InvalidResourceId => -13,
+            error.ShaderCompilationFailed => -14,
+            error.PipelineCreationFailed => -15,
+            else => -99,
+        };
+    };
+
+    return 0;
+}
+
+/// Debug: Get render pass status after frame execution
+export fn pngine_debug_render_pass_status(anim: ?*PngineAnimation) callconv(.c) c_int {
+    const a = anim orelse return -1;
+
+    // Check if we have encoder/pass state (should be null after submit)
+    if (a.gpu.encoder != null) return 1; // Encoder still active
+    if (a.gpu.render_pass != null) return 2; // Pass still active
+
+    return 0; // All cleaned up properly
 }
 
 // ============================================================================

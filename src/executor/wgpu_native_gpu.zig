@@ -148,6 +148,9 @@ pub const WgpuNativeGPU = struct {
     width: u32,
     height: u32,
 
+    /// Texture formats (for creating depth views with correct format)
+    texture_formats: [MAX_TEXTURES]c_uint,
+
     /// Time uniform for animations
     time: f32,
 
@@ -176,6 +179,7 @@ pub const WgpuNativeGPU = struct {
             .module = null,
             .width = width,
             .height = height,
+            .texture_formats = [_]c_uint{c.WGPUTextureFormat_BGRA8Unorm} ** MAX_TEXTURES,
             .time = 0.0,
         };
 
@@ -285,24 +289,91 @@ pub const WgpuNativeGPU = struct {
         assert(texture_id < MAX_TEXTURES);
         assert(self.module != null);
 
-        // For now, create a default RGBA texture
-        // TODO: Parse descriptor from data section
-        _ = descriptor_data_id;
+        const module = self.module.?;
+        const data = module.data.get(DataId.fromInt(descriptor_data_id));
 
-        const descriptor = c.WGPUTextureDescriptor{
-            .nextInChain = null,
-            .label = .{ .data = null, .length = 0 },
-            .usage = c.WGPUTextureUsage_TextureBinding | c.WGPUTextureUsage_CopyDst,
-            .dimension = c.WGPUTextureDimension_2D,
-            .size = .{ .width = 256, .height = 256, .depthOrArrayLayers = 1 },
-            .format = c.WGPUTextureFormat_RGBA8Unorm,
-            .mipLevelCount = 1,
-            .sampleCount = 1,
-            .viewFormatCount = 0,
-            .viewFormats = null,
-        };
+        // Parse texture descriptor from bytecode
+        // Format: [type_tag:u8][field_count:u8][fields...]
+        // Field: [fid:u8][vt:u8][value:varies]
+        var tex_width: u32 = self.width;
+        var tex_height: u32 = self.height;
+        var tex_format: c_uint = c.WGPUTextureFormat_RGBA8Unorm;
+        var tex_usage: c_uint = c.WGPUTextureUsage_RenderAttachment;
+        var sample_count: u32 = 1;
+
+        if (data.len >= 2) {
+            const field_count = data[1];
+            var off: usize = 2;
+
+            for (0..field_count) |_| {
+                if (off + 2 > data.len) break;
+                const fid = data[off];
+                const vt = data[off + 1];
+                off += 2;
+
+                if (vt == 0x00) { // u32
+                    if (off + 4 > data.len) break;
+                    const val = std.mem.readInt(u32, data[off..][0..4], .little);
+                    off += 4;
+                    switch (fid) {
+                        0x01 => tex_width = val,
+                        0x02 => tex_height = val,
+                        0x05 => sample_count = val,
+                        else => {},
+                    }
+                } else if (vt == 0x07) { // enum
+                    if (off >= data.len) break;
+                    const val = data[off];
+                    off += 1;
+                    switch (fid) {
+                        0x07 => tex_format = decodeTextureFormat(val),
+                        0x08 => tex_usage = decodeTextureUsage(val),
+                        else => {},
+                    }
+                }
+            }
+        }
+
+        // Zero-initialize to avoid undefined memory issues
+        var descriptor = std.mem.zeroes(c.WGPUTextureDescriptor);
+        descriptor.nextInChain = null;
+        descriptor.label = .{ .data = null, .length = 0 };
+        descriptor.usage = tex_usage;
+        descriptor.dimension = c.WGPUTextureDimension_2D;
+        descriptor.size = .{ .width = tex_width, .height = tex_height, .depthOrArrayLayers = 1 };
+        descriptor.format = tex_format;
+        descriptor.mipLevelCount = 1;
+        descriptor.sampleCount = sample_count;
+        descriptor.viewFormatCount = 0;
+        descriptor.viewFormats = null;
 
         self.textures[texture_id] = wgpu.deviceCreateTexture(self.ctx.device, &descriptor);
+        self.texture_formats[texture_id] = tex_format;
+    }
+
+    fn decodeTextureFormat(val: u8) c_uint {
+        return switch (val) {
+            0x00 => c.WGPUTextureFormat_RGBA8Unorm,
+            0x01 => c.WGPUTextureFormat_RGBA8Snorm,
+            0x04 => c.WGPUTextureFormat_BGRA8Unorm,
+            0x05 => c.WGPUTextureFormat_RGBA16Float,
+            0x06 => c.WGPUTextureFormat_RGBA32Float,
+            0x10 => c.WGPUTextureFormat_Depth24Plus,
+            0x11 => c.WGPUTextureFormat_Depth24PlusStencil8,
+            0x12 => c.WGPUTextureFormat_Depth32Float,
+            else => c.WGPUTextureFormat_BGRA8Unorm, // Default to preferred canvas format
+        };
+    }
+
+    fn decodeTextureUsage(val: u8) c_uint {
+        var usage: c_uint = 0;
+        if (val & 0x01 != 0) usage |= c.WGPUTextureUsage_CopySrc;
+        if (val & 0x02 != 0) usage |= c.WGPUTextureUsage_CopyDst;
+        if (val & 0x04 != 0) usage |= c.WGPUTextureUsage_TextureBinding;
+        if (val & 0x08 != 0) usage |= c.WGPUTextureUsage_StorageBinding;
+        if (val & 0x10 != 0) usage |= c.WGPUTextureUsage_RenderAttachment;
+        if (usage == 0) usage = c.WGPUTextureUsage_RenderAttachment;
+        return usage;
     }
 
     pub fn createTextureView(self: *Self, allocator: Allocator, view_id: u16, texture_id: u16, descriptor_data_id: u16) !void {
@@ -340,13 +411,14 @@ pub const WgpuNativeGPU = struct {
         self.samplers[sampler_id] = wgpu.deviceCreateSampler(self.ctx.device, &descriptor);
     }
 
-    pub fn createShaderModule(self: *Self, allocator: Allocator, shader_id: u16, wgsl_id: u16) !void {
+    pub fn createShaderModule(self: *Self, allocator: Allocator, shader_id: u16, code_data_id: u16) !void {
         assert(shader_id < MAX_SHADERS);
         assert(self.module != null);
 
-        // Resolve WGSL code from module
-        const code = try self.resolveWgsl(allocator, wgsl_id);
-        defer allocator.free(code);
+        const module = self.module.?;
+
+        // Get WGSL code directly from data section
+        const code = module.data.get(DataId.fromInt(code_data_id));
 
         // Create null-terminated string for wgpu
         const code_z = try allocator.allocSentinel(u8, code.len, 0);
@@ -369,7 +441,11 @@ pub const WgpuNativeGPU = struct {
             .label = .{ .data = null, .length = 0 },
         };
 
-        self.shaders[shader_id] = wgpu.deviceCreateShaderModule(self.ctx.device, &descriptor);
+        const shader = wgpu.deviceCreateShaderModule(self.ctx.device, &descriptor);
+        if (shader == null) {
+            return error.ShaderCompilationFailed;
+        }
+        self.shaders[shader_id] = shader;
     }
 
     /// Resolve WGSL module by ID, concatenating all dependencies.
@@ -438,13 +514,224 @@ pub const WgpuNativeGPU = struct {
     }
 
     pub fn createRenderPipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
-        _ = self;
-        _ = allocator;
-        _ = descriptor_data_id;
         assert(pipeline_id < MAX_RENDER_PIPELINES);
+        assert(self.module != null);
 
-        // TODO: Parse descriptor from data section
-        // For now, this is a placeholder
+        const module = self.module.?;
+        const desc_data = module.data.get(DataId.fromInt(descriptor_data_id));
+
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, desc_data, .{}) catch {
+            return error.InvalidResourceId;
+        };
+        defer parsed.deinit();
+
+        const root = parsed.value.object;
+
+        // Get vertex stage info
+        const vertex_obj = root.get("vertex").?.object;
+        const vertex_shader_id: u16 = @intCast(vertex_obj.get("shader").?.integer);
+        const vertex_entry = vertex_obj.get("entryPoint").?.string;
+        const vertex_shader = self.shaders[vertex_shader_id] orelse return error.InvalidResourceId;
+
+        const vertex_entry_z = try allocator.allocSentinel(u8, vertex_entry.len, 0);
+        defer allocator.free(vertex_entry_z);
+        @memcpy(vertex_entry_z, vertex_entry);
+
+        // Parse vertex buffer layouts (max 4 buffers, 8 attributes each)
+        var buffer_layouts: [4]c.WGPUVertexBufferLayout = undefined;
+        var attributes: [4][8]c.WGPUVertexAttribute = undefined;
+        var buffer_count: usize = 0;
+
+        if (vertex_obj.get("buffers")) |buffers_val| {
+            const buffers_arr = buffers_val.array;
+            for (buffers_arr.items, 0..) |buf_val, bi| {
+                if (bi >= 4) break;
+                const buf_obj = buf_val.object;
+                const stride = buf_obj.get("arrayStride").?.integer;
+
+                var attr_count: usize = 0;
+                if (buf_obj.get("attributes")) |attrs_val| {
+                    for (attrs_val.array.items, 0..) |attr_val, ai| {
+                        if (ai >= 8) break;
+                        const attr_obj = attr_val.object;
+                        attributes[bi][ai] = .{
+                            .format = parseVertexFormat(attr_obj.get("format").?.string),
+                            .offset = @intCast(attr_obj.get("offset").?.integer),
+                            .shaderLocation = @intCast(attr_obj.get("shaderLocation").?.integer),
+                        };
+                        attr_count += 1;
+                    }
+                }
+
+                buffer_layouts[bi] = .{
+                    .arrayStride = @intCast(stride),
+                    .stepMode = c.WGPUVertexStepMode_Vertex,
+                    .attributeCount = attr_count,
+                    .attributes = @ptrCast(&attributes[bi]),
+                };
+                buffer_count += 1;
+            }
+        }
+
+        // Get fragment stage info
+        var fragment_state: ?c.WGPUFragmentState = null;
+        var fragment_entry_z: ?[:0]u8 = null;
+        var blend_state: c.WGPUBlendState = undefined;
+        var color_target: c.WGPUColorTargetState = undefined;
+
+        if (root.get("fragment")) |frag_val| {
+            const frag_obj = frag_val.object;
+            const frag_shader_id: u16 = @intCast(frag_obj.get("shader").?.integer);
+            const frag_entry = frag_obj.get("entryPoint").?.string;
+            const frag_shader = self.shaders[frag_shader_id] orelse return error.InvalidResourceId;
+
+            fragment_entry_z = try allocator.allocSentinel(u8, frag_entry.len, 0);
+            @memcpy(fragment_entry_z.?, frag_entry);
+
+            blend_state = c.WGPUBlendState{
+                .color = .{ .srcFactor = c.WGPUBlendFactor_One, .dstFactor = c.WGPUBlendFactor_Zero, .operation = c.WGPUBlendOperation_Add },
+                .alpha = .{ .srcFactor = c.WGPUBlendFactor_One, .dstFactor = c.WGPUBlendFactor_Zero, .operation = c.WGPUBlendOperation_Add },
+            };
+
+            color_target = c.WGPUColorTargetState{
+                .nextInChain = null,
+                .format = c.WGPUTextureFormat_BGRA8Unorm,
+                .blend = &blend_state,
+                .writeMask = c.WGPUColorWriteMask_All,
+            };
+
+            fragment_state = c.WGPUFragmentState{
+                .nextInChain = null,
+                .module = frag_shader,
+                .entryPoint = .{ .data = fragment_entry_z.?.ptr, .length = fragment_entry_z.?.len },
+                .constantCount = 0,
+                .constants = null,
+                .targetCount = 1,
+                .targets = &color_target,
+            };
+        }
+        defer if (fragment_entry_z) |z| allocator.free(z);
+
+        // Parse primitive options
+        var topology: u32 = c.WGPUPrimitiveTopology_TriangleList;
+        var cull_mode: u32 = c.WGPUCullMode_None;
+        if (root.get("primitive")) |prim_val| {
+            const prim_obj = prim_val.object;
+            if (prim_obj.get("topology")) |topo_val| {
+                topology = parseTopology(topo_val.string);
+            }
+            if (prim_obj.get("cullMode")) |cull_val| {
+                cull_mode = parseCullMode(cull_val.string);
+            }
+        }
+
+        // Parse depth stencil state
+        var depth_stencil_state: c.WGPUDepthStencilState = undefined;
+        var has_depth_stencil = false;
+        if (root.get("depthStencil")) |ds_val| {
+            const ds_obj = ds_val.object;
+            has_depth_stencil = true;
+
+            depth_stencil_state = std.mem.zeroes(c.WGPUDepthStencilState);
+            depth_stencil_state.format = if (ds_obj.get("format")) |fmt|
+                parseDepthFormat(fmt.string)
+            else
+                c.WGPUTextureFormat_Depth24Plus;
+            depth_stencil_state.depthWriteEnabled = if (ds_obj.get("depthWriteEnabled")) |dwe|
+                @intFromBool(dwe.bool)
+            else
+                1;
+            depth_stencil_state.depthCompare = if (ds_obj.get("depthCompare")) |dc|
+                parseCompareFunction(dc.string)
+            else
+                c.WGPUCompareFunction_Less;
+            depth_stencil_state.stencilFront = .{ .compare = c.WGPUCompareFunction_Always, .failOp = c.WGPUStencilOperation_Keep, .depthFailOp = c.WGPUStencilOperation_Keep, .passOp = c.WGPUStencilOperation_Keep };
+            depth_stencil_state.stencilBack = .{ .compare = c.WGPUCompareFunction_Always, .failOp = c.WGPUStencilOperation_Keep, .depthFailOp = c.WGPUStencilOperation_Keep, .passOp = c.WGPUStencilOperation_Keep };
+            depth_stencil_state.stencilReadMask = 0xFFFFFFFF;
+            depth_stencil_state.stencilWriteMask = 0xFFFFFFFF;
+            depth_stencil_state.depthBias = 0;
+            depth_stencil_state.depthBiasSlopeScale = 0;
+            depth_stencil_state.depthBiasClamp = 0;
+        }
+
+        // Create pipeline descriptor
+        var descriptor = std.mem.zeroes(c.WGPURenderPipelineDescriptor);
+        descriptor.label = .{ .data = null, .length = 0 };
+        descriptor.layout = null;
+        descriptor.vertex = .{
+            .nextInChain = null,
+            .module = vertex_shader,
+            .entryPoint = .{ .data = vertex_entry_z.ptr, .length = vertex_entry_z.len },
+            .constantCount = 0,
+            .constants = null,
+            .bufferCount = buffer_count,
+            .buffers = if (buffer_count > 0) @as([*c]const c.WGPUVertexBufferLayout, @ptrCast(&buffer_layouts)) else null,
+        };
+        descriptor.primitive = .{
+            .nextInChain = null,
+            .topology = topology,
+            .stripIndexFormat = c.WGPUIndexFormat_Undefined,
+            .frontFace = c.WGPUFrontFace_CCW,
+            .cullMode = cull_mode,
+        };
+        descriptor.depthStencil = if (has_depth_stencil) &depth_stencil_state else null;
+        descriptor.multisample = .{
+            .nextInChain = null,
+            .count = 1,
+            .mask = 0xFFFFFFFF,
+            .alphaToCoverageEnabled = 0,
+        };
+        descriptor.fragment = if (fragment_state != null) &fragment_state.? else null;
+
+        const pipeline = wgpu.deviceCreateRenderPipeline(self.ctx.device, &descriptor);
+        if (pipeline == null) {
+            return error.PipelineCreationFailed;
+        }
+        self.render_pipelines[pipeline_id] = pipeline;
+    }
+
+    fn parseVertexFormat(fmt: []const u8) c_uint {
+        if (std.mem.eql(u8, fmt, "float32")) return c.WGPUVertexFormat_Float32;
+        if (std.mem.eql(u8, fmt, "float32x2")) return c.WGPUVertexFormat_Float32x2;
+        if (std.mem.eql(u8, fmt, "float32x3")) return c.WGPUVertexFormat_Float32x3;
+        if (std.mem.eql(u8, fmt, "float32x4")) return c.WGPUVertexFormat_Float32x4;
+        if (std.mem.eql(u8, fmt, "uint32")) return c.WGPUVertexFormat_Uint32;
+        if (std.mem.eql(u8, fmt, "sint32")) return c.WGPUVertexFormat_Sint32;
+        return c.WGPUVertexFormat_Float32x4;
+    }
+
+    fn parseTopology(topo: []const u8) c_uint {
+        if (std.mem.eql(u8, topo, "point-list")) return c.WGPUPrimitiveTopology_PointList;
+        if (std.mem.eql(u8, topo, "line-list")) return c.WGPUPrimitiveTopology_LineList;
+        if (std.mem.eql(u8, topo, "line-strip")) return c.WGPUPrimitiveTopology_LineStrip;
+        if (std.mem.eql(u8, topo, "triangle-strip")) return c.WGPUPrimitiveTopology_TriangleStrip;
+        return c.WGPUPrimitiveTopology_TriangleList;
+    }
+
+    fn parseCullMode(mode: []const u8) c_uint {
+        if (std.mem.eql(u8, mode, "front")) return c.WGPUCullMode_Front;
+        if (std.mem.eql(u8, mode, "back")) return c.WGPUCullMode_Back;
+        return c.WGPUCullMode_None;
+    }
+
+    fn parseDepthFormat(fmt: []const u8) c_uint {
+        if (std.mem.eql(u8, fmt, "depth16unorm")) return c.WGPUTextureFormat_Depth16Unorm;
+        if (std.mem.eql(u8, fmt, "depth24plus")) return c.WGPUTextureFormat_Depth24Plus;
+        if (std.mem.eql(u8, fmt, "depth24plus-stencil8")) return c.WGPUTextureFormat_Depth24PlusStencil8;
+        if (std.mem.eql(u8, fmt, "depth32float")) return c.WGPUTextureFormat_Depth32Float;
+        return c.WGPUTextureFormat_Depth24Plus;
+    }
+
+    fn parseCompareFunction(cmp: []const u8) c_uint {
+        if (std.mem.eql(u8, cmp, "never")) return c.WGPUCompareFunction_Never;
+        if (std.mem.eql(u8, cmp, "less")) return c.WGPUCompareFunction_Less;
+        if (std.mem.eql(u8, cmp, "equal")) return c.WGPUCompareFunction_Equal;
+        if (std.mem.eql(u8, cmp, "less-equal")) return c.WGPUCompareFunction_LessEqual;
+        if (std.mem.eql(u8, cmp, "greater")) return c.WGPUCompareFunction_Greater;
+        if (std.mem.eql(u8, cmp, "not-equal")) return c.WGPUCompareFunction_NotEqual;
+        if (std.mem.eql(u8, cmp, "greater-equal")) return c.WGPUCompareFunction_GreaterEqual;
+        if (std.mem.eql(u8, cmp, "always")) return c.WGPUCompareFunction_Always;
+        return c.WGPUCompareFunction_Less;
     }
 
     pub fn createComputePipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
@@ -457,13 +744,136 @@ pub const WgpuNativeGPU = struct {
     }
 
     pub fn createBindGroup(self: *Self, allocator: Allocator, group_id: u16, layout_id: u16, entry_data_id: u16) !void {
-        _ = self;
-        _ = allocator;
-        _ = layout_id;
-        _ = entry_data_id;
         assert(group_id < MAX_BIND_GROUPS);
+        assert(self.module != null);
 
-        // TODO: Parse entries from data section
+        const module = self.module.?;
+        const data = module.data.get(DataId.fromInt(entry_data_id));
+
+        if (data.len < 2) return;
+
+        // Parse bind group descriptor from bytecode
+        // Format: [type_tag:u8][field_count:u8][fields...]
+        // Field 0x01 (group_index): [fid:u8][vt:u8][value:u8]
+        // Field 0x02 (entries): [fid:u8][vt:u8][entry_count:u8][entries...]
+        // Entry: [binding:u8][rt:u8][rid:u16] + optional [offset:u32][size:u32] if rt=0
+        var group_index: u32 = 0;
+        var off: usize = 2;
+        const field_count = data[1];
+
+        // First pass: find group_index
+        for (0..field_count) |_| {
+            if (off + 2 > data.len) break;
+            const fid = data[off];
+            const vt = data[off + 1];
+            off += 2;
+
+            if (fid == 0x01 and vt == 0x07) {
+                if (off < data.len) {
+                    group_index = data[off];
+                    off += 1;
+                }
+            } else if (fid == 0x02 and vt == 0x03) {
+                // Skip entries array for now, we'll parse it in second pass
+                if (off >= data.len) break;
+                const ec = data[off];
+                off += 1;
+                for (0..ec) |_| {
+                    if (off + 4 > data.len) break;
+                    const rt = data[off + 1];
+                    off += 4; // binding, rt, rid (u16)
+                    if (rt == 0) off += 8; // buffer has offset + size
+                }
+            }
+        }
+
+        // Get layout from pipeline
+        const pipeline = self.render_pipelines[layout_id] orelse return;
+        const layout = wgpu.renderPipelineGetBindGroupLayout(pipeline, group_index);
+        if (layout == null) return;
+
+        // Second pass: parse and create entries
+        off = 2;
+        var entries: [16]c.WGPUBindGroupEntry = undefined;
+        var entry_count: usize = 0;
+
+        for (0..field_count) |_| {
+            if (off + 2 > data.len) break;
+            const fid = data[off];
+            const vt = data[off + 1];
+            off += 2;
+
+            if (fid == 0x01 and vt == 0x07) {
+                off += 1; // Skip group_index (already parsed)
+            } else if (fid == 0x02 and vt == 0x03) {
+                if (off >= data.len) break;
+                const ec = data[off];
+                off += 1;
+
+                for (0..ec) |_| {
+                    if (off + 4 > data.len) break;
+                    if (entry_count >= 16) break;
+
+                    const binding = data[off];
+                    const rt = data[off + 1];
+                    const rid = std.mem.readInt(u16, data[off + 2 ..][0..2], .little);
+                    off += 4;
+
+                    var entry = std.mem.zeroes(c.WGPUBindGroupEntry);
+                    entry.binding = binding;
+                    entry.buffer = null;
+                    entry.textureView = null;
+                    entry.sampler = null;
+
+                    if (rt == 0) {
+                        // Buffer binding
+                        if (off + 8 > data.len) break;
+                        const buf_offset = std.mem.readInt(u32, data[off..][0..4], .little);
+                        const buf_size = std.mem.readInt(u32, data[off + 4 ..][0..4], .little);
+                        off += 8;
+
+                        if (self.buffers[rid]) |buffer| {
+                            entry.buffer = buffer;
+                            entry.offset = buf_offset;
+                            entry.size = if (buf_size == 0) wgpu.bufferGetSize(buffer) else buf_size;
+                        }
+                    } else if (rt == 1) {
+                        // Texture binding - create view with correct format
+                        if (self.textures[rid]) |texture| {
+                            // Create view with the texture's format
+                            var view_desc = std.mem.zeroes(c.WGPUTextureViewDescriptor);
+                            view_desc.format = self.texture_formats[rid];
+                            view_desc.dimension = c.WGPUTextureViewDimension_2D;
+                            view_desc.baseMipLevel = 0;
+                            view_desc.mipLevelCount = 1;
+                            view_desc.baseArrayLayer = 0;
+                            view_desc.arrayLayerCount = 1;
+                            view_desc.aspect = c.WGPUTextureAspect_All;
+                            entry.textureView = wgpu.textureCreateView(texture, &view_desc);
+                        }
+                    } else if (rt == 2) {
+                        // Sampler binding
+                        if (self.samplers[rid]) |sampler| {
+                            entry.sampler = sampler;
+                        }
+                    }
+
+                    entries[entry_count] = entry;
+                    entry_count += 1;
+                }
+            }
+        }
+
+        if (entry_count == 0) return;
+
+        // Create bind group
+        var desc = std.mem.zeroes(c.WGPUBindGroupDescriptor);
+        desc.layout = layout;
+        desc.entryCount = entry_count;
+        desc.entries = &entries;
+
+        self.bind_groups[group_id] = wgpu.deviceCreateBindGroup(self.ctx.device, &desc);
+        _ = allocator;
     }
 
     pub fn createBindGroupLayout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
@@ -525,19 +935,28 @@ pub const WgpuNativeGPU = struct {
 
     pub fn beginRenderPass(self: *Self, allocator: Allocator, color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16) !void {
         _ = allocator;
-        _ = depth_texture_id;
 
-        // Get target view
-        var view: wgpu.TextureView = undefined;
+        // Get color target view
+        var view: wgpu.TextureView = null;
 
-        if (color_texture_id == 0) {
-            // Render to surface
+        // 0xFFFE (65534) = render to surface/screen
+        if (color_texture_id == 0xFFFE) {
             if (self.surface) |surface| {
                 var surface_texture: wgpu.SurfaceTexture = undefined;
                 wgpu.surfaceGetCurrentTexture(surface, &surface_texture);
 
+                const status = surface_texture.status;
+                if (status != c.WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal and
+                    status != c.WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal)
+                {
+                    return error.SurfaceTextureUnavailable;
+                }
+
                 if (surface_texture.texture != null) {
                     view = wgpu.textureCreateView(surface_texture.texture, null);
+                    if (view == null) {
+                        return error.SurfaceTextureUnavailable;
+                    }
                     self.current_surface_view = view;
                 } else {
                     return error.SurfaceTextureUnavailable;
@@ -551,35 +970,72 @@ pub const WgpuNativeGPU = struct {
                 view = v;
             } else if (self.textures[color_texture_id]) |t| {
                 view = wgpu.textureCreateView(t, null);
+                if (view == null) {
+                    return error.TextureNotFound;
+                }
             } else {
                 return error.TextureNotFound;
             }
         }
 
+        const valid_view = view orelse return error.SurfaceTextureUnavailable;
+
         // Create command encoder
         self.encoder = wgpu.deviceCreateCommandEncoder(self.ctx.device, null);
+        const encoder = self.encoder orelse return error.SurfaceTextureUnavailable;
 
-        // Begin render pass
-        const color_attachment = c.WGPURenderPassColorAttachment{
-            .view = view,
-            .depthSlice = c.WGPU_DEPTH_SLICE_UNDEFINED,
-            .resolveTarget = null,
-            .loadOp = @intFromEnum(wgpu.mapLoadOp(load_op)),
-            .storeOp = @intFromEnum(wgpu.mapStoreOp(store_op)),
-            .clearValue = .{ .r = 0.0, .g = 0.0, .b = 0.0, .a = 1.0 },
-        };
+        // Map bytecode load/store ops to wgpu-native values
+        const wgpu_load_op: c_uint = if (load_op == 0) c.WGPULoadOp_Load else c.WGPULoadOp_Clear;
+        const wgpu_store_op: c_uint = if (store_op == 0) c.WGPUStoreOp_Store else c.WGPUStoreOp_Discard;
 
-        const render_pass_desc = c.WGPURenderPassDescriptor{
-            .nextInChain = null,
-            .label = .{ .data = null, .length = 0 },
-            .colorAttachmentCount = 1,
-            .colorAttachments = &color_attachment,
-            .depthStencilAttachment = null,
-            .occlusionQuerySet = null,
-            .timestampWrites = null,
-        };
+        // Color attachment
+        var color_attachment = std.mem.zeroes(c.WGPURenderPassColorAttachment);
+        color_attachment.view = valid_view;
+        color_attachment.depthSlice = c.WGPU_DEPTH_SLICE_UNDEFINED;
+        color_attachment.loadOp = wgpu_load_op;
+        color_attachment.storeOp = wgpu_store_op;
+        color_attachment.clearValue = .{ .r = 0.0, .g = 0.0, .b = 0.0, .a = 1.0 };
 
-        self.render_pass = wgpu.commandEncoderBeginRenderPass(self.encoder.?, &render_pass_desc);
+        // Depth stencil attachment (if depth texture provided)
+        var depth_attachment: c.WGPURenderPassDepthStencilAttachment = undefined;
+        var has_depth = false;
+
+        if (depth_texture_id != 0xFFFF and depth_texture_id < MAX_TEXTURES) {
+            if (self.textures[depth_texture_id]) |depth_tex| {
+                // Create view for depth texture with correct aspect
+                var depth_view_desc = std.mem.zeroes(c.WGPUTextureViewDescriptor);
+                depth_view_desc.format = self.texture_formats[depth_texture_id];
+                depth_view_desc.dimension = c.WGPUTextureViewDimension_2D;
+                depth_view_desc.aspect = c.WGPUTextureAspect_DepthOnly;
+                depth_view_desc.baseMipLevel = 0;
+                depth_view_desc.mipLevelCount = 1;
+                depth_view_desc.baseArrayLayer = 0;
+                depth_view_desc.arrayLayerCount = 1;
+
+                const depth_view = wgpu.textureCreateView(depth_tex, &depth_view_desc);
+                if (depth_view != null) {
+                    has_depth = true;
+                    depth_attachment = std.mem.zeroes(c.WGPURenderPassDepthStencilAttachment);
+                    depth_attachment.view = depth_view;
+                    depth_attachment.depthLoadOp = c.WGPULoadOp_Clear;
+                    depth_attachment.depthStoreOp = c.WGPUStoreOp_Store;
+                    depth_attachment.depthClearValue = 1.0;
+                    depth_attachment.stencilLoadOp = c.WGPULoadOp_Undefined;
+                    depth_attachment.stencilStoreOp = c.WGPUStoreOp_Undefined;
+                    depth_attachment.stencilClearValue = 0;
+                    depth_attachment.stencilReadOnly = 0;
+                    depth_attachment.depthReadOnly = 0;
+                }
+            }
+        }
+
+        var render_pass_desc = std.mem.zeroes(c.WGPURenderPassDescriptor);
+        render_pass_desc.label = .{ .data = null, .length = 0 };
+        render_pass_desc.colorAttachmentCount = 1;
+        render_pass_desc.colorAttachments = &color_attachment;
+        render_pass_desc.depthStencilAttachment = if (has_depth) &depth_attachment else null;
+
+        self.render_pass = wgpu.commandEncoderBeginRenderPass(encoder, &render_pass_desc);
     }
 
     pub fn beginComputePass(self: *Self, allocator: Allocator) !void {

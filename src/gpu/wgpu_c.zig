@@ -444,6 +444,10 @@ pub fn renderPipelineRelease(pipeline: RenderPipeline) void {
     c.wgpuRenderPipelineRelease(pipeline);
 }
 
+pub fn renderPipelineGetBindGroupLayout(pipeline: RenderPipeline, group_index: u32) BindGroupLayout {
+    return c.wgpuRenderPipelineGetBindGroupLayout(pipeline, group_index);
+}
+
 pub fn computePipelineRelease(pipeline: ComputePipeline) void {
     c.wgpuComputePipelineRelease(pipeline);
 }
@@ -513,21 +517,21 @@ pub fn mapBufferUsage(bytecode_usage: u8) u32 {
 }
 
 /// Map PNGine bytecode load op to wgpu LoadOp.
+/// Bytecode encoding: 0=load, 1=clear (from types/opcodes.zig)
 pub fn mapLoadOp(bytecode_op: u8) LoadOp {
     return switch (bytecode_op) {
-        0 => .Undefined,
+        0 => .Load,
         1 => .Clear,
-        2 => .Load,
-        else => .Undefined,
+        else => .Clear, // Default to clear for safety
     };
 }
 
 /// Map PNGine bytecode store op to wgpu StoreOp.
+/// Bytecode encoding: 0=store, 1=discard (from types/opcodes.zig)
 pub fn mapStoreOp(bytecode_op: u8) StoreOp {
     return switch (bytecode_op) {
-        0 => .Undefined,
-        1 => .Store,
-        2 => .Discard,
-        else => .Undefined,
+        0 => .Store,
+        1 => .Discard,
+        else => .Store, // Default to store for safety
     };
 }

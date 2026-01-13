@@ -23,7 +23,7 @@ let package = Package(
         .binaryTarget(
             name: "PngineCore",
             // Path to XCFramework built by Zig
-            path: "../../build/PngineCore.xcframework"
+            path: "Sources/PngineCore.xcframework"
         ),
     ]
 )
