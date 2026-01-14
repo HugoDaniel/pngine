@@ -6,6 +6,7 @@
 
 import XCTest
 import QuartzCore
+import SwiftUI
 @testable import PngineKit
 
 final class LifecycleTests: XCTestCase {
@@ -326,13 +327,19 @@ final class LifecycleTests: XCTestCase {
 
     func testSwiftUIConfigureModifier() {
         let bytecode = Data()
-        var configuredSpeed: Float = 0
+        var configureCallCount = 0
 
+        // Note: The configure closure is stored and called when SwiftUI renders the view.
+        // In unit tests, we can only verify that the modifier returns a valid view.
         let view = PngineView(bytecode: bytecode)
-            .configure { animView in
-                configuredSpeed = animView.animationSpeed
+            .configure { _ in
+                configureCallCount += 1
             }
-        XCTAssertNotNil(view)
+        XCTAssertNotNil(view, "configure modifier should return a valid view")
+
+        // Multiple configure calls should chain
+        let chainedView = view.configure { _ in configureCallCount += 1 }
+        XCTAssertNotNil(chainedView, "Multiple configure calls should chain")
     }
 
     func testSwiftUIAllModifiersChained() {
@@ -347,10 +354,15 @@ final class LifecycleTests: XCTestCase {
     }
 
     func testControlledPngineViewCreation() {
-        let bytecode = Data()
-        // Note: We can't fully test bindings in unit tests, but we can verify creation
-        // This would typically be tested with SwiftUI previews or UI tests
-        XCTAssertTrue(true, "ControlledPngineView should be available")
+        let bytecode = BytecodeFixtures.simpleInstanced
+        // Note: We can't fully test binding synchronization in unit tests, but we can verify creation
+        // Full binding tests would require SwiftUI previews or UI tests
+        let view = ControlledPngineView(bytecode: bytecode, isPlaying: .constant(true))
+        XCTAssertNotNil(view, "ControlledPngineView should be creatable")
+
+        // Test with false initial state
+        let pausedView = ControlledPngineView(bytecode: bytecode, isPlaying: .constant(false))
+        XCTAssertNotNil(pausedView, "ControlledPngineView should be creatable with isPlaying=false")
     }
 
     func testAnimationSpeedAffectsPlayback() {
@@ -367,5 +379,46 @@ final class LifecycleTests: XCTestCase {
 
         // Animation speed should persist across play/pause
         XCTAssertEqual(view.animationSpeed, 2.0)
+    }
+
+    @available(iOS 15.0, macOS 12.0, *)
+    func testAsyncPngineViewCreation() {
+        // Test that AsyncPngineView can be created with various configurations
+        let view = AsyncPngineView {
+            // Simulated async load
+            return BytecodeFixtures.simpleInstanced
+        } placeholder: {
+            Text("Loading...")
+        }
+        XCTAssertNotNil(view, "AsyncPngineView should be creatable")
+
+        // Test with modifiers
+        let modifiedView = view
+            .autoPlay(false)
+            .backgroundBehavior(.pause)
+            .animationSpeed(0.5)
+            .targetFrameRate(30)
+        XCTAssertNotNil(modifiedView, "AsyncPngineView should support fluent modifiers")
+    }
+
+    @available(iOS 15.0, macOS 12.0, *)
+    func testAsyncPngineViewWithProgressViewPlaceholder() {
+        // Test convenience initializer with default ProgressView placeholder
+        let view = AsyncPngineView {
+            return BytecodeFixtures.simpleInstanced
+        }
+        XCTAssertNotNil(view, "AsyncPngineView should be creatable with default placeholder")
+    }
+
+    func testAnimationSpeedZeroValue() {
+        let view = PngineAnimationView()
+
+        // Zero speed should be settable (freezes animation)
+        view.animationSpeed = 0.0
+        XCTAssertEqual(view.animationSpeed, 0.0, "Zero animation speed should be valid")
+
+        // Negative speed (reverse playback)
+        view.animationSpeed = -1.0
+        XCTAssertEqual(view.animationSpeed, -1.0, "Negative animation speed should be valid")
     }
 }

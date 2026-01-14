@@ -118,6 +118,10 @@ public struct PngineView: ViewRepresentable {
 
     /// Configure the underlying PngineAnimationView directly.
     /// Use this for advanced customization not exposed through modifiers.
+    ///
+    /// - Warning: Avoid capturing `self` strongly in the closure to prevent retain cycles.
+    ///   Use `[weak self]` if you need to reference the parent view.
+    /// - Note: Configuration closures are called on the main thread during view setup and updates.
     public func configure(_ configure: @escaping (PngineAnimationView) -> Void) -> Self {
         var copy = self
         copy.configurations.append(configure)
@@ -244,6 +248,10 @@ public struct AsyncPngineView<Placeholder: View>: View {
     }
 
     /// Configure the underlying PngineAnimationView directly.
+    ///
+    /// - Warning: Avoid capturing `self` strongly in the closure to prevent retain cycles.
+    ///   Use `[weak self]` if you need to reference the parent view.
+    /// - Note: Configuration closures are called on the main thread during view setup and updates.
     public func configure(_ configure: @escaping (PngineAnimationView) -> Void) -> Self {
         var copy = self
         copy.configurations.append(configure)
@@ -354,6 +362,10 @@ public struct ControlledPngineView: ViewRepresentable {
     }
 
     /// Configure the underlying PngineAnimationView directly.
+    ///
+    /// - Warning: Avoid capturing `self` strongly in the closure to prevent retain cycles.
+    ///   Use `[weak self]` if you need to reference the parent view.
+    /// - Note: Configuration closures are called on the main thread during view setup and updates.
     public func configure(_ configure: @escaping (PngineAnimationView) -> Void) -> Self {
         var copy = self
         copy.configurations.append(configure)
@@ -459,6 +471,8 @@ public class PngineAnimationView: PlatformView {
 
     /// Animation playback speed multiplier. Default is 1.0 (normal speed).
     /// Values > 1.0 speed up, values < 1.0 slow down. Negative values play in reverse.
+    /// - Note: A value of 0.0 will freeze the animation at the current time. Use `pause()` instead
+    ///   if you want to pause with proper state management that respects background behavior.
     public var animationSpeed: Float = 1.0
 
     /// Target frame rate for the display link. Set to 0 for maximum (default).
