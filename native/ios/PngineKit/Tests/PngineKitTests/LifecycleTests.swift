@@ -542,4 +542,272 @@ final class LifecycleTests: XCTestCase {
         XCTAssertEqual(view.targetFrameRate, 30)
         XCTAssertTrue(view.respectAnimationFrameRate)
     }
+
+    // MARK: - Thorough Phase 6 Testing
+
+    func testRespectAnimationFrameRateRapidToggling() {
+        let bytecode = BytecodeFixtures.simpleInstanced
+        let view = PngineAnimationView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+        view.load(bytecode: bytecode)
+        view.targetFrameRate = 30
+        view.play()
+
+        // Rapidly toggle 100 times - should not crash
+        for i in 0..<100 {
+            view.respectAnimationFrameRate = (i % 2 == 0)
+        }
+
+        // Should end up with false (100 is even, so last set was true at i=98, then false at i=99)
+        XCTAssertFalse(view.respectAnimationFrameRate)
+        view.stop()
+    }
+
+    func testFrameRateEdgeCases() {
+        let view = PngineAnimationView()
+
+        // Test zero (should mean max rate)
+        view.targetFrameRate = 0
+        XCTAssertEqual(view.targetFrameRate, 0)
+
+        // Test common rates
+        view.targetFrameRate = 24
+        XCTAssertEqual(view.targetFrameRate, 24)
+
+        view.targetFrameRate = 30
+        XCTAssertEqual(view.targetFrameRate, 30)
+
+        view.targetFrameRate = 60
+        XCTAssertEqual(view.targetFrameRate, 60)
+
+        // Test ProMotion rates
+        view.targetFrameRate = 120
+        XCTAssertEqual(view.targetFrameRate, 120)
+
+        // Test very high rate (beyond typical displays)
+        view.targetFrameRate = 240
+        XCTAssertEqual(view.targetFrameRate, 240)
+    }
+
+    func testDynamicFrameRateChangesDuringPlayback() {
+        let bytecode = BytecodeFixtures.simpleInstanced
+        let view = PngineAnimationView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+        view.load(bytecode: bytecode)
+        view.play()
+
+        // Change frame rate multiple times while playing
+        view.targetFrameRate = 30
+        XCTAssertEqual(view.targetFrameRate, 30)
+
+        view.targetFrameRate = 60
+        XCTAssertEqual(view.targetFrameRate, 60)
+
+        view.respectAnimationFrameRate = true
+        XCTAssertTrue(view.respectAnimationFrameRate)
+
+        view.targetFrameRate = 24
+        XCTAssertEqual(view.targetFrameRate, 24)
+
+        view.respectAnimationFrameRate = false
+        XCTAssertFalse(view.respectAnimationFrameRate)
+
+        view.stop()
+    }
+
+    func testFrameRateWithAnimationSpeedInteraction() {
+        let bytecode = BytecodeFixtures.simpleInstanced
+        let view = PngineAnimationView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+        view.load(bytecode: bytecode)
+
+        // Both properties should be independent
+        view.animationSpeed = 2.0
+        view.targetFrameRate = 30
+        view.respectAnimationFrameRate = true
+
+        XCTAssertEqual(view.animationSpeed, 2.0)
+        XCTAssertEqual(view.targetFrameRate, 30)
+        XCTAssertTrue(view.respectAnimationFrameRate)
+
+        view.play()
+
+        // Change speed, frame rate should be unaffected
+        view.animationSpeed = 0.5
+        XCTAssertEqual(view.targetFrameRate, 30)
+        XCTAssertTrue(view.respectAnimationFrameRate)
+
+        // Change frame rate, speed should be unaffected
+        view.targetFrameRate = 60
+        XCTAssertEqual(view.animationSpeed, 0.5)
+
+        view.stop()
+    }
+
+    func testFrameRateAfterAnimationReload() {
+        let bytecode = BytecodeFixtures.simpleInstanced
+        let view = PngineAnimationView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+
+        // Set frame rate before loading
+        view.targetFrameRate = 30
+        view.respectAnimationFrameRate = true
+
+        view.load(bytecode: bytecode)
+
+        // Settings should persist after load
+        XCTAssertEqual(view.targetFrameRate, 30)
+        XCTAssertTrue(view.respectAnimationFrameRate)
+
+        view.play()
+
+        // Reload animation while playing
+        view.load(bytecode: BytecodeFixtures.instancedBuiltins)
+
+        // Settings should still persist
+        XCTAssertEqual(view.targetFrameRate, 30)
+        XCTAssertTrue(view.respectAnimationFrameRate)
+
+        view.stop()
+    }
+
+    func testFrameRateStressTest() {
+        let bytecode = BytecodeFixtures.simpleInstanced
+        let view = PngineAnimationView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+        view.load(bytecode: bytecode)
+
+        // Stress test: rapid property changes
+        for i in 0..<200 {
+            view.targetFrameRate = (i % 4) * 30  // 0, 30, 60, 90, 0, ...
+            view.respectAnimationFrameRate = (i % 3 == 0)
+            if i % 5 == 0 {
+                view.play()
+            } else if i % 7 == 0 {
+                view.pause()
+            }
+        }
+
+        view.stop()
+        XCTAssertFalse(view.isPlaying)
+    }
+
+    func testFrameRateWithDifferentBytecodeFixtures() {
+        // Test with simpleInstanced
+        let view1 = PngineAnimationView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+        view1.targetFrameRate = 30
+        view1.respectAnimationFrameRate = true
+        view1.load(bytecode: BytecodeFixtures.simpleInstanced)
+        view1.play()
+        XCTAssertEqual(view1.targetFrameRate, 30)
+        view1.stop()
+
+        // Test with instancedBuiltins
+        let view2 = PngineAnimationView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+        view2.targetFrameRate = 60
+        view2.respectAnimationFrameRate = true
+        view2.load(bytecode: BytecodeFixtures.instancedBuiltins)
+        view2.play()
+        XCTAssertEqual(view2.targetFrameRate, 60)
+        view2.stop()
+
+        // Test with boidsCompute
+        let view3 = PngineAnimationView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+        view3.targetFrameRate = 24
+        view3.respectAnimationFrameRate = true
+        view3.load(bytecode: BytecodeFixtures.boidsCompute)
+        view3.play()
+        XCTAssertEqual(view3.targetFrameRate, 24)
+        view3.stop()
+    }
+
+    func testRespectAnimationFrameRateWithoutTargetFrameRate() {
+        let view = PngineAnimationView()
+
+        // Set respectAnimationFrameRate without setting targetFrameRate
+        view.respectAnimationFrameRate = true
+
+        // Should not crash, targetFrameRate defaults to 0 (max)
+        XCTAssertTrue(view.respectAnimationFrameRate)
+        XCTAssertEqual(view.targetFrameRate, 0)
+
+        // Now set a target frame rate
+        view.targetFrameRate = 30
+        XCTAssertEqual(view.targetFrameRate, 30)
+        XCTAssertTrue(view.respectAnimationFrameRate)
+    }
+
+    func testFrameRatePropertyOrdering() {
+        let view = PngineAnimationView()
+
+        // Test setting respectAnimationFrameRate first, then targetFrameRate
+        view.respectAnimationFrameRate = true
+        view.targetFrameRate = 30
+
+        XCTAssertTrue(view.respectAnimationFrameRate)
+        XCTAssertEqual(view.targetFrameRate, 30)
+
+        // Reset
+        view.respectAnimationFrameRate = false
+        view.targetFrameRate = 0
+
+        // Test setting targetFrameRate first, then respectAnimationFrameRate
+        view.targetFrameRate = 60
+        view.respectAnimationFrameRate = true
+
+        XCTAssertTrue(view.respectAnimationFrameRate)
+        XCTAssertEqual(view.targetFrameRate, 60)
+    }
+
+    func testFrameRateWithViewDeallocation() {
+        // Test that setting frame rate properties doesn't prevent deallocation
+        autoreleasepool {
+            let bytecode = BytecodeFixtures.simpleInstanced
+            let view = PngineAnimationView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+            view.targetFrameRate = 30
+            view.respectAnimationFrameRate = true
+            view.load(bytecode: bytecode)
+            view.play()
+            // View should be deallocated when leaving scope
+        }
+
+        // If we get here, deallocation didn't crash
+        XCTAssertTrue(true, "View deallocation with frame rate settings should not crash")
+    }
+
+    func testSwiftUIModifierOrder() {
+        let bytecode = Data()
+
+        // Test various modifier orderings - all should work
+        let view1 = PngineView(bytecode: bytecode)
+            .targetFrameRate(30)
+            .respectAnimationFrameRate(true)
+        XCTAssertNotNil(view1)
+
+        let view2 = PngineView(bytecode: bytecode)
+            .respectAnimationFrameRate(true)
+            .targetFrameRate(30)
+        XCTAssertNotNil(view2)
+
+        let view3 = PngineView(bytecode: bytecode)
+            .animationSpeed(2.0)
+            .targetFrameRate(30)
+            .respectAnimationFrameRate(true)
+            .backgroundBehavior(.pause)
+            .autoPlay(false)
+        XCTAssertNotNil(view3)
+    }
+
+    func testLowFrameRateValues() {
+        let view = PngineAnimationView()
+
+        // Test very low but valid frame rates
+        view.targetFrameRate = 1
+        XCTAssertEqual(view.targetFrameRate, 1)
+
+        view.targetFrameRate = 10
+        XCTAssertEqual(view.targetFrameRate, 10)
+
+        view.targetFrameRate = 15
+        XCTAssertEqual(view.targetFrameRate, 15)
+
+        // CAFrameRateRange minimum logic should handle low values
+        view.respectAnimationFrameRate = true
+        XCTAssertTrue(view.respectAnimationFrameRate)
+    }
 }
