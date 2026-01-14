@@ -421,4 +421,125 @@ final class LifecycleTests: XCTestCase {
         view.animationSpeed = -1.0
         XCTAssertEqual(view.animationSpeed, -1.0, "Negative animation speed should be valid")
     }
+
+    // MARK: - CADisplayLink Optimization Tests (Phase 6)
+
+    func testRespectAnimationFrameRateProperty() {
+        let view = PngineAnimationView()
+
+        // Default should be false
+        XCTAssertFalse(view.respectAnimationFrameRate, "Default respectAnimationFrameRate should be false")
+
+        // Can be changed
+        view.respectAnimationFrameRate = true
+        XCTAssertTrue(view.respectAnimationFrameRate, "respectAnimationFrameRate should be settable to true")
+
+        view.respectAnimationFrameRate = false
+        XCTAssertFalse(view.respectAnimationFrameRate, "respectAnimationFrameRate should be settable to false")
+    }
+
+    func testRespectAnimationFrameRateWithTargetFrameRate() {
+        let view = PngineAnimationView()
+
+        // Set both properties
+        view.targetFrameRate = 30
+        view.respectAnimationFrameRate = true
+
+        XCTAssertEqual(view.targetFrameRate, 30, "targetFrameRate should be 30")
+        XCTAssertTrue(view.respectAnimationFrameRate, "respectAnimationFrameRate should be true")
+    }
+
+    func testRespectAnimationFrameRateWithAnimation() {
+        let bytecode = BytecodeFixtures.simpleInstanced
+        let view = PngineAnimationView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+        view.load(bytecode: bytecode)
+
+        // Set 30fps with respectAnimationFrameRate
+        view.targetFrameRate = 30
+        view.respectAnimationFrameRate = true
+
+        // Start playing
+        view.play()
+
+        // Properties should persist
+        XCTAssertEqual(view.targetFrameRate, 30)
+        XCTAssertTrue(view.respectAnimationFrameRate)
+
+        view.stop()
+    }
+
+    func testSwiftUIRespectAnimationFrameRateModifier() {
+        let bytecode = Data()
+        let view = PngineView(bytecode: bytecode)
+            .respectAnimationFrameRate(true)
+            .targetFrameRate(30)
+        XCTAssertNotNil(view, "respectAnimationFrameRate modifier should work")
+    }
+
+    func testSwiftUIAllModifiersIncludingFrameRate() {
+        let bytecode = Data()
+        let view = PngineView(bytecode: bytecode)
+            .autoPlay(false)
+            .backgroundBehavior(.pause)
+            .animationSpeed(1.5)
+            .targetFrameRate(30)
+            .respectAnimationFrameRate(true)
+            .configure { _ in }
+        XCTAssertNotNil(view, "All modifiers including respectAnimationFrameRate should chain")
+    }
+
+    func testControlledPngineViewRespectAnimationFrameRateModifier() {
+        let bytecode = BytecodeFixtures.simpleInstanced
+        let view = ControlledPngineView(bytecode: bytecode, isPlaying: .constant(true))
+            .respectAnimationFrameRate(true)
+            .targetFrameRate(30)
+        XCTAssertNotNil(view, "ControlledPngineView should support respectAnimationFrameRate modifier")
+    }
+
+    @available(iOS 15.0, macOS 12.0, *)
+    func testAsyncPngineViewRespectAnimationFrameRateModifier() {
+        let view = AsyncPngineView {
+            return BytecodeFixtures.simpleInstanced
+        } placeholder: {
+            Text("Loading...")
+        }
+        .respectAnimationFrameRate(true)
+        .targetFrameRate(30)
+        XCTAssertNotNil(view, "AsyncPngineView should support respectAnimationFrameRate modifier")
+    }
+
+    func testFrameRateRanges() {
+        let view = PngineAnimationView()
+
+        // Test various frame rate values
+        let frameRates = [0, 24, 30, 60, 120]
+        for rate in frameRates {
+            view.targetFrameRate = rate
+            XCTAssertEqual(view.targetFrameRate, rate, "targetFrameRate should be \(rate)")
+        }
+    }
+
+    func testFrameRateWithPlayPauseCycle() {
+        let bytecode = BytecodeFixtures.simpleInstanced
+        let view = PngineAnimationView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+        view.load(bytecode: bytecode)
+
+        // Set frame rate before playing
+        view.targetFrameRate = 30
+        view.respectAnimationFrameRate = true
+
+        view.play()
+        view.pause()
+
+        // Frame rate settings should persist after pause
+        XCTAssertEqual(view.targetFrameRate, 30)
+        XCTAssertTrue(view.respectAnimationFrameRate)
+
+        view.play()
+        view.stop()
+
+        // Frame rate settings should persist after stop
+        XCTAssertEqual(view.targetFrameRate, 30)
+        XCTAssertTrue(view.respectAnimationFrameRate)
+    }
 }

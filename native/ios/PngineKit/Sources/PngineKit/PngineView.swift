@@ -69,6 +69,7 @@ public struct PngineView: ViewRepresentable {
     private var backgroundBehavior: PngineBackgroundBehavior
     private var animationSpeed: Float
     private var targetFrameRate: Int
+    private var respectAnimationFrameRate: Bool
     private var configurations: [(PngineAnimationView) -> Void]
 
     public init(
@@ -81,6 +82,7 @@ public struct PngineView: ViewRepresentable {
         self.backgroundBehavior = backgroundBehavior
         self.animationSpeed = 1.0
         self.targetFrameRate = 0
+        self.respectAnimationFrameRate = false
         self.configurations = []
     }
 
@@ -116,6 +118,17 @@ public struct PngineView: ViewRepresentable {
         return copy
     }
 
+    /// Enable respecting the animation's inherent frame rate for battery savings.
+    /// When enabled, uses `targetFrameRate` to limit display link updates.
+    /// On ProMotion displays (iOS 15+), uses adaptive frame rate range.
+    ///
+    /// Example: `.respectAnimationFrameRate(true).targetFrameRate(30)` for 30fps animation.
+    public func respectAnimationFrameRate(_ enabled: Bool) -> Self {
+        var copy = self
+        copy.respectAnimationFrameRate = enabled
+        return copy
+    }
+
     /// Configure the underlying PngineAnimationView directly.
     /// Use this for advanced customization not exposed through modifiers.
     ///
@@ -132,6 +145,7 @@ public struct PngineView: ViewRepresentable {
         view.backgroundBehavior = backgroundBehavior
         view.animationSpeed = animationSpeed
         view.targetFrameRate = targetFrameRate
+        view.respectAnimationFrameRate = respectAnimationFrameRate
 
         // Apply custom configurations
         for config in configurations {
@@ -148,6 +162,7 @@ public struct PngineView: ViewRepresentable {
         view.backgroundBehavior = backgroundBehavior
         view.animationSpeed = animationSpeed
         view.targetFrameRate = targetFrameRate
+        view.respectAnimationFrameRate = respectAnimationFrameRate
 
         // Apply custom configurations on update
         for config in configurations {
@@ -199,6 +214,7 @@ public struct AsyncPngineView<Placeholder: View>: View {
     private var backgroundBehavior: PngineBackgroundBehavior
     private var animationSpeed: Float
     private var targetFrameRate: Int
+    private var respectAnimationFrameRate: Bool
     private var configurations: [(PngineAnimationView) -> Void]
 
     @State private var bytecode: Data?
@@ -214,6 +230,7 @@ public struct AsyncPngineView<Placeholder: View>: View {
         self.backgroundBehavior = .pauseAndRestore
         self.animationSpeed = 1.0
         self.targetFrameRate = 0
+        self.respectAnimationFrameRate = false
         self.configurations = []
     }
 
@@ -247,6 +264,13 @@ public struct AsyncPngineView<Placeholder: View>: View {
         return copy
     }
 
+    /// Enable respecting the animation's inherent frame rate for battery savings.
+    public func respectAnimationFrameRate(_ enabled: Bool) -> Self {
+        var copy = self
+        copy.respectAnimationFrameRate = enabled
+        return copy
+    }
+
     /// Configure the underlying PngineAnimationView directly.
     ///
     /// - Warning: Avoid capturing `self` strongly in the closure to prevent retain cycles.
@@ -264,6 +288,7 @@ public struct AsyncPngineView<Placeholder: View>: View {
                 PngineView(bytecode: bytecode, autoPlay: autoPlay, backgroundBehavior: backgroundBehavior)
                     .animationSpeed(animationSpeed)
                     .targetFrameRate(targetFrameRate)
+                    .respectAnimationFrameRate(respectAnimationFrameRate)
                     .configure { view in
                         for config in configurations {
                             config(view)
@@ -323,6 +348,7 @@ public struct ControlledPngineView: ViewRepresentable {
     private var backgroundBehavior: PngineBackgroundBehavior
     private var animationSpeed: Float
     private var targetFrameRate: Int
+    private var respectAnimationFrameRate: Bool
     private var configurations: [(PngineAnimationView) -> Void]
 
     public init(
@@ -335,6 +361,7 @@ public struct ControlledPngineView: ViewRepresentable {
         self.backgroundBehavior = backgroundBehavior
         self.animationSpeed = 1.0
         self.targetFrameRate = 0
+        self.respectAnimationFrameRate = false
         self.configurations = []
     }
 
@@ -361,6 +388,13 @@ public struct ControlledPngineView: ViewRepresentable {
         return copy
     }
 
+    /// Enable respecting the animation's inherent frame rate for battery savings.
+    public func respectAnimationFrameRate(_ enabled: Bool) -> Self {
+        var copy = self
+        copy.respectAnimationFrameRate = enabled
+        return copy
+    }
+
     /// Configure the underlying PngineAnimationView directly.
     ///
     /// - Warning: Avoid capturing `self` strongly in the closure to prevent retain cycles.
@@ -376,6 +410,7 @@ public struct ControlledPngineView: ViewRepresentable {
         view.backgroundBehavior = backgroundBehavior
         view.animationSpeed = animationSpeed
         view.targetFrameRate = targetFrameRate
+        view.respectAnimationFrameRate = respectAnimationFrameRate
 
         for config in configurations {
             config(view)
@@ -388,6 +423,7 @@ public struct ControlledPngineView: ViewRepresentable {
         view.backgroundBehavior = backgroundBehavior
         view.animationSpeed = animationSpeed
         view.targetFrameRate = targetFrameRate
+        view.respectAnimationFrameRate = respectAnimationFrameRate
 
         for config in configurations {
             config(view)
@@ -478,6 +514,19 @@ public class PngineAnimationView: PlatformView {
     /// Target frame rate for the display link. Set to 0 for maximum (default).
     /// Lower values can save battery for simple animations.
     public var targetFrameRate: Int = 0 {
+        didSet {
+            updateDisplayLinkFrameRate()
+        }
+    }
+
+    /// Whether to respect the animation's inherent frame rate.
+    /// When true, the display link will use `targetFrameRate` to limit updates.
+    /// When false (default), the display link runs at maximum device refresh rate.
+    ///
+    /// Setting this to true with an appropriate `targetFrameRate` (e.g., 30) can
+    /// significantly reduce battery usage for simple animations that don't need
+    /// high refresh rates.
+    public var respectAnimationFrameRate: Bool = false {
         didSet {
             updateDisplayLinkFrameRate()
         }
@@ -689,7 +738,41 @@ public class PngineAnimationView: PlatformView {
 
     private func updateDisplayLinkFrameRate() {
         guard let displayLink = displayLink else { return }
-        displayLink.preferredFramesPerSecond = targetFrameRate
+
+        if respectAnimationFrameRate && targetFrameRate > 0 {
+            // Use the specified target frame rate for battery savings
+            #if os(iOS)
+            if #available(iOS 15.0, *) {
+                // ProMotion-aware: set a frame rate range for smoother adaptation
+                // Minimum of 30fps, maximum of target, preferred at target
+                let minRate = Float(min(30, targetFrameRate))
+                let maxRate = Float(targetFrameRate)
+                displayLink.preferredFrameRateRange = CAFrameRateRange(
+                    minimum: minRate,
+                    maximum: maxRate,
+                    preferred: maxRate
+                )
+            } else {
+                displayLink.preferredFramesPerSecond = targetFrameRate
+            }
+            #else
+            displayLink.preferredFramesPerSecond = targetFrameRate
+            #endif
+        } else if targetFrameRate > 0 {
+            // Legacy behavior: just set preferred frames per second
+            displayLink.preferredFramesPerSecond = targetFrameRate
+        } else {
+            // Maximum frame rate (0 = device maximum)
+            #if os(iOS)
+            if #available(iOS 15.0, *) {
+                displayLink.preferredFrameRateRange = .default
+            } else {
+                displayLink.preferredFramesPerSecond = 0
+            }
+            #else
+            displayLink.preferredFramesPerSecond = 0
+            #endif
+        }
     }
 
     /// Pause animation playback.
