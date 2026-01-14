@@ -27,21 +27,59 @@ public typealias ViewRepresentable = NSViewRepresentable
 public typealias PlatformView = NSView
 #endif
 
+// MARK: - Background Behavior
+
+/// Controls animation behavior when the app enters background.
+/// Following Lottie's LottieBackgroundBehavior pattern.
+public enum PngineBackgroundBehavior {
+    /// Stop rendering and reset time to 0.
+    case stop
+
+    /// Pause at the current frame.
+    case pause
+
+    /// Pause at the current frame and automatically resume when foregrounded (default).
+    case pauseAndRestore
+}
+
 // MARK: - SwiftUI View
 
 @available(iOS 14.0, macOS 11.0, *)
 public struct PngineView: ViewRepresentable {
     private let bytecode: Data
-    private let autoPlay: Bool
+    private var autoPlay: Bool
+    private var backgroundBehavior: PngineBackgroundBehavior
 
-    public init(bytecode: Data, autoPlay: Bool = true) {
+    public init(
+        bytecode: Data,
+        autoPlay: Bool = true,
+        backgroundBehavior: PngineBackgroundBehavior = .pauseAndRestore
+    ) {
         self.bytecode = bytecode
         self.autoPlay = autoPlay
+        self.backgroundBehavior = backgroundBehavior
+    }
+
+    // MARK: - Fluent Modifiers
+
+    /// Set whether animation should auto-play.
+    public func autoPlay(_ enabled: Bool) -> Self {
+        var copy = self
+        copy.autoPlay = enabled
+        return copy
+    }
+
+    /// Set background behavior.
+    public func backgroundBehavior(_ behavior: PngineBackgroundBehavior) -> Self {
+        var copy = self
+        copy.backgroundBehavior = behavior
+        return copy
     }
 
     #if os(iOS)
     public func makeUIView(context: Context) -> PngineAnimationView {
         let view = PngineAnimationView()
+        view.backgroundBehavior = backgroundBehavior
         view.load(bytecode: bytecode)
         if autoPlay {
             view.play()
@@ -49,10 +87,13 @@ public struct PngineView: ViewRepresentable {
         return view
     }
 
-    public func updateUIView(_ uiView: PngineAnimationView, context: Context) {}
+    public func updateUIView(_ uiView: PngineAnimationView, context: Context) {
+        uiView.backgroundBehavior = backgroundBehavior
+    }
     #elseif os(macOS)
     public func makeNSView(context: Context) -> PngineAnimationView {
         let view = PngineAnimationView()
+        view.backgroundBehavior = backgroundBehavior
         view.load(bytecode: bytecode)
         if autoPlay {
             view.play()
@@ -60,8 +101,28 @@ public struct PngineView: ViewRepresentable {
         return view
     }
 
-    public func updateNSView(_ nsView: PngineAnimationView, context: Context) {}
+    public func updateNSView(_ nsView: PngineAnimationView, context: Context) {
+        nsView.backgroundBehavior = backgroundBehavior
+    }
     #endif
+}
+
+// MARK: - DisplayLink Proxy (breaks retain cycle)
+
+/// Weak proxy to break the CADisplayLink -> View retain cycle.
+/// CADisplayLink retains its target strongly, so we use this proxy
+/// with a weak reference back to the view.
+@available(iOS 14.0, macOS 11.0, *)
+private class DisplayLinkProxy {
+    weak var target: PngineAnimationView?
+
+    init(_ target: PngineAnimationView) {
+        self.target = target
+    }
+
+    @objc func handleDisplayLink(_ link: CADisplayLink) {
+        target?.render(link)
+    }
 }
 
 // MARK: - UIKit/AppKit View
@@ -72,11 +133,53 @@ public class PngineAnimationView: PlatformView {
     private var metalLayer: CAMetalLayer!
     private var animation: OpaquePointer?
     private var displayLink: CADisplayLink?
+    private var displayLinkProxy: DisplayLinkProxy?
     private var startTime: CFTimeInterval = 0
-    private var isPlaying = false
+    private var pausedTime: CFTimeInterval = 0
+    private var _isPlaying = false
     private var pendingBytecode: Data?
     private var shouldAutoPlay = false
     private var hasLoadedAnimation = false
+
+    // MARK: - Lifecycle State
+
+    /// Controls animation behavior when the app enters background.
+    public var backgroundBehavior: PngineBackgroundBehavior = .pauseAndRestore
+
+    /// Whether animation was playing before entering background.
+    private var wasPlayingBeforeBackground = false
+
+    /// Error rate limiting for render failures
+    private var lastErrorLogTime: CFTimeInterval = 0
+    private var consecutiveErrorCount: Int = 0
+
+    /// Current playback time in seconds.
+    /// - Note: Must be accessed from main thread only.
+    public var currentTime: Float {
+        get {
+            assert(Thread.isMainThread, "currentTime must be accessed on main thread")
+            if _isPlaying {
+                return Float(CACurrentMediaTime() - startTime)
+            } else {
+                return Float(pausedTime - startTime)
+            }
+        }
+        set {
+            assert(Thread.isMainThread, "currentTime must be set on main thread")
+            let now = CACurrentMediaTime()
+            startTime = now - CFTimeInterval(newValue)
+            pausedTime = now
+            // Render the new frame if not playing
+            if !_isPlaying, let anim = animation {
+                _ = pngine_render(anim, newValue)
+            }
+        }
+    }
+
+    /// Whether the animation is currently playing.
+    public var isPlaying: Bool {
+        return _isPlaying
+    }
 
     // MARK: - Initialization
 
@@ -94,7 +197,7 @@ public class PngineAnimationView: PlatformView {
         metalLayer = CAMetalLayer()
         metalLayer.pixelFormat = .bgra8Unorm
         metalLayer.framebufferOnly = true
-        metalLayer.contentsScale = UIScreen.main.scale
+        // Scale will be set properly in updateMetalLayerSize() when we have window context
 
         #if os(iOS)
         layer.addSublayer(metalLayer)
@@ -105,9 +208,9 @@ public class PngineAnimationView: PlatformView {
 
         // Initialize PNGine if needed
         if !pngine_is_initialized() {
-            let result = pngine_init()
-            if result != 0 {
-                NSLog("[PngineKit] Failed to initialize PNGine runtime")
+            let error = pngineInit()
+            if error != .ok {
+                pngineLogger.error("Failed to initialize PNGine runtime: \(error.errorDescription ?? "unknown")")
             }
         }
     }
@@ -127,7 +230,14 @@ public class PngineAnimationView: PlatformView {
     private func updateMetalLayerSize() {
         metalLayer.frame = bounds
 
-        let scale = metalLayer.contentsScale
+        // Get scale from window context (avoids deprecated UIScreen.main)
+        #if os(iOS)
+        let scale = window?.screen.scale ?? UITraitCollection.current.displayScale
+        #elseif os(macOS)
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        #endif
+        metalLayer.contentsScale = scale
+
         let width = UInt32(bounds.width * scale)
         let height = UInt32(bounds.height * scale)
 
@@ -135,7 +245,7 @@ public class PngineAnimationView: PlatformView {
 
         // Load pending bytecode now that we have a valid size
         if let bytecode = pendingBytecode, width > 0, height > 0, !hasLoadedAnimation {
-            NSLog("[PngineKit] Layout complete - loading deferred bytecode, size: \(width)x\(height)")
+            pngineLogger.info("Layout complete - loading deferred bytecode, size: \(width)x\(height)")
             pendingBytecode = nil
             loadBytecodeInternal(bytecode, width: width, height: height)
         }
@@ -153,11 +263,11 @@ public class PngineAnimationView: PlatformView {
         let width = UInt32(bounds.width * scale)
         let height = UInt32(bounds.height * scale)
 
-        NSLog("[PngineKit] load() called - size: \(width)x\(height), bytecode: \(bytecode.count) bytes")
+        pngineLogger.info("load() called - size: \(width)x\(height), bytecode: \(bytecode.count) bytes")
 
         // If view has zero size, defer loading until layout
         guard width > 0, height > 0 else {
-            NSLog("[PngineKit] Deferring load until layout (zero size)")
+            pngineLogger.info("Deferring load until layout (zero size)")
             pendingBytecode = bytecode
             return
         }
@@ -174,7 +284,7 @@ public class PngineAnimationView: PlatformView {
 
         bytecode.withUnsafeBytes { ptr in
             let layerPtr = Unmanaged.passUnretained(metalLayer).toOpaque()
-            NSLog("[PngineKit] Calling pngine_create with layer: \(layerPtr), size: \(width)x\(height)")
+            pngineLogger.info("Calling pngine_create with layer: \(layerPtr), size: \(width)x\(height)")
             animation = pngine_create(
                 ptr.baseAddress?.assumingMemoryBound(to: UInt8.self),
                 ptr.count,
@@ -185,10 +295,10 @@ public class PngineAnimationView: PlatformView {
         }
 
         if animation == nil {
-            let error = pngineLastError() ?? "Unknown error"
-            NSLog("[PngineKit] Failed to create animation: \(error)")
+            let errorMsg = pngineLastError() ?? "Unknown error"
+            pngineLogger.error("Failed to create animation: \(errorMsg)")
         } else {
-            NSLog("[PngineKit] Animation created successfully: \(animation!)")
+            pngineLogger.info("Animation created successfully")
             hasLoadedAnimation = true
 
             // Start playing if we were waiting
@@ -200,79 +310,132 @@ public class PngineAnimationView: PlatformView {
     }
 
     /// Start animation playback.
+    /// - Note: Must be called from main thread.
     public func play() {
-        NSLog("[PngineKit] play() called - animation: \(String(describing: animation)), isPlaying: \(isPlaying)")
+        assert(Thread.isMainThread, "play() must be called on main thread")
+        pngineLogger.info("play() called - animation: \(animation != nil), isPlaying: \(_isPlaying)")
 
         // If animation not loaded yet, defer play until it is
         guard animation != nil else {
-            NSLog("[PngineKit] play() deferred - animation not loaded yet")
+            pngineLogger.info("play() deferred - animation not loaded yet")
             shouldAutoPlay = true
             return
         }
 
-        guard !isPlaying else {
-            NSLog("[PngineKit] play() - already playing")
+        guard !_isPlaying else {
+            pngineLogger.info("play() - already playing")
             return
         }
 
-        isPlaying = true
-        startTime = CACurrentMediaTime()
+        // Resume from paused time if we have one
+        let now = CACurrentMediaTime()
+        if pausedTime > 0 {
+            // Adjust start time to maintain continuity
+            let pausedDuration = pausedTime - startTime
+            startTime = now - pausedDuration
+        } else {
+            startTime = now
+        }
 
-        displayLink = CADisplayLink(target: self, selector: #selector(render(_:)))
+        _isPlaying = true
+        consecutiveErrorCount = 0
+
+        // Use proxy to break retain cycle (CADisplayLink retains target strongly)
+        displayLinkProxy = DisplayLinkProxy(self)
+        displayLink = CADisplayLink(target: displayLinkProxy!, selector: #selector(DisplayLinkProxy.handleDisplayLink(_:)))
         displayLink?.add(to: .main, forMode: .common)
-        NSLog("[PngineKit] Display link started")
+        pngineLogger.info("Display link started")
     }
 
     /// Pause animation playback.
+    /// - Note: Must be called from main thread.
     public func pause() {
-        isPlaying = false
+        assert(Thread.isMainThread, "pause() must be called on main thread")
+        guard _isPlaying else { return }
+        pausedTime = CACurrentMediaTime()
+        _isPlaying = false
         displayLink?.invalidate()
         displayLink = nil
+        displayLinkProxy = nil
     }
 
     /// Stop animation and reset to beginning.
     public func stop() {
         pause()
         startTime = CACurrentMediaTime()
+        pausedTime = 0
 
         // Render at t=0
         if let anim = animation {
-            pngine_render(anim, 0)
+            let error = pngineRender(anim, time: 0)
+            if error != .ok {
+                pngineLogger.error("Render at t=0 failed: \(error.errorDescription ?? "unknown")")
+            }
         }
     }
 
     /// Render a single frame at the specified time.
-    public func draw(at time: Float) {
-        if let anim = animation {
-            pngine_render(anim, time)
+    /// Returns the error if any occurred.
+    @discardableResult
+    public func draw(at time: Float) -> PngineError {
+        guard let anim = animation else {
+            return .invalidArgument
         }
+        return pngineRender(anim, time: time)
     }
 
     // MARK: - Display Link
 
     private var renderCount = 0
 
-    @objc private func render(_ link: CADisplayLink) {
-        guard let anim = animation else { return }
+    /// Called by DisplayLinkProxy - must be fileprivate for proxy access.
+    fileprivate func render(_ link: CADisplayLink) {
+        guard let anim = animation else {
+            // Animation became nil while display link was running
+            pngineLogger.warn("render() called but animation is nil - stopping display link")
+            displayLink?.invalidate()
+            displayLink = nil
+            displayLinkProxy = nil
+            _isPlaying = false
+            return
+        }
 
         let elapsed = Float(link.timestamp - startTime)
 
-        // Log first few renders
+        // Log first few renders for debugging
         if renderCount < 3 {
-            NSLog("[PngineKit] render() #\(renderCount) - time: \(elapsed)")
-
-            // Use debug function to check status
+            pngineLogger.info("render() #\(renderCount) - time: \(elapsed)")
             let status = pngine_debug_frame(anim, elapsed)
-            NSLog("[PngineKit] debug_frame returned: \(status)")
+            pngineLogger.info("debug_frame returned: \(status)")
             renderCount += 1
         } else {
-            pngine_render(anim, elapsed)
+            let error = pngineRender(anim, time: elapsed)
+            if error != .ok {
+                // Rate-limit error logging (once per second)
+                let now = CACurrentMediaTime()
+                if lastErrorLogTime == 0 || now - lastErrorLogTime > 1.0 {
+                    pngineLogger.error("Render failed: \(error.errorDescription ?? "unknown") (count: \(consecutiveErrorCount))")
+                    lastErrorLogTime = now
+                }
+                consecutiveErrorCount += 1
+
+                // Stop animation after too many consecutive failures
+                if consecutiveErrorCount > 180 {  // ~3 seconds at 60fps
+                    pngineLogger.error("Too many consecutive render failures, stopping animation")
+                    pause()
+                }
+            } else {
+                consecutiveErrorCount = 0
+            }
         }
     }
 
     // MARK: - Cleanup
 
     deinit {
+        #if os(iOS)
+        removeNotificationObservers()
+        #endif
         displayLink?.invalidate()
         if let anim = animation {
             pngine_destroy(anim)
@@ -280,7 +443,7 @@ public class PngineAnimationView: PlatformView {
     }
 }
 
-// MARK: - Memory Warning Handler
+// MARK: - Lifecycle & Notification Handling
 
 @available(iOS 14.0, macOS 11.0, *)
 extension PngineAnimationView {
@@ -289,23 +452,79 @@ extension PngineAnimationView {
         super.didMoveToWindow()
 
         if window != nil {
-            NotificationCenter.default.addObserver(
-                self,
-                selector: #selector(handleMemoryWarning),
-                name: UIApplication.didReceiveMemoryWarningNotification,
-                object: nil
-            )
+            setupNotificationObservers()
         } else {
-            NotificationCenter.default.removeObserver(
-                self,
-                name: UIApplication.didReceiveMemoryWarningNotification,
-                object: nil
-            )
+            removeNotificationObservers()
         }
+    }
+
+    private func setupNotificationObservers() {
+        let center = NotificationCenter.default
+
+        // Memory warning
+        center.addObserver(
+            self,
+            selector: #selector(handleMemoryWarning),
+            name: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil
+        )
+
+        // Background/foreground
+        center.addObserver(
+            self,
+            selector: #selector(applicationDidEnterBackground),
+            name: UIApplication.didEnterBackgroundNotification,
+            object: nil
+        )
+
+        center.addObserver(
+            self,
+            selector: #selector(applicationWillEnterForeground),
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
+
+        pngineLogger.info("Notification observers registered")
+    }
+
+    private func removeNotificationObservers() {
+        let center = NotificationCenter.default
+        center.removeObserver(self, name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
+        center.removeObserver(self, name: UIApplication.didEnterBackgroundNotification, object: nil)
+        center.removeObserver(self, name: UIApplication.willEnterForegroundNotification, object: nil)
+        pngineLogger.info("Notification observers removed")
     }
     #endif
 
     @objc private func handleMemoryWarning() {
+        pngineLogger.warn("Memory warning received")
         pngine_memory_warning()
+    }
+
+    @objc private func applicationDidEnterBackground() {
+        wasPlayingBeforeBackground = _isPlaying
+
+        switch backgroundBehavior {
+        case .stop:
+            pngineLogger.info("Background: stopping animation")
+            stop()
+        case .pause:
+            pngineLogger.info("Background: pausing animation")
+            pause()
+        case .pauseAndRestore:
+            pngineLogger.info("Background: pausing animation (will restore)")
+            pause()
+        }
+    }
+
+    @objc private func applicationWillEnterForeground() {
+        guard backgroundBehavior == .pauseAndRestore else { return }
+        guard wasPlayingBeforeBackground else {
+            pngineLogger.info("Foreground: was not playing before background")
+            return
+        }
+
+        pngineLogger.info("Foreground: restoring playback")
+        play()
     }
 }

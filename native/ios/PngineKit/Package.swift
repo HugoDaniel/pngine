@@ -25,5 +25,10 @@ let package = Package(
             // Path to XCFramework built by Zig
             path: "Sources/PngineCore.xcframework"
         ),
+        .testTarget(
+            name: "PngineKitTests",
+            dependencies: ["PngineKit"],
+            path: "Tests/PngineKitTests"
+        ),
     ]
 )
