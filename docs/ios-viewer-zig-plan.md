@@ -1,6 +1,6 @@
 # PNGine iOS Viewer - Pure Zig Architecture
 
-**Status**: ✅ Working (Rotating Cube Renders on iOS Simulator)
+**Status**: ✅ Working (Rotating Cube + Compute Shaders on iOS Simulator)
 **Key Insight**: Reuse existing Zig dispatcher with wgpu-native C API backend
 
 ## Implementation Status
@@ -26,6 +26,10 @@
 - ✅ wgpu-native v27 callback API (adapter/device request with polling)
 - ✅ Thread-safe initialization (threadlocal globals)
 - ✅ Memory management (texture view lifecycle, depth view cleanup)
+- ✅ Compute pipelines (createComputePipeline, beginComputePass, dispatch)
+- ✅ Compute-initialized particle rendering (64 particles spiral via compute init)
+- ✅ Explicit bind group layouts (createBindGroupLayout with binary descriptor parsing)
+- ✅ Explicit pipeline layouts (createPipelineLayout with bind group layout references)
 
 ## Build Requirements
 
@@ -45,16 +49,22 @@
 
 2. **WgpuNativeGPU Implementation**: ✅ Core features working
    - `createRenderPipeline` - full vertex buffer layout support
-   - `createBindGroup` - buffer, texture, sampler bindings
+   - `createBindGroup` - buffer, texture, sampler bindings (supports explicit layouts)
+   - `createBindGroupLayout` - parses binary descriptor format
+   - `createPipelineLayout` - references bind group layouts
    - `createTexture` - depth and render textures
    - `beginRenderPass` - color and depth attachments
    - All basic render pass operations
 
 ### Remaining Work
 
-1. **Compute pipelines**: `createComputePipeline`, `beginComputePass`, `dispatch` - stubs only
-2. **Advanced features**: `createBindGroupLayout`, `createPipelineLayout` - stubs only
-3. **iOS device testing**: Only tested on simulator so far
+1. **iOS device testing**: Only tested on simulator so far
+2. **Advanced features** (stubs, not needed for current use cases):
+   - `createQuerySet` - timestamp/occlusion queries for performance measurement
+   - `createImageBitmap` - image loading (JPEG/PNG decode)
+   - `createRenderBundle` - pre-recorded command bundles
+   - `copyExternalImageToTexture` - video frame uploads
+   - `writeTimestamp` - performance timing
 
 ## Architecture
 
@@ -190,6 +200,8 @@ Implemented in `src/executor/wgpu_native_gpu.zig`:
 - `beginRenderPass()` - color and depth attachments, load/store ops
 - `setPipeline()`, `setBindGroup()`, `setVertexBuffer()`, `draw()`, `endPass()`
 - `submit()` - command buffer submission with surface present
+- `createComputePipeline()` - compute shader compilation
+- `beginComputePass()`, `dispatch()`, `endComputePass()` - compute execution
 
 ### 4. ✅ XCFramework and Swift Package
 
@@ -199,20 +211,11 @@ Implemented in `src/executor/wgpu_native_gpu.zig`:
 
 ## Future Work
 
-### 1. Compute Pipeline Support
-
-```zig
-// Currently stubs in wgpu_native_gpu.zig:
-pub fn createComputePipeline(...) !void { /* TODO */ }
-pub fn beginComputePass(...) !void { /* TODO */ }
-pub fn dispatch(...) !void { /* TODO */ }
-```
-
-### 2. iOS Device Testing
+### 1. iOS Device Testing
 
 Only tested on iOS Simulator. Need to verify on physical iOS device.
 
-### 3. Performance Optimization
+### 2. Performance Optimization
 
 - Profile frame times
 - Consider buffer pooling for uniform updates
@@ -274,13 +277,12 @@ view.play()
 
 | Metric | Target | Current |
 |--------|--------|---------|
-| Binary size (iOS sim) | < 5 MB | ~33 MB (debug, unstripped) |
 | Context init | < 200 ms | ✅ ~100 ms |
 | Animation create | < 10 ms | ✅ ~5 ms |
 | Frame render | < 2 ms | ✅ ~16 ms (60fps) |
 | Memory per animation | < 1 KB | ✅ |
 
-Note: Binary size will reduce significantly with release build and stripping.
+**Binary size** (~33 MB debug, unstripped) is acceptable. Release builds with stripping will reduce this, but it's not a priority target.
 
 ## Related Files
 

@@ -19,6 +19,80 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
+// Diagnostic counters for debugging (returned via debug functions)
+var debug_compute_pipelines_created: u32 = 0;
+var debug_bind_groups_created: u32 = 0;
+var debug_compute_passes_begun: u32 = 0;
+var debug_dispatches: u32 = 0;
+var debug_render_passes_begun: u32 = 0;
+var debug_draws: u32 = 0;
+// Buffer ID tracking for compute vs render debugging
+var debug_last_vertex_buffer_id: u16 = 0xFFFF;
+var debug_last_storage_bind_buffer_id: u16 = 0xFFFF;
+// First-frame tracking (only set on first occurrence)
+var debug_first_vertex_buffer_id: u16 = 0xFFFF;
+var debug_first_storage_bind_buffer_id: u16 = 0xFFFF;
+// Buffer 0 size tracking
+var debug_buffer_0_size: u32 = 0;
+// Dispatch X tracking (workgroup count)
+var debug_dispatch_x: u32 = 0;
+// Draw instance count tracking
+var debug_instance_count: u32 = 0;
+var debug_vertex_count: u32 = 0;
+
+/// Get diagnostic counters packed into a u32
+/// Format: [compute_passes:8][compute_pipelines:8][bindgroups:8][dispatches:8]
+pub fn getDebugCounters() u32 {
+    return (@as(u32, @intCast(debug_compute_passes_begun & 0xFF)) << 24) |
+        (@as(u32, @intCast(debug_compute_pipelines_created & 0xFF)) << 16) |
+        (@as(u32, @intCast(debug_bind_groups_created & 0xFF)) << 8) |
+        @as(u32, @intCast(debug_dispatches & 0xFF));
+}
+
+/// Get render counters packed into a u32
+/// Format: [render_passes:16][draws:16]
+pub fn getRenderCounters() u32 {
+    return (@as(u32, @intCast(debug_render_passes_begun & 0xFFFF)) << 16) |
+        @as(u32, @intCast(debug_draws & 0xFFFF));
+}
+
+/// Get buffer IDs for compute/render debugging
+/// Format: [last_vertex_buffer_id:16][last_storage_bind_buffer_id:16]
+pub fn getBufferIds() u32 {
+    return (@as(u32, debug_last_vertex_buffer_id) << 16) |
+        @as(u32, debug_last_storage_bind_buffer_id);
+}
+
+/// Get first-frame buffer IDs (only set once)
+/// Format: [first_vertex_buffer_id:16][first_storage_bind_buffer_id:16]
+pub fn getFirstBufferIds() u32 {
+    return (@as(u32, debug_first_vertex_buffer_id) << 16) |
+        @as(u32, debug_first_storage_bind_buffer_id);
+}
+
+/// Get buffer 0 size
+pub fn getBuffer0Size() u32 {
+    return debug_buffer_0_size;
+}
+
+/// Get dispatch X (workgroup count)
+pub fn getDispatchX() u32 {
+    return debug_dispatch_x;
+}
+
+/// Get draw info packed into a u32
+/// Format: [vertex_count:16][instance_count:16]
+pub fn getDrawInfo() u32 {
+    return (@as(u32, @intCast(debug_vertex_count & 0xFFFF)) << 16) |
+        @as(u32, @intCast(debug_instance_count & 0xFFFF));
+}
+
+fn nativeLog(comptime fmt: []const u8, args: anytype) void {
+    // Logging disabled on iOS - use debug counters instead
+    _ = fmt;
+    _ = args;
+}
+
 const wgpu = @import("../gpu/wgpu_c.zig");
 const c = wgpu.c;
 
@@ -280,6 +354,16 @@ pub const WgpuNativeGPU = struct {
         _ = allocator;
         assert(buffer_id < MAX_BUFFERS);
 
+        // Skip if buffer already exists (resources are created once, not per-frame)
+        if (self.buffers[buffer_id] != null) {
+            return;
+        }
+
+        // Track buffer 0 size for debugging
+        if (buffer_id == 0) {
+            debug_buffer_0_size = size;
+        }
+
         const descriptor = c.WGPUBufferDescriptor{
             .nextInChain = null,
             .label = .{ .data = null, .length = 0 },
@@ -288,13 +372,25 @@ pub const WgpuNativeGPU = struct {
             .mappedAtCreation = @intFromBool(false),
         };
 
-        self.buffers[buffer_id] = wgpu.deviceCreateBuffer(self.ctx.device, &descriptor);
+        const buffer = wgpu.deviceCreateBuffer(self.ctx.device, &descriptor);
+        nativeLog("createBuffer: id={}, size={}, usage=0x{x}, result={}\n", .{
+            buffer_id,
+            size,
+            usage,
+            buffer != null,
+        });
+        self.buffers[buffer_id] = buffer;
     }
 
     pub fn createTexture(self: *Self, allocator: Allocator, texture_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
         assert(texture_id < MAX_TEXTURES);
         assert(self.module != null);
+
+        // Skip if texture already exists
+        if (self.textures[texture_id] != null) {
+            return;
+        }
 
         const module = self.module.?;
         const data = module.data.get(DataId.fromInt(descriptor_data_id));
@@ -399,6 +495,11 @@ pub const WgpuNativeGPU = struct {
         _ = descriptor_data_id;
         assert(sampler_id < MAX_SAMPLERS);
 
+        // Skip if sampler already exists
+        if (self.samplers[sampler_id] != null) {
+            return;
+        }
+
         // Default sampler
         const descriptor = c.WGPUSamplerDescriptor{
             .nextInChain = null,
@@ -421,6 +522,11 @@ pub const WgpuNativeGPU = struct {
     pub fn createShaderModule(self: *Self, allocator: Allocator, shader_id: u16, code_data_id: u16) !void {
         assert(shader_id < MAX_SHADERS);
         assert(self.module != null);
+
+        // Skip if shader already exists
+        if (self.shaders[shader_id] != null) {
+            return;
+        }
 
         const module = self.module.?;
 
@@ -449,6 +555,11 @@ pub const WgpuNativeGPU = struct {
         };
 
         const shader = wgpu.deviceCreateShaderModule(self.ctx.device, &descriptor);
+        nativeLog("createShaderModule: id={}, code_len={}, result={}\n", .{
+            shader_id,
+            code.len,
+            shader != null,
+        });
         if (shader == null) {
             return error.ShaderCompilationFailed;
         }
@@ -524,6 +635,11 @@ pub const WgpuNativeGPU = struct {
         assert(pipeline_id < MAX_RENDER_PIPELINES);
         assert(self.module != null);
 
+        // Skip if pipeline already exists
+        if (self.render_pipelines[pipeline_id] != null) {
+            return;
+        }
+
         const module = self.module.?;
         const desc_data = module.data.get(DataId.fromInt(descriptor_data_id));
 
@@ -570,9 +686,20 @@ pub const WgpuNativeGPU = struct {
                     }
                 }
 
+                // Parse stepMode from JSON, default to vertex
+                const step_mode: c_uint = blk: {
+                    if (buf_obj.get("stepMode")) |step_mode_val| {
+                        const step_mode_str = step_mode_val.string;
+                        if (std.mem.eql(u8, step_mode_str, "instance")) {
+                            break :blk c.WGPUVertexStepMode_Instance;
+                        }
+                    }
+                    break :blk c.WGPUVertexStepMode_Vertex;
+                };
+
                 buffer_layouts[bi] = .{
                     .arrayStride = @intCast(stride),
-                    .stepMode = c.WGPUVertexStepMode_Vertex,
+                    .stepMode = step_mode,
                     .attributeCount = attr_count,
                     .attributes = @ptrCast(&attributes[bi]),
                 };
@@ -742,17 +869,72 @@ pub const WgpuNativeGPU = struct {
     }
 
     pub fn createComputePipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
-        _ = self;
-        _ = allocator;
-        _ = descriptor_data_id;
         assert(pipeline_id < MAX_COMPUTE_PIPELINES);
+        assert(self.module != null);
 
-        // TODO: Parse descriptor from data section
+        // Skip if pipeline already exists
+        if (self.compute_pipelines[pipeline_id] != null) {
+            return;
+        }
+
+        const module = self.module.?;
+        const desc_data = module.data.get(DataId.fromInt(descriptor_data_id));
+
+        // Parse JSON descriptor: {"compute":{"shader":N,"entryPoint":"..."}}
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, desc_data, .{}) catch {
+            return error.InvalidResourceId;
+        };
+        defer parsed.deinit();
+
+        const root = parsed.value.object;
+
+        // Get compute stage info
+        const compute_obj = root.get("compute").?.object;
+        const compute_shader_id: u16 = @intCast(compute_obj.get("shader").?.integer);
+        const compute_entry = compute_obj.get("entryPoint").?.string;
+        const compute_shader = self.shaders[compute_shader_id] orelse return error.InvalidResourceId;
+
+        // Create null-terminated entry point string
+        const entry_z = try allocator.allocSentinel(u8, compute_entry.len, 0);
+        defer allocator.free(entry_z);
+        @memcpy(entry_z, compute_entry);
+
+        // Create compute pipeline descriptor
+        var descriptor = std.mem.zeroes(c.WGPUComputePipelineDescriptor);
+        descriptor.label = .{ .data = null, .length = 0 };
+        descriptor.layout = null; // Auto layout
+        descriptor.compute = .{
+            .nextInChain = null,
+            .module = compute_shader,
+            .entryPoint = .{ .data = entry_z.ptr, .length = entry_z.len },
+            .constantCount = 0,
+            .constants = null,
+        };
+
+        const pipeline = wgpu.deviceCreateComputePipeline(self.ctx.device, &descriptor);
+        if (pipeline != null) {
+            debug_compute_pipelines_created += 1;
+        }
+        nativeLog("createComputePipeline: id={}, shader_id={}, entry={s}, result={}\n", .{
+            pipeline_id,
+            compute_shader_id,
+            compute_entry,
+            pipeline != null,
+        });
+        if (pipeline == null) {
+            return error.PipelineCreationFailed;
+        }
+        self.compute_pipelines[pipeline_id] = pipeline;
     }
 
     pub fn createBindGroup(self: *Self, allocator: Allocator, group_id: u16, layout_id: u16, entry_data_id: u16) !void {
         assert(group_id < MAX_BIND_GROUPS);
         assert(self.module != null);
+
+        // Skip if bind group already exists
+        if (self.bind_groups[group_id] != null) {
+            return;
+        }
 
         const module = self.module.?;
         const data = module.data.get(DataId.fromInt(entry_data_id));
@@ -794,9 +976,24 @@ pub const WgpuNativeGPU = struct {
             }
         }
 
-        // Get layout from pipeline
-        const pipeline = self.render_pipelines[layout_id] orelse return;
-        const layout = wgpu.renderPipelineGetBindGroupLayout(pipeline, group_index);
+        // Get layout: check explicit bind group layout first, then auto-layout from pipeline
+        const layout: c.WGPUBindGroupLayout = blk: {
+            // Try explicit bind group layout first
+            if (layout_id < MAX_BIND_GROUP_LAYOUTS) {
+                if (self.bind_group_layouts[layout_id]) |explicit_layout| {
+                    break :blk explicit_layout;
+                }
+            }
+            // Try auto-layout from render pipeline
+            if (self.render_pipelines[layout_id]) |pipeline| {
+                break :blk wgpu.renderPipelineGetBindGroupLayout(pipeline, group_index);
+            }
+            // Try auto-layout from compute pipeline
+            if (self.compute_pipelines[layout_id]) |pipeline| {
+                break :blk wgpu.computePipelineGetBindGroupLayout(pipeline, group_index);
+            }
+            break :blk null;
+        };
         if (layout == null) return;
 
         // Second pass: parse and create entries
@@ -844,6 +1041,11 @@ pub const WgpuNativeGPU = struct {
                                 entry.buffer = buffer;
                                 entry.offset = buf_offset;
                                 entry.size = if (buf_size == 0) wgpu.bufferGetSize(buffer) else buf_size;
+                                // Track storage buffer ID for debugging
+                                debug_last_storage_bind_buffer_id = rid;
+                                if (debug_first_storage_bind_buffer_id == 0xFFFF) {
+                                    debug_first_storage_bind_buffer_id = rid;
+                                }
                             }
                         }
                     } else if (rt == 1) {
@@ -890,26 +1092,246 @@ pub const WgpuNativeGPU = struct {
         desc.entryCount = entry_count;
         desc.entries = &entries;
 
-        self.bind_groups[group_id] = wgpu.deviceCreateBindGroup(self.ctx.device, &desc);
+        const bind_group = wgpu.deviceCreateBindGroup(self.ctx.device, &desc);
+        if (bind_group != null) {
+            debug_bind_groups_created += 1;
+        }
+        self.bind_groups[group_id] = bind_group;
+        nativeLog("createBindGroup: id={}, layout_id={}, entries={}, result={}\n", .{
+            group_id,
+            layout_id,
+            entry_count,
+            bind_group != null,
+        });
         _ = allocator; // Interface requirement - native backend doesn't need allocator
     }
 
     pub fn createBindGroupLayout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
-        _ = self;
         _ = allocator;
-        _ = descriptor_data_id;
         assert(layout_id < MAX_BIND_GROUP_LAYOUTS);
+        assert(self.module != null);
 
-        // TODO: Parse descriptor from data section
+        // Skip if layout already exists
+        if (self.bind_group_layouts[layout_id] != null) {
+            return;
+        }
+
+        const module = self.module.?;
+        const data = module.data.get(DataId.fromInt(descriptor_data_id));
+
+        // Parse binary descriptor format:
+        // [type_tag:u8][field_count:u8][entries_field_id:u8][array_type:u8][entry_count:u8][entries...]
+        if (data.len < 5) return;
+
+        // Skip type_tag (0x04) and field_count
+        var off: usize = 2;
+
+        // Check for entries field (field_id=0x01, type=0x03 array)
+        if (data[off] != 0x01 or data[off + 1] != 0x03) return;
+        off += 2;
+
+        const entry_count = data[off];
+        off += 1;
+
+        if (entry_count == 0 or entry_count > 16) return;
+
+        // Parse entries into C struct array
+        var entries: [16]c.WGPUBindGroupLayoutEntry = undefined;
+        var parsed_count: usize = 0;
+
+        for (0..entry_count) |i| {
+            if (off + 3 > data.len) break;
+
+            const binding = data[off];
+            const visibility = data[off + 1];
+            const resource_type = data[off + 2];
+            off += 3;
+
+            // Initialize entry with all binding types as "not used"
+            var entry = std.mem.zeroes(c.WGPUBindGroupLayoutEntry);
+            entry.binding = binding;
+            entry.visibility = visibility;
+            entry.buffer.type = c.WGPUBufferBindingType_BindingNotUsed;
+            entry.sampler.type = c.WGPUSamplerBindingType_BindingNotUsed;
+            entry.texture.sampleType = c.WGPUTextureSampleType_BindingNotUsed;
+            entry.storageTexture.access = c.WGPUStorageTextureAccess_BindingNotUsed;
+
+            switch (resource_type) {
+                0x00 => {
+                    // Buffer binding: [type:u8][hasDynamicOffset:u8][minBindingSize:u32]
+                    if (off + 6 > data.len) break;
+                    const buf_type = data[off];
+                    const has_dynamic_offset = data[off + 1];
+                    const min_binding_size = std.mem.readInt(u32, data[off + 2 ..][0..4], .little);
+                    off += 6;
+
+                    entry.buffer.type = switch (buf_type) {
+                        0 => c.WGPUBufferBindingType_Uniform,
+                        1 => c.WGPUBufferBindingType_Storage,
+                        2 => c.WGPUBufferBindingType_ReadOnlyStorage,
+                        else => c.WGPUBufferBindingType_Uniform,
+                    };
+                    entry.buffer.hasDynamicOffset = if (has_dynamic_offset != 0) 1 else 0;
+                    entry.buffer.minBindingSize = min_binding_size;
+                },
+                0x01 => {
+                    // Sampler binding: [type:u8]
+                    if (off + 1 > data.len) break;
+                    const samp_type = data[off];
+                    off += 1;
+
+                    entry.sampler.type = switch (samp_type) {
+                        0 => c.WGPUSamplerBindingType_Filtering,
+                        1 => c.WGPUSamplerBindingType_NonFiltering,
+                        2 => c.WGPUSamplerBindingType_Comparison,
+                        else => c.WGPUSamplerBindingType_Filtering,
+                    };
+                },
+                0x02 => {
+                    // Texture binding: [sampleType:u8][viewDimension:u8][multisampled:u8]
+                    if (off + 3 > data.len) break;
+                    const sample_type = data[off];
+                    const view_dim = data[off + 1];
+                    const multisampled = data[off + 2];
+                    off += 3;
+
+                    entry.texture.sampleType = switch (sample_type) {
+                        0 => c.WGPUTextureSampleType_Float,
+                        1 => c.WGPUTextureSampleType_UnfilterableFloat,
+                        2 => c.WGPUTextureSampleType_Depth,
+                        3 => c.WGPUTextureSampleType_Sint,
+                        4 => c.WGPUTextureSampleType_Uint,
+                        else => c.WGPUTextureSampleType_Float,
+                    };
+                    entry.texture.viewDimension = mapViewDimension(view_dim);
+                    entry.texture.multisampled = if (multisampled != 0) 1 else 0;
+                },
+                0x03 => {
+                    // Storage texture binding: [format:u8][access:u8][viewDimension:u8]
+                    if (off + 3 > data.len) break;
+                    const tex_format = data[off];
+                    const access = data[off + 1];
+                    const view_dim = data[off + 2];
+                    off += 3;
+
+                    entry.storageTexture.format = mapTextureFormat(tex_format);
+                    entry.storageTexture.access = switch (access) {
+                        0 => c.WGPUStorageTextureAccess_WriteOnly,
+                        1 => c.WGPUStorageTextureAccess_ReadOnly,
+                        2 => c.WGPUStorageTextureAccess_ReadWrite,
+                        else => c.WGPUStorageTextureAccess_WriteOnly,
+                    };
+                    entry.storageTexture.viewDimension = mapViewDimension(view_dim);
+                },
+                0x04 => {
+                    // External texture: no extra data
+                    // Note: wgpu-native doesn't have WGPUExternalTextureBindingLayout
+                    // External textures are WebGPU-only, skip for native
+                },
+                else => {},
+            }
+
+            entries[i] = entry;
+            parsed_count += 1;
+        }
+
+        if (parsed_count == 0) return;
+
+        // Create bind group layout
+        var desc = std.mem.zeroes(c.WGPUBindGroupLayoutDescriptor);
+        desc.entryCount = parsed_count;
+        desc.entries = &entries;
+
+        const layout = wgpu.deviceCreateBindGroupLayout(self.ctx.device, &desc);
+        self.bind_group_layouts[layout_id] = layout;
+
+        nativeLog("createBindGroupLayout: id={}, entries={}, result={}\n", .{
+            layout_id,
+            parsed_count,
+            layout != null,
+        });
+    }
+
+    /// Map encoded view dimension to wgpu constant
+    fn mapViewDimension(dim: u8) c_uint {
+        return switch (dim) {
+            0 => c.WGPUTextureViewDimension_1D,
+            1 => c.WGPUTextureViewDimension_2D,
+            2 => c.WGPUTextureViewDimension_2DArray,
+            3 => c.WGPUTextureViewDimension_Cube,
+            4 => c.WGPUTextureViewDimension_CubeArray,
+            5 => c.WGPUTextureViewDimension_3D,
+            else => c.WGPUTextureViewDimension_2D,
+        };
+    }
+
+    /// Map encoded texture format to wgpu constant
+    fn mapTextureFormat(fmt: u8) c_uint {
+        return switch (fmt) {
+            0x00 => c.WGPUTextureFormat_RGBA8Unorm,
+            0x01 => c.WGPUTextureFormat_RGBA8Snorm,
+            0x02 => c.WGPUTextureFormat_RGBA8Uint,
+            0x03 => c.WGPUTextureFormat_RGBA8Sint,
+            0x04 => c.WGPUTextureFormat_RGBA16Uint,
+            0x05 => c.WGPUTextureFormat_RGBA16Sint,
+            0x06 => c.WGPUTextureFormat_RGBA16Float,
+            0x07 => c.WGPUTextureFormat_RGBA32Uint,
+            0x08 => c.WGPUTextureFormat_RGBA32Sint,
+            0x09 => c.WGPUTextureFormat_RGBA32Float,
+            0x0A => c.WGPUTextureFormat_BGRA8Unorm,
+            0x0B => c.WGPUTextureFormat_R32Float,
+            0x0C => c.WGPUTextureFormat_RG32Float,
+            else => c.WGPUTextureFormat_RGBA8Unorm,
+        };
     }
 
     pub fn createPipelineLayout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
-        _ = self;
         _ = allocator;
-        _ = descriptor_data_id;
         assert(layout_id < MAX_PIPELINE_LAYOUTS);
+        assert(self.module != null);
 
-        // TODO: Parse descriptor from data section
+        // Skip if layout already exists
+        if (self.pipeline_layouts[layout_id] != null) {
+            return;
+        }
+
+        const module = self.module.?;
+        const data = module.data.get(DataId.fromInt(descriptor_data_id));
+
+        // Parse descriptor format: [count:u8][layout_id:u16]...
+        if (data.len < 1) return;
+
+        const bgl_count = data[0];
+        if (bgl_count == 0 or bgl_count > 8) return; // WebGPU limit is typically 4, be generous
+
+        // Verify we have enough data for all layout IDs
+        const expected_len = 1 + @as(usize, bgl_count) * 2;
+        if (data.len < expected_len) return;
+
+        // Collect bind group layout handles
+        var layouts: [8]c.WGPUBindGroupLayout = undefined;
+        var valid_count: usize = 0;
+
+        for (0..bgl_count) |i| {
+            const off = 1 + i * 2;
+            const bgl_id = @as(u16, data[off]) | (@as(u16, data[off + 1]) << 8);
+
+            if (bgl_id >= MAX_BIND_GROUP_LAYOUTS) continue;
+
+            const bgl = self.bind_group_layouts[bgl_id] orelse continue;
+            layouts[valid_count] = bgl;
+            valid_count += 1;
+        }
+
+        if (valid_count == 0) return;
+
+        // Create pipeline layout
+        var desc = std.mem.zeroes(c.WGPUPipelineLayoutDescriptor);
+        desc.bindGroupLayoutCount = valid_count;
+        desc.bindGroupLayouts = &layouts;
+
+        const layout = wgpu.deviceCreatePipelineLayout(self.ctx.device, &desc);
+        self.pipeline_layouts[layout_id] = layout;
     }
 
     pub fn createQuerySet(self: *Self, allocator: Allocator, query_set_id: u16, descriptor_data_id: u16) !void {
@@ -998,8 +1420,10 @@ pub const WgpuNativeGPU = struct {
 
         const valid_view = view orelse return error.SurfaceTextureUnavailable;
 
-        // Create command encoder
-        self.encoder = wgpu.deviceCreateCommandEncoder(self.ctx.device, null);
+        // Reuse existing encoder if one exists, otherwise create new
+        if (self.encoder == null) {
+            self.encoder = wgpu.deviceCreateCommandEncoder(self.ctx.device, null);
+        }
         const encoder = self.encoder orelse return error.SurfaceTextureUnavailable;
 
         // Map bytecode load/store ops to wgpu-native values
@@ -1061,13 +1485,24 @@ pub const WgpuNativeGPU = struct {
         render_pass_desc.depthStencilAttachment = if (has_depth) &depth_attachment else null;
 
         self.render_pass = wgpu.commandEncoderBeginRenderPass(encoder, &render_pass_desc);
+        if (self.render_pass != null) {
+            debug_render_passes_begun += 1;
+        }
     }
 
     pub fn beginComputePass(self: *Self, allocator: Allocator) !void {
         _ = allocator;
 
-        self.encoder = wgpu.deviceCreateCommandEncoder(self.ctx.device, null);
+        // Reuse existing encoder if one exists, otherwise create new
+        const reusing = self.encoder != null;
+        if (self.encoder == null) {
+            self.encoder = wgpu.deviceCreateCommandEncoder(self.ctx.device, null);
+        }
         self.compute_pass = wgpu.commandEncoderBeginComputePass(self.encoder.?, null);
+        if (self.compute_pass != null) {
+            debug_compute_passes_begun += 1;
+        }
+        nativeLog("[NATIVE] beginComputePass: reusing={}, pass_valid={}\n", .{ reusing, self.compute_pass != null });
     }
 
     pub fn setPipeline(self: *Self, allocator: Allocator, pipeline_id: u16) !void {
@@ -1078,6 +1513,8 @@ pub const WgpuNativeGPU = struct {
                 wgpu.renderPassEncoderSetPipeline(pass, pipeline);
             }
         } else if (self.compute_pass) |pass| {
+            const has_pipeline = self.compute_pipelines[pipeline_id] != null;
+            nativeLog("setPipeline(compute): id={}, found={}, pass_valid={}\n", .{ pipeline_id, has_pipeline, pass != null });
             if (self.compute_pipelines[pipeline_id]) |pipeline| {
                 wgpu.computePassEncoderSetPipeline(pass, pipeline);
             }
@@ -1086,6 +1523,12 @@ pub const WgpuNativeGPU = struct {
 
     pub fn setBindGroup(self: *Self, allocator: Allocator, slot: u8, group_id: u16) !void {
         _ = allocator;
+
+        const has_group = self.bind_groups[group_id] != null;
+        const in_compute = self.compute_pass != null;
+        if (in_compute) {
+            nativeLog("setBindGroup(compute): slot={}, group_id={}, found={}\n", .{ slot, group_id, has_group });
+        }
 
         if (self.bind_groups[group_id]) |group| {
             if (self.render_pass) |pass| {
@@ -1098,6 +1541,12 @@ pub const WgpuNativeGPU = struct {
 
     pub fn setVertexBuffer(self: *Self, allocator: Allocator, slot: u8, buffer_id: u16) !void {
         _ = allocator;
+
+        // Track buffer ID for debugging
+        debug_last_vertex_buffer_id = buffer_id;
+        if (debug_first_vertex_buffer_id == 0xFFFF) {
+            debug_first_vertex_buffer_id = buffer_id;
+        }
 
         if (self.render_pass) |pass| {
             if (self.buffers[buffer_id]) |buffer| {
@@ -1126,6 +1575,9 @@ pub const WgpuNativeGPU = struct {
         _ = allocator;
 
         if (self.render_pass) |pass| {
+            debug_draws += 1;
+            debug_vertex_count = vertex_count;
+            debug_instance_count = instance_count;
             wgpu.renderPassEncoderDraw(pass, vertex_count, instance_count, first_vertex, first_instance);
         }
     }
@@ -1141,7 +1593,12 @@ pub const WgpuNativeGPU = struct {
     pub fn dispatch(self: *Self, allocator: Allocator, x: u32, y: u32, z: u32) !void {
         _ = allocator;
 
+        const has_pass = self.compute_pass != null;
+        nativeLog("dispatch: x={}, y={}, z={}, has_pass={}\n", .{ x, y, z, has_pass });
+
         if (self.compute_pass) |pass| {
+            debug_dispatches += 1;
+            debug_dispatch_x = x;
             wgpu.computePassEncoderDispatchWorkgroups(pass, x, y, z);
         }
     }
@@ -1155,6 +1612,7 @@ pub const WgpuNativeGPU = struct {
             self.render_pass = null;
         }
         if (self.compute_pass) |pass| {
+            nativeLog("endPass(compute): ending compute pass\n", .{});
             wgpu.computePassEncoderEnd(pass);
             wgpu.computePassEncoderRelease(pass);
             self.compute_pass = null;
