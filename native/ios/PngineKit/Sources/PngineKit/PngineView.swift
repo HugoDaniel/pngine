@@ -513,8 +513,11 @@ public class PngineAnimationView: PlatformView {
 
     /// Target frame rate for the display link. Set to 0 for maximum (default).
     /// Lower values can save battery for simple animations.
+    /// Negative values are clamped to 0.
     public var targetFrameRate: Int = 0 {
         didSet {
+            // Clamp negative values to 0 (maximum frame rate)
+            if targetFrameRate < 0 { targetFrameRate = 0 }
             updateDisplayLinkFrameRate()
         }
     }
@@ -744,7 +747,8 @@ public class PngineAnimationView: PlatformView {
             #if os(iOS)
             if #available(iOS 15.0, *) {
                 // ProMotion-aware: set a frame rate range for smoother adaptation
-                // Minimum of 30fps, maximum of target, preferred at target
+                // minRate = min(30, target) to allow system flexibility
+                // maxRate = target, preferred = target for consistent behavior
                 let minRate = Float(min(30, targetFrameRate))
                 let maxRate = Float(targetFrameRate)
                 displayLink.preferredFrameRateRange = CAFrameRateRange(

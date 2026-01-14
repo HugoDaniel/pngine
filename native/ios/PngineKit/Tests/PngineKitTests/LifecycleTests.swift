@@ -810,4 +810,45 @@ final class LifecycleTests: XCTestCase {
         view.respectAnimationFrameRate = true
         XCTAssertTrue(view.respectAnimationFrameRate)
     }
+
+    func testNegativeFrameRateValuesClamped() {
+        let view = PngineAnimationView()
+
+        // Negative values should be clamped to 0 (max frame rate)
+        view.targetFrameRate = -1
+        XCTAssertEqual(view.targetFrameRate, 0, "Negative frame rate should be clamped to 0")
+
+        view.targetFrameRate = -100
+        XCTAssertEqual(view.targetFrameRate, 0, "Large negative frame rate should be clamped to 0")
+
+        view.targetFrameRate = -999999
+        XCTAssertEqual(view.targetFrameRate, 0, "Very large negative frame rate should be clamped to 0")
+
+        // Verify positive values still work after negative clamping
+        view.targetFrameRate = 30
+        XCTAssertEqual(view.targetFrameRate, 30, "Positive frame rate should work after negative clamping")
+    }
+
+    func testNegativeFrameRateWithRespectAnimationFrameRate() {
+        let bytecode = BytecodeFixtures.simpleInstanced
+        let view = PngineAnimationView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+        view.load(bytecode: bytecode)
+
+        // Set respectAnimationFrameRate first, then negative frame rate
+        view.respectAnimationFrameRate = true
+        view.targetFrameRate = -50
+
+        // Should be clamped and not crash when playing
+        XCTAssertEqual(view.targetFrameRate, 0)
+        XCTAssertTrue(view.respectAnimationFrameRate)
+
+        view.play()
+        view.pause()
+
+        // Settings should persist
+        XCTAssertEqual(view.targetFrameRate, 0)
+        XCTAssertTrue(view.respectAnimationFrameRate)
+
+        view.stop()
+    }
 }
