@@ -1,16 +1,34 @@
 /**
  * PngineView - SwiftUI wrapper for PNGine animations
  *
- * Usage:
+ * Basic Usage:
  * ```swift
  * import PngineKit
  *
  * struct ContentView: View {
  *     var body: some View {
  *         PngineView(bytecode: myBytecodeData)
+ *             .animationSpeed(1.5)
+ *             .backgroundBehavior(.pauseAndRestore)
  *             .frame(width: 300, height: 300)
  *     }
  * }
+ * ```
+ *
+ * Async Loading:
+ * ```swift
+ * AsyncPngineView {
+ *     try await loadBytecodeFromNetwork()
+ * } placeholder: {
+ *     ProgressView()
+ * }
+ * ```
+ *
+ * Controlled Playback:
+ * ```swift
+ * @State private var isPlaying = true
+ *
+ * ControlledPngineView(bytecode: data, isPlaying: $isPlaying)
  * ```
  */
 
@@ -49,6 +67,9 @@ public struct PngineView: ViewRepresentable {
     private let bytecode: Data
     private var autoPlay: Bool
     private var backgroundBehavior: PngineBackgroundBehavior
+    private var animationSpeed: Float
+    private var targetFrameRate: Int
+    private var configurations: [(PngineAnimationView) -> Void]
 
     public init(
         bytecode: Data,
@@ -58,6 +79,9 @@ public struct PngineView: ViewRepresentable {
         self.bytecode = bytecode
         self.autoPlay = autoPlay
         self.backgroundBehavior = backgroundBehavior
+        self.animationSpeed = 1.0
+        self.targetFrameRate = 0
+        self.configurations = []
     }
 
     // MARK: - Fluent Modifiers
@@ -76,33 +100,320 @@ public struct PngineView: ViewRepresentable {
         return copy
     }
 
+    /// Set animation playback speed. Default is 1.0 (normal speed).
+    /// Values > 1.0 speed up, values < 1.0 slow down.
+    public func animationSpeed(_ speed: Float) -> Self {
+        var copy = self
+        copy.animationSpeed = speed
+        return copy
+    }
+
+    /// Set target frame rate. Default is 0 (maximum).
+    /// Lower values can save battery for simple animations.
+    public func targetFrameRate(_ rate: Int) -> Self {
+        var copy = self
+        copy.targetFrameRate = rate
+        return copy
+    }
+
+    /// Configure the underlying PngineAnimationView directly.
+    /// Use this for advanced customization not exposed through modifiers.
+    public func configure(_ configure: @escaping (PngineAnimationView) -> Void) -> Self {
+        var copy = self
+        copy.configurations.append(configure)
+        return copy
+    }
+
+    private func configureView(_ view: PngineAnimationView) {
+        view.backgroundBehavior = backgroundBehavior
+        view.animationSpeed = animationSpeed
+        view.targetFrameRate = targetFrameRate
+
+        // Apply custom configurations
+        for config in configurations {
+            config(view)
+        }
+
+        view.load(bytecode: bytecode)
+        if autoPlay {
+            view.play()
+        }
+    }
+
+    private func updateView(_ view: PngineAnimationView) {
+        view.backgroundBehavior = backgroundBehavior
+        view.animationSpeed = animationSpeed
+        view.targetFrameRate = targetFrameRate
+
+        // Apply custom configurations on update
+        for config in configurations {
+            config(view)
+        }
+    }
+
     #if os(iOS)
     public func makeUIView(context: Context) -> PngineAnimationView {
         let view = PngineAnimationView()
+        configureView(view)
+        return view
+    }
+
+    public func updateUIView(_ uiView: PngineAnimationView, context: Context) {
+        updateView(uiView)
+    }
+    #elseif os(macOS)
+    public func makeNSView(context: Context) -> PngineAnimationView {
+        let view = PngineAnimationView()
+        configureView(view)
+        return view
+    }
+
+    public func updateNSView(_ nsView: PngineAnimationView, context: Context) {
+        updateView(nsView)
+    }
+    #endif
+}
+
+// MARK: - Async Loading View
+
+/// A SwiftUI view that loads animation bytecode asynchronously with a placeholder.
+///
+/// Usage:
+/// ```swift
+/// AsyncPngineView {
+///     try await loadBytecodeFromNetwork()
+/// } placeholder: {
+///     ProgressView()
+/// }
+/// .animationSpeed(1.5)
+/// ```
+@available(iOS 15.0, macOS 12.0, *)
+public struct AsyncPngineView<Placeholder: View>: View {
+    private let loadBytecode: () async throws -> Data
+    private let placeholder: () -> Placeholder
+    private var autoPlay: Bool
+    private var backgroundBehavior: PngineBackgroundBehavior
+    private var animationSpeed: Float
+    private var targetFrameRate: Int
+    private var configurations: [(PngineAnimationView) -> Void]
+
+    @State private var bytecode: Data?
+    @State private var loadError: Error?
+
+    public init(
+        _ loadBytecode: @escaping () async throws -> Data,
+        @ViewBuilder placeholder: @escaping () -> Placeholder
+    ) {
+        self.loadBytecode = loadBytecode
+        self.placeholder = placeholder
+        self.autoPlay = true
+        self.backgroundBehavior = .pauseAndRestore
+        self.animationSpeed = 1.0
+        self.targetFrameRate = 0
+        self.configurations = []
+    }
+
+    // MARK: - Fluent Modifiers
+
+    /// Set whether animation should auto-play.
+    public func autoPlay(_ enabled: Bool) -> Self {
+        var copy = self
+        copy.autoPlay = enabled
+        return copy
+    }
+
+    /// Set background behavior.
+    public func backgroundBehavior(_ behavior: PngineBackgroundBehavior) -> Self {
+        var copy = self
+        copy.backgroundBehavior = behavior
+        return copy
+    }
+
+    /// Set animation playback speed.
+    public func animationSpeed(_ speed: Float) -> Self {
+        var copy = self
+        copy.animationSpeed = speed
+        return copy
+    }
+
+    /// Set target frame rate.
+    public func targetFrameRate(_ rate: Int) -> Self {
+        var copy = self
+        copy.targetFrameRate = rate
+        return copy
+    }
+
+    /// Configure the underlying PngineAnimationView directly.
+    public func configure(_ configure: @escaping (PngineAnimationView) -> Void) -> Self {
+        var copy = self
+        copy.configurations.append(configure)
+        return copy
+    }
+
+    public var body: some View {
+        Group {
+            if let bytecode = bytecode {
+                PngineView(bytecode: bytecode, autoPlay: autoPlay, backgroundBehavior: backgroundBehavior)
+                    .animationSpeed(animationSpeed)
+                    .targetFrameRate(targetFrameRate)
+                    .configure { view in
+                        for config in configurations {
+                            config(view)
+                        }
+                    }
+            } else if loadError != nil {
+                // Show placeholder on error (could be enhanced with error view)
+                placeholder()
+            } else {
+                placeholder()
+            }
+        }
+        .task {
+            do {
+                bytecode = try await loadBytecode()
+            } catch {
+                loadError = error
+                pngineLogger.error("Failed to load bytecode: \(error.localizedDescription)")
+            }
+        }
+    }
+}
+
+/// Convenience initializer for AsyncPngineView with ProgressView placeholder.
+@available(iOS 15.0, macOS 12.0, *)
+public extension AsyncPngineView where Placeholder == ProgressView<EmptyView, EmptyView> {
+    init(_ loadBytecode: @escaping () async throws -> Data) {
+        self.init(loadBytecode, placeholder: { ProgressView() })
+    }
+}
+
+// MARK: - Controlled Playback View
+
+/// A PngineView variant with SwiftUI binding for playback control.
+///
+/// Usage:
+/// ```swift
+/// struct ContentView: View {
+///     @State private var isPlaying = true
+///
+///     var body: some View {
+///         VStack {
+///             ControlledPngineView(bytecode: data, isPlaying: $isPlaying)
+///                 .frame(width: 300, height: 300)
+///
+///             Button(isPlaying ? "Pause" : "Play") {
+///                 isPlaying.toggle()
+///             }
+///         }
+///     }
+/// }
+/// ```
+@available(iOS 14.0, macOS 11.0, *)
+public struct ControlledPngineView: ViewRepresentable {
+    private let bytecode: Data
+    @Binding private var isPlaying: Bool
+    private var backgroundBehavior: PngineBackgroundBehavior
+    private var animationSpeed: Float
+    private var targetFrameRate: Int
+    private var configurations: [(PngineAnimationView) -> Void]
+
+    public init(
+        bytecode: Data,
+        isPlaying: Binding<Bool>,
+        backgroundBehavior: PngineBackgroundBehavior = .pauseAndRestore
+    ) {
+        self.bytecode = bytecode
+        self._isPlaying = isPlaying
+        self.backgroundBehavior = backgroundBehavior
+        self.animationSpeed = 1.0
+        self.targetFrameRate = 0
+        self.configurations = []
+    }
+
+    // MARK: - Fluent Modifiers
+
+    /// Set background behavior.
+    public func backgroundBehavior(_ behavior: PngineBackgroundBehavior) -> Self {
+        var copy = self
+        copy.backgroundBehavior = behavior
+        return copy
+    }
+
+    /// Set animation playback speed.
+    public func animationSpeed(_ speed: Float) -> Self {
+        var copy = self
+        copy.animationSpeed = speed
+        return copy
+    }
+
+    /// Set target frame rate.
+    public func targetFrameRate(_ rate: Int) -> Self {
+        var copy = self
+        copy.targetFrameRate = rate
+        return copy
+    }
+
+    /// Configure the underlying PngineAnimationView directly.
+    public func configure(_ configure: @escaping (PngineAnimationView) -> Void) -> Self {
+        var copy = self
+        copy.configurations.append(configure)
+        return copy
+    }
+
+    private func configureView(_ view: PngineAnimationView) {
         view.backgroundBehavior = backgroundBehavior
+        view.animationSpeed = animationSpeed
+        view.targetFrameRate = targetFrameRate
+
+        for config in configurations {
+            config(view)
+        }
+
         view.load(bytecode: bytecode)
-        if autoPlay {
+    }
+
+    private func updatePlaybackState(_ view: PngineAnimationView) {
+        view.backgroundBehavior = backgroundBehavior
+        view.animationSpeed = animationSpeed
+        view.targetFrameRate = targetFrameRate
+
+        for config in configurations {
+            config(view)
+        }
+
+        // Sync playback state with binding
+        if isPlaying && !view.isPlaying {
+            view.play()
+        } else if !isPlaying && view.isPlaying {
+            view.pause()
+        }
+    }
+
+    #if os(iOS)
+    public func makeUIView(context: Context) -> PngineAnimationView {
+        let view = PngineAnimationView()
+        configureView(view)
+        if isPlaying {
             view.play()
         }
         return view
     }
 
     public func updateUIView(_ uiView: PngineAnimationView, context: Context) {
-        uiView.backgroundBehavior = backgroundBehavior
+        updatePlaybackState(uiView)
     }
     #elseif os(macOS)
     public func makeNSView(context: Context) -> PngineAnimationView {
         let view = PngineAnimationView()
-        view.backgroundBehavior = backgroundBehavior
-        view.load(bytecode: bytecode)
-        if autoPlay {
+        configureView(view)
+        if isPlaying {
             view.play()
         }
         return view
     }
 
     public func updateNSView(_ nsView: PngineAnimationView, context: Context) {
-        nsView.backgroundBehavior = backgroundBehavior
+        updatePlaybackState(nsView)
     }
     #endif
 }
@@ -141,10 +452,24 @@ public class PngineAnimationView: PlatformView {
     private var shouldAutoPlay = false
     private var hasLoadedAnimation = false
 
-    // MARK: - Lifecycle State
+    // MARK: - Playback Properties
 
     /// Controls animation behavior when the app enters background.
     public var backgroundBehavior: PngineBackgroundBehavior = .pauseAndRestore
+
+    /// Animation playback speed multiplier. Default is 1.0 (normal speed).
+    /// Values > 1.0 speed up, values < 1.0 slow down. Negative values play in reverse.
+    public var animationSpeed: Float = 1.0
+
+    /// Target frame rate for the display link. Set to 0 for maximum (default).
+    /// Lower values can save battery for simple animations.
+    public var targetFrameRate: Int = 0 {
+        didSet {
+            updateDisplayLinkFrameRate()
+        }
+    }
+
+    // MARK: - Lifecycle State
 
     /// Whether animation was playing before entering background.
     private var wasPlayingBeforeBackground = false
@@ -344,7 +669,13 @@ public class PngineAnimationView: PlatformView {
         displayLinkProxy = DisplayLinkProxy(self)
         displayLink = CADisplayLink(target: displayLinkProxy!, selector: #selector(DisplayLinkProxy.handleDisplayLink(_:)))
         displayLink?.add(to: .main, forMode: .common)
+        updateDisplayLinkFrameRate()
         pngineLogger.info("Display link started")
+    }
+
+    private func updateDisplayLinkFrameRate() {
+        guard let displayLink = displayLink else { return }
+        displayLink.preferredFramesPerSecond = targetFrameRate
     }
 
     /// Pause animation playback.
@@ -400,7 +731,8 @@ public class PngineAnimationView: PlatformView {
             return
         }
 
-        let elapsed = Float(link.timestamp - startTime)
+        // Apply animation speed to elapsed time
+        let elapsed = Float(link.timestamp - startTime) * animationSpeed
 
         // Log first few renders for debugging
         if renderCount < 3 {
