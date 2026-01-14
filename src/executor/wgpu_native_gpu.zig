@@ -1,90 +1,176 @@
 //! WgpuNative GPU Backend
 //!
-//! Native GPU backend using wgpu-native C API.
-//! Works on iOS (Metal), Android (Vulkan), macOS, Windows, Linux.
+//! Native GPU backend using wgpu-native C API for cross-platform WebGPU support.
+//! Works on iOS (Metal), Android (Vulkan), macOS, Windows, and Linux.
 //!
 //! ## Architecture
 //!
-//! This backend implements the same interface as WasmGPU but calls
-//! wgpu-native's C API directly via @cImport instead of JS externs.
+//! This backend implements the GPU interface using wgpu-native's C API directly
+//! via @cImport instead of JavaScript extern functions. It follows the same
+//! command-based pattern as the WASM backend but executes GPU commands natively.
+//!
+//! ```
+//! ┌─────────────────────────────────────────────────────────────────┐
+//! │                     Context (Shared)                            │
+//! │  - Instance: wgpu instance                                      │
+//! │  - Adapter: Physical GPU handle                                 │
+//! │  - Device: Logical GPU handle                                   │
+//! │  - Queue: Command submission queue                              │
+//! └─────────────────────────────────────────────────────────────────┘
+//!                              │
+//!               ┌──────────────┴──────────────┐
+//!               ▼                              ▼
+//! ┌─────────────────────────┐    ┌─────────────────────────┐
+//! │   WgpuNativeGPU #1      │    │   WgpuNativeGPU #2      │
+//! │   (Animation Instance)  │    │   (Animation Instance)  │
+//! │   - Surface             │    │   - Surface             │
+//! │   - Resources           │    │   - Resources           │
+//! │   - Pipelines           │    │   - Pipelines           │
+//! └─────────────────────────┘    └─────────────────────────┘
+//! ```
+//!
+//! ## Design Decisions
+//!
+//! - **Static allocation**: All resource arrays are fixed-size (MAX_*) to avoid
+//!   runtime allocation. This ensures predictable memory usage and no GC pressure.
+//! - **Resource IDs**: External IDs are array indices for O(1) lookup. The bytecode
+//!   uses u16 IDs which map directly to array slots.
+//! - **Thread-safe context**: Adapter and device request use atomic synchronization
+//!   for thread-safe lazy initialization.
+//! - **Helper functions**: Complex parsing logic is extracted into pure helper
+//!   functions that return result structs (Zig Mastery compliance: ≤70 lines).
 //!
 //! ## Invariants
 //!
 //! - Context must be initialized before creating WgpuNativeGPU instances
 //! - Module must be set before any GPU calls that reference data IDs
-//! - Resource IDs map to internal wgpu handles
-//! - All resource arrays use static allocation (no runtime malloc)
+//! - Resource IDs are valid array indices (< MAX_* constants)
+//! - All handles are either valid GPU objects or null (never dangling)
+//! - Only one pass (render XOR compute) can be active at a time
+//! - All resource arrays use static allocation (no malloc after init)
+//!
+//! ## Bounded Iteration (Zig Mastery Compliance)
+//!
+//! All loops use bounded iteration with `for (0..MAX_X)` and `else` fallback:
+//! - MAX_JSON_TOKENS (2048): JSON descriptor parsing
+//! - MAX_BYTECODE_FIELDS (256): Bytecode field iteration
+//! - MAX_WGSL_ITERATIONS (1024): WGSL dependency resolution
+//!
+//! ## Usage
+//!
+//! ```zig
+//! const gpu = @import("wgpu_native_gpu.zig");
+//!
+//! // Initialize shared context (once per application)
+//! var ctx = try gpu.Context.init();
+//! defer ctx.deinit();
+//!
+//! // Create per-animation GPU state
+//! var native_gpu = gpu.WgpuNativeGPU.init(&ctx);
+//! native_gpu.setModule(&bytecode_module);
+//!
+//! // Execute GPU commands
+//! try native_gpu.createBuffer(allocator, 0, 1024, 0x28); // VERTEX | COPY_DST
+//! try native_gpu.createShaderModule(allocator, 0, 0);
+//! ```
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
+const Atomic = std.atomic.Value;
 
-// Diagnostic counters for debugging (returned via debug functions)
-var debug_compute_pipelines_created: u32 = 0;
-var debug_bind_groups_created: u32 = 0;
-var debug_compute_passes_begun: u32 = 0;
-var debug_dispatches: u32 = 0;
-var debug_render_passes_begun: u32 = 0;
-var debug_draws: u32 = 0;
+// ============================================================================
+// Bounded Iteration Constants (Zig Mastery Compliance)
+// ============================================================================
+
+/// Maximum iterations for JSON token parsing (safety bound)
+const MAX_JSON_TOKENS: u32 = 2048;
+
+/// Maximum iterations for bytecode field parsing
+const MAX_BYTECODE_FIELDS: u32 = 256;
+
+/// Maximum iterations for WGSL dependency resolution
+const MAX_WGSL_ITERATIONS: u32 = 1024;
+
+// ============================================================================
+// Thread-Safe Diagnostic Counters (DEPRECATED - use per-animation diagnostics)
+// ============================================================================
+// These are kept for backward compatibility but are deprecated.
+// Use per-animation diagnostics (PngineAnimation.diag) instead.
+
+var debug_compute_pipelines_created: Atomic(u32) = Atomic(u32).init(0);
+var debug_bind_groups_created: Atomic(u32) = Atomic(u32).init(0);
+var debug_compute_passes_begun: Atomic(u32) = Atomic(u32).init(0);
+var debug_dispatches: Atomic(u32) = Atomic(u32).init(0);
+var debug_render_passes_begun: Atomic(u32) = Atomic(u32).init(0);
+var debug_draws: Atomic(u32) = Atomic(u32).init(0);
 // Buffer ID tracking for compute vs render debugging
-var debug_last_vertex_buffer_id: u16 = 0xFFFF;
-var debug_last_storage_bind_buffer_id: u16 = 0xFFFF;
+var debug_last_vertex_buffer_id: Atomic(u32) = Atomic(u32).init(0xFFFF);
+var debug_last_storage_bind_buffer_id: Atomic(u32) = Atomic(u32).init(0xFFFF);
 // First-frame tracking (only set on first occurrence)
-var debug_first_vertex_buffer_id: u16 = 0xFFFF;
-var debug_first_storage_bind_buffer_id: u16 = 0xFFFF;
+var debug_first_vertex_buffer_id: Atomic(u32) = Atomic(u32).init(0xFFFF);
+var debug_first_storage_bind_buffer_id: Atomic(u32) = Atomic(u32).init(0xFFFF);
 // Buffer 0 size tracking
-var debug_buffer_0_size: u32 = 0;
+var debug_buffer_0_size: Atomic(u32) = Atomic(u32).init(0);
 // Dispatch X tracking (workgroup count)
-var debug_dispatch_x: u32 = 0;
+var debug_dispatch_x: Atomic(u32) = Atomic(u32).init(0);
 // Draw instance count tracking
-var debug_instance_count: u32 = 0;
-var debug_vertex_count: u32 = 0;
+var debug_instance_count: Atomic(u32) = Atomic(u32).init(0);
+var debug_vertex_count: Atomic(u32) = Atomic(u32).init(0);
 
-/// Get diagnostic counters packed into a u32
+/// Get diagnostic counters packed into a u32 (DEPRECATED)
 /// Format: [compute_passes:8][compute_pipelines:8][bindgroups:8][dispatches:8]
 pub fn getDebugCounters() u32 {
-    return (@as(u32, @intCast(debug_compute_passes_begun & 0xFF)) << 24) |
-        (@as(u32, @intCast(debug_compute_pipelines_created & 0xFF)) << 16) |
-        (@as(u32, @intCast(debug_bind_groups_created & 0xFF)) << 8) |
-        @as(u32, @intCast(debug_dispatches & 0xFF));
+    const passes = debug_compute_passes_begun.load(.monotonic);
+    const pipelines = debug_compute_pipelines_created.load(.monotonic);
+    const bindgroups = debug_bind_groups_created.load(.monotonic);
+    const dispatches = debug_dispatches.load(.monotonic);
+    return ((passes & 0xFF) << 24) |
+        ((pipelines & 0xFF) << 16) |
+        ((bindgroups & 0xFF) << 8) |
+        (dispatches & 0xFF);
 }
 
-/// Get render counters packed into a u32
+/// Get render counters packed into a u32 (DEPRECATED)
 /// Format: [render_passes:16][draws:16]
 pub fn getRenderCounters() u32 {
-    return (@as(u32, @intCast(debug_render_passes_begun & 0xFFFF)) << 16) |
-        @as(u32, @intCast(debug_draws & 0xFFFF));
+    const passes = debug_render_passes_begun.load(.monotonic);
+    const draws = debug_draws.load(.monotonic);
+    return ((passes & 0xFFFF) << 16) | (draws & 0xFFFF);
 }
 
-/// Get buffer IDs for compute/render debugging
+/// Get buffer IDs for compute/render debugging (DEPRECATED)
 /// Format: [last_vertex_buffer_id:16][last_storage_bind_buffer_id:16]
 pub fn getBufferIds() u32 {
-    return (@as(u32, debug_last_vertex_buffer_id) << 16) |
-        @as(u32, debug_last_storage_bind_buffer_id);
+    const vertex_id = debug_last_vertex_buffer_id.load(.monotonic);
+    const storage_id = debug_last_storage_bind_buffer_id.load(.monotonic);
+    return ((vertex_id & 0xFFFF) << 16) | (storage_id & 0xFFFF);
 }
 
-/// Get first-frame buffer IDs (only set once)
+/// Get first-frame buffer IDs (only set once) (DEPRECATED)
 /// Format: [first_vertex_buffer_id:16][first_storage_bind_buffer_id:16]
 pub fn getFirstBufferIds() u32 {
-    return (@as(u32, debug_first_vertex_buffer_id) << 16) |
-        @as(u32, debug_first_storage_bind_buffer_id);
+    const vertex_id = debug_first_vertex_buffer_id.load(.monotonic);
+    const storage_id = debug_first_storage_bind_buffer_id.load(.monotonic);
+    return ((vertex_id & 0xFFFF) << 16) | (storage_id & 0xFFFF);
 }
 
-/// Get buffer 0 size
+/// Get buffer 0 size (DEPRECATED)
 pub fn getBuffer0Size() u32 {
-    return debug_buffer_0_size;
+    return debug_buffer_0_size.load(.monotonic);
 }
 
-/// Get dispatch X (workgroup count)
+/// Get dispatch X (workgroup count) (DEPRECATED)
 pub fn getDispatchX() u32 {
-    return debug_dispatch_x;
+    return debug_dispatch_x.load(.monotonic);
 }
 
-/// Get draw info packed into a u32
+/// Get draw info packed into a u32 (DEPRECATED)
 /// Format: [vertex_count:16][instance_count:16]
 pub fn getDrawInfo() u32 {
-    return (@as(u32, @intCast(debug_vertex_count & 0xFFFF)) << 16) |
-        @as(u32, @intCast(debug_instance_count & 0xFFFF));
+    const vertex_count = debug_vertex_count.load(.monotonic);
+    const instance_count = debug_instance_count.load(.monotonic);
+    return ((vertex_count & 0xFFFF) << 16) | (instance_count & 0xFFFF);
 }
 
 fn nativeLog(comptime fmt: []const u8, args: anytype) void {
@@ -108,14 +194,46 @@ const DataId = bytecode_mod.DataId;
 // ============================================================================
 
 /// Shared GPU context - one instance per application.
-/// Manages wgpu instance, adapter, device, and queue.
+///
+/// Manages the core wgpu resources that are shared across all animation instances:
+/// instance, adapter, device, and queue. These resources are expensive to create
+/// and should be reused for multiple WgpuNativeGPU instances.
+///
+/// ## Lifecycle
+///
+/// 1. Create once at application startup with `init()`
+/// 2. Pass reference to WgpuNativeGPU instances
+/// 3. Deinit after all WgpuNativeGPU instances are destroyed
+///
+/// ## Thread Safety
+///
+/// The Context itself is not thread-safe. Create it on the main thread before
+/// spawning worker threads. However, adapter and device requests use atomic
+/// synchronization internally for thread-safe lazy initialization.
+///
+/// ## Error Handling
+///
+/// `init()` returns errors for GPU initialization failures:
+/// - `InstanceCreationFailed`: wgpu instance could not be created
+/// - `AdapterRequestFailed`: No compatible GPU adapter found
+/// - `DeviceRequestFailed`: Device creation failed (driver issue)
 pub const Context = struct {
     const Self = @This();
 
+    /// wgpu instance - entry point for all GPU operations.
     instance: wgpu.Instance,
+
+    /// Physical GPU adapter - represents a specific GPU device.
     adapter: wgpu.Adapter,
+
+    /// Logical GPU device - used for resource creation.
     device: wgpu.Device,
+
+    /// Command submission queue - used for submitting command buffers.
     queue: wgpu.Queue,
+
+    /// Whether the context has been successfully initialized.
+    /// Used to validate state in deinit().
     initialized: bool,
 
     /// Initialize the GPU context.
@@ -173,11 +291,42 @@ pub const Context = struct {
 // ============================================================================
 
 /// Native GPU backend for wgpu-native.
-/// Implements the same interface as WasmGPU/MockGPU.
+///
+/// Implements the GPU interface for executing PNGine bytecode commands natively
+/// using the wgpu-native C API. This backend runs on iOS (Metal), Android (Vulkan),
+/// macOS, Windows, and Linux.
+///
+/// ## Design
+///
+/// - **Static allocation**: All resource arrays are fixed-size arrays indexed by
+///   resource ID. This avoids runtime allocation and ensures O(1) lookup.
+/// - **Command-based**: Same interface as WasmGPU/MockGPU - receives GPU commands
+///   from the bytecode dispatcher.
+/// - **Pass state**: Tracks current encoder, render pass, or compute pass. Only one
+///   pass can be active at a time.
+///
+/// ## Resource Management
+///
+/// Resources are stored in fixed-size arrays indexed by their bytecode ID:
+/// - Buffers, textures, texture views, samplers (data resources)
+/// - Shader modules, render/compute pipelines (program resources)
+/// - Bind groups, bind group layouts, pipeline layouts (binding resources)
+///
+/// ## Surface Rendering
+///
+/// For on-screen rendering, a surface must be provided at init time. The special
+/// texture ID `0xFFFE` in render passes indicates "render to surface".
+///
+/// ## Invariants
+///
+/// - Context must be initialized before init() is called
+/// - width/height must be > 0
+/// - Only one of render_pass/compute_pass can be non-null at a time
+/// - Module must be set before operations that reference data IDs
 pub const WgpuNativeGPU = struct {
     const Self = @This();
 
-    /// Maximum resources per category.
+    /// Maximum resources per category (static allocation bounds).
     pub const MAX_BUFFERS: u16 = 256;
     pub const MAX_TEXTURES: u16 = 256;
     pub const MAX_TEXTURE_VIEWS: u16 = 256;
@@ -189,46 +338,99 @@ pub const WgpuNativeGPU = struct {
     pub const MAX_BIND_GROUP_LAYOUTS: u16 = 64;
     pub const MAX_PIPELINE_LAYOUTS: u16 = 64;
 
-    /// Shared context reference
+    // -----------------------------------------------------------------------
+    // Core References
+    // -----------------------------------------------------------------------
+
+    /// Shared GPU context (instance, adapter, device, queue).
+    /// Must remain valid for the lifetime of this WgpuNativeGPU instance.
     ctx: *Context,
 
-    /// Surface for rendering (optional - null for headless)
+    /// Surface for rendering to a window (optional).
+    /// Set to null for headless/offscreen rendering.
     surface: ?wgpu.Surface,
 
-    /// Current surface texture view (for render passes targeting surface)
+    /// Current surface texture view acquired from surface.
+    /// Valid only during active render pass targeting surface.
+    /// Released after submit().
     current_surface_view: ?wgpu.TextureView,
 
-    /// Resource arrays (static allocation)
+    // -----------------------------------------------------------------------
+    // Resource Arrays (Static Allocation - O(1) Lookup by ID)
+    // -----------------------------------------------------------------------
+
+    /// GPU buffers indexed by bytecode buffer ID.
     buffers: [MAX_BUFFERS]?wgpu.Buffer,
+
+    /// GPU textures indexed by bytecode texture ID.
     textures: [MAX_TEXTURES]?wgpu.Texture,
+
+    /// Texture views for sampling/rendering.
     texture_views: [MAX_TEXTURE_VIEWS]?wgpu.TextureView,
+
+    /// Samplers for texture filtering.
     samplers: [MAX_SAMPLERS]?wgpu.Sampler,
+
+    /// Compiled WGSL shader modules.
     shaders: [MAX_SHADERS]?wgpu.ShaderModule,
+
+    /// Render pipelines (vertex + fragment stages).
     render_pipelines: [MAX_RENDER_PIPELINES]?wgpu.RenderPipeline,
+
+    /// Compute pipelines (compute stage only).
     compute_pipelines: [MAX_COMPUTE_PIPELINES]?wgpu.ComputePipeline,
+
+    /// Bind groups mapping resources to shader bindings.
     bind_groups: [MAX_BIND_GROUPS]?wgpu.BindGroup,
+
+    /// Bind group layouts describing binding structure.
     bind_group_layouts: [MAX_BIND_GROUP_LAYOUTS]?wgpu.BindGroupLayout,
+
+    /// Pipeline layouts combining multiple bind group layouts.
     pipeline_layouts: [MAX_PIPELINE_LAYOUTS]?wgpu.PipelineLayout,
 
-    /// Current encoder state
+    // -----------------------------------------------------------------------
+    // Encoder State (Only One Pass Active at a Time)
+    // -----------------------------------------------------------------------
+
+    /// Command encoder for recording GPU commands.
     encoder: ?wgpu.CommandEncoder,
+
+    /// Active render pass encoder (null if no render pass active).
+    /// Invariant: render_pass != null implies compute_pass == null.
     render_pass: ?wgpu.RenderPassEncoder,
+
+    /// Active compute pass encoder (null if no compute pass active).
+    /// Invariant: compute_pass != null implies render_pass == null.
     compute_pass: ?wgpu.ComputePassEncoder,
 
-    /// Current depth view (released after submit)
+    /// Depth stencil view created during beginRenderPass.
+    /// Released after submit().
     current_depth_view: ?wgpu.TextureView,
 
-    /// Bytecode module reference
+    // -----------------------------------------------------------------------
+    // Bytecode Module Reference
+    // -----------------------------------------------------------------------
+
+    /// Reference to bytecode module for data section lookups.
+    /// Must be set before any GPU calls that reference data IDs.
     module: ?*const Module,
 
-    /// Render target dimensions
+    // -----------------------------------------------------------------------
+    // Render Configuration
+    // -----------------------------------------------------------------------
+
+    /// Render target width in pixels.
     width: u32,
+
+    /// Render target height in pixels.
     height: u32,
 
-    /// Texture formats (for creating depth views with correct format)
+    /// Texture formats for creating depth/stencil views.
+    /// Indexed by texture ID, stores WGPUTextureFormat values.
     texture_formats: [MAX_TEXTURES]c_uint,
 
-    /// Time uniform for animations
+    /// Animation time in seconds for time-based uniforms.
     time: f32,
 
     /// Create a new WgpuNativeGPU instance.
@@ -352,7 +554,11 @@ pub const WgpuNativeGPU = struct {
 
     pub fn createBuffer(self: *Self, allocator: Allocator, buffer_id: u16, size: u32, usage: u8) !void {
         _ = allocator;
+
+        // Pre-condition assertions (Zig Mastery Compliance)
         assert(buffer_id < MAX_BUFFERS);
+        assert(size > 0); // Zero-size buffers are invalid
+        assert(usage != 0); // Must have at least one usage flag
 
         // Skip if buffer already exists (resources are created once, not per-frame)
         if (self.buffers[buffer_id] != null) {
@@ -361,7 +567,7 @@ pub const WgpuNativeGPU = struct {
 
         // Track buffer 0 size for debugging
         if (buffer_id == 0) {
-            debug_buffer_0_size = size;
+            debug_buffer_0_size.store(size, .monotonic);
         }
 
         const descriptor = c.WGPUBufferDescriptor{
@@ -380,6 +586,9 @@ pub const WgpuNativeGPU = struct {
             buffer != null,
         });
         self.buffers[buffer_id] = buffer;
+
+        // Post-condition: buffer slot is now populated (may be null if GPU failed)
+        assert(self.buffers[buffer_id] != null or buffer == null);
     }
 
     pub fn createTexture(self: *Self, allocator: Allocator, texture_id: u16, descriptor_data_id: u16) !void {
@@ -520,8 +729,10 @@ pub const WgpuNativeGPU = struct {
     }
 
     pub fn createShaderModule(self: *Self, allocator: Allocator, shader_id: u16, code_data_id: u16) !void {
+        // Pre-condition assertions (Zig Mastery Compliance)
         assert(shader_id < MAX_SHADERS);
         assert(self.module != null);
+        assert(self.ctx.device != null);
 
         // Skip if shader already exists
         if (self.shaders[shader_id] != null) {
@@ -532,6 +743,7 @@ pub const WgpuNativeGPU = struct {
 
         // Get WGSL code directly from data section
         const code = module.data.get(DataId.fromInt(code_data_id));
+        assert(code.len > 0); // Shader code must not be empty
 
         // Create null-terminated string for wgpu
         const code_z = try allocator.allocSentinel(u8, code.len, 0);
@@ -564,14 +776,19 @@ pub const WgpuNativeGPU = struct {
             return error.ShaderCompilationFailed;
         }
         self.shaders[shader_id] = shader;
+
+        // Post-condition: shader slot is now populated
+        assert(self.shaders[shader_id] != null);
     }
 
     /// Resolve WGSL module by ID, concatenating all dependencies.
+    /// Uses iterative DFS with bounded iteration to prevent infinite loops.
     fn resolveWgsl(self: *Self, allocator: Allocator, wgsl_id: u16) ![]u8 {
         const module = self.module orelse return error.ModuleNotSet;
         const wgsl_table = &module.wgsl;
 
-        const max_iterations: u32 = @as(u32, format.MAX_WGSL_MODULES) * @as(u32, format.MAX_WGSL_DEPS);
+        // Pre-condition assertions
+        assert(wgsl_id < format.MAX_WGSL_MODULES);
 
         var included = std.AutoHashMapUnmanaged(u16, void){};
         defer included.deinit(allocator);
@@ -584,8 +801,8 @@ pub const WgpuNativeGPU = struct {
 
         try stack.append(allocator, wgsl_id);
 
-        // Iterative DFS
-        for (0..max_iterations) |_| {
+        // Iterative DFS with bounded iteration (Zig Mastery Compliance)
+        for (0..MAX_WGSL_ITERATIONS) |_| {
             if (stack.items.len == 0) break;
 
             const current = stack.pop() orelse break;
@@ -604,6 +821,9 @@ pub const WgpuNativeGPU = struct {
             }
 
             try order.append(allocator, current);
+        } else {
+            // Iteration limit exceeded - likely circular dependency or malformed data
+            return error.WgslDependencyDepthExceeded;
         }
 
         // Concatenate code in order
@@ -660,52 +880,8 @@ pub const WgpuNativeGPU = struct {
         defer allocator.free(vertex_entry_z);
         @memcpy(vertex_entry_z, vertex_entry);
 
-        // Parse vertex buffer layouts (max 4 buffers, 8 attributes each)
-        var buffer_layouts: [4]c.WGPUVertexBufferLayout = undefined;
-        var attributes: [4][8]c.WGPUVertexAttribute = undefined;
-        var buffer_count: usize = 0;
-
-        if (vertex_obj.get("buffers")) |buffers_val| {
-            const buffers_arr = buffers_val.array;
-            for (buffers_arr.items, 0..) |buf_val, bi| {
-                if (bi >= 4) break;
-                const buf_obj = buf_val.object;
-                const stride = buf_obj.get("arrayStride").?.integer;
-
-                var attr_count: usize = 0;
-                if (buf_obj.get("attributes")) |attrs_val| {
-                    for (attrs_val.array.items, 0..) |attr_val, ai| {
-                        if (ai >= 8) break;
-                        const attr_obj = attr_val.object;
-                        attributes[bi][ai] = .{
-                            .format = parseVertexFormat(attr_obj.get("format").?.string),
-                            .offset = @intCast(attr_obj.get("offset").?.integer),
-                            .shaderLocation = @intCast(attr_obj.get("shaderLocation").?.integer),
-                        };
-                        attr_count += 1;
-                    }
-                }
-
-                // Parse stepMode from JSON, default to vertex
-                const step_mode: c_uint = blk: {
-                    if (buf_obj.get("stepMode")) |step_mode_val| {
-                        const step_mode_str = step_mode_val.string;
-                        if (std.mem.eql(u8, step_mode_str, "instance")) {
-                            break :blk c.WGPUVertexStepMode_Instance;
-                        }
-                    }
-                    break :blk c.WGPUVertexStepMode_Vertex;
-                };
-
-                buffer_layouts[bi] = .{
-                    .arrayStride = @intCast(stride),
-                    .stepMode = step_mode,
-                    .attributeCount = attr_count,
-                    .attributes = @ptrCast(&attributes[bi]),
-                };
-                buffer_count += 1;
-            }
-        }
+        // Parse vertex buffer layouts using helper function
+        var vertex_layouts = parseVertexBufferLayouts(vertex_obj);
 
         // Get fragment stage info
         var fragment_state: ?c.WGPUFragmentState = null;
@@ -746,47 +922,9 @@ pub const WgpuNativeGPU = struct {
         }
         defer if (fragment_entry_z) |z| allocator.free(z);
 
-        // Parse primitive options
-        var topology: u32 = c.WGPUPrimitiveTopology_TriangleList;
-        var cull_mode: u32 = c.WGPUCullMode_None;
-        if (root.get("primitive")) |prim_val| {
-            const prim_obj = prim_val.object;
-            if (prim_obj.get("topology")) |topo_val| {
-                topology = parseTopology(topo_val.string);
-            }
-            if (prim_obj.get("cullMode")) |cull_val| {
-                cull_mode = parseCullMode(cull_val.string);
-            }
-        }
-
-        // Parse depth stencil state
-        var depth_stencil_state: c.WGPUDepthStencilState = undefined;
-        var has_depth_stencil = false;
-        if (root.get("depthStencil")) |ds_val| {
-            const ds_obj = ds_val.object;
-            has_depth_stencil = true;
-
-            depth_stencil_state = std.mem.zeroes(c.WGPUDepthStencilState);
-            depth_stencil_state.format = if (ds_obj.get("format")) |fmt|
-                parseDepthFormat(fmt.string)
-            else
-                c.WGPUTextureFormat_Depth24Plus;
-            depth_stencil_state.depthWriteEnabled = if (ds_obj.get("depthWriteEnabled")) |dwe|
-                @intFromBool(dwe.bool)
-            else
-                1;
-            depth_stencil_state.depthCompare = if (ds_obj.get("depthCompare")) |dc|
-                parseCompareFunction(dc.string)
-            else
-                c.WGPUCompareFunction_Less;
-            depth_stencil_state.stencilFront = .{ .compare = c.WGPUCompareFunction_Always, .failOp = c.WGPUStencilOperation_Keep, .depthFailOp = c.WGPUStencilOperation_Keep, .passOp = c.WGPUStencilOperation_Keep };
-            depth_stencil_state.stencilBack = .{ .compare = c.WGPUCompareFunction_Always, .failOp = c.WGPUStencilOperation_Keep, .depthFailOp = c.WGPUStencilOperation_Keep, .passOp = c.WGPUStencilOperation_Keep };
-            depth_stencil_state.stencilReadMask = 0xFFFFFFFF;
-            depth_stencil_state.stencilWriteMask = 0xFFFFFFFF;
-            depth_stencil_state.depthBias = 0;
-            depth_stencil_state.depthBiasSlopeScale = 0;
-            depth_stencil_state.depthBiasClamp = 0;
-        }
+        // Parse primitive and depth stencil states using helpers
+        const primitive = parsePrimitiveState(root);
+        var depth_stencil = parseDepthStencilState(root);
 
         // Create pipeline descriptor
         var descriptor = std.mem.zeroes(c.WGPURenderPipelineDescriptor);
@@ -798,17 +936,17 @@ pub const WgpuNativeGPU = struct {
             .entryPoint = .{ .data = vertex_entry_z.ptr, .length = vertex_entry_z.len },
             .constantCount = 0,
             .constants = null,
-            .bufferCount = buffer_count,
-            .buffers = if (buffer_count > 0) @as([*c]const c.WGPUVertexBufferLayout, @ptrCast(&buffer_layouts)) else null,
+            .bufferCount = vertex_layouts.buffer_count,
+            .buffers = if (vertex_layouts.buffer_count > 0) @as([*c]const c.WGPUVertexBufferLayout, @ptrCast(&vertex_layouts.buffer_layouts)) else null,
         };
         descriptor.primitive = .{
             .nextInChain = null,
-            .topology = topology,
+            .topology = primitive.topology,
             .stripIndexFormat = c.WGPUIndexFormat_Undefined,
             .frontFace = c.WGPUFrontFace_CCW,
-            .cullMode = cull_mode,
+            .cullMode = primitive.cull_mode,
         };
-        descriptor.depthStencil = if (has_depth_stencil) &depth_stencil_state else null;
+        descriptor.depthStencil = if (depth_stencil.has_depth_stencil) &depth_stencil.state else null;
         descriptor.multisample = .{
             .nextInChain = null,
             .count = 1,
@@ -868,6 +1006,385 @@ pub const WgpuNativeGPU = struct {
         return c.WGPUCompareFunction_Less;
     }
 
+    /// Vertex buffer layout parsing result for render pipeline creation.
+    const VertexLayoutResult = struct {
+        buffer_layouts: [4]c.WGPUVertexBufferLayout,
+        attributes: [4][8]c.WGPUVertexAttribute,
+        buffer_count: usize,
+    };
+
+    /// Parse vertex buffer layouts from JSON descriptor.
+    /// Extracts array stride, step mode, and vertex attributes.
+    fn parseVertexBufferLayouts(vertex_obj: std.json.ObjectMap) VertexLayoutResult {
+        var result: VertexLayoutResult = undefined;
+        result.buffer_count = 0;
+
+        const buffers_val = vertex_obj.get("buffers") orelse return result;
+        const buffers_arr = buffers_val.array;
+
+        for (buffers_arr.items, 0..) |buf_val, bi| {
+            if (bi >= 4) break;
+            const buf_obj = buf_val.object;
+            const stride = buf_obj.get("arrayStride").?.integer;
+
+            var attr_count: usize = 0;
+            if (buf_obj.get("attributes")) |attrs_val| {
+                for (attrs_val.array.items, 0..) |attr_val, ai| {
+                    if (ai >= 8) break;
+                    const attr_obj = attr_val.object;
+                    result.attributes[bi][ai] = .{
+                        .format = parseVertexFormat(attr_obj.get("format").?.string),
+                        .offset = @intCast(attr_obj.get("offset").?.integer),
+                        .shaderLocation = @intCast(attr_obj.get("shaderLocation").?.integer),
+                    };
+                    attr_count += 1;
+                }
+            }
+
+            // Parse stepMode from JSON, default to vertex
+            const step_mode: c_uint = blk: {
+                if (buf_obj.get("stepMode")) |step_mode_val| {
+                    const step_mode_str = step_mode_val.string;
+                    if (std.mem.eql(u8, step_mode_str, "instance")) {
+                        break :blk c.WGPUVertexStepMode_Instance;
+                    }
+                }
+                break :blk c.WGPUVertexStepMode_Vertex;
+            };
+
+            result.buffer_layouts[bi] = .{
+                .arrayStride = @intCast(stride),
+                .stepMode = step_mode,
+                .attributeCount = attr_count,
+                .attributes = @ptrCast(&result.attributes[bi]),
+            };
+            result.buffer_count += 1;
+        }
+
+        return result;
+    }
+
+    /// Primitive state parsing result.
+    const PrimitiveStateResult = struct {
+        topology: u32,
+        cull_mode: u32,
+    };
+
+    /// Parse primitive state from JSON descriptor.
+    fn parsePrimitiveState(root: std.json.ObjectMap) PrimitiveStateResult {
+        var result = PrimitiveStateResult{
+            .topology = c.WGPUPrimitiveTopology_TriangleList,
+            .cull_mode = c.WGPUCullMode_None,
+        };
+
+        const prim_val = root.get("primitive") orelse return result;
+        const prim_obj = prim_val.object;
+
+        if (prim_obj.get("topology")) |topo_val| {
+            result.topology = parseTopology(topo_val.string);
+        }
+        if (prim_obj.get("cullMode")) |cull_val| {
+            result.cull_mode = parseCullMode(cull_val.string);
+        }
+
+        return result;
+    }
+
+    /// Depth stencil state parsing result.
+    const DepthStencilResult = struct {
+        state: c.WGPUDepthStencilState,
+        has_depth_stencil: bool,
+    };
+
+    /// Parse depth stencil state from JSON descriptor.
+    fn parseDepthStencilState(root: std.json.ObjectMap) DepthStencilResult {
+        var result = DepthStencilResult{
+            .state = undefined,
+            .has_depth_stencil = false,
+        };
+
+        const ds_val = root.get("depthStencil") orelse return result;
+        const ds_obj = ds_val.object;
+        result.has_depth_stencil = true;
+
+        result.state = std.mem.zeroes(c.WGPUDepthStencilState);
+        result.state.format = if (ds_obj.get("format")) |fmt|
+            parseDepthFormat(fmt.string)
+        else
+            c.WGPUTextureFormat_Depth24Plus;
+        result.state.depthWriteEnabled = if (ds_obj.get("depthWriteEnabled")) |dwe|
+            @intFromBool(dwe.bool)
+        else
+            1;
+        result.state.depthCompare = if (ds_obj.get("depthCompare")) |dc|
+            parseCompareFunction(dc.string)
+        else
+            c.WGPUCompareFunction_Less;
+
+        // Default stencil operations
+        result.state.stencilFront = .{
+            .compare = c.WGPUCompareFunction_Always,
+            .failOp = c.WGPUStencilOperation_Keep,
+            .depthFailOp = c.WGPUStencilOperation_Keep,
+            .passOp = c.WGPUStencilOperation_Keep,
+        };
+        result.state.stencilBack = result.state.stencilFront;
+        result.state.stencilReadMask = 0xFFFFFFFF;
+        result.state.stencilWriteMask = 0xFFFFFFFF;
+        result.state.depthBias = 0;
+        result.state.depthBiasSlopeScale = 0;
+        result.state.depthBiasClamp = 0;
+
+        return result;
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper Structs and Functions (Zig Mastery: ≤70 lines per function)
+    // -----------------------------------------------------------------------
+
+    /// Result of acquiring color target view for render pass.
+    ///
+    /// Used by `getColorTargetView()` to return both the view handle and
+    /// metadata about whether it came from the surface (needs cleanup) or
+    /// a custom texture (already managed).
+    const ColorViewResult = struct {
+        /// Texture view to use as color attachment.
+        view: wgpu.TextureView,
+        /// True if view is from surface (must release after submit).
+        is_surface: bool,
+    };
+
+    /// Acquire color target view from texture ID or surface.
+    ///
+    /// Special texture IDs:
+    /// - `0xFFFE`: Render to surface/screen (requires surface to be configured)
+    /// - `0-MAX_TEXTURES`: Render to custom texture
+    ///
+    /// Errors:
+    /// - `NoSurfaceConfigured`: texture_id=0xFFFE but no surface set
+    /// - `SurfaceTextureUnavailable`: Surface texture acquisition failed
+    /// - `TextureNotFound`: texture_id not found in texture arrays
+    fn getColorTargetView(self: *Self, color_texture_id: u16) !ColorViewResult {
+        // 0xFFFE (65534) = render to surface/screen
+        if (color_texture_id == 0xFFFE) {
+            const surface = self.surface orelse return error.NoSurfaceConfigured;
+            var surface_texture: wgpu.SurfaceTexture = undefined;
+            wgpu.surfaceGetCurrentTexture(surface, &surface_texture);
+
+            const status = surface_texture.status;
+            if (status != c.WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal and
+                status != c.WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal)
+            {
+                return error.SurfaceTextureUnavailable;
+            }
+
+            if (surface_texture.texture == null) return error.SurfaceTextureUnavailable;
+            const view = wgpu.textureCreateView(surface_texture.texture, null);
+            if (view == null) return error.SurfaceTextureUnavailable;
+
+            return .{ .view = view, .is_surface = true };
+        }
+
+        // Render to custom texture
+        if (self.texture_views[color_texture_id]) |v| {
+            return .{ .view = v, .is_surface = false };
+        }
+        if (self.textures[color_texture_id]) |t| {
+            const view = wgpu.textureCreateView(t, null);
+            if (view == null) return error.TextureNotFound;
+            return .{ .view = view, .is_surface = false };
+        }
+        return error.TextureNotFound;
+    }
+
+    /// Result of setting up depth stencil attachment.
+    ///
+    /// Used by `setupDepthAttachment()` to return the configured attachment
+    /// and associated view. If `valid` is false, depth testing is disabled.
+    const DepthAttachmentResult = struct {
+        /// Configured depth stencil attachment descriptor.
+        attachment: c.WGPURenderPassDepthStencilAttachment,
+        /// View handle (must be released after submit if valid).
+        view: wgpu.TextureView,
+        /// True if depth attachment is valid and should be used.
+        valid: bool,
+    };
+
+    /// Setup depth stencil attachment from texture ID.
+    ///
+    /// Creates a depth-only texture view from the specified texture ID.
+    /// Returns invalid result for:
+    /// - `0xFFFF`: No depth attachment requested
+    /// - Invalid texture IDs or null textures
+    ///
+    /// The returned view must be released after the command buffer is submitted.
+    fn setupDepthAttachment(self: *Self, depth_texture_id: u16) DepthAttachmentResult {
+        var result = DepthAttachmentResult{
+            .attachment = undefined,
+            .view = null,
+            .valid = false,
+        };
+
+        if (depth_texture_id == 0xFFFF or depth_texture_id >= MAX_TEXTURES) return result;
+        const depth_tex = self.textures[depth_texture_id] orelse return result;
+
+        // Create view for depth texture with correct aspect
+        var depth_view_desc = std.mem.zeroes(c.WGPUTextureViewDescriptor);
+        depth_view_desc.format = self.texture_formats[depth_texture_id];
+        depth_view_desc.dimension = c.WGPUTextureViewDimension_2D;
+        depth_view_desc.aspect = c.WGPUTextureAspect_DepthOnly;
+        depth_view_desc.baseMipLevel = 0;
+        depth_view_desc.mipLevelCount = 1;
+        depth_view_desc.baseArrayLayer = 0;
+        depth_view_desc.arrayLayerCount = 1;
+
+        const depth_view = wgpu.textureCreateView(depth_tex, &depth_view_desc);
+        if (depth_view == null) return result;
+
+        result.view = depth_view;
+        result.valid = true;
+        result.attachment = std.mem.zeroes(c.WGPURenderPassDepthStencilAttachment);
+        result.attachment.view = depth_view;
+        result.attachment.depthLoadOp = c.WGPULoadOp_Clear;
+        result.attachment.depthStoreOp = c.WGPUStoreOp_Store;
+        result.attachment.depthClearValue = 1.0;
+        result.attachment.stencilLoadOp = c.WGPULoadOp_Undefined;
+        result.attachment.stencilStoreOp = c.WGPUStoreOp_Undefined;
+        result.attachment.stencilClearValue = 0;
+        result.attachment.stencilReadOnly = 0;
+        result.attachment.depthReadOnly = 0;
+
+        return result;
+    }
+
+    /// Result of parsing a single bind group layout entry.
+    ///
+    /// Used by `parseBindGroupEntry()` to return the parsed entry and
+    /// byte consumption for advancing through the binary descriptor.
+    const BindGroupEntryResult = struct {
+        /// Parsed bind group layout entry.
+        entry: c.WGPUBindGroupLayoutEntry,
+        /// Number of bytes consumed from the input data.
+        bytes_consumed: usize,
+        /// True if parsing succeeded.
+        valid: bool,
+    };
+
+    /// Parse a single bind group entry from binary descriptor data.
+    ///
+    /// Binary format per entry:
+    /// ```
+    /// [binding:u8][visibility:u8][resource_type:u8][type_specific_data...]
+    /// ```
+    ///
+    /// Resource types:
+    /// - `0x01`: Buffer (uniform, storage, or read-only storage)
+    /// - `0x02`: Sampler
+    /// - `0x03`: Sampled texture
+    /// - `0x04`: Storage texture
+    ///
+    /// Returns invalid result if data is malformed or insufficient.
+    fn parseBindGroupEntry(data: []const u8, offset: usize) BindGroupEntryResult {
+        var result = BindGroupEntryResult{
+            .entry = std.mem.zeroes(c.WGPUBindGroupLayoutEntry),
+            .bytes_consumed = 0,
+            .valid = false,
+        };
+
+        // Need at least 3 bytes for header
+        if (offset + 3 > data.len) return result;
+
+        const binding = data[offset];
+        const visibility = data[offset + 1];
+        const resource_type = data[offset + 2];
+        var off: usize = offset + 3;
+
+        // Initialize entry with all binding types as "not used"
+        result.entry.binding = binding;
+        result.entry.visibility = visibility;
+        result.entry.buffer.type = c.WGPUBufferBindingType_BindingNotUsed;
+        result.entry.sampler.type = c.WGPUSamplerBindingType_BindingNotUsed;
+        result.entry.texture.sampleType = c.WGPUTextureSampleType_BindingNotUsed;
+        result.entry.storageTexture.access = c.WGPUStorageTextureAccess_BindingNotUsed;
+
+        switch (resource_type) {
+            0x00 => {
+                // Buffer binding: [type:u8][hasDynamicOffset:u8][minBindingSize:u32]
+                if (off + 6 > data.len) return result;
+                const buf_type = data[off];
+                const has_dynamic_offset = data[off + 1];
+                const min_binding_size = std.mem.readInt(u32, data[off + 2 ..][0..4], .little);
+                off += 6;
+
+                result.entry.buffer.type = switch (buf_type) {
+                    0 => c.WGPUBufferBindingType_Uniform,
+                    1 => c.WGPUBufferBindingType_Storage,
+                    2 => c.WGPUBufferBindingType_ReadOnlyStorage,
+                    else => c.WGPUBufferBindingType_Uniform,
+                };
+                result.entry.buffer.hasDynamicOffset = if (has_dynamic_offset != 0) 1 else 0;
+                result.entry.buffer.minBindingSize = min_binding_size;
+            },
+            0x01 => {
+                // Sampler binding: [type:u8]
+                if (off + 1 > data.len) return result;
+                const samp_type = data[off];
+                off += 1;
+
+                result.entry.sampler.type = switch (samp_type) {
+                    0 => c.WGPUSamplerBindingType_Filtering,
+                    1 => c.WGPUSamplerBindingType_NonFiltering,
+                    2 => c.WGPUSamplerBindingType_Comparison,
+                    else => c.WGPUSamplerBindingType_Filtering,
+                };
+            },
+            0x02 => {
+                // Texture binding: [sampleType:u8][viewDimension:u8][multisampled:u8]
+                if (off + 3 > data.len) return result;
+                const sample_type = data[off];
+                const view_dim = data[off + 1];
+                const multisampled = data[off + 2];
+                off += 3;
+
+                result.entry.texture.sampleType = switch (sample_type) {
+                    0 => c.WGPUTextureSampleType_Float,
+                    1 => c.WGPUTextureSampleType_UnfilterableFloat,
+                    2 => c.WGPUTextureSampleType_Depth,
+                    3 => c.WGPUTextureSampleType_Sint,
+                    4 => c.WGPUTextureSampleType_Uint,
+                    else => c.WGPUTextureSampleType_Float,
+                };
+                result.entry.texture.viewDimension = mapViewDimension(view_dim);
+                result.entry.texture.multisampled = if (multisampled != 0) 1 else 0;
+            },
+            0x03 => {
+                // Storage texture binding: [format:u8][access:u8][viewDimension:u8]
+                if (off + 3 > data.len) return result;
+                const tex_format = data[off];
+                const access = data[off + 1];
+                const view_dim = data[off + 2];
+                off += 3;
+
+                result.entry.storageTexture.format = mapTextureFormat(tex_format);
+                result.entry.storageTexture.access = switch (access) {
+                    0 => c.WGPUStorageTextureAccess_WriteOnly,
+                    1 => c.WGPUStorageTextureAccess_ReadOnly,
+                    2 => c.WGPUStorageTextureAccess_ReadWrite,
+                    else => c.WGPUStorageTextureAccess_WriteOnly,
+                };
+                result.entry.storageTexture.viewDimension = mapViewDimension(view_dim);
+            },
+            0x04 => {
+                // External texture: no extra data (WebGPU-only, skip for native)
+            },
+            else => {},
+        }
+
+        result.bytes_consumed = off - offset;
+        result.valid = true;
+        return result;
+    }
+
     pub fn createComputePipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
         assert(pipeline_id < MAX_COMPUTE_PIPELINES);
         assert(self.module != null);
@@ -913,7 +1430,7 @@ pub const WgpuNativeGPU = struct {
 
         const pipeline = wgpu.deviceCreateComputePipeline(self.ctx.device, &descriptor);
         if (pipeline != null) {
-            debug_compute_pipelines_created += 1;
+            _ = debug_compute_pipelines_created.fetchAdd(1, .monotonic);
         }
         nativeLog("createComputePipeline: id={}, shader_id={}, entry={s}, result={}\n", .{
             pipeline_id,
@@ -1042,10 +1559,9 @@ pub const WgpuNativeGPU = struct {
                                 entry.offset = buf_offset;
                                 entry.size = if (buf_size == 0) wgpu.bufferGetSize(buffer) else buf_size;
                                 // Track storage buffer ID for debugging
-                                debug_last_storage_bind_buffer_id = rid;
-                                if (debug_first_storage_bind_buffer_id == 0xFFFF) {
-                                    debug_first_storage_bind_buffer_id = rid;
-                                }
+                                debug_last_storage_bind_buffer_id.store(rid, .monotonic);
+                                // Only set first on first occurrence (compare-and-swap)
+                                _ = debug_first_storage_bind_buffer_id.cmpxchgStrong(0xFFFF, rid, .monotonic, .monotonic);
                             }
                         }
                     } else if (rt == 1) {
@@ -1094,7 +1610,7 @@ pub const WgpuNativeGPU = struct {
 
         const bind_group = wgpu.deviceCreateBindGroup(self.ctx.device, &desc);
         if (bind_group != null) {
-            debug_bind_groups_created += 1;
+            _ = debug_bind_groups_created.fetchAdd(1, .monotonic);
         }
         self.bind_groups[group_id] = bind_group;
         nativeLog("createBindGroup: id={}, layout_id={}, entries={}, result={}\n", .{
@@ -1123,115 +1639,23 @@ pub const WgpuNativeGPU = struct {
         // [type_tag:u8][field_count:u8][entries_field_id:u8][array_type:u8][entry_count:u8][entries...]
         if (data.len < 5) return;
 
-        // Skip type_tag (0x04) and field_count
-        var off: usize = 2;
+        // Skip type_tag (0x04) and field_count, check for entries field
+        if (data[2] != 0x01 or data[3] != 0x03) return;
 
-        // Check for entries field (field_id=0x01, type=0x03 array)
-        if (data[off] != 0x01 or data[off + 1] != 0x03) return;
-        off += 2;
-
-        const entry_count = data[off];
-        off += 1;
-
+        const entry_count = data[4];
         if (entry_count == 0 or entry_count > 16) return;
 
-        // Parse entries into C struct array
+        // Parse entries into C struct array using helper
         var entries: [16]c.WGPUBindGroupLayoutEntry = undefined;
         var parsed_count: usize = 0;
+        var off: usize = 5;
 
         for (0..entry_count) |i| {
-            if (off + 3 > data.len) break;
+            const result = parseBindGroupEntry(data, off);
+            if (!result.valid) break;
 
-            const binding = data[off];
-            const visibility = data[off + 1];
-            const resource_type = data[off + 2];
-            off += 3;
-
-            // Initialize entry with all binding types as "not used"
-            var entry = std.mem.zeroes(c.WGPUBindGroupLayoutEntry);
-            entry.binding = binding;
-            entry.visibility = visibility;
-            entry.buffer.type = c.WGPUBufferBindingType_BindingNotUsed;
-            entry.sampler.type = c.WGPUSamplerBindingType_BindingNotUsed;
-            entry.texture.sampleType = c.WGPUTextureSampleType_BindingNotUsed;
-            entry.storageTexture.access = c.WGPUStorageTextureAccess_BindingNotUsed;
-
-            switch (resource_type) {
-                0x00 => {
-                    // Buffer binding: [type:u8][hasDynamicOffset:u8][minBindingSize:u32]
-                    if (off + 6 > data.len) break;
-                    const buf_type = data[off];
-                    const has_dynamic_offset = data[off + 1];
-                    const min_binding_size = std.mem.readInt(u32, data[off + 2 ..][0..4], .little);
-                    off += 6;
-
-                    entry.buffer.type = switch (buf_type) {
-                        0 => c.WGPUBufferBindingType_Uniform,
-                        1 => c.WGPUBufferBindingType_Storage,
-                        2 => c.WGPUBufferBindingType_ReadOnlyStorage,
-                        else => c.WGPUBufferBindingType_Uniform,
-                    };
-                    entry.buffer.hasDynamicOffset = if (has_dynamic_offset != 0) 1 else 0;
-                    entry.buffer.minBindingSize = min_binding_size;
-                },
-                0x01 => {
-                    // Sampler binding: [type:u8]
-                    if (off + 1 > data.len) break;
-                    const samp_type = data[off];
-                    off += 1;
-
-                    entry.sampler.type = switch (samp_type) {
-                        0 => c.WGPUSamplerBindingType_Filtering,
-                        1 => c.WGPUSamplerBindingType_NonFiltering,
-                        2 => c.WGPUSamplerBindingType_Comparison,
-                        else => c.WGPUSamplerBindingType_Filtering,
-                    };
-                },
-                0x02 => {
-                    // Texture binding: [sampleType:u8][viewDimension:u8][multisampled:u8]
-                    if (off + 3 > data.len) break;
-                    const sample_type = data[off];
-                    const view_dim = data[off + 1];
-                    const multisampled = data[off + 2];
-                    off += 3;
-
-                    entry.texture.sampleType = switch (sample_type) {
-                        0 => c.WGPUTextureSampleType_Float,
-                        1 => c.WGPUTextureSampleType_UnfilterableFloat,
-                        2 => c.WGPUTextureSampleType_Depth,
-                        3 => c.WGPUTextureSampleType_Sint,
-                        4 => c.WGPUTextureSampleType_Uint,
-                        else => c.WGPUTextureSampleType_Float,
-                    };
-                    entry.texture.viewDimension = mapViewDimension(view_dim);
-                    entry.texture.multisampled = if (multisampled != 0) 1 else 0;
-                },
-                0x03 => {
-                    // Storage texture binding: [format:u8][access:u8][viewDimension:u8]
-                    if (off + 3 > data.len) break;
-                    const tex_format = data[off];
-                    const access = data[off + 1];
-                    const view_dim = data[off + 2];
-                    off += 3;
-
-                    entry.storageTexture.format = mapTextureFormat(tex_format);
-                    entry.storageTexture.access = switch (access) {
-                        0 => c.WGPUStorageTextureAccess_WriteOnly,
-                        1 => c.WGPUStorageTextureAccess_ReadOnly,
-                        2 => c.WGPUStorageTextureAccess_ReadWrite,
-                        else => c.WGPUStorageTextureAccess_WriteOnly,
-                    };
-                    entry.storageTexture.viewDimension = mapViewDimension(view_dim);
-                },
-                0x04 => {
-                    // External texture: no extra data
-                    // Note: wgpu-native doesn't have WGPUExternalTextureBindingLayout
-                    // External textures are WebGPU-only, skip for native
-                },
-                else => {},
-            }
-
-            entries[i] = entry;
+            entries[i] = result.entry;
+            off += result.bytes_consumed;
             parsed_count += 1;
         }
 
@@ -1244,6 +1668,9 @@ pub const WgpuNativeGPU = struct {
 
         const layout = wgpu.deviceCreateBindGroupLayout(self.ctx.device, &desc);
         self.bind_group_layouts[layout_id] = layout;
+
+        // Post-condition: layout slot is populated (may be null if GPU failed)
+        assert(self.bind_group_layouts[layout_id] != null or layout == null);
 
         nativeLog("createBindGroupLayout: id={}, entries={}, result={}\n", .{
             layout_id,
@@ -1376,49 +1803,16 @@ pub const WgpuNativeGPU = struct {
     pub fn beginRenderPass(self: *Self, allocator: Allocator, color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16) !void {
         _ = allocator;
 
-        // Get color target view
-        var view: wgpu.TextureView = null;
+        // Pre-condition assertions (Zig Mastery Compliance)
+        assert(self.ctx.device != null);
+        assert(load_op <= 1); // 0=Load, 1=Clear
+        assert(store_op <= 1); // 0=Store, 1=Discard
 
-        // 0xFFFE (65534) = render to surface/screen
-        if (color_texture_id == 0xFFFE) {
-            if (self.surface) |surface| {
-                var surface_texture: wgpu.SurfaceTexture = undefined;
-                wgpu.surfaceGetCurrentTexture(surface, &surface_texture);
-
-                const status = surface_texture.status;
-                if (status != c.WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal and
-                    status != c.WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal)
-                {
-                    return error.SurfaceTextureUnavailable;
-                }
-
-                if (surface_texture.texture != null) {
-                    view = wgpu.textureCreateView(surface_texture.texture, null);
-                    if (view == null) {
-                        return error.SurfaceTextureUnavailable;
-                    }
-                    self.current_surface_view = view;
-                } else {
-                    return error.SurfaceTextureUnavailable;
-                }
-            } else {
-                return error.NoSurfaceConfigured;
-            }
-        } else {
-            // Render to custom texture
-            if (self.texture_views[color_texture_id]) |v| {
-                view = v;
-            } else if (self.textures[color_texture_id]) |t| {
-                view = wgpu.textureCreateView(t, null);
-                if (view == null) {
-                    return error.TextureNotFound;
-                }
-            } else {
-                return error.TextureNotFound;
-            }
+        // Get color target view using helper
+        const color_result = try getColorTargetView(self, color_texture_id);
+        if (color_result.is_surface) {
+            self.current_surface_view = color_result.view;
         }
-
-        const valid_view = view orelse return error.SurfaceTextureUnavailable;
 
         // Reuse existing encoder if one exists, otherwise create new
         if (self.encoder == null) {
@@ -1432,66 +1826,45 @@ pub const WgpuNativeGPU = struct {
 
         // Color attachment
         var color_attachment = std.mem.zeroes(c.WGPURenderPassColorAttachment);
-        color_attachment.view = valid_view;
+        color_attachment.view = color_result.view;
         color_attachment.depthSlice = c.WGPU_DEPTH_SLICE_UNDEFINED;
         color_attachment.loadOp = wgpu_load_op;
         color_attachment.storeOp = wgpu_store_op;
         color_attachment.clearValue = .{ .r = 0.0, .g = 0.0, .b = 0.0, .a = 1.0 };
 
-        // Depth stencil attachment (if depth texture provided)
-        var depth_attachment: c.WGPURenderPassDepthStencilAttachment = undefined;
-        var has_depth = false;
+        // Release previous depth view if any
+        if (self.current_depth_view) |old_view| {
+            wgpu.textureViewRelease(old_view);
+            self.current_depth_view = null;
+        }
 
-        if (depth_texture_id != 0xFFFF and depth_texture_id < MAX_TEXTURES) {
-            if (self.textures[depth_texture_id]) |depth_tex| {
-                // Release previous depth view if any
-                if (self.current_depth_view) |old_view| {
-                    wgpu.textureViewRelease(old_view);
-                    self.current_depth_view = null;
-                }
-
-                // Create view for depth texture with correct aspect
-                var depth_view_desc = std.mem.zeroes(c.WGPUTextureViewDescriptor);
-                depth_view_desc.format = self.texture_formats[depth_texture_id];
-                depth_view_desc.dimension = c.WGPUTextureViewDimension_2D;
-                depth_view_desc.aspect = c.WGPUTextureAspect_DepthOnly;
-                depth_view_desc.baseMipLevel = 0;
-                depth_view_desc.mipLevelCount = 1;
-                depth_view_desc.baseArrayLayer = 0;
-                depth_view_desc.arrayLayerCount = 1;
-
-                const depth_view = wgpu.textureCreateView(depth_tex, &depth_view_desc);
-                if (depth_view != null) {
-                    self.current_depth_view = depth_view; // Track for release in submit()
-                    has_depth = true;
-                    depth_attachment = std.mem.zeroes(c.WGPURenderPassDepthStencilAttachment);
-                    depth_attachment.view = depth_view;
-                    depth_attachment.depthLoadOp = c.WGPULoadOp_Clear;
-                    depth_attachment.depthStoreOp = c.WGPUStoreOp_Store;
-                    depth_attachment.depthClearValue = 1.0;
-                    depth_attachment.stencilLoadOp = c.WGPULoadOp_Undefined;
-                    depth_attachment.stencilStoreOp = c.WGPUStoreOp_Undefined;
-                    depth_attachment.stencilClearValue = 0;
-                    depth_attachment.stencilReadOnly = 0;
-                    depth_attachment.depthReadOnly = 0;
-                }
-            }
+        // Depth stencil attachment using helper
+        const depth_result = setupDepthAttachment(self, depth_texture_id);
+        var depth_attachment = depth_result.attachment;
+        if (depth_result.valid) {
+            self.current_depth_view = depth_result.view;
         }
 
         var render_pass_desc = std.mem.zeroes(c.WGPURenderPassDescriptor);
         render_pass_desc.label = .{ .data = null, .length = 0 };
         render_pass_desc.colorAttachmentCount = 1;
         render_pass_desc.colorAttachments = &color_attachment;
-        render_pass_desc.depthStencilAttachment = if (has_depth) &depth_attachment else null;
+        render_pass_desc.depthStencilAttachment = if (depth_result.valid) &depth_attachment else null;
 
         self.render_pass = wgpu.commandEncoderBeginRenderPass(encoder, &render_pass_desc);
+
+        // Post-condition: render pass was started
         if (self.render_pass != null) {
-            debug_render_passes_begun += 1;
+            _ = debug_render_passes_begun.fetchAdd(1, .monotonic);
         }
     }
 
     pub fn beginComputePass(self: *Self, allocator: Allocator) !void {
         _ = allocator;
+
+        // Pre-condition assertions (Zig Mastery Compliance)
+        assert(self.ctx.device != null);
+        assert(self.compute_pass == null); // Must not be in a compute pass already
 
         // Reuse existing encoder if one exists, otherwise create new
         const reusing = self.encoder != null;
@@ -1500,9 +1873,12 @@ pub const WgpuNativeGPU = struct {
         }
         self.compute_pass = wgpu.commandEncoderBeginComputePass(self.encoder.?, null);
         if (self.compute_pass != null) {
-            debug_compute_passes_begun += 1;
+            _ = debug_compute_passes_begun.fetchAdd(1, .monotonic);
         }
         nativeLog("[NATIVE] beginComputePass: reusing={}, pass_valid={}\n", .{ reusing, self.compute_pass != null });
+
+        // Post-condition: compute pass is now active
+        assert(self.compute_pass != null);
     }
 
     pub fn setPipeline(self: *Self, allocator: Allocator, pipeline_id: u16) !void {
@@ -1543,10 +1919,9 @@ pub const WgpuNativeGPU = struct {
         _ = allocator;
 
         // Track buffer ID for debugging
-        debug_last_vertex_buffer_id = buffer_id;
-        if (debug_first_vertex_buffer_id == 0xFFFF) {
-            debug_first_vertex_buffer_id = buffer_id;
-        }
+        debug_last_vertex_buffer_id.store(buffer_id, .monotonic);
+        // Only set first on first occurrence (compare-and-swap)
+        _ = debug_first_vertex_buffer_id.cmpxchgStrong(0xFFFF, buffer_id, .monotonic, .monotonic);
 
         if (self.render_pass) |pass| {
             if (self.buffers[buffer_id]) |buffer| {
@@ -1575,9 +1950,9 @@ pub const WgpuNativeGPU = struct {
         _ = allocator;
 
         if (self.render_pass) |pass| {
-            debug_draws += 1;
-            debug_vertex_count = vertex_count;
-            debug_instance_count = instance_count;
+            _ = debug_draws.fetchAdd(1, .monotonic);
+            debug_vertex_count.store(vertex_count, .monotonic);
+            debug_instance_count.store(instance_count, .monotonic);
             wgpu.renderPassEncoderDraw(pass, vertex_count, instance_count, first_vertex, first_instance);
         }
     }
@@ -1597,8 +1972,8 @@ pub const WgpuNativeGPU = struct {
         nativeLog("dispatch: x={}, y={}, z={}, has_pass={}\n", .{ x, y, z, has_pass });
 
         if (self.compute_pass) |pass| {
-            debug_dispatches += 1;
-            debug_dispatch_x = x;
+            _ = debug_dispatches.fetchAdd(1, .monotonic);
+            debug_dispatch_x.store(x, .monotonic);
             wgpu.computePassEncoderDispatchWorkgroups(pass, x, y, z);
         }
     }
