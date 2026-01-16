@@ -1011,7 +1011,7 @@ Final cleanup and default changes:
 **Completed:**
 - Removed pNGr chunk completely (was intended for WASM runtime embedding)
 - Made `--embed-executor` the default behavior (now `--no-executor` to opt out)
-- Removed `pngine.wasm` from demo output (no longer needed)
+- Removed `pngine.wasm` from playground output (no longer needed)
 - Updated all demo files with embedded executors (~5KB for simple shader)
 - Verified browser loads embedded executor from PNG payload:
   - Console: `[Worker] Using embedded executor from payload`
@@ -1024,7 +1024,7 @@ Final cleanup and default changes:
 - `src/png/embed.zig` - Removed pNGr chunk code
 - `src/png/chunk.zig` - Removed pNGr chunk type
 - `src/cli/render.zig` - Default `embed_executor = true`
-- `build.zig` - Removed pngine.wasm from demo output
+- `build.zig` - Removed pngine.wasm from playground output
 - `CLAUDE.md` - Updated CLI docs, marked plan complete
 
 #### 2025-12-27: Phase 7 Complete (Desktop Viewer)

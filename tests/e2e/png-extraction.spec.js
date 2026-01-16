@@ -274,7 +274,7 @@ test.describe('PNG Bytecode Extraction', () => {
 
 });
 
-test.describe('Demo Page UI', () => {
+test.describe('Playground Page UI', () => {
 
     test('page loads and shows ready status', async ({ page }) => {
         await page.goto('/');

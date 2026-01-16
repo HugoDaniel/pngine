@@ -8,7 +8,7 @@
     "compile": "pngine compile scenes/main.pngine -o dist/demo.pngb",
     "compile:prod": "pngine scenes/main.pngine -o dist/demo.png",
     "watch": "find scenes -type f -name '*.pngine' | entr -c npm run compile",
-    "setup": "cd ../.. && zig build web && cp zig-out/bin/pngine.wasm zig-out/demo/"
+    "setup": "cd ../.. && zig build web && cp zig-out/bin/pngine.wasm zig-out/playground/"
   },
   "devDependencies": {
     "vite": "^7.3.0"

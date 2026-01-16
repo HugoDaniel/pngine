@@ -121,7 +121,7 @@ Press keys to mark important musical moments, then sync your audio to the logged
 ## File Organization
 
 ```
-demo/
+playground/
 ├── sceneQ.wgsl.pngine    # Individual scene definitions
 ├── sceneW.wgsl.pngine
 ├── sceneE.wgsl.pngine
@@ -134,7 +134,7 @@ demo/
 └── README.md             # This file
 
 ../
-├── demo.html             # Playback interface
+├── playground.html       # Playback interface
 ├── demo.png              # Compiled demo (15KB)
 └── Makefile              # Build commands
 ```

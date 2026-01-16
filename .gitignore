@@ -11,8 +11,8 @@ test-results/
 # Generated example outputs
 examples/*.png
 examples/*.pngb
-demo/*.png
-demo/*.pngb
+playground/*.png
+playground/*.pngb
 
 # Coverage reports
 coverage/

@@ -103,7 +103,7 @@ async function main() {
   console.log(`Compiling ${opts.input}...`);
 
   // Compile the shader
-  const pngPath = join('zig-out/demo', basename(opts.input, '.pngine') + '.png');
+  const pngPath = join('zig-out/playground/', basename(opts.input, '.pngine') + '.png');
   try {
     execSync(`./zig-out/bin/pngine ${opts.input} -o ${pngPath}`, { stdio: 'inherit' });
   } catch (err) {
@@ -149,7 +149,7 @@ async function main() {
 </html>
 `;
 
-  const tempHtmlPath = join('zig-out/demo', 'render-frame-temp.html');
+  const tempHtmlPath = join('zig-out/playground/', 'render-frame-temp.html');
   writeFileSync(tempHtmlPath, htmlContent);
 
   console.log(`Rendering at ${opts.width}x${opts.height}, t=${opts.time}...`);

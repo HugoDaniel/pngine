@@ -1,19 +1,13 @@
 # CLAUDE.md - PNGine Development Guide
 
-## CRITICAL: Active Implementation Plan
+## Slack Thread Setup
 
-**READ FIRST**: Before any implementation work, read the active plan:
+On startup, always:
 
-- **`docs/cpu-wasm-data-initialization-plan.md`** - Buffer initialization with
-  compile-time shapes and compute shader `#init`
-
-This plan defines:
-
-- Compile-time `#data` shape generators: `cube=`, `plane=`, `sphere=`
-- Compute shader `#init` macro for GPU-generated procedural data
-- Auto-sizing via shader reflection: `size=shader.varName`
-- Frame `init=` support for one-time initialization
-- **Phase 6 complete**: Fill opcodes removed, two approaches remain
+1. Get tmux session: `tmux display-message -p '#S'`
+2. Get tmux window: `tmux display-message -p '#W'`
+3. Post to slack #shannon (C0A7RDF5X1N): "[{session}][{window}] Claude Code instance online"
+4. Save the thread_ts and use it for all subsequent Slack messages
 
 **Zig Mastery Guidelines**: `/Users/hugo/Development/specs-llm/mastery/zig/`
 
@@ -24,47 +18,6 @@ This plan defines:
 
 **If you discover of find anything relevant for other developers write it down
 in CONTRIBUTING.md to help out further developments with compounded knowledge**
-
-## Related Plans (Reference as Needed)
-
-| Plan                                        | Purpose                                  | Status      |
-| ------------------------------------------- | ---------------------------------------- | ----------- |
-| `docs/cpu-wasm-data-initialization-plan.md` | **ACTIVE** - Buffer init + shapes        | In Progress |
-| `docs/embedded-executor-plan.md`            | Embedded executor + plugins              | Complete    |
-| `docs/llm-runtime-testing-plan.md`          | LLM-friendly validation via wasm3        | Complete    |
-| `docs/multiplatform-command-buffer-plan.md` | Platform abstraction                     | Reference   |
-| `docs/data-generation-plan.md`              | Compute shader data gen (superseded)     | Archived    |
-| `docs/command-buffer-refactor-plan.md`      | JS bundle optimization                   | Reference   |
-| `docs/remove-wasm-in-wasm-plan.md`          | **SUPERSEDED** - Do not use              | Archived    |
-
-### Buffer Initialization (docs/cpu-wasm-data-initialization-plan.md)
-
-Two approaches for buffer initialization:
-
-**1. Compile-time shapes** (static meshes):
-```
-#data cubeVertexArray {
-  cube={ format=[position4 color4 uv2] }
-}
-```
-
-**2. Compute shader #init** (procedural data):
-```
-#init resetParticles {
-  buffer=particles
-  shader=initParticles
-  params=[42]
-}
-```
-
-Key features:
-
-- **Built-in shapes**: `cube=`, `plane=`, `sphere=` with format specifiers
-- **Auto-sizing**: `size=shader.varName` uses reflection
-- **One-time init**: `#frame { init=[...] }` runs before first frame
-- **GPU-native**: Compute shaders for procedural data
-
----
 
 ## Project Overview
 
@@ -122,7 +75,7 @@ If libminiray.a is not linked:
 # Build CLI
 /Users/hugo/.zvm/bin/zig build
 
-# Build WASM + JS for demo (outputs to zig-out/demo/)
+# Build WASM + JS for demo (outputs to zig-out/playground/)
 /Users/hugo/.zvm/bin/zig build web
 
 # Build minified production JS bundle (requires npm install)
@@ -660,7 +613,7 @@ examples/                 # Example .pngine files
 ├── simple_triangle.pngine
 ├── rotating_cube.pngine
 └── boids.pngine          # Compute simulation with ping-pong buffers
-demo/                     # Demo/test HTML files (not sources)
+playground/               # Playground/test HTML files (not sources)
 ├── index.html            # Interactive demo page
 ├── test-*.html           # Development test pages
 └── *.png                 # Demo assets (gitignored)
@@ -1058,8 +1011,11 @@ npm/
 ### Build Commands
 
 ```bash
-# Build WASM + copy JS sources for development (outputs to zig-out/demo/)
-/Users/hugo/.zvm/bin/zig build web
+# Build WASM + copy JS sources for development (outputs to zig-out/playground/)
+zig build web
+
+# Build website (outputs to website/public/)
+zig build website
 
 # Build minified production bundle (runs zig build web + esbuild)
 /Users/hugo/.zvm/bin/zig build web-bundle

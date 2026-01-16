@@ -777,12 +777,12 @@ pub fn build(b: *std.Build) void {
     // For production bundles, use: node npm/pngine/scripts/bundle.js
     const web_step = b.step("web", "Build demo bundle (WASM + JS)");
 
-    // Note: pngine.wasm is no longer copied to demo/ because PNGs now embed their executor.
+    // Note: pngine.wasm is no longer copied to playground/ because PNGs now embed their executor.
     // The embedded executor is extracted from the bytecode payload at runtime.
 
-    // Install ancillary mvp.wasm to demo/assets directory
+    // Install ancillary mvp.wasm to playground/assets directory
     const install_mvp_wasm = b.addInstallArtifact(mvp_wasm, .{
-        .dest_dir = .{ .override = .{ .custom = "demo/assets" } },
+        .dest_dir = .{ .override = .{ .custom = "playground/assets" } },
     });
     web_step.dependOn(&install_mvp_wasm.step);
 
@@ -794,10 +794,10 @@ pub fn build(b: *std.Build) void {
 
     // Copy demo HTML files
     const html_files = [_][]const u8{
-        "demo/index.html",
+        "playground/index.html",
     };
     for (html_files) |file| {
-        const install_file = b.addInstallFile(b.path(file), b.fmt("demo/{s}", .{std.fs.path.basename(file)}));
+        const install_file = b.addInstallFile(b.path(file), b.fmt("playground/{s}", .{std.fs.path.basename(file)}));
         web_step.dependOn(&install_file.step);
     }
 
@@ -805,13 +805,13 @@ pub fn build(b: *std.Build) void {
     // Note: gpu.js uses closure pattern for better minification (58% smaller)
     const SrcFile = struct { src: []const u8, dest: []const u8 };
     const js_files = [_]SrcFile{
-        .{ .src = "npm/pngine/src/index.js", .dest = "demo/pngine.js" },
-        .{ .src = "npm/pngine/src/init.js", .dest = "demo/init.js" },
-        .{ .src = "npm/pngine/src/worker.js", .dest = "demo/worker.js" },
-        .{ .src = "npm/pngine/src/gpu.js", .dest = "demo/gpu.js" },
-        .{ .src = "npm/pngine/src/anim.js", .dest = "demo/anim.js" },
-        .{ .src = "npm/pngine/src/extract.js", .dest = "demo/extract.js" },
-        .{ .src = "npm/pngine/src/loader.js", .dest = "demo/loader.js" },
+        .{ .src = "npm/pngine/src/index.js", .dest = "playground/pngine.js" },
+        .{ .src = "npm/pngine/src/init.js", .dest = "playground/init.js" },
+        .{ .src = "npm/pngine/src/worker.js", .dest = "playground/worker.js" },
+        .{ .src = "npm/pngine/src/gpu.js", .dest = "playground/gpu.js" },
+        .{ .src = "npm/pngine/src/anim.js", .dest = "playground/anim.js" },
+        .{ .src = "npm/pngine/src/extract.js", .dest = "playground/extract.js" },
+        .{ .src = "npm/pngine/src/loader.js", .dest = "playground/loader.js" },
     };
     for (js_files) |file| {
         const install_file = b.addInstallFile(b.path(file.src), file.dest);

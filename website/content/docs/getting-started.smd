@@ -36,8 +36,8 @@ zig build test
 
 Output files:
 - `zig-out/bin/pngine` - CLI executable
-- `zig-out/demo/pngine.wasm` - Browser runtime
-- `zig-out/demo/pngine.js` - Browser JavaScript
+- `zig-out/playground/index.html` - Local playground
+- `zig-out/playground/pngine.js` - Browser JavaScript
 
 ## First Program
 

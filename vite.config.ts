@@ -2,7 +2,7 @@ import { defineConfig } from 'vite'
 import { resolve } from 'path'
 
 export default defineConfig({
-  root: 'zig-out/demo',
+  root: 'zig-out/playground',
   server: {
     port: 5173,
     open: false,
@@ -15,7 +15,7 @@ export default defineConfig({
   },
   assetsInclude: ['**/*.wasm'],
   build: {
-    outDir: '../../dist-demo',
+    outDir: '../../dist-playground',
   },
   resolve: {
     alias: {
@@ -27,8 +27,8 @@ export default defineConfig({
       './anim.js': resolve(__dirname, 'npm/pngine/src/anim.js'),
       './extract.js': resolve(__dirname, 'npm/pngine/src/extract.js'),
       './loader.js': resolve(__dirname, 'npm/pngine/src/loader.js'),
-      // WASM file - resolve to built demo output
-      'pngine.wasm': resolve(__dirname, 'zig-out/demo/pngine.wasm'),
+      // WASM file - resolve to built playground output
+      'pngine.wasm': resolve(__dirname, 'zig-out/playground/pngine.wasm'),
     }
   }
 })

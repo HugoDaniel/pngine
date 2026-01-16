@@ -565,26 +565,15 @@ test "ShaderID: shader with data blocks gets correct WGSL code" {
 }
 ```
 
-### Browser Test Files
+### Web Runtime Tests
 
-Create test HTML files in `demo/` directory:
+Create test HTML files in `playground/` directory:
 
 ```html
-<!DOCTYPE html>
-<html>
-<head><title>Test Case Name</title></head>
-<body>
-  <canvas id="canvas" width="512" height="512"></canvas>
-  <script type="module">
-    import { pngine, play } from './pngine.js';
-    const engine = await pngine('test_case.png', {
-      canvas: document.getElementById('canvas'),
-      debug: true
-    });
-    play(engine);
-  </script>
-</body>
-</html>
+<script type="module">
+  import { pngine } from './pngine.js';
+  // Test code...
+</script>
 ```
 
 ## Built-in Shape Generators
