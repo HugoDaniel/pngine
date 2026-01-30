@@ -12,25 +12,33 @@
 const std = @import("std");
 const testing = std.testing;
 const Compiler = @import("../Compiler.zig").Compiler;
+const format = @import("bytecode").format;
 
-// Use bytecode module import
-const bytecode_mod = @import("bytecode");
-const format = bytecode_mod.format;
+/// Create a threaded IO instance for testing.
+/// Caller must deinit returned Threaded instance.
+pub fn initTestIo(allocator: std.mem.Allocator) std.Io.Threaded {
+    return std.Io.Threaded.init(allocator, .{
+        .environ = std.process.Environ.empty,
+        .argv0 = .empty,
+    });
+}
 
-// ============================================================================
-// Test Helpers
-// ============================================================================
-
-/// Compile source and return bytecode (caller owns)
 fn compileSource(source: [:0]const u8) ![]u8 {
     return Compiler.compile(testing.allocator, source);
 }
 
-/// Compile source with base_dir for file loading
+// Helper to compile with base directory
 fn compileWithBaseDir(source: [:0]const u8, base_dir: []const u8) ![]u8 {
-    return Compiler.compileWithOptions(testing.allocator, source, .{
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const result = try Compiler.compileWithPlugins(testing.allocator, source, .{
         .base_dir = base_dir,
+        .minify_shaders = false,
+        .io = io,
     });
+    return result.pngb;
 }
 
 /// Extract shader data from bytecode for verification
@@ -441,15 +449,20 @@ test "WGSL imports: wide import tree (many direct imports)" {
 test "WGSL imports: load from file path" {
     // Create temp directory and files
     const tmp_dir = "/tmp/pngine_wgsl_test";
-    std.fs.cwd().deleteTree(tmp_dir) catch {};
-    try std.fs.cwd().makePath(tmp_dir);
-    defer std.fs.cwd().deleteTree(tmp_dir) catch {};
+    
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    std.Io.Dir.cwd().deleteTree(io, tmp_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, tmp_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, tmp_dir) catch {};
 
     // Write WGSL file
     {
-        const file = try std.fs.cwd().createFile(tmp_dir ++ "/constants.wgsl", .{});
-        defer file.close();
-        try file.writeAll("const FILE_LOADED: f32 = 42.0;");
+        const file = try std.Io.Dir.cwd().createFile(io, tmp_dir ++ "/constants.wgsl", .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, "const FILE_LOADED: f32 = 42.0;");
     }
 
     const source: [:0]const u8 =
@@ -465,22 +478,27 @@ test "WGSL imports: load from file path" {
 
 test "WGSL imports: file with imports from file" {
     const tmp_dir = "/tmp/pngine_wgsl_test2";
-    std.fs.cwd().deleteTree(tmp_dir) catch {};
-    try std.fs.cwd().makePath(tmp_dir);
-    defer std.fs.cwd().deleteTree(tmp_dir) catch {};
+    
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    std.Io.Dir.cwd().deleteTree(io, tmp_dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, tmp_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, tmp_dir) catch {};
 
     // Write base WGSL
     {
-        const file = try std.fs.cwd().createFile(tmp_dir ++ "/base.wgsl", .{});
-        defer file.close();
-        try file.writeAll("const BASE_LOADED: f32 = 1.0;");
+        const file = try std.Io.Dir.cwd().createFile(io, tmp_dir ++ "/base.wgsl", .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, "const BASE_LOADED: f32 = 1.0;");
     }
 
     // Write main WGSL
     {
-        const file = try std.fs.cwd().createFile(tmp_dir ++ "/main.wgsl", .{});
-        defer file.close();
-        try file.writeAll("fn useBase() { let x = BASE_LOADED; }");
+        const file = try std.Io.Dir.cwd().createFile(io, tmp_dir ++ "/main.wgsl", .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, "fn useBase() { let x = BASE_LOADED; }");
     }
 
     const source: [:0]const u8 =

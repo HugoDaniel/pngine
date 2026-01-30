@@ -131,7 +131,7 @@ pub const NativeGPU = struct {
     }
 
     /// Set module reference for data lookups.
-    pub fn setModule(self: *Self, module: *const format.Module) void {
+    pub fn set_module(self: *Self, module: *const format.Module) void {
         // Pre-conditions
         assert(self.initialized);
         assert(module.bytecode.len > 0);
@@ -140,7 +140,7 @@ pub const NativeGPU = struct {
     }
 
     /// Set time uniform for animations.
-    pub fn setTime(self: *Self, time_value: f32) void {
+    pub fn set_time(self: *Self, time_value: f32) void {
         // Pre-conditions
         assert(self.initialized);
         assert(!std.math.isNan(time_value));
@@ -152,7 +152,7 @@ pub const NativeGPU = struct {
     ///
     /// Pre-condition: GPU is initialized.
     /// Post-condition: Returns RGBA pixel data (width * height * 4 bytes).
-    pub fn readPixels(self: *Self, allocator: Allocator) Error![]u8 {
+    pub fn read_pixels(self: *Self, allocator: Allocator) Error![]u8 {
         // Pre-conditions
         assert(self.initialized);
         assert(self.pixel_buffer != null);
@@ -172,7 +172,7 @@ pub const NativeGPU = struct {
     }
 
     /// Check if native GPU rendering is available.
-    pub fn isAvailable() bool {
+    pub fn is_available() bool {
         // TODO(NativeGPU) Implement actual GPU availability check
         // For now, return true to indicate stub is functional
         return true;
@@ -182,7 +182,7 @@ pub const NativeGPU = struct {
     // GPU Backend Interface (required by Dispatcher)
     // ========================================================================
 
-    pub fn createBuffer(self: *Self, allocator: Allocator, buffer_id: u16, size: u32, usage: u8) !void {
+    pub fn create_buffer(self: *Self, allocator: Allocator, buffer_id: u16, size: u32, usage: u8) !void {
         _ = allocator;
         _ = size;
         _ = usage;
@@ -195,7 +195,7 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Create actual GPU buffer
     }
 
-    pub fn createTexture(self: *Self, allocator: Allocator, texture_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_texture(self: *Self, allocator: Allocator, texture_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
         _ = descriptor_data_id;
 
@@ -207,7 +207,7 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Create actual GPU texture
     }
 
-    pub fn createTextureView(self: *Self, allocator: Allocator, view_id: u16, texture_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_texture_view(self: *Self, allocator: Allocator, view_id: u16, texture_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
         _ = view_id;
         _ = descriptor_data_id;
@@ -218,7 +218,7 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Create actual GPU texture view
     }
 
-    pub fn createSampler(self: *Self, allocator: Allocator, sampler_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_sampler(self: *Self, allocator: Allocator, sampler_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
         _ = descriptor_data_id;
 
@@ -228,7 +228,7 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Create actual GPU sampler
     }
 
-    pub fn createShaderModule(self: *Self, allocator: Allocator, shader_id: u16, code_data_id: u16) !void {
+    pub fn create_shader_module(self: *Self, allocator: Allocator, shader_id: u16, code_data_id: u16) !void {
         _ = allocator;
         _ = code_data_id;
 
@@ -240,7 +240,7 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Create actual GPU shader module
     }
 
-    pub fn createRenderPipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_render_pipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
         _ = descriptor_data_id;
 
@@ -252,7 +252,7 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Create actual GPU render pipeline
     }
 
-    pub fn createComputePipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_compute_pipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
         _ = descriptor_data_id;
 
@@ -264,7 +264,7 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Create actual GPU compute pipeline
     }
 
-    pub fn createBindGroup(self: *Self, allocator: Allocator, group_id: u16, layout_id: u16, entry_data_id: u16) !void {
+    pub fn create_bind_group(self: *Self, allocator: Allocator, group_id: u16, layout_id: u16, entry_data_id: u16) !void {
         _ = allocator;
         _ = layout_id;
         _ = entry_data_id;
@@ -277,7 +277,7 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Create actual GPU bind group
     }
 
-    pub fn createBindGroupLayout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_bind_group_layout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
         _ = layout_id;
         _ = descriptor_data_id;
@@ -287,7 +287,7 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Create actual GPU bind group layout
     }
 
-    pub fn createPipelineLayout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_pipeline_layout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
         _ = layout_id;
         _ = descriptor_data_id;
@@ -297,7 +297,7 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Create actual GPU pipeline layout
     }
 
-    pub fn createQuerySet(self: *Self, allocator: Allocator, query_set_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_query_set(self: *Self, allocator: Allocator, query_set_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
         _ = query_set_id;
         _ = descriptor_data_id;
@@ -307,7 +307,7 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Create actual GPU query set
     }
 
-    pub fn createImageBitmap(self: *Self, allocator: Allocator, bitmap_id: u16, blob_data_id: u16) !void {
+    pub fn create_image_bitmap(self: *Self, allocator: Allocator, bitmap_id: u16, blob_data_id: u16) !void {
         _ = allocator;
         _ = bitmap_id;
         _ = blob_data_id;
@@ -317,7 +317,7 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Create actual ImageBitmap from blob data
     }
 
-    pub fn createRenderBundle(self: *Self, allocator: Allocator, bundle_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_render_bundle(self: *Self, allocator: Allocator, bundle_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
         _ = bundle_id;
         _ = descriptor_data_id;
@@ -327,7 +327,7 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Create actual GPU render bundle
     }
 
-    pub fn executeBundles(self: *Self, allocator: Allocator, bundle_ids: []const u16) !void {
+    pub fn execute_bundles(self: *Self, allocator: Allocator, bundle_ids: []const u16) !void {
         _ = allocator;
         _ = bundle_ids;
 
@@ -341,7 +341,7 @@ pub const NativeGPU = struct {
     // Pass Operations
     // ========================================================================
 
-    pub fn beginRenderPass(self: *Self, allocator: Allocator, color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16) !void {
+    pub fn begin_render_pass(self: *Self, allocator: Allocator, color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16) !void {
         _ = allocator;
         _ = color_texture_id;
         _ = load_op;
@@ -357,7 +357,7 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Begin actual GPU render pass
     }
 
-    pub fn beginComputePass(self: *Self, allocator: Allocator) !void {
+    pub fn begin_compute_pass(self: *Self, allocator: Allocator) !void {
         _ = allocator;
 
         assert(!self.in_render_pass and !self.in_compute_pass);
@@ -369,7 +369,7 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Begin actual GPU compute pass
     }
 
-    pub fn setPipeline(self: *Self, allocator: Allocator, pipeline_id: u16) !void {
+    pub fn set_pipeline(self: *Self, allocator: Allocator, pipeline_id: u16) !void {
         _ = allocator;
 
         assert(self.in_render_pass or self.in_compute_pass);
@@ -380,7 +380,7 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Set actual GPU pipeline
     }
 
-    pub fn setBindGroup(self: *Self, allocator: Allocator, slot: u8, group_id: u16) !void {
+    pub fn set_bind_group(self: *Self, allocator: Allocator, slot: u8, group_id: u16) !void {
         _ = allocator;
         _ = slot;
         _ = group_id;
@@ -391,7 +391,7 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Set actual GPU bind group
     }
 
-    pub fn setVertexBuffer(self: *Self, allocator: Allocator, slot: u8, buffer_id: u16) !void {
+    pub fn set_vertex_buffer(self: *Self, allocator: Allocator, slot: u8, buffer_id: u16) !void {
         _ = allocator;
         _ = slot;
         _ = buffer_id;
@@ -402,7 +402,7 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Set actual GPU vertex buffer
     }
 
-    pub fn setIndexBuffer(self: *Self, allocator: Allocator, buffer_id: u16, index_format: u8) !void {
+    pub fn set_index_buffer(self: *Self, allocator: Allocator, buffer_id: u16, index_format: u8) !void {
         _ = allocator;
         _ = buffer_id;
         _ = index_format;
@@ -441,7 +441,7 @@ pub const NativeGPU = struct {
         }
     }
 
-    pub fn drawIndexed(self: *Self, allocator: Allocator, index_count: u32, instance_count: u32, first_index: u32, base_vertex: u32, first_instance: u32) !void {
+    pub fn draw_indexed(self: *Self, allocator: Allocator, index_count: u32, instance_count: u32, first_index: u32, base_vertex: u32, first_instance: u32) !void {
         _ = allocator;
         _ = index_count;
         _ = instance_count;
@@ -467,7 +467,7 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Execute actual GPU compute dispatch
     }
 
-    pub fn endPass(self: *Self, allocator: Allocator) !void {
+    pub fn end_pass(self: *Self, allocator: Allocator) !void {
         _ = allocator;
 
         assert(self.in_render_pass or self.in_compute_pass);
@@ -484,7 +484,7 @@ pub const NativeGPU = struct {
     // Queue Operations
     // ========================================================================
 
-    pub fn writeBuffer(self: *Self, allocator: Allocator, buffer_id: u16, offset: u32, data_id: u16) !void {
+    pub fn write_buffer(self: *Self, allocator: Allocator, buffer_id: u16, offset: u32, data_id: u16) !void {
         _ = allocator;
         _ = buffer_id;
         _ = offset;
@@ -504,7 +504,7 @@ pub const NativeGPU = struct {
         // TODO(NativeGPU) Submit actual GPU commands
     }
 
-    pub fn copyExternalImageToTexture(self: *Self, allocator: Allocator, bitmap_id: u16, texture_id: u16, mip_level: u8, origin_x: u16, origin_y: u16) !void {
+    pub fn copy_external_image_to_texture(self: *Self, allocator: Allocator, bitmap_id: u16, texture_id: u16, mip_level: u8, origin_x: u16, origin_y: u16) !void {
         _ = allocator;
         _ = bitmap_id;
         _ = texture_id;
@@ -521,7 +521,7 @@ pub const NativeGPU = struct {
     // WASM Module Operations (stub - native GPU doesn't support WASM calls)
     // ========================================================================
 
-    pub fn initWasmModule(self: *Self, allocator: Allocator, module_id: u16, wasm_data_id: u16) !void {
+    pub fn init_wasm_module(self: *Self, allocator: Allocator, module_id: u16, wasm_data_id: u16) !void {
         _ = allocator;
         _ = module_id;
         _ = wasm_data_id;
@@ -532,7 +532,7 @@ pub const NativeGPU = struct {
         // WASM calls are only meaningful in browser context
     }
 
-    pub fn callWasmFunc(self: *Self, allocator: Allocator, call_id: u16, module_id: u16, func_name_id: u16, args: []const u8) !void {
+    pub fn call_wasm_func(self: *Self, allocator: Allocator, call_id: u16, module_id: u16, func_name_id: u16, args: []const u8) !void {
         _ = allocator;
         _ = call_id;
         _ = module_id;
@@ -545,7 +545,7 @@ pub const NativeGPU = struct {
         // WASM calls are only meaningful in browser context
     }
 
-    pub fn writeBufferFromWasm(self: *Self, allocator: Allocator, call_id: u16, buffer_id: u16, offset: u32, byte_len: u32) !void {
+    pub fn write_buffer_from_wasm(self: *Self, allocator: Allocator, call_id: u16, buffer_id: u16, offset: u32, byte_len: u32) !void {
         _ = allocator;
         _ = call_id;
         _ = buffer_id;
@@ -560,7 +560,7 @@ pub const NativeGPU = struct {
 
     /// Write time/canvas uniform data to GPU buffer.
     /// Runtime provides f32 values: time, canvas_width, canvas_height[, aspect_ratio].
-    pub fn writeTimeUniform(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
+    pub fn write_time_uniform(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
         _ = allocator;
         _ = buffer_id;
         _ = buffer_offset;
@@ -589,7 +589,7 @@ test "NativeGPU: read pixels returns RGBA data" {
     var gpu = try NativeGPU.init(testing.allocator, 2, 2);
     defer gpu.deinit(testing.allocator);
 
-    const pixels = try gpu.readPixels(testing.allocator);
+    const pixels = try gpu.read_pixels(testing.allocator);
     defer testing.allocator.free(pixels);
 
     // Should be 2x2x4 = 16 bytes
@@ -602,13 +602,13 @@ test "NativeGPU: render pass lifecycle" {
 
     try testing.expect(!gpu.in_render_pass);
 
-    try gpu.beginRenderPass(testing.allocator, 0, 1, 0, 0xFFFF);
+    try gpu.begin_render_pass(testing.allocator, 0, 1, 0, 0xFFFF);
     try testing.expect(gpu.in_render_pass);
 
-    try gpu.setPipeline(testing.allocator, 0);
+    try gpu.set_pipeline(testing.allocator, 0);
     try gpu.draw(testing.allocator, 3, 1, 0, 0);
 
-    try gpu.endPass(testing.allocator);
+    try gpu.end_pass(testing.allocator);
     try testing.expect(!gpu.in_render_pass);
 }
 
@@ -616,13 +616,13 @@ test "NativeGPU: resource creation" {
     var gpu = try NativeGPU.init(testing.allocator, 64, 64);
     defer gpu.deinit(testing.allocator);
 
-    try gpu.createBuffer(testing.allocator, 0, 1024, 0x44);
+    try gpu.create_buffer(testing.allocator, 0, 1024, 0x44);
     try testing.expect(gpu.buffers_created.isSet(0));
 
-    try gpu.createTexture(testing.allocator, 0, 0);
+    try gpu.create_texture(testing.allocator, 0, 0);
     try testing.expect(gpu.textures_created.isSet(0));
 
-    try gpu.createShaderModule(testing.allocator, 0, 0);
+    try gpu.create_shader_module(testing.allocator, 0, 0);
     try testing.expect(gpu.shaders_created.isSet(0));
 }
 
@@ -630,13 +630,13 @@ test "NativeGPU: draw produces pixels" {
     var gpu = try NativeGPU.init(testing.allocator, 4, 4);
     defer gpu.deinit(testing.allocator);
 
-    try gpu.beginRenderPass(testing.allocator, 0, 1, 0, 0xFFFF);
-    try gpu.setPipeline(testing.allocator, 0);
+    try gpu.begin_render_pass(testing.allocator, 0, 1, 0, 0xFFFF);
+    try gpu.set_pipeline(testing.allocator, 0);
     try gpu.draw(testing.allocator, 3, 1, 0, 0);
-    try gpu.endPass(testing.allocator);
+    try gpu.end_pass(testing.allocator);
     try gpu.submit(testing.allocator);
 
-    const pixels = try gpu.readPixels(testing.allocator);
+    const pixels = try gpu.read_pixels(testing.allocator);
     defer testing.allocator.free(pixels);
 
     // After draw, pixels should have the test gradient pattern
@@ -675,7 +675,7 @@ test "NativeGPU: readPixels OOM handling" {
         .fail_index = 0,
     });
 
-    const result = gpu.readPixels(failing_alloc.allocator());
+    const result = gpu.read_pixels(failing_alloc.allocator());
     try testing.expectError(Error.OutOfMemory, result);
 }
 
@@ -691,8 +691,8 @@ test "regression: createTextureView stub exists and callable" {
     defer gpu.deinit(testing.allocator);
 
     // Should not crash - stub method exists
-    try gpu.createTextureView(testing.allocator, 0, 0, 0);
-    try gpu.createTextureView(testing.allocator, 1, 0, 1);
+    try gpu.create_texture_view(testing.allocator, 0, 0, 0);
+    try gpu.create_texture_view(testing.allocator, 1, 0, 1);
 }
 
 test "regression: createBindGroupLayout stub exists and callable" {
@@ -700,8 +700,8 @@ test "regression: createBindGroupLayout stub exists and callable" {
     defer gpu.deinit(testing.allocator);
 
     // Should not crash - stub method exists
-    try gpu.createBindGroupLayout(testing.allocator, 0, 0);
-    try gpu.createBindGroupLayout(testing.allocator, 1, 1);
+    try gpu.create_bind_group_layout(testing.allocator, 0, 0);
+    try gpu.create_bind_group_layout(testing.allocator, 1, 1);
 }
 
 test "regression: createPipelineLayout stub exists and callable" {
@@ -709,8 +709,8 @@ test "regression: createPipelineLayout stub exists and callable" {
     defer gpu.deinit(testing.allocator);
 
     // Should not crash - stub method exists
-    try gpu.createPipelineLayout(testing.allocator, 0, 0);
-    try gpu.createPipelineLayout(testing.allocator, 1, 1);
+    try gpu.create_pipeline_layout(testing.allocator, 0, 0);
+    try gpu.create_pipeline_layout(testing.allocator, 1, 1);
 }
 
 test "regression: createQuerySet stub exists and callable" {
@@ -718,8 +718,8 @@ test "regression: createQuerySet stub exists and callable" {
     defer gpu.deinit(testing.allocator);
 
     // Should not crash - stub method exists
-    try gpu.createQuerySet(testing.allocator, 0, 0);
-    try gpu.createQuerySet(testing.allocator, 1, 1);
+    try gpu.create_query_set(testing.allocator, 0, 0);
+    try gpu.create_query_set(testing.allocator, 1, 1);
 }
 
 test "regression: all GPU stubs work together in sequence" {
@@ -728,23 +728,23 @@ test "regression: all GPU stubs work together in sequence" {
     defer gpu.deinit(testing.allocator);
 
     // Resource creation phase (stubs)
-    try gpu.createBindGroupLayout(testing.allocator, 0, 0);
-    try gpu.createPipelineLayout(testing.allocator, 0, 0);
-    try gpu.createTexture(testing.allocator, 0, 0);
-    try gpu.createTextureView(testing.allocator, 0, 0, 0);
-    try gpu.createBuffer(testing.allocator, 0, 1024, 0x44);
-    try gpu.createShaderModule(testing.allocator, 0, 0);
-    try gpu.createQuerySet(testing.allocator, 0, 0);
+    try gpu.create_bind_group_layout(testing.allocator, 0, 0);
+    try gpu.create_pipeline_layout(testing.allocator, 0, 0);
+    try gpu.create_texture(testing.allocator, 0, 0);
+    try gpu.create_texture_view(testing.allocator, 0, 0, 0);
+    try gpu.create_buffer(testing.allocator, 0, 1024, 0x44);
+    try gpu.create_shader_module(testing.allocator, 0, 0);
+    try gpu.create_query_set(testing.allocator, 0, 0);
 
     // Render pass should still work after stub calls
-    try gpu.beginRenderPass(testing.allocator, 0, 1, 0, 0xFFFF);
-    try gpu.setPipeline(testing.allocator, 0);
+    try gpu.begin_render_pass(testing.allocator, 0, 1, 0, 0xFFFF);
+    try gpu.set_pipeline(testing.allocator, 0);
     try gpu.draw(testing.allocator, 3, 1, 0, 0);
-    try gpu.endPass(testing.allocator);
+    try gpu.end_pass(testing.allocator);
     try gpu.submit(testing.allocator);
 
     // Verify pixel output works
-    const pixels = try gpu.readPixels(testing.allocator);
+    const pixels = try gpu.read_pixels(testing.allocator);
     defer testing.allocator.free(pixels);
     try testing.expectEqual(@as(usize, 64 * 64 * 4), pixels.len);
 }

@@ -61,7 +61,7 @@ test "dispatcher empty bytecode" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     try dispatcher.executeAll(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 0), gpu.callCount());
+    try testing.expectEqual(@as(usize, 0), gpu.call_count());
 }
 
 test "dispatcher create shader module" {
@@ -84,8 +84,8 @@ test "dispatcher create shader module" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     try dispatcher.executeAll(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 1), gpu.callCount());
-    try testing.expectEqual(CallType.create_shader_module, gpu.getCall(0).call_type);
+    try testing.expectEqual(@as(usize, 1), gpu.call_count());
+    try testing.expectEqual(CallType.create_shader_module, gpu.get_call(0).call_type);
 }
 
 test "dispatcher create texture" {
@@ -108,11 +108,11 @@ test "dispatcher create texture" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     try dispatcher.executeAll(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 1), gpu.callCount());
-    try testing.expectEqual(CallType.create_texture, gpu.getCall(0).call_type);
+    try testing.expectEqual(@as(usize, 1), gpu.call_count());
+    try testing.expectEqual(CallType.create_texture, gpu.get_call(0).call_type);
 
     // Verify parameters were passed correctly
-    const call = gpu.getCall(0);
+    const call = gpu.get_call(0);
     try testing.expectEqual(@as(u16, 0), call.params.create_texture.texture_id);
     try testing.expectEqual(@as(u16, 0), call.params.create_texture.descriptor_data_id);
 }
@@ -137,11 +137,11 @@ test "dispatcher create sampler" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     try dispatcher.executeAll(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 1), gpu.callCount());
-    try testing.expectEqual(CallType.create_sampler, gpu.getCall(0).call_type);
+    try testing.expectEqual(@as(usize, 1), gpu.call_count());
+    try testing.expectEqual(CallType.create_sampler, gpu.get_call(0).call_type);
 
     // Verify parameters were passed correctly
-    const call = gpu.getCall(0);
+    const call = gpu.get_call(0);
     try testing.expectEqual(@as(u16, 3), call.params.create_sampler.sampler_id);
     try testing.expectEqual(@as(u16, 0), call.params.create_sampler.descriptor_data_id);
 }
@@ -169,9 +169,9 @@ test "dispatcher draw sequence" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     try dispatcher.executeAll(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 4), gpu.callCount());
+    try testing.expectEqual(@as(usize, 4), gpu.call_count());
 
-    const calls = gpu.getCalls();
+    const calls = gpu.get_calls();
     try testing.expectEqual(CallType.begin_render_pass, calls[0].call_type);
     try testing.expectEqual(CallType.set_pipeline, calls[1].call_type);
     try testing.expectEqual(CallType.draw, calls[2].call_type);
@@ -226,7 +226,7 @@ test "dispatcher frame control" {
         .submit,
     };
 
-    try testing.expect(gpu.expectCallTypes(&expected));
+    try testing.expect(gpu.expect_call_types(&expected));
 }
 
 // ============================================================================
@@ -398,7 +398,7 @@ test "scanPassDefinitions: exec_pass uses scanned range" {
 
     // Verify pass was executed
     var draw_found = false;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .draw) {
             draw_found = true;
             break;
@@ -437,8 +437,8 @@ test "exec_pass with missing pass_id does not crash" {
     try dispatcher.executeAll(testing.allocator);
 
     // Only submit should be called (exec_pass 99 finds nothing)
-    try testing.expectEqual(@as(usize, 1), gpu.callCount());
-    try testing.expectEqual(CallType.submit, gpu.getCall(0).call_type);
+    try testing.expectEqual(@as(usize, 1), gpu.call_count());
+    try testing.expectEqual(CallType.submit, gpu.get_call(0).call_type);
 }
 
 // ============================================================================
@@ -509,8 +509,8 @@ test "pool operations: vertex buffer pool selection" {
         defer dispatcher.deinit();
         try dispatcher.executeAll(testing.allocator);
 
-        try testing.expectEqual(@as(usize, 3), gpu.callCount()); // begin, set, end
-        const call = gpu.getCall(1);
+        try testing.expectEqual(@as(usize, 3), gpu.call_count()); // begin, set, end
+        const call = gpu.get_call(1);
         try testing.expectEqual(CallType.set_vertex_buffer, call.call_type);
         try testing.expectEqual(@as(u16, 10), call.params.set_vertex_buffer.buffer_id);
     }
@@ -523,8 +523,8 @@ test "pool operations: vertex buffer pool selection" {
         defer dispatcher.deinit();
         try dispatcher.executeAll(testing.allocator);
 
-        try testing.expectEqual(@as(usize, 3), gpu.callCount());
-        const call = gpu.getCall(1);
+        try testing.expectEqual(@as(usize, 3), gpu.call_count());
+        const call = gpu.get_call(1);
         try testing.expectEqual(@as(u16, 11), call.params.set_vertex_buffer.buffer_id);
     }
 
@@ -536,7 +536,7 @@ test "pool operations: vertex buffer pool selection" {
         defer dispatcher.deinit();
         try dispatcher.executeAll(testing.allocator);
 
-        const call = gpu.getCall(1);
+        const call = gpu.get_call(1);
         try testing.expectEqual(@as(u16, 10), call.params.set_vertex_buffer.buffer_id);
     }
 }
@@ -568,7 +568,7 @@ test "pool operations: bind group pool selection with offset" {
         defer dispatcher.deinit();
         try dispatcher.executeAll(testing.allocator);
 
-        const call = gpu.getCall(1); // Index 1 (after begin_render_pass)
+        const call = gpu.get_call(1); // Index 1 (after begin_render_pass)
         try testing.expectEqual(CallType.set_bind_group, call.call_type);
         try testing.expectEqual(@as(u16, 21), call.params.set_bind_group.group_id);
     }
@@ -581,7 +581,7 @@ test "pool operations: bind group pool selection with offset" {
         defer dispatcher.deinit();
         try dispatcher.executeAll(testing.allocator);
 
-        const call = gpu.getCall(1); // Index 1 (after begin_render_pass)
+        const call = gpu.get_call(1); // Index 1 (after begin_render_pass)
         try testing.expectEqual(@as(u16, 20), call.params.set_bind_group.group_id);
     }
 }
@@ -613,8 +613,8 @@ test "dispatcher handles large varint values" {
 
     try dispatcher.executeAll(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 1), gpu.callCount());
-    const call = gpu.getCall(0);
+    try testing.expectEqual(@as(usize, 1), gpu.call_count());
+    const call = gpu.get_call(0);
     try testing.expectEqual(@as(u32, 100000), call.params.create_buffer.size);
 }
 
@@ -644,7 +644,7 @@ test "dispatcher handles draw with large vertex count" {
 
     try dispatcher.executeAll(testing.allocator);
 
-    const call = gpu.getCall(1); // Index 1 (after begin_render_pass)
+    const call = gpu.get_call(1); // Index 1 (after begin_render_pass)
     try testing.expectEqual(@as(u32, 16384), call.params.draw.vertex_count);
     try testing.expectEqual(@as(u32, 1000), call.params.draw.instance_count);
     try testing.expectEqual(@as(u32, 128), call.params.draw.first_vertex);
@@ -829,7 +829,7 @@ test "dispatcher: nop opcode is handled" {
     try dispatcher.executeAll(testing.allocator);
 
     // Only submit should be called (nop is ignored)
-    try testing.expectEqual(@as(usize, 1), gpu.callCount());
+    try testing.expectEqual(@as(usize, 1), gpu.call_count());
 }
 
 test "dispatcher: begin_compute_pass with no params" {
@@ -855,9 +855,9 @@ test "dispatcher: begin_compute_pass with no params" {
 
     try dispatcher.executeAll(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 2), gpu.callCount());
-    try testing.expectEqual(CallType.begin_compute_pass, gpu.getCall(0).call_type);
-    try testing.expectEqual(CallType.end_pass, gpu.getCall(1).call_type);
+    try testing.expectEqual(@as(usize, 2), gpu.call_count());
+    try testing.expectEqual(CallType.begin_compute_pass, gpu.get_call(0).call_type);
+    try testing.expectEqual(CallType.end_pass, gpu.get_call(1).call_type);
 }
 
 test "dispatcher: dispatch workgroups" {
@@ -885,8 +885,8 @@ test "dispatcher: dispatch workgroups" {
 
     try dispatcher.executeAll(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 3), gpu.callCount()); // begin, dispatch, end
-    const call = gpu.getCall(1); // Index 1 (after begin_compute_pass)
+    try testing.expectEqual(@as(usize, 3), gpu.call_count()); // begin, dispatch, end
+    const call = gpu.get_call(1); // Index 1 (after begin_compute_pass)
     try testing.expectEqual(CallType.dispatch, call.call_type);
     try testing.expectEqual(@as(u32, 64), call.params.dispatch.x);
     try testing.expectEqual(@as(u32, 32), call.params.dispatch.y);
@@ -918,8 +918,8 @@ test "dispatcher: draw_indexed with all parameters" {
 
     try dispatcher.executeAll(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 3), gpu.callCount()); // begin, draw_indexed, end
-    const call = gpu.getCall(1); // Index 1 (after begin_render_pass)
+    try testing.expectEqual(@as(usize, 3), gpu.call_count()); // begin, draw_indexed, end
+    const call = gpu.get_call(1); // Index 1 (after begin_render_pass)
     try testing.expectEqual(CallType.draw_indexed, call.call_type);
     try testing.expectEqual(@as(u32, 36), call.params.draw_indexed.index_count);
     try testing.expectEqual(@as(u32, 10), call.params.draw_indexed.instance_count);
@@ -1063,7 +1063,7 @@ test "scene switching: exec_pass with scan finds pass defined before frame" {
     var draw_count: usize = 0;
     var begin_pass_count: usize = 0;
     var submit_count: usize = 0;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         switch (call.call_type) {
             .draw => draw_count += 1,
             .begin_render_pass => begin_pass_count += 1,
@@ -1118,7 +1118,7 @@ test "scene switching: pass defined after exec_pass still works" {
     try dispatcher.executeAll(testing.allocator);
 
     var draw_found = false;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .draw) {
             draw_found = true;
             break;
@@ -1319,7 +1319,7 @@ test "exec_pass_once: basic execution on first frame" {
 
     // Verify dispatch was called (pass executed)
     var dispatch_found = false;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .dispatch) {
             dispatch_found = true;
             try testing.expectEqual(@as(u32, 64), call.params.dispatch.x);
@@ -1368,7 +1368,7 @@ test "exec_pass_once: skipped on subsequent executions" {
 
     // Count dispatch calls - should only have 1 even though exec_pass_once was called 3 times
     var dispatch_count: usize = 0;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .dispatch) dispatch_count += 1;
     }
     try testing.expectEqual(@as(usize, 1), dispatch_count);
@@ -1430,7 +1430,7 @@ test "exec_pass_once: multiple different passes each run once" {
     // Count dispatches - should be exactly 3 (one per unique pass)
     var dispatch_count: usize = 0;
     var x_values: [3]u32 = undefined;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .dispatch) {
             if (dispatch_count < 3) {
                 x_values[dispatch_count] = call.params.dispatch.x;
@@ -1492,7 +1492,7 @@ test "exec_pass_once: mixed with exec_pass - both work correctly" {
 
     // First frame: both passes should execute
     var dispatch_count: usize = 0;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .dispatch) dispatch_count += 1;
     }
     try testing.expectEqual(@as(usize, 2), dispatch_count);
@@ -1506,7 +1506,7 @@ test "exec_pass_once: mixed with exec_pass - both work correctly" {
 
     dispatch_count = 0;
     var found_update = false;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .dispatch) {
             dispatch_count += 1;
             if (call.params.dispatch.x == 64) found_update = true;
@@ -1547,8 +1547,8 @@ test "exec_pass_once: invalid pass_id does not crash" {
     try dispatcher.executeAll(testing.allocator);
 
     // Only submit should be called (exec_pass_once 99 finds nothing)
-    try testing.expectEqual(@as(usize, 1), gpu.callCount());
-    try testing.expectEqual(CallType.submit, gpu.getCall(0).call_type);
+    try testing.expectEqual(@as(usize, 1), gpu.call_count());
+    try testing.expectEqual(CallType.submit, gpu.get_call(0).call_type);
 }
 
 test "exec_pass_once: order preserved - init before update" {
@@ -1609,7 +1609,7 @@ test "exec_pass_once: order preserved - init before update" {
     var draw_after_dispatches = false;
     var dispatches_before_draw: usize = 0;
 
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .dispatch) {
             if (dispatch_idx < 2) {
                 dispatch_order[dispatch_idx] = call.params.dispatch.x;
@@ -1670,7 +1670,7 @@ test "exec_pass_once: persistence across multiple executeAll calls" {
         dispatcher.pc = 0; // Reset pc to simulate new frame
         try dispatcher.executeAll(testing.allocator);
 
-        for (gpu.getCalls()) |call| {
+        for (gpu.get_calls()) |call| {
             if (call.call_type == .dispatch) total_dispatches += 1;
         }
     }
@@ -1724,7 +1724,7 @@ test "exec_pass_once: interleaved with regular opcodes" {
     var write_buffer_count: usize = 0;
     var create_buffer_count: usize = 0;
 
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .dispatch) found_dispatch = true;
         if (call.call_type == .write_buffer) write_buffer_count += 1;
         if (call.call_type == .create_buffer) create_buffer_count += 1;
@@ -1793,7 +1793,7 @@ test "exec_pass_once: boids-like pattern - init + compute + render" {
 
     var frame1_dispatches: usize = 0;
     var frame1_draws: usize = 0;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .dispatch) frame1_dispatches += 1;
         if (call.call_type == .draw) frame1_draws += 1;
     }
@@ -1809,7 +1809,7 @@ test "exec_pass_once: boids-like pattern - init + compute + render" {
 
         var dispatches: usize = 0;
         var draws: usize = 0;
-        for (gpu.getCalls()) |call| {
+        for (gpu.get_calls()) |call| {
             if (call.call_type == .dispatch) dispatches += 1;
             if (call.call_type == .draw) draws += 1;
         }

@@ -66,6 +66,13 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    var threaded: std.Io.Threaded = .init(allocator, .{
+        .environ = std.process.Environ.empty,
+        .argv0 = .empty,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
     // Parse command line
     const opts = try parseArgs(allocator);
     defer allocator.free(opts.input_path);
@@ -83,15 +90,15 @@ pub fn main() !void {
     std.debug.print("WAMR version: {s}\n", .{WamrRuntime.version()});
 
     // Run the viewer
-    run(allocator, opts) catch |err| {
+    run(allocator, io, opts) catch |err| {
         std.debug.print("Error: {}\n", .{err});
         std.process.exit(1);
     };
 }
 
-fn run(allocator: std.mem.Allocator, opts: Options) !void {
+fn run(allocator: std.mem.Allocator, io: std.Io, opts: Options) !void {
     // Load input file
-    const file_data = try std.fs.cwd().readFileAlloc(opts.input_path, allocator, .limited(16 * 1024 * 1024));
+    const file_data = try io.cwd().readFileAlloc(io, opts.input_path, allocator, .limited(16 * 1024 * 1024));
     defer allocator.free(file_data);
 
     std.debug.print("Loaded {s}: {} bytes\n", .{ opts.input_path, file_data.len });

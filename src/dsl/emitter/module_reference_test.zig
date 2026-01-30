@@ -28,9 +28,9 @@ const executor_mod = @import("executor");
 const mock_gpu = executor_mod.mock_gpu;
 const Dispatcher = executor_mod.Dispatcher;
 
-// ============================================================================
+// ============================================================================ 
 // Test Helpers
-// ============================================================================
+// ============================================================================ 
 
 fn compileSource(source: [:0]const u8) ![]u8 {
     return Compiler.compile(testing.allocator, source);
@@ -50,7 +50,7 @@ fn executeAndGetPipelineShaderIds(allocator: std.mem.Allocator, pngb: []const u8
     var ids = std.ArrayListUnmanaged(u16){};
     errdefer ids.deinit(allocator);
 
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_render_pipeline) {
             // Get vertex shader ID from pipeline descriptor
             const desc = call.params.create_render_pipeline.descriptor;
@@ -84,7 +84,7 @@ fn countShaders(allocator: std.mem.Allocator, pngb: []const u8) !u32 {
     try dispatcher.executeAll(allocator);
 
     var count: u32 = 0;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_shader_module) {
             count += 1;
         }
@@ -92,15 +92,15 @@ fn countShaders(allocator: std.mem.Allocator, pngb: []const u8) !u32 {
     return count;
 }
 
-// ============================================================================
+// ============================================================================ 
 // Basic Module Reference Tests
-// ============================================================================
+// ============================================================================ 
 
 test "ModuleRef: bare identifier module reference (the main bug fix)" {
     // This is the pattern that was broken:
     // #shaderModule scene { code="..." }
     // #renderPipeline pipe { vertex={ module=scene } }
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#shaderModule scene { code="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); }" }
         \\#renderPipeline pipe {
         \\  layout=auto
@@ -132,7 +132,7 @@ test "ModuleRef: bare identifier module reference (the main bug fix)" {
 
     // Verify pipeline was created
     var pipeline_count: u32 = 0;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_render_pipeline) {
             pipeline_count += 1;
         }
@@ -142,7 +142,7 @@ test "ModuleRef: bare identifier module reference (the main bug fix)" {
 
 test "ModuleRef: wgsl reference in shaderModule code" {
     // shaderModule code property references a wgsl by name
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#wgsl shaderCode { value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); }" }
         \\#shaderModule scene { code=shaderCode }
         \\#renderPipeline pipe {
@@ -169,7 +169,7 @@ test "ModuleRef: wgsl reference in shaderModule code" {
 test "ModuleRef: bare identifier module reference in pipeline" {
     // Bare identifier reference to shaderModule from pipeline
     // Note: #wgsl alone does NOT create a shader module - must use #shaderModule
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#wgsl shaderCode { value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); }" }
         \\#shaderModule shader { code=shaderCode }
         \\#renderPipeline pipe {
@@ -192,13 +192,13 @@ test "ModuleRef: bare identifier module reference in pipeline" {
     try testing.expectEqual(@as(u32, 1), shader_count);
 }
 
-// ============================================================================
+// ============================================================================ 
 // Edge Cases for Naming Patterns
-// ============================================================================
+// ============================================================================ 
 
 test "ModuleRef: wgsl name with underscores" {
     // Names with underscores
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#wgsl shader_code_v2 { value="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); }" }
         \\#shaderModule mod { code=shader_code_v2 }
         \\#renderPipeline pipe {
@@ -223,7 +223,7 @@ test "ModuleRef: wgsl name with underscores" {
 
 test "ModuleRef: inline WGSL code is treated as literal" {
     // Inline code should be treated as a literal string, not a reference
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#shaderModule mod { code="fn check() -> f32 { return 3.14; }" }
         \\#renderPipeline pipe {
         \\  layout=auto
@@ -245,13 +245,13 @@ test "ModuleRef: inline WGSL code is treated as literal" {
     try testing.expectEqual(@as(u32, 1), shader_count);
 }
 
-// ============================================================================
+// ============================================================================ 
 // Mixed Syntax Tests
-// ============================================================================
+// ============================================================================ 
 
 test "ModuleRef: multiple shaders referenced by bare identifier" {
     // All pipelines use bare identifiers
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#wgsl shader1 { value="@vertex fn vs1() -> @builtin(position) vec4f { return vec4f(0); }" }
         \\#wgsl shader2 { value="@vertex fn vs2() -> @builtin(position) vec4f { return vec4f(1); }" }
         \\#shaderModule mod3 { code="@vertex fn vs3() -> @builtin(position) vec4f { return vec4f(2); }" }
@@ -303,7 +303,7 @@ test "ModuleRef: multiple shaders referenced by bare identifier" {
 
     // Count pipelines created
     var pipeline_count: u32 = 0;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_render_pipeline) {
             pipeline_count += 1;
         }
@@ -311,13 +311,13 @@ test "ModuleRef: multiple shaders referenced by bare identifier" {
     try testing.expectEqual(@as(u32, 3), pipeline_count);
 }
 
-// ============================================================================
+// ============================================================================ 
 // Complex Patterns (Demo-like)
-// ============================================================================
+// ============================================================================ 
 
 test "ModuleRef: demo pattern - wgsl with imports, shaderModule ref" {
     // Pattern with wgsl imports and shaderModule reference
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#wgsl constants { value="const AWAY: f32 = 1e10;" }
         \\#wgsl transform2D { value="fn transform(p: vec2f) -> vec2f { return p; }" }
         \\#wgsl sceneEShader {
@@ -356,7 +356,7 @@ test "ModuleRef: demo pattern - wgsl with imports, shaderModule ref" {
     // Verify all expected resources created
     var shader_count: u32 = 0;
     var pipeline_count: u32 = 0;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         switch (call.call_type) {
             .create_shader_module => shader_count += 1,
             .create_render_pipeline => pipeline_count += 1,
@@ -370,13 +370,13 @@ test "ModuleRef: demo pattern - wgsl with imports, shaderModule ref" {
     try testing.expectEqual(@as(u32, 1), pipeline_count);
 }
 
-// ============================================================================
+// ============================================================================ 
 // Entry Point Edge Cases
-// ============================================================================
+// ============================================================================ 
 
 test "ModuleRef: entry point as string vs identifier" {
     // Test both entryPoint="name" and entryPoint=name
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#shaderModule mod { code="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); }" }
         \\#renderPipeline pipe {
         \\  layout=auto
@@ -401,7 +401,7 @@ test "ModuleRef: entry point as string vs identifier" {
 
 test "ModuleRef: case sensitivity in entry points" {
     // Entry points should be case-sensitive
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#shaderModule mod { code="@vertex fn VertexMain() -> @builtin(position) vec4f { return vec4f(0); }" }
         \\#renderPipeline pipe {
         \\  layout=auto
@@ -424,12 +424,12 @@ test "ModuleRef: case sensitivity in entry points" {
     try testing.expectEqual(@as(u32, 1), shader_count);
 }
 
-// ============================================================================
+// ============================================================================ 
 // Compute Pipeline Tests
-// ============================================================================
+// ============================================================================ 
 
 test "ModuleRef: compute pipeline with bare identifier" {
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#shaderModule comp { code="@compute @workgroup_size(64) fn main() {}" }
         \\#computePipeline pipe {
         \\  compute={ module=comp entryPoint=main }
@@ -455,7 +455,7 @@ test "ModuleRef: compute pipeline with bare identifier" {
     try dispatcher.executeAll(testing.allocator);
 
     var compute_pipeline_count: u32 = 0;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_compute_pipeline) {
             compute_pipeline_count += 1;
         }
@@ -463,9 +463,9 @@ test "ModuleRef: compute pipeline with bare identifier" {
     try testing.expectEqual(@as(u32, 1), compute_pipeline_count);
 }
 
-// ============================================================================
+// ============================================================================ 
 // Property Tests
-// ============================================================================
+// ============================================================================ 
 
 test "ModuleRef: property - all pipelines get valid shader IDs" {
     var prng = std.Random.DefaultPrng.init(testing.random_seed);
@@ -481,20 +481,20 @@ test "ModuleRef: property - all pipelines get valid shader IDs" {
         for (0..shader_count) |i| {
             const is_wgsl = random.boolean();
             if (is_wgsl) {
-                const line = std.fmt.bufPrint(source_buf[pos..], "#wgsl s{d} {{ value=\"fn f{d}() {{}}\" }}\n", .{ i, i }) catch break;
+                const line = std.fmt.bufPrint(source_buf[pos..], "#wgsl s{d} {{ value=\"fn f{d}() {{}}\" }}\\n", .{ i, i }) catch break;
                 pos += line.len;
             } else {
-                const line = std.fmt.bufPrint(source_buf[pos..], "#shaderModule s{d} {{ code=\"fn f{d}() {{}}\" }}\n", .{ i, i }) catch break;
+                const line = std.fmt.bufPrint(source_buf[pos..], "#shaderModule s{d} {{ code=\"fn f{d}() {{}}\" }}\\n", .{ i, i }) catch break;
                 pos += line.len;
             }
         }
 
         // Generate a pipeline referencing first shader using bare identifier
-        const pipe_line = "#renderPipeline pipe { layout=auto vertex={ module=s0 entryPoint=f0 } fragment={ module=s0 entryPoint=f0 targets=[{format=preferredCanvasFormat}] } }\n";
+        const pipe_line = "#renderPipeline pipe { layout=auto vertex={ module=s0 entryPoint=f0 } fragment={ module=s0 entryPoint=f0 targets=[{format=preferredCanvasFormat}] } }\\n";
         @memcpy(source_buf[pos..][0..pipe_line.len], pipe_line);
         pos += pipe_line.len;
 
-        const pass_frame =
+        const pass_frame = 
             \\#renderPass pass { pipeline=pipe colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}] draw=3 }
             \\#frame main { perform=[pass] }
             \\
@@ -521,9 +521,9 @@ test "ModuleRef: property - all pipelines get valid shader IDs" {
     }
 }
 
-// ============================================================================
+// ============================================================================ 
 // Stress Tests
-// ============================================================================
+// ============================================================================ 
 
 test "ModuleRef: many shaders with bare identifier refs" {
     var source_buf: [16384]u8 = undefined;
@@ -532,7 +532,7 @@ test "ModuleRef: many shaders with bare identifier refs" {
 
     // Generate 20 shaders
     for (0..20) |i| {
-        const line = std.fmt.bufPrint(source_buf[pos..], "#shaderModule s{d} {{ code=\"fn f{d}() {{}}\" }}\n", .{ i, i }) catch break;
+        const line = std.fmt.bufPrint(source_buf[pos..], "#shaderModule s{d} {{ code=\"fn f{d}() {{}}\" }}\\n", .{ i, i }) catch break;
         pos += line.len;
     }
 
@@ -549,7 +549,7 @@ test "ModuleRef: many shaders with bare identifier refs" {
             \\  colorAttachments=[{{view=contextCurrentTexture loadOp=clear storeOp=store}}]
             \\  draw=3
             \\}}
-            \\
+            \\,
         , .{ i, i, i, i, i, i, i }) catch break;
         pos += line.len;
     }
@@ -568,7 +568,7 @@ test "ModuleRef: many shaders with bare identifier refs" {
         pos += pass_ref.len;
     }
 
-    const frame_end = "] }\n";
+    const frame_end = "] }\\n";
     @memcpy(source_buf[pos..][0..frame_end.len], frame_end);
     pos += frame_end.len;
 
@@ -588,7 +588,7 @@ test "ModuleRef: many shaders with bare identifier refs" {
 
     // Verify all 20 pipelines were created
     var pipeline_count: u32 = 0;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_render_pipeline) {
             pipeline_count += 1;
         }
@@ -596,9 +596,9 @@ test "ModuleRef: many shaders with bare identifier refs" {
     try testing.expectEqual(@as(u32, 20), pipeline_count);
 }
 
-// ============================================================================
+// ============================================================================ 
 // Fuzz Tests
-// ============================================================================
+// ============================================================================ 
 
 fn fuzzModuleReference(_: void, input: []const u8) !void {
     // Filter inputs
@@ -617,21 +617,21 @@ fn fuzzModuleReference(_: void, input: []const u8) !void {
 
     // Generate shader
     if (use_wgsl) {
-        const shader = "#wgsl test { value=\"fn f() {}\" }\n";
+        const shader = "#wgsl test { value=\"fn f() {}\" }\\n";
         @memcpy(source_buf[pos..][0..shader.len], shader);
         pos += shader.len;
     } else {
-        const shader = "#shaderModule test { code=\"fn f() {}\" }\n";
+        const shader = "#shaderModule test { code=\"fn f() {}\" }\\n";
         @memcpy(source_buf[pos..][0..shader.len], shader);
         pos += shader.len;
     }
 
     // Generate pipeline using bare identifier
-    const pipe = "#renderPipeline pipe { layout=auto vertex={ module=test entryPoint=f } fragment={ module=test entryPoint=f targets=[{format=preferredCanvasFormat}] } }\n";
+    const pipe = "#renderPipeline pipe { layout=auto vertex={ module=test entryPoint=f } fragment={ module=test entryPoint=f targets=[{format=preferredCanvasFormat}] } }\\n";
     @memcpy(source_buf[pos..][0..pipe.len], pipe);
     pos += pipe.len;
 
-    const rest =
+    const rest = 
         \\#renderPass pass { pipeline=pipe colorAttachments=[{view=contextCurrentTexture loadOp=clear storeOp=store}] draw=3 }
         \\#frame main { perform=[pass] }
         \\
@@ -667,12 +667,12 @@ test "ModuleRef: fuzz test" {
     try std.testing.fuzz({}, fuzzModuleReference, .{});
 }
 
-// ============================================================================
+// ============================================================================ 
 // Long-Tail Edge Cases
-// ============================================================================
+// ============================================================================ 
 
 test "ModuleRef: module name with numbers" {
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#shaderModule shader123 { code="fn f() {}" }
         \\#renderPipeline pipe {
         \\  layout=auto
@@ -695,7 +695,7 @@ test "ModuleRef: module name with numbers" {
 }
 
 test "ModuleRef: module name starting with underscore" {
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#shaderModule _internal { code="fn f() {}" }
         \\#renderPipeline pipe {
         \\  layout=auto
@@ -718,7 +718,7 @@ test "ModuleRef: module name starting with underscore" {
 }
 
 test "ModuleRef: very long module name" {
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#shaderModule thisIsAVeryLongModuleNameThatShouldStillWorkCorrectly { code="fn f() {}" }
         \\#renderPipeline pipe {
         \\  layout=auto
@@ -741,7 +741,7 @@ test "ModuleRef: very long module name" {
 }
 
 test "ModuleRef: same module referenced multiple times" {
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#shaderModule shared { code="fn f() {}" }
         \\#renderPipeline pipe1 {
         \\  layout=auto
@@ -792,7 +792,7 @@ test "ModuleRef: same module referenced multiple times" {
     // Should have 1 shader, 3 pipelines
     var shader_count: u32 = 0;
     var pipeline_count: u32 = 0;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         switch (call.call_type) {
             .create_shader_module => shader_count += 1,
             .create_render_pipeline => pipeline_count += 1,
@@ -803,12 +803,12 @@ test "ModuleRef: same module referenced multiple times" {
     try testing.expectEqual(@as(u32, 3), pipeline_count);
 }
 
-// ============================================================================
+// ============================================================================ 
 // OOM Tests
-// ============================================================================
+// ============================================================================ 
 
 test "ModuleRef: OOM resilience baseline" {
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#shaderModule mod { code="fn f() {}" }
         \\#renderPipeline pipe {
         \\  layout=auto
@@ -831,13 +831,13 @@ test "ModuleRef: OOM resilience baseline" {
     try testing.expectEqual(@as(u32, 1), shader_count);
 }
 
-// ============================================================================
+// ============================================================================ 
 // Additional Long-Tail Edge Cases
-// ============================================================================
+// ============================================================================ 
 
 test "ModuleRef: module name containing 'wgsl' substring" {
     // Edge case: name contains 'wgsl' but is a regular identifier
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#shaderModule myWgslShader { code="fn f() {}" }
         \\#renderPipeline pipe {
         \\  layout=auto
@@ -861,7 +861,7 @@ test "ModuleRef: module name containing 'wgsl' substring" {
 
 test "ModuleRef: chained wgsl references with shaderModule" {
     // Complex chain: wgsl A -> wgsl B -> shaderModule C referencing B
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#wgsl base { value="fn base() -> f32 { return 1.0; }" }
         \\#wgsl derived { value="fn derived() -> f32 { return base() * 2.0; }" imports=[base] }
         \\#shaderModule final { code=derived }
@@ -894,7 +894,7 @@ test "ModuleRef: chained wgsl references with shaderModule" {
     // Only #shaderModule creates a shader module now (not #wgsl)
     // 'final' is the only #shaderModule, so shader_count = 1
     var shader_count: u32 = 0;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_shader_module) shader_count += 1;
     }
     try testing.expectEqual(@as(u32, 1), shader_count);
@@ -902,7 +902,7 @@ test "ModuleRef: chained wgsl references with shaderModule" {
 
 test "ModuleRef: vertex-only pipeline with bare identifier" {
     // Some pipelines might only specify vertex or only fragment
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#shaderModule mod { code="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); }" }
         \\#renderPipeline pipe {
         \\  layout=auto
@@ -926,7 +926,7 @@ test "ModuleRef: vertex-only pipeline with bare identifier" {
 
 test "ModuleRef: module reference with CamelCase name" {
     // Test CamelCase naming convention used in many demos
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#shaderModule SceneRenderer { code="fn render() {}" }
         \\#renderPipeline pipe {
         \\  layout=auto
@@ -950,7 +950,7 @@ test "ModuleRef: module reference with CamelCase name" {
 
 test "ModuleRef: different modules for vertex and fragment" {
     // Vertex and fragment use different shader modules
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#shaderModule vertMod { code="@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); }" }
         \\#shaderModule fragMod { code="@fragment fn fs() -> @location(0) vec4f { return vec4f(1); }" }
         \\#renderPipeline pipe {
@@ -975,7 +975,7 @@ test "ModuleRef: different modules for vertex and fragment" {
 
 test "ModuleRef: pipeline property order independence" {
     // module can come before or after entryPoint
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#shaderModule mod { code="fn f() {}" }
         \\#renderPipeline pipe1 {
         \\  layout=auto
@@ -1015,7 +1015,7 @@ test "ModuleRef: pipeline property order independence" {
 
     // Both pipelines should be created
     var pipeline_count: u32 = 0;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_render_pipeline) pipeline_count += 1;
     }
     try testing.expectEqual(@as(u32, 2), pipeline_count);
@@ -1024,7 +1024,7 @@ test "ModuleRef: pipeline property order independence" {
 test "ModuleRef: wgsl and shaderModule with same name (shadowing)" {
     // Edge case: what happens when wgsl and shaderModule have same name
     // The shaderModule should take precedence for bare identifier lookup
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#wgsl shader { value="fn wgsl_fn() {}" }
         \\#shaderModule shader { code="fn module_fn() {}" }
         \\#renderPipeline pipe {
@@ -1062,7 +1062,7 @@ test "ModuleRef: wgsl and shaderModule with same name (shadowing)" {
 
 test "ModuleRef: reference to non-existent module fails gracefully" {
     // Referencing a module that doesn't exist should fail at compile time
-    const source: [:0]const u8 =
+    const source: [:0]const u8 = 
         \\#renderPipeline pipe {
         \\  layout=auto
         \\  vertex={ module=nonExistentModule entryPoint=f }

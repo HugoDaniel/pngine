@@ -36,7 +36,7 @@ pub fn handle(
             const load_op = try self.readByte();
             const store_op = try self.readByte();
             const depth_texture_id = try self.readVarint();
-            try self.backend.beginRenderPass(
+            try self.backend.begin_render_pass(
                 allocator,
                 @intCast(color_texture_id),
                 load_op,
@@ -46,30 +46,30 @@ pub fn handle(
         },
 
         .begin_compute_pass => {
-            try self.backend.beginComputePass(allocator);
+            try self.backend.begin_compute_pass(allocator);
         },
 
         .set_pipeline => {
             const pipeline_id = try self.readVarint();
-            try self.backend.setPipeline(allocator, @intCast(pipeline_id));
+            try self.backend.set_pipeline(allocator, @intCast(pipeline_id));
         },
 
         .set_bind_group => {
             const slot = try self.readByte();
             const group_id = try self.readVarint();
-            try self.backend.setBindGroup(allocator, slot, @intCast(group_id));
+            try self.backend.set_bind_group(allocator, slot, @intCast(group_id));
         },
 
         .set_vertex_buffer => {
             const slot = try self.readByte();
             const buffer_id = try self.readVarint();
-            try self.backend.setVertexBuffer(allocator, slot, @intCast(buffer_id));
+            try self.backend.set_vertex_buffer(allocator, slot, @intCast(buffer_id));
         },
 
         .set_index_buffer => {
             const buffer_id = try self.readVarint();
             const index_format = try self.readByte();
-            try self.backend.setIndexBuffer(allocator, @intCast(buffer_id), index_format);
+            try self.backend.set_index_buffer(allocator, @intCast(buffer_id), index_format);
         },
 
         .draw => {
@@ -86,7 +86,7 @@ pub fn handle(
             const first_index = try self.readVarint();
             const base_vertex = try self.readVarint();
             const first_instance = try self.readVarint();
-            try self.backend.drawIndexed(
+            try self.backend.draw_indexed(
                 allocator,
                 index_count,
                 instance_count,
@@ -122,11 +122,11 @@ pub fn handle(
             for (count..bundle_count) |_| {
                 _ = try self.readVarint();
             }
-            try self.backend.executeBundles(allocator, bundle_ids[0..count]);
+            try self.backend.execute_bundles(allocator, bundle_ids[0..count]);
         },
 
         .end_pass => {
-            try self.backend.endPass(allocator);
+            try self.backend.end_pass(allocator);
         },
 
         else => return false,

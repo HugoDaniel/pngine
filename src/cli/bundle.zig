@@ -13,7 +13,7 @@ const build_options = @import("build_options");
 const embedded_wasm: []const u8 = @embedFile("embedded_wasm");
 
 /// Execute the bundle command.
-pub fn runBundle(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
+pub fn runBundle(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var input_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
     var assets_dir: ?[]const u8 = null;
@@ -70,13 +70,13 @@ pub fn runBundle(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     };
     defer if (output_path == null) allocator.free(output);
 
-    const source = utils.readSourceFile(allocator, input) catch |err| {
+    const source = utils.readSourceFile(allocator, io, input) catch |err| {
         std.debug.print("Error: failed to read '{s}': {}\n", .{ input, err });
         return 2;
     };
     defer allocator.free(source);
 
-    const bytecode = compile.compileSource(allocator, input, source) catch |err| {
+    const bytecode = compile.compileSource(allocator, io, input, source) catch |err| {
         std.debug.print("Error: compilation failed: {}\n", .{err});
         return 3;
     };
@@ -102,7 +102,7 @@ pub fn runBundle(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
 
     var assets_count: u32 = 0;
     if (assets_dir) |dir_path| {
-        assets_count = addAssetsFromDir(allocator, &writer, dir_path) catch |err| {
+        assets_count = addAssetsFromDir(allocator, io, &writer, dir_path) catch |err| {
             std.debug.print("Error: {}\n", .{err});
             return 2;
         };
@@ -125,7 +125,7 @@ pub fn runBundle(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     };
     defer allocator.free(zip_data);
 
-    utils.writeOutputFile(output, zip_data) catch |err| {
+    utils.writeOutputFile(io, output, zip_data) catch |err| {
         std.debug.print("Error: failed to write '{s}': {}\n", .{ output, err });
         return 2;
     };
@@ -138,11 +138,11 @@ pub fn runBundle(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     return 0;
 }
 
-fn addAssetsFromDir(allocator: std.mem.Allocator, writer: *zip.ZipWriter, dir_path: []const u8) !u32 {
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
+fn addAssetsFromDir(allocator: std.mem.Allocator, io: std.Io, writer: *zip.ZipWriter, dir_path: []const u8) !u32 {
+    var dir = io.cwd().openDir(io, dir_path, .{ .iterate = true }) catch {
         return error.FailedToOpenAssetsDir;
     };
-    defer dir.close();
+    defer dir.close(io);
 
     var walker = dir.walk(allocator) catch {
         return error.FailedToWalkAssetsDir;
@@ -151,7 +151,7 @@ fn addAssetsFromDir(allocator: std.mem.Allocator, writer: *zip.ZipWriter, dir_pa
 
     var count: u32 = 0;
     for (0..10000) |_| {
-        const entry = walker.next() catch {
+        const entry = walker.next(io) catch {
             return error.FailedToIterateAssets;
         };
 
@@ -162,7 +162,7 @@ fn addAssetsFromDir(allocator: std.mem.Allocator, writer: *zip.ZipWriter, dir_pa
                 };
                 defer allocator.free(asset_path);
 
-                const content = dir.readFileAlloc(e.path, allocator, .limited(10 * 1024 * 1024)) catch {
+                const content = dir.readFileAlloc(io, e.path, allocator, .limited(10 * 1024 * 1024)) catch {
                     return error.FailedToReadAsset;
                 };
                 defer allocator.free(content);
@@ -179,7 +179,7 @@ fn addAssetsFromDir(allocator: std.mem.Allocator, writer: *zip.ZipWriter, dir_pa
 }
 
 /// Execute the list command.
-pub fn runList(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
+pub fn runList(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (args.len == 0) {
         std.debug.print("Error: no input file specified\n\n", .{});
         std.debug.print("Usage: pngine list <file.zip|file.png>\n", .{});
@@ -187,7 +187,7 @@ pub fn runList(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     }
 
     const input = args[0];
-    const data = utils.readBinaryFile(allocator, input) catch |err| {
+    const data = utils.readBinaryFile(allocator, io, input) catch |err| {
         std.debug.print("Error: failed to read '{s}': {}\n", .{ input, err });
         return 2;
     };

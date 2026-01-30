@@ -26,6 +26,7 @@ const executor_mod = @import("executor");
 const mock_gpu = executor_mod.mock_gpu;
 const MockGPU = mock_gpu.MockGPU;
 const Dispatcher = executor_mod.Dispatcher;
+const reflect = @import("reflect");
 
 /// Helper: compile DSL source to PNGB bytecode.
 fn compileSource(source: [:0]const u8) ![]u8 {
@@ -131,7 +132,7 @@ test "Emitter: buffer size from data reference" {
 
     // Verify buffer was created with correct size: 6 floats * 4 bytes = 24 bytes
     var found_buffer = false;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_buffer) {
             try testing.expectEqual(@as(u32, 24), call.params.create_buffer.size);
             found_buffer = true;
@@ -165,7 +166,7 @@ test "Emitter: buffer size from string arithmetic expression" {
 
     // Verify buffer size: "4+4+4" = 12
     var found_buffer = false;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_buffer) {
             try testing.expectEqual(@as(u32, 12), call.params.create_buffer.size);
             found_buffer = true;
@@ -200,7 +201,7 @@ test "Emitter: buffer size from define with expression" {
 
     // Verify buffer size: VERTEX_SIZE = 4 * 10 = 40
     var found_buffer = false;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_buffer) {
             try testing.expectEqual(@as(u32, 40), call.params.create_buffer.size);
             found_buffer = true;
@@ -631,7 +632,7 @@ test "Emitter: bind group selects correct buffer from multiple" {
     var uniform_buffer_created = false;
     var bind_group_created = false;
 
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_buffer) {
             const size = call.params.create_buffer.size;
             if (size == 64) vertex_buffer_created = true;
@@ -755,7 +756,7 @@ test "Emitter: bind group selects second buffer correctly" {
 
     // Verify all three buffers are created with correct sizes
     var buffer_sizes: [3]bool = .{ false, false, false };
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_buffer) {
             const size = call.params.create_buffer.size;
             if (size == 100) buffer_sizes[0] = true;
@@ -1435,7 +1436,7 @@ test "Emitter: draw with #define identifier resolves to numeric value" {
 
     // Verify draw was called with 36 vertices, not the default 3
     var found_draw = false;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .draw) {
             try testing.expectEqual(@as(u32, 36), call.params.draw.vertex_count);
             try testing.expectEqual(@as(u32, 1), call.params.draw.instance_count);
@@ -1541,7 +1542,7 @@ test "Emitter: vertexBuffers with bare identifier executes correctly" {
 
     // Verify set_vertex_buffer was called with slot=0 and buffer_id=0 (first buffer)
     var found_set_vertex_buffer = false;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .set_vertex_buffer) {
             try testing.expectEqual(@as(u32, 0), call.params.set_vertex_buffer.slot);
             try testing.expectEqual(@as(u32, 0), call.params.set_vertex_buffer.buffer_id);
@@ -1602,7 +1603,7 @@ test "Emitter: rotating_cube style render pass with all commands" {
     var found_set_vertex_buffer = false;
     var found_draw = false;
 
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         switch (call.call_type) {
             .create_buffer => {
                 const size = call.params.create_buffer.size;
@@ -1672,7 +1673,7 @@ test "Emitter: multiple vertex buffers with bare identifiers" {
     var slot_1_set = false;
     var slot_2_set = false;
 
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .set_vertex_buffer) {
             const slot = call.params.set_vertex_buffer.slot;
             if (slot == 0) slot_0_set = true;
@@ -1721,7 +1722,7 @@ test "Emitter: mixed pool and non-pool vertex buffers (boids pattern)" {
     var slot_0_set = false;
     var slot_1_set = false;
 
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .set_vertex_buffer) {
             const slot = call.params.set_vertex_buffer.slot;
             if (slot == 0) slot_0_set = true;
@@ -2203,7 +2204,7 @@ test "Emitter: rotating_cube style wgsl + shaderModule pattern" {
     var found_pipeline = false;
     var found_draw = false;
 
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         switch (call.call_type) {
             .create_shader_module => found_shader = true,
             .create_render_pipeline => found_pipeline = true,
@@ -2310,7 +2311,7 @@ test "Emitter: data with float32Array still works alongside wasm feature" {
 
     // Verify buffer size: 6 floats * 4 bytes = 24 bytes
     var found_buffer = false;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_buffer) {
             try testing.expectEqual(@as(u32, 24), call.params.create_buffer.size);
             found_buffer = true;
@@ -2609,7 +2610,7 @@ test "Emitter: buffer with pool=2 creates pooled resources" {
 
     // Count buffer creations - should have 2 buffers for pool=2
     var buffer_count: usize = 0;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_buffer) {
             buffer_count += 1;
         }
@@ -2622,6 +2623,8 @@ test "Emitter: buffer with pool=2 creates pooled resources" {
 // ============================================================================
 
 test "Emitter: buffer size from WGSL binding reference" {
+    if (!reflect.has_miniray_lib) return;
+
     // Test that size=shader.binding auto-resolves via reflection.
     // This requires miniray to be available at the expected location.
     const source: [:0]const u8 =
@@ -2676,7 +2679,7 @@ test "Emitter: buffer size from WGSL binding reference" {
     // Find the buffer creation call and verify size
     // struct Inputs { time: f32, resolution: vec2<u32> } = 16 bytes
     // (time=4 bytes + padding=4 bytes + resolution=8 bytes = 16 bytes)
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_buffer) {
             // The size should be 16 bytes based on WGSL struct layout
             try testing.expectEqual(@as(u32, 16), call.params.create_buffer.size);
@@ -2722,7 +2725,7 @@ test "Emitter: define with string multiplication expression in instanceCount" {
     try dispatcher.executeAll(testing.allocator);
 
     // Find the draw call and verify instanceCount is 4096, not 1
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .draw) {
             try testing.expectEqual(@as(u32, 4), call.params.draw.vertex_count);
             try testing.expectEqual(@as(u32, 4096), call.params.draw.instance_count);
@@ -2757,7 +2760,7 @@ test "Emitter: define with string addition expression" {
     defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .draw) {
             try testing.expectEqual(@as(u32, 300), call.params.draw.instance_count);
             return;
@@ -2791,7 +2794,7 @@ test "Emitter: define with string division expression" {
     defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .draw) {
             try testing.expectEqual(@as(u32, 100), call.params.draw.instance_count);
             return;
@@ -2827,7 +2830,7 @@ test "Emitter: define with nested define reference in string" {
     defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .draw) {
             try testing.expectEqual(@as(u32, 50), call.params.draw.instance_count);
             return;
@@ -2861,7 +2864,7 @@ test "Emitter: define with ceil function in string" {
     defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .dispatch) {
             // ceil(100/3) = ceil(33.33...) = 34
             try testing.expectEqual(@as(u32, 34), call.params.dispatch.x);
@@ -2896,7 +2899,7 @@ test "Emitter: define with plain number string" {
     defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .draw) {
             try testing.expectEqual(@as(u32, 42), call.params.draw.instance_count);
             return;
@@ -2932,7 +2935,7 @@ test "Emitter: define with complex chained expression" {
     defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .draw) {
             try testing.expectEqual(@as(u32, 256), call.params.draw.instance_count);
             return;
@@ -2967,7 +2970,7 @@ test "Emitter: define number literal (not string) still works" {
     defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .draw) {
             try testing.expectEqual(@as(u32, 100), call.params.draw.instance_count);
             return;
@@ -3002,7 +3005,7 @@ test "Emitter: drawIndexed with string define instanceCount" {
     defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .draw_indexed) {
             try testing.expectEqual(@as(u32, 6), call.params.draw_indexed.index_count);
             try testing.expectEqual(@as(u32, 1024), call.params.draw_indexed.instance_count);
@@ -3040,7 +3043,7 @@ test "Emitter: multiple draw params from string defines" {
     defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .draw) {
             try testing.expectEqual(@as(u32, 6), call.params.draw.vertex_count);
             try testing.expectEqual(@as(u32, 100), call.params.draw.instance_count);
@@ -3928,7 +3931,7 @@ test "Emitter: draw with object params execution" {
     defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .draw) {
             try testing.expectEqual(@as(u32, 6), call.params.draw.vertex_count);
             try testing.expectEqual(@as(u32, 100), call.params.draw.instance_count);
@@ -4458,7 +4461,7 @@ test "Emitter: cube shape with position4 color4 uv2 format" {
 
     // Verify buffer was created with correct size: 36 vertices × 40 bytes = 1440 bytes
     var found_buffer = false;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_buffer) {
             try testing.expectEqual(@as(u32, 1440), call.params.create_buffer.size);
             found_buffer = true;
@@ -4491,7 +4494,7 @@ test "Emitter: cube shape with minimal position3 format" {
 
     // Verify buffer size: 36 vertices × 12 bytes = 432 bytes
     var found_buffer = false;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_buffer) {
             try testing.expectEqual(@as(u32, 432), call.params.create_buffer.size);
             found_buffer = true;
@@ -4526,7 +4529,7 @@ test "Emitter: plane shape with position3 uv2 format" {
 
     // Verify buffer size: 6 vertices × 20 bytes = 120 bytes
     var found_buffer = false;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_buffer) {
             try testing.expectEqual(@as(u32, 120), call.params.create_buffer.size);
             found_buffer = true;
@@ -4559,7 +4562,7 @@ test "Emitter: cube shape with mappedAtCreation" {
 
     // Verify buffer size: 36 vertices × 16 bytes = 576 bytes
     var found_buffer = false;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_buffer) {
             try testing.expectEqual(@as(u32, 576), call.params.create_buffer.size);
             found_buffer = true;
@@ -4570,7 +4573,7 @@ test "Emitter: cube shape with mappedAtCreation" {
 
     // Verify write_buffer was called (mappedAtCreation)
     var found_write = false;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .write_buffer) {
             found_write = true;
             break;
@@ -4602,7 +4605,7 @@ test "Emitter: cube with normal3 format" {
 
     // Verify buffer size: 36 vertices × 24 bytes = 864 bytes
     var found_buffer = false;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_buffer) {
             try testing.expectEqual(@as(u32, 864), call.params.create_buffer.size);
             found_buffer = true;
@@ -4651,7 +4654,7 @@ test "Emitter: init macro creates synthetic resources" {
     var bind_group_count: u32 = 0;
     var dispatch_count: u32 = 0;
 
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         switch (call.call_type) {
             .create_compute_pipeline => pipeline_count += 1,
             .create_bind_group => bind_group_count += 1,
@@ -4696,7 +4699,7 @@ test "Emitter: init macro calculates workgroup count from buffer size" {
 
     // Find dispatch call and verify workgroup count
     var found_dispatch = false;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .dispatch) {
             // Expected: ceil(4096 / 64) = 64 workgroups
             try testing.expectEqual(@as(u32, 64), call.params.dispatch.x);
@@ -4836,7 +4839,7 @@ test "Emitter: init= with multiple passes in single frame" {
 /// Helper to count dispatch calls in mock GPU log.
 fn countDispatchCalls(gpu: *mock_gpu.MockGPU) u32 {
     var count: u32 = 0;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .dispatch) count += 1;
     }
     return count;
@@ -4876,7 +4879,7 @@ test "Emitter: init macro with params creates uniform buffer" {
     var write_buffer_count: u32 = 0;
     var bind_group_count: u32 = 0;
 
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         switch (call.call_type) {
             .create_buffer => buffer_count += 1,
             .write_buffer => write_buffer_count += 1,
@@ -4921,7 +4924,7 @@ test "Emitter: init macro with multiple params values" {
 
     // Find the params buffer creation - should be 12 bytes (3 x f32)
     var found_params_buffer = false;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .create_buffer) {
             // Look for a 12-byte buffer (3 params x 4 bytes each)
             if (call.params.create_buffer.size == 12) {

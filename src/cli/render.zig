@@ -23,6 +23,7 @@ const std = @import("std");
 const pngine = @import("pngine");
 const format = pngine.format;
 const types_gen = @import("types_gen.zig");
+const test_utils = @import("../test_utils.zig");
 
 // Build-time embedded WASM runtime
 const embedded_wasm: []const u8 = @embedFile("embedded_wasm");
@@ -53,7 +54,7 @@ pub const Options = struct {
 ///
 /// Pre-condition: args is the slice after "render" command.
 /// Post-condition: Returns exit code (0 = success).
-pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
+pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     // Parse arguments
     var opts = Options{
         .input_path = "",
@@ -66,7 +67,8 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         .render_frame = false, // 1x1 transparent pixel by default
         .embed_executor = true, // Embed executor by default for self-contained PNG
         .scene_name = null, // Render all frames by default
-        .generate_types = false, // Don't generate TypeScript types by default
+        .generate_types = false, // Don't generate TypeScript type definitions by default
+        .minify_shaders = false,
     };
 
     const parse_result = parseArgs(args, &opts);
@@ -85,7 +87,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     defer if (opts.output_path == null) allocator.free(output);
 
     // Execute render pipeline
-    return executePipeline(allocator, opts.input_path, output, opts.width, opts.height, opts.time, opts.embed_bytecode, opts.render_frame, opts.embed_executor, opts.scene_name, opts.generate_types, opts.minify_shaders);
+    return executePipeline(allocator, io, opts.input_path, output, opts.width, opts.height, opts.time, opts.embed_bytecode, opts.render_frame, opts.embed_executor, opts.scene_name, opts.generate_types, opts.minify_shaders);
 }
 
 /// Parse render command arguments.
@@ -215,6 +217,7 @@ fn parseTimeValue(time_str: []const u8, opts: *Options) u8 {
 /// Execute the render pipeline: compile -> (optionally execute) -> encode -> write.
 fn executePipeline(
     allocator: std.mem.Allocator,
+    io: std.Io,
     input: []const u8,
     output: []const u8,
     width: u32,
@@ -236,13 +239,13 @@ fn executePipeline(
     var plugins: ?pngine.dsl.PluginSet = null;
 
     if (embed_executor) {
-        const result = compileFromFileWithPlugins(allocator, input, minify_shaders) catch |compile_err| {
+        const result = compileFromFileWithPlugins(allocator, io, input, minify_shaders) catch |compile_err| {
             return handleCompileError(compile_err, input);
         };
         bytecode = result.pngb;
         plugins = result.plugins;
     } else {
-        bytecode = compileFromFile(allocator, input, minify_shaders) catch |compile_err| {
+        bytecode = compileFromFile(allocator, io, input, minify_shaders) catch |compile_err| {
             return handleCompileError(compile_err, input);
         };
     }
@@ -258,7 +261,7 @@ fn executePipeline(
     var executor_embedded = false;
     if (embed_executor) {
         if (plugins) |p| {
-            final_bytecode = embedExecutorInBytecode(allocator, bytecode, p) catch |err| {
+            final_bytecode = embedExecutorInBytecode(allocator, io, bytecode, p) catch |err| {
                 std.debug.print("Error: failed to embed executor: {}\n", .{err});
                 return 4;
             };
@@ -283,7 +286,7 @@ fn executePipeline(
     }
 
     // Write final output
-    writeOutputFile(output, png_data) catch |err| {
+    writeOutputFile(io, output, png_data) catch |err| {
         std.debug.print("Error: failed to write '{s}': {}\n", .{ output, err });
         return 2;
     };
@@ -302,7 +305,7 @@ fn executePipeline(
         };
         defer allocator.free(types_content);
 
-        types_gen.writeToFile(types_path, types_content) catch |err| {
+        types_gen.writeToFile(io, types_path, types_content) catch |err| {
             std.debug.print("Error: failed to write '{s}': {}\n", .{ types_path, err });
             return 5;
         };
@@ -316,15 +319,15 @@ fn executePipeline(
 }
 
 /// Compile source file to bytecode.
-fn compileFromFile(allocator: std.mem.Allocator, input: []const u8, minify_shaders: bool) ![]u8 {
-    const source = try readSourceFile(allocator, input);
+fn compileFromFile(allocator: std.mem.Allocator, io: std.Io, input: []const u8, minify_shaders: bool) ![]u8 {
+    const source = try readSourceFile(allocator, io, input);
     defer allocator.free(source);
-    return compileSource(allocator, input, source, minify_shaders);
+    return compileSource(allocator, io, input, source, minify_shaders);
 }
 
 /// Compile source file and return bytecode with detected plugins.
-fn compileFromFileWithPlugins(allocator: std.mem.Allocator, input: []const u8, minify_shaders: bool) !pngine.dsl.Compiler.CompileWithPluginsResult {
-    const source = try readSourceFile(allocator, input);
+fn compileFromFileWithPlugins(allocator: std.mem.Allocator, io: std.Io, input: []const u8, minify_shaders: bool) !pngine.dsl.Compiler.CompileWithPluginsResult {
+    const source = try readSourceFile(allocator, io, input);
     defer allocator.free(source);
 
     const base_dir = std.fs.path.dirname(input);
@@ -332,6 +335,7 @@ fn compileFromFileWithPlugins(allocator: std.mem.Allocator, input: []const u8, m
     return pngine.dsl.Compiler.compileWithPlugins(allocator, source, .{
         .base_dir = base_dir,
         .minify_shaders = minify_shaders,
+        .io = io,
     });
 }
 
@@ -339,7 +343,7 @@ fn compileFromFileWithPlugins(allocator: std.mem.Allocator, input: []const u8, m
 ///
 /// Loads the appropriate pre-built executor based on detected plugins,
 /// then re-serializes the bytecode with the executor embedded.
-fn embedExecutorInBytecode(allocator: std.mem.Allocator, bytecode: []const u8, plugins: pngine.dsl.PluginSet) ![]u8 {
+fn embedExecutorInBytecode(allocator: std.mem.Allocator, io: std.Io, bytecode: []const u8, plugins: pngine.dsl.PluginSet) ![]u8 {
     // Pre-conditions
     std.debug.assert(bytecode.len >= format.HEADER_SIZE);
     std.debug.assert(std.mem.eql(u8, bytecode[0..4], format.MAGIC));
@@ -348,7 +352,7 @@ fn embedExecutorInBytecode(allocator: std.mem.Allocator, bytecode: []const u8, p
     const variant_name = getExecutorVariantName(plugins);
 
     // Load executor WASM from filesystem
-    const executor_wasm = loadExecutorWasm(allocator, variant_name) catch |err| {
+    const executor_wasm = loadExecutorWasm(allocator, io, variant_name) catch |err| {
         std.debug.print("Error: failed to load executor variant '{s}': {}\n", .{ variant_name, err });
         std.debug.print("Hint: Run 'zig build executors' to build executor variants\n", .{});
         return err;
@@ -434,7 +438,7 @@ fn getExecutorVariantName(plugins: pngine.dsl.PluginSet) []const u8 {
 /// Looks for pre-built executors in:
 /// 1. zig-out/executors/ (development)
 /// 2. Relative to CLI binary location
-fn loadExecutorWasm(allocator: std.mem.Allocator, variant_name: []const u8) ![]u8 {
+fn loadExecutorWasm(allocator: std.mem.Allocator, io: std.Io, variant_name: []const u8) ![]u8 {
     // Pre-condition
     std.debug.assert(variant_name.len > 0);
 
@@ -444,7 +448,9 @@ fn loadExecutorWasm(allocator: std.mem.Allocator, variant_name: []const u8) ![]u
         return error.InvalidFormat;
     };
 
-    const file = std.fs.cwd().openFile(dev_path, .{}) catch |err| {
+    // Read file
+    const io_ctx = io;
+    const file = std.Io.Dir.cwd().openFile(io_ctx, dev_path, .{}) catch |err| {
         // Try alternate paths if development path doesn't exist
         if (err == error.FileNotFound) {
             // Could add more search paths here (e.g., relative to binary)
@@ -452,9 +458,9 @@ fn loadExecutorWasm(allocator: std.mem.Allocator, variant_name: []const u8) ![]u
         }
         return err;
     };
-    defer file.close();
+    defer file.close(io);
 
-    const stat = try file.stat();
+    const stat = try file.stat(io);
     const size: u32 = if (stat.size > max_file_size)
         return error.FileTooLarge
     else
@@ -466,7 +472,7 @@ fn loadExecutorWasm(allocator: std.mem.Allocator, variant_name: []const u8) ![]u
     var bytes_read: u32 = 0;
     for (0..size + 1) |_| {
         if (bytes_read >= size) break;
-        const n: u32 = @intCast(try file.read(buffer[bytes_read..]));
+        const n: u32 = @intCast(try file.readStreaming(io, &.{buffer[bytes_read..]}));
         if (n == 0) break;
         bytes_read += n;
     }
@@ -525,13 +531,13 @@ fn embedBytecodeInPng(allocator: std.mem.Allocator, png_data: []u8, bytecode: []
 }
 
 /// Read binary file into buffer.
-fn readBinaryFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+fn readBinaryFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
     std.debug.assert(path.len > 0);
 
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
 
-    const stat = try file.stat();
+    const stat = try file.stat(io);
     const size: u32 = if (stat.size > max_file_size)
         return error.FileTooLarge
     else
@@ -543,7 +549,7 @@ fn readBinaryFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     var bytes_read: u32 = 0;
     for (0..size + 1) |_| {
         if (bytes_read >= size) break;
-        const n: u32 = @intCast(try file.read(buffer[bytes_read..]));
+        const n: u32 = @intCast(try file.readStreaming(io, &.{buffer[bytes_read..]}));
         if (n == 0) break;
         bytes_read += n;
     }
@@ -834,13 +840,13 @@ fn deriveOutputPath(allocator: std.mem.Allocator, input: []const u8) ![]const u8
 
 const max_file_size: u32 = 16 * 1024 * 1024;
 
-fn readSourceFile(allocator: std.mem.Allocator, path: []const u8) ![:0]const u8 {
+fn readSourceFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![:0]const u8 {
     std.debug.assert(path.len > 0);
 
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
+    const file = try io.cwd().openFile(io, path, .{});
+    defer file.close(io);
 
-    const stat = try file.stat();
+    const stat = try file.stat(io);
     const size: u32 = if (stat.size > max_file_size)
         return error.FileTooLarge
     else
@@ -852,7 +858,7 @@ fn readSourceFile(allocator: std.mem.Allocator, path: []const u8) ![:0]const u8 
     var bytes_read: u32 = 0;
     for (0..size + 1) |_| {
         if (bytes_read >= size) break;
-        const n: u32 = @intCast(try file.read(buffer[bytes_read..]));
+        const n: u32 = @intCast(try file.read(io, buffer[bytes_read..]));
         if (n == 0) break;
         bytes_read += n;
     }
@@ -861,7 +867,7 @@ fn readSourceFile(allocator: std.mem.Allocator, path: []const u8) ![:0]const u8 
     return buffer;
 }
 
-fn compileSource(allocator: std.mem.Allocator, path: []const u8, source: [:0]const u8, minify_shaders: bool) ![]u8 {
+fn compileSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8, source: [:0]const u8, minify_shaders: bool) ![]u8 {
     const extension = std.fs.path.extension(path);
 
     if (std.mem.eql(u8, extension, ".pbsf")) {
@@ -872,17 +878,18 @@ fn compileSource(allocator: std.mem.Allocator, path: []const u8, source: [:0]con
         return pngine.dsl.compileWithOptions(allocator, source, .{
             .base_dir = base_dir,
             .minify_shaders = minify_shaders,
+            .io = io,
         });
     }
 }
 
-fn writeOutputFile(path: []const u8, data: []const u8) !void {
+fn writeOutputFile(io: std.Io, path: []const u8, data: []const u8) !void {
     std.debug.assert(path.len > 0);
     std.debug.assert(data.len > 0);
 
-    const file = try std.fs.cwd().createFile(path, .{});
-    defer file.close();
-    try file.writeAll(data);
+    const file = try io.cwd().createFile(io, path, .{});
+    defer file.close(io);
+    try file.writeAll(io, data);
 }
 
 // ============================================================================
@@ -1486,6 +1493,10 @@ test "getExecutorVariantName: result is always a valid variant name" {
 
 test "loadExecutorWasm: returns error for missing file" {
     // Property: missing executor file returns FileNotFound
-    const result = loadExecutorWasm(std.testing.allocator, "nonexistent-variant");
+    var threaded = test_utils.initTestIo(std.testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const result = loadExecutorWasm(std.testing.allocator, io, "nonexistent-variant");
     try std.testing.expectError(error.FileNotFound, result);
 }

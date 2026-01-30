@@ -283,16 +283,16 @@ pub const MockGPU = struct {
     in_compute_pass: bool,
     current_pipeline: ?u16,
 
-    pub const empty: Self = .{
-        .calls = .{},
-        .buffers_created = std.StaticBitSet(MAX_BUFFERS).initEmpty(),
-        .textures_created = std.StaticBitSet(MAX_TEXTURES).initEmpty(),
-        .shaders_created = std.StaticBitSet(MAX_SHADERS).initEmpty(),
-        .pipelines_created = std.StaticBitSet(MAX_PIPELINES).initEmpty(),
-        .bind_groups_created = std.StaticBitSet(MAX_BIND_GROUPS).initEmpty(),
-        .in_render_pass = false,
-        .in_compute_pass = false,
-        .current_pipeline = null,
+    pub const empty: Self = .{ 
+        .calls = .{}, 
+        .buffers_created = std.StaticBitSet(MAX_BUFFERS).initEmpty(), 
+        .textures_created = std.StaticBitSet(MAX_TEXTURES).initEmpty(), 
+        .shaders_created = std.StaticBitSet(MAX_SHADERS).initEmpty(), 
+        .pipelines_created = std.StaticBitSet(MAX_PIPELINES).initEmpty(), 
+        .bind_groups_created = std.StaticBitSet(MAX_BIND_GROUPS).initEmpty(), 
+        .in_render_pass = false, 
+        .in_compute_pass = false, 
+        .current_pipeline = null, 
     };
 
     pub fn deinit(self: *Self, allocator: Allocator) void {
@@ -317,7 +317,7 @@ pub const MockGPU = struct {
     // Resource Creation
     // ========================================================================
 
-    pub fn createBuffer(self: *Self, allocator: Allocator, buffer_id: u16, size: u32, usage: u8) !void {
+    pub fn create_buffer(self: *Self, allocator: Allocator, buffer_id: u16, size: u32, usage: u8) !void {
         // Pre-condition: ID in range
         assert(buffer_id < MAX_BUFFERS);
 
@@ -325,7 +325,7 @@ pub const MockGPU = struct {
 
         try self.calls.append(allocator, .{
             .call_type = .create_buffer,
-            .params = .{ .create_buffer = .{
+            .params = .{ .create_buffer = .{ 
                 .buffer_id = buffer_id,
                 .size = size,
                 .usage = usage,
@@ -335,7 +335,7 @@ pub const MockGPU = struct {
 
     /// Record texture creation.
     /// Tracks texture ID in bitset for resource validation.
-    pub fn createTexture(self: *Self, allocator: Allocator, texture_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_texture(self: *Self, allocator: Allocator, texture_id: u16, descriptor_data_id: u16) !void {
         // Pre-conditions
         assert(texture_id < MAX_TEXTURES);
         assert(!self.textures_created.isSet(texture_id)); // No duplicate IDs
@@ -344,7 +344,7 @@ pub const MockGPU = struct {
 
         try self.calls.append(allocator, .{
             .call_type = .create_texture,
-            .params = .{ .create_texture = .{
+            .params = .{ .create_texture = .{ 
                 .texture_id = texture_id,
                 .descriptor_data_id = descriptor_data_id,
             } },
@@ -353,14 +353,14 @@ pub const MockGPU = struct {
 
     /// Record sampler creation.
     /// Samplers are not tracked in bitset (typically few per pipeline).
-    pub fn createSampler(self: *Self, allocator: Allocator, sampler_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_sampler(self: *Self, allocator: Allocator, sampler_id: u16, descriptor_data_id: u16) !void {
         // Pre-conditions
         assert(sampler_id < MAX_TEXTURES); // Use MAX_TEXTURES as reasonable upper bound
         assert(self.calls.items.len < 10000); // Sanity check: not in runaway loop
 
         try self.calls.append(allocator, .{
             .call_type = .create_sampler,
-            .params = .{ .create_sampler = .{
+            .params = .{ .create_sampler = .{ 
                 .sampler_id = sampler_id,
                 .descriptor_data_id = descriptor_data_id,
             } },
@@ -368,13 +368,13 @@ pub const MockGPU = struct {
     }
 
     /// Record texture view creation.
-    pub fn createTextureView(self: *Self, allocator: Allocator, view_id: u16, texture_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_texture_view(self: *Self, allocator: Allocator, view_id: u16, texture_id: u16, descriptor_data_id: u16) !void {
         assert(view_id < MAX_TEXTURES);
         assert(self.calls.items.len < 10000);
 
         try self.calls.append(allocator, .{
             .call_type = .create_texture_view,
-            .params = .{ .create_texture_view = .{
+            .params = .{ .create_texture_view = .{ 
                 .view_id = view_id,
                 .texture_id = texture_id,
                 .descriptor_data_id = descriptor_data_id,
@@ -383,13 +383,13 @@ pub const MockGPU = struct {
     }
 
     /// Record query set creation.
-    pub fn createQuerySet(self: *Self, allocator: Allocator, query_set_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_query_set(self: *Self, allocator: Allocator, query_set_id: u16, descriptor_data_id: u16) !void {
         assert(query_set_id < MAX_BUFFERS);
         assert(self.calls.items.len < 10000);
 
         try self.calls.append(allocator, .{
             .call_type = .create_query_set,
-            .params = .{ .create_query_set = .{
+            .params = .{ .create_query_set = .{ 
                 .query_set_id = query_set_id,
                 .descriptor_data_id = descriptor_data_id,
             } },
@@ -397,13 +397,13 @@ pub const MockGPU = struct {
     }
 
     /// Record bind group layout creation.
-    pub fn createBindGroupLayout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_bind_group_layout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
         assert(layout_id < MAX_BIND_GROUPS);
         assert(self.calls.items.len < 10000);
 
         try self.calls.append(allocator, .{
             .call_type = .create_bind_group_layout,
-            .params = .{ .create_bind_group_layout = .{
+            .params = .{ .create_bind_group_layout = .{ 
                 .layout_id = layout_id,
                 .descriptor_data_id = descriptor_data_id,
             } },
@@ -411,13 +411,13 @@ pub const MockGPU = struct {
     }
 
     /// Record pipeline layout creation.
-    pub fn createPipelineLayout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_pipeline_layout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
         assert(layout_id < MAX_PIPELINES);
         assert(self.calls.items.len < 10000);
 
         try self.calls.append(allocator, .{
             .call_type = .create_pipeline_layout,
-            .params = .{ .create_pipeline_layout = .{
+            .params = .{ .create_pipeline_layout = .{ 
                 .layout_id = layout_id,
                 .descriptor_data_id = descriptor_data_id,
             } },
@@ -425,69 +425,69 @@ pub const MockGPU = struct {
     }
 
     /// Record render bundle creation.
-    pub fn createRenderBundle(self: *Self, allocator: Allocator, bundle_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_render_bundle(self: *Self, allocator: Allocator, bundle_id: u16, descriptor_data_id: u16) !void {
         assert(bundle_id < MAX_PIPELINES);
         assert(self.calls.items.len < 10000);
 
         try self.calls.append(allocator, .{
             .call_type = .create_render_bundle,
-            .params = .{ .create_render_bundle = .{
+            .params = .{ .create_render_bundle = .{ 
                 .bundle_id = bundle_id,
                 .descriptor_data_id = descriptor_data_id,
             } },
         });
     }
 
-    pub fn createShaderModule(self: *Self, allocator: Allocator, shader_id: u16, code_data_id: u16) !void {
+    pub fn create_shader_module(self: *Self, allocator: Allocator, shader_id: u16, code_data_id: u16) !void {
         assert(shader_id < MAX_SHADERS);
 
         self.shaders_created.set(shader_id);
 
         try self.calls.append(allocator, .{
             .call_type = .create_shader_module,
-            .params = .{ .create_shader_module = .{
+            .params = .{ .create_shader_module = .{ 
                 .shader_id = shader_id,
                 .code_data_id = code_data_id,
             } },
         });
     }
 
-    pub fn createRenderPipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_render_pipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
         assert(pipeline_id < MAX_PIPELINES);
 
         self.pipelines_created.set(pipeline_id);
 
         try self.calls.append(allocator, .{
             .call_type = .create_render_pipeline,
-            .params = .{ .create_render_pipeline = .{
+            .params = .{ .create_render_pipeline = .{ 
                 .pipeline_id = pipeline_id,
                 .descriptor_data_id = descriptor_data_id,
             } },
         });
     }
 
-    pub fn createComputePipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_compute_pipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
         assert(pipeline_id < MAX_PIPELINES);
 
         self.pipelines_created.set(pipeline_id);
 
         try self.calls.append(allocator, .{
             .call_type = .create_compute_pipeline,
-            .params = .{ .create_compute_pipeline = .{
+            .params = .{ .create_compute_pipeline = .{ 
                 .pipeline_id = pipeline_id,
                 .descriptor_data_id = descriptor_data_id,
             } },
         });
     }
 
-    pub fn createBindGroup(self: *Self, allocator: Allocator, group_id: u16, layout_id: u16, entry_data_id: u16) !void {
+    pub fn create_bind_group(self: *Self, allocator: Allocator, group_id: u16, layout_id: u16, entry_data_id: u16) !void {
         assert(group_id < MAX_BIND_GROUPS);
 
         self.bind_groups_created.set(group_id);
 
         try self.calls.append(allocator, .{
             .call_type = .create_bind_group,
-            .params = .{ .create_bind_group = .{
+            .params = .{ .create_bind_group = .{ 
                 .group_id = group_id,
                 .layout_id = layout_id,
                 .entry_data_id = entry_data_id,
@@ -499,7 +499,7 @@ pub const MockGPU = struct {
     // Pass Operations
     // ========================================================================
 
-    pub fn beginRenderPass(self: *Self, allocator: Allocator, color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16) !void {
+    pub fn begin_render_pass(self: *Self, allocator: Allocator, color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16) !void {
         // Pre-condition: not already in a pass
         assert(!self.in_render_pass and !self.in_compute_pass);
 
@@ -508,7 +508,7 @@ pub const MockGPU = struct {
 
         try self.calls.append(allocator, .{
             .call_type = .begin_render_pass,
-            .params = .{ .begin_render_pass = .{
+            .params = .{ .begin_render_pass = .{ 
                 .color_texture_id = color_texture_id,
                 .load_op = load_op,
                 .store_op = store_op,
@@ -517,7 +517,7 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn beginComputePass(self: *Self, allocator: Allocator) !void {
+    pub fn begin_compute_pass(self: *Self, allocator: Allocator) !void {
         assert(!self.in_render_pass and !self.in_compute_pass);
 
         self.in_compute_pass = true;
@@ -529,7 +529,7 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn setPipeline(self: *Self, allocator: Allocator, pipeline_id: u16) !void {
+    pub fn set_pipeline(self: *Self, allocator: Allocator, pipeline_id: u16) !void {
         // Must be in a pass to set pipeline
         assert(self.in_render_pass or self.in_compute_pass);
 
@@ -537,42 +537,42 @@ pub const MockGPU = struct {
 
         try self.calls.append(allocator, .{
             .call_type = .set_pipeline,
-            .params = .{ .set_pipeline = .{
+            .params = .{ .set_pipeline = .{ 
                 .pipeline_id = pipeline_id,
             } },
         });
     }
 
-    pub fn setBindGroup(self: *Self, allocator: Allocator, slot: u8, group_id: u16) !void {
+    pub fn set_bind_group(self: *Self, allocator: Allocator, slot: u8, group_id: u16) !void {
         assert(self.in_render_pass or self.in_compute_pass);
 
         try self.calls.append(allocator, .{
             .call_type = .set_bind_group,
-            .params = .{ .set_bind_group = .{
+            .params = .{ .set_bind_group = .{ 
                 .slot = slot,
                 .group_id = group_id,
             } },
         });
     }
 
-    pub fn setVertexBuffer(self: *Self, allocator: Allocator, slot: u8, buffer_id: u16) !void {
+    pub fn set_vertex_buffer(self: *Self, allocator: Allocator, slot: u8, buffer_id: u16) !void {
         assert(self.in_render_pass);
 
         try self.calls.append(allocator, .{
             .call_type = .set_vertex_buffer,
-            .params = .{ .set_vertex_buffer = .{
+            .params = .{ .set_vertex_buffer = .{ 
                 .slot = slot,
                 .buffer_id = buffer_id,
             } },
         });
     }
 
-    pub fn setIndexBuffer(self: *Self, allocator: Allocator, buffer_id: u16, index_format: u8) !void {
+    pub fn set_index_buffer(self: *Self, allocator: Allocator, buffer_id: u16, index_format: u8) !void {
         assert(self.in_render_pass);
 
         try self.calls.append(allocator, .{
             .call_type = .set_index_buffer,
-            .params = .{ .set_index_buffer = .{
+            .params = .{ .set_index_buffer = .{ 
                 .buffer_id = buffer_id,
                 .index_format = index_format,
             } },
@@ -591,7 +591,7 @@ pub const MockGPU = struct {
 
         try self.calls.append(allocator, .{
             .call_type = .draw,
-            .params = .{ .draw = .{
+            .params = .{ .draw = .{ 
                 .vertex_count = vertex_count,
                 .instance_count = instance_count,
                 .first_vertex = first_vertex,
@@ -600,7 +600,7 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn drawIndexed(
+    pub fn draw_indexed(
         self: *Self,
         allocator: Allocator,
         index_count: u32,
@@ -613,7 +613,7 @@ pub const MockGPU = struct {
 
         try self.calls.append(allocator, .{
             .call_type = .draw_indexed,
-            .params = .{ .draw_indexed = .{
+            .params = .{ .draw_indexed = .{ 
                 .index_count = index_count,
                 .instance_count = instance_count,
                 .first_index = first_index,
@@ -628,7 +628,7 @@ pub const MockGPU = struct {
 
         try self.calls.append(allocator, .{
             .call_type = .dispatch,
-            .params = .{ .dispatch = .{
+            .params = .{ .dispatch = .{ 
                 .x = x,
                 .y = y,
                 .z = z,
@@ -637,18 +637,18 @@ pub const MockGPU = struct {
     }
 
     /// Execute pre-recorded render bundles.
-    pub fn executeBundles(self: *Self, allocator: Allocator, bundle_ids: []const u16) !void {
+    pub fn execute_bundles(self: *Self, allocator: Allocator, bundle_ids: []const u16) !void {
         assert(self.in_render_pass);
 
         try self.calls.append(allocator, .{
             .call_type = .execute_bundles,
-            .params = .{ .execute_bundles = .{
+            .params = .{ .execute_bundles = .{ 
                 .bundle_count = @intCast(bundle_ids.len),
             } },
         });
     }
 
-    pub fn endPass(self: *Self, allocator: Allocator) !void {
+    pub fn end_pass(self: *Self, allocator: Allocator) !void {
         // Pre-condition: in a pass
         assert(self.in_render_pass or self.in_compute_pass);
 
@@ -666,10 +666,10 @@ pub const MockGPU = struct {
     // Queue Operations
     // ========================================================================
 
-    pub fn writeBuffer(self: *Self, allocator: Allocator, buffer_id: u16, offset: u32, data_id: u16) !void {
+    pub fn write_buffer(self: *Self, allocator: Allocator, buffer_id: u16, offset: u32, data_id: u16) !void {
         try self.calls.append(allocator, .{
             .call_type = .write_buffer,
-            .params = .{ .write_buffer = .{
+            .params = .{ .write_buffer = .{ 
                 .buffer_id = buffer_id,
                 .offset = offset,
                 .data_id = data_id,
@@ -687,20 +687,20 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn createImageBitmap(self: *Self, allocator: Allocator, bitmap_id: u16, blob_data_id: u16) !void {
+    pub fn create_image_bitmap(self: *Self, allocator: Allocator, bitmap_id: u16, blob_data_id: u16) !void {
         try self.calls.append(allocator, .{
             .call_type = .create_image_bitmap,
-            .params = .{ .create_image_bitmap = .{
+            .params = .{ .create_image_bitmap = .{ 
                 .bitmap_id = bitmap_id,
                 .blob_data_id = blob_data_id,
             } },
         });
     }
 
-    pub fn copyExternalImageToTexture(self: *Self, allocator: Allocator, bitmap_id: u16, texture_id: u16, mip_level: u8, origin_x: u16, origin_y: u16) !void {
+    pub fn copy_external_image_to_texture(self: *Self, allocator: Allocator, bitmap_id: u16, texture_id: u16, mip_level: u8, origin_x: u16, origin_y: u16) !void {
         try self.calls.append(allocator, .{
             .call_type = .copy_external_image_to_texture,
-            .params = .{ .copy_external_image_to_texture = .{
+            .params = .{ .copy_external_image_to_texture = .{ 
                 .bitmap_id = bitmap_id,
                 .texture_id = texture_id,
                 .mip_level = mip_level,
@@ -714,21 +714,21 @@ pub const MockGPU = struct {
     // WASM Operations
     // ========================================================================
 
-    pub fn initWasmModule(self: *Self, allocator: Allocator, module_id: u16, wasm_data_id: u16) !void {
+    pub fn init_wasm_module(self: *Self, allocator: Allocator, module_id: u16, wasm_data_id: u16) !void {
         try self.calls.append(allocator, .{
             .call_type = .init_wasm_module,
-            .params = .{ .init_wasm_module = .{
+            .params = .{ .init_wasm_module = .{ 
                 .module_id = module_id,
                 .wasm_data_id = wasm_data_id,
             } },
         });
     }
 
-    pub fn callWasmFunc(self: *Self, allocator: Allocator, call_id: u16, module_id: u16, func_name_id: u16, args: []const u8) !void {
+    pub fn call_wasm_func(self: *Self, allocator: Allocator, call_id: u16, module_id: u16, func_name_id: u16, args: []const u8) !void {
         _ = args; // Args passed to JS at runtime, not needed for mock
         try self.calls.append(allocator, .{
             .call_type = .call_wasm_func,
-            .params = .{ .call_wasm_func = .{
+            .params = .{ .call_wasm_func = .{ 
                 .call_id = call_id,
                 .module_id = module_id,
                 .func_name_id = func_name_id,
@@ -736,10 +736,10 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn writeBufferFromWasm(self: *Self, allocator: Allocator, call_id: u16, buffer_id: u16, offset: u32, byte_len: u32) !void {
+    pub fn write_buffer_from_wasm(self: *Self, allocator: Allocator, call_id: u16, buffer_id: u16, offset: u32, byte_len: u32) !void {
         try self.calls.append(allocator, .{
             .call_type = .write_buffer_from_wasm,
-            .params = .{ .write_buffer_from_wasm = .{
+            .params = .{ .write_buffer_from_wasm = .{ 
                 .call_id = call_id,
                 .buffer_id = buffer_id,
                 .offset = offset,
@@ -748,7 +748,7 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn writeTimeUniform(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
+    pub fn write_time_uniform(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
         _ = self;
         _ = allocator;
         _ = buffer_id;
@@ -761,22 +761,22 @@ pub const MockGPU = struct {
     // ========================================================================
 
     /// Get call count.
-    pub fn callCount(self: *const Self) usize {
+    pub fn call_count(self: *const Self) usize {
         return self.calls.items.len;
     }
 
     /// Get call at index.
-    pub fn getCall(self: *const Self, index: usize) Call {
+    pub fn get_call(self: *const Self, index: usize) Call {
         return self.calls.items[index];
     }
 
     /// Get all calls as slice.
-    pub fn getCalls(self: *const Self) []const Call {
+    pub fn get_calls(self: *const Self) []const Call {
         return self.calls.items;
     }
 
     /// Check if call sequence matches expected types.
-    pub fn expectCallTypes(self: *const Self, expected: []const CallType) bool {
+    pub fn expect_call_types(self: *const Self, expected: []const CallType) bool {
         if (self.calls.items.len != expected.len) return false;
 
         for (self.calls.items, expected) |call, exp| {
@@ -787,7 +787,7 @@ pub const MockGPU = struct {
     }
 
     /// Print all recorded calls for debugging.
-    pub fn dumpCalls(self: *const Self, writer: anytype) !void {
+    pub fn dump_calls(self: *const Self, writer: anytype) !void {
         var buf: [256]u8 = undefined;
         try writer.print("MockGPU call log ({d} calls):\n", .{self.calls.items.len});
         for (self.calls.items, 0..) |call, i| {
@@ -807,10 +807,10 @@ test "mock gpu create buffer" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    try gpu.createBuffer(testing.allocator, 0, 1024, 0x44);
+    try gpu.create_buffer(testing.allocator, 0, 1024, 0x44);
 
-    try testing.expectEqual(@as(usize, 1), gpu.callCount());
-    try testing.expectEqual(CallType.create_buffer, gpu.getCall(0).call_type);
+    try testing.expectEqual(@as(usize, 1), gpu.call_count());
+    try testing.expectEqual(CallType.create_buffer, gpu.get_call(0).call_type);
     try testing.expect(gpu.buffers_created.isSet(0));
 }
 
@@ -818,14 +818,14 @@ test "mock gpu create texture" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    try gpu.createTexture(testing.allocator, 0, 42);
+    try gpu.create_texture(testing.allocator, 0, 42);
 
-    try testing.expectEqual(@as(usize, 1), gpu.callCount());
-    try testing.expectEqual(CallType.create_texture, gpu.getCall(0).call_type);
+    try testing.expectEqual(@as(usize, 1), gpu.call_count());
+    try testing.expectEqual(CallType.create_texture, gpu.get_call(0).call_type);
     try testing.expect(gpu.textures_created.isSet(0));
 
     // Verify parameters
-    const call = gpu.getCall(0);
+    const call = gpu.get_call(0);
     try testing.expectEqual(@as(u16, 0), call.params.create_texture.texture_id);
     try testing.expectEqual(@as(u16, 42), call.params.create_texture.descriptor_data_id);
 }
@@ -834,13 +834,13 @@ test "mock gpu create sampler" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    try gpu.createSampler(testing.allocator, 5, 99);
+    try gpu.create_sampler(testing.allocator, 5, 99);
 
-    try testing.expectEqual(@as(usize, 1), gpu.callCount());
-    try testing.expectEqual(CallType.create_sampler, gpu.getCall(0).call_type);
+    try testing.expectEqual(@as(usize, 1), gpu.call_count());
+    try testing.expectEqual(CallType.create_sampler, gpu.get_call(0).call_type);
 
     // Verify parameters
-    const call = gpu.getCall(0);
+    const call = gpu.get_call(0);
     try testing.expectEqual(@as(u16, 5), call.params.create_sampler.sampler_id);
     try testing.expectEqual(@as(u16, 99), call.params.create_sampler.descriptor_data_id);
 }
@@ -849,12 +849,12 @@ test "mock gpu render pass sequence" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    try gpu.createShaderModule(testing.allocator, 0, 0);
-    try gpu.createRenderPipeline(testing.allocator, 0, 1);
-    try gpu.beginRenderPass(testing.allocator, 0, 1, 0, 0xFFFF);
-    try gpu.setPipeline(testing.allocator, 0);
+    try gpu.create_shader_module(testing.allocator, 0, 0);
+    try gpu.create_render_pipeline(testing.allocator, 0, 1);
+    try gpu.begin_render_pass(testing.allocator, 0, 1, 0, 0xFFFF);
+    try gpu.set_pipeline(testing.allocator, 0);
     try gpu.draw(testing.allocator, 3, 1, 0, 0);
-    try gpu.endPass(testing.allocator);
+    try gpu.end_pass(testing.allocator);
     try gpu.submit(testing.allocator);
 
     const expected = [_]CallType{
@@ -867,18 +867,18 @@ test "mock gpu render pass sequence" {
         .submit,
     };
 
-    try testing.expect(gpu.expectCallTypes(&expected));
+    try testing.expect(gpu.expect_call_types(&expected));
 }
 
 test "mock gpu reset" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    try gpu.createBuffer(testing.allocator, 0, 1024, 0x44);
-    try testing.expectEqual(@as(usize, 1), gpu.callCount());
+    try gpu.create_buffer(testing.allocator, 0, 1024, 0x44);
+    try testing.expectEqual(@as(usize, 1), gpu.call_count());
 
     gpu.reset();
-    try testing.expectEqual(@as(usize, 0), gpu.callCount());
+    try testing.expectEqual(@as(usize, 0), gpu.call_count());
     try testing.expect(!gpu.buffers_created.isSet(0));
 }
 
@@ -887,13 +887,13 @@ test "mock gpu call formatting" {
     defer gpu.deinit(testing.allocator);
 
     // load_op=1 (clear), store_op=0 (store)
-    try gpu.beginRenderPass(testing.allocator, 0, 1, 0, 0xFFFF);
+    try gpu.begin_render_pass(testing.allocator, 0, 1, 0, 0xFFFF);
     try gpu.draw(testing.allocator, 3, 1, 0, 0);
-    try gpu.endPass(testing.allocator);
+    try gpu.end_pass(testing.allocator);
 
     var buf: [256]u8 = undefined;
     // calls[0] = begin_render_pass, calls[1] = draw
-    const str = gpu.getCall(1).describe(&buf);
+    const str = gpu.get_call(1).describe(&buf);
     try testing.expectEqualStrings("draw(vertices=3, instances=1)", str);
 }
 
@@ -901,15 +901,15 @@ test "mock gpu texture and sampler formatting" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    try gpu.createTexture(testing.allocator, 1, 42);
-    try gpu.createSampler(testing.allocator, 2, 99);
+    try gpu.create_texture(testing.allocator, 1, 42);
+    try gpu.create_sampler(testing.allocator, 2, 99);
 
     var buf: [256]u8 = undefined;
 
-    const tex_str = gpu.getCall(0).describe(&buf);
+    const tex_str = gpu.get_call(0).describe(&buf);
     try testing.expectEqualStrings("create_texture(id=1, desc=42)", tex_str);
 
-    const sampler_str = gpu.getCall(1).describe(&buf);
+    const sampler_str = gpu.get_call(1).describe(&buf);
     try testing.expectEqualStrings("create_sampler(id=2, desc=99)", sampler_str);
 }
 
@@ -921,14 +921,14 @@ test "mock gpu createImageBitmap records call" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    try gpu.createImageBitmap(testing.allocator, 0, 10);
+    try gpu.create_image_bitmap(testing.allocator, 0, 10);
 
     // Property: call was recorded
-    try testing.expectEqual(@as(usize, 1), gpu.callCount());
-    try testing.expectEqual(CallType.create_image_bitmap, gpu.getCall(0).call_type);
+    try testing.expectEqual(@as(usize, 1), gpu.call_count());
+    try testing.expectEqual(CallType.create_image_bitmap, gpu.get_call(0).call_type);
 
     // Property: parameters match
-    const params = gpu.getCall(0).params.create_image_bitmap;
+    const params = gpu.get_call(0).params.create_image_bitmap;
     try testing.expectEqual(@as(u16, 0), params.bitmap_id);
     try testing.expectEqual(@as(u16, 10), params.blob_data_id);
 }
@@ -937,14 +937,14 @@ test "mock gpu createImageBitmap multiple calls" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    try gpu.createImageBitmap(testing.allocator, 0, 10);
-    try gpu.createImageBitmap(testing.allocator, 1, 20);
-    try gpu.createImageBitmap(testing.allocator, 2, 30);
+    try gpu.create_image_bitmap(testing.allocator, 0, 10);
+    try gpu.create_image_bitmap(testing.allocator, 1, 20);
+    try gpu.create_image_bitmap(testing.allocator, 2, 30);
 
     // Property: all calls recorded in order
-    try testing.expectEqual(@as(usize, 3), gpu.callCount());
+    try testing.expectEqual(@as(usize, 3), gpu.call_count());
 
-    for (gpu.getCalls(), 0..) |call, i| {
+    for (gpu.get_calls(), 0..) |call, i| {
         try testing.expectEqual(CallType.create_image_bitmap, call.call_type);
         try testing.expectEqual(@as(u16, @intCast(i)), call.params.create_image_bitmap.bitmap_id);
         try testing.expectEqual(@as(u16, @intCast((i + 1) * 10)), call.params.create_image_bitmap.blob_data_id);
@@ -955,14 +955,14 @@ test "mock gpu copyExternalImageToTexture records call" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    try gpu.copyExternalImageToTexture(testing.allocator, 5, 10, 2, 100, 200);
+    try gpu.copy_external_image_to_texture(testing.allocator, 5, 10, 2, 100, 200);
 
     // Property: call was recorded
-    try testing.expectEqual(@as(usize, 1), gpu.callCount());
-    try testing.expectEqual(CallType.copy_external_image_to_texture, gpu.getCall(0).call_type);
+    try testing.expectEqual(@as(usize, 1), gpu.call_count());
+    try testing.expectEqual(CallType.copy_external_image_to_texture, gpu.get_call(0).call_type);
 
     // Property: all parameters match
-    const params = gpu.getCall(0).params.copy_external_image_to_texture;
+    const params = gpu.get_call(0).params.copy_external_image_to_texture;
     try testing.expectEqual(@as(u16, 5), params.bitmap_id);
     try testing.expectEqual(@as(u16, 10), params.texture_id);
     try testing.expectEqual(@as(u8, 2), params.mip_level);
@@ -975,9 +975,9 @@ test "mock gpu copyExternalImageToTexture zero origin" {
     defer gpu.deinit(testing.allocator);
 
     // Test default case: zero origin (most common)
-    try gpu.copyExternalImageToTexture(testing.allocator, 0, 0, 0, 0, 0);
+    try gpu.copy_external_image_to_texture(testing.allocator, 0, 0, 0, 0, 0);
 
-    const params = gpu.getCall(0).params.copy_external_image_to_texture;
+    const params = gpu.get_call(0).params.copy_external_image_to_texture;
     try testing.expectEqual(@as(u16, 0), params.origin_x);
     try testing.expectEqual(@as(u16, 0), params.origin_y);
 }
@@ -990,9 +990,9 @@ test "mock gpu image workflow sequence" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    try gpu.createTexture(testing.allocator, 0, 1);
-    try gpu.createImageBitmap(testing.allocator, 0, 2);
-    try gpu.copyExternalImageToTexture(testing.allocator, 0, 0, 0, 0, 0);
+    try gpu.create_texture(testing.allocator, 0, 1);
+    try gpu.create_image_bitmap(testing.allocator, 0, 2);
+    try gpu.copy_external_image_to_texture(testing.allocator, 0, 0, 0, 0, 0);
 
     const expected = [_]CallType{
         .create_texture,
@@ -1000,16 +1000,16 @@ test "mock gpu image workflow sequence" {
         .copy_external_image_to_texture,
     };
 
-    try testing.expect(gpu.expectCallTypes(&expected));
+    try testing.expect(gpu.expect_call_types(&expected));
 
     // Property: texture_id matches between create and copy
-    const create_texture_id = gpu.getCall(0).params.create_texture.texture_id;
-    const copy_texture_id = gpu.getCall(2).params.copy_external_image_to_texture.texture_id;
+    const create_texture_id = gpu.get_call(0).params.create_texture.texture_id;
+    const copy_texture_id = gpu.get_call(2).params.copy_external_image_to_texture.texture_id;
     try testing.expectEqual(create_texture_id, copy_texture_id);
 
     // Property: bitmap_id matches between create and copy
-    const create_bitmap_id = gpu.getCall(1).params.create_image_bitmap.bitmap_id;
-    const copy_bitmap_id = gpu.getCall(2).params.copy_external_image_to_texture.bitmap_id;
+    const create_bitmap_id = gpu.get_call(1).params.create_image_bitmap.bitmap_id;
+    const copy_bitmap_id = gpu.get_call(2).params.copy_external_image_to_texture.bitmap_id;
     try testing.expectEqual(create_bitmap_id, copy_bitmap_id);
 }
 
@@ -1017,14 +1017,14 @@ test "mock gpu reset clears image bitmap calls" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    try gpu.createImageBitmap(testing.allocator, 0, 0);
-    try gpu.copyExternalImageToTexture(testing.allocator, 0, 0, 0, 0, 0);
+    try gpu.create_image_bitmap(testing.allocator, 0, 0);
+    try gpu.copy_external_image_to_texture(testing.allocator, 0, 0, 0, 0, 0);
 
-    try testing.expectEqual(@as(usize, 2), gpu.callCount());
+    try testing.expectEqual(@as(usize, 2), gpu.call_count());
 
     gpu.reset();
 
-    try testing.expectEqual(@as(usize, 0), gpu.callCount());
+    try testing.expectEqual(@as(usize, 0), gpu.call_count());
 }
 
 test "mock gpu full rendering with texture upload" {
@@ -1033,26 +1033,26 @@ test "mock gpu full rendering with texture upload" {
     defer gpu.deinit(testing.allocator);
 
     // Setup phase: create resources
-    try gpu.createTexture(testing.allocator, 0, 0); // texture for upload
-    try gpu.createImageBitmap(testing.allocator, 0, 1); // from blob data
-    try gpu.copyExternalImageToTexture(testing.allocator, 0, 0, 0, 0, 0);
-    try gpu.createShaderModule(testing.allocator, 0, 2);
-    try gpu.createRenderPipeline(testing.allocator, 0, 3);
+    try gpu.create_texture(testing.allocator, 0, 0); // texture for upload
+    try gpu.create_image_bitmap(testing.allocator, 0, 1); // from blob data
+    try gpu.copy_external_image_to_texture(testing.allocator, 0, 0, 0, 0, 0);
+    try gpu.create_shader_module(testing.allocator, 0, 2);
+    try gpu.create_render_pipeline(testing.allocator, 0, 3);
 
     // Render phase
-    try gpu.beginRenderPass(testing.allocator, 0, 1, 0, 0xFFFF);
-    try gpu.setPipeline(testing.allocator, 0);
+    try gpu.begin_render_pass(testing.allocator, 0, 1, 0, 0xFFFF);
+    try gpu.set_pipeline(testing.allocator, 0);
     try gpu.draw(testing.allocator, 6, 1, 0, 0);
-    try gpu.endPass(testing.allocator);
+    try gpu.end_pass(testing.allocator);
     try gpu.submit(testing.allocator);
 
     // Property: correct number of calls
-    try testing.expectEqual(@as(usize, 10), gpu.callCount());
+    try testing.expectEqual(@as(usize, 10), gpu.call_count());
 
     // Property: copy happens after create
     var create_bitmap_idx: ?usize = null;
     var copy_idx: ?usize = null;
-    for (gpu.getCalls(), 0..) |call, i| {
+    for (gpu.get_calls(), 0..) |call, i| {
         if (call.call_type == .create_image_bitmap) create_bitmap_idx = i;
         if (call.call_type == .copy_external_image_to_texture) copy_idx = i;
     }
@@ -1067,14 +1067,14 @@ test "mock gpu initWasmModule records call" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    try gpu.initWasmModule(testing.allocator, 0, 5);
+    try gpu.init_wasm_module(testing.allocator, 0, 5);
 
     // Property: call was recorded
-    try testing.expectEqual(@as(usize, 1), gpu.callCount());
-    try testing.expectEqual(CallType.init_wasm_module, gpu.getCall(0).call_type);
+    try testing.expectEqual(@as(usize, 1), gpu.call_count());
+    try testing.expectEqual(CallType.init_wasm_module, gpu.get_call(0).call_type);
 
     // Property: parameters match
-    const params = gpu.getCall(0).params.init_wasm_module;
+    const params = gpu.get_call(0).params.init_wasm_module;
     try testing.expectEqual(@as(u16, 0), params.module_id);
     try testing.expectEqual(@as(u16, 5), params.wasm_data_id);
 }
@@ -1084,14 +1084,14 @@ test "mock gpu callWasmFunc records call" {
     defer gpu.deinit(testing.allocator);
 
     const args = [_]u8{ 0x01, 0x02 }; // canvas_width, canvas_height
-    try gpu.callWasmFunc(testing.allocator, 0, 0, 3, &args);
+    try gpu.call_wasm_func(testing.allocator, 0, 0, 3, &args);
 
     // Property: call was recorded
-    try testing.expectEqual(@as(usize, 1), gpu.callCount());
-    try testing.expectEqual(CallType.call_wasm_func, gpu.getCall(0).call_type);
+    try testing.expectEqual(@as(usize, 1), gpu.call_count());
+    try testing.expectEqual(CallType.call_wasm_func, gpu.get_call(0).call_type);
 
     // Property: parameters match
-    const params = gpu.getCall(0).params.call_wasm_func;
+    const params = gpu.get_call(0).params.call_wasm_func;
     try testing.expectEqual(@as(u16, 0), params.call_id);
     try testing.expectEqual(@as(u16, 0), params.module_id);
     try testing.expectEqual(@as(u16, 3), params.func_name_id);
@@ -1101,14 +1101,14 @@ test "mock gpu writeBufferFromWasm records call" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    try gpu.writeBufferFromWasm(testing.allocator, 0, 1, 64, 256);
+    try gpu.write_buffer_from_wasm(testing.allocator, 0, 1, 64, 256);
 
     // Property: call was recorded
-    try testing.expectEqual(@as(usize, 1), gpu.callCount());
-    try testing.expectEqual(CallType.write_buffer_from_wasm, gpu.getCall(0).call_type);
+    try testing.expectEqual(@as(usize, 1), gpu.call_count());
+    try testing.expectEqual(CallType.write_buffer_from_wasm, gpu.get_call(0).call_type);
 
     // Property: parameters match
-    const params = gpu.getCall(0).params.write_buffer_from_wasm;
+    const params = gpu.get_call(0).params.write_buffer_from_wasm;
     try testing.expectEqual(@as(u16, 0), params.call_id);
     try testing.expectEqual(@as(u16, 1), params.buffer_id);
     try testing.expectEqual(@as(u32, 64), params.offset);
@@ -1124,10 +1124,10 @@ test "mock gpu WASM workflow sequence" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    try gpu.createBuffer(testing.allocator, 0, 256, 0x44);
-    try gpu.initWasmModule(testing.allocator, 0, 1);
-    try gpu.callWasmFunc(testing.allocator, 0, 0, 2, &.{});
-    try gpu.writeBufferFromWasm(testing.allocator, 0, 0, 0, 256);
+    try gpu.create_buffer(testing.allocator, 0, 256, 0x44);
+    try gpu.init_wasm_module(testing.allocator, 0, 1);
+    try gpu.call_wasm_func(testing.allocator, 0, 0, 2, &.{});
+    try gpu.write_buffer_from_wasm(testing.allocator, 0, 0, 0, 256);
 
     const expected = [_]CallType{
         .create_buffer,
@@ -1136,16 +1136,16 @@ test "mock gpu WASM workflow sequence" {
         .write_buffer_from_wasm,
     };
 
-    try testing.expect(gpu.expectCallTypes(&expected));
+    try testing.expect(gpu.expect_call_types(&expected));
 
     // Property: buffer_id matches between create and write
-    const create_buffer_id = gpu.getCall(0).params.create_buffer.buffer_id;
-    const write_buffer_id = gpu.getCall(3).params.write_buffer_from_wasm.buffer_id;
+    const create_buffer_id = gpu.get_call(0).params.create_buffer.buffer_id;
+    const write_buffer_id = gpu.get_call(3).params.write_buffer_from_wasm.buffer_id;
     try testing.expectEqual(create_buffer_id, write_buffer_id);
 
     // Property: module_id matches between init and call
-    const init_module_id = gpu.getCall(1).params.init_wasm_module.module_id;
-    const call_module_id = gpu.getCall(2).params.call_wasm_func.module_id;
+    const init_module_id = gpu.get_call(1).params.init_wasm_module.module_id;
+    const call_module_id = gpu.get_call(2).params.call_wasm_func.module_id;
     try testing.expectEqual(init_module_id, call_module_id);
 }
 
@@ -1153,26 +1153,26 @@ test "mock gpu multiple WASM calls with different call_ids" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    try gpu.initWasmModule(testing.allocator, 0, 0);
-    try gpu.callWasmFunc(testing.allocator, 0, 0, 1, &.{});
-    try gpu.callWasmFunc(testing.allocator, 1, 0, 2, &.{});
-    try gpu.callWasmFunc(testing.allocator, 2, 0, 3, &.{});
-    try gpu.writeBufferFromWasm(testing.allocator, 0, 0, 0, 64);
-    try gpu.writeBufferFromWasm(testing.allocator, 1, 1, 0, 64);
-    try gpu.writeBufferFromWasm(testing.allocator, 2, 2, 0, 64);
+    try gpu.init_wasm_module(testing.allocator, 0, 0);
+    try gpu.call_wasm_func(testing.allocator, 0, 0, 1, &.{});
+    try gpu.call_wasm_func(testing.allocator, 1, 0, 2, &.{});
+    try gpu.call_wasm_func(testing.allocator, 2, 0, 3, &.{});
+    try gpu.write_buffer_from_wasm(testing.allocator, 0, 0, 0, 64);
+    try gpu.write_buffer_from_wasm(testing.allocator, 1, 1, 0, 64);
+    try gpu.write_buffer_from_wasm(testing.allocator, 2, 2, 0, 64);
 
     // Property: correct number of calls
-    try testing.expectEqual(@as(usize, 7), gpu.callCount());
+    try testing.expectEqual(@as(usize, 7), gpu.call_count());
 
     // Property: call_ids increment correctly
-    try testing.expectEqual(@as(u16, 0), gpu.getCall(1).params.call_wasm_func.call_id);
-    try testing.expectEqual(@as(u16, 1), gpu.getCall(2).params.call_wasm_func.call_id);
-    try testing.expectEqual(@as(u16, 2), gpu.getCall(3).params.call_wasm_func.call_id);
+    try testing.expectEqual(@as(u16, 0), gpu.get_call(1).params.call_wasm_func.call_id);
+    try testing.expectEqual(@as(u16, 1), gpu.get_call(2).params.call_wasm_func.call_id);
+    try testing.expectEqual(@as(u16, 2), gpu.get_call(3).params.call_wasm_func.call_id);
 
     // Property: write_buffer_from_wasm call_ids match call_wasm_func call_ids
-    try testing.expectEqual(@as(u16, 0), gpu.getCall(4).params.write_buffer_from_wasm.call_id);
-    try testing.expectEqual(@as(u16, 1), gpu.getCall(5).params.write_buffer_from_wasm.call_id);
-    try testing.expectEqual(@as(u16, 2), gpu.getCall(6).params.write_buffer_from_wasm.call_id);
+    try testing.expectEqual(@as(u16, 0), gpu.get_call(4).params.write_buffer_from_wasm.call_id);
+    try testing.expectEqual(@as(u16, 1), gpu.get_call(5).params.write_buffer_from_wasm.call_id);
+    try testing.expectEqual(@as(u16, 2), gpu.get_call(6).params.write_buffer_from_wasm.call_id);
 }
 
 // ============================================================================
@@ -1190,7 +1190,7 @@ test "mock gpu initWasmModule handles OOM" {
             .fail_index = fail_index,
         });
 
-        const result = gpu.initWasmModule(failing_alloc.allocator(), 0, 5);
+        const result = gpu.init_wasm_module(failing_alloc.allocator(), 0, 5);
 
         if (failing_alloc.has_induced_failure) {
             try testing.expectError(error.OutOfMemory, result);
@@ -1213,7 +1213,7 @@ test "mock gpu callWasmFunc handles OOM" {
             .fail_index = fail_index,
         });
 
-        const result = gpu.callWasmFunc(failing_alloc.allocator(), 0, 0, 3, &args);
+        const result = gpu.call_wasm_func(failing_alloc.allocator(), 0, 0, 3, &args);
 
         if (failing_alloc.has_induced_failure) {
             try testing.expectError(error.OutOfMemory, result);
@@ -1235,7 +1235,7 @@ test "mock gpu writeBufferFromWasm handles OOM" {
             .fail_index = fail_index,
         });
 
-        const result = gpu.writeBufferFromWasm(failing_alloc.allocator(), 0, 1, 64, 256);
+        const result = gpu.write_buffer_from_wasm(failing_alloc.allocator(), 0, 1, 64, 256);
 
         if (failing_alloc.has_induced_failure) {
             try testing.expectError(error.OutOfMemory, result);

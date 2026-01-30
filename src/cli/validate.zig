@@ -44,7 +44,7 @@ pub const ValidationResult = types.ValidationResult;
 ///
 /// Pre-condition: args is the slice after "validate" command.
 /// Post-condition: Returns exit code (0 = success, 1 = validation errors).
-pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
+pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     // Parse arguments
     var opts = Options.init();
 
@@ -73,7 +73,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     std.debug.assert(opts.frame_indices.len > 0);
 
     // Load and compile source to bytecode
-    const bytecode = loader.loadBytecode(allocator, opts.input_path) catch |err| {
+    const bytecode = loader.loadBytecode(allocator, io, opts.input_path) catch |err| {
         if (opts.json_output) {
             try output.outputJsonError(allocator, "compile_error", @errorName(err));
         } else {

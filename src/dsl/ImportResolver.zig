@@ -41,32 +41,28 @@ pub const ImportResolver = struct {
     const Self = @This();
 
     allocator: Allocator,
+    io: ?std.Io,
     base_dir: []const u8,
     /// Files currently being processed (for cycle detection).
     in_progress: std.StringHashMap(void),
     /// Already resolved files (cached content with sentinel).
     resolved: std.StringHashMap([:0]const u8),
 
+    const MAX_FILE_SIZE = 16 * 1024 * 1024;
+    const MAX_IMPORT_DEPTH = 64;
+
     pub const Error = error{
+        OutOfMemory,
+        FileReadError,
         ImportCycle,
         ImportNotFound,
         InvalidImportPath,
-        OutOfMemory,
-        FileReadError,
     };
 
-    /// Maximum import depth to prevent stack overflow.
-    const MAX_IMPORT_DEPTH: u32 = 64;
-
-    /// Maximum file size to prevent OOM.
-    const MAX_FILE_SIZE: usize = 16 * 1024 * 1024; // 16MB
-
-    /// Maximum line length for import scanning.
-    const MAX_LINE_LEN: usize = 4096;
-
-    pub fn init(allocator: Allocator, base_dir: []const u8) Self {
+    pub fn init(allocator: Allocator, io: ?std.Io, base_dir: []const u8) Self {
         return .{
             .allocator = allocator,
+            .io = io,
             .base_dir = base_dir,
             .in_progress = std.StringHashMap(void).init(allocator),
             .resolved = std.StringHashMap([:0]const u8).init(allocator),
@@ -251,15 +247,17 @@ pub const ImportResolver = struct {
         };
         defer self.allocator.free(full_path);
 
-        const file = std.fs.cwd().openFile(full_path, .{}) catch |err| {
+        const io = self.io orelse return error.FileReadError;
+
+        const file = std.Io.Dir.cwd().openFile(io, full_path, .{}) catch |err| {
             return switch (err) {
                 error.FileNotFound => error.FileNotFound,
                 else => error.AccessDenied,
             };
         };
-        defer file.close();
+        defer file.close(io);
 
-        const stat = try file.stat();
+        const stat = try file.stat(io);
         if (stat.size > MAX_FILE_SIZE) {
             return error.FileTooBig;
         }
@@ -272,7 +270,7 @@ pub const ImportResolver = struct {
         var bytes_read: u32 = 0;
         for (0..size + 1) |_| {
             if (bytes_read >= size) break;
-            const n: u32 = @intCast(try file.read(buffer[bytes_read..]));
+            const n: u32 = @intCast(try file.readStreaming(io, &.{buffer[bytes_read..]}));
             if (n == 0) break; // EOF
             bytes_read += n;
         }
@@ -393,7 +391,7 @@ test "ImportResolver: extractImportPath" {
 }
 
 test "ImportResolver: no imports passthrough" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     const source = "#buffer buf { size=100 }\n#frame main { perform=[] }";
@@ -404,7 +402,7 @@ test "ImportResolver: no imports passthrough" {
 }
 
 test "ImportResolver: cycle detection direct" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     // Simulate a file that imports itself
@@ -422,7 +420,7 @@ test "ImportResolver: cycle detection direct" {
 }
 
 test "ImportResolver: max depth protection" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     // Depth at max should fail
@@ -434,7 +432,7 @@ test "ImportResolver: OOM handling" {
     // Test first allocation failure
     var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
 
-    var resolver = ImportResolver.init(failing.allocator(), ".");
+    var resolver = ImportResolver.init(failing.allocator(), null, ".");
     defer resolver.deinit();
 
     const result = resolver.resolve("test content", "test.pngine");
@@ -447,7 +445,7 @@ test "ImportResolver: OOM handling" {
 
 test "ImportResolver: idempotency - no imports" {
     // Property: resolving content without imports twice gives same result
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     const source = "#buffer buf { size=100 }\n#frame main { perform=[] }";
@@ -456,7 +454,7 @@ test "ImportResolver: idempotency - no imports" {
     defer testing.allocator.free(result1);
 
     // Create new resolver for second pass
-    var resolver2 = ImportResolver.init(testing.allocator, ".");
+    var resolver2 = ImportResolver.init(testing.allocator, null, ".");
     defer resolver2.deinit();
 
     const result2 = try resolver2.resolve(result1, "test.pngine");
@@ -467,7 +465,7 @@ test "ImportResolver: idempotency - no imports" {
 }
 
 test "ImportResolver: content preservation - lines unchanged" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     // Test various line types are preserved exactly
@@ -497,7 +495,7 @@ test "ImportResolver: content preservation - lines unchanged" {
 }
 
 test "ImportResolver: sentinel termination invariant" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     const source = "content";
@@ -514,7 +512,7 @@ test "ImportResolver: sentinel termination invariant" {
 // ============================================================================
 
 test "ImportResolver: empty source" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     const result = try resolver.resolve("", "test.pngine");
@@ -524,7 +522,7 @@ test "ImportResolver: empty source" {
 }
 
 test "ImportResolver: single newline" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     const result = try resolver.resolve("\n", "test.pngine");
@@ -534,7 +532,7 @@ test "ImportResolver: single newline" {
 }
 
 test "ImportResolver: multiple consecutive newlines" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     const result = try resolver.resolve("\n\n\n", "test.pngine");
@@ -544,7 +542,7 @@ test "ImportResolver: multiple consecutive newlines" {
 }
 
 test "ImportResolver: content without trailing newline" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     const source = "#buffer buf { size=100 }";
@@ -555,7 +553,7 @@ test "ImportResolver: content without trailing newline" {
 }
 
 test "ImportResolver: whitespace-only lines preserved" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     const source = "   \n\t\t\n  \t  \n";
@@ -603,7 +601,7 @@ test "ImportResolver: extractImportPath edge cases" {
 }
 
 test "ImportResolver: import-like lines in comments and strings" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     // Comment line starting with // - NOT an import (doesn't start with #import after trim)
@@ -621,14 +619,17 @@ test "ImportResolver: import-like lines in comments and strings" {
 }
 
 test "ImportResolver: indented import line is treated as import" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    var resolver = ImportResolver.init(testing.allocator, io, ".");
     defer resolver.deinit();
 
-    // Indented #import IS treated as import (whitespace is trimmed)
-    // This should fail because the file doesn't exist
-    const source = "  #import \"nonexistent.pngine\"";
+    // Indented import
+    const source = "    #import \"indent.pngine\"";
+    const result = resolver.resolve(source, "main.pngine");
 
-    const result = resolver.resolve(source, "test.pngine");
+    // Should try to resolve and fail (file not found), NOT FileReadError
     try testing.expectError(error.ImportNotFound, result);
 }
 
@@ -648,7 +649,7 @@ test "ImportResolver: systematic OOM at each allocation point" {
             .fail_index = fail_index,
         });
 
-        var resolver = ImportResolver.init(failing.allocator(), ".");
+        var resolver = ImportResolver.init(failing.allocator(), null, ".");
         defer resolver.deinit();
 
         const result = resolver.resolve("#buffer buf { size=100 }", "test.pngine");
@@ -724,7 +725,7 @@ fn fuzzResolve(_: void, input: []const u8) !void {
     // Limit input size
     if (input.len > 4096) return;
 
-    var resolver = ImportResolver.init(std.testing.allocator, ".");
+    var resolver = ImportResolver.init(std.testing.allocator, null, ".");
     defer resolver.deinit();
 
     const result = resolver.resolve(input, "test.pngine") catch |err| {
@@ -752,21 +753,22 @@ fn fuzzResolve(_: void, input: []const u8) !void {
 // ============================================================================
 
 test "ImportResolver: path traversal - parent directory escape" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    var resolver = ImportResolver.init(testing.allocator, io, ".");
     defer resolver.deinit();
 
-    // Attempting to import from parent directory should fail (file won't exist)
-    // This tests that we don't accidentally allow access outside base_dir
-    const source = "#import \"../../../etc/passwd\"";
+    // Try to escape parent directory
+    const source = "#import \"../secret.txt\"";
+    const result = resolver.resolve(source, "main.pngine");
 
-    // The import will fail because the file doesn't exist, which is the
-    // expected behavior. We're testing that it doesn't crash or do something unexpected.
-    const result = resolver.resolve(source, "test.pngine");
+    // Should detect invalid path or fail to find it, but not FileReadError
     try testing.expectError(error.ImportNotFound, result);
 }
 
 test "ImportResolver: empty import path" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     const source = "#import \"\"";
@@ -782,7 +784,7 @@ test "ImportResolver: empty import path" {
 // ============================================================================
 
 test "ImportResolver: import-like content in strings preserved" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     // Content that looks like imports but shouldn't be treated as such
@@ -800,7 +802,7 @@ test "ImportResolver: import-like content in strings preserved" {
 }
 
 test "ImportResolver: commented import line preserved" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     const source = "// #import \"commented.pngine\"\n#buffer buf { size=1 }";
@@ -815,7 +817,7 @@ test "ImportResolver: commented import line preserved" {
 // ============================================================================
 
 test "ImportResolver: depth limit boundary" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     // Test at MAX_IMPORT_DEPTH - 1 (should succeed if file existed)
@@ -840,7 +842,7 @@ test "ImportResolver: depth limit boundary" {
 // ============================================================================
 
 test "ImportResolver: many lines without imports" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     // Generate source with many lines
@@ -861,7 +863,7 @@ test "ImportResolver: many lines without imports" {
 }
 
 test "ImportResolver: very long line" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     // Create a line approaching MAX_LINE_LEN
@@ -875,41 +877,54 @@ test "ImportResolver: very long line" {
     try testing.expectEqual(source.len, result.len);
 }
 
+/// Create a threaded IO instance for testing.
+/// Caller must deinit returned Threaded instance.
+pub fn initTestIo(allocator: Allocator) std.Io.Threaded {
+    return std.Io.Threaded.init(allocator, .{
+        .environ = std.process.Environ.empty,
+        .argv0 = .empty,
+    });
+}
+
 // ============================================================================
 // File-based Integration Tests
 // ============================================================================
 
 /// Helper to create a temporary file for testing
-fn createTempFile(dir: std.fs.Dir, name: []const u8, content: []const u8) !void {
-    const file = try dir.createFile(name, .{});
-    defer file.close();
-    try file.writeAll(content);
+fn createTempFile(io: std.Io, dir: std.Io.Dir, name: []const u8, content: []const u8) !void {
+    const file = try dir.createFile(io, name, .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, content);
 }
 
 /// Helper to clean up temporary test directory
-fn cleanupTempDir(path: []const u8) void {
-    std.fs.cwd().deleteTree(path) catch {};
+fn cleanupTempDir(io: std.Io, path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(io, path) catch {};
 }
 
 test "ImportResolver: simple file import" {
     const test_dir = ".test_import_simple";
-    cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    cleanupTempDir(io, test_dir);
 
     // Create test directory
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer cleanupTempDir(test_dir);
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    defer cleanupTempDir(io, test_dir);
 
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
     // Create imported file
-    try createTempFile(dir, "core.pngine", "#define CORE=1");
+    try createTempFile(io, dir, "core.pngine", "#define CORE=1");
 
     // Create main file
-    try createTempFile(dir, "main.pngine", "#import \"core.pngine\"\n#buffer buf { size=1 }");
+    try createTempFile(io, dir, "main.pngine", "#import \"core.pngine\"\n#buffer buf { size=1 }");
 
     // Resolve imports
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     const source = "#import \"core.pngine\"\n#buffer buf { size=1 }";
@@ -925,28 +940,31 @@ test "ImportResolver: diamond import pattern - deduplication" {
     // Diamond: main imports A and B, both A and B import core
     // core should only be included ONCE (deduplication like #pragma once)
     const test_dir = ".test_import_diamond";
-    cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer cleanupTempDir(test_dir);
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    defer cleanupTempDir(io, test_dir);
 
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
     // Create core (shared dependency)
-    try createTempFile(dir, "core.pngine", "#define CORE_MARKER=unique_value_12345");
+    try createTempFile(io, dir, "core.pngine", "#define CORE_MARKER=unique_value_12345");
 
     // Create A (imports core)
-    try createTempFile(dir, "a.pngine", "#import \"core.pngine\"\n#define A=1");
+    try createTempFile(io, dir, "a.pngine", "#import \"core.pngine\"\n#define A=1");
 
     // Create B (imports core)
-    try createTempFile(dir, "b.pngine", "#import \"core.pngine\"\n#define B=2");
+    try createTempFile(io, dir, "b.pngine", "#import \"core.pngine\"\n#define B=2");
 
     // Create main (imports A and B)
-    try createTempFile(dir, "main.pngine", "#import \"a.pngine\"\n#import \"b.pngine\"\n#define MAIN=3");
+    try createTempFile(io, dir, "main.pngine", "#import \"a.pngine\"\n#import \"b.pngine\"\n#define MAIN=3");
 
     // Resolve imports
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     const source = "#import \"a.pngine\"\n#import \"b.pngine\"\n#define MAIN=3";
@@ -970,27 +988,30 @@ test "ImportResolver: diamond import pattern - deduplication" {
 
 test "ImportResolver: nested directory import" {
     const test_dir = ".test_import_nested";
-    cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer cleanupTempDir(test_dir);
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    defer cleanupTempDir(io, test_dir);
 
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
     // Create subdirectory
-    dir.makeDir("sub") catch {};
-    var sub_dir = dir.openDir("sub", .{}) catch return;
-    defer sub_dir.close();
+    dir.createDir(io, "sub", @enumFromInt(0o755)) catch {};
+    var sub_dir = dir.openDir(io, "sub", .{}) catch return;
+    defer sub_dir.close(io);
 
     // Create file in subdirectory
-    try createTempFile(sub_dir, "helper.pngine", "#define HELPER=1");
+    try createTempFile(io, sub_dir, "helper.pngine", "#define HELPER=1");
 
     // Create main file that imports from subdirectory
-    try createTempFile(dir, "main.pngine", "#import \"sub/helper.pngine\"\n#define MAIN=1");
+    try createTempFile(io, dir, "main.pngine", "#import \"sub/helper.pngine\"\n#define MAIN=1");
 
     // Resolve imports
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     const source = "#import \"sub/helper.pngine\"\n#define MAIN=1";
@@ -1004,27 +1025,30 @@ test "ImportResolver: nested directory import" {
 
 test "ImportResolver: parent directory import from subdirectory" {
     const test_dir = ".test_import_parent";
-    cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer cleanupTempDir(test_dir);
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    defer cleanupTempDir(io, test_dir);
 
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
     // Create core file in root
-    try createTempFile(dir, "core.pngine", "#define CORE=root");
+    try createTempFile(io, dir, "core.pngine", "#define CORE=root");
 
     // Create subdirectory
-    dir.makeDir("sub") catch {};
-    var sub_dir = dir.openDir("sub", .{}) catch return;
-    defer sub_dir.close();
+    dir.createDir(io, "sub", @enumFromInt(0o755)) catch {};
+    var sub_dir = dir.openDir(io, "sub", .{}) catch return;
+    defer sub_dir.close(io);
 
     // Create file in subdirectory that imports from parent
-    try createTempFile(sub_dir, "child.pngine", "#import \"../core.pngine\"\n#define CHILD=1");
+    try createTempFile(io, sub_dir, "child.pngine", "#import \"../core.pngine\"\n#define CHILD=1");
 
     // Resolve imports starting from subdirectory file
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     const source = "#import \"../core.pngine\"\n#define CHILD=1";
@@ -1038,20 +1062,23 @@ test "ImportResolver: parent directory import from subdirectory" {
 
 test "ImportResolver: cycle detection with real files" {
     const test_dir = ".test_import_cycle";
-    cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer cleanupTempDir(test_dir);
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    defer cleanupTempDir(io, test_dir);
 
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
     // Create files that form a cycle: a -> b -> a
-    try createTempFile(dir, "a.pngine", "#import \"b.pngine\"\n#define A=1");
-    try createTempFile(dir, "b.pngine", "#import \"a.pngine\"\n#define B=2");
+    try createTempFile(io, dir, "a.pngine", "#import \"b.pngine\"\n#define A=1");
+    try createTempFile(io, dir, "b.pngine", "#import \"a.pngine\"\n#define B=2");
 
     // Resolve imports - should detect cycle
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     const source = "#import \"a.pngine\"";
@@ -1062,19 +1089,22 @@ test "ImportResolver: cycle detection with real files" {
 
 test "ImportResolver: self-import cycle" {
     const test_dir = ".test_import_self";
-    cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer cleanupTempDir(test_dir);
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    defer cleanupTempDir(io, test_dir);
 
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
     // Create file that imports itself
-    try createTempFile(dir, "self.pngine", "#import \"self.pngine\"\n#define SELF=1");
+    try createTempFile(io, dir, "self.pngine", "#import \"self.pngine\"\n#define SELF=1");
 
     // Resolve imports - should detect self-cycle
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     const source = "#import \"self.pngine\"";
@@ -1085,21 +1115,24 @@ test "ImportResolver: self-import cycle" {
 
 test "ImportResolver: transitive cycle detection" {
     const test_dir = ".test_import_transitive";
-    cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer cleanupTempDir(test_dir);
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    defer cleanupTempDir(io, test_dir);
 
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
     // Create files that form a longer cycle: a -> b -> c -> a
-    try createTempFile(dir, "a.pngine", "#import \"b.pngine\"\n#define A=1");
-    try createTempFile(dir, "b.pngine", "#import \"c.pngine\"\n#define B=2");
-    try createTempFile(dir, "c.pngine", "#import \"a.pngine\"\n#define C=3");
+    try createTempFile(io, dir, "a.pngine", "#import \"b.pngine\"\n#define A=1");
+    try createTempFile(io, dir, "b.pngine", "#import \"c.pngine\"\n#define B=2");
+    try createTempFile(io, dir, "c.pngine", "#import \"a.pngine\"\n#define C=3");
 
     // Resolve imports - should detect cycle
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     const source = "#import \"a.pngine\"";
@@ -1110,21 +1143,24 @@ test "ImportResolver: transitive cycle detection" {
 
 test "ImportResolver: import ordering preserved" {
     const test_dir = ".test_import_order";
-    cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer cleanupTempDir(test_dir);
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    defer cleanupTempDir(io, test_dir);
 
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
     // Create files with distinctive markers
-    try createTempFile(dir, "first.pngine", "MARKER_FIRST");
-    try createTempFile(dir, "second.pngine", "MARKER_SECOND");
-    try createTempFile(dir, "third.pngine", "MARKER_THIRD");
+    try createTempFile(io, dir, "first.pngine", "MARKER_FIRST");
+    try createTempFile(io, dir, "second.pngine", "MARKER_SECOND");
+    try createTempFile(io, dir, "third.pngine", "MARKER_THIRD");
 
     // Resolve imports
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     const source = "#import \"first.pngine\"\n#import \"second.pngine\"\n#import \"third.pngine\"\nMARKER_MAIN";
@@ -1153,19 +1189,22 @@ test "ImportResolver: deduplication across resolve calls" {
     // Tests that files imported in one resolve() call are deduplicated
     // in subsequent resolve() calls on the same resolver instance
     const test_dir = ".test_import_cache";
-    cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer cleanupTempDir(test_dir);
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    defer cleanupTempDir(io, test_dir);
 
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
     // Create file with unique content
-    try createTempFile(dir, "shared.pngine", "#define SHARED=yes");
+    try createTempFile(io, dir, "shared.pngine", "#define SHARED=yes");
 
     // Resolve imports twice from different entry points using SAME resolver
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     // First resolution - includes shared.pngine
@@ -1192,19 +1231,22 @@ test "ImportResolver: deduplication across resolve calls" {
 
 test "ImportResolver: empty imported file" {
     const test_dir = ".test_import_empty";
-    cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer cleanupTempDir(test_dir);
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    defer cleanupTempDir(io, test_dir);
 
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
     // Create empty file
-    try createTempFile(dir, "empty.pngine", "");
+    try createTempFile(io, dir, "empty.pngine", "");
 
     // Resolve imports
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     const source = "#import \"empty.pngine\"\n#define AFTER=1";
@@ -1217,19 +1259,22 @@ test "ImportResolver: empty imported file" {
 
 test "ImportResolver: import with trailing content" {
     const test_dir = ".test_import_trailing";
-    cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer cleanupTempDir(test_dir);
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    defer cleanupTempDir(io, test_dir);
 
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
     // Create file with trailing newlines
-    try createTempFile(dir, "trailing.pngine", "#define TRAILING=1\n\n\n");
+    try createTempFile(io, dir, "trailing.pngine", "#define TRAILING=1\n\n\n");
 
     // Resolve imports
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     const source = "#import \"trailing.pngine\"\n#define AFTER=2";
@@ -1246,7 +1291,7 @@ test "ImportResolver: import with trailing content" {
 // ============================================================================
 
 test "ImportResolver: normalizePath basic cases" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     // Simple path unchanged
@@ -1271,7 +1316,7 @@ test "ImportResolver: normalizePath basic cases" {
 }
 
 test "ImportResolver: normalizePath edge cases" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     // Just a dot
@@ -1312,7 +1357,7 @@ test "ImportResolver: normalizePath edge cases" {
 
 test "ImportResolver: normalizePath parent overflow" {
     // More .. than path components
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     const p1 = try resolver.normalizePath("a/../../..");
@@ -1326,7 +1371,7 @@ test "ImportResolver: normalizePath parent overflow" {
 
 test "ImportResolver: normalizePath idempotent" {
     // Property: normalize(normalize(x)) == normalize(x)
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     const paths = [_][]const u8{
@@ -1357,17 +1402,20 @@ test "ImportResolver: normalizePath idempotent" {
 test "ImportResolver: dedup with dot prefix" {
     // Import same file with and without ./ prefix
     const test_dir = ".test_dedup_dot";
-    cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer cleanupTempDir(test_dir);
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    defer cleanupTempDir(io, test_dir);
 
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
-    try createTempFile(dir, "core.pngine", "#define CORE_UNIQUE_MARKER=1");
+    try createTempFile(io, dir, "core.pngine", "#define CORE_UNIQUE_MARKER=1");
 
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     // Import with ./ and without - should deduplicate
@@ -1385,19 +1433,22 @@ test "ImportResolver: dedup with dot prefix" {
 test "ImportResolver: dedup with parent directory" {
     // Import same file via parent ref: sub/../core.pngine vs core.pngine
     const test_dir = ".test_dedup_parent";
-    cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer cleanupTempDir(test_dir);
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    defer cleanupTempDir(io, test_dir);
 
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
-    dir.makeDir("sub") catch {};
+    dir.createDir(io, "sub", @enumFromInt(0o755)) catch {};
 
-    try createTempFile(dir, "core.pngine", "#define CORE_PARENT_TEST=42");
+    try createTempFile(io, dir, "core.pngine", "#define CORE_PARENT_TEST=42");
 
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     // Import via parent ref and direct - should deduplicate
@@ -1417,19 +1468,22 @@ test "ImportResolver: dedup deep diamond" {
     // A -> D -> C
     // C should appear once
     const test_dir = ".test_dedup_deep_diamond";
-    cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer cleanupTempDir(test_dir);
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    defer cleanupTempDir(io, test_dir);
 
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
-    try createTempFile(dir, "c.pngine", "#define C_DEEP_MARKER=deep");
-    try createTempFile(dir, "b.pngine", "#import \"c.pngine\"\n#define B=1");
-    try createTempFile(dir, "d.pngine", "#import \"c.pngine\"\n#define D=1");
+    try createTempFile(io, dir, "c.pngine", "#define C_DEEP_MARKER=deep");
+    try createTempFile(io, dir, "b.pngine", "#import \"c.pngine\"\n#define B=1");
+    try createTempFile(io, dir, "d.pngine", "#import \"c.pngine\"\n#define D=1");
 
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     const source = "#import \"b.pngine\"\n#import \"d.pngine\"\n#define A=1";
@@ -1449,15 +1503,18 @@ test "ImportResolver: dedup deep diamond" {
 test "ImportResolver: dedup wide fan-in" {
     // Many files all importing the same core
     const test_dir = ".test_dedup_fanin";
-    cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer cleanupTempDir(test_dir);
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    defer cleanupTempDir(io, test_dir);
 
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
-    try createTempFile(dir, "shared.pngine", "#define SHARED_FANIN=unique123");
+    try createTempFile(io, dir, "shared.pngine", "#define SHARED_FANIN=unique123");
 
     // Create 10 files that all import shared
     var i: u32 = 0;
@@ -1466,10 +1523,10 @@ test "ImportResolver: dedup wide fan-in" {
         const name = std.fmt.bufPrint(&name_buf, "file{d}.pngine", .{i}) catch unreachable;
         var content_buf: [128]u8 = undefined;
         const content = std.fmt.bufPrint(&content_buf, "#import \"shared.pngine\"\n#define FILE{d}=1", .{i}) catch unreachable;
-        try createTempFile(dir, name, content);
+        try createTempFile(io, dir, name, content);
     }
 
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     // Import all 10 files
@@ -1509,20 +1566,23 @@ test "ImportResolver: dedup chain with branch" {
     // A -> E -> D (E also imports D)
     // D should appear once
     const test_dir = ".test_dedup_chain";
-    cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer cleanupTempDir(test_dir);
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    defer cleanupTempDir(io, test_dir);
 
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
-    try createTempFile(dir, "d.pngine", "#define D_CHAIN=terminus");
-    try createTempFile(dir, "c.pngine", "#import \"d.pngine\"\n#define C=1");
-    try createTempFile(dir, "b.pngine", "#import \"c.pngine\"\n#define B=1");
-    try createTempFile(dir, "e.pngine", "#import \"d.pngine\"\n#define E=1");
+    try createTempFile(io, dir, "d.pngine", "#define D_CHAIN=terminus");
+    try createTempFile(io, dir, "c.pngine", "#import \"d.pngine\"\n#define C=1");
+    try createTempFile(io, dir, "b.pngine", "#import \"c.pngine\"\n#define B=1");
+    try createTempFile(io, dir, "e.pngine", "#import \"d.pngine\"\n#define E=1");
 
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     const source = "#import \"b.pngine\"\n#import \"e.pngine\"\n#define A=1";
@@ -1545,23 +1605,26 @@ test "ImportResolver: dedup with nested directories" {
     // main imports sub/a.pngine and sub/b.pngine
     // both import ../shared.pngine (same as shared.pngine)
     const test_dir = ".test_dedup_nested";
-    cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer cleanupTempDir(test_dir);
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    defer cleanupTempDir(io, test_dir);
 
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
-    dir.makeDir("sub") catch {};
-    var sub = dir.openDir("sub", .{}) catch return;
-    defer sub.close();
+    dir.createDir(io, "sub", @enumFromInt(0o755)) catch {};
+    var sub = dir.openDir(io, "sub", .{}) catch return;
+    defer sub.close(io);
 
-    try createTempFile(dir, "shared.pngine", "#define SHARED_NESTED=root");
-    try createTempFile(sub, "a.pngine", "#import \"../shared.pngine\"\n#define A=1");
-    try createTempFile(sub, "b.pngine", "#import \"../shared.pngine\"\n#define B=1");
+    try createTempFile(io, dir, "shared.pngine", "#define SHARED_NESTED=root");
+    try createTempFile(io, sub, "a.pngine", "#import \"../shared.pngine\"\n#define A=1");
+    try createTempFile(io, sub, "b.pngine", "#import \"../shared.pngine\"\n#define B=1");
 
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     const source = "#import \"sub/a.pngine\"\n#import \"sub/b.pngine\"\n#define MAIN=1";
@@ -1582,29 +1645,32 @@ test "ImportResolver: dedup with nested directories" {
 test "ImportResolver: demo2025 pattern - main and scene both import core" {
     // Simulates: main imports core, main imports sceneQ, sceneQ imports core
     const test_dir = ".test_demo2025";
-    cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    defer cleanupTempDir(test_dir);
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    defer cleanupTempDir(io, test_dir);
 
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
     // Core has definitions that would cause duplicate_definition errors if included twice
-    try createTempFile(dir, "core.pngine",
+    try createTempFile(io, dir, "core.pngine",
         \\#texture depthTexture { format=depth24plus }
         \\#sampler postProcessSampler { }
         \\#buffer uniformBuffer { size=64 }
     );
 
     // SceneQ imports core
-    try createTempFile(dir, "sceneQ.pngine",
+    try createTempFile(io, dir, "sceneQ.pngine",
         \\#import "core.pngine"
         \\#wgsl sceneQ { value="void main() {}" }
     );
 
     // Main imports both core and sceneQ
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     const source =
@@ -1642,7 +1708,7 @@ test "ImportResolver: OOM in normalizePath" {
             .fail_index = fail_index,
         });
 
-        var resolver = ImportResolver.init(failing.allocator(), ".");
+        var resolver = ImportResolver.init(failing.allocator(), null, ".");
         defer resolver.deinit();
 
         const result = resolver.normalizePath("a/./b/../c/d");
@@ -1661,14 +1727,17 @@ test "ImportResolver: OOM in normalizePath" {
 
 test "ImportResolver: OOM during dedup file import" {
     const test_dir = ".test_oom_dedup";
-    cleanupTempDir(test_dir);
-    defer cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
+    defer cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
-    try createTempFile(dir, "core.pngine", "#define CORE=1");
+    try createTempFile(io, dir, "core.pngine", "#define CORE=1");
 
     var fail_index: usize = 0;
     const max_iterations: usize = 100;
@@ -1678,7 +1747,7 @@ test "ImportResolver: OOM during dedup file import" {
             .fail_index = fail_index,
         });
 
-        var resolver = ImportResolver.init(failing.allocator(), test_dir);
+        var resolver = ImportResolver.init(failing.allocator(), io, test_dir);
         defer resolver.deinit();
 
         const result = resolver.resolve("#import \"core.pngine\"\n#define MAIN=1", "main.pngine");
@@ -1702,19 +1771,22 @@ test "ImportResolver: OOM during dedup file import" {
 test "ImportResolver: property - dedup reduces output size" {
     // Property: with deduplication, output size <= sum of unique file contents
     const test_dir = ".test_prop_size";
-    cleanupTempDir(test_dir);
-    defer cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
+    defer cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
     const shared_content = "#define SHARED=1\n" ** 10; // 160 bytes
-    try createTempFile(dir, "shared.pngine", shared_content);
-    try createTempFile(dir, "a.pngine", "#import \"shared.pngine\"\n#define A=1");
-    try createTempFile(dir, "b.pngine", "#import \"shared.pngine\"\n#define B=1");
+    try createTempFile(io, dir, "shared.pngine", shared_content);
+    try createTempFile(io, dir, "a.pngine", "#import \"shared.pngine\"\n#define A=1");
+    try createTempFile(io, dir, "b.pngine", "#import \"shared.pngine\"\n#define B=1");
 
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     const source = "#import \"a.pngine\"\n#import \"b.pngine\"\n#define MAIN=1";
@@ -1730,19 +1802,22 @@ test "ImportResolver: property - dedup reduces output size" {
 
 test "ImportResolver: property - order preserved for non-duplicates" {
     const test_dir = ".test_prop_order";
-    cleanupTempDir(test_dir);
-    defer cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
+    defer cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
     // Each file has unique content, no shared imports
-    try createTempFile(dir, "first.pngine", "FIRST_UNIQUE");
-    try createTempFile(dir, "second.pngine", "SECOND_UNIQUE");
-    try createTempFile(dir, "third.pngine", "THIRD_UNIQUE");
+    try createTempFile(io, dir, "first.pngine", "FIRST_UNIQUE");
+    try createTempFile(io, dir, "second.pngine", "SECOND_UNIQUE");
+    try createTempFile(io, dir, "third.pngine", "THIRD_UNIQUE");
 
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     const source = "#import \"first.pngine\"\n#import \"second.pngine\"\n#import \"third.pngine\"\nMAIN_UNIQUE";
@@ -1762,18 +1837,21 @@ test "ImportResolver: property - order preserved for non-duplicates" {
 test "ImportResolver: property - first wins in diamond" {
     // In diamond A->B->C, A->D->C, the first path (B) includes C
     const test_dir = ".test_prop_first_wins";
-    cleanupTempDir(test_dir);
-    defer cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
+    defer cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
-    try createTempFile(dir, "c.pngine", "C_CONTENT");
-    try createTempFile(dir, "b.pngine", "#import \"c.pngine\"\nB_AFTER_C");
-    try createTempFile(dir, "d.pngine", "#import \"c.pngine\"\nD_AFTER_C");
+    try createTempFile(io, dir, "c.pngine", "C_CONTENT");
+    try createTempFile(io, dir, "b.pngine", "#import \"c.pngine\"\nB_AFTER_C");
+    try createTempFile(io, dir, "d.pngine", "#import \"c.pngine\"\nD_AFTER_C");
 
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     const source = "#import \"b.pngine\"\n#import \"d.pngine\"\nA_MAIN";
@@ -1815,7 +1893,7 @@ fn fuzzNormalizePath(_: void, input: []const u8) !void {
     // Limit size
     if (input.len > 1024) return;
 
-    var resolver = ImportResolver.init(std.testing.allocator, ".");
+    var resolver = ImportResolver.init(std.testing.allocator, null, ".");
     defer resolver.deinit();
 
     const result = resolver.normalizePath(input) catch |err| {
@@ -1863,7 +1941,7 @@ fn fuzzPathEquivalence(_: void, input: []const u8) !void {
     if (input.len > 256) return;
     if (input.len == 0) return;
 
-    var resolver = ImportResolver.init(std.testing.allocator, ".");
+    var resolver = ImportResolver.init(std.testing.allocator, null, ".");
     defer resolver.deinit();
 
     // Generate a few path variants
@@ -1906,16 +1984,19 @@ fn fuzzPathEquivalence(_: void, input: []const u8) !void {
 
 test "ImportResolver: stress - many imports same file" {
     const test_dir = ".test_stress_many";
-    cleanupTempDir(test_dir);
-    defer cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
+    defer cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
-    try createTempFile(dir, "shared.pngine", "#define STRESS_SHARED=1");
+    try createTempFile(io, dir, "shared.pngine", "#define STRESS_SHARED=1");
 
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     // Build source with 100 imports of same file
@@ -1942,15 +2023,18 @@ test "ImportResolver: stress - many imports same file" {
 
 test "ImportResolver: stress - deep nesting" {
     const test_dir = ".test_stress_deep";
-    cleanupTempDir(test_dir);
-    defer cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
+    defer cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
     // Create chain: a0 -> a1 -> a2 -> ... -> a19 -> shared
-    try createTempFile(dir, "shared.pngine", "#define DEEP_SHARED=terminus");
+    try createTempFile(io, dir, "shared.pngine", "#define DEEP_SHARED=terminus");
 
     var i: u32 = 20;
     while (i > 0) : (i -= 1) {
@@ -1963,10 +2047,10 @@ test "ImportResolver: stress - deep nesting" {
         else
             std.fmt.bufPrint(&content_buf, "#import \"a{d}.pngine\"\n#define A{d}=1", .{ i, i - 1 }) catch unreachable;
 
-        try createTempFile(dir, name, content);
+        try createTempFile(io, dir, name, content);
     }
 
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     const result = try resolver.resolve("#import \"a0.pngine\"\n#define MAIN=1", "main.pngine");
@@ -1991,16 +2075,19 @@ test "ImportResolver: stress - deep nesting" {
 
 test "ImportResolver: import self returns cycle error" {
     const test_dir = ".test_self_import";
-    cleanupTempDir(test_dir);
-    defer cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
+    defer cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
-    try createTempFile(dir, "self.pngine", "#import \"self.pngine\"\n#define SELF=1");
+    try createTempFile(io, dir, "self.pngine", "#import \"self.pngine\"\n#define SELF=1");
 
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     const result = resolver.resolve("#import \"self.pngine\"", "main.pngine");
@@ -2009,17 +2096,20 @@ test "ImportResolver: import self returns cycle error" {
 
 test "ImportResolver: import with special characters in filename" {
     const test_dir = ".test_special_chars";
-    cleanupTempDir(test_dir);
-    defer cleanupTempDir(test_dir);
+    var threaded = initTestIo(testing.allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    cleanupTempDir(io, test_dir);
+    defer cleanupTempDir(io, test_dir);
 
-    std.fs.cwd().makeDir(test_dir) catch {};
-    var dir = std.fs.cwd().openDir(test_dir, .{}) catch return;
-    defer dir.close();
+    std.Io.Dir.cwd().createDir(io, test_dir, @enumFromInt(0o755)) catch {};
+    var dir = std.Io.Dir.cwd().openDir(io, test_dir, .{}) catch return;
+    defer dir.close(io);
 
     // Files with underscores, dashes, numbers
-    try createTempFile(dir, "my-file_v2.pngine", "#define SPECIAL=yes");
+    try createTempFile(io, dir, "my-file_v2.pngine", "#define SPECIAL=yes");
 
-    var resolver = ImportResolver.init(testing.allocator, test_dir);
+    var resolver = ImportResolver.init(testing.allocator, io, test_dir);
     defer resolver.deinit();
 
     const result = try resolver.resolve("#import \"my-file_v2.pngine\"\n#define M=1", "main.pngine");
@@ -2029,7 +2119,7 @@ test "ImportResolver: import with special characters in filename" {
 }
 
 test "ImportResolver: empty path after normalization" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     // Path that normalizes to "."
@@ -2039,7 +2129,7 @@ test "ImportResolver: empty path after normalization" {
 }
 
 test "ImportResolver: very long path normalization" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     // Create a very long path
@@ -2059,7 +2149,7 @@ test "ImportResolver: very long path normalization" {
 }
 
 test "ImportResolver: unicode in path preserved" {
-    var resolver = ImportResolver.init(testing.allocator, ".");
+    var resolver = ImportResolver.init(testing.allocator, null, ".");
     defer resolver.deinit();
 
     const unicode_path = "café/日本語/путь";

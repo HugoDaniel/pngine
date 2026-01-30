@@ -23,7 +23,7 @@ pub const CompileOutput = struct {
 ///
 /// Pre-condition: args is the slice after "compile" command.
 /// Post-condition: Returns exit code (0 = success, non-zero = error).
-pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
+pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var input_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
     var embed_executor: bool = false;
@@ -92,14 +92,14 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     defer if (output_path == null) allocator.free(output);
 
     // Read input file
-    const source = utils.readSourceFile(allocator, input) catch |err| {
+    const source = utils.readSourceFile(allocator, io, input) catch |err| {
         std.debug.print("Error: failed to read '{s}': {}\n", .{ input, err });
         return 2;
     };
     defer allocator.free(source);
 
     // Compile using appropriate compiler based on file extension
-    const result = compileSourceWithPlugins(allocator, input, source, .{
+    const result = compileSourceWithPlugins(allocator, io, input, source, .{
         .embed_executor = embed_executor,
         .executors_dir = executors_dir,
         .minify_shaders = minify_shaders,
@@ -114,7 +114,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     std.debug.assert(std.mem.eql(u8, result.bytecode[0..4], pngine.format.MAGIC));
 
     // Write output file
-    utils.writeOutputFile(output, result.bytecode) catch |err| {
+    utils.writeOutputFile(io, output, result.bytecode) catch |err| {
         std.debug.print("Error: failed to write '{s}': {}\n", .{ output, err });
         return 2;
     };
@@ -155,6 +155,7 @@ pub const CompileOptions = struct {
 /// - `.pbsf` files use the legacy PBSF compiler (S-expression syntax)
 pub fn compileSourceWithPlugins(
     allocator: std.mem.Allocator,
+    io: std.Io,
     path: []const u8,
     source: [:0]const u8,
     options: CompileOptions,
@@ -175,6 +176,7 @@ pub fn compileSourceWithPlugins(
             .minify_shaders = options.minify_shaders,
             .embed_executor = options.embed_executor,
             .executors_dir = options.executors_dir,
+            .io = io,
         });
 
         return .{
@@ -187,8 +189,8 @@ pub fn compileSourceWithPlugins(
 }
 
 /// Legacy compile function for backwards compatibility.
-pub fn compileSource(allocator: std.mem.Allocator, path: []const u8, source: [:0]const u8) ![]u8 {
-    const result = try compileSourceWithPlugins(allocator, path, source, .{});
+pub fn compileSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8, source: [:0]const u8) ![]u8 {
+    const result = try compileSourceWithPlugins(allocator, io, path, source, .{});
     return result.bytecode;
 }
 

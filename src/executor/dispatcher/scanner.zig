@@ -24,22 +24,22 @@ const OpCode = opcodes.OpCode;
 
 /// Pass bytecode range (start and end offsets within bytecode).
 pub const PassRange = struct {
-    start: usize,
-    end: usize,
+    start: u32,
+    end: u32,
 };
 
 /// Maximum iterations for scanning loops.
-const MAX_SCAN_ITERATIONS: usize = 50000;
+const MAX_SCAN_ITERATIONS: u32 = 50000;
 
 /// Opcode scanner for pass definition discovery and parameter skipping.
 pub const OpcodeScanner = struct {
     const Self = @This();
 
     bytecode: []const u8,
-    pc: usize,
+    pc: u32,
 
     /// Initialize scanner at given position.
-    pub fn init(bytecode: []const u8, start_pc: usize) Self {
+    pub fn init(bytecode: []const u8, start_pc: u32) Self {
         // Pre-conditions
         assert(start_pc <= bytecode.len);
 

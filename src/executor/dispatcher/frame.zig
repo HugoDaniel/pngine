@@ -27,10 +27,10 @@ const scanner_mod = @import("scanner.zig");
 const OpcodeScanner = scanner_mod.OpcodeScanner;
 
 /// Maximum iterations for pass execution loop.
-const PASS_MAX_ITERATIONS: usize = 1000;
+const PASS_MAX_ITERATIONS: u32 = 1000;
 
 /// Maximum iterations for scanning within define_pass.
-const SCAN_MAX_ITERATIONS: usize = 10000;
+const SCAN_MAX_ITERATIONS: u32 = 10000;
 
 /// Handle frame control opcodes.
 ///
@@ -132,7 +132,7 @@ fn scanToEndPassDef(
     comptime Self: type,
     self: *Self,
     pass_id: u16,
-    pass_start: usize,
+    pass_start: u32,
 ) !void {
     const bytecode = self.module.bytecode;
     var scanner = OpcodeScanner.init(bytecode, self.pc);

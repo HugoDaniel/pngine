@@ -1,39 +1,39 @@
 //! DSL Parser for PNGine
-//!
+//! 
 //! Parses the macro-based DSL into an AST using iterative descent with
 //! explicit task stacks (no recursion).
-//!
+//! 
 //! ## Grammar
-//!
+//! 
 //! ```ebnf
 //! file = macro*
 //! macro = "#" macro_name identifier "{" property* "}"
 //!       | "#define" identifier "=" value
 //! property = identifier "=" value
 //! value = string | number | identifier | reference | array | object
-//! reference = "$" identifier ("." identifier)*
+//! reference = "$" identifier (".." identifier)*
 //! array = "[" value* "]"
 //! object = "{" property* "}"
 //! ```
-//!
+//! 
 //! ## Design
-//!
+//! 
 //! - **No recursion**: Uses explicit task stack for nested structures
 //! - **Bounded loops**: All loops bounded by MAX_MACROS, MAX_PROPERTIES, MAX_PARSE_ITERATIONS
 //! - **Capacity pre-estimation**: 8:1 source:tokens, 2:1 tokens:nodes
 //! - **Typed indices**: Uses `Node.Index` enum for type safety
-//!
+//! 
 //! ## Invariants
-//!
+//! 
 //! - Input must be sentinel-terminated (source[len] == 0)
 //! - Root node is always at index 0
 //! - All allocations tracked via errdefer for cleanup on error
 //! - Nodes reference tokens by index, no string copies
 //! - Token index never exceeds tokens.len
 //! - Scratch space restored after each parsing operation
-//!
+//! 
 //! ## Complexity
-//!
+//! 
 //! - `parse()`: O(n) where n = source length
 //! - Memory: O(tokens) + O(nodes) + O(extra_data)
 
@@ -117,9 +117,9 @@ pub const Parser = struct {
             .gpa = gpa,
             .source = source,
             .tokens = tokens,
-            .nodes = .{},
+            .nodes = .{}, 
             .extra_data = .{},
-            .scratch = .{},
+            .scratch = .{}, 
             .tok_i = 0,
         };
         errdefer {
@@ -131,7 +131,7 @@ pub const Parser = struct {
         // Estimate capacity: ~2 tokens per node
         try parser.nodes.ensureTotalCapacity(gpa, tokens.len / 2);
 
-        try parser.parseRoot();
+        try parser.parse_root();
 
         // Post-condition
         std.debug.assert(parser.nodes.len > 0);
@@ -153,12 +153,12 @@ pub const Parser = struct {
     /// Maximum number of properties in a single object.
     const MAX_PROPERTIES: u32 = 1024;
 
-    fn parseRoot(self: *Self) Error!void {
+    fn parse_root(self: *Self) Error!void {
         // Pre-condition
         std.debug.assert(self.tok_i == 0);
 
         // Add root node at index 0
-        const root_idx = try self.addNode(.{
+        const root_idx = try self.add_node(.{
             .tag = .root,
             .main_token = 0,
             .data = .{ .extra_range = .{ .start = 0, .end = 0 } },
@@ -171,8 +171,8 @@ pub const Parser = struct {
 
         // Bounded iteration
         for (0..MAX_MACROS) |_| {
-            if (self.currentTag() == .eof) break;
-            if (try self.parseMacro()) |macro_idx| {
+            if (self.current_tag() == .eof) break;
+            if (try self.parse_macro()) |macro_idx| {
                 try self.scratch.append(self.gpa, macro_idx.toInt());
             } else {
                 // Skip unexpected token
@@ -184,18 +184,18 @@ pub const Parser = struct {
         }
 
         // Store macro list in extra_data
-        const range = try self.addExtraSlice(self.scratch.items[scratch_top..]);
+        const range = try self.add_extra_slice(self.scratch.items[scratch_top..]);
         self.nodes.items(.data)[0] = .{ .extra_range = range };
 
         // Post-condition
         std.debug.assert(self.nodes.len > 0);
     }
 
-    fn parseMacro(self: *Self) Error!?Node.Index {
+    fn parse_macro(self: *Self) Error!?Node.Index {
         // Pre-condition: not at EOF
         std.debug.assert(self.tok_i < self.tokens.len);
 
-        const tag = self.currentTag();
+        const tag = self.current_tag();
 
         // Map token tag to node tag
         const node_tag: Node.Tag = switch (tag) {
@@ -221,7 +221,7 @@ pub const Parser = struct {
             .macro_query_set => .macro_query_set,
             .macro_texture_view => .macro_texture_view,
             .macro_animation => .macro_animation,
-            .macro_define => return self.parseDefine(),
+            .macro_define => return self.parse_define(),
             else => return null,
         };
 
@@ -229,60 +229,60 @@ pub const Parser = struct {
         self.tok_i += 1; // consume macro keyword
 
         // Expect identifier (name)
-        if (self.currentTag() != .identifier) {
+        if (self.current_tag() != .identifier) {
             return error.ParseError;
         }
         self.tok_i += 1; // consume name
 
         // Expect opening brace
-        if (self.currentTag() != .l_brace) {
+        if (self.current_tag() != .l_brace) {
             return error.ParseError;
         }
         self.tok_i += 1; // consume {
 
         // Parse properties until closing brace
-        const props = try self.parsePropertyList();
+        const props = try self.parse_property_list();
 
         // Expect closing brace
-        if (self.currentTag() != .r_brace) {
+        if (self.current_tag() != .r_brace) {
             return error.ParseError;
         }
         self.tok_i += 1; // consume }
 
-        return try self.addNode(.{
+        return try self.add_node(.{
             .tag = node_tag,
             .main_token = macro_token,
             .data = .{ .extra_range = props },
         });
     }
 
-    fn parseDefine(self: *Self) Error!?Node.Index {
+    fn parse_define(self: *Self) Error!?Node.Index {
         const define_token = self.tok_i;
         self.tok_i += 1; // consume #define
 
         // Expect identifier
-        if (self.currentTag() != .identifier) {
+        if (self.current_tag() != .identifier) {
             return error.ParseError;
         }
         self.tok_i += 1; // consume name
 
         // Expect =
-        if (self.currentTag() != .equals) {
+        if (self.current_tag() != .equals) {
             return error.ParseError;
         }
         self.tok_i += 1; // consume =
 
         // Parse value
-        const value = try self.parseValue() orelse return error.ParseError;
+        const value = try self.parse_value() orelse return error.ParseError;
 
-        return try self.addNode(.{
+        return try self.add_node(.{
             .tag = .macro_define,
             .main_token = define_token,
             .data = .{ .node = value },
         });
     }
 
-    fn parsePropertyList(self: *Self) Error!Node.SubRange {
+    fn parse_property_list(self: *Self) Error!Node.SubRange {
         // Pre-condition: valid token index
         std.debug.assert(self.tok_i < self.tokens.len);
 
@@ -292,18 +292,18 @@ pub const Parser = struct {
         // Bounded iteration
         for (0..MAX_PROPERTIES) |_| {
             // Skip comments inside macro bodies
-            while (self.currentTag() == .line_comment) {
+            while (self.current_tag() == .line_comment) {
                 self.tok_i += 1;
             }
-            if (self.currentTag() != .identifier) break;
-            const prop = try self.parseProperty();
+            if (self.current_tag() != .identifier) break;
+            const prop = try self.parse_property();
             try self.scratch.append(self.gpa, prop.toInt());
         } else {
             // Too many properties
             return error.ParseError;
         }
 
-        const range = try self.addExtraSlice(self.scratch.items[scratch_top..]);
+        const range = try self.add_extra_slice(self.scratch.items[scratch_top..]);
 
         // Post-condition: valid range
         std.debug.assert(range.end >= range.start);
@@ -311,22 +311,22 @@ pub const Parser = struct {
         return range;
     }
 
-    fn parseProperty(self: *Self) Error!Node.Index {
+    fn parse_property(self: *Self) Error!Node.Index {
         // Pre-condition: current token is identifier
-        std.debug.assert(self.currentTag() == .identifier);
+        std.debug.assert(self.current_tag() == .identifier);
 
         // key=value
         const key_token = self.tok_i;
         self.tok_i += 1; // consume key
 
-        if (self.currentTag() != .equals) {
+        if (self.current_tag() != .equals) {
             return error.ParseError;
         }
         self.tok_i += 1; // consume =
 
-        const value = try self.parseValue() orelse return error.ParseError;
+        const value = try self.parse_value() orelse return error.ParseError;
 
-        const result = try self.addNode(.{
+        const result = try self.add_node(.{
             .tag = .property,
             .main_token = key_token,
             .data = .{ .node = value },
@@ -365,66 +365,19 @@ pub const Parser = struct {
 
     /// Parse a value iteratively (no recursion).
     /// Handles nested arrays and objects using explicit task stack.
-    fn parseValue(self: *Self) Error!?Node.Index {
+    fn parse_value(self: *Self) Error!?Node.Index {
         // Pre-condition
         std.debug.assert(self.tok_i < self.tokens.len);
 
-        // Fast path: simple values (no nesting)
-        switch (self.currentTag()) {
-            .string_literal => return try self.parseSimpleValue(.string_value),
-            .number_literal => {
-                // Check if this is part of an expression (e.g., 1 + 2)
-                if (try self.parseExpression()) |expr| {
-                    return expr;
-                }
-                return try self.parseSimpleValue(.number_value);
-            },
-            .l_paren => {
-                // Grouped expression: (1 + 2)
-                if (try self.parseExpression()) |expr| {
-                    return expr;
-                }
-                return null;
-            },
-            .minus => {
-                // Unary negation at start of value: -10, -(1+2)
-                if (try self.parseExpression()) |expr| {
-                    return expr;
-                }
-                return null;
-            },
-            .boolean_literal => return try self.parseSimpleValue(.boolean_value),
-            .identifier => {
-                // Check for builtin ref pattern (canvas.width, time.total)
-                if (self.isBuiltinRefPattern()) {
-                    return try self.parseBuiltinRef();
-                }
-                // Check for uniform access pattern (shader.inputs)
-                if (self.isUniformAccessPattern()) {
-                    return try self.parseUniformAccess();
-                }
-                // Check if identifier is a math constant (PI, E, TAU)
-                const token_start = self.tokens.items(.start)[self.tok_i];
-                const token_end = if (self.tok_i + 1 < self.tokens.len)
-                    self.tokens.items(.start)[self.tok_i + 1]
-                else
-                    @as(u32, @intCast(self.source.len));
-                const text = std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r");
-                if (isMathConstant(text)) {
-                    // Math constants can be part of expressions
-                    if (try self.parseExpression()) |expr| {
-                        return expr;
-                    }
-                    return try self.parseSimpleValue(.number_value);
-                }
-                // Non-math identifiers: try expression parsing (e.g., CONST*4)
-                if (try self.parseExpression()) |expr| {
-                    return expr;
-                }
-                return try self.parseSimpleValue(.identifier_value);
-            },
-            .l_bracket, .l_brace => {}, // Fall through to iterative parsing
-            else => return null,
+        // Try simple value or expression first
+        if (try self.parse_atomic_or_expression()) |node| {
+            return node;
+        }
+
+        // Check for container start
+        const tag = self.current_tag();
+        if (tag != .l_bracket and tag != .l_brace) {
+            return null;
         }
 
         // Task stack for iterative parsing
@@ -435,8 +388,76 @@ pub const Parser = struct {
         var results = std.ArrayListUnmanaged(Node.Index){};
         defer results.deinit(self.gpa);
 
+        return self.process_container(&tasks, &results);
+    }
+
+    /// Parse atomic value (string, number, identifier) or expression.
+    fn parse_atomic_or_expression(self: *Self) Error!?Node.Index {
+        switch (self.current_tag()) {
+            .string_literal => return try self.parse_simple_value(.string_value),
+            .number_literal => {
+                // Check if this is part of an expression (e.g., 1 + 2)
+                if (try self.parse_expression()) |expr| {
+                    return expr;
+                }
+                return try self.parse_simple_value(.number_value);
+            },
+            .l_paren => {
+                // Grouped expression: (1 + 2)
+                if (try self.parse_expression()) |expr| {
+                    return expr;
+                }
+                return null;
+            },
+            .minus => {
+                // Unary negation at start of value: -10, -(1+2)
+                if (try self.parse_expression()) |expr| {
+                    return expr;
+                }
+                return null;
+            },
+            .boolean_literal => return try self.parse_simple_value(.boolean_value),
+            .identifier => {
+                // Check for builtin ref pattern (canvas.width, time.total)
+                if (self.is_builtin_ref_pattern()) {
+                    return try self.parse_builtin_ref();
+                }
+                // Check for uniform access pattern (shader.inputs)
+                if (self.is_uniform_access_pattern()) {
+                    return try self.parse_uniform_access();
+                }
+                // Check if identifier is a math constant (PI, E, TAU)
+                const token_start = self.tokens.items(.start)[self.tok_i];
+                const token_end = if (self.tok_i + 1 < self.tokens.len)
+                    self.tokens.items(.start)[self.tok_i + 1]
+                else
+                    @as(u32, @intCast(self.source.len));
+                const text = std.mem.trimEnd(u8, self.source[token_start..token_end], " \t\n\r");
+                if (is_math_constant(text)) {
+                    // Math constants can be part of expressions
+                    if (try self.parse_expression()) |expr| {
+                        return expr;
+                    }
+                    return try self.parse_simple_value(.number_value);
+                }
+                // Non-math identifiers: try expression parsing (e.g., CONST*4)
+                if (try self.parse_expression()) |expr| {
+                    return expr;
+                }
+                return try self.parse_simple_value(.identifier_value);
+            },
+            else => return null,
+        }
+    }
+
+    /// Process iterative container parsing (arrays/objects).
+    fn process_container(
+        self: *Self,
+        tasks: *std.ArrayListUnmanaged(ParseTask),
+        results: *std.ArrayListUnmanaged(Node.Index),
+    ) Error!?Node.Index {
         // Push initial container task
-        try self.pushContainerTask(&tasks);
+        try self.push_container_task(tasks);
 
         // Bounded iteration
         for (0..MAX_PARSE_ITERATIONS) |_| {
@@ -446,19 +467,19 @@ pub const Parser = struct {
 
             switch (task.*) {
                 .array => |*arr| {
-                    if (try self.processArrayTask(arr, &tasks, &results)) {
+                    if (try self.process_array_task(arr, tasks, results)) {
                         _ = tasks.pop();
                     }
                 },
                 .object => |*obj| {
-                    if (try self.processObjectTask(obj, &tasks, &results)) {
+                    if (try self.process_object_task(obj, tasks, results)) {
                         _ = tasks.pop();
                     }
                 },
                 .finish_property => |prop| {
                     // Pop the result and create property node
                     const value = results.pop() orelse unreachable;
-                    const prop_node = try self.addNode(.{
+                    const prop_node = try self.add_node(.{
                         .tag = .property,
                         .main_token = prop.key_token,
                         .data = .{ .node = value },
@@ -478,7 +499,7 @@ pub const Parser = struct {
         return if (results.items.len > 0) results.items[0] else null;
     }
 
-    fn parseSimpleValue(self: *Self, node_tag: Node.Tag) Error!Node.Index {
+    fn parse_simple_value(self: *Self, node_tag: Node.Tag) Error!Node.Index {
         // Pre-condition: valid token
         std.debug.assert(self.tok_i < self.tokens.len);
 
@@ -498,7 +519,7 @@ pub const Parser = struct {
             }
         }
 
-        const idx = try self.addNode(.{
+        const idx = try self.add_node(.{
             .tag = actual_tag,
             .main_token = self.tok_i,
             .data = .{ .none = {} },
@@ -510,9 +531,9 @@ pub const Parser = struct {
         return idx;
     }
 
-    fn pushContainerTask(self: *Self, tasks: *std.ArrayListUnmanaged(ParseTask)) Error!void {
+    fn push_container_task(self: *Self, tasks: *std.ArrayListUnmanaged(ParseTask)) Error!void {
         // Pre-condition: at container start
-        const tag = self.currentTag();
+        const tag = self.current_tag();
         std.debug.assert(tag == .l_bracket or tag == .l_brace);
 
         const start_token = self.tok_i;
@@ -521,12 +542,12 @@ pub const Parser = struct {
         self.tok_i += 1; // consume [ or {
 
         if (tag == .l_bracket) {
-            try tasks.append(self.gpa, .{ .array = .{
+            try tasks.append(self.gpa, .{ .array = .{ 
                 .bracket_token = start_token,
                 .scratch_top = scratch_top,
             } });
         } else {
-            try tasks.append(self.gpa, .{ .object = .{
+            try tasks.append(self.gpa, .{ .object = .{ 
                 .brace_token = start_token,
                 .scratch_top = scratch_top,
             } });
@@ -537,8 +558,8 @@ pub const Parser = struct {
     }
 
     /// Create property node and append to scratch. Common pattern in object parsing.
-    fn addPropertyToScratch(self: *Self, key_token: u32, value: Node.Index) Error!void {
-        const prop = try self.addNode(.{
+    fn add_property_to_scratch(self: *Self, key_token: u32, value: Node.Index) Error!void {
+        const prop = try self.add_node(.{
             .tag = .property,
             .main_token = key_token,
             .data = .{ .node = value },
@@ -548,14 +569,14 @@ pub const Parser = struct {
 
     /// Parse identifier value, checking for math constants and special patterns.
     /// Returns the parsed value node and its tag type.
-    fn parseIdentifierAsValue(self: *Self) Error!Node.Index {
+    fn parse_identifier_as_value(self: *Self) Error!Node.Index {
         // Check for builtin ref pattern (canvas.width, time.total)
-        if (self.isBuiltinRefPattern()) {
-            return try self.parseBuiltinRef();
+        if (self.is_builtin_ref_pattern()) {
+            return try self.parse_builtin_ref();
         }
         // Check for uniform access pattern (module.varName)
-        if (self.isUniformAccessPattern()) {
-            return try self.parseUniformAccess();
+        if (self.is_uniform_access_pattern()) {
+            return try self.parse_uniform_access();
         }
         // Check if identifier is a math constant (PI, E, TAU)
         const token_start = self.tokens.items(.start)[self.tok_i];
@@ -563,26 +584,26 @@ pub const Parser = struct {
             self.tokens.items(.start)[self.tok_i + 1]
         else
             @as(u32, @intCast(self.source.len));
-        const text = std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r");
-        const node_tag: Node.Tag = if (isMathConstant(text)) .number_value else .identifier_value;
-        return try self.parseSimpleValue(node_tag);
+        const text = std.mem.trimEnd(u8, self.source[token_start..token_end], " \t\n\r");
+        const node_tag: Node.Tag = if (is_math_constant(text)) .number_value else .identifier_value;
+        return try self.parse_simple_value(node_tag);
     }
 
     /// Parse unary negation in array context: -NUM or -(expr).
-    fn parseArrayNegation(self: *Self) Error!Node.Index {
+    fn parse_array_negation(self: *Self) Error!Node.Index {
         const minus_token = self.tok_i;
         self.tok_i += 1; // consume -
-        if (self.currentTag() == .number_literal) {
-            const operand = try self.parseSimpleValue(.number_value);
-            return try self.addNode(.{
+        if (self.current_tag() == .number_literal) {
+            const operand = try self.parse_simple_value(.number_value);
+            return try self.add_node(.{
                 .tag = .expr_negate,
                 .main_token = minus_token,
                 .data = .{ .node = operand },
             });
-        } else if (self.currentTag() == .l_paren) {
+        } else if (self.current_tag() == .l_paren) {
             // Allow -(expr) for explicit negated expressions
-            const expr = try self.parseExpression() orelse return error.ParseError;
-            return try self.addNode(.{
+            const expr = try self.parse_expression() orelse return error.ParseError;
+            return try self.add_node(.{
                 .tag = .expr_negate,
                 .main_token = minus_token,
                 .data = .{ .node = expr },
@@ -593,7 +614,7 @@ pub const Parser = struct {
     }
 
     /// Process array task. Returns true when array is complete.
-    fn processArrayTask(
+    fn process_array_task(
         self: *Self,
         arr: *ArrayTask,
         tasks: *std.ArrayListUnmanaged(ParseTask),
@@ -605,15 +626,15 @@ pub const Parser = struct {
             try self.scratch.append(self.gpa, nested_result.toInt());
         }
 
-        const current = self.currentTag();
+        const current = self.current_tag();
 
         // Check for array end
         if (current == .r_bracket) {
-            const range = try self.addExtraSlice(self.scratch.items[arr.scratch_top..]);
+            const range = try self.add_extra_slice(self.scratch.items[arr.scratch_top..]);
             self.scratch.shrinkRetainingCapacity(arr.scratch_top);
             self.tok_i += 1; // consume ]
 
-            const node = try self.addNode(.{
+            const node = try self.add_node(.{
                 .tag = .array,
                 .main_token = arr.bracket_token,
                 .data = .{ .extra_range = range },
@@ -633,19 +654,19 @@ pub const Parser = struct {
         // Parse element
         switch (current) {
             .string_literal => {
-                const elem = try self.parseSimpleValue(.string_value);
+                const elem = try self.parse_simple_value(.string_value);
                 try self.scratch.append(self.gpa, elem.toInt());
             },
             .number_literal => {
                 // In arrays, parse numbers as simple values (not expressions)
                 // This allows [1 -1 2 -2] to be 4 values, not 2 subtraction results
                 // Use parentheses for expressions: [(1+2) 3]
-                const elem = try self.parseSimpleValue(.number_value);
+                const elem = try self.parse_simple_value(.number_value);
                 try self.scratch.append(self.gpa, elem.toInt());
             },
             .l_paren => {
                 // Grouped expression in array: [(1 + 2), 3]
-                if (try self.parseExpression()) |expr| {
+                if (try self.parse_expression()) |expr| {
                     try self.scratch.append(self.gpa, expr.toInt());
                 } else {
                     return error.ParseError;
@@ -653,21 +674,21 @@ pub const Parser = struct {
             },
             .minus => {
                 // Unary negation in array: [-1, -2]
-                // Don't use parseExpression to avoid "-1 -2" becoming "-1 - 2"
-                const elem = try self.parseArrayNegation();
+                // Don't use parse_expression to avoid "-1 -2" becoming "-1 - 2"
+                const elem = try self.parse_array_negation();
                 try self.scratch.append(self.gpa, elem.toInt());
             },
             .boolean_literal => {
-                const elem = try self.parseSimpleValue(.boolean_value);
+                const elem = try self.parse_simple_value(.boolean_value);
                 try self.scratch.append(self.gpa, elem.toInt());
             },
             .identifier => {
-                const elem = try self.parseIdentifierAsValue();
+                const elem = try self.parse_identifier_as_value();
                 try self.scratch.append(self.gpa, elem.toInt());
             },
             .l_bracket, .l_brace => {
                 // Nested container - push task (result will come later)
-                try self.pushContainerTask(tasks);
+                try self.push_container_task(tasks);
             },
             else => return true, // End of elements
         }
@@ -676,21 +697,21 @@ pub const Parser = struct {
     }
 
     /// Process object task. Returns true when object is complete.
-    fn processObjectTask(
+    fn process_object_task(
         self: *Self,
         obj: *ObjectTask,
         tasks: *std.ArrayListUnmanaged(ParseTask),
         results: *std.ArrayListUnmanaged(Node.Index),
     ) Error!bool {
-        const current = self.currentTag();
+        const current = self.current_tag();
 
         // Check for object end
         if (current == .r_brace) {
-            const range = try self.addExtraSlice(self.scratch.items[obj.scratch_top..]);
+            const range = try self.add_extra_slice(self.scratch.items[obj.scratch_top..]);
             self.scratch.shrinkRetainingCapacity(obj.scratch_top);
             self.tok_i += 1; // consume }
 
-            const node = try self.addNode(.{
+            const node = try self.add_node(.{
                 .tag = .object,
                 .main_token = obj.brace_token,
                 .data = .{ .extra_range = range },
@@ -713,46 +734,46 @@ pub const Parser = struct {
         const key_token = self.tok_i;
         self.tok_i += 1; // consume key
 
-        if (self.currentTag() != .equals) return error.ParseError;
+        if (self.current_tag() != .equals) return error.ParseError;
         self.tok_i += 1; // consume =
 
         // Parse value and create property
-        const value_tag = self.currentTag();
+        const value_tag = self.current_tag();
         switch (value_tag) {
             .string_literal => {
-                const value = try self.parseSimpleValue(.string_value);
-                try self.addPropertyToScratch(key_token, value);
+                const value = try self.parse_simple_value(.string_value);
+                try self.add_property_to_scratch(key_token, value);
             },
             .number_literal => {
                 // Try to parse as expression first (e.g., size=1+2)
-                const value = if (try self.parseExpression()) |expr|
+                const value = if (try self.parse_expression()) |expr|
                     expr
                 else
-                    try self.parseSimpleValue(.number_value);
-                try self.addPropertyToScratch(key_token, value);
+                    try self.parse_simple_value(.number_value);
+                try self.add_property_to_scratch(key_token, value);
             },
             .l_paren => {
                 // Grouped expression: size=(1+2)
-                const value = try self.parseExpression() orelse return error.ParseError;
-                try self.addPropertyToScratch(key_token, value);
+                const value = try self.parse_expression() orelse return error.ParseError;
+                try self.add_property_to_scratch(key_token, value);
             },
             .minus => {
                 // Unary negation: offset=-10
-                const value = try self.parseExpression() orelse return error.ParseError;
-                try self.addPropertyToScratch(key_token, value);
+                const value = try self.parse_expression() orelse return error.ParseError;
+                try self.add_property_to_scratch(key_token, value);
             },
             .boolean_literal => {
-                const value = try self.parseSimpleValue(.boolean_value);
-                try self.addPropertyToScratch(key_token, value);
+                const value = try self.parse_simple_value(.boolean_value);
+                try self.add_property_to_scratch(key_token, value);
             },
             .identifier => {
-                const value = try self.parseIdentifierAsValue();
-                try self.addPropertyToScratch(key_token, value);
+                const value = try self.parse_identifier_as_value();
+                try self.add_property_to_scratch(key_token, value);
             },
             .l_bracket, .l_brace => {
                 // Nested container - push finish_property task, then container task
                 try tasks.append(self.gpa, .{ .finish_property = .{ .key_token = key_token } });
-                try self.pushContainerTask(tasks);
+                try self.push_container_task(tasks);
             },
             else => return error.ParseError,
         }
@@ -760,20 +781,20 @@ pub const Parser = struct {
         return false;
     }
 
-    // NOTE: The parseReference function has been removed.
+    // NOTE: The parse_reference function has been removed.
     // The $namespace.name reference syntax is no longer supported.
     // Bare identifiers are now used everywhere and resolved based on context.
 
     /// Check if identifier is a builtin namespace (canvas, time).
-    fn isBuiltinNamespace(self: *Self) bool {
-        if (self.currentTag() != .identifier) return false;
-        const text = self.getTokenText(self.tok_i);
+    fn is_builtin_namespace(self: *Self) bool {
+        if (self.current_tag() != .identifier) return false;
+        const text = self.get_token_text(self.tok_i);
         return std.mem.eql(u8, text, "canvas") or std.mem.eql(u8, text, "time");
     }
 
     /// Check if current position is a builtin ref pattern (canvas.width, time.total).
-    fn isBuiltinRefPattern(self: *Self) bool {
-        if (!self.isBuiltinNamespace()) return false;
+    fn is_builtin_ref_pattern(self: *Self) bool {
+        if (!self.is_builtin_namespace()) return false;
         // Check for .identifier pattern following
         if (self.tok_i + 2 >= self.tokens.len) return false;
         if (self.tokens.items(.tag)[self.tok_i + 1] != .dot) return false;
@@ -782,9 +803,9 @@ pub const Parser = struct {
     }
 
     /// Parse a builtin ref (canvas.width, time.total).
-    fn parseBuiltinRef(self: *Self) Error!Node.Index {
+    fn parse_builtin_ref(self: *Self) Error!Node.Index {
         // Pre-condition: at builtin namespace identifier
-        std.debug.assert(self.isBuiltinRefPattern());
+        std.debug.assert(self.is_builtin_ref_pattern());
 
         const namespace_token = self.tok_i;
         self.tok_i += 1; // consume namespace
@@ -792,7 +813,7 @@ pub const Parser = struct {
         const property_token = self.tok_i;
         self.tok_i += 1; // consume property
 
-        return try self.addNode(.{
+        return try self.add_node(.{
             .tag = .builtin_ref,
             .main_token = namespace_token,
             .data = .{ .node_and_node = .{ namespace_token, property_token } },
@@ -802,11 +823,11 @@ pub const Parser = struct {
     /// Check if current position is a uniform access pattern (module.varName).
     /// This is similar to builtin_ref but for shader uniform references.
     /// Returns true for identifier.identifier patterns that aren't builtin refs.
-    fn isUniformAccessPattern(self: *Self) bool {
+    fn is_uniform_access_pattern(self: *Self) bool {
         // Must be identifier
-        if (self.currentTag() != .identifier) return false;
+        if (self.current_tag() != .identifier) return false;
         // Must NOT be a builtin namespace (canvas, time)
-        if (self.isBuiltinNamespace()) return false;
+        if (self.is_builtin_namespace()) return false;
         // Check for .identifier pattern following
         if (self.tok_i + 2 >= self.tokens.len) return false;
         if (self.tokens.items(.tag)[self.tok_i + 1] != .dot) return false;
@@ -815,9 +836,9 @@ pub const Parser = struct {
     }
 
     /// Parse a uniform access (module.varName).
-    fn parseUniformAccess(self: *Self) Error!Node.Index {
+    fn parse_uniform_access(self: *Self) Error!Node.Index {
         // Pre-condition: at module identifier
-        std.debug.assert(self.isUniformAccessPattern());
+        std.debug.assert(self.is_uniform_access_pattern());
 
         const module_token = self.tok_i;
         self.tok_i += 1; // consume module
@@ -825,7 +846,7 @@ pub const Parser = struct {
         const var_token = self.tok_i;
         self.tok_i += 1; // consume varName
 
-        return try self.addNode(.{
+        return try self.add_node(.{
             .tag = .uniform_access,
             .main_token = module_token,
             .data = .{ .node_and_node = .{ module_token, var_token } },
@@ -833,22 +854,22 @@ pub const Parser = struct {
     }
 
     /// Get token text for current position.
-    fn getTokenText(self: *Self, tok_i: u32) []const u8 {
+    fn get_token_text(self: *Self, tok_i: u32) []const u8 {
         const token_start = self.tokens.items(.start)[tok_i];
         const token_end = if (tok_i + 1 < self.tokens.len)
             self.tokens.items(.start)[tok_i + 1]
         else
             @as(u32, @intCast(self.source.len));
-        return std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r.=[]{}");
+        return std.mem.trimEnd(u8, self.source[token_start..token_end], " \t\n\r.=[]{}");
     }
 
-    // Kept for backward compatibility with parsePropertyList
-    fn parseArray(self: *Self) Error!Node.Index {
-        return (try self.parseValue()) orelse error.ParseError;
+    // Kept for backward compatibility with parse_property_list
+    fn parse_array(self: *Self) Error!Node.Index {
+        return (try self.parse_value()) orelse error.ParseError;
     }
 
-    fn parseObject(self: *Self) Error!Node.Index {
-        return (try self.parseValue()) orelse error.ParseError;
+    fn parse_object(self: *Self) Error!Node.Index {
+        return (try self.parse_value()) orelse error.ParseError;
     }
 
     // ========================================================================
@@ -856,8 +877,8 @@ pub const Parser = struct {
     // ========================================================================
 
     /// Check if current token can start an expression.
-    fn canStartExpression(self: *Self) bool {
-        return switch (self.currentTag()) {
+    fn can_start_expression(self: *Self) bool {
+        return switch (self.current_tag()) {
             .number_literal, .l_paren => true,
             .minus => blk: {
                 // Check if this is unary minus (followed by number or paren)
@@ -871,8 +892,8 @@ pub const Parser = struct {
     }
 
     /// Check if current token is an operator that continues an expression.
-    fn isExpressionOperator(self: *Self) bool {
-        return switch (self.currentTag()) {
+    fn is_expression_operator(self: *Self) bool {
+        return switch (self.current_tag()) {
             .plus, .minus, .star, .slash => true,
             else => false,
         };
@@ -884,28 +905,28 @@ pub const Parser = struct {
     /// Handles addition/subtraction (lowest precedence).
     ///
     /// Returns null if current token can't start an expression.
-    fn parseExpression(self: *Self) Error!?Node.Index {
+    fn parse_expression(self: *Self) Error!?Node.Index {
         // Pre-conditions
         std.debug.assert(self.tok_i < self.tokens.len);
         const start_tok = self.tok_i;
 
         // Parse left operand (term handles higher precedence: *, /)
-        var left = try self.parseTerm() orelse return null;
+        var left = try self.parse_term() orelse return null;
 
         // Consume additional terms separated by + or -
         const MAX_EXPR_TERMS: u32 = 256;
         for (0..MAX_EXPR_TERMS) |_| {
-            const op_tag = self.currentTag();
+            const op_tag = self.current_tag();
             if (op_tag != .plus and op_tag != .minus) break;
 
             const op_token = self.tok_i;
             self.tok_i += 1; // advance past operator to parse right-hand side
 
-            const right = try self.parseTerm() orelse return error.ParseError;
+            const right = try self.parse_term() orelse return error.ParseError;
 
             // Build left-associative tree: a + b + c = (a + b) + c
             const node_tag: Node.Tag = if (op_tag == .plus) .expr_add else .expr_sub;
-            left = try self.addNode(.{
+            left = try self.add_node(.{
                 .tag = node_tag,
                 .main_token = op_token,
                 .data = .{ .node_and_node = .{ left.toInt(), right.toInt() } },
@@ -926,28 +947,28 @@ pub const Parser = struct {
     /// Handles multiplication/division (higher precedence than +/-).
     ///
     /// Returns null if current token can't start a factor.
-    fn parseTerm(self: *Self) Error!?Node.Index {
+    fn parse_term(self: *Self) Error!?Node.Index {
         // Pre-conditions
         std.debug.assert(self.tok_i < self.tokens.len);
         const start_tok = self.tok_i;
 
         // Parse left operand (factor)
-        var left = try self.parseFactor() orelse return null;
+        var left = try self.parse_factor() orelse return null;
 
         // Parse right operands with * or /
         const MAX_TERM_FACTORS: u32 = 256;
         for (0..MAX_TERM_FACTORS) |_| {
-            const op_tag = self.currentTag();
+            const op_tag = self.current_tag();
             if (op_tag != .star and op_tag != .slash) break;
 
             const op_token = self.tok_i;
             self.tok_i += 1; // consume operator
 
-            const right = try self.parseFactor() orelse return error.ParseError;
+            const right = try self.parse_factor() orelse return error.ParseError;
 
             // Build left-associative tree: a * b * c = (a * b) * c
             const node_tag: Node.Tag = if (op_tag == .star) .expr_mul else .expr_div;
-            left = try self.addNode(.{
+            left = try self.add_node(.{
                 .tag = node_tag,
                 .main_token = op_token,
                 .data = .{ .node_and_node = .{ left.toInt(), right.toInt() } },
@@ -969,7 +990,7 @@ pub const Parser = struct {
     ///
     /// Recursion is bounded by MAX_EXPR_DEPTH to prevent stack overflow.
     /// Returns null if current token can't start a factor.
-    fn parseFactor(self: *Self) Error!?Node.Index {
+    fn parse_factor(self: *Self) Error!?Node.Index {
         // Pre-conditions
         std.debug.assert(self.tok_i < self.tokens.len);
         if (self.expr_depth >= MAX_EXPR_DEPTH) return error.ParseError;
@@ -979,16 +1000,16 @@ pub const Parser = struct {
         self.expr_depth += 1;
         defer self.expr_depth -= 1;
 
-        const result: ?Node.Index = switch (self.currentTag()) {
+        const result: ?Node.Index = switch (self.current_tag()) {
             .number_literal => {
                 // Simple number
-                return try self.parseSimpleValue(.number_value);
+                return try self.parse_simple_value(.number_value);
             },
             .l_paren => {
                 // Grouped expression: ( expr )
                 self.tok_i += 1; // consume (
-                const inner = try self.parseExpression() orelse return error.ParseError;
-                if (self.currentTag() != .r_paren) return error.ParseError;
+                const inner = try self.parse_expression() orelse return error.ParseError;
+                if (self.current_tag() != .r_paren) return error.ParseError;
                 self.tok_i += 1; // consume )
                 return inner;
             },
@@ -998,8 +1019,8 @@ pub const Parser = struct {
                 self.tok_i += 1; // consume -
 
                 // Parse the operand (handles --x, -(expr), etc.)
-                const operand = try self.parseFactor() orelse return error.ParseError;
-                return try self.addNode(.{
+                const operand = try self.parse_factor() orelse return error.ParseError;
+                return try self.add_node(.{
                     .tag = .expr_negate,
                     .main_token = minus_token,
                     .data = .{ .node = operand },
@@ -1012,12 +1033,12 @@ pub const Parser = struct {
                     self.tokens.items(.start)[self.tok_i + 1]
                 else
                     @as(u32, @intCast(self.source.len));
-                const text = std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r");
-                if (isMathConstant(text)) {
-                    return try self.parseSimpleValue(.number_value);
+                const text = std.mem.trimEnd(u8, self.source[token_start..token_end], " \t\n\r");
+                if (is_math_constant(text)) {
+                    return try self.parse_simple_value(.number_value);
                 }
                 // Non-math-constant identifiers: could be #define references
-                return try self.parseSimpleValue(.identifier_value);
+                return try self.parse_simple_value(.identifier_value);
             },
             else => null,
         };
@@ -1032,16 +1053,16 @@ pub const Parser = struct {
 
     /// Try to parse a value that might be an expression.
     /// Returns expression if operators follow a number, otherwise simple value.
-    fn parseValueOrExpression(self: *Self) Error!?Node.Index {
+    fn parse_value_or_expression(self: *Self) Error!?Node.Index {
         // Pre-condition
         std.debug.assert(self.tok_i < self.tokens.len);
 
         // Check if this could be an expression
-        if (self.canStartExpression()) {
+        if (self.can_start_expression()) {
             // Save position to check if we got more than just a number
             const start_tok = self.tok_i;
 
-            const result = try self.parseExpression();
+            const result = try self.parse_expression();
 
             // If we consumed operators, it's an expression
             // If we just consumed one number, it's already a number_value node
@@ -1068,11 +1089,11 @@ pub const Parser = struct {
     // Helpers
     // ========================================================================
 
-    fn currentTag(self: *Self) Token.Tag {
+    fn current_tag(self: *Self) Token.Tag {
         return self.tokens.items(.tag)[self.tok_i];
     }
 
-    fn addNode(self: *Self, node: Node) Error!Node.Index {
+    fn add_node(self: *Self, node: Node) Error!Node.Index {
         // Pre-condition: valid node tag (all tags are valid)
         std.debug.assert(@intFromEnum(node.tag) < std.meta.fields(Node.Tag).len);
 
@@ -1084,7 +1105,7 @@ pub const Parser = struct {
         return @enumFromInt(idx);
     }
 
-    fn addExtraSlice(self: *Self, items: []const u32) Error!Node.SubRange {
+    fn add_extra_slice(self: *Self, items: []const u32) Error!Node.SubRange {
         const start: u32 = @intCast(self.extra_data.items.len);
         const items_len: u32 = @intCast(items.len);
         try self.extra_data.appendSlice(self.gpa, items);
@@ -1103,8 +1124,8 @@ pub const Parser = struct {
 
 // ============================================================================
 /// Check if text is a recognized math constant.
-/// Supports: PI, E, TAU (case-sensitive)
-fn isMathConstant(text: []const u8) bool {
+/// Supports: PI, E,TAU (case-sensitive)
+fn is_math_constant(text: []const u8) bool {
     return std.mem.eql(u8, text, "PI") or
         std.mem.eql(u8, text, "E") or
         std.mem.eql(u8, text, "TAU");

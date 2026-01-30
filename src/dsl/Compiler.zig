@@ -99,6 +99,9 @@ pub const Compiler = struct {
         /// Requires executors_dir to be set.
         /// Defaults to false for backwards compatibility.
         embed_executor: bool = false,
+
+        /// IO context for file operations (required for file embedding and imports)
+        io: ?std.Io = null,
     };
 
     pub const CompileResult = struct {
@@ -148,15 +151,12 @@ pub const Compiler = struct {
     ///
     /// Returns owned PNGB bytes that the caller must free.
     pub fn compileWithOptions(gpa: Allocator, source: [:0]const u8, options: Options) Error![]u8 {
-        // Pre-condition
-        std.debug.assert(source.len == 0 or source[source.len] == 0);
-
         // Phase 0: Resolve imports (if enabled and base_dir is set)
         var resolved_source: ?[:0]u8 = null;
         defer if (resolved_source) |s| gpa.free(s);
 
         const actual_source = if (options.resolve_imports and options.base_dir != null) blk: {
-            var resolver = ImportResolver.init(gpa, options.base_dir.?);
+            var resolver = ImportResolver.init(gpa, options.io, options.base_dir.?);
             defer resolver.deinit();
 
             const file_path = options.file_path orelse "main.pngine";
@@ -227,7 +227,7 @@ pub const Compiler = struct {
         defer if (resolved_source) |s| gpa.free(s);
 
         const actual_source = if (options.resolve_imports and options.base_dir != null) blk: {
-            var resolver = ImportResolver.init(gpa, options.base_dir.?);
+            var resolver = ImportResolver.init(gpa, options.io, options.base_dir.?);
             defer resolver.deinit();
 
             const file_path = options.file_path orelse "main.pngine";
@@ -281,7 +281,7 @@ pub const Compiler = struct {
 
         if (options.embed_executor) {
             if (options.executors_dir) |executors_dir| {
-                executor_wasm = try readExecutorWasm(gpa, executors_dir, selected_variant.name);
+                executor_wasm = try readExecutorWasm(gpa, options.io, executors_dir, selected_variant.name);
             }
         }
 
@@ -291,6 +291,7 @@ pub const Compiler = struct {
             .minify_shaders = options.minify_shaders,
             .executor_wasm = executor_wasm,
             .plugins = plugins,
+            .io = options.io,
         });
 
         // Post-condition: valid PNGB header
@@ -314,7 +315,7 @@ pub const Compiler = struct {
     /// Post-conditions:
     /// - Returns owned WASM bytes
     /// - Returns error.FileReadError if file not found
-    fn readExecutorWasm(gpa: Allocator, executors_dir: []const u8, variant_name: []const u8) Error![]u8 {
+    fn readExecutorWasm(gpa: Allocator, io: ?std.Io, executors_dir: []const u8, variant_name: []const u8) Error![]u8 {
         // Build path: {executors_dir}/pngine-{variant}.wasm
         var path_buf: [512]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "{s}/pngine-{s}.wasm", .{ executors_dir, variant_name }) catch {
@@ -322,12 +323,13 @@ pub const Compiler = struct {
         };
 
         // Read file
-        const file = std.fs.cwd().openFile(path, .{}) catch {
+        const io_ctx = io orelse return error.FileReadError;
+        const file = std.Io.Dir.cwd().openFile(io_ctx, path, .{}) catch {
             return error.FileReadError;
         };
-        defer file.close();
+        defer file.close(io_ctx);
 
-        const stat = file.stat() catch {
+        const stat = file.stat(io_ctx) catch {
             return error.FileReadError;
         };
 
@@ -347,7 +349,7 @@ pub const Compiler = struct {
         var bytes_read: u32 = 0;
         for (0..size + 1) |_| {
             if (bytes_read >= size) break;
-            const n: u32 = @intCast(file.read(wasm[bytes_read..]) catch {
+            const n: u32 = @intCast(file.readStreaming(io_ctx, &.{wasm[bytes_read..]}) catch {
                 return error.FileReadError;
             });
             if (n == 0) break;

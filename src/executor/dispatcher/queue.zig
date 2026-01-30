@@ -34,14 +34,14 @@ pub fn handle(
             const buffer_id = try self.readVarint();
             const offset = try self.readVarint();
             const data_id = try self.readVarint();
-            try self.backend.writeBuffer(allocator, @intCast(buffer_id), offset, @intCast(data_id));
+            try self.backend.write_buffer(allocator, @intCast(buffer_id), offset, @intCast(data_id));
         },
 
         .write_time_uniform => {
             const buffer_id = try self.readVarint();
             const buffer_offset = try self.readVarint();
             const size = try self.readVarint();
-            try self.backend.writeTimeUniform(allocator, @intCast(buffer_id), buffer_offset, @intCast(size));
+            try self.backend.write_time_uniform(allocator, @intCast(buffer_id), buffer_offset, @intCast(size));
         },
 
         .copy_external_image_to_texture => {
@@ -50,7 +50,7 @@ pub fn handle(
             const mip_level = try self.readByte();
             const origin_x = try self.readVarint();
             const origin_y = try self.readVarint();
-            try self.backend.copyExternalImageToTexture(
+            try self.backend.copy_external_image_to_texture(
                 allocator,
                 @intCast(bitmap_id),
                 @intCast(texture_id),

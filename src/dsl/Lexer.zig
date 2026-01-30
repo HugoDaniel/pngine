@@ -61,7 +61,7 @@ pub const Lexer = struct {
             .loc = .{ .start = self.index, .end = undefined },
         };
 
-        // Labeled switch state machine
+        // Labeled switch state machine for initial dispatch
         state: switch (State.start) {
             .start => {
                 const c = self.buffer[self.index];
@@ -82,28 +82,29 @@ pub const Lexer = struct {
                     },
                     '#' => {
                         self.index += 1;
-                        continue :state .hash;
+                        result.tag = self.lexHash();
                     },
                     '"' => {
                         self.index += 1;
-                        continue :state .string_literal;
+                        result.tag = self.lexString();
                     },
                     '/' => {
                         const next_c = self.buffer[self.index + 1];
                         if (next_c == '/') {
                             self.index += 2;
-                            continue :state .line_comment;
+                            result.tag = self.lexLineComment(result.loc.start);
                         } else {
-                            // Division operator for arithmetic expressions
                             result.tag = .slash;
                             self.index += 1;
                         }
                     },
-                    'a'...'z', 'A'...'Z', '_' => continue :state .identifier,
-                    '0'...'9' => continue :state .number,
+                    'a'...'z', 'A'...'Z', '_' => {
+                        result.tag = self.lexIdentifier(result.loc.start);
+                    },
+                    '0'...'9' => {
+                        result.tag = self.lexNumber();
+                    },
                     '-' => {
-                        // Always emit minus as separate token
-                        // Parser handles unary negation vs binary subtraction
                         result.tag = .minus;
                         self.index += 1;
                     },
@@ -157,111 +158,6 @@ pub const Lexer = struct {
                     },
                 }
             },
-            .hash => {
-                // Read macro name after #
-                const macro_start = self.index;
-                for (0..MAX_TOKEN_LEN) |_| {
-                    const c = self.buffer[self.index];
-                    switch (c) {
-                        'a'...'z', 'A'...'Z', '_', '0'...'9' => self.index += 1,
-                        else => break,
-                    }
-                } else unreachable; // Token exceeds MAX_TOKEN_LEN
-                const macro_name = self.buffer[macro_start..self.index];
-                result.tag = macro_keywords.get(macro_name) orelse .invalid;
-            },
-            .identifier => {
-                for (0..MAX_TOKEN_LEN) |_| {
-                    const c = self.buffer[self.index];
-                    switch (c) {
-                        'a'...'z', 'A'...'Z', '_', '0'...'9', '-' => self.index += 1,
-                        else => break,
-                    }
-                } else unreachable;
-                // WebGPU properties often use boolean flags (e.g., writeMask, depthTest)
-                // Distinguish true/false from regular identifiers for type safety
-                const ident = self.buffer[result.loc.start..self.index];
-                result.tag = literal_keywords.get(ident) orelse .identifier;
-            },
-            .number => {
-                // WebGPU uses hex for usage flags (e.g., 0x00000010 for COPY_DST)
-                // and color values (0xRRGGBBAA format)
-                if (self.buffer[self.index] == '0') {
-                    const next_char = self.buffer[self.index + 1];
-                    if (next_char == 'x' or next_char == 'X') {
-                        self.index += 2;
-                        for (0..MAX_TOKEN_LEN) |_| {
-                            const c = self.buffer[self.index];
-                            switch (c) {
-                                '0'...'9', 'a'...'f', 'A'...'F' => self.index += 1,
-                                else => break,
-                            }
-                        } else unreachable;
-                        result.tag = .number_literal;
-                        break :state;
-                    }
-                }
-                // Integer part (decimal)
-                for (0..MAX_TOKEN_LEN) |_| {
-                    const c = self.buffer[self.index];
-                    switch (c) {
-                        '0'...'9' => self.index += 1,
-                        else => break,
-                    }
-                } else unreachable; // Token exceeds MAX_TOKEN_LEN
-                // Decimal part
-                if (self.buffer[self.index] == '.') {
-                    self.index += 1;
-                    for (0..MAX_TOKEN_LEN) |_| {
-                        const c = self.buffer[self.index];
-                        switch (c) {
-                            '0'...'9' => self.index += 1,
-                            else => break,
-                        }
-                    } else unreachable; // Token exceeds MAX_TOKEN_LEN
-                }
-                result.tag = .number_literal;
-            },
-            .string_literal => {
-                for (0..MAX_TOKEN_LEN) |_| {
-                    const c = self.buffer[self.index];
-                    switch (c) {
-                        0 => {
-                            // Unterminated string
-                            result.tag = .invalid;
-                            break;
-                        },
-                        '"' => {
-                            self.index += 1;
-                            result.tag = .string_literal;
-                            break;
-                        },
-                        '\\' => {
-                            // Escape sequence - skip next char
-                            self.index += 1;
-                            if (self.buffer[self.index] != 0) {
-                                self.index += 1;
-                            }
-                        },
-                        else => self.index += 1,
-                    }
-                } else unreachable; // Token exceeds MAX_TOKEN_LEN
-            },
-            .line_comment => {
-                for (0..MAX_TOKEN_LEN) |_| {
-                    const c = self.buffer[self.index];
-                    switch (c) {
-                        0, '\n' => break,
-                        else => self.index += 1,
-                    }
-                } else unreachable; // Token exceeds MAX_TOKEN_LEN
-                // Check if it's a doc comment (///)
-                const comment_text = self.buffer[result.loc.start..self.index];
-                result.tag = if (comment_text.len >= 3 and comment_text[2] == '/')
-                    .doc_comment
-                else
-                    .line_comment;
-            },
         }
 
         result.loc.end = self.index;
@@ -272,13 +168,103 @@ pub const Lexer = struct {
         return result;
     }
 
+    fn lexHash(self: *Self) Token.Tag {
+        const macro_start = self.index;
+        for (0..MAX_TOKEN_LEN) |_| {
+            const c = self.buffer[self.index];
+            switch (c) {
+                'a'...'z', 'A'...'Z', '_', '0'...'9' => self.index += 1,
+                else => break,
+            }
+        } else unreachable;
+        const macro_name = self.buffer[macro_start..self.index];
+        return macro_keywords.get(macro_name) orelse .invalid;
+    }
+
+    fn lexIdentifier(self: *Self, start: u32) Token.Tag {
+        for (0..MAX_TOKEN_LEN) |_| {
+            const c = self.buffer[self.index];
+            switch (c) {
+                'a'...'z', 'A'...'Z', '_', '0'...'9', '-' => self.index += 1,
+                else => break,
+            }
+        } else unreachable;
+        const ident = self.buffer[start..self.index];
+        return literal_keywords.get(ident) orelse .identifier;
+    }
+
+    fn lexNumber(self: *Self) Token.Tag {
+        if (self.buffer[self.index] == '0') {
+            const next_char = self.buffer[self.index + 1];
+            if (next_char == 'x' or next_char == 'X') {
+                self.index += 2;
+                for (0..MAX_TOKEN_LEN) |_| {
+                    const c = self.buffer[self.index];
+                    switch (c) {
+                        '0'...'9', 'a'...'f', 'A'...'F' => self.index += 1,
+                        else => break,
+                    }
+                } else unreachable;
+                return .number_literal;
+            }
+        }
+        for (0..MAX_TOKEN_LEN) |_| {
+            const c = self.buffer[self.index];
+            switch (c) {
+                '0'...'9' => self.index += 1,
+                else => break,
+            }
+        } else unreachable;
+        if (self.buffer[self.index] == '.') {
+            self.index += 1;
+            for (0..MAX_TOKEN_LEN) |_| {
+                const c = self.buffer[self.index];
+                switch (c) {
+                    '0'...'9' => self.index += 1,
+                    else => break,
+                }
+            } else unreachable;
+        }
+        return .number_literal;
+    }
+
+    fn lexString(self: *Self) Token.Tag {
+        for (0..MAX_TOKEN_LEN) |_| {
+            const c = self.buffer[self.index];
+            switch (c) {
+                0 => return .invalid,
+                '"' => {
+                    self.index += 1;
+                    return .string_literal;
+                },
+                '\\' => {
+                    self.index += 1;
+                    if (self.buffer[self.index] != 0) {
+                        self.index += 1;
+                    }
+                },
+                else => self.index += 1,
+            }
+        } else unreachable;
+    }
+
+    fn lexLineComment(self: *Self, start: u32) Token.Tag {
+        for (0..MAX_TOKEN_LEN) |_| {
+            const c = self.buffer[self.index];
+            switch (c) {
+                0, '\n' => break,
+                else => self.index += 1,
+            }
+        } else unreachable;
+        const comment_text = self.buffer[start..self.index];
+        if (comment_text.len >= 3 and comment_text[2] == '/') {
+            return .doc_comment;
+        }
+        return .line_comment;
+    }
+
     const State = enum {
         start,
-        hash,
-        identifier,
-        number,
-        string_literal,
-        line_comment,
     };
 };
 

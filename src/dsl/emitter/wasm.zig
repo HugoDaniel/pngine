@@ -45,27 +45,29 @@ const WasmModuleInfo = struct {
 
 /// Read file into allocated buffer.
 /// Caller owns returned memory.
-fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+fn readFile(e: *Emitter, path: []const u8) ![]u8 {
     // Pre-condition
     std.debug.assert(path.len > 0);
 
-    const file = try fs.cwd().openFile(path, .{});
-    defer file.close();
+    const io = e.options.io orelse return error.FileReadError;
 
-    const stat = try file.stat();
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+
+    const stat = try file.stat(io);
     const size: u32 = if (stat.size > MAX_WASM_FILE_SIZE)
         return error.FileTooLarge
     else
         @intCast(stat.size);
 
-    const buffer = try allocator.alloc(u8, size);
-    errdefer allocator.free(buffer);
+    const buffer = try e.gpa.alloc(u8, size);
+    errdefer e.gpa.free(buffer);
 
     // Bounded read loop
     var bytes_read: u32 = 0;
     for (0..size + 1) |_| {
         if (bytes_read >= size) break;
-        const n: u32 = @intCast(try file.read(buffer[bytes_read..]));
+        const n: u32 = @intCast(try file.readStreaming(io, &.{buffer[bytes_read..]}));
         if (n == 0) break;
         bytes_read += n;
     }
@@ -130,7 +132,7 @@ pub fn emitWasmCalls(e: *Emitter) Emitter.Error!void {
         var path_buf: [4096]u8 = undefined;
         const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ base_dir, url }) catch continue;
 
-        const wasm_bytes = readFile(e.gpa, full_path) catch |err| {
+        const wasm_bytes = readFile(e, full_path) catch |err| {
             std.debug.print("Warning: Could not read WASM file '{s}': {}\n", .{ full_path, err });
             continue;
         };

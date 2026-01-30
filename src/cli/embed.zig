@@ -19,7 +19,7 @@ const EmbedArgs = struct {
 };
 
 /// Execute the embed command.
-pub fn runEmbed(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
+pub fn runEmbed(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     const parsed = parseEmbedArgs(args) orelse return 1;
 
     const derived = utils.deriveEmbedOutputPath(allocator, parsed.png_path);
@@ -29,7 +29,7 @@ pub fn runEmbed(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     };
     defer if (parsed.output_path == null) allocator.free(output);
 
-    return executeEmbed(allocator, parsed.png_path, parsed.pngb_path, output);
+    return executeEmbed(allocator, io, parsed.png_path, parsed.pngb_path, output);
 }
 
 fn parseEmbedArgs(args: []const []const u8) ?EmbedArgs {
@@ -67,17 +67,17 @@ fn parseEmbedArgs(args: []const []const u8) ?EmbedArgs {
     return .{ .png_path = png_path.?, .pngb_path = pngb_path.?, .output_path = output_path };
 }
 
-fn executeEmbed(allocator: std.mem.Allocator, png_input: []const u8, pngb_input: []const u8, output: []const u8) u8 {
+fn executeEmbed(allocator: std.mem.Allocator, io: std.Io, png_input: []const u8, pngb_input: []const u8, output: []const u8) u8 {
     std.debug.assert(png_input.len > 0);
     std.debug.assert(pngb_input.len > 0);
 
-    const png_data = utils.readBinaryFile(allocator, png_input) catch |err| {
+    const png_data = utils.readBinaryFile(allocator, io, png_input) catch |err| {
         std.debug.print("Error: failed to read PNG '{s}': {}\n", .{ png_input, err });
         return 2;
     };
     defer allocator.free(png_data);
 
-    const bytecode = utils.readBinaryFile(allocator, pngb_input) catch |err| {
+    const bytecode = utils.readBinaryFile(allocator, io, pngb_input) catch |err| {
         std.debug.print("Error: failed to read PNGB '{s}': {}\n", .{ pngb_input, err });
         return 2;
     };
@@ -94,7 +94,7 @@ fn executeEmbed(allocator: std.mem.Allocator, png_input: []const u8, pngb_input:
     };
     defer allocator.free(embedded);
 
-    utils.writeOutputFile(output, embedded) catch |err| {
+    utils.writeOutputFile(io, output, embedded) catch |err| {
         std.debug.print("Error: failed to write '{s}': {}\n", .{ output, err });
         return 2;
     };
@@ -107,7 +107,7 @@ fn executeEmbed(allocator: std.mem.Allocator, png_input: []const u8, pngb_input:
 }
 
 /// Execute the extract command.
-pub fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
+pub fn runExtract(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     var input_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
 
@@ -154,7 +154,7 @@ pub fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     };
     defer if (output_path == null) allocator.free(output);
 
-    const file_data = utils.readBinaryFile(allocator, input) catch |err| {
+    const file_data = utils.readBinaryFile(allocator, io, input) catch |err| {
         std.debug.print("Error: failed to read '{s}': {}\n", .{ input, err });
         return 2;
     };
@@ -187,7 +187,7 @@ pub fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         return 4;
     }
 
-    utils.writeOutputFile(output, bytecode) catch |err| {
+    utils.writeOutputFile(io, output, bytecode) catch |err| {
         std.debug.print("Error: failed to write '{s}': {}\n", .{ output, err });
         return 2;
     };

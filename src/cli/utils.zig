@@ -15,13 +15,13 @@ pub const max_file_size: u32 = 16 * 1024 * 1024;
 ///
 /// Pre-condition: path.len > 0
 /// Post-condition: Returns owned slice with file contents
-pub fn readBinaryFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+pub fn readBinaryFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
     std.debug.assert(path.len > 0);
 
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
 
-    const stat = try file.stat();
+    const stat = try file.stat(io);
     const size: u32 = if (stat.size > max_file_size)
         return error.FileTooLarge
     else
@@ -33,7 +33,7 @@ pub fn readBinaryFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     var bytes_read: u32 = 0;
     for (0..size + 1) |_| {
         if (bytes_read >= size) break;
-        const n: u32 = @intCast(try file.read(buffer[bytes_read..]));
+        const n: u32 = @intCast(try file.readStreaming(io, &.{buffer[bytes_read..]}));
         if (n == 0) break;
         bytes_read += n;
     }
@@ -48,13 +48,13 @@ pub fn readBinaryFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 ///
 /// Pre-condition: path.len > 0
 /// Post-condition: returned slice is null-terminated at index [len]
-pub fn readSourceFile(allocator: std.mem.Allocator, path: []const u8) ![:0]const u8 {
+pub fn readSourceFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![:0]const u8 {
     std.debug.assert(path.len > 0);
 
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
 
-    const stat = try file.stat();
+    const stat = try file.stat(io);
     const size: u32 = if (stat.size > max_file_size)
         return error.FileTooLarge
     else
@@ -66,7 +66,7 @@ pub fn readSourceFile(allocator: std.mem.Allocator, path: []const u8) ![:0]const
     var bytes_read: u32 = 0;
     for (0..size + 1) |_| {
         if (bytes_read >= size) break;
-        const n: u32 = @intCast(try file.read(buffer[bytes_read..]));
+        const n: u32 = @intCast(try file.readStreaming(io, &.{buffer[bytes_read..]}));
         if (n == 0) break;
         bytes_read += n;
     }
@@ -79,13 +79,13 @@ pub fn readSourceFile(allocator: std.mem.Allocator, path: []const u8) ![:0]const
 ///
 /// Pre-condition: path.len > 0, data.len > 0
 /// Post-condition: file contains exactly data bytes
-pub fn writeOutputFile(path: []const u8, data: []const u8) !void {
+pub fn writeOutputFile(io: std.Io, path: []const u8, data: []const u8) !void {
     std.debug.assert(path.len > 0);
     std.debug.assert(data.len > 0);
 
-    const file = try std.fs.cwd().createFile(path, .{});
-    defer file.close();
-    try file.writeAll(data);
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, data);
 }
 
 /// Derive output path from input path by replacing extension with .pngb.

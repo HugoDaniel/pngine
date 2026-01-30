@@ -47,16 +47,32 @@ const bundle_cmd = @import("cli/bundle.zig");
 const utils = @import("cli/utils.zig");
 
 /// CLI entry point.
-pub fn main() !u8 {
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init.Minimal) !void {
+    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa_state.deinit();
+    const gpa = gpa_state.allocator();
 
-    return run(allocator) catch |err| utils.handleError(err);
+    var threaded: std.Io.Threaded = .init(gpa, .{
+        .environ = init.environ,
+        .argv0 = .init(init.args),
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const args = try init.args.toSlice(gpa);
+    defer gpa.free(args);
+
+    if (args.len < 2) {
+        printUsage();
+        std.process.exit(io, 1);
+    }
+
+    const exit_code = try run(gpa, io);
+    std.process.exit(io, exit_code);
 }
 
 /// Parse arguments and dispatch to appropriate command.
-fn run(allocator: std.mem.Allocator) !u8 {
+fn run(allocator: std.mem.Allocator, io: std.Io) !u8 {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
@@ -72,26 +88,26 @@ fn run(allocator: std.mem.Allocator) !u8 {
     // Check if first arg is a .pngine file - treat as implicit render command
     const extension = std.fs.path.extension(command);
     if (std.mem.eql(u8, extension, ".pngine") or std.mem.eql(u8, extension, ".pbsf")) {
-        return render_cmd.run(allocator, args[1..]);
+        return render_cmd.run(allocator, io, args[1..]);
     }
 
     // Dispatch to subcommand
     if (std.mem.eql(u8, command, "compile")) {
-        return compile_cmd.run(allocator, args[2..]);
+        return compile_cmd.run(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "check")) {
-        return check_cmd.run(allocator, args[2..]);
+        return check_cmd.run(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "validate")) {
-        return validate_cmd.run(allocator, args[2..]);
+        return validate_cmd.run(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "render")) {
-        return render_cmd.run(allocator, args[2..]);
+        return render_cmd.run(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "embed")) {
-        return embed_cmd.runEmbed(allocator, args[2..]);
+        return embed_cmd.runEmbed(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "extract")) {
-        return embed_cmd.runExtract(allocator, args[2..]);
+        return embed_cmd.runExtract(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "bundle")) {
-        return bundle_cmd.runBundle(allocator, args[2..]);
+        return bundle_cmd.runBundle(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "list")) {
-        return bundle_cmd.runList(allocator, args[2..]);
+        return bundle_cmd.runList(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or
         std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h"))
     {

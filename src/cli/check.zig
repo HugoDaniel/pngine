@@ -28,7 +28,7 @@ const Options = struct {
 ///
 /// Pre-condition: args is the slice after "check" command.
 /// Post-condition: Returns exit code (0 = success, non-zero = error).
-pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
+pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
     std.debug.assert(args.len <= 1024);
 
     // Parse arguments
@@ -56,7 +56,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     const input = opts.input;
 
     // Load or compile bytecode
-    const bytecode = loadOrCompileBytecode(allocator, input) catch |err| {
+    const bytecode = loadOrCompileBytecode(allocator, io, input) catch |err| {
         return handleLoadError(err, input);
     };
     defer allocator.free(bytecode);
@@ -132,17 +132,17 @@ fn printVerboseTrace(calls: []const Call) void {
 }
 
 /// Load bytecode from file or compile from source.
-fn loadOrCompileBytecode(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+fn loadOrCompileBytecode(allocator: std.mem.Allocator, io: std.Io, input: []const u8) ![]u8 {
     std.debug.assert(input.len > 0);
 
     const extension = std.fs.path.extension(input);
 
     if (std.mem.eql(u8, extension, ".pngb")) {
-        return utils.readBinaryFile(allocator, input);
+        return utils.readBinaryFile(allocator, io, input);
     }
 
     if (std.mem.eql(u8, extension, ".png")) {
-        const png_data = try utils.readBinaryFile(allocator, input);
+        const png_data = try utils.readBinaryFile(allocator, io, input);
         defer allocator.free(png_data);
 
         const bytecode = pngine.png.extractBytecode(allocator, png_data) catch |err| {
@@ -155,7 +155,7 @@ fn loadOrCompileBytecode(allocator: std.mem.Allocator, input: []const u8) ![]u8 
     }
 
     if (std.mem.eql(u8, extension, ".zip")) {
-        const zip_data = try utils.readBinaryFile(allocator, input);
+        const zip_data = try utils.readBinaryFile(allocator, io, input);
         defer allocator.free(zip_data);
 
         const bytecode = bundle.extractFromZip(allocator, zip_data) catch |err| {
@@ -168,10 +168,10 @@ fn loadOrCompileBytecode(allocator: std.mem.Allocator, input: []const u8) ![]u8 
     }
 
     // Compile source file
-    const source = try utils.readSourceFile(allocator, input);
+    const source = try utils.readSourceFile(allocator, io, input);
     defer allocator.free(source);
 
-    const bytecode = try compile.compileSource(allocator, input, source);
+    const bytecode = try compile.compileSource(allocator, io, input, source);
     std.debug.assert(bytecode.len > 0);
     return bytecode;
 }

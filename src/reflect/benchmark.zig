@@ -79,6 +79,10 @@ fn runBenchmark(comptime name: []const u8, wgsl: []const u8, iterations: u32) !v
     for (0..iterations) |_| {
         timer.reset();
         var reflection = miniray.reflect(allocator, wgsl) catch |err| {
+            if (err == error.MinirayNotFound) {
+                std.debug.print("[{s}] Skipped: Miniray not found\n", .{name});
+                return;
+            }
             std.debug.print("[{s}] Error: {}\n", .{ name, err });
             return err;
         };

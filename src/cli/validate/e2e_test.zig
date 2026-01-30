@@ -28,6 +28,7 @@ const types = @import("types.zig");
 const Options = types.Options;
 const ValidationResult = types.ValidationResult;
 const wgsl_parser = @import("wgsl_parser.zig");
+const test_utils = @import("../../test_utils.zig");
 
 /// Maximum file size for test examples (10MB safety limit).
 const MAX_EXAMPLE_SIZE: u32 = 10 * 1024 * 1024;
@@ -59,8 +60,13 @@ fn loadAndValidate(
 
     var result = ValidationResult.init();
 
+    // Init IO for loading
+    var threaded = test_utils.initTestIo(allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+
     // Load bytecode (compiles .pngine to .pngb)
-    const bytecode = loader.loadBytecode(allocator, path) catch |err| {
+    const bytecode = loader.loadBytecode(allocator, io, path) catch |err| {
         try result.errors.append(allocator, .{
             .code = "E000",
             .severity = .err,

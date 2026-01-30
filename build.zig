@@ -54,19 +54,20 @@ pub fn build(b: *std.Build) void {
     // Check if miniray library exists at default location
     const has_miniray_lib = if (miniray_lib_path) |_| true else blk: {
         // Try default development path (compute-initialization is nested in pngine)
-        const default_path = "../../miniray/build/libminiray.a";
-        if (std.fs.cwd().access(default_path, .{})) |_| {
+        const default_path = "../miniray/build/libminiray.a";
+        if (std.Io.Dir.cwd().access(b.graph.io, default_path, .{})) |_| {
             break :blk true;
         } else |_| {
             break :blk false;
         }
     };
 
-    const effective_miniray_path: ?[]const u8 = if (miniray_lib_path) |p| p else if (has_miniray_lib) "../../miniray/build/libminiray.a" else null;
+    const effective_miniray_path: ?[]const u8 = if (miniray_lib_path) |p| p else if (has_miniray_lib) "../miniray/build/libminiray.a" else null;
 
     // Build options for reflect module
     const reflect_build_options = b.addOptions();
     reflect_build_options.addOption(bool, "has_miniray_lib", has_miniray_lib);
+    const reflect_options_mod = reflect_build_options.createModule();
 
     // Reflect module (for main lib, WGSL reflection via miniray)
     const reflect_module = b.createModule(.{
@@ -74,12 +75,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    reflect_module.addImport("build_options", reflect_build_options.createModule());
+    reflect_module.addImport("build_options", reflect_options_mod);
 
     // Add miniray library linking if available
     if (effective_miniray_path) |lib_path| {
         reflect_module.addObjectFile(.{ .cwd_relative = lib_path });
-        reflect_module.addIncludePath(.{ .cwd_relative = "../../miniray/build" });
+        reflect_module.addIncludePath(.{ .cwd_relative = "../miniray/build" });
         reflect_module.link_libc = true;
 
         // Link required system frameworks on macOS
@@ -565,12 +566,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     // Use FFI when library is available (default behavior)
-    reflect_standalone_mod.addImport("build_options", reflect_build_options.createModule());
+    reflect_standalone_mod.addImport("build_options", reflect_options_mod);
 
     // Link miniray library for standalone tests too
     if (effective_miniray_path) |lib_path| {
         reflect_standalone_mod.addObjectFile(.{ .cwd_relative = lib_path });
-        reflect_standalone_mod.addIncludePath(.{ .cwd_relative = "../../miniray/build" });
+        reflect_standalone_mod.addIncludePath(.{ .cwd_relative = "../miniray/build" });
         reflect_standalone_mod.link_libc = true;
         if (target.result.os.tag == .macos) {
             reflect_standalone_mod.linkFramework("CoreFoundation", .{});
@@ -609,7 +610,7 @@ pub fn build(b: *std.Build) void {
     dsl_complete_mod.addImport("reflect", reflect_module);
     dsl_complete_mod.addImport("executor", executor_mod);
     // dsl_complete also needs build_options for FFI status
-    dsl_complete_mod.addImport("build_options", reflect_build_options.createModule());
+    // dsl_complete_mod.addImport("build_options", reflect_options_mod);
     const dsl_complete_test = b.addTest(.{ .name = "dsl-complete", .root_module = dsl_complete_mod });
     const run_dsl_complete_test = b.addRunArtifact(dsl_complete_test);
     dsl_complete_step.dependOn(&run_dsl_complete_test.step);
@@ -1006,15 +1007,14 @@ pub fn build(b: *std.Build) void {
 
             // Add iOS SDK system include path for @cImport to work
             // This is needed because Zig's bundled libc headers don't have iOS-specific macros
-            const sdk_path_result = std.process.Child.run(.{
-                .allocator = b.allocator,
+            const sdk_path_result = std.process.run(b.allocator, b.graph.io, .{
                 .argv = &.{ "xcrun", "--sdk", ios_target.sdk_name, "--show-sdk-path" },
             }) catch |err| {
                 std.log.warn("Failed to get iOS SDK path for {s}: {}", .{ ios_target.sdk_name, err });
                 continue;
             };
-            if (sdk_path_result.term.Exited == 0) {
-                const sdk_path = std.mem.trimRight(u8, sdk_path_result.stdout, "\n\r");
+            if (sdk_path_result.term.exited == 0) {
+                const sdk_path = std.mem.trimEnd(u8, sdk_path_result.stdout, "\n\r");
                 ios_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{sdk_path}) });
             }
 

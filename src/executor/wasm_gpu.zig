@@ -5,7 +5,7 @@
 //!
 //! ## Data Flow
 //!
-//! 1. Bytecode calls createShaderModule(shader_id, wgsl_id)
+//! 1. Bytecode calls create_shader_module(shader_id, wgsl_id)
 //! 2. WasmGPU resolves wgsl_id from Module.wgsl table:
 //!    - Walk dependencies in topological order (iterative DFS)
 //!    - Concatenate raw code from data section with deduplication
@@ -30,9 +30,9 @@ const Module = format.Module;
 const DataSection = bytecode_mod.DataSection;
 const DataId = bytecode_mod.DataId;
 
-// ============================================================================
+// ============================================================================ 
 // JS Extern Declarations (imported from JavaScript)
-// ============================================================================
+// ============================================================================ 
 
 extern "env" fn gpuCreateBuffer(buffer_id: u16, size: u32, usage: u8) void;
 extern "env" fn gpuCreateTexture(texture_id: u16, desc_ptr: [*]const u8, desc_len: u32) void;
@@ -71,9 +71,9 @@ extern "env" fn gpuWriteTimeUniform(buffer_id: u16, buffer_offset: u32, size: u1
 pub extern "env" fn gpuDebugLog(msg_type: u8, value: u32) void;
 extern "env" fn jsConsoleLog(ptr: [*]const u8, len: u32) void;
 
-// ============================================================================
+// ============================================================================ 
 // WasmGPU Backend
-// ============================================================================
+// ============================================================================ 
 
 /// WebGPU backend for WASM that calls out to JavaScript.
 pub const WasmGPU = struct {
@@ -88,16 +88,16 @@ pub const WasmGPU = struct {
 
     /// Set the module for data lookups.
     /// Must be called before any GPU operations that reference data IDs.
-    pub fn setModule(self: *Self, module: *const Module) void {
+    pub fn set_module(self: *Self, module: *const Module) void {
         self.module = module;
     }
 
-    // ========================================================================
+    // ======================================================================== 
     // Debug Logging
-    // ========================================================================
+    // ======================================================================== 
 
     /// Log a message to the console.
-    pub fn consoleLog(_: *Self, prefix: []const u8, msg: []const u8) void {
+    pub fn console_log(_: *Self, prefix: []const u8, msg: []const u8) void {
         // Concatenate prefix and msg (simple approach using stack buffer)
         var buf: [512]u8 = undefined;
         const total_len = @min(prefix.len + msg.len, buf.len);
@@ -108,41 +108,41 @@ pub const WasmGPU = struct {
         jsConsoleLog(&buf, @intCast(total_len));
     }
 
-    // ========================================================================
+    // ======================================================================== 
     // Resource Creation
-    // ========================================================================
+    // ======================================================================== 
 
     /// Create a GPU buffer.
     /// Allocator unused - no WASM-side allocation needed.
-    pub fn createBuffer(self: *Self, allocator: Allocator, buffer_id: u16, size: u32, usage: u8) !void {
+    pub fn create_buffer(self: *Self, allocator: Allocator, buffer_id: u16, size: u32, usage: u8) !void {
         _ = self;
         _ = allocator;
         gpuCreateBuffer(buffer_id, size, usage);
     }
 
     /// Create a GPU texture from descriptor in the data section.
-    pub fn createTexture(self: *Self, allocator: Allocator, texture_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_texture(self: *Self, allocator: Allocator, texture_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
         assert(self.module != null);
 
-        const data = self.getDataOrPanic(descriptor_data_id);
+        const data = self.get_data_or_panic(descriptor_data_id);
         gpuCreateTexture(texture_id, data.ptr, @intCast(data.len));
     }
 
     /// Create a texture sampler from descriptor in the data section.
-    pub fn createSampler(self: *Self, allocator: Allocator, sampler_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_sampler(self: *Self, allocator: Allocator, sampler_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
         assert(self.module != null);
 
-        const data = self.getDataOrPanic(descriptor_data_id);
+        const data = self.get_data_or_panic(descriptor_data_id);
         gpuCreateSampler(sampler_id, data.ptr, @intCast(data.len));
     }
 
     /// Create a shader module from WGSL code.
     /// Resolves wgsl_id from the WGSL table, walking dependencies and concatenating code.
-    pub fn createShaderModule(self: *Self, allocator: Allocator, shader_id: u16, wgsl_id: u16) !void {
-        // Debug: log entry into createShaderModule
-        gpuDebugLog(2, 0xAAAA); // Marker: entering createShaderModule
+    pub fn create_shader_module(self: *Self, allocator: Allocator, shader_id: u16, wgsl_id: u16) !void {
+        // Debug: log entry into create_shader_module
+        gpuDebugLog(2, 0xAAAA); // Marker: entering create_shader_module
         gpuDebugLog(2, shader_id);
         gpuDebugLog(2, wgsl_id);
 
@@ -153,8 +153,8 @@ pub const WasmGPU = struct {
         }
 
         // Resolve from WGSL table (deduplicates transitive imports)
-        const resolved = self.resolveWgsl(allocator, wgsl_id) catch |err| {
-            gpuDebugLog(2, 0xBEEF); // Marker: resolveWgsl failed
+        const resolved = self.resolve_wgsl(allocator, wgsl_id) catch |err| {
+            gpuDebugLog(2, 0xBEEF); // Marker: resolve_wgsl failed
             return err;
         };
         defer allocator.free(resolved);
@@ -168,7 +168,7 @@ pub const WasmGPU = struct {
     /// Resolve a WGSL module by ID, concatenating all dependencies.
     /// Uses iterative DFS with deduplication (no recursion).
     /// Memory: Caller owns returned slice.
-    fn resolveWgsl(self: *Self, allocator: Allocator, wgsl_id: u16) ![]u8 {
+    fn resolve_wgsl(self: *Self, allocator: Allocator, wgsl_id: u16) ![]u8 {
         const module = self.module orelse return error.OutOfMemory;
         const wgsl_table = &module.wgsl;
 
@@ -260,128 +260,128 @@ pub const WasmGPU = struct {
     }
 
     /// Create a render pipeline from descriptor in the data section.
-    pub fn createRenderPipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_render_pipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
         assert(self.module != null);
 
-        const data = self.getDataOrPanic(descriptor_data_id);
+        const data = self.get_data_or_panic(descriptor_data_id);
         gpuCreateRenderPipeline(pipeline_id, data.ptr, @intCast(data.len));
     }
 
     /// Create a compute pipeline from descriptor in the data section.
-    pub fn createComputePipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_compute_pipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
         assert(self.module != null);
 
-        const data = self.getDataOrPanic(descriptor_data_id);
+        const data = self.get_data_or_panic(descriptor_data_id);
         gpuCreateComputePipeline(pipeline_id, data.ptr, @intCast(data.len));
     }
 
     /// Create a bind group from entries in the data section.
-    pub fn createBindGroup(self: *Self, allocator: Allocator, group_id: u16, layout_id: u16, entry_data_id: u16) !void {
+    pub fn create_bind_group(self: *Self, allocator: Allocator, group_id: u16, layout_id: u16, entry_data_id: u16) !void {
         _ = allocator;
         assert(self.module != null);
 
-        const data = self.getDataOrPanic(entry_data_id);
+        const data = self.get_data_or_panic(entry_data_id);
         gpuCreateBindGroup(group_id, layout_id, data.ptr, @intCast(data.len));
     }
 
     /// Create an ImageBitmap from blob data in the data section.
     /// Blob format: [mime_len:u8][mime:bytes][data:bytes]
-    pub fn createImageBitmap(self: *Self, allocator: Allocator, bitmap_id: u16, blob_data_id: u16) !void {
+    pub fn create_image_bitmap(self: *Self, allocator: Allocator, bitmap_id: u16, blob_data_id: u16) !void {
         _ = allocator;
         assert(self.module != null);
 
-        const data = self.getDataOrPanic(blob_data_id);
+        const data = self.get_data_or_panic(blob_data_id);
         gpuCreateImageBitmap(bitmap_id, data.ptr, @intCast(data.len));
     }
 
     /// Create a texture view from an existing texture.
-    pub fn createTextureView(self: *Self, allocator: Allocator, view_id: u16, texture_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_texture_view(self: *Self, allocator: Allocator, view_id: u16, texture_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
         assert(self.module != null);
 
-        const data = self.getDataOrPanic(descriptor_data_id);
+        const data = self.get_data_or_panic(descriptor_data_id);
         gpuCreateTextureView(view_id, texture_id, data.ptr, @intCast(data.len));
     }
 
     /// Create a query set for occlusion or timestamp queries.
-    pub fn createQuerySet(self: *Self, allocator: Allocator, query_set_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_query_set(self: *Self, allocator: Allocator, query_set_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
         assert(self.module != null);
 
-        const data = self.getDataOrPanic(descriptor_data_id);
+        const data = self.get_data_or_panic(descriptor_data_id);
         gpuCreateQuerySet(query_set_id, data.ptr, @intCast(data.len));
     }
 
     /// Create a bind group layout defining binding slot types.
-    pub fn createBindGroupLayout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_bind_group_layout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
         assert(self.module != null);
 
-        const data = self.getDataOrPanic(descriptor_data_id);
+        const data = self.get_data_or_panic(descriptor_data_id);
         gpuCreateBindGroupLayout(layout_id, data.ptr, @intCast(data.len));
     }
 
     /// Create a pipeline layout from bind group layouts.
-    pub fn createPipelineLayout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_pipeline_layout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
         assert(self.module != null);
 
-        const data = self.getDataOrPanic(descriptor_data_id);
+        const data = self.get_data_or_panic(descriptor_data_id);
         gpuCreatePipelineLayout(layout_id, data.ptr, @intCast(data.len));
     }
 
     /// Create a render bundle from pre-recorded draw commands.
-    pub fn createRenderBundle(self: *Self, allocator: Allocator, bundle_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_render_bundle(self: *Self, allocator: Allocator, bundle_id: u16, descriptor_data_id: u16) !void {
         _ = allocator;
         assert(self.module != null);
 
-        const data = self.getDataOrPanic(descriptor_data_id);
+        const data = self.get_data_or_panic(descriptor_data_id);
         gpuCreateRenderBundle(bundle_id, data.ptr, @intCast(data.len));
     }
 
-    // ========================================================================
+    // ======================================================================== 
     // Pass Operations
-    // ========================================================================
+    // ======================================================================== 
 
     /// Begin a render pass.
-    pub fn beginRenderPass(self: *Self, allocator: Allocator, color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16) !void {
+    pub fn begin_render_pass(self: *Self, allocator: Allocator, color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16) !void {
         _ = self;
         _ = allocator;
         gpuBeginRenderPass(color_texture_id, load_op, store_op, depth_texture_id);
     }
 
     /// Begin a compute pass.
-    pub fn beginComputePass(self: *Self, allocator: Allocator) !void {
+    pub fn begin_compute_pass(self: *Self, allocator: Allocator) !void {
         _ = self;
         _ = allocator;
         gpuBeginComputePass();
     }
 
     /// Set the current pipeline.
-    pub fn setPipeline(self: *Self, allocator: Allocator, pipeline_id: u16) !void {
+    pub fn set_pipeline(self: *Self, allocator: Allocator, pipeline_id: u16) !void {
         _ = self;
         _ = allocator;
         gpuSetPipeline(pipeline_id);
     }
 
     /// Set a bind group.
-    pub fn setBindGroup(self: *Self, allocator: Allocator, slot: u8, group_id: u16) !void {
+    pub fn set_bind_group(self: *Self, allocator: Allocator, slot: u8, group_id: u16) !void {
         _ = self;
         _ = allocator;
         gpuSetBindGroup(slot, group_id);
     }
 
     /// Set a vertex buffer.
-    pub fn setVertexBuffer(self: *Self, allocator: Allocator, slot: u8, buffer_id: u16) !void {
+    pub fn set_vertex_buffer(self: *Self, allocator: Allocator, slot: u8, buffer_id: u16) !void {
         _ = self;
         _ = allocator;
         gpuSetVertexBuffer(slot, buffer_id);
     }
 
     /// Set an index buffer.
-    pub fn setIndexBuffer(self: *Self, allocator: Allocator, buffer_id: u16, index_format: u8) !void {
+    pub fn set_index_buffer(self: *Self, allocator: Allocator, buffer_id: u16, index_format: u8) !void {
         _ = self;
         _ = allocator;
         gpuSetIndexBuffer(buffer_id, index_format);
@@ -395,7 +395,7 @@ pub const WasmGPU = struct {
     }
 
     /// Draw indexed primitives.
-    pub fn drawIndexed(self: *Self, allocator: Allocator, index_count: u32, instance_count: u32, first_index: u32, base_vertex: u32, first_instance: u32) !void {
+    pub fn draw_indexed(self: *Self, allocator: Allocator, index_count: u32, instance_count: u32, first_index: u32, base_vertex: u32, first_instance: u32) !void {
         _ = self;
         _ = allocator;
         gpuDrawIndexed(index_count, instance_count, first_index, base_vertex, first_instance);
@@ -409,29 +409,29 @@ pub const WasmGPU = struct {
     }
 
     /// Execute pre-recorded render bundles.
-    pub fn executeBundles(self: *Self, allocator: Allocator, bundle_ids: []const u16) !void {
+    pub fn execute_bundles(self: *Self, allocator: Allocator, bundle_ids: []const u16) !void {
         _ = self;
         _ = allocator;
         gpuExecuteBundles(bundle_ids.ptr, @intCast(bundle_ids.len));
     }
 
     /// End the current pass.
-    pub fn endPass(self: *Self, allocator: Allocator) !void {
+    pub fn end_pass(self: *Self, allocator: Allocator) !void {
         _ = self;
         _ = allocator;
         gpuEndPass();
     }
 
-    // ========================================================================
+    // ======================================================================== 
     // Queue Operations
-    // ========================================================================
+    // ======================================================================== 
 
     /// Write data to a buffer.
-    pub fn writeBuffer(self: *Self, allocator: Allocator, buffer_id: u16, offset: u32, data_id: u16) !void {
+    pub fn write_buffer(self: *Self, allocator: Allocator, buffer_id: u16, offset: u32, data_id: u16) !void {
         _ = allocator;
         assert(self.module != null);
 
-        const data = self.getDataOrPanic(data_id);
+        const data = self.get_data_or_panic(data_id);
         gpuWriteBuffer(buffer_id, offset, data.ptr, @intCast(data.len));
     }
 
@@ -443,28 +443,28 @@ pub const WasmGPU = struct {
     }
 
     /// Copy an ImageBitmap to a texture.
-    pub fn copyExternalImageToTexture(self: *Self, allocator: Allocator, bitmap_id: u16, texture_id: u16, mip_level: u8, origin_x: u16, origin_y: u16) !void {
+    pub fn copy_external_image_to_texture(self: *Self, allocator: Allocator, bitmap_id: u16, texture_id: u16, mip_level: u8, origin_x: u16, origin_y: u16) !void {
         _ = self;
         _ = allocator;
         gpuCopyExternalImageToTexture(bitmap_id, texture_id, mip_level, origin_x, origin_y);
     }
 
-    // ========================================================================
+    // ======================================================================== 
     // WASM Module Operations
-    // ========================================================================
+    // ======================================================================== 
 
     /// Initialize a WASM module from embedded data.
-    pub fn initWasmModule(self: *Self, allocator: Allocator, module_id: u16, wasm_data_id: u16) !void {
+    pub fn init_wasm_module(self: *Self, allocator: Allocator, module_id: u16, wasm_data_id: u16) !void {
         _ = allocator;
         assert(self.module != null);
 
-        const data = self.getDataOrPanic(wasm_data_id);
+        const data = self.get_data_or_panic(wasm_data_id);
         gpuInitWasmModule(module_id, data.ptr, @intCast(data.len));
     }
 
     /// Call a WASM exported function.
     /// The function name comes from string table, args are pre-encoded.
-    pub fn callWasmFunc(self: *Self, allocator: Allocator, call_id: u16, module_id: u16, func_name_id: u16, args: []const u8) !void {
+    pub fn call_wasm_func(self: *Self, allocator: Allocator, call_id: u16, module_id: u16, func_name_id: u16, args: []const u8) !void {
         _ = allocator;
         assert(self.module != null);
 
@@ -476,7 +476,7 @@ pub const WasmGPU = struct {
     }
 
     /// Write bytes from WASM memory to a GPU buffer.
-    pub fn writeBufferFromWasm(self: *Self, allocator: Allocator, call_id: u16, buffer_id: u16, offset: u32, byte_len: u32) !void {
+    pub fn write_buffer_from_wasm(self: *Self, allocator: Allocator, call_id: u16, buffer_id: u16, offset: u32, byte_len: u32) !void {
         _ = self;
         _ = allocator;
         gpuWriteBufferFromWasm(call_id, buffer_id, offset, byte_len);
@@ -484,27 +484,27 @@ pub const WasmGPU = struct {
 
     /// Write time/canvas uniform data to GPU buffer.
     /// Runtime provides f32 values: time, canvas_width, canvas_height[, aspect_ratio].
-    pub fn writeTimeUniform(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
+    pub fn write_time_uniform(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
         _ = self;
         _ = allocator;
         gpuWriteTimeUniform(buffer_id, buffer_offset, size);
     }
 
-    // ========================================================================
+    // ======================================================================== 
     // Internal Helpers
-    // ========================================================================
+    // ======================================================================== 
 
     /// Get data from module by ID.
     /// Panics if module not set or ID invalid (programming error).
-    fn getDataOrPanic(self: *const Self, data_id: u16) []const u8 {
+    fn get_data_or_panic(self: *const Self, data_id: u16) []const u8 {
         const module = self.module orelse unreachable;
         return module.data.get(@enumFromInt(data_id));
     }
 };
 
-// ============================================================================
+// ============================================================================ 
 // Tests (Native only - externs not available)
-// ============================================================================
+// ============================================================================ 
 
 const testing = std.testing;
 const builtin = @import("builtin");

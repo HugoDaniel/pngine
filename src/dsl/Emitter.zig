@@ -263,6 +263,8 @@ pub const Emitter = struct {
         executor_wasm: ?[]const u8 = null,
         /// Plugin set for the executor (required when executor_wasm is provided).
         plugins: ?format.PluginSet = null,
+        /// IO context for file operations.
+        io: ?std.Io = null,
     };
 
     pub const Error = error{

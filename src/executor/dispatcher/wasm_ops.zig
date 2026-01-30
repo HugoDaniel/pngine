@@ -45,7 +45,7 @@ pub fn handle(
         .init_wasm_module => {
             const module_id = try self.readVarint();
             const wasm_data_id = try self.readVarint();
-            try self.backend.initWasmModule(allocator, @intCast(module_id), @intCast(wasm_data_id));
+            try self.backend.init_wasm_module(allocator, @intCast(module_id), @intCast(wasm_data_id));
         },
 
         .call_wasm_func => {
@@ -81,7 +81,7 @@ pub fn handle(
                 }
             }
 
-            try self.backend.callWasmFunc(
+            try self.backend.call_wasm_func(
                 allocator,
                 @intCast(call_id),
                 @intCast(module_id),
@@ -95,7 +95,7 @@ pub fn handle(
             const buffer_id = try self.readVarint();
             const offset = try self.readVarint();
             const byte_len = try self.readVarint();
-            try self.backend.writeBufferFromWasm(
+            try self.backend.write_buffer_from_wasm(
                 allocator,
                 @intCast(call_id),
                 @intCast(buffer_id),

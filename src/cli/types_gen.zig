@@ -152,15 +152,15 @@ fn uniformTypeToTypeScript(uniform_type: UniformType) []const u8 {
 ///
 /// Pre-condition: path ends with .d.ts, content is valid TypeScript.
 /// Post-condition: File is written or error returned.
-pub fn writeToFile(path: []const u8, content: []const u8) !void {
+pub fn writeToFile(io: std.Io, path: []const u8, content: []const u8) !void {
     // Pre-condition
     assert(path.len > 5); // At least "x.d.ts"
     assert(std.mem.endsWith(u8, path, ".d.ts"));
 
-    const file = try std.fs.cwd().createFile(path, .{});
-    defer file.close();
+    const file = try io.cwd().createFile(io, path, .{});
+    defer file.close(io);
 
-    try file.writeAll(content);
+    try file.writeStreamingAll(io, content);
 }
 
 /// Derive .d.ts path from PNG/bytecode output path.

@@ -46,7 +46,7 @@ pub fn handle(
 
             // Calculate actual buffer ID: base + (frame_counter + offset) % pool_size
             const actual_id: u16 = @intCast(base_buffer_id + (self.frame_counter + offset) % pool_size);
-            try self.backend.setVertexBuffer(allocator, slot, actual_id);
+            try self.backend.set_vertex_buffer(allocator, slot, actual_id);
         },
 
         .set_bind_group_pool => {
@@ -60,7 +60,7 @@ pub fn handle(
 
             // Calculate actual bind group ID: base + (frame_counter + offset) % pool_size
             const actual_id: u16 = @intCast(base_group_id + (self.frame_counter + offset) % pool_size);
-            try self.backend.setBindGroup(allocator, slot, actual_id);
+            try self.backend.set_bind_group(allocator, slot, actual_id);
         },
 
         else => return false,

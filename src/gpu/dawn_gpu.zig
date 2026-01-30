@@ -126,7 +126,7 @@ pub const DawnGPU = struct {
         instance.?.requestAdapter(.{
             .power_preference = .high_performance,
             .compatible_surface = null, // Headless
-        }, &adapterCallback, @ptrCast(&adapter), @ptrCast(&adapter_ready));
+        }, &adapter_callback, @ptrCast(&adapter), @ptrCast(&adapter_ready));
 
         // Wait for adapter (Dawn is synchronous on native)
         if (!adapter_ready or adapter == null) return Error.AdapterRequestFailed;
@@ -134,7 +134,7 @@ pub const DawnGPU = struct {
         // Request device
         var device: ?wgpu.Device = null;
         var device_ready = false;
-        adapter.?.requestDevice(.{}, &deviceCallback, @ptrCast(&device), @ptrCast(&device_ready));
+        adapter.?.requestDevice(.{}, &device_callback, @ptrCast(&device), @ptrCast(&device_ready));
 
         if (!device_ready or device == null) return Error.DeviceRequestFailed;
 
@@ -152,7 +152,7 @@ pub const DawnGPU = struct {
         const render_view = render_texture.createView(.{});
 
         // Create readback buffer (for copying pixels from texture)
-        const bytes_per_row = alignTo256(width * 4);
+        const bytes_per_row = align_to_256(width * 4);
         const readback_size = bytes_per_row * height;
         const readback_buffer = device.?.createBuffer(.{
             .size = readback_size,
@@ -198,11 +198,11 @@ pub const DawnGPU = struct {
     }
 
     /// Align to 256 bytes (wgpu requirement for buffer copies).
-    fn alignTo256(value: u32) u32 {
+    fn align_to_256(value: u32) u32 {
         return (value + 255) & ~@as(u32, 255);
     }
 
-    fn adapterCallback(status: wgpu.RequestAdapterStatus, adapter: ?wgpu.Adapter, message: ?[*:0]const u8, userdata1: ?*anyopaque, userdata2: ?*anyopaque) void {
+    fn adapter_callback(status: wgpu.RequestAdapterStatus, adapter: ?wgpu.Adapter, message: ?[*:0]const u8, userdata1: ?*anyopaque, userdata2: ?*anyopaque) void {
         _ = message;
         if (status == .success) {
             const adapter_ptr: *?wgpu.Adapter = @ptrCast(@alignCast(userdata1));
@@ -212,7 +212,7 @@ pub const DawnGPU = struct {
         ready_ptr.* = true;
     }
 
-    fn deviceCallback(status: wgpu.RequestDeviceStatus, device: ?wgpu.Device, message: ?[*:0]const u8, userdata1: ?*anyopaque, userdata2: ?*anyopaque) void {
+    fn device_callback(status: wgpu.RequestDeviceStatus, device: ?wgpu.Device, message: ?[*:0]const u8, userdata1: ?*anyopaque, userdata2: ?*anyopaque) void {
         _ = message;
         if (status == .success) {
             const device_ptr: *?wgpu.Device = @ptrCast(@alignCast(userdata1));
@@ -261,14 +261,14 @@ pub const DawnGPU = struct {
     }
 
     /// Set module reference for data lookups.
-    pub fn setModule(self: *Self, module: *const format.Module) void {
+    pub fn set_module(self: *Self, module: *const format.Module) void {
         assert(self.initialized);
         assert(module.bytecode.len > 0);
         self.module = module;
     }
 
     /// Set time uniform for animations.
-    pub fn setTime(self: *Self, time_value: f32) void {
+    pub fn set_time(self: *Self, time_value: f32) void {
         assert(self.initialized);
         assert(!std.math.isNan(time_value));
         self.time = time_value;
@@ -278,12 +278,12 @@ pub const DawnGPU = struct {
     ///
     /// Pre-condition: GPU is initialized and rendering is complete.
     /// Post-condition: Returns RGBA pixel data (width * height * 4 bytes).
-    pub fn readPixels(self: *Self, allocator: Allocator) Error![]u8 {
+    pub fn read_pixels(self: *Self, allocator: Allocator) Error![]u8 {
         assert(self.initialized);
 
         // Copy render texture to readback buffer
         const encoder = self.device.createCommandEncoder(.{});
-        const bytes_per_row = alignTo256(self.width * 4);
+        const bytes_per_row = align_to_256(self.width * 4);
 
         encoder.copyTextureToBuffer(
             .{ .texture = self.render_texture },
@@ -302,7 +302,7 @@ pub const DawnGPU = struct {
 
         // Map buffer and read data
         var mapped = false;
-        self.readback_buffer.mapAsync(.{ .read = true }, 0, bytes_per_row * self.height, &mapCallback, @ptrCast(&mapped));
+        self.readback_buffer.mapAsync(.{ .read = true }, 0, bytes_per_row * self.height, &map_callback, @ptrCast(&mapped));
 
         // Wait for map (Dawn is synchronous)
         // In a real implementation, we'd poll the device
@@ -337,7 +337,7 @@ pub const DawnGPU = struct {
         return result;
     }
 
-    fn mapCallback(status: wgpu.BufferMapAsyncStatus, userdata: ?*anyopaque) void {
+    fn map_callback(status: wgpu.BufferMapAsyncStatus, userdata: ?*anyopaque) void {
         if (status == .success) {
             const mapped_ptr: *bool = @ptrCast(@alignCast(userdata));
             mapped_ptr.* = true;
@@ -345,7 +345,7 @@ pub const DawnGPU = struct {
     }
 
     /// Check if Dawn GPU rendering is available.
-    pub fn isAvailable() bool {
+    pub fn is_available() bool {
         // Try to create an instance
         const instance = wgpu.createInstance(.{});
         if (instance) |inst| {
@@ -359,7 +359,7 @@ pub const DawnGPU = struct {
     // GPU Backend Interface (required by Dispatcher)
     // ========================================================================
 
-    pub fn createBuffer(self: *Self, _: Allocator, buffer_id: u16, size: u32, usage: u8) !void {
+    pub fn create_buffer(self: *Self, _: Allocator, buffer_id: u16, size: u32, usage: u8) !void {
         assert(buffer_id < MAX_BUFFERS);
         assert(self.initialized);
 
@@ -382,7 +382,7 @@ pub const DawnGPU = struct {
         self.buffers[buffer_id] = buffer;
     }
 
-    pub fn createTexture(self: *Self, _: Allocator, texture_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_texture(self: *Self, _: Allocator, texture_id: u16, descriptor_data_id: u16) !void {
         _ = descriptor_data_id;
         assert(texture_id < MAX_TEXTURES);
         assert(self.initialized);
@@ -400,7 +400,7 @@ pub const DawnGPU = struct {
         self.textures[texture_id] = texture;
     }
 
-    pub fn createTextureView(self: *Self, _: Allocator, view_id: u16, texture_id: u16, _: u16) !void {
+    pub fn create_texture_view(self: *Self, _: Allocator, view_id: u16, texture_id: u16, _: u16) !void {
         assert(view_id < MAX_TEXTURES);
         assert(self.initialized);
 
@@ -409,7 +409,7 @@ pub const DawnGPU = struct {
         }
     }
 
-    pub fn createSampler(self: *Self, _: Allocator, sampler_id: u16, _: u16) !void {
+    pub fn create_sampler(self: *Self, _: Allocator, sampler_id: u16, _: u16) !void {
         assert(sampler_id < MAX_TEXTURES);
         assert(self.initialized);
 
@@ -424,7 +424,7 @@ pub const DawnGPU = struct {
         self.samplers[sampler_id] = sampler;
     }
 
-    pub fn createShaderModule(self: *Self, _: Allocator, shader_id: u16, code_data_id: u16) !void {
+    pub fn create_shader_module(self: *Self, _: Allocator, shader_id: u16, code_data_id: u16) !void {
         assert(shader_id < MAX_SHADERS);
         assert(self.initialized);
 
@@ -439,7 +439,7 @@ pub const DawnGPU = struct {
         self.shaders[shader_id] = shader;
     }
 
-    pub fn createRenderPipeline(self: *Self, _: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_render_pipeline(self: *Self, _: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
         _ = descriptor_data_id;
         assert(pipeline_id < MAX_PIPELINES);
         assert(self.initialized);
@@ -448,7 +448,7 @@ pub const DawnGPU = struct {
         // For now, this is a placeholder - real implementation needs vertex/fragment info
     }
 
-    pub fn createComputePipeline(self: *Self, _: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_compute_pipeline(self: *Self, _: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
         _ = descriptor_data_id;
         assert(pipeline_id < MAX_PIPELINES);
         assert(self.initialized);
@@ -456,7 +456,7 @@ pub const DawnGPU = struct {
         // TODO: Parse descriptor from data section
     }
 
-    pub fn createBindGroup(self: *Self, _: Allocator, group_id: u16, layout_id: u16, _: u16) !void {
+    pub fn create_bind_group(self: *Self, _: Allocator, group_id: u16, layout_id: u16, _: u16) !void {
         _ = layout_id;
         assert(group_id < MAX_BIND_GROUPS);
         assert(self.initialized);
@@ -464,33 +464,33 @@ pub const DawnGPU = struct {
         // TODO: Parse entries from data section
     }
 
-    pub fn createBindGroupLayout(self: *Self, _: Allocator, layout_id: u16, _: u16) !void {
+    pub fn create_bind_group_layout(self: *Self, _: Allocator, layout_id: u16, _: u16) !void {
         assert(layout_id < MAX_BIND_GROUP_LAYOUTS);
         assert(self.initialized);
         // TODO: Implement
     }
 
-    pub fn createPipelineLayout(self: *Self, _: Allocator, _: u16, _: u16) !void {
+    pub fn create_pipeline_layout(self: *Self, _: Allocator, _: u16, _: u16) !void {
         assert(self.initialized);
         // TODO: Implement
     }
 
-    pub fn createQuerySet(self: *Self, _: Allocator, _: u16, _: u16) !void {
+    pub fn create_query_set(self: *Self, _: Allocator, _: u16, _: u16) !void {
         assert(self.initialized);
         // TODO: Implement
     }
 
-    pub fn createImageBitmap(self: *Self, _: Allocator, _: u16, _: u16) !void {
+    pub fn create_image_bitmap(self: *Self, _: Allocator, _: u16, _: u16) !void {
         assert(self.initialized);
         // TODO: Implement
     }
 
-    pub fn createRenderBundle(self: *Self, _: Allocator, _: u16, _: u16) !void {
+    pub fn create_render_bundle(self: *Self, _: Allocator, _: u16, _: u16) !void {
         assert(self.initialized);
         // TODO: Implement
     }
 
-    pub fn executeBundles(self: *Self, _: Allocator, _: []const u16) !void {
+    pub fn execute_bundles(self: *Self, _: Allocator, _: []const u16) !void {
         assert(self.in_render_pass);
         assert(self.initialized);
         // TODO: Implement
@@ -500,7 +500,7 @@ pub const DawnGPU = struct {
     // Pass Operations
     // ========================================================================
 
-    pub fn beginRenderPass(self: *Self, _: Allocator, color_texture_id: u16, load_op: u8, _: u8, _: u16) !void {
+    pub fn begin_render_pass(self: *Self, _: Allocator, color_texture_id: u16, load_op: u8, _: u8, _: u16) !void {
         assert(!self.in_render_pass and !self.in_compute_pass);
         assert(self.initialized);
 
@@ -532,7 +532,7 @@ pub const DawnGPU = struct {
         self.current_pipeline = null;
     }
 
-    pub fn beginComputePass(self: *Self, _: Allocator) !void {
+    pub fn begin_compute_pass(self: *Self, _: Allocator) !void {
         assert(!self.in_render_pass and !self.in_compute_pass);
         assert(self.initialized);
 
@@ -545,7 +545,7 @@ pub const DawnGPU = struct {
         self.current_pipeline = null;
     }
 
-    pub fn setPipeline(self: *Self, _: Allocator, pipeline_id: u16) !void {
+    pub fn set_pipeline(self: *Self, _: Allocator, pipeline_id: u16) !void {
         assert(self.in_render_pass or self.in_compute_pass);
         assert(self.initialized);
 
@@ -561,7 +561,7 @@ pub const DawnGPU = struct {
         self.current_pipeline = pipeline_id;
     }
 
-    pub fn setBindGroup(self: *Self, _: Allocator, slot: u8, group_id: u16) !void {
+    pub fn set_bind_group(self: *Self, _: Allocator, slot: u8, group_id: u16) !void {
         assert(self.in_render_pass or self.in_compute_pass);
         assert(self.initialized);
 
@@ -574,7 +574,7 @@ pub const DawnGPU = struct {
         }
     }
 
-    pub fn setVertexBuffer(self: *Self, _: Allocator, slot: u8, buffer_id: u16) !void {
+    pub fn set_vertex_buffer(self: *Self, _: Allocator, slot: u8, buffer_id: u16) !void {
         assert(self.in_render_pass);
         assert(self.initialized);
 
@@ -583,7 +583,7 @@ pub const DawnGPU = struct {
         }
     }
 
-    pub fn setIndexBuffer(self: *Self, _: Allocator, buffer_id: u16, index_format: u8) !void {
+    pub fn set_index_buffer(self: *Self, _: Allocator, buffer_id: u16, index_format: u8) !void {
         assert(self.in_render_pass);
         assert(self.initialized);
 
@@ -600,7 +600,7 @@ pub const DawnGPU = struct {
         self.render_pass.?.draw(vertex_count, instance_count, first_vertex, first_instance);
     }
 
-    pub fn drawIndexed(self: *Self, _: Allocator, index_count: u32, instance_count: u32, first_index: u32, base_vertex: u32, first_instance: u32) !void {
+    pub fn draw_indexed(self: *Self, _: Allocator, index_count: u32, instance_count: u32, first_index: u32, base_vertex: u32, first_instance: u32) !void {
         assert(self.in_render_pass);
         assert(self.initialized);
 
@@ -614,7 +614,7 @@ pub const DawnGPU = struct {
         self.compute_pass.?.dispatchWorkgroups(x, y, z);
     }
 
-    pub fn endPass(self: *Self, _: Allocator) !void {
+    pub fn end_pass(self: *Self, _: Allocator) !void {
         assert(self.in_render_pass or self.in_compute_pass);
         assert(self.initialized);
 
@@ -635,7 +635,7 @@ pub const DawnGPU = struct {
     // Queue Operations
     // ========================================================================
 
-    pub fn writeBuffer(self: *Self, _: Allocator, buffer_id: u16, offset: u32, data_id: u16) !void {
+    pub fn write_buffer(self: *Self, _: Allocator, buffer_id: u16, offset: u32, data_id: u16) !void {
         assert(self.initialized);
 
         if (self.buffers[buffer_id]) |buffer| {
@@ -656,7 +656,7 @@ pub const DawnGPU = struct {
         }
     }
 
-    pub fn copyExternalImageToTexture(self: *Self, _: Allocator, _: u16, _: u16, _: u8, _: u16, _: u16) !void {
+    pub fn copy_external_image_to_texture(self: *Self, _: Allocator, _: u16, _: u16, _: u8, _: u16, _: u16) !void {
         assert(self.initialized);
         // TODO: Implement
     }
@@ -665,24 +665,24 @@ pub const DawnGPU = struct {
     // WASM Module Operations (stub - Dawn doesn't run WASM)
     // ========================================================================
 
-    pub fn initWasmModule(self: *Self, _: Allocator, _: u16, _: u16) !void {
+    pub fn init_wasm_module(self: *Self, _: Allocator, _: u16, _: u16) !void {
         assert(self.initialized);
         // WASM is not supported in Dawn backend
     }
 
-    pub fn callWasmFunc(self: *Self, _: Allocator, _: u16, _: u16, _: u16, _: []const u8) !void {
+    pub fn call_wasm_func(self: *Self, _: Allocator, _: u16, _: u16, _: u16, _: []const u8) !void {
         assert(self.initialized);
         // WASM is not supported in Dawn backend
     }
 
-    pub fn writeBufferFromWasm(self: *Self, _: Allocator, _: u16, _: u16, _: u32, _: u32) !void {
+    pub fn write_buffer_from_wasm(self: *Self, _: Allocator, _: u16, _: u16, _: u32, _: u32) !void {
         assert(self.initialized);
         // WASM is not supported in Dawn backend
     }
 
     /// Write time/canvas uniform data to GPU buffer.
     /// Runtime provides f32 values: time, canvas_width, canvas_height, aspect_ratio.
-    pub fn writeTimeUniform(self: *Self, _: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
+    pub fn write_time_uniform(self: *Self, _: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
         assert(self.initialized);
 
         if (self.buffers[buffer_id]) |buffer| {

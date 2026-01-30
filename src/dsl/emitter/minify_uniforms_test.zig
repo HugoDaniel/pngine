@@ -220,7 +220,7 @@ test "Minify: execution produces same GPU call count" {
     try dispatcher_minified.executeAll(testing.allocator);
 
     // Same number of GPU calls
-    try testing.expectEqual(gpu_normal.callCount(), gpu_minified.callCount());
+    try testing.expectEqual(gpu_normal.call_count(), gpu_minified.call_count());
 }
 
 test "Minify: execution produces same GPU call types" {
@@ -258,8 +258,8 @@ test "Minify: execution produces same GPU call types" {
     try dispatcher_minified.executeAll(testing.allocator);
 
     // Same call types in same order
-    const calls_normal = gpu_normal.getCalls();
-    const calls_minified = gpu_minified.getCalls();
+    const calls_normal = gpu_normal.get_calls();
+    const calls_minified = gpu_minified.get_calls();
 
     for (calls_normal, calls_minified) |cn, cm| {
         try testing.expectEqual(cn.call_type, cm.call_type);
@@ -422,7 +422,7 @@ test "Minify: complex shader with multiple uniforms compiles" {
     defer dispatcher.deinit();
     try dispatcher.executeAll(testing.allocator);
 
-    try testing.expect(gpu.callCount() > 0);
+    try testing.expect(gpu.call_count() > 0);
 }
 
 test "Minify: multiple binding names preserved" {

@@ -88,27 +88,27 @@ pub fn Backend(comptime T: type) type {
         pub fn validate() void {
             comptime {
                 // Resource creation
-                _ = @field(T, "createBuffer");
-                _ = @field(T, "createTexture");
-                _ = @field(T, "createSampler");
-                _ = @field(T, "createShaderModule");
-                _ = @field(T, "createRenderPipeline");
-                _ = @field(T, "createComputePipeline");
-                _ = @field(T, "createBindGroup");
+                _ = @field(T, "create_buffer");
+                _ = @field(T, "create_texture");
+                _ = @field(T, "create_sampler");
+                _ = @field(T, "create_shader_module");
+                _ = @field(T, "create_render_pipeline");
+                _ = @field(T, "create_compute_pipeline");
+                _ = @field(T, "create_bind_group");
 
                 // Pass operations
-                _ = @field(T, "beginRenderPass");
-                _ = @field(T, "beginComputePass");
-                _ = @field(T, "setPipeline");
-                _ = @field(T, "setBindGroup");
-                _ = @field(T, "setVertexBuffer");
+                _ = @field(T, "begin_render_pass");
+                _ = @field(T, "begin_compute_pass");
+                _ = @field(T, "set_pipeline");
+                _ = @field(T, "set_bind_group");
+                _ = @field(T, "set_vertex_buffer");
                 _ = @field(T, "draw");
-                _ = @field(T, "drawIndexed");
+                _ = @field(T, "draw_indexed");
                 _ = @field(T, "dispatch");
-                _ = @field(T, "endPass");
+                _ = @field(T, "end_pass");
 
                 // Queue operations
-                _ = @field(T, "writeBuffer");
+                _ = @field(T, "write_buffer");
                 _ = @field(T, "submit");
             }
         }
@@ -133,7 +133,7 @@ pub fn Dispatcher(comptime BackendType: type) type {
         module: *const Module,
 
         /// Current bytecode position.
-        pc: usize,
+        pc: u32,
 
         /// Execution state.
         in_pass_def: bool,
@@ -149,7 +149,7 @@ pub fn Dispatcher(comptime BackendType: type) type {
         current_pass_id: ?u16,
 
         /// Start position of current pass definition.
-        current_pass_start: usize,
+        current_pass_start: u32,
 
         /// Frame counter for ping-pong pool calculations.
         frame_counter: u32,
@@ -220,7 +220,7 @@ pub fn Dispatcher(comptime BackendType: type) type {
 
         /// Skip opcode parameters at a given position (for scanning without executing).
         /// Made public for use by CLI frame scanning and tests.
-        pub fn skipOpcodeParamsAt(bytecode: []const u8, pc: *usize, op: OpCode) void {
+        pub fn skipOpcodeParamsAt(bytecode: []const u8, pc: *u32, op: OpCode) void {
             var scanner = OpcodeScanner.init(bytecode, pc.*);
             scanner.skipParams(op);
             pc.* = scanner.pc;
@@ -244,7 +244,7 @@ pub fn Dispatcher(comptime BackendType: type) type {
             assert(self.pc <= self.module.bytecode.len);
 
             const bytecode = self.module.bytecode;
-            const max_iterations: usize = 10000; // Safety bound
+            const max_iterations: u32 = 10000; // Safety bound
 
             for (0..max_iterations) |_| {
                 if (self.pc >= bytecode.len) break;

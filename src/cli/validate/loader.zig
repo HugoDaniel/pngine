@@ -10,7 +10,7 @@ const types = @import("types.zig");
 ///
 /// Pre-condition: path is non-empty
 /// Post-condition: Returns owned bytecode slice (caller must free)
-pub fn loadBytecode(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+pub fn loadBytecode(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
     // Pre-condition: path is non-empty
     std.debug.assert(path.len > 0);
 
@@ -18,12 +18,12 @@ pub fn loadBytecode(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 
     // For .pngb files, just read directly
     if (std.mem.eql(u8, extension, ".pngb")) {
-        return readFile(allocator, path);
+        return readFile(allocator, io, path);
     }
 
     // For .png files, extract embedded bytecode
     if (std.mem.eql(u8, extension, ".png")) {
-        const png_data = try readFile(allocator, path);
+        const png_data = try readFile(allocator, io, path);
         defer allocator.free(png_data);
 
         const extracted = try pngine.png.extract.extract(allocator, png_data);
@@ -31,7 +31,7 @@ pub fn loadBytecode(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     }
 
     // For .pngine or .pbsf, compile first
-    const source = try readFile(allocator, path);
+    const source = try readFile(allocator, io, path);
     defer allocator.free(source);
 
     // Add null terminator for DSL parser
@@ -55,11 +55,11 @@ pub fn loadBytecode(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 ///
 /// Pre-condition: path is non-empty
 /// Post-condition: Returns owned buffer (caller must free)
-pub fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
+pub fn readFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
 
-    const stat = try file.stat();
+    const stat = try file.stat(io);
     const size: u32 = if (stat.size > types.max_file_size)
         return error.FileTooLarge
     else
@@ -72,7 +72,7 @@ pub fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     var bytes_read: u32 = 0;
     for (0..size + 1) |_| {
         if (bytes_read >= size) break;
-        const n: u32 = @intCast(try file.read(buffer[bytes_read..]));
+        const n: u32 = @intCast(try file.readStreaming(io, &.{buffer[bytes_read..]}));
         if (n == 0) break;
         bytes_read += n;
     }

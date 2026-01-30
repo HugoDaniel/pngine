@@ -85,21 +85,21 @@ pub const Payload = struct {
 ///
 /// Pre-condition: path points to valid PNG file
 /// Post-condition: Returns payload info, caller owns memory
-pub fn loadPNG(allocator: std.mem.Allocator, path: []const u8) Error!Payload {
+pub fn loadPNG(allocator: std.mem.Allocator, io: std.Io, path: []const u8) Error!Payload {
     // Pre-condition: path must be non-empty
     std.debug.assert(path.len > 0);
 
     // Open file
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+    const file = io.cwd().openFile(io, path, .{}) catch |err| {
         return switch (err) {
             error.FileNotFound => Error.FileNotFound,
             else => Error.IoError,
         };
     };
-    defer file.close();
+    defer file.close(io);
 
     // Get file size
-    const stat = file.stat() catch return Error.IoError;
+    const stat = file.stat(io) catch return Error.IoError;
     if (stat.size > 10 * 1024 * 1024) return Error.IoError;
     const size: usize = @intCast(stat.size);
 
@@ -111,7 +111,7 @@ pub fn loadPNG(allocator: std.mem.Allocator, path: []const u8) Error!Payload {
     var bytes_read: usize = 0;
     for (0..size + 1) |_| {
         if (bytes_read >= size) break;
-        const n = file.read(png_data[bytes_read..]) catch return Error.IoError;
+        const n = file.readStreaming(io, &.{png_data[bytes_read..]}) catch return Error.IoError;
         if (n == 0) break;
         bytes_read += n;
     }

@@ -302,7 +302,7 @@ test "Parser: builtin refs - canvas.width, time.total without dollar" {
         if (prop_tag == .property) {
             const prop_token = ast.nodes.items(.main_token)[prop_idx];
             const prop_name = ast.tokenSlice(prop_token);
-            if (std.mem.eql(u8, std.mem.trimRight(u8, prop_name, " \t\n\r={"), "args")) {
+            if (std.mem.eql(u8, std.mem.trimEnd(u8, prop_name, " \t\n\r={"), "args")) {
                 const prop_data = ast.nodes.items(.data)[prop_idx];
                 args_array = prop_data.node;
                 break;
