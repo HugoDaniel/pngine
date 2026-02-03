@@ -1,0 +1,44 @@
+{
+  "object" : {
+    "artifacts" : [
+      {
+        "kind" : {
+          "xcframework" : {
+
+          }
+        },
+        "packageRef" : {
+          "identity" : "pnginekit",
+          "kind" : "fileSystem",
+          "location" : "/Users/hugo/Dev/pngine/wt1/native/ios/PngineKit",
+          "name" : "PngineKit"
+        },
+        "path" : "/Users/hugo/Dev/pngine/wt1/native/ios/PngineKit/Sources/PngineCore.xcframework",
+        "source" : {
+          "type" : "local"
+        },
+        "targetName" : "PngineCore"
+      }
+    ],
+    "dependencies" : [
+      {
+        "basedOn" : null,
+        "packageRef" : {
+          "identity" : "pnginekit",
+          "kind" : "fileSystem",
+          "location" : "/Users/hugo/Dev/pngine/wt1/native/ios/PngineKit",
+          "name" : "PngineKit"
+        },
+        "state" : {
+          "name" : "fileSystem",
+          "path" : "/Users/hugo/Dev/pngine/wt1/native/ios/PngineKit"
+        },
+        "subpath" : "pnginekit"
+      }
+    ],
+    "prebuilts" : [
+
+    ]
+  },
+  "version" : 7
+}
