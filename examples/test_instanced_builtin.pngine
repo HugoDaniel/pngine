@@ -1,0 +1,89 @@
+// Test 4c: Instanced rendering using builtins only (no vertex buffers)
+// Tests if instancing works at all without vertex buffer complexity
+
+#shaderModule renderShader {
+  code="
+struct VertexOutput {
+  @builtin(position) position : vec4f,
+  @location(0) color : vec4f,
+}
+
+@vertex
+fn vertexMain(
+  @builtin(vertex_index) vertexIdx : u32,
+  @builtin(instance_index) instanceIdx : u32
+) -> VertexOutput {
+  // Triangle vertices (hardcoded)
+  var triangleVertices = array<vec2f, 3>(
+    vec2f(-0.15, -0.15),
+    vec2f(0.15, -0.15),
+    vec2f(0.0, 0.15)
+  );
+
+  // Instance positions (hardcoded)
+  var instancePositions = array<vec2f, 4>(
+    vec2f(-0.5, -0.5),  // instance 0: bottom-left
+    vec2f(0.5, -0.5),   // instance 1: bottom-right
+    vec2f(-0.5, 0.5),   // instance 2: top-left
+    vec2f(0.5, 0.5)     // instance 3: top-right
+  );
+
+  let vertex = triangleVertices[vertexIdx];
+  let offset = instancePositions[instanceIdx];
+
+  var output : VertexOutput;
+  output.position = vec4f(vertex + offset, 0.0, 1.0);
+
+  // Different color per instance
+  var colors = array<vec4f, 4>(
+    vec4f(1.0, 0.0, 0.0, 1.0),  // red
+    vec4f(0.0, 1.0, 0.0, 1.0),  // green
+    vec4f(0.0, 0.0, 1.0, 1.0),  // blue
+    vec4f(1.0, 1.0, 0.0, 1.0)   // yellow
+  );
+  output.color = colors[instanceIdx];
+  return output;
+}
+
+@fragment
+fn fragMain(@location(0) color : vec4f) -> @location(0) vec4f {
+  return color;
+}
+"
+}
+
+#renderPipeline renderPipeline {
+  layout=auto
+  vertex={
+    entrypoint=vertexMain
+    module=renderShader
+  }
+  fragment={
+    entrypoint=fragMain
+    module=renderShader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+  primitive={
+    topology=triangle-list
+  }
+}
+
+#renderPass renderPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.0 0.0 0.0 1.0]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=renderPipeline
+  draw={
+    vertexCount=3
+    instanceCount=4
+    firstVertex=0
+    firstInstance=0
+  }
+}
+
+#frame main {
+  perform=[renderPass]
+}

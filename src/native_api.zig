@@ -11,11 +11,15 @@
 //! // Initialize once at app startup
 //! pngine_init();
 //!
+//! // Set error callback (optional)
+//! pngine_set_error_callback(my_handler, user_data);
+//!
 //! // Create animation from bytecode
 //! PngineAnimation* anim = pngine_create(bytecode, len, surface_handle);
 //!
 //! // Render frames
-//! pngine_render(anim, time);
+//! PngineError err = pngine_render(anim, time);
+//! if (err != PNGINE_OK) { /* handle error */ }
 //!
 //! // Cleanup
 //! pngine_destroy(anim);
@@ -27,6 +31,7 @@
 //! - pngine_init/shutdown must be called from main thread
 //! - Each PngineAnimation should only be used from one thread
 //! - Multiple animations can exist concurrently on different threads
+//! - Error callback may be invoked from any thread
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -41,6 +46,92 @@ const Module = format.Module;
 
 const wgpu = @import("gpu/wgpu_c.zig");
 const c = wgpu.c;
+
+// ============================================================================
+// Error Codes (match pngine.h PngineError enum)
+// ============================================================================
+
+pub const PngineError = enum(c_int) {
+    ok = 0,
+    not_initialized = -1,
+    already_initialized = -2,
+    context_failed = -3,
+    bytecode_invalid = -4,
+    surface_failed = -5,
+    shader_compile = -6,
+    pipeline_create = -7,
+    texture_unavail = -8,
+    resource_not_found = -9,
+    out_of_memory = -10,
+    invalid_argument = -11,
+    render_failed = -12,
+    compute_failed = -13,
+};
+
+// ============================================================================
+// Error Callback
+// ============================================================================
+
+/// Error callback function type (matches C definition)
+const ErrorCallback = *const fn (PngineError, [*:0]const u8, ?*PngineAnimation, ?*anyopaque) callconv(.c) void;
+
+/// Thread-safe error callback storage
+var error_callback: ?ErrorCallback = null;
+var error_callback_user_data: ?*anyopaque = null;
+
+/// Report an error via callback (if set)
+fn reportError(err: PngineError, message: [*:0]const u8, anim: ?*PngineAnimation) void {
+    if (error_callback) |cb| {
+        cb(err, message, anim, error_callback_user_data);
+    }
+}
+
+// ============================================================================
+// Per-Animation Diagnostics
+// ============================================================================
+
+/// Diagnostics tracked per animation (thread-safe via per-animation isolation)
+pub const AnimDiagnostics = struct {
+    /// Last error that occurred
+    last_error: PngineError = .ok,
+
+    /// Compute pass statistics (reset each frame or on demand)
+    compute_passes: u32 = 0,
+    compute_pipelines: u32 = 0,
+    bind_groups: u32 = 0,
+    dispatches: u32 = 0,
+
+    /// Render pass statistics
+    render_passes: u32 = 0,
+    draws: u32 = 0,
+
+    /// Total frames rendered
+    frame_count: u32 = 0,
+
+    /// Pack compute counters into u32: [passes:8][pipelines:8][bindgroups:8][dispatches:8]
+    pub fn packComputeCounters(self: *const AnimDiagnostics) u32 {
+        return (@as(u32, self.compute_passes & 0xFF) << 24) |
+            (@as(u32, self.compute_pipelines & 0xFF) << 16) |
+            (@as(u32, self.bind_groups & 0xFF) << 8) |
+            @as(u32, self.dispatches & 0xFF);
+    }
+
+    /// Pack render counters into u32: [passes:16][draws:16]
+    pub fn packRenderCounters(self: *const AnimDiagnostics) u32 {
+        return (@as(u32, self.render_passes & 0xFFFF) << 16) |
+            @as(u32, self.draws & 0xFFFF);
+    }
+
+    /// Reset all counters (except frame_count and last_error)
+    pub fn resetCounters(self: *AnimDiagnostics) void {
+        self.compute_passes = 0;
+        self.compute_pipelines = 0;
+        self.bind_groups = 0;
+        self.dispatches = 0;
+        self.render_passes = 0;
+        self.draws = 0;
+    }
+};
 
 // ============================================================================
 // Global State
@@ -60,6 +151,9 @@ pub const PngineAnimation = struct {
     dispatcher: wgpu_native.NativeDispatcher,
     width: u32,
     height: u32,
+
+    /// Per-animation diagnostics (thread-safe by design - each anim on one thread)
+    diag: AnimDiagnostics = .{},
 };
 
 // ============================================================================
@@ -94,6 +188,39 @@ export fn pngine_shutdown() callconv(.c) void {
 /// Clears caches and releases non-essential resources.
 export fn pngine_memory_warning() callconv(.c) void {
     // TODO: Implement cache clearing
+}
+
+// ============================================================================
+// Error Handling Exports
+// ============================================================================
+
+/// Set the error callback for receiving error notifications.
+export fn pngine_set_error_callback(
+    callback: ?ErrorCallback,
+    user_data: ?*anyopaque,
+) callconv(.c) void {
+    error_callback = callback;
+    error_callback_user_data = user_data;
+}
+
+/// Get human-readable error message for an error code.
+export fn pngine_error_string(err: PngineError) callconv(.c) [*:0]const u8 {
+    return switch (err) {
+        .ok => "Success",
+        .not_initialized => "PNGine not initialized - call pngine_init() first",
+        .already_initialized => "PNGine already initialized",
+        .context_failed => "GPU context creation failed",
+        .bytecode_invalid => "Invalid bytecode format",
+        .surface_failed => "Surface creation failed",
+        .shader_compile => "Shader compilation failed",
+        .pipeline_create => "Pipeline creation failed",
+        .texture_unavail => "Surface texture unavailable",
+        .resource_not_found => "Resource ID not found",
+        .out_of_memory => "Out of memory",
+        .invalid_argument => "Invalid argument",
+        .render_failed => "Render pass failed",
+        .compute_failed => "Compute pass failed",
+    };
 }
 
 /// Create an animation from bytecode.
@@ -154,19 +281,41 @@ export fn pngine_create(
 /// Parameters:
 /// - anim: Animation handle
 /// - time: Time in seconds since animation start
-export fn pngine_render(anim: ?*PngineAnimation, time: f32) callconv(.c) void {
-    const a = anim orelse return;
+///
+/// Returns: PNGINE_OK on success, error code on failure.
+export fn pngine_render(anim: ?*PngineAnimation, time: f32) callconv(.c) PngineError {
+    const a = anim orelse {
+        reportError(.invalid_argument, "pngine_render: null animation handle", null);
+        return .invalid_argument;
+    };
 
     a.gpu.setTime(time);
 
     // Execute bytecode for this frame
     // Reset PC to beginning and execute all bytecode
+    // Note: frame_counter is incremented by end_frame opcode, not here
     a.dispatcher.pc = 0;
-    a.dispatcher.frame_counter +%= 1; // Increment for ping-pong buffers
-    a.dispatcher.executeFromPC(global_allocator) catch {
-        // Execution failed - triangle won't render
-        return;
+    a.dispatcher.executeFromPC(global_allocator) catch |err| {
+        const pngine_err: PngineError = switch (err) {
+            error.SurfaceTextureUnavailable => .texture_unavail,
+            error.NoSurfaceConfigured => .surface_failed,
+            error.TextureNotFound => .resource_not_found,
+            error.InvalidResourceId => .resource_not_found,
+            error.ShaderCompilationFailed => .shader_compile,
+            error.PipelineCreationFailed => .pipeline_create,
+            else => .render_failed,
+        };
+
+        a.diag.last_error = pngine_err;
+        reportError(pngine_err, pngine_error_string(pngine_err), a);
+        return pngine_err;
     };
+
+    // Update diagnostics
+    a.diag.frame_count +%= 1;
+    a.diag.last_error = .ok;
+
+    return .ok;
 }
 
 /// Resize the animation surface.
@@ -282,6 +431,48 @@ export fn pngine_debug_render_pass_status(anim: ?*PngineAnimation) callconv(.c) 
     return 0; // All cleaned up properly
 }
 
+/// Debug: Get compute counters packed into u32
+/// Format: [passes:8][pipelines:8][bindgroups:8][dispatches:8]
+/// Use this to diagnose compute shader issues.
+export fn pngine_debug_compute_counters() callconv(.c) u32 {
+    return wgpu_native.getDebugCounters();
+}
+
+/// Debug: Get render counters packed into u32
+/// Format: [render_passes:16][draws:16]
+export fn pngine_debug_render_counters() callconv(.c) u32 {
+    return wgpu_native.getRenderCounters();
+}
+
+/// Debug: Get buffer IDs for compute/render comparison
+/// Format: [last_vertex_buffer_id:16][last_storage_bind_buffer_id:16]
+/// Use this to diagnose buffer mismatch issues between compute and render.
+export fn pngine_debug_buffer_ids() callconv(.c) u32 {
+    return wgpu_native.getBufferIds();
+}
+
+/// Debug: Get first-frame buffer IDs (only set once per session)
+/// Format: [first_vertex_buffer_id:16][first_storage_bind_buffer_id:16]
+export fn pngine_debug_first_buffer_ids() callconv(.c) u32 {
+    return wgpu_native.getFirstBufferIds();
+}
+
+/// Debug: Get buffer 0 size
+export fn pngine_debug_buffer_0_size() callconv(.c) u32 {
+    return wgpu_native.getBuffer0Size();
+}
+
+/// Debug: Get dispatch X (workgroup count)
+export fn pngine_debug_dispatch_x() callconv(.c) u32 {
+    return wgpu_native.getDispatchX();
+}
+
+/// Debug: Get draw info packed into u32
+/// Format: [vertex_count:16][instance_count:16]
+export fn pngine_debug_draw_info() callconv(.c) u32 {
+    return wgpu_native.getDrawInfo();
+}
+
 // ============================================================================
 // Platform-Specific Surface Creation
 // ============================================================================
@@ -385,4 +576,40 @@ export fn pngine_is_initialized() callconv(.c) bool {
 /// Get PNGine version string.
 export fn pngine_version() callconv(.c) [*:0]const u8 {
     return "0.1.0";
+}
+
+// ============================================================================
+// Per-Animation Diagnostics Exports
+// ============================================================================
+
+/// Get last error for a specific animation.
+export fn pngine_anim_get_last_error(anim: ?*PngineAnimation) callconv(.c) PngineError {
+    const a = anim orelse return .invalid_argument;
+    return a.diag.last_error;
+}
+
+/// Get compute counters for a specific animation.
+/// Format: [passes:8][pipelines:8][bindgroups:8][dispatches:8]
+export fn pngine_anim_compute_counters(anim: ?*PngineAnimation) callconv(.c) u32 {
+    const a = anim orelse return 0;
+    return a.diag.packComputeCounters();
+}
+
+/// Get render counters for a specific animation.
+/// Format: [render_passes:16][draws:16]
+export fn pngine_anim_render_counters(anim: ?*PngineAnimation) callconv(.c) u32 {
+    const a = anim orelse return 0;
+    return a.diag.packRenderCounters();
+}
+
+/// Get total frame count for a specific animation.
+export fn pngine_anim_frame_count(anim: ?*PngineAnimation) callconv(.c) u32 {
+    const a = anim orelse return 0;
+    return a.diag.frame_count;
+}
+
+/// Reset diagnostics counters for an animation.
+export fn pngine_anim_reset_counters(anim: ?*PngineAnimation) callconv(.c) void {
+    const a = anim orelse return;
+    a.diag.resetCounters();
 }

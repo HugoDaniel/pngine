@@ -11,7 +11,7 @@
 //!       | "#define" identifier "=" value
 //! property = identifier "=" value
 //! value = string | number | identifier | reference | array | object
-//! reference = "$" identifier (".." identifier)*
+//! reference = "$" identifier ("." identifier)*
 //! array = "[" value* "]"
 //! object = "{" property* "}"
 //! ```

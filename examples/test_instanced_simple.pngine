@@ -1,0 +1,120 @@
+// Test 4b: Simple instanced rendering with larger sprites
+// 4 instances with hardcoded positions, no compute
+
+// Instance data: 4 positions (no velocity)
+#data instanceData {
+  float32Array=[
+    -0.5 -0.5   // instance 0: bottom-left
+    0.5 -0.5    // instance 1: bottom-right
+    -0.5 0.5    // instance 2: top-left
+    0.5 0.5     // instance 3: top-right
+  ]
+}
+
+#buffer instanceBuffer {
+  size=instanceData
+  usage=[VERTEX]
+  mappedAtCreation=instanceData
+}
+
+// Larger triangle sprite vertices
+#data spriteData {
+  float32Array=[
+    -0.15 -0.15
+    0.15 -0.15
+    0.0 0.15
+  ]
+}
+
+#buffer spriteBuffer {
+  size=spriteData
+  usage=[VERTEX]
+  mappedAtCreation=spriteData
+}
+
+#shaderModule renderShader {
+  code="
+struct VertexOutput {
+  @builtin(position) position : vec4f,
+  @location(0) color : vec4f,
+}
+
+@vertex
+fn vertexMain(
+  @location(0) a_instancePos : vec2f,
+  @location(1) a_vertexPos : vec2f,
+  @builtin(instance_index) instanceIdx : u32
+) -> VertexOutput {
+  var output : VertexOutput;
+  output.position = vec4f(a_vertexPos + a_instancePos, 0.0, 1.0);
+
+  // Different color per instance
+  let colors = array<vec4f, 4>(
+    vec4f(1.0, 0.0, 0.0, 1.0),  // red
+    vec4f(0.0, 1.0, 0.0, 1.0),  // green
+    vec4f(0.0, 0.0, 1.0, 1.0),  // blue
+    vec4f(1.0, 1.0, 0.0, 1.0)   // yellow
+  );
+  output.color = colors[instanceIdx];
+  return output;
+}
+
+@fragment
+fn fragMain(@location(0) color : vec4f) -> @location(0) vec4f {
+  return color;
+}
+"
+}
+
+#renderPipeline renderPipeline {
+  layout=auto
+  vertex={
+    entrypoint=vertexMain
+    module=renderShader
+    buffers=[
+      {
+        arrayStride="2*4"
+        stepMode=instance
+        attributes=[
+          { shaderLocation=0 offset=0 format=float32x2 }
+        ]
+      }
+      {
+        arrayStride="2*4"
+        stepMode=vertex
+        attributes=[
+          { shaderLocation=1 offset=0 format=float32x2 }
+        ]
+      }
+    ]
+  }
+  fragment={
+    entrypoint=fragMain
+    module=renderShader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+  primitive={
+    topology=triangle-list
+  }
+}
+
+#renderPass renderPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.0 0.0 0.0 1.0]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=renderPipeline
+  vertexBuffers=[instanceBuffer spriteBuffer]
+  draw={
+    vertexCount=3
+    instanceCount=4
+    firstVertex=0
+    firstInstance=0
+  }
+}
+
+#frame main {
+  perform=[renderPass]
+}

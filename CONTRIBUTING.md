@@ -446,6 +446,58 @@ Single-frame demos work correctly.
 runtime doesn't yet implement scene selection. This is tracked as a future
 enhancement.
 
+### 12. wgpu-native C Struct Initialization (iOS/Native - "invalid store op" panic)
+
+**Symptom**: iOS app crashes with Rust panic: `invalid store op for render pass color attachment`
+or similar "invalid X for Y" messages from wgpu-native.
+
+**Cause**: Zig's @cImport creates struct types where uninitialized fields are `undefined`
+(garbage memory), not zeroed. wgpu-native's validation rejects these garbage values.
+
+**Wrong** (garbage in unset fields):
+```zig
+// Fields not explicitly set remain 'undefined' (garbage)
+const color_attachment = c.WGPURenderPassColorAttachment{
+    .view = view,
+    .loadOp = c.WGPULoadOp_Clear,
+    .storeOp = c.WGPUStoreOp_Store,
+    // .nextInChain = undefined  ← GARBAGE!
+    // .depthSlice = undefined   ← GARBAGE!
+    // etc.
+};
+```
+
+**Correct** (zero-initialize first):
+```zig
+// Zero-initialize struct to avoid undefined memory issues
+var color_attachment = std.mem.zeroes(c.WGPURenderPassColorAttachment);
+color_attachment.view = view;
+color_attachment.loadOp = c.WGPULoadOp_Clear;
+color_attachment.storeOp = c.WGPUStoreOp_Store;
+color_attachment.clearValue = .{ .r = 0.0, .g = 0.0, .b = 0.0, .a = 1.0 };
+// All other fields are now safely zero/null
+```
+
+**Also note**: wgpu-native enum values differ from bytecode encoding:
+
+| Operation | Bytecode Value | wgpu-native Value |
+|-----------|---------------|-------------------|
+| Load | 0 | `WGPULoadOp_Load = 2` |
+| Clear | 1 | `WGPULoadOp_Clear = 2` |
+| Store | 0 | `WGPUStoreOp_Store = 1` |
+| Discard | 1 | `WGPUStoreOp_Discard = 2` |
+
+**Mapping in code**:
+```zig
+const wgpu_load_op: c_uint = if (load_op == 0) c.WGPULoadOp_Load else c.WGPULoadOp_Clear;
+const wgpu_store_op: c_uint = if (store_op == 0) c.WGPUStoreOp_Store else c.WGPUStoreOp_Discard;
+```
+
+**Files affected**: `src/executor/wgpu_native_gpu.zig` - all functions creating C structs
+
+**Key lesson**: When working with wgpu-native (or any C library) through @cImport,
+always use `std.mem.zeroes(T)` for struct initialization, then set only the fields you need.
+
 ## Debugging Strategies
 
 ### 1. Browser Console Logging
@@ -710,7 +762,70 @@ zig build test-dsl-complete             # DSL chain only
 # Browser
 npm run dev                 # Start Vite dev server
 # Navigate to http://localhost:5173/
+
+# iOS Testing (Swift Package Manager doesn't support iOS targets directly)
+xcodebuild test -scheme PngineKit \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  -only-testing:PngineKitTests
 ```
+
+### 13. Resource Recreation Bug - Buffers Cleared on Frame 2+ (Native Only)
+
+**Symptom**: Particles or other compute-initialized data renders correctly on frame 1,
+but shows all particles at origin (0,0) or empty buffers starting from frame 2+.
+
+**Cause**: The native executor (`pngine_render`) resets PC to 0 and re-executes ALL
+bytecode every frame. This caused resource creation opcodes (create_buffer, create_pipeline,
+etc.) to overwrite existing resources with empty ones. Combined with `exec_pass_once`
+only running init compute passes once, this meant:
+
+1. Frame 1: Create buffer → Run compute → Buffer filled with data → Render works!
+2. Frame 2+: Recreate buffer (EMPTY!) → Skip compute (exec_pass_once) → Render fails!
+
+**Fix Applied** (in `wgpu_native_gpu.zig`): Added skip checks to all resource creation functions:
+
+```zig
+pub fn createBuffer(self: *Self, ..., buffer_id: u16, ...) !void {
+    // Skip if buffer already exists (resources are created once, not per-frame)
+    if (self.buffers[buffer_id] != null) {
+        return;
+    }
+    // ... actual creation code
+}
+```
+
+Functions with skip logic:
+- `createBuffer`
+- `createTexture`
+- `createSampler`
+- `createShaderModule`
+- `createRenderPipeline`
+- `createComputePipeline`
+- `createBindGroup`
+
+**Known Limitation - Resize**: If you call `pngine_resize()` to change canvas dimensions,
+textures that use canvas-size defaults will NOT be recreated with new dimensions.
+The skip logic prevents recreation. For now, destroy and recreate the animation
+if you need to resize. This primarily affects depth textures.
+
+**Why this doesn't affect web**: The JS runtime (`gpu.js`) tracks resources and
+skips recreation at the JS level. The native backend needed the same protection.
+
+**Debug verification**: Use `pngine_debug_compute_counters()` to verify bind group count.
+Before fix: `bg=31` (growing each frame). After fix: `bg=1` (created once).
+
+**Pool buffers work correctly**: Pool buffers (e.g., `pool=2` for ping-pong) have
+different IDs (buffer_0, buffer_1), so skip logic doesn't interfere. The selection
+happens at runtime via `set_vertex_buffer_pool` which calculates:
+```
+actual_id = base_id + (frame_counter + offset) % pool_size
+```
+
+**Files affected**: `src/executor/wgpu_native_gpu.zig`
+
+**Key lesson**: Native backends need explicit resource deduplication since bytecode
+execution is stateless (PC resets each frame). The JS backend gets this implicitly
+through object identity.
 
 ## Getting Help
 

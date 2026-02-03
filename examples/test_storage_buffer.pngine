@@ -1,0 +1,62 @@
+// Test 1: Minimal storage buffer creation
+// Just create a storage buffer and render a simple triangle
+
+#buffer storageBuffer {
+  size=1024
+  usage=[STORAGE]
+}
+
+#shaderModule shader {
+  code="
+@vertex
+fn vertexMain(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var pos = array<vec2f, 3>(
+    vec2f(0.0, 0.5),
+    vec2f(-0.5, -0.5),
+    vec2f(0.5, -0.5)
+  );
+  return vec4f(pos[i], 0.0, 1.0);
+}
+
+@fragment
+fn fragMain() -> @location(0) vec4f {
+  return vec4f(0.0, 1.0, 0.0, 1.0);  // Green
+}
+"
+}
+
+#renderPipeline trianglePipeline {
+  layout=auto
+  vertex={
+    entrypoint=vertexMain
+    module=shader
+  }
+  fragment={
+    entrypoint=fragMain
+    module=shader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+  primitive={
+    topology=triangle-list
+  }
+}
+
+#renderPass drawPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.0 0.0 0.0 1.0]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=trianglePipeline
+  draw={
+    vertexCount=3
+    instanceCount=1
+    firstVertex=0
+    firstInstance=0
+  }
+}
+
+#frame main {
+  perform=[drawPass]
+}
