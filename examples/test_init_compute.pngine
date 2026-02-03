@@ -1,0 +1,111 @@
+// Test 3: Compute init with larger buffer (like boids init)
+// 2048 particles * 16 bytes = 32KB buffer
+
+#define NUM_PARTICLES=2048
+
+#buffer particleBuffer {
+  size="NUM_PARTICLES * 16"
+  usage=[VERTEX STORAGE]
+}
+
+#shaderModule initShader {
+  code="
+struct Particle {
+  pos : vec2f,
+  vel : vec2f,
+}
+
+struct Particles {
+  particles : array<Particle>,
+}
+
+@binding(0) @group(0) var<storage, read_write> data : Particles;
+
+fn hash(n: u32) -> f32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return f32(x) / f32(0xffffffffu);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id : vec3u) {
+  let i = id.x;
+  let total = arrayLength(&data.particles);
+  if (i >= total) { return; }
+
+  let t = f32(i) / f32(total);
+  let angle = t * 6.283185;
+  let radius = sqrt(t);
+
+  data.particles[i].pos = vec2f(cos(angle) * radius, sin(angle) * radius);
+  data.particles[i].vel = vec2f(
+    (hash(i * 2u) - 0.5) * 0.1,
+    (hash(i * 2u + 1u) - 0.5) * 0.1
+  );
+}
+"
+}
+
+#init initParticles {
+  buffer=particleBuffer
+  shader=initShader
+  workgroups="ceil(NUM_PARTICLES / 64)"
+}
+
+#shaderModule renderShader {
+  code="
+@vertex
+fn vertexMain(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var pos = array<vec2f, 3>(
+    vec2f(0.0, 0.5),
+    vec2f(-0.5, -0.5),
+    vec2f(0.5, -0.5)
+  );
+  return vec4f(pos[i], 0.0, 1.0);
+}
+
+@fragment
+fn fragMain() -> @location(0) vec4f {
+  return vec4f(0.0, 1.0, 1.0, 1.0);  // Cyan = init compute worked
+}
+"
+}
+
+#renderPipeline renderPipeline {
+  layout=auto
+  vertex={
+    entrypoint=vertexMain
+    module=renderShader
+  }
+  fragment={
+    entrypoint=fragMain
+    module=renderShader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+  primitive={
+    topology=triangle-list
+  }
+}
+
+#renderPass renderPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.0 0.0 0.0 1.0]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=renderPipeline
+  draw={
+    vertexCount=3
+    instanceCount=1
+    firstVertex=0
+    firstInstance=0
+  }
+}
+
+#frame main {
+  init=[initParticles]
+  perform=[renderPass]
+}

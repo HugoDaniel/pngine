@@ -1,0 +1,99 @@
+// Test 2: Minimal compute shader dispatch
+// Create a storage buffer, run compute shader, render triangle
+
+#buffer storageBuffer {
+  size=256
+  usage=[STORAGE]
+}
+
+#shaderModule computeShader {
+  code="
+struct Data {
+  values: array<f32>,
+}
+
+@binding(0) @group(0) var<storage, read_write> data : Data;
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) id : vec3u) {
+  // Just write a simple value
+  data.values[id.x] = f32(id.x) * 0.1;
+}
+"
+}
+
+#computePipeline computePipeline {
+  layout=auto
+  compute={
+    entrypoint=main
+    module=computeShader
+  }
+}
+
+#bindGroup computeBindGroup {
+  layout={ pipeline=computePipeline index=0 }
+  entries=[
+    { binding=0 resource={ buffer=storageBuffer } }
+  ]
+}
+
+#computePass computePass {
+  pipeline=computePipeline
+  bindGroups=[computeBindGroup]
+  dispatchWorkgroups=1
+}
+
+#shaderModule renderShader {
+  code="
+@vertex
+fn vertexMain(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var pos = array<vec2f, 3>(
+    vec2f(0.0, 0.5),
+    vec2f(-0.5, -0.5),
+    vec2f(0.5, -0.5)
+  );
+  return vec4f(pos[i], 0.0, 1.0);
+}
+
+@fragment
+fn fragMain() -> @location(0) vec4f {
+  return vec4f(1.0, 1.0, 0.0, 1.0);  // Yellow = compute worked
+}
+"
+}
+
+#renderPipeline renderPipeline {
+  layout=auto
+  vertex={
+    entrypoint=vertexMain
+    module=renderShader
+  }
+  fragment={
+    entrypoint=fragMain
+    module=renderShader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+  primitive={
+    topology=triangle-list
+  }
+}
+
+#renderPass renderPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.0 0.0 0.0 1.0]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=renderPipeline
+  draw={
+    vertexCount=3
+    instanceCount=1
+    firstVertex=0
+    firstInstance=0
+  }
+}
+
+#frame main {
+  perform=[computePass renderPass]
+}

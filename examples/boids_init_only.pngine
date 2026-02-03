@@ -1,0 +1,168 @@
+#define NUM_PARTICLES=2048
+
+#renderPipeline renderBoids {
+  layout=auto
+  vertex={
+    entrypoint=vertexMain
+    module=code
+    buffers=[
+      // instanced particles buffer (pos + vel per instance)
+      {
+        arrayStride="4*4"
+        stepMode=instance
+        attributes=[
+          { shaderLocation=0 offset=0 format=float32x2 }
+          { shaderLocation=1 offset="2*4" format=float32x2 }
+        ]
+      }
+      // vertex buffer (triangle vertices)
+      {
+        arrayStride="2*4"
+        stepMode=vertex
+        attributes=[
+          { shaderLocation=2 offset=0 format=float32x2 }
+        ]
+      }
+    ]
+  }
+  fragment={
+    entrypoint=fragMain
+    module=code
+    targets=[{ format=preferredCanvasFormat }]
+  }
+  primitive={
+    topology=triangle-list
+  }
+}
+
+#renderPass drawBoidsPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.0 0.0 0.0 1.0]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=renderBoids
+  vertexBuffers=[particleBuffers spriteVertexBuffer]
+  draw={
+    vertexCount=3
+    instanceCount=NUM_PARTICLES
+    firstVertex=0
+    firstInstance=0
+  }
+}
+
+#data vertexBufferData {
+  float32Array=[
+    -0.01 -0.02
+    0.01 -0.02
+    0.0 0.02
+  ]
+}
+
+#buffer spriteVertexBuffer {
+  size=vertexBufferData
+  usage=[VERTEX]
+  mappedAtCreation=vertexBufferData
+}
+
+// Particle buffer: NUM_PARTICLES * 4 floats (pos.x, pos.y, vel.x, vel.y) * 4 bytes
+#buffer particleBuffers {
+  size="NUM_PARTICLES * 4 * 4"
+  usage=[VERTEX STORAGE]
+}
+
+// Initialize particles using compute shader
+#init initParticles {
+  buffer=particleBuffers
+  shader=initShader
+  workgroups="ceil(NUM_PARTICLES / 64)"
+}
+
+#shaderModule initShader {
+  code="
+struct Particle {
+  pos : vec2f,
+  vel : vec2f,
+}
+
+struct Particles {
+  particles : array<Particle>,
+}
+
+@binding(0) @group(0) var<storage, read_write> data : Particles;
+
+// Simple hash for pseudo-random numbers
+fn hash(n: u32) -> f32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return f32(x) / f32(0xffffffffu);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id : vec3u) {
+  let i = id.x;
+  let total = arrayLength(&data.particles);
+  if (i >= total) { return; }
+
+  let t = f32(i) / f32(total);
+  let angle = t * 6.283185;  // 2 * PI
+  let radius = sqrt(t);
+
+  // Spiral pattern for initial positions
+  data.particles[i].pos = vec2f(cos(angle) * radius, sin(angle) * radius);
+
+  // Random velocities
+  data.particles[i].vel = vec2f(
+    (hash(i * 2u) - 0.5) * 0.1,
+    (hash(i * 2u + 1u) - 0.5) * 0.1
+  );
+}
+"
+}
+
+#frame boids {
+  init=[initParticles]
+  perform=[
+    drawBoidsPass
+  ]
+}
+
+#shaderModule code {
+  code="
+struct VertexOutput {
+  @builtin(position) position : vec4f,
+  @location(4) color : vec4f,
+}
+
+@vertex
+fn vertexMain(
+  @location(0) a_particlePos : vec2f,
+  @location(1) a_particleVel : vec2f,
+  @location(2) a_pos : vec2f
+) -> VertexOutput {
+  let angle = -atan2(a_particleVel.x, a_particleVel.y);
+  let pos = vec2(
+    (a_pos.x * cos(angle)) - (a_pos.y * sin(angle)),
+    (a_pos.x * sin(angle)) + (a_pos.y * cos(angle))
+  );
+
+  var output : VertexOutput;
+  output.position = vec4(pos + a_particlePos, 0.0, 1.0);
+  output.color = vec4(
+    1.0 - sin(angle + 1.0) - a_particleVel.y,
+    pos.x * 100.0 - a_particleVel.y + 0.1,
+    a_particleVel.x + cos(angle + 0.5),
+    1.0
+  );
+  return output;
+}
+
+@fragment
+fn fragMain(@location(4) color : vec4f) -> @location(0) vec4f {
+  return color;
+}
+"
+}
