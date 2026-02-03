@@ -455,6 +455,10 @@ pub fn computePipelineRelease(pipeline: ComputePipeline) void {
     c.wgpuComputePipelineRelease(pipeline);
 }
 
+pub fn computePipelineGetBindGroupLayout(pipeline: ComputePipeline, group_index: u32) BindGroupLayout {
+    return c.wgpuComputePipelineGetBindGroupLayout(pipeline, group_index);
+}
+
 pub fn bindGroupRelease(group: BindGroup) void {
     c.wgpuBindGroupRelease(group);
 }

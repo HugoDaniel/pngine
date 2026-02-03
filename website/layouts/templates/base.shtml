@@ -20,9 +20,11 @@
     <main id="main">
       <super>
     </main>
-    <footer>
+    <!--
+     <footer>
       <p>PNGine - GPU apps in a single file</p>
       <p>Built with Zig</p>
     </footer>
+    -->
   </body>
 </html>

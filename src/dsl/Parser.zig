@@ -409,7 +409,7 @@ pub const Parser = struct {
                     self.tokens.items(.start)[self.tok_i + 1]
                 else
                     @as(u32, @intCast(self.source.len));
-                const text = std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r");
+                const text = std.mem.trimEnd(u8, self.source[token_start..token_end], " \t\n\r");
                 if (isMathConstant(text)) {
                     // Math constants can be part of expressions
                     if (try self.parseExpression()) |expr| {
@@ -563,7 +563,7 @@ pub const Parser = struct {
             self.tokens.items(.start)[self.tok_i + 1]
         else
             @as(u32, @intCast(self.source.len));
-        const text = std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r");
+        const text = std.mem.trimEnd(u8, self.source[token_start..token_end], " \t\n\r");
         const node_tag: Node.Tag = if (isMathConstant(text)) .number_value else .identifier_value;
         return try self.parseSimpleValue(node_tag);
     }
@@ -839,7 +839,7 @@ pub const Parser = struct {
             self.tokens.items(.start)[tok_i + 1]
         else
             @as(u32, @intCast(self.source.len));
-        return std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r.=[]{}");
+        return std.mem.trimEnd(u8, self.source[token_start..token_end], " \t\n\r.=[]{}");
     }
 
     // Kept for backward compatibility with parsePropertyList
@@ -1012,7 +1012,7 @@ pub const Parser = struct {
                     self.tokens.items(.start)[self.tok_i + 1]
                 else
                     @as(u32, @intCast(self.source.len));
-                const text = std.mem.trimRight(u8, self.source[token_start..token_end], " \t\n\r");
+                const text = std.mem.trimEnd(u8, self.source[token_start..token_end], " \t\n\r");
                 if (isMathConstant(text)) {
                     return try self.parseSimpleValue(.number_value);
                 }

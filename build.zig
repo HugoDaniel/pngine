@@ -1014,7 +1014,7 @@ pub fn build(b: *std.Build) void {
                 continue;
             };
             if (sdk_path_result.term.Exited == 0) {
-                const sdk_path = std.mem.trimRight(u8, sdk_path_result.stdout, "\n\r");
+                const sdk_path = std.mem.trimEnd(u8, sdk_path_result.stdout, "\n\r");
                 ios_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{sdk_path}) });
             }
 

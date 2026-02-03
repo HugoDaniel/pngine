@@ -81,10 +81,8 @@ fn emitInitMacro(e: *Emitter, name: []const u8, node: Node.Index) Emitter.Error!
     // Look up shader ID
     const shader_id = e.shader_ids.get(shader_name) orelse return;
 
-    // Get buffer size for dispatch calculation
-    const buffer_size = getBufferSize(e, buffer_name);
-    // Ensure at least 1 workgroup (ceil division, min 1)
-    const workgroup_count = @max(1, (buffer_size + DEFAULT_WORKGROUP_SIZE - 1) / DEFAULT_WORKGROUP_SIZE);
+    // Get workgroup count - prefer explicit property, fallback to buffer size calculation
+    const workgroup_count = getWorkgroupCount(e, node, buffer_name);
 
     // Check for optional params
     const params_data = try getParamsData(e, node);
@@ -262,6 +260,25 @@ fn getBufferSize(e: *Emitter, buffer_name: []const u8) u32 {
 
     // Size could be a reference or expression - default to reasonable size
     return DEFAULT_WORKGROUP_SIZE * 16; // 1024 elements
+}
+
+/// Get workgroup count for #init dispatch.
+/// Prefers explicit `workgroups` property, falls back to buffer size calculation.
+fn getWorkgroupCount(e: *Emitter, node: Node.Index, buffer_name: []const u8) u32 {
+    // Pre-condition
+    std.debug.assert(node.toInt() < e.ast.nodes.len);
+
+    // First check for explicit workgroups property
+    if (utils.findPropertyValue(e, node, "workgroups")) |workgroups_node| {
+        if (utils.resolveNumericValueOrString(e, workgroups_node)) |count| {
+            return @max(1, count);
+        }
+    }
+
+    // Fall back to calculation from buffer size
+    const buffer_size = getBufferSize(e, buffer_name);
+    // Ensure at least 1 workgroup (ceil division, min 1)
+    return @max(1, (buffer_size + DEFAULT_WORKGROUP_SIZE - 1) / DEFAULT_WORKGROUP_SIZE);
 }
 
 /// Get params data from #init macro's params property.

@@ -1,70 +1,7 @@
 # CLAUDE.md - PNGine Development Guide
 
-## CRITICAL: Active Implementation Plan
-
-**READ FIRST**: Before any implementation work, read the active plan:
-
-- **`docs/cpu-wasm-data-initialization-plan.md`** - Buffer initialization with
-  compile-time shapes and compute shader `#init`
-
-This plan defines:
-
-- Compile-time `#data` shape generators: `cube=`, `plane=`, `sphere=`
-- Compute shader `#init` macro for GPU-generated procedural data
-- Auto-sizing via shader reflection: `size=shader.varName`
-- Frame `init=` support for one-time initialization
-- **Phase 6 complete**: Fill opcodes removed, two approaches remain
-
-**Zig Mastery Guidelines**: `/Users/hugo/Development/specs-llm/mastery/zig/`
-
-- Always follow bounded loops, no recursion, 2+ assertions per function
-- Functions ≤ 70 lines (exception: state machines with labeled switch)
-- Explicitly-sized types (u32, i64, not usize except for slice indexing)
-- Read TESTING_AND_FUZZING.md before writing tests
-
 **If you discover of find anything relevant for other developers write it down
 in CONTRIBUTING.md to help out further developments with compounded knowledge**
-
-## Related Plans (Reference as Needed)
-
-| Plan                                        | Purpose                                  | Status      |
-| ------------------------------------------- | ---------------------------------------- | ----------- |
-| `docs/cpu-wasm-data-initialization-plan.md` | **ACTIVE** - Buffer init + shapes        | In Progress |
-| `docs/embedded-executor-plan.md`            | Embedded executor + plugins              | Complete    |
-| `docs/llm-runtime-testing-plan.md`          | LLM-friendly validation via wasm3        | Complete    |
-| `docs/multiplatform-command-buffer-plan.md` | Platform abstraction                     | Reference   |
-| `docs/data-generation-plan.md`              | Compute shader data gen (superseded)     | Archived    |
-| `docs/command-buffer-refactor-plan.md`      | JS bundle optimization                   | Reference   |
-| `docs/remove-wasm-in-wasm-plan.md`          | **SUPERSEDED** - Do not use              | Archived    |
-
-### Buffer Initialization (docs/cpu-wasm-data-initialization-plan.md)
-
-Two approaches for buffer initialization:
-
-**1. Compile-time shapes** (static meshes):
-```
-#data cubeVertexArray {
-  cube={ format=[position4 color4 uv2] }
-}
-```
-
-**2. Compute shader #init** (procedural data):
-```
-#init resetParticles {
-  buffer=particles
-  shader=initParticles
-  params=[42]
-}
-```
-
-Key features:
-
-- **Built-in shapes**: `cube=`, `plane=`, `sphere=` with format specifiers
-- **Auto-sizing**: `size=shader.varName` uses reflection
-- **One-time init**: `#frame { init=[...] }` runs before first frame
-- **GPU-native**: Compute shaders for procedural data
-
----
 
 ## Project Overview
 
@@ -74,13 +11,6 @@ WASM runtime.
 
 **Goal**: Shader art that fits in a PNG file, executable in any browser AND any
 platform (iOS, Android, native) via embedded WASM executor.
-
-## Environment
-
-```bash
-# Zig binary location (use this path for all zig commands)
-ZIG=/Users/hugo/.zvm/bin/zig
-```
 
 ## Build Dependencies
 
@@ -1165,16 +1095,14 @@ The `build.zig` npm step:
   at cross-compile time)
 - Outputs to `zig-out/npm/pngine-{platform}/bin/`
 
-## Embedded Executor (Complete)
+## Embedded Executor
 
-PNGs now embed their executor WASM by default, creating fully self-contained payloads:
+PNGs embeds their executor WASM by default, creating fully self-contained payloads:
 
 - **Default behavior**: `pngine shader.pngine` produces PNG with bytecode + executor (~5KB for simple shader)
 - **Opt-out**: Use `--no-executor` flag for development builds
 - **Runtime detection**: JS loader auto-detects embedded executor and uses it instead of external `pngine.wasm`
 - **Backward compatible**: Old PNGs without embedded executor still work (falls back to `pngine.wasm`)
-
-See `docs/embedded-executor-plan.md` for implementation details.
 
 ## Related Files
 
@@ -1189,7 +1117,7 @@ See `docs/embedded-executor-plan.md` for implementation details.
 
 **Zig Guidelines**:
 
-- `/Users/hugo/Development/specs-llm/mastery/zig/` - Zig coding conventions
+- `/Users/hugo/llm/mastery/zig/` - Zig coding conventions
   (MUST follow)
 
 **Key Implementation Files**:
