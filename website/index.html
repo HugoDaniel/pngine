@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PNGine - Shaders in a PNG</title>
+  <meta name="description" content="Bundle WebGPU shaders into portable PNG files. For shader artists who hate boilerplate.">
+
+  <!-- Styles -->
+  <link rel="stylesheet" href="styles/variables.css">
+  <link rel="stylesheet" href="styles/base.css">
+  <link rel="stylesheet" href="styles/components.css">
+  <link rel="stylesheet" href="styles/sections.css">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="assets/logo.png">
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="PNGine - Shaders in a PNG">
+  <meta property="og:description" content="Bundle WebGPU shaders into portable PNG files. A triangle in 500 bytes.">
+  <meta property="og:type" content="website">
+</head>
+<body>
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="container nav__inner">
+      <a href="/" aria-label="PNGine Home">
+        <img src="assets/logo.png" alt="PNGine" class="nav__logo">
+      </a>
+      <ul class="nav__links">
+        <li><a href="#how-small" class="nav__link">Examples</a></li>
+        <li><a href="/docs" class="nav__link">Docs</a></li>
+        <li>
+          <a href="https://github.com/HugoDaniel/pngine"
+             class="nav__link"
+             target="_blank"
+             rel="noopener noreferrer">
+            GitHub
+          </a>
+        </li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- Hero Section -->
+  <section class="hero">
+    <div class="pixel-grid-bg" aria-hidden="true"></div>
+
+    <div class="container hero__grid">
+      <!-- Demo (Left) -->
+      <div class="hero__demo">
+        <div class="hero__canvas-glow" aria-hidden="true"></div>
+        <div class="hero__canvas-wrap">
+          <canvas id="hero-canvas" aria-label="Live WebGPU shader demo"></canvas>
+          <div id="hero-fallback" class="fallback" style="display: none;">
+            <span class="fallback-icon">⚠</span>
+            <span>WebGPU not available</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Content (Right) -->
+      <div class="hero__content">
+        <h1 class="hero__headline">
+          Shaders in<br>
+          <span class="hero__headline-accent">a PNG</span>
+        </h1>
+
+        <p class="hero__subhead">
+          For <strong>shader artists</strong> who hate boilerplate.
+          Bundle WebGPU shaders into portable files that run anywhere.
+        </p>
+
+        <div class="hero__badge-wrap">
+          <div class="size-badge">
+            <span class="size-badge__number">487</span>
+            <span class="size-badge__unit">bytes</span>
+          </div>
+          <span class="hero__badge-label">
+            A complete triangle shader.<br>
+            Self-contained. Portable.
+          </span>
+        </div>
+
+        <div class="hero__cta">
+          <a href="/docs/getting-started" class="btn btn-primary btn-lg">
+            Get Started <span class="arrow">→</span>
+          </a>
+          <a href="#how-small" class="btn btn-secondary btn-lg">
+            See Examples
+          </a>
+        </div>
+      </div>
+    </div>
+
+    <!-- Scroll indicator -->
+    <div class="hero__scroll">
+      <span>How is this possible?</span>
+      <div class="hero__scroll-icon"></div>
+    </div>
+  </section>
+
+  <!-- Size Gallery Section -->
+  <section id="how-small" class="size-gallery">
+    <div class="container">
+      <header class="size-gallery__header">
+        <h2 class="size-gallery__title">How small?</h2>
+        <p class="size-gallery__subtitle">
+          Real shaders. Real sizes. Running in your browser right now.
+        </p>
+      </header>
+
+      <div class="size-gallery__grid">
+        <!-- Triangle -->
+        <article class="size-gallery__card">
+          <div class="size-gallery__card-demo">
+            <canvas data-demo="triangle"></canvas>
+          </div>
+          <div class="size-gallery__card-info">
+            <span class="size-gallery__card-name">Triangle</span>
+            <span class="size-gallery__card-size">~500 bytes</span>
+          </div>
+        </article>
+
+        <!-- Rotating Cube -->
+        <article class="size-gallery__card">
+          <div class="size-gallery__card-demo">
+            <canvas data-demo="cube"></canvas>
+          </div>
+          <div class="size-gallery__card-info">
+            <span class="size-gallery__card-name">Rotating Cube</span>
+            <span class="size-gallery__card-size">~2 KB</span>
+          </div>
+        </article>
+
+        <!-- Boids -->
+        <article class="size-gallery__card">
+          <div class="size-gallery__card-demo">
+            <canvas data-demo="boids"></canvas>
+          </div>
+          <div class="size-gallery__card-info">
+            <span class="size-gallery__card-name">Boids Simulation</span>
+            <span class="size-gallery__card-size">~8 KB</span>
+          </div>
+        </article>
+      </div>
+
+      <p style="text-align: center; margin-top: var(--space-8); color: var(--text-muted);">
+        For comparison: this paragraph is about 150 bytes. A triangle shader is 3× that.
+      </p>
+    </div>
+  </section>
+
+  <!-- Section Divider -->
+  <div class="section-divider container">
+    <span>How does it work?</span>
+  </div>
+
+  <!-- Architecture Section (placeholder) -->
+  <section class="architecture">
+    <div class="container">
+      <h2 style="text-align: center; margin-bottom: var(--space-6);">Simple Pipeline</h2>
+      <p style="text-align: center; color: var(--text-secondary); max-width: 50ch; margin: 0 auto var(--space-8);">
+        The compiler does the heavy lifting. The executor just reads opcodes and calls WebGPU.
+      </p>
+
+      <!-- ASCII-style diagram -->
+      <pre style="text-align: center; color: var(--color-primary-light); font-size: var(--text-sm); overflow-x: auto;">
+.pngine ──► Compiler ──► Bytecode ──► PNG ──► Executor ──► WebGPU
+  (DSL)       (Zig)       (PNGB)    (image)    (WASM)      (GPU)
+      </pre>
+    </div>
+  </section>
+
+  <!-- Section Divider -->
+  <div class="section-divider container">
+    <span>The story</span>
+  </div>
+
+  <!-- Origin Story Section -->
+  <section style="padding: var(--space-12) 0;">
+    <div class="container" style="max-width: 700px;">
+      <blockquote style="border-left: 3px solid var(--color-primary); padding-left: var(--space-5); margin: 0;">
+        <p style="font-size: var(--text-xl); color: var(--text-primary); font-style: italic; margin-bottom: var(--space-4);">
+          "Built for Inércia 2025, a Portuguese demoparty.
+          The demo crashed spectacularly on the competition machine.
+          We fixed the engine. Now we're sharing it."
+        </p>
+      </blockquote>
+      <p style="margin-top: var(--space-4);">
+        <a href="/blog/inercia-story" style="color: var(--color-primary-light);">
+          Read the full story →
+        </a>
+      </p>
+    </div>
+  </section>
+
+  <!-- Section Divider -->
+  <div class="section-divider container">
+    <span>Try it now</span>
+  </div>
+
+  <!-- Try It Section -->
+  <section class="try-it">
+    <div class="container" style="max-width: 700px;">
+      <h2 style="text-align: center; margin-bottom: var(--space-6);">Three lines to play</h2>
+
+      <!-- Install command -->
+      <div class="code-block" style="margin-bottom: var(--space-4);">
+        <pre><code>npm install pngine</code></pre>
+        <button class="code-block__copy">Copy</button>
+      </div>
+
+      <!-- Usage code -->
+      <div class="code-block">
+        <pre><code>import { pngine, play } from 'pngine';
+
+const p = await pngine('shader.png', {
+  canvas: document.getElementById('canvas')
+});
+play(p);</code></pre>
+        <button class="code-block__copy">Copy</button>
+      </div>
+
+      <p style="text-align: center; margin-top: var(--space-6); color: var(--text-secondary);">
+        That's it. Load a PNG, get a running shader.
+      </p>
+
+      <div style="display: flex; justify-content: center; gap: var(--space-4); margin-top: var(--space-6);">
+        <a href="/docs/getting-started" class="btn btn-primary">
+          Get Started <span class="arrow">→</span>
+        </a>
+        <a href="/examples" class="btn btn-secondary">
+          See Examples
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer style="padding: var(--space-10) 0; border-top: 1px solid var(--bg-card);">
+    <div class="container" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: var(--space-4);">
+      <img src="assets/logo.png" alt="PNGine" style="height: 24px; opacity: 0.6;">
+      <nav style="display: flex; gap: var(--space-5);">
+        <a href="/docs" style="color: var(--text-muted); font-size: var(--text-sm);">Docs</a>
+        <a href="/examples" style="color: var(--text-muted); font-size: var(--text-sm);">Examples</a>
+        <a href="https://github.com/HugoDaniel/pngine" style="color: var(--text-muted); font-size: var(--text-sm);">GitHub</a>
+      </nav>
+    </div>
+  </footer>
+
+  <!-- Scripts -->
+  <script src="scripts/main.js"></script>
+</body>
+</html>
