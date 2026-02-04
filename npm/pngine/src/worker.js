@@ -124,8 +124,8 @@ async function handleInit(data) {
 
     // Load bytecode into executor
     await loadBytecode(payloadInfo.payload);
-  } else {
-    // Use shared executor from wasmUrl
+  } else if (!EMBEDDED_ONLY) {
+    // Use shared executor from wasmUrl (only available in --shared builds)
     if (!data.wasmUrl) throw new Error("wasmUrl required (no embedded executor)");
 
     const resp = await fetch(data.wasmUrl);
@@ -141,6 +141,9 @@ async function handleInit(data) {
     if (data.bytecode) {
       await loadBytecode(data.bytecode);
     }
+  } else {
+    // EMBEDDED_ONLY mode: no embedded executor found
+    throw new Error("No embedded executor in payload. Use a PNG with embedded executor, or build with --shared flag.");
   }
 
   // Report ready
@@ -299,8 +302,10 @@ function handleGetUniforms() {
 /**
  * WASM imports for wasm_entry.zig.
  * Only requires the log function for debug output.
+ * Only used in --shared builds.
  */
 function getWasmImports() {
+  if (EMBEDDED_ONLY) return {}; // Dead code in embedded-only builds
   return {
     env: {
       log: (ptr, len) => {

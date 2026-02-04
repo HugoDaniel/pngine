@@ -144,11 +144,11 @@ export function getExecutorImports(callbacks = {}) {
   return {
     env: {
       // Debug logging (optional)
-      log: callbacks.log || ((ptr, len) => {}),
+      log: callbacks.log || ((ptr, len) => { }),
 
       // WASM-in-WASM plugin imports
-      wasmInstantiate: callbacks.wasmInstantiate || ((id, ptr, len) => {}),
-      wasmCall: callbacks.wasmCall || ((callId, modId, namePtr, nameLen, argsPtr, argsLen) => {}),
+      wasmInstantiate: callbacks.wasmInstantiate || ((id, ptr, len) => { }),
+      wasmCall: callbacks.wasmCall || ((callId, modId, namePtr, nameLen, argsPtr, argsLen) => { }),
       wasmGetResult: callbacks.wasmGetResult || ((callId, outPtr, outLen) => 0),
     },
   };
@@ -239,11 +239,15 @@ export async function createExecutor(wasmBytes, imports = {}) {
  * Generate a name for the executor variant based on plugins.
  *
  * Used for fetching shared executor when not embedded.
+ * Only available in --shared builds.
  *
  * @param {Object} plugins - Plugin flags
  * @returns {string} Variant name (e.g., "core-render-compute")
  */
 export function getExecutorVariantName(plugins) {
+  if (EMBEDDED_ONLY) {
+    throw new Error("getExecutorVariantName not available in embedded-only builds");
+  }
   const parts = ["core"];
   if (plugins.render) parts.push("render");
   if (plugins.compute) parts.push("compute");
