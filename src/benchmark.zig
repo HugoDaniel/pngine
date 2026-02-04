@@ -185,7 +185,7 @@ fn benchExecution(allocator: std.mem.Allocator, pngb: []const u8) !BenchResult {
     for (0..WARMUP_ITERATIONS) |_| {
         gpu.reset();
         var dispatcher = Dispatcher(MockGPU).init(&gpu, &module);
-        try dispatcher.executeAll(allocator);
+        try dispatcher.execute_all(allocator);
     }
 
     // Benchmark
@@ -195,7 +195,7 @@ fn benchExecution(allocator: std.mem.Allocator, pngb: []const u8) !BenchResult {
         timer.reset();
 
         var dispatcher = Dispatcher(MockGPU).init(&gpu, &module);
-        try dispatcher.executeAll(allocator);
+        try dispatcher.execute_all(allocator);
 
         const elapsed = timer.read();
         total_ns += elapsed;
@@ -225,7 +225,7 @@ fn benchFullPipeline(allocator: std.mem.Allocator, pngb: []const u8) !BenchResul
         gpu.reset();
         var module = try format.deserialize(allocator, pngb);
         var dispatcher = Dispatcher(MockGPU).init(&gpu, &module);
-        try dispatcher.executeAll(allocator);
+        try dispatcher.execute_all(allocator);
         module.deinit(allocator);
     }
 
@@ -237,7 +237,7 @@ fn benchFullPipeline(allocator: std.mem.Allocator, pngb: []const u8) !BenchResul
 
         var module = try format.deserialize(allocator, pngb);
         var dispatcher = Dispatcher(MockGPU).init(&gpu, &module);
-        try dispatcher.executeAll(allocator);
+        try dispatcher.execute_all(allocator);
         module.deinit(allocator);
 
         const elapsed = timer.read();

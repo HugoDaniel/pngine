@@ -42,12 +42,12 @@ pub fn handle(
     allocator: Allocator,
 ) !bool {
     // Pre-condition: valid opcode for this handler
-    assert(isFrameOpcode(op));
+    assert(is_frame_opcode(op));
 
     switch (op) {
         .define_frame => {
-            _ = try self.readVarint(); // frame_id
-            _ = try self.readVarint(); // name_string_id
+            _ = try self.read_varint(); // frame_id
+            _ = try self.read_varint(); // name_string_id
             self.in_frame_def = true;
         },
 
@@ -57,12 +57,12 @@ pub fn handle(
         },
 
         .exec_pass => {
-            const pass_id: u16 = @intCast(try self.readVarint());
+            const pass_id: u16 = @intCast(try self.read_varint());
             try executePass(Self, self, pass_id, allocator);
         },
 
         .exec_pass_once => {
-            const pass_id: u16 = @intCast(try self.readVarint());
+            const pass_id: u16 = @intCast(try self.read_varint());
             // Only execute if not already executed
             if (self.executed_once.get(pass_id) == null) {
                 try executePass(Self, self, pass_id, allocator);
@@ -71,9 +71,9 @@ pub fn handle(
         },
 
         .define_pass => {
-            const pass_id: u16 = @intCast(try self.readVarint());
-            _ = try self.readByte(); // pass_type
-            _ = try self.readVarint(); // descriptor_data_id
+            const pass_id: u16 = @intCast(try self.read_varint());
+            _ = try self.read_byte(); // pass_type
+            _ = try self.read_varint(); // descriptor_data_id
 
             // Record pass start position
             const pass_start = self.pc;
@@ -138,7 +138,7 @@ fn scanToEndPassDef(
     var scanner = OpcodeScanner.init(bytecode, self.pc);
 
     for (0..SCAN_MAX_ITERATIONS) |_| {
-        const scan_op = scanner.readOpcode() orelse break;
+        const scan_op = scanner.read_opcode() orelse break;
 
         if (scan_op == .end_pass_def) {
             // Store the pass range (excluding end_pass_def)
@@ -149,7 +149,7 @@ fn scanToEndPassDef(
             break;
         }
 
-        scanner.skipParams(scan_op);
+        scanner.skip_params(scan_op);
     }
 
     // Update dispatcher's pc to match scanner
@@ -157,7 +157,7 @@ fn scanToEndPassDef(
 }
 
 /// Check if opcode is a frame control opcode.
-pub fn isFrameOpcode(op: OpCode) bool {
+pub fn is_frame_opcode(op: OpCode) bool {
     return switch (op) {
         .define_frame,
         .end_frame,

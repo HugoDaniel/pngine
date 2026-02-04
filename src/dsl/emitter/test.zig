@@ -128,7 +128,7 @@ test "Emitter: buffer size from data reference" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify buffer was created with correct size: 6 floats * 4 bytes = 24 bytes
     var found_buffer = false;
@@ -162,7 +162,7 @@ test "Emitter: buffer size from string arithmetic expression" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify buffer size: "4+4+4" = 12
     var found_buffer = false;
@@ -197,7 +197,7 @@ test "Emitter: buffer size from define with expression" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify buffer size: VERTEX_SIZE = 4 * 10 = 40
     var found_buffer = false;
@@ -625,7 +625,7 @@ test "Emitter: bind group selects correct buffer from multiple" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify both buffers are created with correct sizes
     var vertex_buffer_created = false;
@@ -752,7 +752,7 @@ test "Emitter: bind group selects second buffer correctly" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify all three buffers are created with correct sizes
     var buffer_sizes: [3]bool = .{ false, false, false };
@@ -1305,11 +1305,11 @@ test "Emitter: texture with canvas size uses canvas-size encoding" {
 
             // Read texture_id (varint)
             i += 1;
-            const texture_id_result = opcodes.decodeVarint(module.bytecode[i..]);
+            const texture_id_result = opcodes.decode_varint(module.bytecode[i..]);
             i += texture_id_result.len;
 
             // Read descriptor data_id (varint)
-            const desc_id_result = opcodes.decodeVarint(module.bytecode[i..]);
+            const desc_id_result = opcodes.decode_varint(module.bytecode[i..]);
             const desc_id = desc_id_result.value;
 
             // Get the descriptor blob
@@ -1381,7 +1381,7 @@ test "Emitter: render pass with depth attachment emits depth texture ID" {
             i += 1;
 
             // Read color_texture_id (varint)
-            const color_result = opcodes.decodeVarint(module.bytecode[i..]);
+            const color_result = opcodes.decode_varint(module.bytecode[i..]);
             i += color_result.len;
 
             // Read load_op (1 byte)
@@ -1391,7 +1391,7 @@ test "Emitter: render pass with depth attachment emits depth texture ID" {
             i += 1;
 
             // Read depth_texture_id (varint)
-            const depth_result = opcodes.decodeVarint(module.bytecode[i..]);
+            const depth_result = opcodes.decode_varint(module.bytecode[i..]);
             const depth_texture_id = depth_result.value;
 
             // depth_texture_id should be 0 (first texture created), not 0xFFFF
@@ -1432,7 +1432,7 @@ test "Emitter: draw with #define identifier resolves to numeric value" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify draw was called with 36 vertices, not the default 3
     var found_draw = false;
@@ -1474,7 +1474,7 @@ test "Emitter: drawIndexed with #define identifier emits correct bytecode" {
 
             // Read the index count from bytecode (after opcode)
             i += 1;
-            const index_count_result = opcodes.decodeVarint(module.bytecode[i..]);
+            const index_count_result = opcodes.decode_varint(module.bytecode[i..]);
             const index_count = index_count_result.value;
 
             // Verify the #define was resolved: 72, not default 3
@@ -1538,7 +1538,7 @@ test "Emitter: vertexBuffers with bare identifier executes correctly" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify set_vertex_buffer was called with slot=0 and buffer_id=0 (first buffer)
     var found_set_vertex_buffer = false;
@@ -1593,7 +1593,7 @@ test "Emitter: rotating_cube style render pass with all commands" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify all expected GPU calls were made
     var found_create_vertex_buffer = false;
@@ -1666,7 +1666,7 @@ test "Emitter: multiple vertex buffers with bare identifiers" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify 3 vertex buffers are set at slots 0, 1, 2
     var slot_0_set = false;
@@ -1716,7 +1716,7 @@ test "Emitter: mixed pool and non-pool vertex buffers (boids pattern)" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify both vertex buffers are set at slots 0 and 1
     var slot_0_set = false;
@@ -1781,9 +1781,9 @@ test "Emitter: textureUsesCanvasSize detects builtin_ref nodes" {
     for (canvas_module.bytecode, 0..) |byte, idx| {
         if (byte == @intFromEnum(opcodes.OpCode.create_texture)) {
             var j = idx + 1;
-            _ = opcodes.decodeVarint(canvas_module.bytecode[j..]); // texture_id
-            j += opcodes.decodeVarint(canvas_module.bytecode[j..]).len;
-            const desc_id = opcodes.decodeVarint(canvas_module.bytecode[j..]).value;
+            _ = opcodes.decode_varint(canvas_module.bytecode[j..]); // texture_id
+            j += opcodes.decode_varint(canvas_module.bytecode[j..]).len;
+            const desc_id = opcodes.decode_varint(canvas_module.bytecode[j..]).value;
             if (desc_id < canvas_module.data.blobs.items.len) {
                 const desc = canvas_module.data.blobs.items[desc_id];
                 if (desc.len >= 2 and desc[0] == @intFromEnum(DescriptorEncoder.DescriptorType.texture)) {
@@ -1798,9 +1798,9 @@ test "Emitter: textureUsesCanvasSize detects builtin_ref nodes" {
     for (explicit_module.bytecode, 0..) |byte, idx| {
         if (byte == @intFromEnum(opcodes.OpCode.create_texture)) {
             var j = idx + 1;
-            _ = opcodes.decodeVarint(explicit_module.bytecode[j..]); // texture_id
-            j += opcodes.decodeVarint(explicit_module.bytecode[j..]).len;
-            const desc_id = opcodes.decodeVarint(explicit_module.bytecode[j..]).value;
+            _ = opcodes.decode_varint(explicit_module.bytecode[j..]); // texture_id
+            j += opcodes.decode_varint(explicit_module.bytecode[j..]).len;
+            const desc_id = opcodes.decode_varint(explicit_module.bytecode[j..]).value;
             if (desc_id < explicit_module.data.blobs.items.len) {
                 const desc = explicit_module.data.blobs.items[desc_id];
                 if (desc.len >= 2 and desc[0] == @intFromEnum(DescriptorEncoder.DescriptorType.texture)) {
@@ -2197,7 +2197,7 @@ test "Emitter: rotating_cube style wgsl + shaderModule pattern" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify shader module, pipeline, and draw were created
     var found_shader = false;
@@ -2307,7 +2307,7 @@ test "Emitter: data with float32Array still works alongside wasm feature" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify buffer size: 6 floats * 4 bytes = 24 bytes
     var found_buffer = false;
@@ -2606,7 +2606,7 @@ test "Emitter: buffer with pool=2 creates pooled resources" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Count buffer creations - should have 2 buffers for pool=2
     var buffer_count: usize = 0;
@@ -2674,7 +2674,7 @@ test "Emitter: buffer size from WGSL binding reference" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Find the buffer creation call and verify size
     // struct Inputs { time: f32, resolution: vec2<u32> } = 16 bytes
@@ -2722,7 +2722,7 @@ test "Emitter: define with string multiplication expression in instanceCount" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Find the draw call and verify instanceCount is 4096, not 1
     for (gpu.get_calls()) |call| {
@@ -2758,7 +2758,7 @@ test "Emitter: define with string addition expression" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     for (gpu.get_calls()) |call| {
         if (call.call_type == .draw) {
@@ -2792,7 +2792,7 @@ test "Emitter: define with string division expression" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     for (gpu.get_calls()) |call| {
         if (call.call_type == .draw) {
@@ -2828,7 +2828,7 @@ test "Emitter: define with nested define reference in string" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     for (gpu.get_calls()) |call| {
         if (call.call_type == .draw) {
@@ -2862,7 +2862,7 @@ test "Emitter: define with ceil function in string" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     for (gpu.get_calls()) |call| {
         if (call.call_type == .dispatch) {
@@ -2897,7 +2897,7 @@ test "Emitter: define with plain number string" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     for (gpu.get_calls()) |call| {
         if (call.call_type == .draw) {
@@ -2933,7 +2933,7 @@ test "Emitter: define with complex chained expression" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     for (gpu.get_calls()) |call| {
         if (call.call_type == .draw) {
@@ -2968,7 +2968,7 @@ test "Emitter: define number literal (not string) still works" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     for (gpu.get_calls()) |call| {
         if (call.call_type == .draw) {
@@ -3003,7 +3003,7 @@ test "Emitter: drawIndexed with string define instanceCount" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     for (gpu.get_calls()) |call| {
         if (call.call_type == .draw_indexed) {
@@ -3041,7 +3041,7 @@ test "Emitter: multiple draw params from string defines" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     for (gpu.get_calls()) |call| {
         if (call.call_type == .draw) {
@@ -3929,7 +3929,7 @@ test "Emitter: draw with object params execution" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     for (gpu.get_calls()) |call| {
         if (call.call_type == .draw) {
@@ -4457,7 +4457,7 @@ test "Emitter: cube shape with position4 color4 uv2 format" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify buffer was created with correct size: 36 vertices × 40 bytes = 1440 bytes
     var found_buffer = false;
@@ -4490,7 +4490,7 @@ test "Emitter: cube shape with minimal position3 format" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify buffer size: 36 vertices × 12 bytes = 432 bytes
     var found_buffer = false;
@@ -4525,7 +4525,7 @@ test "Emitter: plane shape with position3 uv2 format" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify buffer size: 6 vertices × 20 bytes = 120 bytes
     var found_buffer = false;
@@ -4558,7 +4558,7 @@ test "Emitter: cube shape with mappedAtCreation" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify buffer size: 36 vertices × 16 bytes = 576 bytes
     var found_buffer = false;
@@ -4601,7 +4601,7 @@ test "Emitter: cube with normal3 format" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify buffer size: 36 vertices × 24 bytes = 864 bytes
     var found_buffer = false;
@@ -4647,7 +4647,7 @@ test "Emitter: init macro creates synthetic resources" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Count synthetic resources created by #init expansion
     var pipeline_count: u32 = 0;
@@ -4695,7 +4695,7 @@ test "Emitter: init macro calculates workgroup count from buffer size" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Find dispatch call and verify workgroup count
     var found_dispatch = false;
@@ -4738,7 +4738,7 @@ test "Emitter: frame init= runs passes once" {
     defer dispatcher.deinit();
 
     // Execute first frame - init pass should run
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
     const first_dispatch_count = countDispatchCalls(&gpu);
     try testing.expect(first_dispatch_count >= 1);
 
@@ -4748,7 +4748,7 @@ test "Emitter: frame init= runs passes once" {
 
     // Execute second frame - init pass should be skipped (run-once)
     dispatcher.pc = 0; // Reset PC to start
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
     const second_dispatch_count = countDispatchCalls(&gpu);
 
     // Init pass should NOT run on second execution
@@ -4786,7 +4786,7 @@ test "Emitter: multiple frames with different init= lists" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Both init passes should have executed (once each)
     const dispatch_count = countDispatchCalls(&gpu);
@@ -4821,7 +4821,7 @@ test "Emitter: init= with multiple passes in single frame" {
     defer dispatcher.deinit();
 
     // First execution: both init passes run
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
     const first_count = countDispatchCalls(&gpu);
     try testing.expectEqual(@as(u32, 2), first_count);
 
@@ -4829,7 +4829,7 @@ test "Emitter: init= with multiple passes in single frame" {
     gpu.deinit(testing.allocator);
     gpu = .empty;
     dispatcher.pc = 0;
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
     const second_count = countDispatchCalls(&gpu);
 
     // Second execution: no init passes run (all skipped)
@@ -4872,7 +4872,7 @@ test "Emitter: init macro with params creates uniform buffer" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Count resources created
     var buffer_count: u32 = 0;
@@ -4920,7 +4920,7 @@ test "Emitter: init macro with multiple params values" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Find the params buffer creation - should be 12 bytes (3 x f32)
     var found_params_buffer = false;

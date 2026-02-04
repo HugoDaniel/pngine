@@ -1,12 +1,12 @@
 //! Opcode Scanner
 //!
 //! Unified bytecode scanning for pass definitions and opcode skipping.
-//! Eliminates duplication between skipOpcodeParamsAt and skipOpcodeParams.
+//! Eliminates duplication between skip_opcode_params_at and skipOpcodeParams.
 //!
 //! ## Design
 //!
 //! - Single OpcodeScanner type works with external pc pointer
-//! - Used by scanPassDefinitions for pass range discovery
+//! - Used by scan_pass_definitions for pass range discovery
 //! - Used by define_pass handler for skipping during execution
 //!
 //! ## Invariants
@@ -50,12 +50,12 @@ pub const OpcodeScanner = struct {
     }
 
     /// Check if scanner has more bytes to read.
-    pub fn hasMore(self: *const Self) bool {
+    pub fn has_more(self: *const Self) bool {
         return self.pc < self.bytecode.len;
     }
 
     /// Read current opcode and advance pc.
-    pub fn readOpcode(self: *Self) ?OpCode {
+    pub fn read_opcode(self: *Self) ?OpCode {
         if (self.pc >= self.bytecode.len) return null;
         const op: OpCode = @enumFromInt(self.bytecode[self.pc]);
         self.pc += 1;
@@ -63,21 +63,21 @@ pub const OpcodeScanner = struct {
     }
 
     /// Skip a single varint parameter.
-    fn skipVarint(self: *Self) void {
+    fn skip_varint(self: *Self) void {
         if (self.pc >= self.bytecode.len) return;
-        const result = opcodes.decodeVarint(self.bytecode[self.pc..]);
+        const result = opcodes.decode_varint(self.bytecode[self.pc..]);
         self.pc += result.len;
     }
 
     /// Skip N varint parameters.
-    fn skipVarints(self: *Self, comptime count: u32) void {
+    fn skip_varints(self: *Self, comptime count: u32) void {
         inline for (0..count) |_| {
-            self.skipVarint();
+            self.skip_varint();
         }
     }
 
     /// Skip a single byte parameter.
-    fn skipByte(self: *Self) void {
+    fn skip_byte(self: *Self) void {
         if (self.pc < self.bytecode.len) {
             self.pc += 1;
         }
@@ -86,15 +86,15 @@ pub const OpcodeScanner = struct {
     /// Skip opcode parameters based on opcode type.
     /// This must stay synchronized with the emitter's output format.
     ///
-    /// INVARIANT: If skipParams skips fewer bytes than emitted, the scanner
+    /// INVARIANT: If skip_params skips fewer bytes than emitted, the scanner
     /// will desync and misinterpret data as opcodes, causing missed pass definitions.
-    pub fn skipParams(self: *Self, op: OpCode) void {
+    pub fn skip_params(self: *Self, op: OpCode) void {
         switch (op) {
             // No parameters
             .end_pass, .submit, .end_frame, .nop, .begin_compute_pass, .end_pass_def => {},
 
             // 1 varint
-            .set_pipeline, .exec_pass, .exec_pass_once => self.skipVarint(),
+            .set_pipeline, .exec_pass, .exec_pass_once => self.skip_varint(),
 
             // 2 varints
             .define_frame,
@@ -111,7 +111,7 @@ pub const OpcodeScanner = struct {
             .write_uniform,
             .copy_texture_to_texture,
             .init_wasm_module,
-            => self.skipVarints(2),
+            => self.skip_varints(2),
 
             // 3 varints
             .create_bind_group,
@@ -119,86 +119,86 @@ pub const OpcodeScanner = struct {
             .write_time_uniform,
             .create_texture_view,
             .dispatch,
-            => self.skipVarints(3),
+            => self.skip_varints(3),
 
             // 4 varints
-            .draw, .write_buffer_from_wasm => self.skipVarints(4),
+            .draw, .write_buffer_from_wasm => self.skip_varints(4),
 
             // 5 varints
-            .draw_indexed, .copy_buffer_to_buffer, .copy_external_image_to_texture => self.skipVarints(5),
+            .draw_indexed, .copy_buffer_to_buffer, .copy_external_image_to_texture => self.skip_varints(5),
 
             // varint + varint + byte (create_buffer)
             .create_buffer => {
-                self.skipVarints(2);
-                self.skipByte();
+                self.skip_varints(2);
+                self.skip_byte();
             },
 
             // byte + varint
             .set_bind_group, .set_vertex_buffer => {
-                self.skipByte();
-                self.skipVarint();
+                self.skip_byte();
+                self.skip_varint();
             },
 
             // varint + byte
             .set_index_buffer => {
-                self.skipVarint();
-                self.skipByte();
+                self.skip_varint();
+                self.skip_byte();
             },
 
             // varint + 2 bytes + varint (begin_render_pass)
             .begin_render_pass => {
-                self.skipVarint();
-                self.skipByte();
-                self.skipByte();
-                self.skipVarint();
+                self.skip_varint();
+                self.skip_byte();
+                self.skip_byte();
+                self.skip_varint();
             },
 
             // byte + varint + 2 bytes (pool operations)
             .set_bind_group_pool, .set_vertex_buffer_pool => {
-                self.skipByte();
-                self.skipVarint();
-                self.skipByte();
-                self.skipByte();
+                self.skip_byte();
+                self.skip_varint();
+                self.skip_byte();
+                self.skip_byte();
             },
 
             // byte + varint + byte (select_from_pool)
             .select_from_pool => {
-                self.skipByte();
-                self.skipVarint();
-                self.skipByte();
+                self.skip_byte();
+                self.skip_varint();
+                self.skip_byte();
             },
 
             // varint + byte + varint (define_pass)
             .define_pass => {
-                self.skipVarint();
-                self.skipByte();
-                self.skipVarint();
+                self.skip_varint();
+                self.skip_byte();
+                self.skip_varint();
             },
 
             // Variable length: count + N varints
             .execute_bundles => {
                 if (self.pc >= self.bytecode.len) return;
-                const bundle_count = opcodes.decodeVarint(self.bytecode[self.pc..]);
+                const bundle_count = opcodes.decode_varint(self.bytecode[self.pc..]);
                 self.pc += bundle_count.len;
                 for (0..@min(bundle_count.value, MAX_SCAN_ITERATIONS)) |_| {
-                    self.skipVarint();
+                    self.skip_varint();
                 }
             },
 
             // Variable length: shader_id + count + N data_ids
             .create_shader_concat => {
-                self.skipVarint(); // shader_id
+                self.skip_varint(); // shader_id
                 if (self.pc >= self.bytecode.len) return;
-                const count = opcodes.decodeVarint(self.bytecode[self.pc..]);
+                const count = opcodes.decode_varint(self.bytecode[self.pc..]);
                 self.pc += count.len;
                 for (0..@min(count.value, MAX_SCAN_ITERATIONS)) |_| {
-                    self.skipVarint();
+                    self.skip_varint();
                 }
             },
 
             // Variable length: 3 varints + byte + args
             .call_wasm_func => {
-                self.skipVarints(3); // call_id, module_id, func_name_id
+                self.skip_varints(3); // call_id, module_id, func_name_id
                 if (self.pc >= self.bytecode.len) return;
                 const arg_count = self.bytecode[self.pc];
                 self.pc += 1;
@@ -219,7 +219,7 @@ pub const OpcodeScanner = struct {
     /// Scan bytecode for all pass definitions and return their ranges.
     ///
     /// Complexity: O(bytecode.len)
-    pub fn scanPassDefinitions(
+    pub fn scan_pass_definitions(
         bytecode: []const u8,
         allocator: Allocator,
     ) std.AutoHashMap(u16, PassRange) {
@@ -230,25 +230,25 @@ pub const OpcodeScanner = struct {
         var scanner = OpcodeScanner.init(bytecode, 0);
 
         for (0..MAX_SCAN_ITERATIONS) |_| {
-            const op = scanner.readOpcode() orelse break;
+            const op = scanner.read_opcode() orelse break;
 
             if (op == .define_pass) {
                 // Read pass_id
                 if (scanner.pc >= bytecode.len) break;
-                const pass_id_result = opcodes.decodeVarint(bytecode[scanner.pc..]);
+                const pass_id_result = opcodes.decode_varint(bytecode[scanner.pc..]);
                 scanner.pc += pass_id_result.len;
 
                 // Skip pass_type byte
-                scanner.skipByte();
+                scanner.skip_byte();
 
                 // Skip descriptor_data_id
-                scanner.skipVarint();
+                scanner.skip_varint();
 
                 const pass_start = scanner.pc;
 
                 // Scan for end_pass_def
                 for (0..MAX_SCAN_ITERATIONS) |_| {
-                    const scan_op = scanner.readOpcode() orelse break;
+                    const scan_op = scanner.read_opcode() orelse break;
                     if (scan_op == .end_pass_def) {
                         pass_ranges.put(@intCast(pass_id_result.value), .{
                             .start = pass_start,
@@ -256,10 +256,10 @@ pub const OpcodeScanner = struct {
                         }) catch {};
                         break;
                     }
-                    scanner.skipParams(scan_op);
+                    scanner.skip_params(scan_op);
                 }
             } else {
-                scanner.skipParams(op);
+                scanner.skip_params(op);
             }
         }
 
@@ -291,7 +291,7 @@ test "OpcodeScanner: skip draw params" {
     try testing.expectEqual(OpCode.draw, @as(OpCode, @enumFromInt(bytecode[0])));
 
     var scanner = OpcodeScanner.init(bytecode, 1); // Skip opcode byte
-    scanner.skipParams(.draw);
+    scanner.skip_params(.draw);
 
     // Post-condition: skipped to end
     try testing.expectEqual(bytecode.len, scanner.pc);
@@ -312,12 +312,12 @@ test "OpcodeScanner: skip call_wasm_func with mixed args" {
     };
 
     var scanner = OpcodeScanner.init(&bytecode, 1); // Skip opcode byte
-    scanner.skipParams(.call_wasm_func);
+    scanner.skip_params(.call_wasm_func);
 
     try testing.expectEqual(bytecode.len, scanner.pc);
 }
 
-test "OpcodeScanner: scanPassDefinitions finds multiple passes" {
+test "OpcodeScanner: scan_pass_definitions finds multiple passes" {
     var builder = Builder.init();
     defer builder.deinit(testing.allocator);
 
@@ -339,7 +339,7 @@ test "OpcodeScanner: scanPassDefinitions finds multiple passes" {
     var module = try format.deserialize(testing.allocator, pngb);
     defer module.deinit(testing.allocator);
 
-    var pass_ranges = OpcodeScanner.scanPassDefinitions(module.bytecode, testing.allocator);
+    var pass_ranges = OpcodeScanner.scan_pass_definitions(module.bytecode, testing.allocator);
     defer pass_ranges.deinit();
 
     try testing.expectEqual(@as(usize, 2), pass_ranges.count());
@@ -358,7 +358,7 @@ test "OpcodeScanner: skip create_bind_group (3 varints)" {
     try testing.expectEqual(OpCode.create_bind_group, @as(OpCode, @enumFromInt(bytecode[0])));
 
     var scanner = OpcodeScanner.init(bytecode, 1);
-    scanner.skipParams(.create_bind_group);
+    scanner.skip_params(.create_bind_group);
 
     try testing.expectEqual(bytecode.len, scanner.pc);
 }

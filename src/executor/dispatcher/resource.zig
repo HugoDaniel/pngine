@@ -28,87 +28,87 @@ pub fn handle(
     allocator: Allocator,
 ) !bool {
     // Pre-condition: valid opcode for this handler
-    assert(isResourceOpcode(op));
+    assert(is_resource_opcode(op));
 
     switch (op) {
         .create_buffer => {
-            const buffer_id = try self.readVarint();
-            const size = try self.readVarint();
-            const usage = try self.readByte();
+            const buffer_id = try self.read_varint();
+            const size = try self.read_varint();
+            const usage = try self.read_byte();
             try self.backend.create_buffer(allocator, @intCast(buffer_id), size, usage);
         },
 
         .create_texture => {
-            const texture_id = try self.readVarint();
-            const descriptor_data_id = try self.readVarint();
+            const texture_id = try self.read_varint();
+            const descriptor_data_id = try self.read_varint();
             try self.backend.create_texture(allocator, @intCast(texture_id), @intCast(descriptor_data_id));
         },
 
         .create_sampler => {
-            const sampler_id = try self.readVarint();
-            const descriptor_data_id = try self.readVarint();
+            const sampler_id = try self.read_varint();
+            const descriptor_data_id = try self.read_varint();
             try self.backend.create_sampler(allocator, @intCast(sampler_id), @intCast(descriptor_data_id));
         },
 
         .create_shader_module => {
-            const shader_id = try self.readVarint();
-            const code_data_id = try self.readVarint();
+            const shader_id = try self.read_varint();
+            const code_data_id = try self.read_varint();
             try self.backend.create_shader_module(allocator, @intCast(shader_id), @intCast(code_data_id));
         },
 
         .create_render_pipeline => {
-            const pipeline_id = try self.readVarint();
-            const descriptor_data_id = try self.readVarint();
+            const pipeline_id = try self.read_varint();
+            const descriptor_data_id = try self.read_varint();
             try self.backend.create_render_pipeline(allocator, @intCast(pipeline_id), @intCast(descriptor_data_id));
         },
 
         .create_compute_pipeline => {
-            const pipeline_id = try self.readVarint();
-            const descriptor_data_id = try self.readVarint();
+            const pipeline_id = try self.read_varint();
+            const descriptor_data_id = try self.read_varint();
             try self.backend.create_compute_pipeline(allocator, @intCast(pipeline_id), @intCast(descriptor_data_id));
         },
 
         .create_bind_group => {
-            const group_id = try self.readVarint();
-            const layout_id = try self.readVarint();
-            const entry_data_id = try self.readVarint();
+            const group_id = try self.read_varint();
+            const layout_id = try self.read_varint();
+            const entry_data_id = try self.read_varint();
             try self.backend.create_bind_group(allocator, @intCast(group_id), @intCast(layout_id), @intCast(entry_data_id));
         },
 
         .create_bind_group_layout => {
-            const layout_id = try self.readVarint();
-            const descriptor_data_id = try self.readVarint();
+            const layout_id = try self.read_varint();
+            const descriptor_data_id = try self.read_varint();
             try self.backend.create_bind_group_layout(allocator, @intCast(layout_id), @intCast(descriptor_data_id));
         },
 
         .create_pipeline_layout => {
-            const layout_id = try self.readVarint();
-            const descriptor_data_id = try self.readVarint();
+            const layout_id = try self.read_varint();
+            const descriptor_data_id = try self.read_varint();
             try self.backend.create_pipeline_layout(allocator, @intCast(layout_id), @intCast(descriptor_data_id));
         },
 
         .create_image_bitmap => {
-            const bitmap_id = try self.readVarint();
-            const blob_data_id = try self.readVarint();
+            const bitmap_id = try self.read_varint();
+            const blob_data_id = try self.read_varint();
             try self.backend.create_image_bitmap(allocator, @intCast(bitmap_id), @intCast(blob_data_id));
         },
 
         .create_texture_view => {
-            const view_id = try self.readVarint();
-            const texture_id = try self.readVarint();
-            const descriptor_data_id = try self.readVarint();
+            const view_id = try self.read_varint();
+            const texture_id = try self.read_varint();
+            const descriptor_data_id = try self.read_varint();
             try self.backend.create_texture_view(allocator, @intCast(view_id), @intCast(texture_id), @intCast(descriptor_data_id));
         },
 
         .create_query_set => {
-            const query_set_id = try self.readVarint();
-            const descriptor_data_id = try self.readVarint();
+            const query_set_id = try self.read_varint();
+            const descriptor_data_id = try self.read_varint();
             try self.backend.create_query_set(allocator, @intCast(query_set_id), @intCast(descriptor_data_id));
         },
 
         .create_render_bundle => {
-            const bundle_id = try self.readVarint();
-            const descriptor_data_id = try self.readVarint();
+            const bundle_id = try self.read_varint();
+            const descriptor_data_id = try self.read_varint();
             try self.backend.create_render_bundle(allocator, @intCast(bundle_id), @intCast(descriptor_data_id));
         },
 
@@ -119,7 +119,7 @@ pub fn handle(
 }
 
 /// Check if opcode is a resource creation opcode.
-pub fn isResourceOpcode(op: OpCode) bool {
+pub fn is_resource_opcode(op: OpCode) bool {
     return switch (op) {
         .create_buffer,
         .create_texture,

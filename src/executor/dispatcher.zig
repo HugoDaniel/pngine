@@ -162,7 +162,7 @@ pub fn Dispatcher(comptime BackendType: type) type {
         /// Complexity: O(1)
         /// Memory: Allocates hashmap for pass ranges (grows on demand).
         pub fn init(allocator: Allocator, backend: *BackendType, module: *const Module) Self {
-            return initWithFrame(allocator, backend, module, 0);
+            return init_with_frame(allocator, backend, module, 0);
         }
 
         /// Initialize with a specific frame counter (for animation loops).
@@ -171,7 +171,7 @@ pub fn Dispatcher(comptime BackendType: type) type {
         /// actual_id = base_id + (frame_counter + offset) % pool_size
         ///
         /// Complexity: O(1)
-        pub fn initWithFrame(allocator: Allocator, backend: *BackendType, module: *const Module, initial_frame: u32) Self {
+        pub fn init_with_frame(allocator: Allocator, backend: *BackendType, module: *const Module, initial_frame: u32) Self {
             // Pre-conditions
             assert(module.bytecode.len <= 1024 * 1024); // 1MB max bytecode
 
@@ -201,12 +201,12 @@ pub fn Dispatcher(comptime BackendType: type) type {
         /// opcodes within the frame need to reference pass ranges.
         ///
         /// Complexity: O(bytecode.len)
-        pub fn scanPassDefinitions(self: *Self) void {
+        pub fn scan_pass_definitions(self: *Self) void {
             // Pre-condition: module bytecode is valid
             assert(self.module.bytecode.len <= 1024 * 1024);
 
             // Delegate to OpcodeScanner
-            var scanned = OpcodeScanner.scanPassDefinitions(self.module.bytecode, self.allocator);
+            var scanned = OpcodeScanner.scan_pass_definitions(self.module.bytecode, self.allocator);
 
             // Merge scanned ranges into our map
             var it = scanned.iterator();
@@ -220,18 +220,18 @@ pub fn Dispatcher(comptime BackendType: type) type {
 
         /// Skip opcode parameters at a given position (for scanning without executing).
         /// Made public for use by CLI frame scanning and tests.
-        pub fn skipOpcodeParamsAt(bytecode: []const u8, pc: *u32, op: OpCode) void {
+        pub fn skip_opcode_params_at(bytecode: []const u8, pc: *u32, op: OpCode) void {
             var scanner = OpcodeScanner.init(bytecode, pc.*);
-            scanner.skipParams(op);
+            scanner.skip_params(op);
             pc.* = scanner.pc;
         }
 
         /// Execute all bytecode.
-        pub fn executeAll(self: *Self, allocator: Allocator) ExecuteError!void {
+        pub fn execute_all(self: *Self, allocator: Allocator) ExecuteError!void {
             // Pre-condition: start at beginning
             assert(self.pc == 0);
 
-            try self.executeFromPC(allocator);
+            try self.execute_from_pc(allocator);
 
             // Post-condition: consumed all bytecode
             assert(self.pc == self.module.bytecode.len);
@@ -239,7 +239,7 @@ pub fn Dispatcher(comptime BackendType: type) type {
 
         /// Execute bytecode from current PC to end.
         /// Use this when starting from a non-zero position (e.g., skipping resource creation).
-        pub fn executeFromPC(self: *Self, allocator: Allocator) ExecuteError!void {
+        pub fn execute_from_pc(self: *Self, allocator: Allocator) ExecuteError!void {
             // Pre-condition: pc within bounds or at end
             assert(self.pc <= self.module.bytecode.len);
 
@@ -273,37 +273,37 @@ pub fn Dispatcher(comptime BackendType: type) type {
 
             // Try each handler in priority order
             // Resource creation
-            if (handlers.resource.isResourceOpcode(op)) {
+            if (handlers.resource.is_resource_opcode(op)) {
                 _ = try handlers.resource.handle(Self, self, op, allocator);
                 return;
             }
 
             // Pass operations
-            if (handlers.pass.isPassOpcode(op)) {
+            if (handlers.pass.is_pass_opcode(op)) {
                 _ = try handlers.pass.handle(Self, self, op, allocator);
                 return;
             }
 
             // Queue operations
-            if (handlers.queue.isQueueOpcode(op)) {
+            if (handlers.queue.is_queue_opcode(op)) {
                 _ = try handlers.queue.handle(Self, self, op, allocator);
                 return;
             }
 
             // Frame control
-            if (handlers.frame.isFrameOpcode(op)) {
+            if (handlers.frame.is_frame_opcode(op)) {
                 _ = try handlers.frame.handle(Self, self, op, allocator);
                 return;
             }
 
             // Pool operations
-            if (handlers.pool.isPoolOpcode(op)) {
+            if (handlers.pool.is_pool_opcode(op)) {
                 _ = try handlers.pool.handle(Self, self, op, allocator);
                 return;
             }
 
             // WASM operations
-            if (handlers.wasm_ops.isWasmOpcode(op)) {
+            if (handlers.wasm_ops.is_wasm_opcode(op)) {
                 _ = try handlers.wasm_ops.handle(Self, self, op, allocator);
                 return;
             }
@@ -328,7 +328,7 @@ pub fn Dispatcher(comptime BackendType: type) type {
         // Bytecode Reading
         // ====================================================================
 
-        pub fn readByte(self: *Self) ExecuteError!u8 {
+        pub fn read_byte(self: *Self) ExecuteError!u8 {
             const bytecode = self.module.bytecode;
             if (self.pc >= bytecode.len) return error.UnexpectedEndOfBytecode;
 
@@ -337,11 +337,11 @@ pub fn Dispatcher(comptime BackendType: type) type {
             return byte;
         }
 
-        pub fn readVarint(self: *Self) ExecuteError!u32 {
+        pub fn read_varint(self: *Self) ExecuteError!u32 {
             const bytecode = self.module.bytecode;
             if (self.pc >= bytecode.len) return error.UnexpectedEndOfBytecode;
 
-            const result = opcodes.decodeVarint(bytecode[self.pc..]);
+            const result = opcodes.decode_varint(bytecode[self.pc..]);
             self.pc += result.len;
             return result.value;
         }

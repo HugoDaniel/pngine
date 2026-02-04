@@ -279,11 +279,11 @@ test "full pipeline: compile and execute" {
     defer gpu.deinit(std.testing.allocator);
 
     var disp = MockDispatcher.init(std.testing.allocator, &gpu, &module);
-    try disp.executeAll(std.testing.allocator);
+    try disp.execute_all(std.testing.allocator);
 
     // Verify GPU calls: create_shader_module, create_render_pipeline,
     // begin_render_pass, set_pipeline, draw, end_pass,
     // define_frame (no GPU call), exec_pass (no GPU call), submit, end_frame (no GPU call)
     // Actual GPU calls: create_shader_module, create_render_pipeline, begin_render_pass, set_pipeline, draw, end_pass, submit
-    try std.testing.expectEqual(@as(usize, 7), gpu.callCount());
+    try std.testing.expectEqual(@as(usize, 7), gpu.call_count());
 }

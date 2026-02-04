@@ -58,7 +58,7 @@ pub fn encodeVarint(value: u32, buffer: *[4]u8) u8 {
 /// Pre-condition: buffer.len >= encoded length (asserted at runtime).
 ///
 /// Complexity: O(1).
-pub fn decodeVarint(buffer: []const u8) struct { value: u32, len: u8 } {
+pub fn decode_varint(buffer: []const u8) struct { value: u32, len: u8 } {
     // Pre-condition: buffer has at least 1 byte
     assert(buffer.len >= 1);
 
@@ -135,7 +135,7 @@ test "varint roundtrip" {
 
     for (test_values) |value| {
         const len = encodeVarint(value, &buffer);
-        const decoded = decodeVarint(buffer[0..len]);
+        const decoded = decode_varint(buffer[0..len]);
         try testing.expectEqual(value, decoded.value);
         try testing.expectEqual(len, decoded.len);
     }
@@ -188,7 +188,7 @@ test "varint roundtrip for image bitmap IDs" {
 
     for (test_ids) |id| {
         const len = encodeVarint(id, &buffer);
-        const decoded = decodeVarint(buffer[0..len]);
+        const decoded = decode_varint(buffer[0..len]);
 
         // Property: roundtrip preserves value and length
         try testing.expectEqual(id, decoded.value);
@@ -216,7 +216,7 @@ test "varint encoding boundary cases for origin coordinates" {
     // Typical texture dimensions (512, 1024, 2048)
     const len_512 = encodeVarint(512, &buffer);
     try testing.expectEqual(@as(u8, 2), len_512);
-    const decoded_512 = decodeVarint(buffer[0..len_512]);
+    const decoded_512 = decode_varint(buffer[0..len_512]);
     try testing.expectEqual(@as(u32, 512), decoded_512.value);
 }
 

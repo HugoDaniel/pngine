@@ -110,7 +110,7 @@ test "pngineInputs: executes correctly with MockGPU" {
     defer gpu.deinit(testing.allocator);
 
     var dispatcher = Dispatcher(MockGPU).init(testing.allocator, &gpu, &module);
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Should have created buffer and written time uniform
     try testing.expect(gpu.calls.items.len >= 2);
@@ -207,7 +207,7 @@ test "sceneTimeInputs: executes correctly with MockGPU" {
     defer gpu.deinit(testing.allocator);
 
     var dispatcher = Dispatcher(MockGPU).init(testing.allocator, &gpu, &module);
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     try testing.expect(gpu.calls.items.len >= 2);
 }

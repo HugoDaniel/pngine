@@ -208,7 +208,7 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !AnimationTable {
 
     // Read name_string_id
     if (pos >= data.len) return AnimationTable.empty;
-    const name_result = opcodes.decodeVarint(data[pos..]);
+    const name_result = opcodes.decode_varint(data[pos..]);
     pos += name_result.len;
     const name_string_id: u16 = @intCast(name_result.value);
 
@@ -224,7 +224,7 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !AnimationTable {
 
     // Read scene_count
     if (pos >= data.len) return AnimationTable.empty;
-    const count_result = opcodes.decodeVarint(data[pos..]);
+    const count_result = opcodes.decode_varint(data[pos..]);
     pos += count_result.len;
     const scene_count: u16 = @intCast(@min(count_result.value, MAX_SCENES));
 
@@ -235,12 +235,12 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !AnimationTable {
     for (0..scene_count) |i| {
         // id_string_id
         if (pos >= data.len) break;
-        const id_result = opcodes.decodeVarint(data[pos..]);
+        const id_result = opcodes.decode_varint(data[pos..]);
         pos += id_result.len;
 
         // frame_string_id
         if (pos >= data.len) break;
-        const frame_result = opcodes.decodeVarint(data[pos..]);
+        const frame_result = opcodes.decode_varint(data[pos..]);
         pos += frame_result.len;
 
         // start_ms

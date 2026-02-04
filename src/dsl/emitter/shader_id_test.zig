@@ -82,7 +82,7 @@ fn executeAndCountShaders(pngb: []const u8) !u32 {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     var count: u32 = 0;
     for (gpu.get_calls()) |call| {
@@ -103,7 +103,7 @@ fn getCreatedShaderIds(allocator: std.mem.Allocator, pngb: []const u8) ![]u16 {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(allocator);
+    try dispatcher.execute_all(allocator);
 
     var ids = std.ArrayListUnmanaged(u16){};
     errdefer ids.deinit(allocator);
@@ -351,7 +351,7 @@ test "ShaderID: pipeline references valid shader after empty ones" {
     defer dispatcher.deinit();
 
     // This should not error - the pipeline should reference shader ID 0 (the valid one)
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify pipeline was created
     var found_pipeline = false;
@@ -388,7 +388,7 @@ test "ShaderID: compute pipeline after skipped shaders" {
     defer dispatcher.deinit();
 
     // This should succeed
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify compute pipeline was created
     var pipeline_created = false;
@@ -443,7 +443,7 @@ test "ShaderID: shader with data blocks gets correct WGSL code" {
 
     // Execute - this would fail with the bug because pipeline creation
     // would receive expression string instead of WGSL code
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify shader was created and get the data_id
     const types_mod = @import("types");
@@ -484,7 +484,7 @@ test "ShaderID: multiple data blocks before shader" {
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify shader code is WGSL, not expression strings
     const types_mod = @import("types");
@@ -545,7 +545,7 @@ test "ShaderID: data with buffer and shader combined" {
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify all resources created correctly
     const types_mod = @import("types");

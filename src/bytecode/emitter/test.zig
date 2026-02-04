@@ -155,11 +155,11 @@ test "emit createImageBitmap with larger IDs" {
     try testing.expectEqual(@as(usize, 5), bc.len);
 
     // Decode and verify values
-    const bitmap_id_result = opcodes.decodeVarint(bc[1..]);
+    const bitmap_id_result = opcodes.decode_varint(bc[1..]);
     try testing.expectEqual(@as(u32, 200), bitmap_id_result.value);
     try testing.expectEqual(@as(u8, 2), bitmap_id_result.len);
 
-    const blob_id_result = opcodes.decodeVarint(bc[1 + bitmap_id_result.len ..]);
+    const blob_id_result = opcodes.decode_varint(bc[1 + bitmap_id_result.len ..]);
     try testing.expectEqual(@as(u32, 300), blob_id_result.value);
 }
 
@@ -209,12 +209,12 @@ test "emit copyExternalImageToTexture with non-zero origin" {
     var offset: usize = 1;
 
     // bitmap_id
-    const bitmap_result = opcodes.decodeVarint(bc[offset..]);
+    const bitmap_result = opcodes.decode_varint(bc[offset..]);
     try testing.expectEqual(@as(u32, 0), bitmap_result.value);
     offset += bitmap_result.len;
 
     // texture_id
-    const texture_result = opcodes.decodeVarint(bc[offset..]);
+    const texture_result = opcodes.decode_varint(bc[offset..]);
     try testing.expectEqual(@as(u32, 1), texture_result.value);
     offset += texture_result.len;
 
@@ -223,13 +223,13 @@ test "emit copyExternalImageToTexture with non-zero origin" {
     offset += 1;
 
     // origin_x (128 requires 2 bytes)
-    const origin_x_result = opcodes.decodeVarint(bc[offset..]);
+    const origin_x_result = opcodes.decode_varint(bc[offset..]);
     try testing.expectEqual(@as(u32, 128), origin_x_result.value);
     try testing.expectEqual(@as(u8, 2), origin_x_result.len);
     offset += origin_x_result.len;
 
     // origin_y (256 requires 2 bytes)
-    const origin_y_result = opcodes.decodeVarint(bc[offset..]);
+    const origin_y_result = opcodes.decode_varint(bc[offset..]);
     try testing.expectEqual(@as(u32, 256), origin_y_result.value);
 }
 
@@ -267,14 +267,14 @@ test "emit image sequence (create then copy)" {
 
     // Find second opcode (after create_texture params)
     var offset: usize = 1;
-    offset += opcodes.decodeVarint(bc[offset..]).len; // texture_id
-    offset += opcodes.decodeVarint(bc[offset..]).len; // desc_id
+    offset += opcodes.decode_varint(bc[offset..]).len; // texture_id
+    offset += opcodes.decode_varint(bc[offset..]).len; // desc_id
     try testing.expectEqual(@as(u8, @intFromEnum(OpCode.create_image_bitmap)), bc[offset]);
 
     // Find third opcode
     offset += 1;
-    offset += opcodes.decodeVarint(bc[offset..]).len; // bitmap_id
-    offset += opcodes.decodeVarint(bc[offset..]).len; // blob_id
+    offset += opcodes.decode_varint(bc[offset..]).len; // bitmap_id
+    offset += opcodes.decode_varint(bc[offset..]).len; // blob_id
     try testing.expectEqual(@as(u8, @intFromEnum(OpCode.copy_external_image_to_texture)), bc[offset]);
 }
 
@@ -294,17 +294,17 @@ test "emit multiple image bitmaps" {
 
     // Decode first instruction
     var offset: usize = 1;
-    var result = opcodes.decodeVarint(bc[offset..]);
+    var result = opcodes.decode_varint(bc[offset..]);
     try testing.expectEqual(@as(u32, 0), result.value); // bitmap_id 0
     offset += result.len;
-    result = opcodes.decodeVarint(bc[offset..]);
+    result = opcodes.decode_varint(bc[offset..]);
     try testing.expectEqual(@as(u32, 0), result.value); // blob_id 0
     offset += result.len;
 
     // Second instruction
     try testing.expectEqual(@as(u8, @intFromEnum(OpCode.create_image_bitmap)), bc[offset]);
     offset += 1;
-    result = opcodes.decodeVarint(bc[offset..]);
+    result = opcodes.decode_varint(bc[offset..]);
     try testing.expectEqual(@as(u32, 1), result.value); // bitmap_id 1
 }
 
@@ -400,7 +400,7 @@ test "emit createShaderConcat with multiple data IDs" {
     var offset: usize = 1;
 
     // shader_id
-    const shader_result = opcodes.decodeVarint(bc[offset..]);
+    const shader_result = opcodes.decode_varint(bc[offset..]);
     try testing.expectEqual(@as(u32, 10), shader_result.value);
     offset += shader_result.len;
 
@@ -410,7 +410,7 @@ test "emit createShaderConcat with multiple data IDs" {
 
     // data_ids
     for (0..4) |i| {
-        const data_result = opcodes.decodeVarint(bc[offset..]);
+        const data_result = opcodes.decode_varint(bc[offset..]);
         try testing.expectEqual(@as(u32, @intCast(i)), data_result.value);
         offset += data_result.len;
     }
@@ -430,7 +430,7 @@ test "emit createShaderConcat with large IDs" {
     try testing.expectEqual(@as(u8, @intFromEnum(OpCode.create_shader_concat)), bc[0]);
 
     // Decode shader_id (150 requires 2 bytes)
-    const shader_result = opcodes.decodeVarint(bc[1..]);
+    const shader_result = opcodes.decode_varint(bc[1..]);
     try testing.expectEqual(@as(u32, 150), shader_result.value);
     try testing.expectEqual(@as(u8, 2), shader_result.len);
 }
@@ -454,27 +454,27 @@ test "emit copyBufferToBuffer basic" {
     var offset: usize = 1;
 
     // src_buffer
-    var result = opcodes.decodeVarint(bc[offset..]);
+    var result = opcodes.decode_varint(bc[offset..]);
     try testing.expectEqual(@as(u32, 0), result.value);
     offset += result.len;
 
     // src_offset
-    result = opcodes.decodeVarint(bc[offset..]);
+    result = opcodes.decode_varint(bc[offset..]);
     try testing.expectEqual(@as(u32, 0), result.value);
     offset += result.len;
 
     // dst_buffer
-    result = opcodes.decodeVarint(bc[offset..]);
+    result = opcodes.decode_varint(bc[offset..]);
     try testing.expectEqual(@as(u32, 1), result.value);
     offset += result.len;
 
     // dst_offset
-    result = opcodes.decodeVarint(bc[offset..]);
+    result = opcodes.decode_varint(bc[offset..]);
     try testing.expectEqual(@as(u32, 0), result.value);
     offset += result.len;
 
     // size
-    result = opcodes.decodeVarint(bc[offset..]);
+    result = opcodes.decode_varint(bc[offset..]);
     try testing.expectEqual(@as(u32, 1024), result.value);
 }
 
@@ -489,27 +489,27 @@ test "emit copyBufferToBuffer with offsets" {
     var offset: usize = 1;
 
     // src_buffer
-    var result = opcodes.decodeVarint(bc[offset..]);
+    var result = opcodes.decode_varint(bc[offset..]);
     try testing.expectEqual(@as(u32, 5), result.value);
     offset += result.len;
 
     // src_offset (256 requires 2 bytes)
-    result = opcodes.decodeVarint(bc[offset..]);
+    result = opcodes.decode_varint(bc[offset..]);
     try testing.expectEqual(@as(u32, 256), result.value);
     offset += result.len;
 
     // dst_buffer
-    result = opcodes.decodeVarint(bc[offset..]);
+    result = opcodes.decode_varint(bc[offset..]);
     try testing.expectEqual(@as(u32, 10), result.value);
     offset += result.len;
 
     // dst_offset (512 requires 2 bytes)
-    result = opcodes.decodeVarint(bc[offset..]);
+    result = opcodes.decode_varint(bc[offset..]);
     try testing.expectEqual(@as(u32, 512), result.value);
     offset += result.len;
 
     // size (2048 requires 2 bytes)
-    result = opcodes.decodeVarint(bc[offset..]);
+    result = opcodes.decode_varint(bc[offset..]);
     try testing.expectEqual(@as(u32, 2048), result.value);
 }
 
@@ -525,12 +525,12 @@ test "emit copyBufferToBuffer large size" {
     // Find size parameter (last one)
     var offset: usize = 1;
     for (0..4) |_| {
-        const result = opcodes.decodeVarint(bc[offset..]);
+        const result = opcodes.decode_varint(bc[offset..]);
         offset += result.len;
     }
 
     // size should be decoded correctly
-    const size_result = opcodes.decodeVarint(bc[offset..]);
+    const size_result = opcodes.decode_varint(bc[offset..]);
     try testing.expectEqual(@as(u32, 1000000), size_result.value);
     try testing.expectEqual(@as(u8, 4), size_result.len); // 4-byte varint
 }
@@ -572,11 +572,11 @@ test "emit copyTextureToTexture with large IDs" {
     try testing.expectEqual(@as(u8, @intFromEnum(OpCode.copy_texture_to_texture)), bc[0]);
 
     // Decode and verify
-    const src_result = opcodes.decodeVarint(bc[1..]);
+    const src_result = opcodes.decode_varint(bc[1..]);
     try testing.expectEqual(@as(u32, 200), src_result.value);
     try testing.expectEqual(@as(u8, 2), src_result.len);
 
-    const dst_result = opcodes.decodeVarint(bc[1 + src_result.len ..]);
+    const dst_result = opcodes.decode_varint(bc[1 + src_result.len ..]);
     try testing.expectEqual(@as(u32, 300), dst_result.value);
     try testing.expectEqual(@as(u8, 2), dst_result.len);
 }
@@ -597,7 +597,7 @@ test "emit copy sequence (buffer to buffer, texture to texture)" {
     // Find second opcode
     var offset: usize = 1;
     for (0..5) |_| {
-        const result = opcodes.decodeVarint(bc[offset..]);
+        const result = opcodes.decode_varint(bc[offset..]);
         offset += result.len;
     }
 

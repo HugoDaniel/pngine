@@ -78,13 +78,13 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !
 
     var dispatcher = Dispatcher(MockGPU).init(allocator, &gpu, &module);
     defer dispatcher.deinit();
-    dispatcher.executeAll(allocator) catch |err| {
+    dispatcher.execute_all(allocator) catch |err| {
         std.debug.print("\nExecution error: {}\n", .{err});
         return 5;
     };
 
     // Print execution summary and validate
-    const calls = gpu.getCalls();
+    const calls = gpu.get_calls();
 
     // Verbose mode: print each GPU call with [GPU] prefix
     if (opts.verbose) {

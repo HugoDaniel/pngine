@@ -295,7 +295,7 @@ export fn pngine_render(anim: ?*PngineAnimation, time: f32) callconv(.c) PngineE
     // Reset PC to beginning and execute all bytecode
     // Note: frame_counter is incremented by end_frame opcode, not here
     a.dispatcher.pc = 0;
-    a.dispatcher.executeFromPC(global_allocator) catch |err| {
+    a.dispatcher.execute_from_pc(global_allocator) catch |err| {
         const pngine_err: PngineError = switch (err) {
             error.SurfaceTextureUnavailable => .texture_unavail,
             error.NoSurfaceConfigured => .surface_failed,
@@ -405,7 +405,7 @@ export fn pngine_debug_frame(anim: ?*PngineAnimation, time: f32) callconv(.c) c_
     a.dispatcher.pc = 0;
     a.dispatcher.frame_counter +%= 1;
 
-    a.dispatcher.executeFromPC(global_allocator) catch |err| {
+    a.dispatcher.execute_from_pc(global_allocator) catch |err| {
         return switch (err) {
             error.SurfaceTextureUnavailable => -10,
             error.NoSurfaceConfigured => -11,

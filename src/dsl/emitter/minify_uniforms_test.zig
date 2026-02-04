@@ -213,11 +213,11 @@ test "Minify: execution produces same GPU call count" {
 
     var dispatcher_normal = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu_normal, &module_normal);
     defer dispatcher_normal.deinit();
-    try dispatcher_normal.executeAll(testing.allocator);
+    try dispatcher_normal.execute_all(testing.allocator);
 
     var dispatcher_minified = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu_minified, &module_minified);
     defer dispatcher_minified.deinit();
-    try dispatcher_minified.executeAll(testing.allocator);
+    try dispatcher_minified.execute_all(testing.allocator);
 
     // Same number of GPU calls
     try testing.expectEqual(gpu_normal.call_count(), gpu_minified.call_count());
@@ -251,11 +251,11 @@ test "Minify: execution produces same GPU call types" {
 
     var dispatcher_normal = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu_normal, &module_normal);
     defer dispatcher_normal.deinit();
-    try dispatcher_normal.executeAll(testing.allocator);
+    try dispatcher_normal.execute_all(testing.allocator);
 
     var dispatcher_minified = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu_minified, &module_minified);
     defer dispatcher_minified.deinit();
-    try dispatcher_minified.executeAll(testing.allocator);
+    try dispatcher_minified.execute_all(testing.allocator);
 
     // Same call types in same order
     const calls_normal = gpu_normal.get_calls();
@@ -420,7 +420,7 @@ test "Minify: complex shader with multiple uniforms compiles" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     try testing.expect(gpu.call_count() > 0);
 }

@@ -222,7 +222,7 @@ pub fn parseFloatNumber(e: *Emitter, value_node: Node.Index) ?f64 {
 }
 
 /// Parse a property as u32.
-pub fn parsePropertyNumber(e: *Emitter, node: Node.Index, prop_name: []const u8) ?u32 {
+pub fn parse_propertyNumber(e: *Emitter, node: Node.Index, prop_name: []const u8) ?u32 {
     // Pre-conditions
     std.debug.assert(node.toInt() < e.ast.nodes.len);
     std.debug.assert(prop_name.len > 0);
@@ -321,7 +321,7 @@ pub fn resolveNumericValueOrString(e: *Emitter, value_node: Node.Index) ?u32 {
 
     if (value_tag == .string_value) {
         const text = getStringContent(e, value_node);
-        return parseExpressionWithDefines(e, text);
+        return parse_expressionWithDefines(e, text);
     }
 
     return resolveNumericValue(e, value_node);
@@ -329,7 +329,7 @@ pub fn resolveNumericValueOrString(e: *Emitter, value_node: Node.Index) ?u32 {
 
 /// Parse expression with #define substitution and function support.
 /// Supports: integers, +, *, /, ceil(), and #define references.
-fn parseExpressionWithDefines(e: *Emitter, expr: []const u8) ?u32 {
+fn parse_expressionWithDefines(e: *Emitter, expr: []const u8) ?u32 {
     var buffer: [256]u8 = undefined;
     var result = substituteDefines(e, expr, &buffer) orelse return null;
 

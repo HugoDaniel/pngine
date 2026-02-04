@@ -45,7 +45,7 @@ fn executeAndGetPipelineShaderIds(allocator: std.mem.Allocator, pngb: []const u8
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(allocator);
+    try dispatcher.execute_all(allocator);
 
     var ids = std.ArrayListUnmanaged(u16){};
     errdefer ids.deinit(allocator);
@@ -81,7 +81,7 @@ fn countShaders(allocator: std.mem.Allocator, pngb: []const u8) !u32 {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(allocator);
+    try dispatcher.execute_all(allocator);
 
     var count: u32 = 0;
     for (gpu.get_calls()) |call| {
@@ -128,7 +128,7 @@ test "ModuleRef: bare identifier module reference (the main bug fix)" {
     defer dispatcher.deinit();
 
     // This should NOT error - the pipeline should find the shader
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify pipeline was created
     var pipeline_count: u32 = 0;
@@ -299,7 +299,7 @@ test "ModuleRef: multiple shaders referenced by bare identifier" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Count pipelines created
     var pipeline_count: u32 = 0;
@@ -351,7 +351,7 @@ test "ModuleRef: demo pattern - wgsl with imports, shaderModule ref" {
     defer dispatcher.deinit();
 
     // This was the exact pattern that was failing
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify all expected resources created
     var shader_count: u32 = 0;
@@ -452,7 +452,7 @@ test "ModuleRef: compute pipeline with bare identifier" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     var compute_pipeline_count: u32 = 0;
     for (gpu.get_calls()) |call| {
@@ -517,7 +517,7 @@ test "ModuleRef: property - all pipelines get valid shader IDs" {
         defer dispatcher.deinit();
 
         // Should not crash
-        dispatcher.executeAll(testing.allocator) catch continue;
+        dispatcher.execute_all(testing.allocator) catch continue;
     }
 }
 
@@ -584,7 +584,7 @@ test "ModuleRef: many shaders with bare identifier refs" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify all 20 pipelines were created
     var pipeline_count: u32 = 0;
@@ -657,7 +657,7 @@ fn fuzzModuleReference(_: void, input: []const u8) !void {
         defer dispatcher.deinit();
 
         // Should not crash
-        dispatcher.executeAll(testing.allocator) catch return;
+        dispatcher.execute_all(testing.allocator) catch return;
     } else |_| {
         // Compilation error is acceptable
     }
@@ -787,7 +787,7 @@ test "ModuleRef: same module referenced multiple times" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Should have 1 shader, 3 pipelines
     var shader_count: u32 = 0;
@@ -889,7 +889,7 @@ test "ModuleRef: chained wgsl references with shaderModule" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Only #shaderModule creates a shader module now (not #wgsl)
     // 'final' is the only #shaderModule, so shader_count = 1
@@ -1011,7 +1011,7 @@ test "ModuleRef: pipeline property order independence" {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Both pipelines should be created
     var pipeline_count: u32 = 0;
@@ -1054,7 +1054,7 @@ test "ModuleRef: wgsl and shaderModule with same name (shadowing)" {
 
         var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
         defer dispatcher.deinit();
-        dispatcher.executeAll(testing.allocator) catch return;
+        dispatcher.execute_all(testing.allocator) catch return;
     } else |_| {
         // Compilation error due to duplicate name is acceptable
     }

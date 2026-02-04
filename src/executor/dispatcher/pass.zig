@@ -28,14 +28,14 @@ pub fn handle(
     allocator: Allocator,
 ) !bool {
     // Pre-condition: valid opcode for this handler
-    assert(isPassOpcode(op));
+    assert(is_pass_opcode(op));
 
     switch (op) {
         .begin_render_pass => {
-            const color_texture_id = try self.readVarint();
-            const load_op = try self.readByte();
-            const store_op = try self.readByte();
-            const depth_texture_id = try self.readVarint();
+            const color_texture_id = try self.read_varint();
+            const load_op = try self.read_byte();
+            const store_op = try self.read_byte();
+            const depth_texture_id = try self.read_varint();
             try self.backend.begin_render_pass(
                 allocator,
                 @intCast(color_texture_id),
@@ -50,42 +50,42 @@ pub fn handle(
         },
 
         .set_pipeline => {
-            const pipeline_id = try self.readVarint();
+            const pipeline_id = try self.read_varint();
             try self.backend.set_pipeline(allocator, @intCast(pipeline_id));
         },
 
         .set_bind_group => {
-            const slot = try self.readByte();
-            const group_id = try self.readVarint();
+            const slot = try self.read_byte();
+            const group_id = try self.read_varint();
             try self.backend.set_bind_group(allocator, slot, @intCast(group_id));
         },
 
         .set_vertex_buffer => {
-            const slot = try self.readByte();
-            const buffer_id = try self.readVarint();
+            const slot = try self.read_byte();
+            const buffer_id = try self.read_varint();
             try self.backend.set_vertex_buffer(allocator, slot, @intCast(buffer_id));
         },
 
         .set_index_buffer => {
-            const buffer_id = try self.readVarint();
-            const index_format = try self.readByte();
+            const buffer_id = try self.read_varint();
+            const index_format = try self.read_byte();
             try self.backend.set_index_buffer(allocator, @intCast(buffer_id), index_format);
         },
 
         .draw => {
-            const vertex_count = try self.readVarint();
-            const instance_count = try self.readVarint();
-            const first_vertex = try self.readVarint();
-            const first_instance = try self.readVarint();
+            const vertex_count = try self.read_varint();
+            const instance_count = try self.read_varint();
+            const first_vertex = try self.read_varint();
+            const first_instance = try self.read_varint();
             try self.backend.draw(allocator, vertex_count, instance_count, first_vertex, first_instance);
         },
 
         .draw_indexed => {
-            const index_count = try self.readVarint();
-            const instance_count = try self.readVarint();
-            const first_index = try self.readVarint();
-            const base_vertex = try self.readVarint();
-            const first_instance = try self.readVarint();
+            const index_count = try self.read_varint();
+            const instance_count = try self.read_varint();
+            const first_index = try self.read_varint();
+            const base_vertex = try self.read_varint();
+            const first_instance = try self.read_varint();
             try self.backend.draw_indexed(
                 allocator,
                 index_count,
@@ -97,9 +97,9 @@ pub fn handle(
         },
 
         .dispatch => {
-            const x = try self.readVarint();
-            const y = try self.readVarint();
-            const z = try self.readVarint();
+            const x = try self.read_varint();
+            const y = try self.read_varint();
+            const z = try self.read_varint();
             // Debug logging for WASM builds
             if (@import("builtin").target.cpu.arch == .wasm32) {
                 const wasm_gpu = @import("../wasm_gpu.zig");
@@ -111,16 +111,16 @@ pub fn handle(
         },
 
         .execute_bundles => {
-            const bundle_count = try self.readVarint();
+            const bundle_count = try self.read_varint();
             // Read bundle IDs into temporary buffer
             var bundle_ids: [16]u16 = undefined;
             const count = @min(bundle_count, 16);
             for (0..count) |i| {
-                bundle_ids[i] = @intCast(try self.readVarint());
+                bundle_ids[i] = @intCast(try self.read_varint());
             }
             // Skip any excess bundles
             for (count..bundle_count) |_| {
-                _ = try self.readVarint();
+                _ = try self.read_varint();
             }
             try self.backend.execute_bundles(allocator, bundle_ids[0..count]);
         },
@@ -136,7 +136,7 @@ pub fn handle(
 }
 
 /// Check if opcode is a pass operation opcode.
-pub fn isPassOpcode(op: OpCode) bool {
+pub fn is_pass_opcode(op: OpCode) bool {
     return switch (op) {
         .begin_render_pass,
         .begin_compute_pass,

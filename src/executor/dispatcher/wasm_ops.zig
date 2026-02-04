@@ -39,20 +39,20 @@ pub fn handle(
     allocator: Allocator,
 ) !bool {
     // Pre-condition: valid opcode for this handler
-    assert(isWasmOpcode(op));
+    assert(is_wasm_opcode(op));
 
     switch (op) {
         .init_wasm_module => {
-            const module_id = try self.readVarint();
-            const wasm_data_id = try self.readVarint();
+            const module_id = try self.read_varint();
+            const wasm_data_id = try self.read_varint();
             try self.backend.init_wasm_module(allocator, @intCast(module_id), @intCast(wasm_data_id));
         },
 
         .call_wasm_func => {
-            const call_id = try self.readVarint();
-            const module_id = try self.readVarint();
-            const func_name_id = try self.readVarint();
-            const arg_count = try self.readByte();
+            const call_id = try self.read_varint();
+            const module_id = try self.read_varint();
+            const func_name_id = try self.read_varint();
+            const arg_count = try self.read_byte();
 
             // Collect encoded args into buffer
             // Format: [arg_count][arg_type, value?]...
@@ -62,7 +62,7 @@ pub fn handle(
             args_len += 1;
 
             for (0..@min(arg_count, MAX_WASM_ARGS)) |_| {
-                const arg_type = try self.readByte();
+                const arg_type = try self.read_byte();
                 if (args_len < args_buf.len) {
                     args_buf[args_len] = arg_type;
                     args_len += 1;
@@ -73,7 +73,7 @@ pub fn handle(
                     else => 0, // runtime resolved
                 };
                 for (0..value_size) |_| {
-                    const byte = try self.readByte();
+                    const byte = try self.read_byte();
                     if (args_len < args_buf.len) {
                         args_buf[args_len] = byte;
                         args_len += 1;
@@ -91,10 +91,10 @@ pub fn handle(
         },
 
         .write_buffer_from_wasm => {
-            const call_id = try self.readVarint();
-            const buffer_id = try self.readVarint();
-            const offset = try self.readVarint();
-            const byte_len = try self.readVarint();
+            const call_id = try self.read_varint();
+            const buffer_id = try self.read_varint();
+            const offset = try self.read_varint();
+            const byte_len = try self.read_varint();
             try self.backend.write_buffer_from_wasm(
                 allocator,
                 @intCast(call_id),
@@ -111,7 +111,7 @@ pub fn handle(
 }
 
 /// Check if opcode is a WASM operation opcode.
-pub fn isWasmOpcode(op: OpCode) bool {
+pub fn is_wasm_opcode(op: OpCode) bool {
     return switch (op) {
         .init_wasm_module,
         .call_wasm_func,

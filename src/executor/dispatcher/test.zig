@@ -16,7 +16,7 @@
 //! - Resource creation: shader, texture, sampler, buffer
 //! - Draw/dispatch: render pass, compute pass sequences
 //! - Frame control: define_frame, end_frame, exec_pass
-//! - Pass scanning: scanPassDefinitions edge cases
+//! - Pass scanning: scan_pass_definitions edge cases
 //! - Pool operations: frame counter, buffer/bind group selection
 //! - Varint: large values, boundary conditions
 //! - Fuzz: random bytecode, varint roundtrip
@@ -59,7 +59,7 @@ test "dispatcher empty bytecode" {
     defer gpu.deinit(testing.allocator);
 
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     try testing.expectEqual(@as(usize, 0), gpu.call_count());
 }
@@ -82,7 +82,7 @@ test "dispatcher create shader module" {
     defer gpu.deinit(testing.allocator);
 
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     try testing.expectEqual(@as(usize, 1), gpu.call_count());
     try testing.expectEqual(CallType.create_shader_module, gpu.get_call(0).call_type);
@@ -106,7 +106,7 @@ test "dispatcher create texture" {
     defer gpu.deinit(testing.allocator);
 
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     try testing.expectEqual(@as(usize, 1), gpu.call_count());
     try testing.expectEqual(CallType.create_texture, gpu.get_call(0).call_type);
@@ -135,7 +135,7 @@ test "dispatcher create sampler" {
     defer gpu.deinit(testing.allocator);
 
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     try testing.expectEqual(@as(usize, 1), gpu.call_count());
     try testing.expectEqual(CallType.create_sampler, gpu.get_call(0).call_type);
@@ -167,7 +167,7 @@ test "dispatcher draw sequence" {
     defer gpu.deinit(testing.allocator);
 
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     try testing.expectEqual(@as(usize, 4), gpu.call_count());
 
@@ -214,7 +214,7 @@ test "dispatcher frame control" {
     defer gpu.deinit(testing.allocator);
 
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // define_frame and end_frame don't generate GPU calls
     // Only begin_render_pass, set_pipeline, draw, end_pass, submit
@@ -230,10 +230,10 @@ test "dispatcher frame control" {
 }
 
 // ============================================================================
-// scanPassDefinitions Tests
+// scan_pass_definitions Tests
 // ============================================================================
 
-test "scanPassDefinitions: empty bytecode" {
+test "scan_pass_definitions: empty bytecode" {
     var builder = Builder.init();
     defer builder.deinit(testing.allocator);
 
@@ -252,13 +252,13 @@ test "scanPassDefinitions: empty bytecode" {
     // Pre-condition: pass_ranges is empty
     try testing.expectEqual(@as(usize, 0), dispatcher.pass_ranges.count());
 
-    dispatcher.scanPassDefinitions();
+    dispatcher.scan_pass_definitions();
 
     // Post-condition: still empty (no passes in bytecode)
     try testing.expectEqual(@as(usize, 0), dispatcher.pass_ranges.count());
 }
 
-test "scanPassDefinitions: no pass definitions" {
+test "scan_pass_definitions: no pass definitions" {
     var builder = Builder.init();
     defer builder.deinit(testing.allocator);
 
@@ -279,13 +279,13 @@ test "scanPassDefinitions: no pass definitions" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    dispatcher.scanPassDefinitions();
+    dispatcher.scan_pass_definitions();
 
     // Post-condition: no passes found
     try testing.expectEqual(@as(usize, 0), dispatcher.pass_ranges.count());
 }
 
-test "scanPassDefinitions: single pass definition" {
+test "scan_pass_definitions: single pass definition" {
     var builder = Builder.init();
     defer builder.deinit(testing.allocator);
 
@@ -310,7 +310,7 @@ test "scanPassDefinitions: single pass definition" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    dispatcher.scanPassDefinitions();
+    dispatcher.scan_pass_definitions();
 
     // Post-condition: exactly one pass found
     try testing.expectEqual(@as(usize, 1), dispatcher.pass_ranges.count());
@@ -320,7 +320,7 @@ test "scanPassDefinitions: single pass definition" {
     try testing.expect(range.start < range.end);
 }
 
-test "scanPassDefinitions: multiple pass definitions" {
+test "scan_pass_definitions: multiple pass definitions" {
     var builder = Builder.init();
     defer builder.deinit(testing.allocator);
 
@@ -353,7 +353,7 @@ test "scanPassDefinitions: multiple pass definitions" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    dispatcher.scanPassDefinitions();
+    dispatcher.scan_pass_definitions();
 
     // Post-condition: all three passes found
     try testing.expectEqual(@as(usize, 3), dispatcher.pass_ranges.count());
@@ -362,7 +362,7 @@ test "scanPassDefinitions: multiple pass definitions" {
     try testing.expect(dispatcher.pass_ranges.get(2) != null);
 }
 
-test "scanPassDefinitions: exec_pass uses scanned range" {
+test "scan_pass_definitions: exec_pass uses scanned range" {
     var builder = Builder.init();
     defer builder.deinit(testing.allocator);
 
@@ -394,7 +394,7 @@ test "scanPassDefinitions: exec_pass uses scanned range" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify pass was executed
     var draw_found = false;
@@ -432,9 +432,9 @@ test "exec_pass with missing pass_id does not crash" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    // Don't call scanPassDefinitions - pass_ranges is empty
+    // Don't call scan_pass_definitions - pass_ranges is empty
 
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Only submit should be called (exec_pass 99 finds nothing)
     try testing.expectEqual(@as(usize, 1), gpu.call_count());
@@ -470,13 +470,13 @@ test "pool operations: frame counter increments" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    var dispatcher = MockDispatcher.initWithFrame(testing.allocator, &gpu, &module, 0);
+    var dispatcher = MockDispatcher.init_with_frame(testing.allocator, &gpu, &module, 0);
     defer dispatcher.deinit();
 
     // Pre-condition
     try testing.expectEqual(@as(u32, 0), dispatcher.frame_counter);
 
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Post-condition: frame counter incremented by 2
     try testing.expectEqual(@as(u32, 2), dispatcher.frame_counter);
@@ -505,9 +505,9 @@ test "pool operations: vertex buffer pool selection" {
 
     // Frame 0: actual_id = 10 + (0 + 0) % 2 = 10
     {
-        var dispatcher = MockDispatcher.initWithFrame(testing.allocator, &gpu, &module, 0);
+        var dispatcher = MockDispatcher.init_with_frame(testing.allocator, &gpu, &module, 0);
         defer dispatcher.deinit();
-        try dispatcher.executeAll(testing.allocator);
+        try dispatcher.execute_all(testing.allocator);
 
         try testing.expectEqual(@as(usize, 3), gpu.call_count()); // begin, set, end
         const call = gpu.get_call(1);
@@ -519,9 +519,9 @@ test "pool operations: vertex buffer pool selection" {
 
     // Frame 1: actual_id = 10 + (1 + 0) % 2 = 11
     {
-        var dispatcher = MockDispatcher.initWithFrame(testing.allocator, &gpu, &module, 1);
+        var dispatcher = MockDispatcher.init_with_frame(testing.allocator, &gpu, &module, 1);
         defer dispatcher.deinit();
-        try dispatcher.executeAll(testing.allocator);
+        try dispatcher.execute_all(testing.allocator);
 
         try testing.expectEqual(@as(usize, 3), gpu.call_count());
         const call = gpu.get_call(1);
@@ -532,9 +532,9 @@ test "pool operations: vertex buffer pool selection" {
 
     // Frame 2: actual_id = 10 + (2 + 0) % 2 = 10 (wraps around)
     {
-        var dispatcher = MockDispatcher.initWithFrame(testing.allocator, &gpu, &module, 2);
+        var dispatcher = MockDispatcher.init_with_frame(testing.allocator, &gpu, &module, 2);
         defer dispatcher.deinit();
-        try dispatcher.executeAll(testing.allocator);
+        try dispatcher.execute_all(testing.allocator);
 
         const call = gpu.get_call(1);
         try testing.expectEqual(@as(u16, 10), call.params.set_vertex_buffer.buffer_id);
@@ -564,9 +564,9 @@ test "pool operations: bind group pool selection with offset" {
 
     // Frame 0 with offset 1: actual_id = 20 + (0 + 1) % 2 = 21
     {
-        var dispatcher = MockDispatcher.initWithFrame(testing.allocator, &gpu, &module, 0);
+        var dispatcher = MockDispatcher.init_with_frame(testing.allocator, &gpu, &module, 0);
         defer dispatcher.deinit();
-        try dispatcher.executeAll(testing.allocator);
+        try dispatcher.execute_all(testing.allocator);
 
         const call = gpu.get_call(1); // Index 1 (after begin_render_pass)
         try testing.expectEqual(CallType.set_bind_group, call.call_type);
@@ -577,9 +577,9 @@ test "pool operations: bind group pool selection with offset" {
 
     // Frame 1 with offset 1: actual_id = 20 + (1 + 1) % 2 = 20
     {
-        var dispatcher = MockDispatcher.initWithFrame(testing.allocator, &gpu, &module, 1);
+        var dispatcher = MockDispatcher.init_with_frame(testing.allocator, &gpu, &module, 1);
         defer dispatcher.deinit();
-        try dispatcher.executeAll(testing.allocator);
+        try dispatcher.execute_all(testing.allocator);
 
         const call = gpu.get_call(1); // Index 1 (after begin_render_pass)
         try testing.expectEqual(@as(u16, 20), call.params.set_bind_group.group_id);
@@ -611,7 +611,7 @@ test "dispatcher handles large varint values" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     try testing.expectEqual(@as(usize, 1), gpu.call_count());
     const call = gpu.get_call(0);
@@ -642,7 +642,7 @@ test "dispatcher handles draw with large vertex count" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     const call = gpu.get_call(1); // Index 1 (after begin_render_pass)
     try testing.expectEqual(@as(u32, 16384), call.params.draw.vertex_count);
@@ -654,8 +654,8 @@ test "dispatcher handles draw with large vertex count" {
 // Fuzz Testing
 // ============================================================================
 
-test "fuzz scanPassDefinitions with random bytecode" {
-    // Property: scanPassDefinitions never panics on any bytecode
+test "fuzz scan_pass_definitions with random bytecode" {
+    // Property: scan_pass_definitions never panics on any bytecode
     try std.testing.fuzz({}, fuzzScanPassDefinitions, .{});
 }
 
@@ -669,7 +669,7 @@ fn fuzzScanPassDefinitions(_: void, input: []const u8) !void {
     if (input.len < 4) return;
 
     // Test the OpcodeScanner directly
-    var pass_ranges = OpcodeScanner.scanPassDefinitions(input, testing.allocator);
+    var pass_ranges = OpcodeScanner.scan_pass_definitions(input, testing.allocator);
     defer pass_ranges.deinit();
 
     // Property: pass_ranges entries always have start <= input.len
@@ -693,7 +693,7 @@ fn fuzzVarintRoundtrip(_: void, input: []const u8) !void {
 
     var buffer: [4]u8 = undefined;
     const len = opcodes.encodeVarint(value, &buffer);
-    const decoded = opcodes.decodeVarint(buffer[0..len]);
+    const decoded = opcodes.decode_varint(buffer[0..len]);
 
     // Property: roundtrip preserves value
     try testing.expectEqual(value, decoded.value);
@@ -705,7 +705,7 @@ fn fuzzVarintRoundtrip(_: void, input: []const u8) !void {
 // OOM Testing with FailingAllocator
 // ============================================================================
 
-test "OOM: scanPassDefinitions handles allocation failure gracefully" {
+test "OOM: scan_pass_definitions handles allocation failure gracefully" {
     // Test that pass_ranges.put failing doesn't crash
     var builder = Builder.init();
     defer builder.deinit(testing.allocator);
@@ -755,7 +755,7 @@ test "OOM: scanPassDefinitions handles allocation failure gracefully" {
     }
 }
 
-test "OOM: dispatcher executeAll with early allocation failure" {
+test "OOM: dispatcher execute_all with early allocation failure" {
     // Test complete execution path under OOM
     var builder = Builder.init();
     defer builder.deinit(testing.allocator);
@@ -783,7 +783,7 @@ test "OOM: dispatcher executeAll with early allocation failure" {
         var dispatcher = MockDispatcher.init(failing.allocator(), &gpu, &module);
         defer dispatcher.deinit();
 
-        const result = dispatcher.executeAll(failing.allocator());
+        const result = dispatcher.execute_all(failing.allocator());
 
         if (failing.has_induced_failure) {
             // OOM occurred - should return OutOfMemory error
@@ -826,7 +826,7 @@ test "dispatcher: nop opcode is handled" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Only submit should be called (nop is ignored)
     try testing.expectEqual(@as(usize, 1), gpu.call_count());
@@ -853,7 +853,7 @@ test "dispatcher: begin_compute_pass with no params" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     try testing.expectEqual(@as(usize, 2), gpu.call_count());
     try testing.expectEqual(CallType.begin_compute_pass, gpu.get_call(0).call_type);
@@ -883,7 +883,7 @@ test "dispatcher: dispatch workgroups" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     try testing.expectEqual(@as(usize, 3), gpu.call_count()); // begin, dispatch, end
     const call = gpu.get_call(1); // Index 1 (after begin_compute_pass)
@@ -916,7 +916,7 @@ test "dispatcher: draw_indexed with all parameters" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     try testing.expectEqual(@as(usize, 3), gpu.call_count()); // begin, draw_indexed, end
     const call = gpu.get_call(1); // Index 1 (after begin_render_pass)
@@ -928,7 +928,7 @@ test "dispatcher: draw_indexed with all parameters" {
     try testing.expectEqual(@as(u32, 5), call.params.draw_indexed.first_instance);
 }
 
-test "scanPassDefinitions: passes interleaved with other opcodes" {
+test "scan_pass_definitions: passes interleaved with other opcodes" {
     var builder = Builder.init();
     defer builder.deinit(testing.allocator);
 
@@ -971,7 +971,7 @@ test "scanPassDefinitions: passes interleaved with other opcodes" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    dispatcher.scanPassDefinitions();
+    dispatcher.scan_pass_definitions();
 
     // Both passes should be found despite interleaved opcodes
     try testing.expectEqual(@as(usize, 2), dispatcher.pass_ranges.count());
@@ -979,7 +979,7 @@ test "scanPassDefinitions: passes interleaved with other opcodes" {
     try testing.expect(dispatcher.pass_ranges.get(1) != null);
 }
 
-test "scanPassDefinitions: max pass_id (255 for u16 cast)" {
+test "scan_pass_definitions: max pass_id (255 for u16 cast)" {
     var builder = Builder.init();
     defer builder.deinit(testing.allocator);
 
@@ -1002,7 +1002,7 @@ test "scanPassDefinitions: max pass_id (255 for u16 cast)" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    dispatcher.scanPassDefinitions();
+    dispatcher.scan_pass_definitions();
 
     try testing.expectEqual(@as(usize, 1), dispatcher.pass_ranges.count());
     try testing.expect(dispatcher.pass_ranges.get(255) != null);
@@ -1057,7 +1057,7 @@ test "scene switching: exec_pass with scan finds pass defined before frame" {
     // Execute all - should run both frames
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify: should see 2 begin_render_pass, 2 draws (3 and 6), 2 end_pass, 2 submit
     var draw_count: usize = 0;
@@ -1110,12 +1110,12 @@ test "scene switching: pass defined after exec_pass still works" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    // scanPassDefinitions should find the pass even though it's after the frame
-    dispatcher.scanPassDefinitions();
+    // scan_pass_definitions should find the pass even though it's after the frame
+    dispatcher.scan_pass_definitions();
     try testing.expectEqual(@as(usize, 1), dispatcher.pass_ranges.count());
 
     // Now execute - should work because pass was scanned
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     var draw_found = false;
     for (gpu.get_calls()) |call| {
@@ -1159,7 +1159,7 @@ test "scene switching: many passes with non-sequential IDs" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    dispatcher.scanPassDefinitions();
+    dispatcher.scan_pass_definitions();
 
     try testing.expectEqual(@as(usize, 3), dispatcher.pass_ranges.count());
     try testing.expect(dispatcher.pass_ranges.get(10) != null);
@@ -1169,7 +1169,7 @@ test "scene switching: many passes with non-sequential IDs" {
     try testing.expect(dispatcher.pass_ranges.get(11) == null);
 }
 
-test "scanPassDefinitions: deeply nested opcode sequence" {
+test "scan_pass_definitions: deeply nested opcode sequence" {
     // Test with many different opcodes in pass body
     var builder = Builder.init();
     defer builder.deinit(testing.allocator);
@@ -1201,7 +1201,7 @@ test "scanPassDefinitions: deeply nested opcode sequence" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    dispatcher.scanPassDefinitions();
+    dispatcher.scan_pass_definitions();
 
     try testing.expectEqual(@as(usize, 1), dispatcher.pass_ranges.count());
     const range = dispatcher.pass_ranges.get(0).?;
@@ -1209,7 +1209,7 @@ test "scanPassDefinitions: deeply nested opcode sequence" {
     try testing.expect(range.end - range.start > 20);
 }
 
-test "scanPassDefinitions: boids-like pattern with bind_group + write_buffer" {
+test "scan_pass_definitions: boids-like pattern with bind_group + write_buffer" {
     // Regression test for the specific pattern that caused the original bug:
     // create_bind_group (3 varints) followed by other opcodes.
 
@@ -1260,7 +1260,7 @@ test "scanPassDefinitions: boids-like pattern with bind_group + write_buffer" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    dispatcher.scanPassDefinitions();
+    dispatcher.scan_pass_definitions();
 
     // CRITICAL: Both passes must be found
     try testing.expectEqual(@as(usize, 2), dispatcher.pass_ranges.count());
@@ -1315,7 +1315,7 @@ test "exec_pass_once: basic execution on first frame" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify dispatch was called (pass executed)
     var dispatch_found = false;
@@ -1364,7 +1364,7 @@ test "exec_pass_once: skipped on subsequent executions" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Count dispatch calls - should only have 1 even though exec_pass_once was called 3 times
     var dispatch_count: usize = 0;
@@ -1425,7 +1425,7 @@ test "exec_pass_once: multiple different passes each run once" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Count dispatches - should be exactly 3 (one per unique pass)
     var dispatch_count: usize = 0;
@@ -1488,7 +1488,7 @@ test "exec_pass_once: mixed with exec_pass - both work correctly" {
     defer dispatcher.deinit();
 
     // Execute frame once
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // First frame: both passes should execute
     var dispatch_count: usize = 0;
@@ -1502,7 +1502,7 @@ test "exec_pass_once: mixed with exec_pass - both work correctly" {
     dispatcher.pc = 0; // Reset pc to simulate new frame
 
     // On second frame, only exec_pass should run (exec_pass_once is skipped)
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     dispatch_count = 0;
     var found_update = false;
@@ -1544,7 +1544,7 @@ test "exec_pass_once: invalid pass_id does not crash" {
     defer dispatcher.deinit();
 
     // Should not crash
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Only submit should be called (exec_pass_once 99 finds nothing)
     try testing.expectEqual(@as(usize, 1), gpu.call_count());
@@ -1601,7 +1601,7 @@ test "exec_pass_once: order preserved - init before update" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify order: dispatch(1), dispatch(2), begin_render_pass, draw
     var dispatch_order: [2]u32 = undefined;
@@ -1629,7 +1629,7 @@ test "exec_pass_once: order preserved - init before update" {
     try testing.expect(draw_after_dispatches);
 }
 
-test "exec_pass_once: persistence across multiple executeAll calls" {
+test "exec_pass_once: persistence across multiple execute_all calls" {
     // Test: exec_pass_once state persists when dispatcher is reused
     // This simulates animation loop behavior
     var builder = Builder.init();
@@ -1668,7 +1668,7 @@ test "exec_pass_once: persistence across multiple executeAll calls" {
     for (0..5) |_| {
         gpu.reset();
         dispatcher.pc = 0; // Reset pc to simulate new frame
-        try dispatcher.executeAll(testing.allocator);
+        try dispatcher.execute_all(testing.allocator);
 
         for (gpu.get_calls()) |call| {
             if (call.call_type == .dispatch) total_dispatches += 1;
@@ -1717,7 +1717,7 @@ test "exec_pass_once: interleaved with regular opcodes" {
     var dispatcher = MockDispatcher.init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
 
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     // Verify: create_buffer, write_buffer, dispatch, write_buffer, submit
     var found_dispatch = false;
@@ -1789,7 +1789,7 @@ test "exec_pass_once: boids-like pattern - init + compute + render" {
     defer dispatcher.deinit();
 
     // Frame 1: init + compute + render = 2 dispatches + 1 draw
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     var frame1_dispatches: usize = 0;
     var frame1_draws: usize = 0;
@@ -1805,7 +1805,7 @@ test "exec_pass_once: boids-like pattern - init + compute + render" {
         _ = frame_idx;
         gpu.reset();
         dispatcher.pc = 0; // Reset pc to simulate new frame
-        try dispatcher.executeAll(testing.allocator);
+        try dispatcher.execute_all(testing.allocator);
 
         var dispatches: usize = 0;
         var draws: usize = 0;

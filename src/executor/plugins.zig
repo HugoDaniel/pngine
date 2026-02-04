@@ -135,7 +135,7 @@ pub fn commandPlugin(cmd: Cmd) ?Plugin {
 
 /// Check if a command is available with current plugin configuration.
 /// Note: Uses runtime switch since cmd is runtime value.
-pub fn isCommandEnabled(cmd: Cmd) bool {
+pub fn is_command_enabled(cmd: Cmd) bool {
     const plugin = commandPlugin(cmd);
     if (plugin) |p| {
         return switch (p) {
@@ -388,9 +388,9 @@ test "enabled plugins" {
 
 test "command enabled check" {
     // Core commands always enabled
-    try testing.expect(isCommandEnabled(.create_buffer));
-    try testing.expect(isCommandEnabled(.submit));
-    try testing.expect(isCommandEnabled(.end));
+    try testing.expect(is_command_enabled(.create_buffer));
+    try testing.expect(is_command_enabled(.submit));
+    try testing.expect(is_command_enabled(.end));
 }
 
 test "PluginSet roundtrip" {

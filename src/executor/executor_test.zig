@@ -75,7 +75,7 @@ test "simpleTriangle full pipeline" {
     defer gpu.deinit(testing.allocator);
 
     var exec = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
     // Verify call sequence
     const expected = [_]CallType{
@@ -88,10 +88,10 @@ test "simpleTriangle full pipeline" {
         .submit,
     };
 
-    try testing.expect(gpu.expectCallTypes(&expected));
+    try testing.expect(gpu.expect_call_types(&expected));
 
     // Verify specific parameters
-    const calls = gpu.getCalls();
+    const calls = gpu.get_calls();
 
     // create_shader_module: id=0, data=0
     try testing.expectEqual(@as(u16, 0), calls[0].params.create_shader_module.shader_id);
@@ -116,7 +116,7 @@ test "simpleTriangle full pipeline" {
     std.debug.print("=== simpleTriangle Execution ===\n", .{});
     std.debug.print("  PNGB size: {d} bytes\n", .{pngb.len});
     std.debug.print("  Bytecode: {d} bytes\n", .{module.bytecode.len});
-    std.debug.print("  GPU calls: {d}\n", .{gpu.callCount()});
+    std.debug.print("  GPU calls: {d}\n", .{gpu.call_count()});
     std.debug.print("\n", .{});
 }
 
@@ -145,7 +145,7 @@ test "compute dispatch" {
     defer gpu.deinit(testing.allocator);
 
     var exec = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
     const expected = [_]CallType{
         .create_compute_pipeline,
@@ -156,10 +156,10 @@ test "compute dispatch" {
         .submit,
     };
 
-    try testing.expect(gpu.expectCallTypes(&expected));
+    try testing.expect(gpu.expect_call_types(&expected));
 
     // Verify dispatch parameters
-    const dispatch_call = gpu.getCall(3);
+    const dispatch_call = gpu.get_call(3);
     try testing.expectEqual(@as(u32, 16), dispatch_call.params.dispatch.x);
     try testing.expectEqual(@as(u32, 16), dispatch_call.params.dispatch.y);
     try testing.expectEqual(@as(u32, 1), dispatch_call.params.dispatch.z);
@@ -202,12 +202,12 @@ test "multi-pass rendering" {
     defer gpu.deinit(testing.allocator);
 
     var exec = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
     // Count calls by type
     var pass_count: usize = 0;
     var draw_count: usize = 0;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         switch (call.call_type) {
             .begin_render_pass => pass_count += 1,
             .draw => draw_count += 1,
@@ -249,7 +249,7 @@ test "buffer write and use" {
     defer gpu.deinit(testing.allocator);
 
     var exec = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
     const expected = [_]CallType{
         .create_buffer,
@@ -262,10 +262,10 @@ test "buffer write and use" {
         .submit,
     };
 
-    try testing.expect(gpu.expectCallTypes(&expected));
+    try testing.expect(gpu.expect_call_types(&expected));
 
     // Verify buffer parameters
-    const create_call = gpu.getCall(0);
+    const create_call = gpu.get_call(0);
     try testing.expectEqual(@as(u32, 64), create_call.params.create_buffer.size);
     // uniform (0x40) + copy_dst (0x08) = 0x48
     try testing.expectEqual(@as(u8, @bitCast(BufferUsage.uniform_copy_dst)), create_call.params.create_buffer.usage);
@@ -298,7 +298,7 @@ test "bind group setup" {
     defer gpu.deinit(testing.allocator);
 
     var exec = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
     const expected = [_]CallType{
         .create_bind_group,
@@ -310,10 +310,10 @@ test "bind group setup" {
         .submit,
     };
 
-    try testing.expect(gpu.expectCallTypes(&expected));
+    try testing.expect(gpu.expect_call_types(&expected));
 
     // Verify bind group parameters
-    const set_bg_call = gpu.getCall(3);
+    const set_bg_call = gpu.get_call(3);
     try testing.expectEqual(@as(u8, 0), set_bg_call.params.set_bind_group.slot);
     try testing.expectEqual(@as(u16, 0), set_bg_call.params.set_bind_group.group_id);
 }
@@ -344,9 +344,9 @@ test "large vertex count varint encoding" {
     defer gpu.deinit(testing.allocator);
 
     var exec = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
-    const calls = gpu.getCalls();
+    const calls = gpu.get_calls();
 
     // calls[0] = begin_render_pass
     // First draw: 10000 vertices
@@ -380,10 +380,10 @@ test "indexed draw" {
     defer gpu.deinit(testing.allocator);
 
     var exec = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
     // calls[0] = begin_render_pass, calls[1] = set_pipeline, calls[2] = draw_indexed
-    const draw_call = gpu.getCall(2);
+    const draw_call = gpu.get_call(2);
     try testing.expectEqual(CallType.draw_indexed, draw_call.call_type);
     try testing.expectEqual(@as(u32, 36), draw_call.params.draw_indexed.index_count);
     try testing.expectEqual(@as(u32, 10), draw_call.params.draw_indexed.instance_count);
@@ -444,7 +444,7 @@ test "texture-based render pass (MSAA pattern)" {
     defer gpu.deinit(testing.allocator);
 
     var exec = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
     // Verify call sequence
     const expected = [_]CallType{
@@ -458,13 +458,13 @@ test "texture-based render pass (MSAA pattern)" {
         .submit,
     };
 
-    try testing.expect(gpu.expectCallTypes(&expected));
+    try testing.expect(gpu.expect_call_types(&expected));
 
     // Verify texture was created
     try testing.expect(gpu.textures_created.isSet(0));
 
     // Verify texture parameters
-    const tex_call = gpu.getCall(0);
+    const tex_call = gpu.get_call(0);
     try testing.expectEqual(@as(u16, 0), tex_call.params.create_texture.texture_id);
 }
 
@@ -728,14 +728,14 @@ test "create_image_bitmap dispatch" {
     defer gpu.deinit(testing.allocator);
 
     var exec = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
     // Property: create_image_bitmap was called
-    try testing.expectEqual(@as(usize, 1), gpu.callCount());
-    try testing.expectEqual(CallType.create_image_bitmap, gpu.getCall(0).call_type);
+    try testing.expectEqual(@as(usize, 1), gpu.call_count());
+    try testing.expectEqual(CallType.create_image_bitmap, gpu.get_call(0).call_type);
 
     // Property: parameters match
-    const params = gpu.getCall(0).params.create_image_bitmap;
+    const params = gpu.get_call(0).params.create_image_bitmap;
     try testing.expectEqual(@as(u16, 0), params.bitmap_id);
     try testing.expectEqual(blob_data_id.toInt(), params.blob_data_id);
 }
@@ -760,14 +760,14 @@ test "copy_external_image_to_texture dispatch" {
     defer gpu.deinit(testing.allocator);
 
     var exec = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
     // Property: copy was called
-    try testing.expectEqual(@as(usize, 1), gpu.callCount());
-    try testing.expectEqual(CallType.copy_external_image_to_texture, gpu.getCall(0).call_type);
+    try testing.expectEqual(@as(usize, 1), gpu.call_count());
+    try testing.expectEqual(CallType.copy_external_image_to_texture, gpu.get_call(0).call_type);
 
     // Property: all parameters match
-    const params = gpu.getCall(0).params.copy_external_image_to_texture;
+    const params = gpu.get_call(0).params.copy_external_image_to_texture;
     try testing.expectEqual(@as(u16, 0), params.bitmap_id);
     try testing.expectEqual(@as(u16, 1), params.texture_id);
     try testing.expectEqual(@as(u8, 2), params.mip_level);
@@ -820,7 +820,7 @@ test "image texture upload sequence" {
     defer gpu.deinit(testing.allocator);
 
     var exec = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
     // Property: correct call sequence
     const expected = [_]CallType{
@@ -828,7 +828,7 @@ test "image texture upload sequence" {
         .create_image_bitmap,
         .copy_external_image_to_texture,
     };
-    try testing.expect(gpu.expectCallTypes(&expected));
+    try testing.expect(gpu.expect_call_types(&expected));
 }
 
 test "multiple image bitmaps dispatch" {
@@ -864,13 +864,13 @@ test "multiple image bitmaps dispatch" {
     defer gpu.deinit(testing.allocator);
 
     var exec = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
     // Property: both image bitmaps created
-    try testing.expectEqual(@as(usize, 2), gpu.callCount());
+    try testing.expectEqual(@as(usize, 2), gpu.call_count());
 
-    try testing.expectEqual(@as(u16, 0), gpu.getCall(0).params.create_image_bitmap.bitmap_id);
-    try testing.expectEqual(@as(u16, 1), gpu.getCall(1).params.create_image_bitmap.bitmap_id);
+    try testing.expectEqual(@as(u16, 0), gpu.get_call(0).params.create_image_bitmap.bitmap_id);
+    try testing.expectEqual(@as(u16, 1), gpu.get_call(1).params.create_image_bitmap.bitmap_id);
 }
 
 test "image upload then render" {
@@ -927,7 +927,7 @@ test "image upload then render" {
     defer gpu.deinit(testing.allocator);
 
     var exec = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
     // Property: all expected calls made
     const expected = [_]CallType{
@@ -942,7 +942,7 @@ test "image upload then render" {
         .end_pass,
         .submit,
     };
-    try testing.expect(gpu.expectCallTypes(&expected));
+    try testing.expect(gpu.expect_call_types(&expected));
 
     // Property: texture was created before copy
     try testing.expect(gpu.textures_created.isSet(0));
@@ -968,10 +968,10 @@ test "copy to non-zero mip level" {
     defer gpu.deinit(testing.allocator);
 
     var exec = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
     // Property: mip level preserved
-    try testing.expectEqual(@as(u8, 3), gpu.getCall(0).params.copy_external_image_to_texture.mip_level);
+    try testing.expectEqual(@as(u8, 3), gpu.get_call(0).params.copy_external_image_to_texture.mip_level);
 }
 
 test "copy with large origin offset" {
@@ -994,10 +994,10 @@ test "copy with large origin offset" {
     defer gpu.deinit(testing.allocator);
 
     var exec = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
     // Property: origin preserved through varint encoding/decoding
-    const params = gpu.getCall(0).params.copy_external_image_to_texture;
+    const params = gpu.get_call(0).params.copy_external_image_to_texture;
     try testing.expectEqual(@as(u16, 512), params.origin_x);
     try testing.expectEqual(@as(u16, 1024), params.origin_y);
 }
@@ -1170,7 +1170,7 @@ test "fuzz blob parsing with random data" {
 // 3. draw executes with no texture data (black)
 // 4. Async decode completes AFTER submit
 //
-// Fix: JS must call waitForBitmaps() after first executeAll() to wait for
+// Fix: JS must call waitForBitmaps() after first execute_all() to wait for
 // all ImageBitmap Promises to resolve, then re-execute.
 
 test "texture upload sequence: bitmap before copy" {
@@ -1201,10 +1201,10 @@ test "texture upload sequence: bitmap before copy" {
     defer gpu.deinit(testing.allocator);
 
     var exec = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
     // Invariant: create_image_bitmap comes before copy_external_image_to_texture
-    const calls = gpu.getCalls();
+    const calls = gpu.get_calls();
     try testing.expectEqual(@as(usize, 2), calls.len);
     try testing.expectEqual(CallType.create_image_bitmap, calls[0].call_type);
     try testing.expectEqual(CallType.copy_external_image_to_texture, calls[1].call_type);
@@ -1268,10 +1268,10 @@ test "texture upload sequence: copy before draw" {
     defer gpu.deinit(testing.allocator);
 
     var exec = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
     // Find indices of key operations
-    const calls = gpu.getCalls();
+    const calls = gpu.get_calls();
     var copy_idx: ?usize = null;
     var draw_idx: ?usize = null;
 
@@ -1348,7 +1348,7 @@ test "texture upload sequence: full frame with multiple bitmaps" {
     defer gpu.deinit(testing.allocator);
 
     var exec = MockDispatcher.init(testing.allocator, &gpu, &module);
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
     // Count operations
     var bitmap_count: usize = 0;
@@ -1356,7 +1356,7 @@ test "texture upload sequence: full frame with multiple bitmaps" {
     var last_copy_idx: usize = 0;
     var draw_idx: usize = 0;
 
-    const calls = gpu.getCalls();
+    const calls = gpu.get_calls();
     for (calls, 0..) |call, i| {
         switch (call.call_type) {
             .create_image_bitmap => bitmap_count += 1,
@@ -1422,13 +1422,13 @@ test "set_vertex_buffer_pool: basic ping-pong" {
     defer gpu.deinit(testing.allocator);
 
     // Execute at frame 0
-    var exec = MockDispatcher.initWithFrame(testing.allocator, &gpu, &module, 0);
+    var exec = MockDispatcher.init_with_frame(testing.allocator, &gpu, &module, 0);
     defer exec.deinit();
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
     // Find set_vertex_buffer call
     var found_vb = false;
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .set_vertex_buffer) {
             // At frame 0, offset 0: (0 + 0) % 2 = 0
             try testing.expectEqual(@as(u16, 0), call.params.set_vertex_buffer.buffer_id);
@@ -1465,12 +1465,12 @@ test "set_vertex_buffer_pool: frame counter affects selection" {
         var gpu: MockGPU = .empty;
         defer gpu.deinit(testing.allocator);
 
-        var exec = MockDispatcher.initWithFrame(testing.allocator, &gpu, &module, @intCast(frame));
+        var exec = MockDispatcher.init_with_frame(testing.allocator, &gpu, &module, @intCast(frame));
         defer exec.deinit();
-        try exec.executeAll(testing.allocator);
+        try exec.execute_all(testing.allocator);
 
         // Find set_vertex_buffer call
-        for (gpu.getCalls()) |call| {
+        for (gpu.get_calls()) |call| {
             if (call.call_type == .set_vertex_buffer) {
                 try testing.expectEqual(expected_buffer, call.params.set_vertex_buffer.buffer_id);
                 break;
@@ -1504,12 +1504,12 @@ test "set_vertex_buffer_pool: offset shifts selection" {
     defer gpu.deinit(testing.allocator);
 
     // Execute at frame 0 with offset=1
-    var exec = MockDispatcher.initWithFrame(testing.allocator, &gpu, &module, 0);
+    var exec = MockDispatcher.init_with_frame(testing.allocator, &gpu, &module, 0);
     defer exec.deinit();
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
     // Find set_vertex_buffer call: (0 + 1) % 2 = 1
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .set_vertex_buffer) {
             try testing.expectEqual(@as(u16, 1), call.params.set_vertex_buffer.buffer_id);
             break;
@@ -1544,12 +1544,12 @@ test "set_bind_group_pool: basic ping-pong" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    var exec = MockDispatcher.initWithFrame(testing.allocator, &gpu, &module, 0);
+    var exec = MockDispatcher.init_with_frame(testing.allocator, &gpu, &module, 0);
     defer exec.deinit();
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
     // At frame 0, offset 0: should use bind group 0
-    for (gpu.getCalls()) |call| {
+    for (gpu.get_calls()) |call| {
         if (call.call_type == .set_bind_group) {
             try testing.expectEqual(@as(u16, 0), call.params.set_bind_group.group_id);
             break;
@@ -1584,11 +1584,11 @@ test "set_bind_group_pool: frame counter affects selection" {
         var gpu: MockGPU = .empty;
         defer gpu.deinit(testing.allocator);
 
-        var exec = MockDispatcher.initWithFrame(testing.allocator, &gpu, &module, @intCast(frame));
+        var exec = MockDispatcher.init_with_frame(testing.allocator, &gpu, &module, @intCast(frame));
         defer exec.deinit();
-        try exec.executeAll(testing.allocator);
+        try exec.execute_all(testing.allocator);
 
-        for (gpu.getCalls()) |call| {
+        for (gpu.get_calls()) |call| {
             if (call.call_type == .set_bind_group) {
                 try testing.expectEqual(expected_group, call.params.set_bind_group.group_id);
                 break;
@@ -1643,14 +1643,14 @@ test "pool operations: boids ping-pong pattern" {
         var gpu: MockGPU = .empty;
         defer gpu.deinit(testing.allocator);
 
-        var exec = MockDispatcher.initWithFrame(testing.allocator, &gpu, &module, 0);
+        var exec = MockDispatcher.init_with_frame(testing.allocator, &gpu, &module, 0);
         defer exec.deinit();
-        try exec.executeAll(testing.allocator);
+        try exec.execute_all(testing.allocator);
 
         var compute_bind_group: ?u16 = null;
         var render_vertex_buffer: ?u16 = null;
 
-        for (gpu.getCalls()) |call| {
+        for (gpu.get_calls()) |call| {
             switch (call.call_type) {
                 .set_bind_group => compute_bind_group = call.params.set_bind_group.group_id,
                 .set_vertex_buffer => render_vertex_buffer = call.params.set_vertex_buffer.buffer_id,
@@ -1668,14 +1668,14 @@ test "pool operations: boids ping-pong pattern" {
         var gpu: MockGPU = .empty;
         defer gpu.deinit(testing.allocator);
 
-        var exec = MockDispatcher.initWithFrame(testing.allocator, &gpu, &module, 1);
+        var exec = MockDispatcher.init_with_frame(testing.allocator, &gpu, &module, 1);
         defer exec.deinit();
-        try exec.executeAll(testing.allocator);
+        try exec.execute_all(testing.allocator);
 
         var compute_bind_group: ?u16 = null;
         var render_vertex_buffer: ?u16 = null;
 
-        for (gpu.getCalls()) |call| {
+        for (gpu.get_calls()) |call| {
             switch (call.call_type) {
                 .set_bind_group => compute_bind_group = call.params.set_bind_group.group_id,
                 .set_vertex_buffer => render_vertex_buffer = call.params.set_vertex_buffer.buffer_id,
@@ -1716,11 +1716,11 @@ test "pool operations: larger pool size" {
         var gpu: MockGPU = .empty;
         defer gpu.deinit(testing.allocator);
 
-        var exec = MockDispatcher.initWithFrame(testing.allocator, &gpu, &module, @intCast(frame));
+        var exec = MockDispatcher.init_with_frame(testing.allocator, &gpu, &module, @intCast(frame));
         defer exec.deinit();
-        try exec.executeAll(testing.allocator);
+        try exec.execute_all(testing.allocator);
 
-        for (gpu.getCalls()) |call| {
+        for (gpu.get_calls()) |call| {
             if (call.call_type == .set_vertex_buffer) {
                 try testing.expectEqual(expected, call.params.set_vertex_buffer.buffer_id);
                 break;
@@ -1755,11 +1755,11 @@ test "frame counter increment on end_frame" {
     var gpu: MockGPU = .empty;
     defer gpu.deinit(testing.allocator);
 
-    var exec = MockDispatcher.initWithFrame(testing.allocator, &gpu, &module, 0);
+    var exec = MockDispatcher.init_with_frame(testing.allocator, &gpu, &module, 0);
     defer exec.deinit();
 
     // First execution: frame_counter starts at 0
-    try exec.executeAll(testing.allocator);
+    try exec.execute_all(testing.allocator);
 
     // After end_frame, frame_counter should be 1
     try testing.expectEqual(@as(u32, 1), exec.frame_counter);

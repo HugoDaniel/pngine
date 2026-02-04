@@ -642,7 +642,7 @@ fn renderWithGpu(allocator: std.mem.Allocator, bytecode: []const u8, width: u32,
         }
     } else {
         // Execute all frames
-        dispatcher.executeAll(allocator) catch |err| {
+        dispatcher.execute_all(allocator) catch |err| {
             std.debug.print("Error: execution failed: {}\n", .{err});
             return .{ .png_data = undefined, .exit_code = 5 };
         };
@@ -691,7 +691,7 @@ fn executeFrameByName(dispatcher: anytype, module: *const format.Module, name: [
     };
 
     // Scan for pass definitions before executing - exec_pass needs pass_ranges
-    dispatcher.scanPassDefinitions();
+    dispatcher.scan_pass_definitions();
 
     // Execute only the specified frame
     dispatcher.pc = frame_range.start;
@@ -727,9 +727,9 @@ fn scanForFrameByNameId(bytecode: []const u8, target_name_id: u16) ?FrameRange {
         pc += 1;
 
         if (op == .define_frame) {
-            const frame_id_result = opcodes.decodeVarint(bytecode[pc..]);
+            const frame_id_result = opcodes.decode_varint(bytecode[pc..]);
             pc += frame_id_result.len;
-            const name_result = opcodes.decodeVarint(bytecode[pc..]);
+            const name_result = opcodes.decode_varint(bytecode[pc..]);
             pc += name_result.len;
 
             // Scan for end_frame to find frame boundaries
@@ -747,20 +747,20 @@ fn scanForFrameByNameId(bytecode: []const u8, target_name_id: u16) ?FrameRange {
                     break;
                 }
                 pc += 1;
-                skipOpcodeParamsAt(bytecode, &pc, scan_op);
+                skip_opcode_params_at(bytecode, &pc, scan_op);
             }
         } else {
-            skipOpcodeParamsAt(bytecode, &pc, op);
+            skip_opcode_params_at(bytecode, &pc, op);
         }
     }
 
     return null;
 }
 
-/// Skip opcode parameters (mirrors dispatcher.skipOpcodeParamsAt).
-fn skipOpcodeParamsAt(bytecode: []const u8, pc: *usize, op: pngine.opcodes.OpCode) void {
+/// Skip opcode parameters (mirrors dispatcher.skip_opcode_params_at).
+fn skip_opcode_params_at(bytecode: []const u8, pc: *usize, op: pngine.opcodes.OpCode) void {
     // Delegate to dispatcher's implementation
-    pngine.Dispatcher(pngine.gpu_backends.NativeGPU).skipOpcodeParamsAt(bytecode, pc, op);
+    pngine.Dispatcher(pngine.gpu_backends.NativeGPU).skip_opcode_params_at(bytecode, pc, op);
 }
 
 /// Create a 1x1 transparent PNG image.

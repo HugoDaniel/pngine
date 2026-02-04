@@ -32,14 +32,14 @@ pub fn handle(
     allocator: Allocator,
 ) !bool {
     // Pre-condition: valid opcode for this handler
-    assert(isPoolOpcode(op));
+    assert(is_pool_opcode(op));
 
     switch (op) {
         .set_vertex_buffer_pool => {
-            const slot = try self.readByte();
-            const base_buffer_id = try self.readVarint();
-            const pool_size = try self.readByte();
-            const offset = try self.readByte();
+            const slot = try self.read_byte();
+            const base_buffer_id = try self.read_varint();
+            const pool_size = try self.read_byte();
+            const offset = try self.read_byte();
 
             // Pre-condition: pool_size > 0 to avoid division by zero
             if (pool_size == 0) return error.InvalidResourceId;
@@ -50,10 +50,10 @@ pub fn handle(
         },
 
         .set_bind_group_pool => {
-            const slot = try self.readByte();
-            const base_group_id = try self.readVarint();
-            const pool_size = try self.readByte();
-            const offset = try self.readByte();
+            const slot = try self.read_byte();
+            const base_group_id = try self.read_varint();
+            const pool_size = try self.read_byte();
+            const offset = try self.read_byte();
 
             // Pre-condition: pool_size > 0 to avoid division by zero
             if (pool_size == 0) return error.InvalidResourceId;
@@ -70,7 +70,7 @@ pub fn handle(
 }
 
 /// Check if opcode is a pool operation opcode.
-pub fn isPoolOpcode(op: OpCode) bool {
+pub fn is_pool_opcode(op: OpCode) bool {
     return switch (op) {
         .set_vertex_buffer_pool,
         .set_bind_group_pool,

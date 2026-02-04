@@ -58,7 +58,7 @@ fn compileAndExecute(source: [:0]const u8) !mock_gpu.MockGPU {
 
     var dispatcher = Dispatcher(mock_gpu.MockGPU).init(testing.allocator, &gpu, &module);
     defer dispatcher.deinit();
-    try dispatcher.executeAll(testing.allocator);
+    try dispatcher.execute_all(testing.allocator);
 
     return gpu;
 }

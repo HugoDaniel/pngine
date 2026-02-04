@@ -887,7 +887,7 @@ pub fn emitTextures(e: *Emitter) Emitter.Error!void {
         // Check if texture uses imageBitmap size (size=[img.width img.height])
         const image_bitmap_id = textureUsesImageBitmapSize(e, info.node);
 
-        const sample_count = utils.parsePropertyNumber(e, info.node, "sampleCount") orelse 1;
+        const sample_count = utils.parse_propertyNumber(e, info.node, "sampleCount") orelse 1;
 
         // Parse format
         const format_enum = utils.parseTextureFormat(e, info.node);
@@ -912,8 +912,8 @@ pub fn emitTextures(e: *Emitter) Emitter.Error!void {
                 sample_count,
             ) catch return error.OutOfMemory
         else blk: {
-            const width = utils.parsePropertyNumber(e, info.node, "width") orelse 256;
-            const height = utils.parsePropertyNumber(e, info.node, "height") orelse 256;
+            const width = utils.parse_propertyNumber(e, info.node, "width") orelse 256;
+            const height = utils.parse_propertyNumber(e, info.node, "height") orelse 256;
             break :blk DescriptorEncoder.encodeTexture(
                 e.gpa,
                 width,

@@ -284,7 +284,7 @@ pub fn deserializeWgslTable(allocator: Allocator, data: []const u8) !WgslTable {
     var pos: usize = 0;
 
     // Read count
-    const count_result = opcodes.decodeVarint(data[pos..]);
+    const count_result = opcodes.decode_varint(data[pos..]);
     pos += count_result.len;
     const entry_count: u16 = @intCast(count_result.value);
 
@@ -297,7 +297,7 @@ pub fn deserializeWgslTable(allocator: Allocator, data: []const u8) !WgslTable {
         if (pos >= data.len) break;
 
         // data_id
-        const data_id_result = opcodes.decodeVarint(data[pos..]);
+        const data_id_result = opcodes.decode_varint(data[pos..]);
         pos += data_id_result.len;
         const data_id: u16 = @intCast(data_id_result.value);
 
@@ -307,7 +307,7 @@ pub fn deserializeWgslTable(allocator: Allocator, data: []const u8) !WgslTable {
             table.entries.appendAssumeCapacity(.{ .data_id = data_id, .deps = &[_]u16{} });
             break;
         }
-        const dep_count_result = opcodes.decodeVarint(data[pos..]);
+        const dep_count_result = opcodes.decode_varint(data[pos..]);
         pos += dep_count_result.len;
         const dep_count: u16 = @intCast(dep_count_result.value);
 
@@ -323,7 +323,7 @@ pub fn deserializeWgslTable(allocator: Allocator, data: []const u8) !WgslTable {
                     deps = &[_]u16{};
                     break;
                 }
-                const dep_result = opcodes.decodeVarint(data[pos..]);
+                const dep_result = opcodes.decode_varint(data[pos..]);
                 pos += dep_result.len;
                 deps[i] = @intCast(dep_result.value);
             }

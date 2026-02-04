@@ -230,7 +230,7 @@ const Parser = struct {
     }
 
     /// Parse root: all top-level expressions until EOF.
-    fn parseRoot(p: *Parser) !void {
+    fn parse_root(p: *Parser) !void {
         // Root node is always index 0
         const root_node: Node = .{
             .tag = .root,
@@ -438,7 +438,7 @@ pub fn parse(gpa: Allocator, source: [:0]const u8) !Ast {
     const estimated_node_count = @max((tokens.len + 2) / 2, 8);
     try nodes.ensureTotalCapacity(gpa, estimated_node_count);
 
-    try parser.parseRoot();
+    try parser.parse_root();
 
     // Convert to owned slices in order that handles partial failure.
     // Each toOwnedSlice clears the source, so we must not call errdefer after.

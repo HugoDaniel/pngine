@@ -376,10 +376,10 @@ fn executeResourceCreation(cmds: *CommandBuffer) void {
 
         // Handle define_pass: store range and skip to end_pass_def
         if (op == .define_pass) {
-            const pass_id = readVarint(bytecode, &pc);
+            const pass_id = read_varint(bytecode, &pc);
             _ = bytecode[pc]; // pass_type
             pc += 1;
-            _ = readVarint(bytecode, &pc); // desc_id
+            _ = read_varint(bytecode, &pc); // desc_id
 
             // Store pass body start (after define_pass params)
             const pass_start: u32 = @intCast(pc);
@@ -464,8 +464,8 @@ fn executeFrame(cmds: *CommandBuffer, time: f32, width: u32, height: u32) void {
 
             if (op == .define_frame) {
                 // Skip frame_id and name_id
-                _ = readVarint(bytecode, &pc);
-                _ = readVarint(bytecode, &pc);
+                _ = read_varint(bytecode, &pc);
+                _ = read_varint(bytecode, &pc);
                 break;
             }
 
@@ -484,7 +484,7 @@ fn executeFrame(cmds: *CommandBuffer, time: f32, width: u32, height: u32) void {
 
         // Handle exec_pass: replay stored pass bytecode
         if (op == .exec_pass) {
-            const pass_id = readVarint(bytecode, &pc);
+            const pass_id = read_varint(bytecode, &pc);
             if (pass_id < pass_count) {
                 const range = pass_ranges[pass_id];
                 executePassBody(cmds, bytecode, range.start, range.end);
@@ -494,7 +494,7 @@ fn executeFrame(cmds: *CommandBuffer, time: f32, width: u32, height: u32) void {
 
         // Handle exec_pass_once: replay pass only on frame 0 (for initialization)
         if (op == .exec_pass_once) {
-            const pass_id = readVarint(bytecode, &pc);
+            const pass_id = read_varint(bytecode, &pc);
             if (frame_counter == 0 and pass_id < pass_count) {
                 const range = pass_ranges[pass_id];
                 executePassBody(cmds, bytecode, range.start, range.end);
@@ -504,9 +504,9 @@ fn executeFrame(cmds: *CommandBuffer, time: f32, width: u32, height: u32) void {
 
         // Handle time uniform specially
         if (op == .write_time_uniform) {
-            const buffer_id = readVarint(bytecode, &pc);
-            const offset = readVarint(bytecode, &pc);
-            const size = readVarint(bytecode, &pc);
+            const buffer_id = read_varint(bytecode, &pc);
+            const offset = read_varint(bytecode, &pc);
+            const size = read_varint(bytecode, &pc);
             _ = size;
 
             // Write time uniform data (time, width, height, aspect)
@@ -593,56 +593,56 @@ fn executeOpcode(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpC
 fn execCore(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) void {
     switch (op) {
         .create_buffer => {
-            const id = readVarint(bytecode, pc);
-            const size = readVarint(bytecode, pc);
+            const id = read_varint(bytecode, pc);
+            const size = read_varint(bytecode, pc);
             const usage = bytecode[pc.*];
             pc.* += 1;
             cmds.createBuffer(@intCast(id), @intCast(size), usage);
         },
         .create_shader_module => {
-            const id = readVarint(bytecode, pc);
-            const data_id = readVarint(bytecode, pc);
+            const id = read_varint(bytecode, pc);
+            const data_id = read_varint(bytecode, pc);
             const data = getDataSlice(@intCast(data_id));
             cmds.createShader(@intCast(id), @intFromPtr(data.ptr), @intCast(data.len));
         },
         .create_sampler => {
-            const id = readVarint(bytecode, pc);
-            const desc_id = readVarint(bytecode, pc);
+            const id = read_varint(bytecode, pc);
+            const desc_id = read_varint(bytecode, pc);
             const data = getDataSlice(@intCast(desc_id));
             cmds.createSampler(@intCast(id), @intFromPtr(data.ptr), @intCast(data.len));
         },
         .create_bind_group => {
-            const id = readVarint(bytecode, pc);
-            const layout_id = readVarint(bytecode, pc);
-            const entries_id = readVarint(bytecode, pc);
+            const id = read_varint(bytecode, pc);
+            const layout_id = read_varint(bytecode, pc);
+            const entries_id = read_varint(bytecode, pc);
             const data = getDataSlice(@intCast(entries_id));
             cmds.createBindGroup(@intCast(id), @intCast(layout_id), @intFromPtr(data.ptr), @intCast(data.len));
         },
         .create_bind_group_layout => {
-            const id = readVarint(bytecode, pc);
-            const desc_id = readVarint(bytecode, pc);
+            const id = read_varint(bytecode, pc);
+            const desc_id = read_varint(bytecode, pc);
             const data = getDataSlice(@intCast(desc_id));
             cmds.createBindGroupLayout(@intCast(id), @intFromPtr(data.ptr), @intCast(data.len));
         },
         .create_pipeline_layout => {
-            const id = readVarint(bytecode, pc);
-            const desc_id = readVarint(bytecode, pc);
+            const id = read_varint(bytecode, pc);
+            const desc_id = read_varint(bytecode, pc);
             const data = getDataSlice(@intCast(desc_id));
             cmds.createPipelineLayout(@intCast(id), @intFromPtr(data.ptr), @intCast(data.len));
         },
         .write_buffer => {
-            const buffer_id = readVarint(bytecode, pc);
-            const offset = readVarint(bytecode, pc);
-            const data_id = readVarint(bytecode, pc);
+            const buffer_id = read_varint(bytecode, pc);
+            const offset = read_varint(bytecode, pc);
+            const data_id = read_varint(bytecode, pc);
             const data = getDataSlice(@intCast(data_id));
             cmds.writeBuffer(@intCast(buffer_id), @intCast(offset), @intFromPtr(data.ptr), @intCast(data.len));
         },
         .copy_buffer_to_buffer => {
-            const src_id = readVarint(bytecode, pc);
-            const src_off = readVarint(bytecode, pc);
-            const dst_id = readVarint(bytecode, pc);
-            const dst_off = readVarint(bytecode, pc);
-            const size = readVarint(bytecode, pc);
+            const src_id = read_varint(bytecode, pc);
+            const src_off = read_varint(bytecode, pc);
+            const dst_id = read_varint(bytecode, pc);
+            const dst_off = read_varint(bytecode, pc);
+            const size = read_varint(bytecode, pc);
             cmds.copyBufferToBuffer(@intCast(src_id), @intCast(src_off), @intCast(dst_id), @intCast(dst_off), @intCast(size));
         },
         .submit => cmds.submit(),
@@ -659,8 +659,8 @@ fn execRender(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode
     switch (op) {
         .create_render_pipeline => {
             if (comptime plugins.isEnabled(.render)) {
-                const id = readVarint(bytecode, pc);
-                const desc_id = readVarint(bytecode, pc);
+                const id = read_varint(bytecode, pc);
+                const desc_id = read_varint(bytecode, pc);
                 const data = getDataSlice(@intCast(desc_id));
                 cmds.createRenderPipeline(@intCast(id), @intFromPtr(data.ptr), @intCast(data.len));
             } else {
@@ -669,55 +669,55 @@ fn execRender(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode
         },
         .begin_render_pass => {
             if (comptime plugins.isEnabled(.render)) {
-                const color_id = readVarint(bytecode, pc);
+                const color_id = read_varint(bytecode, pc);
                 const load_op = bytecode[pc.*];
                 pc.* += 1;
                 const store_op = bytecode[pc.*];
                 pc.* += 1;
-                const depth_id = readVarint(bytecode, pc);
+                const depth_id = read_varint(bytecode, pc);
                 cmds.beginRenderPass(@intCast(color_id), load_op, store_op, @intCast(depth_id));
             } else {
                 skipRenderPassParams(bytecode, pc);
             }
         },
         .set_pipeline => {
-            const id = readVarint(bytecode, pc);
+            const id = read_varint(bytecode, pc);
             cmds.setPipeline(@intCast(id));
         },
         .set_bind_group => {
             const slot = bytecode[pc.*];
             pc.* += 1;
-            const id = readVarint(bytecode, pc);
+            const id = read_varint(bytecode, pc);
             cmds.setBindGroup(slot, @intCast(id));
         },
         .set_vertex_buffer => {
             if (comptime plugins.isEnabled(.render)) {
                 const slot = bytecode[pc.*];
                 pc.* += 1;
-                const id = readVarint(bytecode, pc);
+                const id = read_varint(bytecode, pc);
                 cmds.setVertexBuffer(slot, @intCast(id));
             } else {
                 pc.* += 1;
-                _ = readVarint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
             }
         },
         .set_index_buffer => {
             if (comptime plugins.isEnabled(.render)) {
-                const id = readVarint(bytecode, pc);
+                const id = read_varint(bytecode, pc);
                 const fmt = bytecode[pc.*];
                 pc.* += 1;
                 cmds.setIndexBuffer(@intCast(id), fmt);
             } else {
-                _ = readVarint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
                 pc.* += 1;
             }
         },
         .draw => {
             if (comptime plugins.isEnabled(.render)) {
-                const vtx = readVarint(bytecode, pc);
-                const inst = readVarint(bytecode, pc);
-                const first_vtx = readVarint(bytecode, pc);
-                const first_inst = readVarint(bytecode, pc);
+                const vtx = read_varint(bytecode, pc);
+                const inst = read_varint(bytecode, pc);
+                const first_vtx = read_varint(bytecode, pc);
+                const first_inst = read_varint(bytecode, pc);
                 cmds.draw(@intCast(vtx), @intCast(inst), @intCast(first_vtx), @intCast(first_inst));
             } else {
                 skipDrawParams(bytecode, pc);
@@ -725,11 +725,11 @@ fn execRender(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode
         },
         .draw_indexed => {
             if (comptime plugins.isEnabled(.render)) {
-                const idx = readVarint(bytecode, pc);
-                const inst = readVarint(bytecode, pc);
-                const first_idx = readVarint(bytecode, pc);
-                const base_vtx = readVarint(bytecode, pc);
-                const first_inst = readVarint(bytecode, pc);
+                const idx = read_varint(bytecode, pc);
+                const inst = read_varint(bytecode, pc);
+                const first_idx = read_varint(bytecode, pc);
+                const base_vtx = read_varint(bytecode, pc);
+                const first_inst = read_varint(bytecode, pc);
                 cmds.drawIndexed(@intCast(idx), @intCast(inst), @intCast(first_idx), @intCast(base_vtx), @intCast(first_inst));
             } else {
                 skipDrawIndexedParams(bytecode, pc);
@@ -738,13 +738,13 @@ fn execRender(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode
         .end_pass => cmds.endPass(),
         .create_render_bundle => {
             if (comptime plugins.isEnabled(.render)) {
-                const id = readVarint(bytecode, pc);
-                const desc_id = readVarint(bytecode, pc);
+                const id = read_varint(bytecode, pc);
+                const desc_id = read_varint(bytecode, pc);
                 const data = getDataSlice(@intCast(desc_id));
                 cmds.createRenderBundle(@intCast(id), @intFromPtr(data.ptr), @intCast(data.len));
             } else {
-                _ = readVarint(bytecode, pc);
-                _ = readVarint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
             }
         },
         else => {},
@@ -760,13 +760,13 @@ fn execCompute(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCod
     switch (op) {
         .create_compute_pipeline => {
             if (comptime plugins.isEnabled(.compute)) {
-                const id = readVarint(bytecode, pc);
-                const desc_id = readVarint(bytecode, pc);
+                const id = read_varint(bytecode, pc);
+                const desc_id = read_varint(bytecode, pc);
                 const data = getDataSlice(@intCast(desc_id));
                 cmds.createComputePipeline(@intCast(id), @intFromPtr(data.ptr), @intCast(data.len));
             } else {
-                _ = readVarint(bytecode, pc);
-                _ = readVarint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
             }
         },
         .begin_compute_pass => {
@@ -776,14 +776,14 @@ fn execCompute(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCod
         },
         .dispatch => {
             if (comptime plugins.isEnabled(.compute)) {
-                const x = readVarint(bytecode, pc);
-                const y = readVarint(bytecode, pc);
-                const z = readVarint(bytecode, pc);
+                const x = read_varint(bytecode, pc);
+                const y = read_varint(bytecode, pc);
+                const z = read_varint(bytecode, pc);
                 cmds.dispatch(@intCast(x), @intCast(y), @intCast(z));
             } else {
-                _ = readVarint(bytecode, pc);
-                _ = readVarint(bytecode, pc);
-                _ = readVarint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
             }
         },
         else => {},
@@ -799,63 +799,63 @@ fn execTexture(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCod
     switch (op) {
         .create_texture => {
             if (comptime plugins.isEnabled(.texture)) {
-                const id = readVarint(bytecode, pc);
-                const desc_id = readVarint(bytecode, pc);
+                const id = read_varint(bytecode, pc);
+                const desc_id = read_varint(bytecode, pc);
                 const data = getDataSlice(@intCast(desc_id));
                 cmds.createTexture(@intCast(id), @intFromPtr(data.ptr), @intCast(data.len));
             } else {
-                _ = readVarint(bytecode, pc);
-                _ = readVarint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
             }
         },
         .create_texture_view => {
             if (comptime plugins.isEnabled(.texture)) {
-                const id = readVarint(bytecode, pc);
-                const tex_id = readVarint(bytecode, pc);
-                const desc_id = readVarint(bytecode, pc);
+                const id = read_varint(bytecode, pc);
+                const tex_id = read_varint(bytecode, pc);
+                const desc_id = read_varint(bytecode, pc);
                 const data = getDataSlice(@intCast(desc_id));
                 cmds.createTextureView(@intCast(id), @intCast(tex_id), @intFromPtr(data.ptr), @intCast(data.len));
             } else {
-                _ = readVarint(bytecode, pc);
-                _ = readVarint(bytecode, pc);
-                _ = readVarint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
             }
         },
         .create_image_bitmap => {
             if (comptime plugins.isEnabled(.texture)) {
-                const id = readVarint(bytecode, pc);
-                const data_id = readVarint(bytecode, pc);
+                const id = read_varint(bytecode, pc);
+                const data_id = read_varint(bytecode, pc);
                 const data = getDataSlice(@intCast(data_id));
                 cmds.createImageBitmap(@intCast(id), @intFromPtr(data.ptr), @intCast(data.len));
             } else {
-                _ = readVarint(bytecode, pc);
-                _ = readVarint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
             }
         },
         .copy_texture_to_texture => {
             if (comptime plugins.isEnabled(.texture)) {
-                const src_id = readVarint(bytecode, pc);
-                const dst_id = readVarint(bytecode, pc);
+                const src_id = read_varint(bytecode, pc);
+                const dst_id = read_varint(bytecode, pc);
                 cmds.copyTextureToTexture(@intCast(src_id), @intCast(dst_id), 0, 0);
             } else {
-                _ = readVarint(bytecode, pc);
-                _ = readVarint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
             }
         },
         .copy_external_image_to_texture => {
             if (comptime plugins.isEnabled(.texture)) {
-                const bmp_id = readVarint(bytecode, pc);
-                const tex_id = readVarint(bytecode, pc);
-                const mip = readVarint(bytecode, pc);
-                const ox = readVarint(bytecode, pc);
-                const oy = readVarint(bytecode, pc);
+                const bmp_id = read_varint(bytecode, pc);
+                const tex_id = read_varint(bytecode, pc);
+                const mip = read_varint(bytecode, pc);
+                const ox = read_varint(bytecode, pc);
+                const oy = read_varint(bytecode, pc);
                 cmds.copyExternalImageToTexture(@intCast(bmp_id), @intCast(tex_id), @intCast(mip), @intCast(ox), @intCast(oy));
             } else {
-                _ = readVarint(bytecode, pc);
-                _ = readVarint(bytecode, pc);
-                _ = readVarint(bytecode, pc);
-                _ = readVarint(bytecode, pc);
-                _ = readVarint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
             }
         },
         else => {},
@@ -871,20 +871,20 @@ fn execWasm(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) 
     switch (op) {
         .init_wasm_module => {
             if (comptime plugins.isEnabled(.wasm)) {
-                const mod_id = readVarint(bytecode, pc);
-                const data_id = readVarint(bytecode, pc);
+                const mod_id = read_varint(bytecode, pc);
+                const data_id = read_varint(bytecode, pc);
                 const data = getDataSlice(@intCast(data_id));
                 cmds.initWasmModule(@intCast(mod_id), @intFromPtr(data.ptr), @intCast(data.len));
             } else {
-                _ = readVarint(bytecode, pc);
-                _ = readVarint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
             }
         },
         .call_wasm_func => {
             if (comptime plugins.isEnabled(.wasm)) {
-                const call_id = readVarint(bytecode, pc);
-                const mod_id = readVarint(bytecode, pc);
-                const func_id = readVarint(bytecode, pc);
+                const call_id = read_varint(bytecode, pc);
+                const mod_id = read_varint(bytecode, pc);
+                const func_id = read_varint(bytecode, pc);
                 const arg_count_raw = bytecode[pc.*];
                 pc.* += 1;
 
@@ -923,16 +923,16 @@ fn execWasm(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) 
         },
         .write_buffer_from_wasm => {
             if (comptime plugins.isEnabled(.wasm)) {
-                const call_id = readVarint(bytecode, pc);
-                const buffer_id = readVarint(bytecode, pc);
-                const offset = readVarint(bytecode, pc);
-                const size = readVarint(bytecode, pc);
+                const call_id = read_varint(bytecode, pc);
+                const buffer_id = read_varint(bytecode, pc);
+                const offset = read_varint(bytecode, pc);
+                const size = read_varint(bytecode, pc);
                 cmds.writeBufferFromWasm(@intCast(buffer_id), @intCast(offset), @intCast(call_id), @intCast(size));
             } else {
-                _ = readVarint(bytecode, pc);
-                _ = readVarint(bytecode, pc);
-                _ = readVarint(bytecode, pc);
-                _ = readVarint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
             }
         },
         else => {},
@@ -950,7 +950,7 @@ fn execPool(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) 
         .set_vertex_buffer_pool => {
             const slot = bytecode[pc.*];
             pc.* += 1;
-            const base_id = readVarint(bytecode, pc);
+            const base_id = read_varint(bytecode, pc);
             const pool_size = bytecode[pc.*];
             pc.* += 1;
             const offset = bytecode[pc.*];
@@ -963,7 +963,7 @@ fn execPool(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) 
         .set_bind_group_pool => {
             const slot = bytecode[pc.*];
             pc.* += 1;
-            const base_id = readVarint(bytecode, pc);
+            const base_id = read_varint(bytecode, pc);
             const pool_size = bytecode[pc.*];
             pc.* += 1;
             const offset = bytecode[pc.*];
@@ -1016,7 +1016,7 @@ fn parseAnimationTable(offset: u32) void {
 
     // Read name_string_id (skip - we don't need the name)
     if (pos >= data.len) return;
-    const name_result = opcodes.decodeVarint(data[pos..]);
+    const name_result = opcodes.decode_varint(data[pos..]);
     pos += name_result.len;
 
     // Read duration_ms
@@ -1031,7 +1031,7 @@ fn parseAnimationTable(offset: u32) void {
 
     // Read scene_count
     if (pos >= data.len) return;
-    const count_result = opcodes.decodeVarint(data[pos..]);
+    const count_result = opcodes.decode_varint(data[pos..]);
     pos += count_result.len;
     anim_scene_count = @min(count_result.value, MAX_SCENES);
 
@@ -1039,11 +1039,11 @@ fn parseAnimationTable(offset: u32) void {
     for (0..anim_scene_count) |i| {
         // id_string_id (skip - we don't need scene ID)
         if (pos >= data.len) break;
-        pos += opcodes.decodeVarint(data[pos..]).len;
+        pos += opcodes.decode_varint(data[pos..]).len;
 
         // frame_string_id (this maps to a #frame name)
         if (pos >= data.len) break;
-        const frame_result = opcodes.decodeVarint(data[pos..]);
+        const frame_result = opcodes.decode_varint(data[pos..]);
         pos += frame_result.len;
 
         // start_ms
@@ -1137,9 +1137,9 @@ fn scanFrameDefinitions() void {
 
         if (op == .define_frame) {
             // Read frame_id (skip)
-            _ = readVarint(bytecode, &pc);
+            _ = read_varint(bytecode, &pc);
             // Read name_string_id (we need this for matching)
-            const name_id = readVarint(bytecode, &pc);
+            const name_id = read_varint(bytecode, &pc);
 
             // Store frame entry: name_string_id → current PC (after params)
             frame_entries[frame_count] = .{
@@ -1179,8 +1179,8 @@ fn scanFrameDefinitions() void {
 // ============================================================================
 
 /// Read varint from bytecode.
-fn readVarint(bytecode: []const u8, pc: *usize) u32 {
-    const result = opcodes.decodeVarint(bytecode[pc.*..]);
+fn read_varint(bytecode: []const u8, pc: *usize) u32 {
+    const result = opcodes.decode_varint(bytecode[pc.*..]);
     pc.* += result.len;
     return result.value;
 }
@@ -1266,78 +1266,78 @@ fn getStringSlice(string_id: u16) []const u8 {
 fn skipOpcodeParams(bytecode: []const u8, pc: *usize, op: OpCode) void {
     switch (op) {
         .end_pass, .submit, .end_frame, .nop, .begin_compute_pass, .end_pass_def => {},
-        .set_pipeline, .exec_pass, .exec_pass_once => _ = readVarint(bytecode, pc),
+        .set_pipeline, .exec_pass, .exec_pass_once => _ = read_varint(bytecode, pc),
         .define_frame, .create_shader_module, .write_uniform,
         .create_texture, .create_render_pipeline, .create_compute_pipeline,
         .create_sampler, .create_bind_group_layout, .create_pipeline_layout,
         .create_query_set, .create_render_bundle, .create_image_bitmap,
         .init_wasm_module, .copy_texture_to_texture => {
-            _ = readVarint(bytecode, pc);
-            _ = readVarint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
         },
         .create_buffer => {
-            _ = readVarint(bytecode, pc);
-            _ = readVarint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
             pc.* += 1;
         },
         // write_buffer has 3 params: buffer_id, offset, data_id
         .dispatch, .write_time_uniform, .create_bind_group, .create_texture_view, .write_buffer => {
-            _ = readVarint(bytecode, pc);
-            _ = readVarint(bytecode, pc);
-            _ = readVarint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
         },
         .draw, .write_buffer_from_wasm => {
-            _ = readVarint(bytecode, pc);
-            _ = readVarint(bytecode, pc);
-            _ = readVarint(bytecode, pc);
-            _ = readVarint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
         },
         .draw_indexed, .copy_buffer_to_buffer, .copy_external_image_to_texture => {
-            _ = readVarint(bytecode, pc);
-            _ = readVarint(bytecode, pc);
-            _ = readVarint(bytecode, pc);
-            _ = readVarint(bytecode, pc);
-            _ = readVarint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
         },
         .begin_render_pass => {
-            _ = readVarint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
             pc.* += 2;
-            _ = readVarint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
         },
         .set_bind_group, .set_vertex_buffer => {
             pc.* += 1;
-            _ = readVarint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
         },
         .set_index_buffer => {
-            _ = readVarint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
             pc.* += 1;
         },
         .define_pass => {
-            _ = readVarint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
             pc.* += 1;
-            _ = readVarint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
         },
         .set_bind_group_pool, .set_vertex_buffer_pool => {
             pc.* += 1;
-            _ = readVarint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
             pc.* += 2;
         },
         .select_from_pool => {
             pc.* += 1;
-            _ = readVarint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
             pc.* += 1;
         },
         .execute_bundles => {
-            const count = readVarint(bytecode, pc);
+            const count = read_varint(bytecode, pc);
             for (0..count) |_| {
-                _ = readVarint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
             }
         },
         .create_shader_concat => {
-            _ = readVarint(bytecode, pc);
-            const count = readVarint(bytecode, pc);
+            _ = read_varint(bytecode, pc);
+            const count = read_varint(bytecode, pc);
             for (0..count) |_| {
-                _ = readVarint(bytecode, pc);
+                _ = read_varint(bytecode, pc);
             }
         },
         .call_wasm_func => skipWasmCallParams(bytecode, pc),
@@ -1347,36 +1347,36 @@ fn skipOpcodeParams(bytecode: []const u8, pc: *usize, op: OpCode) void {
 
 // Skip helpers for plugin-disabled paths
 fn skipRenderPipelineParams(bytecode: []const u8, pc: *usize) void {
-    _ = readVarint(bytecode, pc);
-    _ = readVarint(bytecode, pc);
+    _ = read_varint(bytecode, pc);
+    _ = read_varint(bytecode, pc);
 }
 
 fn skipRenderPassParams(bytecode: []const u8, pc: *usize) void {
-    _ = readVarint(bytecode, pc);
+    _ = read_varint(bytecode, pc);
     pc.* += 2;
-    _ = readVarint(bytecode, pc);
+    _ = read_varint(bytecode, pc);
 }
 
 fn skipDrawParams(bytecode: []const u8, pc: *usize) void {
-    _ = readVarint(bytecode, pc);
-    _ = readVarint(bytecode, pc);
-    _ = readVarint(bytecode, pc);
-    _ = readVarint(bytecode, pc);
+    _ = read_varint(bytecode, pc);
+    _ = read_varint(bytecode, pc);
+    _ = read_varint(bytecode, pc);
+    _ = read_varint(bytecode, pc);
 }
 
 fn skipDrawIndexedParams(bytecode: []const u8, pc: *usize) void {
-    _ = readVarint(bytecode, pc);
-    _ = readVarint(bytecode, pc);
-    _ = readVarint(bytecode, pc);
-    _ = readVarint(bytecode, pc);
-    _ = readVarint(bytecode, pc);
+    _ = read_varint(bytecode, pc);
+    _ = read_varint(bytecode, pc);
+    _ = read_varint(bytecode, pc);
+    _ = read_varint(bytecode, pc);
+    _ = read_varint(bytecode, pc);
 }
 
 fn skipWasmCallParams(bytecode: []const u8, pc: *usize) void {
-    _ = readVarint(bytecode, pc); // call_id
-    _ = readVarint(bytecode, pc); // module_id
-    _ = readVarint(bytecode, pc); // func_name_id
-    const arg_count = readVarint(bytecode, pc);
+    _ = read_varint(bytecode, pc); // call_id
+    _ = read_varint(bytecode, pc); // module_id
+    _ = read_varint(bytecode, pc); // func_name_id
+    const arg_count = read_varint(bytecode, pc);
     for (0..arg_count) |_| {
         const arg_type = bytecode[pc.*];
         pc.* += 1;

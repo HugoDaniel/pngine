@@ -125,7 +125,7 @@ pub const WasmPlugin = struct {
     }
 
     /// Check if a module is initialized.
-    pub fn isModuleInitialized(self: *const Self, module_id: u16) bool {
+    pub fn is_module_initialized(self: *const Self, module_id: u16) bool {
         if (module_id >= MAX_WASM_MODULES) return false;
         return (self.initialized_modules & (@as(u16, 1) << @intCast(module_id))) != 0;
     }
@@ -142,12 +142,12 @@ test "WasmPlugin: init module" {
     var cmd_buffer = CommandBuffer.init(&buffer);
     var wasm_plugin = WasmPlugin.init(&cmd_buffer);
 
-    try testing.expect(!wasm_plugin.isModuleInitialized(0));
+    try testing.expect(!wasm_plugin.is_module_initialized(0));
 
     wasm_plugin.initWasmModule(0, 0x1000, 256);
 
-    try testing.expect(wasm_plugin.isModuleInitialized(0));
-    try testing.expect(!wasm_plugin.isModuleInitialized(1));
+    try testing.expect(wasm_plugin.is_module_initialized(0));
+    try testing.expect(!wasm_plugin.is_module_initialized(1));
 
     const result = cmd_buffer.finish();
     try testing.expect(result.len > 8);
