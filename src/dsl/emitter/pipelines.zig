@@ -305,6 +305,8 @@ fn buildPrimitiveJson(e: *Emitter, prop_node: Node.Index) ?[]const u8 {
     if (obj_tag != .object) return null;
 
     var json = std.ArrayListUnmanaged(u8){};
+    errdefer json.deinit(e.gpa);
+
     json.append(e.gpa, '{') catch return null;
 
     var first = true;
@@ -330,19 +332,13 @@ fn buildPrimitiveJson(e: *Emitter, prop_node: Node.Index) ?[]const u8 {
             // String enum values
             const value_text = getIdentifierOrStringValue(e, value_node);
             const entry = std.fmt.allocPrint(e.gpa, "\"{s}\":\"{s}\"", .{ inner_name, value_text }) catch return null;
-            json.appendSlice(e.gpa, entry) catch {
-                e.gpa.free(entry);
-                return null;
-            };
-            e.gpa.free(entry);
+            defer e.gpa.free(entry);
+            json.appendSlice(e.gpa, entry) catch return null;
         } else if (std.mem.eql(u8, inner_name, "unclippedDepth")) {
             const value = parseBoolValue(e, value_node);
             const entry = std.fmt.allocPrint(e.gpa, "\"unclippedDepth\":{s}", .{if (value) "true" else "false"}) catch return null;
-            json.appendSlice(e.gpa, entry) catch {
-                e.gpa.free(entry);
-                return null;
-            };
-            e.gpa.free(entry);
+            defer e.gpa.free(entry);
+            json.appendSlice(e.gpa, entry) catch return null;
         } else {
             first = true; // Reset if unknown property
         }
@@ -364,6 +360,7 @@ fn buildDepthStencilJson(e: *Emitter, prop_node: Node.Index) ?[]const u8 {
     if (obj_tag != .object) return null;
 
     var json = std.ArrayListUnmanaged(u8){};
+    errdefer json.deinit(e.gpa);
     json.append(e.gpa, '{') catch return null;
 
     var first = true;
@@ -481,6 +478,7 @@ fn buildStencilFaceJson(e: *Emitter, obj_node: Node.Index) ?[]const u8 {
     if (obj_tag != .object) return null;
 
     var json = std.ArrayListUnmanaged(u8){};
+    errdefer json.deinit(e.gpa);
     json.append(e.gpa, '{') catch return null;
 
     var first = true;
@@ -504,11 +502,8 @@ fn buildStencilFaceJson(e: *Emitter, obj_node: Node.Index) ?[]const u8 {
 
             const value_text = getIdentifierOrStringValue(e, value_node);
             const entry = std.fmt.allocPrint(e.gpa, "\"{s}\":\"{s}\"", .{ inner_name, value_text }) catch return null;
-            json.appendSlice(e.gpa, entry) catch {
-                e.gpa.free(entry);
-                return null;
-            };
-            e.gpa.free(entry);
+            defer e.gpa.free(entry);
+            json.appendSlice(e.gpa, entry) catch return null;
         }
     }
 
@@ -532,6 +527,7 @@ fn buildMultisampleJson(e: *Emitter, prop_node: Node.Index) ?[]const u8 {
     if (obj_tag != .object) return null;
 
     var json = std.ArrayListUnmanaged(u8){};
+    errdefer json.deinit(e.gpa);
     json.append(e.gpa, '{') catch return null;
 
     var first = true;
@@ -552,19 +548,13 @@ fn buildMultisampleJson(e: *Emitter, prop_node: Node.Index) ?[]const u8 {
             const default_val: u32 = if (std.mem.eql(u8, inner_name, "count")) 1 else 0xFFFFFFFF;
             const value = utils.resolveNumericValue(e, value_node) orelse default_val;
             const entry = std.fmt.allocPrint(e.gpa, "\"{s}\":{d}", .{ inner_name, value }) catch return null;
-            json.appendSlice(e.gpa, entry) catch {
-                e.gpa.free(entry);
-                return null;
-            };
-            e.gpa.free(entry);
+            defer e.gpa.free(entry);
+            json.appendSlice(e.gpa, entry) catch return null;
         } else if (std.mem.eql(u8, inner_name, "alphaToCoverageEnabled")) {
             const value = parseBoolValue(e, value_node);
             const entry = std.fmt.allocPrint(e.gpa, "\"alphaToCoverageEnabled\":{s}", .{if (value) "true" else "false"}) catch return null;
-            json.appendSlice(e.gpa, entry) catch {
-                e.gpa.free(entry);
-                return null;
-            };
-            e.gpa.free(entry);
+            defer e.gpa.free(entry);
+            json.appendSlice(e.gpa, entry) catch return null;
         } else {
             first = true; // Reset if unknown property
         }
@@ -642,6 +632,7 @@ fn buildVertexBuffersJson(e: *Emitter, buffers_node: Node.Index) ?[]const u8 {
     const buffer_elements = e.ast.extraData(buffers_data.extra_range);
 
     var result = std.ArrayListUnmanaged(u8){};
+    errdefer result.deinit(e.gpa);
     result.append(e.gpa, '[') catch return null;
 
     var first_buffer = true;
@@ -681,20 +672,14 @@ fn buildVertexBuffersJson(e: *Emitter, buffers_node: Node.Index) ?[]const u8 {
         }
 
         const stride_json = std.fmt.allocPrint(e.gpa, "\"arrayStride\":{d}", .{array_stride}) catch return null;
-        result.appendSlice(e.gpa, stride_json) catch {
-            e.gpa.free(stride_json);
-            return null;
-        };
-        e.gpa.free(stride_json);
+        defer e.gpa.free(stride_json);
+        result.appendSlice(e.gpa, stride_json) catch return null;
 
         // Add stepMode if specified (default is "vertex" so only emit if instance)
         if (step_mode) |mode| {
             const mode_json = std.fmt.allocPrint(e.gpa, ",\"stepMode\":\"{s}\"", .{mode}) catch return null;
-            result.appendSlice(e.gpa, mode_json) catch {
-                e.gpa.free(mode_json);
-                return null;
-            };
-            e.gpa.free(mode_json);
+            defer e.gpa.free(mode_json);
+            result.appendSlice(e.gpa, mode_json) catch return null;
         }
 
         if (attributes_json) |attrs| {
@@ -722,6 +707,7 @@ fn buildAttributesJson(e: *Emitter, attrs_node: Node.Index) ?[]const u8 {
     const attr_elements = e.ast.extraData(attrs_data.extra_range);
 
     var result = std.ArrayListUnmanaged(u8){};
+    errdefer result.deinit(e.gpa);
     result.append(e.gpa, '[') catch return null;
 
     var first_attr = true;
@@ -763,19 +749,16 @@ fn buildAttributesJson(e: *Emitter, attrs_node: Node.Index) ?[]const u8 {
             "{{\"shaderLocation\":{d},\"offset\":{d},\"format\":\"{s}\"}}",
             .{ shader_location, attr_offset, attr_format },
         ) catch return null;
-        result.appendSlice(e.gpa, attr_json) catch {
-            e.gpa.free(attr_json);
-            return null;
-        };
-        e.gpa.free(attr_json);
+        defer e.gpa.free(attr_json);
+        result.appendSlice(e.gpa, attr_json) catch return null;
     }
 
     result.append(e.gpa, ']') catch return null;
     return result.toOwnedSlice(e.gpa) catch return null;
 }
 
-/// Build JSON descriptor for compute pipeline.
-/// Format: {"compute":{"shader":N,"entryPoint":"..."}}
+/// Build binary descriptor for compute pipeline.
+/// Binary format: [type_tag:0x06][shader_id:u16 LE][entry_len:u8][entry_bytes]
 ///
 /// If no module is specified in compute stage, infers the shader module:
 /// - Uses the first available shader module from shader_ids
@@ -809,18 +792,28 @@ fn buildComputePipelineDescriptor(e: *Emitter, node: Node.Index) ![]u8 {
         break :blk if (first_entry) |entry| entry.value_ptr.* else 0;
     };
 
-    const result = try std.fmt.allocPrint(
-        e.gpa,
-        "{{\"compute\":{{\"shader\":{d},\"entryPoint\":\"{s}\"}}}}",
-        .{ final_shader_id, compute_entry },
-    );
+    // Binary format: [type_tag:0x06][shader_id:u16 LE][entry_len:u8][entry_bytes]
+    // Total size: 1 + 2 + 1 + entry_len
+    const entry_len: u8 = @intCast(@min(compute_entry.len, 255));
+    const total_len = 1 + 2 + 1 + entry_len;
+    
+    const result = try e.gpa.alloc(u8, total_len);
+    errdefer e.gpa.free(result);
+    
+    result[0] = 0x06; // compute_pipeline type tag
+    // Shader ID as little-endian u16
+    result[1] = @intCast(final_shader_id & 0xFF);
+    result[2] = @intCast((final_shader_id >> 8) & 0xFF);
+    result[3] = entry_len;
+    @memcpy(result[4..][0..entry_len], compute_entry[0..entry_len]);
 
-    // Post-condition: valid JSON
-    std.debug.assert(result.len > 0);
-    std.debug.assert(result[0] == '{');
+    // Post-condition: valid binary descriptor
+    std.debug.assert(result.len >= 4);
+    std.debug.assert(result[0] == 0x06);
 
     return result;
 }
+
 
 const StageDescriptor = struct {
     shader_id: ?u16,

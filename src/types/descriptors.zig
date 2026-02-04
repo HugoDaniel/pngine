@@ -202,6 +202,44 @@ pub const AddressMode = enum(u8) {
     mirror_repeat = 0x02,
 };
 
+/// Primitive topologies (matches WebGPU GPUPrimitiveTopology).
+/// IMPORTANT: Indices must match enums.js TOPOLOGY array.
+pub const PrimitiveTopology = enum(u8) {
+    point_list = 0x00,
+    line_list = 0x01,
+    line_strip = 0x02,
+    triangle_list = 0x03,
+    triangle_strip = 0x04,
+};
+
+/// Cull modes (matches WebGPU GPUCullMode).
+/// IMPORTANT: Indices must match enums.js CULL_MODE array.
+pub const CullMode = enum(u8) {
+    none = 0x00,
+    front = 0x01,
+    back = 0x02,
+};
+
+/// Front face winding (matches WebGPU GPUFrontFace).
+/// IMPORTANT: Indices must match enums.js FRONT_FACE array.
+pub const FrontFace = enum(u8) {
+    ccw = 0x00,
+    cw = 0x01,
+};
+
+/// Compare functions (matches WebGPU GPUCompareFunction).
+/// IMPORTANT: Indices must match enums.js COMPARE_FUNCTION array.
+pub const CompareFunction = enum(u8) {
+    never = 0x00,
+    less = 0x01,
+    equal = 0x02,
+    less_equal = 0x03,
+    greater = 0x04,
+    not_equal = 0x05,
+    greater_equal = 0x06,
+    always = 0x07,
+};
+
 // Note: LoadOp and StoreOp are in opcodes.zig
 
 pub const ResourceType = enum(u8) {
@@ -211,6 +249,8 @@ pub const ResourceType = enum(u8) {
     external_texture = 0x03,
 };
 
+/// Texture usage flags (matches WebGPU GPUTextureUsage).
+/// Bit positions are verified at comptime to match WebGPU spec.
 pub const TextureUsage = packed struct(u8) {
     copy_src: bool = false,
     copy_dst: bool = false,
@@ -224,6 +264,18 @@ pub const TextureUsage = packed struct(u8) {
     pub const copy_dst_val: TextureUsage = .{ .copy_dst = true };
     pub const storage_binding_val: TextureUsage = .{ .storage_binding = true };
 
+    /// WebGPU GPUTextureUsage constants (from W3C WebGPU spec §6.1.2)
+    pub const WEBGPU_COPY_SRC: u32 = 0x01;
+    pub const WEBGPU_COPY_DST: u32 = 0x02;
+    pub const WEBGPU_TEXTURE_BINDING: u32 = 0x04;
+    pub const WEBGPU_STORAGE_BINDING: u32 = 0x08;
+    pub const WEBGPU_RENDER_ATTACHMENT: u32 = 0x10;
+
+    /// Convert to WebGPU-compatible u32 (identity since bits match).
+    pub fn toWebGPU(self: TextureUsage) u32 {
+        return @as(u8, @bitCast(self));
+    }
+
     /// Convert to u8 for serialization.
     pub fn toU8(self: TextureUsage) u8 {
         return @bitCast(self);
@@ -233,7 +285,18 @@ pub const TextureUsage = packed struct(u8) {
     pub fn fromU8(value: u8) TextureUsage {
         return @bitCast(value);
     }
+
+    // Compile-time verification that packed struct bits match WebGPU values
+    comptime {
+        const assert = std.debug.assert;
+        assert(@as(u8, @bitCast(TextureUsage{ .copy_src = true })) == WEBGPU_COPY_SRC);
+        assert(@as(u8, @bitCast(TextureUsage{ .copy_dst = true })) == WEBGPU_COPY_DST);
+        assert(@as(u8, @bitCast(TextureUsage{ .texture_binding = true })) == WEBGPU_TEXTURE_BINDING);
+        assert(@as(u8, @bitCast(TextureUsage{ .storage_binding = true })) == WEBGPU_STORAGE_BINDING);
+        assert(@as(u8, @bitCast(TextureUsage{ .render_attachment = true })) == WEBGPU_RENDER_ATTACHMENT);
+    }
 };
+
 
 // ============================================================================
 // Tests

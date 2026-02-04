@@ -13,8 +13,33 @@
 // For dev: keep as true; for prod: esbuild replaces at build time
 const DEBUG = true;
 
-// Usage flags (must match opcodes.zig)
-const U_COPY_DST = 0x08, U_INDEX = 0x10, U_VERTEX = 0x20, U_UNIFORM = 0x40, U_STORAGE = 0x80;
+// ═══════════════════════════════════════════════════════════════════════════
+// Enum Lookup Tables (must match descriptors.zig and enums.js)
+// 
+// To add new enum values:
+// 1. Add to descriptors.zig (Zig enum)
+// 2. Add to enums.js (JS canonical reference)  
+// 3. Update the inlined version below to match
+//
+// See npm/pngine/src/enums.js for full documentation
+// ═══════════════════════════════════════════════════════════════════════════
+
+// TextureFormat (descriptors.zig:TextureFormat)
+const TEXTURE_FORMAT = {
+  0x00: "rgba8unorm", 0x01: "rgba8snorm", 0x02: "rgba8uint", 0x03: "rgba8sint",
+  0x04: "bgra8unorm", 0x05: "rgba16float", 0x06: "rgba32float",
+  0x10: "depth24plus", 0x11: "depth24plus-stencil8", 0x12: "depth32float",
+  0x20: "r32float", 0x21: "rg32float",
+};
+const decodeTextureFormat = (v) => TEXTURE_FORMAT[v] ?? navigator.gpu.getPreferredCanvasFormat();
+
+// FilterMode (descriptors.zig:FilterMode): 0=nearest, 1=linear
+const FILTER_MODE = ["nearest", "linear"];
+const decodeFilterMode = (v) => FILTER_MODE[v] ?? "linear";
+
+// AddressMode (descriptors.zig:AddressMode): 0=clamp-to-edge, 1=repeat, 2=mirror-repeat
+const ADDRESS_MODE = ["clamp-to-edge", "repeat", "mirror-repeat"];
+const decodeAddressMode = (v) => ADDRESS_MODE[v] ?? "clamp-to-edge";
 
 // UniformType enum values (must match uniform_table.zig)
 const UT_F32 = 0, UT_I32 = 1, UT_U32 = 2;
@@ -160,47 +185,17 @@ export function createCommandDispatcher(device, ctx) {
     return new TextDecoder().decode(new Uint8Array(mem.buffer, ptr, len));
   }
 
-  // Helper: translate buffer usage flags
-  function tu(u) {
-    let r = 0;
-    if (u & 0x01) r |= GPUBufferUsage.MAP_READ;
-    if (u & 0x02) r |= GPUBufferUsage.MAP_WRITE;
-    if (u & 0x04) r |= GPUBufferUsage.COPY_SRC;
-    if (u & U_COPY_DST) r |= GPUBufferUsage.COPY_DST;
-    if (u & U_INDEX) r |= GPUBufferUsage.INDEX;
-    if (u & U_VERTEX) r |= GPUBufferUsage.VERTEX;
-    if (u & U_UNIFORM) r |= GPUBufferUsage.UNIFORM;
-    if (u & U_STORAGE) r |= GPUBufferUsage.STORAGE;
-    return r || GPUBufferUsage.COPY_DST;
-  }
-
-  // Decode texture format enum
-  function dtf(v) {
-    const f = {
-      0x00: "rgba8unorm", 0x01: "rgba8snorm", 0x04: "bgra8unorm",
-      0x05: "rgba16float", 0x06: "rgba32float",
-      0x10: "depth24plus", 0x11: "depth24plus-stencil8", 0x12: "depth32float",
-    };
-    return f[v] || navigator.gpu.getPreferredCanvasFormat();
-  }
-
-  // Decode texture usage flags
-  function dtu(v) {
-    let u = 0;
-    if (v & 0x01) u |= GPUTextureUsage.COPY_SRC;
-    if (v & 0x02) u |= GPUTextureUsage.COPY_DST;
-    if (v & 0x04) u |= GPUTextureUsage.TEXTURE_BINDING;
-    if (v & 0x08) u |= GPUTextureUsage.STORAGE_BINDING;
-    if (v & 0x10) u |= GPUTextureUsage.RENDER_ATTACHMENT;
-    return u || GPUTextureUsage.RENDER_ATTACHMENT;
-  }
+  // Decode texture format enum - uses centralized lookup from enums.js
+  const dtf = decodeTextureFormat;
 
   // Command handlers - all minifiable function names
   function createBuffer(id, size, usage) {
     if (buf[id]) return;
     DEBUG && dbg && console.log(`[GPU] createBuffer(${id}, ${size}, 0x${usage.toString(16)})`);
-    buf[id] = device.createBuffer({ size, usage: tu(usage) });
+    // Bytecode usage flags match WebGPU GPUBufferUsage values directly
+    buf[id] = device.createBuffer({ size, usage: usage || GPUBufferUsage.COPY_DST });
   }
+
 
   function createShader(id, ptr, len) {
     if (shd[id]) return;
@@ -217,7 +212,7 @@ export function createCommandDispatcher(device, ctx) {
       for (const msg of info.messages) {
         if (msg.type === 'error') {
           console.error(`[GPU] Shader ${id} error at line ${msg.lineNum}:${msg.linePos}: ${msg.message}`);
-          console.error(`[GPU] Context: ${code.split('\n').slice(Math.max(0,msg.lineNum-3), msg.lineNum+2).join('\n')}`);
+          console.error(`[GPU] Context: ${code.split('\n').slice(Math.max(0, msg.lineNum - 3), msg.lineNum + 2).join('\n')}`);
         }
       }
     });
@@ -262,21 +257,28 @@ export function createCommandDispatcher(device, ctx) {
 
   function createComputePipeline(id, ptr, len) {
     if (pip[id]) return;
-    if (len === 0) {
-      DEBUG && dbg && console.warn(`[GPU] createComputePipeline(${id}) skipped: len=0`);
+    if (len < 4) {
+      DEBUG && dbg && console.warn(`[GPU] createComputePipeline(${id}) skipped: len=${len}`);
       return;
     }
-    const desc = JSON.parse(rs(ptr, len));
+    // Binary format: [type_tag:0x06][shader_id:u16 LE][entry_len:u8][entry_bytes]
+    const bytes = new Uint8Array(mem.buffer, ptr, len);
+    const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const shaderId = v.getUint16(1, true); // bytes 1-2, little endian
+    const entryLen = bytes[3];
+    const entryPoint = entryLen > 0 ? new TextDecoder().decode(bytes.slice(4, 4 + entryLen)) : "main";
+    DEBUG && dbg && console.log(`[GPU] createComputePipeline(${id}) shader=${shaderId} entry=${entryPoint}`);
     const p = device.createComputePipeline({
       layout: "auto",
       compute: {
-        module: shd[desc.compute?.shader ?? 0],
-        entryPoint: desc.compute?.entryPoint ?? "main",
+        module: shd[shaderId] ?? shd[0],
+        entryPoint,
       },
     });
     pip[id] = p;
     bgl[id] = p.getBindGroupLayout(0);
   }
+
 
   function createTexture(id, ptr, len) {
     if (tex[id]) return;
@@ -299,7 +301,8 @@ export function createCommandDispatcher(device, ctx) {
       } else if (vt === 0x07) { // enum
         const val = bytes[off++];
         if (fid === 0x07) desc.format = dtf(val);
-        else if (fid === 0x08) desc.usage = dtu(val);
+        // Bytecode texture usage flags match WebGPU GPUTextureUsage values directly
+        else if (fid === 0x08) desc.usage = val || GPUTextureUsage.RENDER_ATTACHMENT;
       }
     }
     txd[id] = { format: desc.format, usage: desc.usage };
@@ -315,16 +318,16 @@ export function createCommandDispatcher(device, ctx) {
     }
     const bytes = new Uint8Array(mem.buffer, ptr, len);
     let off = 2;
-    const desc = { magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" };
+    const desc = { magFilter: FILTER_MODE[1], minFilter: FILTER_MODE[1], addressModeU: ADDRESS_MODE[0], addressModeV: ADDRESS_MODE[0] };
     const fc = bytes[1];
     for (let i = 0; i < fc; i++) {
       const fid = bytes[off++], vt = bytes[off++];
       if (vt === 0x07) {
         const val = bytes[off++];
-        if (fid === 0x04) desc.magFilter = val === 0 ? "nearest" : "linear";
-        else if (fid === 0x05) desc.minFilter = val === 0 ? "nearest" : "linear";
-        else if (fid === 0x01) desc.addressModeU = ["clamp-to-edge", "repeat", "mirror-repeat"][val];
-        else if (fid === 0x02) desc.addressModeV = ["clamp-to-edge", "repeat", "mirror-repeat"][val];
+        if (fid === 0x04) desc.magFilter = decodeFilterMode(val);
+        else if (fid === 0x05) desc.minFilter = decodeFilterMode(val);
+        else if (fid === 0x01) desc.addressModeU = decodeAddressMode(val);
+        else if (fid === 0x02) desc.addressModeV = decodeAddressMode(val);
       }
     }
     DEBUG && dbg && console.log(`[GPU] createSampler(${id}) ${desc.magFilter}/${desc.minFilter}`);

@@ -275,6 +275,7 @@ pub const OpCode = enum(u8) {
 };
 
 /// Buffer usage flags (matches WebGPU GPUBufferUsage).
+/// Bit positions are verified at comptime to match WebGPU spec.
 pub const BufferUsage = packed struct(u8) {
     map_read: bool = false,
     map_write: bool = false,
@@ -288,7 +289,36 @@ pub const BufferUsage = packed struct(u8) {
     pub const uniform_copy_dst: BufferUsage = .{ .uniform = true, .copy_dst = true };
     pub const vertex_copy_dst: BufferUsage = .{ .vertex = true, .copy_dst = true };
     pub const storage_copy_dst: BufferUsage = .{ .storage = true, .copy_dst = true };
+
+    /// WebGPU GPUBufferUsage constants (from W3C WebGPU spec §4.3.2)
+    pub const WEBGPU_MAP_READ: u32 = 0x0001;
+    pub const WEBGPU_MAP_WRITE: u32 = 0x0002;
+    pub const WEBGPU_COPY_SRC: u32 = 0x0004;
+    pub const WEBGPU_COPY_DST: u32 = 0x0008;
+    pub const WEBGPU_INDEX: u32 = 0x0010;
+    pub const WEBGPU_VERTEX: u32 = 0x0020;
+    pub const WEBGPU_UNIFORM: u32 = 0x0040;
+    pub const WEBGPU_STORAGE: u32 = 0x0080;
+
+    /// Convert to WebGPU-compatible u32 (identity since bits match).
+    pub fn toWebGPU(self: BufferUsage) u32 {
+        return @as(u8, @bitCast(self));
+    }
+
+    // Compile-time verification that packed struct bits match WebGPU values
+    comptime {
+        const assert = @import("std").debug.assert;
+        assert(@as(u8, @bitCast(BufferUsage{ .map_read = true })) == WEBGPU_MAP_READ);
+        assert(@as(u8, @bitCast(BufferUsage{ .map_write = true })) == WEBGPU_MAP_WRITE);
+        assert(@as(u8, @bitCast(BufferUsage{ .copy_src = true })) == WEBGPU_COPY_SRC);
+        assert(@as(u8, @bitCast(BufferUsage{ .copy_dst = true })) == WEBGPU_COPY_DST);
+        assert(@as(u8, @bitCast(BufferUsage{ .index = true })) == WEBGPU_INDEX);
+        assert(@as(u8, @bitCast(BufferUsage{ .vertex = true })) == WEBGPU_VERTEX);
+        assert(@as(u8, @bitCast(BufferUsage{ .uniform = true })) == WEBGPU_UNIFORM);
+        assert(@as(u8, @bitCast(BufferUsage{ .storage = true })) == WEBGPU_STORAGE);
+    }
 };
+
 
 /// Load operation for render pass attachments.
 pub const LoadOp = enum(u8) {

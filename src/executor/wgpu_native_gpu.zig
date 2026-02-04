@@ -1397,24 +1397,25 @@ pub const WgpuNativeGPU = struct {
         const module = self.module.?;
         const desc_data = module.data.get(DataId.fromInt(descriptor_data_id));
 
-        // Parse JSON descriptor: {"compute":{"shader":N,"entryPoint":"..."}}
-        const parsed = std.json.parseFromSlice(std.json.Value, allocator, desc_data, .{}) catch {
-            return error.InvalidResourceId;
-        };
-        defer parsed.deinit();
+        // Binary format: [type_tag:0x06][shader_id:u16 LE][entry_len:u8][entry_bytes]
+        if (desc_data.len < 4) return error.InvalidResourceId;
+        if (desc_data[0] != 0x06) return error.InvalidResourceId; // type tag must be compute_pipeline
 
-        const root = parsed.value.object;
+        const compute_shader_id: u16 = @as(u16, desc_data[1]) | (@as(u16, desc_data[2]) << 8);
+        const entry_len = desc_data[3];
 
-        // Get compute stage info
-        const compute_obj = root.get("compute").?.object;
-        const compute_shader_id: u16 = @intCast(compute_obj.get("shader").?.integer);
-        const compute_entry = compute_obj.get("entryPoint").?.string;
+        // Default entry point if none specified
+        var entry_point: []const u8 = "main";
+        if (entry_len > 0 and desc_data.len >= 4 + entry_len) {
+            entry_point = desc_data[4..][0..entry_len];
+        }
+
         const compute_shader = self.shaders[compute_shader_id] orelse return error.InvalidResourceId;
 
         // Create null-terminated entry point string
-        const entry_z = try allocator.allocSentinel(u8, compute_entry.len, 0);
+        const entry_z = try allocator.allocSentinel(u8, entry_point.len, 0);
         defer allocator.free(entry_z);
-        @memcpy(entry_z, compute_entry);
+        @memcpy(entry_z, entry_point);
 
         // Create compute pipeline descriptor
         var descriptor = std.mem.zeroes(c.WGPUComputePipelineDescriptor);
@@ -1435,7 +1436,7 @@ pub const WgpuNativeGPU = struct {
         nativeLog("createComputePipeline: id={}, shader_id={}, entry={s}, result={}\n", .{
             pipeline_id,
             compute_shader_id,
-            compute_entry,
+            entry_point,
             pipeline != null,
         });
         if (pipeline == null) {
@@ -1443,6 +1444,7 @@ pub const WgpuNativeGPU = struct {
         }
         self.compute_pipelines[pipeline_id] = pipeline;
     }
+
 
     pub fn createBindGroup(self: *Self, allocator: Allocator, group_id: u16, layout_id: u16, entry_data_id: u16) !void {
         assert(group_id < MAX_BIND_GROUPS);
