@@ -6,8 +6,9 @@
  * Uses esbuild for bundling and minification.
  *
  * Usage:
- *   node scripts/bundle.js          # Production build (minified)
- *   node scripts/bundle.js --debug  # Debug build (source maps, no minify)
+ *   node scripts/bundle.js           # Production build (embedded-only, smallest)
+ *   node scripts/bundle.js --debug   # Debug build (source maps, no minify)
+ *   node scripts/bundle.js --shared  # Include shared executor support (larger)
  */
 
 const fs = require('fs');
@@ -17,6 +18,8 @@ const { execSync } = require('child_process');
 const SRC_DIR = path.join(__dirname, '../src');
 const DIST_DIR = path.join(__dirname, '../dist');
 const DEBUG = process.argv.includes('--debug');
+// EMBEDDED_ONLY is the default; use --shared to include shared executor code paths
+const EMBEDDED_ONLY = !process.argv.includes('--shared');
 
 // Ensure dist directory exists
 if (!fs.existsSync(DIST_DIR)) {
@@ -48,6 +51,9 @@ function esbuild(entry, outfile, opts = {}) {
     // Keep DEBUG logging in development
     args.push('--define:DEBUG=true');
   }
+
+  // Strip shared executor code paths when EMBEDDED_ONLY is true
+  args.push(`--define:EMBEDDED_ONLY=${EMBEDDED_ONLY}`);
 
   if (opts.external) {
     opts.external.forEach(e => args.push(`--external:${e}`));
@@ -89,10 +95,13 @@ import './loader.js';
 import './worker.js';
 `);
 
-// Copy worker source files to dist for bundling
-fs.copyFileSync(path.join(SRC_DIR, 'gpu.js'), path.join(DIST_DIR, 'gpu.js'));
-fs.copyFileSync(path.join(SRC_DIR, 'worker.js'), path.join(DIST_DIR, 'worker.js'));
-fs.copyFileSync(path.join(SRC_DIR, 'loader.js'), path.join(DIST_DIR, 'loader.js'));
+// Copy worker source files to dist for bundling (with EMBEDDED_ONLY replacement)
+fs.writeFileSync(path.join(DIST_DIR, 'gpu.js'),
+  stripSharedExecutorCode(fs.readFileSync(path.join(SRC_DIR, 'gpu.js'), 'utf-8')));
+fs.writeFileSync(path.join(DIST_DIR, 'worker.js'),
+  stripSharedExecutorCode(fs.readFileSync(path.join(SRC_DIR, 'worker.js'), 'utf-8')));
+fs.writeFileSync(path.join(DIST_DIR, 'loader.js'),
+  stripSharedExecutorCode(fs.readFileSync(path.join(SRC_DIR, 'loader.js'), 'utf-8')));
 
 const workerOut = path.join(DIST_DIR, '_worker-bundle.js');
 if (!esbuild(workerEntry, workerOut)) {
@@ -130,6 +139,20 @@ function stripExports(code) {
   return code;
 }
 
+/**
+ * Strip shared executor code in embedded-only mode.
+ * Replaces `if (!EMBEDDED_ONLY)` blocks with empty code.
+ */
+function stripSharedExecutorCode(code) {
+  if (!EMBEDDED_ONLY) return code;
+
+  // Replace EMBEDDED_ONLY constant with true
+  code = code.replace(/\bEMBEDDED_ONLY\b/g, 'true');
+
+  return code;
+}
+
+
 // Build browser bundle source
 const browserSource = `
 /**
@@ -157,21 +180,23 @@ ${stripImports(stripExports(anim))}
 
 // === _init.js ===
 ${stripImports(stripExports(init))
-  .replace(
-    /new\s+Worker\s*\(\s*getWorkerUrl\s*\(\s*\)\s*,\s*\{\s*type:\s*["']module["']\s*\}\s*\)/g,
-    'new Worker(createWorkerBlobUrl())'
-  )
-  .replace(
-    /function\s+getWorkerUrl\s*\(\s*\)\s*\{[\s\S]*?return[^}]+\}/,
-    'function getWorkerUrl() { return createWorkerBlobUrl(); }'
-  )
-}
+    .replace(
+      /new\s+Worker\s*\(\s*getWorkerUrl\s*\(\s*\)\s*,\s*\{\s*type:\s*["']module["']\s*\}\s*\)/g,
+      'new Worker(createWorkerBlobUrl())'
+    )
+    .replace(
+      /function\s+getWorkerUrl\s*\(\s*\)\s*\{[\s\S]*?return[^}]+\}/,
+      'function getWorkerUrl() { return createWorkerBlobUrl(); }'
+    )
+  }
 
 // === Exports ===
 export { pngine, destroy };
 export { draw, play, pause, stop, seek, setFrame, setUniform, setUniforms };
 export { extractBytecode, detectFormat, isPng, isZip, isPngb };
-export { parsePayload, createExecutor, getExecutorImports, getExecutorVariantName };
+export { parsePayload, createExecutor, getExecutorImports };
+// getExecutorVariantName is only exported in --shared builds
+${EMBEDDED_ONLY ? '' : 'export { getExecutorVariantName };'}
 `;
 
 // Write unminified browser source
@@ -186,6 +211,18 @@ if (!esbuild(browserSourcePath, browserOut)) {
 
 // Cleanup
 fs.unlinkSync(browserSourcePath);
+
+// Step 2b: Create embedded-only bundle (minimal for PNG payloads)
+console.log('2b. Creating embedded-only bundle...');
+
+const embeddedOut = path.join(DIST_DIR, 'embedded.mjs');
+if (!esbuild(path.join(SRC_DIR, 'embedded.js'), embeddedOut, {
+  define: {
+    'DEBUG': DEBUG ? 'true' : 'false',
+  }
+})) {
+  console.warn('Warning: embedded bundle failed, skipping...');
+}
 
 // Step 3: Create Node.js stubs
 console.log('3. Creating Node.js stubs...');
@@ -390,10 +427,16 @@ console.log('\n=== Bundle Sizes ===\n');
 const browserInfo = sizeInfo(browserOut);
 console.log(`browser.mjs:  ${(browserInfo.raw / 1024).toFixed(1)} KB (${(browserInfo.gzipped / 1024).toFixed(1)} KB gzipped)`);
 
+// Report embedded bundle size if it exists
+if (fs.existsSync(embeddedOut)) {
+  const embeddedInfo = sizeInfo(embeddedOut);
+  console.log(`embedded.mjs: ${(embeddedInfo.raw / 1024).toFixed(1)} KB (${(embeddedInfo.gzipped / 1024).toFixed(1)} KB gzipped) ← minimal`);
+}
+
 const indexInfo = sizeInfo(path.join(DIST_DIR, 'index.js'));
 console.log(`index.js:     ${(indexInfo.raw / 1024).toFixed(1)} KB`);
 
-console.log(`\nTotal gzipped: ${((browserInfo.gzipped + indexInfo.raw) / 1024).toFixed(1)} KB`);
+console.log(`\nFull bundle gzipped: ${((browserInfo.gzipped + indexInfo.raw) / 1024).toFixed(1)} KB`);
 
 if (DEBUG) {
   console.log('\n[Debug build - includes source maps]');
