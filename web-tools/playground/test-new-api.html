@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>PNGine New API Test</title>
+  <style>
+    body { font-family: sans-serif; margin: 20px; }
+    canvas { border: 1px solid #ccc; }
+    .controls { margin: 10px 0; }
+    button { margin-right: 10px; padding: 5px 15px; }
+  </style>
+</head>
+<body>
+  <h1>PNGine New API Test</h1>
+
+  <canvas id="canvas" width="512" height="512"></canvas>
+
+  <div class="controls">
+    <button id="play">Play</button>
+    <button id="pause">Pause</button>
+    <button id="stop">Stop</button>
+    <span id="time">0.00s</span>
+  </div>
+
+  <div id="status">Loading...</div>
+
+  <script type="module">
+    // Use bundled version
+    import { pngine, play, pause, stop, draw } from '../npm/pngine/dist/browser.mjs';
+
+    const canvas = document.getElementById('canvas');
+    const status = document.getElementById('status');
+    const timeEl = document.getElementById('time');
+
+    async function init() {
+      try {
+        // Test with simple_triangle.png
+        const p = await pngine('../examples/simple_triangle.png', {
+          canvas,
+          debug: true,
+        });
+
+        status.textContent = `Loaded! ${p.width}x${p.height}, ${p.frameCount} frames`;
+
+        // Draw initial frame
+        draw(p, { time: 0 });
+
+        // Wire up controls
+        document.getElementById('play').onclick = () => {
+          play(p);
+          updateLoop(p);
+        };
+        document.getElementById('pause').onclick = () => pause(p);
+        document.getElementById('stop').onclick = () => stop(p);
+
+        // Update time display
+        function updateLoop(p) {
+          if (p.isPlaying) {
+            timeEl.textContent = `${p.time.toFixed(2)}s`;
+            requestAnimationFrame(() => updateLoop(p));
+          }
+        }
+
+      } catch (err) {
+        status.textContent = `Error: ${err.message}`;
+        console.error(err);
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

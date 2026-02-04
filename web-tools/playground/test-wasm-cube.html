@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WASM Cube Test</title>
+    <style>
+        body { font-family: system-ui; background: #1a1a2e; color: #eee; padding: 2rem; }
+        canvas { border: 1px solid #444; }
+        #status { margin-top: 1rem; }
+    </style>
+</head>
+<body>
+    <h1>WASM Cube Test</h1>
+    <p>Tests wasm_rotated_cube.pngine - matrix generation via nested WASM</p>
+    <canvas id="canvas" width="512" height="512"></canvas>
+    <div id="status">Loading...</div>
+    <script type="module">
+        import { pngine, play } from './pngine.js';
+
+        const status = document.getElementById('status');
+
+        try {
+            const engine = await pngine('wasm_cube.png', {
+                canvas: document.getElementById('canvas'),
+                debug: true
+            });
+
+            status.textContent = `Loaded! Frames: ${engine.frameCount}`;
+            play(engine);
+
+            // Log after first frame
+            setTimeout(() => {
+                status.textContent = `Playing - time: ${engine.time.toFixed(2)}s`;
+            }, 100);
+        } catch (err) {
+            status.textContent = `Error: ${err.message}`;
+            console.error(err);
+        }
+    </script>
+</body>
+</html>

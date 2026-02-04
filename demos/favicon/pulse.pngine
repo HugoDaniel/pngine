@@ -1,0 +1,147 @@
+// Coudycol by @paulofalcao - Ported from Shadertoy to PNGine
+// Original: Inercia 2019
+// https://www.shadertoy.com/view/...
+
+#define UNIFORMS_SIZE=16
+
+#shaderModule coudycol {
+  code="
+    struct Inputs {
+        time: f32,
+        canvasW: f32,
+        canvasH: f32,
+        aspect: f32,
+    };
+    @group(0) @binding(0) var<uniform> inputs: Inputs;
+
+    // Constants (from original #defines)
+    const Size: f32 = 0.192;
+    const ScreenL: f32 = 4.686;
+    const SphereOpacity: f32 = 0.006;
+    const Color: vec3f = vec3f(1.0, 0.38, 0.38);
+    const R1: f32 = 5.475;
+    const G1: f32 = 6.954;
+    const B1: f32 = 6.313;
+
+    fn sincostex(p_in: vec3f, s: f32) -> f32 {
+      let p = p_in * s;
+      return cos(p.x) * sin(p.y) * cos(p.z) * 0.5 + 0.5;
+    }
+
+    fn orbField(p_in: vec3f, time: f32) -> vec4f {
+      var p = p_in * (sin(time * 2.0) * 0.5 + 1.5);
+      
+      // First rotation (xz plane)
+      let ct1 = cos(time);
+      let st1 = sin(time);
+      let xz_rot = mat2x2f(ct1, -st1, st1, ct1);
+      let new_xz = xz_rot * vec2f(p.x, p.z);
+      p = vec3f(new_xz.x, p.y, new_xz.y);
+      
+      // Second rotation (xy plane)
+      let ct2 = cos(time * 0.5);
+      let st2 = sin(time * 0.5);
+      let xy_rot = mat2x2f(ct2, -st2, st2, ct2);
+      let new_xy = xy_rot * vec2f(p.x, p.y);
+      p = vec3f(new_xy.x, new_xy.y, p.z);
+
+      let op = p;
+      let a1 = p * (1.0 + sin(op.yzx * 4.0) * 0.4);
+      let a2 = p * (1.0 + sin(op * 4.0) * 0.4);
+      p = mix(a1, a2, sin(time * 0.1) * 0.5 + 0.5);
+
+      let n = normalize(p);
+      p = p * (0.5 + sincostex(n, sin(floor(time)) * 10.0 + 10.0));
+      
+      var a: f32 = 0.0;
+      if (length(p) < (sincostex(n, Size * 10.0) + 2.0)) {
+        a = SphereOpacity;
+      }
+
+      let col = (sin(p * vec3f(R1, G1, B1)) * 0.5 + 0.5) * Color;
+      return vec4f(col, a);
+    }
+
+    @vertex fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
+        var pos = array<vec2f, 3>(
+            vec2f(-1.0, -1.0),
+            vec2f(3.0, -1.0),
+            vec2f(-1.0, 3.0)
+        );
+        return vec4f(pos[vi], 0.0, 1.0);
+    }
+
+    @fragment fn fs(@builtin(position) fragCoord: vec4f) -> @location(0) vec4f {
+        let resolution = vec2f(inputs.canvasW, inputs.canvasH);
+        let uv = (fragCoord.xy - resolution * 0.5) / resolution.y;
+
+        let ro = vec3f(0.0, 0.0, 5.0);
+        let r = normalize(vec3f(uv, -1.0));
+
+        var color = vec4f(0.0);
+        var f: f32 = 1.0;
+        
+        // Raymarch loop (reduced iterations for performance)
+        for (var i: i32 = 0; i < 200; i = i + 1) {
+            let p = ro + f * r;
+            let d = orbField(p, inputs.time);
+            color = color + vec4f(d.xyz * d.w, d.w);
+            if (f > 8.0) { break; }
+            if (color.w > 1.0) { break; }
+            f = f + 0.02;
+        }
+
+        return vec4f(color.xyz * ScreenL, 1.0);
+    }
+  "
+}
+
+#buffer uniformInputsBuffer {
+  size=UNIFORMS_SIZE
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeInputUniforms {
+  writeBuffer={
+    buffer=uniformInputsBuffer
+    bufferOffset=0
+    data=pngineInputs
+  }
+}
+
+#renderPipeline coudycolPipeline {
+  layout=auto
+  vertex={ entrypoint=vs module=coudycol }
+  fragment={
+    entrypoint=fs
+    module=coudycol
+    targets=[{ format=preferredCanvasFormat }]
+  }
+  primitive={ topology=triangle-list }
+}
+
+#bindGroup inputsBinding {
+  layout={ pipeline=coudycolPipeline index=0 }
+  entries=[
+    { binding=0 resource={ buffer=uniformInputsBuffer }}
+  ]
+}
+
+#renderPass drawCoudycol {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0 0 0 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=coudycolPipeline
+  bindGroups=[inputsBinding]
+  draw=3
+}
+
+#frame main {
+  perform=[
+    writeInputUniforms
+    drawCoudycol
+  ]
+}

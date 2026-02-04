@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head><title>Demo2025 Test</title></head>
+<body>
+  <canvas id="canvas" width="512" height="512" style="border: 1px solid #333;"></canvas>
+  <script type="module">
+    import { pngine, play } from './pngine.js';
+    try {
+      const engine = await pngine('demo2025.png', {
+        canvas: document.getElementById('canvas'),
+        debug: true
+      });
+      console.log('[Test] Engine created:', engine.width, 'x', engine.height);
+      play(engine);
+      console.log('[Test] Playing');
+    } catch (err) {
+      console.error('[Test] Error:', err.message);
+    }
+  </script>
+</body>
+</html>

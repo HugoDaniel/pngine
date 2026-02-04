@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PNGine - WebGPU Bytecode Demo</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 2rem;
+        }
+        h1 { font-size: 1.5rem; font-weight: 500; margin-bottom: 1rem; }
+        .container { display: flex; gap: 2rem; flex-wrap: wrap; justify-content: center; }
+        .panel {
+            background: #16213e;
+            border-radius: 8px;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        label { font-size: 0.875rem; color: #888; }
+        canvas { background: #000; border-radius: 4px; }
+        .controls { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+        button {
+            padding: 0.5rem 1rem;
+            background: #0f3460;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.875rem;
+        }
+        button:hover { background: #1a4a7a; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        button.playing { background: #e94560; }
+        .status {
+            font-size: 0.75rem;
+            padding: 0.5rem;
+            border-radius: 4px;
+            background: #0f0f23;
+        }
+        .status.success { color: #4ade80; }
+        .status.error { color: #f87171; }
+        .drop-zone {
+            border: 2px dashed #333;
+            border-radius: 8px;
+            padding: 2rem;
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.2s;
+        }
+        .drop-zone:hover, .drop-zone.dragover { border-color: #0f3460; }
+        .drop-zone input { display: none; }
+        .time { font-family: monospace; font-size: 0.875rem; }
+        .info { font-size: 0.75rem; color: #666; margin-top: 0.5rem; }
+        .examples { margin-top: 1rem; }
+        .examples a {
+            color: #60a5fa;
+            text-decoration: none;
+            margin-right: 1rem;
+        }
+        .examples a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <h1>PNGine - WebGPU Bytecode Engine</h1>
+
+    <div class="container">
+        <div class="panel">
+            <label>Drop PNG with embedded bytecode</label>
+            <div class="drop-zone" id="drop-zone">
+                <p>Drop .png file here</p>
+                <p style="font-size: 0.75rem; color: #666; margin-top: 0.5rem;">or click to browse</p>
+                <input type="file" id="file-input" accept=".png,.pngb">
+            </div>
+            <div id="file-info" class="info"></div>
+            <div class="examples">
+                <span style="color: #666; font-size: 0.75rem;">Examples: </span>
+                <a href="#" data-url="simple_triangle.png">Triangle</a>
+                <a href="#" data-url="moving_triangle.png">Moving</a>
+                <a href="#" data-url="rotating_cube.png">Cube</a>
+                <a href="#" data-url="boids.png">Boids</a>
+                <a href="#" data-url="demo2025.png">Demo2025</a>
+            </div>
+        </div>
+
+        <div class="panel">
+            <label>Output (512x512)</label>
+            <canvas id="canvas" width="512" height="512"></canvas>
+            <div class="controls">
+                <button id="play-btn" disabled>Play</button>
+                <button id="stop-btn" disabled>Stop</button>
+                <span class="time" id="time">t = 0.00s</span>
+            </div>
+            <div id="status" class="status">Initializing...</div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { pngine, play, pause, stop, draw, destroy, extractBytecode, isPng, isPngb } from './pngine.js';
+
+        let canvas = document.getElementById('canvas');
+        const status = document.getElementById('status');
+        const playBtn = document.getElementById('play-btn');
+        const stopBtn = document.getElementById('stop-btn');
+        const timeEl = document.getElementById('time');
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+        const fileInfo = document.getElementById('file-info');
+
+        let engine = null;
+
+        function setStatus(msg, type = '') {
+            status.textContent = msg;
+            status.className = 'status' + (type ? ' ' + type : '');
+        }
+
+        function formatBytes(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+        }
+
+        // Initialize
+        async function init() {
+            try {
+                if (!canvas.transferControlToOffscreen) {
+                    throw new Error('OffscreenCanvas not supported');
+                }
+                setStatus('Ready - drop a PNG file to start', 'success');
+            } catch (err) {
+                setStatus('Error: ' + err.message, 'error');
+            }
+        }
+
+        // Load file
+        async function loadFile(file) {
+            try {
+                setStatus('Loading...');
+
+                // Clean up previous engine
+                if (engine) {
+                    destroy(engine);
+                    engine = null;
+                    // Need to recreate canvas since control was transferred
+                    const parent = canvas.parentElement;
+                    const newCanvas = document.createElement('canvas');
+                    newCanvas.id = 'canvas';
+                    newCanvas.width = 512;
+                    newCanvas.height = 512;
+                    parent.replaceChild(newCanvas, canvas);
+                    canvas = newCanvas;
+                }
+
+                const data = new Uint8Array(await file.arrayBuffer());
+                fileInfo.textContent = `${file.name} (${formatBytes(data.length)})`;
+
+                // Create new engine
+                engine = await pngine(data, {
+                    canvas: canvas,
+                    debug: true,
+                    onError: (err) => setStatus('Error: ' + err.message, 'error'),
+                });
+
+                setStatus(`Loaded: ${engine.width}x${engine.height}, ${engine.frameCount} frames`, 'success');
+                playBtn.disabled = false;
+                stopBtn.disabled = false;
+
+                // Draw first frame
+                draw(engine, { time: 0 });
+
+            } catch (err) {
+                setStatus('Error: ' + err.message, 'error');
+                console.error(err);
+            }
+        }
+
+        // Load from URL
+        async function loadUrl(url) {
+            try {
+                setStatus('Fetching ' + url + '...');
+                const resp = await fetch(url);
+                if (!resp.ok) throw new Error('Fetch failed: ' + resp.status);
+                const blob = await resp.blob();
+                const file = new File([blob], url.split('/').pop(), { type: 'image/png' });
+                await loadFile(file);
+            } catch (err) {
+                setStatus('Error: ' + err.message, 'error');
+                console.error(err);
+            }
+        }
+
+        // Play/pause toggle
+        function togglePlay() {
+            if (!engine) return;
+
+            if (engine.isPlaying) {
+                pause(engine);
+                playBtn.textContent = 'Play';
+                playBtn.classList.remove('playing');
+            } else {
+                play(engine);
+                playBtn.textContent = 'Pause';
+                playBtn.classList.add('playing');
+                updateTime();
+            }
+        }
+
+        // Stop
+        function handleStop() {
+            if (!engine) return;
+            stop(engine);
+            playBtn.textContent = 'Play';
+            playBtn.classList.remove('playing');
+            timeEl.textContent = 't = 0.00s';
+        }
+
+        // Update time display
+        function updateTime() {
+            if (!engine || !engine.isPlaying) return;
+            timeEl.textContent = `t = ${engine.time.toFixed(2)}s`;
+            requestAnimationFrame(updateTime);
+        }
+
+        // Event listeners
+        playBtn.onclick = togglePlay;
+        stopBtn.onclick = handleStop;
+
+        // File drop handling
+        dropZone.onclick = () => fileInput.click();
+        fileInput.onchange = (e) => {
+            if (e.target.files[0]) loadFile(e.target.files[0]);
+        };
+
+        dropZone.ondragover = (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        };
+        dropZone.ondragleave = () => dropZone.classList.remove('dragover');
+        dropZone.ondrop = (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
+        };
+
+        // Example links
+        document.querySelectorAll('.examples a').forEach(a => {
+            a.onclick = (e) => {
+                e.preventDefault();
+                loadUrl(a.dataset.url);
+            };
+        });
+
+        init();
+    </script>
+</body>
+</html>

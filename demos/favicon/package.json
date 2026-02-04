@@ -1,0 +1,14 @@
+{
+    "name": "pngine-favicon-demo",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "vite",
+        "build": "npm run compile && npm run compile:prod && vite build",
+        "compile": "cd ../.. && ./zig-out/bin/pngine demos/favicon/pulse.pngine -o demos/favicon/dist/favicon.png",
+        "compile:prod": "cd ../.. && ./zig-out/bin/pngine demos/favicon/pulse.pngine -o demos/favicon/dist/favicon.png --minify"
+    },
+    "devDependencies": {
+        "vite": "^5.0.0"
+    }
+}

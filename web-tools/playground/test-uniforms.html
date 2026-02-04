@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>PNGine - Uniform API Test</title>
+  <style>
+    body { font-family: sans-serif; background: #1a1a2e; color: #fff; padding: 20px; }
+    canvas { border: 1px solid #333; }
+    pre { background: #0a0a1a; padding: 10px; overflow: auto; max-height: 300px; }
+    button { padding: 8px 16px; margin: 5px; cursor: pointer; }
+    .controls { margin: 10px 0; }
+  </style>
+</head>
+<body>
+  <h1>Uniform API Test</h1>
+  <canvas id="canvas" width="512" height="512"></canvas>
+
+  <div class="controls">
+    <button id="getUniforms">Get Uniforms</button>
+    <button id="play">Play</button>
+    <button id="pause">Pause</button>
+  </div>
+
+  <h3>Uniforms:</h3>
+  <pre id="uniformsOutput">Loading...</pre>
+
+  <h3>Console:</h3>
+  <pre id="console"></pre>
+
+  <script type="module">
+    import { pngine, play, pause, draw, getUniforms, setUniform, setUniforms } from './pngine.js';
+
+    const consoleEl = document.getElementById('console');
+    const log = (msg) => {
+      consoleEl.textContent += msg + '\n';
+      console.log(msg);
+    };
+
+    // Make functions available globally for testing
+    window.testApi = { getUniforms, setUniform, setUniforms, draw };
+
+    async function init() {
+      try {
+        log('Loading rotating_cube.png...');
+        const engine = await pngine('rotating_cube.png', {
+          canvas: document.getElementById('canvas'),
+          debug: true
+        });
+
+        // Store globally for testing
+        window.engine = engine;
+        log(`Loaded: ${engine.width}x${engine.height}`);
+
+        // Get and display uniforms
+        const uniforms = await getUniforms(engine);
+        document.getElementById('uniformsOutput').textContent = JSON.stringify(uniforms, null, 2);
+        log(`Found ${Object.keys(uniforms).length} uniforms`);
+
+        // Draw initial frame
+        draw(engine, { time: 0 });
+
+        // Button handlers
+        document.getElementById('getUniforms').onclick = async () => {
+          const u = await getUniforms(engine);
+          document.getElementById('uniformsOutput').textContent = JSON.stringify(u, null, 2);
+          log('Refreshed uniforms');
+        };
+
+        document.getElementById('play').onclick = () => {
+          play(engine);
+          log('Playing');
+        };
+
+        document.getElementById('pause').onclick = () => {
+          pause(engine);
+          log('Paused');
+        };
+
+        log('Ready! Use window.engine and window.testApi in console.');
+
+      } catch (err) {
+        log('Error: ' + err.message);
+        console.error(err);
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>
