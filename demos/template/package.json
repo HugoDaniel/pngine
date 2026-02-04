@@ -5,10 +5,10 @@
   "scripts": {
     "dev": "vite --open",
     "build": "npm run compile && npm run compile:prod && vite build",
-    "compile": "pngine compile scenes/main.pngine -o dist/demo.pngb",
-    "compile:prod": "pngine scenes/main.pngine -o dist/demo.png",
+    "compile": "cd ../.. && ./zig-out/bin/pngine compile demos/template/scenes/main.pngine -o demos/template/dist/demo.pngb",
+    "compile:prod": "cd ../.. && ./zig-out/bin/pngine demos/template/scenes/main.pngine -o demos/template/dist/demo.png",
     "watch": "find scenes -type f -name '*.pngine' | entr -c npm run compile",
-    "setup": "cd ../.. && zig build web && cp zig-out/bin/pngine.wasm zig-out/playground/"
+    "setup": "cd ../.. && zig build web && zig build executors"
   },
   "devDependencies": {
     "vite": "^7.3.0"

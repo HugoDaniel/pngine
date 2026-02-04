@@ -38,6 +38,7 @@ export default defineConfig({
     alias: {
       // Use the main pngine package from the monorepo
       'pngine': resolve(__dirname, '../../npm/pngine/src/index.js'),
+      'pngine-bundle': resolve(__dirname, '../../npm/pngine/dist/browser.mjs'),
       './pngine.wasm': resolve(__dirname, '../../zig-out/playground/pngine.wasm'),
     }
   },
