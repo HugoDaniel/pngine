@@ -15,20 +15,52 @@
   "homepage": "https://pngine.dev",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
-  "browser": "dist/browser.mjs",
+  "browser": "dist/viewer.mjs",
   "types": "dist/index.d.ts",
   "bin": {
     "pngine": "bin/pngine"
   },
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "browser": {
-        "import": "./dist/browser.mjs",
-        "default": "./dist/browser.js"
+        "import": "./dist/viewer.mjs",
+        "default": "./dist/viewer.mjs"
       },
       "import": "./dist/index.mjs",
-      "require": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "require": "./dist/index.js"
+    },
+    "./viewer": {
+      "types": "./dist/viewer.d.ts",
+      "browser": {
+        "import": "./dist/viewer.mjs",
+        "default": "./dist/viewer.mjs"
+      },
+      "import": "./dist/viewer.mjs"
+    },
+    "./dev": {
+      "types": "./dist/dev.d.ts",
+      "browser": {
+        "import": "./dist/dev.mjs",
+        "default": "./dist/dev.mjs"
+      },
+      "import": "./dist/dev.mjs"
+    },
+    "./core": {
+      "types": "./dist/core.d.ts",
+      "browser": {
+        "import": "./dist/core.mjs",
+        "default": "./dist/core.mjs"
+      },
+      "import": "./dist/core.mjs"
+    },
+    "./executor": {
+      "types": "./dist/executor.d.ts",
+      "browser": {
+        "import": "./dist/executor.mjs",
+        "default": "./dist/executor.mjs"
+      },
+      "import": "./dist/executor.mjs"
     },
     "./wasm": "./wasm/pngine.wasm"
   },

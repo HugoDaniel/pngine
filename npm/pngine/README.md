@@ -1,240 +1,132 @@
 # PNGine NPM Package
 
-WebGPU bytecode engine - shader art that fits in a PNG file.
+WebGPU bytecode engine for PNG payloads.
 
-## Package Structure
+## Runtime Profiles
 
-```
-npm/pngine/
-├── src/                  # Source files (authoritative)
-│   ├── index.js          # Public API exports
-│   ├── init.js           # Main thread initialization
-│   ├── worker.js         # WebWorker entry point
-│   ├── gpu.js            # CommandDispatcher (WebGPU command execution)
-│   ├── anim.js           # Animation controls (play/pause/stop)
-│   └── extract.js        # Bytecode extraction from PNG/ZIP/PNGB
-├── dist/                 # Bundled output (generated)
-│   ├── browser.mjs       # Browser bundle with inline worker
-│   ├── index.js          # Node.js CJS entry (stubs)
-│   ├── index.mjs         # Node.js ESM entry (stubs)
-│   └── index.d.ts        # TypeScript definitions
-├── bin/pngine            # CLI wrapper (finds native binary)
-├── wasm/pngine.wasm      # WASM runtime for browser
-├── scripts/bundle.js     # esbuild bundler script
-└── package.json
-```
+PNGine now ships four browser-facing profiles:
 
-## Architecture
+| Profile | Import | Purpose |
+| --- | --- | --- |
+| Viewer (default) | `pngine` or `pngine/viewer` | Lean production player for PNG payloads with embedded executor |
+| Dev | `pngine/dev` | Full feature surface for iteration and debugging |
+| Core | `pngine/core` | Low-level runtime API (dispatcher-centric) |
+| Executor | `pngine/executor` | Advanced payload/executor helper API |
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      Main Thread                             │
-│  ┌─────────┐    ┌─────────┐    ┌───────────┐               │
-│  │ init.js │───►│ anim.js │───►│ extract.js│               │
-│  └────┬────┘    └─────────┘    └───────────┘               │
-│       │ postMessage                                         │
-│       ▼                                                     │
-├───────────────────────── Worker ────────────────────────────┤
-│  ┌───────────┐    ┌────────┐    ┌──────────────┐           │
-│  │ worker.js │───►│ gpu.js │───►│ pngine.wasm  │           │
-│  └───────────┘    └───┬────┘    └──────────────┘           │
-│                       │                                     │
-│                       ▼                                     │
-│                   WebGPU API                                │
-└─────────────────────────────────────────────────────────────┘
+## Viewer API (Default)
+
+### Usage scenario
+
+Use viewer for normal playback of PNG payloads generated with the default embedded executor.
+
+### Input contract
+
+```ts
+pngine(
+  source: string | Uint8Array | ArrayBuffer | Blob,
+  options: {
+    canvas: HTMLCanvasElement;
+    debug?: boolean;
+    onError?: (err: Error) => void;
+  }
+)
 ```
 
-**Data Flow:**
-1. `init.js` fetches PNG, extracts bytecode via `extract.js`
-2. Creates OffscreenCanvas, spawns Worker
-3. Worker initializes WebGPU and WASM
-4. `anim.js` sends draw commands via postMessage
-5. Worker executes WASM `renderFrame()` which returns command buffer
-6. `gpu.js` CommandDispatcher executes GPU commands
+Notes:
+- `canvas` is required.
+- `source` can be URL or byte data.
+- `wasmUrl`, selector strings, and `HTMLImageElement` sources are dev-only features.
+- Viewer keeps wasm-in-wasm runtime support enabled by default.
+- Viewer supports runtime interactivity via `draw(...uniforms)`, `setUniform`, `setUniforms`, and `getUniforms`.
 
-## Public API
+### Example
 
-```javascript
-// Browser usage
-import { pngine, play, pause, stop, draw, destroy } from 'pngine';
+```js
+import { pngine, play } from 'pngine';
 
-// Initialize from PNG with embedded bytecode
-const p = await pngine('shader.png', {
-  canvas: document.getElementById('canvas'),
-  debug: true,           // Enable console logging
-  wasmUrl: 'pngine.wasm' // Optional: custom WASM path
-});
-
-// Animation control
-play(p);                 // Start animation loop
-pause(p);                // Pause (keeps time)
-stop(p);                 // Stop and reset time to 0
-draw(p, { time: 2.5 });  // Manual render at specific time
-destroy(p);              // Cleanup resources
-
-// Properties (read-only)
-p.width;                 // Canvas width
-p.height;                // Canvas height
-p.frameCount;            // Number of frames in bytecode
-p.isPlaying;             // Animation state
-p.time;                  // Current time in seconds
+const canvas = document.getElementById('canvas');
+const p = await pngine('/assets/triangle.png', { canvas });
+play(p);
 ```
 
-## Source Files
+## Dev API
 
-### index.js (Public API)
-```javascript
-export { pngine, destroy } from "./init.js";
-export { draw, play, pause, stop, seek, setFrame } from "./anim.js";
-export { extractBytecode, detectFormat, isPng, isZip, isPngb } from "./extract.js";
+Dev profile keeps the full feature set:
+- Selector and image-element initialization paths.
+- Shared executor fallback (`wasmUrl`) for payloads without embedded executor.
+- Executor helper exports on the same entrypoint.
+
+```js
+import { pngine, parsePayload } from 'pngine/dev';
 ```
 
-### init.js (Main Thread)
-- `pngine(source, options)` - Initialize from URL, selector, or data
-- `destroy(p)` - Terminate worker and cleanup
-- Handles: URL fetching, image element extraction, OffscreenCanvas transfer
+## Core API
 
-### anim.js (Animation)
-- `play(p)` - Start requestAnimationFrame loop
-- `pause(p)` - Stop loop, preserve time
-- `stop(p)` - Stop loop, reset time to 0
-- `draw(p, opts)` - Single frame render
-- `seek(p, time)` - Jump to time
-- `setFrame(p, name)` - Select named frame
+Core profile is for integrators who already manage device/context/lifecycle.
 
-### extract.js (Bytecode Extraction)
-- `extractBytecode(data)` - Extract from PNG/ZIP/PNGB
-- `detectFormat(data)` - Returns 'png' | 'zip' | 'pngb' | null
-- `isPng(data)`, `isZip(data)`, `isPngb(data)` - Format detection
-
-### worker.js (Worker Entry)
-- Receives messages: init, draw, load, destroy
-- Initializes WebGPU device and context
-- Loads WASM module
-- Calls `wasm.renderFrame()` and executes command buffer
-
-### gpu.js (Command Dispatcher)
-- `CommandDispatcher` class - Executes binary command buffer from WASM
-- Manages GPU resources: buffers, textures, pipelines, bind groups
-- Parses pipeline descriptors from JSON in command buffer
-- ~1200 lines due to WebGPU API complexity
-
-## Command Buffer Protocol
-
-WASM generates a binary command buffer, JS executes it:
-
-```
-┌──────────────────────────────────────┐
-│ Command Buffer (from WASM memory)    │
-├──────────────────────────────────────┤
-│ [u8 opcode] [varint args...]         │
-│ [u8 opcode] [varint args...]         │
-│ ...                                  │
-│ [0x00 END]                           │
-└──────────────────────────────────────┘
+```js
+import { createCoreDispatcher, configureCanvas, getDevice } from 'pngine/core';
 ```
 
-Opcodes: CreateBuffer, CreateTexture, CreatePipeline, BeginRenderPass, Draw, etc.
+## Executor API
+
+Advanced helpers for payload parsing and manual executor loading.
+
+```js
+import { parsePayload, createExecutor, getExecutorImports } from 'pngine/executor';
+```
+
+## Bundle Sizes (Current)
+
+Generated by `npm run build` on `2026-02-08`:
+
+| File | Raw | Gzip |
+| --- | --- | --- |
+| `viewer.mjs` | 27.1 KB | 9.4 KB |
+| `dev.mjs` | 29.5 KB | 10.2 KB |
+| `core.mjs` | 15.9 KB | 5.4 KB |
+| `executor.mjs` | 1.8 KB | 0.9 KB |
+| `index.js` (Node stub) | 1.1 KB | - |
 
 ## Build Commands
 
 ```bash
-# Bundle for production (minified, drops console.log)
-node scripts/bundle.js
+# Production bundles
+npm run build
 
-# Bundle for debug (source maps, keeps console.log)
-node scripts/bundle.js --debug
-
-# Build WASM (from project root)
-zig build web
+# Debug bundles (source maps, DEBUG=true)
+npm run build:debug
 ```
 
-## Bundle Sizes
+## Dist Files
 
-| File | Size | Gzipped |
-|------|------|---------|
-| browser.mjs | 27.6 KB | 8.2 KB |
-| index.js | 1.2 KB | - |
-| pngine.wasm | 57 KB | - |
-
-## CLI Usage
-
-```bash
-# Install
-npm install pngine
-
-# Compile .pngine to bytecode
-npx pngine compile shader.pngine -o output.pngb
-
-# Create PNG with embedded bytecode
-npx pngine shader.pngine -o output.png
-
-# Render frame via GPU
-npx pngine shader.pngine --frame -s 512x512 -o preview.png
+```text
+dist/
+├── viewer.mjs
+├── dev.mjs
+├── core.mjs
+├── executor.mjs
+├── index.js          # Node CJS stubs
+├── index.mjs         # Node ESM stubs
+├── index.d.ts        # default (viewer) types
+├── viewer.d.ts
+├── dev.d.ts
+├── core.d.ts
+└── executor.d.ts
 ```
 
-## Platform Binaries
+## CLI and Native Binaries
 
-The CLI uses native binaries distributed as optional dependencies:
+The package also ships the `pngine` CLI via optional native binaries:
 
 | Package | Platform |
-|---------|----------|
-| @pngine/darwin-arm64 | macOS Apple Silicon |
-| @pngine/darwin-x64 | macOS Intel |
-| @pngine/linux-x64 | Linux x64 |
-| @pngine/linux-arm64 | Linux ARM64 |
-| @pngine/win32-x64 | Windows x64 |
-| @pngine/win32-arm64 | Windows ARM64 |
-
-## Key Implementation Details
-
-1. **OffscreenCanvas + Worker**: All GPU operations happen in worker thread
-2. **Command Buffer**: WASM generates binary commands, JS executes (no JS↔WASM per-call overhead)
-3. **Inline Worker**: Browser bundle embeds worker as blob URL (no separate file needed)
-4. **PNGB Format**: Compact bytecode with string table and data section
-5. **pNGb Chunk**: Bytecode embedded in PNG ancillary chunk (invisible to image viewers)
-
-## Internal State
-
-The `pngine()` function returns a POJO with internal state in `p._`:
-
-```javascript
-{
-  canvas,        // Original canvas element
-  worker,        // Worker instance
-  width,         // Canvas width
-  height,        // Canvas height
-  frameCount,    // Frames in bytecode
-  playing,       // Animation state
-  time,          // Current time
-  startTime,     // Animation start timestamp
-  animationId,   // requestAnimationFrame ID
-  debug,         // Debug mode flag
-  log,           // Logger function
-}
-```
-
-## Worker Protocol
-
-Messages between main thread and worker:
-
-```javascript
-// Main → Worker
-{ type: 'init', canvas, bytecode, wasmUrl, debug }
-{ type: 'draw', time, frame }
-{ type: 'load', bytecode }
-{ type: 'destroy' }
-
-// Worker → Main
-{ type: 'ready', width, height, frameCount }
-{ type: 'error', message }
-```
-
-## Dependencies
-
-- **Runtime**: None (browser built-ins only)
-- **Build**: esbuild (bundling)
-- **CLI**: Native Zig binaries (no Node.js runtime needed)
+| --- | --- |
+| `@pngine/darwin-arm64` | macOS Apple Silicon |
+| `@pngine/darwin-x64` | macOS Intel |
+| `@pngine/linux-x64` | Linux x64 |
+| `@pngine/linux-arm64` | Linux ARM64 |
+| `@pngine/win32-x64` | Windows x64 |
+| `@pngine/win32-arm64` | Windows ARM64 |
 
 ## License
 

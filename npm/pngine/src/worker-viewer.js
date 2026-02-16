@@ -1,5 +1,5 @@
-// Dev worker thread - owns WebGPU, WASM, and resources.
-// Supports both embedded executor payloads and shared wasmUrl fallback.
+// Viewer worker thread - owns WebGPU, WASM, and resources.
+// Embedded-executor payloads only (no shared wasmUrl fallback).
 
 import { createCommandDispatcher, parseUniformTable } from "./gpu.js";
 import { parsePayload, getExecutorImports } from "./loader.js";
@@ -76,7 +76,7 @@ async function handleInit(data) {
 
   // Add error handling to catch WebGPU validation errors
   device.onuncapturederror = (event) => {
-    console.error('[Worker] WebGPU uncaptured error:', event.error.message);
+    console.error("[Worker] WebGPU uncaptured error:", event.error.message);
   };
 
   context = canvas.getContext("webgpu");
@@ -88,60 +88,41 @@ async function handleInit(data) {
   gpu.setDebug(debugMode);
   gpu.setCanvasSize(canvas.width, canvas.height);
 
-  // Check if bytecode has embedded executor
-  let hasEmbeddedExecutor = false;
-  let payloadInfo = null;
-
-  if (data.bytecode) {
-    try {
-      const bytecodeArray = new Uint8Array(data.bytecode);
-      payloadInfo = parsePayload(bytecodeArray);
-      hasEmbeddedExecutor = payloadInfo.hasEmbeddedExecutor;
-    } catch (e) {
-      // Not a PNGB payload, use shared executor
-      if (data.debug) console.log("[Worker] Bytecode parse failed, using shared executor:", e.message);
-    }
+  if (!data.bytecode) {
+    throw new Error("No payload data provided");
   }
 
-  if (hasEmbeddedExecutor && payloadInfo.executor) {
-    // Use embedded executor from PNG payload
-    if (data.debug) console.log("[Worker] Using embedded executor from payload");
-
-    const imports = getExecutorImports({
-      log: (ptr, len) => {
-        if (data.debug) {
-          const str = new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len));
-          console.log("[Executor]", str);
-        }
-      },
-    });
-
-    const { instance } = await WebAssembly.instantiate(payloadInfo.executor, imports);
-    wasm = instance.exports;
-    memory = wasm.memory;
-    gpu.setMemory(memory);
-    initialized = true;
-
-    // Load bytecode into executor
-    await loadBytecode(payloadInfo.payload);
-  } else {
-    // Use shared executor from wasmUrl fallback
-    if (!data.wasmUrl) throw new Error("wasmUrl required (no embedded executor)");
-
-    const resp = await fetch(data.wasmUrl);
-    if (!resp.ok) throw new Error(`Failed to fetch WASM: ${resp.status}`);
-
-    const { instance } = await WebAssembly.instantiateStreaming(resp, getWasmImports());
-    wasm = instance.exports;
-    memory = wasm.memory;
-    gpu.setMemory(memory);
-    initialized = true;
-
-    // If bytecode was provided, load it
-    if (data.bytecode) {
-      await loadBytecode(data.bytecode);
-    }
+  let payloadInfo;
+  try {
+    payloadInfo = parsePayload(new Uint8Array(data.bytecode));
+  } catch (err) {
+    throw new Error(`Invalid payload for viewer: ${err.message}`);
   }
+
+  if (!payloadInfo.hasEmbeddedExecutor || !payloadInfo.executor) {
+    throw new Error("No embedded executor in payload. Use an embedded-executor PNG payload, or use pngine/dev with wasmUrl fallback.");
+  }
+
+  // Use embedded executor from PNG payload
+  if (data.debug) console.log("[Worker] Using embedded executor from payload");
+
+  const imports = getExecutorImports({
+    log: (ptr, len) => {
+      if (data.debug) {
+        const str = new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len));
+        console.log("[Executor]", str);
+      }
+    },
+  });
+
+  const { instance } = await WebAssembly.instantiate(payloadInfo.executor, imports);
+  wasm = instance.exports;
+  memory = wasm.memory;
+  gpu.setMemory(memory);
+  initialized = true;
+
+  // Load full payload into executor
+  await loadBytecode(payloadInfo.payload);
 
   // Report ready
   postMessage({
@@ -225,7 +206,7 @@ function render(time, width, height) {
 
   const result = wasm.frame(time, width, height);
   if (result !== 0) {
-    console.warn('[Worker] frame() returned non-zero:', result);
+    console.warn("[Worker] frame() returned non-zero:", result);
     return;
   }
 
@@ -240,7 +221,7 @@ function handleDraw(data) {
   if (!initialized || !moduleLoaded) return;
 
   // Apply uniforms before rendering (if provided)
-  if (data.uniforms && typeof data.uniforms === 'object') {
+  if (data.uniforms && typeof data.uniforms === "object") {
     const count = gpu.setUniforms(data.uniforms);
     if (debugMode && count > 0) {
       console.log(`[Worker] Set ${count} uniforms`);
@@ -267,7 +248,7 @@ function handleDestroy() {
 function handleSetUniform(data) {
   if (!initialized || !moduleLoaded) return;
 
-  if (data.uniforms && typeof data.uniforms === 'object') {
+  if (data.uniforms && typeof data.uniforms === "object") {
     gpu.setUniforms(data.uniforms);
   } else if (data.name !== undefined && data.value !== undefined) {
     gpu.setUniform(data.name, data.value);
@@ -294,18 +275,4 @@ function handleGetUniforms() {
     };
   }
   postMessage({ type: MSG.UNIFORMS, uniforms });
-}
-
-/**
- * WASM imports for shared wasmUrl executor path.
- */
-function getWasmImports() {
-  return {
-    env: {
-      log: (ptr, len) => {
-        const str = new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len));
-        console.log("[Executor]", str);
-      },
-    },
-  };
 }

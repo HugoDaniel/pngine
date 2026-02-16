@@ -9,6 +9,8 @@
  * 5. Short internal names (but readable - minifier handles the rest)
  */
 
+import { dispatchResourcePassCommand } from "./gpu-resource-pass-commands.js";
+
 // Build flag - esbuild eliminates dead code with: --define:DEBUG=false
 // For dev: keep as true; for prod: esbuild replaces at build time
 const DEBUG = true;
@@ -402,123 +404,46 @@ export function createCommandDispatcher(device, ctx) {
     pass = enc.beginComputePass();
   }
 
+  const resourcePassOps = {
+    createBuffer,
+    createTexture,
+    createSampler,
+    createShader,
+    createRenderPipeline,
+    createComputePipeline,
+    createBindGroup,
+    txv,
+    tex,
+    bgl,
+    device,
+    rs,
+    get mem() {
+      return mem;
+    },
+    bmp,
+    ppl,
+    beginRenderPass,
+    beginComputePass,
+    getPass: () => pass,
+    setPass: (v) => {
+      pass = v;
+    },
+    pip,
+    bg,
+    buf,
+    log: (message) => {
+      DEBUG && dbg && console.log(message);
+    },
+  };
+
   // Main dispatch - inline command constants for minification
   // Opcode dispatch - MUST match src/executor/command_buffer.zig Cmd enum!
   // (NOT types/opcodes.zig - that's for bytecode format, not command buffer)
   function dispatch(cmd, view, pos) {
+    const resourcePassResult = dispatchResourcePassCommand(cmd, view, pos, resourcePassOps);
+    if (resourcePassResult !== null) return resourcePassResult;
+
     switch (cmd) {
-      // === Resource Creation (0x01-0x0D) - matches command_buffer.zig ===
-      case 0x01: { // create_buffer
-        createBuffer(view.getUint16(pos, true), view.getUint32(pos + 2, true), view.getUint8(pos + 6));
-        return pos + 7;
-      }
-      case 0x02: { // create_texture
-        createTexture(view.getUint16(pos, true), view.getUint32(pos + 2, true), view.getUint32(pos + 6, true));
-        return pos + 10;
-      }
-      case 0x03: { // create_sampler
-        createSampler(view.getUint16(pos, true), view.getUint32(pos + 2, true), view.getUint32(pos + 6, true));
-        return pos + 10;
-      }
-      case 0x04: { // create_shader
-        createShader(view.getUint16(pos, true), view.getUint32(pos + 2, true), view.getUint32(pos + 6, true));
-        return pos + 10;
-      }
-      case 0x05: { // create_render_pipeline
-        createRenderPipeline(view.getUint16(pos, true), view.getUint32(pos + 2, true), view.getUint32(pos + 6, true));
-        return pos + 10;
-      }
-      case 0x06: { // create_compute_pipeline
-        createComputePipeline(view.getUint16(pos, true), view.getUint32(pos + 2, true), view.getUint32(pos + 6, true));
-        return pos + 10;
-      }
-      case 0x07: { // create_bind_group
-        createBindGroup(view.getUint16(pos, true), view.getUint16(pos + 2, true), view.getUint32(pos + 4, true), view.getUint32(pos + 8, true));
-        return pos + 12;
-      }
-      case 0x08: { // create_texture_view
-        const id = view.getUint16(pos, true), tid = view.getUint16(pos + 2, true);
-        if (!txv[id] && tex[tid]) txv[id] = tex[tid].createView();
-        return pos + 12;
-      }
-      case 0x09: { // create_query_set (stub)
-        return pos + 10;
-      }
-      case 0x0A: { // create_bind_group_layout
-        const id = view.getUint16(pos, true), ptr = view.getUint32(pos + 2, true), len = view.getUint32(pos + 6, true);
-        if (!bgl[id]) bgl[id] = device.createBindGroupLayout(JSON.parse(rs(ptr, len)));
-        return pos + 10;
-      }
-      case 0x0B: { // create_image_bitmap (async)
-        const id = view.getUint16(pos, true), ptr = view.getUint32(pos + 2, true), len = view.getUint32(pos + 6, true);
-        if (len === 0) return pos + 10;
-        const blob = new Blob([new Uint8Array(mem.buffer, ptr, len)]);
-        return createImageBitmap(blob).then(b => { bmp[id] = b; return pos + 10; });
-      }
-      case 0x0C: { // create_pipeline_layout
-        const id = view.getUint16(pos, true), ptr = view.getUint32(pos + 2, true), len = view.getUint32(pos + 6, true);
-        const desc = JSON.parse(rs(ptr, len));
-        ppl[id] = device.createPipelineLayout({ bindGroupLayouts: desc.bindGroupLayouts.map(i => bgl[i]) });
-        return pos + 10;
-      }
-      case 0x0D: { // create_render_bundle (stub)
-        return pos + 10;
-      }
-
-      // === Pass Operations (0x10-0x1A) - matches command_buffer.zig ===
-      case 0x10: { // begin_render_pass
-        beginRenderPass(view.getUint16(pos, true), view.getUint8(pos + 2), view.getUint8(pos + 3), view.getUint16(pos + 4, true));
-        return pos + 6;
-      }
-      case 0x11: { // begin_compute_pass
-        beginComputePass();
-        return pos;
-      }
-      case 0x12: { // set_pipeline
-        const pipId = view.getUint16(pos, true);
-        DEBUG && dbg && console.log(`[GPU] setPipeline(${pipId})`);
-        pass?.setPipeline(pip[pipId]);
-        return pos + 2;
-      }
-      case 0x13: { // set_bind_group
-        const gi = view.getUint8(pos), bgId = view.getUint16(pos + 1, true);
-        DEBUG && dbg && console.log(`[GPU] setBindGroup(${gi}, ${bgId}) pass=${pass ? 'valid' : 'NULL'} bg[${bgId}]=${bg[bgId] ? 'exists' : 'MISSING'}`);
-        pass?.setBindGroup(gi, bg[bgId]);
-        return pos + 3;
-      }
-      case 0x14: { // set_vertex_buffer
-        pass?.setVertexBuffer(view.getUint8(pos), buf[view.getUint16(pos + 1, true)]);
-        return pos + 3;
-      }
-      case 0x15: { // draw
-        const vc = view.getUint32(pos, true), ic = view.getUint32(pos + 4, true);
-        DEBUG && dbg && console.log(`[GPU] draw(${vc}, ${ic}) pass=${pass ? 'valid' : 'NULL'}`);
-        pass?.draw(vc, ic, view.getUint32(pos + 8, true), view.getUint32(pos + 12, true));
-        return pos + 16;
-      }
-      case 0x16: { // draw_indexed
-        pass?.drawIndexed(view.getUint32(pos, true), view.getUint32(pos + 4, true), view.getUint32(pos + 8, true), view.getInt32(pos + 12, true), view.getUint32(pos + 16, true));
-        return pos + 20;
-      }
-      case 0x17: { // end_pass
-        DEBUG && dbg && console.log(`[GPU] endPass`);
-        pass?.end();
-        pass = null;
-        return pos;
-      }
-      case 0x18: { // dispatch
-        pass?.dispatchWorkgroups(view.getUint32(pos, true), view.getUint32(pos + 4, true), view.getUint32(pos + 8, true));
-        return pos + 12;
-      }
-      case 0x19: { // set_index_buffer
-        pass?.setIndexBuffer(buf[view.getUint16(pos, true)], view.getUint8(pos + 2) === 1 ? "uint32" : "uint16");
-        return pos + 3;
-      }
-      case 0x1A: { // execute_bundles
-        const count = view.getUint8(pos);
-        return pos + 1 + count * 2;
-      }
-
       // === Queue Operations (0x20-0x25) - matches command_buffer.zig ===
       case 0x20: { // write_buffer
         const id = view.getUint16(pos, true), offset = view.getUint32(pos + 2, true);

@@ -1,7 +1,7 @@
 /**
- * PNGine Embedded-Only Entry Point
- * 
- * Minimal runtime for embedded PNG execution.
+ * PNGine Core Runtime
+ *
+ * Minimal runtime for low-level integration.
  * No Worker, no PNG extraction, no animation - just the GPU dispatcher.
  */
 
@@ -11,15 +11,15 @@ import { createCommandDispatcher, parseUniformTable } from './gpu.js';
 export { createCommandDispatcher, parseUniformTable };
 
 /**
- * Create an embedded PNGine instance.
- * 
- * This is for use when bytecode is already extracted (embedded in PNG payload).
- * 
+ * Create a core PNGine dispatcher.
+ *
+ * This is for use when bytecode is already extracted.
+ *
  * @param {GPUDevice} device - WebGPU device
  * @param {GPUCanvasContext} ctx - Canvas context (already configured)
  * @returns {Object} Minimal PNGine interface
  */
-export function createEmbeddedDispatcher(device, ctx) {
+export function createCoreDispatcher(device, ctx) {
     const dispatcher = createCommandDispatcher(device, ctx);
 
     return {

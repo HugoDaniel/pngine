@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 
 /**
- * PNGine Bundle Script
+ * PNGine bundle script.
  *
- * Uses esbuild for bundling and minification.
+ * Build profiles:
+ * - viewer: lean production viewer API (embedded-executor payloads)
+ * - dev: full-feature browser API (shared fallback + diagnostics)
+ * - core: low-level runtime API
+ * - executor: advanced executor helper API
  *
  * Usage:
- *   node scripts/bundle.js           # Production build (embedded-only, smallest)
- *   node scripts/bundle.js --debug   # Debug build (source maps, no minify)
- *   node scripts/bundle.js --shared  # Include shared executor support (larger)
+ *   node scripts/bundle.js         # production build
+ *   node scripts/bundle.js --debug # debug build
  */
 
 const fs = require('fs');
@@ -18,20 +21,61 @@ const { execSync } = require('child_process');
 const SRC_DIR = path.join(__dirname, '../src');
 const DIST_DIR = path.join(__dirname, '../dist');
 const DEBUG = process.argv.includes('--debug');
-// EMBEDDED_ONLY is the default; use --shared to include shared executor code paths
-const EMBEDDED_ONLY = !process.argv.includes('--shared');
 
-// Ensure dist directory exists
 if (!fs.existsSync(DIST_DIR)) {
   fs.mkdirSync(DIST_DIR, { recursive: true });
 }
 
 console.log(`Bundling PNGine (${DEBUG ? 'debug' : 'production'})...\n`);
 
-/**
- * Run esbuild with given options
- */
-function esbuild(entry, outfile, opts = {}) {
+function cleanupDist() {
+  const generatedFiles = [
+    'viewer.mjs',
+    'viewer.mjs.map',
+    'dev.mjs',
+    'dev.mjs.map',
+    'core.mjs',
+    'core.mjs.map',
+    'executor.mjs',
+    'executor.mjs.map',
+    'index.js',
+    'index.mjs',
+    'index.d.ts',
+    'viewer.d.ts',
+    'dev.d.ts',
+    'core.d.ts',
+    'executor.d.ts',
+    // Removed compatibility outputs (keep cleaning stale artifacts).
+    'browser.mjs',
+    'browser.mjs.map',
+    'embedded.mjs',
+    'embedded.mjs.map',
+    'embedded.d.ts',
+  ];
+
+  for (const file of generatedFiles) {
+    const fullPath = path.join(DIST_DIR, file);
+    if (fs.existsSync(fullPath)) {
+      fs.unlinkSync(fullPath);
+    }
+  }
+
+  for (const file of fs.readdirSync(DIST_DIR)) {
+    if (/^_worker-.*\.mjs(\.map)?$/.test(file) || /^_worker-entry-.*\.js$/.test(file) || /^_.*-source\.mjs$/.test(file)) {
+      fs.unlinkSync(path.join(DIST_DIR, file));
+    }
+  }
+}
+
+cleanupDist();
+
+function normalizeImportPath(p) {
+  const clean = p.split(path.sep).join('/');
+  if (clean.startsWith('.')) return clean;
+  return `./${clean}`;
+}
+
+function runEsbuild(entry, outfile, opts = {}) {
   const args = [
     'esbuild',
     entry,
@@ -43,143 +87,58 @@ function esbuild(entry, outfile, opts = {}) {
 
   if (!DEBUG) {
     args.push('--minify');
-    // Strip DEBUG logging code in gpu.js
     args.push('--define:DEBUG=false');
     args.push('--drop:debugger');
   } else {
     args.push('--sourcemap');
-    // Keep DEBUG logging in development
     args.push('--define:DEBUG=true');
   }
 
-  // Strip shared executor code paths when EMBEDDED_ONLY is true
-  args.push(`--define:EMBEDDED_ONLY=${EMBEDDED_ONLY}`);
-
-  if (opts.external) {
-    opts.external.forEach(e => args.push(`--external:${e}`));
-  }
+  const embeddedOnly = opts.embeddedOnly === true ? 'true' : 'false';
+  args.push(`--define:EMBEDDED_ONLY=${embeddedOnly}`);
 
   if (opts.define) {
-    Object.entries(opts.define).forEach(([k, v]) => {
+    for (const [k, v] of Object.entries(opts.define)) {
       args.push(`--define:${k}=${v}`);
-    });
+    }
+  }
+
+  if (opts.external) {
+    for (const ext of opts.external) {
+      args.push(`--external:${ext}`);
+    }
   }
 
   try {
     execSync(args.join(' '), { stdio: 'pipe' });
     return true;
   } catch (e) {
-    console.error(`esbuild failed: ${e.message}`);
+    console.error(`esbuild failed for ${path.basename(outfile)}: ${e.message}`);
     return false;
   }
 }
 
-/**
- * Get file size info
- */
 function sizeInfo(filepath) {
   const stat = fs.statSync(filepath);
   const raw = stat.size;
-  const gzipped = execSync(`gzip -c "${filepath}" | wc -c`).toString().trim();
-  return { raw, gzipped: parseInt(gzipped) };
+  const gzipped = parseInt(execSync(`gzip -c "${filepath}" | wc -c`).toString().trim(), 10);
+  return { raw, gzipped };
 }
 
-// Step 1: Bundle worker code (_gpu.js + _worker.js + _loader.js)
-console.log('1. Bundling worker code...');
-
-// Create a temporary entry that imports worker modules
-const workerEntry = path.join(DIST_DIR, '_worker-entry.js');
-fs.writeFileSync(workerEntry, `
-import './gpu.js';
-import './loader.js';
-import './worker.js';
-`);
-
-// Copy worker source files to dist for bundling (with EMBEDDED_ONLY replacement)
-fs.writeFileSync(path.join(DIST_DIR, 'gpu.js'),
-  stripSharedExecutorCode(fs.readFileSync(path.join(SRC_DIR, 'gpu.js'), 'utf-8')));
-fs.writeFileSync(path.join(DIST_DIR, 'worker.js'),
-  stripSharedExecutorCode(fs.readFileSync(path.join(SRC_DIR, 'worker.js'), 'utf-8')));
-fs.writeFileSync(path.join(DIST_DIR, 'loader.js'),
-  stripSharedExecutorCode(fs.readFileSync(path.join(SRC_DIR, 'loader.js'), 'utf-8')));
-
-const workerOut = path.join(DIST_DIR, '_worker-bundle.js');
-if (!esbuild(workerEntry, workerOut)) {
-  process.exit(1);
-}
-
-// Read bundled worker code
-const workerCode = fs.readFileSync(workerOut, 'utf-8');
-
-// Cleanup temp files
-fs.unlinkSync(workerEntry);
-fs.unlinkSync(path.join(DIST_DIR, 'gpu.js'));
-fs.unlinkSync(path.join(DIST_DIR, 'worker.js'));
-fs.unlinkSync(path.join(DIST_DIR, 'loader.js'));
-fs.unlinkSync(workerOut);
-
-// Step 2: Create browser bundle with inlined worker
-console.log('2. Creating browser bundle...');
-
-// Read source files
-const extract = fs.readFileSync(path.join(SRC_DIR, 'extract.js'), 'utf-8');
-const anim = fs.readFileSync(path.join(SRC_DIR, 'anim.js'), 'utf-8');
-const init = fs.readFileSync(path.join(SRC_DIR, 'init.js'), 'utf-8');
-const loader = fs.readFileSync(path.join(SRC_DIR, 'loader.js'), 'utf-8');
-
-// Remove import/export statements
 function stripImports(code) {
   return code.replace(/^import\s+.*?from\s+['"].*?['"];?\s*$/gm, '');
 }
 
 function stripExports(code) {
-  code = code.replace(/^export\s+(const|let|var|function|class|async\s+function)/gm, '$1');
-  code = code.replace(/^export\s+default\s+/gm, '');
-  code = code.replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
-  return code;
+  let out = code;
+  out = out.replace(/^export\s+(const|let|var|function|class|async\s+function)/gm, '$1');
+  out = out.replace(/^export\s+default\s+/gm, '');
+  out = out.replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
+  return out;
 }
 
-/**
- * Strip shared executor code in embedded-only mode.
- * Replaces `if (!EMBEDDED_ONLY)` blocks with empty code.
- */
-function stripSharedExecutorCode(code) {
-  if (!EMBEDDED_ONLY) return code;
-
-  // Replace EMBEDDED_ONLY constant with true
-  code = code.replace(/\bEMBEDDED_ONLY\b/g, 'true');
-
-  return code;
-}
-
-
-// Build browser bundle source
-const browserSource = `
-/**
- * PNGine Browser Bundle
- * ${DEBUG ? 'Debug build' : 'Production build'}
- * Generated: ${new Date().toISOString()}
- */
-
-// Inlined worker code
-const WORKER_CODE = ${JSON.stringify(workerCode)};
-
-function createWorkerBlobUrl() {
-  const blob = new Blob([WORKER_CODE], { type: 'application/javascript' });
-  return URL.createObjectURL(blob);
-}
-
-// === _extract.js ===
-${stripImports(stripExports(extract))}
-
-// === _loader.js ===
-${stripImports(stripExports(loader))}
-
-// === _anim.js ===
-${stripImports(stripExports(anim))}
-
-// === _init.js ===
-${stripImports(stripExports(init))
+function inlineWorkerInit(code) {
+  return stripImports(stripExports(code))
     .replace(
       /new\s+Worker\s*\(\s*getWorkerUrl\s*\(\s*\)\s*,\s*\{\s*type:\s*["']module["']\s*\}\s*\)/g,
       'new Worker(createWorkerBlobUrl())'
@@ -187,54 +146,92 @@ ${stripImports(stripExports(init))
     .replace(
       /function\s+getWorkerUrl\s*\(\s*\)\s*\{[\s\S]*?return[^}]+\}/,
       'function getWorkerUrl() { return createWorkerBlobUrl(); }'
-    )
-  }
-
-// === Exports ===
-export { pngine, destroy };
-export { draw, play, pause, stop, seek, setFrame, setUniform, setUniforms };
-export { extractBytecode, detectFormat, isPng, isZip, isPngb };
-export { parsePayload, createExecutor, getExecutorImports };
-// getExecutorVariantName is only exported in --shared builds
-${EMBEDDED_ONLY ? '' : 'export { getExecutorVariantName };'}
-`;
-
-// Write unminified browser source
-const browserSourcePath = path.join(DIST_DIR, '_browser-source.mjs');
-fs.writeFileSync(browserSourcePath, browserSource);
-
-// Minify with esbuild
-const browserOut = path.join(DIST_DIR, 'browser.mjs');
-if (!esbuild(browserSourcePath, browserOut)) {
-  process.exit(1);
+    );
 }
 
-// Cleanup
-fs.unlinkSync(browserSourcePath);
+function buildWorkerBundle(name, embeddedOnly, workerFile) {
+  const workerEntry = path.join(DIST_DIR, `_worker-entry-${name}.js`);
+  const workerOut = path.join(DIST_DIR, `_worker-${name}.mjs`);
 
-// Step 2b: Create embedded-only bundle (minimal for PNG payloads)
-console.log('2b. Creating embedded-only bundle...');
+  const relGpu = normalizeImportPath(path.relative(DIST_DIR, path.join(SRC_DIR, 'gpu.js')));
+  const relLoader = normalizeImportPath(path.relative(DIST_DIR, path.join(SRC_DIR, 'loader.js')));
+  const relWorker = normalizeImportPath(path.relative(DIST_DIR, path.join(SRC_DIR, workerFile)));
 
-const embeddedOut = path.join(DIST_DIR, 'embedded.mjs');
-if (!esbuild(path.join(SRC_DIR, 'embedded.js'), embeddedOut, {
-  define: {
-    'DEBUG': DEBUG ? 'true' : 'false',
+  fs.writeFileSync(workerEntry, `import '${relGpu}';\nimport '${relLoader}';\nimport '${relWorker}';\n`);
+
+  if (!runEsbuild(workerEntry, workerOut, { embeddedOnly })) {
+    process.exit(1);
   }
-})) {
-  console.warn('Warning: embedded bundle failed, skipping...');
+
+  const workerCode = fs.readFileSync(workerOut, 'utf-8');
+  fs.unlinkSync(workerEntry);
+  fs.unlinkSync(workerOut);
+  return workerCode;
 }
 
-// Step 3: Create Node.js stubs
-console.log('3. Creating Node.js stubs...');
+function buildInlinedProfileBundle(config) {
+  const {
+    name,
+    title,
+    embeddedOnly,
+    workerFile,
+    initFile,
+    includeLoader,
+    exportBlock,
+  } = config;
 
-const nodeStub = `
+  const workerCode = buildWorkerBundle(name, embeddedOnly, workerFile);
+  const extractCode = fs.readFileSync(path.join(SRC_DIR, 'extract.js'), 'utf-8');
+  const animCode = fs.readFileSync(path.join(SRC_DIR, 'anim.js'), 'utf-8');
+  const initCode = fs.readFileSync(path.join(SRC_DIR, initFile), 'utf-8');
+  const loaderCode = includeLoader
+    ? fs.readFileSync(path.join(SRC_DIR, 'loader.js'), 'utf-8')
+    : '';
+
+  const source = `
 /**
- * PNGine - Node.js entry
- *
- * Note: PNGine requires a browser with WebGPU support.
- * Use the CLI for compilation: npx pngine compile input.pngine -o output.pngb
+ * PNGine ${title} Bundle
+ * ${DEBUG ? 'Debug build' : 'Production build'}
+ * Generated: ${new Date().toISOString()}
  */
 
+const WORKER_CODE = ${JSON.stringify(workerCode)};
+
+function createWorkerBlobUrl() {
+  const blob = new Blob([WORKER_CODE], { type: 'application/javascript' });
+  return URL.createObjectURL(blob);
+}
+
+// === extract.js ===
+${stripImports(stripExports(extractCode))}
+
+${includeLoader ? `// === loader.js ===\n${stripImports(stripExports(loaderCode))}\n` : ''}
+// === anim.js ===
+${stripImports(stripExports(animCode))}
+
+// === ${initFile} ===
+${inlineWorkerInit(initCode)}
+
+// === Exports ===
+${exportBlock}
+`;
+
+  const sourcePath = path.join(DIST_DIR, `_${name}-source.mjs`);
+  const outPath = path.join(DIST_DIR, `${name}.mjs`);
+
+  fs.writeFileSync(sourcePath, source);
+  if (!runEsbuild(sourcePath, outPath, { embeddedOnly })) {
+    process.exit(1);
+  }
+  fs.unlinkSync(sourcePath);
+
+  return outPath;
+}
+
+function writeNodeStubs() {
+  console.log('4. Creating Node.js stubs...');
+
+  const nodeStub = `
 const PNG_SIG = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
 function isPng(d) {
@@ -262,15 +259,26 @@ function detectFormat(d) {
 const browserOnly = () => { throw new Error('PNGine requires browser with WebGPU'); };
 
 module.exports = {
-  pngine: browserOnly, destroy: browserOnly, draw: browserOnly,
-  play: browserOnly, pause: browserOnly, stop: browserOnly,
-  seek: browserOnly, setFrame: browserOnly, setUniform: browserOnly,
-  setUniforms: browserOnly, extractBytecode: browserOnly,
-  isPng, isZip, isPngb, detectFormat,
+  pngine: browserOnly,
+  destroy: browserOnly,
+  draw: browserOnly,
+  play: browserOnly,
+  pause: browserOnly,
+  stop: browserOnly,
+  seek: browserOnly,
+  setFrame: browserOnly,
+  setUniform: browserOnly,
+  setUniforms: browserOnly,
+  getUniforms: browserOnly,
+  extractBytecode: browserOnly,
+  isPng,
+  isZip,
+  isPngb,
+  detectFormat,
 };
 `;
 
-const nodeStubEsm = `
+  const nodeStubEsm = `
 export function isPng(d) {
   const b = d instanceof Uint8Array ? d : new Uint8Array(d);
   const s = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
@@ -291,33 +299,34 @@ export function detectFormat(d) {
   return null;
 }
 const browserOnly = () => { throw new Error('PNGine requires browser with WebGPU'); };
-export const pngine = browserOnly, destroy = browserOnly, draw = browserOnly;
-export const play = browserOnly, pause = browserOnly, stop = browserOnly;
-export const seek = browserOnly, setFrame = browserOnly, setUniform = browserOnly;
-export const setUniforms = browserOnly, extractBytecode = browserOnly;
+export const pngine = browserOnly;
+export const destroy = browserOnly;
+export const draw = browserOnly;
+export const play = browserOnly;
+export const pause = browserOnly;
+export const stop = browserOnly;
+export const seek = browserOnly;
+export const setFrame = browserOnly;
+export const setUniform = browserOnly;
+export const setUniforms = browserOnly;
+export const getUniforms = browserOnly;
+export const extractBytecode = browserOnly;
 `;
 
-fs.writeFileSync(path.join(DIST_DIR, 'index.js'), nodeStub);
-fs.writeFileSync(path.join(DIST_DIR, 'index.mjs'), nodeStubEsm);
-
-// Step 4: Create TypeScript definitions
-console.log('4. Creating TypeScript definitions...');
-
-const typeDefs = `
-export interface PngineOptions {
-  canvas?: HTMLCanvasElement;
-  debug?: boolean;
-  wasmUrl?: string | URL;
-  onError?: (error: Error) => void;
+  fs.writeFileSync(path.join(DIST_DIR, 'index.js'), nodeStub);
+  fs.writeFileSync(path.join(DIST_DIR, 'index.mjs'), nodeStubEsm);
 }
 
+function writeTypeDefs() {
+  console.log('5. Creating TypeScript definitions...');
+
+  const sharedTypes = `
 /** Uniform value: number (f32), array (vecNf), or nested array (matNxMf) */
 export type UniformValue = number | number[] | number[][];
 
 export interface DrawOptions {
   time?: number;
   frame?: string;
-  /** Uniform values to set before drawing */
   uniforms?: Record<string, UniformValue>;
 }
 
@@ -329,11 +338,6 @@ export interface PngineInstance {
   readonly time: number;
 }
 
-export function pngine(
-  source: ArrayBuffer | Uint8Array | Blob | string,
-  options?: PngineOptions
-): Promise<PngineInstance>;
-
 export function destroy(instance: PngineInstance): void;
 export function draw(instance: PngineInstance, options?: DrawOptions): void;
 export function play(instance: PngineInstance): PngineInstance;
@@ -341,29 +345,45 @@ export function pause(instance: PngineInstance): PngineInstance;
 export function stop(instance: PngineInstance): PngineInstance;
 export function seek(instance: PngineInstance, time: number): PngineInstance;
 export function setFrame(instance: PngineInstance, frame: string | null): PngineInstance;
-
-/** Set a single uniform value */
-export function setUniform(
-  instance: PngineInstance,
-  name: string,
-  value: UniformValue,
-  redraw?: boolean
-): PngineInstance;
-
-/** Set multiple uniforms at once */
-export function setUniforms(
-  instance: PngineInstance,
-  uniforms: Record<string, UniformValue>,
-  redraw?: boolean
-): PngineInstance;
+export function setUniform(instance: PngineInstance, name: string, value: UniformValue, redraw?: boolean): PngineInstance;
+export function setUniforms(instance: PngineInstance, uniforms: Record<string, UniformValue>, redraw?: boolean): PngineInstance;
+export function getUniforms(instance: PngineInstance): Promise<Record<string, { type: number; size: number; bufferId: number; offset: number }>>;
 
 export function extractBytecode(data: ArrayBuffer | Uint8Array): Promise<Uint8Array>;
 export function detectFormat(data: ArrayBuffer | Uint8Array): 'png' | 'zip' | 'pngb' | null;
 export function isPng(data: ArrayBuffer | Uint8Array): boolean;
 export function isZip(data: ArrayBuffer | Uint8Array): boolean;
 export function isPngb(data: ArrayBuffer | Uint8Array): boolean;
+`;
 
-// Embedded executor support (advanced)
+  const viewerTypes = `
+export interface ViewerOptions {
+  canvas: HTMLCanvasElement;
+  debug?: boolean;
+  onError?: (error: Error) => void;
+}
+
+export function pngine(
+  source: ArrayBuffer | Uint8Array | Blob | string,
+  options: ViewerOptions
+): Promise<PngineInstance>;
+${sharedTypes}
+`;
+
+  const devTypes = `
+export interface DevOptions {
+  canvas?: HTMLCanvasElement;
+  debug?: boolean;
+  wasmUrl?: string | URL;
+  onError?: (error: Error) => void;
+}
+
+export function pngine(
+  source: ArrayBuffer | Uint8Array | Blob | string | HTMLImageElement,
+  options?: DevOptions
+): Promise<PngineInstance>;
+${sharedTypes}
+
 export interface PayloadInfo {
   version: number;
   hasEmbeddedExecutor: boolean;
@@ -419,24 +439,165 @@ export function getExecutorImports(callbacks?: ExecutorCallbacks): WebAssembly.I
 export function getExecutorVariantName(plugins: PayloadInfo['plugins']): string;
 `;
 
-fs.writeFileSync(path.join(DIST_DIR, 'index.d.ts'), typeDefs);
-
-// Step 5: Report sizes
-console.log('\n=== Bundle Sizes ===\n');
-
-const browserInfo = sizeInfo(browserOut);
-console.log(`browser.mjs:  ${(browserInfo.raw / 1024).toFixed(1)} KB (${(browserInfo.gzipped / 1024).toFixed(1)} KB gzipped)`);
-
-// Report embedded bundle size if it exists
-if (fs.existsSync(embeddedOut)) {
-  const embeddedInfo = sizeInfo(embeddedOut);
-  console.log(`embedded.mjs: ${(embeddedInfo.raw / 1024).toFixed(1)} KB (${(embeddedInfo.gzipped / 1024).toFixed(1)} KB gzipped) ← minimal`);
+  const coreTypes = `
+export interface UniformInfo {
+  bufferId: number;
+  offset: number;
+  size: number;
+  type: number;
 }
 
-const indexInfo = sizeInfo(path.join(DIST_DIR, 'index.js'));
-console.log(`index.js:     ${(indexInfo.raw / 1024).toFixed(1)} KB`);
+export interface UniformTableResult {
+  uniforms: Map<string, UniformInfo>;
+  strings: string[];
+}
 
-console.log(`\nFull bundle gzipped: ${((browserInfo.gzipped + indexInfo.raw) / 1024).toFixed(1)} KB`);
+export interface CoreDispatcher {
+  setMemory(memory: WebAssembly.Memory): void;
+  execute(ptr: number): Promise<void> | void;
+  setUniform(name: string, value: number | number[]): boolean;
+  setUniforms(uniforms: Record<string, number | number[]>): number;
+  setUniformTable(table: Map<string, UniformInfo>): void;
+  destroy(): void;
+  setDebug(v: boolean): void;
+  setTime(t: number): void;
+  setCanvasSize(w: number, h: number): void;
+  _dispatcher: unknown;
+}
+
+export function createCommandDispatcher(device: GPUDevice, ctx: GPUCanvasContext): unknown;
+export function parseUniformTable(bytecode: Uint8Array): UniformTableResult;
+export function createCoreDispatcher(device: GPUDevice, ctx: GPUCanvasContext): CoreDispatcher;
+export function getDevice(adapter?: GPUAdapter): Promise<GPUDevice>;
+export function configureCanvas(canvas: HTMLCanvasElement, device: GPUDevice): GPUCanvasContext;
+`;
+
+  const executorTypes = `
+export interface PayloadInfo {
+  version: number;
+  hasEmbeddedExecutor: boolean;
+  hasAnimationTable: boolean;
+  plugins: {
+    core: boolean;
+    render: boolean;
+    compute: boolean;
+    wasm: boolean;
+    animation: boolean;
+    texture: boolean;
+  };
+  executor: Uint8Array | null;
+  bytecode: Uint8Array;
+  payload: Uint8Array;
+  offsets: {
+    executor: number;
+    executorLength: number;
+    bytecode: number;
+    bytecodeLength: number;
+    stringTable: number;
+    data: number;
+    wgsl: number;
+    uniform: number;
+    animation: number;
+  };
+}
+
+export interface ExecutorInstance {
+  instance: WebAssembly.Instance;
+  memory: WebAssembly.Memory;
+  exports: WebAssembly.Exports;
+  getBytecodePtr(): number;
+  setBytecodeLen(len: number): void;
+  getDataPtr(): number;
+  setDataLen(len: number): void;
+  init(): void;
+  frame(time: number, width: number, height: number): void;
+  getCommandPtr(): number;
+  getCommandLen(): number;
+}
+
+export interface ExecutorCallbacks {
+  log?: (ptr: number, len: number) => void;
+  wasmInstantiate?: (id: number, ptr: number, len: number) => void;
+  wasmCall?: (callId: number, modId: number, namePtr: number, nameLen: number, argsPtr: number, argsLen: number) => void;
+  wasmGetResult?: (callId: number, outPtr: number, outLen: number) => number;
+}
+
+export function parsePayload(pngb: Uint8Array): PayloadInfo;
+export function createExecutor(wasmBytes: Uint8Array, imports?: WebAssembly.Imports): Promise<ExecutorInstance>;
+export function getExecutorImports(callbacks?: ExecutorCallbacks): WebAssembly.Imports;
+export function getExecutorVariantName(plugins: PayloadInfo['plugins']): string;
+`;
+
+  fs.writeFileSync(path.join(DIST_DIR, 'index.d.ts'), viewerTypes);
+  fs.writeFileSync(path.join(DIST_DIR, 'viewer.d.ts'), viewerTypes);
+  fs.writeFileSync(path.join(DIST_DIR, 'dev.d.ts'), devTypes);
+  fs.writeFileSync(path.join(DIST_DIR, 'core.d.ts'), coreTypes);
+  fs.writeFileSync(path.join(DIST_DIR, 'executor.d.ts'), executorTypes);
+}
+
+console.log('1. Building viewer profile...');
+const viewerOut = buildInlinedProfileBundle({
+  name: 'viewer',
+  title: 'Viewer',
+  embeddedOnly: true,
+  workerFile: 'worker-viewer.js',
+  initFile: 'viewer-init.js',
+  includeLoader: false,
+  exportBlock: `
+export { pngine, destroy };
+export { draw, play, pause, stop, seek, setFrame, setUniform, setUniforms, getUniforms };
+export { extractBytecode, detectFormat, isPng, isZip, isPngb };`,
+});
+
+console.log('2. Building dev profile...');
+const devOut = buildInlinedProfileBundle({
+  name: 'dev',
+  title: 'Dev',
+  embeddedOnly: false,
+  workerFile: 'worker.js',
+  initFile: 'init.js',
+  includeLoader: true,
+  exportBlock: `
+export { pngine, destroy };
+export { draw, play, pause, stop, seek, setFrame, setUniform, setUniforms, getUniforms };
+export { extractBytecode, detectFormat, isPng, isZip, isPngb };
+export { parsePayload, createExecutor, getExecutorImports, getExecutorVariantName };`,
+});
+
+console.log('3. Building core/executor profiles...');
+const coreOut = path.join(DIST_DIR, 'core.mjs');
+if (!runEsbuild(path.join(SRC_DIR, 'core.js'), coreOut, { embeddedOnly: true })) {
+  process.exit(1);
+}
+
+const executorOut = path.join(DIST_DIR, 'executor.mjs');
+if (!runEsbuild(path.join(SRC_DIR, 'executor.js'), executorOut, { embeddedOnly: false })) {
+  process.exit(1);
+}
+
+writeNodeStubs();
+writeTypeDefs();
+
+console.log('\n=== Bundle Sizes ===\n');
+
+const files = [
+  ['viewer.mjs', viewerOut],
+  ['dev.mjs', devOut],
+  ['core.mjs', coreOut],
+  ['executor.mjs', executorOut],
+  ['index.js (node stub)', path.join(DIST_DIR, 'index.js')],
+];
+
+for (const [label, file] of files) {
+  const info = sizeInfo(file);
+  const rawKb = (info.raw / 1024).toFixed(1);
+  const gzKb = (info.gzipped / 1024).toFixed(1);
+  if (label.includes('node stub')) {
+    console.log(`${label}: ${rawKb} KB`);
+  } else {
+    console.log(`${label}: ${rawKb} KB (${gzKb} KB gzipped)`);
+  }
+}
 
 if (DEBUG) {
   console.log('\n[Debug build - includes source maps]');
