@@ -2104,6 +2104,50 @@ pub const WgpuNativeGPU = struct {
             wgpu.queueWriteBuffer(self.ctx.queue, buffer, buffer_offset, data[0..write_size]);
         }
     }
+
+    // ========================================================================
+    // Snake_case Aliases (Dispatcher Backend Interface Compliance)
+    // ========================================================================
+    //
+    // The dispatcher and handler modules (resource.zig, pass.zig, queue.zig, etc.)
+    // call backend methods using snake_case names matching MockGPU's convention.
+    // These zero-cost comptime aliases bridge the naming difference.
+
+    // Resource creation
+    pub const create_buffer = createBuffer;
+    pub const create_texture = createTexture;
+    pub const create_sampler = createSampler;
+    pub const create_shader_module = createShaderModule;
+    pub const create_render_pipeline = createRenderPipeline;
+    pub const create_compute_pipeline = createComputePipeline;
+    pub const create_bind_group = createBindGroup;
+    pub const create_bind_group_layout = createBindGroupLayout;
+    pub const create_pipeline_layout = createPipelineLayout;
+    pub const create_texture_view = createTextureView;
+    pub const create_query_set = createQuerySet;
+    pub const create_image_bitmap = createImageBitmap;
+    pub const create_render_bundle = createRenderBundle;
+
+    // Pass operations
+    pub const begin_render_pass = beginRenderPass;
+    pub const begin_compute_pass = beginComputePass;
+    pub const set_pipeline = setPipeline;
+    pub const set_bind_group = setBindGroup;
+    pub const set_vertex_buffer = setVertexBuffer;
+    pub const set_index_buffer = setIndexBuffer;
+    pub const draw_indexed = drawIndexed;
+    pub const end_pass = endPass;
+    pub const execute_bundles = executeBundles;
+
+    // Queue operations
+    pub const write_buffer = writeBuffer;
+    pub const write_time_uniform = writeTimeUniform;
+    pub const copy_external_image_to_texture = copyExternalImageToTexture;
+
+    // WASM operations
+    pub const init_wasm_module = initWasmModule;
+    pub const call_wasm_func = callWasmFunc;
+    pub const write_buffer_from_wasm = writeBufferFromWasm;
 };
 
 // ============================================================================

@@ -25,8 +25,8 @@ const std = @import("std");
 
 // Import the C headers
 pub const c = @cImport({
-    @cInclude("webgpu.h");
-    @cInclude("wgpu.h");
+    @cInclude("webgpu/webgpu.h");
+    @cInclude("webgpu/wgpu.h");
 });
 
 // ============================================================================
@@ -159,7 +159,9 @@ pub fn requestAdapterSync(instance: Instance, options: ?*const c.WGPURequestAdap
         }
 
         // Small sleep to avoid busy-waiting (1ms)
-        std.posix.nanosleep(0, 1_000_000);
+        // Use C nanosleep directly — std.time.sleep is unavailable on iOS
+        const ts = std.c.timespec{ .sec = 0, .nsec = 1_000_000 };
+        _ = std.c.nanosleep(&ts, null);
     }
 
     // Timeout - return error result
@@ -232,7 +234,9 @@ pub fn requestDeviceSync(instance: Instance, adapter: Adapter, descriptor: ?*con
         }
 
         // Small sleep to avoid busy-waiting (1ms)
-        std.posix.nanosleep(0, 1_000_000);
+        // Use C nanosleep directly — std.time.sleep is unavailable on iOS
+        const ts = std.c.timespec{ .sec = 0, .nsec = 1_000_000 };
+        _ = std.c.nanosleep(&ts, null);
     }
 
     // Timeout - return error result

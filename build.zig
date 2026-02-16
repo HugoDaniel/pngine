@@ -807,9 +807,16 @@ pub fn build(b: *std.Build) void {
     const SrcFile = struct { src: []const u8, dest: []const u8 };
     const js_files = [_]SrcFile{
         .{ .src = "npm/pngine/src/index.js", .dest = "playground/pngine.js" },
+        .{ .src = "npm/pngine/src/viewer.js", .dest = "playground/viewer.js" },
+        .{ .src = "npm/pngine/src/viewer-init.js", .dest = "playground/viewer-init.js" },
         .{ .src = "npm/pngine/src/init.js", .dest = "playground/init.js" },
+        .{ .src = "npm/pngine/src/dev.js", .dest = "playground/dev.js" },
+        .{ .src = "npm/pngine/src/core.js", .dest = "playground/core.js" },
+        .{ .src = "npm/pngine/src/executor.js", .dest = "playground/executor.js" },
         .{ .src = "npm/pngine/src/worker.js", .dest = "playground/worker.js" },
+        .{ .src = "npm/pngine/src/worker-viewer.js", .dest = "playground/worker-viewer.js" },
         .{ .src = "npm/pngine/src/gpu.js", .dest = "playground/gpu.js" },
+        .{ .src = "npm/pngine/src/gpu-resource-pass-commands.js", .dest = "playground/gpu-resource-pass-commands.js" },
         .{ .src = "npm/pngine/src/anim.js", .dest = "playground/anim.js" },
         .{ .src = "npm/pngine/src/extract.js", .dest = "playground/extract.js" },
         .{ .src = "npm/pngine/src/loader.js", .dest = "playground/loader.js" },
@@ -819,8 +826,8 @@ pub fn build(b: *std.Build) void {
         web_step.dependOn(&install_file.step);
     }
 
-    // Web bundle: minified production bundle (requires Node.js + esbuild)
-    // Produces npm/pngine/dist/browser.mjs with DEBUG=false (strips debug logging)
+    // Web bundle: minified production bundles (requires Node.js + esbuild)
+    // Produces npm/pngine/dist/{viewer,dev,core,executor}.mjs with DEBUG=false
     const web_bundle_step = b.step("web-bundle", "Build minified production JS bundle");
     web_bundle_step.dependOn(web_step);
     const bundle_cmd = b.addSystemCommand(&.{ "node", "npm/pngine/scripts/bundle.js" });
@@ -1142,9 +1149,16 @@ pub fn build(b: *std.Build) void {
     const WebsiteFile = struct { src: []const u8, dest: []const u8 };
     const website_js_files = [_]WebsiteFile{
         .{ .src = "npm/pngine/src/index.js", .dest = "pngine.js" },
+        .{ .src = "npm/pngine/src/viewer.js", .dest = "viewer.js" },
+        .{ .src = "npm/pngine/src/viewer-init.js", .dest = "viewer-init.js" },
         .{ .src = "npm/pngine/src/init.js", .dest = "init.js" },
+        .{ .src = "npm/pngine/src/dev.js", .dest = "dev.js" },
+        .{ .src = "npm/pngine/src/core.js", .dest = "core.js" },
+        .{ .src = "npm/pngine/src/executor.js", .dest = "executor.js" },
         .{ .src = "npm/pngine/src/worker.js", .dest = "worker.js" },
+        .{ .src = "npm/pngine/src/worker-viewer.js", .dest = "worker-viewer.js" },
         .{ .src = "npm/pngine/src/gpu.js", .dest = "gpu.js" },
+        .{ .src = "npm/pngine/src/gpu-resource-pass-commands.js", .dest = "gpu-resource-pass-commands.js" },
         .{ .src = "npm/pngine/src/anim.js", .dest = "anim.js" },
         .{ .src = "npm/pngine/src/extract.js", .dest = "extract.js" },
         .{ .src = "npm/pngine/src/loader.js", .dest = "loader.js" },
@@ -1175,9 +1189,16 @@ pub fn build(b: *std.Build) void {
     // Zine doesn't auto-copy JS modules, so we do it manually
     const runtime_files = [_][]const u8{
         "pngine.js",
+        "viewer.js",
+        "viewer-init.js",
         "init.js",
+        "dev.js",
+        "core.js",
+        "executor.js",
         "worker.js",
+        "worker-viewer.js",
         "gpu.js",
+        "gpu-resource-pass-commands.js",
         "anim.js",
         "extract.js",
         "loader.js",
