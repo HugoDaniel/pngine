@@ -155,3 +155,150 @@ Java_com_pngine_PngineView_00024Companion_version(JNIEnv* env, jobject thiz) {
     (void)thiz;
     return (*env)->NewStringUTF(env, pngine_version());
 }
+
+// ============================================================================
+// Utilities
+// ============================================================================
+
+JNIEXPORT jint JNICALL
+Java_com_pngine_PngineView_nativeGetWidth(JNIEnv* env, jobject thiz, jlong ptr) {
+    (void)env;
+    (void)thiz;
+
+    PngineAnimation* anim = (PngineAnimation*)ptr;
+    if (anim != NULL) {
+        return (jint)pngine_get_width(anim);
+    }
+    return 0;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_pngine_PngineView_nativeGetHeight(JNIEnv* env, jobject thiz, jlong ptr) {
+    (void)env;
+    (void)thiz;
+
+    PngineAnimation* anim = (PngineAnimation*)ptr;
+    if (anim != NULL) {
+        return (jint)pngine_get_height(anim);
+    }
+    return 0;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_pngine_PngineView_nativeErrorString(JNIEnv* env, jobject thiz, jint error) {
+    (void)thiz;
+
+    const char* msg = pngine_error_string((PngineError)error);
+    if (msg == NULL) {
+        return NULL;
+    }
+    return (*env)->NewStringUTF(env, msg);
+}
+
+// ============================================================================
+// Debug
+// ============================================================================
+
+JNIEXPORT jint JNICALL
+Java_com_pngine_PngineView_nativeDebugStatus(JNIEnv* env, jobject thiz, jlong ptr) {
+    (void)env;
+    (void)thiz;
+
+    PngineAnimation* anim = (PngineAnimation*)ptr;
+    if (anim != NULL) {
+        return pngine_debug_status(anim);
+    }
+    return -1;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_pngine_PngineView_nativeDebugFrame(
+    JNIEnv* env,
+    jobject thiz,
+    jlong ptr,
+    jfloat time
+) {
+    (void)env;
+    (void)thiz;
+
+    PngineAnimation* anim = (PngineAnimation*)ptr;
+    if (anim != NULL) {
+        return pngine_debug_frame(anim, time);
+    }
+    return -1;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_pngine_PngineView_nativeDebugRenderPassStatus(JNIEnv* env, jobject thiz, jlong ptr) {
+    (void)env;
+    (void)thiz;
+
+    PngineAnimation* anim = (PngineAnimation*)ptr;
+    if (anim != NULL) {
+        return pngine_debug_render_pass_status(anim);
+    }
+    return -1;
+}
+
+// ============================================================================
+// Per-Animation Diagnostics
+// ============================================================================
+
+JNIEXPORT jint JNICALL
+Java_com_pngine_PngineView_nativeAnimGetLastError(JNIEnv* env, jobject thiz, jlong ptr) {
+    (void)env;
+    (void)thiz;
+
+    PngineAnimation* anim = (PngineAnimation*)ptr;
+    if (anim != NULL) {
+        return (jint)pngine_anim_get_last_error(anim);
+    }
+    return -1;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_pngine_PngineView_nativeAnimComputeCounters(JNIEnv* env, jobject thiz, jlong ptr) {
+    (void)env;
+    (void)thiz;
+
+    PngineAnimation* anim = (PngineAnimation*)ptr;
+    if (anim != NULL) {
+        return (jint)pngine_anim_compute_counters(anim);
+    }
+    return 0;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_pngine_PngineView_nativeAnimRenderCounters(JNIEnv* env, jobject thiz, jlong ptr) {
+    (void)env;
+    (void)thiz;
+
+    PngineAnimation* anim = (PngineAnimation*)ptr;
+    if (anim != NULL) {
+        return (jint)pngine_anim_render_counters(anim);
+    }
+    return 0;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_pngine_PngineView_nativeAnimFrameCount(JNIEnv* env, jobject thiz, jlong ptr) {
+    (void)env;
+    (void)thiz;
+
+    PngineAnimation* anim = (PngineAnimation*)ptr;
+    if (anim != NULL) {
+        return (jint)pngine_anim_frame_count(anim);
+    }
+    return 0;
+}
+
+JNIEXPORT void JNICALL
+Java_com_pngine_PngineView_nativeAnimResetCounters(JNIEnv* env, jobject thiz, jlong ptr) {
+    (void)env;
+    (void)thiz;
+
+    PngineAnimation* anim = (PngineAnimation*)ptr;
+    if (anim != NULL) {
+        pngine_anim_reset_counters(anim);
+    }
+}

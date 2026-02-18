@@ -47,6 +47,23 @@ play(p);
 
 That's it. The PNG is self-contained.
 
+## Browser Runtime Profiles
+
+The npm package ships focused runtime profiles:
+
+| Profile | Import | Usage |
+|---------|--------|-------|
+| Viewer (default) | `pngine` | Lean production playback for PNG payloads with embedded executor |
+| Dev | `pngine/dev` | Full feature browser runtime (selectors, image init, shared fallback) |
+| Core | `pngine/core` | Low-level dispatcher integration |
+| Executor | `pngine/executor` | Advanced payload/executor helper utilities |
+
+Viewer `pngine()` input contract:
+- `source`: URL string or byte buffer (`Uint8Array`/`ArrayBuffer`/`Blob`)
+- `options.canvas`: required `HTMLCanvasElement`
+
+See `/Users/hugo/Dev/pngine/npm/pngine/README.md` for API and bundle sizing details.
+
 ## How It Works
 
 ```

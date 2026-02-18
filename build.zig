@@ -1046,7 +1046,82 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-    // ========================================================================
+    // Android native shared libraries
+    const android_step = b.step("native-android", "Build Android shared libraries (arm64 + x86_64)");
+    {
+        const AndroidTarget = struct {
+            query: std.Target.Query,
+            name: []const u8,
+            abi_dir: []const u8, // maps to Android ABI directory name
+        };
+
+        const android_targets = [_]AndroidTarget{
+            .{
+                .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .android },
+                .name = "aarch64-linux-android",
+                .abi_dir = "arm64-v8a",
+            },
+            .{
+                .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .android },
+                .name = "x86_64-linux-android",
+                .abi_dir = "x86_64",
+            },
+        };
+
+        for (android_targets) |android_target| {
+            const android_resolved = b.resolveTargetQuery(android_target.query);
+
+            // Types module for Android target
+            const android_types = b.createModule(.{
+                .root_source_file = b.path("src/types/main.zig"),
+                .target = android_resolved,
+                .optimize = .ReleaseFast,
+            });
+
+            // Bytecode module for Android target
+            const android_bytecode = b.createModule(.{
+                .root_source_file = b.path("src/bytecode/standalone.zig"),
+                .target = android_resolved,
+                .optimize = .ReleaseFast,
+            });
+            android_bytecode.addImport("types", android_types);
+
+            // Native API module for Android target
+            const android_module = b.createModule(.{
+                .root_source_file = b.path("src/native_api.zig"),
+                .target = android_resolved,
+                .optimize = .ReleaseFast,
+            });
+            android_module.addImport("bytecode", android_bytecode);
+
+            // Add wgpu-native headers and Android library
+            android_module.addIncludePath(b.path("vendor/wgpu-native/include"));
+            android_module.addLibraryPath(b.path(b.fmt("vendor/wgpu-native/android/{s}/lib", .{android_target.abi_dir})));
+
+            // Link wgpu_native shared library (Android uses .so)
+            android_module.linkSystemLibrary("wgpu_native", .{});
+            android_module.link_libc = true;
+
+            const android_lib = b.addLibrary(.{
+                .name = "pngine",
+                .root_module = android_module,
+                .linkage = .dynamic,
+            });
+
+            // Install to platform-specific directory and also to jniLibs for Gradle
+            const install_android = b.addInstallArtifact(android_lib, .{
+                .dest_dir = .{ .override = .{ .custom = b.fmt("lib/{s}", .{android_target.name}) } },
+            });
+            android_step.dependOn(&install_android.step);
+
+            // Also install to native/android/pngine-android/src/main/jniLibs/{abi}/ for Gradle
+            const install_jnilib = b.addInstallArtifact(android_lib, .{
+                .dest_dir = .{ .override = .{ .custom = b.fmt("native/android/pngine-android/src/main/jniLibs/{s}", .{android_target.abi_dir}) } },
+            });
+            android_step.dependOn(&install_jnilib.step);
+        }
+    }
+
     // Desktop Viewer (WAMR + trace mode)
     // ========================================================================
     //
