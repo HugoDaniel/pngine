@@ -1,0 +1,169 @@
+// Circle Avalanche — procedural physics preview
+// Circles pour through funnel onto zigzag ramps (WGSL fragment shader)
+
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+#shaderModule shader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    const PI: f32 = 3.14159265359;
+    const CIRCLE_COUNT: i32 = 60;
+    const RADIUS: f32 = 0.008;
+
+    // Hash functions for pseudo-random
+    fn hash(n: f32) -> f32 {
+      return fract(sin(n * 127.1) * 43758.5453);
+    }
+    fn hash2(n: f32) -> vec2f {
+      return vec2f(hash(n), hash(n + 57.0));
+    }
+
+    // Signed distance to line segment
+    fn sdSegment(p: vec2f, a: vec2f, b: vec2f) -> f32 {
+      let pa = p - a;
+      let ba = b - a;
+      let h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+      return length(pa - ba * h);
+    }
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let x = f32(i & 1u) * 4.0 - 1.0;
+      let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+      return vec4f(x, y, 0.0, 1.0);
+    }
+
+    @fragment
+    fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = vec2f(pos.x / u.width, 1.0 - pos.y / u.height);
+      let t = u.time;
+
+      var col = vec3f(0.04, 0.04, 0.07);
+
+      // Draw ramps (static geometry)
+      // Funnel
+      let d1 = sdSegment(uv, vec2f(0.15, 0.95), vec2f(0.38, 0.75));
+      let d2 = sdSegment(uv, vec2f(0.85, 0.95), vec2f(0.62, 0.75));
+      // Zigzag ramps
+      let d3 = sdSegment(uv, vec2f(0.1, 0.58), vec2f(0.75, 0.52));
+      let d4 = sdSegment(uv, vec2f(0.9, 0.40), vec2f(0.25, 0.34));
+      let d5 = sdSegment(uv, vec2f(0.1, 0.22), vec2f(0.75, 0.16));
+      // Basin
+      let d6 = sdSegment(uv, vec2f(0.15, 0.08), vec2f(0.85, 0.08));
+
+      let rampDist = min(min(min(d1, d2), min(d3, d4)), min(d5, d6));
+      col += vec3f(0.12, 0.12, 0.2) * smoothstep(0.004, 0.0, rampDist);
+
+      // Pegs
+      let pegs = array<vec2f, 6>(
+        vec2f(0.4, 0.68), vec2f(0.6, 0.68),
+        vec2f(0.5, 0.55), vec2f(0.5, 0.37),
+        vec2f(0.35, 0.25), vec2f(0.65, 0.25)
+      );
+      for (var p: i32 = 0; p < 6; p++) {
+        let pd = length(uv - pegs[p]) - 0.012;
+        col += vec3f(0.08, 0.08, 0.15) * smoothstep(0.003, 0.0, pd);
+        if pd < 0.0 {
+          col = vec3f(0.1, 0.1, 0.18);
+        }
+      }
+
+      // Animated circles
+      for (var i: i32 = 0; i < CIRCLE_COUNT; i++) {
+        let fi = f32(i);
+        let spawnTime = fi * 0.06;
+        let elapsed = t - spawnTime;
+        if elapsed < 0.0 {
+          continue;
+        }
+
+        // Start position: random within funnel opening
+        let h = hash2(fi * 13.7);
+        let startX = 0.42 + h.x * 0.16;
+        let startY = 0.88;
+
+        // Simple gravity path with bouncing off ramps (approximation)
+        let speed = 0.18 + h.y * 0.06;
+        let wobble = sin(elapsed * 3.0 + fi * 2.0) * 0.02;
+
+        // Vertical fall with horizontal drift
+        var cx = startX + wobble + sin(elapsed * 1.5 + fi) * 0.04;
+        var cy = startY - elapsed * speed;
+
+        // Clamp to basin
+        if cy < 0.08 + RADIUS {
+          cy = 0.08 + RADIUS;
+          // Pile up slightly
+          cx = startX + hash(fi + 200.0) * 0.4 - 0.2 + 0.5;
+          let pileRow = floor(fi / 8.0);
+          cy = 0.08 + RADIUS + pileRow * RADIUS * 2.0;
+          if cy > 0.14 {
+            cy = 0.08 + RADIUS + hash(fi + 300.0) * 0.06;
+          }
+        }
+
+        // Circle SDF
+        let cd = length(uv - vec2f(cx, cy)) - RADIUS;
+
+        // Color per circle
+        let hue = hash(fi * 7.3);
+        let cr = 0.4 + 0.5 * hue;
+        let cg = 0.3 + 0.4 * (1.0 - hue);
+        let cb = 0.6 + 0.3 * hue;
+        let circCol = vec3f(cr, cg, cb);
+
+        col += circCol * 0.2 * smoothstep(0.006, 0.0, cd);
+        if cd < 0.0 {
+          col = circCol;
+        }
+      }
+
+      return vec4f(col, 1.0);
+    }
+  "
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={ entryPoint=vs module=shader }
+  fragment={
+    entryPoint=fs
+    module=shader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#bindGroup uniformsBindGroup {
+  layout={ pipeline=pipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=uniforms } }]
+}
+
+#renderPass mainPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.04 0.04 0.07 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=pipeline
+  bindGroups=[uniformsBindGroup]
+  draw=3
+}
+
+#frame main {
+  perform=[writeUniforms mainPass]
+}

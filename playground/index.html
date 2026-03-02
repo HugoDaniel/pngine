@@ -1,11 +1,17 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PNGine - WebGPU Bytecode Demo</title>
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
         body {
             font-family: system-ui, -apple-system, sans-serif;
             background: #1a1a2e;
@@ -16,8 +22,20 @@
             align-items: center;
             padding: 2rem;
         }
-        h1 { font-size: 1.5rem; font-weight: 500; margin-bottom: 1rem; }
-        .container { display: flex; gap: 2rem; flex-wrap: wrap; justify-content: center; }
+
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 500;
+            margin-bottom: 1rem;
+        }
+
+        .container {
+            display: flex;
+            gap: 2rem;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
         .panel {
             background: #16213e;
             border-radius: 8px;
@@ -26,9 +44,23 @@
             flex-direction: column;
             gap: 0.5rem;
         }
-        label { font-size: 0.875rem; color: #888; }
-        canvas { background: #000; border-radius: 4px; }
-        .controls { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+
+        label {
+            font-size: 0.875rem;
+            color: #888;
+        }
+
+        canvas {
+            background: #000;
+            border-radius: 4px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+
         button {
             padding: 0.5rem 1rem;
             background: #0f3460;
@@ -38,17 +70,35 @@
             cursor: pointer;
             font-size: 0.875rem;
         }
-        button:hover { background: #1a4a7a; }
-        button:disabled { opacity: 0.5; cursor: not-allowed; }
-        button.playing { background: #e94560; }
+
+        button:hover {
+            background: #1a4a7a;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        button.playing {
+            background: #e94560;
+        }
+
         .status {
             font-size: 0.75rem;
             padding: 0.5rem;
             border-radius: 4px;
             background: #0f0f23;
         }
-        .status.success { color: #4ade80; }
-        .status.error { color: #f87171; }
+
+        .status.success {
+            color: #4ade80;
+        }
+
+        .status.error {
+            color: #f87171;
+        }
+
         .drop-zone {
             border: 2px dashed #333;
             border-radius: 8px;
@@ -57,19 +107,43 @@
             cursor: pointer;
             transition: border-color 0.2s;
         }
-        .drop-zone:hover, .drop-zone.dragover { border-color: #0f3460; }
-        .drop-zone input { display: none; }
-        .time { font-family: monospace; font-size: 0.875rem; }
-        .info { font-size: 0.75rem; color: #666; margin-top: 0.5rem; }
-        .examples { margin-top: 1rem; }
+
+        .drop-zone:hover,
+        .drop-zone.dragover {
+            border-color: #0f3460;
+        }
+
+        .drop-zone input {
+            display: none;
+        }
+
+        .time {
+            font-family: monospace;
+            font-size: 0.875rem;
+        }
+
+        .info {
+            font-size: 0.75rem;
+            color: #666;
+            margin-top: 0.5rem;
+        }
+
+        .examples {
+            margin-top: 1rem;
+        }
+
         .examples a {
             color: #60a5fa;
             text-decoration: none;
             margin-right: 1rem;
         }
-        .examples a:hover { text-decoration: underline; }
+
+        .examples a:hover {
+            text-decoration: underline;
+        }
     </style>
 </head>
+
 <body>
     <h1>PNGine - WebGPU Bytecode Engine</h1>
 
@@ -89,6 +163,12 @@
                 <a href="#" data-url="rotating_cube.png">Cube</a>
                 <a href="#" data-url="boids.png">Boids</a>
                 <a href="#" data-url="demo2025.png">Demo2025</a>
+            </div>
+            <div class="examples" style="margin-top: 0.5rem;">
+                <span style="color: #666; font-size: 0.75rem;">Physics (preview): </span>
+                <a href="test-domino-cascade.html" data-url="domino_cascade.png">Domino Cascade</a>
+                <a href="test-tower-explosion.html" data-url="tower_explosion.png">Tower Explosion</a>
+                <a href="test-circle-avalanche.html" data-url="circle_avalanche.png">Circle Avalanche</a>
             </div>
         </div>
 
@@ -262,4 +342,5 @@
         init();
     </script>
 </body>
+
 </html>

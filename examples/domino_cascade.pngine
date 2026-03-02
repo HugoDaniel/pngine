@@ -1,0 +1,133 @@
+// Domino Cascade — procedural physics preview
+// 30 dominoes topple in a chain reaction (WGSL fragment shader)
+
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+#shaderModule shader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    const PI: f32 = 3.14159265359;
+    const DOMINO_COUNT: i32 = 30;
+    const DOMINO_W: f32 = 0.008;
+    const DOMINO_H: f32 = 0.07;
+
+    // Rotation matrix 2D
+    fn rot2(a: f32) -> mat2x2<f32> {
+      let c = cos(a);
+      let s = sin(a);
+      return mat2x2<f32>(c, -s, s, c);
+    }
+
+    // Signed distance to a box
+    fn sdBox(p: vec2f, b: vec2f) -> f32 {
+      let d = abs(p) - b;
+      return length(max(d, vec2f(0.0))) + min(max(d.x, d.y), 0.0);
+    }
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let x = f32(i & 1u) * 4.0 - 1.0;
+      let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+      return vec4f(x, y, 0.0, 1.0);
+    }
+
+    @fragment
+    fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = vec2f(pos.x / u.width, 1.0 - pos.y / u.height);
+      let t = u.time;
+
+      // Floor line
+      let floorY: f32 = 0.15;
+      var col = vec3f(0.04, 0.04, 0.07);
+
+      // Floor glow
+      let floorDist = abs(uv.y - floorY);
+      col += vec3f(0.1, 0.1, 0.15) * smoothstep(0.005, 0.0, floorDist);
+
+      // Draw dominoes
+      let spacing: f32 = 0.028;
+      let startX: f32 = 0.08;
+
+      for (var i: i32 = 0; i < DOMINO_COUNT; i++) {
+        let fi = f32(i);
+        let frac = fi / f32(DOMINO_COUNT - 1);
+
+        // Position
+        let baseX = startX + fi * spacing;
+        let baseY = floorY;
+
+        // Fall timing — chain reaction wave
+        let triggerTime = fi * 0.08;
+        let elapsed = max(t - triggerTime, 0.0);
+        let fallProgress = min(elapsed * 3.0, 1.0);
+        // Ease-out quad
+        let eased = 1.0 - (1.0 - fallProgress) * (1.0 - fallProgress);
+        let angle = eased * PI * 0.48;
+
+        // Pivot from base
+        let pivotP = vec2f(uv.x - baseX, uv.y - baseY);
+        let rotP = rot2(-angle) * pivotP;
+        let d = sdBox(rotP - vec2f(0.0, DOMINO_H), vec2f(DOMINO_W, DOMINO_H));
+
+        // Color gradient per domino
+        let r = 0.2 + 0.6 * frac;
+        let g = 0.3 + 0.4 * (1.0 - frac);
+        let b = 0.7 - 0.3 * frac;
+        let dominoCol = vec3f(r, g, b);
+
+        // Glow + fill
+        col += dominoCol * 0.3 * smoothstep(0.008, 0.0, d);
+        if d < 0.001 {
+          col = dominoCol;
+        }
+      }
+
+      return vec4f(col, 1.0);
+    }
+  "
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={ entryPoint=vs module=shader }
+  fragment={
+    entryPoint=fs
+    module=shader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#bindGroup uniformsBindGroup {
+  layout={ pipeline=pipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=uniforms } }]
+}
+
+#renderPass mainPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.04 0.04 0.07 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=pipeline
+  bindGroups=[uniformsBindGroup]
+  draw=3
+}
+
+#frame main {
+  perform=[writeUniforms mainPass]
+}

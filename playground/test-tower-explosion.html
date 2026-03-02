@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Tower Explosion — PNGine Physics Demo</title>
+    <meta name="description"
+        content="A 60-body brick tower explodes after 2 seconds, rendered with PNGine WebGPU shaders">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', system-ui, sans-serif;
+            background: #0a0a0f;
+            color: #e0e0e8;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            padding: 2rem;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            background: linear-gradient(135deg, #f97316, #ef4444);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .subtitle {
+            font-size: 0.85rem;
+            color: #666;
+            margin-bottom: 1.5rem;
+        }
+
+        canvas {
+            border-radius: 12px;
+            box-shadow: 0 0 40px rgba(255, 100, 50, 0.1);
+            max-width: 100%;
+        }
+
+        .controls {
+            margin-top: 1rem;
+            display: flex;
+            gap: 0.75rem;
+            align-items: center;
+        }
+
+        button {
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            color: #e0e0e8;
+            padding: 0.5rem 1.25rem;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            transition: all 0.2s;
+        }
+
+        button:hover {
+            background: rgba(255, 255, 255, 0.15);
+        }
+
+        .time {
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 0.8rem;
+            color: #888;
+        }
+
+        .status {
+            margin-top: 1rem;
+            font-size: 0.75rem;
+            color: #555;
+            font-family: monospace;
+        }
+
+        .status.error {
+            color: #f87171;
+        }
+
+        .back {
+            margin-top: 1.5rem;
+        }
+
+        .back a {
+            color: #60a5fa;
+            text-decoration: none;
+            font-size: 0.8rem;
+        }
+
+        .back a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Tower Explosion</h1>
+    <p class="subtitle">60-body brick tower auto-explodes at t=2s — PNGine WebGPU</p>
+
+    <canvas id="canvas" width="640" height="400"></canvas>
+
+    <div class="controls">
+        <button id="play">▶ Play</button>
+        <button id="pause">⏸ Pause</button>
+        <button id="stop">⏹ Stop</button>
+        <span class="time" id="time">0.00s</span>
+    </div>
+
+    <div class="status" id="status">Loading PNGine...</div>
+
+    <div class="back">
+        <a href="index.html">← Back to Playground</a>
+    </div>
+
+    <script type="module">
+        import { pngine, play, pause, stop, draw } from './pngine.js';
+
+        const canvas = document.getElementById('canvas');
+        const statusEl = document.getElementById('status');
+        const timeEl = document.getElementById('time');
+
+        async function init() {
+            try {
+                const p = await pngine('tower_explosion.png', {
+                    canvas,
+                    debug: true,
+                });
+
+                statusEl.textContent = `Ready — ${p.width}×${p.height} • Explosion at t=2.0s`;
+
+                draw(p, { time: 0 });
+
+                document.getElementById('play').onclick = () => {
+                    play(p);
+                    updateLoop(p);
+                };
+                document.getElementById('pause').onclick = () => pause(p);
+                document.getElementById('stop').onclick = () => {
+                    stop(p);
+                    timeEl.textContent = '0.00s';
+                };
+
+                function updateLoop(p) {
+                    if (p.isPlaying) {
+                        timeEl.textContent = `${p.time.toFixed(2)}s`;
+                        requestAnimationFrame(() => updateLoop(p));
+                    }
+                }
+
+                // Auto-play
+                play(p);
+                updateLoop(p);
+
+            } catch (err) {
+                statusEl.textContent = `Error: ${err.message}`;
+                statusEl.classList.add('error');
+                console.error(err);
+            }
+        }
+
+        init();
+    </script>
+</body>
+
+</html>

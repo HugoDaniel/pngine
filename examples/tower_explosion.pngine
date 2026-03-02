@@ -1,0 +1,165 @@
+// Tower Explosion — procedural physics preview
+// 4x15 brick tower settles then explodes at t=2s (WGSL fragment shader)
+
+#buffer uniforms {
+  size=16
+  usage=[UNIFORM COPY_DST]
+}
+
+#queue writeUniforms {
+  writeBuffer={ buffer=uniforms bufferOffset=0 data=pngineInputs }
+}
+
+#shaderModule shader {
+  code="
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    const PI: f32 = 3.14159265359;
+    const COLS: i32 = 4;
+    const ROWS: i32 = 15;
+    const BOX_W: f32 = 0.028;
+    const BOX_H: f32 = 0.018;
+    const EXPLODE_TIME: f32 = 2.0;
+
+    fn sdBox(p: vec2f, b: vec2f) -> f32 {
+      let d = abs(p) - b;
+      return length(max(d, vec2f(0.0))) + min(max(d.x, d.y), 0.0);
+    }
+
+    // Hash for pseudo-random per brick
+    fn hash(n: f32) -> f32 {
+      return fract(sin(n * 127.1) * 43758.5453);
+    }
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let x = f32(i & 1u) * 4.0 - 1.0;
+      let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+      return vec4f(x, y, 0.0, 1.0);
+    }
+
+    @fragment
+    fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = vec2f(pos.x / u.width, 1.0 - pos.y / u.height);
+      let t = u.time;
+
+      let floorY: f32 = 0.1;
+      var col = vec3f(0.04, 0.04, 0.07);
+
+      // Floor
+      let floorDist = abs(uv.y - floorY);
+      col += vec3f(0.1, 0.1, 0.15) * smoothstep(0.004, 0.0, floorDist);
+
+      // Explosion flash
+      let explodeElapsed = max(t - EXPLODE_TIME, 0.0);
+      if explodeElapsed > 0.0 && explodeElapsed < 0.3 {
+        let flash = (1.0 - explodeElapsed / 0.3);
+        col += vec3f(0.91, 0.36, 0.30) * flash * 0.3;
+      }
+
+      // Center of tower
+      let cx: f32 = 0.5;
+      let gapX: f32 = BOX_W * 2.2;
+      let gapY: f32 = BOX_H * 2.1;
+
+      for (var row: i32 = 0; row < ROWS; row++) {
+        for (var c: i32 = 0; c < COLS; c++) {
+          let fi = f32(row * COLS + c);
+          let frow = f32(row);
+          let fc = f32(c);
+
+          // Base position
+          var bx = cx + (fc - 1.5) * gapX;
+          // Offset odd rows
+          if row % 2 == 1 {
+            bx += gapX * 0.5;
+          }
+          var by = floorY + BOX_H + frow * gapY;
+          var angle: f32 = 0.0;
+
+          // After explosion
+          if explodeElapsed > 0.0 {
+            let dx = bx - cx;
+            let dy = by - (floorY + 0.15);
+            let dist = sqrt(dx * dx + dy * dy) + 0.01;
+            let force = 0.8 / dist;
+            let rx = (hash(fi) - 0.5) * 0.4;
+            let ry = (hash(fi + 100.0) - 0.5) * 0.4;
+
+            let et = min(explodeElapsed, 3.0);
+            bx += (dx / dist * force + rx) * et;
+            by += (dy / dist * force + ry) * et - 0.3 * et * et;
+            angle = (hash(fi + 50.0) - 0.5) * 15.0 * et;
+
+            // Floor collision
+            if by < floorY + BOX_H {
+              by = floorY + BOX_H;
+            }
+          }
+
+          // SDF
+          let p = vec2f(uv.x - bx, uv.y - by);
+          let ca = cos(angle);
+          let sa = sin(angle);
+          let rp = vec2f(p.x * ca + p.y * sa, -p.x * sa + p.y * ca);
+          let d = sdBox(rp, vec2f(BOX_W, BOX_H));
+
+          // Color by row
+          let rowFrac = frow / f32(ROWS);
+          let cr = 0.3 + 0.6 * rowFrac;
+          let cg = 0.2 + 0.2 * (1.0 - rowFrac);
+          let cb = 0.7 - 0.4 * rowFrac;
+          let brickCol = vec3f(cr, cg, cb);
+
+          // Glow
+          if explodeElapsed > 0.0 && explodeElapsed < 0.5 {
+            col += brickCol * 0.2 * smoothstep(0.02, 0.0, d);
+          }
+          col += brickCol * 0.15 * smoothstep(0.006, 0.0, d);
+          if d < 0.001 {
+            col = brickCol;
+          }
+        }
+      }
+
+      return vec4f(col, 1.0);
+    }
+  "
+}
+
+#renderPipeline pipeline {
+  layout=auto
+  vertex={ entryPoint=vs module=shader }
+  fragment={
+    entryPoint=fs
+    module=shader
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#bindGroup uniformsBindGroup {
+  layout={ pipeline=pipeline index=0 }
+  entries=[{ binding=0 resource={ buffer=uniforms } }]
+}
+
+#renderPass mainPass {
+  colorAttachments=[{
+    view=contextCurrentTexture
+    clearValue=[0.04 0.04 0.07 1]
+    loadOp=clear
+    storeOp=store
+  }]
+  pipeline=pipeline
+  bindGroups=[uniformsBindGroup]
+  draw=3
+}
+
+#frame main {
+  perform=[writeUniforms mainPass]
+}

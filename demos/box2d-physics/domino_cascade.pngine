@@ -1,0 +1,228 @@
+// Box2D v3 Domino Cascade — PNGine DSL Example
+//
+// This file demonstrates how a Box2D physics simulation compiled
+// to WASM integrates with PNGine's rendering pipeline.
+//
+// Architecture:
+//   WASM module (Box2D) → storage buffer (transforms) → instanced draw
+
+// ============================================================================
+// WASM Module Setup
+// ============================================================================
+
+// Step the physics simulation each frame
+#wasmCall physicsStep {
+  module={ url="domino_cascade.wasm" }
+  func=physics_step
+  args=[time.delta]
+  returns=void
+}
+
+// Read body transforms from WASM memory into a buffer
+#wasmCall physicsTransforms {
+  module={ url="domino_cascade.wasm" }
+  func=physics_get_transforms
+  args=[]
+  returns="array<f32, 120>"   // 30 bodies × 4 floats (x, y, cos, sin)
+}
+
+// ============================================================================
+// GPU Resources
+// ============================================================================
+
+// Unit quad vertex data (2D box, centered at origin)
+// Each vertex: position.xy (2 floats)
+#data quadVertices {
+  type=f32
+  values=[
+    -0.5 -0.5
+     0.5 -0.5
+     0.5  0.5
+    -0.5  0.5
+  ]
+}
+
+#data quadIndices {
+  type=u16
+  values=[0 1 2  0 2 3]
+}
+
+#buffer vertexBuffer {
+  size="4*8"
+  usage=[VERTEX COPY_DST]
+}
+
+#buffer indexBuffer {
+  size="2*6"
+  usage=[INDEX COPY_DST]
+}
+
+// Storage buffer for body transforms from WASM
+#buffer transformBuffer {
+  size="4*120"               // 30 bodies × 4 floats × 4 bytes
+  usage=[STORAGE COPY_DST]
+}
+
+// Camera uniform: orthographic projection matrix
+#buffer cameraBuffer {
+  size="4*16"
+  usage=[UNIFORM COPY_DST]
+}
+
+// ============================================================================
+// Shader
+// ============================================================================
+
+#shaderModule physicsShader {
+  code="
+    struct CameraUniforms {
+      projection: mat4x4<f32>,
+    }
+
+    @group(0) @binding(0) var<uniform> camera: CameraUniforms;
+
+    struct Transform {
+      x: f32,
+      y: f32,
+      cos_a: f32,
+      sin_a: f32,
+    }
+
+    @group(0) @binding(1) var<storage, read> transforms: array<Transform>;
+
+    struct VertexInput {
+      @location(0) position: vec2<f32>,
+      @builtin(instance_index) instance: u32,
+    }
+
+    struct VertexOutput {
+      @builtin(position) position: vec4<f32>,
+      @location(0) color: vec3<f32>,
+    }
+
+    @vertex fn vs(in: VertexInput) -> VertexOutput {
+      let t = transforms[in.instance];
+
+      // Scale: domino is 0.2 wide × 1.6 tall
+      let scaled = vec2<f32>(in.position.x * 0.2, in.position.y * 1.6);
+
+      // Rotate by body angle
+      let rotated = vec2<f32>(
+        scaled.x * t.cos_a - scaled.y * t.sin_a,
+        scaled.x * t.sin_a + scaled.y * t.cos_a
+      );
+
+      // Translate to body position
+      let world_pos = rotated + vec2<f32>(t.x, t.y);
+
+      var out: VertexOutput;
+      out.position = camera.projection * vec4<f32>(world_pos, 0.0, 1.0);
+
+      // Color based on instance index (gradient)
+      let hue = f32(in.instance) / 30.0;
+      out.color = vec3<f32>(
+        0.2 + 0.6 * hue,
+        0.3 + 0.4 * (1.0 - hue),
+        0.8 - 0.3 * hue
+      );
+
+      return out;
+    }
+
+    @fragment fn fs(in: VertexOutput) -> @location(0) vec4<f32> {
+      return vec4<f32>(in.color, 1.0);
+    }
+  "
+}
+
+// ============================================================================
+// Pipeline
+// ============================================================================
+
+#data cameraMatrix {
+  type=f32
+  values=[
+    0.05 0.0 0.0 0.0
+    0.0 0.08 0.0 0.0
+    0.0 0.0 -1.0 0.0
+    0.0 -0.6 0.0 1.0
+  ]
+}
+
+#renderPipeline physicsPipeline {
+  layout=auto
+  vertex={
+    module=physicsShader
+    entryPoint=vs
+    buffers=[
+      { arrayStride=8 attributes=[{ format=float32x2 offset=0 shaderLocation=0 }] }
+    ]
+  }
+  fragment={
+    module=physicsShader
+    entryPoint=fs
+    targets=[{ format=preferredCanvasFormat }]
+  }
+}
+
+#bindGroup physicsBindGroup {
+  layout=0
+  entries=[
+    { binding=0 buffer=cameraBuffer }
+    { binding=1 buffer=transformBuffer }
+  ]
+}
+
+// ============================================================================
+// Frame
+// ============================================================================
+
+#queue initVertices {
+  writeBuffer={ buffer=vertexBuffer data=quadVertices }
+}
+
+#queue initIndices {
+  writeBuffer={ buffer=indexBuffer data=quadIndices }
+}
+
+#queue callPhysics {
+  writeBuffer={ buffer=transformBuffer dataFrom={ wasm=physicsStep } }
+}
+
+#queue readTransforms {
+  writeBuffer={ buffer=transformBuffer dataFrom={ wasm=physicsTransforms } }
+}
+
+#queue writeCamera {
+  writeBuffer={ buffer=cameraBuffer data=cameraMatrix }
+}
+
+#renderPass physicsRenderPass {
+  colorAttachments=[{ 
+    view=contextCurrentTexture
+    clearValue=[0.05 0.05 0.1 1.0]
+    loadOp=clear
+    storeOp=store
+  }]
+  commands=[
+    { setPipeline=physicsPipeline }
+    { setBindGroup={ index=0 bindGroup=physicsBindGroup } }
+    { setVertexBuffer={ slot=0 buffer=vertexBuffer } }
+    { setIndexBuffer={ buffer=indexBuffer format=uint16 } }
+    { drawIndexed={ indexCount=6 instanceCount=30 } }
+  ]
+}
+
+#frame main {
+  init=[
+    initVertices
+    initIndices
+  ]
+
+  perform=[
+    callPhysics
+    readTransforms
+    writeCamera
+    physicsRenderPass
+  ]
+}
