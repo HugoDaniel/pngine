@@ -157,7 +157,7 @@ pub fn writeToFile(io: std.Io, path: []const u8, content: []const u8) !void {
     assert(path.len > 5); // At least "x.d.ts"
     assert(std.mem.endsWith(u8, path, ".d.ts"));
 
-    const file = try io.cwd().createFile(io, path, .{});
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
 
     try file.writeStreamingAll(io, content);

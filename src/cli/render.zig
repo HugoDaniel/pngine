@@ -628,8 +628,8 @@ fn renderWithGpu(allocator: std.mem.Allocator, bytecode: []const u8, width: u32,
     };
     defer gpu.deinit(allocator);
 
-    gpu.setModule(&module);
-    gpu.setTime(time);
+    gpu.set_module(&module);
+    gpu.set_time(time);
 
     var dispatcher = pngine.Dispatcher(NativeGPU).init(allocator, &gpu, &module);
     defer dispatcher.deinit();
@@ -648,7 +648,7 @@ fn renderWithGpu(allocator: std.mem.Allocator, bytecode: []const u8, width: u32,
         };
     }
 
-    const pixels = gpu.readPixels(allocator) catch |err| {
+    const pixels = gpu.read_pixels(allocator) catch |err| {
         std.debug.print("Error: failed to read pixels: {}\n", .{err});
         return .{ .png_data = undefined, .exit_code = 5 };
     };
@@ -694,10 +694,10 @@ fn executeFrameByName(dispatcher: anytype, module: *const format.Module, name: [
     dispatcher.scan_pass_definitions();
 
     // Execute only the specified frame
-    dispatcher.pc = frame_range.start;
+    dispatcher.pc = @intCast(frame_range.start);
     const max_iterations: usize = 10000;
     for (0..max_iterations) |_| {
-        if (dispatcher.pc >= frame_range.end) break;
+        if (dispatcher.pc >= @as(@TypeOf(dispatcher.pc), @intCast(frame_range.end))) break;
         dispatcher.step(allocator) catch |err| {
             std.debug.print("Error: execution failed: {}\n", .{err});
             return 5;
@@ -759,8 +759,10 @@ fn scanForFrameByNameId(bytecode: []const u8, target_name_id: u16) ?FrameRange {
 
 /// Skip opcode parameters (mirrors dispatcher.skip_opcode_params_at).
 fn skip_opcode_params_at(bytecode: []const u8, pc: *usize, op: pngine.opcodes.OpCode) void {
-    // Delegate to dispatcher's implementation
-    pngine.Dispatcher(pngine.gpu_backends.NativeGPU).skip_opcode_params_at(bytecode, pc, op);
+    // Delegate to dispatcher's implementation - need a u32 wrapper
+    var pc32: u32 = @intCast(pc.*);
+    pngine.Dispatcher(pngine.gpu_backends.NativeGPU).skip_opcode_params_at(bytecode, &pc32, op);
+    pc.* = pc32;
 }
 
 /// Create a 1x1 transparent PNG image.
@@ -843,7 +845,7 @@ const max_file_size: u32 = 16 * 1024 * 1024;
 fn readSourceFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![:0]const u8 {
     std.debug.assert(path.len > 0);
 
-    const file = try io.cwd().openFile(io, path, .{});
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
 
     const stat = try file.stat(io);
@@ -858,7 +860,7 @@ fn readSourceFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![
     var bytes_read: u32 = 0;
     for (0..size + 1) |_| {
         if (bytes_read >= size) break;
-        const n: u32 = @intCast(try file.read(io, buffer[bytes_read..]));
+        const n: u32 = @intCast(try file.readStreaming(io, &.{buffer[bytes_read..]}));
         if (n == 0) break;
         bytes_read += n;
     }
@@ -887,9 +889,9 @@ fn writeOutputFile(io: std.Io, path: []const u8, data: []const u8) !void {
     std.debug.assert(path.len > 0);
     std.debug.assert(data.len > 0);
 
-    const file = try io.cwd().createFile(io, path, .{});
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
-    try file.writeAll(io, data);
+    try file.writeStreamingAll(io, data);
 }
 
 // ============================================================================

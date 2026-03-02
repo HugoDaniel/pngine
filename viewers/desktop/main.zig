@@ -61,20 +61,20 @@ const Options = struct {
     help: bool = false,
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     var threaded: std.Io.Threaded = .init(allocator, .{
-        .environ = std.process.Environ.empty,
-        .argv0 = .empty,
+        .environ = init.environ,
+        .argv0 = .init(init.args),
     });
     defer threaded.deinit();
     const io = threaded.io();
 
     // Parse command line
-    const opts = try parseArgs(allocator);
+    const opts = try parseArgs(allocator, init.args);
     defer allocator.free(opts.input_path);
 
     if (opts.help) {
@@ -98,8 +98,25 @@ pub fn main() !void {
 
 fn run(allocator: std.mem.Allocator, io: std.Io, opts: Options) !void {
     // Load input file
-    const file_data = try io.cwd().readFileAlloc(io, opts.input_path, allocator, .limited(16 * 1024 * 1024));
+    const file = try std.Io.Dir.cwd().openFile(io, opts.input_path, .{});
+    defer file.close(io);
+
+    const stat = try file.stat(io);
+    const size: u32 = if (stat.size > 16 * 1024 * 1024)
+        return error.FileTooLarge
+    else
+        @intCast(stat.size);
+
+    const file_data = try allocator.alloc(u8, size);
     defer allocator.free(file_data);
+
+    var bytes_read: u32 = 0;
+    for (0..size + 1) |_| {
+        if (bytes_read >= size) break;
+        const n: u32 = @intCast(try file.readStreaming(io, &.{file_data[bytes_read..]}));
+        if (n == 0) break;
+        bytes_read += n;
+    }
 
     std.debug.print("Loaded {s}: {} bytes\n", .{ opts.input_path, file_data.len });
 
@@ -347,17 +364,18 @@ fn cmdSize(cmd: u8) usize {
     };
 }
 
-fn parseArgs(allocator: std.mem.Allocator) !Options {
-    var args = try std.process.argsWithAllocator(allocator);
-    defer args.deinit();
-
-    _ = args.skip(); // Skip program name
+fn parseArgs(allocator: std.mem.Allocator, raw_args: std.process.Args) !Options {
+    const args = try raw_args.toSlice(allocator);
+    defer allocator.free(args);
 
     var opts = Options{
         .input_path = "",
     };
 
-    while (args.next()) |arg| {
+    // Skip program name (args[0]), iterate from index 1
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             opts.help = true;
         } else if (std.mem.eql(u8, arg, "--trace")) {

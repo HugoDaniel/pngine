@@ -64,18 +64,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     if (args.len < 2) {
         printUsage();
-        std.process.exit(io, 1);
+        std.process.exit(1);
     }
 
-    const exit_code = try run(gpa, io);
-    std.process.exit(io, exit_code);
+    const exit_code = try run(gpa, args, io);
+    std.process.exit(exit_code);
 }
 
 /// Parse arguments and dispatch to appropriate command.
-fn run(allocator: std.mem.Allocator, io: std.Io) !u8 {
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-
+fn run(allocator: std.mem.Allocator, args: []const [:0]const u8, io: std.Io) !u8 {
     std.debug.assert(args.len >= 1);
 
     if (args.len < 2) {

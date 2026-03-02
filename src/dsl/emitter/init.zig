@@ -118,13 +118,16 @@ fn emitInitMacro(e: *Emitter, name: []const u8, node: Node.Index) Emitter.Error!
     const pipeline_id = e.next_pipeline_id;
     e.next_pipeline_id += 1;
 
-    // Build pipeline descriptor JSON
-    const desc = try std.fmt.allocPrint(
-        e.gpa,
-        "{{\"compute\":{{\"shader\":{d},\"entryPoint\":\"main\"}}}}",
-        .{shader_id},
-    );
+    // Binary format: [type_tag:0x06][shader_id:u16 LE][entry_len:u8][entry_bytes]
+    // Total size for "main": 1 + 2 + 1 + 4 = 8 bytes
+    const desc = try e.gpa.alloc(u8, 8);
     defer e.gpa.free(desc);
+
+    desc[0] = 0x06; // compute_pipeline type tag
+    desc[1] = @intCast(shader_id & 0xFF);
+    desc[2] = @intCast((shader_id >> 8) & 0xFF);
+    desc[3] = 4; // entry_len
+    @memcpy(desc[4..8], "main");
 
     const desc_id = try e.builder.addData(e.gpa, desc);
 

@@ -90,7 +90,7 @@ pub fn loadPNG(allocator: std.mem.Allocator, io: std.Io, path: []const u8) Error
     std.debug.assert(path.len > 0);
 
     // Open file
-    const file = io.cwd().openFile(io, path, .{}) catch |err| {
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
         return switch (err) {
             error.FileNotFound => Error.FileNotFound,
             else => Error.IoError,

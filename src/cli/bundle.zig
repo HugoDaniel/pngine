@@ -139,7 +139,7 @@ pub fn runBundle(allocator: std.mem.Allocator, io: std.Io, args: []const []const
 }
 
 fn addAssetsFromDir(allocator: std.mem.Allocator, io: std.Io, writer: *zip.ZipWriter, dir_path: []const u8) !u32 {
-    var dir = io.cwd().openDir(io, dir_path, .{ .iterate = true }) catch {
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch {
         return error.FailedToOpenAssetsDir;
     };
     defer dir.close(io);
