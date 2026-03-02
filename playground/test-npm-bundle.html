@@ -14,14 +14,14 @@
 <body>
   <div class="info">
     <h2>NPM Bundle Test</h2>
-    <p>Testing: <code>npm/pngine/dist/browser.mjs</code></p>
+    <p>Testing: <code>npm/pngine/dist/dev.mjs</code></p>
     <p id="status" class="status">Loading...</p>
   </div>
   <canvas id="canvas" width="512" height="512"></canvas>
 
   <script type="module">
-    // Import from npm bundle
-    import { pngine, play } from '../npm/pngine/dist/browser.mjs';
+    // Import dev profile bundle (includes wasmUrl fallback)
+    import { pngine, play } from '../npm/pngine/dist/dev.mjs';
 
     const status = document.getElementById('status');
     const canvas = document.getElementById('canvas');
@@ -43,7 +43,7 @@
         // Start animation
         play(engine);
 
-        status.textContent = `Running! (36KB bundle, ${engine.frameCount} frames)`;
+        status.textContent = `Running! (${engine.frameCount} frames)`;
       } catch (err) {
         console.error(err);
         status.textContent = `Error: ${err.message}`;

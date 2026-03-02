@@ -6,9 +6,23 @@
 | `docs/embedded-executor-plan.md`            | Embedded executor + plugins              | Complete    |
 | `docs/llm-runtime-testing-plan.md`          | LLM-friendly validation via wasm3        | Complete    |
 | `docs/multiplatform-command-buffer-plan.md` | Platform abstraction                     | Reference   |
+| `docs/runtime-profile-simplification-plan.md` | **ACTIVE** - Runtime profile simplification | Planned  |
 | `docs/data-generation-plan.md`              | Compute shader data gen (superseded)     | Archived    |
 | `docs/command-buffer-refactor-plan.md`      | JS bundle optimization                   | Reference   |
 | `docs/remove-wasm-in-wasm-plan.md`          | **SUPERSEDED** - Do not use              | Archived    |
+
+### Runtime Profiles (npm/pngine)
+
+The browser package now exposes profile-specific entrypoints:
+
+| Profile | Import | Purpose |
+| ------- | ------ | ------- |
+| Viewer (default) | `pngine` / `pngine/viewer` | Lean player for embedded-executor PNG payloads |
+| Dev | `pngine/dev` | Full browser feature set and fallback paths |
+| Core | `pngine/core` | Low-level dispatcher-centric runtime API |
+| Executor | `pngine/executor` | Advanced payload/executor helpers |
+
+Viewer is the canonical production path and keeps wasm-in-wasm runtime support.
 
 ### Buffer Initialization (docs/cpu-wasm-data-initialization-plan.md)
 
@@ -38,4 +52,3 @@ Key features:
 - **GPU-native**: Compute shaders for procedural data
 
 ---
-
