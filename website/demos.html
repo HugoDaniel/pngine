@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Demos — PNGine</title>
+    <meta name="description"
+        content="Interactive PNGine demos: WebGPU shaders, physics simulations, and more — all running from tiny PNG files.">
+
+    <!-- Styles -->
+    <link rel="stylesheet" href="styles/variables.css">
+    <link rel="stylesheet" href="styles/base.css">
+    <link rel="stylesheet" href="styles/components.css">
+    <link rel="stylesheet" href="styles/sections.css">
+    <link rel="stylesheet" href="styles/demos.css">
+
+    <!-- Favicon -->
+    <link rel="icon" type="image/png" href="assets/logo.png">
+
+    <!-- Open Graph -->
+    <meta property="og:title" content="Demos — PNGine">
+    <meta property="og:description"
+        content="Interactive demos: WebGPU shaders, Box2D physics, and more — all from tiny PNG files.">
+    <meta property="og:type" content="website">
+</head>
+
+<body>
+    <!-- Navigation -->
+    <nav class="nav">
+        <div class="container nav__inner">
+            <a href="/" aria-label="PNGine Home">
+                <img src="assets/logo.png" alt="PNGine" class="nav__logo">
+            </a>
+            <ul class="nav__links">
+                <li><a href="/demos" class="nav__link nav__link--active">Demos</a></li>
+                <li><a href="/docs" class="nav__link">Docs</a></li>
+                <li>
+                    <a href="https://github.com/HugoDaniel/pngine" class="nav__link" target="_blank"
+                        rel="noopener noreferrer">
+                        GitHub
+                    </a>
+                </li>
+            </ul>
+        </div>
+    </nav>
+
+    <!-- Page Header -->
+    <section class="demos-header">
+        <div class="pixel-grid-bg" aria-hidden="true"></div>
+        <div class="container">
+            <h1 class="demos-header__title">Demos</h1>
+            <p class="demos-header__subtitle">
+                Interactive examples of what PNGine can do.
+                Each demo runs from a compiled <code>.pngb</code> file — shader, data, and logic in one portable bundle.
+            </p>
+        </div>
+    </section>
+
+    <!-- Shader Demos Section -->
+    <section class="demos-section" id="shaders">
+        <div class="container">
+            <header class="demos-section__header">
+                <h2 class="demos-section__title">
+                    <span class="demos-section__icon">✦</span>
+                    Shader Demos
+                </h2>
+                <p class="demos-section__subtitle">Core WebGPU shaders — the foundation of PNGine.</p>
+            </header>
+
+            <div class="demos-grid">
+                <!-- Triangle -->
+                <a href="/playground/" class="demo-card-link">
+                    <article class="demo-card">
+                        <div class="demo-card__preview">
+                            <canvas data-demo="triangle" aria-label="Triangle demo"></canvas>
+                        </div>
+                        <div class="demo-card__body">
+                            <div class="demo-card__meta">
+                                <h3 class="demo-card__name">Triangle</h3>
+                                <span class="demo-card__badge">~500 B</span>
+                            </div>
+                            <p class="demo-card__desc">The smallest possible WebGPU shader — a single colored triangle.
+                            </p>
+                        </div>
+                    </article>
+                </a>
+
+                <!-- Rotating Cube -->
+                <a href="/playground/test-wasm-cube.html" class="demo-card-link">
+                    <article class="demo-card">
+                        <div class="demo-card__preview">
+                            <canvas data-demo="cube" aria-label="Rotating cube demo"></canvas>
+                        </div>
+                        <div class="demo-card__body">
+                            <div class="demo-card__meta">
+                                <h3 class="demo-card__name">Rotating Cube</h3>
+                                <span class="demo-card__badge">~2 KB</span>
+                            </div>
+                            <p class="demo-card__desc">3D cube with per-frame WASM matrix computation and depth testing.
+                            </p>
+                        </div>
+                    </article>
+                </a>
+
+                <!-- Boids -->
+                <a href="/playground/test-boids.html" class="demo-card-link">
+                    <article class="demo-card">
+                        <div class="demo-card__preview">
+                            <canvas data-demo="boids" aria-label="Boids simulation demo"></canvas>
+                        </div>
+                        <div class="demo-card__body">
+                            <div class="demo-card__meta">
+                                <h3 class="demo-card__name">Boids Simulation</h3>
+                                <span class="demo-card__badge">~8 KB</span>
+                            </div>
+                            <p class="demo-card__desc">GPU compute shader flocking simulation with instanced rendering.
+                            </p>
+                        </div>
+                    </article>
+                </a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Section Divider -->
+    <div class="section-divider container">
+        <span>Physics</span>
+    </div>
+
+    <!-- Box2D Physics Demos Section -->
+    <section class="demos-section" id="physics">
+        <div class="container">
+            <header class="demos-section__header">
+                <div class="demos-section__header-row">
+                    <div>
+                        <h2 class="demos-section__title">
+                            <span class="demos-section__icon">⚛</span>
+                            Box2D Physics
+                        </h2>
+                        <p class="demos-section__subtitle">
+                            Real-time 2D physics powered by
+                            <a href="https://box2d.org/" target="_blank" rel="noopener noreferrer">Box2D v3</a>
+                            compiled to WebAssembly — pure C, no Emscripten.
+                        </p>
+                    </div>
+                    <div class="demos-section__tech-badge">
+                        <span class="demos-section__tech-badge-label">Box2D v3.2</span>
+                        <span class="demos-section__tech-badge-detail">Pure C → WASM</span>
+                    </div>
+                </div>
+            </header>
+
+            <div class="demos-grid">
+                <!-- Domino Cascade -->
+                <a href="/playground/test-domino-cascade.html" class="demo-card-link">
+                    <article class="demo-card demo-card--featured">
+                        <div class="demo-card__preview demo-card__preview--physics">
+                            <canvas data-demo="domino-cascade" aria-label="Domino cascade physics demo"></canvas>
+                            <div class="demo-card__overlay">
+                                <span class="demo-card__status">Coming Soon</span>
+                            </div>
+                        </div>
+                        <div class="demo-card__body">
+                            <div class="demo-card__meta">
+                                <h3 class="demo-card__name">Domino Cascade</h3>
+                                <span class="demo-card__badge demo-card__badge--accent">30 bodies</span>
+                            </div>
+                            <p class="demo-card__desc">
+                                Thin domino boxes arranged in a curve — one push triggers a satisfying chain reaction
+                                across
+                                the screen.
+                            </p>
+                            <ul class="demo-card__tags">
+                                <li>continuous collision</li>
+                                <li>impulse</li>
+                                <li>chain reaction</li>
+                            </ul>
+                        </div>
+                    </article>
+                </a>
+
+                <!-- Tower Explosion -->
+                <a href="/playground/test-tower-explosion.html" class="demo-card-link">
+                    <article class="demo-card demo-card--featured">
+                        <div class="demo-card__preview demo-card__preview--physics">
+                            <canvas data-demo="tower-explosion" aria-label="Tower explosion physics demo"></canvas>
+                            <div class="demo-card__overlay">
+                                <span class="demo-card__status">Coming Soon</span>
+                            </div>
+                        </div>
+                        <div class="demo-card__body">
+                            <div class="demo-card__meta">
+                                <h3 class="demo-card__name">Tower Explosion</h3>
+                                <span class="demo-card__badge demo-card__badge--accent">60 bodies</span>
+                            </div>
+                            <p class="demo-card__desc">
+                                A 4×15 brick tower settles under gravity, then <code>b2World_Explode()</code> blows it
+                                apart. Dramatic particle-like burst.
+                            </p>
+                            <ul class="demo-card__tags">
+                                <li>stacking</li>
+                                <li>explosion</li>
+                                <li>b2World_Explode</li>
+                            </ul>
+                        </div>
+                    </article>
+                </a>
+
+                <!-- Circle Avalanche -->
+                <a href="/playground/test-circle-avalanche.html" class="demo-card-link">
+                    <article class="demo-card demo-card--featured">
+                        <div class="demo-card__preview demo-card__preview--physics">
+                            <canvas data-demo="circle-avalanche" aria-label="Circle avalanche physics demo"></canvas>
+                            <div class="demo-card__overlay">
+                                <span class="demo-card__status">Coming Soon</span>
+                            </div>
+                        </div>
+                        <div class="demo-card__body">
+                            <div class="demo-card__meta">
+                                <h3 class="demo-card__name">Circle Avalanche</h3>
+                                <span class="demo-card__badge demo-card__badge--accent">200 bodies</span>
+                            </div>
+                            <p class="demo-card__desc">
+                                Circles pour through a funnel onto zigzag ramps with obstacle pegs.
+                                Continuous spawning creates a mesmerizing particle flow.
+                            </p>
+                            <ul class="demo-card__tags">
+                                <li>particle-like</li>
+                                <li>spawning</li>
+                                <li>collision</li>
+                            </ul>
+                        </div>
+                    </article>
+                </a>
+            </div>
+
+            <!-- Technical callout -->
+            <div class="demos-callout">
+                <div class="demos-callout__icon">⚡</div>
+                <div class="demos-callout__content">
+                    <strong>How it works:</strong>
+                    Box2D's C17 source is compiled to a <code>~150KB</code> WASM module using Zig's cross-compiler.
+                    Each frame, PNGine calls <code>physics_step(dt)</code> via <code>#wasmCall</code>,
+                    reads body transforms into a GPU storage buffer, and draws everything with instanced rendering.
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Section Divider -->
+    <div class="section-divider container">
+        <span>Build your own</span>
+    </div>
+
+    <!-- CTA Section -->
+    <section class="demos-cta">
+        <div class="container" style="max-width: 600px; text-align: center;">
+            <h2 style="margin-bottom: var(--space-4);">Create something</h2>
+            <p style="color: var(--text-secondary); margin-bottom: var(--space-6);">
+                PNGine is open source. Write a shader, compile it, share a PNG.
+            </p>
+            <div style="display: flex; justify-content: center; gap: var(--space-4); flex-wrap: wrap;">
+                <a href="/docs/getting-started" class="btn btn-primary">
+                    Get Started <span class="arrow">→</span>
+                </a>
+                <a href="https://github.com/HugoDaniel/pngine" class="btn btn-secondary" target="_blank"
+                    rel="noopener noreferrer">
+                    View Source
+                </a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer style="padding: var(--space-10) 0; border-top: 1px solid var(--bg-card);">
+        <div class="container"
+            style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: var(--space-4);">
+            <img src="assets/logo.png" alt="PNGine" style="height: 24px; opacity: 0.6;">
+            <nav style="display: flex; gap: var(--space-5);">
+                <a href="/demos" style="color: var(--text-muted); font-size: var(--text-sm);">Demos</a>
+                <a href="/docs" style="color: var(--text-muted); font-size: var(--text-sm);">Docs</a>
+                <a href="https://github.com/HugoDaniel/pngine"
+                    style="color: var(--text-muted); font-size: var(--text-sm);">GitHub</a>
+            </nav>
+        </div>
+    </footer>
+
+    <!-- Scripts -->
+    <script src="scripts/main.js"></script>
+</body>
+
+</html>
