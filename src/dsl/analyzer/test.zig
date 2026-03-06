@@ -991,6 +991,7 @@ test "Analyzer: WGSL reflection fuzz - random patterns don't crash" {
         // Should not crash, may have errors
         var ast = Parser.parse(testing.allocator, source) catch continue;
         defer ast.deinit(testing.allocator);
+        if (ast.hasParseErrors()) continue;
 
         var result = Analyzer.analyze(testing.allocator, &ast) catch continue;
         defer result.deinit(testing.allocator);
@@ -1087,6 +1088,7 @@ test "Analyzer: WGSL reflection - malformed group/binding numbers" {
     for (malformed_sources) |source| {
         var ast = Parser.parse(testing.allocator, source) catch continue;
         defer ast.deinit(testing.allocator);
+        if (ast.hasParseErrors()) continue;
 
         var result = Analyzer.analyze(testing.allocator, &ast) catch continue;
         defer result.deinit(testing.allocator);

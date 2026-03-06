@@ -52,6 +52,7 @@ pub const Ast = struct {
     tokens: TokenList.Slice,
     nodes: NodeList.Slice,
     extra_data: []const u32,
+    errors: []const Diagnostic,
 
     pub const TokenList = std.MultiArrayList(struct {
         tag: Token.Tag,
@@ -62,9 +63,15 @@ pub const Ast = struct {
 
     pub fn deinit(self: *Ast, gpa: std.mem.Allocator) void {
         gpa.free(self.extra_data);
+        gpa.free(self.errors);
         self.tokens.deinit(gpa);
         self.nodes.deinit(gpa);
         self.* = undefined;
+    }
+
+    /// Returns true if the parser detected syntax errors.
+    pub fn hasParseErrors(self: Ast) bool {
+        return self.errors.len > 0;
     }
 
     /// Get the source slice for a token.
@@ -82,7 +89,147 @@ pub const Ast = struct {
     pub fn extraData(self: Ast, range: Node.SubRange) []const u32 {
         return self.extra_data[range.start..range.end];
     }
+
+    /// Render all parse errors to a writer with source context.
+    pub fn renderErrors(self: Ast, writer: anytype) !void {
+        for (self.errors) |diag| {
+            try self.renderDiagnostic(diag, writer);
+        }
+    }
+
+    /// Render a single diagnostic with source location and context.
+    fn renderDiagnostic(self: Ast, diag: Diagnostic, writer: anytype) !void {
+        const token_start = self.tokens.items(.start)[diag.token];
+        const info = getLineInfo(self.source, token_start);
+        const line_text = self.source[info.line_start..info.line_end];
+        const found_tag = self.tokens.items(.tag)[diag.token];
+
+        // error: message
+        try writer.print("error: {s}\n", .{diag.tag.message()});
+
+        // --> location
+        try writer.print(" --> line {d}, col {d}\n", .{ info.line_num, info.col_num });
+
+        // source context
+        try writer.writeAll("  |\n");
+        try writer.print("{d: >3} | {s}\n", .{ info.line_num, line_text });
+
+        // pointer with found-token info
+        try writer.writeAll("    | ");
+        for (0..info.col_num - 1) |_| try writer.writeByte(' ');
+        if (found_tag == .eof) {
+            try writer.writeAll("^ unexpected end of input\n");
+        } else if (found_tag.lexeme()) |lex| {
+            try writer.print("^ found '{s}'\n", .{lex});
+        } else {
+            try writer.writeAll("^\n");
+        }
+
+        // suggestion
+        if (diag.tag.suggestion()) |sugg| {
+            try writer.writeAll("  |\n");
+            try writer.print("  = help: {s}\n", .{sugg});
+        }
+
+        try writer.writeByte('\n');
+    }
 };
+
+/// Parse diagnostic with error tag and token location.
+pub const Diagnostic = struct {
+    tag: Tag,
+    token: u32,
+
+    pub const Tag = enum(u8) {
+        expected_name,
+        expected_opening_brace,
+        expected_closing_brace,
+        expected_equals,
+        expected_value,
+        expected_closing_bracket,
+        expected_closing_paren,
+        expected_operand,
+        too_many_macros,
+        too_many_properties,
+        expression_too_deep,
+        expression_too_complex,
+        iteration_limit,
+
+        /// Human-readable error message for this diagnostic kind.
+        pub fn message(self: Tag) []const u8 {
+            return switch (self) {
+                .expected_name => "expected resource name after macro keyword",
+                .expected_opening_brace => "expected '{' to open macro body",
+                .expected_closing_brace => "unclosed block, expected '}'",
+                .expected_equals => "expected '=' between property name and value",
+                .expected_value => "expected a value",
+                .expected_closing_bracket => "unclosed array, expected ']'",
+                .expected_closing_paren => "unclosed parenthesis, expected ')'",
+                .expected_operand => "expected number or expression after operator",
+                .too_many_macros => "exceeded maximum of 4096 top-level macros",
+                .too_many_properties => "exceeded maximum of 1024 properties in a single block",
+                .expression_too_deep => "expression nesting exceeds maximum depth of 64",
+                .expression_too_complex => "expression has too many terms",
+                .iteration_limit => "input too complex: parser iteration limit exceeded",
+            };
+        }
+
+        /// Fix suggestion for this diagnostic kind, or null if none.
+        pub fn suggestion(self: Tag) ?[]const u8 {
+            return switch (self) {
+                .expected_name => "macros require a name: #buffer myBuf { size=100 }",
+                .expected_opening_brace => "wrap properties in braces: #buffer myBuf { size=100 }",
+                .expected_closing_brace => "add '}' to close the block",
+                .expected_equals => "use '=' to assign values: size=100",
+                .expected_value => "valid values: number (100), string (\"text\"), identifier, array ([...]), or object ({ key=val })",
+                .expected_closing_bracket => "add ']' to close the array",
+                .expected_closing_paren => "add ')' to match the opening '('",
+                .expected_operand => "provide a number, identifier, or (expression) after the operator",
+                .too_many_macros => "split into multiple files using #import",
+                .expression_too_deep => "simplify or use #define for sub-expressions",
+                .expression_too_complex => "simplify or use #define for sub-expressions",
+                .too_many_properties, .iteration_limit => null,
+            };
+        }
+    };
+};
+
+/// Source location info computed from byte offset.
+pub const LineInfo = struct {
+    line_num: u32,
+    col_num: u32,
+    line_start: u32,
+    line_end: u32,
+};
+
+/// Compute line number, column, and line boundaries from a byte offset.
+pub fn getLineInfo(source: []const u8, byte_offset: u32) LineInfo {
+    const src_len: u32 = @intCast(source.len);
+    const offset: u32 = @min(byte_offset, src_len);
+    var line: u32 = 1;
+    var line_start: u32 = 0;
+
+    var i: u32 = 0;
+    while (i < offset) : (i += 1) {
+        if (source[i] == '\n') {
+            line += 1;
+            line_start = i + 1;
+        }
+    }
+
+    // Find end of current line
+    var line_end: u32 = offset;
+    while (line_end < src_len and source[line_end] != '\n') {
+        line_end += 1;
+    }
+
+    return .{
+        .line_num = line,
+        .col_num = offset - line_start + 1,
+        .line_start = line_start,
+        .line_end = line_end,
+    };
+}
 
 /// AST Node - compact representation.
 ///
@@ -359,4 +506,42 @@ test "Ast: OptionalIndex" {
     try testing.expectEqual(Node.OptionalIndex.none, Node.OptionalIndex.from(null));
     const idx: Node.Index = @enumFromInt(10);
     try testing.expectEqual(@as(u32, 10), @intFromEnum(Node.OptionalIndex.from(idx)));
+}
+
+test "Diagnostic: all tags have messages" {
+    inline for (std.meta.fields(Diagnostic.Tag)) |field| {
+        const tag: Diagnostic.Tag = @enumFromInt(field.value);
+        try std.testing.expect(tag.message().len > 0);
+    }
+}
+
+test "getLineInfo: first line" {
+    const source = "hello world";
+    const info = getLineInfo(source, 6);
+    try std.testing.expectEqual(@as(u32, 1), info.line_num);
+    try std.testing.expectEqual(@as(u32, 7), info.col_num);
+    try std.testing.expectEqual(@as(u32, 0), info.line_start);
+}
+
+test "getLineInfo: second line" {
+    const source = "line1\nline2\nline3";
+    const info = getLineInfo(source, 8);
+    try std.testing.expectEqual(@as(u32, 2), info.line_num);
+    try std.testing.expectEqual(@as(u32, 3), info.col_num);
+    try std.testing.expectEqual(@as(u32, 6), info.line_start);
+    try std.testing.expectEqual(@as(u32, 11), info.line_end);
+}
+
+test "getLineInfo: offset at end of source" {
+    const source = "abc";
+    const info = getLineInfo(source, 3);
+    try std.testing.expectEqual(@as(u32, 1), info.line_num);
+    try std.testing.expectEqual(@as(u32, 4), info.col_num);
+}
+
+test "getLineInfo: empty source" {
+    const source = "";
+    const info = getLineInfo(source, 0);
+    try std.testing.expectEqual(@as(u32, 1), info.line_num);
+    try std.testing.expectEqual(@as(u32, 1), info.col_num);
 }

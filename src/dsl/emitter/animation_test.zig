@@ -237,10 +237,11 @@ fn fuzzAnimationParser(_: void, input: []const u8) !void {
 
     // Property: parser never crashes
     var ast = Parser.parse(testing.allocator, source) catch {
-        // Parse error is acceptable for fuzz input
+        // OOM is acceptable for fuzz input
         return;
     };
     defer ast.deinit(testing.allocator);
+    if (ast.hasParseErrors()) return;
 
     // Property: root node always at index 0
     try testing.expectEqual(@as(usize, 0), 0);

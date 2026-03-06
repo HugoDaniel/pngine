@@ -8,9 +8,20 @@ const testing = std.testing;
 const Parser = @import("../Parser.zig").Parser;
 const Ast = @import("../Ast.zig").Ast;
 const Node = @import("../Ast.zig").Node;
+const Diagnostic = @import("../Ast.zig").Diagnostic;
 
 fn parseSource(source: [:0]const u8) !Ast {
     return Parser.parse(testing.allocator, source);
+}
+
+/// Parse and expect a specific diagnostic tag. Returns the Ast for inspection.
+fn expectParseError(source: [:0]const u8, expected_tag: Diagnostic.Tag) !void {
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    try testing.expect(ast.hasParseErrors());
+    try testing.expect(ast.errors.len > 0);
+    try testing.expectEqual(expected_tag, ast.errors[0].tag);
 }
 
 // ============================================================================
@@ -414,10 +425,52 @@ test "Parser: simpleTriangle example" {
 // Error Handling Tests
 // ============================================================================
 
-test "Parser: memory cleanup on error" {
-    // Invalid input - should return error but not leak
-    const result = Parser.parse(testing.allocator, "#buffer { }");
-    try testing.expectError(error.ParseError, result);
+test "Parser: missing name reports expected_name" {
+    try expectParseError("#buffer { }", .expected_name);
+}
+
+test "Parser: missing opening brace reports expected_opening_brace" {
+    try expectParseError("#buffer buf size=100", .expected_opening_brace);
+}
+
+test "Parser: missing closing brace reports expected_closing_brace" {
+    try expectParseError("#buffer buf { size=100", .expected_closing_brace);
+}
+
+test "Parser: missing equals reports expected_equals" {
+    try expectParseError("#buffer buf { size 100 }", .expected_equals);
+}
+
+test "Parser: missing value reports expected_value" {
+    try expectParseError("#define FOO=", .expected_value);
+}
+
+test "Parser: unclosed array reports expected_closing_bracket" {
+    try expectParseError("#data d { arr=[1 2 3 }", .expected_closing_bracket);
+}
+
+test "Parser: unclosed paren reports expected_closing_paren" {
+    try expectParseError("#buffer buf { size=(1+2 }", .expected_closing_paren);
+}
+
+test "Parser: dangling operator reports expected_operand" {
+    try expectParseError("#buffer buf { size=1+ }", .expected_operand);
+}
+
+test "Parser: define missing name reports expected_name" {
+    try expectParseError("#define =100", .expected_name);
+}
+
+test "Parser: define missing equals reports expected_equals" {
+    try expectParseError("#define FOO 100", .expected_equals);
+}
+
+test "Parser: error Ast does not leak memory" {
+    // Parse error returns Ast with errors — must not leak
+    var ast = try parseSource("#buffer { }");
+    defer ast.deinit(testing.allocator);
+
+    try testing.expect(ast.hasParseErrors());
 }
 
 test "Parser: OOM handling" {
@@ -428,6 +481,53 @@ test "Parser: OOM handling" {
 
     const result = Parser.parse(failing.allocator(), "#buffer buf { size=100 }");
     try testing.expectError(error.OutOfMemory, result);
+}
+
+test "Parser: error messages are self-explanatory" {
+    // Verify rendered output contains key information
+    var ast = try parseSource("#buffer { }");
+    defer ast.deinit(testing.allocator);
+
+    var buf: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    try ast.renderErrors(&writer);
+    const output = writer.buffered();
+
+    // Must contain the error message
+    try testing.expect(std.mem.indexOf(u8, output, "expected resource name") != null);
+    // Must contain line/col location
+    try testing.expect(std.mem.indexOf(u8, output, "line 1") != null);
+    // Must contain help suggestion
+    try testing.expect(std.mem.indexOf(u8, output, "help:") != null);
+    // Must contain source context
+    try testing.expect(std.mem.indexOf(u8, output, "#buffer") != null);
+}
+
+test "Parser: multiline error reports correct line" {
+    const source: [:0]const u8 =
+        \\#buffer buf1 { size=100 }
+        \\#buffer { size=200 }
+    ;
+    var ast = try parseSource(source);
+    defer ast.deinit(testing.allocator);
+
+    try testing.expect(ast.hasParseErrors());
+
+    var buf: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    try ast.renderErrors(&writer);
+    const output = writer.buffered();
+
+    // Error should be on line 2
+    try testing.expect(std.mem.indexOf(u8, output, "line 2") != null);
+}
+
+test "Parser: unclosed object in nested position" {
+    try expectParseError(
+        \\#renderPipeline p {
+        \\  vertex={ entryPoint=vs
+        \\}
+    , .expected_closing_brace);
 }
 
 // ============================================================================
@@ -487,10 +587,10 @@ test "Parser: fuzz with random input" {
 /// Fuzz test function for parser properties.
 /// Properties tested:
 /// - Never crashes on any input
-/// - Root node always at index 0 when successful
+/// - Always returns an Ast (with or without errors)
 /// - All nodes reference valid token indices
-/// - All extra_data indices are within bounds
-/// - Only returns ParseError or OutOfMemory on failure
+/// - Token positions are within source bounds
+/// - Diagnostics have valid token indices
 fn fuzzParserProperties(_: void, input: []const u8) !void {
     // Filter out inputs with embedded nulls (invalid for sentinel-terminated)
     for (input) |byte| {
@@ -505,7 +605,7 @@ fn fuzzParserProperties(_: void, input: []const u8) !void {
 
     const source: [:0]const u8 = buf[0..input.len :0];
 
-    // Try to parse - should either succeed or return error, never crash
+    // Parse always returns an Ast (never crashes)
     if (Parser.parse(testing.allocator, source)) |ast| {
         var mutable_ast = ast;
         defer mutable_ast.deinit(testing.allocator);
@@ -513,25 +613,24 @@ fn fuzzParserProperties(_: void, input: []const u8) !void {
         const nodes = mutable_ast.nodes;
         const tokens = mutable_ast.tokens;
 
-        // Property 1: At least root node
-        try testing.expect(nodes.len >= 1);
-
-        // Property 2: Root node at index 0
-        try testing.expect(nodes.items(.tag)[0] == .root);
-
-        // Property 3: All main_token indices are valid
+        // Property 1: All main_token indices are valid
         const main_tokens = nodes.items(.main_token);
         for (main_tokens) |tok_idx| {
             try testing.expect(tok_idx < tokens.len);
         }
 
-        // Property 4: Token positions within source bounds
+        // Property 2: Token positions within source bounds
         const token_starts = tokens.items(.start);
         for (token_starts) |start| {
             try testing.expect(start <= source.len);
         }
+
+        // Property 3: Diagnostic tokens are valid indices
+        for (mutable_ast.errors) |diag| {
+            try testing.expect(diag.token < tokens.len);
+        }
     } else |err| {
-        // Property 5: Only expected errors
-        try testing.expect(err == error.ParseError or err == error.OutOfMemory);
+        // Only OOM should propagate
+        try testing.expect(err == error.OutOfMemory);
     }
 }

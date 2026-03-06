@@ -44,6 +44,7 @@ const macro_keywords = @import("Token.zig").macro_keywords;
 const Lexer = @import("Lexer.zig").Lexer;
 const Ast = @import("Ast.zig").Ast;
 const Node = @import("Ast.zig").Node;
+const Diagnostic = @import("Ast.zig").Diagnostic;
 
 pub const Parser = struct {
     /// General-purpose allocator for AST construction.
@@ -76,6 +77,9 @@ pub const Parser = struct {
     /// Current expression parsing depth. Used to bound recursion.
     expr_depth: u32 = 0,
 
+    /// Collected parse diagnostics. Populated before returning ParseError.
+    errors: std.ArrayListUnmanaged(Diagnostic),
+
     /// Maximum expression nesting depth (prevents stack overflow).
     const MAX_EXPR_DEPTH: u32 = 64;
 
@@ -87,7 +91,11 @@ pub const Parser = struct {
     };
 
     /// Parse DSL source into an AST.
-    pub fn parse(gpa: Allocator, source: [:0]const u8) Error!Ast {
+    ///
+    /// Always returns an AST. On syntax errors, `ast.errors` is non-empty
+    /// and the AST may be partial. Check `ast.hasParseErrors()` before use.
+    /// Only returns `error.OutOfMemory` on allocation failure.
+    pub fn parse(gpa: Allocator, source: [:0]const u8) Allocator.Error!Ast {
         // Pre-condition
         std.debug.assert(source.len == 0 or source[source.len] == 0);
 
@@ -117,33 +125,41 @@ pub const Parser = struct {
             .gpa = gpa,
             .source = source,
             .tokens = tokens,
-            .nodes = .{}, 
+            .nodes = .{},
             .extra_data = .{},
-            .scratch = .{}, 
+            .scratch = .{},
+            .errors = .{},
             .tok_i = 0,
         };
+        // Scratch is always freed; nodes/extra_data/errors are freed only on OOM
+        defer parser.scratch.deinit(gpa);
         errdefer {
             parser.nodes.deinit(gpa);
             parser.extra_data.deinit(gpa);
-            parser.scratch.deinit(gpa);
+            parser.errors.deinit(gpa);
         }
 
         // Estimate capacity: ~2 tokens per node
         try parser.nodes.ensureTotalCapacity(gpa, tokens.len / 2);
 
-        try parser.parse_root();
+        // Parse — ParseError falls through, OOM propagates
+        parser.parse_root() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ParseError => {},
+        };
 
-        // Post-condition
-        std.debug.assert(parser.nodes.len > 0);
+        // Transfer ownership to Ast
+        const owned_extra = try parser.extra_data.toOwnedSlice(gpa);
+        errdefer gpa.free(owned_extra);
 
-        // Clean up scratch (not needed after parsing)
-        parser.scratch.deinit(gpa);
+        const owned_errors = try parser.errors.toOwnedSlice(gpa);
 
         return Ast{
             .source = source,
             .tokens = tokens.toOwnedSlice(),
             .nodes = parser.nodes.toOwnedSlice(),
-            .extra_data = try parser.extra_data.toOwnedSlice(gpa),
+            .extra_data = owned_extra,
+            .errors = owned_errors,
         };
     }
 
@@ -179,8 +195,7 @@ pub const Parser = struct {
                 self.tok_i += 1;
             }
         } else {
-            // Too many macros
-            return error.ParseError;
+            return self.fail(.too_many_macros);
         }
 
         // Store macro list in extra_data
@@ -230,13 +245,13 @@ pub const Parser = struct {
 
         // Expect identifier (name)
         if (self.current_tag() != .identifier) {
-            return error.ParseError;
+            return self.fail(.expected_name);
         }
         self.tok_i += 1; // consume name
 
         // Expect opening brace
         if (self.current_tag() != .l_brace) {
-            return error.ParseError;
+            return self.fail(.expected_opening_brace);
         }
         self.tok_i += 1; // consume {
 
@@ -245,7 +260,7 @@ pub const Parser = struct {
 
         // Expect closing brace
         if (self.current_tag() != .r_brace) {
-            return error.ParseError;
+            return self.fail(.expected_closing_brace);
         }
         self.tok_i += 1; // consume }
 
@@ -262,18 +277,18 @@ pub const Parser = struct {
 
         // Expect identifier
         if (self.current_tag() != .identifier) {
-            return error.ParseError;
+            return self.fail(.expected_name);
         }
         self.tok_i += 1; // consume name
 
         // Expect =
         if (self.current_tag() != .equals) {
-            return error.ParseError;
+            return self.fail(.expected_equals);
         }
         self.tok_i += 1; // consume =
 
         // Parse value
-        const value = try self.parse_value() orelse return error.ParseError;
+        const value = try self.parse_value() orelse return self.fail(.expected_value);
 
         return try self.add_node(.{
             .tag = .macro_define,
@@ -299,8 +314,7 @@ pub const Parser = struct {
             const prop = try self.parse_property();
             try self.scratch.append(self.gpa, prop.toInt());
         } else {
-            // Too many properties
-            return error.ParseError;
+            return self.fail(.too_many_properties);
         }
 
         const range = try self.add_extra_slice(self.scratch.items[scratch_top..]);
@@ -320,11 +334,11 @@ pub const Parser = struct {
         self.tok_i += 1; // consume key
 
         if (self.current_tag() != .equals) {
-            return error.ParseError;
+            return self.fail(.expected_equals);
         }
         self.tok_i += 1; // consume =
 
-        const value = try self.parse_value() orelse return error.ParseError;
+        const value = try self.parse_value() orelse return self.fail(.expected_value);
 
         const result = try self.add_node(.{
             .tag = .property,
@@ -489,8 +503,7 @@ pub const Parser = struct {
                 },
             }
         } else {
-            // Loop bound exceeded
-            return error.ParseError;
+            return self.fail(.iteration_limit);
         }
 
         // Post-condition
@@ -602,14 +615,14 @@ pub const Parser = struct {
             });
         } else if (self.current_tag() == .l_paren) {
             // Allow -(expr) for explicit negated expressions
-            const expr = try self.parse_expression() orelse return error.ParseError;
+            const expr = try self.parse_expression() orelse return self.fail(.expected_operand);
             return try self.add_node(.{
                 .tag = .expr_negate,
                 .main_token = minus_token,
                 .data = .{ .node = expr },
             });
         } else {
-            return error.ParseError;
+            return self.fail(.expected_operand);
         }
     }
 
@@ -649,7 +662,7 @@ pub const Parser = struct {
             return false;
         }
 
-        if (current == .eof) return error.ParseError;
+        if (current == .eof) return self.failAt(.expected_closing_bracket, arr.bracket_token);
 
         // Parse element
         switch (current) {
@@ -669,7 +682,7 @@ pub const Parser = struct {
                 if (try self.parse_expression()) |expr| {
                     try self.scratch.append(self.gpa, expr.toInt());
                 } else {
-                    return error.ParseError;
+                    return self.fail(.expected_value);
                 }
             },
             .minus => {
@@ -690,6 +703,7 @@ pub const Parser = struct {
                 // Nested container - push task (result will come later)
                 try self.push_container_task(tasks);
             },
+            .r_brace => return self.failAt(.expected_closing_bracket, arr.bracket_token),
             else => return true, // End of elements
         }
 
@@ -720,7 +734,7 @@ pub const Parser = struct {
             return true;
         }
 
-        if (current == .eof) return error.ParseError;
+        if (current == .eof) return self.failAt(.expected_closing_brace, obj.brace_token);
 
         // Skip comments inside objects
         if (current == .line_comment) {
@@ -734,7 +748,7 @@ pub const Parser = struct {
         const key_token = self.tok_i;
         self.tok_i += 1; // consume key
 
-        if (self.current_tag() != .equals) return error.ParseError;
+        if (self.current_tag() != .equals) return self.fail(.expected_equals);
         self.tok_i += 1; // consume =
 
         // Parse value and create property
@@ -754,12 +768,12 @@ pub const Parser = struct {
             },
             .l_paren => {
                 // Grouped expression: size=(1+2)
-                const value = try self.parse_expression() orelse return error.ParseError;
+                const value = try self.parse_expression() orelse return self.fail(.expected_value);
                 try self.add_property_to_scratch(key_token, value);
             },
             .minus => {
                 // Unary negation: offset=-10
-                const value = try self.parse_expression() orelse return error.ParseError;
+                const value = try self.parse_expression() orelse return self.fail(.expected_value);
                 try self.add_property_to_scratch(key_token, value);
             },
             .boolean_literal => {
@@ -775,7 +789,7 @@ pub const Parser = struct {
                 try tasks.append(self.gpa, .{ .finish_property = .{ .key_token = key_token } });
                 try self.push_container_task(tasks);
             },
-            else => return error.ParseError,
+            else => return self.fail(.expected_value),
         }
 
         return false;
@@ -865,11 +879,11 @@ pub const Parser = struct {
 
     // Kept for backward compatibility with parse_property_list
     fn parse_array(self: *Self) Error!Node.Index {
-        return (try self.parse_value()) orelse error.ParseError;
+        return (try self.parse_value()) orelse self.fail(.expected_value);
     }
 
     fn parse_object(self: *Self) Error!Node.Index {
-        return (try self.parse_value()) orelse error.ParseError;
+        return (try self.parse_value()) orelse self.fail(.expected_value);
     }
 
     // ========================================================================
@@ -922,7 +936,7 @@ pub const Parser = struct {
             const op_token = self.tok_i;
             self.tok_i += 1; // advance past operator to parse right-hand side
 
-            const right = try self.parse_term() orelse return error.ParseError;
+            const right = try self.parse_term() orelse return self.fail(.expected_operand);
 
             // Build left-associative tree: a + b + c = (a + b) + c
             const node_tag: Node.Tag = if (op_tag == .plus) .expr_add else .expr_sub;
@@ -932,7 +946,7 @@ pub const Parser = struct {
                 .data = .{ .node_and_node = .{ left.toInt(), right.toInt() } },
             });
         } else {
-            return error.ParseError; // Bounded loop guard - expression too complex
+            return self.fail(.expression_too_complex);
         }
 
         // Post-condition: consumed at least one token
@@ -964,7 +978,7 @@ pub const Parser = struct {
             const op_token = self.tok_i;
             self.tok_i += 1; // consume operator
 
-            const right = try self.parse_factor() orelse return error.ParseError;
+            const right = try self.parse_factor() orelse return self.fail(.expected_operand);
 
             // Build left-associative tree: a * b * c = (a * b) * c
             const node_tag: Node.Tag = if (op_tag == .star) .expr_mul else .expr_div;
@@ -974,7 +988,7 @@ pub const Parser = struct {
                 .data = .{ .node_and_node = .{ left.toInt(), right.toInt() } },
             });
         } else {
-            return error.ParseError; // Too many factors
+            return self.fail(.expression_too_complex);
         }
 
         // Post-condition: consumed at least one token
@@ -993,7 +1007,7 @@ pub const Parser = struct {
     fn parse_factor(self: *Self) Error!?Node.Index {
         // Pre-conditions
         std.debug.assert(self.tok_i < self.tokens.len);
-        if (self.expr_depth >= MAX_EXPR_DEPTH) return error.ParseError;
+        if (self.expr_depth >= MAX_EXPR_DEPTH) return self.fail(.expression_too_deep);
         const start_tok = self.tok_i;
 
         // Track depth for recursive calls
@@ -1008,8 +1022,8 @@ pub const Parser = struct {
             .l_paren => {
                 // Grouped expression: ( expr )
                 self.tok_i += 1; // consume (
-                const inner = try self.parse_expression() orelse return error.ParseError;
-                if (self.current_tag() != .r_paren) return error.ParseError;
+                const inner = try self.parse_expression() orelse return self.fail(.expected_value);
+                if (self.current_tag() != .r_paren) return self.fail(.expected_closing_paren);
                 self.tok_i += 1; // consume )
                 return inner;
             },
@@ -1019,7 +1033,7 @@ pub const Parser = struct {
                 self.tok_i += 1; // consume -
 
                 // Parse the operand (handles --x, -(expr), etc.)
-                const operand = try self.parse_factor() orelse return error.ParseError;
+                const operand = try self.parse_factor() orelse return self.fail(.expected_operand);
                 return try self.add_node(.{
                     .tag = .expr_negate,
                     .main_token = minus_token,
@@ -1088,6 +1102,20 @@ pub const Parser = struct {
     // ========================================================================
     // Helpers
     // ========================================================================
+
+    /// Record a diagnostic at the current token and return ParseError.
+    fn fail(self: *Self, tag: Diagnostic.Tag) Error {
+        return self.failAt(tag, self.tok_i);
+    }
+
+    /// Record a diagnostic at a specific token and return ParseError.
+    fn failAt(self: *Self, tag: Diagnostic.Tag, token: u32) Error {
+        self.errors.append(self.gpa, .{
+            .tag = tag,
+            .token = token,
+        }) catch {}; // Silently drop diagnostic on OOM
+        return error.ParseError;
+    }
 
     fn current_tag(self: *Self) Token.Tag {
         return self.tokens.items(.tag)[self.tok_i];

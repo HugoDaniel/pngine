@@ -96,9 +96,13 @@ pub const Compiler = struct {
         executors_dir: ?[]const u8 = null,
 
         /// Whether to embed the executor WASM in the payload.
-        /// Requires executors_dir to be set.
+        /// Uses executors_dir first, then falls back to embedded_executor_wasm.
         /// Defaults to false for backwards compatibility.
         embed_executor: bool = false,
+
+        /// Fallback executor WASM bytes (e.g., from @embedFile in CLI).
+        /// Used when executors_dir file is not found.
+        embedded_executor_wasm: ?[]const u8 = null,
 
         /// IO context for file operations (required for file embedding and imports)
         io: ?std.Io = null,
@@ -173,13 +177,18 @@ pub const Compiler = struct {
         } else source;
 
         // Phase 1: Parse
-        var ast = Parser.parse(gpa, actual_source) catch |err| {
-            return switch (err) {
-                error.ParseError => error.ParseError,
-                error.OutOfMemory => error.OutOfMemory,
-            };
-        };
+        var ast = try Parser.parse(gpa, actual_source);
         defer ast.deinit(gpa);
+
+        if (ast.hasParseErrors()) {
+            {
+                var stderr_buf: [4096]u8 = undefined;
+                const stderr = std.debug.lockStderr(&stderr_buf);
+                defer std.debug.unlockStderr();
+                ast.renderErrors(&stderr.file_writer.interface) catch {};
+            }
+            return error.ParseError;
+        }
 
         // Phase 2: Analyze
         var analysis = Analyzer.analyze(gpa, &ast) catch |err| {
@@ -244,13 +253,18 @@ pub const Compiler = struct {
         } else source;
 
         // Phase 1: Parse
-        var ast = Parser.parse(gpa, actual_source) catch |err| {
-            return switch (err) {
-                error.ParseError => error.ParseError,
-                error.OutOfMemory => error.OutOfMemory,
-            };
-        };
+        var ast = try Parser.parse(gpa, actual_source);
         defer ast.deinit(gpa);
+
+        if (ast.hasParseErrors()) {
+            {
+                var stderr_buf: [4096]u8 = undefined;
+                const stderr = std.debug.lockStderr(&stderr_buf);
+                defer std.debug.unlockStderr();
+                ast.renderErrors(&stderr.file_writer.interface) catch {};
+            }
+            return error.ParseError;
+        }
 
         // Phase 2: Analyze
         var analysis = Analyzer.analyze(gpa, &ast) catch |err| {
@@ -276,12 +290,20 @@ pub const Compiler = struct {
         const selected_variant = variant_mod.selectVariant(plugins);
 
         // Phase 3: Read executor WASM if embedding is enabled
+        // Try variant-specific file first, fall back to embedded full executor
         var executor_wasm: ?[]u8 = null;
-        defer if (executor_wasm) |e| gpa.free(e);
+        var executor_is_fallback = false;
+        defer if (executor_wasm != null and !executor_is_fallback) gpa.free(executor_wasm.?);
 
         if (options.embed_executor) {
             if (options.executors_dir) |executors_dir| {
-                executor_wasm = try readExecutorWasm(gpa, options.io, executors_dir, selected_variant.name);
+                executor_wasm = readExecutorWasm(gpa, options.io, executors_dir, selected_variant.name) catch null;
+            }
+            if (executor_wasm == null) {
+                if (options.embedded_executor_wasm) |embedded| {
+                    executor_wasm = @constCast(embedded);
+                    executor_is_fallback = true;
+                }
             }
         }
 

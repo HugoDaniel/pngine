@@ -349,6 +349,7 @@ fn fuzzExpressionEvaluation(_: void, input: []const u8) !void {
     // Try to parse (may fail, that's OK)
     var ast = Parser.parse(testing.allocator, source) catch return;
     defer ast.deinit(testing.allocator);
+    if (ast.hasParseErrors()) return;
 
     // Create analyzer
     var analyzer = Analyzer.init(testing.allocator, &ast);
