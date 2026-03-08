@@ -126,6 +126,12 @@ pub const Emitter = struct {
     /// Used for v2 format runtime deduplication.
     wgsl_name_to_id: std.StringHashMapUnmanaged(u16),
 
+    /// Maps wgsl_id → unminified code for import resolution.
+    /// When --minify is used, the data section stores minified code, but
+    /// buildAndCacheResolvedCode needs unminified code to avoid mixing
+    /// minified fragments with unminified references.
+    unminified_wgsl: std.AutoHashMapUnmanaged(u16, []const u8),
+
     // Counters for generating IDs
     next_buffer_id: u16 = 0,
     next_texture_id: u16 = 0,
@@ -309,6 +315,7 @@ pub const Emitter = struct {
             .uniform_bindings = .{},
             .resolved_wgsl_cache = .{},
             .wgsl_name_to_id = .{},
+            .unminified_wgsl = .{},
         };
     }
 
@@ -351,6 +358,12 @@ pub const Emitter = struct {
         }
         self.resolved_wgsl_cache.deinit(self.gpa);
         self.wgsl_name_to_id.deinit(self.gpa);
+        // Free unminified WGSL cache
+        var um_it = self.unminified_wgsl.valueIterator();
+        while (um_it.next()) |value_ptr| {
+            self.gpa.free(value_ptr.*);
+        }
+        self.unminified_wgsl.deinit(self.gpa);
         // Free animation metadata scenes array
         if (self.animation_metadata) |meta| {
             if (meta.scenes.len > 0) {

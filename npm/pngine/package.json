@@ -1,6 +1,6 @@
 {
   "name": "pngine",
-  "version": "0.1.0",
+  "version": "1.0.10",
   "description": "WebGPU bytecode engine - shader art that fits in a PNG",
   "scripts": {
     "build": "node scripts/bundle.js",
@@ -62,15 +62,23 @@
       },
       "import": "./dist/executor.mjs"
     },
+    "./mini": {
+      "types": "./dist/mini.d.ts",
+      "browser": {
+        "import": "./dist/mini.mjs",
+        "default": "./dist/mini.mjs"
+      },
+      "import": "./dist/mini.mjs"
+    },
     "./wasm": "./wasm/pngine.wasm"
   },
   "optionalDependencies": {
-    "@pngine/darwin-arm64": "0.1.0",
-    "@pngine/darwin-x64": "0.1.0",
-    "@pngine/linux-x64": "0.1.0",
-    "@pngine/linux-arm64": "0.1.0",
-    "@pngine/win32-x64": "0.1.0",
-    "@pngine/win32-arm64": "0.1.0"
+    "@pngine/darwin-arm64": "1.0.10",
+    "@pngine/darwin-x64": "1.0.10",
+    "@pngine/linux-x64": "1.0.10",
+    "@pngine/linux-arm64": "1.0.10",
+    "@pngine/win32-x64": "1.0.10",
+    "@pngine/win32-arm64": "1.0.10"
   },
   "files": [
     "dist/",

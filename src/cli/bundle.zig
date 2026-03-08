@@ -10,7 +10,7 @@ const zip = pngine.zip;
 const utils = @import("utils.zig");
 const compile = @import("compile.zig");
 const build_options = @import("build_options");
-const embedded_wasm: []const u8 = @embedFile("embedded_wasm");
+const embedded_wasm: []const u8 = if (build_options.has_embedded_wasm) @embedFile("embedded_wasm") else &.{};
 
 /// Execute the bundle command.
 pub fn runBundle(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {

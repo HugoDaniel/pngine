@@ -3,6 +3,7 @@
 
 const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 const PNGB_CHUNK = [0x70, 0x4e, 0x47, 0x62]; // 'pNGb'
+const PNGA_CHUNK = [0x70, 0x4e, 0x47, 0x61]; // 'pNGa'
 
 /**
  * Check if data is PNG
@@ -223,6 +224,48 @@ async function decompress(data) {
   }
 
   return result;
+}
+
+/**
+ * Extract audio WASM from PNG with pNGa chunk
+ * @param {ArrayBuffer|Uint8Array} data
+ * @returns {Promise<Uint8Array|null>} Audio WASM bytes or null if no audio
+ */
+export async function extractAudio(data) {
+  const b = data instanceof Uint8Array ? data : new Uint8Array(data);
+  if (!isPng(b)) return null;
+
+  let pos = 8;
+  while (pos + 12 <= b.length) {
+    const len = readU32BE(b, pos);
+    const type = b.subarray(pos + 4, pos + 8);
+
+    if (type[0] === PNGA_CHUNK[0] && type[1] === PNGA_CHUNK[1] &&
+        type[2] === PNGA_CHUNK[2] && type[3] === PNGA_CHUNK[3]) {
+      const chunk = b.subarray(pos + 8, pos + 8 + len);
+      return parsePngaChunk(chunk);
+    }
+    pos += 12 + len;
+  }
+
+  return null;
+}
+
+/**
+ * Parse pNGa chunk data (same format as pNGb: version + flags + data)
+ * @param {Uint8Array} data
+ * @returns {Promise<Uint8Array>}
+ */
+async function parsePngaChunk(data) {
+  if (data.length < 2) throw new Error("Invalid pNGa chunk");
+
+  const flags = data[1];
+  const payload = data.subarray(2);
+
+  if (flags & 1) {
+    return decompress(payload);
+  }
+  return new Uint8Array(payload);
 }
 
 // Little-endian readers

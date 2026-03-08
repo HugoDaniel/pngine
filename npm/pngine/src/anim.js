@@ -76,6 +76,9 @@ export function play(p) {
   i.playing = true;
   i.startTime = performance.now() - i.time * 1000;
 
+  // Start audio synced with visual time
+  if (i.audio) i.audio.play(i.time);
+
   const loop = () => {
     if (!i.playing) return;
 
@@ -93,10 +96,12 @@ export function play(p) {
           case "restart":
             i.startTime = now;
             time = 0;
+            if (i.audio) i.audio.seek(0);
             break;
           case "stop":
             i.playing = false;
             i.time = durationSec;
+            if (i.audio) i.audio.stop();
             draw(p, { time: durationSec });
             return;
           case "hold":
@@ -135,6 +140,8 @@ export function pause(p) {
   i.playing = false;
   i.time = (performance.now() - i.startTime) / 1000;
 
+  if (i.audio) i.audio.pause();
+
   if (i.animationId) {
     cancelAnimationFrame(i.animationId);
     i.animationId = null;
@@ -153,6 +160,8 @@ export function stop(p) {
 
   const i = p._;
   if (!i) return p;
+
+  if (i.audio) i.audio.stop();
 
   i.time = 0;
   i.startTime = performance.now();
@@ -175,6 +184,8 @@ export function seek(p, time) {
   if (i.playing) {
     i.startTime = performance.now() - time * 1000;
   }
+
+  if (i.audio) i.audio.seek(time);
 
   draw(p, { time });
   return p;

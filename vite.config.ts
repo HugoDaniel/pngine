@@ -2,6 +2,7 @@ import { defineConfig } from 'vite'
 import { resolve } from 'path'
 
 export default defineConfig({
+  define: { DEBUG: 'true' },
   root: 'zig-out/playground',
   server: {
     port: 5173,

@@ -22,6 +22,13 @@ const SRC_DIR = path.join(__dirname, '../src');
 const DIST_DIR = path.join(__dirname, '../dist');
 const DEBUG = process.argv.includes('--debug');
 
+// Resolve esbuild binary: prefer local node_modules, fall back to global
+const ESBUILD = (() => {
+  const localBin = path.join(__dirname, '../../../node_modules/.bin/esbuild');
+  if (fs.existsSync(localBin)) return localBin;
+  return 'esbuild';
+})();
+
 if (!fs.existsSync(DIST_DIR)) {
   fs.mkdirSync(DIST_DIR, { recursive: true });
 }
@@ -38,6 +45,10 @@ function cleanupDist() {
     'core.mjs.map',
     'executor.mjs',
     'executor.mjs.map',
+    'mini.mjs',
+    'mini.mjs.map',
+    'mini-no-audio.mjs',
+    'mini-no-audio.mjs.map',
     'index.js',
     'index.mjs',
     'index.d.ts',
@@ -45,6 +56,8 @@ function cleanupDist() {
     'dev.d.ts',
     'core.d.ts',
     'executor.d.ts',
+    'mini.d.ts',
+    'mini-no-audio.d.ts',
     // Removed compatibility outputs (keep cleaning stale artifacts).
     'browser.mjs',
     'browser.mjs.map',
@@ -77,7 +90,7 @@ function normalizeImportPath(p) {
 
 function runEsbuild(entry, outfile, opts = {}) {
   const args = [
-    'esbuild',
+    ESBUILD,
     entry,
     `--outfile=${outfile}`,
     '--bundle',
@@ -229,7 +242,7 @@ ${exportBlock}
 }
 
 function writeNodeStubs() {
-  console.log('4. Creating Node.js stubs...');
+  console.log('5. Creating Node.js stubs...');
 
   const nodeStub = `
 const PNG_SIG = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
@@ -318,7 +331,7 @@ export const extractBytecode = browserOnly;
 }
 
 function writeTypeDefs() {
-  console.log('5. Creating TypeScript definitions...');
+  console.log('6. Creating TypeScript definitions...');
 
   const sharedTypes = `
 /** Uniform value: number (f32), array (vecNf), or nested array (matNxMf) */
@@ -360,6 +373,7 @@ export function isPngb(data: ArrayBuffer | Uint8Array): boolean;
 export interface ViewerOptions {
   canvas: HTMLCanvasElement;
   debug?: boolean;
+  dpr?: number;
   onError?: (error: Error) => void;
 }
 
@@ -374,6 +388,7 @@ ${sharedTypes}
 export interface DevOptions {
   canvas?: HTMLCanvasElement;
   debug?: boolean;
+  dpr?: number;
   wasmUrl?: string | URL;
   onError?: (error: Error) => void;
 }
@@ -528,11 +543,34 @@ export function getExecutorImports(callbacks?: ExecutorCallbacks): WebAssembly.I
 export function getExecutorVariantName(plugins: PayloadInfo['plugins']): string;
 `;
 
+  const miniTypes = `
+export interface MiniOptions {
+  autoplay?: boolean;
+}
+
+export interface MiniInstance {
+  play(): void;
+  pause(): void;
+  stop(): void;
+  destroy(): void;
+  readonly time: number;
+  readonly isPlaying: boolean;
+}
+
+export function miniPngine(
+  canvas: HTMLCanvasElement,
+  source: string | ArrayBuffer | Uint8Array,
+  opts?: MiniOptions
+): Promise<MiniInstance>;
+`;
+
   fs.writeFileSync(path.join(DIST_DIR, 'index.d.ts'), viewerTypes);
   fs.writeFileSync(path.join(DIST_DIR, 'viewer.d.ts'), viewerTypes);
   fs.writeFileSync(path.join(DIST_DIR, 'dev.d.ts'), devTypes);
   fs.writeFileSync(path.join(DIST_DIR, 'core.d.ts'), coreTypes);
   fs.writeFileSync(path.join(DIST_DIR, 'executor.d.ts'), executorTypes);
+  fs.writeFileSync(path.join(DIST_DIR, 'mini.d.ts'), miniTypes);
+  fs.writeFileSync(path.join(DIST_DIR, 'mini-no-audio.d.ts'), miniTypes);
 }
 
 console.log('1. Building viewer profile...');
@@ -575,6 +613,18 @@ if (!runEsbuild(path.join(SRC_DIR, 'executor.js'), executorOut, { embeddedOnly: 
   process.exit(1);
 }
 
+console.log('4. Building mini profile...');
+const miniOut = path.join(DIST_DIR, 'mini.mjs');
+if (!runEsbuild(path.join(SRC_DIR, 'mini.js'), miniOut, { embeddedOnly: true, define: { AUDIO: 'true' } })) {
+  process.exit(1);
+}
+
+console.log('4b. Building mini-no-audio profile...');
+const miniNoAudioOut = path.join(DIST_DIR, 'mini-no-audio.mjs');
+if (!runEsbuild(path.join(SRC_DIR, 'mini.js'), miniNoAudioOut, { embeddedOnly: true, define: { AUDIO: 'false' } })) {
+  process.exit(1);
+}
+
 writeNodeStubs();
 writeTypeDefs();
 
@@ -585,6 +635,8 @@ const files = [
   ['dev.mjs', devOut],
   ['core.mjs', coreOut],
   ['executor.mjs', executorOut],
+  ['mini.mjs', miniOut],
+  ['mini-no-audio.mjs', miniNoAudioOut],
   ['index.js (node stub)', path.join(DIST_DIR, 'index.js')],
 ];
 

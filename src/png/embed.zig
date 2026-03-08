@@ -34,6 +34,12 @@ pub const PNGB_CHUNK_TYPE = chunk.ChunkType.pNGb;
 /// pNGm chunk type identifier for metadata.
 pub const PNGM_CHUNK_TYPE = chunk.ChunkType.pNGm;
 
+/// pNGa chunk type identifier for audio.
+pub const PNGA_CHUNK_TYPE = chunk.ChunkType.pNGa;
+
+/// pNGf chunk type identifier for flat command buffers.
+pub const PNGF_CHUNK_TYPE = chunk.ChunkType.pNGf;
+
 /// Current pNGm format version.
 pub const PNGM_VERSION: u8 = 0x01;
 
@@ -238,6 +244,145 @@ pub fn embedWithMetadata(
 
 /// Find the byte offset of the IEND chunk in PNG data.
 ///
+/// Embed audio WASM into a PNG image as a pNGa chunk.
+///
+/// Inserts a pNGa chunk containing compressed audio WASM immediately
+/// before the IEND chunk. The audio WASM (e.g., sointu compiled song)
+/// is compressed with DEFLATE for size reduction.
+///
+/// Pre-conditions:
+/// - png_data starts with valid PNG signature
+/// - png_data contains IEND chunk
+/// - audio_wasm is a valid WASM module
+///
+/// Post-conditions:
+/// - Returns valid PNG with embedded pNGa chunk
+/// - Original image data and other chunks preserved
+/// - Caller owns returned slice
+pub fn embedAudio(
+    allocator: std.mem.Allocator,
+    png_data: []const u8,
+    audio_wasm: []const u8,
+) Error![]u8 {
+    // Pre-condition: valid PNG signature
+    if (png_data.len < 8 or !std.mem.eql(u8, png_data[0..8], &chunk.PNG_SIGNATURE)) {
+        return Error.InvalidPng;
+    }
+
+    std.debug.assert(png_data.len >= 8);
+    std.debug.assert(audio_wasm.len > 0);
+
+    // Find IEND chunk position
+    const iend_pos = findIEND(png_data) orelse return Error.MissingIEND;
+    std.debug.assert(iend_pos >= 8);
+
+    // Compress audio WASM
+    const compressed = compressDeflateRaw(allocator, audio_wasm) catch {
+        return Error.CompressionFailed;
+    };
+    defer allocator.free(compressed);
+
+    // Build pNGa chunk data: version + flags + compressed payload
+    const pnga_data_size = 2 + compressed.len;
+    const pnga_data = allocator.alloc(u8, pnga_data_size) catch {
+        return Error.OutOfMemory;
+    };
+    defer allocator.free(pnga_data);
+
+    pnga_data[0] = PNGB_VERSION; // Same version scheme
+    pnga_data[1] = FLAG_COMPRESSED;
+    @memcpy(pnga_data[2..], compressed);
+
+    // Calculate output size
+    const pnga_chunk_size = chunk.chunkSize(pnga_data_size);
+    const result_size = iend_pos + pnga_chunk_size + (png_data.len - iend_pos);
+
+    const result = allocator.alloc(u8, result_size) catch {
+        return Error.OutOfMemory;
+    };
+    errdefer allocator.free(result);
+
+    // Assemble: [original up to IEND] + [pNGa chunk] + [IEND chunk]
+    @memcpy(result[0..iend_pos], png_data[0..iend_pos]);
+    _ = chunk.writeChunkToBuffer(result[iend_pos..], PNGA_CHUNK_TYPE, pnga_data);
+    @memcpy(result[iend_pos + pnga_chunk_size ..], png_data[iend_pos..]);
+
+    // Post-conditions
+    std.debug.assert(std.mem.eql(u8, result[0..8], &chunk.PNG_SIGNATURE));
+    std.debug.assert(result.len > png_data.len);
+
+    return result;
+}
+
+/// Embed flat command buffer data into a PNG image as a pNGf chunk.
+///
+/// The flat data contains pre-flattened init + frame command buffers with
+/// inline data section. No WASM executor needed at runtime.
+///
+/// Pre-conditions:
+/// - png_data starts with valid PNG signature
+/// - png_data contains IEND chunk
+/// - flat_data is a valid flat command buffer
+///
+/// Post-conditions:
+/// - Returns valid PNG with embedded pNGf chunk
+/// - Original image data and other chunks preserved
+/// - Caller owns returned slice
+pub fn embedFlat(
+    allocator: std.mem.Allocator,
+    png_data: []const u8,
+    flat_data: []const u8,
+) Error![]u8 {
+    // Pre-condition: valid PNG signature
+    if (png_data.len < 8 or !std.mem.eql(u8, png_data[0..8], &chunk.PNG_SIGNATURE)) {
+        return Error.InvalidPng;
+    }
+
+    std.debug.assert(png_data.len >= 8);
+    std.debug.assert(flat_data.len > 0);
+
+    // Find IEND chunk position
+    const iend_pos = findIEND(png_data) orelse return Error.MissingIEND;
+    std.debug.assert(iend_pos >= 8);
+
+    // Compress flat data
+    const compressed = compressDeflateRaw(allocator, flat_data) catch {
+        return Error.CompressionFailed;
+    };
+    defer allocator.free(compressed);
+
+    // Build pNGf chunk data: version + flags + compressed payload
+    const pngf_data_size = 2 + compressed.len;
+    const pngf_data = allocator.alloc(u8, pngf_data_size) catch {
+        return Error.OutOfMemory;
+    };
+    defer allocator.free(pngf_data);
+
+    pngf_data[0] = PNGB_VERSION; // Same version scheme
+    pngf_data[1] = FLAG_COMPRESSED;
+    @memcpy(pngf_data[2..], compressed);
+
+    // Calculate output size
+    const pngf_chunk_size = chunk.chunkSize(pngf_data_size);
+    const result_size = iend_pos + pngf_chunk_size + (png_data.len - iend_pos);
+
+    const result = allocator.alloc(u8, result_size) catch {
+        return Error.OutOfMemory;
+    };
+    errdefer allocator.free(result);
+
+    // Assemble: [original up to IEND] + [pNGf chunk] + [IEND chunk]
+    @memcpy(result[0..iend_pos], png_data[0..iend_pos]);
+    _ = chunk.writeChunkToBuffer(result[iend_pos..], PNGF_CHUNK_TYPE, pngf_data);
+    @memcpy(result[iend_pos + pngf_chunk_size ..], png_data[iend_pos..]);
+
+    // Post-conditions
+    std.debug.assert(std.mem.eql(u8, result[0..8], &chunk.PNG_SIGNATURE));
+    std.debug.assert(result.len > png_data.len);
+
+    return result;
+}
+
 /// IEND chunks have 0-length data, so we look for the pattern:
 /// 00 00 00 00 (length) + 49 45 4E 44 ("IEND")
 ///

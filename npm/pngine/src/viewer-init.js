@@ -1,7 +1,8 @@
 // Viewer initialization (lean production path)
 // Spawns worker with embedded-executor payloads only.
 
-import { extractBytecode } from "./extract.js";
+import { extractBytecode, extractAudio } from "./extract.js";
+import { createAudioPlayer } from "./audio.js";
 
 const PNGB_HEADER_SIZE = 40;
 const PNGB_VERSION_V0 = 0;
@@ -19,6 +20,7 @@ let workerUrl = null;
  * @param {Object} options
  * @param {HTMLCanvasElement} options.canvas
  * @param {boolean} [options.debug]
+ * @param {number} [options.dpr]
  * @param {(err: Error) => void} [options.onError]
  * @returns {Promise<Pngine>}
  */
@@ -32,7 +34,7 @@ export async function pngine(source, options = {}) {
     throw new Error("viewer pngine() does not support wasmUrl; use embedded executor payloads");
   }
 
-  let bytecode;
+  let bytecode, rawData;
 
   if (typeof source === "string") {
     // CSS selector shortcuts are intentionally dev-only to keep viewer API strict.
@@ -43,14 +45,15 @@ export async function pngine(source, options = {}) {
 
     const resp = await fetch(source);
     if (!resp.ok) throw new Error(`Fetch failed: ${resp.status}`);
-    bytecode = await extractBytecode(await resp.arrayBuffer());
+    rawData = await resp.arrayBuffer();
+    bytecode = await extractBytecode(rawData);
   } else if (
     source instanceof ArrayBuffer ||
     source instanceof Uint8Array ||
     source instanceof Blob
   ) {
-    const data = source instanceof Blob ? await source.arrayBuffer() : source;
-    bytecode = await extractBytecode(data);
+    rawData = source instanceof Blob ? await source.arrayBuffer() : source;
+    bytecode = await extractBytecode(rawData);
   } else if (typeof HTMLImageElement !== "undefined" && source instanceof HTMLImageElement) {
     throw new Error("viewer pngine() does not support HTMLImageElement sources; use pngine/dev");
   } else {
@@ -59,6 +62,15 @@ export async function pngine(source, options = {}) {
 
   // Viewer contract: only embedded-executor payloads are accepted.
   assertEmbeddedExecutorPayload(bytecode);
+
+  // Scale canvas buffer for HiDPI displays (Three.js pattern)
+  const dpr = options.dpr ?? globalThis.devicePixelRatio ?? 1;
+  const logicalW = canvas.width;
+  const logicalH = canvas.height;
+  canvas.width = Math.floor(logicalW * dpr);
+  canvas.height = Math.floor(logicalH * dpr);
+  canvas.style.width = logicalW + "px";
+  canvas.style.height = logicalH + "px";
 
   const offscreen = canvas.transferControlToOffscreen();
   const worker = new Worker(getWorkerUrl(), { type: "module" });
@@ -95,6 +107,15 @@ export async function pngine(source, options = {}) {
     );
   });
 
+  // Extract and initialize audio from PNG (pNGa chunk) on main thread
+  let audio = null;
+  if (rawData) {
+    const audioWasm = await extractAudio(rawData);
+    if (audioWasm) {
+      audio = await createAudioPlayer(audioWasm);
+    }
+  }
+
   worker.onmessage = (e) => {
     if (e.data.type === "error" && options.onError) {
       options.onError(new Error(e.data.message));
@@ -104,8 +125,8 @@ export async function pngine(source, options = {}) {
   return createPngine({
     canvas,
     worker,
-    width: result.width,
-    height: result.height,
+    width: logicalW,
+    height: logicalH,
     frameCount: result.frameCount,
     animation: result.animation || null,
     currentScene: null,
@@ -115,6 +136,7 @@ export async function pngine(source, options = {}) {
     time: 0,
     startTime: 0,
     animationId: null,
+    audio,
   });
 }
 
@@ -150,6 +172,9 @@ function createPngine(internal) {
     get duration() {
       return internal.animation ? internal.animation.duration / 1000 : 0;
     },
+    get audio() {
+      return internal.audio;
+    },
 
     // Internal state (for other functions)
     _: internal,
@@ -166,6 +191,7 @@ export function destroy(p) {
   if (!i) return p;
 
   if (i.animationId) cancelAnimationFrame(i.animationId);
+  if (i.audio) i.audio.destroy();
   i.worker.postMessage({ type: "destroy" });
   i.worker.terminate();
 

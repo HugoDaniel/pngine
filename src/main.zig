@@ -81,6 +81,8 @@ pub const png = struct {
 
     // Re-export bytecode functions
     pub const embedBytecode = embed.embed;
+    pub const embedAudio = embed.embedAudio;
+    pub const embedFlat = embed.embedFlat;
     pub const extractBytecode = extract.extract;
     pub const hasPngb = extract.hasPngb;
     pub const getPngbInfo = extract.getPngbInfo;

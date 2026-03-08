@@ -1,0 +1,13 @@
+{
+  "name": "pngine-audio-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:png": "../../zig-out/bin/pngine ../demo2025/sceneR.wgsl.pngine -o public/sceneR.png --audio audio/test_chords.wasm",
+    "dev": "vite",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^7.3.0"
+  }
+}

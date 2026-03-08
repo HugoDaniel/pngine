@@ -10,6 +10,8 @@
 const std = @import("std");
 const pngine = @import("pngine");
 const utils = @import("utils.zig");
+const build_options = @import("build_options");
+const embedded_wasm: []const u8 = if (build_options.has_embedded_wasm) @embedFile("embedded_wasm") else &.{};
 
 /// Compile result with optional plugin/variant info for DSL files.
 pub const CompileOutput = struct {
@@ -99,10 +101,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     defer allocator.free(source);
 
     // Compile using appropriate compiler based on file extension
+    const fallback_wasm: ?[]const u8 = if (embedded_wasm.len > 0) embedded_wasm else null;
     const result = compileSourceWithPlugins(allocator, io, input, source, .{
         .embed_executor = embed_executor,
         .executors_dir = executors_dir,
         .minify_shaders = minify_shaders,
+        .embedded_executor_wasm = fallback_wasm,
     }) catch |err| {
         std.debug.print("Error: compilation failed: {}\n", .{err});
         return 3;
@@ -147,6 +151,8 @@ pub const CompileOptions = struct {
     /// Minify WGSL shaders for smaller payload size.
     /// Requires libminiray.a to be linked.
     minify_shaders: bool = false,
+    /// Fallback executor WASM bytes when variant file not found on disk.
+    embedded_executor_wasm: ?[]const u8 = null,
 };
 
 /// Compile source using appropriate compiler based on file extension.
@@ -176,6 +182,7 @@ pub fn compileSourceWithPlugins(
             .minify_shaders = options.minify_shaders,
             .embed_executor = options.embed_executor,
             .executors_dir = options.executors_dir,
+            .embedded_executor_wasm = options.embedded_executor_wasm,
             .io = io,
         });
 

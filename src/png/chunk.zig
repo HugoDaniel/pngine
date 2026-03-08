@@ -35,6 +35,15 @@ pub const ChunkType = struct {
     /// PNGine metadata chunk (ancillary, public, safe-to-copy)
     /// Contains animation metadata as JSON for JS runtime consumption
     pub const pNGm = [4]u8{ 'p', 'N', 'G', 'm' };
+    /// PNGine audio chunk (ancillary, public, safe-to-copy)
+    /// Contains audio WASM module (e.g., sointu compiled song)
+    pub const pNGa = [4]u8{ 'p', 'N', 'G', 'a' };
+    /// PNGine flat command buffer chunk (ancillary, public, safe-to-copy)
+    /// Contains pre-flattened init + frame command buffers with inline data
+    pub const pNGf = [4]u8{ 'p', 'N', 'G', 'f' };
+    /// PNGine WGSL source chunk (ancillary, public, safe-to-copy)
+    /// Contains deflate-compressed WGSL shader code for --html compression
+    pub const pNGw = [4]u8{ 'p', 'N', 'G', 'w' };
 };
 
 /// A parsed PNG chunk (references original data, no allocation).

@@ -53,23 +53,35 @@ const opcodes = bytecode_mod.opcodes;
 const OpCode = opcodes.OpCode;
 
 // ============================================================================
-// Configuration
+// Configuration (overridable via "wasm_config" build option module)
 // ============================================================================
 
-/// Maximum bytecode size (256KB).
-const MAX_BYTECODE_SIZE: u32 = 256 * 1024;
+/// Buffer size configuration. Defaults are used when no "wasm_config" module
+/// is provided by the build system. The micro build (`zig build wasm-micro`)
+/// overrides these with smaller values for size-coding.
+const wasm_config = struct {
+    const cfg = @import("wasm_config");
+    pub const max_bytecode_kb: u32 = if (@hasDecl(cfg, "max_bytecode_kb")) cfg.max_bytecode_kb else 256;
+    pub const max_data_kb: u32 = if (@hasDecl(cfg, "max_data_kb")) cfg.max_data_kb else 512;
+    pub const command_buffer_kb: u32 = if (@hasDecl(cfg, "command_buffer_kb")) cfg.command_buffer_kb else 64;
+    pub const max_wgsl_modules: u32 = if (@hasDecl(cfg, "max_wgsl_modules")) cfg.max_wgsl_modules else 64;
+    pub const max_passes: u32 = if (@hasDecl(cfg, "max_passes")) cfg.max_passes else 8;
+};
 
-/// Maximum data section size (512KB).
-const MAX_DATA_SIZE: u32 = 512 * 1024;
+/// Maximum bytecode size.
+const MAX_BYTECODE_SIZE: u32 = wasm_config.max_bytecode_kb * 1024;
 
-/// Command buffer capacity (64KB).
-const COMMAND_BUFFER_SIZE: u32 = 64 * 1024;
+/// Maximum data section size.
+const MAX_DATA_SIZE: u32 = wasm_config.max_data_kb * 1024;
+
+/// Command buffer capacity.
+const COMMAND_BUFFER_SIZE: u32 = wasm_config.command_buffer_kb * 1024;
 
 /// Maximum WGSL modules for resolution.
-const MAX_WGSL_MODULES: u32 = 64;
+const MAX_WGSL_MODULES: u32 = wasm_config.max_wgsl_modules;
 
 /// Maximum passes that can be defined.
-const MAX_PASSES: u32 = 64;
+const MAX_PASSES: u32 = wasm_config.max_passes;
 
 /// Maximum iterations for bytecode execution (safety bound).
 /// Must be >= bytecode size to handle 1-byte opcodes worst case.

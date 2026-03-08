@@ -23,6 +23,9 @@ const std = @import("std");
 const pngine = @import("pngine");
 const format = pngine.format;
 const types_gen = @import("types_gen.zig");
+const flat = @import("flat.zig");
+const html_template = @import("html_template.zig");
+const js_codegen = @import("js_codegen.zig");
 const test_utils = @import("../test_utils.zig");
 
 // Build-time embedded WASM runtime
@@ -48,6 +51,14 @@ pub const Options = struct {
     generate_types: bool = false,
     /// true to minify WGSL shaders for smaller payload
     minify_shaders: bool = false,
+    /// Optional path to audio WASM file (e.g., sointu compiled song) to embed as pNGa chunk
+    audio_path: ?[]const u8 = null,
+    /// true to produce flat command buffer (pNGf) instead of WASM executor
+    flat_mode: bool = false,
+    /// true to produce self-contained HTML file
+    html_mode: bool = false,
+    /// true to disable WGSL compression in HTML output
+    no_compress: bool = false,
 };
 
 /// Execute the render command.
@@ -87,7 +98,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     defer if (opts.output_path == null) allocator.free(output);
 
     // Execute render pipeline
-    return executePipeline(allocator, io, opts.input_path, output, opts.width, opts.height, opts.time, opts.embed_bytecode, opts.render_frame, opts.embed_executor, opts.scene_name, opts.generate_types, opts.minify_shaders);
+    return executePipeline(allocator, io, opts.input_path, output, opts.width, opts.height, opts.time, opts.embed_bytecode, opts.render_frame, opts.embed_executor, opts.scene_name, opts.generate_types, opts.minify_shaders, opts.audio_path, opts.flat_mode, opts.html_mode, opts.no_compress);
 }
 
 /// Parse render command arguments.
@@ -145,8 +156,22 @@ fn parseArgs(args: []const []const u8, opts: *Options) u8 {
             opts.embed_executor = false;
         } else if (std.mem.eql(u8, arg, "--minify") or std.mem.eql(u8, arg, "-m")) {
             opts.minify_shaders = true;
+        } else if (std.mem.eql(u8, arg, "--audio") or std.mem.eql(u8, arg, "-a")) {
+            if (i + 1 >= args_len) {
+                std.debug.print("Error: --audio requires a path to audio WASM file\n", .{});
+                return 1;
+            }
+            opts.audio_path = args[i + 1];
+            skip_count = 1;
         } else if (std.mem.eql(u8, arg, "--types")) {
             opts.generate_types = true;
+        } else if (std.mem.eql(u8, arg, "--flat")) {
+            opts.flat_mode = true;
+        } else if (std.mem.eql(u8, arg, "--html")) {
+            opts.html_mode = true;
+            opts.flat_mode = true; // HTML implies flat
+        } else if (std.mem.eql(u8, arg, "--no-compress")) {
+            opts.no_compress = true;
         } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--scene")) {
             if (i + 1 >= args_len) {
                 std.debug.print("Error: -n requires a scene/frame name\n", .{});
@@ -229,6 +254,10 @@ fn executePipeline(
     scene_name: ?[]const u8,
     generate_types: bool,
     minify_shaders: bool,
+    audio_path: ?[]const u8,
+    flat_mode: bool,
+    html_mode: bool,
+    no_compress: bool,
 ) !u8 {
     // Pre-conditions
     std.debug.assert(input.len > 0);
@@ -270,6 +299,16 @@ fn executePipeline(
     }
     defer if (executor_embedded) allocator.free(final_bytecode);
 
+    // HTML mode: use JS codegen (no pNGf intermediate, no PNG framing)
+    if (html_mode) {
+        return executeHtmlCodegen(allocator, io, output, width, height, bytecode, audio_path, !no_compress);
+    }
+
+    // Flat mode: flatten bytecode into pNGf format
+    if (flat_mode) {
+        return executeFlatPipeline(allocator, io, input, output, width, height, bytecode, audio_path);
+    }
+
     // Generate PNG (either rendered frame or 1x1 transparent pixel)
     const png_result = generatePng(allocator, final_bytecode, width, height, time, render_frame, scene_name);
     if (png_result.exit_code != 0) return png_result.exit_code;
@@ -283,6 +322,24 @@ fn executePipeline(
             std.debug.print("Error: failed to embed bytecode: {}\n", .{err});
             return 4;
         };
+    }
+
+    // Optionally embed audio WASM in PNG (pNGa chunk)
+    if (audio_path) |apath| {
+        const audio_wasm = readBinaryFile(allocator, io, apath) catch |err| {
+            std.debug.print("Error: failed to read audio '{s}': {}\n", .{ apath, err });
+            return 2;
+        };
+        defer allocator.free(audio_wasm);
+
+        const with_audio = pngine.png.embedAudio(allocator, png_data, audio_wasm) catch |err| {
+            std.debug.print("Error: failed to embed audio: {}\n", .{err});
+            return 4;
+        };
+        allocator.free(png_data);
+        png_data = with_audio;
+
+        std.debug.print("  Audio: {s} ({d} bytes)\n", .{ apath, audio_wasm.len });
     }
 
     // Write final output
@@ -315,6 +372,110 @@ fn executePipeline(
 
     // Report success to user
     printSuccessMessage(input, output, png_data.len, width, height, time, embed_bytecode, render_frame, executor_embedded);
+    return 0;
+}
+
+/// Execute HTML codegen pipeline: compile → MockGPU → emit JS directly.
+fn executeHtmlCodegen(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    output: []const u8,
+    width: u32,
+    height: u32,
+    bytecode: []const u8,
+    audio_path: ?[]const u8,
+    compress: bool,
+) !u8 {
+    // Read audio WASM if present
+    var audio_wasm_data: ?[]const u8 = null;
+    if (audio_path) |apath| {
+        audio_wasm_data = readBinaryFile(allocator, io, apath) catch |err| {
+            std.debug.print("Error: failed to read audio '{s}': {}\n", .{ apath, err });
+            return 2;
+        };
+    }
+    defer if (audio_wasm_data) |awd| allocator.free(awd);
+
+    var codegen_result = js_codegen.generate(allocator, bytecode, width, height, audio_wasm_data, compress) catch |err| {
+        std.debug.print("Error: failed to generate HTML: {}\n", .{err});
+        return 4;
+    };
+    defer codegen_result.deinit(allocator);
+
+    // Write HTML
+    {
+        const file = std.Io.Dir.cwd().createFile(io, output, .{}) catch |err| {
+            std.debug.print("Error: failed to write '{s}': {}\n", .{ output, err });
+            return 2;
+        };
+        defer file.close(io);
+        file.writeStreamingAll(io, codegen_result.html) catch |err| {
+            std.debug.print("Error: failed to write '{s}': {}\n", .{ output, err });
+            return 2;
+        };
+    }
+
+    std.debug.print("Created: {s} ({d} bytes, self-contained HTML)\n", .{ output, codegen_result.html.len });
+    return 0;
+}
+
+/// Execute flat pipeline: compile → flatten → embed pNGf.
+fn executeFlatPipeline(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    _: []const u8,
+    output: []const u8,
+    width: u32,
+    height: u32,
+    bytecode: []const u8,
+    audio_path: ?[]const u8,
+) !u8 {
+    // Flatten bytecode into pNGf format
+    var flat_payload = flat.flattenPayload(allocator, bytecode) catch |err| {
+        std.debug.print("Error: failed to flatten bytecode: {}\n", .{err});
+        return 4;
+    };
+    defer flat_payload.deinit(allocator);
+
+    // Generate 1x1 transparent pixel PNG
+    const png_result = generatePng(allocator, bytecode, width, height, 0.0, false, null);
+    if (png_result.exit_code != 0) return png_result.exit_code;
+
+    // Embed pNGf chunk instead of pNGb
+    var png_data = pngine.png.embedFlat(allocator, png_result.png_data, flat_payload.data) catch |err| {
+        std.debug.print("Error: failed to embed flat data: {}\n", .{err});
+        allocator.free(png_result.png_data);
+        return 4;
+    };
+    allocator.free(png_result.png_data);
+
+    // Optionally embed audio
+    if (audio_path) |apath| {
+        const audio_wasm = readBinaryFile(allocator, io, apath) catch |err| {
+            std.debug.print("Error: failed to read audio '{s}': {}\n", .{ apath, err });
+            return 2;
+        };
+        defer allocator.free(audio_wasm);
+
+        const with_audio = pngine.png.embedAudio(allocator, png_data, audio_wasm) catch |err| {
+            std.debug.print("Error: failed to embed audio: {}\n", .{err});
+            return 4;
+        };
+        allocator.free(png_data);
+        png_data = with_audio;
+
+        std.debug.print("  Audio: {s} ({d} bytes)\n", .{ apath, audio_wasm.len });
+    }
+
+    // Write PNG output
+    writeOutputFile(io, output, png_data) catch |err| {
+        std.debug.print("Error: failed to write '{s}': {}\n", .{ output, err });
+        return 2;
+    };
+
+    std.debug.print("Created: {s} ({d} bytes, flat pNGf format)\n", .{ output, png_data.len });
+    std.debug.print("  pNGf payload: {d} bytes\n", .{flat_payload.data.len});
+    allocator.free(png_data);
     return 0;
 }
 
@@ -351,13 +512,20 @@ fn embedExecutorInBytecode(allocator: std.mem.Allocator, io: std.Io, bytecode: [
     // Determine executor variant name based on plugins
     const variant_name = getExecutorVariantName(plugins);
 
-    // Load executor WASM from filesystem
-    const executor_wasm = loadExecutorWasm(allocator, io, variant_name) catch |err| {
-        std.debug.print("Error: failed to load executor variant '{s}': {}\n", .{ variant_name, err });
-        std.debug.print("Hint: Run 'zig build executors' to build executor variants\n", .{});
-        return err;
+    // Load executor WASM: try variant-specific file first, fall back to embedded full executor
+    const executor_wasm, const executor_is_embedded = blk: {
+        if (loadExecutorWasm(allocator, io, variant_name)) |wasm| {
+            break :blk .{ wasm, false };
+        } else |_| {
+            if (embedded_wasm.len > 0) {
+                break :blk .{ embedded_wasm, true };
+            }
+            std.debug.print("Error: no executor available (no variant '{s}' on disk, no embedded WASM)\n", .{variant_name});
+            std.debug.print("Hint: Run 'zig build executors --prefix zig-out' to build executor variants\n", .{});
+            return error.FileNotFound;
+        }
     };
-    defer allocator.free(executor_wasm);
+    defer if (!executor_is_embedded) allocator.free(executor_wasm);
 
     // Validate WASM magic
     if (executor_wasm.len < 8 or !std.mem.eql(u8, executor_wasm[0..4], &[_]u8{ 0x00, 0x61, 0x73, 0x6d })) {

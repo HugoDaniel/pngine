@@ -94,7 +94,28 @@ pub fn emitShaders(e: *Emitter) Emitter.Error!void {
                 std.debug.print("WARN: resolved_wgsl_cache miss for '{s}'\n", .{ref_name});
                 continue;
             };
-            std.debug.print("DEBUG: #shaderModule '{s}' using resolved code for '{s}' ({} bytes)\n", .{ name, ref_name, resolved_code.len });
+
+            // Dump pre-minification WGSL for debugging
+            if (e.options.minify_shaders) {
+                if (e.options.io) |io| {
+                    if (std.Io.Dir.cwd().createFile(io, "/tmp/pre-minify.wgsl", .{})) |f| {
+                        defer f.close(io);
+                        f.writeStreamingAll(io, resolved_code) catch {};
+                        std.debug.print("  Pre-minify WGSL: /tmp/pre-minify.wgsl ({} bytes)\n", .{resolved_code.len});
+                    } else |_| {}
+                }
+            }
+
+            // Minify the fully-resolved code as a whole (avoids name collisions
+            // that occur when minifying fragments independently then concatenating)
+            const final_code: []const u8 = if (e.options.minify_shaders)
+                minifyAndCache(e, name, resolved_code, true) orelse resolved_code
+            else blk: {
+                reflectAndCache(e, name, resolved_code);
+                break :blk resolved_code;
+            };
+
+            std.debug.print("DEBUG: #shaderModule '{s}' using resolved code for '{s}' ({} bytes)\n", .{ name, ref_name, final_code.len });
 
             // Assign shader_id for this #shaderModule
             const shader_id = e.next_shader_id;
@@ -102,7 +123,13 @@ pub fn emitShaders(e: *Emitter) Emitter.Error!void {
             try e.shader_ids.put(e.gpa, name, shader_id);
 
             // Store resolved code (with imports) in data section and emit
-            const data_id = try e.builder.addData(e.gpa, resolved_code);
+            const data_id = try e.builder.addData(e.gpa, final_code);
+
+            // Free minified code if it was allocated
+            if (e.options.minify_shaders and final_code.ptr != resolved_code.ptr) {
+                e.gpa.free(@constCast(final_code));
+            }
+
             try e.builder.getEmitter().createShaderModule(
                 e.gpa,
                 shader_id,
@@ -118,7 +145,7 @@ pub fn emitShaders(e: *Emitter) Emitter.Error!void {
 
             // Minify if requested, otherwise use substituted code
             const code_to_store: []const u8 = if (e.options.minify_shaders)
-                minifyAndCache(e, name, substituted) orelse substituted
+                minifyAndCache(e, name, substituted, false) orelse substituted
             else blk: {
                 // Perform reflection on substituted code (no minification)
                 reflectAndCache(e, name, substituted);
@@ -244,7 +271,7 @@ fn emitWgslModule(e: *Emitter, name: []const u8, macro_node: Node.Index) Emitter
     // Minify if requested (stores minified code, caches reflection with mapped names)
     // Otherwise store original and reflect on substituted code
     const code_to_store: []const u8 = if (e.options.minify_shaders)
-        minifyAndCache(e, name, substituted) orelse substituted
+        minifyAndCache(e, name, substituted, false) orelse substituted
     else blk: {
         // Perform reflection on substituted code (no minification)
         reflectAndCache(e, name, substituted);
@@ -253,11 +280,6 @@ fn emitWgslModule(e: *Emitter, name: []const u8, macro_node: Node.Index) Emitter
 
     // Store in data section
     const data_id = try e.builder.addData(e.gpa, code_to_store);
-
-    // Free minified code if it was allocated
-    if (e.options.minify_shaders and code_to_store.ptr != substituted.ptr) {
-        e.gpa.free(@constCast(code_to_store));
-    }
 
     // Get direct dependencies (imports)
     const import_names = getWgslImports(e, macro_node);
@@ -275,13 +297,23 @@ fn emitWgslModule(e: *Emitter, name: []const u8, macro_node: Node.Index) Emitter
     const wgsl_id = try e.builder.addWgsl(e.gpa, data_id.toInt(), deps.items);
     try e.wgsl_name_to_id.put(e.gpa, name, wgsl_id);
 
-    // NOTE: We do NOT create a shader module here for #wgsl declarations.
-    // #wgsl is a reusable code fragment - it may be incomplete (missing imports).
-    // Only #shaderModule creates actual GPU shader modules with fully resolved code.
+    // Store unminified code for import resolution (data section may have minified)
+    if (e.options.minify_shaders) {
+        const unmin = try e.gpa.dupe(u8, substituted);
+        errdefer e.gpa.free(unmin);
+        try e.unminified_wgsl.put(e.gpa, wgsl_id, unmin);
+    }
 
-    // Cache the resolved code for #shaderModule to use later
-    // Build resolved code by concatenating deps + this module's code
-    try buildAndCacheResolvedCode(e, name, code_to_store, deps.items);
+    // Cache the resolved code for #shaderModule to use later.
+    // IMPORTANT: Always use unminified (substituted) code for the cache.
+    // Minifying fragments independently causes name collisions when concatenated.
+    // The resolved code will be minified as a whole in the #shaderModule handler.
+    try buildAndCacheResolvedCode(e, name, substituted, deps.items);
+
+    // Free minified code if it was allocated
+    if (e.options.minify_shaders and code_to_store.ptr != substituted.ptr) {
+        e.gpa.free(@constCast(code_to_store));
+    }
 }
 
 /// Perform WGSL reflection on substituted code and cache the result.
@@ -336,7 +368,7 @@ fn reflectViaFfi(e: *Emitter, name: []const u8, code: []const u8) void {
 /// The reflection data with mapped identifiers is cached automatically.
 ///
 /// Requires libminiray.a to be linked (FFI path).
-fn minifyAndCache(e: *Emitter, name: []const u8, code: []const u8) ?[]const u8 {
+fn minifyAndCache(e: *Emitter, name: []const u8, code: []const u8, preserve_names: bool) ?[]const u8 {
     // Pre-conditions
     std.debug.assert(name.len > 0);
     std.debug.assert(code.len > 0);
@@ -352,8 +384,13 @@ fn minifyAndCache(e: *Emitter, name: []const u8, code: []const u8) ?[]const u8 {
         return null;
     }
 
+    // For resolved (multi-module) code, preserve struct/function names to avoid
+    // miniray's bug where it renames definitions but misses some call sites.
+    const preserve_json = if (preserve_names) buildPreserveNamesJson(e.gpa, code) else null;
+    defer if (preserve_json) |j| e.gpa.free(j);
+
     // Call minifyAndReflectFfi
-    var result = miniray_ffi.minifyAndReflectFfi(code, null) catch |err| {
+    var result = miniray_ffi.minifyAndReflectFfi(code, preserve_json) catch |err| {
         std.log.warn("WGSL minification failed for '{s}': {}", .{ name, err });
         // Fall back to reflection-only
         reflectAndCache(e, name, code);
@@ -377,6 +414,62 @@ fn minifyAndCache(e: *Emitter, name: []const u8, code: []const u8) ?[]const u8 {
 
     // Return a copy of the minified code (caller owns)
     return e.gpa.dupe(u8, result.code) catch null;
+}
+
+/// Build a JSON options string with preserveNames for struct names found in WGSL.
+/// Miniray doesn't consistently rename struct constructor calls (e.g. Transform2D(...)),
+/// so we preserve all user-defined struct names to avoid WGSL compilation errors.
+fn buildPreserveNamesJson(allocator: std.mem.Allocator, code: []const u8) ?[]const u8 {
+    var names = std.ArrayListUnmanaged([]const u8){};
+    defer names.deinit(allocator);
+
+    // Scan for "struct <Name>" and "fn <Name>" patterns.
+    // Miniray has a bug where it renames definitions but misses some call sites
+    // in concatenated multi-module WGSL, so we preserve all user-defined names.
+    const keywords = [_][]const u8{ "struct ", "struct\t", "struct\n", "fn ", "fn\t", "fn\n" };
+    var i: usize = 0;
+    while (i + 3 < code.len) : (i += 1) {
+        var matched = false;
+        var kw_len: usize = 0;
+        for (keywords) |kw| {
+            if (i + kw.len <= code.len and std.mem.startsWith(u8, code[i..], kw)) {
+                matched = true;
+                kw_len = kw.len;
+                break;
+            }
+        }
+        if (matched) {
+            var j = i + kw_len;
+            // Skip whitespace
+            while (j < code.len and (code[j] == ' ' or code[j] == '\t' or code[j] == '\n')) : (j += 1) {}
+            const start = j;
+            // Read identifier
+            while (j < code.len and (std.ascii.isAlphanumeric(code[j]) or code[j] == '_')) : (j += 1) {}
+            if (j > start) {
+                const ident = code[start..j];
+                // Only preserve multi-char names (single-char already minimal)
+                if (ident.len > 1) {
+                    names.append(allocator, ident) catch continue;
+                }
+            }
+            i = j;
+        }
+    }
+
+    if (names.items.len == 0) return null;
+
+    // Build JSON: {"preserveNames":["Name1","Name2"]}
+    var buf = std.ArrayListUnmanaged(u8){};
+    buf.appendSlice(allocator, "{\"preserveNames\":[") catch return null;
+    for (names.items, 0..) |name, idx| {
+        if (idx > 0) buf.append(allocator, ',') catch return null;
+        buf.append(allocator, '"') catch return null;
+        buf.appendSlice(allocator, name) catch return null;
+        buf.append(allocator, '"') catch return null;
+    }
+    buf.appendSlice(allocator, "]}") catch return null;
+
+    return buf.toOwnedSlice(allocator) catch null;
 }
 
 /// Build and cache the fully resolved code for #shaderModule backward compatibility.
@@ -434,8 +527,11 @@ fn buildAndCacheResolvedCode(e: *Emitter, name: []const u8, code: []const u8, de
     errdefer result.deinit(e.gpa);
 
     for (order.items) |wgsl_id| {
-        const entry = e.builder.wgsl_table.get(wgsl_id) orelse continue;
-        const dep_code = e.builder.data.get(@enumFromInt(entry.data_id));
+        // Prefer unminified code for deps (data section may have minified code)
+        const dep_code = e.unminified_wgsl.get(wgsl_id) orelse blk: {
+            const entry = e.builder.wgsl_table.get(wgsl_id) orelse continue;
+            break :blk e.builder.data.get(@enumFromInt(entry.data_id));
+        };
         if (dep_code.len > 0) {
             try result.appendSlice(e.gpa, dep_code);
             try result.append(e.gpa, '\n');

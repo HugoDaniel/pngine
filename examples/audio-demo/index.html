@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PNGine + Sointu Audio Demo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #111;
+      color: #eee;
+      font-family: monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+    canvas {
+      border: 1px solid #333;
+      max-width: 90vw;
+      max-height: 70vh;
+    }
+    .controls {
+      margin-top: 16px;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+    button {
+      background: #333;
+      color: #eee;
+      border: 1px solid #555;
+      padding: 8px 20px;
+      font-family: monospace;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    button:hover { background: #444; }
+    button:active { background: #555; }
+    .info {
+      margin-top: 12px;
+      font-size: 12px;
+      color: #888;
+    }
+    #status {
+      margin-top: 8px;
+      font-size: 13px;
+      color: #aaa;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas" width="512" height="512"></canvas>
+  <div class="controls">
+    <button id="play">Play</button>
+    <button id="pause">Pause</button>
+    <button id="stop">Stop</button>
+  </div>
+  <div id="status">Click Play to start (audio requires user gesture)</div>
+  <div class="info">
+    Single PNG file with embedded WebGPU shaders + Sointu audio WASM
+  </div>
+
+  <script type="module">
+    import { pngine, play, pause, stop } from "pngine";
+    // Set worker URL to local shim (sets DEBUG for Vite dev)
+    const { setWorkerUrl } = await import("../../npm/pngine/src/viewer-init.js");
+    setWorkerUrl(new URL("./worker-shim.js", import.meta.url));
+
+    const canvas = document.getElementById("canvas");
+    const statusEl = document.getElementById("status");
+
+    async function init() {
+      statusEl.textContent = "Loading PNG...";
+
+      try {
+        const p = await pngine("sceneR.png", {
+          canvas,
+          debug: true,
+          onError: (err) => {
+            statusEl.textContent = "Error: " + err.message;
+            console.error(err);
+          },
+        });
+
+        const hasAudio = !!p.audio;
+        statusEl.textContent = hasAudio
+          ? `Ready (audio: ${p.audio.duration.toFixed(1)}s)`
+          : "Ready (no audio found in PNG)";
+
+        document.getElementById("play").onclick = () => {
+          play(p);
+          statusEl.textContent = "Playing" + (hasAudio ? " (audio + shader)" : "");
+        };
+        document.getElementById("pause").onclick = () => {
+          pause(p);
+          statusEl.textContent = "Paused at " + p.time.toFixed(2) + "s";
+        };
+        document.getElementById("stop").onclick = () => {
+          stop(p);
+          statusEl.textContent = "Stopped";
+        };
+      } catch (err) {
+        statusEl.textContent = "Init error: " + err.message;
+        console.error(err);
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

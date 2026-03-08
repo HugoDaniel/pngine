@@ -141,6 +141,9 @@ pub fn build(b: *std.Build) void {
     });
     wasm_bytecode_module.addImport("types", wasm_types_module);
 
+    // Default (empty) wasm_config - wasm_entry.zig uses built-in defaults
+    const wasm_default_config = b.addOptions();
+
     // Create WASM entry module (separate from main library)
     const wasm_module = b.createModule(.{
         .root_source_file = b.path("src/wasm_entry.zig"),
@@ -149,6 +152,7 @@ pub fn build(b: *std.Build) void {
     });
     wasm_module.addImport("types", wasm_types_module);
     wasm_module.addImport("bytecode", wasm_bytecode_module);
+    wasm_module.addImport("wasm_config", wasm_default_config.createModule());
 
     const wasm = b.addExecutable(.{
         .name = "pngine",
@@ -695,6 +699,36 @@ pub fn build(b: *std.Build) void {
     const wasm_step = b.step("wasm", "Build WASM for browser");
     wasm_step.dependOn(&b.addInstallArtifact(wasm, .{}).step);
 
+    // Micro WASM: stripped-down executor for size-coding (demoscene, JS13K)
+    // Reduced buffer sizes: 16KB bytecode, 32KB data, 8KB commands, 8 passes
+    {
+        const micro_config = b.addOptions();
+        micro_config.addOption(u32, "max_bytecode_kb", 16);
+        micro_config.addOption(u32, "max_data_kb", 32);
+        micro_config.addOption(u32, "command_buffer_kb", 8);
+        micro_config.addOption(u32, "max_wgsl_modules", 16);
+        micro_config.addOption(u32, "max_passes", 8);
+
+        const micro_module = b.createModule(.{
+            .root_source_file = b.path("src/wasm_entry.zig"),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+        });
+        micro_module.addImport("types", wasm_types_module);
+        micro_module.addImport("bytecode", wasm_bytecode_module);
+        micro_module.addImport("wasm_config", micro_config.createModule());
+
+        const micro_wasm = b.addExecutable(.{
+            .name = "pngine-micro",
+            .root_module = micro_module,
+        });
+        micro_wasm.rdynamic = true;
+        micro_wasm.entry = .disabled;
+
+        const micro_step = b.step("wasm-micro", "Build micro WASM executor (reduced buffers for size-coding)");
+        micro_step.dependOn(&b.addInstallArtifact(micro_wasm, .{}).step);
+    }
+
     // ========================================================================
     // Executor Variants (for embedded executor feature)
     // ========================================================================
@@ -758,6 +792,7 @@ pub fn build(b: *std.Build) void {
         });
         executor_module.addImport("plugins", plugin_options.createModule());
         executor_module.addImport("bytecode", bytecode_wasm);
+        executor_module.addImport("wasm_config", wasm_default_config.createModule());
 
         const executor = b.addExecutable(.{
             .name = b.fmt("pngine-{s}", .{variant.name}),
@@ -855,12 +890,50 @@ pub fn build(b: *std.Build) void {
     for (npm_targets) |npm_target| {
         const cross_target = b.resolveTargetQuery(npm_target.query);
 
+        // Create sub-modules for this cross-compile target
+        const cross_types = b.createModule(.{
+            .root_source_file = b.path("src/types/main.zig"),
+            .target = cross_target,
+            .optimize = .ReleaseFast,
+        });
+
+        const cross_bytecode = b.createModule(.{
+            .root_source_file = b.path("src/bytecode/standalone.zig"),
+            .target = cross_target,
+            .optimize = .ReleaseFast,
+        });
+        cross_bytecode.addImport("types", cross_types);
+
+        const cross_reflect_options = b.addOptions();
+        cross_reflect_options.addOption(bool, "has_miniray_lib", false);
+        const cross_reflect = b.createModule(.{
+            .root_source_file = b.path("src/reflect.zig"),
+            .target = cross_target,
+            .optimize = .ReleaseFast,
+        });
+        cross_reflect.addImport("build_options", cross_reflect_options.createModule());
+
+        const cross_executor = b.createModule(.{
+            .root_source_file = b.path("src/executor/standalone.zig"),
+            .target = cross_target,
+            .optimize = .ReleaseFast,
+        });
+        cross_executor.addImport("bytecode", cross_bytecode);
+
         // Create library module for this target
         const cross_lib = b.addModule("pngine", .{
             .root_source_file = b.path("src/main.zig"),
             .target = cross_target,
             .optimize = .ReleaseFast,
         });
+        cross_lib.addImport("types", cross_types);
+        cross_lib.addImport("bytecode", cross_bytecode);
+        cross_lib.addImport("reflect", cross_reflect);
+        cross_lib.addImport("executor", cross_executor);
+
+        const cross_gpu_options = b.addOptions();
+        cross_gpu_options.addOption(bool, "has_zgpu", false);
+        cross_lib.addImport("gpu_build_options", cross_gpu_options.createModule());
 
         // Create CLI module for this target
         const cross_cli_module = b.createModule(.{
@@ -873,6 +946,8 @@ pub fn build(b: *std.Build) void {
         // Add build options (no embedded WASM for cross-compiled CLI)
         const cross_build_options = b.addOptions();
         cross_build_options.addOption(bool, "has_embedded_wasm", false);
+        cross_build_options.addOption(bool, "has_embedded_aot", false);
+        cross_build_options.addOption(bool, "has_wamr", false);
         cross_cli_module.addImport("build_options", cross_build_options.createModule());
 
         const cross_cli = b.addExecutable(.{
@@ -881,9 +956,9 @@ pub fn build(b: *std.Build) void {
         });
 
         // Install to npm package directory
-        const install_path = b.fmt("npm/pngine-{s}/bin/{s}", .{ npm_target.name, npm_target.exe_name });
+        const install_dir = b.fmt("npm/pngine-{s}/bin", .{npm_target.name});
         const install_cross = b.addInstallArtifact(cross_cli, .{
-            .dest_dir = .{ .override = .{ .custom = install_path } },
+            .dest_dir = .{ .override = .{ .custom = install_dir } },
         });
         npm_step.dependOn(&install_cross.step);
     }

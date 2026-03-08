@@ -11,9 +11,8 @@
 
 import { dispatchResourcePassCommand } from "./gpu-resource-pass-commands.js";
 
-// Build flag - esbuild eliminates dead code with: --define:DEBUG=false
-// For dev: keep as true; for prod: esbuild replaces at build time
-const DEBUG = true;
+// Build flag - esbuild replaces DEBUG with false in production (--define:DEBUG=false)
+// For dev: Vite provides DEBUG=true via define config
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Enum Lookup Tables (must match descriptors.zig and enums.js)
@@ -254,7 +253,6 @@ export function createCommandDispatcher(device, ctx) {
       depthStencil: desc.depthStencil,
     });
     pip[id] = p;
-    bgl[id] = p.getBindGroupLayout(0);
   }
 
   function createComputePipeline(id, ptr, len) {
@@ -278,7 +276,6 @@ export function createCommandDispatcher(device, ctx) {
       },
     });
     pip[id] = p;
-    bgl[id] = p.getBindGroupLayout(0);
   }
 
 
