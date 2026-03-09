@@ -4,6 +4,7 @@ import { resolve } from 'path'
 export default defineConfig({
   define: { DEBUG: 'true' },
   root: 'zig-out/playground',
+  appType: 'mpa',
   server: {
     port: 5173,
     open: false
