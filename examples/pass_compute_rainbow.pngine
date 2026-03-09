@@ -1,0 +1,15 @@
+// compute.toys-style rainbow using #pass sugar
+// Replaces 100+ LOC of explicit DSL
+
+#pass main {
+  code="
+    @compute @workgroup_size(16, 16)
+    fn main_image(@builtin(global_invocation_id) id: vec3u) {
+      let screen_size = textureDimensions(screen);
+      if (id.x >= screen_size.x || id.y >= screen_size.y) { return; }
+      let uv = vec2f(id.xy) / vec2f(screen_size);
+      let col = .5 + .5 * cos(pngine.time + uv.xyx + vec3f(0., 2., 4.));
+      textureStore(screen, id.xy, vec4f(col, 1.));
+    }
+  "
+}

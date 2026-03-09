@@ -1,0 +1,29 @@
+// Temporal bloom with feedback — TinyShade-style multi-pass
+
+#pass pass0 {
+  feedback=true
+  code="
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      let history = textureSample(prev_pass0, samp, uv).rgb;
+      let t = pngine.time;
+      let c = vec2f(sin(t) * .3 + .5, cos(t * .7) * .3 + .5);
+      let d = length(uv - c);
+      let glow = smoothstep(.15, .0, d);
+      let col = .5 + .5 * cos(t * 2. + vec3f(0., 2., 4.) + d * 10.);
+      let current = col * glow;
+      return vec4f(mix(current, history, 0.92), 1);
+    }
+  "
+}
+
+#pass main {
+  code="
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      let scene = textureSample(pass0, samp, uv).rgb;
+      let vignette = smoothstep(1.2, 0.3, length(uv - 0.5));
+      return vec4f(scene * vignette, 1);
+    }
+  "
+}

@@ -1,0 +1,11 @@
+// Simple animated shader art using #pass sugar
+// Replaces ~70 LOC of explicit DSL with a single declaration
+
+#pass main {
+  code="
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return vec4f(uv, sin(pngine.time) * .5 + .5, 1);
+    }
+  "
+}

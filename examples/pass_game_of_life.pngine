@@ -1,0 +1,54 @@
+// Game of Life — compute with feedback
+
+#pass sim {
+  feedback=true
+  init="
+    @compute @workgroup_size(16, 16)
+    fn seed(@builtin(global_invocation_id) id: vec3u) {
+      let size = textureDimensions(screen);
+      if (id.x >= size.x || id.y >= size.y) { return; }
+      let h = (((id.x * 2654435761u) ^ (id.y * 2246822519u)) >> 8u) & 0xFFu;
+      let alive = select(0.0, 1.0, h < 80u);
+      textureStore(screen, id.xy, vec4f(alive, alive, alive, 1));
+    }
+  "
+  code="
+    fn countNeighbors(tex: texture_2d<f32>, pos: vec2u, size: vec2u) -> u32 {
+      var count: u32 = 0u;
+      for (var dy: i32 = -1; dy <= 1; dy++) {
+        for (var dx: i32 = -1; dx <= 1; dx++) {
+          if (dx == 0 && dy == 0) { continue; }
+          let np = vec2u(
+            u32((i32(pos.x) + dx + i32(size.x)) % i32(size.x)),
+            u32((i32(pos.y) + dy + i32(size.y)) % i32(size.y))
+          );
+          if (textureLoad(tex, np, 0).r > 0.5) { count++; }
+        }
+      }
+      return count;
+    }
+
+    @compute @workgroup_size(16, 16)
+    fn step(@builtin(global_invocation_id) id: vec3u) {
+      let size = textureDimensions(prev_sim);
+      if (id.x >= size.x || id.y >= size.y) { return; }
+      let neighbors = countNeighbors(prev_sim, id.xy, size);
+      let alive = textureLoad(prev_sim, id.xy, 0).r > 0.5;
+      var next = false;
+      if (alive) { next = neighbors == 2u || neighbors == 3u; }
+      else { next = neighbors == 3u; }
+      let v = select(0.0, 1.0, next);
+      textureStore(screen, id.xy, vec4f(v, v, v, 1));
+    }
+  "
+}
+
+#pass main {
+  code="
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      let cell = textureSample(sim, samp, uv);
+      return vec4f(vec3f(cell.r), 1);
+    }
+  "
+}
