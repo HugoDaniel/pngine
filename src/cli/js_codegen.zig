@@ -271,8 +271,9 @@ pub fn generate(
     var frame_js = std.ArrayListUnmanaged(u8){};
     defer frame_js.deinit(allocator);
 
-    // If animated, emit write_time_uniform before the render pass
-    if (time_uniform) |tu| {
+    // If animated, emit write_time_uniform for ALL uniform buffers
+    const all_time_uniforms = scanAllTimeUniforms(module.bytecode);
+    for (all_time_uniforms.items[0..all_time_uniforms.count]) |tu| {
         try frame_js.appendSlice(allocator, "d.queue.writeBuffer(b");
         try appendInt(&frame_js, allocator, tu.buffer_id);
         try frame_js.appendSlice(allocator, ",0,new Float32Array([t,");
@@ -664,16 +665,17 @@ const TimeUniformInfo = struct {
     size: u16,
 };
 
-/// Scan PNGB bytecode for write_time_uniform opcode (0x2A).
-/// Returns the first occurrence's params, or null if not found.
-fn scanForTimeUniform(bytecode: []const u8) ?TimeUniformInfo {
+/// Scan PNGB bytecode for all write_time_uniform opcodes (0x2A).
+/// Returns the count of unique occurrences found (up to MAX_TIME_UNIFORMS).
+const MAX_TIME_UNIFORMS = 16;
+const TimeUniformScanResult = struct { items: [MAX_TIME_UNIFORMS]TimeUniformInfo, count: u8 };
+
+fn scanAllTimeUniforms(bytecode: []const u8) TimeUniformScanResult {
     const OPCODE: u8 = 0x2A; // write_time_uniform
-    // Simple scan: find the opcode byte and try to parse varint args after it.
-    // This is heuristic (could match data bytes), but write_time_uniform is
-    // always emitted in frame sections where it's preceded by define_frame/begin_frame.
+    var result: TimeUniformScanResult = .{ .items = undefined, .count = 0 };
+
     for (0..bytecode.len) |i| {
         if (bytecode[i] == OPCODE and i + 1 < bytecode.len) {
-            // Try to decode three varints: buffer_id, offset, size
             const rest = bytecode[i + 1 ..];
             if (rest.len < 3) continue;
 
@@ -686,14 +688,30 @@ fn scanForTimeUniform(bytecode: []const u8) ?TimeUniformInfo {
 
             // Sanity check: buffer_id should be small, size should be 12 or 16
             if (r1.value < 256 and (r3.value == 12 or r3.value == 16)) {
-                return TimeUniformInfo{
+                const info = TimeUniformInfo{
                     .buffer_id = @intCast(r1.value),
                     .offset = r2.value,
                     .size = @intCast(r3.value),
                 };
+                // Deduplicate by buffer_id
+                var dup = false;
+                for (result.items[0..result.count]) |existing| {
+                    if (existing.buffer_id == info.buffer_id) { dup = true; break; }
+                }
+                if (!dup and result.count < MAX_TIME_UNIFORMS) {
+                    result.items[result.count] = info;
+                    result.count += 1;
+                }
             }
         }
     }
+    return result;
+}
+
+/// Backward-compatible wrapper: returns first time uniform or null.
+fn scanForTimeUniform(bytecode: []const u8) ?TimeUniformInfo {
+    const result = scanAllTimeUniforms(bytecode);
+    if (result.count > 0) return result.items[0];
     return null;
 }
 
@@ -843,10 +861,27 @@ fn emitRenderPipelineDesc(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.A
 
 /// Emit compute pipeline descriptor from JSON data.
 fn emitComputePipelineDesc(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, data: []const u8) !void {
+    // Binary format: [type_tag:0x06][shader_id:u16 LE][entry_len:u8][entry_bytes]
+    if (data.len >= 4 and data[0] == 0x06) {
+        const shader_id: u16 = @as(u16, data[1]) | (@as(u16, data[2]) << 8);
+        const entry_len = data[3];
+        const has_entry = entry_len > 0 and data.len >= 4 + entry_len;
+        const entry_point = if (has_entry) data[4 .. 4 + entry_len] else "main";
+
+        try out.appendSlice(allocator, "{layout:'auto',compute:{module:s");
+        try appendInt(out, allocator, shader_id);
+        if (!std.mem.eql(u8, entry_point, "main")) {
+            try out.appendSlice(allocator, ",entryPoint:'");
+            try out.appendSlice(allocator, entry_point);
+            try out.appendSlice(allocator, "'");
+        }
+        try out.appendSlice(allocator, "}}");
+        return;
+    }
+
+    // Fallback: try JSON (legacy/manual descriptors)
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch {
-        try out.appendSlice(allocator, "JSON.parse('");
-        try out.appendSlice(allocator, data);
-        try out.appendSlice(allocator, "')");
+        try out.appendSlice(allocator, "{layout:'auto',compute:{module:s0}}");
         return;
     };
     defer parsed.deinit();
