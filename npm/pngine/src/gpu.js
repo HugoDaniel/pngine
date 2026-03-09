@@ -13,6 +13,8 @@ import { dispatchResourcePassCommand } from "./gpu-resource-pass-commands.js";
 
 // Build flag - esbuild replaces DEBUG with false in production (--define:DEBUG=false)
 // For dev: Vite provides DEBUG=true via define config
+// Fallback for Worker contexts where Vite's define doesn't reach
+if (typeof DEBUG === "undefined") globalThis.DEBUG = false;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Enum Lookup Tables (must match descriptors.zig and enums.js)
