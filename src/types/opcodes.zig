@@ -213,6 +213,11 @@ pub const OpCode = enum(u8) {
     /// Params: slot, base_group_id, pool_size, offset
     set_bind_group_pool = 0x42,
 
+    /// Begin render pass with pool texture (ping-pong render targets).
+    /// Params: base_texture_id, pool_size, offset, load_op, store_op, depth_texture_id
+    /// Runtime computes: actual_tex_id = base_tex_id + (frame_counter + offset) % pool_size
+    begin_render_pass_pool = 0x43,
+
     // ========================================================================
     // Reserved (0x50-0x7F) - formerly data generation
     // Use compute shaders or WASM calls for buffer initialization
@@ -267,6 +272,7 @@ pub const OpCode = enum(u8) {
             .select_from_pool,
             .set_vertex_buffer_pool,
             .set_bind_group_pool,
+            .begin_render_pass_pool,
             .write_time_uniform,
             => true,
             _ => false,

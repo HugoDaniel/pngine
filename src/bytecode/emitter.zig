@@ -351,6 +351,33 @@ pub const Emitter = struct {
         try self.emitVarint(allocator, depth_texture_id);
     }
 
+    /// Emit begin_render_pass_pool instruction.
+    /// Pool variant of begin_render_pass that alternates render target texture each frame.
+    /// Runtime computes: actual_tex_id = base_tex_id + (frame_counter + offset) % pool_size
+    /// depth_texture_id: use 0xFFFF for no depth attachment.
+    pub fn beginRenderPassPool(
+        self: *Self,
+        allocator: Allocator,
+        base_texture_id: u16,
+        pool_size: u8,
+        offset: u8,
+        load_op: LoadOp,
+        store_op: StoreOp,
+        depth_texture_id: u16,
+    ) !void {
+        // Pre-conditions
+        assert(pool_size > 0); // Pool must have at least 1 texture
+        assert(offset < pool_size); // Offset must be within pool
+
+        try self.emitOpcode(allocator, .begin_render_pass_pool);
+        try self.emitVarint(allocator, base_texture_id);
+        try self.emitByte(allocator, pool_size);
+        try self.emitByte(allocator, offset);
+        try self.emitByte(allocator, @intFromEnum(load_op));
+        try self.emitByte(allocator, @intFromEnum(store_op));
+        try self.emitVarint(allocator, depth_texture_id);
+    }
+
     /// Emit begin_compute_pass instruction.
     pub fn beginComputePass(self: *Self, allocator: Allocator) !void {
         try self.emitOpcode(allocator, .begin_compute_pass);

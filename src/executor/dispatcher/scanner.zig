@@ -161,6 +161,16 @@ pub const OpcodeScanner = struct {
                 self.skip_byte();
             },
 
+            // varint + 4 bytes + varint (begin_render_pass_pool)
+            .begin_render_pass_pool => {
+                self.skip_varint(); // base_tex_id
+                self.skip_byte(); // pool_size
+                self.skip_byte(); // offset
+                self.skip_byte(); // load_op
+                self.skip_byte(); // store_op
+                self.skip_varint(); // depth_tex_id
+            },
+
             // byte + varint + byte (select_from_pool)
             .select_from_pool => {
                 self.skip_byte();

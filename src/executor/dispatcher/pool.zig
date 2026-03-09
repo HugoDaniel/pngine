@@ -63,6 +63,22 @@ pub fn handle(
             try self.backend.set_bind_group(allocator, slot, actual_id);
         },
 
+        .begin_render_pass_pool => {
+            const base_tex_id = try self.read_varint();
+            const pool_size = try self.read_byte();
+            const offset = try self.read_byte();
+            const load_op = try self.read_byte();
+            const store_op = try self.read_byte();
+            const depth_tex_id = try self.read_varint();
+
+            // Pre-condition: pool_size > 0 to avoid division by zero
+            if (pool_size == 0) return error.InvalidResourceId;
+
+            // Calculate actual texture ID: base + (frame_counter + offset) % pool_size
+            const actual_id: u16 = @intCast(base_tex_id + (self.frame_counter + offset) % pool_size);
+            try self.backend.begin_render_pass(allocator, actual_id, load_op, store_op, @intCast(depth_tex_id));
+        },
+
         else => return false,
     }
 
@@ -74,6 +90,7 @@ pub fn is_pool_opcode(op: OpCode) bool {
     return switch (op) {
         .set_vertex_buffer_pool,
         .set_bind_group_pool,
+        .begin_render_pass_pool,
         => true,
         else => false,
     };

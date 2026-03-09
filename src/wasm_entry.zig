@@ -583,7 +583,7 @@ fn executeOpcode(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpC
         => execWasm(cmds, bytecode, pc, op),
 
         // Pool operations (render/compute - use frame_counter for selection)
-        .set_vertex_buffer_pool, .set_bind_group_pool,
+        .set_vertex_buffer_pool, .set_bind_group_pool, .begin_render_pass_pool,
         => execPool(cmds, bytecode, pc, op),
 
         // Pass/Frame structure and ignored opcodes
@@ -985,6 +985,22 @@ fn execPool(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) 
             const actual_id: u16 = @intCast(base_id + (frame_counter + offset) % pool_size);
             cmds.setBindGroup(slot, actual_id);
         },
+        .begin_render_pass_pool => {
+            const base_tex_id = read_varint(bytecode, pc);
+            const pool_size = bytecode[pc.*];
+            pc.* += 1;
+            const offset = bytecode[pc.*];
+            pc.* += 1;
+            const load_op = bytecode[pc.*];
+            pc.* += 1;
+            const store_op = bytecode[pc.*];
+            pc.* += 1;
+            const depth_tex_id = read_varint(bytecode, pc);
+
+            // Calculate actual texture ID: base_tex_id + (frame_counter + offset) % pool_size
+            const actual_id: u16 = @intCast(base_tex_id + (frame_counter + offset) % pool_size);
+            cmds.beginRenderPass(actual_id, load_op, store_op, @intCast(depth_tex_id));
+        },
         else => {},
     }
 }
@@ -1333,6 +1349,11 @@ fn skipOpcodeParams(bytecode: []const u8, pc: *usize, op: OpCode) void {
             pc.* += 1;
             _ = read_varint(bytecode, pc);
             pc.* += 2;
+        },
+        .begin_render_pass_pool => {
+            _ = read_varint(bytecode, pc); // base_tex_id
+            pc.* += 4; // pool_size + offset + load_op + store_op
+            _ = read_varint(bytecode, pc); // depth_tex_id
         },
         .select_from_pool => {
             pc.* += 1;
