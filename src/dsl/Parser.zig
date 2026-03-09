@@ -236,6 +236,7 @@ pub const Parser = struct {
             .macro_query_set => .macro_query_set,
             .macro_texture_view => .macro_texture_view,
             .macro_animation => .macro_animation,
+            .macro_pass => .macro_pass,
             .macro_define => return self.parse_define(),
             else => return null,
         };

@@ -82,4 +82,6 @@ test {
     _ = @import("emitter/module_reference_test.zig");
     _ = @import("emitter/builtin_inputs_test.zig");
     _ = @import("emitter/minify_uniforms_test.zig");
+    _ = @import("emitter/wgsl_scan.zig");
+    _ = @import("emitter/pass_sugar_test.zig");
 }

@@ -318,6 +318,9 @@ pub const Node = struct {
         /// - endBehavior: hold | stop | restart (default: hold)
         /// - scenes: array of scene objects { id frame start end }
         macro_animation,
+        /// #pass name { code="..." init="..." feedback=true deps=[...] }
+        /// High-level pass sugar: auto-detects fragment vs compute from WGSL.
+        macro_pass,
 
         // Values
         /// "string literal"

@@ -54,6 +54,7 @@ const frames = @import("emitter/frames.zig");
 const wasm = @import("emitter/wasm.zig");
 const animations = @import("emitter/animations.zig");
 const buffer_init = @import("emitter/init.zig");
+const pass_sugar = @import("emitter/pass_sugar.zig");
 
 // Use reflect module import
 const reflect = @import("reflect");
@@ -401,6 +402,9 @@ pub const Emitter = struct {
         try pipelines.emitPipelines(&self);
         try resources.emitBindGroups(&self);
         try resources.emitRenderBundles(&self);
+
+        // Pass 1.5: Expand #pass macros (creates synthetic resources, pipelines, passes, frames)
+        try pass_sugar.expandPassMacros(&self);
 
         // Pass 2: Emit #init macros (creates synthetic pipelines, bind groups, passes)
         try buffer_init.emitInitMacros(&self);

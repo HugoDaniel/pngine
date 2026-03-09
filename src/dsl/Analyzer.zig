@@ -141,6 +141,7 @@ pub const Analyzer = struct {
         query_set: std.StringHashMapUnmanaged(SymbolInfo),
         texture_view: std.StringHashMapUnmanaged(SymbolInfo),
         animation: std.StringHashMapUnmanaged(SymbolInfo),
+        pass: std.StringHashMapUnmanaged(SymbolInfo),
 
         pub fn init() SymbolTable {
             return .{
@@ -168,6 +169,7 @@ pub const Analyzer = struct {
                 .query_set = .{},
                 .texture_view = .{},
                 .animation = .{},
+                .pass = .{},
             };
         }
 
@@ -196,6 +198,7 @@ pub const Analyzer = struct {
             self.query_set.deinit(gpa);
             self.texture_view.deinit(gpa);
             self.animation.deinit(gpa);
+            self.pass.deinit(gpa);
         }
 
         pub fn getNamespace(self: *SymbolTable, ns: Namespace) *std.StringHashMapUnmanaged(SymbolInfo) {
@@ -223,6 +226,7 @@ pub const Analyzer = struct {
                 .query_set => &self.query_set,
                 .texture_view => &self.texture_view,
                 .animation => &self.animation,
+                .pass => &self.pass,
             };
         }
     };
@@ -263,6 +267,7 @@ pub const Analyzer = struct {
         query_set,
         texture_view,
         animation,
+        pass,
 
         pub fn fromString(s: []const u8) ?Namespace {
             const map = std.StaticStringMap(Namespace).initComptime(.{
@@ -580,6 +585,7 @@ pub const Analyzer = struct {
             .macro_query_set => .query_set,
             .macro_texture_view => .texture_view,
             .macro_animation => .animation,
+            .macro_pass => .pass,
             else => return, // Skip non-declaration nodes
         };
 
@@ -647,6 +653,7 @@ pub const Analyzer = struct {
         .{ "bind_group_layout", RequiredProperties{ .required = &.{"entries"}, .name = "#bindGroupLayout" } },
         // #init macro: buffer and shader are required, params is optional
         .{ "buffer_init", RequiredProperties{ .required = &.{ "buffer", "shader" }, .name = "#init" } },
+        .{ "pass", RequiredProperties{ .required = &.{"code"}, .name = "#pass" } },
     });
 
     /// Validate that all declarations have their required properties.
@@ -674,6 +681,7 @@ pub const Analyzer = struct {
                 .macro_wgsl => "wgsl",
                 .macro_bind_group_layout => "bind_group_layout",
                 .macro_init => "buffer_init",
+                .macro_pass => "pass",
                 else => null,
             };
 
