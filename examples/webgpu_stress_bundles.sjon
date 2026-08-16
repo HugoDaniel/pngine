@@ -1,0 +1,329 @@
+; Bundle-dispatch stress — the bundle arm of a dispatch-throughput comparison
+; after the webgpu-samples `animometer` sample. 60 hash-placed triangles, each
+; drawn by its own `(render-bundle …)` with its own uniform buffer and bind
+; group (the triangle index rides in the uniform), executed as 4 passes × 15
+; bundles. Upstream measures per-frame JS encoding cost, which a pre-recorded
+; payload does not have; this file stresses the per-frame path pngine does
+; run — bytecode walk → command buffer → JS application — at 60 bundle
+; executions each carrying a bind-group switch.
+;
+; Sizing: `:execute-bundles` takes at most 16 bundles per pass, hence the
+; four passes; N=60 also stays under the bind-group and buffer limits with
+; headroom. The first pass writes timestamps 0/1 and the last 2/3 (a count-4
+; query set; total = ts3 − ts0), resolved and copied to a MAP_READ buffer for
+; the host's onQueryResult. Companion: webgpu_stress_instanced.sjon draws the
+; same 60 triangles as one instanced draw. Measured on M-series Metal / Chrome
+; at DPR 2 (65.536 µs timestamp steps), both arms run display-limited (~118
+; fps); GPU time ~262 µs for the bundle arm (at an earlier 256-bundle,
+; 16-pass prototype) vs ~66 µs instanced — dispatch overhead is measurable
+; but far from the frame budget. Native `--frame`: bundles and queries are
+; no-ops, so it shows only the clear.
+
+(shader-module :name code :code """
+struct Info { v : vec4f }
+@group(0) @binding(0) var<uniform> info : Info;
+
+fn hash(n: u32) -> f32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return f32(x) / f32(0xffffffffu);
+}
+
+struct VSOut {
+  @builtin(position) pos : vec4f,
+  @location(0) color : vec3f,
+}
+
+@vertex
+fn vs(@builtin(vertex_index) vi : u32) -> VSOut {
+  let i = u32(info.v.x);
+  let c = vec2f(hash(i * 3u + 1u), hash(i * 3u + 2u)) * 1.9 - 0.95;
+  let s = 0.03;
+  var corners = array<vec2f, 3>(vec2f(0.0, s), vec2f(-s, -s), vec2f(s, -s));
+  var out : VSOut;
+  out.pos = vec4f(c + corners[vi], 0.0, 1.0);
+  let hue = hash(i * 3u) * 6.2831853;
+  out.color = 0.55 + 0.45 * vec3f(cos(hue), cos(hue - 2.0944), cos(hue + 2.0944));
+  return out;
+}
+
+@fragment
+fn fs(@location(0) color : vec3f) -> @location(0) vec4f {
+  return vec4f(color, 1.0);
+}
+""")
+
+(render-pipeline :name pipe
+  (layout auto)
+  (vertex (module code) (entry vs))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list)))
+
+(query-set :name tsQS :type timestamp :count 4)
+(buffer :name resolveBuf :size 32 :usage [query-resolve copy-src])
+(buffer :name readbackBuf :size 32 :usage [map-read copy-dst])
+
+(data :name d0 :float32 [0 0 0 0])
+(data :name d1 :float32 [1 0 0 0])
+(data :name d2 :float32 [2 0 0 0])
+(data :name d3 :float32 [3 0 0 0])
+(data :name d4 :float32 [4 0 0 0])
+(data :name d5 :float32 [5 0 0 0])
+(data :name d6 :float32 [6 0 0 0])
+(data :name d7 :float32 [7 0 0 0])
+(data :name d8 :float32 [8 0 0 0])
+(data :name d9 :float32 [9 0 0 0])
+(data :name d10 :float32 [10 0 0 0])
+(data :name d11 :float32 [11 0 0 0])
+(data :name d12 :float32 [12 0 0 0])
+(data :name d13 :float32 [13 0 0 0])
+(data :name d14 :float32 [14 0 0 0])
+(data :name d15 :float32 [15 0 0 0])
+(data :name d16 :float32 [16 0 0 0])
+(data :name d17 :float32 [17 0 0 0])
+(data :name d18 :float32 [18 0 0 0])
+(data :name d19 :float32 [19 0 0 0])
+(data :name d20 :float32 [20 0 0 0])
+(data :name d21 :float32 [21 0 0 0])
+(data :name d22 :float32 [22 0 0 0])
+(data :name d23 :float32 [23 0 0 0])
+(data :name d24 :float32 [24 0 0 0])
+(data :name d25 :float32 [25 0 0 0])
+(data :name d26 :float32 [26 0 0 0])
+(data :name d27 :float32 [27 0 0 0])
+(data :name d28 :float32 [28 0 0 0])
+(data :name d29 :float32 [29 0 0 0])
+(data :name d30 :float32 [30 0 0 0])
+(data :name d31 :float32 [31 0 0 0])
+(data :name d32 :float32 [32 0 0 0])
+(data :name d33 :float32 [33 0 0 0])
+(data :name d34 :float32 [34 0 0 0])
+(data :name d35 :float32 [35 0 0 0])
+(data :name d36 :float32 [36 0 0 0])
+(data :name d37 :float32 [37 0 0 0])
+(data :name d38 :float32 [38 0 0 0])
+(data :name d39 :float32 [39 0 0 0])
+(data :name d40 :float32 [40 0 0 0])
+(data :name d41 :float32 [41 0 0 0])
+(data :name d42 :float32 [42 0 0 0])
+(data :name d43 :float32 [43 0 0 0])
+(data :name d44 :float32 [44 0 0 0])
+(data :name d45 :float32 [45 0 0 0])
+(data :name d46 :float32 [46 0 0 0])
+(data :name d47 :float32 [47 0 0 0])
+(data :name d48 :float32 [48 0 0 0])
+(data :name d49 :float32 [49 0 0 0])
+(data :name d50 :float32 [50 0 0 0])
+(data :name d51 :float32 [51 0 0 0])
+(data :name d52 :float32 [52 0 0 0])
+(data :name d53 :float32 [53 0 0 0])
+(data :name d54 :float32 [54 0 0 0])
+(data :name d55 :float32 [55 0 0 0])
+(data :name d56 :float32 [56 0 0 0])
+(data :name d57 :float32 [57 0 0 0])
+(data :name d58 :float32 [58 0 0 0])
+(data :name d59 :float32 [59 0 0 0])
+(buffer :name u0 :size 16 :usage [uniform] :mapped-at-creation d0)
+(buffer :name u1 :size 16 :usage [uniform] :mapped-at-creation d1)
+(buffer :name u2 :size 16 :usage [uniform] :mapped-at-creation d2)
+(buffer :name u3 :size 16 :usage [uniform] :mapped-at-creation d3)
+(buffer :name u4 :size 16 :usage [uniform] :mapped-at-creation d4)
+(buffer :name u5 :size 16 :usage [uniform] :mapped-at-creation d5)
+(buffer :name u6 :size 16 :usage [uniform] :mapped-at-creation d6)
+(buffer :name u7 :size 16 :usage [uniform] :mapped-at-creation d7)
+(buffer :name u8 :size 16 :usage [uniform] :mapped-at-creation d8)
+(buffer :name u9 :size 16 :usage [uniform] :mapped-at-creation d9)
+(buffer :name u10 :size 16 :usage [uniform] :mapped-at-creation d10)
+(buffer :name u11 :size 16 :usage [uniform] :mapped-at-creation d11)
+(buffer :name u12 :size 16 :usage [uniform] :mapped-at-creation d12)
+(buffer :name u13 :size 16 :usage [uniform] :mapped-at-creation d13)
+(buffer :name u14 :size 16 :usage [uniform] :mapped-at-creation d14)
+(buffer :name u15 :size 16 :usage [uniform] :mapped-at-creation d15)
+(buffer :name u16 :size 16 :usage [uniform] :mapped-at-creation d16)
+(buffer :name u17 :size 16 :usage [uniform] :mapped-at-creation d17)
+(buffer :name u18 :size 16 :usage [uniform] :mapped-at-creation d18)
+(buffer :name u19 :size 16 :usage [uniform] :mapped-at-creation d19)
+(buffer :name u20 :size 16 :usage [uniform] :mapped-at-creation d20)
+(buffer :name u21 :size 16 :usage [uniform] :mapped-at-creation d21)
+(buffer :name u22 :size 16 :usage [uniform] :mapped-at-creation d22)
+(buffer :name u23 :size 16 :usage [uniform] :mapped-at-creation d23)
+(buffer :name u24 :size 16 :usage [uniform] :mapped-at-creation d24)
+(buffer :name u25 :size 16 :usage [uniform] :mapped-at-creation d25)
+(buffer :name u26 :size 16 :usage [uniform] :mapped-at-creation d26)
+(buffer :name u27 :size 16 :usage [uniform] :mapped-at-creation d27)
+(buffer :name u28 :size 16 :usage [uniform] :mapped-at-creation d28)
+(buffer :name u29 :size 16 :usage [uniform] :mapped-at-creation d29)
+(buffer :name u30 :size 16 :usage [uniform] :mapped-at-creation d30)
+(buffer :name u31 :size 16 :usage [uniform] :mapped-at-creation d31)
+(buffer :name u32 :size 16 :usage [uniform] :mapped-at-creation d32)
+(buffer :name u33 :size 16 :usage [uniform] :mapped-at-creation d33)
+(buffer :name u34 :size 16 :usage [uniform] :mapped-at-creation d34)
+(buffer :name u35 :size 16 :usage [uniform] :mapped-at-creation d35)
+(buffer :name u36 :size 16 :usage [uniform] :mapped-at-creation d36)
+(buffer :name u37 :size 16 :usage [uniform] :mapped-at-creation d37)
+(buffer :name u38 :size 16 :usage [uniform] :mapped-at-creation d38)
+(buffer :name u39 :size 16 :usage [uniform] :mapped-at-creation d39)
+(buffer :name u40 :size 16 :usage [uniform] :mapped-at-creation d40)
+(buffer :name u41 :size 16 :usage [uniform] :mapped-at-creation d41)
+(buffer :name u42 :size 16 :usage [uniform] :mapped-at-creation d42)
+(buffer :name u43 :size 16 :usage [uniform] :mapped-at-creation d43)
+(buffer :name u44 :size 16 :usage [uniform] :mapped-at-creation d44)
+(buffer :name u45 :size 16 :usage [uniform] :mapped-at-creation d45)
+(buffer :name u46 :size 16 :usage [uniform] :mapped-at-creation d46)
+(buffer :name u47 :size 16 :usage [uniform] :mapped-at-creation d47)
+(buffer :name u48 :size 16 :usage [uniform] :mapped-at-creation d48)
+(buffer :name u49 :size 16 :usage [uniform] :mapped-at-creation d49)
+(buffer :name u50 :size 16 :usage [uniform] :mapped-at-creation d50)
+(buffer :name u51 :size 16 :usage [uniform] :mapped-at-creation d51)
+(buffer :name u52 :size 16 :usage [uniform] :mapped-at-creation d52)
+(buffer :name u53 :size 16 :usage [uniform] :mapped-at-creation d53)
+(buffer :name u54 :size 16 :usage [uniform] :mapped-at-creation d54)
+(buffer :name u55 :size 16 :usage [uniform] :mapped-at-creation d55)
+(buffer :name u56 :size 16 :usage [uniform] :mapped-at-creation d56)
+(buffer :name u57 :size 16 :usage [uniform] :mapped-at-creation d57)
+(buffer :name u58 :size 16 :usage [uniform] :mapped-at-creation d58)
+(buffer :name u59 :size 16 :usage [uniform] :mapped-at-creation d59)
+(bind-group :name g0 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u0))
+(bind-group :name g1 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u1))
+(bind-group :name g2 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u2))
+(bind-group :name g3 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u3))
+(bind-group :name g4 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u4))
+(bind-group :name g5 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u5))
+(bind-group :name g6 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u6))
+(bind-group :name g7 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u7))
+(bind-group :name g8 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u8))
+(bind-group :name g9 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u9))
+(bind-group :name g10 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u10))
+(bind-group :name g11 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u11))
+(bind-group :name g12 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u12))
+(bind-group :name g13 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u13))
+(bind-group :name g14 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u14))
+(bind-group :name g15 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u15))
+(bind-group :name g16 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u16))
+(bind-group :name g17 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u17))
+(bind-group :name g18 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u18))
+(bind-group :name g19 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u19))
+(bind-group :name g20 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u20))
+(bind-group :name g21 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u21))
+(bind-group :name g22 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u22))
+(bind-group :name g23 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u23))
+(bind-group :name g24 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u24))
+(bind-group :name g25 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u25))
+(bind-group :name g26 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u26))
+(bind-group :name g27 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u27))
+(bind-group :name g28 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u28))
+(bind-group :name g29 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u29))
+(bind-group :name g30 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u30))
+(bind-group :name g31 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u31))
+(bind-group :name g32 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u32))
+(bind-group :name g33 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u33))
+(bind-group :name g34 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u34))
+(bind-group :name g35 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u35))
+(bind-group :name g36 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u36))
+(bind-group :name g37 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u37))
+(bind-group :name g38 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u38))
+(bind-group :name g39 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u39))
+(bind-group :name g40 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u40))
+(bind-group :name g41 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u41))
+(bind-group :name g42 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u42))
+(bind-group :name g43 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u43))
+(bind-group :name g44 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u44))
+(bind-group :name g45 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u45))
+(bind-group :name g46 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u46))
+(bind-group :name g47 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u47))
+(bind-group :name g48 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u48))
+(bind-group :name g49 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u49))
+(bind-group :name g50 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u50))
+(bind-group :name g51 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u51))
+(bind-group :name g52 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u52))
+(bind-group :name g53 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u53))
+(bind-group :name g54 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u54))
+(bind-group :name g55 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u55))
+(bind-group :name g56 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u56))
+(bind-group :name g57 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u57))
+(bind-group :name g58 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u58))
+(bind-group :name g59 :layout-pipeline pipe :layout-index 0 (entry :binding 0 :buffer u59))
+(render-bundle :name b0 :pipeline pipe :bind-groups [g0] :draw 3)
+(render-bundle :name b1 :pipeline pipe :bind-groups [g1] :draw 3)
+(render-bundle :name b2 :pipeline pipe :bind-groups [g2] :draw 3)
+(render-bundle :name b3 :pipeline pipe :bind-groups [g3] :draw 3)
+(render-bundle :name b4 :pipeline pipe :bind-groups [g4] :draw 3)
+(render-bundle :name b5 :pipeline pipe :bind-groups [g5] :draw 3)
+(render-bundle :name b6 :pipeline pipe :bind-groups [g6] :draw 3)
+(render-bundle :name b7 :pipeline pipe :bind-groups [g7] :draw 3)
+(render-bundle :name b8 :pipeline pipe :bind-groups [g8] :draw 3)
+(render-bundle :name b9 :pipeline pipe :bind-groups [g9] :draw 3)
+(render-bundle :name b10 :pipeline pipe :bind-groups [g10] :draw 3)
+(render-bundle :name b11 :pipeline pipe :bind-groups [g11] :draw 3)
+(render-bundle :name b12 :pipeline pipe :bind-groups [g12] :draw 3)
+(render-bundle :name b13 :pipeline pipe :bind-groups [g13] :draw 3)
+(render-bundle :name b14 :pipeline pipe :bind-groups [g14] :draw 3)
+(render-bundle :name b15 :pipeline pipe :bind-groups [g15] :draw 3)
+(render-bundle :name b16 :pipeline pipe :bind-groups [g16] :draw 3)
+(render-bundle :name b17 :pipeline pipe :bind-groups [g17] :draw 3)
+(render-bundle :name b18 :pipeline pipe :bind-groups [g18] :draw 3)
+(render-bundle :name b19 :pipeline pipe :bind-groups [g19] :draw 3)
+(render-bundle :name b20 :pipeline pipe :bind-groups [g20] :draw 3)
+(render-bundle :name b21 :pipeline pipe :bind-groups [g21] :draw 3)
+(render-bundle :name b22 :pipeline pipe :bind-groups [g22] :draw 3)
+(render-bundle :name b23 :pipeline pipe :bind-groups [g23] :draw 3)
+(render-bundle :name b24 :pipeline pipe :bind-groups [g24] :draw 3)
+(render-bundle :name b25 :pipeline pipe :bind-groups [g25] :draw 3)
+(render-bundle :name b26 :pipeline pipe :bind-groups [g26] :draw 3)
+(render-bundle :name b27 :pipeline pipe :bind-groups [g27] :draw 3)
+(render-bundle :name b28 :pipeline pipe :bind-groups [g28] :draw 3)
+(render-bundle :name b29 :pipeline pipe :bind-groups [g29] :draw 3)
+(render-bundle :name b30 :pipeline pipe :bind-groups [g30] :draw 3)
+(render-bundle :name b31 :pipeline pipe :bind-groups [g31] :draw 3)
+(render-bundle :name b32 :pipeline pipe :bind-groups [g32] :draw 3)
+(render-bundle :name b33 :pipeline pipe :bind-groups [g33] :draw 3)
+(render-bundle :name b34 :pipeline pipe :bind-groups [g34] :draw 3)
+(render-bundle :name b35 :pipeline pipe :bind-groups [g35] :draw 3)
+(render-bundle :name b36 :pipeline pipe :bind-groups [g36] :draw 3)
+(render-bundle :name b37 :pipeline pipe :bind-groups [g37] :draw 3)
+(render-bundle :name b38 :pipeline pipe :bind-groups [g38] :draw 3)
+(render-bundle :name b39 :pipeline pipe :bind-groups [g39] :draw 3)
+(render-bundle :name b40 :pipeline pipe :bind-groups [g40] :draw 3)
+(render-bundle :name b41 :pipeline pipe :bind-groups [g41] :draw 3)
+(render-bundle :name b42 :pipeline pipe :bind-groups [g42] :draw 3)
+(render-bundle :name b43 :pipeline pipe :bind-groups [g43] :draw 3)
+(render-bundle :name b44 :pipeline pipe :bind-groups [g44] :draw 3)
+(render-bundle :name b45 :pipeline pipe :bind-groups [g45] :draw 3)
+(render-bundle :name b46 :pipeline pipe :bind-groups [g46] :draw 3)
+(render-bundle :name b47 :pipeline pipe :bind-groups [g47] :draw 3)
+(render-bundle :name b48 :pipeline pipe :bind-groups [g48] :draw 3)
+(render-bundle :name b49 :pipeline pipe :bind-groups [g49] :draw 3)
+(render-bundle :name b50 :pipeline pipe :bind-groups [g50] :draw 3)
+(render-bundle :name b51 :pipeline pipe :bind-groups [g51] :draw 3)
+(render-bundle :name b52 :pipeline pipe :bind-groups [g52] :draw 3)
+(render-bundle :name b53 :pipeline pipe :bind-groups [g53] :draw 3)
+(render-bundle :name b54 :pipeline pipe :bind-groups [g54] :draw 3)
+(render-bundle :name b55 :pipeline pipe :bind-groups [g55] :draw 3)
+(render-bundle :name b56 :pipeline pipe :bind-groups [g56] :draw 3)
+(render-bundle :name b57 :pipeline pipe :bind-groups [g57] :draw 3)
+(render-bundle :name b58 :pipeline pipe :bind-groups [g58] :draw 3)
+(render-bundle :name b59 :pipeline pipe :bind-groups [g59] :draw 3)
+
+(render-pass :name pass0
+  (color-attachment :view context-current-texture :clear-value [0.03 0.03 0.05 1] :load-op clear :store-op store)
+  (timestamp-writes :query-set tsQS :begin 0 :end 1)
+  :execute-bundles [b0 b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14])
+(render-pass :name pass1
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  :execute-bundles [b15 b16 b17 b18 b19 b20 b21 b22 b23 b24 b25 b26 b27 b28 b29])
+(render-pass :name pass2
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  :execute-bundles [b30 b31 b32 b33 b34 b35 b36 b37 b38 b39 b40 b41 b42 b43 b44])
+(render-pass :name pass3
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (timestamp-writes :query-set tsQS :begin 2 :end 3)
+  :execute-bundles [b45 b46 b47 b48 b49 b50 b51 b52 b53 b54 b55 b56 b57 b58 b59])
+
+(queue :name resolveOps
+  (resolve-query-set :query-set tsQS :first-query 0 :query-count 4 :destination resolveBuf :destination-offset 0)
+  (copy-buffer-to-buffer :source resolveBuf :destination readbackBuf :size 32))
+
+(frame :name main :perform [pass0 pass1 pass2 pass3 resolveOps])

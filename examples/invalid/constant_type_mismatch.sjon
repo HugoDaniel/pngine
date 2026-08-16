@@ -1,0 +1,11 @@
+; Invalid: a fractional value (3.5) for a `u32` override. The schema sees only
+; a number; the emitter type-checks the constant against the reflected WGSL
+; declaration and rejects it rather than truncating.
+(shader-module :name code :code """
+override QUALITY: u32 = 1u;
+@compute @workgroup_size(1) fn cs() { let q = QUALITY; }
+""")
+(compute-pipeline :name cp :module code :entry cs
+  (constant :name QUALITY :value 3.5))
+(compute-pass :name step :pipeline cp :dispatch-workgroups 1)
+(frame :name main :perform [step])

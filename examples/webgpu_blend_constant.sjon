@@ -1,0 +1,47 @@
+; Blend constant — a fullscreen triangle whose fragment outputs opaque white,
+; drawn over a black-cleared attachment with a blend state that uses the
+; `constant` / `one-minus-constant` factors, and a render pass that sets
+; :blend-constant:
+;
+;   out.rgb = src.rgb * constant.rgb + dst.rgb * (1 - constant.rgb)
+;           = (1,1,1) * constant.rgb + (0,0,0) * (…)
+;           = constant.rgb
+;
+; So the on-screen color is the blend constant. With :blend-constant
+; [0.9 0.4 0.1 1.0] the whole frame is orange; if setBlendConstant never ran
+; the constant would default to [0 0 0 0] → src factor 0 → a black frame.
+
+(shader-module :name code :code """
+struct VO { @builtin(position) pos: vec4f };
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> VO {
+  var p = array<vec2f, 3>(vec2f(-1.0, -3.0), vec2f(-1.0, 1.0), vec2f(3.0, 1.0));
+  var o: VO;
+  o.pos = vec4f(p[i], 0.0, 1.0);
+  return o;
+}
+
+@fragment
+fn fs() -> @location(0) vec4f {
+  return vec4f(1.0, 1.0, 1.0, 1.0);
+}
+""")
+
+(render-pipeline :name pipe (layout auto)
+  (vertex (module code) (entry vs))
+  (fragment (module code) (entry fs)
+    (targets
+      (target :format preferred-canvas-format
+        (blend
+          (color :src-factor constant :dst-factor one-minus-constant :operation add)
+          (alpha :src-factor one :dst-factor zero :operation add))))))
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipe
+  :blend-constant [0.9 0.4 0.1 1.0]
+  (draw :vertex-count 3))
+
+(frame :name main :perform [draw])

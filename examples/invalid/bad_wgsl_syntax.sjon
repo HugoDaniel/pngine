@@ -1,0 +1,32 @@
+; Invalid: the WGSL has syntax and type errors (missing semicolon, undeclared
+; identifier, wrong return type); shader validation rejects the module.
+(shader-module :name code :code """
+    @vertex
+    fn vertexMain(
+      @builtin(vertex_index) VertexIndex : u32
+    ) -> @builtin(position) vec4f {
+      // ERROR: missing semicolon
+      var pos = array<vec2f, 3>(
+        vec2(0.0, 0.5),
+        vec2(-0.5, -0.5),
+        vec2(0.5, -0.5)
+      )
+
+      // ERROR: undeclared identifier 'undefined_var'
+      return vec4f(pos[undefined_var], 0.0, 1.0);
+    }
+
+    @fragment
+    fn fragMain() -> @location(0) vec4f {
+      // ERROR: wrong return type (vec3 instead of vec4)
+      return vec3(1.0, 0.0, 0.0);
+    }
+""")
+(render-pipeline :name pipeline (layout auto)
+  (vertex (module code)(entry vertexMain))
+  (fragment (module code)(entry fragMain)(targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list)))
+(render-pass :name render :pipeline pipeline
+  (color-attachment :view context-current-texture :clear-value [0 0 0 0] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name badSyntax :perform [render])

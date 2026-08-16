@@ -1,0 +1,122 @@
+; Fractal cube — port of the webgpu-samples `fractalCube` sample. A rotating
+; cube whose faces sample the previous frame: a sampler + a feedback texture
+; bound as a texture entry, and a (copy-texture-to-texture …) queue op that
+; copies the canvas back into the feedback texture after each draw. No image
+; assets.
+
+(shader-module :name code :code """
+struct PngineInputs {
+  time: f32,
+  canvasW: f32,
+  canvasH: f32,
+  aspect: f32,
+};
+
+@group(0) @binding(0) var<uniform> inputs : PngineInputs;
+@group(0) @binding(1) var mySampler: sampler;
+@group(0) @binding(2) var myTexture: texture_2d<f32>;
+
+struct VertexOutput {
+  @builtin(position) Position : vec4f,
+  @location(0) fragUV : vec2f,
+  @location(1) fragPosition : vec4f,
+};
+
+// Rodrigues rotation: rotate p around normalized axis k by angle a
+fn rotateAxis(p: vec3f, k: vec3f, a: f32) -> vec3f {
+  let c = cos(a); let s = sin(a);
+  return p * c + cross(k, p) * s + k * dot(k, p) * (1.0 - c);
+}
+
+@vertex
+fn vertexMain(
+  @location(0) position : vec4f,
+  @location(1) color : vec4f,
+  @location(2) uv : vec2f
+) -> VertexOutput {
+  var output : VertexOutput;
+
+  let t = inputs.time;
+  // Rotate around time-varying axis [sin(t), cos(t), 0] by 1 radian (matches original)
+  let axis = normalize(vec3f(sin(t), cos(t), 0.0));
+  let rotated = rotateAxis(position.xyz, axis, 1.0);
+
+  // View transform: translate z by -4
+  let viewPos = rotated + vec3f(0.0, 0.0, -4.0);
+
+  // Perspective projection: FOV=72deg, near=1, far=100
+  let fov = 2.0 * 3.14159265 / 5.0;
+  let f = 1.0 / tan(fov * 0.5);
+  let nf = 1.0 / (1.0 - 100.0);
+  let clipX = viewPos.x * f / inputs.aspect;
+  let clipY = viewPos.y * f;
+  let clipZ = viewPos.z * (100.0 * nf) + (100.0 * nf);
+  let clipW = -viewPos.z;
+
+  output.Position = vec4f(clipX, clipY, clipZ, clipW);
+  output.fragUV = uv;
+  output.fragPosition = 0.5 * (position + vec4f(1.0, 1.0, 1.0, 1.0));
+  return output;
+}
+
+@fragment
+fn fragMain(
+  @location(0) fragUV : vec2f,
+  @location(1) fragPosition : vec4f
+) -> @location(0) vec4f {
+  // Sample previous frame with offset UV for fractal effect
+  let texColor = textureSample(myTexture, mySampler, fragUV * 0.8 + vec2f(0.1));
+  // If previous frame pixel is near gray (initial clear), use position color instead
+  let f = select(1.0, 0.0, length(texColor.rgb - vec3f(0.5)) < 0.01);
+  return f * texColor + (1.0 - f) * fragPosition;
+}
+""")
+
+(data :name cubeVertexArray (cube :format [position4 color4 uv2]))
+
+(buffer :name verticesBuffer :size cubeVertexArray :usage [vertex]
+  :mapped-at-creation cubeVertexArray)
+
+(buffer :name uniformBuffer :size 16 :usage [uniform copy-dst])
+
+; Feedback texture: stores previous frame for self-referencing.
+(texture :name feedbackTex :size canvas :format preferred-canvas-format :usage [texture-binding copy-dst])
+
+(texture :name depthTex :size canvas :format depth24plus :usage [render-attachment])
+
+(sampler :name linearSampler :mag-filter linear :min-filter linear)
+
+(queue :name writeUniforms
+  (write-buffer :buffer uniformBuffer :offset 0 :data pngine-inputs))
+
+(render-pipeline :name pipe
+  (layout auto)
+  (vertex (module code) (entry vertexMain)
+    (buffers
+      (vertex-buffer :array-stride 40
+        (attribute :shader-location 0 :offset 0 :format float32x4)
+        (attribute :shader-location 1 :offset 16 :format float32x4)
+        (attribute :shader-location 2 :offset 32 :format float32x2))))
+  (fragment (module code) (entry fragMain)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list) :cull-mode back)
+  (depth-stencil :depth-write-enabled true :depth-compare less :format depth24plus))
+
+(bind-group :name mainBG :layout-pipeline pipe :layout-index 0
+  (entry :binding 0 :buffer uniformBuffer)
+  (entry :binding 1 :sampler linearSampler)
+  (entry :binding 2 :texture feedbackTex))
+
+(render-pass :name drawCube
+  (color-attachment :view context-current-texture :clear-value [0.5 0.5 0.5 1.0] :load-op clear :store-op store)
+  (depth-attachment :view depthTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  :pipeline pipe
+  :vertex-buffers [verticesBuffer]
+  :bind-groups [mainBG]
+  (draw :vertex-count 36))
+
+; Copy rendered frame to feedback texture for next frame.
+(queue :name copyFeedback
+  (copy-texture-to-texture :source context-current-texture :destination feedbackTex))
+
+(frame :name main :perform [writeUniforms drawCube copyFeedback])

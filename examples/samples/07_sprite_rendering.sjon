@@ -1,0 +1,186 @@
+; Sprite rendering — 64 gently floating "sprites" drawn as instanced,
+; alpha-blended quads. Despite the name there are no textures: each sprite is a
+; procedural SDF shape (circle, star, ring or diamond) picked per instance and
+; evaluated in the fragment shader with a soft edge and glow. A compute
+; `(init …)` fills the per-instance buffer once with random position, scale and
+; type (one vec4f per sprite); the pipeline blends src-alpha over
+; one-minus-src-alpha.
+;
+; Every vertex buffer states its `:step-mode` (`vertex` on the quad, `instance`
+; on the sprite data) even though `vertex` is the default, so the per-vertex /
+; per-instance split reads at a glance.
+
+(define :name NUM_SPRITES :value 64)
+
+(data :name quadVertices :float32 [
+  -0.5 -0.5
+   0.5 -0.5
+  -0.5  0.5
+   0.5 -0.5
+   0.5  0.5
+  -0.5  0.5
+])
+
+; quadBuffer is mapped-at-creation from the static quad; instanceBuffer is
+; storage+vertex and is seeded by the init pass (no mapped data); uniforms
+; receives pngine-inputs each frame.
+(buffer :name quadBuffer :size quadVertices :usage [vertex]
+  :mapped-at-creation quadVertices)
+
+(buffer :name instanceBuffer :size (* NUM_SPRITES 4 4) :usage [vertex storage])
+
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+
+(queue :name writeUniforms
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+; One-shot seed of the per-instance buffer: a scalar `:workgroups 1` dispatches
+; (1,1,1), and one 64-thread workgroup covers all 64 sprites.
+(init :name initSprites :buffer instanceBuffer :shader initShader :workgroups 1)
+
+(shader-module :name initShader :code """
+    struct Instances {
+      data: array<vec4f>,
+    }
+    @binding(0) @group(0) var<storage, read_write> instances: Instances;
+
+    fn hash(n: u32) -> f32 {
+      var x = n;
+      x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+      x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+      x = (x >> 16u) ^ x;
+      return f32(x) / f32(0xffffffffu);
+    }
+
+    const NUM: u32 = 64u;
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+      let i = id.x;
+      if (i >= NUM) { return; }
+
+      let x = hash(i * 7u) * 1.8 - 0.9;
+      let y = hash(i * 11u) * 1.8 - 0.9;
+      let scale = hash(i * 13u) * 0.12 + 0.04;
+      let spriteType = hash(i * 17u);  // 0-1 for sprite variety
+
+      instances.data[i] = vec4f(x, y, scale, spriteType);
+    }
+""")
+
+(shader-module :name renderShader :code """
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    struct VertexOutput {
+      @builtin(position) pos: vec4f,
+      @location(0) localUV: vec2f,
+      @location(1) spriteType: f32,
+    }
+
+    @vertex
+    fn vs(
+      @location(0) quadPos: vec2f,
+      @location(1) instanceData: vec4f
+    ) -> VertexOutput {
+      let pos = instanceData.xy;
+      let scale = instanceData.z;
+      let spriteType = instanceData.w;
+
+      // Gentle floating animation
+      let floatY = sin(u.time * 2.0 + pos.x * 5.0) * 0.02;
+
+      let scaledPos = quadPos * scale;
+
+      var out: VertexOutput;
+      out.pos = vec4f(scaledPos.x / u.aspect + pos.x, scaledPos.y + pos.y + floatY, 0.0, 1.0);
+      out.localUV = quadPos + 0.5;  // Convert to 0-1 range
+      out.spriteType = spriteType;
+      return out;
+    }
+
+    fn sdCircle(p: vec2f, r: f32) -> f32 {
+      return length(p) - r;
+    }
+
+    fn sdStar(p: vec2f, r: f32, n: u32) -> f32 {
+      let an = 3.14159 / f32(n);
+      let en = 3.14159 / 2.5;
+      let acs = vec2f(cos(an), sin(an));
+      let ecs = vec2f(cos(en), sin(en));
+      let bn = (atan2(p.x, p.y) % (2.0 * an)) - an;
+      var pp = length(p) * vec2f(cos(bn), abs(sin(bn)));
+      pp -= r * acs;
+      pp += ecs * clamp(-dot(pp, ecs), 0.0, r * acs.y / ecs.y);
+      return length(pp) * sign(pp.x);
+    }
+
+    @fragment
+    fn fs(in: VertexOutput) -> @location(0) vec4f {
+      let uv = in.localUV * 2.0 - 1.0;  // -1 to 1
+
+      var d: f32;
+      var color: vec3f;
+
+      // Different sprite types based on spriteType value
+      if (in.spriteType < 0.25) {
+        // Circle sprite
+        d = sdCircle(uv, 0.6);
+        color = vec3f(1.0, 0.4, 0.4);
+      } else if (in.spriteType < 0.5) {
+        // Star sprite
+        d = sdStar(uv, 0.4, 5u);
+        color = vec3f(1.0, 0.9, 0.3);
+      } else if (in.spriteType < 0.75) {
+        // Ring sprite
+        d = abs(sdCircle(uv, 0.5)) - 0.1;
+        color = vec3f(0.4, 0.8, 1.0);
+      } else {
+        // Diamond sprite
+        d = (abs(uv.x) + abs(uv.y)) - 0.6;
+        color = vec3f(0.6, 1.0, 0.6);
+      }
+
+      // Smooth edge with glow
+      let alpha = 1.0 - smoothstep(0.0, 0.1, d);
+      let glow = 0.05 / (abs(d) + 0.05);
+
+      if (alpha < 0.01) { discard; }
+
+      return vec4f(color * (alpha + glow * 0.3), alpha);
+    }
+""")
+
+(render-pipeline :name pipeline
+  (layout auto)
+  (vertex (module renderShader) (entry vs)
+    (buffers
+      (vertex-buffer :array-stride 8 :step-mode vertex
+        (attribute :shader-location 0 :offset 0 :format float32x2))
+      (vertex-buffer :array-stride 16 :step-mode instance
+        (attribute :shader-location 1 :offset 0 :format float32x4))))
+  (fragment (module renderShader) (entry fs)
+    (targets
+      (target :format preferred-canvas-format
+        (blend
+          (color :src-factor src-alpha :dst-factor one-minus-src-alpha)
+          (alpha :src-factor one :dst-factor one-minus-src-alpha))))))
+
+(bind-group :name bindings :layout-pipeline pipeline :layout-index 0
+  (entry :binding 0 :buffer uniforms))
+
+(render-pass :name drawPass
+  (color-attachment :view context-current-texture :clear-value [0.1 0.1 0.2 1] :load-op clear :store-op store)
+  :pipeline pipeline
+  :vertex-buffers [quadBuffer instanceBuffer]
+  :bind-groups [bindings]
+  (draw :vertex-count 6 :instance-count NUM_SPRITES))
+
+(frame :name main
+  :init [initSprites]
+  :perform [writeUniforms drawPass])

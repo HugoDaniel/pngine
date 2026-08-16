@@ -1,0 +1,28 @@
+; Invalid: the buffer is declared with storage usage but the shader binds it as
+; var<uniform>; the shader/binding cross-check rejects the address-space
+; mismatch instead of leaving it to fail at bind time.
+(buffer :name buf0 :size 16 :usage [storage copy-dst])
+(shader-module :name code :code """
+    struct Uniforms { color: vec4f, }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+    @vertex
+    fn vertexMain(@builtin(vertex_index) VertexIndex : u32) -> @builtin(position) vec4f {
+      var pos = array<vec2f, 3>(vec2(0.0, 0.5), vec2(-0.5, -0.5), vec2(0.5, -0.5));
+      return vec4f(pos[VertexIndex], 0.0, 1.0);
+    }
+    @fragment
+    fn fragMain() -> @location(0) vec4f {
+      return u.color;
+    }
+""")
+(bind-group :name uniformGroup :layout-pipeline pipeline :layout-index 0
+  (entry :binding 0 :buffer buf0))
+(render-pipeline :name pipeline (layout auto)
+  (vertex (module code)(entry vertexMain))
+  (fragment (module code)(entry fragMain)(targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list)))
+(render-pass :name render :pipeline pipeline
+  (color-attachment :view context-current-texture :clear-value [0 0 0 0] :load-op clear :store-op store)
+  :bind-groups [uniformGroup]
+  (draw :vertex-count 3))
+(frame :name addressSpaceMismatch :perform [render])

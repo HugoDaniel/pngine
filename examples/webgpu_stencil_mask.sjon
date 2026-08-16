@@ -1,0 +1,481 @@
+; webgpu_stencil_mask — port of the webgpu-samples `stencilMask` sample. Six
+; mask planes form a cube that follows the pointer; each is drawn with
+; `:stencil-reference` 1..6 through a `(stencil-front :compare always
+; :pass-op replace)` pipeline, then seven object scenes (spheres, cubes,
+; tori, cones, cylinders, faceted "jems", faceted "dice"; 50 instances each)
+; are drawn through a `(stencil-front :compare equal :pass-op keep)` pipeline,
+; each only where the stencil equals its reference (0 = the background). Per
+; frame: 6 mask passes then 7 scene passes on one depth24plus-stencil8
+; texture, with per-pass stencil load/store ops.
+;
+; Exercises eight shape generators (plane / sphere / cube / torus /
+; truncated-cone / cylinder plus two `:faceted true` variants), two `(init …)`
+; compute passes filling the per-instance transforms and colors storage
+; buffers, instanced draws with `(define …)`-driven counts and `:first-instance`
+; offsets into those buffers, and the pngine-inputs + pointer-inputs uniforms.
+;
+; Shape params are kebab-case (`:radial-subdivisions`, `:body-subdivisions`,
+; `:vertical-subdivisions`, `:faceted`). `:workgroups 6` is ceil(356 / 64):
+; 6 masks + 7 × 50 objects over a 64-wide workgroup. The shaders reference no
+; `(define …)` — they carry their own WGSL consts, plus PI, which the compiler
+; substitutes into shader text.
+
+(define :name NUM_OBJECTS_PER_SCENE :value 50)
+(define :name NUM_MASKS :value 6)
+(define :name PLANE_VERTEX_COUNT :value 6)
+(define :name SPHERE_VERTEX_COUNT :value 1728)
+(define :name CUBE_VERTEX_COUNT :value 36)
+(define :name TORUS_VERTEX_COUNT :value 1728)
+(define :name CONE_VERTEX_COUNT :value 432)
+(define :name CYLINDER_VERTEX_COUNT :value 432)
+(define :name JEM_VERTEX_COUNT :value 180)
+(define :name DICE_VERTEX_COUNT :value 384)
+
+; ── Geometry: 8 generators (jem = faceted sphere, dice = faceted torus) ──────────
+(data :name planeVerts    (plane :format [position3 normal3]))
+(data :name sphereVerts   (sphere :format [position3 normal3] :segments 24 :rings 12))
+(data :name cubeVerts     (cube :format [position3 normal3]))
+(data :name torusVerts    (torus :format [position3 normal3] :thickness 0.5 :radial-subdivisions 24 :body-subdivisions 12))
+(data :name coneVerts     (truncated-cone :format [position3 normal3] :radial-subdivisions 24 :vertical-subdivisions 1))
+(data :name cylinderVerts (cylinder :format [position3 normal3] :radial-subdivisions 24 :vertical-subdivisions 1))
+(data :name jemVerts      (sphere :format [position3 normal3] :segments 6 :rings 5 :faceted true))
+(data :name diceVerts     (torus :format [position3 normal3] :thickness 0.5 :radial-subdivisions 8 :body-subdivisions 8 :faceted true))
+
+; One vertex buffer per shape, in the same order as the `(data …)` forms above,
+; then the two per-instance storage buffers, then the uniforms.
+(buffer :name planeVB    :size planeVerts    :usage [vertex] :mapped-at-creation planeVerts)
+(buffer :name sphereVB   :size sphereVerts   :usage [vertex] :mapped-at-creation sphereVerts)
+(buffer :name cubeVB     :size cubeVerts     :usage [vertex] :mapped-at-creation cubeVerts)
+(buffer :name torusVB    :size torusVerts    :usage [vertex] :mapped-at-creation torusVerts)
+(buffer :name coneVB     :size coneVerts     :usage [vertex] :mapped-at-creation coneVerts)
+(buffer :name cylinderVB :size cylinderVerts :usage [vertex] :mapped-at-creation cylinderVerts)
+(buffer :name jemVB      :size jemVerts      :usage [vertex] :mapped-at-creation jemVerts)
+(buffer :name diceVB     :size diceVerts     :usage [vertex] :mapped-at-creation diceVerts)
+(buffer :name transforms :size 22784        :usage [storage])   ; 356 mat4x4f
+(buffer :name colors     :size 5696         :usage [storage])   ; 356 vec4f
+(buffer :name uniforms   :size 16           :usage [uniform copy-dst])
+(buffer :name pointerBuf :size 48           :usage [uniform copy-dst])
+
+(queue :name writeUniforms (write-buffer :buffer uniforms   :offset 0 :data pngine-inputs))
+(queue :name writePointer  (write-buffer :buffer pointerBuf :offset 0 :data pointer-inputs))
+
+; ── Depth-Stencil Texture ───────────────────────────────────────────────────────
+(texture :name depthStencilTex :size canvas :format depth24plus-stencil8 :usage [render-attachment])
+
+; ── Compute Init: fill transforms + colors ──────────────────────────────────────
+(shader-module :name initShader :code """
+struct Transforms { m: array<mat4x4f> }
+@binding(0) @group(0) var<storage, read_write> data: Transforms;
+
+fn hash(n: u32) -> f32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return f32(x) / f32(0xffffffffu);
+}
+
+fn rotX(a: f32) -> mat4x4f {
+  let c = cos(a); let s = sin(a);
+  return mat4x4f(vec4f(1,0,0,0), vec4f(0,c,-s,0), vec4f(0,s,c,0), vec4f(0,0,0,1));
+}
+fn rotY(a: f32) -> mat4x4f {
+  let c = cos(a); let s = sin(a);
+  return mat4x4f(vec4f(c,0,s,0), vec4f(0,1,0,0), vec4f(-s,0,c,0), vec4f(0,0,0,1));
+}
+fn rotZ(a: f32) -> mat4x4f {
+  let c = cos(a); let s = sin(a);
+  return mat4x4f(vec4f(c,-s,0,0), vec4f(s,c,0,0), vec4f(0,0,1,0), vec4f(0,0,0,1));
+}
+fn scale(s: f32) -> mat4x4f {
+  return mat4x4f(vec4f(s,0,0,0), vec4f(0,s,0,0), vec4f(0,0,s,0), vec4f(0,0,0,1));
+}
+fn xlate(t: vec3f) -> mat4x4f {
+  return mat4x4f(vec4f(1,0,0,0), vec4f(0,1,0,0), vec4f(0,0,1,0), vec4f(t, 1));
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let idx = id.x;
+  if (idx >= arrayLength(&data.m)) { return; }
+
+  if (idx < 6u) {
+    // Mask plane face rotations (baked into base transform)
+    // PNGine plane is XY at z=0; offset by z=5 (0.5 * scale) so faces form a cube
+    var rot = mat4x4f(vec4f(1,0,0,0), vec4f(0,1,0,0), vec4f(0,0,1,0), vec4f(0,0,0,1));
+    switch (idx) {
+      case 0u: { rot = mat4x4f(vec4f(1,0,0,0), vec4f(0,1,0,0), vec4f(0,0,1,0), vec4f(0,0,0,1)); }
+      case 1u: { rot = rotY(PI); }
+      case 2u: { rot = rotY(PI * 0.5); }
+      case 3u: { rot = rotY(-PI * 0.5); }
+      case 4u: { rot = rotX(-PI * 0.5); }
+      case 5u: { rot = rotX(PI * 0.5); }
+      default: {}
+    }
+    data.m[idx] = rot * xlate(vec3f(0.0, 0.0, 5.0)) * scale(10.0);
+  } else {
+    // Object transforms: random orbital position (tight around origin)
+    let oi = idx - 6u;
+    let angle = hash(oi * 7u + 1u) * 6.2832;
+    let radius = 1.0 + hash(oi * 13u + 3u) * 5.0;
+    let y_off = (hash(oi * 23u + 5u) - 0.5) * 6.0;
+    let obj_scale = 1.2 + hash(oi * 37u + 11u) * 1.8;
+
+    let px = cos(angle) * radius;
+    let pz = sin(angle) * radius;
+
+    let rx = hash(oi * 41u + 17u) * 6.2832;
+    let ry = hash(oi * 53u + 19u) * 6.2832;
+
+    // Scale * RotY * RotX, then translate
+    let r = rotY(ry) * rotX(rx) * scale(obj_scale);
+    data.m[idx] = mat4x4f(r[0], r[1], r[2], vec4f(px, y_off, pz, 1.0));
+  }
+}
+""")
+
+(shader-module :name initColorShader :code """
+struct Colors { c: array<vec4f> }
+@binding(0) @group(0) var<storage, read_write> data: Colors;
+
+fn hash(n: u32) -> f32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return f32(x) / f32(0xffffffffu);
+}
+
+// HSL to RGB conversion
+fn hsl2rgb(h: f32, s: f32, l: f32) -> vec3f {
+  let a = s * min(l, 1.0 - l);
+  let f = vec3f(0.0, 8.0, 4.0);
+  let k = (f + h * 12.0) % 12.0;
+  return vec3f(l) - a * max(min(min(k - 3.0, vec3f(9.0) - k), vec3f(1.0)), vec3f(-1.0));
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let idx = id.x;
+  if (idx >= arrayLength(&data.c)) { return; }
+
+  if (idx < 6u) {
+    // Mask face colors: each face gets a distinct hue (matches original)
+    let baseHue = f32(idx) / 6.0 + 0.5;
+    let rgb = hsl2rgb(baseHue, 0.85, 0.65);
+    data.c[idx] = vec4f(rgb, 1.0);
+  } else {
+    let oi = idx - 6u;
+    let scene = oi / 50u;
+    // Per-scene base hue, evenly spaced
+    let baseHue = f32(scene) / 7.0;
+    let hue = baseHue + (hash(idx * 71u + 37u) - 0.5) * 0.15;
+    let sat = 0.6 + hash(idx * 83u + 41u) * 0.4;
+    let lit = 0.4 + hash(idx * 97u + 43u) * 0.35;
+    let rgb = hsl2rgb(hue, sat, lit);
+    data.c[idx] = vec4f(rgb, 1.0);
+  }
+}
+""")
+
+(init :name initTransforms :buffer transforms :shader initShader :workgroups 6)
+(init :name initColors :buffer colors :shader initColorShader :workgroups 6)
+
+; ── Render Shader ───────────────────────────────────────────────────────────────
+(shader-module :name renderShader :code """
+struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+struct PointerInputs { x: f32, y: f32, clickX: f32, clickY: f32, dx: f32, dy: f32, buttons: f32, pressure: f32, modifiers: f32, scrollX: f32, scrollY: f32, _pad: f32 }
+struct Transforms { m: array<mat4x4f> }
+struct Colors { c: array<vec4f> }
+
+@group(0) @binding(0) var<uniform> pngine: PngineInputs;
+@group(0) @binding(1) var<uniform> pointer: PointerInputs;
+@group(0) @binding(2) var<storage, read> xforms: Transforms;
+@group(0) @binding(3) var<storage, read> colors: Colors;
+
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  return mat4x4f(
+    vec4f(f / aspect, 0, 0, 0),
+    vec4f(0, f, 0, 0),
+    vec4f(0, 0, far * nf, -1),
+    vec4f(0, 0, far * near * nf, 0));
+}
+fn lookAt(eye: vec3f, tgt: vec3f, up: vec3f) -> mat4x4f {
+  let f = normalize(tgt - eye);
+  let s = normalize(cross(f, up));
+  let u = cross(s, f);
+  return mat4x4f(
+    vec4f(s.x, u.x, -f.x, 0),
+    vec4f(s.y, u.y, -f.y, 0),
+    vec4f(s.z, u.z, -f.z, 0),
+    vec4f(-dot(s, eye), -dot(u, eye), dot(f, eye), 1));
+}
+fn translate(t: vec3f) -> mat4x4f {
+  return mat4x4f(vec4f(1,0,0,0), vec4f(0,1,0,0), vec4f(0,0,1,0), vec4f(t, 1));
+}
+fn rotX(a: f32) -> mat4x4f {
+  let c = cos(a); let s = sin(a);
+  return mat4x4f(vec4f(1,0,0,0), vec4f(0,c,-s,0), vec4f(0,s,c,0), vec4f(0,0,0,1));
+}
+fn rotY(a: f32) -> mat4x4f {
+  let c = cos(a); let s = sin(a);
+  return mat4x4f(vec4f(c,0,s,0), vec4f(0,1,0,0), vec4f(-s,0,c,0), vec4f(0,0,0,1));
+}
+
+struct VertexOutput {
+  @builtin(position) position: vec4f,
+  @location(0) normal: vec3f,
+  @location(1) color: vec3f,
+}
+
+// normalize(1, 8, 10): len=sqrt(165)=12.845
+const lightDir = vec3f(0.07784, 0.62275, 0.77844);
+const MASK_COUNT = 6u;
+const OBJS_PER_SCENE = 50u;
+
+@vertex
+fn vs(
+  @location(0) pos: vec3f,
+  @location(1) normal: vec3f,
+  @builtin(instance_index) inst: u32,
+) -> VertexOutput {
+  var out: VertexOutput;
+  let baseXform = xforms.m[inst];
+  let time = pngine.time;
+
+  if (inst < MASK_COUNT) {
+    // Mask plane: apply pointer offset + time rotation + baked face rotation
+    let mouseX = (pointer.x * 2.0 - 1.0) * 10.0;
+    let mouseY = (1.0 - pointer.y * 2.0) * 10.0;
+    let world = translate(vec3f(mouseX, mouseY, 0)) * rotX(time * 0.25) * rotY(time * 0.15) * baseXform;
+    let vp = perspective(0.5236, pngine.aspect, 0.5, 100.0) * lookAt(vec3f(0, 0, 45), vec3f(0, 0, 0), vec3f(0, 1, 0));
+    out.position = vp * world * vec4f(pos, 1);
+    out.normal = normalize((world * vec4f(normal, 0)).xyz);
+  } else {
+    // Object: time-based orbital animation
+    let oi = inst - MASK_COUNT;
+    let fi = f32(oi);
+    let world = translate(vec3f(0, 0, sin(fi * 3.721 + time * 0.1) * 4.0))
+              * rotX(fi * 4.567)
+              * rotY(fi * 2.967)
+              * translate(vec3f(0, 0, sin(fi * 9.721 + time * 0.1) * 4.0))
+              * rotX(time * 0.53 + fi)
+              * baseXform;
+
+    // Camera: scenes 0,2,4,6 fixed, scenes 1,3,5 orbiting
+    let scene = oi / OBJS_PER_SCENE;
+    var eye = vec3f(0, 0, 35);
+    if (scene % 2u == 1u) {
+      let t = time * 0.1;
+      eye = vec3f(cos(t) * 35.0, 4.0, sin(t) * 35.0);
+    }
+    let vp = perspective(0.5236, pngine.aspect, 0.5, 100.0) * lookAt(eye, vec3f(0, 0, 0), vec3f(0, 1, 0));
+    out.position = vp * world * vec4f(pos, 1);
+    out.normal = normalize((world * vec4f(normal, 0)).xyz);
+  }
+
+  out.color = colors.c[inst].rgb;
+  return out;
+}
+
+@fragment
+fn fs(in: VertexOutput) -> @location(0) vec4f {
+  let n = normalize(in.normal);
+  let l = dot(n, lightDir) * 0.5 + 0.5;
+  return vec4f(in.color * l, 1.0);
+}
+""")
+
+; ── Pipelines: stencilSet (compare=always passOp=replace) + stencilMask (compare=equal passOp=keep) ──
+(render-pipeline :name stencilSetPipe
+  (layout auto)
+  (vertex (module renderShader) (entry vs)
+    (buffers
+      (vertex-buffer :array-stride 24
+        (attribute :shader-location 0 :offset 0 :format float32x3)
+        (attribute :shader-location 1 :offset 12 :format float32x3))))
+  (fragment (module renderShader) (entry fs)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list) :cull-mode back)
+  (depth-stencil :format depth24plus-stencil8 :depth-write-enabled true :depth-compare less
+    (stencil-front :compare always :pass-op replace)))
+
+(render-pipeline :name stencilMaskPipe
+  (layout auto)
+  (vertex (module renderShader) (entry vs)
+    (buffers
+      (vertex-buffer :array-stride 24
+        (attribute :shader-location 0 :offset 0 :format float32x3)
+        (attribute :shader-location 1 :offset 12 :format float32x3))))
+  (fragment (module renderShader) (entry fs)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list) :cull-mode back)
+  (depth-stencil :format depth24plus-stencil8 :depth-write-enabled true :depth-compare less
+    (stencil-front :compare equal :pass-op keep)))
+
+; ── Bind Groups (4 buffer entries each; binding order 0..3 mirrors the shader) ────
+(bind-group :name maskBG :layout-pipeline stencilSetPipe :layout-index 0
+  (entry :binding 0 :buffer uniforms)
+  (entry :binding 1 :buffer pointerBuf)
+  (entry :binding 2 :buffer transforms)
+  (entry :binding 3 :buffer colors))
+
+(bind-group :name sceneBG :layout-pipeline stencilMaskPipe :layout-index 0
+  (entry :binding 0 :buffer uniforms)
+  (entry :binding 1 :buffer pointerBuf)
+  (entry :binding 2 :buffer transforms)
+  (entry :binding 3 :buffer colors))
+
+; ── Render Passes ───────────────────────────────────────────────────────────────
+; Masks (mask0..5): draw the 6 mask planes, each writing stencil value 1..6.
+; Scenes (scene0..6): draw 7 object scenes, each only where stencil == ref.
+
+; mask0: clear color + depth + stencil, stencilRef=1
+(render-pass :name mask0
+  (color-attachment :view context-current-texture :clear-value [0.2 0.2 0.2 1.0] :load-op clear :store-op store)
+  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+    :stencil-load-op clear :stencil-store-op store)
+  :pipeline stencilSetPipe
+  :vertex-buffers [planeVB]
+  :bind-groups [maskBG]
+  :stencil-reference 1
+  (draw :vertex-count PLANE_VERTEX_COUNT :instance-count 1 :first-instance 0))
+
+; mask1..5: load color + stencil, clear depth, stencilRef=2..6
+(render-pass :name mask1
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+    :stencil-load-op load :stencil-store-op store)
+  :pipeline stencilSetPipe
+  :vertex-buffers [planeVB]
+  :bind-groups [maskBG]
+  :stencil-reference 2
+  (draw :vertex-count PLANE_VERTEX_COUNT :instance-count 1 :first-instance 1))
+
+(render-pass :name mask2
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+    :stencil-load-op load :stencil-store-op store)
+  :pipeline stencilSetPipe
+  :vertex-buffers [planeVB]
+  :bind-groups [maskBG]
+  :stencil-reference 3
+  (draw :vertex-count PLANE_VERTEX_COUNT :instance-count 1 :first-instance 2))
+
+(render-pass :name mask3
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+    :stencil-load-op load :stencil-store-op store)
+  :pipeline stencilSetPipe
+  :vertex-buffers [planeVB]
+  :bind-groups [maskBG]
+  :stencil-reference 4
+  (draw :vertex-count PLANE_VERTEX_COUNT :instance-count 1 :first-instance 3))
+
+(render-pass :name mask4
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+    :stencil-load-op load :stencil-store-op store)
+  :pipeline stencilSetPipe
+  :vertex-buffers [planeVB]
+  :bind-groups [maskBG]
+  :stencil-reference 5
+  (draw :vertex-count PLANE_VERTEX_COUNT :instance-count 1 :first-instance 4))
+
+(render-pass :name mask5
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+    :stencil-load-op load :stencil-store-op store)
+  :pipeline stencilSetPipe
+  :vertex-buffers [planeVB]
+  :bind-groups [maskBG]
+  :stencil-reference 6
+  (draw :vertex-count PLANE_VERTEX_COUNT :instance-count 1 :first-instance 5))
+
+; scene0 (stencilRef=0 — background where no mask was written) — spheres
+(render-pass :name scene0
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+    :stencil-load-op load :stencil-store-op store)
+  :pipeline stencilMaskPipe
+  :vertex-buffers [sphereVB]
+  :bind-groups [sceneBG]
+  :stencil-reference 0
+  (draw :vertex-count SPHERE_VERTEX_COUNT :instance-count NUM_OBJECTS_PER_SCENE :first-instance NUM_MASKS))
+
+; scene1 (stencilRef=1) — cubes
+(render-pass :name scene1
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+    :stencil-load-op load :stencil-store-op store)
+  :pipeline stencilMaskPipe
+  :vertex-buffers [cubeVB]
+  :bind-groups [sceneBG]
+  :stencil-reference 1
+  (draw :vertex-count CUBE_VERTEX_COUNT :instance-count NUM_OBJECTS_PER_SCENE :first-instance 56))
+
+; scene2 (stencilRef=2) — tori
+(render-pass :name scene2
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+    :stencil-load-op load :stencil-store-op store)
+  :pipeline stencilMaskPipe
+  :vertex-buffers [torusVB]
+  :bind-groups [sceneBG]
+  :stencil-reference 2
+  (draw :vertex-count TORUS_VERTEX_COUNT :instance-count NUM_OBJECTS_PER_SCENE :first-instance 106))
+
+; scene3 (stencilRef=3) — cones
+(render-pass :name scene3
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+    :stencil-load-op load :stencil-store-op store)
+  :pipeline stencilMaskPipe
+  :vertex-buffers [coneVB]
+  :bind-groups [sceneBG]
+  :stencil-reference 3
+  (draw :vertex-count CONE_VERTEX_COUNT :instance-count NUM_OBJECTS_PER_SCENE :first-instance 156))
+
+; scene4 (stencilRef=4) — cylinders
+(render-pass :name scene4
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+    :stencil-load-op load :stencil-store-op store)
+  :pipeline stencilMaskPipe
+  :vertex-buffers [cylinderVB]
+  :bind-groups [sceneBG]
+  :stencil-reference 4
+  (draw :vertex-count CYLINDER_VERTEX_COUNT :instance-count NUM_OBJECTS_PER_SCENE :first-instance 206))
+
+; scene5 (stencilRef=5) — jems (faceted spheres)
+(render-pass :name scene5
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+    :stencil-load-op load :stencil-store-op store)
+  :pipeline stencilMaskPipe
+  :vertex-buffers [jemVB]
+  :bind-groups [sceneBG]
+  :stencil-reference 5
+  (draw :vertex-count JEM_VERTEX_COUNT :instance-count NUM_OBJECTS_PER_SCENE :first-instance 256))
+
+; scene6 (stencilRef=6) — dice (faceted tori)
+(render-pass :name scene6
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+    :stencil-load-op load :stencil-store-op store)
+  :pipeline stencilMaskPipe
+  :vertex-buffers [diceVB]
+  :bind-groups [sceneBG]
+  :stencil-reference 6
+  (draw :vertex-count DICE_VERTEX_COUNT :instance-count NUM_OBJECTS_PER_SCENE :first-instance 306))
+
+; ── Frame: two compute inits, then write inputs, 6 mask passes, 7 scene passes ────
+(frame :name main
+  :init [initTransforms initColors]
+  :perform [
+    writeUniforms writePointer
+    mask0 mask1 mask2 mask3 mask4 mask5
+    scene0 scene1 scene2 scene3 scene4 scene5 scene6
+  ])

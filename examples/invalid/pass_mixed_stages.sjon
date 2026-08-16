@@ -1,0 +1,11 @@
+; Invalid: a `(pass …)` whose WGSL declares both a @fragment and a @compute
+; entry point. Fragment and compute passes lower to different shapes, so the
+; pass is rejected rather than one entry point being silently discarded.
+
+(pass-graph
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      return vec4f(1, 0, 0, 1);
+    }
+    @compute @workgroup_size(8, 8) fn cs() {}
+  """))

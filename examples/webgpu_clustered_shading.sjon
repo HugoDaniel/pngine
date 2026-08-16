@@ -1,0 +1,439 @@
+; Clustered forward shading — the technique behind toji's
+; webgpu-clustered-shading demo, authored from scratch in the canonical
+; Ortiz/toji shape (no upstream sources).
+;
+; 256 orbiting point lights shade a ground plane + 24 instanced spheres
+; through a 16x9x24 cluster grid: a compute pass builds each cluster's
+; view-space AABB from the inverse projection (exponential depth slices), a
+; second pass tests every light sphere against every cluster AABB into
+; fixed-capacity per-cluster lists (one thread per cluster — single writer,
+; no atomics; lights beyond 64 per cluster are dropped), and the fragment
+; stage derives its cluster from @builtin(position) + interpolated view depth
+; and accumulates only that cluster's lights. Lights are seeded once by an
+; (init …) pass and animated by a compute pass each frame.
+;
+; Conventions that must stay in sync between cull and shade (the classic seam
+; bug): the view matrix (time-orbit camera, same formula in both modules), the
+; exponential slice formula, and the NDC-indexed tile-Y (the fragment flips
+; framebuffer y). Set DEBUG_HEAT = true in sceneCode to tint by
+; lights-per-cluster instead of shading, which shows the culling directly.
+
+(define :name NUM_LIGHTS :value 256)
+(define :name NUM_CLUSTERS :value 3456)   ; 16 x 9 x 24
+(define :name MAX_PER_CLUSTER :value 64)
+
+(data :name sphereVerts (sphere :format [position3 normal3] :segments 16 :rings 8))
+(data :name planeVerts (plane :format [position3 normal3]))
+
+(buffer :name sphereVB :size sphereVerts :usage [vertex] :mapped-at-creation sphereVerts)
+(buffer :name planeVB :size planeVerts :usage [vertex] :mapped-at-creation planeVerts)
+(buffer :name lights :size (* NUM_LIGHTS 32) :usage [storage])
+(buffer :name clusterBounds :size (* NUM_CLUSTERS 32) :usage [storage])
+(buffer :name clusterLights :size (* NUM_CLUSTERS (+ 4 (* MAX_PER_CLUSTER 4))) :usage [storage])
+(buffer :name inputs :size 16 :usage [uniform copy-dst])
+(texture :name depthTex :size canvas :format depth24plus :usage [render-attachment])
+
+(queue :name writeInputs
+  (write-buffer :buffer inputs :offset 0 :data pngine-inputs))
+
+(shader-module :name seedCode :code """
+struct Light {
+  pos : vec3f,
+  range : f32,
+  color : vec3f,
+  intensity : f32,
+}
+struct Lights { lights : array<Light> }
+
+@binding(0) @group(0) var<storage, read_write> data : Lights;
+
+fn hash(n: u32) -> f32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return f32(x) / f32(0xffffffffu);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid : vec3u) {
+  let i = gid.x;
+  if (i >= 256u) { return; }
+  let hue = hash(i * 7u + 5u) * 6.2831853;
+  data.lights[i].color = 0.55 + 0.45 * vec3f(
+    cos(hue), cos(hue - 2.0944), cos(hue + 2.0944));
+  data.lights[i].range = 2.5 + hash(i * 7u + 11u) * 2.5;
+  data.lights[i].intensity = 1.5 + hash(i * 7u + 17u) * 2.0;
+  data.lights[i].pos = vec3f(0.0, 1.0, 0.0);   // overwritten every frame
+}
+""")
+
+(shader-module :name updateCode :code """
+struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+struct Light {
+  pos : vec3f,
+  range : f32,
+  color : vec3f,
+  intensity : f32,
+}
+struct Lights { lights : array<Light> }
+
+@group(0) @binding(0) var<uniform> inputs : PngineInputs;
+@group(0) @binding(1) var<storage, read_write> data : Lights;
+
+fn hash(n: u32) -> f32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return f32(x) / f32(0xffffffffu);
+}
+
+// Positions are pure functions of (index, time): hashed orbit radius,
+// speed, phase and height, with a slow vertical bob.
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid : vec3u) {
+  let i = gid.x;
+  if (i >= 256u) { return; }
+  let rad = 2.5 + hash(i * 3u + 1u) * 10.5;
+  let speed = 0.15 + hash(i * 3u + 2u) * 0.45;
+  let phase = hash(i * 3u) * 6.2831853;
+  let h = 0.4 + hash(i * 3u + 4u) * 5.0;
+  let ang = phase + inputs.time * speed;
+  data.lights[i].pos = vec3f(
+    cos(ang) * rad,
+    h + sin(inputs.time * 0.7 + phase) * 0.8,
+    sin(ang) * rad);
+}
+""")
+
+(shader-module :name boundsCode :code """
+struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+struct Bounds { minB : vec4f, maxB : vec4f }
+struct AllBounds { bounds : array<Bounds> }
+
+@group(0) @binding(0) var<uniform> inputs : PngineInputs;
+@group(0) @binding(1) var<storage, read_write> outB : AllBounds;
+
+const CX = 16u;
+const CY = 9u;
+const CZ = 24u;
+const NEAR = 0.1;
+const FAR = 100.0;
+const F = 1.3763819;                     // 1 / tan(fov/2), fov = 2pi/5
+
+// One thread per cluster: view-space AABB spanning the tile's NDC rect at
+// the slice's exponential near/far depths, via the analytic unprojection
+// x_v = x_ndc * (-z) * aspect / F, y_v = y_ndc * (-z) / F.
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid : vec3u) {
+  let idx = gid.x;
+  if (idx >= 3456u) { return; }
+  let i = idx % CX;
+  let j = (idx / CX) % CY;
+  let k = idx / (CX * CY);
+
+  let x0 = 2.0 * f32(i) / f32(CX) - 1.0;
+  let x1 = 2.0 * f32(i + 1u) / f32(CX) - 1.0;
+  let y0 = 2.0 * f32(j) / f32(CY) - 1.0;
+  let y1 = 2.0 * f32(j + 1u) / f32(CY) - 1.0;
+  let zn = -NEAR * pow(FAR / NEAR, f32(k) / f32(CZ));
+  let zf = -NEAR * pow(FAR / NEAR, f32(k + 1u) / f32(CZ));
+
+  let ax = inputs.aspect / F;
+  let ay = 1.0 / F;
+  var mn = vec3f(1e9);
+  var mx = vec3f(-1e9);
+  var zs = array<f32, 2>(zn, zf);
+  var xs = array<f32, 2>(x0, x1);
+  var ys = array<f32, 2>(y0, y1);
+  for (var a = 0u; a < 2u; a++) {
+    for (var b = 0u; b < 2u; b++) {
+      for (var c = 0u; c < 2u; c++) {
+        let z = zs[a];
+        let p = vec3f(xs[b] * (-z) * ax, ys[c] * (-z) * ay, z);
+        mn = min(mn, p);
+        mx = max(mx, p);
+      }
+    }
+  }
+  outB.bounds[idx].minB = vec4f(mn, 0.0);
+  outB.bounds[idx].maxB = vec4f(mx, 0.0);
+}
+""")
+
+(shader-module :name cullCode :code """
+struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+struct Light {
+  pos : vec3f,
+  range : f32,
+  color : vec3f,
+  intensity : f32,
+}
+struct Lights { lights : array<Light> }
+struct Bounds { minB : vec4f, maxB : vec4f }
+struct AllBounds { bounds : array<Bounds> }
+struct ClusterList {
+  count : u32,
+  indices : array<u32, 64>,
+}
+struct ClusterLists { clusters : array<ClusterList> }
+
+@group(0) @binding(0) var<uniform> inputs : PngineInputs;
+@group(0) @binding(1) var<storage, read> allBounds : AllBounds;
+@group(0) @binding(2) var<storage, read> lightData : Lights;
+@group(0) @binding(3) var<storage, read_write> lists : ClusterLists;
+
+// Camera formula — MUST match sceneCode's viewMatrix verbatim.
+fn lookAt(eye: vec3f, focus: vec3f, up: vec3f) -> mat4x4f {
+  let fwd = normalize(focus - eye);
+  let s = normalize(cross(fwd, up));
+  let u = cross(s, fwd);
+  return mat4x4f(
+    vec4f(s.x, u.x, -fwd.x, 0),
+    vec4f(s.y, u.y, -fwd.y, 0),
+    vec4f(s.z, u.z, -fwd.z, 0),
+    vec4f(-dot(s, eye), -dot(u, eye), dot(fwd, eye), 1));
+}
+fn eyePos(t: f32) -> vec3f {
+  return vec3f(sin(t * 0.1) * 16.0, 7.0, cos(t * 0.1) * 16.0);
+}
+
+// One thread per cluster loops all lights: sphere-vs-AABB in view space.
+// Single writer per list — no atomics.
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid : vec3u) {
+  let idx = gid.x;
+  if (idx >= 3456u) { return; }
+  let view = lookAt(eyePos(inputs.time), vec3f(0.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0));
+  let mn = allBounds.bounds[idx].minB.xyz;
+  let mx = allBounds.bounds[idx].maxB.xyz;
+  var cnt = 0u;
+  for (var li = 0u; li < 256u; li++) {
+    let lp = (view * vec4f(lightData.lights[li].pos, 1.0)).xyz;
+    let closest = clamp(lp, mn, mx);
+    let d = lp - closest;
+    let r = lightData.lights[li].range;
+    if (dot(d, d) <= r * r) {
+      if (cnt < 64u) { lists.clusters[idx].indices[cnt] = li; }
+      cnt++;
+    }
+  }
+  lists.clusters[idx].count = min(cnt, 64u);
+}
+""")
+
+(shader-module :name sceneCode :code """
+struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+struct Light {
+  pos : vec3f,
+  range : f32,
+  color : vec3f,
+  intensity : f32,
+}
+struct Lights { lights : array<Light> }
+struct ClusterList {
+  count : u32,
+  indices : array<u32, 64>,
+}
+struct ClusterLists { clusters : array<ClusterList> }
+
+@group(0) @binding(0) var<uniform> inputs : PngineInputs;
+@group(0) @binding(1) var<storage, read> lightData : Lights;
+@group(0) @binding(2) var<storage, read> lists : ClusterLists;
+
+const CX = 16u;
+const CY = 9u;
+const CZ = 24u;
+const NEAR = 0.1;
+const FAR = 100.0;
+const DEBUG_HEAT = false;                // true: tint by lights-per-cluster
+
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  return mat4x4f(
+    vec4f(f / aspect, 0, 0, 0),
+    vec4f(0, f, 0, 0),
+    vec4f(0, 0, far * nf, -1),
+    vec4f(0, 0, far * near * nf, 0));
+}
+fn lookAt(eye: vec3f, focus: vec3f, up: vec3f) -> mat4x4f {
+  let fwd = normalize(focus - eye);
+  let s = normalize(cross(fwd, up));
+  let u = cross(s, fwd);
+  return mat4x4f(
+    vec4f(s.x, u.x, -fwd.x, 0),
+    vec4f(s.y, u.y, -fwd.y, 0),
+    vec4f(s.z, u.z, -fwd.z, 0),
+    vec4f(-dot(s, eye), -dot(u, eye), dot(fwd, eye), 1));
+}
+fn eyePos(t: f32) -> vec3f {
+  return vec3f(sin(t * 0.1) * 16.0, 7.0, cos(t * 0.1) * 16.0);
+}
+fn viewMatrix(t: f32) -> mat4x4f {
+  return lookAt(eyePos(t), vec3f(0.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0));
+}
+
+fn hash(n: u32) -> f32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return f32(x) / f32(0xffffffffu);
+}
+
+struct VSOut {
+  @builtin(position) pos : vec4f,
+  @location(0) worldPos : vec3f,
+  @location(1) normal : vec3f,
+  @location(2) viewZ : f32,
+  @location(3) albedo : vec3f,
+}
+
+fn emit(world: vec3f, normal: vec3f, albedo: vec3f) -> VSOut {
+  let view = viewMatrix(inputs.time);
+  let vp = view * vec4f(world, 1.0);
+  var out : VSOut;
+  out.pos = perspective(1.2566, inputs.aspect, NEAR, FAR) * vp;
+  out.worldPos = world;
+  out.normal = normal;
+  out.viewZ = vp.z;
+  out.albedo = albedo;
+  return out;
+}
+
+// Unit XY plane -> 36x36 ground at y=0.
+@vertex
+fn vsPlane(@location(0) position : vec3f,
+           @location(1) normal : vec3f) -> VSOut {
+  let world = vec3f(position.x * 36.0, 0.0, position.y * 36.0);
+  return emit(world, vec3f(0.0, 1.0, 0.0), vec3f(0.28, 0.28, 0.30));
+}
+
+// Unit spheres placed on two hashed rings.
+@vertex
+fn vsSphere(@location(0) position : vec3f,
+            @location(1) normal : vec3f,
+            @builtin(instance_index) ii : u32) -> VSOut {
+  let ang = f32(ii) / 24.0 * 6.2831853;
+  let ringR = 5.0 + f32(ii % 3u) * 3.0;
+  let r = 0.7 + hash(ii * 13u + 3u) * 1.1;
+  let center = vec3f(cos(ang) * ringR, r, sin(ang) * ringR);
+  return emit(center + position * r, normal, vec3f(0.55, 0.55, 0.58));
+}
+
+@fragment
+fn fs(in: VSOut) -> @location(0) vec4f {
+  // Cluster from framebuffer position + interpolated view depth. Tile-Y is
+  // NDC-indexed (framebuffer y flipped) — must match boundsCode.
+  let tileX = min(u32(in.pos.x / inputs.width * f32(CX)), CX - 1u);
+  let tileYfb = min(u32(in.pos.y / inputs.height * f32(CY)), CY - 1u);
+  let tileY = CY - 1u - tileYfb;
+  let vz = max(-in.viewZ, NEAR);
+  let slice = min(u32(log(vz / NEAR) / log(FAR / NEAR) * f32(CZ)), CZ - 1u);
+  let c = tileX + tileY * CX + slice * CX * CY;
+
+  let n = min(lists.clusters[c].count, 64u);
+  if (DEBUG_HEAT) {
+    let heat = f32(n) / 64.0;
+    return vec4f(heat, 1.0 - heat, 0.1, 1.0);
+  }
+
+  let N = normalize(in.normal);
+  var col = in.albedo * 0.05;
+  for (var x = 0u; x < 64u; x++) {
+    if (x >= n) { break; }
+    let L = lightData.lights[lists.clusters[c].indices[x]];
+    let dv = L.pos - in.worldPos;
+    let dist = length(dv);
+    if (dist < L.range) {
+      let NdotL = max(dot(N, dv / max(dist, 1e-4)), 0.0);
+      let att = 1.0 - dist / L.range;
+      col += in.albedo * L.color * (L.intensity * NdotL * att * att * 0.6);
+    }
+  }
+  return vec4f(col, 1.0);
+}
+""")
+
+(compute-pipeline :name updatePipe :module updateCode :entry main)
+(compute-pipeline :name boundsPipe :module boundsCode :entry main)
+(compute-pipeline :name cullPipe :module cullCode :entry main)
+
+(render-pipeline :name planePipe
+  (layout auto)
+  (vertex (module sceneCode) (entry vsPlane)
+    (buffers
+      (vertex-buffer :array-stride 24
+        (attribute :shader-location 0 :offset 0 :format float32x3)
+        (attribute :shader-location 1 :offset 12 :format float32x3))))
+  (fragment (module sceneCode) (entry fs)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list))
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+(render-pipeline :name spherePipe
+  (layout auto)
+  (vertex (module sceneCode) (entry vsSphere)
+    (buffers
+      (vertex-buffer :array-stride 24
+        (attribute :shader-location 0 :offset 0 :format float32x3)
+        (attribute :shader-location 1 :offset 12 :format float32x3))))
+  (fragment (module sceneCode) (entry fs)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list) :cull-mode back)
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+(bind-group :name updateBG :layout-pipeline updatePipe :layout-index 0
+  (entry :binding 0 :buffer inputs)
+  (entry :binding 1 :buffer lights))
+
+(bind-group :name boundsBG :layout-pipeline boundsPipe :layout-index 0
+  (entry :binding 0 :buffer inputs)
+  (entry :binding 1 :buffer clusterBounds))
+
+(bind-group :name cullBG :layout-pipeline cullPipe :layout-index 0
+  (entry :binding 0 :buffer inputs)
+  (entry :binding 1 :buffer clusterBounds)
+  (entry :binding 2 :buffer lights)
+  (entry :binding 3 :buffer clusterLights))
+
+(bind-group :name planeBG :layout-pipeline planePipe :layout-index 0
+  (entry :binding 0 :buffer inputs)
+  (entry :binding 1 :buffer lights)
+  (entry :binding 2 :buffer clusterLights))
+
+(bind-group :name sphereBG :layout-pipeline spherePipe :layout-index 0
+  (entry :binding 0 :buffer inputs)
+  (entry :binding 1 :buffer lights)
+  (entry :binding 2 :buffer clusterLights))
+
+(init :name seedLights :buffer lights :shader seedCode
+  :workgroups (ceil (/ NUM_LIGHTS 64)))
+
+(compute-pass :name updateLights :pipeline updatePipe :bind-groups [updateBG]
+  :dispatch-workgroups (ceil (/ NUM_LIGHTS 64)))
+
+(compute-pass :name clusterBoundsPass :pipeline boundsPipe :bind-groups [boundsBG]
+  :dispatch-workgroups (ceil (/ NUM_CLUSTERS 64)))
+
+(compute-pass :name cullLights :pipeline cullPipe :bind-groups [cullBG]
+  :dispatch-workgroups (ceil (/ NUM_CLUSTERS 64)))
+
+(render-pass :name drawFloor
+  (color-attachment :view context-current-texture
+    :clear-value [0.015 0.015 0.02 1] :load-op clear :store-op store)
+  (depth-attachment :view depthTex :depth-clear-value 1.0
+    :depth-load-op clear :depth-store-op store)
+  :pipeline planePipe :bind-groups [planeBG] :vertex-buffers [planeVB]
+  (draw :vertex-count 6))
+
+(render-pass :name drawSpheres
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (depth-attachment :view depthTex :depth-load-op load :depth-store-op store)
+  :pipeline spherePipe :bind-groups [sphereBG] :vertex-buffers [sphereVB]
+  (draw :vertex-count 768 :instance-count 24))
+
+(frame :name main :init [seedLights] :before [writeInputs]
+  :perform [updateLights clusterBoundsPass cullLights drawFloor drawSpheres])

@@ -1,0 +1,45 @@
+; Invalid: 33 compute passes (p0..p32), one past the 32-entry pass table of the
+; browser executor; the emitter rejects the 33rd rather than letting it be
+; dropped at load. All share one no-binding compute pipeline.
+
+(shader-module :name code :code """
+@compute @workgroup_size(1) fn main() {}
+""")
+
+(compute-pipeline :name cp :module code :entry main)
+
+(compute-pass :name p0 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p1 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p2 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p3 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p4 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p5 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p6 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p7 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p8 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p9 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p10 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p11 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p12 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p13 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p14 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p15 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p16 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p17 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p18 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p19 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p20 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p21 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p22 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p23 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p24 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p25 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p26 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p27 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p28 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p29 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p30 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p31 :pipeline cp :dispatch-workgroups 1)
+(compute-pass :name p32 :pipeline cp :dispatch-workgroups 1)
+
+(frame :name main :perform [p0])

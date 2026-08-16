@@ -1,0 +1,173 @@
+; webgpu_sampler_grid — the side-by-side sampler comparison of the
+; webgpu-samples `samplerParameters` sample (sampler_options.sjon shows the
+; `(sampler …)` form on one quad; this file shows what the options do). Six
+; cells, one sampler + one pass each, over a shared 64×64 checkerboard that
+; an `:init` compute pass bakes — no external asset:
+;
+;   top row — magnification (uv [0, 0.25]², 2×2 checks blown up per cell):
+;     [0] nearest        — crisp texel squares
+;     [1] linear         — smooth gradients between texels
+;     [2] linear, uv [0,1]² — full-texture baseline view
+;   bottom row — address modes (uv [−0.75, 1.75]², linear):
+;     [3] repeat         — tint gradient resets each tile (sawtooth)
+;     [4] mirror-repeat  — tint gradient ping-pongs
+;     [5] clamp-to-edge  — the 1-texel green border smears outward
+;
+; The checkerboard is deliberately asymmetric (a horizontal cream→orange tint
+; on the light checks): a symmetric board mirrors into itself and cells 3/4
+; would be indistinguishable. Cells are NDC rectangles from per-cell static
+; uniforms (one `:mapped-at-creation` buffer each — parameter writes to a
+; shared buffer within one frame would collapse to the last value), placed in
+; the vertex shader rather than with a viewport, whose fixed pixel rects would
+; tie the grid to one canvas size. Upstream's live GUI knobs have no
+; equivalent in a pre-recorded payload; the grid is static. The mip debug
+; view is webgpu_sampler_mips.sjon's subject.
+
+; Per-cell uniforms: rectMin.xy rectMax.xy uvMin.xy uvMax.xy (8 f32 = 32 B).
+(data :name cell0 :float32 [-0.98  0.12 -0.36  0.84   0 0 0.25 0.25])
+(data :name cell1 :float32 [-0.31  0.12  0.31  0.84   0 0 0.25 0.25])
+(data :name cell2 :float32 [ 0.36  0.12  0.98  0.84   0 0 1 1])
+(data :name cell3 :float32 [-0.98 -0.84 -0.36 -0.12  -0.75 -0.75 1.75 1.75])
+(data :name cell4 :float32 [-0.31 -0.84  0.31 -0.12  -0.75 -0.75 1.75 1.75])
+(data :name cell5 :float32 [ 0.36 -0.84  0.98 -0.12  -0.75 -0.75 1.75 1.75])
+
+(buffer :name cell0Buf :size cell0 :usage [uniform] :mapped-at-creation cell0)
+(buffer :name cell1Buf :size cell1 :usage [uniform] :mapped-at-creation cell1)
+(buffer :name cell2Buf :size cell2 :usage [uniform] :mapped-at-creation cell2)
+(buffer :name cell3Buf :size cell3 :usage [uniform] :mapped-at-creation cell3)
+(buffer :name cell4Buf :size cell4 :usage [uniform] :mapped-at-creation cell4)
+(buffer :name cell5Buf :size cell5 :usage [uniform] :mapped-at-creation cell5)
+
+(texture :name checkerTex :width 64 :height 64 :format rgba8unorm
+  :usage [storage-binding texture-binding])
+
+(sampler :name sampNearest :mag-filter nearest :min-filter nearest)
+(sampler :name sampLinear :mag-filter linear :min-filter linear)
+(sampler :name sampRepeat :mag-filter linear :min-filter linear
+  :address-mode-u repeat :address-mode-v repeat)
+(sampler :name sampMirror :mag-filter linear :min-filter linear
+  :address-mode-u mirror-repeat :address-mode-v mirror-repeat)
+(sampler :name sampClamp :mag-filter linear :min-filter linear
+  :address-mode-u clamp-to-edge :address-mode-v clamp-to-edge)
+
+; Checkerboard bake: 8-px checks, tint gradient on the light checks,
+; green border texel ring.
+(shader-module :name bakeShader :code """
+@group(0) @binding(0) var outTex: texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= 64u || id.y >= 64u) { return; }
+  let check = f32(((id.x / 8u) + (id.y / 8u)) % 2u);
+  let u = f32(id.x) / 63.0;
+  let light = mix(vec3f(0.95, 0.9, 0.8), vec3f(0.9, 0.45, 0.15), u);
+  let dark = vec3f(0.13, 0.17, 0.28);
+  var color = mix(dark, light, check);
+  if (id.x == 0u || id.x == 63u || id.y == 0u || id.y == 63u) {
+    color = vec3f(0.2, 0.8, 0.35);
+  }
+  textureStore(outTex, id.xy, vec4f(color, 1.0));
+}
+""")
+
+(shader-module :name gridShader :code """
+struct Cell {
+  rectMin: vec2f,
+  rectMax: vec2f,
+  uvMin: vec2f,
+  uvMax: vec2f,
+}
+@group(0) @binding(0) var<uniform> cell: Cell;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var tex: texture_2d<f32>;
+
+struct VSOut {
+  @builtin(position) pos: vec4f,
+  @location(0) uv: vec2f,
+}
+
+@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
+  var corners = array<vec2f, 6>(
+    vec2f(0, 0), vec2f(1, 0), vec2f(0, 1),
+    vec2f(0, 1), vec2f(1, 0), vec2f(1, 1));
+  let t = corners[vi];
+  var out: VSOut;
+  out.pos = vec4f(mix(cell.rectMin, cell.rectMax, t), 0.0, 1.0);
+  out.uv = mix(cell.uvMin, cell.uvMax, vec2f(t.x, 1.0 - t.y));
+  return out;
+}
+
+@fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  return textureSample(tex, samp, uv);
+}
+""")
+
+(compute-pipeline :name bakePipeline :module bakeShader :entry main)
+
+(render-pipeline :name gridPipeline
+  (layout auto)
+  (vertex (module gridShader) (entry vs))
+  (fragment (module gridShader) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(bind-group :name bakeBindGroup :layout-pipeline bakePipeline :layout-index 0
+  (entry :binding 0 :texture checkerTex))
+
+(bind-group :name bg0 :layout-pipeline gridPipeline :layout-index 0
+  (entry :binding 0 :buffer cell0Buf)
+  (entry :binding 1 :sampler sampNearest)
+  (entry :binding 2 :texture checkerTex))
+(bind-group :name bg1 :layout-pipeline gridPipeline :layout-index 0
+  (entry :binding 0 :buffer cell1Buf)
+  (entry :binding 1 :sampler sampLinear)
+  (entry :binding 2 :texture checkerTex))
+(bind-group :name bg2 :layout-pipeline gridPipeline :layout-index 0
+  (entry :binding 0 :buffer cell2Buf)
+  (entry :binding 1 :sampler sampLinear)
+  (entry :binding 2 :texture checkerTex))
+(bind-group :name bg3 :layout-pipeline gridPipeline :layout-index 0
+  (entry :binding 0 :buffer cell3Buf)
+  (entry :binding 1 :sampler sampRepeat)
+  (entry :binding 2 :texture checkerTex))
+(bind-group :name bg4 :layout-pipeline gridPipeline :layout-index 0
+  (entry :binding 0 :buffer cell4Buf)
+  (entry :binding 1 :sampler sampMirror)
+  (entry :binding 2 :texture checkerTex))
+(bind-group :name bg5 :layout-pipeline gridPipeline :layout-index 0
+  (entry :binding 0 :buffer cell5Buf)
+  (entry :binding 1 :sampler sampClamp)
+  (entry :binding 2 :texture checkerTex))
+
+(compute-pass :name bakeChecker :pipeline bakePipeline
+  :bind-groups [bakeBindGroup]
+  :dispatch [8 8 1])
+
+(render-pass :name drawCell0
+  (color-attachment :view context-current-texture
+    :clear-value [0.05 0.05 0.07 1] :load-op clear :store-op store)
+  :pipeline gridPipeline :bind-groups [bg0]
+  (draw :vertex-count 6))
+(render-pass :name drawCell1
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  :pipeline gridPipeline :bind-groups [bg1]
+  (draw :vertex-count 6))
+(render-pass :name drawCell2
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  :pipeline gridPipeline :bind-groups [bg2]
+  (draw :vertex-count 6))
+(render-pass :name drawCell3
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  :pipeline gridPipeline :bind-groups [bg3]
+  (draw :vertex-count 6))
+(render-pass :name drawCell4
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  :pipeline gridPipeline :bind-groups [bg4]
+  (draw :vertex-count 6))
+(render-pass :name drawCell5
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  :pipeline gridPipeline :bind-groups [bg5]
+  (draw :vertex-count 6))
+
+(frame :name main
+  :init [bakeChecker]
+  :perform [drawCell0 drawCell1 drawCell2 drawCell3 drawCell4 drawCell5])

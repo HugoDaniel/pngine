@@ -1,0 +1,69 @@
+; test_copy_texture — exercises copy-texture-to-texture, with the result read
+; back in the same frame:
+;
+;   pass 1  paint srcTex solid orange
+;   queue   copy srcTex → dstTex
+;   pass 2  sample dstTex onto the canvas
+;
+; A working copy renders solid orange; a missing one leaves dstTex
+; zero-initialised and renders black. Both passes and the copy share one command
+; encoder, so the copy is ordered between them without a submit boundary.
+
+(shader-module :name code :code """
+    @vertex fn fullscreen(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+      return vec4f(p[i], 0.0, 1.0);
+    }
+
+    @fragment fn paint() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.0, 1.0); }
+
+    @group(0) @binding(0) var samp: sampler;
+    @group(0) @binding(1) var tex: texture_2d<f32>;
+
+    @fragment fn show(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let dims = vec2f(textureDimensions(tex));
+      return textureSample(tex, samp, pos.xy / dims);
+    }
+  """)
+
+; Source: rendered into, then copied out of.
+(texture :name srcTex :size canvas :format preferred-canvas-format
+  :usage [render-attachment copy-src])
+
+; Destination: written only by the copy, then sampled.
+(texture :name dstTex :size canvas :format preferred-canvas-format
+  :usage [texture-binding copy-dst])
+
+(sampler :name samp :mag-filter nearest :min-filter nearest)
+
+(render-pipeline :name paintPipe
+  (layout auto)
+  (vertex (module code) (entry fullscreen))
+  (fragment (module code) (entry paint)
+    (targets (target :format preferred-canvas-format))))
+
+(render-pipeline :name showPipe
+  (layout auto)
+  (vertex (module code) (entry fullscreen))
+  (fragment (module code) (entry show)
+    (targets (target :format preferred-canvas-format))))
+
+(bind-group :name showBG :layout-pipeline showPipe :layout-index 0
+  (entry :binding 0 :sampler samp)
+  (entry :binding 1 :texture dstTex))
+
+(render-pass :name paintSrc
+  (color-attachment :view srcTex :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline paintPipe
+  (draw :vertex-count 3))
+
+(queue :name copySrcToDst
+  (copy-texture-to-texture :source srcTex :destination dstTex))
+
+(render-pass :name showDst
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline showPipe
+  :bind-groups [showBG]
+  (draw :vertex-count 3))
+
+(frame :name main :perform [paintSrc copySrcToDst showDst])

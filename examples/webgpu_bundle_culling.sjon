@@ -1,0 +1,375 @@
+; GPU frustum culling into an indirect draw — the technique behind toji's
+; webgpu-bundle-culling sample, authored from scratch (no upstream sources).
+;
+; 4096 hash-seeded cubes in a 200-unit field, seeded once by an :init pass.
+; Every frame, entirely on the GPU: a camera pass builds the orbit viewProj
+; and extracts the six Gribb-Hartmann frustum planes; a clear pass zeroes the
+; visible counter (and the indirect instanceCount, so a fully-culled frame
+; stays well-formed); a cull pass tests each instance's bounding sphere
+; against the planes and atomicAdd-compacts survivor indices; an args pass
+; writes [36, visibleCount, 0, 0] draw-indirect args; the render pass consumes
+; them with (draw-indirect …) — the CPU never knows the count. Survivors are
+; tinted by their compacted slot, so the varying visible set shimmers as the
+; camera orbits.
+;
+; Unlike upstream, the culled draw issues from a plain render pass rather than
+; a replayed render bundle — (render-bundle …) records only count-based draws.
+; The cube is drawn non-indexed (the cube shape is deindexed).
+;
+; The vertex stage reads 3 storage buffers (visibleInstances + instanceData +
+; camFrustum); the core default limit is 8.
+
+(define :name M :value 4096)
+
+(data :name cubeMesh (cube :format [position3 normal3]))
+(buffer :name cubeVB :size cubeMesh :usage [vertex] :mapped-at-creation cubeMesh)
+(data :name groundMesh (plane :format [position3 normal3]))
+(buffer :name groundVB :size groundMesh :usage [vertex] :mapped-at-creation groundMesh)
+
+(buffer :name instanceData :size (* M 32) :usage [storage])
+(buffer :name visibleInstances :size (* M 4) :usage [storage])
+(buffer :name counters :size 16 :usage [storage])
+(buffer :name indirectArgs :size 16 :usage [indirect storage])
+(buffer :name camFrustum :size 160 :usage [storage])
+(buffer :name inputsBuf :size 16 :usage [uniform copy-dst])
+(texture :name depthTex :size canvas :format depth24plus
+  :usage [render-attachment])
+
+(queue :name writeInputs
+  (write-buffer :buffer inputsBuf :offset 0 :data pngine-inputs))
+
+(shader-module :name seedCode :code """
+struct Instance {
+  pos : vec3f,
+  scale : f32,
+  color : vec4f,
+}
+struct Instances { instances : array<Instance> }
+
+@binding(0) @group(0) var<storage, read_write> data : Instances;
+
+fn hash(n: u32) -> f32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return f32(x) / f32(0xffffffffu);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid : vec3u) {
+  let i = gid.x;
+  if (i >= 4096u) { return; }
+  let s = 0.8 + hash(i * 5u + 3u) * 1.6;
+  data.instances[i].pos = vec3f(
+    hash(i * 5u + 1u) * 200.0 - 100.0,
+    s + hash(i * 5u + 7u) * 12.0,
+    hash(i * 5u + 2u) * 200.0 - 100.0);
+  data.instances[i].scale = s;
+  let hue = hash(i * 5u + 11u) * 6.2831853;
+  data.instances[i].color = vec4f(
+    0.55 + 0.4 * cos(hue),
+    0.55 + 0.4 * cos(hue - 2.0944),
+    0.55 + 0.4 * cos(hue + 2.0944), 1.0);
+}
+""")
+
+(shader-module :name cameraCode :code """
+struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+struct CamFrustum {
+  viewProj : mat4x4f,
+  planes : array<vec4f, 6>,
+}
+
+@group(0) @binding(0) var<uniform> inputs : PngineInputs;
+@group(0) @binding(1) var<storage, read_write> cam : CamFrustum;
+
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  return mat4x4f(
+    vec4f(f / aspect, 0, 0, 0),
+    vec4f(0, f, 0, 0),
+    vec4f(0, 0, far * nf, -1),
+    vec4f(0, 0, far * near * nf, 0));
+}
+fn lookAt(eye: vec3f, focus: vec3f, up: vec3f) -> mat4x4f {
+  let fwd = normalize(focus - eye);
+  let s = normalize(cross(fwd, up));
+  let u = cross(s, fwd);
+  return mat4x4f(
+    vec4f(s.x, u.x, -fwd.x, 0),
+    vec4f(s.y, u.y, -fwd.y, 0),
+    vec4f(s.z, u.z, -fwd.z, 0),
+    vec4f(-dot(s, eye), -dot(u, eye), dot(fwd, eye), 1));
+}
+
+fn row(m: mat4x4f, i: u32) -> vec4f {
+  return vec4f(m[0][i], m[1][i], m[2][i], m[3][i]);
+}
+fn normalizePlane(p: vec4f) -> vec4f {
+  return p / length(p.xyz);
+}
+
+// Gribb-Hartmann plane extraction from viewProj (WebGPU z in [0,1]:
+// near plane is row2 itself, far is row3 - row2).
+@compute @workgroup_size(1)
+fn main() {
+  let t = inputs.time;
+  let ang = t * 0.15;
+  let eye = vec3f(sin(ang) * 90.0, 40.0, cos(ang) * 90.0);
+  let view = lookAt(eye, vec3f(0.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0));
+  let m = perspective(1.2566, inputs.aspect, 1.0, 300.0) * view;
+  cam.viewProj = m;
+  let r0 = row(m, 0u);
+  let r1 = row(m, 1u);
+  let r2 = row(m, 2u);
+  let r3 = row(m, 3u);
+  cam.planes[0] = normalizePlane(r3 + r0);   // left
+  cam.planes[1] = normalizePlane(r3 - r0);   // right
+  cam.planes[2] = normalizePlane(r3 + r1);   // bottom
+  cam.planes[3] = normalizePlane(r3 - r1);   // top
+  cam.planes[4] = normalizePlane(r2);        // near
+  cam.planes[5] = normalizePlane(r3 - r2);   // far
+}
+""")
+
+(shader-module :name clearCode :code """
+struct Counters { visible : atomic<u32>, _pad : array<u32, 3> }
+struct DrawArgs { vertexCount : u32, instanceCount : u32, firstVertex : u32, firstInstance : u32 }
+
+@group(0) @binding(0) var<storage, read_write> counters : Counters;
+@group(0) @binding(1) var<storage, read_write> args : DrawArgs;
+
+@compute @workgroup_size(1)
+fn main() {
+  atomicStore(&counters.visible, 0u);
+  args.instanceCount = 0u;   // a fully-culled frame stays well-formed
+}
+""")
+
+(shader-module :name cullCode :code """
+struct Instance {
+  pos : vec3f,
+  scale : f32,
+  color : vec4f,
+}
+struct Instances { instances : array<Instance> }
+struct CamFrustum {
+  viewProj : mat4x4f,
+  planes : array<vec4f, 6>,
+}
+struct Counters { visible : atomic<u32>, _pad : array<u32, 3> }
+struct Visible { indices : array<u32> }
+
+@group(0) @binding(0) var<storage, read> data : Instances;
+@group(0) @binding(1) var<storage, read> cam : CamFrustum;
+@group(0) @binding(2) var<storage, read_write> counters : Counters;
+@group(0) @binding(3) var<storage, read_write> visible : Visible;
+
+// Bounding sphere (radius scale*sqrt(3)) vs the six frustum planes;
+// survivors compact via atomicAdd.
+@compute @workgroup_size(64)
+fn cull(@builtin(global_invocation_id) gid : vec3u) {
+  let i = gid.x;
+  if (i >= 4096u) { return; }
+  let inst = data.instances[i];
+  let r = inst.scale * 1.7320508;
+  for (var p = 0u; p < 6u; p++) {
+    if (dot(cam.planes[p].xyz, inst.pos) + cam.planes[p].w < -r) {
+      return;
+    }
+  }
+  let slot = atomicAdd(&counters.visible, 1u);
+  visible.indices[slot] = i;
+}
+""")
+
+(shader-module :name argsCode :code """
+struct Counters { visible : atomic<u32>, _pad : array<u32, 3> }
+struct DrawArgs { vertexCount : u32, instanceCount : u32, firstVertex : u32, firstInstance : u32 }
+
+@group(0) @binding(0) var<storage, read_write> counters : Counters;
+@group(0) @binding(1) var<storage, read_write> args : DrawArgs;
+
+@compute @workgroup_size(1)
+fn main() {
+  args.vertexCount = 36u;                          // deindexed cube
+  args.instanceCount = atomicLoad(&counters.visible);
+  args.firstVertex = 0u;
+  args.firstInstance = 0u;
+}
+""")
+
+(shader-module :name groundCode :code """
+struct CamFrustum {
+  viewProj : mat4x4f,
+  planes : array<vec4f, 6>,
+}
+@group(0) @binding(0) var<storage, read> cam : CamFrustum;
+
+struct VSOut {
+  @builtin(position) pos : vec4f,
+  @location(0) world : vec3f,
+}
+
+@vertex
+fn vs(@location(0) position : vec3f,
+      @location(1) normal : vec3f) -> VSOut {
+  let world = vec3f(position.x * 240.0, 0.0, position.y * 240.0);
+  var out : VSOut;
+  out.pos = cam.viewProj * vec4f(world, 1.0);
+  out.world = world;
+  return out;
+}
+
+@fragment
+fn fs(in : VSOut) -> @location(0) vec4f {
+  // Faint checker so the orbit reads.
+  let c = f32((u32(floor(in.world.x / 20.0 + 100.0)) +
+               u32(floor(in.world.z / 20.0 + 100.0))) % 2u);
+  let base = mix(vec3f(0.10, 0.11, 0.13), vec3f(0.13, 0.14, 0.17), c);
+  return vec4f(base, 1.0);
+}
+""")
+
+(shader-module :name drawCode :code """
+struct Instance {
+  pos : vec3f,
+  scale : f32,
+  color : vec4f,
+}
+struct Instances { instances : array<Instance> }
+struct CamFrustum {
+  viewProj : mat4x4f,
+  planes : array<vec4f, 6>,
+}
+struct Visible { indices : array<u32> }
+
+@group(0) @binding(0) var<storage, read> data : Instances;
+@group(0) @binding(1) var<storage, read> cam : CamFrustum;
+@group(0) @binding(2) var<storage, read> visible : Visible;
+
+struct VSOut {
+  @builtin(position) pos : vec4f,
+  @location(0) normal : vec3f,
+  @location(1) color : vec3f,
+}
+
+// Pure storage-driven instancing: instance_index -> compacted slot ->
+// instance record. The slot-based tint makes the compaction visible.
+@vertex
+fn vs(@location(0) position : vec3f,
+      @location(1) normal : vec3f,
+      @builtin(instance_index) ii : u32) -> VSOut {
+  let inst = data.instances[visible.indices[ii]];
+  let world = inst.pos + position * inst.scale;
+  var out : VSOut;
+  out.pos = cam.viewProj * vec4f(world, 1.0);
+  out.normal = normal;
+  let tint = 0.6 + 0.4 * f32(ii % 64u) / 64.0;
+  out.color = inst.color.rgb * tint;
+  return out;
+}
+
+@fragment
+fn fs(in : VSOut) -> @location(0) vec4f {
+  let N = normalize(in.normal);
+  let L = normalize(vec3f(0.5, 0.8, 0.3));
+  let diff = max(dot(N, L), 0.0);
+  return vec4f(in.color * (0.25 + diff * 0.75), 1.0);
+}
+""")
+
+(compute-pipeline :name seedPipe :module seedCode :entry main)
+(compute-pipeline :name cameraPipe :module cameraCode :entry main)
+(compute-pipeline :name clearPipe :module clearCode :entry main)
+(compute-pipeline :name cullPipe :module cullCode :entry cull)
+(compute-pipeline :name argsPipe :module argsCode :entry main)
+
+(render-pipeline :name groundPipe
+  (layout auto)
+  (vertex (module groundCode) (entry vs)
+    (buffers
+      (vertex-buffer :array-stride 24
+        (attribute :shader-location 0 :offset 0 :format float32x3)
+        (attribute :shader-location 1 :offset 12 :format float32x3))))
+  (fragment (module groundCode) (entry fs)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list))
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+(render-pipeline :name instancePipe
+  (layout auto)
+  (vertex (module drawCode) (entry vs)
+    (buffers
+      (vertex-buffer :array-stride 24
+        (attribute :shader-location 0 :offset 0 :format float32x3)
+        (attribute :shader-location 1 :offset 12 :format float32x3))))
+  (fragment (module drawCode) (entry fs)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list) :cull-mode back)
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+(bind-group :name seedBG :layout-pipeline seedPipe :layout-index 0
+  (entry :binding 0 :buffer instanceData))
+
+(bind-group :name cameraBG :layout-pipeline cameraPipe :layout-index 0
+  (entry :binding 0 :buffer inputsBuf)
+  (entry :binding 1 :buffer camFrustum))
+
+(bind-group :name clearBG :layout-pipeline clearPipe :layout-index 0
+  (entry :binding 0 :buffer counters)
+  (entry :binding 1 :buffer indirectArgs))
+
+(bind-group :name cullBG :layout-pipeline cullPipe :layout-index 0
+  (entry :binding 0 :buffer instanceData)
+  (entry :binding 1 :buffer camFrustum)
+  (entry :binding 2 :buffer counters)
+  (entry :binding 3 :buffer visibleInstances))
+
+(bind-group :name argsBG :layout-pipeline argsPipe :layout-index 0
+  (entry :binding 0 :buffer counters)
+  (entry :binding 1 :buffer indirectArgs))
+
+(bind-group :name groundBG :layout-pipeline groundPipe :layout-index 0
+  (entry :binding 0 :buffer camFrustum))
+
+(bind-group :name drawBG :layout-pipeline instancePipe :layout-index 0
+  (entry :binding 0 :buffer instanceData)
+  (entry :binding 1 :buffer camFrustum)
+  (entry :binding 2 :buffer visibleInstances))
+
+(compute-pass :name seedPass :pipeline seedPipe :bind-groups [seedBG]
+  :dispatch-workgroups (ceil (/ M 64)))
+
+(compute-pass :name cameraPass :pipeline cameraPipe :bind-groups [cameraBG]
+  :dispatch [1 1 1])
+
+(compute-pass :name clearPass :pipeline clearPipe :bind-groups [clearBG]
+  :dispatch [1 1 1])
+
+(compute-pass :name cullPass :pipeline cullPipe :bind-groups [cullBG]
+  :dispatch-workgroups (ceil (/ M 64)))
+
+(compute-pass :name argsPass :pipeline argsPipe :bind-groups [argsBG]
+  :dispatch [1 1 1])
+
+(render-pass :name envPass
+  (color-attachment :view context-current-texture
+    :clear-value [0.04 0.05 0.08 1] :load-op clear :store-op store)
+  (depth-attachment :view depthTex :depth-clear-value 1.0
+    :depth-load-op clear :depth-store-op store)
+  :pipeline groundPipe :bind-groups [groundBG] :vertex-buffers [groundVB]
+  (draw :vertex-count 6))
+
+(render-pass :name cullDrawPass
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (depth-attachment :view depthTex :depth-load-op load :depth-store-op store)
+  :pipeline instancePipe :bind-groups [drawBG] :vertex-buffers [cubeVB]
+  (draw-indirect :buffer indirectArgs))
+
+(frame :name main
+  :init [seedPass]
+  :perform [writeInputs cameraPass clearPass cullPass argsPass
+            envPass cullDrawPass])

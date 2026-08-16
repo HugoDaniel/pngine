@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PNGine Bundle Inspector</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'SF Mono','Cascadia Code','Fira Code','Consolas',monospace;background:#0a0a0a;color:#888;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:24px}
+h1{font-size:13px;font-weight:500;color:#fff;letter-spacing:.12em;text-transform:uppercase;margin-bottom:16px}
+.drop{width:100%;max-width:720px;border:2px dashed #2a2a2a;border-radius:8px;padding:48px 24px;text-align:center;font-size:12px;color:#555;cursor:pointer;transition:all .15s;margin-bottom:20px}
+.drop:hover,.drop.over{border-color:#555;color:#888;background:#111}
+.drop input{display:none}
+.info{width:100%;max-width:720px;font-size:11px;margin-bottom:16px;color:#666}
+.info span{color:#fff}
+.treemap{width:100%;max-width:720px;min-height:320px;border-radius:6px;overflow:hidden;background:#111;border:1px solid #1a1a1a}
+.treemap canvas{display:block;width:100%;cursor:pointer}
+.table{width:100%;max-width:720px;margin-top:16px;border-collapse:collapse;font-size:11px}
+.table th{text-align:left;color:#555;font-weight:500;padding:6px 10px;border-bottom:1px solid #1a1a1a;text-transform:uppercase;letter-spacing:.08em;font-size:10px}
+.table td{padding:5px 10px;border-bottom:1px solid #111}
+.table .name{color:#ccc}
+.table .bytes{color:#4f8;text-align:right;font-variant-numeric:tabular-nums}
+.table .pct{color:#666;text-align:right;font-variant-numeric:tabular-nums;width:60px}
+.table .bar-cell{width:120px}
+.bar{height:10px;border-radius:2px;min-width:1px}
+.tooltip{position:fixed;pointer-events:none;background:#1a1a1a;border:1px solid #333;border-radius:4px;padding:6px 10px;font-size:10px;color:#ccc;box-shadow:0 4px 12px rgba(0,0,0,.5);z-index:100;display:none;white-space:pre}
+</style>
+</head>
+<body>
+<h1>PNGine Bundle Inspector</h1>
+<div class="drop" id="drop">
+  Drop a <strong>.png</strong>, <strong>.html</strong>, or <strong>.pngb</strong> file here
+  <br><br><span style="color:#444">or click to browse</span>
+  <input type="file" id="fileInput" accept=".png,.html,.pngb">
+</div>
+<div class="info" id="info"></div>
+<div class="treemap" id="treemap" style="display:none"><canvas id="cv"></canvas></div>
+<table class="table" id="table" style="display:none">
+  <thead><tr><th>Section</th><th class="bar-cell"></th><th>Size</th><th>%</th></tr></thead>
+  <tbody id="tbody"></tbody>
+</table>
+<div class="tooltip" id="tip"></div>
+
+<script>
+const COLORS = {
+  'WGSL Shaders':'#e04030','Executor WASM':'#3088ff','Opcodes':'#30e068',
+  'Data Section':'#e0a030','String Table':'#9050e0','Header':'#e05080',
+  'Uniform Table':'#50c0c0','WGSL Table':'#c0a050','Animation Table':'#8060d0',
+  'PNG Header':'#666','IDAT (pixels)':'#444','pNGb chunk overhead':'#555',
+  'pNGa (audio)':'#c05050','Other PNG chunks':'#333',
+  'HTML Boilerplate':'#555','Compressed Payload':'#3088ff','Audio WASM':'#c05050',
+  'JS Code':'#e0a030','pNGf chunk overhead':'#557',
+  'Flat Commands':'#30e068',
+};
+const FALLBACK = '#888';
+
+// ── PNG parsing ──
+const PNG_SIG = [0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a];
+const isPng = b => b.length >= 8 && PNG_SIG.every((v,i) => b[i]===v);
+const u32be = (b,o) => ((b[o]<<24)|(b[o+1]<<16)|(b[o+2]<<8)|b[o+3])>>>0;
+const u16le = (b,o) => b[o]|(b[o+1]<<8);
+const u32le = (b,o) => (b[o]|(b[o+1]<<8)|(b[o+2]<<16)|(b[o+3]<<24))>>>0;
+const txt = (b,o,n) => new TextDecoder().decode(b.subarray(o,o+n));
+
+function parsePngChunks(b) {
+  const chunks = [];
+  let pos = 8;
+  while (pos + 12 <= b.length) {
+    const len = u32be(b, pos);
+    const type = txt(b, pos+4, 4);
+    chunks.push({ type, offset: pos, dataOffset: pos+8, length: len, totalLength: 12+len });
+    pos += 12 + len;
+  }
+  return chunks;
+}
+
+async function decompress(data) {
+  const ds = new DecompressionStream('deflate-raw');
+  const w = ds.writable.getWriter();
+  w.write(data); w.close();
+  const r = ds.readable.getReader();
+  const chunks = []; let len = 0;
+  while (true) { const {done,value} = await r.read(); if (done) break; chunks.push(value); len += value.length; }
+  const out = new Uint8Array(len); let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+}
+
+// ── PNGB parsing ──
+function parsePngb(b) {
+  if (b.length < 40) return null;
+  if (txt(b,0,4) !== 'PNGB') return null;
+  const view = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  const flags = view.getUint16(6, true);
+  const hasExec = (flags & 1) !== 0;
+  const execOff = view.getUint32(12, true);
+  const execLen = view.getUint32(16, true);
+  const strOff = view.getUint32(20, true);
+  const dataOff = view.getUint32(24, true);
+  const wgslOff = view.getUint32(28, true);
+  const uniOff = view.getUint32(32, true);
+  const animOff = view.getUint32(36, true);
+
+  const bcStart = hasExec ? execOff + execLen : 40;
+  const bcLen = strOff - bcStart;
+
+  const sections = [{ name: 'Header', size: 40 }];
+  if (hasExec) sections.push({ name: 'Executor WASM', size: execLen });
+  sections.push({ name: 'Opcodes', size: bcLen });
+
+  // String table size
+  const strSize = dataOff - strOff;
+  sections.push({ name: 'String Table', size: strSize });
+
+  // Data section — break down into individual entries
+  const dataEnd = wgslOff > dataOff ? wgslOff : b.length;
+  const dataSectionSize = dataEnd - dataOff;
+
+  // Try to parse data section entries (count: u16, then count * {u32 offset, u32 len})
+  let wgslTotalSize = 0;
+  let otherDataSize = 0;
+  const dataEntries = [];
+  if (dataSectionSize > 2) {
+    const count = u16le(b, dataOff);
+    const headerSize = 2 + count * 8;
+    // Collect WGSL table data IDs
+    const wgslDataIds = new Set();
+    if (wgslOff > 0 && wgslOff < b.length) {
+      const wgslCount = u16le(b, wgslOff);
+      let wp = wgslOff + 2;
+      for (let i = 0; i < wgslCount && wp + 4 <= b.length; i++) {
+        const dataId = u16le(b, wp);
+        wgslDataIds.add(dataId);
+        const depCount = u16le(b, wp + 2);
+        wp += 4 + depCount * 2;
+      }
+    }
+    for (let i = 0; i < count && dataOff + 2 + i*8 + 8 <= b.length; i++) {
+      const entryOff = u32le(b, dataOff + 2 + i*8);
+      const entryLen = u32le(b, dataOff + 2 + i*8 + 4);
+      const isWgsl = wgslDataIds.has(i);
+      if (isWgsl) wgslTotalSize += entryLen;
+      else otherDataSize += entryLen;
+      // Try to read a preview
+      const absOff = dataOff + headerSize + entryOff;
+      let preview = '';
+      if (absOff + Math.min(entryLen, 60) <= b.length) {
+        try { preview = txt(b, absOff, Math.min(entryLen, 60)); } catch(e) {}
+      }
+      dataEntries.push({ id: i, size: entryLen, isWgsl, preview });
+    }
+    const dataHeaderSize = headerSize;
+    if (wgslTotalSize > 0) sections.push({ name: 'WGSL Shaders', size: wgslTotalSize, entries: dataEntries.filter(e => e.isWgsl) });
+    if (otherDataSize > 0) sections.push({ name: 'Data Section', size: otherDataSize, entries: dataEntries.filter(e => !e.isWgsl) });
+    // Account for data section header overhead
+    const accounted = wgslTotalSize + otherDataSize + dataHeaderSize;
+    if (dataSectionSize > accounted) {
+      // padding or alignment
+    }
+  } else if (dataSectionSize > 0) {
+    sections.push({ name: 'Data Section', size: dataSectionSize });
+  }
+
+  // WGSL table metadata
+  const wgslEnd = uniOff > wgslOff ? uniOff : (animOff > wgslOff ? animOff : b.length);
+  const wgslTableSize = wgslEnd - wgslOff;
+  if (wgslTableSize > 0) sections.push({ name: 'WGSL Table', size: wgslTableSize });
+
+  // Uniform table
+  const uniEnd = animOff > uniOff ? animOff : b.length;
+  const uniSize = uniEnd - uniOff;
+  if (uniSize > 0 && uniOff > 0) sections.push({ name: 'Uniform Table', size: uniSize });
+
+  // Animation table
+  if (animOff > 0 && animOff < b.length) {
+    sections.push({ name: 'Animation Table', size: b.length - animOff });
+  }
+
+  return { sections, entries: dataEntries, total: b.length };
+}
+
+// ── HTML parsing ──
+function parseHtml(text, raw) {
+  const total = raw.length;
+  const sections = [];
+
+  // Self-extracting HTML: <body onload="fetch('#').then(...)">BINARY
+  const onloadMatch = text.indexOf('<body onload=');
+  if (onloadMatch !== -1) {
+    // Find the closing > of the body tag
+    const bodyEnd = text.indexOf('>', onloadMatch);
+    if (bodyEnd !== -1) {
+      const htmlPart = bodyEnd + 1;
+      sections.push({ name: 'HTML Boilerplate', size: htmlPart });
+      sections.push({ name: 'Compressed Payload', size: total - htmlPart });
+    }
+    return { sections, total };
+  }
+
+  // Module-based HTML with <script type=module>
+  const scriptMatch = text.match(/<script[^>]*type=module[^>]*>([\s\S]*?)<\/script>/);
+  if (scriptMatch) {
+    const jsCode = scriptMatch[1];
+    const jsBytes = new TextEncoder().encode(jsCode).length;
+    const htmlBytes = total - jsBytes;
+
+    // Try to find WGSL shader strings in the JS
+    const shaderMatches = jsCode.match(/`[^`]*(?:@fragment|@vertex|@compute|fn\s+\w+)[^`]*`/g) || [];
+    let shaderBytes = 0;
+    for (const m of shaderMatches) shaderBytes += new TextEncoder().encode(m).length;
+
+    // Try to find audio/wasm references
+    const audioMatch = jsCode.match(/new Uint8Array\(\[[\d,\s]+\]\)/g);
+    let audioBytes = 0;
+    if (audioMatch) for (const m of audioMatch) audioBytes += m.length;
+
+    sections.push({ name: 'HTML Boilerplate', size: htmlBytes });
+    if (shaderBytes > 0) {
+      sections.push({ name: 'WGSL Shaders', size: shaderBytes });
+      sections.push({ name: 'JS Code', size: jsBytes - shaderBytes - audioBytes });
+    } else {
+      sections.push({ name: 'JS Code', size: jsBytes - audioBytes });
+    }
+    if (audioBytes > 0) sections.push({ name: 'Audio WASM', size: audioBytes });
+  } else {
+    sections.push({ name: 'HTML Boilerplate', size: total });
+  }
+  return { sections, total };
+}
+
+// ── Analyze file ──
+async function analyze(file) {
+  const raw = new Uint8Array(await file.arrayBuffer());
+  const name = file.name;
+
+  if (name.endsWith('.html') || name.endsWith('.htm')) {
+    const text = new TextDecoder().decode(raw);
+    return { type: 'html', name, ...parseHtml(text, raw) };
+  }
+
+  if (isPng(raw)) {
+    const chunks = parsePngChunks(raw);
+    const sections = [];
+    sections.push({ name: 'PNG Header', size: 8 });
+
+    let pngbData = null, pngbCompressed = 0, pngbRaw = 0;
+    let pngfData = null, pngfCompressed = 0;
+    let pngaSize = 0;
+    let idatSize = 0;
+    let otherSize = 0;
+
+    for (const ch of chunks) {
+      if (ch.type === 'pNGb') {
+        pngbCompressed = ch.totalLength;
+        const payload = raw.subarray(ch.dataOffset, ch.dataOffset + ch.length);
+        const flags = payload[1];
+        try {
+          pngbData = (flags & 1) ? await decompress(payload.subarray(2)) : payload.subarray(2);
+          pngbRaw = pngbData.length;
+        } catch(e) { pngbData = null; }
+      } else if (ch.type === 'pNGf') {
+        pngfCompressed = ch.totalLength;
+        const payload = raw.subarray(ch.dataOffset, ch.dataOffset + ch.length);
+        const flags = payload[1];
+        try {
+          pngfData = (flags & 1) ? await decompress(payload.subarray(2)) : payload.subarray(2);
+        } catch(e) { pngfData = null; }
+      } else if (ch.type === 'pNGa') {
+        pngaSize = ch.totalLength;
+      } else if (ch.type === 'IDAT') {
+        idatSize += ch.totalLength;
+      } else if (ch.type === 'IHDR' || ch.type === 'IEND') {
+        // counted as PNG overhead
+      } else {
+        otherSize += ch.totalLength;
+      }
+    }
+
+    if (idatSize > 0) sections.push({ name: 'IDAT (pixels)', size: idatSize });
+
+    if (pngbData) {
+      const pngb = parsePngb(pngbData);
+      if (pngb) {
+        // Show PNGB internals, scaled to compressed size
+        const ratio = pngbCompressed / pngbRaw;
+        sections.push({ name: 'pNGb chunk overhead', size: 14 }); // 12 chunk + 2 header
+        for (const s of pngb.sections) {
+          sections.push({
+            name: s.name,
+            size: Math.round(s.size * ratio),
+            rawSize: s.size,
+            entries: s.entries,
+          });
+        }
+      } else {
+        sections.push({ name: 'pNGb (bytecode)', size: pngbCompressed });
+      }
+    }
+
+    if (pngfData) {
+      sections.push({ name: 'pNGf chunk overhead', size: 14 });
+      sections.push({ name: 'Flat Commands', size: pngfCompressed - 14 });
+    }
+
+    if (pngaSize > 0) sections.push({ name: 'pNGa (audio)', size: pngaSize });
+    if (otherSize > 0) sections.push({ name: 'Other PNG chunks', size: otherSize });
+
+    return { type: 'png', name, sections, total: raw.length, chunks, pngbRaw };
+  }
+
+  // Try raw PNGB
+  if (raw.length >= 4 && txt(raw,0,4) === 'PNGB') {
+    const pngb = parsePngb(raw);
+    if (pngb) return { type: 'pngb', name, ...pngb };
+  }
+
+  return { type: 'unknown', name, sections: [{ name: 'Unknown', size: raw.length }], total: raw.length };
+}
+
+// ── Treemap rendering ──
+function drawTreemap(canvas, sections, total) {
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.parentElement.clientWidth;
+  const H = Math.max(200, Math.min(400, W * 0.45));
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  // Squarified treemap layout
+  const rects = squarify(sections.map(s => ({ ...s, value: s.size })), 0, 0, W, H);
+
+  for (let i = 0; i < rects.length; i++) {
+    const r = rects[i];
+    const color = COLORS[r.name] || FALLBACK;
+    ctx.fillStyle = color;
+    ctx.fillRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2);
+
+    // Label
+    if (r.w > 50 && r.h > 24) {
+      ctx.fillStyle = '#fff';
+      ctx.font = '10px monospace';
+      ctx.fillText(r.name, r.x + 5, r.y + 14);
+      ctx.fillStyle = 'rgba(255,255,255,.6)';
+      ctx.font = '9px monospace';
+      ctx.fillText(fmtBytes(r.size), r.x + 5, r.y + 26);
+    } else if (r.w > 30 && r.h > 14) {
+      ctx.fillStyle = '#fff';
+      ctx.font = '9px monospace';
+      ctx.fillText(fmtBytes(r.size), r.x + 3, r.y + 11);
+    }
+  }
+
+  return rects;
+}
+
+function squarify(items, x, y, w, h) {
+  if (!items.length) return [];
+  const sorted = items.slice().sort((a,b) => b.value - a.value);
+  const total = sorted.reduce((s,i) => s + i.value, 0);
+  return layoutRow(sorted, [], x, y, w, h, total);
+}
+
+function layoutRow(items, row, x, y, w, h, total) {
+  if (!items.length) return placeRow(row, x, y, w, h, total);
+  const item = items[0];
+  const rest = items.slice(1);
+  const newRow = [...row, item];
+
+  if (!row.length || worstRatio(newRow, w, h, total) <= worstRatio(row, w, h, total)) {
+    return layoutRow(rest, newRow, x, y, w, h, total);
+  }
+
+  const rowTotal = row.reduce((s,i) => s + i.value, 0);
+  const frac = rowTotal / total;
+  const placed = placeRow(row, x, y, w, h, total);
+
+  if (w >= h) {
+    const usedW = w * frac;
+    return [...placed, ...squarify(items, x + usedW, y, w - usedW, h)];
+  } else {
+    const usedH = h * frac;
+    return [...placed, ...squarify(items, x, y + usedH, w, h - usedH)];
+  }
+}
+
+function placeRow(row, x, y, w, h, total) {
+  const rowTotal = row.reduce((s,i) => s + i.value, 0);
+  const frac = rowTotal / total;
+  const rects = [];
+
+  if (w >= h) {
+    const rowW = w * frac;
+    let cy = y;
+    for (const item of row) {
+      const itemH = h * (item.value / rowTotal);
+      rects.push({ ...item, x, y: cy, w: rowW, h: itemH });
+      cy += itemH;
+    }
+  } else {
+    const rowH = h * frac;
+    let cx = x;
+    for (const item of row) {
+      const itemW = w * (item.value / rowTotal);
+      rects.push({ ...item, x: cx, y, w: itemW, h: rowH });
+      cx += itemW;
+    }
+  }
+  return rects;
+}
+
+function worstRatio(row, w, h, total) {
+  const rowTotal = row.reduce((s,i) => s + i.value, 0);
+  const frac = rowTotal / total;
+  const side = w >= h ? w * frac : h * frac;
+  let worst = 0;
+  for (const item of row) {
+    const other = (w >= h ? h : w) * (item.value / rowTotal);
+    const r = Math.max(side / other, other / side);
+    if (r > worst) worst = r;
+  }
+  return worst;
+}
+
+function fmtBytes(n) {
+  if (n < 1024) return n + 'B';
+  if (n < 1024*1024) return (n/1024).toFixed(1) + 'KB';
+  return (n/1024/1024).toFixed(1) + 'MB';
+}
+
+// ── Table rendering ──
+function renderTable(sections, total) {
+  const tbody = document.getElementById('tbody');
+  tbody.innerHTML = '';
+  const sorted = sections.slice().sort((a,b) => b.size - a.size);
+  const maxSize = sorted[0]?.size || 1;
+
+  for (const s of sorted) {
+    const pct = (s.size / total * 100).toFixed(1);
+    const barW = Math.max(1, s.size / maxSize * 110);
+    const color = COLORS[s.name] || FALLBACK;
+    const rawNote = s.rawSize != null ? ` (${fmtBytes(s.rawSize)} raw)` : '';
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="name">${s.name}</td>
+      <td class="bar-cell"><div class="bar" style="width:${barW}px;background:${color}"></div></td>
+      <td class="bytes">${fmtBytes(s.size)}${rawNote}</td>
+      <td class="pct">${pct}%</td>`;
+
+    // Tooltip with data entries
+    if (s.entries?.length) {
+      tr.title = s.entries.map(e => {
+        const p = e.preview.replace(/[\n\r]/g,' ').slice(0,50);
+        return `  [${e.id}] ${fmtBytes(e.size)} ${p}`;
+      }).join('\n');
+    }
+    tbody.appendChild(tr);
+  }
+}
+
+// ── Tooltip on treemap ──
+let rects = [];
+const tip = document.getElementById('tip');
+const cv = document.getElementById('cv');
+
+cv.addEventListener('mousemove', e => {
+  const rect = cv.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  const hit = rects.find(r => x >= r.x && x <= r.x+r.w && y >= r.y && y <= r.y+r.h);
+  if (hit) {
+    let text = `${hit.name}: ${fmtBytes(hit.size)}`;
+    if (hit.rawSize != null) text += ` (${fmtBytes(hit.rawSize)} raw)`;
+    if (hit.entries?.length) {
+      text += '\n' + hit.entries.slice(0, 8).map(e => {
+        const p = e.preview.replace(/[\n\r]/g,' ').slice(0,40);
+        return `  [${e.id}] ${fmtBytes(e.size)} ${p}`;
+      }).join('\n');
+      if (hit.entries.length > 8) text += `\n  ...${hit.entries.length - 8} more`;
+    }
+    tip.textContent = text;
+    tip.style.display = 'block';
+    tip.style.left = (e.clientX + 12) + 'px';
+    tip.style.top = (e.clientY + 12) + 'px';
+  } else {
+    tip.style.display = 'none';
+  }
+});
+cv.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+
+// ── File handling ──
+async function handleFile(file) {
+  const result = await analyze(file);
+  const info = document.getElementById('info');
+  const treemap = document.getElementById('treemap');
+  const table = document.getElementById('table');
+
+  let infoText = `<span>${result.name}</span> &mdash; ${fmtBytes(result.total)} (${result.type})`;
+  if (result.pngbRaw) infoText += ` &mdash; PNGB: ${fmtBytes(result.pngbRaw)} raw`;
+  if (result.chunks) {
+    infoText += ` &mdash; ${result.chunks.length} PNG chunks`;
+    infoText += ` (${result.chunks.map(c=>c.type).join(', ')})`;
+  }
+  info.innerHTML = infoText;
+
+  treemap.style.display = 'block';
+  table.style.display = 'table';
+  rects = drawTreemap(cv, result.sections, result.total);
+  renderTable(result.sections, result.total);
+}
+
+// ── Drop / click ──
+const dropEl = document.getElementById('drop');
+const fileInput = document.getElementById('fileInput');
+
+dropEl.addEventListener('dragover', e => { e.preventDefault(); dropEl.classList.add('over'); });
+dropEl.addEventListener('dragleave', () => dropEl.classList.remove('over'));
+dropEl.addEventListener('drop', e => {
+  e.preventDefault();
+  dropEl.classList.remove('over');
+  if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+});
+dropEl.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => { if (fileInput.files.length) handleFile(fileInput.files[0]); });
+
+// Resize
+window.addEventListener('resize', () => {
+  if (rects.length) rects = drawTreemap(cv, rects.map(r => ({ name: r.name, size: r.size, rawSize: r.rawSize, entries: r.entries })), rects.reduce((s,r) => s + r.size, 0));
+});
+</script>
+</body>
+</html>

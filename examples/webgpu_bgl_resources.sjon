@@ -1,0 +1,58 @@
+; Explicit bind-group-layout with sampler and texture entries — a
+; (bind-group-layout …) authoring the (sampler …) and (texture …) entry
+; sub-forms, composed into a (pipeline-layout …) that the render pipeline uses
+; via :pipeline-layout instead of (layout auto).
+;
+; The fragment samples `tex` through `samp`, so the entry types must match the
+; WGSL (a filtering sampler + a float 2d texture); a mismatch is rejected at
+; pipeline creation. `tex` is zero-initialized (s = 0), so
+; `orange*(1 - s.a) + s.rgb` renders solid orange; `s` feeds the output, so
+; both bindings stay live.
+
+(shader-module :name code :code """
+    @group(0) @binding(0) var samp: sampler;
+    @group(0) @binding(1) var tex: texture_2d<f32>;
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      var p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
+      return vec4f(p[i], 0, 1);
+    }
+
+    @fragment
+    fn fs(@builtin(position) c: vec4f) -> @location(0) vec4f {
+      let uv = c.xy / vec2f(256.0);
+      let s = textureSample(tex, samp, uv);
+      // Zero-initialized texture → s = (0,0,0,0) → orange. Referencing `s` keeps the
+      // texture + sampler bindings live so the BGL entry types must match the WGSL.
+      return vec4f(0.9, 0.4, 0.1, 1.0) * (1.0 - s.a) + vec4f(s.rgb, 0.0);
+    }
+""")
+
+(texture :name tex :size canvas :format rgba8unorm :usage [texture-binding])
+
+(sampler :name samp :mag-filter linear :min-filter linear)
+
+(bind-group-layout :name bgl
+  (entry :binding 0 :visibility [fragment] (sampler :type filtering))
+  (entry :binding 1 :visibility [fragment]
+    (texture :sample-type float :view-dimension 1 :multisampled false)))
+
+(pipeline-layout :name pl :bind-group-layouts [bgl])
+
+(render-pipeline :name pipe :pipeline-layout pl
+  (vertex (module code) (entry vs))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(bind-group :name g :bind-group-layout bgl
+  (entry :binding 0 :sampler samp)
+  (entry :binding 1 :texture tex))
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipe :bind-groups [g]
+  (draw :vertex-count 3))
+
+(frame :name main :perform [draw])

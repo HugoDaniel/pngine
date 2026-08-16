@@ -1,0 +1,187 @@
+; webgpu_occlusion_query — port of the webgpu-samples `occlusionQuery` sample.
+; Six colored cubes, each draw wrapped in its own occlusion query so the GPU
+; counts the samples that pass depth testing; the six results are resolved into
+; a buffer and copied to a MAP_READ readback buffer the host page can map.
+;
+; Exercises `(query-set :type occlusion)`, `:occlusion-query-set` on the
+; render pass, `(occlusion-query :query-index N (draw …))` brackets around each
+; draw, and the `(resolve-query-set …)` / `(copy-buffer-to-buffer …)` queue
+; ops. The cube is a `cube` shape (position3+normal3, stride 24) drawn six
+; times with a per-cube `:first-instance`; the shader indexes POSITIONS/COLORS
+; by `@builtin(instance_index)`.
+;
+; A payload cannot consume its own readbacks, so displaying the results is the
+; host page's job: `pngine(url, { canvas, onQueryResult: (results) => … })`
+; receives the six sample counts each frame (nonzero = that cube is visible).
+; Browser-only: the query family is a no-op under native `--frame`.
+
+(define :name CUBE_VERTEX_COUNT :value 36)
+
+(data :name cubeVerts (cube :format [position3 normal3]))
+
+(buffer :name vertexBuffer :size cubeVerts :usage [vertex]
+  :mapped-at-creation cubeVerts)
+
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+
+; Six occlusion queries, one per cube.
+(query-set :name occQS :type occlusion :count 6)
+
+; resolveBuf receives the six resolved query values (QUERY_RESOLVE); readbackBuf is the
+; MAP_READ copy the host can map and read (6 × 8 bytes = 48).
+(buffer :name resolveBuf :size 48 :usage [query-resolve copy-src])
+(buffer :name readbackBuf :size 48 :usage [map-read copy-dst])
+
+(texture :name depthTexture :size canvas :format depth24plus :usage [render-attachment])
+
+(queue :name writeUniforms
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+(shader-module :name code :code """
+    struct PngineInputs {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> pngine: PngineInputs;
+
+    // 6 cube positions (scaled by 10, matching original sample)
+    const POSITIONS = array<vec3f, 6>(
+      vec3f(-10, 0, 0),
+      vec3f(10, 0, 0),
+      vec3f(0, -10, 0),
+      vec3f(0, 10, 0),
+      vec3f(0, 0, -10),
+      vec3f(0, 0, 10),
+    );
+
+    // 6 cube colors: red, yellow, green, orange, blue, purple
+    const COLORS = array<vec3f, 6>(
+      vec3f(1, 0, 0),
+      vec3f(1, 1, 0),
+      vec3f(0, 0.5, 0),
+      vec3f(1, 0.6, 0),
+      vec3f(0, 0, 1),
+      vec3f(0.5, 0, 0.5),
+    );
+
+    fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+      let f = 1.0 / tan(fovy * 0.5);
+      let nf = 1.0 / (near - far);
+      return mat4x4f(
+        vec4f(f / aspect, 0, 0, 0),
+        vec4f(0, f, 0, 0),
+        vec4f(0, 0, (far + near) * nf, -1),
+        vec4f(0, 0, 2 * far * near * nf, 0),
+      );
+    }
+
+    fn rotateX(a: f32) -> mat4x4f {
+      let c = cos(a); let s = sin(a);
+      return mat4x4f(
+        vec4f(1, 0, 0, 0),
+        vec4f(0, c, -s, 0),
+        vec4f(0, s, c, 0),
+        vec4f(0, 0, 0, 1),
+      );
+    }
+
+    fn rotateY(a: f32) -> mat4x4f {
+      let c = cos(a); let s = sin(a);
+      return mat4x4f(
+        vec4f(c, 0, s, 0),
+        vec4f(0, 1, 0, 0),
+        vec4f(-s, 0, c, 0),
+        vec4f(0, 0, 0, 1),
+      );
+    }
+
+    fn tr(t: vec3f) -> mat4x4f {
+      return mat4x4f(
+        vec4f(1, 0, 0, 0),
+        vec4f(0, 1, 0, 0),
+        vec4f(0, 0, 1, 0),
+        vec4f(t, 1),
+      );
+    }
+
+    // Ping-pong sine: oscillates 0->1->0 using sine wave
+    fn pingPongSine(t: f32) -> f32 {
+      return sin(t * 6.28318530) * 0.5 + 0.5;
+    }
+
+    struct VertexOutput {
+      @builtin(position) position: vec4f,
+      @location(0) color: vec3f,
+      @location(1) normal: vec3f,
+    }
+
+    @vertex fn vs(
+      @builtin(instance_index) cubeIdx: u32,
+      @location(0) position: vec3f,
+      @location(1) normal: vec3f,
+    ) -> VertexOutput {
+      let t = pngine.time;
+
+      // Camera: rotate around origin, then translate along Z
+      // Original: M = RX(t) * RY(t*0.7) * T(0,0,camZ)
+      // View = inverse(M) = T(0,0,-camZ) * RY(-t*0.7) * RX(-t)
+      let camZ = mix(5.0, 40.0, pingPongSine(t * 0.2));
+      let view = tr(vec3f(0, 0, -camZ)) * rotateY(-t * 0.7) * rotateX(-t);
+
+      // 30 degree FOV = 0.5236 radians
+      let proj = perspective(0.5236, pngine.aspect, 0.5, 100.0);
+
+      // Per-cube world transform (translation only)
+      let model = tr(POSITIONS[cubeIdx]);
+
+      var out: VertexOutput;
+      out.position = proj * view * model * vec4f(position, 1.0);
+      out.color = COLORS[cubeIdx];
+      // Normal unchanged by translation
+      out.normal = normal;
+      return out;
+    }
+
+    @fragment fn fs(in: VertexOutput) -> @location(0) vec4f {
+      let lightDir = normalize(vec3f(4, 10, 6));
+      let light = dot(normalize(in.normal), lightDir) * 0.5 + 0.5;
+      return vec4f(in.color * light, 1.0);
+    }
+  """)
+
+(render-pipeline :name pipeline
+  (layout auto)
+  (vertex (module code) (entry vs)
+    (buffers
+      (vertex-buffer :array-stride 24
+        (attribute :shader-location 0 :offset 0 :format float32x3)
+        (attribute :shader-location 1 :offset 12 :format float32x3))))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list) :cull-mode back)
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+(bind-group :name mainBG :layout-pipeline pipeline :layout-index 0
+  (entry :binding 0 :buffer uniforms))
+
+(render-pass :name renderPass
+  (color-attachment :view context-current-texture :clear-value [128 128 128 255] :load-op clear :store-op store)
+  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  :occlusion-query-set occQS
+  :pipeline pipeline
+  :vertex-buffers [vertexBuffer]
+  :bind-groups [mainBG]
+  (occlusion-query :query-index 0 (draw :vertex-count CUBE_VERTEX_COUNT :first-instance 0))
+  (occlusion-query :query-index 1 (draw :vertex-count CUBE_VERTEX_COUNT :first-instance 1))
+  (occlusion-query :query-index 2 (draw :vertex-count CUBE_VERTEX_COUNT :first-instance 2))
+  (occlusion-query :query-index 3 (draw :vertex-count CUBE_VERTEX_COUNT :first-instance 3))
+  (occlusion-query :query-index 4 (draw :vertex-count CUBE_VERTEX_COUNT :first-instance 4))
+  (occlusion-query :query-index 5 (draw :vertex-count CUBE_VERTEX_COUNT :first-instance 5)))
+
+(queue :name resolveOps
+  (resolve-query-set :query-set occQS :first-query 0 :query-count 6 :destination resolveBuf :destination-offset 0)
+  (copy-buffer-to-buffer :source resolveBuf :source-offset 0 :destination readbackBuf :destination-offset 0 :size 48))
+
+(frame :name main :perform [writeUniforms renderPass resolveOps])

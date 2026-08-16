@@ -1,0 +1,14 @@
+; Invalid: the compute entry reaches the override NEEDED, which has no default
+; and no way to receive a value, so the pipeline is rejected (WG has a default
+; and is fine). Compute counterpart of override_no_default.sjon.
+(shader-module :name code :code """
+override WG: u32 = 8u;
+override NEEDED: f32;
+
+@compute @workgroup_size(WG) fn cs() {
+  let unused = NEEDED;
+}
+""")
+(compute-pipeline :name cp :module code :entry cs)
+(compute-pass :name step :pipeline cp :dispatch-workgroups 4)
+(frame :name main :perform [step])

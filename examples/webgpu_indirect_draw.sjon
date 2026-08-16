@@ -1,0 +1,57 @@
+; webgpu_indirect_draw — exercises `(draw-indirect …)`. A one-shot compute pass
+; writes GPUDrawIndirectArgs = [3,1,0,0] (vertexCount, instanceCount,
+; firstVertex, firstInstance) into a storage+indirect buffer; the render pass
+; then draws a fullscreen triangle with those arguments read GPU-side. No index
+; buffer is involved (contrast draw-indexed-indirect).
+
+(shader-module :name seedCode :code """
+@group(0) @binding(0) var<storage, read_write> drawArgs: array<u32>;
+@compute @workgroup_size(1)
+fn seedArgs() {
+  drawArgs[0] = 3u; // vertexCount
+  drawArgs[1] = 1u; // instanceCount
+  drawArgs[2] = 0u; // firstVertex
+  drawArgs[3] = 0u; // firstInstance
+}
+""")
+
+(shader-module :name drawCode :code """
+@vertex
+fn vertexMain(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4f {
+  var pos = array<vec2f, 3>(
+    vec2f(-1.0, -3.0),
+    vec2f(-1.0,  1.0),
+    vec2f( 3.0,  1.0)
+  );
+  return vec4f(pos[vid], 0.0, 1.0);
+}
+
+@fragment
+fn fragMain() -> @location(0) vec4f {
+  return vec4f(0.2, 0.7, 1.0, 1.0);
+}
+""")
+
+(buffer :name drawArgs :size 16 :usage [storage indirect])
+
+(compute-pipeline :name seedPipe :module seedCode :entry seedArgs)
+
+(bind-group :name seedGroup :layout-pipeline seedPipe :layout-index 0
+  (entry :binding 0 :buffer drawArgs))
+
+(compute-pass :name seedPass :pipeline seedPipe :bind-groups [seedGroup]
+  :dispatch-workgroups 1)
+
+(render-pipeline :name pipeline
+  (layout auto)
+  (vertex (module drawCode) (entry vertexMain))
+  (fragment (module drawCode) (entry fragMain)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list)))
+
+(render-pass :name drawPass
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipeline
+  (draw-indirect :buffer drawArgs))
+
+(frame :name main :perform [seedPass drawPass])

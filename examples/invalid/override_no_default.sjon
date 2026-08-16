@@ -1,0 +1,22 @@
+; Invalid: a WGSL `override` (SCALE) with no default, reached by a render
+; pipeline. Nothing supplies a value, so the pipeline could never be created;
+; it is rejected. Giving the declaration a default (`= 1.0`) compiles.
+(shader-module :name code :code """
+override SCALE: f32;
+
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-0.5, -0.5), vec2f(0.5, -0.5), vec2f(0.0, 0.5));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(SCALE, 0.0, 0.0, 1.0); }
+""")
+(render-pipeline :name pipe (layout auto)
+  (vertex (module code) (entry vs))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipe
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

@@ -1,0 +1,37 @@
+; test_storage_buffer — a plain green triangle plus one storage buffer that
+; nothing binds or reads. Declaring a buffer is enough to create it: the
+; 1024-byte storage buffer is created even though no bind group, pass or shader
+; touches it.
+
+(shader-module :name shader :code """
+@vertex
+fn vertexMain(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var pos = array<vec2f, 3>(
+    vec2f(0.0, 0.5),
+    vec2f(-0.5, -0.5),
+    vec2f(0.5, -0.5)
+  );
+  return vec4f(pos[i], 0.0, 1.0);
+}
+
+@fragment
+fn fragMain() -> @location(0) vec4f {
+  return vec4f(0.0, 1.0, 0.0, 1.0);  // Green
+}
+""")
+
+(buffer :name storageBuffer :size 1024 :usage [storage])
+
+(render-pipeline :name trianglePipeline
+  (layout auto)
+  (vertex (module shader) (entry vertexMain))
+  (fragment (module shader) (entry fragMain)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list)))
+
+(render-pass :name drawPass
+  (color-attachment :view context-current-texture :clear-value [0.0 0.0 0.0 1.0] :load-op clear :store-op store)
+  :pipeline trianglePipeline
+  (draw :vertex-count 3 :instance-count 1 :first-vertex 0 :first-instance 0))
+
+(frame :name main :perform [drawPass])

@@ -1,0 +1,232 @@
+; GPU mipmap generation — port of the webgpu-samples `generateMipmap` sample,
+; done as a compute downsample chain. Upstream renders into each mip level's
+; view as a color attachment; here attachments are whole-texture default
+; views, so the chain runs in compute instead: level 0 is painted analytically
+; (concentric ring palette + darkened quadrants; no asset, no upload op), then
+; eight passes each bind level N-1 as a sampled (texture-view …) and level N
+; as a write-only storage view and run an exact 2x2 box average. The whole
+; 9-dispatch chain lives in frame :init (runs once); the per-frame work is one
+; rotating trilinear cube whose ring colors visibly shift with mip selection
+; as faces recede.
+
+(texture :name mipTex :width 256 :height 256 :format rgba8unorm
+  :mip-level-count 9
+  :usage [texture-binding storage-binding])
+
+; Per-level binding views: 9 storage dests + 8 sampled sources. The display
+; samples mipTex's default view (all 9 levels — what trilinear wants).
+(texture-view :name dst0 :texture mipTex :base-mip-level 0 :mip-level-count 1)
+(texture-view :name src0 :texture mipTex :base-mip-level 0 :mip-level-count 1)
+(texture-view :name dst1 :texture mipTex :base-mip-level 1 :mip-level-count 1)
+(texture-view :name src1 :texture mipTex :base-mip-level 1 :mip-level-count 1)
+(texture-view :name dst2 :texture mipTex :base-mip-level 2 :mip-level-count 1)
+(texture-view :name src2 :texture mipTex :base-mip-level 2 :mip-level-count 1)
+(texture-view :name dst3 :texture mipTex :base-mip-level 3 :mip-level-count 1)
+(texture-view :name src3 :texture mipTex :base-mip-level 3 :mip-level-count 1)
+(texture-view :name dst4 :texture mipTex :base-mip-level 4 :mip-level-count 1)
+(texture-view :name src4 :texture mipTex :base-mip-level 4 :mip-level-count 1)
+(texture-view :name dst5 :texture mipTex :base-mip-level 5 :mip-level-count 1)
+(texture-view :name src5 :texture mipTex :base-mip-level 5 :mip-level-count 1)
+(texture-view :name dst6 :texture mipTex :base-mip-level 6 :mip-level-count 1)
+(texture-view :name src6 :texture mipTex :base-mip-level 6 :mip-level-count 1)
+(texture-view :name dst7 :texture mipTex :base-mip-level 7 :mip-level-count 1)
+(texture-view :name src7 :texture mipTex :base-mip-level 7 :mip-level-count 1)
+(texture-view :name dst8 :texture mipTex :base-mip-level 8 :mip-level-count 1)
+
+(texture :name depthTex :size canvas :format depth24plus :usage [render-attachment])
+(buffer :name inputs :size 16 :usage [uniform copy-dst])
+
+(sampler :name trilinear :mag-filter linear :min-filter linear
+  :mipmap-filter linear)
+
+(queue :name writeInputs
+  (write-buffer :buffer inputs :offset 0 :data pngine-inputs))
+
+(shader-module :name cardCode :code """
+@group(0) @binding(0) var card : texture_storage_2d<rgba8unorm, write>;
+
+// Analytic test card: 8 concentric rings in distinct hues, opposite
+// quadrants darkened — every downsampled level stays distinguishable.
+@compute @workgroup_size(8, 8)
+fn paint(@builtin(global_invocation_id) gid : vec3u) {
+  let size = textureDimensions(card);
+  if (gid.x >= size.x || gid.y >= size.y) { return; }
+  let uv = (vec2f(gid.xy) + 0.5) / vec2f(size);
+  let p = uv * 2.0 - 1.0;
+  let ring = u32(clamp(length(p), 0.0, 0.999) * 8.0) % 8u;
+  var palette = array<vec3f, 8>(
+    vec3f(0.90, 0.20, 0.20), vec3f(0.90, 0.60, 0.20),
+    vec3f(0.90, 0.90, 0.20), vec3f(0.20, 0.80, 0.30),
+    vec3f(0.20, 0.80, 0.80), vec3f(0.20, 0.40, 0.90),
+    vec3f(0.60, 0.30, 0.90), vec3f(0.90, 0.30, 0.70));
+  var c = palette[ring];
+  if ((p.x > 0.0) != (p.y > 0.0)) { c = c * 0.55; }
+  textureStore(card, gid.xy, vec4f(c, 1.0));
+}
+""")
+
+(shader-module :name mipCode :code """
+@group(0) @binding(0) var src : texture_2d<f32>;
+@group(0) @binding(1) var dst : texture_storage_2d<rgba8unorm, write>;
+
+// Exact 2x2 box average — equivalent to upstream's bilinear fullscreen
+// blit for power-of-two chains, with no sampler or filterability questions.
+@compute @workgroup_size(8, 8)
+fn downsample(@builtin(global_invocation_id) gid : vec3u) {
+  let dstSize = textureDimensions(dst);
+  if (gid.x >= dstSize.x || gid.y >= dstSize.y) { return; }
+  let s = gid.xy * 2u;
+  let c = textureLoad(src, s, 0) + textureLoad(src, s + vec2u(1u, 0u), 0)
+        + textureLoad(src, s + vec2u(0u, 1u), 0) + textureLoad(src, s + vec2u(1u, 1u), 0);
+  textureStore(dst, gid.xy, c * 0.25);
+}
+""")
+
+(shader-module :name cubeCode :code """
+struct PngineInputs {
+  time: f32,
+  canvasW: f32,
+  canvasH: f32,
+  aspect: f32,
+};
+@group(0) @binding(0) var<uniform> inputs : PngineInputs;
+@group(0) @binding(1) var samp : sampler;
+@group(0) @binding(2) var tex : texture_2d<f32>;
+
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  return mat4x4f(
+    vec4f(f / aspect, 0, 0, 0),
+    vec4f(0, f, 0, 0),
+    vec4f(0, 0, far * nf, -1),
+    vec4f(0, 0, far * near * nf, 0));
+}
+
+fn getMVP() -> mat4x4f {
+  let now = inputs.time;
+  var view = mat4x4f(
+    vec4f(1, 0, 0, 0),
+    vec4f(0, 1, 0, 0),
+    vec4f(0, 0, 1, 0),
+    vec4f(0, 0, -4, 1));
+  let axis = vec3f(sin(now), cos(now), 0.0);
+  let c = cos(1.0);
+  let s = sin(1.0);
+  let t = 1.0 - c;
+  let x = axis.x;
+  let y = axis.y;
+  let rot = mat4x4f(
+    vec4f(t*x*x+c,  t*x*y,    s*y, 0),
+    vec4f(t*x*y,    t*y*y+c, -s*x, 0),
+    vec4f(-s*y,     s*x,      c,   0),
+    vec4f(0, 0, 0, 1));
+  view = view * rot;
+  return perspective(1.2566, inputs.aspect, 1.0, 100.0) * view;
+}
+
+struct VertexOutput {
+  @builtin(position) Position : vec4f,
+  @location(0) fragUV : vec2f,
+};
+
+@vertex
+fn vertexMain(
+  @location(0) position : vec4f,
+  @location(1) uv : vec2f
+) -> VertexOutput {
+  var output : VertexOutput;
+  output.Position = getMVP() * position;
+  output.fragUV = uv;
+  return output;
+}
+
+@fragment
+fn fragMain(@location(0) fragUV : vec2f) -> @location(0) vec4f {
+  return textureSample(tex, samp, fragUV);
+}
+""")
+
+(data :name cubeVerts (cube :format [position4 color4 uv2]))
+(buffer :name cubeVB :size cubeVerts :usage [vertex] :mapped-at-creation cubeVerts)
+
+(compute-pipeline :name cardPipe :module cardCode :entry paint)
+(compute-pipeline :name mipPipe :module mipCode :entry downsample)
+
+(render-pipeline :name cubePipe
+  (layout auto)
+  (vertex (module cubeCode) (entry vertexMain)
+    (buffers
+      (vertex-buffer :array-stride 40
+        (attribute :shader-location 0 :offset 0 :format float32x4)
+        (attribute :shader-location 1 :offset 32 :format float32x2))))
+  (fragment (module cubeCode) (entry fragMain)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list) :cull-mode back)
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+(bind-group :name cardBG :layout-pipeline cardPipe :layout-index 0
+  (entry :binding 0 :texture-view dst0))
+
+(bind-group :name mipBG1 :layout-pipeline mipPipe :layout-index 0
+  (entry :binding 0 :texture-view src0)
+  (entry :binding 1 :texture-view dst1))
+(bind-group :name mipBG2 :layout-pipeline mipPipe :layout-index 0
+  (entry :binding 0 :texture-view src1)
+  (entry :binding 1 :texture-view dst2))
+(bind-group :name mipBG3 :layout-pipeline mipPipe :layout-index 0
+  (entry :binding 0 :texture-view src2)
+  (entry :binding 1 :texture-view dst3))
+(bind-group :name mipBG4 :layout-pipeline mipPipe :layout-index 0
+  (entry :binding 0 :texture-view src3)
+  (entry :binding 1 :texture-view dst4))
+(bind-group :name mipBG5 :layout-pipeline mipPipe :layout-index 0
+  (entry :binding 0 :texture-view src4)
+  (entry :binding 1 :texture-view dst5))
+(bind-group :name mipBG6 :layout-pipeline mipPipe :layout-index 0
+  (entry :binding 0 :texture-view src5)
+  (entry :binding 1 :texture-view dst6))
+(bind-group :name mipBG7 :layout-pipeline mipPipe :layout-index 0
+  (entry :binding 0 :texture-view src6)
+  (entry :binding 1 :texture-view dst7))
+(bind-group :name mipBG8 :layout-pipeline mipPipe :layout-index 0
+  (entry :binding 0 :texture-view src7)
+  (entry :binding 1 :texture-view dst8))
+
+(bind-group :name cubeBG :layout-pipeline cubePipe :layout-index 0
+  (entry :binding 0 :buffer inputs)
+  (entry :binding 1 :sampler trilinear)
+  (entry :binding 2 :texture mipTex))
+
+(compute-pass :name paintCard :pipeline cardPipe :bind-groups [cardBG]
+  :dispatch [32 32 1])
+
+(compute-pass :name mip1 :pipeline mipPipe :bind-groups [mipBG1]
+  :dispatch [16 16 1])
+(compute-pass :name mip2 :pipeline mipPipe :bind-groups [mipBG2]
+  :dispatch [8 8 1])
+(compute-pass :name mip3 :pipeline mipPipe :bind-groups [mipBG3]
+  :dispatch [4 4 1])
+(compute-pass :name mip4 :pipeline mipPipe :bind-groups [mipBG4]
+  :dispatch [2 2 1])
+(compute-pass :name mip5 :pipeline mipPipe :bind-groups [mipBG5]
+  :dispatch [1 1 1])
+(compute-pass :name mip6 :pipeline mipPipe :bind-groups [mipBG6]
+  :dispatch [1 1 1])
+(compute-pass :name mip7 :pipeline mipPipe :bind-groups [mipBG7]
+  :dispatch [1 1 1])
+(compute-pass :name mip8 :pipeline mipPipe :bind-groups [mipBG8]
+  :dispatch [1 1 1])
+
+(render-pass :name drawCube
+  (color-attachment :view context-current-texture
+    :clear-value [0.3 0.3 0.3 1] :load-op clear :store-op store)
+  (depth-attachment :view depthTex :depth-clear-value 1.0
+    :depth-load-op clear :depth-store-op store)
+  :pipeline cubePipe :bind-groups [cubeBG] :vertex-buffers [cubeVB]
+  (draw :vertex-count 36))
+
+(frame :name main
+  :init [paintCard mip1 mip2 mip3 mip4 mip5 mip6 mip7 mip8]
+  :before [writeInputs]
+  :perform [drawCube])

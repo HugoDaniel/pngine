@@ -1,0 +1,10 @@
+; Invalid: `:pool 300` exceeds the 255 ceiling on a ping-pong pool (the pool
+; index is a byte everywhere it is encoded); the schema's pool-size bound
+; rejects the literal.
+
+(shader-module :name code :code """
+@compute @workgroup_size(64)
+fn main() {}
+""")
+
+(buffer :name particles :size 1024 :usage [storage] :pool 300)

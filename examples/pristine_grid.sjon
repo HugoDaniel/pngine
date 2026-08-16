@@ -1,0 +1,158 @@
+; Pristine grid — an infinite-looking ground grid with analytic anti-aliasing,
+; after Ben Golus's "The Best Darn Grid Shader (Yet)" (the technique behind
+; the pristineGrid demo linked from webgpu-samples); the implementation is
+; written from the published math, not copied. One unit quad is scaled into a
+; 200×200 ground plane in the vertex shader; the fragment shader draws two
+; grid scales with screen-space-constant line width computed from UV
+; derivatives, fading to the clear colour with distance so the horizon does
+; not shimmer.
+;
+; The (plane …) generator emits a fixed unit quad (XY at z=0, centred, CCW,
+; uv 0..1), so all sizing lives in the vertex shader. Grid colours and widths
+; sit in a reflected uniform struct, live-tweakable via setUniform from a
+; host page.
+
+(data :name planeVerts (plane :format [position3 uv2]))
+(buffer :name vb :size planeVerts :usage [vertex] :mapped-at-creation planeVerts)
+(buffer :name inputs :size 16 :usage [uniform copy-dst])
+
+; lineWidth.xy = minor UV half-width, .zw = major; colors are RGBA.
+(data :name gridParamsData :float32 [
+  0.02 0.02 0.03 0.03
+  0.08 0.09 0.11 1.0
+  0.35 0.36 0.40 1.0
+  0.70 0.75 0.85 1.0
+])
+(buffer :name gridParams :size 64 :usage [uniform] :mapped-at-creation gridParamsData)
+
+(shader-module :name code :code """
+struct PngineInputs {
+  time: f32,
+  canvasW: f32,
+  canvasH: f32,
+  aspect: f32,
+};
+struct GridParams {
+  lineWidth : vec4f,   // xy: minor, zw: major (UV-space half widths)
+  baseColor : vec4f,
+  minorColor : vec4f,
+  majorColor : vec4f,
+};
+@group(0) @binding(0) var<uniform> inputs : PngineInputs;
+@group(0) @binding(1) var<uniform> grid : GridParams;
+
+const PLANE_SCALE : f32 = 200.0;
+const UV_CELLS : f32 = 100.0;      // minor cells across the plane (2 units/cell)
+const FADE_DIST : f32 = 120.0;
+const CLEAR_COLOR : vec3f = vec3f(0.05, 0.06, 0.09);
+
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  return mat4x4f(
+    vec4f(f / aspect, 0, 0, 0),
+    vec4f(0, f, 0, 0),
+    vec4f(0, 0, far * nf, -1),
+    vec4f(0, 0, far * near * nf, 0));
+}
+
+fn lookAt(eye: vec3f, focus: vec3f, up: vec3f) -> mat4x4f {
+  let fwd = normalize(focus - eye);
+  let s = normalize(cross(fwd, up));
+  let u = cross(s, fwd);
+  return mat4x4f(
+    vec4f(s.x, u.x, -fwd.x, 0),
+    vec4f(s.y, u.y, -fwd.y, 0),
+    vec4f(s.z, u.z, -fwd.z, 0),
+    vec4f(-dot(s, eye), -dot(u, eye), dot(fwd, eye), 1));
+}
+
+fn cameraEye(t: f32) -> vec3f {
+  return vec3f(sin(t * 0.05) * 8.0, 2.5, cos(t * 0.05) * 8.0);
+}
+
+struct VertexOutput {
+  @builtin(position) Position : vec4f,
+  @location(0) uv : vec2f,
+  @location(1) worldPos : vec3f,
+};
+
+@vertex
+fn vsMain(
+  @location(0) position : vec3f,
+  @location(1) uv : vec2f
+) -> VertexOutput {
+  // Unit XY quad -> XZ ground plane, scaled to 200x200 world units.
+  let world = vec3f(position.x * PLANE_SCALE, 0.0, position.y * PLANE_SCALE);
+  let eye = cameraEye(inputs.time);
+  let viewProj = perspective(1.2566, inputs.aspect, 0.1, 500.0)
+               * lookAt(eye, vec3f(0.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0));
+  var output : VertexOutput;
+  output.Position = viewProj * vec4f(world, 1.0);
+  output.uv = uv * UV_CELLS;
+  output.worldPos = world;
+  return output;
+}
+
+// Golus's pristineGrid: derivative-scaled line half-width + analytic AA.
+// Handles wide "inverted" lines, clamps draw width to the footprint, and
+// converges to the average coverage when cells go sub-pixel (moire killer).
+fn pristineGrid(uv: vec2f, lineWidth: vec2f) -> f32 {
+  let ddx = dpdx(uv);
+  let ddy = dpdy(uv);
+  let uvDeriv = vec2f(length(vec2f(ddx.x, ddy.x)), length(vec2f(ddx.y, ddy.y)));
+  let invertLine = lineWidth > vec2f(0.5);
+  let targetWidth = select(lineWidth, 1.0 - lineWidth, invertLine);
+  let drawWidth = clamp(targetWidth, uvDeriv, vec2f(0.5));
+  let lineAA = uvDeriv * 1.5;
+  var gridUV = abs(fract(uv) * 2.0 - 1.0);
+  gridUV = select(1.0 - gridUV, gridUV, invertLine);
+  var g = smoothstep(drawWidth + lineAA, drawWidth - lineAA, gridUV);
+  g *= saturate(targetWidth / drawWidth);
+  g = mix(g, targetWidth, saturate(uvDeriv * 2.0 - 1.0));
+  g = select(g, 1.0 - g, invertLine);
+  return mix(g.x, 1.0 - (1.0 - g.x) * (1.0 - g.y), g.y);
+}
+
+@fragment
+fn fsMain(
+  @location(0) uv : vec2f,
+  @location(1) worldPos : vec3f
+) -> @location(0) vec4f {
+  let minor = pristineGrid(uv, grid.lineWidth.xy);
+  let major = pristineGrid(uv * 0.1, grid.lineWidth.zw);
+  var color = mix(grid.baseColor.rgb, grid.minorColor.rgb, minor);
+  color = mix(color, grid.majorColor.rgb, major);
+  // Distance fade toward the clear color hides sub-pixel sparkle and makes
+  // the finite plane read as infinite.
+  let eye = cameraEye(inputs.time);
+  let fade = saturate(length(worldPos - eye) / FADE_DIST);
+  color = mix(color, CLEAR_COLOR, fade);
+  return vec4f(color, 1.0);
+}
+""")
+
+(render-pipeline :name pipe
+  (layout auto)
+  (vertex (module code) (entry vsMain)
+    (buffers
+      (vertex-buffer :array-stride 20
+        (attribute :shader-location 0 :offset 0 :format float32x3)
+        (attribute :shader-location 1 :offset 12 :format float32x2))))
+  (fragment (module code) (entry fsMain)
+    (targets (target :format preferred-canvas-format))))
+
+(bind-group :name g :layout-pipeline pipe :layout-index 0
+  (entry :binding 0 :buffer inputs)
+  (entry :binding 1 :buffer gridParams))
+
+(queue :name writeInputs
+  (write-buffer :buffer inputs :offset 0 :data pngine-inputs))
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0.05 0.06 0.09 1] :load-op clear :store-op store)
+  :pipeline pipe :bind-groups [g] :vertex-buffers [vb]
+  (draw :vertex-count 6))
+
+(frame :name main :perform [writeInputs draw])

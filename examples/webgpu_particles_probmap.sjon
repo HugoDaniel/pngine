@@ -1,0 +1,330 @@
+; webgpu_particles_probmap — the probability-map spawn of the webgpu-samples
+; `particles` sample (webgpu_particles.sjon covers the simulation alone):
+; particles respawn with probability proportional to a source image's
+; luminance, so the swarm re-draws the image.
+;
+; The map is built once in `:init`, following upstream's importLevel /
+; exportLevel chain: a bake pass draws the source image (two soft discs + a
+; bar) into a 64×64 texture; importLevel writes its luminance into level 0 of
+; one flattened weights buffer (64² + 32² + … + 1² = 5461 f32); six
+; exportLevel passes each sum 2×2 children into the parent level, giving a
+; 7-level pyramid whose apex is the image's total energy. Upstream keeps the
+; pyramid in the mip levels of a texture; here it is per-level ranges of one
+; storage buffer, read the same way.
+;
+; At respawn the simulation runs an inverse-CDF descent: one random number,
+; renormalized through six levels of 2×2 cumulative-weight brackets, lands on
+; a level-0 texel (bright texels proportionally likely, black impossible); the
+; particle spawns there with that texel's color (textureLoad). Rendering pulls
+; the particle storage buffer directly in the vertex stage (instance_index →
+; struct, no vertex buffers), additive blend, no depth. No external assets;
+; the image emerges over about 2s of wall time.
+
+(define :name NUM_PARTICLES :value 8000)
+
+; 5461 f32 = 21844 B: levels at offsets 0 (64²), 4096 (32²), 5120 (16²),
+; 5376 (8²), 5440 (4²), 5456 (2²), 5460 (1²).
+(buffer :name weights :size 21844 :usage [storage])
+
+; Particle: pos.xy, vel.xy, life, seed, color.rgba, pad ×2 = 12 f32 = 48 B.
+(buffer :name particles :size (* NUM_PARTICLES 12 4) :usage [storage])
+
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+
+(texture :name srcTex :width 64 :height 64 :format rgba8unorm
+  :usage [storage-binding texture-binding])
+
+(queue :name writeUniforms
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+; ---- The probability-map chain (all :init) --------------------------------
+
+(shader-module :name mapShader :code """
+@group(0) @binding(0) var srcTex: texture_2d<f32>;
+@group(0) @binding(1) var<storage, read_write> weights: array<f32>;
+
+fn levelOffset(lvl: u32) -> u32 {
+  if (lvl == 0u) { return 0u; }
+  if (lvl == 1u) { return 4096u; }
+  if (lvl == 2u) { return 5120u; }
+  if (lvl == 3u) { return 5376u; }
+  if (lvl == 4u) { return 5440u; }
+  if (lvl == 5u) { return 5456u; }
+  return 5460u;
+}
+
+// Level 0: texel luminance.
+@compute @workgroup_size(8, 8)
+fn importLevel(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= 64u || id.y >= 64u) { return; }
+  let c = textureLoad(srcTex, vec2u(id.xy), 0);
+  weights[id.y * 64u + id.x] = dot(c.rgb, vec3f(0.2126, 0.7152, 0.0722));
+}
+
+// Parent = sum of its 2×2 children. One entry per level keeps the fixture
+// uniform-free; each hardcodes its source level.
+fn exportAt(id: vec2u, srcLvl: u32) {
+  let dstDim = 64u >> (srcLvl + 1u);
+  if (id.x >= dstDim || id.y >= dstDim) { return; }
+  let srcDim = dstDim * 2u;
+  let so = levelOffset(srcLvl);
+  let base = so + (id.y * 2u) * srcDim + id.x * 2u;
+  let sum = weights[base] + weights[base + 1u]
+          + weights[base + srcDim] + weights[base + srcDim + 1u];
+  weights[levelOffset(srcLvl + 1u) + id.y * dstDim + id.x] = sum;
+}
+
+@compute @workgroup_size(8, 8)
+fn export0(@builtin(global_invocation_id) id: vec3u) { exportAt(id.xy, 0u); }
+@compute @workgroup_size(8, 8)
+fn export1(@builtin(global_invocation_id) id: vec3u) { exportAt(id.xy, 1u); }
+@compute @workgroup_size(8, 8)
+fn export2(@builtin(global_invocation_id) id: vec3u) { exportAt(id.xy, 2u); }
+@compute @workgroup_size(8, 8)
+fn export3(@builtin(global_invocation_id) id: vec3u) { exportAt(id.xy, 3u); }
+@compute @workgroup_size(8, 8)
+fn export4(@builtin(global_invocation_id) id: vec3u) { exportAt(id.xy, 4u); }
+@compute @workgroup_size(8, 8)
+fn export5(@builtin(global_invocation_id) id: vec3u) { exportAt(id.xy, 5u); }
+""")
+
+; Source image bake: two soft discs + a bar, hue varying across the canvas.
+(shader-module :name bakeShader :code """
+@group(0) @binding(0) var outTex: texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= 64u || id.y >= 64u) { return; }
+  let uv = (vec2f(id.xy) + 0.5) / 64.0;
+  let d1 = length(uv - vec2f(0.33, 0.38)) * 3.2;
+  let d2 = length(uv - vec2f(0.68, 0.62)) * 4.0;
+  let discs = max(1.0 - smoothstep(0.5, 1.0, d1), 1.0 - smoothstep(0.5, 1.0, d2));
+  let inBar = uv.y > 0.78 && uv.y < 0.88 && uv.x > 0.15 && uv.x < 0.85;
+  let bar = select(0.0, 1.0, inBar);
+  let lum = max(discs, bar);
+  let tint = mix(vec3f(0.2, 0.7, 1.0), vec3f(1.0, 0.5, 0.15), uv.x);
+  textureStore(outTex, id.xy, vec4f(tint * lum, 1.0));
+}
+""")
+
+; ---- Simulation -----------------------------------------------------------
+
+(shader-module :name simShader :code """
+struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+struct Particle {
+  pos: vec2f,
+  vel: vec2f,
+  life: f32,
+  seed: f32,
+  color: vec4f,
+  pad: vec2f,
+}
+@group(0) @binding(0) var<uniform> pngine: PngineInputs;
+@group(0) @binding(1) var<storage, read_write> parts: array<Particle>;
+@group(0) @binding(2) var<storage, read> weights: array<f32>;
+@group(0) @binding(3) var srcTex: texture_2d<f32>;
+
+var<private> rnd: u32;
+
+fn srand(x: u32) { rnd = x * 747796405u + 2891336453u; }
+fn rand() -> f32 {
+  rnd = rnd * 747796405u + 2891336453u;
+  var h = ((rnd >> ((rnd >> 28u) + 4u)) ^ rnd) * 277803737u;
+  h = (h >> 22u) ^ h;
+  return f32(h) / 4294967295.0;
+}
+
+fn levelOffset(lvl: u32) -> u32 {
+  if (lvl == 0u) { return 0u; }
+  if (lvl == 1u) { return 4096u; }
+  if (lvl == 2u) { return 5120u; }
+  if (lvl == 3u) { return 5376u; }
+  if (lvl == 4u) { return 5440u; }
+  if (lvl == 5u) { return 5456u; }
+  return 5460u;
+}
+
+// Inverse-CDF descent: one uniform random number walks the pyramid from the
+// 2×2 level down to a level-0 texel, renormalizing inside the chosen
+// bracket at each step.
+fn spawnTexel(r0: f32) -> vec2u {
+  var x = 0u;
+  var y = 0u;
+  var r = r0;
+  for (var i = 0u; i < 6u; i = i + 1u) {
+    let childLvl = 5u - i;           // 5,4,3,2,1,0
+    let dim = 64u >> childLvl;       // 2,4,8,16,32,64
+    let off = levelOffset(childLvl);
+    let bx = x * 2u;
+    let by = y * 2u;
+    let w00 = weights[off + by * dim + bx];
+    let w10 = weights[off + by * dim + bx + 1u];
+    let w01 = weights[off + (by + 1u) * dim + bx];
+    let w11 = weights[off + (by + 1u) * dim + bx + 1u];
+    let total = w00 + w10 + w01 + w11;
+    if (total <= 0.0) { x = bx; y = by; continue; }
+    var t = r * total;
+    if (t < w00) {
+      x = bx; y = by; r = t / max(w00, 1e-6);
+    } else if (t < w00 + w10) {
+      x = bx + 1u; y = by; r = (t - w00) / max(w10, 1e-6);
+    } else if (t < w00 + w10 + w01) {
+      x = bx; y = by + 1u; r = (t - w00 - w10) / max(w01, 1e-6);
+    } else {
+      x = bx + 1u; y = by + 1u; r = (t - w00 - w10 - w01) / max(w11, 1e-6);
+    }
+    r = clamp(r, 0.0, 1.0);
+  }
+  return vec2u(x, y);
+}
+
+@compute @workgroup_size(64)
+fn simulate(@builtin(global_invocation_id) gid: vec3u) {
+  let idx = gid.x;
+  if (idx >= arrayLength(&parts)) { return; }
+  srand((idx * 9781u) ^ bitcast<u32>(pngine.time));
+  var p = parts[idx];
+
+  let dt = 1.0 / 60.0;
+  p.pos += p.vel * dt;
+  p.vel *= 0.985;
+  p.life -= dt;
+  p.color.a = smoothstep(0.0, 0.35, p.life) * 0.85;
+
+  if (p.life <= 0.0) {
+    let texel = spawnTexel(rand());
+    // Texel → NDC: image spans [−0.8, 0.8], y flipped.
+    let jitter = vec2f(rand(), rand()) - 0.5;
+    let uv = (vec2f(texel) + 0.5 + jitter) / 64.0;
+    p.pos = vec2f(uv.x * 1.6 - 0.8, 0.8 - uv.y * 1.6);
+    p.vel = (vec2f(rand(), rand()) - 0.5) * 0.06;
+    p.life = 0.6 + rand() * 2.4;
+    let c = textureLoad(srcTex, texel, 0);
+    p.color = vec4f(c.rgb + 0.12, 1.0);
+  }
+
+  parts[idx] = p;
+}
+""")
+
+(shader-module :name drawShader :code """
+struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+struct Particle {
+  pos: vec2f,
+  vel: vec2f,
+  life: f32,
+  seed: f32,
+  color: vec4f,
+  pad: vec2f,
+}
+@group(0) @binding(0) var<uniform> pngine: PngineInputs;
+@group(0) @binding(1) var<storage, read> parts: array<Particle>;
+
+struct VSOut {
+  @builtin(position) pos: vec4f,
+  @location(0) quad: vec2f,
+  @location(1) color: vec4f,
+}
+
+@vertex fn vs(
+  @builtin(vertex_index) vi: u32,
+  @builtin(instance_index) ii: u32,
+) -> VSOut {
+  var corners = array<vec2f, 6>(
+    vec2f(-1, -1), vec2f(1, -1), vec2f(-1, 1),
+    vec2f(-1, 1), vec2f(1, -1), vec2f(1, 1));
+  let p = parts[ii];
+  let c = corners[vi];
+  let size = 4.5 / vec2f(pngine.width, pngine.height);
+  var out: VSOut;
+  out.pos = vec4f(p.pos + c * size, 0.0, 1.0);
+  out.quad = c;
+  out.color = p.color;
+  return out;
+}
+
+@fragment fn fs(
+  @location(0) quad: vec2f,
+  @location(1) color: vec4f,
+) -> @location(0) vec4f {
+  let falloff = max(1.0 - length(quad), 0.0);
+  return vec4f(color.rgb * color.a * falloff, color.a * falloff);
+}
+""")
+
+(compute-pipeline :name bakePipeline :module bakeShader :entry main)
+(compute-pipeline :name importPipeline :module mapShader :entry importLevel)
+(compute-pipeline :name export0Pipeline :module mapShader :entry export0)
+(compute-pipeline :name export1Pipeline :module mapShader :entry export1)
+(compute-pipeline :name export2Pipeline :module mapShader :entry export2)
+(compute-pipeline :name export3Pipeline :module mapShader :entry export3)
+(compute-pipeline :name export4Pipeline :module mapShader :entry export4)
+(compute-pipeline :name export5Pipeline :module mapShader :entry export5)
+(compute-pipeline :name simPipeline :module simShader :entry simulate)
+
+(render-pipeline :name drawPipeline
+  (layout auto)
+  (vertex (module drawShader) (entry vs))
+  (fragment (module drawShader) (entry fs)
+    (targets
+      (target :format preferred-canvas-format
+        (blend
+          (color :src-factor one :dst-factor one :operation add)
+          (alpha :src-factor one :dst-factor one :operation add))))))
+
+(bind-group :name bakeBg :layout-pipeline bakePipeline :layout-index 0
+  (entry :binding 0 :texture srcTex))
+(bind-group :name importBg :layout-pipeline importPipeline :layout-index 0
+  (entry :binding 0 :texture srcTex)
+  (entry :binding 1 :buffer weights))
+(bind-group :name export0Bg :layout-pipeline export0Pipeline :layout-index 0
+  (entry :binding 1 :buffer weights))
+(bind-group :name export1Bg :layout-pipeline export1Pipeline :layout-index 0
+  (entry :binding 1 :buffer weights))
+(bind-group :name export2Bg :layout-pipeline export2Pipeline :layout-index 0
+  (entry :binding 1 :buffer weights))
+(bind-group :name export3Bg :layout-pipeline export3Pipeline :layout-index 0
+  (entry :binding 1 :buffer weights))
+(bind-group :name export4Bg :layout-pipeline export4Pipeline :layout-index 0
+  (entry :binding 1 :buffer weights))
+(bind-group :name export5Bg :layout-pipeline export5Pipeline :layout-index 0
+  (entry :binding 1 :buffer weights))
+(bind-group :name simBg :layout-pipeline simPipeline :layout-index 0
+  (entry :binding 0 :buffer uniforms)
+  (entry :binding 1 :buffer particles)
+  (entry :binding 2 :buffer weights)
+  (entry :binding 3 :texture srcTex))
+(bind-group :name drawBg :layout-pipeline drawPipeline :layout-index 0
+  (entry :binding 0 :buffer uniforms)
+  (entry :binding 1 :buffer particles))
+
+(compute-pass :name bakeSource :pipeline bakePipeline
+  :bind-groups [bakeBg] :dispatch [8 8 1])
+(compute-pass :name importPass :pipeline importPipeline
+  :bind-groups [importBg] :dispatch [8 8 1])
+(compute-pass :name exportPass0 :pipeline export0Pipeline
+  :bind-groups [export0Bg] :dispatch [4 4 1])
+(compute-pass :name exportPass1 :pipeline export1Pipeline
+  :bind-groups [export1Bg] :dispatch [2 2 1])
+(compute-pass :name exportPass2 :pipeline export2Pipeline
+  :bind-groups [export2Bg] :dispatch [1 1 1])
+(compute-pass :name exportPass3 :pipeline export3Pipeline
+  :bind-groups [export3Bg] :dispatch [1 1 1])
+(compute-pass :name exportPass4 :pipeline export4Pipeline
+  :bind-groups [export4Bg] :dispatch [1 1 1])
+(compute-pass :name exportPass5 :pipeline export5Pipeline
+  :bind-groups [export5Bg] :dispatch [1 1 1])
+
+(compute-pass :name simulatePass :pipeline simPipeline
+  :bind-groups [simBg] :dispatch-workgroups 125)
+
+(render-pass :name drawPass
+  (color-attachment :view context-current-texture
+    :clear-value [0.02 0.02 0.04 1] :load-op clear :store-op store)
+  :pipeline drawPipeline :bind-groups [drawBg]
+  (draw :vertex-count 6 :instance-count NUM_PARTICLES))
+
+(frame :name main
+  :init [bakeSource importPass exportPass0 exportPass1 exportPass2
+         exportPass3 exportPass4 exportPass5]
+  :perform [writeUniforms simulatePass drawPass])

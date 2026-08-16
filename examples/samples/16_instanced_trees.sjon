@@ -1,0 +1,184 @@
+; Instanced trees — 400 low-poly trees (a brown trunk quad plus two foliage
+; triangles) scattered over a ground plane, swaying in the wind, depth-tested.
+; A compute `(init …)` fills the per-instance buffer once (position, scale,
+; rotation, green tint), read by the render pass at a 32-byte instance stride.
+; The tree mesh is a hand-authored 12-vertex float array uploaded
+; mapped-at-creation; the pass draws it with a two-buffer vertex layout
+; (`:step-mode instance`) and an expression-valued `:instance-count`. The
+; depth24plus texture is sized `canvas` so it always matches the colour target.
+; No `(primitive …)` form: the triangle-list defaults are what it needs.
+
+(define :name NUM_TREES :value 400)
+
+; Tree mesh: trunk quad (6 verts, brown) + two foliage triangles (6 verts,
+; zeroed color → the vertex shader substitutes the per-instance tint).
+; 12 vertices × (localPos: vec3 + localColor: vec3), arrayStride 24.
+(data :name treeMesh :float32 [
+  -0.05 0.0 0.0    0.6 0.3 0.1
+  0.05 0.0 0.0     0.6 0.3 0.1
+  0.05 0.4 0.0     0.5 0.25 0.1
+  -0.05 0.0 0.0    0.6 0.3 0.1
+  0.05 0.4 0.0     0.5 0.25 0.1
+  -0.05 0.4 0.0    0.5 0.25 0.1
+  -0.2 0.3 0.0     0.0 0.0 0.0
+  0.2 0.3 0.0      0.0 0.0 0.0
+  0.0 0.8 0.0      0.0 0.0 0.0
+  -0.15 0.45 0.0   0.0 0.0 0.0
+  0.15 0.45 0.0    0.0 0.0 0.0
+  0.0 0.95 0.0     0.0 0.0 0.0
+])
+
+(buffer :name treeBuffer :size treeMesh :usage [vertex]
+  :mapped-at-creation treeMesh)
+
+(buffer :name instanceBuffer :size (* NUM_TREES 8 4) :usage [vertex storage])
+
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+
+(queue :name writeUniforms
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+(init :name initTrees :buffer instanceBuffer :shader initShader :workgroups 7)
+
+(texture :name depthTexture :format depth24plus :size canvas :usage [render-attachment])
+
+(shader-module :name renderShader :code """
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    struct VertexOutput {
+      @builtin(position) pos: vec4f,
+      @location(0) color: vec3f,
+    }
+
+    @vertex
+    fn vs(
+      @location(0) localPos: vec3f,
+      @location(1) localColor: vec3f,
+      @location(2) instPos: vec3f,
+      @location(3) instScale: f32,
+      @location(4) instRotation: f32,
+      @location(5) instColorTint: vec3f
+    ) -> VertexOutput {
+      // Apply instance transform
+      let c = cos(instRotation);
+      let s = sin(instRotation);
+
+      var pos = localPos * instScale;
+
+      // Rotate around Y axis
+      let rx = pos.x * c - pos.z * s;
+      let rz = pos.x * s + pos.z * c;
+      pos = vec3f(rx, pos.y, rz);
+
+      pos += instPos;
+
+      // Wind sway for foliage (vertices above y=0.3)
+      if (localPos.y > 0.25) {
+        let sway = sin(u.time * 2.0 + instPos.x * 3.0) * 0.02 * (localPos.y - 0.25);
+        pos.x += sway;
+      }
+
+      // Simple perspective projection
+      let z = pos.z + 3.0;
+      let projX = pos.x / z / u.aspect;
+      let projY = pos.y / z;
+      let depth = 1.0 - (z / 6.0);
+
+      var out: VertexOutput;
+      out.pos = vec4f(projX, projY, depth, 1.0);
+
+      // Use local color for trunk, instance tint for foliage
+      if (length(localColor) > 0.1) {
+        out.color = localColor;  // Trunk
+      } else {
+        out.color = instColorTint;  // Foliage
+      }
+
+      return out;
+    }
+
+    @fragment
+    fn fs(in: VertexOutput) -> @location(0) vec4f {
+      return vec4f(in.color, 1.0);
+    }
+  """)
+
+(shader-module :name initShader :code """
+    struct Tree {
+      pos: vec3f,
+      scale: f32,
+      rotation: f32,
+      colorTint: vec3f,
+    }
+    struct Trees { data: array<Tree> }
+
+    @binding(0) @group(0) var<storage, read_write> trees: Trees;
+
+    fn hash(n: u32) -> f32 {
+      var x = n;
+      x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+      x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+      x = (x >> 16u) ^ x;
+      return f32(x) / f32(0xffffffffu);
+    }
+
+    const NUM: u32 = 400u;
+    const PI: f32 = 3.14159265359;
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+      let i = id.x;
+      if (i >= NUM) { return; }
+
+      // Random position in a large area
+      let x = (hash(i * 7u) - 0.5) * 4.0;
+      let z = (hash(i * 11u) - 0.5) * 4.0 - 2.0;  // Offset back
+      let y = -0.5;  // Ground level
+
+      trees.data[i].pos = vec3f(x, y, z);
+      trees.data[i].scale = 0.1 + hash(i * 13u) * 0.15;
+      trees.data[i].rotation = hash(i * 17u) * PI * 2.0;
+
+      // Green tint variations
+      trees.data[i].colorTint = vec3f(
+        0.2 + hash(i * 19u) * 0.2,
+        0.5 + hash(i * 23u) * 0.3,
+        0.1 + hash(i * 29u) * 0.15
+      );
+    }
+  """)
+
+(render-pipeline :name renderPipeline
+  (layout auto)
+  (vertex (module renderShader) (entry vs)
+    (buffers
+      (vertex-buffer :array-stride 24 :step-mode vertex
+        (attribute :shader-location 0 :offset 0 :format float32x3)
+        (attribute :shader-location 1 :offset 12 :format float32x3))
+      (vertex-buffer :array-stride 32 :step-mode instance
+        (attribute :shader-location 2 :offset 0 :format float32x3)
+        (attribute :shader-location 3 :offset 12 :format float32)
+        (attribute :shader-location 4 :offset 16 :format float32)
+        (attribute :shader-location 5 :offset 20 :format float32x3))))
+  (fragment (module renderShader) (entry fs)
+    (targets (target :format preferred-canvas-format)))
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+(bind-group :name uniformsBindGroup :layout-pipeline renderPipeline :layout-index 0
+  (entry :binding 0 :buffer uniforms))
+
+(render-pass :name mainPass
+  (color-attachment :view context-current-texture :clear-value [0.5 0.7 0.9 1] :load-op clear :store-op store)
+  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  :pipeline renderPipeline
+  :vertex-buffers [treeBuffer instanceBuffer]
+  :bind-groups [uniformsBindGroup]
+  (draw :vertex-count 12 :instance-count NUM_TREES))
+
+(frame :name main :init [initTrees] :perform [writeUniforms mainPass])

@@ -1,0 +1,17 @@
+{
+  "name": "pngine-vite-gallery-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^7.3.0",
+    "vite-plugin-pngine": "file:../../npm/vite-plugin-pngine"
+  },
+  "dependencies": {
+    "pngine": "file:../../npm/pngine"
+  }
+}

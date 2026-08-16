@@ -1,0 +1,58 @@
+<!DOCTYPE html><html><head><meta charset=utf-8><style>*{margin:0}body{background:#111;display:flex;justify-content:center;align-items:center;height:100vh}</style></head><body><canvas id=c width=512 height=512 style=width:512px;height:512px></canvas><script type=module>
+const c=document.getElementById('c'),W=512,H=512
+async function P(ab){const b=new Uint8Array(ab);let p=8,bc,au
+while(p+12<=b.length){const l=(b[p]<<24|b[p+1]<<16|b[p+2]<<8|b[p+3])>>>0,t=b[p+7],d=b.subarray(p+8,p+8+l)
+if(b[p+4]==112&&b[p+5]==78&&b[p+6]==71){if(t==98)bc=await D(d);if(t==97)au=await D(d)}
+p+=12+l}return{bc,au}}
+async function D(d){const p=d.subarray(2);if(!(d[1]&1))return new Uint8Array(p)
+const s=new DecompressionStream('deflate-raw'),w=s.writable.getWriter(),r=s.readable.getReader()
+w.write(p);w.close();const c=[];let n=0;for(;;){const{done:x,value:v}=await r.read();if(x)break;c.push(v);n+=v.length}
+const o=new Uint8Array(n);let i=0;for(const k of c){o.set(k,i);i+=k.length}return o}
+const{bc,au}=await P(await(await fetch('triangle.png')).arrayBuffer())
+const dv=(await(await navigator.gpu.requestAdapter()).requestDevice())
+const ctx=c.getContext('webgpu'),fm=navigator.gpu.getPreferredCanvasFormat()
+ctx.configure({device:dv,format:fm,alphaMode:'premultiplied'})
+const V=new DataView(bc.buffer,bc.byteOffset,bc.byteLength)
+const{instance:wi}=await WebAssembly.instantiate(bc.subarray(V.getUint32(12,true),V.getUint32(12,true)+V.getUint32(16,true)),{env:{log:()=>{},wasmInstantiate:()=>{},wasmCall:()=>{},wasmGetResult:()=>0}})
+const X=wi.exports,M=X.memory
+const bp=X.getBytecodePtr();new Uint8Array(M.buffer,bp,bc.length).set(bc);X.setBytecodeLen(bc.length);X.init()
+const bf=[],sh=[],pp=[],bg=[];let ps,en,tm=0
+const rs=(p,l)=>new TextDecoder().decode(new Uint8Array(M.buffer,p,l))
+function ex(ptr){const V=new DataView(M.buffer);let n=V.getUint16(ptr+4,true),p=ptr+8
+for(let i=0;i<n;i++){const o=V.getUint8(p++)
+switch(o){
+case 1:{const id=V.getUint16(p,true),sz=V.getUint32(p+2,true),u=V.getUint8(p+6);let f=0
+if(u&8)f|=8;if(u&0x20)f|=32;if(u&0x40)f|=64;if(u&0x80)f|=128
+bf[id]=dv.createBuffer({size:sz,usage:f});p+=7;break}
+case 4:sh[V.getUint16(p,true)]=dv.createShaderModule({code:rs(V.getUint32(p+2,true),V.getUint32(p+6,true))});p+=10;break
+case 5:{const id=V.getUint16(p,true),d=JSON.parse(rs(V.getUint32(p+2,true),V.getUint32(p+6,true)))
+pp[id]=dv.createRenderPipeline({layout:'auto',vertex:{module:sh[d.vertex?.shader??0],entryPoint:d.vertex?.entryPoint??'vs',buffers:d.vertex?.buffers??[]},fragment:{module:sh[d.fragment?.shader??0],entryPoint:d.fragment?.entryPoint??'fs',targets:[{format:fm}]},primitive:d.primitive??{topology:'triangle-list'}});p+=10;break}
+case 7:{const id=V.getUint16(p,true),pl=V.getUint16(p+2,true),dp=V.getUint32(p+4,true),dl=V.getUint32(p+8,true)
+const b=new Uint8Array(M.buffer,dp,dl),bv=new DataView(b.buffer,b.byteOffset,b.byteLength)
+let q=2,gi=0;const es=[];for(let k=0;k<b[1];k++){const fi=b[q++],vt=b[q++]
+if(fi==1&&vt==7)gi=b[q++]
+else if(fi==2&&vt==3){let ec=b[q++];while(ec--){const bi=b[q++],rt=b[q++],ri=bv.getUint16(q,true);q+=2
+if(rt==0){es.push({binding:bi,resource:{buffer:bf[ri]}});q+=8}
+else es.push({binding:bi,resource:rt==2?sm[ri]:null})}}}
+bg[id]=dv.createBindGroup({layout:pp[pl].getBindGroupLayout(gi),entries:es});p+=12;break}
+case 16:{en=dv.createCommandEncoder()
+ps=en.beginRenderPass({colorAttachments:[{view:ctx.getCurrentTexture().createView(),loadOp:'clear',storeOp:'store',clearValue:{r:0,g:0,b:0,a:1}}]});p+=6;break}
+case 18:ps.setPipeline(pp[V.getUint16(p,true)]);p+=2;break
+case 19:ps.setBindGroup(V.getUint8(p),bg[V.getUint16(p+1,true)]);p+=3;break
+case 21:ps.draw(V.getUint32(p,true),V.getUint32(p+4,true));p+=16;break
+case 23:ps.end();ps=null;break
+case 33:dv.queue.writeBuffer(bf[V.getUint16(p,true)],0,new Float32Array([tm,W,H,W/H]));p+=8;break
+case 240:if(en){dv.queue.submit([en.finish()]);en=null};break
+case 255:break}}}
+let cp=X.getCommandPtr();if(cp)ex(cp)
+let ax,ab,sr;if(au){const{instance:ai}=await WebAssembly.instantiate(au,{m:Math})
+const m=ai.exports.m,s=ai.exports.s.value,l=ai.exports.l.value,t=ai.exports.t.value==1
+const fr=t?l/4:l/8,sm=t?new Int16Array(m.buffer,s,fr*2):new Float32Array(m.buffer,s,fr*2)
+ax=new AudioContext({sampleRate:44100});ab=ax.createBuffer(2,fr,44100)
+for(let c=0;c<2;c++){const d=ab.getChannelData(c);for(let i=0;i<fr;i++)d[i]=t?sm[i*2+c]/32768:sm[i*2+c]}}
+let on=0,t0=0;function frame(){if(!on)return;tm=(performance.now()-t0)/1e3;X.frame(tm,W,H);ex(X.getCommandPtr());requestAnimationFrame(frame)}
+X.frame(0,W,H);ex(X.getCommandPtr())
+c.onclick=()=>{if(on)return;on=1;t0=performance.now()
+if(ax){if(ax.state=='suspended')ax.resume();sr=ax.createBufferSource();sr.buffer=ab;sr.connect(ax.destination);sr.start(0,0)}
+frame()}
+</script></body></html>

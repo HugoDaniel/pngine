@@ -1,0 +1,46 @@
+; MSAA triangle — a red triangle through a 4× multisample pipeline, a
+; multisampled texture render target, and a resolve to the canvas (store-op
+; discard).
+
+(shader-module :name code :code """
+    @vertex
+    fn vertexMain(
+      @builtin(vertex_index) VertexIndex : u32
+    ) -> @builtin(position) vec4f {
+      var pos = array<vec2f, 3>(
+        vec2(0.0, 0.5),
+        vec2(-0.5, -0.5),
+        vec2(0.5, -0.5)
+      );
+
+      return vec4f(pos[VertexIndex], 0.0, 1.0);
+    }
+
+    @fragment
+    fn fragMain() -> @location(0) vec4f {
+      return vec4(1.0, 0.0, 0.0, 1.0);
+    }
+  """)
+
+; The render target `tex` is 4× multisampled to match the pipeline's
+; (multisample :count 4): fragments are shaded per-sample into `tex`, whose
+; contents are discarded (store-op discard below) after being resolved down to
+; the single-sample canvas — the classic MSAA resolve. The sample counts must
+; match: a 4× pipeline cannot draw into a 1× texture.
+(texture :name tex :size canvas :format preferred-canvas-format :sample-count 4 :usage [render-attachment])
+
+(render-pipeline :name pipeline
+  (layout auto)
+  (vertex (module code) (entry vertexMain))
+  (fragment (module code) (entry fragMain)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list))
+  (multisample :count 4))
+
+(render-pass :name renderIt
+  (color-attachment :view tex :resolve-target context-current-texture
+    :clear-value [0 0 0 0] :load-op clear :store-op discard)
+  :pipeline pipeline
+  (draw :vertex-count 3))
+
+(frame :name msaaTriangle :perform [renderIt])

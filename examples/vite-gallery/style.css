@@ -1,0 +1,42 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: #0a0a0a;
+  color: #eee;
+  font-family: system-ui, -apple-system, sans-serif;
+  padding: 2rem;
+}
+
+h1 {
+  text-align: center;
+  font-weight: 400;
+  margin-bottom: 2rem;
+  color: #888;
+}
+
+.gallery {
+  display: flex;
+  gap: 2rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.card {
+  background: #161616;
+  border-radius: 8px;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.card h2 {
+  font-size: 0.875rem;
+  font-weight: 400;
+  color: #666;
+}
+
+canvas {
+  background: #000;
+  border-radius: 4px;
+}

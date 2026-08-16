@@ -1,0 +1,49 @@
+; Moving triangle — the top vertex sways and the fill colour cycles, both
+; driven by the time field of a `pngine-inputs` uniform written each frame.
+
+(shader-module :name code :code """
+struct PngineInputs {
+  time: f32,
+};
+@binding(0) @group(0) var<uniform> inputs : PngineInputs;
+
+@vertex
+fn vertexMain(
+  @builtin(vertex_index) VertexIndex : u32
+) -> @builtin(position) vec4f {
+  var pos = array<vec2f, 3>(
+    vec2(sin(inputs.time * 8.0) * 0.25, 0.5),
+    vec2(-0.5, -0.5),
+    vec2(0.5, -0.5)
+  );
+  return vec4f(pos[VertexIndex], 0.0, 1.0);
+}
+
+@fragment
+fn fragMain() -> @location(0) vec4f {
+  return vec4(abs(sin(inputs.time)), abs(cos(inputs.time)), 0.0, 1.0);
+}
+""")
+
+(render-pipeline :name pipeline
+  (layout auto)
+  (vertex (module code) (entry vertexMain))
+  (fragment (module code) (entry fragMain)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list)))
+
+(buffer :name uniformInputsBuffer :size 16 :usage [uniform copy-dst])
+
+(queue :name writeInputUniforms
+  (write-buffer :buffer uniformInputsBuffer :offset 0 :data pngine-inputs))
+
+(bind-group :name inputsBinding :layout-pipeline pipeline :layout-index 0
+  (entry :binding 0 :buffer uniformInputsBuffer))
+
+(render-pass :name drawTriangle
+  (color-attachment :view context-current-texture :clear-value [0 0 0 0] :load-op clear :store-op store)
+  :pipeline pipeline
+  :bind-groups [inputsBinding]
+  (draw :vertex-count 3))
+
+(frame :name msaaTriangle :perform [writeInputUniforms drawTriangle])

@@ -1,0 +1,42 @@
+; HDDPI checkerboard — a 1-device-pixel checkerboard computed from
+; @builtin(position), after the webgpu-samples `resizeObserverHDDPI` sample.
+; If the canvas backing store matches device pixels exactly the pattern is
+; crisp and uniform; any fractional-pixel sizing error shows up as moiré
+; banding. The document is just a fullscreen triangle and one fragment shader;
+; the device-pixel canvas sizing is done by the pngine runtime's auto-resize.
+;
+; To check: load it in the browser, drag the window between monitors of
+; different DPR and toggle browser zoom — the pattern should re-sharpen with
+; no banding. Under `--frame` there is no DPR; it renders as a static pattern
+; at any `-s WxH`.
+
+(shader-module :name code :code """
+struct VSOut { @builtin(position) pos : vec4f }
+
+@vertex
+fn vs(@builtin(vertex_index) vi : u32) -> VSOut {
+  var p = array<vec2f, 3>(
+    vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return VSOut(vec4f(p[vi], 0.0, 1.0));
+}
+
+@fragment
+fn fs(@builtin(position) pos : vec4f) -> @location(0) vec4f {
+  let c = f32((u32(pos.x) + u32(pos.y)) & 1u);
+  return vec4f(vec3f(c), 1.0);
+}
+""")
+
+(render-pipeline :name pipe
+  (layout auto)
+  (vertex (module code) (entry vs))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipe
+  (draw :vertex-count 3))
+
+(frame :name main :perform [draw])

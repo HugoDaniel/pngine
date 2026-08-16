@@ -1,0 +1,206 @@
+; Volume rendering, texture_3d — port of the webgpu-samples
+; `volumeRenderingTexture3D` sample with a procedural volume. A compute pass
+; in the frame's :init writes a 64^3 rgba8unorm volume through a 3d storage
+; view (:view-dimension 5); a brain-like analytic density stands in for
+; upstream's MRI data. The raymarcher follows upstream: a fullscreen
+; triangle, per-vertex near/step ray endpoints from the inverse MVP, 64
+; sampling steps through a linear + anisotropic sampler over a texture_3d,
+; front-to-back compositing, and MSAA 4 with :store-op discard resolving to
+; the canvas. A one-thread compute pass builds the inverse MVP analytically
+; (rotate(axis(sin t, cos t, 0), -1 rad) * translate(+4z) * invPerspective)
+; where upstream inverts on the CPU. The thin near/far slab (4.3/4.4) sweeps
+; a moving cross-section through the volume as the camera rotates.
+;
+; Renders in the native `--frame` renderer as well as in the browser: 3d
+; storage writes and 3d sampled views are both supported there.
+
+(texture :name volume :width 64 :height 64
+  :dimension 3 :depth-or-array-layers 64
+  :format rgba8unorm :usage [texture-binding storage-binding])
+(texture-view :name volumeStore :texture volume :view-dimension 5)   ; 3d, textureStore
+(texture-view :name volumeSample :texture volume :view-dimension 5)  ; 3d, sampled
+
+(texture :name msaaTex :size canvas :format preferred-canvas-format
+  :sample-count 4 :usage [render-attachment])
+
+; Anisotropy > 1 requires all-linear filters; address-mode applies to all
+; three axes (w matters for a 3d texture).
+(sampler :name volSampler
+  :mag-filter linear :min-filter linear :mipmap-filter linear
+  :address-mode clamp-to-edge :max-anisotropy 16)
+
+(buffer :name cameraBuf :size 64 :usage [storage])
+(buffer :name inputs :size 16 :usage [uniform copy-dst])
+
+(queue :name writeInputs
+  (write-buffer :buffer inputs :offset 0 :data pngine-inputs))
+
+(shader-module :name fillCode :code """
+@group(0) @binding(0) var volume : texture_storage_3d<rgba8unorm, write>;
+
+// Brain-ish analytic density: squashed outer shell, folded interior
+// structure, a central void. Intensity rides the red channel (the marcher
+// samples .r, as upstream does with its r8unorm volume).
+fn densityAt(p: vec3f) -> f32 {
+  let r = length(p * vec3f(1.0, 1.15, 1.0));
+  var d = smoothstep(0.9, 0.75, r) * 0.35;
+  let w = sin(p.x * 9.0 + sin(p.y * 7.0))
+        * sin(p.y * 8.0 + sin(p.z * 6.0))
+        * sin(p.z * 10.0 + sin(p.x * 5.0));
+  d += smoothstep(0.78, 0.3, r) * (0.1 + 0.9 * smoothstep(-0.25, 0.55, w));
+  d *= smoothstep(0.05, 0.25, length(p - vec3f(0.0, 0.1, 0.0)));
+  return clamp(d, 0.0, 1.0);
+}
+
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) gid : vec3u) {
+  if (any(gid >= vec3u(64u))) { return; }
+  let p = (vec3f(gid) + 0.5) / 32.0 - 1.0;
+  textureStore(volume, gid, vec4f(densityAt(p), 0.0, 0.0, 1.0));
+}
+""")
+
+(shader-module :name cameraCode :code """
+struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+struct CameraData { invMVP : mat4x4f }
+
+@group(0) @binding(0) var<uniform> pngine : PngineInputs;
+@group(0) @binding(1) var<storage, read_write> cam : CameraData;
+
+// Analytic inverse of the corpus perspective helper (verified P * invP = I).
+fn invPerspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  let a = far * nf;
+  let b = far * near * nf;
+  return mat4x4f(
+    vec4f(aspect / f, 0, 0, 0),
+    vec4f(0, 1.0 / f, 0, 0),
+    vec4f(0, 0, 0, 1.0 / b),
+    vec4f(0, 0, -1, a / b));
+}
+
+fn rotate(axis: vec3f, ang: f32) -> mat4x4f {
+  let c = cos(ang);
+  let s = sin(ang);
+  let t = 1.0 - c;
+  let x = axis.x;
+  let y = axis.y;
+  let z = axis.z;
+  return mat4x4f(
+    vec4f(t*x*x+c,   t*x*y+s*z, t*x*z-s*y, 0),
+    vec4f(t*x*y-s*z, t*y*y+c,   t*y*z+s*x, 0),
+    vec4f(t*x*z+s*y, t*y*z-s*x, t*z*z+c,   0),
+    vec4f(0, 0, 0, 1));
+}
+
+// Upstream: view = translate(0,0,-4) * rotate(axis(sin t, cos t, 0), 1 rad);
+// MVP = perspective(2pi/5, aspect, 4.3, 4.4) * view; inverted on the CPU.
+// Closed form here: invMVP = rotate(axis, -1 rad) * translate(0,0,+4) * invP.
+@compute @workgroup_size(1)
+fn main() {
+  let t = pngine.time;
+  let axis = normalize(vec3f(sin(t), cos(t), 0.0));
+  let unTranslate = mat4x4f(
+    vec4f(1, 0, 0, 0),
+    vec4f(0, 1, 0, 0),
+    vec4f(0, 0, 1, 0),
+    vec4f(0, 0, 4, 1));
+  cam.invMVP = rotate(axis, -1.0) * unTranslate
+             * invPerspective(1.2566, pngine.aspect, 4.3, 4.4);
+}
+""")
+
+(shader-module :name volCode :code """
+struct CameraData { invMVP : mat4x4f }
+
+@group(0) @binding(0) var<storage, read> cam : CameraData;
+@group(0) @binding(1) var mySampler : sampler;
+@group(0) @binding(2) var myTexture : texture_3d<f32>;
+
+struct VertexOutput {
+  @builtin(position) Position : vec4f,
+  @location(0) near : vec3f,
+  @location(1) rayStep : vec3f,
+}
+
+const NumSteps = 64u;
+
+@vertex
+fn vertex_main(
+  @builtin(vertex_index) VertexIndex : u32
+) -> VertexOutput {
+  var pos = array<vec2f, 3>(
+    vec2(-1.0, 3.0),
+    vec2(-1.0, -1.0),
+    vec2(3.0, -1.0)
+  );
+  var xy = pos[VertexIndex];
+  var near = cam.invMVP * vec4f(xy, 0.0, 1);
+  var far = cam.invMVP * vec4f(xy, 1, 1);
+  near /= near.w;
+  far /= far.w;
+  return VertexOutput(
+    vec4f(xy, 0.0, 1.0),
+    near.xyz,
+    (far.xyz - near.xyz) / f32(NumSteps)
+  );
+}
+
+@fragment
+fn fragment_main(
+  @location(0) near: vec3f,
+  @location(1) rayStep: vec3f
+) -> @location(0) vec4f {
+  var rayPos = near;
+  var result = 0.0;
+  for (var i = 0u; i < NumSteps; i++) {
+    let texCoord = (rayPos.xyz + 1.0) * 0.5;
+    let s =
+      textureSample(myTexture, mySampler, texCoord).r * 4.0 / f32(NumSteps);
+    let intersects =
+      all(rayPos.xyz < vec3f(1.0)) && all(rayPos.xyz > vec3f(-1.0));
+    result += select(0.0, (1.0 - result) * s, intersects && result < 1.0);
+    rayPos += rayStep;
+  }
+  return vec4f(vec3f(result), 1.0);
+}
+""")
+
+(compute-pipeline :name fillPipe :module fillCode :entry main)
+(compute-pipeline :name cameraPipe :module cameraCode :entry main)
+
+(render-pipeline :name volPipe
+  (layout auto)
+  (vertex (module volCode) (entry vertex_main))
+  (fragment (module volCode) (entry fragment_main)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list) :cull-mode back)
+  (multisample :count 4))
+
+(bind-group :name fillGroup :layout-pipeline fillPipe :layout-index 0
+  (entry :binding 0 :texture-view volumeStore))
+
+(bind-group :name cameraGroup :layout-pipeline cameraPipe :layout-index 0
+  (entry :binding 0 :buffer inputs)
+  (entry :binding 1 :buffer cameraBuf))
+
+(bind-group :name volGroup :layout-pipeline volPipe :layout-index 0
+  (entry :binding 0 :buffer cameraBuf)
+  (entry :binding 1 :sampler volSampler)
+  (entry :binding 2 :texture-view volumeSample))
+
+(compute-pass :name fillVolume :pipeline fillPipe :bind-groups [fillGroup]
+  :dispatch [16 16 16])
+
+(compute-pass :name updateCamera :pipeline cameraPipe :bind-groups [cameraGroup]
+  :dispatch [1 1 1])
+
+(render-pass :name draw
+  (color-attachment :view msaaTex :clear-value [0 0 0 1]
+    :load-op clear :store-op discard :resolve-target context-current-texture)
+  :pipeline volPipe :bind-groups [volGroup]
+  (draw :vertex-count 3))
+
+(frame :name main :init [fillVolume] :before [writeInputs]
+  :perform [updateCamera draw])

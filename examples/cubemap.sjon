@@ -1,0 +1,143 @@
+; Cubemap skybox — port of the webgpu-samples `cubemap` sample. Six JPEG faces
+; upload into the layers of one 512x512x6 2d texture (:origin [0 0 i]); a
+; fullscreen triangle samples it through a cube view (:view-dimension 3),
+; with the view direction transformed by the inverse view-projection. That
+; inverse is computed in closed form in the vertex shader
+; (rotY(-yaw)·rotX(-pitch)·P^-1) where upstream inverts on the CPU each
+; frame. The camera yaws continuously with a sinusoidal pitch.
+;
+; Image upload (image-bitmap / copy-external-image-to-texture) is a browser
+; feature; the native `--frame` renderer stubs it, so this example renders
+; black there. The six uploads re-run every frame — wasteful but correct.
+;
+; Assets: upstream's faces re-encoded to 512x512 JPEG (~232 KB total).
+; Credit: examples/assets/cubemap/credit.txt.
+
+(data :name facePX :blob "assets/cubemap/posx.jpg" :mime "image/jpeg")
+(data :name faceNX :blob "assets/cubemap/negx.jpg" :mime "image/jpeg")
+(data :name facePY :blob "assets/cubemap/posy.jpg" :mime "image/jpeg")
+(data :name faceNY :blob "assets/cubemap/negy.jpg" :mime "image/jpeg")
+(data :name facePZ :blob "assets/cubemap/posz.jpg" :mime "image/jpeg")
+(data :name faceNZ :blob "assets/cubemap/negz.jpg" :mime "image/jpeg")
+
+(image-bitmap :name bmPX :image facePX)
+(image-bitmap :name bmNX :image faceNX)
+(image-bitmap :name bmPY :image facePY)
+(image-bitmap :name bmNY :image faceNY)
+(image-bitmap :name bmPZ :image facePZ)
+(image-bitmap :name bmNZ :image faceNZ)
+
+; Explicit dims, not :size-from — the 6-layer count must ride this descriptor.
+(texture :name cubeTex :width 512 :height 512
+  :dimension 2 :depth-or-array-layers 6
+  :format rgba8unorm :usage [texture-binding copy-dst render-attachment])
+
+(texture-view :name cubeView :texture cubeTex :view-dimension 3)  ; 3 = cube
+
+(sampler :name samp :mag-filter linear :min-filter linear)
+(buffer :name inputs :size 16 :usage [uniform copy-dst])
+
+(shader-module :name code :code """
+struct PngineInputs {
+  time: f32,
+  canvasW: f32,
+  canvasH: f32,
+  aspect: f32,
+};
+@group(0) @binding(0) var<uniform> inputs : PngineInputs;
+@group(0) @binding(1) var samp : sampler;
+@group(0) @binding(2) var tex : texture_cube<f32>;
+
+// Analytic inverse of the perspective helper used across the corpus
+// (verified P * invP = I): swap the diagonal reciprocals, move the -1.
+fn invPerspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  let a = far * nf;
+  let b = far * near * nf;
+  return mat4x4f(
+    vec4f(aspect / f, 0, 0, 0),
+    vec4f(0, 1.0 / f, 0, 0),
+    vec4f(0, 0, 0, 1.0 / b),
+    vec4f(0, 0, -1, a / b));
+}
+
+fn rotX(ang: f32) -> mat4x4f {
+  let c = cos(ang);
+  let s = sin(ang);
+  return mat4x4f(
+    vec4f(1, 0, 0, 0),
+    vec4f(0, c, s, 0),
+    vec4f(0, -s, c, 0),
+    vec4f(0, 0, 0, 1));
+}
+
+fn rotY(ang: f32) -> mat4x4f {
+  let c = cos(ang);
+  let s = sin(ang);
+  return mat4x4f(
+    vec4f(c, 0, -s, 0),
+    vec4f(0, 1, 0, 0),
+    vec4f(s, 0, c, 0),
+    vec4f(0, 0, 0, 1));
+}
+
+struct VSOut {
+  @builtin(position) pos : vec4f,
+  @location(0) dir : vec4f,
+};
+
+@vertex
+fn vsMain(@builtin(vertex_index) vi : u32) -> VSOut {
+  var p = array<vec2f, 3>(
+    vec2f(-1.0, -1.0), vec2f(-1.0, 3.0), vec2f(3.0, -1.0));
+  // Upstream: view = rotX(pitch)·rotY(yaw), VP = P·view, inverse on the CPU.
+  // Closed form here: invVP = rotY(-yaw)·rotX(-pitch)·invP. The direction is
+  // affine in p, so interpolating it as a varying is exact.
+  let now = inputs.time * 1.25;
+  let pitch = 0.31415927 * sin(now);
+  let yaw = now * 0.2;
+  let invVP = rotY(-yaw) * rotX(-pitch)
+            * invPerspective(1.2566, inputs.aspect, 1.0, 3000.0);
+  var out : VSOut;
+  out.pos = vec4f(p[vi], 0.0, 1.0);
+  out.dir = invVP * vec4f(p[vi], -1.0, 1.0);
+  return out;
+}
+
+@fragment
+fn fsMain(@location(0) dir : vec4f) -> @location(0) vec4f {
+  return textureSample(tex, samp, normalize(dir.xyz / dir.w));
+}
+""")
+
+(render-pipeline :name pipe
+  (layout auto)
+  (vertex (module code) (entry vsMain))
+  (fragment (module code) (entry fsMain)
+    (targets (target :format preferred-canvas-format))))
+
+(bind-group :name g :layout-pipeline pipe :layout-index 0
+  (entry :binding 0 :buffer inputs)
+  (entry :binding 1 :sampler samp)
+  (entry :binding 2 :texture-view cubeView))
+
+; WebGPU cube layer order: +X -X +Y -Y +Z -Z.
+(queue :name upload
+  (copy-external-image-to-texture :source bmPX :texture cubeTex :origin [0 0 0])
+  (copy-external-image-to-texture :source bmNX :texture cubeTex :origin [0 0 1])
+  (copy-external-image-to-texture :source bmPY :texture cubeTex :origin [0 0 2])
+  (copy-external-image-to-texture :source bmNY :texture cubeTex :origin [0 0 3])
+  (copy-external-image-to-texture :source bmPZ :texture cubeTex :origin [0 0 4])
+  (copy-external-image-to-texture :source bmNZ :texture cubeTex :origin [0 0 5]))
+
+(queue :name writeInputs
+  (write-buffer :buffer inputs :offset 0 :data pngine-inputs))
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipe :bind-groups [g]
+  (draw :vertex-count 3))
+
+(frame :name main :perform [upload writeInputs draw])

@@ -1,0 +1,64 @@
+; Instanced-dispatch companion to webgpu_stress_bundles.sjon: the same 60
+; hash-placed triangles as one instanced draw in one pass — the comparison
+; arm for the dispatch-throughput measurement (matching triangle counts is
+; what matters, not absolute scale). Same shader math with i =
+; instance_index; same timestamp bracket (queries 0/1 of a count-2 set),
+; resolved and copied to a MAP_READ buffer. This arm renders natively; the
+; measurement recipe and numbers are in the bundle file's header.
+
+(shader-module :name instCode :code """
+fn hash(n: u32) -> f32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return f32(x) / f32(0xffffffffu);
+}
+
+struct VSOut {
+  @builtin(position) pos : vec4f,
+  @location(0) color : vec3f,
+}
+
+@vertex
+fn vs(@builtin(vertex_index) vi : u32,
+      @builtin(instance_index) ii : u32) -> VSOut {
+  let c = vec2f(hash(ii * 3u + 1u), hash(ii * 3u + 2u)) * 1.9 - 0.95;
+  let s = 0.03;
+  var corners = array<vec2f, 3>(vec2f(0.0, s), vec2f(-s, -s), vec2f(s, -s));
+  var out : VSOut;
+  out.pos = vec4f(c + corners[vi], 0.0, 1.0);
+  let hue = hash(ii * 3u) * 6.2831853;
+  out.color = 0.55 + 0.45 * vec3f(cos(hue), cos(hue - 2.0944), cos(hue + 2.0944));
+  return out;
+}
+
+@fragment
+fn fs(@location(0) color : vec3f) -> @location(0) vec4f {
+  return vec4f(color, 1.0);
+}
+""")
+
+(render-pipeline :name instPipe
+  (layout auto)
+  (vertex (module instCode) (entry vs))
+  (fragment (module instCode) (entry fs)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list)))
+
+(query-set :name tsQS :type timestamp :count 2)
+(buffer :name resolveBuf :size 16 :usage [query-resolve copy-src])
+(buffer :name readbackBuf :size 16 :usage [map-read copy-dst])
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0.03 0.03 0.05 1] :load-op clear :store-op store)
+  (timestamp-writes :query-set tsQS :begin 0 :end 1)
+  :pipeline instPipe
+  (draw :vertex-count 3 :instance-count 60))
+
+(queue :name resolveOps
+  (resolve-query-set :query-set tsQS :first-query 0 :query-count 2 :destination resolveBuf :destination-offset 0)
+  (copy-buffer-to-buffer :source resolveBuf :destination readbackBuf :size 16))
+
+(frame :name main :perform [draw resolveOps])

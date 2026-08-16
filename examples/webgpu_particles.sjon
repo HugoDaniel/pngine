@@ -1,0 +1,210 @@
+; webgpu_particles — port of the webgpu-samples `particles` sample (particles
+; respawn at random positions; webgpu_particles_probmap.sjon adds the
+; probability-map spawn). 10000 GPU-simulated particles: a compute pass
+; mutates a storage buffer of (position, lifetime, color, velocity) records
+; each frame; a render pass draws them as additively-blended billboard quads
+; (instanced, 6 verts × 10000).
+;
+; What to read this one for: a compute simulation feeding a pipeline that also
+; blends and depth-tests. The three concerns are independent —
+;
+;  - the `particles` buffer carries `:usage [vertex storage]`, so the same bytes
+;    are compute storage in the sim pass and a per-instance vertex buffer in the
+;    render pass (no copy between them);
+;  - the vertex layout pairs `:step-mode instance` (the particle record) with
+;    `:step-mode vertex` (the six-vertex quad), which is what turns one draw
+;    into 10000 billboards;
+;  - the color target carries an explicit additive `(blend …)` (src-alpha/one,
+;    zero/one, `:operation add`) while the depth target keeps testing with
+;    `:depth-write-enabled false` — the usual recipe for un-sorted additive
+;    sprites.
+;
+; Sizes and counts derive from the two defines rather than being written out:
+; `:size (* NUM_PARTICLES 12 4)` (12 floats per record) and
+; `:dispatch-workgroups (ceil (/ NUM_PARTICLES WORKGROUP_SIZE))`.
+
+(define :name NUM_PARTICLES :value 10000)
+(define :name WORKGROUP_SIZE :value 64)
+
+; Quad vertex buffer (6 verts × 2 floats = 48 bytes)
+(data :name quadVerts :float32 [
+  -1 -1   1 -1   -1  1
+  -1  1   1 -1    1  1
+])
+
+; particles: position:vec3f, lifetime:f32, color:vec4f, velocity:vec3f, pad:f32
+; = 12 floats × 4 bytes per particle. Used as BOTH a vertex buffer (per-instance)
+; and compute storage. size = NUM_PARTICLES * (12 * 4) = 480000.
+(buffer :name particles :size (* NUM_PARTICLES 12 4) :usage [vertex storage])
+
+(buffer :name quadBuffer :size quadVerts :usage [vertex]
+  :mapped-at-creation quadVerts)
+
+(buffer :name renderUniforms :size 16 :usage [uniform copy-dst])
+
+(texture :name depthTexture :size canvas :format depth24plus :usage [render-attachment])
+
+(queue :name writeRenderUniforms
+  (write-buffer :buffer renderUniforms :offset 0 :data pngine-inputs))
+
+(shader-module :name renderShader :code """
+    struct PngineInputs {
+      time: f32, width: f32, height: f32, aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> pngine: PngineInputs;
+
+    struct VertexInput {
+      @location(0) position: vec3f,
+      @location(1) color: vec4f,
+      @location(2) quad_pos: vec2f,
+    }
+
+    struct VertexOutput {
+      @builtin(position) position: vec4f,
+      @location(0) color: vec4f,
+      @location(1) quad_pos: vec2f,
+    }
+
+    fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+      let f = 1.0 / tan(fovy * 0.5);
+      let nf = 1.0 / (near - far);
+      return mat4x4f(
+        vec4f(f / aspect, 0, 0, 0),
+        vec4f(0, f, 0, 0),
+        vec4f(0, 0, (far + near) * nf, -1),
+        vec4f(0, 0, 2 * far * near * nf, 0));
+    }
+
+    @vertex
+    fn vs(in: VertexInput) -> VertexOutput {
+      // Match original: perspective((2*PI)/5, aspect, 1, 100) + translate(0,0,-3) + rotateX(-0.2*PI)
+      let rx = -0.2 * 3.14159265;
+      let cr = cos(rx);
+      let sr = sin(rx);
+      let view = mat4x4f(
+        vec4f(1, 0, 0, 0),
+        vec4f(0, cr, sr, 0),
+        vec4f(0, -sr, cr, 0),
+        vec4f(0, 0, -3, 1));
+      let mvp = perspective(1.2566, pngine.aspect, 1.0, 100.0) * view;
+      // Billboard quad in camera space
+      let right = vec3f(1, 0, 0);
+      let up = vec3f(0, 1, 0);
+      let offset = (right * in.quad_pos.x + up * in.quad_pos.y) * 0.01;
+      let worldPos = in.position + offset;
+      var out: VertexOutput;
+      out.position = mvp * vec4f(worldPos, 1.0);
+      out.color = in.color;
+      out.quad_pos = in.quad_pos;
+      return out;
+    }
+
+    @fragment
+    fn fs(in: VertexOutput) -> @location(0) vec4f {
+      var color = in.color;
+      color.a = color.a * max(1.0 - length(in.quad_pos), 0.0);
+      return color;
+    }
+  """)
+
+(shader-module :name computeShader :code """
+    struct PngineInputs {
+      time: f32, width: f32, height: f32, aspect: f32,
+    }
+    struct Particle {
+      position: vec3f,
+      lifetime: f32,
+      color: vec4f,
+      velocity: vec3f,
+      pad: f32,
+    }
+    struct Particles {
+      p: array<Particle>,
+    }
+
+    @group(0) @binding(0) var<uniform> pngine: PngineInputs;
+    @group(0) @binding(1) var<storage, read_write> data: Particles;
+
+    var<private> rnd: vec4u;
+
+    fn init_rand(id: u32, seed: vec4u) {
+      rnd = (vec4u(1741651*1009, 140893*1609*13, 6521*983*7*2, 1109*509*83*11*3) * vec4u(id)) ^ seed;
+    }
+
+    fn rand() -> f32 {
+      rnd = (rnd * vec4u(60493*9377, 11279*2539*23, 7919*631*5*3, 1277*211*19*7*2)) ^ (rnd.yzwx >> vec4u(4u));
+      return f32(rnd.x ^ rnd.y) / f32(0xffffffffu);
+    }
+
+    @compute @workgroup_size(64)
+    fn simulate(@builtin(global_invocation_id) gid: vec3u) {
+      let idx = gid.x;
+      if (idx >= arrayLength(&data.p)) { return; }
+
+      // Derive deltaTime and seed from pngineInputs.time
+      let dt = 0.04;
+      let seed = vec4u(bitcast<u32>(pngine.time), idx * 17u, idx * 31u + 7u, bitcast<u32>(pngine.time * 3.7));
+      init_rand(idx, seed);
+      var p = data.p[idx];
+
+      p.velocity.z -= dt * 0.5;
+      p.position += dt * p.velocity;
+      p.lifetime -= dt;
+      p.color.a = smoothstep(0.0, 0.5, p.lifetime);
+
+      if (p.lifetime < 0.0) {
+        p.position = vec3f((rand() - 0.5) * 2.0, (rand() - 0.5) * 2.0, 0.0);
+        let hue = rand() * 6.28;
+        p.color = vec4f(0.5 + 0.5 * cos(hue), 0.5 + 0.5 * cos(hue + 2.09), 0.5 + 0.5 * cos(hue + 4.19), 1.0);
+        p.velocity = vec3f((rand() - 0.5) * 0.2, (rand() - 0.5) * 0.2, rand() * 0.5);
+        p.lifetime = 0.5 + rand() * 3.0;
+      }
+
+      data.p[idx] = p;
+    }
+  """)
+
+(render-pipeline :name renderPipeline
+  (layout auto)
+  (vertex (module renderShader) (entry vs)
+    (buffers
+      ; per-instance particle data (position@0 float32x3, color@16 float32x4)
+      (vertex-buffer :array-stride (* 12 4) :step-mode instance
+        (attribute :shader-location 0 :offset 0 :format float32x3)
+        (attribute :shader-location 1 :offset 16 :format float32x4))
+      ; per-vertex quad corner (quad_pos@0 float32x2)
+      (vertex-buffer :array-stride 8 :step-mode vertex
+        (attribute :shader-location 2 :offset 0 :format float32x2))))
+  (fragment (module renderShader) (entry fs)
+    (targets
+      (target :format preferred-canvas-format
+        ; additive blend: color = src-alpha*src + one*dst; alpha = zero + one*dst
+        (blend
+          (color :src-factor src-alpha :dst-factor one :operation add)
+          (alpha :src-factor zero :dst-factor one :operation add)))))
+  (primitive (topology triangle-list))
+  (depth-stencil :format depth24plus :depth-write-enabled false :depth-compare less))
+
+(compute-pipeline :name computePipeline :module computeShader :entry simulate)
+
+(bind-group :name renderBindGroup :layout-pipeline renderPipeline :layout-index 0
+  (entry :binding 0 :buffer renderUniforms))
+
+(bind-group :name simBindGroup :layout-pipeline computePipeline :layout-index 0
+  (entry :binding 0 :buffer renderUniforms)
+  (entry :binding 1 :buffer particles))
+
+(render-pass :name drawParticles
+  (color-attachment :view context-current-texture :clear-value [0 0 0 255] :load-op clear :store-op store)
+  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  :pipeline renderPipeline
+  :vertex-buffers [particles quadBuffer]
+  :bind-groups [renderBindGroup]
+  (draw :vertex-count 6 :instance-count NUM_PARTICLES))
+
+(compute-pass :name simulateParticles
+  :pipeline computePipeline
+  :bind-groups [simBindGroup]
+  :dispatch-workgroups (ceil (/ NUM_PARTICLES WORKGROUP_SIZE)))
+
+(frame :name main :perform [writeRenderUniforms simulateParticles drawParticles])

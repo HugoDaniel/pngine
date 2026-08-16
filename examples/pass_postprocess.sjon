@@ -1,0 +1,33 @@
+; `(pass …)` post-processing — a drifting glow with chromatic aberration and a
+; vignette on top. The main pass also declares an `@fragment fn post()`, so
+; the sugar renders the main pass to an intermediate rgba8unorm texture and
+; adds a post pass that samples it (`postTex` via `samp`) to the canvas.
+
+(pass-graph
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      let t = pngine.time;
+      let c = vec2f(sin(t) * .3 + .5, cos(t * .7) * .3 + .5);
+      let d = length(uv - c);
+      let glow = smoothstep(.2, .0, d);
+      let col = .5 + .5 * cos(t * 2. + vec3f(0., 2., 4.) + d * 10.);
+      return vec4f(col * glow, 1);
+    }
+
+    @fragment fn post(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+
+      // Chromatic aberration
+      let ca = .003 * (1. - uv.y);
+      let r = textureSample(postTex, samp, uv + vec2f(ca, 0)).r;
+      let g = textureSample(postTex, samp, uv).g;
+      let b = textureSample(postTex, samp, uv - vec2f(ca, 0)).b;
+      var color = vec3f(r, g, b);
+
+      // Vignette
+      color *= 1. - smoothstep(.4, .9, length(uv - .5));
+
+      return vec4f(color, 1);
+    }
+  """))

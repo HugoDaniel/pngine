@@ -1,0 +1,93 @@
+; Explicit bind-group-layout with a (storage-texture …) entry — a compute pass
+; writes a hard left/right split (green | orange) into a 256² storage texture
+; through the explicit layout, then a fullscreen pass samples it. A
+; zero-initialized texture (compute never ran) renders black; an entry whose
+; type or format disagrees with the WGSL is rejected at pipeline creation.
+;
+; `:format rgba8unorm` must equal the shader's
+; `texture_storage_2d<rgba8unorm, write>` exactly — storage textures have no
+; scalar-class slack. The compute bind group targets the layout by name
+; (:bind-group-layout fillBgl); the draw bind group uses the render pipeline's
+; auto layout.
+
+(texture :name img :width 256 :height 256 :format rgba8unorm
+  :usage [storage-binding texture-binding])
+
+(sampler :name samp :mag-filter nearest :min-filter nearest)
+
+(shader-module :name fillCode :code """
+@group(0) @binding(0) var outTex : texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id : vec3u) {
+  let dims = textureDimensions(outTex);
+  if (id.x >= dims.x || id.y >= dims.y) { return; }
+  // Hard split, no gradient: the render pass's two probe regions are then
+  // unambiguous even under a tolerant snapshot preset.
+  let left = f32(id.x) < f32(dims.x) * 0.5;
+  let color = select(vec4f(0.9, 0.4, 0.1, 1.0), vec4f(0.1, 0.7, 0.3, 1.0), left);
+  textureStore(outTex, vec2i(id.xy), color);
+}
+""")
+
+; `:access write-only` is the default; it is spelled out because the WGSL says
+; `write` and the two must agree.
+(bind-group-layout :name fillBgl
+  (entry :binding 0 :visibility [compute]
+    (storage-texture :format rgba8unorm :access write-only :view-dimension 1)))
+
+(pipeline-layout :name fillPl :bind-group-layouts [fillBgl])
+
+(compute-pipeline :name fillPipe :module fillCode :entry main :pipeline-layout fillPl)
+
+; The bind group names the explicit layout directly.
+(bind-group :name fillBg :bind-group-layout fillBgl :layout-index 0
+  (entry :binding 0 :texture img))
+
+; 256 / 8 = 32 workgroups per axis. Fixed, because the texture is fixed-size —
+; the pass does not follow the canvas.
+(compute-pass :name fill :pipeline fillPipe :bind-groups [fillBg] :dispatch [32 32 1])
+
+(shader-module :name drawCode :code """
+@group(0) @binding(0) var samp : sampler;
+@group(0) @binding(1) var tex : texture_2d<f32>;
+
+struct VSOut {
+  @builtin(position) pos : vec4f,
+  @location(0) uv : vec2f,
+}
+
+@vertex
+fn vs(@builtin(vertex_index) i : u32) -> VSOut {
+  var p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
+  var o : VSOut;
+  o.pos = vec4f(p[i], 0, 1);
+  // NDC → uv in the VERTEX stage, so the sample is independent of the render
+  // size: the texture is 256² whatever `--size` says.
+  o.uv = p[i] * vec2f(0.5, -0.5) + vec2f(0.5);
+  return o;
+}
+
+@fragment
+fn fs(in : VSOut) -> @location(0) vec4f {
+  return textureSampleLevel(tex, samp, in.uv, 0.0);
+}
+""")
+
+(render-pipeline :name drawPipe
+  (layout auto)
+  (vertex (module drawCode) (entry vs))
+  (fragment (module drawCode) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(bind-group :name drawBg :layout-pipeline drawPipe :layout-index 0
+  (entry :binding 0 :sampler samp)
+  (entry :binding 1 :texture img))
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline drawPipe :bind-groups [drawBg]
+  (draw :vertex-count 3))
+
+(frame :name main :perform [fill draw])

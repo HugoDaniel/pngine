@@ -1,0 +1,5 @@
+; Invalid: a `(pass-graph …)` with no `(pass …)` children. Lowering would
+; produce a frame with an empty :perform that draws nothing, so the empty
+; container is rejected.
+
+(pass-graph)

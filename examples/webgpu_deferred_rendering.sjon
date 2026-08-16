@@ -1,0 +1,476 @@
+; Deferred rendering — port of the webgpu-samples `deferredRendering` sample.
+; G-buffer MRT: two render passes (the dragon, then a ground plane) each write
+; two color attachments (normal + albedo) plus a shared depth target; a compute
+; pass updates 128 lights; a deferred lighting pass reads the three G-buffer
+; textures through texture bind entries and shades the fullscreen triangle.
+; Hold a mouse button (pointer-inputs) to see a depth | normal | albedo debug
+; split. `PI` in the WGSL is a bare identifier the compiler substitutes.
+
+(define :name NUM_LIGHTS :value 128)
+
+(data :name dragonMesh (dragon :format [position3 normal3]))
+
+(buffer :name dragonVB :size dragonMesh :usage [vertex] :mapped-at-creation dragonMesh)
+(buffer :name dragonIB :index-of dragonMesh :usage [index])
+(buffer :name lights :size (* NUM_LIGHTS 32) :usage [storage])
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+(buffer :name pointerBuf :size 48 :usage [uniform copy-dst])
+
+(queue :name writeUniforms (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+(queue :name writePointer (write-buffer :buffer pointerBuf :offset 0 :data pointer-inputs))
+
+; G-buffer render targets (sampled in the deferred pass → texture-binding too).
+(texture :name normalTex :size canvas :format rgba16float :usage [render-attachment texture-binding])
+(texture :name albedoTex :size canvas :format rgba8unorm :usage [render-attachment texture-binding])
+(texture :name gBufferDepth :size canvas :format depth32float :usage [render-attachment texture-binding])
+
+(shader-module :name lightUpdateShader :code """
+struct Light {
+  position: vec3f,
+  radius: f32,
+  color: vec3f,
+  pad: f32,
+}
+
+struct Lights {
+  l: array<Light>,
+}
+
+@group(0) @binding(0) var<storage, read_write> lights: Lights;
+
+fn hash(n: u32) -> f32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return f32(x) / f32(0xffffffffu);
+}
+
+// Light extent matching original sample around dragon's natural position
+const Y_MIN = 0.0;
+const Y_MAX = 100.0;
+
+@compute @workgroup_size(64)
+fn updateLights(@builtin(global_invocation_id) id: vec3u) {
+  let i = id.x;
+  if (i >= arrayLength(&lights.l)) { return; }
+
+  // First frame: buffer is zeroed, so radius==0 means uninitialized
+  if (lights.l[i].radius == 0.0) {
+    // Initialize: spread in [-50..50] x [Y_MIN..Y_MAX] x [-50..50]
+    lights.l[i].position = vec3f(
+      (hash(i * 3u + 0u) - 0.5) * 100.0,
+      Y_MIN + hash(i * 3u + 1u) * (Y_MAX - Y_MIN),
+      (hash(i * 3u + 2u) - 0.5) * 100.0
+    );
+    lights.l[i].radius = 30.0;
+
+    // Random colors in [0, 2] per channel (matching original)
+    lights.l[i].color = vec3f(
+      hash(i * 7u + 3u) * 2.0,
+      hash(i * 7u + 5u) * 2.0,
+      hash(i * 7u + 9u) * 2.0
+    );
+    lights.l[i].pad = 0.0;
+    return;
+  }
+
+  // Per-frame: move lights downward at varied speeds (like original)
+  let speed = 0.5 + 0.003 * (f32(i) - 64.0 * floor(f32(i) / 64.0));
+  lights.l[i].position.y -= speed;
+
+  // Wrap around at bottom
+  if (lights.l[i].position.y < Y_MIN) {
+    lights.l[i].position.y = Y_MAX;
+  }
+}
+""")
+
+(compute-pipeline :name lightUpdatePipeline :module lightUpdateShader :entry updateLights)
+
+(bind-group :name lightUpdateBG :layout-pipeline lightUpdatePipeline :layout-index 0
+  (entry :binding 0 :buffer lights))
+
+(compute-pass :name lightUpdatePass :pipeline lightUpdatePipeline :bind-groups [lightUpdateBG]
+  :dispatch-workgroups 2)
+
+(shader-module :name gBufferShader :code """
+struct Inputs {
+  time: f32,
+  width: f32,
+  height: f32,
+  aspect: f32,
+}
+
+@group(0) @binding(0) var<uniform> u: Inputs;
+
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  return mat4x4f(
+    vec4f(f / aspect, 0.0, 0.0, 0.0),
+    vec4f(0.0, f, 0.0, 0.0),
+    vec4f(0.0, 0.0, far * nf, -1.0),
+    vec4f(0.0, 0.0, far * near * nf, 0.0));
+}
+
+fn lookAt(eye: vec3f, center: vec3f, up: vec3f) -> mat4x4f {
+  let fwd = normalize(center - eye);
+  let right = normalize(cross(fwd, up));
+  let u2 = cross(right, fwd);
+  return mat4x4f(
+    vec4f(right.x, u2.x, -fwd.x, 0.0),
+    vec4f(right.y, u2.y, -fwd.y, 0.0),
+    vec4f(right.z, u2.z, -fwd.z, 0.0),
+    vec4f(-dot(right, eye), -dot(u2, eye), dot(fwd, eye), 1.0));
+}
+
+struct VSOut {
+  @builtin(position) pos: vec4f,
+  @location(0) normal: vec3f,
+  @location(1) worldPos: vec3f,
+}
+
+@vertex fn gbuffer_vs(
+  @location(0) position: vec3f,
+  @location(1) normal: vec3f
+) -> VSOut {
+  let angle = u.time * 0.2;
+  let center = vec3f(0.0, 60.0, 0.0);
+  let eye = center + vec3f(120.0 * sin(angle), 3.0, -120.0 * cos(angle));
+  let view = lookAt(eye, center, vec3f(0.0, 1.0, 0.0));
+  let proj = perspective(PI * 2.0 / 5.0, u.aspect, 1.0, 2000.0);
+  let vp = proj * view;
+
+  var out: VSOut;
+  out.pos = vp * vec4f(position, 1.0);
+  out.normal = normal;
+  out.worldPos = position;
+  return out;
+}
+
+struct GBufferOut {
+  @location(0) normal: vec4f,
+  @location(1) albedo: vec4f,
+}
+
+@fragment fn gbuffer_fs(in: VSOut) -> GBufferOut {
+  let n = normalize(in.normal);
+  var out: GBufferOut;
+  out.normal = vec4f(n, 1.0);
+  out.albedo = vec4f(0.9, 0.9, 0.9, 1.0);
+  return out;
+}
+
+// ── Ground plane (vertex-generated quad, no vertex buffer) ──
+
+const GROUND_Y = 20.0;
+const GROUND_HALF = 100.0;
+
+fn groundPos(i: u32) -> vec3f {
+  let idx = array<vec2f, 6>(
+    vec2f(-1, -1), vec2f(1, -1), vec2f(1, 1),
+    vec2f(-1, -1), vec2f(1, 1),  vec2f(-1, 1));
+  let xz = idx[i] * GROUND_HALF;
+  return vec3f(xz.x, GROUND_Y, xz.y);
+}
+
+@vertex fn ground_gbuffer_vs(@builtin(vertex_index) i: u32) -> VSOut {
+  let pos = groundPos(i);
+  let angle = u.time * 0.2;
+  let center = vec3f(0.0, 60.0, 0.0);
+  let eye = center + vec3f(120.0 * sin(angle), 3.0, -120.0 * cos(angle));
+  let view = lookAt(eye, center, vec3f(0.0, 1.0, 0.0));
+  let proj = perspective(PI * 2.0 / 5.0, u.aspect, 1.0, 2000.0);
+  let vp = proj * view;
+
+  var out: VSOut;
+  out.pos = vp * vec4f(pos, 1.0);
+  out.normal = vec3f(0.0, 1.0, 0.0);
+  out.worldPos = pos;
+  return out;
+}
+
+@fragment fn ground_gbuffer_fs(in: VSOut) -> GBufferOut {
+  // Checkerboard pattern on ground
+  let uv = floor(in.worldPos.xz * 0.1);
+  let checker = ((uv.x + uv.y) % 2.0 + 2.0) % 2.0;
+  let c = mix(0.3, 0.6, checker);
+
+  var out: GBufferOut;
+  out.normal = vec4f(0.0, 1.0, 0.0, 1.0);
+  out.albedo = vec4f(c, c, c, 1.0);
+  return out;
+}
+""")
+
+(render-pipeline :name gBufferPipeline
+  (layout auto)
+  (vertex (module gBufferShader) (entry gbuffer_vs)
+    (buffers
+      (vertex-buffer :array-stride (* 4 6)
+        (attribute :shader-location 0 :offset 0 :format float32x3)
+        (attribute :shader-location 1 :offset 12 :format float32x3))))
+  (fragment (module gBufferShader) (entry gbuffer_fs)
+    (targets
+      (target :format rgba16float)
+      (target :format rgba8unorm)))
+  (primitive (topology triangle-list) :cull-mode back)
+  (depth-stencil :depth-write-enabled true :depth-compare less :format depth32float))
+
+; Ground plane G-buffer pipeline (no vertex buffer).
+(render-pipeline :name groundGBufPipeline
+  (layout auto)
+  (vertex (module gBufferShader) (entry ground_gbuffer_vs))
+  (fragment (module gBufferShader) (entry ground_gbuffer_fs)
+    (targets
+      (target :format rgba16float)
+      (target :format rgba8unorm)))
+  (primitive (topology triangle-list))
+  (depth-stencil :depth-write-enabled true :depth-compare less :format depth32float))
+
+(bind-group :name gBufferBG :layout-pipeline gBufferPipeline :layout-index 0
+  (entry :binding 0 :buffer uniforms))
+
+(bind-group :name groundGBufBG :layout-pipeline groundGBufPipeline :layout-index 0
+  (entry :binding 0 :buffer uniforms))
+
+(render-pass :name gBufferPass
+  (color-attachment :view normalTex :clear-value [0 0 0 0] :load-op clear :store-op store)
+  (color-attachment :view albedoTex :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (depth-attachment :view gBufferDepth :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  :pipeline gBufferPipeline
+  :vertex-buffers [dragonVB]
+  :index-buffer dragonIB
+  :bind-groups [gBufferBG]
+  (draw-indexed :index-count 33306))
+
+; Ground plane G-buffer pass (loads existing MRT + depth).
+(render-pass :name groundGBufPass
+  (color-attachment :view normalTex :load-op load :store-op store)
+  (color-attachment :view albedoTex :load-op load :store-op store)
+  (depth-attachment :view gBufferDepth :depth-load-op load :depth-store-op store)
+  :pipeline groundGBufPipeline
+  :bind-groups [groundGBufBG]
+  (draw :vertex-count 6))
+
+(shader-module :name deferredShader :code """
+struct Inputs {
+  time: f32,
+  width: f32,
+  height: f32,
+  aspect: f32,
+}
+
+struct PointerInputs {
+  x: f32,
+  y: f32,
+  clickX: f32,
+  clickY: f32,
+  dx: f32,
+  dy: f32,
+  buttons: f32,
+  pressure: f32,
+  modifiers: f32,
+  scrollX: f32,
+  scrollY: f32,
+  _pad: f32,
+}
+
+struct Light {
+  position: vec3f,
+  radius: f32,
+  color: vec3f,
+  pad: f32,
+}
+
+struct Lights {
+  l: array<Light>,
+}
+
+@group(0) @binding(0) var<uniform> u: Inputs;
+@group(0) @binding(1) var<uniform> pointer: PointerInputs;
+@group(0) @binding(2) var normalTex: texture_2d<f32>;
+@group(0) @binding(3) var albedoTex: texture_2d<f32>;
+@group(0) @binding(4) var depthTex: texture_depth_2d;
+@group(0) @binding(5) var<storage, read> lights: Lights;
+
+// ── Matrix utilities (must match gBufferShader exactly) ──
+
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  return mat4x4f(
+    vec4f(f / aspect, 0.0, 0.0, 0.0),
+    vec4f(0.0, f, 0.0, 0.0),
+    vec4f(0.0, 0.0, far * nf, -1.0),
+    vec4f(0.0, 0.0, far * near * nf, 0.0));
+}
+
+fn lookAt(eye: vec3f, center: vec3f, up: vec3f) -> mat4x4f {
+  let fwd = normalize(center - eye);
+  let right = normalize(cross(fwd, up));
+  let u2 = cross(right, fwd);
+  return mat4x4f(
+    vec4f(right.x, u2.x, -fwd.x, 0.0),
+    vec4f(right.y, u2.y, -fwd.y, 0.0),
+    vec4f(right.z, u2.z, -fwd.z, 0.0),
+    vec4f(-dot(right, eye), -dot(u2, eye), dot(fwd, eye), 1.0));
+}
+
+fn getCameraVP(t: f32, aspect: f32) -> mat4x4f {
+  let angle = t * 0.2;
+  let center = vec3f(0.0, 60.0, 0.0);
+  let eye = center + vec3f(120.0 * sin(angle), 3.0, -120.0 * cos(angle));
+  let view = lookAt(eye, center, vec3f(0.0, 1.0, 0.0));
+  let proj = perspective(PI * 2.0 / 5.0, aspect, 1.0, 2000.0);
+  return proj * view;
+}
+
+// ── 4x4 matrix inverse via cofactors ──
+
+fn inverse4x4(m: mat4x4f) -> mat4x4f {
+  let a00 = m[0][0]; let a01 = m[0][1]; let a02 = m[0][2]; let a03 = m[0][3];
+  let a10 = m[1][0]; let a11 = m[1][1]; let a12 = m[1][2]; let a13 = m[1][3];
+  let a20 = m[2][0]; let a21 = m[2][1]; let a22 = m[2][2]; let a23 = m[2][3];
+  let a30 = m[3][0]; let a31 = m[3][1]; let a32 = m[3][2]; let a33 = m[3][3];
+
+  let b00 = a00 * a11 - a01 * a10;
+  let b01 = a00 * a12 - a02 * a10;
+  let b02 = a00 * a13 - a03 * a10;
+  let b03 = a01 * a12 - a02 * a11;
+  let b04 = a01 * a13 - a03 * a11;
+  let b05 = a02 * a13 - a03 * a12;
+  let b06 = a20 * a31 - a21 * a30;
+  let b07 = a20 * a32 - a22 * a30;
+  let b08 = a20 * a33 - a23 * a30;
+  let b09 = a21 * a32 - a22 * a31;
+  let b10 = a21 * a33 - a23 * a31;
+  let b11 = a22 * a33 - a23 * a32;
+
+  let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+  let invDet = 1.0 / det;
+
+  return mat4x4f(
+    vec4f(
+      ( a11 * b11 - a12 * b10 + a13 * b09) * invDet,
+      (-a01 * b11 + a02 * b10 - a03 * b09) * invDet,
+      ( a31 * b05 - a32 * b04 + a33 * b03) * invDet,
+      (-a21 * b05 + a22 * b04 - a23 * b03) * invDet),
+    vec4f(
+      (-a10 * b11 + a12 * b08 - a13 * b07) * invDet,
+      ( a00 * b11 - a02 * b08 + a03 * b07) * invDet,
+      (-a30 * b05 + a32 * b02 - a33 * b01) * invDet,
+      ( a20 * b05 - a22 * b02 + a23 * b01) * invDet),
+    vec4f(
+      ( a10 * b10 - a11 * b08 + a13 * b06) * invDet,
+      (-a00 * b10 + a01 * b08 - a03 * b06) * invDet,
+      ( a30 * b04 - a31 * b02 + a33 * b00) * invDet,
+      (-a20 * b04 + a21 * b02 - a23 * b00) * invDet),
+    vec4f(
+      (-a10 * b09 + a11 * b07 - a12 * b06) * invDet,
+      ( a00 * b09 - a01 * b07 + a02 * b06) * invDet,
+      (-a30 * b03 + a31 * b01 - a32 * b00) * invDet,
+      ( a20 * b03 - a21 * b01 + a22 * b00) * invDet));
+}
+
+// ── World position from screen coord + depth ──
+
+fn worldFromScreenCoord(coord: vec2f, depth: f32, invVP: mat4x4f) -> vec3f {
+  let ndc = vec4f(
+    coord.x * 2.0 - 1.0,
+    (1.0 - coord.y) * 2.0 - 1.0,
+    depth,
+    1.0
+  );
+  let worldH = invVP * ndc;
+  return worldH.xyz / worldH.w;
+}
+
+// ── Fullscreen triangle vertex shader ──
+
+@vertex fn deferred_vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let x = f32((i << 1u) & 2u);
+  let y = f32(i & 2u);
+  return vec4f(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+}
+
+// ── Deferred lighting / debug view fragment shader ──
+
+@fragment fn deferred_fs(@builtin(position) fragPos: vec4f) -> @location(0) vec4f {
+  let coord = vec2u(fragPos.xy);
+  let screenUV = fragPos.xy / vec2f(u.width, u.height);
+
+  let normal = textureLoad(normalTex, coord, 0).xyz;
+  let albedo = textureLoad(albedoTex, coord, 0).rgb;
+  let depth = textureLoad(depthTex, coord, 0);
+
+  // Hold mouse button → show G-buffer debug split view
+  if (pointer.buttons > 0.0) {
+    if (screenUV.x < 0.333) {
+      // Left: depth visualization (inverted + scaled for visibility)
+      let d = (1.0 - depth) * 50.0;
+      return vec4f(d, d, d, 1.0);
+    } else if (screenUV.x < 0.666) {
+      // Middle: normal visualization (remap from [-1,1] to [0,1])
+      return vec4f(normal * 0.5 + 0.5, 1.0);
+    } else {
+      // Right: albedo
+      return vec4f(albedo, 1.0);
+    }
+  }
+
+  // Background (no geometry drawn at this pixel)
+  if (depth >= 1.0) {
+    return vec4f(0.1, 0.1, 0.15, 1.0);
+  }
+
+  // Reconstruct world position
+  let invVP = inverse4x4(getCameraVP(u.time, u.aspect));
+  let worldPos = worldFromScreenCoord(screenUV, depth, invVP);
+
+  // Accumulate light contributions
+  let n = normalize(normal);
+  var result = vec3f(0.0);
+  let numLights = arrayLength(&lights.l);
+
+  for (var i = 0u; i < numLights; i++) {
+    let light = lights.l[i];
+    let lightVec = light.position - worldPos;
+    let dist = length(lightVec);
+    if (dist > light.radius) { continue; }
+
+    let lightDir = lightVec / dist;
+    let lambert = max(dot(n, lightDir), 0.0);
+    let attenuation = 1.0 - dist / light.radius;
+    result += light.color * lambert * attenuation * attenuation;
+  }
+
+  // Ambient + final composite (matching original: flat 0.2 ambient)
+  result = albedo * result + vec3f(0.2);
+  return vec4f(result, 1.0);
+}
+""")
+
+(render-pipeline :name deferredPipeline
+  (layout auto)
+  (vertex (module deferredShader) (entry deferred_vs))
+  (fragment (module deferredShader) (entry deferred_fs)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list)))
+
+(bind-group :name deferredBG :layout-pipeline deferredPipeline :layout-index 0
+  (entry :binding 0 :buffer uniforms)
+  (entry :binding 1 :buffer pointerBuf)
+  (entry :binding 2 :texture normalTex)
+  (entry :binding 3 :texture albedoTex)
+  (entry :binding 4 :texture gBufferDepth)
+  (entry :binding 5 :buffer lights))
+
+(render-pass :name deferredPass
+  (color-attachment :view context-current-texture :clear-value [0.1 0.1 0.15 1] :load-op clear :store-op store)
+  :pipeline deferredPipeline
+  :bind-groups [deferredBG]
+  (draw :vertex-count 3))
+
+(frame :name main :perform [writeUniforms writePointer lightUpdatePass gBufferPass groundGBufPass deferredPass])

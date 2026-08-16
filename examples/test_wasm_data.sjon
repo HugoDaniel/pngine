@@ -1,0 +1,58 @@
+; test_wasm_data — a static cube from `(wasm-data …)`. assets/cube.wasm exports
+; `cube` → array<f32, 360> (36 vertices × 10 floats, stride 40: position4 at
+; offset 0, uv2 at offset 32); the module is embedded in the payload, called
+; once when the buffer is created, and the result fills the vertex buffer via
+; :mapped-at-creation. The shader passes position through unchanged (no camera,
+; no uniforms), colors by uv, and culls back faces.
+;
+; Distinct from `(wasm-call …)` (see wasm_rotated_cube.sjon), where the WASM
+; function runs every frame with canvas/time arguments; here it runs once with
+; no arguments.
+
+(shader-module :name cubeShader :code """
+struct VertexOutput {
+  @builtin(position) Position : vec4f,
+  @location(0) fragUV : vec2f,
+}
+
+@vertex
+fn vertexMain(
+  @location(0) position : vec4f,
+  @location(1) uv : vec2f
+) -> VertexOutput {
+  var output : VertexOutput;
+  output.Position = position;
+  output.fragUV = uv;
+  return output;
+}
+
+@fragment
+fn fragMain(@location(0) fragUV: vec2f) -> @location(0) vec4f {
+  return vec4f(fragUV, 0.5, 1.0);
+}
+""")
+
+(data :name cubeVertexArray
+  (wasm-data :url "assets/cube.wasm" :func cube :returns "array<f32, 360>"))
+
+(buffer :name verticesBuffer :size cubeVertexArray :usage [vertex]
+  :mapped-at-creation cubeVertexArray)
+
+(render-pipeline :name renderCube
+  (layout auto)
+  (vertex (module cubeShader) (entry vertexMain)
+    (buffers
+      (vertex-buffer :array-stride 40
+        (attribute :shader-location 0 :offset 0 :format float32x4)
+        (attribute :shader-location 1 :offset 32 :format float32x2))))
+  (fragment (module cubeShader) (entry fragMain)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list) :cull-mode back))
+
+(render-pass :name drawCube
+  (color-attachment :view context-current-texture :clear-value [0.5 0.5 0.5 1.0] :load-op clear :store-op store)
+  :pipeline renderCube
+  :vertex-buffers [verticesBuffer]
+  (draw :vertex-count 36))
+
+(frame :name cube :perform [drawCube])

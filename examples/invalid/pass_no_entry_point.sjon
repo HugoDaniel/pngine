@@ -1,0 +1,10 @@
+; Invalid: a `(pass …)` whose WGSL is valid but declares no entry point (helper
+; functions only, e.g. a dropped `@fragment`); there is nothing for the lowered
+; pipeline to name, so the pass is rejected.
+
+(pass-graph
+  (pass :name main :code """
+    fn luma(c: vec3f) -> f32 { return dot(c, vec3f(.2126, .7152, .0722)); }
+
+    fn tint(c: vec3f, t: f32) -> vec3f { return mix(c, vec3f(t), .5); }
+  """))

@@ -1,0 +1,25 @@
+; Invalid: the render pass replays 17 render bundles, one past the 16 the
+; execute-bundles opcode can carry; the emitter rejects it rather than letting
+; the 17th bundle be dropped at load. One bundle `tri` is replayed 17 times.
+
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
+  return vec4f(p[i], 0, 1);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1, 0, 0, 1); }
+""")
+
+(render-pipeline :name pipe (layout auto)
+  (vertex (module code) (entry vs))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(render-bundle :name tri :pipeline pipe :draw 3)
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :execute-bundles [tri tri tri tri tri tri tri tri tri tri tri tri tri tri tri tri tri])
+
+(frame :name main :perform [draw])

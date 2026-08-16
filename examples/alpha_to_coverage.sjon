@@ -1,0 +1,155 @@
+; Alpha-to-coverage vs alpha blending, side by side. Eight overlapping,
+; depth-interleaved soft discs are drawn twice into one 4x MSAA attachment:
+; the left half through src-alpha blending with depth writes (the classic
+; artifact — invisible quad corners still write depth and punch holes in
+; later draws), the right half through
+; (multisample :alpha-to-coverage-enabled true) with no blend, where alpha
+; becomes a per-sample coverage mask (an order-independent screen-door
+; cutout, no halos). Original program; the feature is the one behind the
+; alphaToCoverageEmulator sample linked from webgpu-samples.
+;
+; The half-split is done in the vertex shader (vsLeft/vsRight map into their
+; own NDC half) rather than with :viewport, so it renders identically at any
+; canvas size. The MSAA content is carried across the two passes (:store-op
+; store, then :load-op load); only the second pass resolves to the canvas
+; and discards.
+;
+; The right half's dither pattern is implementation-defined per GPU, so
+; expect small differences there between machines.
+
+(texture :name msaaColor :size canvas :sample-count 4
+  :format preferred-canvas-format :usage [render-attachment])
+(texture :name msaaDepth :size canvas :sample-count 4
+  :format depth24plus :usage [render-attachment])
+(buffer :name inputs :size 16 :usage [uniform copy-dst])
+
+(shader-module :name code :code """
+struct PngineInputs {
+  time: f32,
+  canvasW: f32,
+  canvasH: f32,
+  aspect: f32,
+};
+@group(0) @binding(0) var<uniform> inputs : PngineInputs;
+
+// Per disc: xy center (local -1..1), z depth, w radius. Depth is interleaved
+// against draw (instance) order so the blend half must get ordering wrong.
+const DISCS = array<vec4f, 8>(
+  vec4f(-0.40,  0.40, 0.60, 0.45),
+  vec4f( 0.30,  0.50, 0.30, 0.40),
+  vec4f( 0.50, -0.10, 0.70, 0.50),
+  vec4f(-0.10,  0.00, 0.40, 0.55),
+  vec4f(-0.60, -0.40, 0.55, 0.40),
+  vec4f( 0.20, -0.50, 0.25, 0.45),
+  vec4f( 0.60,  0.60, 0.65, 0.35),
+  vec4f(-0.30, -0.70, 0.35, 0.40));
+
+const TINTS = array<vec3f, 8>(
+  vec3f(0.95, 0.35, 0.30),
+  vec3f(0.30, 0.75, 0.95),
+  vec3f(0.95, 0.80, 0.25),
+  vec3f(0.45, 0.90, 0.45),
+  vec3f(0.80, 0.45, 0.95),
+  vec3f(0.95, 0.55, 0.20),
+  vec3f(0.35, 0.55, 0.95),
+  vec3f(0.60, 0.95, 0.75));
+
+struct VSOut {
+  @builtin(position) pos : vec4f,
+  @location(0) local : vec2f,
+  @location(1) @interpolate(flat) inst : u32,
+};
+
+fn quadCorner(vi: u32) -> vec2f {
+  var corners = array<vec2f, 6>(
+    vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0),
+    vec2f(-1.0, -1.0), vec2f(1.0, 1.0),  vec2f(-1.0, 1.0));
+  return corners[vi];
+}
+
+fn placeDisc(vi: u32, inst: u32, halfShift: f32) -> VSOut {
+  let d = DISCS[inst];
+  let corner = quadCorner(vi);
+  let t = inputs.time;
+  let drift = vec2f(sin(t * 0.30 + f32(inst) * 1.7),
+                    cos(t * 0.23 + f32(inst) * 2.1)) * 0.15;
+  let p = d.xy + drift + corner * d.w;
+  var out : VSOut;
+  out.pos = vec4f(p.x * 0.5 + halfShift, p.y, d.z, 1.0);
+  out.local = corner;
+  out.inst = inst;
+  return out;
+}
+
+@vertex
+fn vsLeft(@builtin(vertex_index) vi : u32,
+          @builtin(instance_index) ii : u32) -> VSOut {
+  return placeDisc(vi, ii, -0.5);
+}
+
+@vertex
+fn vsRight(@builtin(vertex_index) vi : u32,
+           @builtin(instance_index) ii : u32) -> VSOut {
+  return placeDisc(vi, ii, 0.5);
+}
+
+@fragment
+fn fsMain(@location(0) local : vec2f,
+          @location(1) @interpolate(flat) inst : u32) -> @location(0) vec4f {
+  let dist = length(local);
+  let alpha = 1.0 - smoothstep(0.55, 1.0, dist);
+  // Non-premultiplied on purpose: the blend half multiplies by src-alpha,
+  // the a2c half converts .a into the sample coverage mask.
+  return vec4f(TINTS[inst], alpha);
+}
+""")
+
+(render-pipeline :name blendPipe
+  (layout auto)
+  (vertex (module code) (entry vsLeft))
+  (fragment (module code) (entry fsMain)
+    (targets (target :format preferred-canvas-format
+      (blend (color :src-factor src-alpha :dst-factor one-minus-src-alpha :operation add)
+             (alpha :src-factor one :dst-factor one-minus-src-alpha :operation add)))))
+  (primitive (topology triangle-list))
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less)
+  (multisample :count 4))
+
+; :write-mask 7 (RGB): alpha-to-coverage derives coverage from the shader's
+; output alpha before the mask applies, but without the mask that sub-1 alpha
+; would land in the attachment and leave the canvas translucent (the canvas
+; composites premultiplied). The clear's alpha 1 stays put; only color
+; channels write.
+(render-pipeline :name a2cPipe
+  (layout auto)
+  (vertex (module code) (entry vsRight))
+  (fragment (module code) (entry fsMain)
+    (targets (target :format preferred-canvas-format :write-mask 7)))
+  (primitive (topology triangle-list))
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less)
+  (multisample :count 4 :alpha-to-coverage-enabled true))
+
+(bind-group :name gBlend :layout-pipeline blendPipe :layout-index 0
+  (entry :binding 0 :buffer inputs))
+(bind-group :name gA2c :layout-pipeline a2cPipe :layout-index 0
+  (entry :binding 0 :buffer inputs))
+
+(queue :name writeInputs
+  (write-buffer :buffer inputs :offset 0 :data pngine-inputs))
+
+(render-pass :name left
+  (color-attachment :view msaaColor
+    :clear-value [0.10 0.10 0.12 1] :load-op clear :store-op store)
+  (depth-attachment :view msaaDepth :depth-clear-value 1.0
+    :depth-load-op clear :depth-store-op store)
+  :pipeline blendPipe :bind-groups [gBlend]
+  (draw :vertex-count 6 :instance-count 8))
+
+(render-pass :name right
+  (color-attachment :view msaaColor :resolve-target context-current-texture
+    :load-op load :store-op discard)
+  (depth-attachment :view msaaDepth :depth-load-op load :depth-store-op store)
+  :pipeline a2cPipe :bind-groups [gA2c]
+  (draw :vertex-count 6 :instance-count 8))
+
+(frame :name main :perform [writeInputs left right])

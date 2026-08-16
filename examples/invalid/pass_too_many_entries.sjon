@@ -1,0 +1,58 @@
+; Invalid: a `(pass …)` with 17 entry points, one past the 16 the WGSL scanner
+; accepts. Lowering a truncated prefix would silently drop the last pipeline,
+; so the pass is rejected. One fewer entry compiles.
+
+(pass-graph
+  (pass :name main :code """
+    @compute @workgroup_size(64) fn c0(@builtin(global_invocation_id) id: vec3u) {
+      textureStore(screen, vec2i(id.xy), vec4f(0. / 17., 0, 0, 1));
+    }
+    @compute @workgroup_size(64) fn c1(@builtin(global_invocation_id) id: vec3u) {
+      textureStore(screen, vec2i(id.xy), vec4f(1. / 17., 0, 0, 1));
+    }
+    @compute @workgroup_size(64) fn c2(@builtin(global_invocation_id) id: vec3u) {
+      textureStore(screen, vec2i(id.xy), vec4f(2. / 17., 0, 0, 1));
+    }
+    @compute @workgroup_size(64) fn c3(@builtin(global_invocation_id) id: vec3u) {
+      textureStore(screen, vec2i(id.xy), vec4f(3. / 17., 0, 0, 1));
+    }
+    @compute @workgroup_size(64) fn c4(@builtin(global_invocation_id) id: vec3u) {
+      textureStore(screen, vec2i(id.xy), vec4f(4. / 17., 0, 0, 1));
+    }
+    @compute @workgroup_size(64) fn c5(@builtin(global_invocation_id) id: vec3u) {
+      textureStore(screen, vec2i(id.xy), vec4f(5. / 17., 0, 0, 1));
+    }
+    @compute @workgroup_size(64) fn c6(@builtin(global_invocation_id) id: vec3u) {
+      textureStore(screen, vec2i(id.xy), vec4f(6. / 17., 0, 0, 1));
+    }
+    @compute @workgroup_size(64) fn c7(@builtin(global_invocation_id) id: vec3u) {
+      textureStore(screen, vec2i(id.xy), vec4f(7. / 17., 0, 0, 1));
+    }
+    @compute @workgroup_size(64) fn c8(@builtin(global_invocation_id) id: vec3u) {
+      textureStore(screen, vec2i(id.xy), vec4f(8. / 17., 0, 0, 1));
+    }
+    @compute @workgroup_size(64) fn c9(@builtin(global_invocation_id) id: vec3u) {
+      textureStore(screen, vec2i(id.xy), vec4f(9. / 17., 0, 0, 1));
+    }
+    @compute @workgroup_size(64) fn c10(@builtin(global_invocation_id) id: vec3u) {
+      textureStore(screen, vec2i(id.xy), vec4f(10. / 17., 0, 0, 1));
+    }
+    @compute @workgroup_size(64) fn c11(@builtin(global_invocation_id) id: vec3u) {
+      textureStore(screen, vec2i(id.xy), vec4f(11. / 17., 0, 0, 1));
+    }
+    @compute @workgroup_size(64) fn c12(@builtin(global_invocation_id) id: vec3u) {
+      textureStore(screen, vec2i(id.xy), vec4f(12. / 17., 0, 0, 1));
+    }
+    @compute @workgroup_size(64) fn c13(@builtin(global_invocation_id) id: vec3u) {
+      textureStore(screen, vec2i(id.xy), vec4f(13. / 17., 0, 0, 1));
+    }
+    @compute @workgroup_size(64) fn c14(@builtin(global_invocation_id) id: vec3u) {
+      textureStore(screen, vec2i(id.xy), vec4f(14. / 17., 0, 0, 1));
+    }
+    @compute @workgroup_size(64) fn c15(@builtin(global_invocation_id) id: vec3u) {
+      textureStore(screen, vec2i(id.xy), vec4f(15. / 17., 0, 0, 1));
+    }
+    @compute @workgroup_size(64) fn c16(@builtin(global_invocation_id) id: vec3u) {
+      textureStore(screen, vec2i(id.xy), vec4f(16. / 17., 0, 0, 1));
+    }
+  """))

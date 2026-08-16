@@ -1,0 +1,21 @@
+; Invalid: :scissor-rect must be exactly [x y w h]; a 5-element vector is
+; rejected by the schema's pixel-rect shape (vector_length_mismatch) rather
+; than the extra component being silently dropped.
+(shader-module :name code :code """
+    @vertex
+    fn vertexMain(@builtin(vertex_index) VertexIndex : u32) -> @builtin(position) vec4f {
+      var pos = array<vec2f, 3>(vec2(0.0, 0.5), vec2(-0.5, -0.5), vec2(0.5, -0.5));
+      return vec4f(pos[VertexIndex], 0.0, 1.0);
+    }
+    @fragment
+    fn fragMain() -> @location(0) vec4f { return vec4(1.0, 0.0, 0.0, 1.0); }
+""")
+(render-pipeline :name pipeline (layout auto)
+  (vertex (module code)(entry vertexMain))
+  (fragment (module code)(entry fragMain)(targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list)))
+(render-pass :name render :pipeline pipeline
+  (color-attachment :view context-current-texture :clear-value [0 0 0 0] :load-op clear :store-op store)
+  :scissor-rect [96 96 320 320 1]
+  (draw :vertex-count 3))
+(frame :name badScissor :perform [render])

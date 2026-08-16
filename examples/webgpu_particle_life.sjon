@@ -1,0 +1,221 @@
+; Particle Life — 4096 particles of 4 species (species = index % 4, no
+; per-particle storage) driven by an asymmetric 4x4 signed interaction matrix
+; in the params uniform: universal repulsion below RMIN, then a matrix-weighted
+; tent force out to RMAX, with friction, integration and a toroidal world.
+; Distances use the minimum image (d - round(d/2)*2) so the wrap has no force
+; seam. Fresh-authored after the technique of the external `particleLife`
+; sample linked from webgpu-samples (gpu-life.silverspace.io); the emergent
+; cells and chasers come from the baked matrix preset, so changing it means
+; recompiling.
+;
+; Same structure as boids.sjon: ping-pong `:pool 2` particle buffers, an
+; `(init …)` seed pass (uniform random positions, zero velocity), one compute
+; step and an instanced additive-blended sprite draw. Brute force O(N^2):
+; 4096^2 = 16.8M pair evaluations per frame. The image at time t depends on
+; frames elapsed, not on t — a `--frame` render shows the seeded state after
+; one step.
+
+(define :name NUM_PARTICLES :value 4096)
+
+(shader-module :name code :code """
+struct Particle {
+  pos : vec2f,
+  vel : vec2f,
+}
+
+struct SimParams {
+  dt : f32,
+  friction : f32,
+  forceScale : f32,
+  _pad : f32,
+  matrix : array<vec4f, 4>,   // A[a][b]: force species a feels from b
+}
+
+struct Particles {
+  particles : array<Particle>,
+}
+
+@binding(0) @group(0) var<uniform> params : SimParams;
+@binding(1) @group(0) var<storage, read> particlesA : Particles;
+@binding(2) @group(0) var<storage, read_write> particlesB : Particles;
+
+const M : u32 = 4u;
+const RMIN : f32 = 0.02;
+const RMAX : f32 = 0.12;
+
+// The particle-life kernel: hard repulsion inside RMIN, then a tent force
+// peaking at the midpoint of [RMIN, RMAX] weighted by the matrix entry.
+fn lifeForce(r: f32, a: f32) -> f32 {
+  if (r < RMIN) { return r / RMIN - 1.0; }
+  if (r < RMAX) {
+    return a * (1.0 - abs(2.0 * r - RMIN - RMAX) / (RMAX - RMIN));
+  }
+  return 0.0;
+}
+
+@compute @workgroup_size(64)
+fn computeMain(@builtin(global_invocation_id) gid : vec3u) {
+  let index = gid.x;
+  let total = arrayLength(&particlesA.particles);
+  if (index >= total) { return; }
+  let si = index % M;
+
+  var pos = particlesA.particles[index].pos;
+  var vel = particlesA.particles[index].vel;
+  var force = vec2f(0.0);
+
+  for (var j = 0u; j < total; j++) {
+    if (j == index) { continue; }
+    var d = particlesA.particles[j].pos - pos;
+    d -= round(d * 0.5) * 2.0;          // min-image on the [-1,1]^2 torus
+    let r = length(d);
+    if (r < 1e-6 || r >= RMAX) { continue; }
+    let a = params.matrix[si][j % M];
+    force += lifeForce(r, a) * (d / r);
+  }
+
+  vel = vel * params.friction + force * params.forceScale * params.dt;
+  pos += vel * params.dt;
+  pos = fract((pos + 1.0) * 0.5) * 2.0 - 1.0;   // toroidal wrap
+
+  particlesB.particles[index].pos = pos;
+  particlesB.particles[index].vel = vel;
+}
+
+struct VertexOutput {
+  @builtin(position) position : vec4f,
+  @location(0) local : vec2f,
+  @location(1) color : vec3f,
+}
+
+const SPRITE_R : f32 = 0.008;
+
+@vertex
+fn vertexMain(
+  @location(0) particlePos : vec2f,
+  @location(1) particleVel : vec2f,
+  @location(2) corner : vec2f,
+  @builtin(instance_index) ii : u32
+) -> VertexOutput {
+  var palette = array<vec3f, 4>(
+    vec3f(1.00, 0.45, 0.30),
+    vec3f(0.35, 0.85, 0.45),
+    vec3f(0.35, 0.55, 1.00),
+    vec3f(0.95, 0.85, 0.30));
+  var out : VertexOutput;
+  out.position = vec4f(particlePos + corner * SPRITE_R, 0.0, 1.0);
+  out.local = corner;
+  out.color = palette[ii % 4u];
+  return out;
+}
+
+@fragment
+fn fragMain(@location(0) local : vec2f,
+            @location(1) color : vec3f) -> @location(0) vec4f {
+  let f = max(0.0, 1.0 - length(local));
+  return vec4f(color * f * f, 1.0);    // additive blend; soft round dot
+}
+""")
+
+(shader-module :name initShader :code """
+struct Particle {
+  pos : vec2f,
+  vel : vec2f,
+}
+
+struct Particles {
+  particles : array<Particle>,
+}
+
+@binding(0) @group(0) var<storage, read_write> data : Particles;
+
+fn hash(n: u32) -> f32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return f32(x) / f32(0xffffffffu);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id : vec3u) {
+  let i = id.x;
+  let total = arrayLength(&data.particles);
+  if (i >= total) { return; }
+
+  // Uniform random positions, zero velocity — structure must emerge from
+  // the matrix, not the seed.
+  data.particles[i].pos = vec2f(
+    hash(i * 2u + 7u) * 2.0 - 1.0,
+    hash(i * 2u + 13u) * 2.0 - 1.0);
+  data.particles[i].vel = vec2f(0.0);
+}
+""")
+
+(data :name spriteData :float32 [
+  -1 -1   1 -1   1 1
+  -1 -1   1  1  -1 1
+])
+
+; dt, friction, forceScale, pad, then the 4x4 matrix row-major —
+; a cells-and-chasers preset (positive diagonal clusters same-species,
+; asymmetric off-diagonals chase).
+(data :name simParamsData :float32 [
+  0.02 0.9 4.0 0
+   0.6 -0.3  0.2  0.0
+   0.3  0.5 -0.4  0.1
+  -0.2  0.4  0.6 -0.3
+   0.1 -0.1  0.3  0.4
+])
+
+(buffer :name particleBuffers :size (* NUM_PARTICLES 4 4) :usage [vertex storage] :pool 2)
+
+(buffer :name spriteVertexBuffer :size spriteData :usage [vertex]
+  :mapped-at-creation spriteData)
+
+(buffer :name simParamBuffer :size (* 20 4) :usage [uniform copy-dst])
+
+(queue :name updateSimParams
+  (write-buffer :buffer simParamBuffer :offset 0 :data simParamsData))
+
+(render-pipeline :name renderParticles
+  (layout auto)
+  (vertex (module code) (entry vertexMain)
+    (buffers
+      (vertex-buffer :array-stride (* 4 4) :step-mode instance
+        (attribute :shader-location 0 :offset 0 :format float32x2)
+        (attribute :shader-location 1 :offset (* 2 4) :format float32x2))
+      (vertex-buffer :array-stride (* 2 4) :step-mode vertex
+        (attribute :shader-location 2 :offset 0 :format float32x2))))
+  (fragment (module code) (entry fragMain)
+    (targets (target :format preferred-canvas-format
+      (blend (color :src-factor one :dst-factor one :operation add)
+             (alpha :src-factor one :dst-factor one :operation add)))))
+  (primitive (topology triangle-list)))
+
+(compute-pipeline :name simPipeline :module code :entry computeMain)
+
+(bind-group :name particleBindGroups :layout-pipeline simPipeline :layout-index 0 :pool 2
+  (entry :binding 0 :buffer simParamBuffer)
+  (entry :binding 1 :buffer particleBuffers :ping-pong 0)
+  (entry :binding 2 :buffer particleBuffers :ping-pong 1))
+
+(init :name initParticles :buffer particleBuffers :shader initShader :workgroups 64)
+
+(render-pass :name drawPass
+  (color-attachment :view context-current-texture
+    :clear-value [0.02 0.02 0.03 1.0] :load-op clear :store-op store)
+  :pipeline renderParticles
+  :vertex-buffers [particleBuffers spriteVertexBuffer]
+  :vertex-buffers-pool-offsets [1 0]
+  (draw :vertex-count 6 :instance-count NUM_PARTICLES))
+
+(compute-pass :name simPass
+  :pipeline simPipeline
+  :bind-groups [particleBindGroups]
+  :dispatch-workgroups (ceil (/ NUM_PARTICLES 64)))
+
+(frame :name main
+  :init [initParticles]
+  :before [updateSimParams]
+  :perform [simPass drawPass])

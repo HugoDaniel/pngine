@@ -1,0 +1,80 @@
+; webgpu_indirect_dispatch — exercises `:dispatch-indirect`. A seed compute
+; pass writes GPUDispatchIndirectArgs = [1,1,1] into a storage+indirect buffer;
+; a second compute pass takes its workgroup counts from that buffer GPU-side and
+; writes an RGBA colour into a storage buffer, which a fullscreen render pass
+; reads in its fragment shader.
+
+(shader-module :name seedCode :code """
+@group(0) @binding(0) var<storage, read_write> dispatchArgs: array<u32>;
+@compute @workgroup_size(1)
+fn seedArgs() {
+  dispatchArgs[0] = 1u; // workgroupCountX
+  dispatchArgs[1] = 1u; // workgroupCountY
+  dispatchArgs[2] = 1u; // workgroupCountZ
+}
+""")
+
+(shader-module :name workCode :code """
+@group(0) @binding(0) var<storage, read_write> colour: array<f32>;
+@compute @workgroup_size(1)
+fn writeColour() {
+  colour[0] = 0.9;
+  colour[1] = 0.4;
+  colour[2] = 0.1;
+  colour[3] = 1.0;
+}
+""")
+
+(shader-module :name drawCode :code """
+@group(0) @binding(0) var<storage, read> colour: array<f32>;
+
+@vertex
+fn vertexMain(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4f {
+  var pos = array<vec2f, 3>(
+    vec2f(-1.0, -3.0),
+    vec2f(-1.0,  1.0),
+    vec2f( 3.0,  1.0)
+  );
+  return vec4f(pos[vid], 0.0, 1.0);
+}
+
+@fragment
+fn fragMain() -> @location(0) vec4f {
+  return vec4f(colour[0], colour[1], colour[2], colour[3]);
+}
+""")
+
+(buffer :name dispatchArgs :size 12 :usage [storage indirect])
+(buffer :name colourBuf :size 16 :usage [storage])
+
+(compute-pipeline :name seedPipe :module seedCode :entry seedArgs)
+(compute-pipeline :name workPipe :module workCode :entry writeColour)
+
+(bind-group :name seedGroup :layout-pipeline seedPipe :layout-index 0
+  (entry :binding 0 :buffer dispatchArgs))
+
+(bind-group :name workGroup :layout-pipeline workPipe :layout-index 0
+  (entry :binding 0 :buffer colourBuf))
+
+(compute-pass :name seedPass :pipeline seedPipe :bind-groups [seedGroup]
+  :dispatch-workgroups 1)
+
+(compute-pass :name workPass :pipeline workPipe :bind-groups [workGroup]
+  :dispatch-indirect dispatchArgs)
+
+(render-pipeline :name pipeline
+  (layout auto)
+  (vertex (module drawCode) (entry vertexMain))
+  (fragment (module drawCode) (entry fragMain)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list)))
+
+(bind-group :name drawGroup :layout-pipeline pipeline :layout-index 0
+  (entry :binding 0 :buffer colourBuf))
+
+(render-pass :name drawPass
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipeline :bind-groups [drawGroup]
+  (draw :vertex-count 3))
+
+(frame :name main :perform [seedPass workPass drawPass])

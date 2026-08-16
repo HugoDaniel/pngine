@@ -1,0 +1,113 @@
+{
+  "name": "pngine",
+  "version": "2.2.0",
+  "description": "WebGPU spec mapped 1:1 to s-expressions that can be packed in a png",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/bundle.cjs",
+    "build:debug": "node scripts/bundle.cjs --debug",
+    "sync-versions": "node scripts/sync-versions.mjs",
+    "version": "node scripts/sync-versions.mjs && git add package.json ../pngine-*/package.json",
+    "prepublishOnly": "test -f wasm/pngine-compiler.wasm || { echo 'wasm/pngine-compiler.wasm missing — run: zig build wasm-compiler' >&2; exit 1; }; node scripts/bundle.cjs && node scripts/sync-versions.mjs --check"
+  },
+  "author": "Hugo Daniel",
+  "license": "CC0-1.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HugoDaniel/pngine"
+  },
+  "homepage": "https://github.com/HugoDaniel/pngine",
+  "main": "dist/index.cjs",
+  "module": "dist/index.mjs",
+  "browser": "dist/viewer.mjs",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "pngine": "bin/pngine.cjs"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "browser": {
+        "import": "./dist/viewer.mjs",
+        "default": "./dist/viewer.mjs"
+      },
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./viewer": {
+      "types": "./dist/viewer.d.ts",
+      "browser": {
+        "import": "./dist/viewer.mjs",
+        "default": "./dist/viewer.mjs"
+      },
+      "import": "./dist/viewer.mjs"
+    },
+    "./dev": {
+      "types": "./dist/dev.d.ts",
+      "browser": {
+        "import": "./dist/dev.mjs",
+        "default": "./dist/dev.mjs"
+      },
+      "import": "./dist/dev.mjs"
+    },
+    "./core": {
+      "types": "./dist/core.d.ts",
+      "browser": {
+        "import": "./dist/core.mjs",
+        "default": "./dist/core.mjs"
+      },
+      "import": "./dist/core.mjs"
+    },
+    "./executor": {
+      "types": "./dist/executor.d.ts",
+      "browser": {
+        "import": "./dist/executor.mjs",
+        "default": "./dist/executor.mjs"
+      },
+      "import": "./dist/executor.mjs"
+    },
+    "./mini": {
+      "types": "./dist/mini.d.ts",
+      "browser": {
+        "import": "./dist/mini.mjs",
+        "default": "./dist/mini.mjs"
+      },
+      "import": "./dist/mini.mjs"
+    },
+    "./mini-no-audio": {
+      "types": "./dist/mini-no-audio.d.ts",
+      "browser": {
+        "import": "./dist/mini-no-audio.mjs",
+        "default": "./dist/mini-no-audio.mjs"
+      },
+      "import": "./dist/mini-no-audio.mjs"
+    },
+    "./wasm": "./wasm/pngine.wasm",
+    "./compiler": "./src/compiler.js",
+    "./compiler-wasm": "./wasm/pngine-compiler.wasm",
+    "./worker": "./src/worker.js",
+    "./schema/pngine.sjon": "./schema/pngine.sjon"
+  },
+  "optionalDependencies": {
+    "@pngine/darwin-arm64": "2.2.0",
+    "@pngine/darwin-x64": "2.2.0",
+    "@pngine/linux-x64": "2.2.0",
+    "@pngine/linux-arm64": "2.2.0",
+    "@pngine/win32-x64": "2.2.0",
+    "@pngine/win32-arm64": "2.2.0"
+  },
+  "files": ["dist/", "bin/", "src/", "wasm/", "schema/", "README.md"],
+  "keywords": [
+    "webgpu",
+    "shader",
+    "wgsl",
+    "png",
+    "bytecode",
+    "graphics",
+    "rendering",
+    "creative-coding"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

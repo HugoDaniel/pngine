@@ -1,0 +1,119 @@
+; Rotating cube — exercises the `cube` shape generator (position4+color4+uv2),
+; a depth texture with depth/stencil pipeline state, cull mode, and a
+; pngine-inputs uniform.
+;
+; Vertex strides and offsets are written as literals (40/0/16/32): a
+; byte-count slot takes a number or an expression but not a bare define name,
+; so a define there would have to be written `(* CUBE_VERTEX_SIZE 1)`.
+
+(shader-module :name code :code """
+struct PngineInputs {
+  time: f32,
+  canvasW: f32,
+  canvasH: f32,
+  aspect: f32,
+};
+@group(0) @binding(0) var<uniform> inputs : PngineInputs;
+
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  return mat4x4f(
+    vec4f(f / aspect, 0, 0, 0),
+    vec4f(0, f, 0, 0),
+    vec4f(0, 0, far * nf, -1),
+    vec4f(0, 0, far * near * nf, 0));
+}
+
+fn getMVP() -> mat4x4f {
+  let now = inputs.time;
+
+  // Translate z=-4
+  var view = mat4x4f(
+    vec4f(1, 0, 0, 0),
+    vec4f(0, 1, 0, 0),
+    vec4f(0, 0, 1, 0),
+    vec4f(0, 0, -4, 1));
+
+  // Rotate around axis (sin(t), cos(t), 0) by angle=1 radian
+  let axis = vec3f(sin(now), cos(now), 0.0);
+  let c = cos(1.0);
+  let s = sin(1.0);
+  let t = 1.0 - c;
+  let x = axis.x;
+  let y = axis.y;
+  let rot = mat4x4f(
+    vec4f(t*x*x+c,     t*x*y,       s*y, 0),
+    vec4f(t*x*y,        t*y*y+c,    -s*x, 0),
+    vec4f(-s*y,         s*x,         c,   0),
+    vec4f(0, 0, 0, 1));
+  view = view * rot;
+
+  return perspective(1.2566, inputs.aspect, 1.0, 100.0) * view;
+}
+
+struct VertexOutput {
+  @builtin(position) Position : vec4f,
+  @location(0) fragUV : vec2f,
+  @location(1) fragPosition : vec4f,
+};
+
+@vertex
+fn vertexMain(
+  @location(0) position : vec4f,
+  @location(1) color : vec4f,
+  @location(2) uv : vec2f
+) -> VertexOutput {
+  var output : VertexOutput;
+  output.Position = getMVP() * position;
+  output.fragUV = uv;
+  output.fragPosition = 0.5 * (position + vec4f(1.0, 1.0, 1.0, 1.0));
+  return output;
+}
+
+@fragment
+fn fragMain(
+  @location(0) fragUV : vec2f,
+  @location(1) fragPosition : vec4f
+) -> @location(0) vec4f {
+  return fragPosition;
+}
+""")
+
+(data :name cubeVertexArray (cube :format [position4 color4 uv2]))
+
+(buffer :name verticesBuffer :size cubeVertexArray :usage [vertex]
+  :mapped-at-creation cubeVertexArray)
+
+(buffer :name uniformInputsBuffer :size 16 :usage [uniform copy-dst])
+
+(texture :name depthTexture :size canvas :format depth24plus :usage [render-attachment])
+
+(queue :name writeInputUniforms
+  (write-buffer :buffer uniformInputsBuffer :offset 0 :data pngine-inputs))
+
+(render-pipeline :name renderCube
+  (layout auto)
+  (vertex (module code) (entry vertexMain)
+    (buffers
+      (vertex-buffer :array-stride 40
+        (attribute :shader-location 0 :offset 0 :format float32x4)
+        (attribute :shader-location 1 :offset 16 :format float32x4)
+        (attribute :shader-location 2 :offset 32 :format float32x2))))
+  (fragment (module code) (entry fragMain)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list) :cull-mode back)
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+(bind-group :name inputsBinding :layout-pipeline renderCube :layout-index 0
+  (entry :binding 0 :buffer uniformInputsBuffer))
+
+(render-pass :name drawCube
+  (color-attachment :view context-current-texture :clear-value [0.5 0.5 0.5 1.0] :load-op clear :store-op store)
+  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  :pipeline renderCube
+  :vertex-buffers [verticesBuffer]
+  :bind-groups [inputsBinding]
+  (draw :vertex-count 36))
+
+(frame :name cube :perform [writeInputUniforms drawCube])

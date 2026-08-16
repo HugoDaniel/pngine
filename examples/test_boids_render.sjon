@@ -1,0 +1,119 @@
+; test_boids_render — a one-shot `(init …)` compute spirals 2048 particles into
+; a storage buffer, then an instanced draw renders one small sprite triangle per
+; particle from two vertex buffers (per-instance position/velocity, per-vertex
+; sprite). There is no per-frame compute: the particles never move.
+;
+; The buffer size `(* NUM_PARTICLES 16)` is an expression over the define, but
+; `(init … :workgroups 32)` is a literal (ceil(2048/64)): the init form is
+; lowered before defines are in scope, so its slots take numbers only.
+
+(define :name NUM_PARTICLES :value 2048)
+
+(shader-module :name code :code """
+struct VertexOutput {
+  @builtin(position) position : vec4f,
+  @location(4) color : vec4f,
+}
+
+@vertex
+fn vertexMain(
+  @location(0) a_particlePos : vec2f,
+  @location(1) a_particleVel : vec2f,
+  @location(2) a_pos : vec2f
+) -> VertexOutput {
+  let angle = -atan2(a_particleVel.x, a_particleVel.y);
+  let pos = vec2(
+    (a_pos.x * cos(angle)) - (a_pos.y * sin(angle)),
+    (a_pos.x * sin(angle)) + (a_pos.y * cos(angle))
+  );
+
+  var output : VertexOutput;
+  output.position = vec4(pos + a_particlePos, 0.0, 1.0);
+  output.color = vec4(
+    1.0 - sin(angle + 1.0) - a_particleVel.y,
+    pos.x * 100.0 - a_particleVel.y + 0.1,
+    a_particleVel.x + cos(angle + 0.5),
+    1.0
+  );
+  return output;
+}
+
+@fragment
+fn fragMain(@location(4) color : vec4f) -> @location(0) vec4f {
+  return color;
+}
+""")
+
+(shader-module :name initShader :code """
+struct Particle {
+  pos : vec2f,
+  vel : vec2f,
+}
+
+struct Particles {
+  particles : array<Particle>,
+}
+
+@binding(0) @group(0) var<storage, read_write> data : Particles;
+
+fn hash(n: u32) -> f32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return f32(x) / f32(0xffffffffu);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id : vec3u) {
+  let i = id.x;
+  let total = arrayLength(&data.particles);
+  if (i >= total) { return; }
+
+  let t = f32(i) / f32(total);
+  let angle = t * 6.283185;
+  let radius = sqrt(t);
+
+  data.particles[i].pos = vec2f(cos(angle) * radius, sin(angle) * radius);
+  data.particles[i].vel = vec2f(
+    (hash(i * 2u) - 0.5) * 0.1,
+    (hash(i * 2u + 1u) - 0.5) * 0.1
+  );
+}
+""")
+
+(data :name spriteData :float32 [
+  -0.01 -0.02
+  0.01 -0.02
+  0.0 0.02
+])
+
+(buffer :name particleBuffer :size (* NUM_PARTICLES 16) :usage [vertex storage])
+
+(buffer :name spriteBuffer :size spriteData :usage [vertex]
+  :mapped-at-creation spriteData)
+
+(render-pipeline :name renderPipeline
+  (layout auto)
+  (vertex (module code) (entry vertexMain)
+    (buffers
+      (vertex-buffer :array-stride (* 4 4) :step-mode instance
+        (attribute :shader-location 0 :offset 0 :format float32x2)
+        (attribute :shader-location 1 :offset (* 2 4) :format float32x2))
+      (vertex-buffer :array-stride (* 2 4) :step-mode vertex
+        (attribute :shader-location 2 :offset 0 :format float32x2))))
+  (fragment (module code) (entry fragMain)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list)))
+
+(init :name initParticles :buffer particleBuffer :shader initShader :workgroups 32)
+
+(render-pass :name renderPass
+  (color-attachment :view context-current-texture :clear-value [0.0 0.0 0.0 1.0] :load-op clear :store-op store)
+  :pipeline renderPipeline
+  :vertex-buffers [particleBuffer spriteBuffer]
+  (draw :vertex-count 3 :instance-count NUM_PARTICLES :first-vertex 0 :first-instance 0))
+
+(frame :name main
+  :init [initParticles]
+  :perform [renderPass])

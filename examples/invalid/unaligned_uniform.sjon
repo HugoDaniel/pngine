@@ -1,0 +1,33 @@
+; Invalid: a 12-byte uniform buffer (a vec3f's 3 floats), below WebGPU's
+; 16-byte minimum uniform size; the undersized-uniform check rejects it. There
+; is no multiple-of-16 rule: a 28-byte all-f32 uniform is valid.
+(data :name uniforms :float32 [1.0 2.0 3.0])
+(buffer :name uniformBuffer :size 12 :usage [uniform copy-dst] :mapped-at-creation uniforms)
+(shader-module :name code :code """
+    struct Uniforms {
+        values: vec3f,
+    }
+    @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+    @vertex
+    fn vertexMain(@builtin(vertex_index) VertexIndex : u32) -> @builtin(position) vec4f {
+      var pos = array<vec2f, 3>(vec2(0.0, 0.5), vec2(-0.5, -0.5), vec2(0.5, -0.5));
+      return vec4f(pos[VertexIndex], 0.0, 1.0);
+    }
+    @fragment
+    fn fragMain() -> @location(0) vec4f {
+      return vec4(uniforms.values.x, uniforms.values.y, uniforms.values.z, 1.0);
+    }
+""")
+(bind-group-layout :name uniformLayout
+  (entry :binding 0 :visibility [fragment] (buffer :type uniform)))
+(bind-group :name uniformGroup :bind-group-layout uniformLayout
+  (entry :binding 0 :buffer uniformBuffer))
+(render-pipeline :name pipeline (layout auto)
+  (vertex (module code)(entry vertexMain))
+  (fragment (module code)(entry fragMain)(targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list)))
+(render-pass :name render :pipeline pipeline
+  (color-attachment :view context-current-texture :clear-value [0 0 0 0] :load-op clear :store-op store)
+  :bind-groups [uniformGroup]
+  (draw :vertex-count 3))
+(frame :name unalignedUniform :perform [render])

@@ -1,0 +1,114 @@
+; Uniform access — a fullscreen triangle whose fragment shader reads fields
+; from three uniform structs (camera, light, scene) in one bind group.
+; Exercises an explicit (bind-group-layout …) with per-entry visibility and
+; buffer binding type, a (bind-group …) that targets it via
+; :bind-group-layout, and a (pipeline-layout …) that the render pipeline
+; consumes via :pipeline-layout.
+;
+; The explicit pipeline layout is required, not decorative: WebGPU makes an
+; auto-derived layout exclusive to its own pipeline and an explicitly created
+; one incompatible with any (layout auto) pipeline, so a bind group built on
+; layout0 can only be used by a pipeline whose layout also references layout0.
+;
+; The three uniform buffers (32/32/24 bytes) are declared but never written,
+; so the shader reads zeros; the file is about the layouts, not the picture.
+
+(shader-module :name shaderMod :code """
+struct Camera {
+    viewPos: vec3f,
+    aspectRatio: f32,
+    fov: f32,
+    near: f32,
+    far: f32,
+}
+
+struct Light {
+    position: vec3f,
+    intensity: f32,
+    color: vec3f,
+}
+
+struct Scene {
+    time: f32,
+    resolution: vec2f,
+    mousePos: vec2f,
+}
+
+@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(1) var<uniform> light: Light;
+@group(0) @binding(2) var<uniform> scene: Scene;
+
+// Helper function (can be renamed by minifier)
+fn calculateLighting(normal: vec3f, viewDir: vec3f) -> vec3f {
+    let lightDir = normalize(light.position - viewDir);
+    let diff = max(dot(normal, lightDir), 0.0);
+    return light.color * diff * light.intensity;
+}
+
+@vertex fn vertexMain(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+    // Field accesses that must be preserved
+    let aspect = camera.aspectRatio;
+    let t = scene.time;
+
+    // Simple fullscreen triangle
+    let x = f32(i & 1u) * 4.0 - 1.0;
+    let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+    return vec4f(x, y, 0.0, 1.0);
+}
+
+@fragment fn fragmentMain(@builtin(position) fragCoord: vec4f) -> @location(0) vec4f {
+    // Normalized coords using uniform field access
+    let uv = fragCoord.xy / scene.resolution;
+
+    // Camera uniform field access
+    let viewDir = normalize(camera.viewPos);
+
+    // Light uniform field access
+    let lightPos = light.position;
+    let lightColor = light.color;
+    let intensity = light.intensity;
+
+    // Scene uniform field access
+    let time = scene.time;
+    let mouse = scene.mousePos;
+
+    // Animated gradient
+    let color = vec3f(
+        sin(time + uv.x * 3.14159) * 0.5 + 0.5,
+        cos(time + uv.y * 3.14159) * 0.5 + 0.5,
+        sin(time * 0.5) * 0.5 + 0.5
+    );
+
+    // Mix with light color
+    return vec4f(color * lightColor * intensity, 1.0);
+}
+""")
+
+(buffer :name cameraBuffer :size 32 :usage [uniform copy-dst])
+(buffer :name lightBuffer :size 32 :usage [uniform copy-dst])
+(buffer :name sceneBuffer :size 24 :usage [uniform copy-dst])
+
+(bind-group-layout :name layout0
+  (entry :binding 0 :visibility [vertex fragment] (buffer :type uniform))
+  (entry :binding 1 :visibility [fragment] (buffer :type uniform))
+  (entry :binding 2 :visibility [vertex fragment] (buffer :type uniform)))
+
+(bind-group :name group0 :bind-group-layout layout0
+  (entry :binding 0 :buffer cameraBuffer)
+  (entry :binding 1 :buffer lightBuffer)
+  (entry :binding 2 :buffer sceneBuffer))
+
+(pipeline-layout :name layout0Pl :bind-group-layouts [layout0])
+
+(render-pipeline :name pipeline :pipeline-layout layout0Pl
+  (vertex (module shaderMod) (entry vertexMain))
+  (fragment (module shaderMod) (entry fragmentMain)
+    (targets (target :format bgra8unorm))))
+
+(render-pass :name mainPass
+  (color-attachment :view context-current-texture :clear-value [0.1 0.1 0.15 1] :load-op clear :store-op store)
+  :pipeline pipeline
+  :bind-groups [group0]
+  (draw :vertex-count 3))
+
+(frame :name main :perform [mainPass])

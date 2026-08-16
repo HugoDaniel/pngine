@@ -1,0 +1,62 @@
+; test_compute_dispatch — a compute pass with a single workgroup dispatch writes
+; a storage buffer, then a plain yellow triangle renders. The triangle does not
+; read the buffer; the file exercises the flat `:module/:entry` compute-pipeline
+; form, a `:layout-pipeline/:layout-index` bind group and
+; `:dispatch-workgroups 1`, with no pool or ping-pong.
+
+(shader-module :name computeShader :code """
+struct Data {
+  values: array<f32>,
+}
+
+@binding(0) @group(0) var<storage, read_write> data : Data;
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) id : vec3u) {
+  // Just write a simple value
+  data.values[id.x] = f32(id.x) * 0.1;
+}
+""")
+
+(shader-module :name renderShader :code """
+@vertex
+fn vertexMain(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var pos = array<vec2f, 3>(
+    vec2f(0.0, 0.5),
+    vec2f(-0.5, -0.5),
+    vec2f(0.5, -0.5)
+  );
+  return vec4f(pos[i], 0.0, 1.0);
+}
+
+@fragment
+fn fragMain() -> @location(0) vec4f {
+  return vec4f(1.0, 1.0, 0.0, 1.0);  // Yellow = compute worked
+}
+""")
+
+(buffer :name storageBuffer :size 256 :usage [storage])
+
+(render-pipeline :name renderPipeline
+  (layout auto)
+  (vertex (module renderShader) (entry vertexMain))
+  (fragment (module renderShader) (entry fragMain)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list)))
+
+(compute-pipeline :name computePipeline :module computeShader :entry main)
+
+(bind-group :name computeBindGroup :layout-pipeline computePipeline :layout-index 0
+  (entry :binding 0 :buffer storageBuffer))
+
+(compute-pass :name computePass
+  :pipeline computePipeline
+  :bind-groups [computeBindGroup]
+  :dispatch-workgroups 1)
+
+(render-pass :name renderPass
+  (color-attachment :view context-current-texture :clear-value [0.0 0.0 0.0 1.0] :load-op clear :store-op store)
+  :pipeline renderPipeline
+  (draw :vertex-count 3 :instance-count 1 :first-vertex 0 :first-instance 0))
+
+(frame :name main :perform [computePass renderPass])

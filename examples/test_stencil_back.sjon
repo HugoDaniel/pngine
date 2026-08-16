@@ -1,0 +1,79 @@
+; test_stencil_back — two-face stencil state, `(stencil-back …)`. Pass 1 draws
+; two quads in one draw call with opposite winding — the left CCW
+; (front-facing), the right CW (back-facing) — with `:cull-mode none` so both
+; rasterize. The pipeline gives the faces opposite roles:
+;   (stencil-front :pass-op keep)     the front quad writes nothing
+;   (stencil-back  :pass-op replace)  the back quad writes stencil = 1
+; Pass 2 draws a fullscreen orange triangle where stencil == 1, so the mask it
+; tests against is stamped only by back-facing geometry. Expected render: an
+; orange rectangle on the right, black elsewhere. Without `(stencil-back …)`
+; the back face takes the default (compare always, ops keep), nothing is
+; written, and the frame is uniformly black.
+;
+; Winding: with these shaders a triangle wound CCW in NDC is front-facing
+; (`:front-face ccw`); the right quad reverses each triangle's vertex order to
+; obtain the back face.
+
+(texture :name depthStencilTex :size canvas :format depth24plus-stencil8 :usage [render-attachment])
+
+(shader-module :name shader :code """
+    // Two quads, 6 vertices each. 0..5 = left (CCW, front-facing);
+    // 6..11 = right, the same rectangle with each triangle's winding reversed.
+    @vertex fn writeVs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let p = array<vec2f, 12>(
+        vec2f(-0.8, -0.5), vec2f(-0.1, -0.5), vec2f(-0.1, 0.5),
+        vec2f(-0.8, -0.5), vec2f(-0.1,  0.5), vec2f(-0.8, 0.5),
+        vec2f( 0.1, -0.5), vec2f( 0.8,  0.5), vec2f( 0.8, -0.5),
+        vec2f( 0.1, -0.5), vec2f( 0.1,  0.5), vec2f( 0.8, 0.5));
+      return vec4f(p[i], 0.0, 1.0);
+    }
+    @fragment fn writeFs() -> @location(0) vec4f { return vec4f(0.0, 0.0, 0.0, 1.0); }
+
+    @vertex fn testVs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+      return vec4f(p[i], 0.0, 1.0);
+    }
+    @fragment fn testFs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.0, 1.0); }
+  """)
+
+; The front face is written out at the WebGPU default (always/keep) on purpose:
+; the left quad's silence is authored, not inherited.
+(render-pipeline :name writePipe
+  (layout auto)
+  (vertex (module shader) (entry writeVs))
+  (fragment (module shader) (entry writeFs)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list) :cull-mode none :front-face ccw)
+  (depth-stencil :format depth24plus-stencil8 :depth-write-enabled false :depth-compare always
+    (stencil-front :compare always :pass-op keep)
+    (stencil-back :compare always :pass-op replace)))
+
+; Pass 2's fullscreen triangle is front-facing, so its front state is the one
+; that gates. Both faces carry the same equal/keep test so the mask cannot
+; depend on which way that triangle happens to wind.
+(render-pipeline :name testPipe
+  (layout auto)
+  (vertex (module shader) (entry testVs))
+  (fragment (module shader) (entry testFs)
+    (targets (target :format preferred-canvas-format)))
+  (depth-stencil :format depth24plus-stencil8 :depth-write-enabled false :depth-compare always
+    (stencil-front :compare equal :pass-op keep)
+    (stencil-back :compare equal :pass-op keep)))
+
+(render-pass :name writePass
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+    :stencil-load-op clear :stencil-store-op store)
+  :pipeline writePipe
+  :stencil-reference 1
+  (draw :vertex-count 12))
+
+(render-pass :name testPass
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (depth-attachment :view depthStencilTex :depth-load-op load :depth-store-op store
+    :stencil-load-op load :stencil-store-op store)
+  :pipeline testPipe
+  :stencil-reference 1
+  (draw :vertex-count 3))
+
+(frame :name main :perform [writePass testPass])

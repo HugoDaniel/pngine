@@ -1,0 +1,75 @@
+; test_instanced_simple — four colored triangles from an instanced draw over two
+; mapped float32 vertex buffers: per-instance positions (step-mode instance) and
+; a shared sprite triangle (step-mode vertex). Color comes from
+; @builtin(instance_index). No compute, no textures.
+
+(shader-module :name renderShader :code """
+struct VertexOutput {
+  @builtin(position) position : vec4f,
+  @location(0) color : vec4f,
+}
+
+@vertex
+fn vertexMain(
+  @location(0) a_instancePos : vec2f,
+  @location(1) a_vertexPos : vec2f,
+  @builtin(instance_index) instanceIdx : u32
+) -> VertexOutput {
+  var output : VertexOutput;
+  output.position = vec4f(a_vertexPos + a_instancePos, 0.0, 1.0);
+
+  // Different color per instance
+  let colors = array<vec4f, 4>(
+    vec4f(1.0, 0.0, 0.0, 1.0),  // red
+    vec4f(0.0, 1.0, 0.0, 1.0),  // green
+    vec4f(0.0, 0.0, 1.0, 1.0),  // blue
+    vec4f(1.0, 1.0, 0.0, 1.0)   // yellow
+  );
+  output.color = colors[instanceIdx];
+  return output;
+}
+
+@fragment
+fn fragMain(@location(0) color : vec4f) -> @location(0) vec4f {
+  return color;
+}
+""")
+
+(data :name instanceData :float32 [
+  -0.5 -0.5
+  0.5 -0.5
+  -0.5 0.5
+  0.5 0.5
+])
+
+(buffer :name instanceBuffer :size instanceData :usage [vertex]
+  :mapped-at-creation instanceData)
+
+(data :name spriteData :float32 [
+  -0.15 -0.15
+  0.15 -0.15
+  0.0 0.15
+])
+
+(buffer :name spriteBuffer :size spriteData :usage [vertex]
+  :mapped-at-creation spriteData)
+
+(render-pipeline :name renderPipeline
+  (layout auto)
+  (vertex (module renderShader) (entry vertexMain)
+    (buffers
+      (vertex-buffer :array-stride 8 :step-mode instance
+        (attribute :shader-location 0 :offset 0 :format float32x2))
+      (vertex-buffer :array-stride 8 :step-mode vertex
+        (attribute :shader-location 1 :offset 0 :format float32x2))))
+  (fragment (module renderShader) (entry fragMain)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list)))
+
+(render-pass :name renderPass
+  (color-attachment :view context-current-texture :clear-value [0.0 0.0 0.0 1.0] :load-op clear :store-op store)
+  :pipeline renderPipeline
+  :vertex-buffers [instanceBuffer spriteBuffer]
+  (draw :vertex-count 3 :instance-count 4 :first-vertex 0 :first-instance 0))
+
+(frame :name main :perform [renderPass])

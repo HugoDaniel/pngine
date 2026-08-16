@@ -1,0 +1,156 @@
+; webgpu_instanced_cubes — 16 instanced cubes in a 4x4 grid, after the
+; webgpu-samples `instancedCube` sample. One `cube` shape mesh (position4+
+; color4+uv2, array-stride 40, attributes at offsets 0/16/32) drawn with
+; `:instance-count 16`; the per-instance grid offset and rotation come from
+; `@builtin(instance_index)` and all MVP math runs in the vertex shader. Also
+; uses a depth texture, `:cull-mode back`, `:mapped-at-creation` and a
+; pngine-inputs uniform.
+;
+; `:vertex-count` / `:instance-count` are count slots and accept a bare define
+; name (CUBE_VERTEX_COUNT, NUM_INSTANCES). The vertex-layout numbers (stride 40,
+; offsets 0/16/32) sit in byte-count slots, which take a number or an expression
+; but not a bare symbol, so they are written as literals.
+
+(define :name CUBE_VERTEX_COUNT :value 36)
+(define :name NUM_INSTANCES :value 16)
+
+(data :name cubeVertexArray (cube :format [position4 color4 uv2]))
+
+(buffer :name verticesBuffer :size cubeVertexArray :usage [vertex]
+  :mapped-at-creation cubeVertexArray)
+
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+
+(texture :name depthTexture :size canvas :format depth24plus :usage [render-attachment])
+
+(queue :name writeUniforms
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+(shader-module :name code :code """
+    struct PngineInputs {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> pngine: PngineInputs;
+
+    struct VertexOutput {
+      @builtin(position) position: vec4f,
+      @location(0) fragColor: vec4f,
+    }
+
+    // Perspective projection
+    fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+      let f = 1.0 / tan(fovy * 0.5);
+      let nf = 1.0 / (near - far);
+      return mat4x4f(
+        vec4f(f / aspect, 0, 0, 0),
+        vec4f(0, f, 0, 0),
+        vec4f(0, 0, (far + near) * nf, -1),
+        vec4f(0, 0, 2 * far * near * nf, 0),
+      );
+    }
+
+    fn rotateY(angle: f32) -> mat4x4f {
+      let c = cos(angle);
+      let s = sin(angle);
+      return mat4x4f(
+        vec4f(c, 0, s, 0),
+        vec4f(0, 1, 0, 0),
+        vec4f(-s, 0, c, 0),
+        vec4f(0, 0, 0, 1),
+      );
+    }
+
+    fn rotateX(angle: f32) -> mat4x4f {
+      let c = cos(angle);
+      let s = sin(angle);
+      return mat4x4f(
+        vec4f(1, 0, 0, 0),
+        vec4f(0, c, -s, 0),
+        vec4f(0, s, c, 0),
+        vec4f(0, 0, 0, 1),
+      );
+    }
+
+    fn translate(t: vec3f) -> mat4x4f {
+      return mat4x4f(
+        vec4f(1, 0, 0, 0),
+        vec4f(0, 1, 0, 0),
+        vec4f(0, 0, 1, 0),
+        vec4f(t, 1),
+      );
+    }
+
+    @vertex
+    fn vs(
+      @builtin(instance_index) instanceIdx: u32,
+      @location(0) position: vec4f,
+      @location(1) color: vec4f,
+      @location(2) uv: vec2f
+    ) -> VertexOutput {
+      let xCount = 4u;
+      let yCount = 4u;
+      let step = 4.0;
+      let now = pngine.time;
+
+      // Grid position for this instance
+      let x = instanceIdx % xCount;
+      let y = instanceIdx / xCount;
+      let tx = step * (f32(x) - f32(xCount) / 2.0 + 0.5);
+      let ty = step * (f32(y) - f32(yCount) / 2.0 + 0.5);
+
+      // Model: translate to grid position
+      let model = translate(vec3f(tx, ty, 0.0));
+
+      // Per-instance rotation (matches original sample)
+      let ax = sin((f32(x) + 0.5) * now);
+      let ay = cos((f32(y) + 0.5) * now);
+      let rotation = rotateX(ax) * rotateY(ay);
+
+      // View: camera at z=-12
+      let view = translate(vec3f(0.0, 0.0, -12.0));
+
+      // Projection
+      let proj = perspective(2.0 * 3.14159 / 5.0, pngine.aspect, 1.0, 100.0);
+
+      let mvp = proj * view * model * rotation;
+
+      var output: VertexOutput;
+      output.position = mvp * position;
+      output.fragColor = color;
+      return output;
+    }
+
+    @fragment
+    fn fs(@location(0) fragColor: vec4f) -> @location(0) vec4f {
+      return fragColor;
+    }
+  """)
+
+(render-pipeline :name pipeline
+  (layout auto)
+  (vertex (module code) (entry vs)
+    (buffers
+      (vertex-buffer :array-stride 40
+        (attribute :shader-location 0 :offset 0 :format float32x4)
+        (attribute :shader-location 1 :offset 16 :format float32x4)
+        (attribute :shader-location 2 :offset 32 :format float32x2))))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list) :cull-mode back)
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+(bind-group :name mainBindGroup :layout-pipeline pipeline :layout-index 0
+  (entry :binding 0 :buffer uniforms))
+
+(render-pass :name renderPass
+  (color-attachment :view context-current-texture :clear-value [128 128 128 255] :load-op clear :store-op store)
+  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  :pipeline pipeline
+  :vertex-buffers [verticesBuffer]
+  :bind-groups [mainBindGroup]
+  (draw :vertex-count CUBE_VERTEX_COUNT :instance-count NUM_INSTANCES))
+
+(frame :name main :perform [writeUniforms renderPass])

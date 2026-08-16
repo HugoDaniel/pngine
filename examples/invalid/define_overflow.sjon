@@ -1,0 +1,10 @@
+; Invalid: `:size (* 100000 100000)` evaluates to 10^10, past what a byte-count
+; slot can hold. The schema bound applies to literals only, so the emitter
+; range-checks the evaluated expression and rejects it.
+
+(shader-module :name code :code """
+@compute @workgroup_size(64)
+fn main() {}
+""")
+
+(buffer :name particles :size (* 100000 100000) :usage [storage])

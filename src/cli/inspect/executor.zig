@@ -1,0 +1,739 @@
+//! WASM execution and validation for validate command.
+//!
+//! Uses WAMR with AOT-compiled executor for native performance.
+
+const std = @import("std");
+const pngine = @import("pngine");
+const format = pngine.format;
+const build_options = @import("build_options");
+const types = @import("types.zig");
+const Options = types.Options;
+const ValidationResult = types.ValidationResult;
+const FrameResult = types.FrameResult;
+const FrameDiff = types.FrameDiff;
+const CommandInfo = types.CommandInfo;
+
+// WAMR runtime for native WASM/AOT execution
+const wamr = @import("wamr.zig");
+const WamrRuntime = wamr.WamrRuntime;
+
+const cmd_validator = @import("cmd_validator.zig");
+const Validator = cmd_validator.Validator;
+const symptom_diagnosis = @import("symptom_diagnosis.zig");
+const wgsl_reflect = @import("wgsl_reflect.zig");
+
+// Embedded WASM executor for WAMR interpreter
+// Note: AOT is not used for embedded scenarios because @embedFile puts data
+// in read-only memory which can't be properly mmap'd for execution
+const embedded_wasm = if (build_options.has_embedded_wasm)
+    @embedFile("embedded_wasm")
+else
+    @as([]const u8, &.{});
+
+/// Check if WASM execution is available.
+pub fn isAvailable() bool {
+    return WamrRuntime.isAvailable() and embedded_wasm.len > 0;
+}
+
+/// Validate bytecode structure and content.
+pub fn validateBytecode(
+    allocator: std.mem.Allocator,
+    bytecode: []const u8,
+    result: *ValidationResult,
+    opts: *const Options,
+) !void {
+    const version = try checkHeader(allocator, bytecode, result) orelse return;
+
+    // Deserialize the full module for analysis
+    const module = format.deserialize(allocator, bytecode) catch |err| {
+        try result.errors.append(allocator, .{
+            .code = "E004",
+            .severity = .err,
+            .message = switch (err) {
+                error.InvalidMagic => "Invalid magic bytes",
+                error.InvalidFormat => "Invalid bytecode format",
+                error.OutOfMemory => "Out of memory during parsing",
+                else => "Failed to parse bytecode",
+            },
+            .command_index = null,
+        });
+        result.status = .err;
+        return;
+    };
+    defer @constCast(&module).deinit(allocator);
+
+    // Extract WGSL from module structure (WGSL Table → Data Section)
+    try extractWgslFromModule(allocator, result, &module, opts.extract_wgsl);
+
+    result.module_info = moduleInfoOf(&module, version);
+    try checkModuleContents(allocator, &module, result);
+    try runWasmOrWarn(allocator, bytecode, result, opts);
+}
+
+/// The `"module"` block of the report: pure projection of the parsed module.
+fn moduleInfoOf(module: *const format.Module, version: u16) types.ModuleInfo {
+    return .{
+        .version = version,
+        .has_executor = module.hasEmbeddedExecutor(),
+        .executor_size = @intCast(module.executor.len),
+        .bytecode_size = @intCast(module.bytecode.len),
+        .strings_count = @intCast(module.strings.strings.items.len),
+        .data_blobs_count = @intCast(module.data.blobs.items.len),
+        .wgsl_entries_count = @intCast(module.wgsl.entries.items.len),
+        .uniform_entries_count = @intCast(module.uniforms.bindings.items.len),
+        .has_animation = module.animation.hasAnimation(),
+        .scene_count = if (module.animation.info) |info| @intCast(info.scenes.len) else 0,
+    };
+}
+
+/// Run the bytecode under WAMR, downgrading every failure to a W100 warning.
+///
+/// A run that cannot happen is not the same as a program that is wrong: the
+/// static checks above already passed, so an unavailable or failing runtime
+/// costs coverage, not validity. Hence warning, never error.
+fn runWasmOrWarn(
+    allocator: std.mem.Allocator,
+    bytecode: []const u8,
+    result: *ValidationResult,
+    opts: *const Options,
+) !void {
+    if (isAvailable()) {
+        executeWasm(allocator, bytecode, result, opts) catch |err| {
+            try result.warnings.append(allocator, .{
+                .code = "W100",
+                .severity = .warning,
+                .message = switch (err) {
+                    error.InitFailed => "WASM runtime init failed",
+                    error.ParseFailed => "WASM parse failed",
+                    error.LoadFailed => "WASM load failed",
+                    error.InstantiateFailed => "WASM instantiate failed",
+                    error.FunctionNotFound => "WASM function not found",
+                    error.CallFailed => "WASM call failed",
+                    error.MemoryAccessFailed => "WASM memory access failed",
+                    error.NotAvailable => "WASM runtime not available",
+                    else => "WASM execution failed",
+                },
+                .command_index = null,
+            });
+            if (result.status == .ok) result.status = .warning;
+        };
+        return;
+    }
+
+    // Why it could not run is only worth saying when the user asked for detail.
+    if (!opts.quiet and opts.verbose) {
+        try result.warnings.append(allocator, .{
+            .code = "W100",
+            .severity = .warning,
+            .message = if (!WamrRuntime.isAvailable())
+                "WAMR not available at compile time"
+            else
+                "No embedded WASM executor",
+            .command_index = null,
+        });
+        if (result.status == .ok) result.status = .warning;
+    }
+}
+
+/// Check the PNGB header before anything tries to deserialize it.
+///
+/// Returns the format version, or null when the header is unusable — in which
+/// case `result` already carries the error and the caller must stop. Splitting
+/// this out is what keeps the three near-identical bail-outs from making the
+/// rest of `validateBytecode` hard to see.
+fn checkHeader(
+    allocator: std.mem.Allocator,
+    bytecode: []const u8,
+    result: *ValidationResult,
+) !?u16 {
+    const fatal = struct {
+        fn f(a: std.mem.Allocator, r: *ValidationResult, code: []const u8, msg: []const u8) !void {
+            try r.errors.append(a, .{
+                .code = code,
+                .severity = .err,
+                .message = msg,
+                .command_index = null,
+            });
+            r.status = .err;
+        }
+    }.f;
+
+    if (bytecode.len < format.HEADER_SIZE) {
+        try fatal(allocator, result, "E001", "Bytecode too small - missing header");
+        return null;
+    }
+    if (!std.mem.eql(u8, bytecode[0..4], format.MAGIC)) {
+        try fatal(allocator, result, "E002", "Invalid magic bytes - not a PNGB file");
+        return null;
+    }
+
+    const version = std.mem.readInt(u16, bytecode[4..6], .little);
+    if (version != format.VERSION) {
+        try fatal(allocator, result, "E003", "Unsupported PNGB version");
+        return null;
+    }
+
+    std.debug.assert(bytecode.len >= format.HEADER_SIZE);
+    return version;
+}
+
+/// Warn about a module that parsed cleanly but has nothing in it.
+fn checkModuleContents(
+    allocator: std.mem.Allocator,
+    module: *const format.Module,
+    result: *ValidationResult,
+) !void {
+    const warn = struct {
+        fn f(a: std.mem.Allocator, r: *ValidationResult, code: []const u8, msg: []const u8) !void {
+            try r.warnings.append(a, .{
+                .code = code,
+                .severity = .warning,
+                .message = msg,
+                .command_index = null,
+            });
+            if (r.status == .ok) r.status = .warning;
+        }
+    }.f;
+
+    if (module.bytecode.len == 0) try warn(allocator, result, "W001", "Empty bytecode section");
+    if (module.wgsl.entries.items.len == 0) try warn(allocator, result, "W002", "No WGSL shaders defined");
+}
+
+/// Execute WASM to capture command buffer output.
+///
+/// Runs init phase once, then executes multiple frames based on opts.frame_indices.
+/// Collects per-frame results and performs diff analysis for animation debugging.
+///
+/// Complexity: O(init_commands + sum(frame_commands))
+///
+/// Pre-condition: bytecode is valid PNGB format
+/// Post-condition: result contains all frame data and validation issues
+fn executeWasm(
+    allocator: std.mem.Allocator,
+    bytecode: []const u8,
+    result: *ValidationResult,
+    opts: *const Options,
+) !void {
+    // Pre-conditions
+    std.debug.assert(bytecode.len >= format.HEADER_SIZE);
+    std.debug.assert(opts.frame_indices.len > 0);
+
+    wamr.WamrRuntime.setVerbose(opts.verbose);
+
+    // 1MB stack and 1MB heap.
+    var runtime = try WamrRuntime.init(allocator, 1024 * 1024, 1024 * 1024);
+    defer runtime.deinit();
+
+    const module = try loadIntoRuntime(allocator, &runtime, bytecode);
+    defer @constCast(&module).deinit(allocator);
+
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+    try configureValidator(&validator, &runtime, &module);
+
+    // Init runs first and unconditionally as far as this function is concerned:
+    // the frame phase depends on the resources it creates. A non-zero return
+    // from either phase is fatal, so both report it and stop.
+    if (opts.phase == .init or opts.phase == .both) {
+        if (!try runInitPhase(allocator, &runtime, &validator, result)) return;
+    }
+    if (opts.phase == .frame or opts.phase == .both) {
+        if (!try runFramePhases(allocator, &runtime, &validator, result, opts)) return;
+    }
+
+    try collectFindings(allocator, &validator, result, opts);
+
+    // Post-condition: frame_results populated if frame phase was run
+    if (opts.phase == .frame or opts.phase == .both) {
+        std.debug.assert(result.frame_results.items.len > 0 or result.status == .err);
+    }
+}
+
+/// Copy the bytecode and its data section into WASM memory, and hand back the
+/// deserialized module (which the caller owns).
+fn loadIntoRuntime(
+    allocator: std.mem.Allocator,
+    runtime: *WamrRuntime,
+    bytecode: []const u8,
+) !format.Module {
+    std.debug.assert(bytecode.len >= format.HEADER_SIZE);
+
+    try runtime.loadModule(embedded_wasm);
+    runtime.linkLogFunction() catch {}; // host log is optional
+
+    const bytecode_ptr = try runtime.callGetPtr("getBytecodePtr");
+    const data_ptr = try runtime.callGetPtr("getDataPtr");
+
+    try runtime.writeMemory(bytecode_ptr, bytecode);
+    try runtime.callSetLen("setBytecodeLen", @intCast(bytecode.len));
+
+    const module = try format.deserialize(allocator, bytecode);
+    errdefer @constCast(&module).deinit(allocator);
+
+    // The data section runs to the WGSL table, or to end-of-file when there
+    // isn't one.
+    const data_offset = module.header.data_section_offset;
+    const data_end = if (module.header.wgsl_table_offset > 0)
+        module.header.wgsl_table_offset
+    else
+        @as(u32, @intCast(bytecode.len));
+
+    if (data_end > data_offset) {
+        const data_section = bytecode[data_offset..data_end];
+        try runtime.writeMemory(data_ptr, data_section);
+        try runtime.callSetLen("setDataLen", @intCast(data_section.len));
+    }
+
+    return module;
+}
+
+/// Give the validator the two things it cannot derive from the command stream:
+/// the WASM memory the descriptors live in, and which buffers carry uniforms.
+fn configureValidator(
+    validator: *Validator,
+    runtime: *WamrRuntime,
+    module: *const format.Module,
+) !void {
+    // Enables E004 bounds checking and E006 descriptor parsing. Without it both
+    // are skipped rather than reported wrongly.
+    if (runtime.getMemory()) |mem| {
+        validator.setWasmMemory(mem);
+    } else |_| {}
+
+    // W009: buffers with uniform fields may conflict with the setUniform() API.
+    if (module.uniforms.bindings.items.len > 0) {
+        var buffer_ids: [64]u16 = undefined;
+        const count = @min(module.uniforms.bindings.items.len, 64);
+        for (module.uniforms.bindings.items[0..count], 0..) |binding, i| {
+            buffer_ids[i] = binding.buffer_id;
+        }
+        try validator.setUniformBufferIds(buffer_ids[0..count]);
+    }
+}
+
+/// Run `init()` and validate the commands it produced.
+///
+/// Returns false when init failed, meaning the caller must stop: everything
+/// downstream assumes the resources it creates exist.
+fn runInitPhase(
+    allocator: std.mem.Allocator,
+    runtime: *WamrRuntime,
+    validator: *Validator,
+    result: *ValidationResult,
+) !bool {
+    if (try runtime.callInit() != 0) {
+        try result.errors.append(allocator, .{
+            .code = "E010",
+            .severity = .err,
+            .message = "WASM init() returned error",
+            .command_index = null,
+        });
+        result.status = .err;
+        return false;
+    }
+
+    const cmd_ptr = try runtime.callGetPtr("getCommandPtr");
+    const cmd_len = try runtime.callGetPtr("getCommandLen");
+    if (cmd_len > 0) {
+        const cmd_data = try runtime.readMemory(cmd_ptr, cmd_len);
+        result.init_commands = try cmd_validator.parseCommands(allocator, cmd_data);
+        try validator.validate(result.init_commands);
+        try crossValidateWgslPipelines(allocator, result);
+    }
+    return true;
+}
+
+/// Run `frame()` once per requested frame index, and diff them if there is more
+/// than one.
+///
+/// Returns false when a frame failed, for the same reason `runInitPhase` does.
+fn runFramePhases(
+    allocator: std.mem.Allocator,
+    runtime: *WamrRuntime,
+    validator: *Validator,
+    result: *ValidationResult,
+    opts: *const Options,
+) !bool {
+    const max_frames: u32 = @min(@as(u32, @intCast(opts.frame_indices.len)), 100);
+
+    for (0..max_frames) |frame_loop_idx| {
+        const frame_idx = opts.frame_indices[frame_loop_idx];
+        const frame_time = opts.time + @as(f32, @floatFromInt(frame_idx)) * opts.time_step;
+
+        if (try runtime.callFrame(frame_time, opts.width, opts.height) != 0) {
+            try result.errors.append(allocator, .{
+                .code = "E011",
+                .severity = .err,
+                .message = "WASM frame() returned error",
+                .command_index = null,
+            });
+            result.status = .err;
+            return false;
+        }
+
+        const cmd_ptr = try runtime.callGetPtr("getCommandPtr");
+        const cmd_len = try runtime.callGetPtr("getCommandLen");
+        if (cmd_len == 0) continue;
+
+        const cmd_data = try runtime.readMemory(cmd_ptr, cmd_len);
+        const frame_commands = try cmd_validator.parseCommands(allocator, cmd_data);
+
+        try result.frame_results.append(allocator, .{
+            .frame_index = frame_idx,
+            .time = frame_time,
+            .commands = frame_commands,
+            .draw_count = countDrawCalls(frame_commands),
+            .dispatch_count = countDispatchCalls(frame_commands),
+        });
+
+        // Only frame 0 feeds the main validator, which already carries the
+        // resources init created; `frame_commands` stays the single-frame view
+        // the report has always exposed.
+        if (frame_loop_idx == 0) {
+            result.frame_commands = frame_commands;
+            try validator.validate(frame_commands);
+        }
+    }
+
+    if (result.frame_results.items.len > 1) {
+        result.frame_diff = analyzeFrameDiff(result.frame_results.items);
+    }
+    return true;
+}
+
+/// Move everything the validator accumulated into the report.
+fn collectFindings(
+    allocator: std.mem.Allocator,
+    validator: *Validator,
+    result: *ValidationResult,
+    opts: *const Options,
+) !void {
+    // The two severity enums are distinct types (the validator's `Severity` vs
+    // ValidationIssue's inline one), so each arm names its own tag rather than
+    // forwarding `issue.severity`.
+    for (validator.issues.items) |issue| {
+        if (issue.severity == .err) {
+            try result.errors.append(allocator, .{
+                .code = issue.code,
+                .severity = .err,
+                .message = issue.message,
+                .command_index = issue.command_index,
+            });
+        } else {
+            try result.warnings.append(allocator, .{
+                .code = issue.code,
+                .severity = .warning,
+                .message = issue.message,
+                .command_index = issue.command_index,
+            });
+        }
+    }
+
+    if (validator.hasErrors()) {
+        result.status = .err;
+    } else if (validator.warningCount() > 0 and result.status == .ok) {
+        result.status = .warning;
+    }
+
+    result.resource_counts = validator.getResourceCounts();
+    result.draw_count = validator.draw_count;
+    result.dispatch_count = validator.dispatch_count;
+    result.likely_causes = validator.analyzeLikelyCauses();
+
+    if (opts.symptom != .none) {
+        const symptom = switch (opts.symptom) {
+            .black => symptom_diagnosis.Symptom.black,
+            .colors => symptom_diagnosis.Symptom.colors,
+            .blend => symptom_diagnosis.Symptom.blend,
+            .flicker => symptom_diagnosis.Symptom.flicker,
+            .geometry => symptom_diagnosis.Symptom.geometry,
+            .none => symptom_diagnosis.Symptom.none,
+        };
+        result.diagnosis = symptom_diagnosis.diagnose(
+            symptom,
+            result.init_commands,
+            result.frame_commands,
+            validator,
+        );
+    }
+}
+
+/// Count DRAW and DRAW_INDEXED commands in a command list.
+///
+/// Complexity: O(n) where n = commands.len
+///
+/// Post-condition: Result <= commands.len
+pub fn countDrawCalls(commands: []const CommandInfo) u32 {
+    // Pre-condition: commands is bounded
+    std.debug.assert(commands.len <= 10000);
+
+    var count: u32 = 0;
+    for (commands) |cmd| {
+        if (cmd.cmd == .draw or cmd.cmd == .draw_indexed) {
+            count += 1;
+        }
+    }
+
+    // Post-condition: count cannot exceed input length
+    std.debug.assert(count <= commands.len);
+    return count;
+}
+
+/// Count DISPATCH commands in a command list.
+///
+/// Complexity: O(n) where n = commands.len
+///
+/// Post-condition: Result <= commands.len
+pub fn countDispatchCalls(commands: []const CommandInfo) u32 {
+    // Pre-condition: commands is bounded
+    std.debug.assert(commands.len <= 10000);
+
+    var count: u32 = 0;
+    for (commands) |cmd| {
+        if (cmd.cmd == .dispatch) {
+            count += 1;
+        }
+    }
+
+    // Post-condition: count cannot exceed input length
+    std.debug.assert(count <= commands.len);
+    return count;
+}
+
+/// Analyze differences between frames for animation debugging.
+///
+/// Complexity: O(n) where n = max(frames[0].commands.len, frames[last].commands.len)
+///
+/// Detects:
+/// - Whether time values are changing (animation working)
+/// - Whether draw counts are consistent
+/// - Static vs varying command patterns
+///
+/// Pre-condition: frames.len >= 2
+/// Post-condition: static_command_count + varying_command_count <= max commands in any frame
+pub fn analyzeFrameDiff(frames: []const FrameResult) FrameDiff {
+    // Pre-conditions
+    std.debug.assert(frames.len >= 2);
+    std.debug.assert(frames.len <= 100); // Bounded by max frames limit
+
+    // Check if times are varying
+    var time_is_varying = false;
+    const first_time = frames[0].time;
+    for (frames[1..]) |fr| {
+        if (fr.time != first_time) {
+            time_is_varying = true;
+            break;
+        }
+    }
+
+    // Check if draw counts are consistent
+    var draw_counts_consistent = true;
+    const first_draw_count = frames[0].draw_count;
+    for (frames[1..]) |fr| {
+        if (fr.draw_count != first_draw_count) {
+            draw_counts_consistent = false;
+            break;
+        }
+    }
+
+    // Count static vs varying commands (compare first and last frame)
+    var static_count: u32 = 0;
+    var varying_count: u32 = 0;
+
+    const first_cmds = frames[0].commands;
+    const last_cmds = frames[frames.len - 1].commands;
+
+    if (first_cmds.len == last_cmds.len) {
+        for (first_cmds, last_cmds) |c1, c2| {
+            if (c1.cmd == c2.cmd) {
+                static_count += 1;
+            } else {
+                varying_count += 1;
+            }
+        }
+    } else {
+        // Different command counts means significant variation
+        varying_count = @intCast(@max(first_cmds.len, last_cmds.len));
+    }
+
+    // Generate summary message
+    const summary: []const u8 = if (!time_is_varying)
+        "Time values identical across frames - animation may not be working"
+    else if (!draw_counts_consistent)
+        "Draw counts vary between frames - check for conditional rendering issues"
+    else
+        "Animation appears to be working correctly";
+
+    const result: FrameDiff = .{
+        .static_command_count = static_count,
+        .varying_command_count = varying_count,
+        .time_is_varying = time_is_varying,
+        .draw_counts_consistent = draw_counts_consistent,
+        .summary = summary,
+    };
+
+    // Post-condition: counts are bounded by max command count
+    const max_cmds: u32 = @intCast(@max(first_cmds.len, last_cmds.len));
+    std.debug.assert(result.static_command_count + result.varying_command_count <= max_cmds + 1);
+
+    return result;
+}
+
+/// Extract WGSL source from the PNGB module structure.
+///
+/// Reads shader code from the WGSL Table → Data Section mapping in the module,
+/// not from WASM memory. This is more reliable because the WASM executor may
+/// use wgsl_id (table index) vs data_id (section index) differently.
+///
+/// Complexity: O(wgsl_count * source_size) for parsing
+///
+/// Pre-condition: module has been deserialized
+/// Post-condition: result.wgsl_shaders populated with parsed info
+fn extractWgslFromModule(
+    allocator: std.mem.Allocator,
+    result: *ValidationResult,
+    module: *const format.Module,
+    extract_source: bool,
+) !void {
+    // Pre-conditions
+    std.debug.assert(result.wgsl_shader_count == 0); // Fresh start
+
+    // One arena for every shader's reflection, owned by the result.
+    if (result.wgsl_arena == null) {
+        result.wgsl_arena = std.heap.ArenaAllocator.init(allocator);
+    }
+    const arena = result.wgsl_arena.?.allocator();
+
+    // Iterate through WGSL table entries
+    const wgsl_count = module.wgsl.count();
+    for (0..wgsl_count) |wgsl_id_usize| {
+        const wgsl_id: u16 = @intCast(wgsl_id_usize);
+
+        // Get WGSL table entry
+        const entry = module.wgsl.get(wgsl_id) orelse continue;
+
+        // Get data from data section using data_id from WGSL table
+        const data_id = pngine.data_section.DataId.fromInt(entry.data_id);
+        const wgsl_source = module.data.get(data_id);
+        if (wgsl_source.len == 0) continue;
+
+        // Reflect the WGSL for entry points and bindings
+        const parse_result = wgsl_reflect.reflectShader(arena, wgsl_source);
+
+        // Store source if requested (for --extract-wgsl flag)
+        var source_copy: ?[]const u8 = null;
+        if (extract_source) {
+            source_copy = allocator.dupe(u8, wgsl_source) catch null;
+        }
+
+        // Add to result (bounded by MAX_SHADERS)
+        // Use wgsl_id as shader_id for now (they may differ in actual use)
+        result.addWgslShader(.{
+            .shader_id = wgsl_id,
+            .parse_result = parse_result,
+            .source = source_copy,
+        });
+
+        // Safety: stop if we've hit the shader limit
+        if (result.wgsl_shader_count >= types.MAX_SHADERS) break;
+    }
+
+    // Post-condition: shader count is bounded
+    std.debug.assert(result.wgsl_shader_count <= types.MAX_SHADERS);
+}
+
+/// Cross-validate WGSL shaders against pipeline commands.
+///
+/// Detects:
+/// - Shaders with no entry points (empty or parse failed)
+/// - Render pipelines without vertex/fragment shaders available
+/// - Compute pipelines without compute shaders available
+///
+/// Complexity: O(shaders * commands)
+///
+/// Pre-condition: extractWgslShaders has been called
+/// Post-condition: warnings added to result.warnings if issues found
+fn crossValidateWgslPipelines(
+    allocator: std.mem.Allocator,
+    result: *ValidationResult,
+) !void {
+    const wgsl_shaders = result.getWgslShaders();
+    if (wgsl_shaders.len == 0) return;
+
+    const stages = try collectShaderStages(allocator, result, wgsl_shaders);
+    const pipelines = countPipelineKinds(result.init_commands);
+
+    if (pipelines.render > 0) {
+        if (!stages.vertex) try warnMissingStage(allocator, result, "W202", "Render pipeline exists but no @vertex entry point found in shaders");
+        if (!stages.fragment) try warnMissingStage(allocator, result, "W203", "Render pipeline exists but no @fragment entry point found in shaders");
+    }
+    if (pipelines.compute > 0 and !stages.compute) {
+        try warnMissingStage(allocator, result, "W204", "Compute pipeline exists but no @compute entry point found in shaders");
+    }
+}
+
+/// Which shader stages the module's WGSL actually provides, warning (W201)
+/// about any shader that reflects to nothing.
+fn collectShaderStages(
+    allocator: std.mem.Allocator,
+    result: *ValidationResult,
+    shaders: anytype,
+) !struct { vertex: bool, fragment: bool, compute: bool } {
+    var vertex = false;
+    var fragment = false;
+    var compute = false;
+
+    for (shaders) |shader| {
+        const entry_points = shader.getEntryPoints();
+        if (entry_points.len == 0) {
+            try warnMissingStage(allocator, result, "W201", "Shader has no entry points - may not be valid WGSL");
+            continue;
+        }
+        for (entry_points) |ep| switch (ep.stage) {
+            .vertex => vertex = true,
+            .fragment => fragment = true,
+            .compute => compute = true,
+        };
+    }
+
+    return .{ .vertex = vertex, .fragment = fragment, .compute = compute };
+}
+
+/// How many pipelines of each kind the init phase creates.
+fn countPipelineKinds(init_commands: []const CommandInfo) struct { render: u32, compute: u32 } {
+    var render: u32 = 0;
+    var compute: u32 = 0;
+
+    const max_iter: u32 = @min(@as(u32, @intCast(init_commands.len)), 10000);
+    for (0..max_iter) |i| {
+        switch (init_commands[i].cmd) {
+            .create_render_pipeline => render += 1,
+            .create_compute_pipeline => compute += 1,
+            else => {},
+        }
+    }
+
+    std.debug.assert(render + compute <= max_iter);
+    return .{ .render = render, .compute = compute };
+}
+
+/// Append a W2xx shader/pipeline mismatch warning and lift the status to
+/// `.warning` if nothing worse has been found yet.
+fn warnMissingStage(
+    allocator: std.mem.Allocator,
+    result: *ValidationResult,
+    code: []const u8,
+    message: []const u8,
+) !void {
+    try result.warnings.append(allocator, .{
+        .code = code,
+        .severity = .warning,
+        .message = message,
+        .command_index = null,
+    });
+    if (result.status == .ok) result.status = .warning;
+}
+
+// ============================================================================
+// Tests
+// ============================================================================

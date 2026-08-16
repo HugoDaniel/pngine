@@ -1,0 +1,30 @@
+; Invalid: the (entry …) :offset/:size slice ends past the declared buffer size
+; (384 + 256 = 640 > 512); the compiler rejects it rather than leaving an
+; anonymous bind-group validation error to the runtime.
+
+(buffer :name colors :size 512 :usage [uniform copy-dst])
+
+(shader-module :name code :code """
+    @group(0) @binding(0) var<uniform> color: vec4f;
+    @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+      return vec4f(p[i], 0.0, 1.0);
+    }
+    @fragment fn fs() -> @location(0) vec4f { return color; }
+  """)
+
+(render-pipeline :name pipe
+  (layout auto)
+  (vertex (module code) (entry vs))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(bind-group :name g :layout-pipeline pipe :layout-index 0
+  (entry :binding 0 :buffer colors :offset 384 :size 256))
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipe :bind-groups [g]
+  (draw :vertex-count 3))
+
+(frame :name main :perform [draw])

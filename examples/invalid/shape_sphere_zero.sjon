@@ -1,0 +1,7 @@
+; Invalid: `(sphere … :segments 0)`; a sphere needs at least 3 segments. Shape
+; sub-forms are open, so the schema carries no bound here; the emitter checks
+; the generator config itself and rejects it.
+
+(data :name mesh (sphere :format [position4] :segments 0))
+
+(buffer :name verts :size mesh :usage [vertex] :mapped-at-creation mesh)

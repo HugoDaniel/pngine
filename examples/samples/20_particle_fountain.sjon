@@ -1,0 +1,237 @@
+; Particle fountain — 2048 GPU-simulated particles shot upward from a point,
+; falling under gravity and respawning when their lifetime ends; drawn as
+; points that fade yellow → orange → dark red and blend additively (src-alpha
+; over one). A compute `(init …)` seeds the `:pool 2` particle buffer once with
+; staggered lifetimes; each frame a compute step reads one pool variant and
+; writes the other (`:ping-pong` bind-group entries selected with
+; `:bind-groups-pool-offsets`), then the render pass binds the variant just
+; written as its instance-step vertex buffer (`:vertex-buffers-pool-offsets
+; [1]`) and draws one point per instance with `point-list` topology.
+;
+; Particle layout: pos(3) life(1) vel(3) maxLife(1) = 32 bytes. Both dispatches
+; use a scalar workgroup count of 32 (32 × 64 threads = 2048 particles).
+
+(define :name NUM_PARTICLES :value 2048)
+
+(buffer :name particleBuffer :size (* NUM_PARTICLES 8 4) :usage [vertex storage] :pool 2)
+
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+
+(queue :name writeUniforms
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+(init :name initParticles :buffer particleBuffer :shader initShader :workgroups 32)
+
+(shader-module :name initShader :code """
+struct Particle {
+  pos: vec3f,
+  life: f32,
+  vel: vec3f,
+  maxLife: f32,
+}
+struct Particles { data: array<Particle> }
+
+@binding(0) @group(0) var<storage, read_write> particles: Particles;
+
+fn hash(n: u32) -> f32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return f32(x) / f32(0xffffffffu);
+}
+
+const NUM: u32 = 2048u;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let i = id.x;
+  if (i >= NUM) { return; }
+
+  // Stagger initial lifetimes
+  particles.data[i].life = -hash(i * 13u) * 3.0;
+  particles.data[i].maxLife = 1.5 + hash(i * 17u) * 1.5;
+  particles.data[i].pos = vec3f(0.0, -0.5, 0.0);
+  particles.data[i].vel = vec3f(0.0);
+}
+""")
+
+(shader-module :name stepShader :code """
+struct Uniforms {
+  time: f32,
+  width: f32,
+  height: f32,
+  aspect: f32,
+}
+@group(0) @binding(0) var<uniform> u: Uniforms;
+
+struct Particle {
+  pos: vec3f,
+  life: f32,
+  vel: vec3f,
+  maxLife: f32,
+}
+struct Particles { data: array<Particle> }
+
+@group(0) @binding(1) var<storage, read> particlesIn: Particles;
+@group(0) @binding(2) var<storage, read_write> particlesOut: Particles;
+
+fn hash(n: u32) -> f32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return f32(x) / f32(0xffffffffu);
+}
+
+const PI: f32 = 3.14159265359;
+const DT: f32 = 0.016;
+const GRAVITY: f32 = -1.5;
+const NUM: u32 = 2048u;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let i = id.x;
+  if (i >= NUM) { return; }
+
+  var p = particlesIn.data[i];
+  p.life += DT;
+
+  if (p.life <= 0.0 || p.life > p.maxLife) {
+    // Respawn at fountain source
+    p.pos = vec3f(0.0, -0.5, 0.0);
+
+    let seed = u32(u.time * 1000.0) + i;
+    let angle = hash(seed * 7u) * PI * 2.0;
+    let spread = hash(seed * 11u) * 0.3;
+    let upSpeed = 1.8 + hash(seed * 13u) * 0.8;
+
+    p.vel = vec3f(
+      cos(angle) * spread,
+      upSpeed,
+      sin(angle) * spread
+    );
+
+    p.life = 0.001;
+    p.maxLife = 1.2 + hash(seed * 17u) * 1.0;
+  } else {
+    // Physics
+    p.vel.y += GRAVITY * DT;
+    p.pos += p.vel * DT;
+  }
+
+  particlesOut.data[i] = p;
+}
+""")
+
+(compute-pipeline :name stepPipeline :module stepShader :entry main)
+
+(bind-group :name stepBindGroup :layout-pipeline stepPipeline :layout-index 0 :pool 2
+  (entry :binding 0 :buffer uniforms)
+  (entry :binding 1 :buffer particleBuffer :ping-pong 0)
+  (entry :binding 2 :buffer particleBuffer :ping-pong 1))
+
+(compute-pass :name stepPass
+  :pipeline stepPipeline
+  :bind-groups [stepBindGroup]
+  :bind-groups-pool-offsets [0]
+  :dispatch-workgroups 32)
+
+(shader-module :name renderShader :code """
+struct Uniforms {
+  time: f32,
+  width: f32,
+  height: f32,
+  aspect: f32,
+}
+@group(0) @binding(0) var<uniform> u: Uniforms;
+
+struct VertexOutput {
+  @builtin(position) pos: vec4f,
+  @location(0) life: f32,
+  @location(1) maxLife: f32,
+}
+
+@vertex
+fn vs(
+  @location(0) position: vec3f,
+  @location(1) life: f32,
+  @location(2) velocity: vec3f,
+  @location(3) maxLife: f32
+) -> VertexOutput {
+  var out: VertexOutput;
+
+  // Hide waiting particles
+  var pos = position;
+  if (life <= 0.0) {
+    pos = vec3f(100.0);
+  }
+
+  // Simple perspective
+  let z = pos.z + 2.5;
+  let projX = pos.x / z / u.aspect;
+  let projY = pos.y / z;
+
+  out.pos = vec4f(projX, projY, 0.5, 1.0);
+  out.life = life;
+  out.maxLife = maxLife;
+  return out;
+}
+
+@fragment
+fn fs(in: VertexOutput) -> @location(0) vec4f {
+  let t = clamp(in.life / in.maxLife, 0.0, 1.0);
+
+  // Yellow -> Orange -> Red -> Dark red
+  var color = mix(
+    vec3f(1.0, 0.9, 0.3),
+    vec3f(1.0, 0.4, 0.1),
+    t
+  );
+  color = mix(color, vec3f(0.3, 0.0, 0.0), smoothstep(0.7, 1.0, t));
+
+  // Fade out
+  let alpha = 1.0 - smoothstep(0.6, 1.0, t);
+
+  return vec4f(color * alpha, alpha);
+}
+""")
+
+(render-pipeline :name renderPipeline
+  (layout auto)
+  (vertex (module renderShader) (entry vs)
+    (buffers
+      (vertex-buffer :array-stride 32 :step-mode instance
+        (attribute :shader-location 0 :offset 0 :format float32x3)
+        (attribute :shader-location 1 :offset 12 :format float32)
+        (attribute :shader-location 2 :offset 16 :format float32x3)
+        (attribute :shader-location 3 :offset 28 :format float32))))
+  (fragment (module renderShader) (entry fs)
+    (targets
+      (target :format preferred-canvas-format
+        (blend
+          (color :src-factor src-alpha :dst-factor one)
+          (alpha :src-factor one :dst-factor one)))))
+  (primitive (topology point-list)))
+
+(bind-group :name renderBindGroup :layout-pipeline renderPipeline :layout-index 0
+  (entry :binding 0 :buffer uniforms))
+
+; drawPass binds the ping-pong particle buffer as its instance vertex buffer.
+; The pipeline declares a step-mode-instance vertex layout that the vertex stage
+; reads via @location(0..3), so vertex buffer 0 must be set.
+; `:vertex-buffers-pool-offsets [1]` selects the variant the compute step just
+; wrote: stepBindGroup variant 0 reads particleBuffer[0] and writes [1] at
+; frame 0, so offset 1 renders the fresh output.
+(render-pass :name drawPass
+  (color-attachment :view context-current-texture :clear-value [0.02 0.02 0.05 1] :load-op clear :store-op store)
+  :pipeline renderPipeline
+  :vertex-buffers [particleBuffer]
+  :vertex-buffers-pool-offsets [1]
+  :bind-groups [renderBindGroup]
+  :bind-groups-pool-offsets [0]
+  (draw :vertex-count 1 :instance-count NUM_PARTICLES))
+
+(frame :name main
+  :init [initParticles]
+  :perform [writeUniforms stepPass drawPass])

@@ -1,0 +1,12 @@
+; Invalid: `:pool (* COPIES 3)` evaluates to 300, past the 255 ceiling on a
+; ping-pong pool. The schema bound applies to literals only, so the emitter
+; range-checks the expression result and rejects it.
+
+(define :name COPIES :value 100)
+
+(shader-module :name code :code """
+@compute @workgroup_size(64)
+fn main() {}
+""")
+
+(buffer :name particles :size 1024 :usage [storage] :pool (* COPIES 3))

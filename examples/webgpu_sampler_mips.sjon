@@ -1,0 +1,154 @@
+; webgpu_sampler_mips — the checkerboard mip debug view of the webgpu-samples
+; `samplerParameters` sample; companion to webgpu_sampler_grid.sjon (filter /
+; address comparison). This one makes mip selection visible. Upper mip levels
+; are written by an `:init` compute pass per mip through single-level storage
+; views (`(texture-view … :base-mip-level N :mip-level-count 1)`).
+;
+; Each of the 4 mips of a 64×64 texture is a checkerboard in an identifying
+; hue — mip0 blue (64²), mip1 green (32²), mip2 orange (16²), mip3 magenta
+; (8²) — with the same spatial check frequency at every level, so only the
+; color says which level the sampler picked. Two rows of 5 quads shrink from
+; 128 px to 8 px (texel:pixel = 0.5, 1.33, 2.67, 5.33, 8 → mip level
+; −1, 0.41, 1.42, 2.42, 3):
+;
+;   TOP    — :mipmap-filter nearest — hard hue switches at mip boundaries
+;   BOTTOM — :mipmap-filter linear (trilinear) — hues blend between levels
+;            on the off-boundary quads (blue→green, green→orange, …)
+;
+; The bake shader is one entry point for all 4 mips: it derives both its
+; bounds and its hue from textureDimensions() of the bound view, so 4 bind
+; groups (one per mip view) reuse it with no uniforms. Quad geometry is an
+; in-shader table indexed by instance_index; the two rows are two vertex
+; entries (top/bottom), one pipeline each, sharing one module. Sizes are
+; exact at the native 512² frame; a DPR-2 browser canvas doubles the pixel
+; density, which shifts every texel:pixel ratio (and thus the selected mips)
+; one level down — expected, not a defect.
+
+(texture :name mipTex :width 64 :height 64 :format rgba8unorm
+  :mip-level-count 4
+  :usage [texture-binding storage-binding])
+
+(texture-view :name mip0 :texture mipTex :base-mip-level 0 :mip-level-count 1)
+(texture-view :name mip1 :texture mipTex :base-mip-level 1 :mip-level-count 1)
+(texture-view :name mip2 :texture mipTex :base-mip-level 2 :mip-level-count 1)
+(texture-view :name mip3 :texture mipTex :base-mip-level 3 :mip-level-count 1)
+
+(sampler :name sampNearestMip
+  :mag-filter linear :min-filter linear :mipmap-filter nearest)
+(sampler :name sampTrilinear
+  :mag-filter linear :min-filter linear :mipmap-filter linear)
+
+; One bake entry for all four mips: hue and bounds from the bound view's
+; dimensions (64/32/16/8).
+(shader-module :name bakeShader :code """
+@group(0) @binding(0) var outTex: texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let dim = textureDimensions(outTex).x;
+  if (id.x >= dim || id.y >= dim) { return; }
+  var tint = vec3f(0.35, 0.55, 1.0);                  // 64² mip0 blue
+  if (dim == 32u) { tint = vec3f(0.3, 0.9, 0.4); }    // mip1 green
+  if (dim == 16u) { tint = vec3f(1.0, 0.6, 0.15); }   // mip2 orange
+  if (dim == 8u)  { tint = vec3f(0.95, 0.3, 0.85); }  // mip3 magenta
+  let cs = max(dim / 8u, 1u);
+  let check = f32(((id.x / cs) + (id.y / cs)) % 2u);
+  let color = mix(tint * 0.25, tint, check);
+  textureStore(outTex, id.xy, vec4f(color, 1.0));
+}
+""")
+
+(shader-module :name viewShader :code """
+@group(0) @binding(0) var samp: sampler;
+@group(0) @binding(1) var tex: texture_2d<f32>;
+
+struct VSOut {
+  @builtin(position) pos: vec4f,
+  @location(0) uv: vec2f,
+}
+
+// 5 quads: 128, 48, 24, 12, 8 px on the native 512² frame.
+fn quadAt(ii: u32, vi: u32, yCenter: f32) -> VSOut {
+  var halfExt = array<f32, 5>(0.25, 0.09375, 0.046875, 0.0234375, 0.015625);
+  var centerX = array<f32, 5>(-0.62, -0.2, 0.08, 0.28, 0.45);
+  var corners = array<vec2f, 6>(
+    vec2f(-1, -1), vec2f(1, -1), vec2f(-1, 1),
+    vec2f(-1, 1), vec2f(1, -1), vec2f(1, 1));
+  let c = corners[vi];
+  var out: VSOut;
+  out.pos = vec4f(centerX[ii] + c.x * halfExt[ii],
+                  yCenter + c.y * halfExt[ii], 0.0, 1.0);
+  out.uv = vec2f(c.x, -c.y) * 0.5 + 0.5;
+  return out;
+}
+
+@vertex fn vsTop(
+  @builtin(vertex_index) vi: u32,
+  @builtin(instance_index) ii: u32,
+) -> VSOut { return quadAt(ii, vi, 0.45); }
+
+@vertex fn vsBottom(
+  @builtin(vertex_index) vi: u32,
+  @builtin(instance_index) ii: u32,
+) -> VSOut { return quadAt(ii, vi, -0.45); }
+
+@fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  return textureSample(tex, samp, uv);
+}
+""")
+
+(compute-pipeline :name bakePipeline :module bakeShader :entry main)
+
+(render-pipeline :name nearestRowPipeline
+  (layout auto)
+  (vertex (module viewShader) (entry vsTop))
+  (fragment (module viewShader) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(render-pipeline :name trilinearRowPipeline
+  (layout auto)
+  (vertex (module viewShader) (entry vsBottom))
+  (fragment (module viewShader) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(bind-group :name bakeBg0 :layout-pipeline bakePipeline :layout-index 0
+  (entry :binding 0 :texture-view mip0))
+(bind-group :name bakeBg1 :layout-pipeline bakePipeline :layout-index 0
+  (entry :binding 0 :texture-view mip1))
+(bind-group :name bakeBg2 :layout-pipeline bakePipeline :layout-index 0
+  (entry :binding 0 :texture-view mip2))
+(bind-group :name bakeBg3 :layout-pipeline bakePipeline :layout-index 0
+  (entry :binding 0 :texture-view mip3))
+
+; The display samples mipTex's default view — all 4 levels, as mip
+; selection requires.
+(bind-group :name nearestBg :layout-pipeline nearestRowPipeline :layout-index 0
+  (entry :binding 0 :sampler sampNearestMip)
+  (entry :binding 1 :texture mipTex))
+(bind-group :name trilinearBg :layout-pipeline trilinearRowPipeline :layout-index 0
+  (entry :binding 0 :sampler sampTrilinear)
+  (entry :binding 1 :texture mipTex))
+
+(compute-pass :name bakeMip0 :pipeline bakePipeline
+  :bind-groups [bakeBg0] :dispatch [8 8 1])
+(compute-pass :name bakeMip1 :pipeline bakePipeline
+  :bind-groups [bakeBg1] :dispatch [4 4 1])
+(compute-pass :name bakeMip2 :pipeline bakePipeline
+  :bind-groups [bakeBg2] :dispatch [2 2 1])
+(compute-pass :name bakeMip3 :pipeline bakePipeline
+  :bind-groups [bakeBg3] :dispatch [1 1 1])
+
+(render-pass :name drawNearestRow
+  (color-attachment :view context-current-texture
+    :clear-value [0.06 0.06 0.08 1] :load-op clear :store-op store)
+  :pipeline nearestRowPipeline :bind-groups [nearestBg]
+  (draw :vertex-count 6 :instance-count 5))
+
+(render-pass :name drawTrilinearRow
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  :pipeline trilinearRowPipeline :bind-groups [trilinearBg]
+  (draw :vertex-count 6 :instance-count 5))
+
+(frame :name main
+  :init [bakeMip0 bakeMip1 bakeMip2 bakeMip3]
+  :perform [drawNearestRow drawTrilinearRow])

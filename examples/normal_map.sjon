@@ -1,0 +1,274 @@
+; Normal mapping + parallax — port of the webgpu-samples `normalMap` sample.
+; A rotating tangent-space cube lit by a point light; the surface technique
+; is an in-shader branch on the mapInfo.mode uniform: 0 albedo, 1 normal
+; texture, 2 height texture, 3 normal map (the seeded default), 4 parallax
+; scale, 5 steep parallax (raymarched). Uniform struct fields are reflected,
+; so a host page can switch technique or move the light live via setUniform.
+;
+; Reductions from upstream: one texture set (brickwall) instead of the GUI's
+; three; the camera is fixed at upstream's default (0, 0.8, -1.4) with
+; view/proj/model math in-shader (model = rotY(-0.5t)); the light is
+; transformed to view space in-shader instead of on the CPU; MapInfo fields
+; are all f32 (data literals are float32-only; the shader casts mode). The
+; 24-vertex tangent box (per-face axis-aligned half-vector tangents) is
+; deindexed to 36 vertices and inlined: 5 attributes, stride 56.
+;
+; Image upload is a browser feature; the native `--frame` renderer stubs it,
+; so the geometry renders with empty textures there (a flat black cube).
+; Assets: upstream's brickwall PNGs, unchanged (~219 KB total).
+
+; 36 verts x (pos3 normal3 uv2 tangent3 bitangent3) = 504 floats.
+(data :name boxVerts :float32 [
+  0.5 -0.5 0.5   0.5 0 0   0 0   0 0 -0.5   0 0.5 0
+  0.5 -0.5 -0.5   0.5 0 0   1 0   0 0 -0.5   0 0.5 0
+  0.5 0.5 0.5   0.5 0 0   0 1   0 0 -0.5   0 0.5 0
+  0.5 -0.5 -0.5   0.5 0 0   1 0   0 0 -0.5   0 0.5 0
+  0.5 0.5 -0.5   0.5 0 0   1 1   0 0 -0.5   0 0.5 0
+  0.5 0.5 0.5   0.5 0 0   0 1   0 0 -0.5   0 0.5 0
+  -0.5 -0.5 -0.5   -0.5 0 0   0 0   0 0 0.5   0 0.5 0
+  -0.5 -0.5 0.5   -0.5 0 0   1 0   0 0 0.5   0 0.5 0
+  -0.5 0.5 -0.5   -0.5 0 0   0 1   0 0 0.5   0 0.5 0
+  -0.5 -0.5 0.5   -0.5 0 0   1 0   0 0 0.5   0 0.5 0
+  -0.5 0.5 0.5   -0.5 0 0   1 1   0 0 0.5   0 0.5 0
+  -0.5 0.5 -0.5   -0.5 0 0   0 1   0 0 0.5   0 0.5 0
+  -0.5 0.5 0.5   0 0.5 0   0 0   0.5 0 0   0 0 -0.5
+  0.5 0.5 0.5   0 0.5 0   1 0   0.5 0 0   0 0 -0.5
+  -0.5 0.5 -0.5   0 0.5 0   0 1   0.5 0 0   0 0 -0.5
+  0.5 0.5 0.5   0 0.5 0   1 0   0.5 0 0   0 0 -0.5
+  0.5 0.5 -0.5   0 0.5 0   1 1   0.5 0 0   0 0 -0.5
+  -0.5 0.5 -0.5   0 0.5 0   0 1   0.5 0 0   0 0 -0.5
+  -0.5 -0.5 -0.5   0 -0.5 0   0 0   0.5 0 0   0 0 0.5
+  0.5 -0.5 -0.5   0 -0.5 0   1 0   0.5 0 0   0 0 0.5
+  -0.5 -0.5 0.5   0 -0.5 0   0 1   0.5 0 0   0 0 0.5
+  0.5 -0.5 -0.5   0 -0.5 0   1 0   0.5 0 0   0 0 0.5
+  0.5 -0.5 0.5   0 -0.5 0   1 1   0.5 0 0   0 0 0.5
+  -0.5 -0.5 0.5   0 -0.5 0   0 1   0.5 0 0   0 0 0.5
+  -0.5 -0.5 0.5   0 0 0.5   0 0   0.5 0 0   0 0.5 0
+  0.5 -0.5 0.5   0 0 0.5   1 0   0.5 0 0   0 0.5 0
+  -0.5 0.5 0.5   0 0 0.5   0 1   0.5 0 0   0 0.5 0
+  0.5 -0.5 0.5   0 0 0.5   1 0   0.5 0 0   0 0.5 0
+  0.5 0.5 0.5   0 0 0.5   1 1   0.5 0 0   0 0.5 0
+  -0.5 0.5 0.5   0 0 0.5   0 1   0.5 0 0   0 0.5 0
+  0.5 -0.5 -0.5   0 0 -0.5   0 0   -0.5 0 0   0 0.5 0
+  -0.5 -0.5 -0.5   0 0 -0.5   1 0   -0.5 0 0   0 0.5 0
+  0.5 0.5 -0.5   0 0 -0.5   0 1   -0.5 0 0   0 0.5 0
+  -0.5 -0.5 -0.5   0 0 -0.5   1 0   -0.5 0 0   0 0.5 0
+  -0.5 0.5 -0.5   0 0 -0.5   1 1   -0.5 0 0   0 0.5 0
+  0.5 0.5 -0.5   0 0 -0.5   0 1   -0.5 0 0   0 0.5 0
+])
+(buffer :name vb :size boxVerts :usage [vertex] :mapped-at-creation boxVerts)
+
+(data :name albedoImg :blob "assets/normalmap/brickwall_albedo.png" :mime "image/png")
+(data :name normalImg :blob "assets/normalmap/brickwall_normal.png" :mime "image/png")
+(data :name heightImg :blob "assets/normalmap/brickwall_height.png" :mime "image/png")
+(image-bitmap :name albedoBm :image albedoImg)
+(image-bitmap :name normalBm :image normalImg)
+(image-bitmap :name heightBm :image heightImg)
+
+(texture :name albedoTex :size-from albedoBm :format rgba8unorm
+  :usage [texture-binding copy-dst render-attachment])
+(texture :name normalTex :size-from normalBm :format rgba8unorm
+  :usage [texture-binding copy-dst render-attachment])
+(texture :name heightTex :size-from heightBm :format rgba8unorm
+  :usage [texture-binding copy-dst render-attachment])
+
+(sampler :name samp :mag-filter linear :min-filter linear)
+(texture :name depth :size canvas :format depth24plus :usage [render-attachment])
+
+(buffer :name inputs :size 16 :usage [uniform copy-dst])
+; MapInfo, all f32: lightPos.xyz, mode, lightIntensity, depthScale,
+; depthLayers, pad — upstream GUI defaults, mode seeded 3 (Normal Map).
+(data :name mapInfoData :float32 [1.7 0.7 -1.9  3  5.0 0.05 16 0])
+(buffer :name mapInfo :size 32 :usage [uniform copy-dst] :mapped-at-creation mapInfoData)
+
+(shader-module :name code :code """
+struct PngineInputs {
+  time: f32,
+  canvasW: f32,
+  canvasH: f32,
+  aspect: f32,
+};
+struct MapInfo {
+  lightPos : vec3f,        // world space; view transform happens in-shader
+  mode : f32,              // 0..5, cast to u32 (data literals are f32-only)
+  lightIntensity : f32,
+  depthScale : f32,
+  depthLayers : f32,
+};
+@group(0) @binding(0) var<uniform> inputs : PngineInputs;
+@group(0) @binding(1) var<uniform> mapInfo : MapInfo;
+
+@group(1) @binding(0) var textureSampler : sampler;
+@group(1) @binding(1) var albedoTexture : texture_2d<f32>;
+@group(1) @binding(2) var normalTexture : texture_2d<f32>;
+@group(1) @binding(3) var depthTexture : texture_2d<f32>;
+
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  return mat4x4f(
+    vec4f(f / aspect, 0, 0, 0),
+    vec4f(0, f, 0, 0),
+    vec4f(0, 0, far * nf, -1),
+    vec4f(0, 0, far * near * nf, 0));
+}
+
+fn lookAt(eye: vec3f, focus: vec3f, up: vec3f) -> mat4x4f {
+  let fwd = normalize(focus - eye);
+  let s = normalize(cross(fwd, up));
+  let u = cross(s, fwd);
+  return mat4x4f(
+    vec4f(s.x, u.x, -fwd.x, 0),
+    vec4f(s.y, u.y, -fwd.y, 0),
+    vec4f(s.z, u.z, -fwd.z, 0),
+    vec4f(-dot(s, eye), -dot(u, eye), dot(fwd, eye), 1));
+}
+
+// Upstream's fixed camera GUI default; the technique/light knobs stay live
+// through the mapInfo uniform instead.
+fn viewMatrix() -> mat4x4f {
+  return lookAt(vec3f(0.0, 0.8, -1.4), vec3f(0.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0));
+}
+
+fn modelMatrix() -> mat4x4f {
+  let ang = inputs.time * -0.5;
+  let c = cos(ang);
+  let s = sin(ang);
+  return mat4x4f(
+    vec4f(c, 0, -s, 0),
+    vec4f(0, 1, 0, 0),
+    vec4f(s, 0, c, 0),
+    vec4f(0, 0, 0, 1));
+}
+
+struct VertexOutput {
+  @builtin(position) posCS : vec4f,
+  @location(0) posVS : vec3f,
+  @location(1) tangentVS : vec3f,
+  @location(2) bitangentVS : vec3f,
+  @location(3) normalVS : vec3f,
+  @location(4) uv : vec2f,
+};
+
+@vertex
+fn vsMain(
+  @location(0) position : vec3f,
+  @location(1) normal : vec3f,
+  @location(2) uv : vec2f,
+  @location(3) vertTan : vec3f,
+  @location(4) vertBitan : vec3f
+) -> VertexOutput {
+  let worldView = viewMatrix() * modelMatrix();
+  let worldViewProj = perspective(1.2566, inputs.aspect, 0.1, 10.0) * worldView;
+  let pos = vec4f(position, 1.0);
+  var output : VertexOutput;
+  output.posCS = worldViewProj * pos;
+  output.posVS = (worldView * pos).xyz;
+  output.tangentVS = (worldView * vec4f(vertTan, 0.0)).xyz;
+  output.bitangentVS = (worldView * vec4f(vertBitan, 0.0)).xyz;
+  output.normalVS = (worldView * vec4f(normal, 0.0)).xyz;
+  output.uv = uv;
+  return output;
+}
+
+// Displace uv along the view direction by the sampled height (single tap).
+fn parallaxScale(uv: vec2f, viewDirTS: vec3f) -> vec2f {
+  let depthSample = textureSample(depthTexture, textureSampler, uv).r;
+  return uv + viewDirTS.xy * (depthSample * mapInfo.depthScale) / -viewDirTS.z;
+}
+
+// Raymarch the height map in depthLayers steps (steep parallax).
+fn parallaxSteep(startUV: vec2f, viewDirTS: vec3f) -> vec2f {
+  let ddx = dpdx(startUV);
+  let ddy = dpdy(startUV);
+  let uvDelta = viewDirTS.xy * mapInfo.depthScale / (-viewDirTS.z * mapInfo.depthLayers);
+  let depthDelta = 1.0 / mapInfo.depthLayers;
+  let posDelta = vec3(uvDelta, depthDelta);
+  var pos = vec3(startUV, 0.0);
+  for (var i = 0; i < 32; i++) {
+    if (pos.z >= textureSampleGrad(depthTexture, textureSampler, pos.xy, ddx, ddy).r) {
+      break;
+    }
+    pos += posDelta;
+  }
+  return pos.xy;
+}
+
+@fragment
+fn fsMain(input: VertexOutput) -> @location(0) vec4f {
+  let mode = u32(mapInfo.mode);
+
+  // Tangent space <-> view space (transpose inverts the unscaled basis).
+  let tangentToView = mat3x3f(input.tangentVS, input.bitangentVS, input.normalVS);
+  let viewToTangent = transpose(tangentToView);
+  let viewDirTS = normalize(viewToTangent * input.posVS);
+
+  var uv : vec2f;
+  switch (mode) {
+    case 4u: { uv = parallaxScale(input.uv, viewDirTS); }
+    case 5u: { uv = parallaxSteep(input.uv, viewDirTS); }
+    default: { uv = input.uv; }
+  }
+
+  let albedoSample = textureSample(albedoTexture, textureSampler, uv);
+  let normalSample = textureSample(normalTexture, textureSampler, uv);
+
+  switch (mode) {
+    case 0u: { return albedoSample; }
+    case 1u: { return normalSample; }
+    case 2u: { return textureSample(depthTexture, textureSampler, input.uv); }
+    default: {
+      let normalTS = normalSample.xyz * 2.0 - 1.0;
+      let normalVS = normalize(tangentToView * normalTS);
+      let lightPosVS = (viewMatrix() * vec4f(mapInfo.lightPos, 1.0)).xyz;
+      let fragToLightVS = lightPosVS - input.posVS;
+      let lightSqrDist = dot(fragToLightVS, fragToLightVS);
+      let lightDirVS = fragToLightVS * inverseSqrt(lightSqrDist);
+      let diffuseLight = mapInfo.lightIntensity
+                       * max(dot(lightDirVS, normalVS), 0.0) / lightSqrDist;
+      return vec4f(albedoSample.rgb * diffuseLight, 1.0);
+    }
+  }
+}
+""")
+
+(render-pipeline :name pipe
+  (layout auto)
+  (vertex (module code) (entry vsMain)
+    (buffers
+      (vertex-buffer :array-stride 56
+        (attribute :shader-location 0 :offset 0 :format float32x3)
+        (attribute :shader-location 1 :offset 12 :format float32x3)
+        (attribute :shader-location 2 :offset 24 :format float32x2)
+        (attribute :shader-location 3 :offset 32 :format float32x3)
+        (attribute :shader-location 4 :offset 44 :format float32x3))))
+  (fragment (module code) (entry fsMain)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list) :cull-mode back)
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+(bind-group :name frameG :layout-pipeline pipe :layout-index 0
+  (entry :binding 0 :buffer inputs)
+  (entry :binding 1 :buffer mapInfo))
+(bind-group :name surfaceG :layout-pipeline pipe :layout-index 1
+  (entry :binding 0 :sampler samp)
+  (entry :binding 1 :texture albedoTex)
+  (entry :binding 2 :texture normalTex)
+  (entry :binding 3 :texture heightTex))
+
+(queue :name upload
+  (copy-external-image-to-texture :source albedoBm :texture albedoTex)
+  (copy-external-image-to-texture :source normalBm :texture normalTex)
+  (copy-external-image-to-texture :source heightBm :texture heightTex))
+(queue :name writeInputs
+  (write-buffer :buffer inputs :offset 0 :data pngine-inputs))
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (depth-attachment :view depth :depth-clear-value 1.0
+    :depth-load-op clear :depth-store-op store)
+  :pipeline pipe :bind-groups [frameG surfaceG] :vertex-buffers [vb]
+  (draw :vertex-count 36))
+
+(frame :name main :perform [upload writeInputs draw])

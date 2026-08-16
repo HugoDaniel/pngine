@@ -1,0 +1,88 @@
+; test_cube_view — the cube view dimension end to end. An init compute pass
+; paints each of a texture's six array layers a distinct flat color through a
+; 2d-array storage view (:view-dimension 2); a fullscreen pass then samples the
+; same texture through a cube view (:view-dimension 3), sweeping the direction
+; over an equirect mapping, so all six faces show as colored bands.
+; WebGPU cube face order: +X -X +Y -Y +Z -Z = red green blue yellow magenta
+; cyan.
+
+(texture :name cubeTex :width 64 :height 64
+  :dimension 2 :depth-or-array-layers 6
+  :format rgba8unorm :usage [storage-binding texture-binding])
+
+(texture-view :name facesView :texture cubeTex :view-dimension 2)  ; 2d-array
+(texture-view :name cubeView :texture cubeTex :view-dimension 3)   ; cube
+
+(sampler :name samp :mag-filter linear :min-filter linear)
+
+(shader-module :name paintCode :code """
+@group(0) @binding(0) var faces : texture_storage_2d_array<rgba8unorm, write>;
+
+@compute @workgroup_size(8, 8, 1)
+fn paint(@builtin(global_invocation_id) gid : vec3u) {
+  var colors = array<vec4f, 6>(
+    vec4f(1, 0, 0, 1),
+    vec4f(0, 1, 0, 1),
+    vec4f(0, 0, 1, 1),
+    vec4f(1, 1, 0, 1),
+    vec4f(1, 0, 1, 1),
+    vec4f(0, 1, 1, 1));
+  textureStore(faces, gid.xy, gid.z, colors[gid.z]);
+}
+""")
+
+(shader-module :name showCode :code """
+@group(0) @binding(0) var samp : sampler;
+@group(0) @binding(1) var tex : texture_cube<f32>;
+
+struct VSOut {
+  @builtin(position) pos : vec4f,
+  @location(0) uv : vec2f,
+};
+
+@vertex
+fn vsMain(@builtin(vertex_index) vi : u32) -> VSOut {
+  var p = array<vec2f, 3>(
+    vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  var out : VSOut;
+  out.pos = vec4f(p[vi], 0.0, 1.0);
+  out.uv = p[vi] * 0.5 + 0.5;
+  return out;
+}
+
+@fragment
+fn fsMain(@location(0) uv : vec2f) -> @location(0) vec4f {
+  // Equirect sweep: longitude across x, latitude across y. All six faces
+  // appear — 4 side bands plus top/bottom at the poles.
+  let theta = uv.x * 6.2831853;
+  let phi = (uv.y - 0.5) * 3.14159265;
+  let dir = vec3f(cos(phi) * cos(theta), sin(phi), cos(phi) * sin(theta));
+  return textureSample(tex, samp, dir);
+}
+""")
+
+(compute-pipeline :name paintPipe :module paintCode :entry paint)
+
+(render-pipeline :name showPipe
+  (layout auto)
+  (vertex (module showCode) (entry vsMain))
+  (fragment (module showCode) (entry fsMain)
+    (targets (target :format preferred-canvas-format))))
+
+(bind-group :name paintBind :layout-pipeline paintPipe :layout-index 0
+  (entry :binding 0 :texture-view facesView))
+
+(bind-group :name showBind :layout-pipeline showPipe :layout-index 0
+  (entry :binding 0 :sampler samp)
+  (entry :binding 1 :texture-view cubeView))
+
+(compute-pass :name paint :pipeline paintPipe :bind-groups [paintBind]
+  :dispatch [8 8 6])
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline showPipe :bind-groups [showBind]
+  (draw :vertex-count 3))
+
+(frame :name main :init [paint] :perform [draw])

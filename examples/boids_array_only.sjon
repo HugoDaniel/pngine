@@ -1,0 +1,33 @@
+; boids_array_only — a plain yellow triangle from three hardcoded positions,
+; drawn with a single render pass. No compute, no buffers.
+
+(shader-module :name code :code """
+@vertex
+fn vertexMain(@builtin(vertex_index) vid : u32) -> @builtin(position) vec4f {
+  var positions = array<vec2f, 3>(
+    vec2f(-0.5, -0.5),
+    vec2f(0.5, -0.5),
+    vec2f(0.0, 0.5)
+  );
+  return vec4f(positions[vid], 0.0, 1.0);
+}
+
+@fragment
+fn fragMain() -> @location(0) vec4f {
+  return vec4f(1.0, 1.0, 0.0, 1.0);  // yellow
+}
+""")
+
+(render-pipeline :name renderBoids
+  (layout auto)
+  (vertex (module code) (entry vertexMain))
+  (fragment (module code) (entry fragMain)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list)))
+
+(render-pass :name drawBoidsPass
+  (color-attachment :view context-current-texture :clear-value [0.0 0.0 0.0 1.0] :load-op clear :store-op store)
+  :pipeline renderBoids
+  (draw :vertex-count 3))
+
+(frame :name boids :perform [drawBoidsPass])

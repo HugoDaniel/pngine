@@ -1,0 +1,314 @@
+; webgpu_shadow_mapping_hq — the webgpu-samples `shadowMapping` scene with a
+; true 1024×1024 shadow map (upstream's resolution). Form-for-form identical
+; to webgpu_shadow_mapping.sjon except for the explicit `:width`/`:height`
+; on shadowMap: that file's map defaults to 256² while both WGSL sources say
+; SHADOW_SIZE_F = 1024.0, so only here is the 3x3 PCF texel size truthful.
+; The map resolution is the only delta, so the two renders are the
+; resolution comparison; at this scene's orbit the difference is real but
+; subtle — about 900 pixels (max Δ31) along the penumbra edges. Keep the two
+; files in step.
+
+(data :name dragonMesh (dragon :format [position3 normal3]))
+
+(buffer :name dragonVB :size dragonMesh :usage [vertex] :mapped-at-creation dragonMesh)
+(buffer :name dragonIB :index-of dragonMesh :usage [index])
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+
+(queue :name writeUniforms (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+; depthTexture: per-frame canvas depth buffer for the color passes.
+; shadowMap: 1024x1024 depth target, also sampled (texture-binding) for PCF.
+(texture :name depthTexture :size canvas :format depth24plus :usage [render-attachment])
+(texture :name shadowMap :width 1024 :height 1024 :format depth32float
+  :usage [render-attachment texture-binding])
+
+; Comparison sampler → WGSL sampler_comparison (textureSampleCompare).
+(sampler :name shadowSampler :compare less :mag-filter linear :min-filter linear)
+
+(shader-module :name shader :code """
+const LIGHT_POS = vec3f(80.0, 50.0, -60.0);
+const SHADOW_SIZE_F = 1024.0;
+
+struct Inputs {
+  time: f32,
+  width: f32,
+  height: f32,
+  aspect: f32,
+};
+
+@group(0) @binding(0) var<uniform> u: Inputs;
+@group(0) @binding(1) var t_shadow: texture_depth_2d;
+@group(0) @binding(2) var s_shadow: sampler_comparison;
+
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  return mat4x4f(
+    vec4f(f / aspect, 0.0, 0.0, 0.0),
+    vec4f(0.0, f, 0.0, 0.0),
+    vec4f(0.0, 0.0, far * nf, -1.0),
+    vec4f(0.0, 0.0, far * near * nf, 0.0));
+}
+
+fn ortho(l: f32, r: f32, b: f32, tp: f32, n: f32, f: f32) -> mat4x4f {
+  let rml = 1.0 / (r - l);
+  let tmb = 1.0 / (tp - b);
+  let fmn = 1.0 / (f - n);
+  return mat4x4f(
+    vec4f(2.0 * rml, 0.0, 0.0, 0.0),
+    vec4f(0.0, 2.0 * tmb, 0.0, 0.0),
+    vec4f(0.0, 0.0, -fmn, 0.0),
+    vec4f(-(r + l) * rml, -(tp + b) * tmb, -n * fmn, 1.0));
+}
+
+fn lookAt(eye: vec3f, center: vec3f, up: vec3f) -> mat4x4f {
+  let fwd = normalize(center - eye);
+  let right = normalize(cross(fwd, up));
+  let u2 = cross(right, fwd);
+  return mat4x4f(
+    vec4f(right.x, u2.x, -fwd.x, 0.0),
+    vec4f(right.y, u2.y, -fwd.y, 0.0),
+    vec4f(right.z, u2.z, -fwd.z, 0.0),
+    vec4f(-dot(right, eye), -dot(u2, eye), dot(fwd, eye), 1.0));
+}
+
+fn getLightVP() -> mat4x4f {
+  let view = lookAt(LIGHT_POS, vec3f(0.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0));
+  let proj = ortho(-80.0, 80.0, -80.0, 80.0, -200.0, 300.0);
+  return proj * view;
+}
+
+fn getCameraVP(t: f32, aspect: f32) -> mat4x4f {
+  let angle = PI * (t / 2.0);
+  let center = vec3f(0.0, 60.0, 0.0);
+  let eye = center + vec3f(120.0 * sin(angle), 3.0, -120.0 * cos(angle));
+  let view = lookAt(eye, center, vec3f(0.0, 1.0, 0.0));
+  let proj = perspective(PI * 2.0 / 5.0, aspect, 0.5, 2000.0);
+  return proj * view;
+}
+
+// =====================
+// Shadow pass vertex
+// =====================
+
+@vertex fn shadow_vs(
+  @location(0) position: vec3f,
+  @location(1) _normal: vec3f
+) -> @builtin(position) vec4f {
+  return getLightVP() * vec4f(position, 1.0);
+}
+
+// =====================
+// Color pass
+// =====================
+
+struct ColorVSOut {
+  @builtin(position) pos: vec4f,
+  @location(0) shadowPos: vec3f,
+  @location(1) fragNorm: vec3f,
+  @location(2) worldPos: vec3f,
+};
+
+@vertex fn color_vs(
+  @location(0) position: vec3f,
+  @location(1) normal: vec3f
+) -> ColorVSOut {
+  let worldPos = vec4f(position, 1.0);
+  let cameraVP = getCameraVP(u.time, u.aspect);
+  let lightClip = getLightVP() * worldPos;
+  var out: ColorVSOut;
+  out.pos = cameraVP * worldPos;
+  out.shadowPos = vec3f(
+    lightClip.xy * vec2f(0.5, -0.5) + vec2f(0.5),
+    lightClip.z);
+  out.fragNorm = normal;
+  out.worldPos = position;
+  return out;
+}
+
+@fragment fn color_fs(in: ColorVSOut) -> @location(0) vec4f {
+  let n = normalize(in.fragNorm);
+  let lightDir = normalize(LIGHT_POS - in.worldPos);
+  let lambertian = max(dot(n, lightDir), 0.0);
+
+  // 3x3 PCF shadow sampling
+  let texelSize = 1.0 / SHADOW_SIZE_F;
+  var visibility = 0.0;
+  for (var y = -1; y <= 1; y++) {
+    for (var x = -1; x <= 1; x++) {
+      let offset = vec2f(f32(x), f32(y)) * texelSize;
+      visibility += textureSampleCompare(
+        t_shadow, s_shadow,
+        in.shadowPos.xy + offset, in.shadowPos.z - 0.007);
+    }
+  }
+  visibility /= 9.0;
+
+  let albedo = vec3f(0.9);
+  // Base shape lighting (always visible, no shadows)
+  let wrap = max(dot(n, normalize(LIGHT_POS)), 0.0) * 0.3;
+  let fill = 0.15 + 0.1 * (0.5 + 0.5 * n.y);
+  // Direct light gated by shadow visibility
+  let direct = visibility * lambertian * 0.7;
+  let lighting = min(fill + wrap + direct, 1.0);
+  return vec4f(lighting * albedo, 1.0);
+}
+
+// =====================
+// Ground plane (vertex-generated quad, no vertex buffer)
+// =====================
+
+const GROUND_Y = 20.0;
+const GROUND_HALF = 100.0;
+
+fn groundPos(i: u32) -> vec3f {
+  // 6 vertices: two CCW triangles forming a quad on the XZ plane at y=GROUND_Y
+  //   0: (-H, Y, -H)  1: (H, Y, -H)  2: (H, Y, H)
+  //   3: (-H, Y, -H)  4: (H, Y, H)   5: (-H, Y, H)
+  let idx = array<vec2f, 6>(
+    vec2f(-1, -1), vec2f(1, -1), vec2f(1, 1),
+    vec2f(-1, -1), vec2f(1, 1),  vec2f(-1, 1));
+  let xz = idx[i] * GROUND_HALF;
+  return vec3f(xz.x, GROUND_Y, xz.y);
+}
+
+@vertex fn ground_shadow_vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  return getLightVP() * vec4f(groundPos(i), 1.0);
+}
+
+@vertex fn ground_color_vs(@builtin(vertex_index) i: u32) -> ColorVSOut {
+  let pos = groundPos(i);
+  let worldPos = vec4f(pos, 1.0);
+  let cameraVP = getCameraVP(u.time, u.aspect);
+  let lightClip = getLightVP() * worldPos;
+  var out: ColorVSOut;
+  out.pos = cameraVP * worldPos;
+  out.shadowPos = vec3f(
+    lightClip.xy * vec2f(0.5, -0.5) + vec2f(0.5),
+    lightClip.z);
+  out.fragNorm = vec3f(0.0, 1.0, 0.0);
+  out.worldPos = pos;
+  return out;
+}
+
+@fragment fn ground_color_fs(in: ColorVSOut) -> @location(0) vec4f {
+  let n = vec3f(0.0, 1.0, 0.0);
+  let lightDir = normalize(LIGHT_POS - in.worldPos);
+  let lambertian = max(dot(n, lightDir), 0.0);
+
+  // 3x3 PCF shadow sampling
+  let texelSize = 1.0 / SHADOW_SIZE_F;
+  var visibility = 0.0;
+  for (var y = -1; y <= 1; y++) {
+    for (var x = -1; x <= 1; x++) {
+      let offset = vec2f(f32(x), f32(y)) * texelSize;
+      visibility += textureSampleCompare(
+        t_shadow, s_shadow,
+        in.shadowPos.xy + offset, in.shadowPos.z - 0.007);
+    }
+  }
+  visibility /= 9.0;
+
+  // Checkerboard pattern on ground
+  let uv = floor(in.worldPos.xz * 0.1);
+  let checker = ((uv.x + uv.y) % 2.0 + 2.0) % 2.0;
+  let albedo = mix(vec3f(0.4), vec3f(0.7), checker);
+
+  let fill = 0.15;
+  let direct = visibility * lambertian * 0.7;
+  let lighting = min(fill + direct, 1.0);
+  return vec4f(lighting * albedo, 1.0);
+}
+""")
+
+; --- Pipelines ---
+
+; Color pipeline: dragon, shadow-sampled lighting (uses the comparison sampler).
+(render-pipeline :name colorPipe
+  (layout auto)
+  (vertex (module shader) (entry color_vs)
+    (buffers
+      (vertex-buffer :array-stride (* 4 6)
+        (attribute :shader-location 0 :offset 0 :format float32x3)
+        (attribute :shader-location 1 :offset 12 :format float32x3))))
+  (fragment (module shader) (entry color_fs)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list) :cull-mode back)
+  (depth-stencil :depth-write-enabled true :depth-compare less :format depth24plus))
+
+; Ground shadow pipeline: depth-only (no fragment), vertex-generated quad + bias.
+(render-pipeline :name groundShadowPipe
+  (layout auto)
+  (vertex (module shader) (entry ground_shadow_vs))
+  (primitive (topology triangle-list))
+  (depth-stencil :depth-write-enabled true :depth-compare less :format depth32float
+    :depth-bias 1 :depth-bias-slope-scale 1.0 :depth-bias-clamp 0.0))
+
+; Ground color pipeline: vertex-generated quad, shadow-sampled lighting.
+(render-pipeline :name groundColorPipe
+  (layout auto)
+  (vertex (module shader) (entry ground_color_vs))
+  (fragment (module shader) (entry ground_color_fs)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list))
+  (depth-stencil :depth-write-enabled true :depth-compare less :format depth24plus))
+
+; Shadow pipeline: depth-only (no fragment), dragon from the light's POV + bias.
+(render-pipeline :name shadowPipe
+  (layout auto)
+  (vertex (module shader) (entry shadow_vs)
+    (buffers
+      (vertex-buffer :array-stride (* 4 6)
+        (attribute :shader-location 0 :offset 0 :format float32x3)
+        (attribute :shader-location 1 :offset 12 :format float32x3))))
+  (primitive (topology triangle-list) :cull-mode back)
+  (depth-stencil :depth-write-enabled true :depth-compare less :format depth32float
+    :depth-bias 1 :depth-bias-slope-scale 1.0 :depth-bias-clamp 0.0))
+
+; --- Bind groups ---
+
+(bind-group :name groundColorBG :layout-pipeline groundColorPipe :layout-index 0
+  (entry :binding 0 :buffer uniforms)
+  (entry :binding 1 :texture shadowMap)
+  (entry :binding 2 :sampler shadowSampler))
+
+(bind-group :name colorBG :layout-pipeline colorPipe :layout-index 0
+  (entry :binding 0 :buffer uniforms)
+  (entry :binding 1 :texture shadowMap)
+  (entry :binding 2 :sampler shadowSampler))
+
+; --- Render passes (frame-perform order) ---
+
+; Depth-only shadow pass: dragon from the light's POV, zero color attachments.
+(render-pass :name shadowPass
+  (depth-attachment :view shadowMap :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  :pipeline shadowPipe
+  :vertex-buffers [dragonVB]
+  :index-buffer dragonIB
+  (draw-indexed :index-count 33306))
+
+; Depth-only shadow pass: ground plane (loads the existing shadow depth).
+(render-pass :name groundShadowPass
+  (depth-attachment :view shadowMap :depth-load-op load :depth-store-op store)
+  :pipeline groundShadowPipe
+  (draw :vertex-count 6))
+
+; Color pass: dragon with PCF shadow sampling.
+(render-pass :name colorPass
+  (color-attachment :view context-current-texture :clear-value [0.1 0.1 0.15 1] :load-op clear :store-op store)
+  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  :pipeline colorPipe
+  :vertex-buffers [dragonVB]
+  :index-buffer dragonIB
+  :bind-groups [colorBG]
+  (draw-indexed :index-count 33306))
+
+; Color pass: ground plane (loads the existing color + depth).
+(render-pass :name groundColorPass
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (depth-attachment :view depthTexture :depth-load-op load :depth-store-op store)
+  :pipeline groundColorPipe
+  :bind-groups [groundColorBG]
+  (draw :vertex-count 6))
+
+(frame :name main :perform [writeUniforms shadowPass groundShadowPass colorPass groundColorPass])

@@ -1,0 +1,252 @@
+; webgpu_primitive_picking — port of the webgpu-samples `primitivePicking`
+; sample. Hover over the teapot to highlight individual triangles. Uses
+; @builtin(primitive_index) plus a compute readback for GPU-side picking:
+;   - MRT forward pass: color → canvas, primitive_index+1 → r32uint texture
+;   - pick compute pass: reads the r32uint texel under the pointer and writes
+;     the picked id into a 4-byte storage buffer the forward shader
+;     highlights from.
+; Exercises the `teapot` shape with an `:index-of` index buffer and
+; draw-indexed, two color targets, an `(entry … :texture …)` bind entry and
+; the pointer-inputs uniform. Requires the 'primitive-index' WebGPU feature.
+;
+; ⚠️ Browser-only in practice: naga (wgpu-native's WGSL frontend) rejects the
+; `enable primitive_index;` directive (gfx-rs/wgpu#8236), so native `--frame`
+; aborts inside queue submit — the module is marked invalid and that
+; invalidity cascades through pipeline → bind group → submit.
+
+(define :name INDEX_COUNT :value 2976)
+
+; ── Mesh Data ──────────────────────────────────────────────────────────
+
+(data :name teapotMesh (teapot :format [position3 normal3]))
+
+(buffer :name pointerBuf :size 48 :usage [uniform copy-dst])
+
+(buffer :name indexBuffer :index-of teapotMesh :usage [index])
+
+; Storage buffer for picked primitive ID (single u32)
+(buffer :name pickResult :size 4 :usage [storage])
+
+(buffer :name vertexBuffer :size teapotMesh :usage [vertex]
+  :mapped-at-creation teapotMesh)
+
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+
+(queue :name writeUniforms
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+(queue :name writePointer
+  (write-buffer :buffer pointerBuf :offset 0 :data pointer-inputs))
+
+; ── Textures ───────────────────────────────────────────────────────────
+
+(texture :name depthTexture :size canvas :format depth24plus
+  :usage [render-attachment])
+
+(texture :name primIdTex :size canvas :format r32uint
+  :usage [render-attachment texture-binding])
+
+; ── Pick Compute Shader ────────────────────────────────────────────────
+
+(shader-module :name pickShader :code """
+struct PngineInputs {
+  time: f32,
+  width: f32,
+  height: f32,
+  aspect: f32,
+}
+
+struct PointerInputs {
+  x: f32,
+  y: f32,
+  clickX: f32,
+  clickY: f32,
+  dx: f32,
+  dy: f32,
+  buttons: f32,
+  pressure: f32,
+  modifiers: f32,
+  scrollX: f32,
+  scrollY: f32,
+  _pad: f32,
+}
+
+struct PickData {
+  pickedPrimitive: u32,
+}
+
+@group(0) @binding(0) var<uniform> pngine: PngineInputs;
+@group(0) @binding(1) var<uniform> pointer: PointerInputs;
+@group(0) @binding(2) var primTex: texture_2d<u32>;
+@group(0) @binding(3) var<storage, read_write> pick: PickData;
+
+@compute @workgroup_size(1)
+fn main() {
+  // pointer.x/y are normalized 0-1, convert to pixel coords
+  let texel = vec2u(
+    u32(clamp(pointer.x, 0.0, 1.0) * pngine.width),
+    u32(clamp(pointer.y, 0.0, 1.0) * pngine.height)
+  );
+  pick.pickedPrimitive = textureLoad(primTex, texel, 0).x;
+}
+""")
+
+; ── Forward Shader (MRT: color + primitive ID) ─────────────────────────
+
+(shader-module :name forwardShader :code """
+enable primitive_index;
+
+struct PngineInputs {
+  time: f32,
+  width: f32,
+  height: f32,
+  aspect: f32,
+}
+
+struct PickData {
+  pickedPrimitive: u32,
+}
+
+@group(0) @binding(0) var<uniform> pngine: PngineInputs;
+@group(0) @binding(1) var<storage, read> pick: PickData;
+
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  return mat4x4f(
+    vec4f(f / aspect, 0, 0, 0),
+    vec4f(0, f, 0, 0),
+    vec4f(0, 0, far * nf, -1),
+    vec4f(0, 0, far * near * nf, 0));
+}
+
+struct VSOut {
+  @builtin(position) pos: vec4f,
+  @location(0) normal: vec3f,
+}
+
+@vertex fn vs(
+  @location(0) position: vec3f,
+  @location(1) normal: vec3f
+) -> VSOut {
+  let t = pngine.time;
+
+  // Rotate camera around teapot
+  let rad = t * 0.3;
+  let camDist = 4.0;
+  let eyeX = sin(rad) * camDist;
+  let eyeZ = cos(rad) * camDist;
+  let eye = vec3f(eyeX, 1.5, eyeZ);
+  let tgt = vec3f(0, -0.3, 0);
+  let up = vec3f(0, 1, 0);
+
+  // LookAt view matrix
+  let fwd = normalize(tgt - eye);
+  let right = normalize(cross(fwd, up));
+  let camUp = cross(right, fwd);
+  let view = mat4x4f(
+    vec4f(right.x, camUp.x, -fwd.x, 0),
+    vec4f(right.y, camUp.y, -fwd.y, 0),
+    vec4f(right.z, camUp.z, -fwd.z, 0),
+    vec4f(-dot(right, eye), -dot(camUp, eye), dot(fwd, eye), 1));
+
+  // Scale teapot (raw data is roughly [-8, 8])
+  let scale = 0.18;
+  let model = mat4x4f(
+    vec4f(scale, 0, 0, 0),
+    vec4f(0, scale, 0, 0),
+    vec4f(0, 0, scale, 0),
+    vec4f(0, -0.5, 0, 1));
+
+  let proj = perspective(1.2, pngine.aspect, 0.1, 100.0);
+  let n = normalize((model * vec4f(normal, 0.0)).xyz);
+
+  var out: VSOut;
+  out.pos = proj * view * model * vec4f(position, 1.0);
+  out.normal = n;
+  return out;
+}
+
+struct FragOut {
+  @location(0) color: vec4f,
+  @location(1) primId: u32,
+}
+
+@fragment fn fs(
+  @location(0) normal: vec3f,
+  @builtin(primitive_index) primIndex: u32
+) -> FragOut {
+  let lightDir = normalize(vec3f(4, 10, 6));
+  let n = normalize(normal);
+  let light = dot(n, lightDir) * 0.5 + 0.5;
+
+  let baseColor = vec3f(0.75, 0.55, 0.35); // warm clay
+
+  var color: vec4f;
+  // Highlight picked primitive (offset by 1: 0 = nothing picked)
+  if (primIndex + 1u == pick.pickedPrimitive) {
+    color = vec4f(1.0, 1.0, 0.0, 1.0); // yellow
+  } else {
+    color = vec4f(baseColor * light, 1.0);
+  }
+
+  var out: FragOut;
+  out.color = color;
+  out.primId = primIndex + 1u;
+  return out;
+}
+""")
+
+; ── Pipelines ──────────────────────────────────────────────────────────
+
+(render-pipeline :name forwardPipeline
+  (layout auto)
+  (vertex (module forwardShader) (entry vs)
+    (buffers
+      (vertex-buffer :array-stride 24
+        (attribute :shader-location 0 :offset 0 :format float32x3)
+        (attribute :shader-location 1 :offset 12 :format float32x3))))
+  (fragment (module forwardShader) (entry fs)
+    (targets
+      (target :format preferred-canvas-format)
+      (target :format r32uint)))
+  (primitive (topology triangle-list) :cull-mode none)
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+(compute-pipeline :name pickPipeline :module pickShader :entry main)
+
+; ── Bind Groups ────────────────────────────────────────────────────────
+
+(bind-group :name forwardBG :layout-pipeline forwardPipeline :layout-index 0
+  (entry :binding 0 :buffer uniforms)
+  (entry :binding 1 :buffer pickResult))
+
+(bind-group :name pickBG :layout-pipeline pickPipeline :layout-index 0
+  (entry :binding 0 :buffer uniforms)
+  (entry :binding 1 :buffer pointerBuf)
+  (entry :binding 2 :texture primIdTex)
+  (entry :binding 3 :buffer pickResult))
+
+; ── Render Pass (MRT) ──────────────────────────────────────────────────
+
+(render-pass :name drawTeapot
+  (color-attachment :view context-current-texture
+    :clear-value [0.15 0.15 0.2 1] :load-op clear :store-op store)
+  (color-attachment :view primIdTex
+    :clear-value [0 0 0 0] :load-op clear :store-op store)
+  (depth-attachment :view depthTexture
+    :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  :pipeline forwardPipeline
+  :vertex-buffers [vertexBuffer]
+  :index-buffer indexBuffer
+  :bind-groups [forwardBG]
+  (draw-indexed :index-count INDEX_COUNT))
+
+; ── Compute Pass (picking) ─────────────────────────────────────────────
+
+(compute-pass :name pickPass :pipeline pickPipeline :bind-groups [pickBG]
+  :dispatch [1 1 1])
+
+; ── Frame ──────────────────────────────────────────────────────────────
+
+(frame :name main :perform [writeUniforms writePointer drawTeapot pickPass])

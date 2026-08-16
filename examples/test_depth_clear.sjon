@@ -1,0 +1,37 @@
+; test_depth_clear — depth/stencil clear values. One pass clears depth to 0.4
+; and stencil to 7, then draws two quads through a stencil==7 gate with
+; depth-compare less: the left quad at z=0.2 passes against the 0.4 clear, the
+; right quad at z=0.6 fails. Expected render: left half orange, right half
+; black. Clearing to 1.0 / 0 instead would fail the stencil gate everywhere and
+; leave the canvas all black.
+
+(texture :name dsTex :size canvas :format depth24plus-stencil8 :usage [render-attachment])
+
+(shader-module :name shader :code """
+    @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let q = array<vec2f, 6>(
+        vec2f(-1.0, -1.0), vec2f(0.0, -1.0), vec2f(0.0, 1.0),
+        vec2f(-1.0, -1.0), vec2f(0.0, 1.0), vec2f(-1.0, 1.0));
+      let p = q[i % 6u];
+      let right = f32(i / 6u); // quad 0 = left half at z=0.2, quad 1 = right half at z=0.6
+      return vec4f(p.x + right, p.y, 0.2 + 0.4 * right, 1.0);
+    }
+    @fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.0, 1.0); }
+  """)
+
+(render-pipeline :name pipe
+  (layout auto)
+  (vertex (module shader) (entry vs))
+  (fragment (module shader) (entry fs)
+    (targets (target :format preferred-canvas-format)))
+  (depth-stencil :format depth24plus-stencil8 :depth-write-enabled true :depth-compare less
+    (stencil-front :compare equal :pass-op keep)))
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (depth-attachment :view dsTex :depth-clear-value 0.4 :stencil-clear-value 7)
+  :pipeline pipe
+  :stencil-reference 7
+  (draw :vertex-count 12))
+
+(frame :name main :perform [draw])

@@ -1,0 +1,12 @@
+; `(pass …)` shader art — the smallest fullscreen shader: a single fragment
+; pass that references `pngine`. The sugar generates the uniform buffer,
+; shader module (with the injected prelude), pipeline, bind group, render pass
+; and frame.
+
+(pass-graph
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return vec4f(uv, sin(pngine.time) * .5 + .5, 1);
+    }
+  """))

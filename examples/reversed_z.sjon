@@ -1,0 +1,189 @@
+; Reversed-Z — port of the webgpu-samples `reversedZ` sample, colour mode.
+; Two nearly-coplanar planes (z = ±0.0001, half-overlapping, red/green)
+; instanced 5x at exponentially increasing distance (z = -800·i) and scale
+; (1+50·i). The left half draws with conventional depth (clear 1.0, compare
+; less) and z-fights on the distant instances; the right half draws reversed
+; (clear 0.0, compare greater, clip-space remap z' = w - z folded into the
+; vertex shader) and resolves cleanly. Exercises :depth-compare greater with
+; :depth-clear-value 0.
+;
+; Upstream splits the canvas with setViewport; the split here is instead a
+; clip-space squeeze in the two vertex entry points (x' = 0.5·x ∓ 0.5·w) —
+; exact and canvas-size-independent. Upstream's per-frame CPU model matrices
+; are closed-form in @builtin(instance_index) + pngine-inputs.time, computed
+; in-shader. Only upstream's colour mode is ported; its precision-error and
+; depth-texture modes are separate pass sequences. The left half's distant
+; z-fighting is genuine numeric noise by construction and varies between
+; GPUs.
+
+; 12 verts x (pos4, color4): red plane at z=+0.0001 shifted left by 0.5,
+; green plane at z=-0.0001 shifted right by 0.5 (upstream's d/o constants).
+(data :name planesData :float32 [
+  -1.5 -1  0.0001 1   1 0 0 1
+   0.5 -1  0.0001 1   1 0 0 1
+  -1.5  1  0.0001 1   1 0 0 1
+   0.5 -1  0.0001 1   1 0 0 1
+   0.5  1  0.0001 1   1 0 0 1
+  -1.5  1  0.0001 1   1 0 0 1
+  -0.5 -1 -0.0001 1   0 1 0 1
+   1.5 -1 -0.0001 1   0 1 0 1
+  -0.5  1 -0.0001 1   0 1 0 1
+   1.5 -1 -0.0001 1   0 1 0 1
+   1.5  1 -0.0001 1   0 1 0 1
+  -0.5  1 -0.0001 1   0 1 0 1
+])
+(buffer :name vb :size planesData :usage [vertex] :mapped-at-creation planesData)
+(buffer :name inputs :size 16 :usage [uniform copy-dst])
+(texture :name depth :size canvas :format depth32float :usage [render-attachment])
+
+(shader-module :name code :code """
+struct PngineInputs {
+  time: f32,
+  canvasW: f32,
+  canvasH: f32,
+  aspect: f32,
+};
+@group(0) @binding(0) var<uniform> inputs : PngineInputs;
+
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  return mat4x4f(
+    vec4f(f / aspect, 0, 0, 0),
+    vec4f(0, f, 0, 0),
+    vec4f(0, 0, far * nf, -1),
+    vec4f(0, 0, far * near * nf, 0));
+}
+
+// viewProj: perspective(2pi/5, half-width aspect, 5, 9999) * translate(0,0,-12).
+// The 0.5 factor matches upstream's half-canvas viewport; the in-shader split
+// below squeezes clip x by the same 0.5, so proportions stay correct.
+fn viewProj() -> mat4x4f {
+  let view = mat4x4f(
+    vec4f(1, 0, 0, 0),
+    vec4f(0, 1, 0, 0),
+    vec4f(0, 0, 1, 0),
+    vec4f(0, 0, -12, 1));
+  return perspective(1.2566, 0.5 * inputs.aspect, 5.0, 9999.0) * view;
+}
+
+// Upstream's instance placement: z = -800·i, scale 1+50·i,
+// y = (4 - 0.2z)·(i - 1.5); then a 30-degree rotation about (sin t, cos t, 0).
+fn model(i: u32) -> mat4x4f {
+  let fi = f32(i);
+  let z = -800.0 * fi;
+  let s = 1.0 + 50.0 * fi;
+  let ty = (4.0 - 0.2 * z) * (fi - 1.5);
+  return mat4x4f(
+    vec4f(s, 0, 0, 0),
+    vec4f(0, s, 0, 0),
+    vec4f(0, 0, s, 0),
+    vec4f(0, ty, z, 1));
+}
+
+fn rotation(now: f32) -> mat4x4f {
+  let axis = normalize(vec3f(sin(now), cos(now), 0.0));
+  let ang = 0.5235988;                    // 30 degrees
+  let c = cos(ang);
+  let s = sin(ang);
+  let t = 1.0 - c;
+  let x = axis.x;
+  let y = axis.y;
+  return mat4x4f(
+    vec4f(t*x*x+c,  t*x*y,    s*y, 0),
+    vec4f(t*x*y,    t*y*y+c, -s*x, 0),
+    vec4f(-s*y,     s*x,      c,   0),
+    vec4f(0, 0, 0, 1));
+}
+
+// The viewport replacement: squeeze clip x into one NDC half. Exact in clip
+// space because the shift is scaled by w.
+fn toHalf(p: vec4f, shift: f32) -> vec4f {
+  return vec4f(p.x * 0.5 + shift * p.w, p.yzw);
+}
+
+struct VSOut {
+  @builtin(position) pos : vec4f,
+  @location(0) color : vec4f,
+};
+
+fn project(position: vec4f, i: u32) -> vec4f {
+  return viewProj() * model(i) * rotation(inputs.time) * position;
+}
+
+@vertex
+fn vsDefault(@location(0) position : vec4f,
+             @location(1) color : vec4f,
+             @builtin(instance_index) i : u32) -> VSOut {
+  var out : VSOut;
+  out.pos = toHalf(project(position, i), -0.5);
+  out.color = color;
+  return out;
+}
+
+@vertex
+fn vsReversed(@location(0) position : vec4f,
+              @location(1) color : vec4f,
+              @builtin(instance_index) i : u32) -> VSOut {
+  var p = toHalf(project(position, i), 0.5);
+  p.z = p.w - p.z;                        // depth-range remap: reversed z
+  var out : VSOut;
+  out.pos = p;
+  out.color = color;
+  return out;
+}
+
+@fragment
+fn fsMain(@location(0) color : vec4f) -> @location(0) vec4f {
+  return color;
+}
+""")
+
+(render-pipeline :name defaultPipe
+  (layout auto)
+  (vertex (module code) (entry vsDefault)
+    (buffers
+      (vertex-buffer :array-stride 32
+        (attribute :shader-location 0 :offset 0 :format float32x4)
+        (attribute :shader-location 1 :offset 16 :format float32x4))))
+  (fragment (module code) (entry fsMain)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list) :cull-mode back)
+  (depth-stencil :format depth32float :depth-write-enabled true :depth-compare less))
+
+(render-pipeline :name reversedPipe
+  (layout auto)
+  (vertex (module code) (entry vsReversed)
+    (buffers
+      (vertex-buffer :array-stride 32
+        (attribute :shader-location 0 :offset 0 :format float32x4)
+        (attribute :shader-location 1 :offset 16 :format float32x4))))
+  (fragment (module code) (entry fsMain)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list) :cull-mode back)
+  (depth-stencil :format depth32float :depth-write-enabled true :depth-compare greater))
+
+(bind-group :name gD :layout-pipeline defaultPipe :layout-index 0
+  (entry :binding 0 :buffer inputs))
+(bind-group :name gR :layout-pipeline reversedPipe :layout-index 0
+  (entry :binding 0 :buffer inputs))
+
+(queue :name writeInputs
+  (write-buffer :buffer inputs :offset 0 :data pngine-inputs))
+
+(render-pass :name left
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0.5 1] :load-op clear :store-op store)
+  (depth-attachment :view depth :depth-clear-value 1.0
+    :depth-load-op clear :depth-store-op store)
+  :pipeline defaultPipe :bind-groups [gD] :vertex-buffers [vb]
+  (draw :vertex-count 12 :instance-count 5))
+
+(render-pass :name right
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (depth-attachment :view depth :depth-clear-value 0.0
+    :depth-load-op clear :depth-store-op store)
+  :pipeline reversedPipe :bind-groups [gR] :vertex-buffers [vb]
+  (draw :vertex-count 12 :instance-count 5))
+
+(frame :name main :perform [writeInputs left right])

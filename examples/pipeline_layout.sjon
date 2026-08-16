@@ -1,0 +1,55 @@
+; Pipeline layout — a fullscreen triangle whose colour and offset come from
+; two uniform buffers in separate bind groups. Exercises the explicit
+; (pipeline-layout …) form: two (bind-group-layout …) forms compose into a
+; layout at @group(0)/@group(1) that the render pipeline references via
+; :pipeline-layout instead of deriving one from the WGSL. @group(0) is a
+; fragment-visible colour uniform, @group(1) a vertex-visible offset uniform —
+; per-group visibility that only an explicit layout can pin. The bind groups
+; still take their layout from the pipeline (:layout-pipeline pipe), which
+; resolves to the matching explicit layout.
+
+(shader-module :name mod :code """
+struct Color { rgba: vec4f }
+struct Offset { xy: vec2f, _pad: vec2f }
+
+@group(0) @binding(0) var<uniform> color: Color;
+@group(1) @binding(0) var<uniform> offset: Offset;
+
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+    let x = f32(i & 1u) * 4.0 - 1.0 + offset.xy.x;
+    let y = f32((i >> 1u) & 1u) * 4.0 - 1.0 + offset.xy.y;
+    return vec4f(x, y, 0.0, 1.0);
+}
+
+@fragment fn fs() -> @location(0) vec4f {
+    return color.rgba;
+}
+""")
+
+(buffer :name colorBuf :size 16 :usage [uniform copy-dst])
+(buffer :name offsetBuf :size 16 :usage [uniform copy-dst])
+
+(bind-group-layout :name bglColor
+  (entry :binding 0 :visibility [fragment] (buffer :type uniform)))
+(bind-group-layout :name bglOffset
+  (entry :binding 0 :visibility [vertex] (buffer :type uniform)))
+
+(pipeline-layout :name pl :bind-group-layouts [bglColor bglOffset])
+
+(render-pipeline :name pipe :pipeline-layout pl
+  (vertex (module mod) (entry vs))
+  (fragment (module mod) (entry fs)
+    (targets (target :format bgra8unorm))))
+
+(bind-group :name gColor :layout-pipeline pipe :layout-index 0
+  (entry :binding 0 :buffer colorBuf))
+(bind-group :name gOffset :layout-pipeline pipe :layout-index 1
+  (entry :binding 0 :buffer offsetBuf))
+
+(render-pass :name pass
+  (color-attachment :view context-current-texture :clear-value [0.1 0.1 0.15 1] :load-op clear :store-op store)
+  :pipeline pipe
+  :bind-groups [gColor gOffset]
+  (draw :vertex-count 3))
+
+(frame :name main :perform [pass])

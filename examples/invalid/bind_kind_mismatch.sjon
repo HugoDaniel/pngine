@@ -1,0 +1,25 @@
+; Invalid: the shader declares @group(0) @binding(0) as texture_2d<f32>, but the
+; bind group binds a buffer at that slot; the shader/binding cross-check rejects
+; the resource-kind mismatch. textureLoad is used so no sampler is needed.
+(shader-module :name code :code """
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f {
+  return textureLoad(tex, vec2i(0, 0), 0);
+}
+""")
+(buffer :name buf :size 256 :usage [storage copy-dst])
+(render-pipeline :name pipe (layout auto)
+  (vertex (module code) (entry vs))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+(bind-group :name g0 :layout-pipeline pipe :layout-index 0
+  (entry :binding 0 :buffer buf))
+(render-pass :name draw :pipeline pipe :bind-groups [g0]
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

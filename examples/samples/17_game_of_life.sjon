@@ -1,0 +1,162 @@
+; Game of Life — Conway's cellular automaton on a 128×128 toroidal grid. A
+; compute `(init …)` seeds the cell buffer once with a ~30% random alive
+; pattern; each frame a compute pass applies the rules from the previous
+; generation into the next (`:pool 2` ping-pong buffer, `:ping-pong` bind-group
+; entries with `:bind-groups-pool-offsets`, `:dispatch [8 8 1]` over a 16×16
+; workgroup), and a fullscreen triangle reads the latest generation straight
+; from the storage buffer. Corresponds to the webgpu-samples `gameOfLife`
+; sample; the cells are drawn here without instanced quads.
+;
+; GRID_SIZE sizes the buffer only; `(define …)` values never reach WGSL, so
+; each shader restates the extent as a local `SIZE` constant. Keep them in step.
+
+(define :name GRID_SIZE :value 128)
+
+(buffer :name cellBuffer :size (* GRID_SIZE GRID_SIZE 4) :usage [storage] :pool 2)
+
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+
+(queue :name writeUniforms
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+; Seed the cell buffer once with a ~30% random alive pattern.
+(init :name initCells :buffer cellBuffer :shader initShader :workgroups (ceil (/ (* GRID_SIZE GRID_SIZE) 64)))
+
+(shader-module :name initShader :code """
+struct Cells { data: array<u32> }
+@binding(0) @group(0) var<storage, read_write> cells: Cells;
+
+fn hash(n: u32) -> f32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return f32(x) / f32(0xffffffffu);
+}
+
+const SIZE: u32 = 128u;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let idx = id.x;
+  if (idx >= SIZE * SIZE) { return; }
+  // ~30% chance of being alive
+  cells.data[idx] = select(0u, 1u, hash(idx) < 0.3);
+}
+""")
+
+(shader-module :name stepShader :code """
+struct Cells { data: array<u32> }
+@binding(0) @group(0) var<storage, read> cellsIn: Cells;
+@binding(1) @group(0) var<storage, read_write> cellsOut: Cells;
+
+const SIZE: u32 = 128u;
+
+fn getCell(x: i32, y: i32) -> u32 {
+  let wx = (x + i32(SIZE)) % i32(SIZE);
+  let wy = (y + i32(SIZE)) % i32(SIZE);
+  return cellsIn.data[u32(wy) * SIZE + u32(wx)];
+}
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= SIZE || id.y >= SIZE) { return; }
+
+  let x = i32(id.x);
+  let y = i32(id.y);
+  let idx = id.y * SIZE + id.x;
+
+  // Count neighbors (8-way)
+  var neighbors = 0u;
+  neighbors += getCell(x - 1, y - 1);
+  neighbors += getCell(x, y - 1);
+  neighbors += getCell(x + 1, y - 1);
+  neighbors += getCell(x - 1, y);
+  neighbors += getCell(x + 1, y);
+  neighbors += getCell(x - 1, y + 1);
+  neighbors += getCell(x, y + 1);
+  neighbors += getCell(x + 1, y + 1);
+
+  let alive = cellsIn.data[idx];
+
+  // Conway's rules
+  var newState = 0u;
+  if (alive == 1u) {
+    newState = select(0u, 1u, neighbors == 2u || neighbors == 3u);
+  } else {
+    newState = select(0u, 1u, neighbors == 3u);
+  }
+
+  cellsOut.data[idx] = newState;
+}
+""")
+
+(compute-pipeline :name stepPipeline :module stepShader :entry main)
+
+(bind-group :name stepBindGroup :layout-pipeline stepPipeline :layout-index 0 :pool 2
+  (entry :binding 0 :buffer cellBuffer :ping-pong 0)
+  (entry :binding 1 :buffer cellBuffer :ping-pong 1))
+
+(compute-pass :name stepPass
+  :pipeline stepPipeline
+  :bind-groups [stepBindGroup]
+  :bind-groups-pool-offsets [0]
+  :dispatch [8 8 1])
+
+(shader-module :name renderShader :code """
+struct Cells { data: array<u32> }
+@group(0) @binding(0) var<storage, read> cells: Cells;
+
+struct Uniforms {
+  time: f32,
+  width: f32,
+  height: f32,
+  aspect: f32,
+}
+@group(0) @binding(1) var<uniform> u: Uniforms;
+
+const SIZE: f32 = 128.0;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let x = f32(i & 1u) * 4.0 - 1.0;
+  let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+  return vec4f(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let cellX = u32(pos.x * SIZE / u.width);
+  let cellY = u32(pos.y * SIZE / u.height);
+  let idx = cellY * u32(SIZE) + cellX;
+
+  if (idx >= u32(SIZE * SIZE)) {
+    return vec4f(0.1, 0.1, 0.15, 1.0);
+  }
+
+  let alive = cells.data[idx];
+  let color = select(vec3f(0.1, 0.1, 0.15), vec3f(0.2, 0.8, 0.3), alive == 1u);
+  return vec4f(color, 1.0);
+}
+""")
+
+(render-pipeline :name renderPipeline
+  (layout auto)
+  (vertex (module renderShader) (entry vs))
+  (fragment (module renderShader) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(bind-group :name renderBindGroup :layout-pipeline renderPipeline :layout-index 0 :pool 2
+  (entry :binding 0 :buffer cellBuffer :ping-pong 1)
+  (entry :binding 1 :buffer uniforms))
+
+(render-pass :name drawPass
+  (color-attachment :view context-current-texture :clear-value [0.1 0.1 0.15 1] :load-op clear :store-op store)
+  :pipeline renderPipeline
+  :bind-groups [renderBindGroup]
+  :bind-groups-pool-offsets [0]
+  (draw :vertex-count 3))
+
+(frame :name main
+  :init [initCells]
+  :perform [writeUniforms stepPass drawPass])

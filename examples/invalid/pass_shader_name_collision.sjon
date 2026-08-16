@@ -1,0 +1,14 @@
+; Invalid: a hand-written shader-module named `main__shader` collides with the
+; module `(pass :name main …)` lowering synthesizes under that same name; the
+; duplicate name is rejected.
+
+(shader-module :name main__shader :code """
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+
+(pass-graph
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      return vec4f(1.0);
+    }
+  """))

@@ -1,0 +1,29 @@
+; Invalid: the shader declares @group(0) @binding(1) as sampler_comparison
+; (used with textureSampleCompare), but the bind group binds a plain (sampler …)
+; with no :compare; the shader/binding cross-check rejects the mismatch.
+(shader-module :name code :code """
+@group(0) @binding(0) var t: texture_depth_2d;
+@group(0) @binding(1) var s: sampler_comparison;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f {
+  let d = textureSampleCompare(t, s, vec2f(0.5, 0.5), 0.5);
+  return vec4f(d, d, d, 1.0);
+}
+""")
+(texture :name shadowMap :format depth24plus :width 4 :height 4 :usage [texture-binding])
+(sampler :name plainSamp :mag-filter linear :min-filter linear)
+(render-pipeline :name pipe (layout auto)
+  (vertex (module code) (entry vs))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+(bind-group :name g0 :layout-pipeline pipe :layout-index 0
+  (entry :binding 0 :texture shadowMap)
+  (entry :binding 1 :sampler plainSamp))
+(render-pass :name draw :pipeline pipe :bind-groups [g0]
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

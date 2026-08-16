@@ -1,0 +1,27 @@
+; Invalid: a (wasm-call :args …) names a builtin that does not exist
+; (`canvas-widht`). The schema accepts any symbol in an args vector, so the
+; emitter rejects the unknown name rather than encoding it as a literal 0.0.
+
+(wasm-call :name mvp :url "assets/mvp.wasm" :func f :returns "mat4x4"
+  :args [canvas-widht canvas-height time-total])
+
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
+  return vec4f(p[i], 0, 1);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1, 0, 0, 1); }
+""")
+
+(render-pipeline :name pipe (layout auto)
+  (vertex (module code) (entry vs))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipe
+  (draw :vertex-count 3))
+
+(frame :name main :perform [draw])

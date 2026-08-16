@@ -1,0 +1,171 @@
+; Skinned grid — matrix-palette skinning on the hand-authored 4-bone 2D line
+; grid from the webgpu-samples `skinnedMesh` sample (the grid part only, not
+; the GLB whale). The indexed grid is pre-expanded to a 38-vertex non-indexed
+; line-list because inline `(data …)` is float32-only, so u16 indices cannot
+; ride along; joints are authored as float32x4 and cast to u32 in the shader.
+; A 1-thread compute pass reproduces upstream's animSkinnedGrid chain each
+; frame — bone 0 rotates by angle = sin(t*2.5)*0.2, bones 1-2 each append
+; translate(4,0,0) * rotZ(angle), bone 3 stays at bind pose — and writes the
+; final skin matrices (transform * inverseBind, the binds baked as consts:
+; I, T(-4), T(-8), I) so the vertex shader blends four palette entries by
+; weight directly. The fragment shader colors by weights (upstream's
+; render_mode 2) so bone influence is visible.
+
+(shader-module :name paletteCode :code """
+struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+struct Palette { joints : array<mat4x4f, 4> }
+
+@group(0) @binding(0) var<uniform> inputs : PngineInputs;
+@group(0) @binding(1) var<storage, read_write> palette : Palette;
+
+fn rotZ(a: f32) -> mat4x4f {
+  let c = cos(a);
+  let s = sin(a);
+  return mat4x4f(
+    vec4f(c, s, 0, 0),
+    vec4f(-s, c, 0, 0),
+    vec4f(0, 0, 1, 0),
+    vec4f(0, 0, 0, 1));
+}
+fn tx(x: f32) -> mat4x4f {
+  return mat4x4f(
+    vec4f(1, 0, 0, 0),
+    vec4f(0, 1, 0, 0),
+    vec4f(0, 0, 1, 0),
+    vec4f(x, 0, 0, 1));
+}
+
+// animSkinnedGrid: b0 = rotZ(a); b_i+1 = b_i * T(4,0,0) * rotZ(a); bone 3
+// untouched. Bind poses are the angle=0 chain: I, T(4), T(8), I — their
+// inverses fold in here so the palette holds final skin matrices.
+@compute @workgroup_size(1)
+fn main() {
+  let a = sin(inputs.time * 2.5) * 0.2;
+  let b0 = rotZ(a);
+  let b1 = b0 * tx(4.0) * rotZ(a);
+  let b2 = b1 * tx(4.0) * rotZ(a);
+  palette.joints[0] = b0;
+  palette.joints[1] = b1 * tx(-4.0);
+  palette.joints[2] = b2 * tx(-8.0);
+  palette.joints[3] = mat4x4f(
+    vec4f(1, 0, 0, 0), vec4f(0, 1, 0, 0), vec4f(0, 0, 1, 0), vec4f(0, 0, 0, 1));
+}
+""")
+
+(shader-module :name gridCode :code """
+struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+struct Palette { joints : array<mat4x4f, 4> }
+
+@group(0) @binding(0) var<uniform> inputs : PngineInputs;
+@group(0) @binding(1) var<storage, read> palette : Palette;
+
+struct VSOut {
+  @builtin(position) pos : vec4f,
+  @location(0) weights : vec4f,
+}
+
+@vertex
+fn vertexMain(@location(0) vertPos : vec2f,
+              @location(1) jointsF : vec4f,
+              @location(2) weights : vec4f) -> VSOut {
+  let joints = vec4u(jointsF);
+  let position = vec4f(vertPos, 0.0, 1.0);
+  let skin = palette.joints[joints.x] * weights.x +
+             palette.joints[joints.y] * weights.y +
+             palette.joints[joints.z] * weights.z +
+             palette.joints[joints.w] * weights.w;
+  let p = (skin * position).xy;
+  var out : VSOut;
+  // Orthographic fit: grid spans x 0..12, tip swings ~+-7 in y.
+  out.pos = vec4f((p.x - 6.0) / (9.0 * inputs.aspect), p.y / 9.0, 0.0, 1.0);
+  out.weights = weights;
+  return out;
+}
+
+// Upstream's render_mode 2: weights as color, so bone influence is legible.
+@fragment
+fn fragmentMain(@location(0) weights : vec4f) -> @location(0) vec4f {
+  return vec4f(weights.xyz + vec3f(0.15), 1.0);
+}
+""")
+
+; 38 expanded line-list verts x (pos2, joints4-as-f32, weights4) = stride 40.
+(data :name gridData :float32 [
+  0 1 0 0 0 0 1 0 0 0
+  0 -1 0 0 0 0 1 0 0 0
+  0 1 0 0 0 0 1 0 0 0
+  2 1 0 1 0 0 0.5 0.5 0 0
+  0 -1 0 0 0 0 1 0 0 0
+  2 -1 0 1 0 0 0.5 0.5 0 0
+  2 1 0 1 0 0 0.5 0.5 0 0
+  2 -1 0 1 0 0 0.5 0.5 0 0
+  2 1 0 1 0 0 0.5 0.5 0 0
+  4 1 1 0 0 0 1 0 0 0
+  2 -1 0 1 0 0 0.5 0.5 0 0
+  4 -1 1 0 0 0 1 0 0 0
+  4 1 1 0 0 0 1 0 0 0
+  4 -1 1 0 0 0 1 0 0 0
+  4 1 1 0 0 0 1 0 0 0
+  6 1 1 2 0 0 0.5 0.5 0 0
+  4 -1 1 0 0 0 1 0 0 0
+  6 -1 1 2 0 0 0.5 0.5 0 0
+  6 1 1 2 0 0 0.5 0.5 0 0
+  6 -1 1 2 0 0 0.5 0.5 0 0
+  6 1 1 2 0 0 0.5 0.5 0 0
+  8 1 2 0 0 0 1 0 0 0
+  6 -1 1 2 0 0 0.5 0.5 0 0
+  8 -1 2 0 0 0 1 0 0 0
+  8 1 2 0 0 0 1 0 0 0
+  8 -1 2 0 0 0 1 0 0 0
+  8 1 2 0 0 0 1 0 0 0
+  10 1 1 2 3 0 0.5 0.5 0 0
+  8 -1 2 0 0 0 1 0 0 0
+  10 -1 1 2 3 0 0.5 0.5 0 0
+  10 1 1 2 3 0 0.5 0.5 0 0
+  10 -1 1 2 3 0 0.5 0.5 0 0
+  10 1 1 2 3 0 0.5 0.5 0 0
+  12 1 2 3 0 0 1 0 0 0
+  10 -1 1 2 3 0 0.5 0.5 0 0
+  12 -1 2 3 0 0 1 0 0 0
+  12 1 2 3 0 0 1 0 0 0
+  12 -1 2 3 0 0 1 0 0 0
+])
+(buffer :name gridVB :size gridData :usage [vertex] :mapped-at-creation gridData)
+(buffer :name paletteBuf :size 256 :usage [storage])
+(buffer :name inputs :size 16 :usage [uniform copy-dst])
+
+(queue :name writeInputs
+  (write-buffer :buffer inputs :offset 0 :data pngine-inputs))
+
+(compute-pipeline :name palettePipe :module paletteCode :entry main)
+
+(render-pipeline :name gridPipe
+  (layout auto)
+  (vertex (module gridCode) (entry vertexMain)
+    (buffers
+      (vertex-buffer :array-stride 40
+        (attribute :shader-location 0 :offset 0 :format float32x2)
+        (attribute :shader-location 1 :offset 8 :format float32x4)
+        (attribute :shader-location 2 :offset 24 :format float32x4))))
+  (fragment (module gridCode) (entry fragmentMain)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology line-list)))
+
+(bind-group :name paletteBG :layout-pipeline palettePipe :layout-index 0
+  (entry :binding 0 :buffer inputs)
+  (entry :binding 1 :buffer paletteBuf))
+
+(bind-group :name gridBG :layout-pipeline gridPipe :layout-index 0
+  (entry :binding 0 :buffer inputs)
+  (entry :binding 1 :buffer paletteBuf))
+
+(compute-pass :name updatePalette :pipeline palettePipe :bind-groups [paletteBG]
+  :dispatch [1 1 1])
+
+(render-pass :name drawGrid
+  (color-attachment :view context-current-texture
+    :clear-value [0.08 0.08 0.1 1] :load-op clear :store-op store)
+  :pipeline gridPipe :bind-groups [gridBG] :vertex-buffers [gridVB]
+  (draw :vertex-count 38))
+
+(frame :name main :perform [writeInputs updatePalette drawGrid])

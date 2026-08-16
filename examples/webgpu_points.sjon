@@ -1,0 +1,229 @@
+; webgpu_points — port of the webgpu-samples `points` sample: 1000 points on
+; a fibonacci sphere (positions computed in-shader from
+; @builtin(instance_index)), drawn as billboard quads on the default
+; triangle-list — "points" names the visual, not the primitive. Upstream's
+; two teaching axes sit side by side: LEFT (orange) fixed size — the quad
+; offset is scaled by the point's clip-space w, which cancels in the
+; perspective divide, so pixel size is constant at any depth; RIGHT (cyan)
+; perspective size — the offset is scaled by a constant reference distance,
+; so after the divide nearer points are larger.
+;
+; Both halves sample a 64×64 sparkle sprite across the quad. Upstream
+; rasterizes an emoji to an OffscreenCanvas at runtime; a payload is data,
+; not code, so here an `:init` compute pass generates the sprite into an
+; rgba8unorm storage texture (premultiplied alpha) — no external asset.
+;
+; The split is an in-shader clip-space squeeze (x' = 0.5·x ∓ 0.5·w with a
+; 0.5·aspect projection) rather than a viewport, which would be
+; size-dependent. The squeeze lands on each point's center only; the quad
+; offset is added after it, so the sprites stay round.
+
+(define :name NUM_POINTS :value 1000)
+
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+
+(texture :name depthTexture :size canvas :format depth24plus :usage [render-attachment])
+
+(texture :name spriteTex :width 64 :height 64 :format rgba8unorm
+  :usage [storage-binding texture-binding])
+
+(sampler :name spriteSampler :mag-filter linear :min-filter linear)
+
+(queue :name writeUniforms
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+; Sprite generator: soft core + 4-point sparkle spikes, premultiplied white.
+(shader-module :name spriteShader :code """
+@group(0) @binding(0) var outTex: texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= 64u || id.y >= 64u) { return; }
+  let uv = (vec2f(id.xy) + 0.5) / 32.0 - 1.0;
+  let ax = abs(uv.x);
+  let ay = abs(uv.y);
+  let core = max(0.0, 1.0 - length(uv) * 1.6);
+  let spikes = max(0.0, 1.0 - (ax * 7.0 + ay * 0.8))
+             + max(0.0, 1.0 - (ay * 7.0 + ax * 0.8));
+  let a = clamp(core * core * 1.5 + spikes, 0.0, 1.0);
+  textureStore(outTex, id.xy, vec4f(a, a, a, a));
+}
+""")
+
+(shader-module :name code :code """
+struct PngineInputs {
+  time: f32,
+  width: f32,
+  height: f32,
+  aspect: f32,
+}
+@group(0) @binding(0) var<uniform> pngine: PngineInputs;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var sprite: texture_2d<f32>;
+
+struct VSOutput {
+  @builtin(position) position: vec4f,
+  @location(0) texcoord: vec2f,
+  @location(1) tint: vec3f,
+}
+
+const PI: f32 = 3.14159265359;
+
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  return mat4x4f(
+    vec4f(f / aspect, 0, 0, 0),
+    vec4f(0, f, 0, 0),
+    vec4f(0, 0, (far + near) * nf, -1),
+    vec4f(0, 0, 2 * far * near * nf, 0),
+  );
+}
+
+fn rotateY(a: f32) -> mat4x4f {
+  let c = cos(a); let s = sin(a);
+  return mat4x4f(
+    vec4f(c, 0, s, 0), vec4f(0, 1, 0, 0),
+    vec4f(-s, 0, c, 0), vec4f(0, 0, 0, 1));
+}
+
+fn rotateX(a: f32) -> mat4x4f {
+  let c = cos(a); let s = sin(a);
+  return mat4x4f(
+    vec4f(1, 0, 0, 0), vec4f(0, c, -s, 0),
+    vec4f(0, s, c, 0), vec4f(0, 0, 0, 1));
+}
+
+// Fibonacci sphere: compute point position from index
+fn fibSphere(i: u32, n: u32) -> vec3f {
+  let golden = PI * (3.0 - sqrt(5.0));
+  let off = 2.0 / f32(n);
+  let y = f32(i) * off - 1.0 + off * 0.5;
+  let r = sqrt(1.0 - y * y);
+  let phi = f32(i % n) * golden;
+  return vec3f(cos(phi) * r, y, sin(phi) * r);
+}
+
+// Shared: point center in clip space, squeezed into one half.
+fn pointCenter(instanceIdx: u32, side: f32) -> vec4f {
+  let pos3d = fibSphere(instanceIdx, 1000u);
+  let proj = perspective(PI * 0.5, pngine.aspect * 0.5, 0.1, 50.0);
+  let view = rotateX(pngine.time * 0.1) * rotateY(pngine.time);
+  let viewTranslate = mat4x4f(
+    vec4f(1, 0, 0, 0), vec4f(0, 1, 0, 0),
+    vec4f(0, 0, 1, 0), vec4f(0, 0, -2.5, 1));
+  var clip = (proj * viewTranslate * view) * vec4f(pos3d, 1.0);
+  clip.x = 0.5 * clip.x + side * 0.5 * clip.w;
+  return clip;
+}
+
+fn quadCorner(vNdx: u32) -> vec2f {
+  var quad = array<vec2f, 6>(
+    vec2f(-1, -1), vec2f( 1, -1), vec2f(-1,  1),
+    vec2f(-1,  1), vec2f( 1, -1), vec2f( 1,  1));
+  return quad[vNdx];
+}
+
+// LEFT — fixed pixel size: offset × clipPos.w cancels the divide.
+@vertex fn vsFixed(
+  @builtin(instance_index) instanceIdx: u32,
+  @builtin(vertex_index) vNdx: u32,
+) -> VSOutput {
+  let clipPos = pointCenter(instanceIdx, -1.0);
+  let resolution = vec2f(pngine.width, pngine.height);
+  let quadPos = quadCorner(vNdx);
+  let offset = vec4f(quadPos * 12.0 / resolution * clipPos.w, 0, 0);
+  var out: VSOutput;
+  out.position = clipPos + offset;
+  out.texcoord = quadPos * 0.5 + 0.5;
+  out.tint = vec3f(1.0, 0.55, 0.2);
+  return out;
+}
+
+// RIGHT — perspective size: offset × constant reference distance, so the
+// divide leaves a 1/w factor (nearer = larger).
+@vertex fn vsPersp(
+  @builtin(instance_index) instanceIdx: u32,
+  @builtin(vertex_index) vNdx: u32,
+) -> VSOutput {
+  let clipPos = pointCenter(instanceIdx, 1.0);
+  let resolution = vec2f(pngine.width, pngine.height);
+  let quadPos = quadCorner(vNdx);
+  let offset = vec4f(quadPos * 12.0 / resolution * 2.5, 0, 0);
+  var out: VSOutput;
+  out.position = clipPos + offset;
+  out.texcoord = quadPos * 0.5 + 0.5;
+  out.tint = vec3f(0.3, 0.85, 1.0);
+  return out;
+}
+
+@fragment fn fs(
+  @location(0) texcoord: vec2f,
+  @location(1) tint: vec3f,
+) -> @location(0) vec4f {
+  // Sprite is premultiplied white; tint the color channels.
+  let s = textureSample(sprite, samp, texcoord);
+  return vec4f(s.rgb * tint, s.a);
+}
+""")
+
+(compute-pipeline :name spritePipeline :module spriteShader :entry main)
+
+(render-pipeline :name fixedPipeline
+  (layout auto)
+  (vertex (module code) (entry vsFixed))
+  (fragment (module code) (entry fs)
+    (targets
+      (target :format preferred-canvas-format
+        ; Premultiplied-alpha blend.
+        (blend
+          (color :src-factor one :dst-factor one-minus-src-alpha)
+          (alpha :src-factor one :dst-factor one-minus-src-alpha)))))
+  (depth-stencil :format depth24plus :depth-write-enabled false :depth-compare less))
+
+(render-pipeline :name perspPipeline
+  (layout auto)
+  (vertex (module code) (entry vsPersp))
+  (fragment (module code) (entry fs)
+    (targets
+      (target :format preferred-canvas-format
+        (blend
+          (color :src-factor one :dst-factor one-minus-src-alpha)
+          (alpha :src-factor one :dst-factor one-minus-src-alpha)))))
+  (depth-stencil :format depth24plus :depth-write-enabled false :depth-compare less))
+
+(bind-group :name spriteBindGroup :layout-pipeline spritePipeline :layout-index 0
+  (entry :binding 0 :texture spriteTex))
+
+(bind-group :name fixedBindGroup :layout-pipeline fixedPipeline :layout-index 0
+  (entry :binding 0 :buffer uniforms)
+  (entry :binding 1 :sampler spriteSampler)
+  (entry :binding 2 :texture spriteTex))
+
+(bind-group :name perspBindGroup :layout-pipeline perspPipeline :layout-index 0
+  (entry :binding 0 :buffer uniforms)
+  (entry :binding 1 :sampler spriteSampler)
+  (entry :binding 2 :texture spriteTex))
+
+; One-time sprite bake (64×64 / 8×8 workgroups → [8 8 1]).
+(compute-pass :name bakeSprite :pipeline spritePipeline
+  :bind-groups [spriteBindGroup]
+  :dispatch [8 8 1])
+
+(render-pass :name fixedPass
+  (color-attachment :view context-current-texture :clear-value [0.05 0.05 0.08 1] :load-op clear :store-op store)
+  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  :pipeline fixedPipeline
+  :bind-groups [fixedBindGroup]
+  (draw :vertex-count 6 :instance-count NUM_POINTS))
+
+(render-pass :name perspPass
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (depth-attachment :view depthTexture :depth-load-op load :depth-store-op store)
+  :pipeline perspPipeline
+  :bind-groups [perspBindGroup]
+  (draw :vertex-count 6 :instance-count NUM_POINTS))
+
+(frame :name main
+  :init [bakeSprite]
+  :perform [writeUniforms fixedPass perspPass])

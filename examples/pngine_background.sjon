@@ -1,0 +1,422 @@
+; pngine_background — an ambient particle background: 384 soft translucent
+; discs in a warm palette drift and flock slowly over a transparent clear, so
+; the page behind the canvas shows through (premultiplied alphaMode). Same
+; structure as boids: an `(init …)` seed, ping-pong `:pool 2` storage buffers,
+; a per-frame compute step, and an instanced quad render that reads the live
+; pool through `:vertex-buffers-pool-offsets`.
+;
+; Particle layout: pos vec2f, vel vec2f, size f32, age f32 — 6 floats, 24 B.
+;
+; One 48-byte uniform buffer takes two writes: `pngine-inputs` (16 B) at
+; offset 0, then the 8-float sim params (32 B) at offset 16. The frame's
+; `:before` runs them in source order.
+;
+; Blend is premultiplied-alpha (one / one-minus-src-alpha, add on both colour
+; and alpha); the fragment shader outputs rgb already multiplied by alpha.
+
+(define :name NUM_PARTICLES :value 384)
+(define :name WORKGROUP_SIZE :value 64)
+
+; Quad vertices for the per-particle shape (two triangles).
+(data :name quadVertexData :float32 [
+  -1.0 -1.0
+   1.0 -1.0
+  -1.0  1.0
+  -1.0  1.0
+   1.0 -1.0
+   1.0  1.0
+])
+
+; Simulation parameters (8 floats) written into the uniform buffer at offset 16.
+(data :name simParamsData :float32 [
+  0.008   ; deltaT - very slow movement
+  0.25    ; rule1Distance - cohesion
+  0.08    ; rule2Distance - separation
+  0.15    ; rule3Distance - alignment
+  0.008   ; rule1Scale
+  0.03    ; rule2Scale
+  0.004   ; rule3Scale
+  0.025   ; maxSpeed
+])
+
+(buffer :name particleBuffers :size (* NUM_PARTICLES 6 4) :usage [vertex storage] :pool 2)
+
+(buffer :name quadVertexBuffer :size quadVertexData :usage [vertex]
+  :mapped-at-creation quadVertexData)
+
+(buffer :name uniforms :size 48 :usage [uniform copy-dst])
+
+(queue :name writeUniforms
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+(queue :name writeSimParams
+  (write-buffer :buffer uniforms :offset 16 :data simParamsData))
+
+; One-shot seed of the particle pool. `:workgroups` takes the same define
+; expression as the compute pass's `:dispatch-workgroups`.
+(init :name initParticles :buffer particleBuffers :shader initShader
+  :workgroups (ceil (/ NUM_PARTICLES WORKGROUP_SIZE)))
+
+(shader-module :name initShader :code """
+struct Particle {
+  pos: vec2f,
+  vel: vec2f,
+  size: f32,
+  age: f32,
+}
+
+struct Particles {
+  particles: array<Particle>,
+}
+
+@group(0) @binding(0) var<storage, read_write> data: Particles;
+
+// Hash function for pseudo-random numbers
+fn hash(n: u32) -> f32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return f32(x) / f32(0xffffffffu);
+}
+
+fn hash2(n: u32) -> vec2f {
+  return vec2f(hash(n), hash(n + 1000u));
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let i = id.x;
+  let total = arrayLength(&data.particles);
+  if (i >= total) { return; }
+
+  let t = f32(i) / f32(total);
+
+  // Distribute in a soft cloud pattern using multiple overlapping spirals
+  let spiral1 = t * 12.566371;  // 4 * PI
+  let spiral2 = t * 8.377580;   // different frequency
+  let radius1 = sqrt(t) * 0.7;
+  let radius2 = sqrt(1.0 - t) * 0.5;
+
+  let pos1 = vec2f(cos(spiral1), sin(spiral1)) * radius1;
+  let pos2 = vec2f(cos(spiral2 + 1.0), sin(spiral2 + 1.0)) * radius2;
+
+  // Blend positions with some randomness
+  let blend = hash(i * 3u);
+  var pos = mix(pos1, pos2, blend);
+  pos += (hash2(i * 7u) - 0.5) * 0.3;
+
+  data.particles[i].pos = pos;
+
+  // Very slow initial velocities - almost stationary
+  let velAngle = hash(i * 5u) * 6.283185;
+  let velMag = hash(i * 11u) * 0.01;
+  data.particles[i].vel = vec2f(cos(velAngle), sin(velAngle)) * velMag;
+
+  // Varied sizes for depth effect (0.008 to 0.025)
+  data.particles[i].size = 0.008 + hash(i * 13u) * 0.017;
+
+  // Random starting age for varied animation phase
+  data.particles[i].age = hash(i * 17u) * 100.0;
+}
+""")
+
+(shader-module :name computeCode :code """
+struct Uniforms {
+  time: f32,
+  width: f32,
+  height: f32,
+  aspect: f32,
+  deltaT: f32,
+  rule1Distance: f32,
+  rule2Distance: f32,
+  rule3Distance: f32,
+  rule1Scale: f32,
+  rule2Scale: f32,
+  rule3Scale: f32,
+  maxSpeed: f32,
+}
+
+struct Particle {
+  pos: vec2f,
+  vel: vec2f,
+  size: f32,
+  age: f32,
+}
+
+struct Particles {
+  particles: array<Particle>,
+}
+
+@group(0) @binding(0) var<uniform> u: Uniforms;
+@group(0) @binding(1) var<storage, read> particlesA: Particles;
+@group(0) @binding(2) var<storage, read_write> particlesB: Particles;
+
+const PI: f32 = 3.14159265359;
+
+@compute @workgroup_size(64)
+fn computeMain(@builtin(global_invocation_id) id: vec3u) {
+  let index = id.x;
+  let total = arrayLength(&particlesA.particles);
+  if (index >= total) { return; }
+
+  var vPos = particlesA.particles[index].pos;
+  var vVel = particlesA.particles[index].vel;
+  let vSize = particlesA.particles[index].size;
+  var vAge = particlesA.particles[index].age + u.deltaT;
+
+  // Flocking accumulators
+  var cMass = vec2f(0.0);
+  var cVel = vec2f(0.0);
+  var separation = vec2f(0.0);
+  var cMassCount = 0u;
+  var cVelCount = 0u;
+
+  // Flocking behavior with nearby particles
+  for (var i = 0u; i < total; i++) {
+    if (i == index) { continue; }
+
+    let otherPos = particlesA.particles[i].pos;
+    let otherVel = particlesA.particles[i].vel;
+    let dist = distance(otherPos, vPos);
+
+    // Rule 1: Cohesion - steer towards center of mass of neighbors
+    if (dist < u.rule1Distance) {
+      cMass += otherPos;
+      cMassCount++;
+    }
+
+    // Rule 2: Separation - avoid crowding neighbors
+    if (dist < u.rule2Distance && dist > 0.001) {
+      separation -= (otherPos - vPos) / dist;
+    }
+
+    // Rule 3: Alignment - steer towards average heading of neighbors
+    if (dist < u.rule3Distance) {
+      cVel += otherVel;
+      cVelCount++;
+    }
+  }
+
+  // Apply flocking rules
+  if (cMassCount > 0u) {
+    cMass = (cMass / f32(cMassCount)) - vPos;
+  }
+  if (cVelCount > 0u) {
+    cVel = cVel / f32(cVelCount);
+  }
+
+  vVel += cMass * u.rule1Scale;
+  vVel += separation * u.rule2Scale;
+  vVel += cVel * u.rule3Scale;
+
+  // Add gentle drift towards center (prevents particles from escaping)
+  let centerPull = -vPos * 0.001;
+  vVel += centerPull;
+
+  // Add subtle sine wave motion for organic feel
+  let waveOffset = sin(vAge * 0.5 + f32(index) * 0.1) * 0.0005;
+  vVel.x += waveOffset;
+  vVel.y += cos(vAge * 0.3 + f32(index) * 0.15) * 0.0003;
+
+  // Clamp velocity to max speed
+  let speed = length(vVel);
+  if (speed > u.maxSpeed) {
+    vVel = normalize(vVel) * u.maxSpeed;
+  }
+
+  // Apply damping for smoother motion
+  vVel *= 0.995;
+
+  // Update position
+  vPos += vVel * u.deltaT * 60.0; // Normalize for ~60fps
+
+  // Soft boundary - gently push back when near edges
+  let boundary = 0.9;
+  let pushStrength = 0.02;
+  if (vPos.x < -boundary) { vVel.x += pushStrength; }
+  if (vPos.x > boundary) { vVel.x -= pushStrength; }
+  if (vPos.y < -boundary) { vVel.y += pushStrength; }
+  if (vPos.y > boundary) { vVel.y -= pushStrength; }
+
+  // Hard clamp as failsafe
+  vPos = clamp(vPos, vec2f(-1.0), vec2f(1.0));
+
+  // Write output
+  particlesB.particles[index].pos = vPos;
+  particlesB.particles[index].vel = vVel;
+  particlesB.particles[index].size = vSize;
+  particlesB.particles[index].age = vAge;
+}
+""")
+
+(shader-module :name renderCode :code """
+struct Uniforms {
+  time: f32,
+  width: f32,
+  height: f32,
+  aspect: f32,
+}
+
+@group(0) @binding(0) var<uniform> u: Uniforms;
+
+const PI: f32 = 3.14159265359;
+
+// Warm color palette matching website theme
+// Background: vec3(0.9, 0.8, 0.7) = #E6CCB3
+// Terracotta: vec3(0.78, 0.36, 0.23) = #C75D3A
+// Teal: vec3(0.10, 0.37, 0.37) = #1A5F5E
+// Warm brown: vec3(0.36, 0.29, 0.24) = #5C4A3D
+
+fn palette(t: f32) -> vec3f {
+  // Smooth gradient between terracotta, teal, and muted tones
+  let a = vec3f(0.5, 0.45, 0.4);
+  let b = vec3f(0.4, 0.35, 0.3);
+  let c = vec3f(1.0, 0.8, 0.6);
+  let d = vec3f(0.0, 0.15, 0.25);
+  return a + b * cos(6.28318 * (c * t + d));
+}
+
+fn palette2(t: f32) -> vec3f {
+  // Warm colors that contrast nicely with cream background
+  let terracotta = vec3f(0.78, 0.36, 0.23);
+  let teal = vec3f(0.10, 0.37, 0.37);
+  let warmBrown = vec3f(0.45, 0.32, 0.25);
+
+  let blend = sin(t * PI) * 0.5 + 0.5;
+  let color1 = mix(terracotta, teal, blend);
+  return mix(color1, warmBrown, 0.15);
+}
+
+struct VertexOutput {
+  @builtin(position) position: vec4f,
+  @location(0) uv: vec2f,
+  @location(1) color: vec3f,
+  @location(2) alpha: f32,
+  @location(3) size: f32,
+}
+
+@vertex
+fn vertexMain(
+  @location(0) particlePos: vec2f,
+  @location(1) particleVel: vec2f,
+  @location(2) particleSize: f32,
+  @location(3) particleAge: f32,
+  @location(4) quadVertex: vec2f,
+  @builtin(instance_index) instanceIdx: u32
+) -> VertexOutput {
+  var output: VertexOutput;
+
+  // Scale quad by particle size, adjust for aspect ratio
+  var scaledVertex = quadVertex * particleSize;
+  scaledVertex.x /= u.aspect;
+
+  // Subtle rotation based on velocity direction
+  let speed = length(particleVel);
+  let angle = atan2(particleVel.y, particleVel.x) * 0.3; // Reduced rotation
+  let cosA = cos(angle);
+  let sinA = sin(angle);
+  let rotatedVertex = vec2f(
+    scaledVertex.x * cosA - scaledVertex.y * sinA,
+    scaledVertex.x * sinA + scaledVertex.y * cosA
+  );
+
+  output.position = vec4f(particlePos + rotatedVertex, 0.0, 1.0);
+  output.uv = quadVertex;
+
+  // Color based on position, age, and instance for variety
+  let colorPhase = f32(instanceIdx) * 0.0173 + particleAge * 0.01 + particlePos.x * 0.5;
+  output.color = palette2(colorPhase);
+
+  // Alpha based on speed and position (slower = more visible, center = more visible)
+  let distFromCenter = length(particlePos);
+  let speedFade = 1.0 - smoothstep(0.0, 0.03, speed);
+  let edgeFade = 1.0 - smoothstep(0.5, 1.0, distFromCenter);
+  output.alpha = 0.25 + speedFade * 0.15 + edgeFade * 0.2;
+
+  output.size = particleSize;
+
+  return output;
+}
+
+@fragment
+fn fragMain(
+  @location(0) uv: vec2f,
+  @location(1) color: vec3f,
+  @location(2) alpha: f32,
+  @location(3) size: f32
+) -> @location(0) vec4f {
+  // Soft circle with smooth falloff
+  let dist = length(uv);
+
+  // Multi-layered soft circle for organic feel
+  let innerCircle = 1.0 - smoothstep(0.0, 0.4, dist);
+  let outerGlow = 1.0 - smoothstep(0.3, 1.0, dist);
+
+  let shape = innerCircle * 0.7 + outerGlow * 0.3;
+
+  // Subtle inner highlight
+  let highlight = 1.0 - smoothstep(0.0, 0.2, dist);
+  let finalColor = color + vec3f(0.1) * highlight;
+
+  // Final alpha with shape falloff
+  let finalAlpha = alpha * shape;
+
+  // Discard fully transparent pixels
+  if (finalAlpha < 0.01) { discard; }
+
+  // Output premultiplied alpha (rgb * alpha) for canvas compositing
+  return vec4f(finalColor * finalAlpha, finalAlpha);
+}
+""")
+
+(compute-pipeline :name computeParticles :module computeCode :entry computeMain)
+
+(bind-group :name particleBindGroups :layout-pipeline computeParticles :layout-index 0 :pool 2
+  (entry :binding 0 :buffer uniforms)
+  (entry :binding 1 :buffer particleBuffers :ping-pong 0)
+  (entry :binding 2 :buffer particleBuffers :ping-pong 1))
+
+(render-pipeline :name renderParticles
+  (layout auto)
+  (vertex (module renderCode) (entry vertexMain)
+    (buffers
+      ; Instance buffer (particle data: pos, vel, size, age — 6 floats).
+      (vertex-buffer :array-stride (* 6 4) :step-mode instance
+        (attribute :shader-location 0 :offset 0 :format float32x2)
+        (attribute :shader-location 1 :offset (* 2 4) :format float32x2)
+        (attribute :shader-location 2 :offset (* 4 4) :format float32)
+        (attribute :shader-location 3 :offset (* 5 4) :format float32))
+      ; Quad vertices.
+      (vertex-buffer :array-stride (* 2 4) :step-mode vertex
+        (attribute :shader-location 4 :offset 0 :format float32x2))))
+  (fragment (module renderCode) (entry fragMain)
+    (targets
+      (target :format preferred-canvas-format
+        ; Premultiplied-alpha blending.
+        (blend
+          (color :src-factor one :dst-factor one-minus-src-alpha :operation add)
+          (alpha :src-factor one :dst-factor one-minus-src-alpha :operation add)))))
+  (primitive (topology triangle-list)))
+
+(bind-group :name renderBindGroup :layout-pipeline renderParticles :layout-index 0
+  (entry :binding 0 :buffer uniforms))
+
+(compute-pass :name computePass
+  :pipeline computeParticles
+  :bind-groups [particleBindGroups]
+  :dispatch-workgroups (ceil (/ NUM_PARTICLES WORKGROUP_SIZE)))
+
+(render-pass :name renderPass
+  ; Transparent clear — CSS background shows through (alphaMode premultiplied).
+  (color-attachment :view context-current-texture :clear-value [0.0 0.0 0.0 0.0] :load-op clear :store-op store)
+  :pipeline renderParticles
+  :bind-groups [renderBindGroup]
+  :vertex-buffers [particleBuffers quadVertexBuffer]
+  :vertex-buffers-pool-offsets [1 0]
+  (draw :vertex-count 6 :instance-count NUM_PARTICLES :first-vertex 0 :first-instance 0))
+
+(frame :name pngineBackground
+  :init [initParticles]
+  :before [writeUniforms writeSimParams]
+  :perform [computePass renderPass])

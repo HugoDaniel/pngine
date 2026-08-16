@@ -1,0 +1,37 @@
+{
+  "name": "pngine-workspace",
+  "private": true,
+  "type": "module",
+  "license": "CC0-1.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HugoDaniel/pngine"
+  },
+  "homepage": "https://github.com/HugoDaniel/pngine",
+  "scripts": {
+    "dev": "bash scripts/build-samples.sh && vite",
+    "pretest": "npm run test:types && npm run test:npm",
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:debug": "playwright test --debug",
+    "test:abi": "node --test tests/npm/abi-surface.test.js tests/npm/abi-museum.test.js",
+    "test:npm": "node --test tests/npm/*.test.js",
+    "test:types": "tsc -p npm/pngine/jsconfig.json",
+    "test:zig": "zig test src/main.zig",
+    "test:zig:full": "zig build test",
+    "browser": "npx tsx tests/browser/browser.ts",
+    "render-frame": "npx tsx tests/browser/render-frame.ts",
+    "parity": "npx tsx tests/browser/parity.ts",
+    "gen-fragments": "node scripts/gen-js-fragments.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.40.0",
+    "@webgpu/types": "^0.1.71",
+    "esbuild": "^0.24.0",
+    "terser": "^5.46.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.0"
+  },
+  "packageManager": "pnpm@11.8.0+sha512.c1f5e7c4cb241c8f174b743851d82f42b802324afc8b0f116b96adb15aa06664948dde36960a3ba1079ba5b4b29dd0140135b94b5b5f5263592249d68e555f26"
+}

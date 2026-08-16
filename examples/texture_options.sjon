@@ -1,0 +1,56 @@
+; Texture options — exercises the extended (texture …) keys: :dimension
+; (1d/2d/3d as 1/2/3), :depth-or-array-layers and :mip-level-count. Two
+; textures cover the set:
+;
+;   mip_tex — a mipmapped 2D texture (:mip-level-count 4), sampled through its
+;             default view (level 0) by a fullscreen triangle.
+;   vol     — a 3D texture (:dimension 3 :depth-or-array-layers 8). Sampling
+;             a 3D texture needs a matching (texture-view …), so it is declared
+;             but not bound (texture_view.sjon covers explicit views).
+;
+; Nothing writes to either texture, so the output is black; the file is about
+; the descriptors. A plain (texture …) emits none of these fields — they are
+; appended only when authored.
+
+(shader-module :name code :code """
+    @group(0) @binding(0) var samp: sampler;
+    @group(0) @binding(1) var tex: texture_2d<f32>;
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      var p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
+      return vec4f(p[i], 0, 1);
+    }
+
+    @fragment
+    fn fs(@builtin(position) c: vec4f) -> @location(0) vec4f {
+      let uv = c.xy / vec2f(256.0);
+      return textureSample(tex, samp, uv);
+    }
+""")
+
+(texture :name mip_tex :width 256 :height 256 :mip-level-count 4
+  :format rgba8unorm :usage [texture-binding copy-dst])
+
+(texture :name vol :width 16 :height 16 :dimension 3 :depth-or-array-layers 8
+  :format rgba8unorm :usage [texture-binding copy-dst])
+
+(sampler :name samp :mag-filter linear :min-filter linear :mipmap-filter linear)
+
+(render-pipeline :name pipe
+  (layout auto)
+  (vertex (module code) (entry vs))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(bind-group :name g :layout-pipeline pipe :layout-index 0
+  (entry :binding 0 :sampler samp)
+  (entry :binding 1 :texture mip_tex))
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipe :bind-groups [g]
+  (draw :vertex-count 3))
+
+(frame :name main :perform [draw])

@@ -1,0 +1,917 @@
+; webgpu_metaballs — after the external `metaballs` sample linked from
+; webgpu-samples (toji.github.io/webgpu-metaballs); fresh-authored on the
+; webgpu_marching_cubes.sjon machinery. Six balls orbit on golden-angle-
+; decorrelated Lissajous paths; each frame the 5-stage compute pipeline
+; (clear, density, vertex-gen, index-gen, indirect-args) re-meshes the
+; isosurface of the inverse-square field f(p) = sum r_i^2/|p-c_i|^2 - 1 on a
+; 33^3 grid and renders it via `(draw-indexed-indirect …)` over the same
+; ground plane.
+;
+; Departures from webgpu_marching_cubes.sjon:
+; - The field is positive-inside directly (no SDF negation).
+; - Normals are the negated central-difference field gradient; the AO
+;   ray-march is dropped (ao = 1) — fresnel shading carries the depth cue.
+; - The arcball is replaced by a stateless time-orbit camera, so there is no
+;   pointer input and the image at time t is fully deterministic.
+; Budget: 6 balls at r~3 give ~700 units^2 of shell over 1^3 cells, about 2k
+; emitting cells — far under MAX_VERTICES 65536 / MAX_INDICES 262144; the
+; indirect-args stage clamps the index count as the overflow backstop.
+
+; Defines used in buffer :size expressions; byte-count slots like
+; :array-stride take the literal instead.
+(define :name GRID_TOTAL_VERTS :value 35937)
+(define :name MAX_VERTICES :value 65536)
+(define :name MAX_INDICES :value 262144)
+(define :name VERTEX_ID_MAP_SIZE :value 98304)
+(define :name VERTEX_STRIDE :value 32)
+
+; ── Ground Plane (mesh primitive) ──────────────────────────────────────
+
+(data :name groundPlane (plane :format [position3 normal3]))
+
+; ── Buffers ────────────────────────────────────────────────────────────
+
+(buffer :name vertexBuffer :size (* MAX_VERTICES VERTEX_STRIDE)
+  :usage [vertex storage])
+
+; GPU-generated u32 indices: no :index-of companion, so the index format is
+; declared explicitly (propagates to set_index_buffer).
+(buffer :name indexBuffer :size (* MAX_INDICES 4) :usage [index storage]
+  :index-format uint32)
+
+(buffer :name atomicCounters :size 16 :usage [storage])
+
+(buffer :name mvpBuffer :size 128 :usage [storage])
+
+(buffer :name indirectDrawBuffer :size 20 :usage [indirect storage])
+
+(buffer :name timeUniforms :size 16 :usage [uniform copy-dst])
+
+(buffer :name groundVB :size groundPlane :usage [vertex]
+  :mapped-at-creation groundPlane)
+
+(buffer :name vertexIdMap :size (* VERTEX_ID_MAP_SIZE 4) :usage [storage])
+
+(buffer :name densityBuffer :size (* GRID_TOTAL_VERTS 4) :usage [storage])
+
+; ── Textures ───────────────────────────────────────────────────────────
+
+(texture :name depthTexture :size canvas :format depth24plus
+  :usage [render-attachment])
+
+; ── Queue Operations ───────────────────────────────────────────────────
+
+(queue :name writeTime
+  (write-buffer :buffer timeUniforms :offset 0 :data pngine-inputs))
+
+
+
+
+; ── Shader: Indirect Args ─────────────────────────────────────────
+
+(shader-module :name indirectArgsShader :code """
+@group(0) @binding(0) var<storage, read_write> counters: array<atomic<u32>, 4>;
+@group(0) @binding(1) var<storage, read_write> indirect: array<u32, 5>;
+
+@compute @workgroup_size(1)
+fn main() {
+  indirect[0] = min(atomicLoad(&counters[1]), 262144u); // indexCount
+  indirect[1] = 1u; // instanceCount
+  indirect[2] = 0u; // firstIndex
+  indirect[3] = 0u; // baseVertex
+  indirect[4] = 0u; // firstInstance
+}
+""")
+
+; ── Shader: Clear ─────────────────────────────────────────────────
+
+(shader-module :name clearShader :code """
+@group(0) @binding(0) var<storage, read_write> counters: array<atomic<u32>, 4>;
+@group(0) @binding(1) var<storage, read_write> indirect: array<u32, 5>;
+@group(0) @binding(2) var<storage, read_write> vidMap: array<atomic<u32>>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+  let id = gid.x;
+  // Clear atomic counters and indirect draw buffer
+  if (id == 0u) {
+    atomicStore(&counters[0], 0u); // vertex count
+    atomicStore(&counters[1], 0u); // index count
+    atomicStore(&counters[2], 0u);
+    atomicStore(&counters[3], 0u);
+    indirect[0] = 0u; // indexCount
+    indirect[1] = 1u; // instanceCount
+    indirect[2] = 0u; // firstIndex
+    indirect[3] = 0u; // baseVertex
+    indirect[4] = 0u; // firstInstance
+  }
+  // Clear vertex ID map
+  if (id < 98304u) {
+    atomicStore(&vidMap[id], 0xFFFFFFFFu);
+  }
+}
+""")
+
+; ── Shader: Index Generation ──────────────────────────────────────
+
+(shader-module :name indexGenShader :code """
+@group(0) @binding(0) var<storage, read> density: array<f32>;
+@group(0) @binding(1) var<storage, read> vidMap: array<u32>;
+@group(0) @binding(2) var<storage, read_write> indices: array<u32>;
+@group(0) @binding(3) var<storage, read_write> counters: array<atomic<u32>, 4>;
+
+const N: u32 = 32u;
+const NV: u32 = 33u;
+
+fn densityAt(x: u32, y: u32, z: u32) -> f32 {
+  return density[z * NV * NV + y * NV + x];
+}
+
+const kCorner = array<vec3u, 8>(
+  vec3u(0,0,0), vec3u(1,0,0), vec3u(1,1,0), vec3u(0,1,0),
+  vec3u(0,0,1), vec3u(1,0,1), vec3u(1,1,1), vec3u(0,1,1)
+);
+
+// Maps each of 12 edges to (dx, dy, dz, axis) for the owning cell's primary edge.
+// Paul Bourke convention: 0,2,4,6=X-axis(0); 1,3,5,7=Y-axis(1); 8-11=Z-axis(2)
+const kEdgeToPrimary = array<vec4u, 12>(
+  vec4u(0,0,0, 0), // edge 0:  X at (x,y,z)       [v0→v1]
+  vec4u(1,0,0, 1), // edge 1:  Y at (x+1,y,z)     [v1→v2]
+  vec4u(0,1,0, 0), // edge 2:  X at (x,y+1,z)     [v2→v3, reversed]
+  vec4u(0,0,0, 1), // edge 3:  Y at (x,y,z)       [v3→v0, reversed]
+  vec4u(0,0,1, 0), // edge 4:  X at (x,y,z+1)     [v4→v5]
+  vec4u(1,0,1, 1), // edge 5:  Y at (x+1,y,z+1)   [v5→v6]
+  vec4u(0,1,1, 0), // edge 6:  X at (x,y+1,z+1)   [v6→v7, reversed]
+  vec4u(0,0,1, 1), // edge 7:  Y at (x,y,z+1)     [v7→v4, reversed]
+  vec4u(0,0,0, 2), // edge 8:  Z at (x,y,z)       [v0→v4]
+  vec4u(1,0,0, 2), // edge 9:  Z at (x+1,y,z)     [v1→v5]
+  vec4u(1,1,0, 2), // edge 10: Z at (x+1,y+1,z)   [v2→v6]
+  vec4u(0,1,0, 2)  // edge 11: Z at (x,y+1,z)     [v3→v7]
+);
+
+fn getVertexId(cx: u32, cy: u32, cz: u32, edgeIdx: u32) -> u32 {
+  let e = kEdgeToPrimary[edgeIdx];
+  let nx = cx + e.x;
+  let ny = cy + e.y;
+  let nz = cz + e.z;
+  let axis = e.w;
+  if (nx >= N || ny >= N || nz >= N) { return 0xFFFFFFFFu; }
+  return vidMap[axis * N * N * N + nz * N * N + ny * N + nx];
+}
+
+const kNumTris = array<u32, 256>(
+  0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 2, 1, 2, 2, 3, 2, 3, 3, 4, 2,
+  3, 3, 4, 3, 4, 4, 3, 1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 3, 2, 3,
+  3, 2, 3, 4, 4, 3, 3, 4, 4, 3, 4, 5, 5, 2, 1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3,
+  4, 3, 4, 4, 3, 2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 4, 2, 3, 3, 4,
+  3, 4, 2, 3, 3, 4, 4, 5, 4, 5, 3, 2, 3, 4, 4, 3, 4, 5, 3, 2, 4, 5, 5, 4, 5,
+  2, 4, 1, 1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 3, 2, 3, 3, 4, 3, 4,
+  4, 5, 3, 2, 4, 3, 4, 3, 5, 2, 2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5,
+  4, 3, 4, 4, 3, 4, 5, 5, 4, 4, 3, 5, 2, 5, 4, 2, 1, 2, 3, 3, 4, 3, 4, 4, 5,
+  3, 4, 4, 5, 2, 3, 3, 2, 3, 4, 4, 5, 4, 5, 5, 2, 4, 3, 5, 4, 3, 2, 4, 1, 3,
+  4, 4, 5, 4, 5, 3, 4, 4, 5, 5, 2, 3, 4, 2, 1, 2, 3, 3, 2, 3, 4, 2, 1, 3, 2,
+  4, 1, 2, 1, 1, 0
+);
+
+// Triangle table: 1280 vec3i entries (5 per case × 256 cases)
+// Each vec3i holds 3 edge indices for one triangle, -1 = unused
+const kTriTable = array<vec3i, 1280>(
+  vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,8,3),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,1,9),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,8,3),vec3i(9,8,1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,2,10),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,8,3),vec3i(1,2,10),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(9,2,10),vec3i(0,2,9),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(2,8,3),vec3i(2,10,8),vec3i(10,9,8),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(3,11,2),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,11,2),vec3i(8,11,0),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,9,0),vec3i(2,3,11),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,11,2),vec3i(1,9,11),vec3i(9,8,11),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(3,10,1),vec3i(11,10,3),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,10,1),vec3i(0,8,10),vec3i(8,11,10),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(3,9,0),vec3i(3,11,9),vec3i(11,10,9),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(9,8,10),vec3i(10,8,11),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(4,7,8),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(4,3,0),vec3i(7,3,4),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,1,9),vec3i(8,4,7),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(4,1,9),vec3i(4,7,1),vec3i(7,3,1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,2,10),vec3i(8,4,7),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(3,4,7),vec3i(3,0,4),vec3i(1,2,10),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(9,2,10),vec3i(9,0,2),vec3i(8,4,7),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(2,10,9),vec3i(2,9,7),vec3i(2,7,3),vec3i(7,9,4),vec3i(-1,-1,-1),
+  vec3i(8,4,7),vec3i(3,11,2),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(11,4,7),vec3i(11,2,4),vec3i(2,0,4),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(9,0,1),vec3i(8,4,7),vec3i(2,3,11),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(4,7,11),vec3i(9,4,11),vec3i(9,11,2),vec3i(9,2,1),vec3i(-1,-1,-1),
+  vec3i(3,10,1),vec3i(3,11,10),vec3i(7,8,4),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,11,10),vec3i(1,4,11),vec3i(1,0,4),vec3i(7,11,4),vec3i(-1,-1,-1),
+  vec3i(4,7,8),vec3i(9,0,11),vec3i(9,11,10),vec3i(11,0,3),vec3i(-1,-1,-1),
+  vec3i(4,7,11),vec3i(4,11,9),vec3i(9,11,10),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(9,5,4),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(9,5,4),vec3i(0,8,3),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,5,4),vec3i(1,5,0),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(8,5,4),vec3i(8,3,5),vec3i(3,1,5),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,2,10),vec3i(9,5,4),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(3,0,8),vec3i(1,2,10),vec3i(4,9,5),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(5,2,10),vec3i(5,4,2),vec3i(4,0,2),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(2,10,5),vec3i(3,2,5),vec3i(3,5,4),vec3i(3,4,8),vec3i(-1,-1,-1),
+  vec3i(9,5,4),vec3i(2,3,11),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,11,2),vec3i(0,8,11),vec3i(4,9,5),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,5,4),vec3i(0,1,5),vec3i(2,3,11),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(2,1,5),vec3i(2,5,8),vec3i(2,8,11),vec3i(4,8,5),vec3i(-1,-1,-1),
+  vec3i(10,3,11),vec3i(10,1,3),vec3i(9,5,4),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(4,9,5),vec3i(0,8,1),vec3i(8,10,1),vec3i(8,11,10),vec3i(-1,-1,-1),
+  vec3i(5,4,0),vec3i(5,0,11),vec3i(5,11,10),vec3i(11,0,3),vec3i(-1,-1,-1),
+  vec3i(5,4,8),vec3i(5,8,10),vec3i(10,8,11),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(9,7,8),vec3i(5,7,9),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(9,3,0),vec3i(9,5,3),vec3i(5,7,3),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,7,8),vec3i(0,1,7),vec3i(1,5,7),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,5,3),vec3i(3,5,7),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(9,7,8),vec3i(9,5,7),vec3i(10,1,2),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(10,1,2),vec3i(9,5,0),vec3i(5,3,0),vec3i(5,7,3),vec3i(-1,-1,-1),
+  vec3i(8,0,2),vec3i(8,2,5),vec3i(8,5,7),vec3i(10,5,2),vec3i(-1,-1,-1),
+  vec3i(2,10,5),vec3i(2,5,3),vec3i(3,5,7),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(7,9,5),vec3i(7,8,9),vec3i(3,11,2),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(9,5,7),vec3i(9,7,2),vec3i(9,2,0),vec3i(2,7,11),vec3i(-1,-1,-1),
+  vec3i(2,3,11),vec3i(0,1,8),vec3i(1,7,8),vec3i(1,5,7),vec3i(-1,-1,-1),
+  vec3i(11,2,1),vec3i(11,1,7),vec3i(7,1,5),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(9,5,8),vec3i(8,5,7),vec3i(10,1,3),vec3i(10,3,11),vec3i(-1,-1,-1),
+  vec3i(5,7,0),vec3i(5,0,9),vec3i(7,11,0),vec3i(1,0,10),vec3i(11,10,0),
+  vec3i(11,10,0),vec3i(11,0,3),vec3i(10,5,0),vec3i(8,0,7),vec3i(5,7,0),
+  vec3i(11,10,5),vec3i(7,11,5),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(10,6,5),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,8,3),vec3i(5,10,6),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(9,0,1),vec3i(5,10,6),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,8,3),vec3i(1,9,8),vec3i(5,10,6),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,6,5),vec3i(2,6,1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,6,5),vec3i(1,2,6),vec3i(3,0,8),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(9,6,5),vec3i(9,0,6),vec3i(0,2,6),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(5,9,8),vec3i(5,8,2),vec3i(5,2,6),vec3i(3,2,8),vec3i(-1,-1,-1),
+  vec3i(2,3,11),vec3i(10,6,5),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(11,0,8),vec3i(11,2,0),vec3i(10,6,5),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,1,9),vec3i(2,3,11),vec3i(5,10,6),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(5,10,6),vec3i(1,9,2),vec3i(9,11,2),vec3i(9,8,11),vec3i(-1,-1,-1),
+  vec3i(6,3,11),vec3i(6,5,3),vec3i(5,1,3),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,8,11),vec3i(0,11,5),vec3i(0,5,1),vec3i(5,11,6),vec3i(-1,-1,-1),
+  vec3i(3,11,6),vec3i(0,3,6),vec3i(0,6,5),vec3i(0,5,9),vec3i(-1,-1,-1),
+  vec3i(6,5,9),vec3i(6,9,11),vec3i(11,9,8),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(5,10,6),vec3i(4,7,8),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(4,3,0),vec3i(4,7,3),vec3i(6,5,10),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,9,0),vec3i(5,10,6),vec3i(8,4,7),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(10,6,5),vec3i(1,9,7),vec3i(1,7,3),vec3i(7,9,4),vec3i(-1,-1,-1),
+  vec3i(6,1,2),vec3i(6,5,1),vec3i(4,7,8),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,2,5),vec3i(5,2,6),vec3i(3,0,4),vec3i(3,4,7),vec3i(-1,-1,-1),
+  vec3i(8,4,7),vec3i(9,0,5),vec3i(0,6,5),vec3i(0,2,6),vec3i(-1,-1,-1),
+  vec3i(7,3,9),vec3i(7,9,4),vec3i(3,2,9),vec3i(5,9,6),vec3i(2,6,9),
+  vec3i(3,11,2),vec3i(7,8,4),vec3i(10,6,5),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(5,10,6),vec3i(4,7,2),vec3i(4,2,0),vec3i(2,7,11),vec3i(-1,-1,-1),
+  vec3i(0,1,9),vec3i(4,7,8),vec3i(2,3,11),vec3i(5,10,6),vec3i(-1,-1,-1),
+  vec3i(9,2,1),vec3i(9,11,2),vec3i(9,4,11),vec3i(7,11,4),vec3i(5,10,6),
+  vec3i(8,4,7),vec3i(3,11,5),vec3i(3,5,1),vec3i(5,11,6),vec3i(-1,-1,-1),
+  vec3i(5,1,11),vec3i(5,11,6),vec3i(1,0,11),vec3i(7,11,4),vec3i(0,4,11),
+  vec3i(0,5,9),vec3i(0,6,5),vec3i(0,3,6),vec3i(11,6,3),vec3i(8,4,7),
+  vec3i(6,5,9),vec3i(6,9,11),vec3i(4,7,9),vec3i(7,11,9),vec3i(-1,-1,-1),
+  vec3i(10,4,9),vec3i(6,4,10),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(4,10,6),vec3i(4,9,10),vec3i(0,8,3),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(10,0,1),vec3i(10,6,0),vec3i(6,4,0),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(8,3,1),vec3i(8,1,6),vec3i(8,6,4),vec3i(6,1,10),vec3i(-1,-1,-1),
+  vec3i(1,4,9),vec3i(1,2,4),vec3i(2,6,4),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(3,0,8),vec3i(1,2,9),vec3i(2,4,9),vec3i(2,6,4),vec3i(-1,-1,-1),
+  vec3i(0,2,4),vec3i(4,2,6),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(8,3,2),vec3i(8,2,4),vec3i(4,2,6),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(10,4,9),vec3i(10,6,4),vec3i(11,2,3),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,8,2),vec3i(2,8,11),vec3i(4,9,10),vec3i(4,10,6),vec3i(-1,-1,-1),
+  vec3i(3,11,2),vec3i(0,1,6),vec3i(0,6,4),vec3i(6,1,10),vec3i(-1,-1,-1),
+  vec3i(6,4,1),vec3i(6,1,10),vec3i(4,8,1),vec3i(2,1,11),vec3i(8,11,1),
+  vec3i(9,6,4),vec3i(9,3,6),vec3i(9,1,3),vec3i(11,6,3),vec3i(-1,-1,-1),
+  vec3i(8,11,1),vec3i(8,1,0),vec3i(11,6,1),vec3i(9,1,4),vec3i(6,4,1),
+  vec3i(3,11,6),vec3i(3,6,0),vec3i(0,6,4),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(6,4,8),vec3i(11,6,8),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(7,10,6),vec3i(7,8,10),vec3i(8,9,10),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,7,3),vec3i(0,10,7),vec3i(0,9,10),vec3i(6,7,10),vec3i(-1,-1,-1),
+  vec3i(10,6,7),vec3i(1,10,7),vec3i(1,7,8),vec3i(1,8,0),vec3i(-1,-1,-1),
+  vec3i(10,6,7),vec3i(10,7,1),vec3i(1,7,3),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,2,6),vec3i(1,6,8),vec3i(1,8,9),vec3i(8,6,7),vec3i(-1,-1,-1),
+  vec3i(2,6,9),vec3i(2,9,1),vec3i(6,7,9),vec3i(0,9,3),vec3i(7,3,9),
+  vec3i(7,8,0),vec3i(7,0,6),vec3i(6,0,2),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(7,3,2),vec3i(6,7,2),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(2,3,11),vec3i(10,6,8),vec3i(10,8,9),vec3i(8,6,7),vec3i(-1,-1,-1),
+  vec3i(2,0,7),vec3i(2,7,11),vec3i(0,9,7),vec3i(6,7,10),vec3i(9,10,7),
+  vec3i(1,8,0),vec3i(1,7,8),vec3i(1,10,7),vec3i(6,7,10),vec3i(2,3,11),
+  vec3i(11,2,1),vec3i(11,1,7),vec3i(10,6,1),vec3i(6,7,1),vec3i(-1,-1,-1),
+  vec3i(8,9,6),vec3i(8,6,7),vec3i(9,1,6),vec3i(11,6,3),vec3i(1,3,6),
+  vec3i(0,9,1),vec3i(11,6,7),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(7,8,0),vec3i(7,0,6),vec3i(3,11,0),vec3i(11,6,0),vec3i(-1,-1,-1),
+  vec3i(7,11,6),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(7,6,11),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(3,0,8),vec3i(11,7,6),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,1,9),vec3i(11,7,6),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(8,1,9),vec3i(8,3,1),vec3i(11,7,6),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(10,1,2),vec3i(6,11,7),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,2,10),vec3i(3,0,8),vec3i(6,11,7),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(2,9,0),vec3i(2,10,9),vec3i(6,11,7),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(6,11,7),vec3i(2,10,3),vec3i(10,8,3),vec3i(10,9,8),vec3i(-1,-1,-1),
+  vec3i(7,2,3),vec3i(6,2,7),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(7,0,8),vec3i(7,6,0),vec3i(6,2,0),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(2,7,6),vec3i(2,3,7),vec3i(0,1,9),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,6,2),vec3i(1,8,6),vec3i(1,9,8),vec3i(8,7,6),vec3i(-1,-1,-1),
+  vec3i(10,7,6),vec3i(10,1,7),vec3i(1,3,7),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(10,7,6),vec3i(1,7,10),vec3i(1,8,7),vec3i(1,0,8),vec3i(-1,-1,-1),
+  vec3i(0,3,7),vec3i(0,7,10),vec3i(0,10,9),vec3i(6,10,7),vec3i(-1,-1,-1),
+  vec3i(7,6,10),vec3i(7,10,8),vec3i(8,10,9),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(6,8,4),vec3i(11,8,6),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(3,6,11),vec3i(3,0,6),vec3i(0,4,6),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(8,6,11),vec3i(8,4,6),vec3i(9,0,1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(9,4,6),vec3i(9,6,3),vec3i(9,3,1),vec3i(11,3,6),vec3i(-1,-1,-1),
+  vec3i(6,8,4),vec3i(6,11,8),vec3i(2,10,1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,2,10),vec3i(3,0,11),vec3i(0,6,11),vec3i(0,4,6),vec3i(-1,-1,-1),
+  vec3i(4,11,8),vec3i(4,6,11),vec3i(0,2,9),vec3i(2,10,9),vec3i(-1,-1,-1),
+  vec3i(10,9,3),vec3i(10,3,2),vec3i(9,4,3),vec3i(11,3,6),vec3i(4,6,3),
+  vec3i(8,2,3),vec3i(8,4,2),vec3i(4,6,2),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,4,2),vec3i(4,6,2),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,9,0),vec3i(2,3,4),vec3i(2,4,6),vec3i(4,3,8),vec3i(-1,-1,-1),
+  vec3i(1,9,4),vec3i(1,4,2),vec3i(2,4,6),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(8,1,3),vec3i(8,6,1),vec3i(8,4,6),vec3i(6,10,1),vec3i(-1,-1,-1),
+  vec3i(10,1,0),vec3i(10,0,6),vec3i(6,0,4),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(4,6,3),vec3i(4,3,8),vec3i(6,10,3),vec3i(0,3,9),vec3i(10,9,3),
+  vec3i(10,9,4),vec3i(6,10,4),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(4,9,5),vec3i(7,6,11),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,8,3),vec3i(4,9,5),vec3i(11,7,6),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(5,0,1),vec3i(5,4,0),vec3i(7,6,11),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(11,7,6),vec3i(8,3,4),vec3i(3,5,4),vec3i(3,1,5),vec3i(-1,-1,-1),
+  vec3i(9,5,4),vec3i(10,1,2),vec3i(7,6,11),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(6,11,7),vec3i(1,2,10),vec3i(0,8,3),vec3i(4,9,5),vec3i(-1,-1,-1),
+  vec3i(7,6,11),vec3i(5,4,10),vec3i(4,2,10),vec3i(4,0,2),vec3i(-1,-1,-1),
+  vec3i(3,4,8),vec3i(3,5,4),vec3i(3,2,5),vec3i(10,5,2),vec3i(11,7,6),
+  vec3i(7,2,3),vec3i(7,6,2),vec3i(5,4,9),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(9,5,4),vec3i(0,8,6),vec3i(0,6,2),vec3i(6,8,7),vec3i(-1,-1,-1),
+  vec3i(3,6,2),vec3i(3,7,6),vec3i(1,5,0),vec3i(5,4,0),vec3i(-1,-1,-1),
+  vec3i(6,2,8),vec3i(6,8,7),vec3i(2,1,8),vec3i(4,8,5),vec3i(1,5,8),
+  vec3i(9,5,4),vec3i(10,1,6),vec3i(1,7,6),vec3i(1,3,7),vec3i(-1,-1,-1),
+  vec3i(1,6,10),vec3i(1,7,6),vec3i(1,0,7),vec3i(8,7,0),vec3i(9,5,4),
+  vec3i(4,0,10),vec3i(4,10,5),vec3i(0,3,10),vec3i(6,10,7),vec3i(3,7,10),
+  vec3i(7,6,10),vec3i(7,10,8),vec3i(5,4,10),vec3i(4,8,10),vec3i(-1,-1,-1),
+  vec3i(6,9,5),vec3i(6,11,9),vec3i(11,8,9),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(3,6,11),vec3i(0,6,3),vec3i(0,5,6),vec3i(0,9,5),vec3i(-1,-1,-1),
+  vec3i(0,11,8),vec3i(0,5,11),vec3i(0,1,5),vec3i(5,6,11),vec3i(-1,-1,-1),
+  vec3i(6,11,3),vec3i(6,3,5),vec3i(5,3,1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,2,10),vec3i(9,5,11),vec3i(9,11,8),vec3i(11,5,6),vec3i(-1,-1,-1),
+  vec3i(0,11,3),vec3i(0,6,11),vec3i(0,9,6),vec3i(5,6,9),vec3i(1,2,10),
+  vec3i(11,8,5),vec3i(11,5,6),vec3i(8,0,5),vec3i(10,5,2),vec3i(0,2,5),
+  vec3i(6,11,3),vec3i(6,3,5),vec3i(2,10,3),vec3i(10,5,3),vec3i(-1,-1,-1),
+  vec3i(5,8,9),vec3i(5,2,8),vec3i(5,6,2),vec3i(3,8,2),vec3i(-1,-1,-1),
+  vec3i(9,5,6),vec3i(9,6,0),vec3i(0,6,2),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,5,8),vec3i(1,8,0),vec3i(5,6,8),vec3i(3,8,2),vec3i(6,2,8),
+  vec3i(1,5,6),vec3i(2,1,6),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,3,6),vec3i(1,6,10),vec3i(3,8,6),vec3i(5,6,9),vec3i(8,9,6),
+  vec3i(10,1,0),vec3i(10,0,6),vec3i(9,5,0),vec3i(5,6,0),vec3i(-1,-1,-1),
+  vec3i(0,3,8),vec3i(5,6,10),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(10,5,6),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(11,5,10),vec3i(7,5,11),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(11,5,10),vec3i(11,7,5),vec3i(8,3,0),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(5,11,7),vec3i(5,10,11),vec3i(1,9,0),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(10,7,5),vec3i(10,11,7),vec3i(9,8,1),vec3i(8,3,1),vec3i(-1,-1,-1),
+  vec3i(11,1,2),vec3i(11,7,1),vec3i(7,5,1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,8,3),vec3i(1,2,7),vec3i(1,7,5),vec3i(7,2,11),vec3i(-1,-1,-1),
+  vec3i(9,7,5),vec3i(9,2,7),vec3i(9,0,2),vec3i(2,11,7),vec3i(-1,-1,-1),
+  vec3i(7,5,2),vec3i(7,2,11),vec3i(5,9,2),vec3i(3,2,8),vec3i(9,8,2),
+  vec3i(2,5,10),vec3i(2,3,5),vec3i(3,7,5),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(8,2,0),vec3i(8,5,2),vec3i(8,7,5),vec3i(10,2,5),vec3i(-1,-1,-1),
+  vec3i(9,0,1),vec3i(5,10,3),vec3i(5,3,7),vec3i(3,10,2),vec3i(-1,-1,-1),
+  vec3i(9,8,2),vec3i(9,2,1),vec3i(8,7,2),vec3i(10,2,5),vec3i(7,5,2),
+  vec3i(1,3,5),vec3i(3,7,5),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,8,7),vec3i(0,7,1),vec3i(1,7,5),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(9,0,3),vec3i(9,3,5),vec3i(5,3,7),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(9,8,7),vec3i(5,9,7),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(5,8,4),vec3i(5,10,8),vec3i(10,11,8),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(5,0,4),vec3i(5,11,0),vec3i(5,10,11),vec3i(11,3,0),vec3i(-1,-1,-1),
+  vec3i(0,1,9),vec3i(8,4,10),vec3i(8,10,11),vec3i(10,4,5),vec3i(-1,-1,-1),
+  vec3i(10,11,4),vec3i(10,4,5),vec3i(11,3,4),vec3i(9,4,1),vec3i(3,1,4),
+  vec3i(2,5,1),vec3i(2,8,5),vec3i(2,11,8),vec3i(4,5,8),vec3i(-1,-1,-1),
+  vec3i(0,4,11),vec3i(0,11,3),vec3i(4,5,11),vec3i(2,11,1),vec3i(5,1,11),
+  vec3i(0,2,5),vec3i(0,5,9),vec3i(2,11,5),vec3i(4,5,8),vec3i(11,8,5),
+  vec3i(9,4,5),vec3i(2,11,3),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(2,5,10),vec3i(3,5,2),vec3i(3,4,5),vec3i(3,8,4),vec3i(-1,-1,-1),
+  vec3i(5,10,2),vec3i(5,2,4),vec3i(4,2,0),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(3,10,2),vec3i(3,5,10),vec3i(3,8,5),vec3i(4,5,8),vec3i(0,1,9),
+  vec3i(5,10,2),vec3i(5,2,4),vec3i(1,9,2),vec3i(9,4,2),vec3i(-1,-1,-1),
+  vec3i(8,4,5),vec3i(8,5,3),vec3i(3,5,1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,4,5),vec3i(1,0,5),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(8,4,5),vec3i(8,5,3),vec3i(9,0,5),vec3i(0,3,5),vec3i(-1,-1,-1),
+  vec3i(9,4,5),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(4,11,7),vec3i(4,9,11),vec3i(9,10,11),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,8,3),vec3i(4,9,7),vec3i(9,11,7),vec3i(9,10,11),vec3i(-1,-1,-1),
+  vec3i(1,10,11),vec3i(1,11,4),vec3i(1,4,0),vec3i(7,4,11),vec3i(-1,-1,-1),
+  vec3i(3,1,4),vec3i(3,4,8),vec3i(1,10,4),vec3i(7,4,11),vec3i(10,11,4),
+  vec3i(4,11,7),vec3i(9,11,4),vec3i(9,2,11),vec3i(9,1,2),vec3i(-1,-1,-1),
+  vec3i(9,7,4),vec3i(9,11,7),vec3i(9,1,11),vec3i(2,11,1),vec3i(0,8,3),
+  vec3i(11,7,4),vec3i(11,4,2),vec3i(2,4,0),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(11,7,4),vec3i(11,4,2),vec3i(8,3,4),vec3i(3,2,4),vec3i(-1,-1,-1),
+  vec3i(2,9,10),vec3i(2,7,9),vec3i(2,3,7),vec3i(7,4,9),vec3i(-1,-1,-1),
+  vec3i(9,10,7),vec3i(9,7,4),vec3i(10,2,7),vec3i(8,7,0),vec3i(2,0,7),
+  vec3i(3,7,10),vec3i(3,10,2),vec3i(7,4,10),vec3i(1,10,0),vec3i(4,0,10),
+  vec3i(1,10,2),vec3i(8,7,4),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(4,9,1),vec3i(4,1,7),vec3i(7,1,3),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(4,9,1),vec3i(4,1,7),vec3i(0,8,1),vec3i(8,7,1),vec3i(-1,-1,-1),
+  vec3i(4,0,3),vec3i(7,4,3),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(4,8,7),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(9,10,8),vec3i(10,11,8),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(3,0,9),vec3i(3,9,11),vec3i(11,9,10),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,1,10),vec3i(0,10,8),vec3i(8,10,11),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(3,1,10),vec3i(11,3,10),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,2,11),vec3i(1,11,9),vec3i(9,11,8),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(3,0,9),vec3i(3,9,11),vec3i(1,2,9),vec3i(2,11,9),vec3i(-1,-1,-1),
+  vec3i(0,2,11),vec3i(8,0,11),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(3,2,11),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(2,3,8),vec3i(2,8,10),vec3i(10,8,9),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(9,10,2),vec3i(0,9,2),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(2,3,8),vec3i(2,8,10),vec3i(0,1,8),vec3i(1,10,8),vec3i(-1,-1,-1),
+  vec3i(1,10,2),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(1,3,8),vec3i(9,1,8),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,9,1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(0,3,8),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),
+  vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1),vec3i(-1,-1,-1)
+);
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+  let id = gid.x;
+  if (id >= 32768u) { return; } // 32^3 cells
+  let N = 32u;
+  let NV = 33u;
+  let cz = id / (N * N);
+  let cy = (id / N) % N;
+  let cx = id % N;
+
+  // Read 8 corner densities and compute cube case
+  let kCorner = array<vec3u, 8>(
+    vec3u(0,0,0), vec3u(1,0,0), vec3u(1,1,0), vec3u(0,1,0),
+    vec3u(0,0,1), vec3u(1,0,1), vec3u(1,1,1), vec3u(0,1,1)
+  );
+  var cubeCase = 0u;
+  for (var i = 0u; i < 8u; i++) {
+    let c = kCorner[i];
+    let d = densityAt(cx + c.x, cy + c.y, cz + c.z);
+    if (d < 0.0) { cubeCase |= (1u << i); }
+  }
+
+  let numTris = kNumTris[cubeCase];
+  if (numTris == 0u) { return; }
+
+  // Generate triangles
+  for (var t = 0u; t < numTris; t++) {
+    let tri = kTriTable[cubeCase * 5u + t];
+    let e0 = tri.x;
+    let e1 = tri.y;
+    let e2 = tri.z;
+    if (e0 < 0 || e1 < 0 || e2 < 0) { continue; }
+
+    let v0 = getVertexId(cx, cy, cz, u32(e0));
+    let v1 = getVertexId(cx, cy, cz, u32(e1));
+    let v2 = getVertexId(cx, cy, cz, u32(e2));
+
+    if (v0 == 0xFFFFFFFFu || v1 == 0xFFFFFFFFu || v2 == 0xFFFFFFFFu) { continue; }
+
+    let baseIdx = atomicAdd(&counters[1], 3u);
+    if (baseIdx + 2u >= 262144u) { continue; }
+    indices[baseIdx] = v0;
+    indices[baseIdx + 1u] = v1;
+    indices[baseIdx + 2u] = v2;
+  }
+}
+""")
+
+; ── Shader: Ground Render ─────────────────────────────────────────
+
+(shader-module :name groundRenderShader :code """
+struct MVPData { matrix: mat4x4f, camPos: vec4f }
+@group(0) @binding(0) var<storage, read> mvp: MVPData;
+
+struct VSOut {
+  @builtin(position) position: vec4f,
+  @location(0) normal: vec3f,
+  @location(1) worldPos: vec3f,
+}
+
+@vertex
+fn vs(@location(0) pos: vec3f, @location(1) normal: vec3f) -> VSOut {
+  var out: VSOut;
+  let worldPos = vec3f(pos.x, pos.y - 12.0, pos.z);
+  out.position = mvp.matrix * vec4f(worldPos, 1.0);
+  out.normal = normal;
+  out.worldPos = worldPos;
+  return out;
+}
+
+@fragment
+fn fs(in: VSOut) -> @location(0) vec4f {
+  let N = normalize(in.normal);
+  let L = normalize(vec3f(0.4, 0.8, 0.3));
+  let diff = max(dot(N, L), 0.0);
+  let ambient = 0.08;
+  let color = vec3f(0.35, 0.35, 0.38) * (ambient + diff * 0.5);
+  return vec4f(color, 1.0);
+}
+""")
+
+; ── Shader: Camera (time orbit) ───────────────────────────────────
+
+(shader-module :name cameraShader :code """
+struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+struct MVPData { matrix: mat4x4f, camPos: vec4f }
+
+@group(0) @binding(0) var<uniform> pngine: PngineInputs;
+@group(0) @binding(1) var<storage, read_write> mvp: MVPData;
+
+const PI: f32 = 3.14159265;
+
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  return mat4x4f(
+    vec4f(f / aspect, 0, 0, 0), vec4f(0, f, 0, 0),
+    vec4f(0, 0, far * nf, -1), vec4f(0, 0, far * near * nf, 0));
+}
+fn inverseCamera(r: vec3f, u: vec3f, b: vec3f, p: vec3f) -> mat4x4f {
+  return mat4x4f(
+    vec4f(r.x, u.x, b.x, 0), vec4f(r.y, u.y, b.y, 0),
+    vec4f(r.z, u.z, b.z, 0),
+    vec4f(-dot(r, p), -dot(u, p), -dot(b, p), 1));
+}
+
+// Stateless slow orbit — replaces the donor's arcball (write_pointer_uniform
+// was its only native stub; time is fully deterministic for parity).
+@compute @workgroup_size(1)
+fn updateCamera() {
+  let t = pngine.time;
+  let ang = t * 0.15;
+  let eye = vec3f(sin(ang) * 40.0, 12.0 + 4.0 * sin(t * 0.07), cos(ang) * 40.0);
+  let back = normalize(eye);
+  let worldUp = vec3f(0.0, 1.0, 0.0);
+  let right = normalize(cross(worldUp, back));
+  let up = normalize(cross(back, right));
+  let viewMatrix = inverseCamera(right, up, back, eye);
+  let proj = perspective(PI / 3.0, pngine.aspect, 0.1, 200.0);
+  mvp.matrix = proj * viewMatrix;
+  mvp.camPos = vec4f(eye, 1.0);
+}
+""")
+
+; ── Shader: Density ───────────────────────────────────────────────
+
+(shader-module :name densityShader :code """
+struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+@group(0) @binding(0) var<uniform> pngine: PngineInputs;
+@group(0) @binding(1) var<storage, read_write> density: array<f32>;
+
+const K: u32 = 6u;
+const THRESHOLD: f32 = 1.0;
+
+fn ballCenter(i: u32, t: f32) -> vec3f {
+  let phase = f32(i) * 2.399963;             // golden-angle decorrelation
+  let sp = vec3f(0.9, 1.3, 1.1) * (0.4 + 0.13 * f32(i));
+  return vec3f(sin(t * sp.x + phase),
+               sin(t * sp.y + phase * 1.7),
+               sin(t * sp.z + phase * 2.3)) * 9.0;   // stay inside the 33^3 grid
+}
+
+// Inverse-square metaball field, positive inside (f > 0 <=> inside surface).
+fn field(p: vec3f, t: f32) -> f32 {
+  var f = 0.0;
+  for (var i = 0u; i < K; i++) {
+    let d = p - ballCenter(i, t);
+    let r2 = 8.0 + 3.0 * f32(i % 3u);        // ball radii ~2.8..3.3
+    f += r2 / max(dot(d, d), 1e-4);
+  }
+  return f - THRESHOLD;
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+  let id = gid.x;
+  if (id >= 35937u) { return; } // 33^3
+  let N = 33u;
+  let z = id / (N * N);
+  let y = (id / N) % N;
+  let x = id % N;
+  let pos = vec3f(f32(x), f32(y), f32(z)) * 1.0 + vec3f(-16.0);
+  density[id] = field(pos, pngine.time); // already positive = inside
+}
+""")
+
+; ── Shader: Vertex Generation ─────────────────────────────────────
+
+(shader-module :name vertexGenShader :code """
+struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+@group(0) @binding(0) var<storage, read> density: array<f32>;
+@group(0) @binding(1) var<storage, read_write> vertices: array<f32>;
+@group(0) @binding(2) var<storage, read_write> vidMap: array<atomic<u32>>;
+@group(0) @binding(3) var<storage, read_write> counters: array<atomic<u32>, 4>;
+@group(0) @binding(4) var<uniform> pngine: PngineInputs;
+
+const N: u32 = 32u;
+const NV: u32 = 33u;
+const GRID_MIN: f32 = -16.0;
+const CELL_SIZE: f32 = 1.0;
+
+// Field functions (duplicated for normal computation)
+const K: u32 = 6u;
+const THRESHOLD: f32 = 1.0;
+
+fn ballCenter(i: u32, t: f32) -> vec3f {
+  let phase = f32(i) * 2.399963;             // golden-angle decorrelation
+  let sp = vec3f(0.9, 1.3, 1.1) * (0.4 + 0.13 * f32(i));
+  return vec3f(sin(t * sp.x + phase),
+               sin(t * sp.y + phase * 1.7),
+               sin(t * sp.z + phase * 2.3)) * 9.0;   // stay inside the 33^3 grid
+}
+
+// Inverse-square metaball field, positive inside (f > 0 <=> inside surface).
+fn field(p: vec3f, t: f32) -> f32 {
+  var f = 0.0;
+  for (var i = 0u; i < K; i++) {
+    let d = p - ballCenter(i, t);
+    let r2 = 8.0 + 3.0 * f32(i % 3u);        // ball radii ~2.8..3.3
+    f += r2 / max(dot(d, d), 1e-4);
+  }
+  return f - THRESHOLD;
+}
+
+fn densityAt(x: u32, y: u32, z: u32) -> f32 {
+  return density[z * NV * NV + y * NV + x];
+}
+
+fn computeNormal(pos: vec3f) -> vec3f {
+  // The field is positive inside, so its gradient points inward; the
+  // outward surface normal is the negated central difference.
+  let eps = 0.5;
+  let t = pngine.time;
+  return normalize(vec3f(
+    field(pos - vec3f(eps, 0, 0), t) - field(pos + vec3f(eps, 0, 0), t),
+    field(pos - vec3f(0, eps, 0), t) - field(pos + vec3f(0, eps, 0), t),
+    field(pos - vec3f(0, 0, eps), t) - field(pos + vec3f(0, 0, eps), t)
+  ));
+}
+
+
+// Corner offsets for 8 cube vertices
+const kCorner = array<vec3u, 8>(
+  vec3u(0,0,0), vec3u(1,0,0), vec3u(1,1,0), vec3u(0,1,0),
+  vec3u(0,0,1), vec3u(1,0,1), vec3u(1,1,1), vec3u(0,1,1)
+);
+
+// Primary edge definitions: (corner0, corner1, axis)
+// Edge 0: X-axis (corners 0→1), Edge 3: Y-axis (corners 0→3), Edge 8: Z-axis (corners 0→4)
+const kPrimaryEdge = array<vec3u, 3>(
+  vec3u(0u, 1u, 0u), // edge 0: X
+  vec3u(0u, 3u, 1u), // edge 3: Y
+  vec3u(0u, 4u, 2u)  // edge 8: Z
+);
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+  let id = gid.x;
+  if (id >= 32768u) { return; } // 32^3 cells
+  let cz = id / (N * N);
+  let cy = (id / N) % N;
+  let cx = id % N;
+
+  // Read 8 corner densities
+  var d: array<f32, 8>;
+  for (var i = 0u; i < 8u; i++) {
+    let c = kCorner[i];
+    d[i] = densityAt(cx + c.x, cy + c.y, cz + c.z);
+  }
+
+  // Compute cube case (standard Paul Bourke convention: bit i = corner i inside)
+  var cubeCase = 0u;
+  for (var i = 0u; i < 8u; i++) {
+    if (d[i] > 0.0) { cubeCase |= (1u << i); }
+  }
+  if (cubeCase == 0u || cubeCase == 255u) { return; }
+
+  // Check 3 primary edges
+  for (var e = 0u; e < 3u; e++) {
+    let c0 = kPrimaryEdge[e].x;
+    let c1 = kPrimaryEdge[e].y;
+    let axis = kPrimaryEdge[e].z;
+    let d0 = d[c0];
+    let d1 = d[c1];
+
+    // Edge crosses isosurface if signs differ
+    if ((d0 < 0.0) == (d1 < 0.0)) { continue; }
+
+    // Interpolate position
+    let t = d0 / (d0 - d1);
+    let p0 = vec3f(f32(cx) + f32(kCorner[c0].x), f32(cy) + f32(kCorner[c0].y), f32(cz) + f32(kCorner[c0].z));
+    let p1 = vec3f(f32(cx) + f32(kCorner[c1].x), f32(cy) + f32(kCorner[c1].y), f32(cz) + f32(kCorner[c1].z));
+    let localPos = mix(p0, p1, vec3f(t));
+    let worldPos = localPos * CELL_SIZE + vec3f(GRID_MIN);
+
+    // Normal from the field gradient; the donor's AO march is dropped.
+    let normal = computeNormal(worldPos);
+    let ao = 1.0;
+
+    // Allocate vertex
+    let vertexId = atomicAdd(&counters[0], 1u);
+    if (vertexId >= 65536u) { continue; }
+
+    // Write vertex data: [pos.x, pos.y, pos.z, ao, normal.x, normal.y, normal.z, 0]
+    let base = vertexId * 8u;
+    vertices[base + 0u] = worldPos.x;
+    vertices[base + 1u] = worldPos.y;
+    vertices[base + 2u] = worldPos.z;
+    vertices[base + 3u] = ao;
+    vertices[base + 4u] = normal.x;
+    vertices[base + 5u] = normal.y;
+    vertices[base + 6u] = normal.z;
+    vertices[base + 7u] = 0.0;
+
+    // Store vertex ID in map
+    let mapIdx = axis * N * N * N + cz * N * N + cy * N + cx;
+    atomicStore(&vidMap[mapIdx], vertexId);
+  }
+}
+""")
+
+; ── Shader: Mesh Render ───────────────────────────────────────────
+
+(shader-module :name meshRenderShader :code """
+struct MVPData { matrix: mat4x4f, camPos: vec4f }
+@group(0) @binding(0) var<storage, read> mvp: MVPData;
+
+struct VSOut {
+  @builtin(position) position: vec4f,
+  @location(0) worldPos: vec3f,
+  @location(1) normal: vec3f,
+  @location(2) ao: f32,
+}
+
+@vertex
+fn vs(@location(0) posAO: vec4f, @location(1) normalPad: vec4f) -> VSOut {
+  var out: VSOut;
+  out.position = mvp.matrix * vec4f(posAO.xyz, 1.0);
+  out.worldPos = posAO.xyz;
+  out.normal = normalPad.xyz;
+  out.ao = posAO.w;
+  return out;
+}
+
+@fragment
+fn fs(in: VSOut) -> @location(0) vec4f {
+  let N = normalize(in.normal);
+  let L = normalize(vec3f(0.4, 0.8, 0.3));
+  let V = normalize(mvp.camPos.xyz - in.worldPos);
+  let H = normalize(L + V);
+
+  // Glossy metaball palette: deep teal body, cyan tops, indigo underside.
+  let ny = N.y * 0.5 + 0.5; // 0=down, 1=up
+  let top    = vec3f(0.45, 0.85, 0.80); // cyan
+  let side   = vec3f(0.10, 0.45, 0.55); // deep teal
+  let bottom = vec3f(0.12, 0.15, 0.35); // indigo
+  let mat = mix(mix(bottom, side, smoothstep(0.0, 0.4, ny)), top, smoothstep(0.5, 1.0, ny));
+
+  let NdotL = dot(N, L);
+  let diff = max(NdotL, 0.0);
+  let back_diff = max(-NdotL, 0.0) * 0.15;
+  let spec = pow(max(dot(N, H), 0.0), 48.0);
+  let fresnel = pow(1.0 - max(dot(N, V), 0.0), 3.0) * 0.25;
+  let ambient = 0.12;
+  let color = mat * (ambient + diff * 0.75 + back_diff) + vec3f(0.9) * spec + vec3f(0.4, 0.5, 0.7) * fresnel;
+  return vec4f(color * in.ao, 1.0);
+}
+""")
+
+; ── Compute Pipelines ──────────────────────────────────────────────────
+
+(compute-pipeline :name densityPipeline :module densityShader :entry main)
+
+(compute-pipeline :name cameraPipeline :module cameraShader :entry updateCamera)
+
+(compute-pipeline :name clearPipeline :module clearShader :entry main)
+
+(compute-pipeline :name vertexGenPipeline :module vertexGenShader :entry main)
+
+(compute-pipeline :name indexGenPipeline :module indexGenShader :entry main)
+
+(compute-pipeline :name indirectArgsPipeline :module indirectArgsShader :entry main)
+
+
+; ── Render Pipelines ───────────────────────────────────────────────────
+
+(render-pipeline :name groundRenderPipeline
+  (layout auto)
+  (vertex (module groundRenderShader) (entry vs)
+    (buffers
+      (vertex-buffer :array-stride 24
+        (attribute :shader-location 0 :offset 0 :format float32x3)
+        (attribute :shader-location 1 :offset 12 :format float32x3))))
+  (fragment (module groundRenderShader) (entry fs)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list))
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+(render-pipeline :name meshRenderPipeline
+  (layout auto)
+  (vertex (module meshRenderShader) (entry vs)
+    (buffers
+      (vertex-buffer :array-stride 32
+        (attribute :shader-location 0 :offset 0 :format float32x4)
+        (attribute :shader-location 1 :offset 16 :format float32x4))))
+  (fragment (module meshRenderShader) (entry fs)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list) :cull-mode back)
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+; ── Bind Groups ────────────────────────────────────────────────────────
+
+(bind-group :name meshRenderBG :layout-pipeline meshRenderPipeline :layout-index 0
+  (entry :binding 0 :buffer mvpBuffer))
+
+(bind-group :name groundRenderBG :layout-pipeline groundRenderPipeline :layout-index 0
+  (entry :binding 0 :buffer mvpBuffer))
+
+(bind-group :name vertexGenBG :layout-pipeline vertexGenPipeline :layout-index 0
+  (entry :binding 0 :buffer densityBuffer)
+  (entry :binding 1 :buffer vertexBuffer)
+  (entry :binding 2 :buffer vertexIdMap)
+  (entry :binding 3 :buffer atomicCounters)
+  (entry :binding 4 :buffer timeUniforms))
+
+(bind-group :name densityBG :layout-pipeline densityPipeline :layout-index 0
+  (entry :binding 0 :buffer timeUniforms)
+  (entry :binding 1 :buffer densityBuffer))
+
+(bind-group :name indirectArgsBG :layout-pipeline indirectArgsPipeline :layout-index 0
+  (entry :binding 0 :buffer atomicCounters)
+  (entry :binding 1 :buffer indirectDrawBuffer))
+
+(bind-group :name indexGenBG :layout-pipeline indexGenPipeline :layout-index 0
+  (entry :binding 0 :buffer densityBuffer)
+  (entry :binding 1 :buffer vertexIdMap)
+  (entry :binding 2 :buffer indexBuffer)
+  (entry :binding 3 :buffer atomicCounters))
+
+(bind-group :name cameraBG :layout-pipeline cameraPipeline :layout-index 0
+  (entry :binding 0 :buffer timeUniforms)
+  (entry :binding 1 :buffer mvpBuffer))
+
+(bind-group :name clearBG :layout-pipeline clearPipeline :layout-index 0
+  (entry :binding 0 :buffer atomicCounters)
+  (entry :binding 1 :buffer indirectDrawBuffer)
+  (entry :binding 2 :buffer vertexIdMap))
+
+; ── Compute Passes ─────────────────────────────────────────────────────
+
+(compute-pass :name cameraPass :pipeline cameraPipeline :bind-groups [cameraBG]
+  :dispatch [1 1 1])
+
+(compute-pass :name clearPass :pipeline clearPipeline :bind-groups [clearBG]
+  :dispatch [384 1 1])
+
+(compute-pass :name densityPass :pipeline densityPipeline :bind-groups [densityBG]
+  :dispatch [141 1 1])
+
+(compute-pass :name vertexPass :pipeline vertexGenPipeline :bind-groups [vertexGenBG]
+  :dispatch [128 1 1])
+
+(compute-pass :name indexPass :pipeline indexGenPipeline :bind-groups [indexGenBG]
+  :dispatch [128 1 1])
+
+(compute-pass :name indirectArgsPass :pipeline indirectArgsPipeline :bind-groups [indirectArgsBG]
+  :dispatch [1 1 1])
+
+; ── Render Passes ──────────────────────────────────────────────────────
+
+(render-pass :name renderMeshPass
+  (color-attachment :view context-current-texture
+    :clear-value [0.18 0.18 0.22 1.0] :load-op clear :store-op store)
+  (depth-attachment :view depthTexture
+    :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  :pipeline meshRenderPipeline
+  :vertex-buffers [vertexBuffer]
+  :index-buffer indexBuffer
+  :bind-groups [meshRenderBG]
+  (draw-indexed-indirect :buffer indirectDrawBuffer :offset 0))
+
+(render-pass :name renderGroundPass
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (depth-attachment :view depthTexture :depth-load-op load :depth-store-op store)
+  :pipeline groundRenderPipeline
+  :vertex-buffers [groundVB]
+  :bind-groups [groundRenderBG]
+  (draw :vertex-count 6))
+
+; ── Frame ──────────────────────────────────────────────────────────────
+
+(frame :name main
+  :perform [writeTime
+            clearPass
+            densityPass
+            vertexPass
+            indexPass
+            indirectArgsPass
+            cameraPass
+            renderMeshPass
+            renderGroundPass])

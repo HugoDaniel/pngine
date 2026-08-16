@@ -1,0 +1,25 @@
+; Invalid: the fragment shader writes @location(0) and @location(1), but the
+; pipeline declares only one color target; the output-count check rejects the
+; missing target for location 1.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+struct FragOut {
+  @location(0) a : vec4f,
+  @location(1) b : vec4f,
+}
+@fragment fn fs() -> FragOut {
+  return FragOut(vec4f(1.0), vec4f(0.5));
+}
+""")
+(render-pipeline :name pipe (layout auto)
+  (vertex (module code) (entry vs))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

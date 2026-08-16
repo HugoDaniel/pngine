@@ -1,0 +1,23 @@
+; Invalid: the vertex and fragment stages specialise the same override (TINT)
+; to different values. Constants are substituted into the shared module text,
+; so one value would have to win silently; the conflict is rejected instead.
+(shader-module :name code :code """
+override TINT: f32 = 1.0;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-0.5, -0.5), vec2f(0.5, -0.5), vec2f(0.0, 0.5));
+  return vec4f(p[i] * TINT, 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(TINT, 0.0, 0.0, 1.0); }
+""")
+(render-pipeline :name pipe (layout auto)
+  (vertex (module code) (entry vs)
+    (constant :name TINT :value 0.5))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format))
+    (constant :name TINT :value 0.9)))
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipe
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

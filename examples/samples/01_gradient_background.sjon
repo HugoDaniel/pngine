@@ -1,0 +1,79 @@
+; Gradient background — a fullscreen triangle whose fragment shader paints a
+; slowly rotating colour gradient, its three channels phase-shifted sines that
+; drift with time. Driven by a single 16-byte pngine-inputs uniform
+; (time/width/height/aspect); no vertex buffer.
+
+(shader-module :name shader :code """
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    struct VertexOutput {
+      @builtin(position) pos: vec4f,
+      @location(0) uv: vec2f,
+    }
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> VertexOutput {
+      // Fullscreen triangle (covers entire screen with single triangle)
+      let x = f32(i & 1u) * 4.0 - 1.0;
+      let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+      var out: VertexOutput;
+      out.pos = vec4f(x, y, 0.0, 1.0);
+      out.uv = vec2f((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+      return out;
+    }
+
+    @fragment
+    fn fs(in: VertexOutput) -> @location(0) vec4f {
+      let t = u.time;
+
+      // Animated gradient
+      let angle = t * 0.3;
+      let c = cos(angle);
+      let s = sin(angle);
+
+      // Rotate UV coordinates
+      let centered = in.uv - 0.5;
+      let rotated = vec2f(
+        centered.x * c - centered.y * s,
+        centered.x * s + centered.y * c
+      );
+
+      // Create gradient based on rotated position
+      let gradient = rotated.x + rotated.y + 0.5;
+
+      // Color palette with time-based shift
+      let r = sin(gradient * 3.14159 + t) * 0.5 + 0.5;
+      let g = sin(gradient * 3.14159 + t + 2.094) * 0.5 + 0.5;
+      let b = sin(gradient * 3.14159 + t + 4.188) * 0.5 + 0.5;
+
+      return vec4f(r, g, b, 1.0);
+    }
+  """)
+
+(render-pipeline :name pipeline
+  (layout auto)
+  (vertex (module shader) (entry vs))
+  (fragment (module shader) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+
+(queue :name writeUniforms
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+(bind-group :name uniformsBindGroup :layout-pipeline pipeline :layout-index 0
+  (entry :binding 0 :buffer uniforms))
+
+(render-pass :name mainPass
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipeline
+  :bind-groups [uniformsBindGroup]
+  (draw :vertex-count 3))
+
+(frame :name main :perform [writeUniforms mainPass])

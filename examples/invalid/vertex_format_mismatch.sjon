@@ -1,0 +1,23 @@
+; Invalid: the vertex shader reads @location(0) as vec4<f32>, but the vertex
+; buffer layout declares that attribute as uint32x4; the shader/layout
+; cross-check rejects the scalar-class mismatch (normalized and half formats
+; read as f32 and are never flagged).
+(shader-module :name code :code """
+@vertex fn vs(@location(0) pos : vec4<f32>) -> @builtin(position) vec4f {
+  return pos;
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+(buffer :name verts :size 256 :usage [vertex])
+(render-pipeline :name pipe (layout auto)
+  (vertex (module code) (entry vs)
+    (buffers
+      (vertex-buffer :array-stride 16
+        (attribute :shader-location 0 :offset 0 :format uint32x4))))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+(render-pass :name draw :pipeline pipe :vertex-buffers [verts]
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

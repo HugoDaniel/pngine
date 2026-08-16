@@ -1,0 +1,20 @@
+; Invalid: the pipeline declares a depth-stencil state but the render pass has
+; no depth attachment; depth presence must agree in both directions, so the
+; pass/pipeline check rejects it. Reverse of pass_depth_missing_in_pipeline.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+(render-pipeline :name pipe (layout auto)
+  (vertex (module code) (entry vs))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format)))
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

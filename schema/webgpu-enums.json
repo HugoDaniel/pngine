@@ -1,0 +1,709 @@
+{
+  "$comment": "Generated from external/gpuweb/spec/index.bs by scripts/extract-webgpu-enums.mjs. Do not edit by hand — run `node scripts/extract-webgpu-enums.mjs --regen`. The canonical WebGPU enum/flag vocabulary; tests/npm/webgpu-conformance.test.js checks schema/pngine.sjon + the cross-stack byte tables against it.",
+  "source": "external/gpuweb/spec/index.bs",
+  "enums": {
+    "GPUPowerPreference": [
+      "low-power",
+      "high-performance"
+    ],
+    "GPUFeatureName": [
+      "core-features-and-limits",
+      "depth-clip-control",
+      "depth32float-stencil8",
+      "texture-compression-bc",
+      "texture-compression-bc-sliced-3d",
+      "texture-compression-etc2",
+      "texture-compression-astc",
+      "texture-compression-astc-sliced-3d",
+      "timestamp-query",
+      "indirect-first-instance",
+      "shader-f16",
+      "rg11b10ufloat-renderable",
+      "bgra8unorm-storage",
+      "float32-filterable",
+      "float32-blendable",
+      "clip-distances",
+      "dual-source-blending",
+      "subgroups",
+      "texture-formats-tier1",
+      "texture-formats-tier2",
+      "primitive-index",
+      "texture-component-swizzle"
+    ],
+    "GPUBufferMapState": [
+      "unmapped",
+      "pending",
+      "mapped"
+    ],
+    "GPUTextureDimension": [
+      "1d",
+      "2d",
+      "3d"
+    ],
+    "GPUTextureViewDimension": [
+      "1d",
+      "2d",
+      "2d-array",
+      "cube",
+      "cube-array",
+      "3d"
+    ],
+    "GPUTextureAspect": [
+      "all",
+      "stencil-only",
+      "depth-only"
+    ],
+    "GPUTextureFormat": [
+      "r8unorm",
+      "r8snorm",
+      "r8uint",
+      "r8sint",
+      "r16unorm",
+      "r16snorm",
+      "r16uint",
+      "r16sint",
+      "r16float",
+      "rg8unorm",
+      "rg8snorm",
+      "rg8uint",
+      "rg8sint",
+      "r32uint",
+      "r32sint",
+      "r32float",
+      "rg16unorm",
+      "rg16snorm",
+      "rg16uint",
+      "rg16sint",
+      "rg16float",
+      "rgba8unorm",
+      "rgba8unorm-srgb",
+      "rgba8snorm",
+      "rgba8uint",
+      "rgba8sint",
+      "bgra8unorm",
+      "bgra8unorm-srgb",
+      "rgb9e5ufloat",
+      "rgb10a2uint",
+      "rgb10a2unorm",
+      "rg11b10ufloat",
+      "rg32uint",
+      "rg32sint",
+      "rg32float",
+      "rgba16unorm",
+      "rgba16snorm",
+      "rgba16uint",
+      "rgba16sint",
+      "rgba16float",
+      "rgba32uint",
+      "rgba32sint",
+      "rgba32float",
+      "stencil8",
+      "depth16unorm",
+      "depth24plus",
+      "depth24plus-stencil8",
+      "depth32float",
+      "depth32float-stencil8",
+      "bc1-rgba-unorm",
+      "bc1-rgba-unorm-srgb",
+      "bc2-rgba-unorm",
+      "bc2-rgba-unorm-srgb",
+      "bc3-rgba-unorm",
+      "bc3-rgba-unorm-srgb",
+      "bc4-r-unorm",
+      "bc4-r-snorm",
+      "bc5-rg-unorm",
+      "bc5-rg-snorm",
+      "bc6h-rgb-ufloat",
+      "bc6h-rgb-float",
+      "bc7-rgba-unorm",
+      "bc7-rgba-unorm-srgb",
+      "etc2-rgb8unorm",
+      "etc2-rgb8unorm-srgb",
+      "etc2-rgb8a1unorm",
+      "etc2-rgb8a1unorm-srgb",
+      "etc2-rgba8unorm",
+      "etc2-rgba8unorm-srgb",
+      "eac-r11unorm",
+      "eac-r11snorm",
+      "eac-rg11unorm",
+      "eac-rg11snorm",
+      "astc-4x4-unorm",
+      "astc-4x4-unorm-srgb",
+      "astc-5x4-unorm",
+      "astc-5x4-unorm-srgb",
+      "astc-5x5-unorm",
+      "astc-5x5-unorm-srgb",
+      "astc-6x5-unorm",
+      "astc-6x5-unorm-srgb",
+      "astc-6x6-unorm",
+      "astc-6x6-unorm-srgb",
+      "astc-8x5-unorm",
+      "astc-8x5-unorm-srgb",
+      "astc-8x6-unorm",
+      "astc-8x6-unorm-srgb",
+      "astc-8x8-unorm",
+      "astc-8x8-unorm-srgb",
+      "astc-10x5-unorm",
+      "astc-10x5-unorm-srgb",
+      "astc-10x6-unorm",
+      "astc-10x6-unorm-srgb",
+      "astc-10x8-unorm",
+      "astc-10x8-unorm-srgb",
+      "astc-10x10-unorm",
+      "astc-10x10-unorm-srgb",
+      "astc-12x10-unorm",
+      "astc-12x10-unorm-srgb",
+      "astc-12x12-unorm",
+      "astc-12x12-unorm-srgb"
+    ],
+    "GPUAddressMode": [
+      "clamp-to-edge",
+      "repeat",
+      "mirror-repeat"
+    ],
+    "GPUFilterMode": [
+      "nearest",
+      "linear"
+    ],
+    "GPUMipmapFilterMode": [
+      "nearest",
+      "linear"
+    ],
+    "GPUCompareFunction": [
+      "never",
+      "less",
+      "equal",
+      "less-equal",
+      "greater",
+      "not-equal",
+      "greater-equal",
+      "always"
+    ],
+    "GPUBufferBindingType": [
+      "uniform",
+      "storage",
+      "read-only-storage"
+    ],
+    "GPUSamplerBindingType": [
+      "filtering",
+      "non-filtering",
+      "comparison"
+    ],
+    "GPUTextureSampleType": [
+      "float",
+      "unfilterable-float",
+      "depth",
+      "sint",
+      "uint"
+    ],
+    "GPUStorageTextureAccess": [
+      "write-only",
+      "read-only",
+      "read-write"
+    ],
+    "GPUCompilationMessageType": [
+      "error",
+      "warning",
+      "info"
+    ],
+    "GPUPipelineErrorReason": [
+      "validation",
+      "internal"
+    ],
+    "GPUAutoLayoutMode": [
+      "auto"
+    ],
+    "GPUPrimitiveTopology": [
+      "point-list",
+      "line-list",
+      "line-strip",
+      "triangle-list",
+      "triangle-strip"
+    ],
+    "GPUFrontFace": [
+      "ccw",
+      "cw"
+    ],
+    "GPUCullMode": [
+      "none",
+      "front",
+      "back"
+    ],
+    "GPUBlendFactor": [
+      "zero",
+      "one",
+      "src",
+      "one-minus-src",
+      "src-alpha",
+      "one-minus-src-alpha",
+      "dst",
+      "one-minus-dst",
+      "dst-alpha",
+      "one-minus-dst-alpha",
+      "src-alpha-saturated",
+      "constant",
+      "one-minus-constant",
+      "src1",
+      "one-minus-src1",
+      "src1-alpha",
+      "one-minus-src1-alpha"
+    ],
+    "GPUBlendOperation": [
+      "add",
+      "subtract",
+      "reverse-subtract",
+      "min",
+      "max"
+    ],
+    "GPUStencilOperation": [
+      "keep",
+      "zero",
+      "replace",
+      "invert",
+      "increment-clamp",
+      "decrement-clamp",
+      "increment-wrap",
+      "decrement-wrap"
+    ],
+    "GPUIndexFormat": [
+      "uint16",
+      "uint32"
+    ],
+    "GPUVertexFormat": [
+      "uint8",
+      "uint8x2",
+      "uint8x4",
+      "sint8",
+      "sint8x2",
+      "sint8x4",
+      "unorm8",
+      "unorm8x2",
+      "unorm8x4",
+      "snorm8",
+      "snorm8x2",
+      "snorm8x4",
+      "uint16",
+      "uint16x2",
+      "uint16x4",
+      "sint16",
+      "sint16x2",
+      "sint16x4",
+      "unorm16",
+      "unorm16x2",
+      "unorm16x4",
+      "snorm16",
+      "snorm16x2",
+      "snorm16x4",
+      "float16",
+      "float16x2",
+      "float16x4",
+      "float32",
+      "float32x2",
+      "float32x3",
+      "float32x4",
+      "uint32",
+      "uint32x2",
+      "uint32x3",
+      "uint32x4",
+      "sint32",
+      "sint32x2",
+      "sint32x3",
+      "sint32x4",
+      "unorm10-10-10-2",
+      "unorm8x4-bgra"
+    ],
+    "GPUVertexStepMode": [
+      "vertex",
+      "instance"
+    ],
+    "GPULoadOp": [
+      "load",
+      "clear"
+    ],
+    "GPUStoreOp": [
+      "store",
+      "discard"
+    ],
+    "GPUQueryType": [
+      "occlusion",
+      "timestamp"
+    ],
+    "GPUCanvasAlphaMode": [
+      "opaque",
+      "premultiplied"
+    ],
+    "GPUCanvasToneMappingMode": [
+      "standard",
+      "extended"
+    ],
+    "GPUDeviceLostReason": [
+      "unknown",
+      "destroyed"
+    ],
+    "GPUErrorFilter": [
+      "validation",
+      "out-of-memory",
+      "internal"
+    ]
+  },
+  "flags": {
+    "GPUBufferUsage": {
+      "MAP_READ": "0x0001",
+      "MAP_WRITE": "0x0002",
+      "COPY_SRC": "0x0004",
+      "COPY_DST": "0x0008",
+      "INDEX": "0x0010",
+      "VERTEX": "0x0020",
+      "UNIFORM": "0x0040",
+      "STORAGE": "0x0080",
+      "INDIRECT": "0x0100",
+      "QUERY_RESOLVE": "0x0200"
+    },
+    "GPUMapMode": {
+      "READ": "0x0001",
+      "WRITE": "0x0002"
+    },
+    "GPUTextureUsage": {
+      "COPY_SRC": "0x01",
+      "COPY_DST": "0x02",
+      "TEXTURE_BINDING": "0x04",
+      "STORAGE_BINDING": "0x08",
+      "RENDER_ATTACHMENT": "0x10",
+      "TRANSIENT_ATTACHMENT": "0x20"
+    },
+    "GPUShaderStage": {
+      "VERTEX": "0x1",
+      "FRAGMENT": "0x2",
+      "COMPUTE": "0x4"
+    },
+    "GPUColorWrite": {
+      "RED": "0x1",
+      "GREEN": "0x2",
+      "BLUE": "0x4",
+      "ALPHA": "0x8",
+      "ALL": "0xf"
+    }
+  },
+  "dictionaries": {
+    "GPUObjectDescriptorBase": [
+      "label"
+    ],
+    "GPURequestAdapterOptions": [
+      "featureLevel",
+      "powerPreference",
+      "forceFallbackAdapter",
+      "xrCompatible"
+    ],
+    "GPUDeviceDescriptor": [
+      "requiredFeatures",
+      "requiredLimits",
+      "defaultQueue"
+    ],
+    "GPUBufferDescriptor": [
+      "size",
+      "usage",
+      "mappedAtCreation"
+    ],
+    "GPUTextureDescriptor": [
+      "size",
+      "mipLevelCount",
+      "sampleCount",
+      "dimension",
+      "format",
+      "usage",
+      "viewFormats",
+      "textureBindingViewDimension"
+    ],
+    "GPUTextureViewDescriptor": [
+      "format",
+      "dimension",
+      "usage",
+      "aspect",
+      "baseMipLevel",
+      "mipLevelCount",
+      "baseArrayLayer",
+      "arrayLayerCount",
+      "swizzle"
+    ],
+    "GPUExternalTextureDescriptor": [
+      "source",
+      "colorSpace"
+    ],
+    "GPUSamplerDescriptor": [
+      "addressModeU",
+      "addressModeV",
+      "addressModeW",
+      "magFilter",
+      "minFilter",
+      "mipmapFilter",
+      "lodMinClamp",
+      "lodMaxClamp",
+      "compare",
+      "maxAnisotropy"
+    ],
+    "GPUBindGroupLayoutDescriptor": [
+      "entries"
+    ],
+    "GPUBindGroupLayoutEntry": [
+      "binding",
+      "visibility",
+      "buffer",
+      "sampler",
+      "texture",
+      "storageTexture",
+      "externalTexture"
+    ],
+    "GPUBufferBindingLayout": [
+      "type",
+      "hasDynamicOffset",
+      "minBindingSize"
+    ],
+    "GPUSamplerBindingLayout": [
+      "type"
+    ],
+    "GPUTextureBindingLayout": [
+      "sampleType",
+      "viewDimension",
+      "multisampled"
+    ],
+    "GPUStorageTextureBindingLayout": [
+      "access",
+      "format",
+      "viewDimension"
+    ],
+    "GPUExternalTextureBindingLayout": [],
+    "GPUBindGroupDescriptor": [
+      "layout",
+      "entries"
+    ],
+    "GPUBindGroupEntry": [
+      "binding",
+      "resource"
+    ],
+    "GPUBufferBinding": [
+      "buffer",
+      "offset",
+      "size"
+    ],
+    "GPUPipelineLayoutDescriptor": [
+      "bindGroupLayouts"
+    ],
+    "GPUShaderModuleDescriptor": [
+      "code",
+      "compilationHints"
+    ],
+    "GPUShaderModuleCompilationHint": [
+      "entryPoint",
+      "layout"
+    ],
+    "GPUPipelineErrorInit": [
+      "reason"
+    ],
+    "GPUPipelineDescriptorBase": [
+      "layout"
+    ],
+    "GPUProgrammableStage": [
+      "module",
+      "entryPoint",
+      "constants"
+    ],
+    "GPUComputePipelineDescriptor": [
+      "compute"
+    ],
+    "GPURenderPipelineDescriptor": [
+      "vertex",
+      "primitive",
+      "depthStencil",
+      "multisample",
+      "fragment"
+    ],
+    "GPUPrimitiveState": [
+      "topology",
+      "stripIndexFormat",
+      "frontFace",
+      "cullMode",
+      "unclippedDepth"
+    ],
+    "GPUMultisampleState": [
+      "count",
+      "mask",
+      "alphaToCoverageEnabled"
+    ],
+    "GPUFragmentState": [
+      "targets"
+    ],
+    "GPUColorTargetState": [
+      "format",
+      "blend",
+      "writeMask"
+    ],
+    "GPUBlendState": [
+      "color",
+      "alpha"
+    ],
+    "GPUBlendComponent": [
+      "operation",
+      "srcFactor",
+      "dstFactor"
+    ],
+    "GPUDepthStencilState": [
+      "format",
+      "depthWriteEnabled",
+      "depthCompare",
+      "stencilFront",
+      "stencilBack",
+      "stencilReadMask",
+      "stencilWriteMask",
+      "depthBias",
+      "depthBiasSlopeScale",
+      "depthBiasClamp"
+    ],
+    "GPUStencilFaceState": [
+      "compare",
+      "failOp",
+      "depthFailOp",
+      "passOp"
+    ],
+    "GPUVertexState": [
+      "buffers"
+    ],
+    "GPUVertexBufferLayout": [
+      "arrayStride",
+      "stepMode",
+      "attributes"
+    ],
+    "GPUVertexAttribute": [
+      "format",
+      "offset",
+      "shaderLocation"
+    ],
+    "GPUCommandBufferDescriptor": [],
+    "GPUCommandEncoderDescriptor": [],
+    "GPUComputePassTimestampWrites": [
+      "querySet",
+      "beginningOfPassWriteIndex",
+      "endOfPassWriteIndex"
+    ],
+    "GPUComputePassDescriptor": [
+      "timestampWrites"
+    ],
+    "GPURenderPassTimestampWrites": [
+      "querySet",
+      "beginningOfPassWriteIndex",
+      "endOfPassWriteIndex"
+    ],
+    "GPURenderPassDescriptor": [
+      "colorAttachments",
+      "depthStencilAttachment",
+      "occlusionQuerySet",
+      "timestampWrites",
+      "maxDrawCount"
+    ],
+    "GPURenderPassColorAttachment": [
+      "view",
+      "depthSlice",
+      "resolveTarget",
+      "clearValue",
+      "loadOp",
+      "storeOp"
+    ],
+    "GPURenderPassDepthStencilAttachment": [
+      "view",
+      "depthClearValue",
+      "depthLoadOp",
+      "depthStoreOp",
+      "depthReadOnly",
+      "stencilClearValue",
+      "stencilLoadOp",
+      "stencilStoreOp",
+      "stencilReadOnly"
+    ],
+    "GPURenderPassLayout": [
+      "colorFormats",
+      "depthStencilFormat",
+      "sampleCount"
+    ],
+    "GPURenderBundleDescriptor": [],
+    "GPURenderBundleEncoderDescriptor": [
+      "depthReadOnly",
+      "stencilReadOnly"
+    ],
+    "GPUQueueDescriptor": [],
+    "GPUQuerySetDescriptor": [
+      "type",
+      "count"
+    ],
+    "GPUCanvasToneMapping": [
+      "mode"
+    ],
+    "GPUCanvasConfiguration": [
+      "device",
+      "format",
+      "usage",
+      "viewFormats",
+      "colorSpace",
+      "toneMapping",
+      "alphaMode"
+    ],
+    "GPUUncapturedErrorEventInit": [
+      "error"
+    ],
+    "GPUColorDict": [
+      "r",
+      "g",
+      "b",
+      "a"
+    ],
+    "GPUOrigin2DDict": [
+      "x",
+      "y"
+    ],
+    "GPUOrigin3DDict": [
+      "x",
+      "y",
+      "z"
+    ],
+    "GPUExtent3DDict": [
+      "width",
+      "height",
+      "depthOrArrayLayers"
+    ]
+  },
+  "limits": [
+    "maxTextureDimension1D",
+    "maxTextureDimension2D",
+    "maxTextureDimension3D",
+    "maxTextureArrayLayers",
+    "maxBindGroups",
+    "maxBindGroupsPlusVertexBuffers",
+    "maxBindingsPerBindGroup",
+    "maxDynamicUniformBuffersPerPipelineLayout",
+    "maxDynamicStorageBuffersPerPipelineLayout",
+    "maxSampledTexturesPerShaderStage",
+    "maxSamplersPerShaderStage",
+    "maxStorageBuffersPerShaderStage",
+    "maxStorageBuffersInVertexStage",
+    "maxStorageBuffersInFragmentStage",
+    "maxStorageTexturesPerShaderStage",
+    "maxStorageTexturesInVertexStage",
+    "maxStorageTexturesInFragmentStage",
+    "maxUniformBuffersPerShaderStage",
+    "maxUniformBufferBindingSize",
+    "maxStorageBufferBindingSize",
+    "minUniformBufferOffsetAlignment",
+    "minStorageBufferOffsetAlignment",
+    "maxVertexBuffers",
+    "maxBufferSize",
+    "maxVertexAttributes",
+    "maxVertexBufferArrayStride",
+    "maxInterStageShaderVariables",
+    "maxColorAttachments",
+    "maxColorAttachmentBytesPerSample",
+    "maxComputeWorkgroupStorageSize",
+    "maxComputeInvocationsPerWorkgroup",
+    "maxComputeWorkgroupSizeX",
+    "maxComputeWorkgroupSizeY",
+    "maxComputeWorkgroupSizeZ",
+    "maxComputeWorkgroupsPerDimension"
+  ]
+}

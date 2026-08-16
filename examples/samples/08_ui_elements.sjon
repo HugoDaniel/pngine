@@ -1,0 +1,183 @@
+; UI elements — a mock UI (panel with border, title bar, two rounded buttons,
+; an animated progress bar, sliders, a round icon, a pulsing status dot) built
+; from 12 instanced quads. Exercises alpha blending with separate colour and
+; alpha blend components, per-instance rect+colour vertex data, and
+; `@builtin(instance_index)` to special-case individual elements in the shaders.
+
+(define :name NUM_UI_ELEMENTS :value 12)
+
+(data :name quadVertices :float32 [
+  0.0 0.0
+  1.0 0.0
+  0.0 1.0
+  1.0 0.0
+  1.0 1.0
+  0.0 1.0
+])
+
+; UI element data: x, y, width, height, r, g, b, a (normalized coords)
+(data :name uiData :float32 [
+  0.05 0.1 0.35 0.5 0.15 0.15 0.2 0.9
+  0.05 0.52 0.35 0.06 0.3 0.3 0.4 1.0
+  0.08 0.38 0.12 0.06 0.2 0.5 0.2 1.0
+  0.24 0.38 0.12 0.06 0.5 0.2 0.2 1.0
+  0.08 0.26 0.28 0.04 0.1 0.1 0.12 1.0
+  0.08 0.26 0.14 0.04 0.3 0.7 0.3 1.0
+  0.08 0.46 0.2 0.025 0.7 0.7 0.7 1.0
+  0.08 0.32 0.15 0.02 0.6 0.6 0.6 1.0
+  0.32 0.14 0.05 0.05 0.5 0.5 0.8 1.0
+  0.05 0.1 0.35 0.005 0.4 0.7 0.4 1.0
+  0.36 0.55 0.02 0.02 0.3 0.8 0.3 1.0
+  0.08 0.24 0.28 0.003 0.3 0.3 0.35 1.0
+])
+
+(buffer :name quadBuffer :size quadVertices :usage [vertex]
+  :mapped-at-creation quadVertices)
+
+(buffer :name uiBuffer :size uiData :usage [vertex]
+  :mapped-at-creation uiData)
+
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+
+(queue :name writeUniforms
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+(shader-module :name shader :code """
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    struct VertexOutput {
+      @builtin(position) pos: vec4f,
+      @location(0) color: vec4f,
+      @location(1) localUV: vec2f,
+      @location(2) @interpolate(flat) elementIdx: u32,
+    }
+
+    @vertex
+    fn vs(
+      @builtin(instance_index) instIdx: u32,
+      @location(0) quadPos: vec2f,
+      @location(1) rect: vec4f,
+      @location(2) color: vec4f
+    ) -> VertexOutput {
+      var r = rect;
+
+      // Animate progress bar (element 5)
+      if (instIdx == 5u) {
+        r.z = 0.05 + (sin(u.time * 0.5) * 0.5 + 0.5) * 0.23;
+      }
+
+      // Animate status dot (element 10) - pulsing
+      if (instIdx == 10u) {
+        let pulse = 1.0 + sin(u.time * 3.0) * 0.2;
+        r.z *= pulse;
+        r.w *= pulse;
+      }
+
+      // Convert from normalized [0,1] to clip space [-1,1]
+      let x = (r.x + quadPos.x * r.z) * 2.0 - 1.0;
+      let y = (r.y + quadPos.y * r.w) * 2.0 - 1.0;
+
+      var out: VertexOutput;
+      out.pos = vec4f(x, y, 0.0, 1.0);
+      out.color = color;
+      out.localUV = quadPos;
+      out.elementIdx = instIdx;
+      return out;
+    }
+
+    @fragment
+    fn fs(in: VertexOutput) -> @location(0) vec4f {
+      var color = in.color;
+
+      // Add rounded corners for buttons (elements 2, 3)
+      if (in.elementIdx == 2u || in.elementIdx == 3u) {
+        let cornerRadius = 0.15;
+        let uv = in.localUV;
+
+        // Check corners
+        var d = 0.0;
+        if (uv.x < cornerRadius && uv.y < cornerRadius) {
+          d = length(uv - vec2f(cornerRadius)) - cornerRadius;
+        } else if (uv.x > 1.0 - cornerRadius && uv.y < cornerRadius) {
+          d = length(uv - vec2f(1.0 - cornerRadius, cornerRadius)) - cornerRadius;
+        } else if (uv.x < cornerRadius && uv.y > 1.0 - cornerRadius) {
+          d = length(uv - vec2f(cornerRadius, 1.0 - cornerRadius)) - cornerRadius;
+        } else if (uv.x > 1.0 - cornerRadius && uv.y > 1.0 - cornerRadius) {
+          d = length(uv - vec2f(1.0 - cornerRadius)) - cornerRadius;
+        }
+
+        if (d > 0.0) {
+          color.a = 0.0;
+        }
+
+        // Add highlight at top
+        if (in.localUV.y > 0.7) {
+          color = mix(color, vec4f(1.0, 1.0, 1.0, color.a), 0.2);
+        }
+      }
+
+      // Add subtle border to panel (element 0)
+      if (in.elementIdx == 0u) {
+        let borderWidth = 0.008;
+        let isEdge = in.localUV.x < borderWidth || in.localUV.x > 1.0 - borderWidth ||
+                     in.localUV.y < borderWidth || in.localUV.y > 1.0 - borderWidth;
+        if (isEdge) {
+          color = mix(color, vec4f(0.4, 0.4, 0.5, color.a), 0.5);
+        }
+      }
+
+      // Round the icon (element 8)
+      if (in.elementIdx == 8u) {
+        let uv = in.localUV * 2.0 - 1.0;
+        if (length(uv) > 1.0) {
+          color.a = 0.0;
+        }
+      }
+
+      // Round the status dot (element 10)
+      if (in.elementIdx == 10u) {
+        let uv = in.localUV * 2.0 - 1.0;
+        if (length(uv) > 1.0) {
+          color.a = 0.0;
+        }
+      }
+
+      if (color.a < 0.01) { discard; }
+
+      return color;
+    }
+  """)
+
+(render-pipeline :name pipeline
+  (layout auto)
+  (vertex (module shader) (entry vs)
+    (buffers
+      (vertex-buffer :array-stride 8 :step-mode vertex
+        (attribute :shader-location 0 :offset 0 :format float32x2))
+      (vertex-buffer :array-stride 32 :step-mode instance
+        (attribute :shader-location 1 :offset 0 :format float32x4)
+        (attribute :shader-location 2 :offset 16 :format float32x4))))
+  (fragment (module shader) (entry fs)
+    (targets
+      (target :format preferred-canvas-format
+        (blend
+          (color :src-factor src-alpha :dst-factor one-minus-src-alpha)
+          (alpha :src-factor one :dst-factor one-minus-src-alpha))))))
+
+(bind-group :name bindings :layout-pipeline pipeline :layout-index 0
+  (entry :binding 0 :buffer uniforms))
+
+(render-pass :name drawPass
+  (color-attachment :view context-current-texture :clear-value [0.08 0.08 0.12 1] :load-op clear :store-op store)
+  :pipeline pipeline
+  :vertex-buffers [quadBuffer uiBuffer]
+  :bind-groups [bindings]
+  (draw :vertex-count 6 :instance-count NUM_UI_ELEMENTS))
+
+(frame :name main :perform [writeUniforms drawPass])

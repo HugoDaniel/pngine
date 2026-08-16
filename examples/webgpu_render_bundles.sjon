@@ -1,0 +1,169 @@
+; webgpu_render_bundles — port of the webgpu-samples `renderBundles` sample:
+; 500 instanced cubes in an orbital ring, drawn via a pre-recorded
+; `(render-bundle …)` replayed with the render pass's `:execute-bundles`.
+; Per-asteroid transforms (mat4x4f) are filled once by a compute `(init …)`;
+; the bundle records pipeline + vertex buffer + bind group + an instanced
+; draw, so the pass that lists it carries no inline pipeline or draw. The
+; other ingredients — `cube` shape, vertex-attribute layout, depth texture,
+; instancing, pngine-inputs uniform — are the same as webgpu_instanced_cubes.
+
+(define :name NUM_ASTEROIDS :value 500)
+(define :name CUBE_VERTEX_COUNT :value 36)
+
+(data :name cubeVertexArray (cube :format [position4 color4 uv2]))
+
+(buffer :name vertices :size cubeVertexArray :usage [vertex]
+  :mapped-at-creation cubeVertexArray)
+
+; 500 × mat4x4f (64 B) transforms, filled by the compute `(init …)`.
+(buffer :name transforms :size (* NUM_ASTEROIDS 64) :usage [storage])
+
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+
+(queue :name writeUniforms
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+(texture :name depthTex :size canvas :format depth24plus :usage [render-attachment])
+
+; One-shot compute: spiral the 500 transforms into the storage buffer (first frame).
+(init :name initTransforms :buffer transforms :shader initShader
+  :workgroups (ceil (/ NUM_ASTEROIDS 64)))
+
+(shader-module :name initShader :code """
+struct Transforms { m: array<mat4x4f> }
+@binding(0) @group(0) var<storage, read_write> data: Transforms;
+
+fn hash(n: u32) -> f32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return f32(x) / f32(0xffffffffu);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let idx = id.x;
+  if (idx >= arrayLength(&data.m)) { return; }
+
+  let angle = hash(idx * 7u + 1u) * 6.2832;
+  let radius = 1.5 + hash(idx * 13u + 3u) * 1.5;
+  let y_off = (hash(idx * 23u + 5u) - 0.5) * 0.3;
+  let scale = 0.03 + hash(idx * 37u + 11u) * 0.04;
+
+  let px = cos(angle) * radius;
+  let pz = sin(angle) * radius;
+  let py = y_off;
+
+  // Rotation angles
+  let rx = hash(idx * 41u + 17u) * 6.2832;
+  let ry = hash(idx * 53u + 19u) * 6.2832;
+  let cx = cos(rx); let sx = sin(rx);
+  let cy = cos(ry); let sy = sin(ry);
+
+  // Scale * RotY * RotX, then translate
+  data.m[idx] = mat4x4f(
+    vec4f(scale * cy,          scale * sy * sx,      scale * sy * cx, 0),
+    vec4f(0,                   scale * cx,           -scale * sx,     0),
+    vec4f(-scale * sy,         scale * cy * sx,      scale * cy * cx, 0),
+    vec4f(px, py, pz, 1));
+}
+""")
+
+(shader-module :name renderShader :code """
+struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+struct Transforms { m: array<mat4x4f> }
+
+@group(0) @binding(0) var<uniform> pngine: PngineInputs;
+@group(0) @binding(1) var<storage, read> xforms: Transforms;
+
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  return mat4x4f(
+    vec4f(f / aspect, 0, 0, 0),
+    vec4f(0, f, 0, 0),
+    vec4f(0, 0, far * nf, -1),
+    vec4f(0, 0, far * near * nf, 0));
+}
+
+struct VertexOutput {
+  @builtin(position) position: vec4f,
+  @location(0) normal: vec3f,
+  @location(1) color: vec3f,
+}
+
+@vertex
+fn vs(
+  @location(0) pos: vec4f,
+  @location(1) col: vec4f,
+  @location(2) uv: vec2f,
+  @builtin(instance_index) inst: u32,
+) -> VertexOutput {
+  let t = pngine.time * 0.1;
+  let ct = cos(t); let st = sin(t);
+  let cx = cos(0.3); let sx = sin(0.3);
+  let view = mat4x4f(
+    vec4f(ct, sx*st, -cx*st, 0),
+    vec4f(0,  cx,     sx,    0),
+    vec4f(st, -sx*ct, cx*ct, 0),
+    vec4f(0, 0, -5, 1));
+  let proj = perspective(1.2566, pngine.aspect, 0.5, 100.0);
+  let model = xforms.m[inst];
+
+  var out: VertexOutput;
+  let worldPos = model * pos;
+  out.position = proj * view * worldPos;
+  // Normal from cube face (approximate from position)
+  let n = normalize(pos.xyz);
+  out.normal = normalize((model * vec4f(n, 0)).xyz);
+  out.color = 0.5 * (pos.xyz + vec3f(1));
+  return out;
+}
+
+const lightDir = vec3f(0.577, 0.577, 0.577);
+
+@fragment
+fn fs(in: VertexOutput) -> @location(0) vec4f {
+  let ambient = vec3f(0.15);
+  let diffuse = max(dot(in.normal, lightDir), 0.0);
+  let lit = ambient + diffuse * vec3f(0.85);
+  return vec4f(in.color * lit, 1.0);
+}
+""")
+
+(render-pipeline :name renderPipeline
+  (layout auto)
+  (vertex (module renderShader) (entry vs)
+    (buffers
+      (vertex-buffer :array-stride 40
+        (attribute :shader-location 0 :offset 0 :format float32x4)
+        (attribute :shader-location 1 :offset 16 :format float32x4)
+        (attribute :shader-location 2 :offset 32 :format float32x2))))
+  (fragment (module renderShader) (entry fs)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list) :cull-mode back)
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+(bind-group :name renderBG :layout-pipeline renderPipeline :layout-index 0
+  (entry :binding 0 :buffer uniforms)
+  (entry :binding 1 :buffer transforms))
+
+; Pre-recorded bundle: the recorded instanced draw replays all 500 asteroids.
+(render-bundle :name asteroidBundle
+  :pipeline renderPipeline
+  :depth-stencil-format depth24plus
+  :vertex-buffers [vertices]
+  :bind-groups [renderBG]
+  :draw CUBE_VERTEX_COUNT
+  :instance-count NUM_ASTEROIDS)
+
+; The pass replays the bundle (execute_bundles) instead of an inline pipeline/draw.
+(render-pass :name drawScene
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (depth-attachment :view depthTex
+    :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  :execute-bundles [asteroidBundle])
+
+(frame :name main :init [initTransforms] :perform [writeUniforms drawScene])

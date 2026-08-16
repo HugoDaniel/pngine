@@ -1,0 +1,10 @@
+; Invalid: a truncated-cone with 2000×2000 subdivisions describes ~24 million
+; indices, far past the 65,536-index cap on generated shapes; the emitter
+; rejects the configuration before the generator allocates anything.
+
+(data :name mesh
+  (truncated-cone :format [position4]
+    :radial-subdivisions 2000
+    :vertical-subdivisions 2000))
+
+(buffer :name verts :size mesh :usage [vertex] :mapped-at-creation mesh)

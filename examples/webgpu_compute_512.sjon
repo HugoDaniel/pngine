@@ -1,0 +1,74 @@
+; Authored device limits — a (limits …) form unlocks @workgroup_size(512).
+;
+; A single compute pass runs at @workgroup_size(512, 1, 1). The WebGPU default
+; maxComputeWorkgroupSizeX / maxComputeInvocationsPerWorkgroup is 256, so this
+; does not compile without the (limits …) form below: the compiler's
+; workgroup-size check reads the authored caps, and the runtime passes them as
+; requestDevice's requiredLimits.
+;
+; Only the 512th thread (local index 511) writes the orange into the storage
+; buffer the fullscreen pass reads. On a device that honored the 256 default
+; the buffer would stay zero and the frame would render black.
+
+(limits
+  :max-compute-workgroup-size-x 512
+  :max-compute-invocations-per-workgroup 512)
+
+(shader-module :name workCode :code """
+@group(0) @binding(0) var<storage, read_write> colour: array<f32>;
+@compute @workgroup_size(512, 1, 1)
+fn writeColour(@builtin(local_invocation_index) idx: u32) {
+  if (idx == 511u) {
+    colour[0] = 0.9;
+    colour[1] = 0.4;
+    colour[2] = 0.1;
+    colour[3] = 1.0;
+  }
+}
+""")
+
+(shader-module :name drawCode :code """
+@group(0) @binding(0) var<storage, read> colour: array<f32>;
+
+@vertex
+fn vertexMain(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4f {
+  var pos = array<vec2f, 3>(
+    vec2f(-1.0, -3.0),
+    vec2f(-1.0,  1.0),
+    vec2f( 3.0,  1.0)
+  );
+  return vec4f(pos[vid], 0.0, 1.0);
+}
+
+@fragment
+fn fragMain() -> @location(0) vec4f {
+  return vec4f(colour[0], colour[1], colour[2], colour[3]);
+}
+""")
+
+(buffer :name colourBuf :size 16 :usage [storage])
+
+(compute-pipeline :name workPipe :module workCode :entry writeColour)
+
+(bind-group :name workGroup :layout-pipeline workPipe :layout-index 0
+  (entry :binding 0 :buffer colourBuf))
+
+(compute-pass :name workPass :pipeline workPipe :bind-groups [workGroup]
+  :dispatch-workgroups 1)
+
+(render-pipeline :name pipeline
+  (layout auto)
+  (vertex (module drawCode) (entry vertexMain))
+  (fragment (module drawCode) (entry fragMain)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list)))
+
+(bind-group :name drawGroup :layout-pipeline pipeline :layout-index 0
+  (entry :binding 0 :buffer colourBuf))
+
+(render-pass :name drawPass
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipeline :bind-groups [drawGroup]
+  (draw :vertex-count 3))
+
+(frame :name main :perform [workPass drawPass])

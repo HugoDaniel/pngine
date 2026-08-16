@@ -1,0 +1,237 @@
+//! Validate command types and data structures.
+//!
+//! Shared type definitions for the validate command modules.
+
+const std = @import("std");
+const cmd_validator = @import("cmd_validator.zig");
+const symptom_diagnosis = @import("symptom_diagnosis.zig");
+const wgsl_reflect = @import("wgsl_reflect.zig");
+
+/// Maximum input file size (16 MiB).
+pub const max_file_size: u32 = 16 * 1024 * 1024;
+
+/// Validation phase to inspect.
+pub const Phase = enum {
+    init, // Resource creation only
+    frame, // First frame only
+    both, // Both init and frame
+};
+
+/// Known symptom categories for diagnosis.
+pub const Symptom = enum {
+    black, // Black screen / nothing renders
+    colors, // Wrong colors
+    blend, // Blending/transparency issues
+    flicker, // Flickering / strobing
+    geometry, // Wrong geometry / distortion
+    none, // No specific symptom
+};
+
+/// Validate command options parsed from CLI arguments.
+pub const Options = struct {
+    input_path: []const u8,
+    json_output: bool,
+    verbose: bool,
+    phase: Phase,
+    symptom: Symptom,
+    frame_indices: []const u32, // Frame indices to test (parsed from --frames)
+    time: f32,
+    time_step: f32,
+    width: u32,
+    height: u32,
+    strict: bool,
+    extract_wgsl: bool,
+    quiet: bool,
+
+    /// Default frame indices (just frame 0).
+    pub const default_frames = [_]u32{0};
+
+    /// Create default options.
+    pub fn init() Options {
+        return .{
+            .input_path = "",
+            .json_output = false,
+            .verbose = false,
+            .phase = .both,
+            .symptom = .none,
+            .frame_indices = &default_frames,
+            .time = 0.0,
+            .time_step = 1.0 / 60.0, // 60fps default
+            .width = 512,
+            .height = 512,
+            .strict = false,
+            .extract_wgsl = false,
+            .quiet = false,
+        };
+    }
+};
+
+/// Validation result for a single command.
+/// Uses ParsedCommand from cmd_validator for full parameter info.
+pub const CommandInfo = cmd_validator.ParsedCommand;
+
+/// Result for a single frame execution.
+pub const FrameResult = struct {
+    frame_index: u32,
+    time: f32,
+    commands: []const CommandInfo,
+    draw_count: u32,
+    dispatch_count: u32,
+};
+
+/// Validation error or warning.
+pub const ValidationIssue = struct {
+    code: []const u8,
+    severity: enum { err, warning },
+    message: []const u8,
+    command_index: ?u32,
+};
+
+/// Bytecode module info for output.
+pub const ModuleInfo = struct {
+    version: u16,
+    has_executor: bool,
+    executor_size: u32,
+    bytecode_size: u32,
+    strings_count: u32,
+    data_blobs_count: u32,
+    wgsl_entries_count: u32,
+    uniform_entries_count: u32,
+    has_animation: bool,
+    scene_count: u32,
+};
+
+/// Extracted WGSL shader information.
+pub const WgslShaderInfo = struct {
+    /// Shader ID from CREATE_SHADER command.
+    shader_id: u16,
+    /// Reflected entry points and bindings. Slices are owned by the owning
+    /// ValidationResult's arena.
+    parse_result: wgsl_reflect.ShaderReflection,
+    /// Raw WGSL source code (if extract_wgsl enabled).
+    source: ?[]const u8 = null,
+
+    /// Get entry points from this shader.
+    pub fn getEntryPoints(self: *const WgslShaderInfo) []const wgsl_reflect.EntryPoint {
+        return self.parse_result.getEntryPoints();
+    }
+
+    /// Get bindings from this shader.
+    pub fn getBindings(self: *const WgslShaderInfo) []const wgsl_reflect.Binding {
+        return self.parse_result.getBindings();
+    }
+
+    /// Check if shader has a specific entry point.
+    pub fn hasEntryPoint(self: *const WgslShaderInfo, name: []const u8, stage: wgsl_reflect.Stage) bool {
+        return self.parse_result.hasEntryPoint(name, stage);
+    }
+};
+
+/// Maximum number of shaders we track.
+pub const MAX_SHADERS: u8 = 32;
+
+/// Frame diff analysis for detecting animation issues.
+pub const FrameDiff = struct {
+    /// Commands that are identical across all frames.
+    static_command_count: u32,
+    /// Commands that vary between frames.
+    varying_command_count: u32,
+    /// Whether time values are changing (animation working).
+    time_is_varying: bool,
+    /// Whether draw counts are consistent.
+    draw_counts_consistent: bool,
+    /// Summary message for LLM consumption.
+    summary: []const u8,
+};
+
+/// Complete validation result.
+pub const ValidationResult = struct {
+    status: enum { ok, warning, err },
+    init_commands: []const CommandInfo,
+    frame_commands: []const CommandInfo, // First frame (for backwards compat)
+    frame_results: std.ArrayList(FrameResult), // All frames
+    frame_diff: ?FrameDiff,
+    errors: std.ArrayList(ValidationIssue),
+    warnings: std.ArrayList(ValidationIssue),
+    module_info: ?ModuleInfo,
+    resource_counts: ?cmd_validator.Validator.ResourceCounts,
+    draw_count: u32,
+    dispatch_count: u32,
+    diagnosis: ?symptom_diagnosis.DiagnosisResult, // Symptom-based diagnosis (if --symptom used)
+    likely_causes: ?cmd_validator.Validator.LikelyCausesResult, // Likely causes from state machine analysis
+    wgsl_shaders: [MAX_SHADERS]WgslShaderInfo = undefined, // Extracted WGSL shader info
+    wgsl_shader_count: u8 = 0,
+    /// Owns every string and slice reachable from `wgsl_shaders[*].parse_result`.
+    /// WGSL reflection allocates (the scanner it replaced was fixed-size), and an
+    /// inspect run is a one-shot CLI diagnostic, so one arena freed with the
+    /// result is the whole lifetime story. Null until reflection runs.
+    wgsl_arena: ?std.heap.ArenaAllocator = null,
+
+    pub fn init() ValidationResult {
+        return .{
+            .status = .ok,
+            .init_commands = &[_]CommandInfo{},
+            .frame_commands = &[_]CommandInfo{},
+            .frame_results = .empty,
+            .frame_diff = null,
+            .errors = .empty,
+            .warnings = .empty,
+            .module_info = null,
+            .resource_counts = null,
+            .draw_count = 0,
+            .dispatch_count = 0,
+            .diagnosis = null,
+            .likely_causes = null,
+            .wgsl_shader_count = 0,
+        };
+    }
+
+    /// Get extracted WGSL shader info as slice.
+    pub fn getWgslShaders(self: *const ValidationResult) []const WgslShaderInfo {
+        return self.wgsl_shaders[0..self.wgsl_shader_count];
+    }
+
+    /// Add a WGSL shader info entry.
+    pub fn addWgslShader(self: *ValidationResult, info: WgslShaderInfo) void {
+        if (self.wgsl_shader_count < MAX_SHADERS) {
+            self.wgsl_shaders[self.wgsl_shader_count] = info;
+            self.wgsl_shader_count += 1;
+        }
+    }
+
+    /// Find shader by ID.
+    pub fn findShader(self: *const ValidationResult, shader_id: u16) ?*const WgslShaderInfo {
+        for (self.wgsl_shaders[0..self.wgsl_shader_count]) |*shader| {
+            if (shader.shader_id == shader_id) {
+                return shader;
+            }
+        }
+        return null;
+    }
+
+    pub fn deinit(self: *ValidationResult, allocator: std.mem.Allocator) void {
+        if (self.init_commands.len > 0) allocator.free(self.init_commands);
+        // Free frame_commands only if it's not shared with frame_results[0]
+        const first_frame_cmd_ptr = if (self.frame_results.items.len > 0)
+            self.frame_results.items[0].commands.ptr
+        else
+            null;
+        if (self.frame_commands.len > 0 and self.frame_commands.ptr != first_frame_cmd_ptr) {
+            allocator.free(self.frame_commands);
+        }
+        for (self.frame_results.items) |fr| {
+            if (fr.commands.len > 0) allocator.free(fr.commands);
+        }
+        self.frame_results.deinit(allocator);
+        self.errors.deinit(allocator);
+        self.warnings.deinit(allocator);
+        // Free WGSL source strings if allocated
+        for (self.wgsl_shaders[0..self.wgsl_shader_count]) |shader| {
+            if (shader.source) |src| {
+                allocator.free(src);
+            }
+        }
+        // Releases every entry point / binding slice in one shot.
+        if (self.wgsl_arena) |*arena| arena.deinit();
+    }
+};

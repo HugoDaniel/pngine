@@ -1,0 +1,722 @@
+; Cornell box — port of the webgpu-samples `cornell` sample (its raytracer
+; path only). Progressive GPU radiosity: every frame a 256x1024-photon compute
+; pass bounces light from the ceiling quad through 4 bounces, atomicAdd-ing
+; energy into a u32 accumulation buffer; a second pass scales it into an
+; rgba16float 2d-array lightmap (one layer per quad, halving the accumulation
+; when nearing u32 saturation); a compute raytracer intersects each pixel ray
+; with the 19 quads and samples the lightmap; a tonemapper writes the screen
+; storage texture; a blit samples it to the canvas. All-compute — six
+; dispatches + one draw.
+;
+; Differences from upstream: the CPU-tracked accumulationMean is a pure
+; function of frame count, reproduced by a 1-thread updateState pass into a
+; frameState storage buffer; the MVP/inverse and the per-frame random seeds
+; are computed by a 1-thread camera pass (analytic inverses; seeds hashed from
+; the time bits, so photon sequences differ from upstream's Math.random() with
+; statistically identical convergence); pipeline-overridable constants and the
+; output-format substitution are baked into the WGSL text; the storage-binding
+; canvas becomes the screen-texture + blit pattern; light geometry (center
+; (0,9.95,0), 2x2) is baked as consts. The 19 quads (304 floats) follow
+; upstream's scene.ts box() packing — normal plane, reciprocal right/up
+; planes, color+emissive per quad.
+;
+; The raytrace/tonemap dispatch is a fixed grid with in-shader bounds checks
+; (canvas dims are runtime uniforms, not compile-time). The image depends on
+; frames elapsed (progressive accumulation), so only frame-1-at-t=0
+; comparisons between renders are meaningful.
+
+(data :name quadData :float32 [
+  -1 0 0 5 0 0 0.2 0 0 0.2 0 -1 0 0.5 0 0
+  0 -1 0 10 0.2 0 0 0 0 0 0.2 0 0.5 0.5 0.5 0
+  0 0 1 5 0.2 0 0 0 0 0.2 0 -1 0.5 0.5 0.5 0
+  1 0 0 5 0 0 -0.2 0 0 0.2 0 -1 0.5 0 0 0
+  0 1 0 0 0.2 0 0 0 0 0 -0.2 0 0.5 0.5 0.5 0
+  0 0 -1 5 -0.2 0 0 0 0 0.2 0 -1 0.5 0.5 0.5 0
+  0.9553365 0 0.2955202 -3.228525 0.1970135 0 -0.636891 0.3413708 0 0.6666667 0 -1 0.8 0.8 0.8 0
+  0 1 0 -3 -0.636891 0 -0.1970135 1.15235 -0.1970135 0 0.636891 -0.3413708 0.8 0.8 0.8 0
+  0.2955202 0 -0.9553365 -0.9879438 -0.636891 0 -0.1970135 1.15235 0 0.6666667 0 -1 0.8 0.8 0.8 0
+  -0.9553365 0 -0.2955202 0.2285249 -0.1970135 0 0.636891 -0.3413708 0 0.6666667 0 -1 0.8 0.8 0.8 0
+  0 -1 0 0 -0.636891 0 -0.1970135 1.15235 0.1970135 0 -0.636891 0.3413708 0.8 0.8 0.8 0
+  -0.2955202 0 0.9553365 -2.012056 0.636891 0 0.1970135 -1.15235 0 0.6666667 0 -1 0.8 0.8 0.8 0
+  0.921061 0 -0.3894183 -0.4367147 -0.2596122 0 -0.6140407 -1.747306 0 0.3333333 0 -1 0.8 0.8 0.8 0
+  0 1 0 -6 -0.6140407 0 0.2596122 -0.7088569 0.2596122 0 0.6140407 1.747306 0.8 0.8 0.8 0
+  -0.3894183 0 -0.921061 -4.120959 -0.6140407 0 0.2596122 -0.7088569 0 0.3333333 0 -1 0.8 0.8 0.8 0
+  -0.921061 0 0.3894183 -2.563285 0.2596122 0 0.6140407 1.747306 0 0.3333333 0 -1 0.8 0.8 0.8 0
+  0 -1 0 0 -0.6140407 0 0.2596122 -0.7088569 -0.2596122 0 -0.6140407 -1.747306 0.8 0.8 0.8 0
+  0.3894183 0 0.921061 1.120959 0.6140407 0 -0.2596122 0.7088569 0 0.3333333 0 -1 0.8 0.8 0.8 0
+  0 -1 0 9.95 1 0 0 0 0 0 1 0 5 5 5 1
+])
+(buffer :name quads :size quadData :usage [storage] :mapped-at-creation quadData)
+(buffer :name accumulation :size (* 256 256 19 16) :usage [storage])
+(buffer :name frameState :size 16 :usage [storage])
+(buffer :name common :size 144 :usage [storage])
+(buffer :name inputs :size 16 :usage [uniform copy-dst])
+
+(texture :name lightmap :width 256 :height 256
+  :dimension 2 :depth-or-array-layers 19
+  :format rgba16float :usage [texture-binding storage-binding])
+(texture-view :name lightmapStore :texture lightmap :view-dimension 2)
+(texture-view :name lightmapSample :texture lightmap :view-dimension 2)
+(texture :name framebuffer :size canvas :format rgba16float
+  :usage [texture-binding storage-binding])
+(texture :name screenTex :size canvas :format rgba8unorm
+  :usage [texture-binding storage-binding])
+(sampler :name lmSampler :mag-filter linear :min-filter linear
+  :address-mode clamp-to-edge)
+
+(queue :name writeInputs
+  (write-buffer :buffer inputs :offset 0 :data pngine-inputs))
+
+(shader-module :name stateCode :code """
+// Reproduces Radiosity.run()'s CPU arithmetic on-GPU: the accumulation
+// mean is a pure function of frame count.
+struct FrameState {
+  mean : f32,
+  lightmapScale : f32,
+  bufferScale : f32,
+  _pad : f32,
+}
+@group(0) @binding(0) var<storage, read_write> state : FrameState;
+
+const MeanIncrement = 21052.631579;       // photons/frame * energy / texels
+const MeanMax = 268435456.0;           // 0x10000000
+
+@compute @workgroup_size(1)
+fn main() {
+  var mean = state.mean + MeanIncrement;
+  let bufScale = select(1.0, 0.5, mean > 2.0 * MeanMax);
+  mean = mean * bufScale;
+  state.mean = mean;
+  state.lightmapScale = 1.0 / mean;
+  state.bufferScale = bufScale;
+}
+""")
+
+(shader-module :name cameraCode :code """
+struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+struct CommonUniforms {
+  mvp : mat4x4f,
+  inv_mvp : mat4x4f,
+  seed : vec3u,
+}
+@group(0) @binding(0) var<uniform> inputs : PngineInputs;
+@group(0) @binding(1) var<storage, read_write> common_out : CommonUniforms;
+
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  return mat4x4f(
+    vec4f(f / aspect, 0, 0, 0),
+    vec4f(0, f, 0, 0),
+    vec4f(0, 0, far * nf, -1),
+    vec4f(0, 0, far * near * nf, 0));
+}
+fn invPerspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  let a = far * nf;
+  let b = far * near * nf;
+  return mat4x4f(
+    vec4f(aspect / f, 0, 0, 0),
+    vec4f(0, 1.0 / f, 0, 0),
+    vec4f(0, 0, 0, 1.0 / b),
+    vec4f(0, 0, -1, a / b));
+}
+
+fn hashU(n: u32) -> u32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return x;
+}
+
+// Upstream: lookAt(sin(r)*15, 5, cos(r)*15 -> (0,5,0)), r = frame/1000;
+// repositioned to r = t * 0.06 (60 fps equivalent). Inverse is analytic:
+// invView columns are the camera basis + eye; invMVP = invView * invP.
+@compute @workgroup_size(1)
+fn main() {
+  let t = inputs.time;
+  let r = t * 0.06;
+  let eye = vec3f(sin(r) * 15.0, 5.0, cos(r) * 15.0);
+  let focus = vec3f(0.0, 5.0, 0.0);
+  let up = vec3f(0.0, 1.0, 0.0);
+  let fwd = normalize(focus - eye);
+  let s = normalize(cross(fwd, up));
+  let u = cross(s, fwd);
+  let view = mat4x4f(
+    vec4f(s.x, u.x, -fwd.x, 0),
+    vec4f(s.y, u.y, -fwd.y, 0),
+    vec4f(s.z, u.z, -fwd.z, 0),
+    vec4f(-dot(s, eye), -dot(u, eye), dot(fwd, eye), 1));
+  let invView = mat4x4f(
+    vec4f(s, 0.0),
+    vec4f(u, 0.0),
+    vec4f(-fwd, 0.0),
+    vec4f(eye, 1.0));
+  let proj = perspective(0.7853982, inputs.aspect, 0.5, 100.0);
+  let invProj = invPerspective(0.7853982, inputs.aspect, 0.5, 100.0);
+  common_out.mvp = proj * view;
+  common_out.inv_mvp = invView * invProj;
+  let tb = bitcast<u32>(t + 1.0);
+  common_out.seed = vec3u(hashU(tb), hashU(tb ^ 0x9E3779B9u), hashU(tb * 3u + 1u));
+}
+""")
+
+(shader-module :name radiosityCode :code """
+const pi = 3.14159265359;
+
+// Quad describes 2D rectangle on a plane
+struct Quad {
+  // The surface plane
+  plane    : vec4f,
+  // A plane with a normal in the 'u' direction, intersecting the origin, at
+  // right-angles to the surface plane.
+  // The dot product of 'right' with a 'vec4(pos, 1)' will range between [-1..1]
+  // if the projected point is within the quad.
+  right    : vec4f,
+  // A plane with a normal in the 'v' direction, intersecting the origin, at
+  // right-angles to the surface plane.
+  // The dot product of 'up' with a 'vec4(pos, 1)' will range between [-1..1]
+  // if the projected point is within the quad.
+  up       : vec4f,
+  // The diffuse color of the quad
+  color    : vec3f,
+  // Emissive value. 0=no emissive, 1=full emissive.
+  emissive : f32,
+};
+
+// Ray is a start point and direction.
+struct Ray {
+  start : vec3f,
+  dir   : vec3f,
+}
+
+// Value for HitInfo.quad if no intersection occured.
+const kNoHit = 0xffffffff;
+
+// HitInfo describes the hit location of a ray-quad intersection
+struct HitInfo {
+  // Distance along the ray to the intersection
+  dist : f32,
+  // The quad index that was hit
+  quad : u32,
+  // The position of the intersection
+  pos : vec3f,
+  // The UVs of the quad at the point of intersection
+  uv : vec2f,
+}
+
+// CommonUniforms uniform buffer data
+struct CommonUniforms {
+  // Model View Projection matrix
+  mvp : mat4x4f,
+  // Inverse of mvp
+  inv_mvp : mat4x4f,
+  // Random seed for the workgroup
+  seed : vec3u,
+}
+
+// The common uniform buffer binding.
+@group(0) @binding(0) var<storage, read> common_uniforms : CommonUniforms;
+
+// The quad buffer binding.
+@group(0) @binding(1) var<storage> quads : array<Quad>;
+
+// intersect_ray_quad will check to see if the ray 'r' intersects the quad 'q'.
+// If an intersection occurs, and the intersection is closer than 'closest' then
+// the intersection information is returned, otherwise 'closest' is returned.
+fn intersect_ray_quad(r : Ray, quad : u32, closest : HitInfo) -> HitInfo {
+  let q = quads[quad];
+  let plane_dist = dot(q.plane, vec4(r.start, 1));
+  let ray_dist = plane_dist / -dot(q.plane.xyz, r.dir);
+  let pos = r.start + r.dir * ray_dist;
+  let uv = vec2(dot(vec4f(pos, 1), q.right),
+                dot(vec4f(pos, 1), q.up)) * 0.5 + 0.5;
+  let hit = plane_dist > 0 &&
+            ray_dist > 0 &&
+            ray_dist < closest.dist &&
+            all(uv > vec2f()) && all(uv < vec2f(1));
+  return HitInfo(
+    select(closest.dist, ray_dist, hit),
+    select(closest.quad, quad,     hit),
+    select(closest.pos,  pos,      hit),
+    select(closest.uv,   uv,       hit),
+  );
+}
+
+// raytrace finds the closest intersecting quad for the given ray
+fn raytrace(ray : Ray) -> HitInfo {
+  var hit = HitInfo();
+  hit.dist = 1e20;
+  hit.quad = kNoHit;
+  for (var quad = 0u; quad < arrayLength(&quads); quad++) {
+    hit = intersect_ray_quad(ray, quad, hit);
+  }
+  return hit;
+}
+
+// A pseudo random number. Initialized with init_rand(), updated with rand().
+var<private> rnd : vec3u;
+
+// Initializes the random number generator.
+fn init_rand(invocation_id : vec3u) {
+  const A = vec3u(1741651u * 1009u,
+                 140893u  * 1609u * 13u,
+                 6521u    * 983u  * 7u * 2u);
+  rnd = (invocation_id * A) ^ common_uniforms.seed;
+}
+
+// Returns a random number between 0 and 1.
+fn rand() -> f32 {
+  const C = vec3u(60493u  * 9377u,
+                 11279u  * 2539u * 23u,
+                 7919u   * 631u  * 5u * 3u);
+
+  rnd = (rnd * C) ^ (rnd.yzx >> vec3(4u));
+  return f32(rnd.x ^ rnd.y) / f32(0xffffffff);
+}
+
+// Returns a random point within a unit sphere centered at (0,0,0).
+fn rand_unit_sphere() -> vec3f {
+    var u = rand();
+    var v = rand();
+    var theta = u * 2.0 * pi;
+    var phi = acos(2.0 * v - 1.0);
+    var r = pow(rand(), 1.0/3.0);
+    var sin_theta = sin(theta);
+    var cos_theta = cos(theta);
+    var sin_phi = sin(phi);
+    var cos_phi = cos(phi);
+    var x = r * sin_phi * sin_theta;
+    var y = r * sin_phi * cos_theta;
+    var z = r * cos_phi;
+    return vec3f(x, y, z);
+}
+
+fn rand_concentric_disk() -> vec2f {
+    let u = vec2f(rand(), rand());
+    let uOffset = 2.f * u - vec2f(1, 1);
+
+    if (uOffset.x == 0 && uOffset.y == 0){
+        return vec2f(0, 0);
+    }
+
+    var theta = 0.0;
+    var r = 0.0;
+    if (abs(uOffset.x) > abs(uOffset.y)) {
+        r = uOffset.x;
+        theta = (pi / 4) * (uOffset.y / uOffset.x);
+    } else {
+        r = uOffset.y;
+        theta = (pi / 2) - (pi / 4) * (uOffset.x / uOffset.y);
+    }
+    return r * vec2f(cos(theta), sin(theta));
+}
+
+fn rand_cosine_weighted_hemisphere() -> vec3f {
+    let d = rand_concentric_disk();
+    let z = sqrt(max(0.0, 1.0 - d.x * d.x - d.y * d.y));
+    return vec3f(d.x, d.y, z);
+}
+
+// The quads storage above is @group(0) @binding(1); accumulation state:
+@group(0) @binding(2) var<storage, read_write> accumulation : array<atomic<u32>>;
+@group(0) @binding(3) var lightmap : texture_storage_2d_array<rgba16float, write>;
+struct FrameState {
+  mean : f32,
+  lightmapScale : f32,
+  bufferScale : f32,
+  _pad : f32,
+}
+@group(0) @binding(4) var<storage, read> state : FrameState;
+
+// Baked upstream overrides + light geometry (scene.ts light quad).
+const PhotonsPerWorkgroup = 256u;
+const PhotonEnergy = 100000.0;
+const PhotonBounces = 4;
+const LightAbsorbtion = 0.5;
+const LightCenter = vec3f(0.0, 9.95, 0.0);
+const LightWidth = 2.0;
+const LightHeight = 2.0;
+
+@compute @workgroup_size(256)
+fn radiosity(@builtin(global_invocation_id) invocation_id : vec3u) {
+  init_rand(invocation_id);
+  photon();
+}
+
+fn photon() {
+  var ray = new_light_ray();
+  var color = PhotonEnergy * vec3f(1, 0.8, 0.6);
+  for (var i = 0; i < (PhotonBounces + 1); i++) {
+    let hit = raytrace(ray);
+    let quad = quads[hit.quad];
+    ray.start = hit.pos + quad.plane.xyz * 1e-5;
+    ray.dir = normalize(reflect(ray.dir, quad.plane.xyz) + rand_unit_sphere() * 0.75);
+    color *= quad.color;
+    accumulate(hit.uv, hit.quad, color * LightAbsorbtion);
+    color *= 1 - LightAbsorbtion;
+  }
+}
+
+fn accumulate(uv : vec2f, quad : u32, color : vec3f) {
+  let dims = textureDimensions(lightmap);
+  let base_idx = accumulation_base_index(vec2u(uv * vec2f(dims)), quad);
+  let _r = atomicAdd(&accumulation[base_idx + 0], u32(color.r + 0.5));
+  let _g = atomicAdd(&accumulation[base_idx + 1], u32(color.g + 0.5));
+  let _b = atomicAdd(&accumulation[base_idx + 2], u32(color.b + 0.5));
+}
+
+fn accumulation_base_index(coord : vec2u, quad : u32) -> u32 {
+  let dims = textureDimensions(lightmap);
+  let c = min(vec2u(dims) - 1, coord);
+  return 3 * (c.x + dims.x * c.y + dims.x * dims.y * quad);
+}
+
+fn new_light_ray() -> Ray {
+  let pos = LightCenter + vec3f(LightWidth * (rand() - 0.5),
+                                0,
+                                LightHeight * (rand() - 0.5));
+  var dir = rand_cosine_weighted_hemisphere().xzy;
+  dir.y = -dir.y;
+  return Ray(pos, dir);
+}
+
+@compute @workgroup_size(16, 16)
+fn accumulation_to_lightmap(@builtin(global_invocation_id) invocation_id : vec3u,
+                            @builtin(workgroup_id)         workgroup_id  : vec3u) {
+  let dims = textureDimensions(lightmap);
+  let quad = workgroup_id.z;
+  let coord = invocation_id.xy;
+  if (all(coord < dims)) {
+    let base_idx = accumulation_base_index(coord, quad);
+    let color = vec3(f32(atomicLoad(&accumulation[base_idx + 0])),
+                     f32(atomicLoad(&accumulation[base_idx + 1])),
+                     f32(atomicLoad(&accumulation[base_idx + 2])));
+    textureStore(lightmap, coord, quad, vec4(color * state.lightmapScale, 1));
+    if (state.bufferScale != 1.0) {
+      let scaled = color * state.bufferScale + 0.5;
+      atomicStore(&accumulation[base_idx + 0], u32(scaled.r));
+      atomicStore(&accumulation[base_idx + 1], u32(scaled.g));
+      atomicStore(&accumulation[base_idx + 2], u32(scaled.b));
+    }
+  }
+}
+""")
+
+(shader-module :name raytraceCode :code """
+const pi = 3.14159265359;
+
+// Quad describes 2D rectangle on a plane
+struct Quad {
+  // The surface plane
+  plane    : vec4f,
+  // A plane with a normal in the 'u' direction, intersecting the origin, at
+  // right-angles to the surface plane.
+  // The dot product of 'right' with a 'vec4(pos, 1)' will range between [-1..1]
+  // if the projected point is within the quad.
+  right    : vec4f,
+  // A plane with a normal in the 'v' direction, intersecting the origin, at
+  // right-angles to the surface plane.
+  // The dot product of 'up' with a 'vec4(pos, 1)' will range between [-1..1]
+  // if the projected point is within the quad.
+  up       : vec4f,
+  // The diffuse color of the quad
+  color    : vec3f,
+  // Emissive value. 0=no emissive, 1=full emissive.
+  emissive : f32,
+};
+
+// Ray is a start point and direction.
+struct Ray {
+  start : vec3f,
+  dir   : vec3f,
+}
+
+// Value for HitInfo.quad if no intersection occured.
+const kNoHit = 0xffffffff;
+
+// HitInfo describes the hit location of a ray-quad intersection
+struct HitInfo {
+  // Distance along the ray to the intersection
+  dist : f32,
+  // The quad index that was hit
+  quad : u32,
+  // The position of the intersection
+  pos : vec3f,
+  // The UVs of the quad at the point of intersection
+  uv : vec2f,
+}
+
+// CommonUniforms uniform buffer data
+struct CommonUniforms {
+  // Model View Projection matrix
+  mvp : mat4x4f,
+  // Inverse of mvp
+  inv_mvp : mat4x4f,
+  // Random seed for the workgroup
+  seed : vec3u,
+}
+
+// The common uniform buffer binding.
+@group(0) @binding(0) var<storage, read> common_uniforms : CommonUniforms;
+
+// The quad buffer binding.
+@group(0) @binding(1) var<storage> quads : array<Quad>;
+
+// intersect_ray_quad will check to see if the ray 'r' intersects the quad 'q'.
+// If an intersection occurs, and the intersection is closer than 'closest' then
+// the intersection information is returned, otherwise 'closest' is returned.
+fn intersect_ray_quad(r : Ray, quad : u32, closest : HitInfo) -> HitInfo {
+  let q = quads[quad];
+  let plane_dist = dot(q.plane, vec4(r.start, 1));
+  let ray_dist = plane_dist / -dot(q.plane.xyz, r.dir);
+  let pos = r.start + r.dir * ray_dist;
+  let uv = vec2(dot(vec4f(pos, 1), q.right),
+                dot(vec4f(pos, 1), q.up)) * 0.5 + 0.5;
+  let hit = plane_dist > 0 &&
+            ray_dist > 0 &&
+            ray_dist < closest.dist &&
+            all(uv > vec2f()) && all(uv < vec2f(1));
+  return HitInfo(
+    select(closest.dist, ray_dist, hit),
+    select(closest.quad, quad,     hit),
+    select(closest.pos,  pos,      hit),
+    select(closest.uv,   uv,       hit),
+  );
+}
+
+// raytrace finds the closest intersecting quad for the given ray
+fn raytrace(ray : Ray) -> HitInfo {
+  var hit = HitInfo();
+  hit.dist = 1e20;
+  hit.quad = kNoHit;
+  for (var quad = 0u; quad < arrayLength(&quads); quad++) {
+    hit = intersect_ray_quad(ray, quad, hit);
+  }
+  return hit;
+}
+
+// A pseudo random number. Initialized with init_rand(), updated with rand().
+var<private> rnd : vec3u;
+
+// Initializes the random number generator.
+fn init_rand(invocation_id : vec3u) {
+  const A = vec3u(1741651u * 1009u,
+                 140893u  * 1609u * 13u,
+                 6521u    * 983u  * 7u * 2u);
+  rnd = (invocation_id * A) ^ common_uniforms.seed;
+}
+
+// Returns a random number between 0 and 1.
+fn rand() -> f32 {
+  const C = vec3u(60493u  * 9377u,
+                 11279u  * 2539u * 23u,
+                 7919u   * 631u  * 5u * 3u);
+
+  rnd = (rnd * C) ^ (rnd.yzx >> vec3(4u));
+  return f32(rnd.x ^ rnd.y) / f32(0xffffffff);
+}
+
+// Returns a random point within a unit sphere centered at (0,0,0).
+fn rand_unit_sphere() -> vec3f {
+    var u = rand();
+    var v = rand();
+    var theta = u * 2.0 * pi;
+    var phi = acos(2.0 * v - 1.0);
+    var r = pow(rand(), 1.0/3.0);
+    var sin_theta = sin(theta);
+    var cos_theta = cos(theta);
+    var sin_phi = sin(phi);
+    var cos_phi = cos(phi);
+    var x = r * sin_phi * sin_theta;
+    var y = r * sin_phi * cos_theta;
+    var z = r * cos_phi;
+    return vec3f(x, y, z);
+}
+
+fn rand_concentric_disk() -> vec2f {
+    let u = vec2f(rand(), rand());
+    let uOffset = 2.f * u - vec2f(1, 1);
+
+    if (uOffset.x == 0 && uOffset.y == 0){
+        return vec2f(0, 0);
+    }
+
+    var theta = 0.0;
+    var r = 0.0;
+    if (abs(uOffset.x) > abs(uOffset.y)) {
+        r = uOffset.x;
+        theta = (pi / 4) * (uOffset.y / uOffset.x);
+    } else {
+        r = uOffset.y;
+        theta = (pi / 2) - (pi / 4) * (uOffset.x / uOffset.y);
+    }
+    return r * vec2f(cos(theta), sin(theta));
+}
+
+fn rand_cosine_weighted_hemisphere() -> vec3f {
+    let d = rand_concentric_disk();
+    let z = sqrt(max(0.0, 1.0 - d.x * d.x - d.y * d.y));
+    return vec3f(d.x, d.y, z);
+}
+
+@group(0) @binding(2) var lightmap : texture_2d_array<f32>;
+@group(0) @binding(3) var smpl : sampler;
+@group(0) @binding(4) var framebuffer : texture_storage_2d<rgba16float, write>;
+
+const NumReflectionRays = 5;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) invocation_id : vec3u) {
+  if (all(invocation_id.xy < textureDimensions(framebuffer))) {
+    init_rand(invocation_id);
+    let uv = vec2f(invocation_id.xy) / vec2f(textureDimensions(framebuffer).xy);
+    let ndcXY = (uv - 0.5) * vec2(2, -2);
+    var near = common_uniforms.inv_mvp * vec4f(ndcXY, 0.0, 1);
+    var far = common_uniforms.inv_mvp * vec4f(ndcXY, 1, 1);
+    near /= near.w;
+    far /= far.w;
+    let ray = Ray(near.xyz, normalize(far.xyz - near.xyz));
+    let hit = raytrace(ray);
+    let hit_color = sample_hit(hit);
+    var normal = quads[hit.quad].plane.xyz;
+    let bounce = reflect(ray.dir, normal);
+    var reflection : vec3f;
+    for (var i = 0; i < NumReflectionRays; i++) {
+      let reflection_dir = normalize(bounce + rand_unit_sphere() * 0.1);
+      let reflection_ray = Ray(hit.pos + bounce * 1e-5, reflection_dir);
+      let reflection_hit = raytrace(reflection_ray);
+      reflection += sample_hit(reflection_hit);
+    }
+    let color = mix(reflection / NumReflectionRays, hit_color, 0.95);
+    textureStore(framebuffer, invocation_id.xy, vec4(color, 1));
+  }
+}
+
+fn sample_hit(hit : HitInfo) -> vec3f {
+  let quad = quads[hit.quad];
+  return textureSampleLevel(lightmap, smpl, hit.uv, hit.quad, 0).rgb +
+         quad.emissive * quad.color;
+}
+""")
+
+(shader-module :name tonemapCode :code """
+@group(0) @binding(0) var input : texture_2d<f32>;
+@group(0) @binding(1) var output : texture_storage_2d<rgba8unorm, write>;
+
+const TonemapExposure = 0.5;
+const Gamma = 2.2;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) invocation_id : vec3u) {
+  if (all(invocation_id.xy < textureDimensions(output))) {
+    let color = textureLoad(input, invocation_id.xy, 0).rgb;
+    let tonemapped = reinhard_tonemap(color);
+    textureStore(output, invocation_id.xy, vec4f(tonemapped, 1));
+  }
+}
+
+fn reinhard_tonemap(linearColor: vec3f) -> vec3f {
+  let color = linearColor * TonemapExposure;
+  let mapped = color / (1 + color);
+  return pow(mapped, vec3f(1 / Gamma));
+}
+""")
+
+(shader-module :name blitCode :code """
+@group(0) @binding(0) var smpl : sampler;
+@group(0) @binding(1) var tex : texture_2d<f32>;
+
+struct VSOut {
+  @builtin(position) pos : vec4f,
+  @location(0) uv : vec2f,
+}
+
+@vertex
+fn vs(@builtin(vertex_index) vi : u32) -> VSOut {
+  var p = array<vec2f, 3>(
+    vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  var out : VSOut;
+  out.pos = vec4f(p[vi], 0.0, 1.0);
+  out.uv = vec2f(p[vi].x * 0.5 + 0.5, 1.0 - (p[vi].y * 0.5 + 0.5));
+  return out;
+}
+
+@fragment
+fn fs(@location(0) uv : vec2f) -> @location(0) vec4f {
+  return textureSample(tex, smpl, uv);
+}
+""")
+
+(compute-pipeline :name statePipe :module stateCode :entry main)
+(compute-pipeline :name cameraPipe :module cameraCode :entry main)
+(compute-pipeline :name radiosityPipe :module radiosityCode :entry radiosity)
+(compute-pipeline :name accumPipe :module radiosityCode :entry accumulation_to_lightmap)
+(compute-pipeline :name raytracePipe :module raytraceCode :entry main)
+(compute-pipeline :name tonemapPipe :module tonemapCode :entry main)
+
+(render-pipeline :name blitPipe
+  (layout auto)
+  (vertex (module blitCode) (entry vs))
+  (fragment (module blitCode) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(bind-group :name stateGroup :layout-pipeline statePipe :layout-index 0
+  (entry :binding 0 :buffer frameState))
+
+(bind-group :name cameraGroup :layout-pipeline cameraPipe :layout-index 0
+  (entry :binding 0 :buffer inputs)
+  (entry :binding 1 :buffer common))
+
+(bind-group :name radiosityGroup :layout-pipeline radiosityPipe :layout-index 0
+  (entry :binding 0 :buffer common)
+  (entry :binding 1 :buffer quads)
+  (entry :binding 2 :buffer accumulation)
+  (entry :binding 3 :texture-view lightmapStore))
+
+(bind-group :name accumGroup :layout-pipeline accumPipe :layout-index 0
+  (entry :binding 2 :buffer accumulation)
+  (entry :binding 3 :texture-view lightmapStore)
+  (entry :binding 4 :buffer frameState))
+
+(bind-group :name raytraceGroup :layout-pipeline raytracePipe :layout-index 0
+  (entry :binding 0 :buffer common)
+  (entry :binding 1 :buffer quads)
+  (entry :binding 2 :texture-view lightmapSample)
+  (entry :binding 3 :sampler lmSampler)
+  (entry :binding 4 :texture framebuffer))
+
+(bind-group :name tonemapGroup :layout-pipeline tonemapPipe :layout-index 0
+  (entry :binding 0 :texture framebuffer)
+  (entry :binding 1 :texture screenTex))
+
+(bind-group :name blitGroup :layout-pipeline blitPipe :layout-index 0
+  (entry :binding 0 :sampler lmSampler)
+  (entry :binding 1 :texture screenTex))
+
+(compute-pass :name updateState :pipeline statePipe :bind-groups [stateGroup]
+  :dispatch [1 1 1])
+(compute-pass :name updateCamera :pipeline cameraPipe :bind-groups [cameraGroup]
+  :dispatch [1 1 1])
+(compute-pass :name radiosity :pipeline radiosityPipe :bind-groups [radiosityGroup]
+  :dispatch-workgroups 1024)
+(compute-pass :name accumToLightmap :pipeline accumPipe :bind-groups [accumGroup]
+  :dispatch [16 16 19])
+; 64x64 workgroups of 16x16 cover up to a 1024^2 canvas (the browser canvas is
+; devicePixelRatio-scaled); the in-shader bounds checks discard the excess at
+; smaller sizes.
+(compute-pass :name raytrace :pipeline raytracePipe :bind-groups [raytraceGroup]
+  :dispatch [64 64 1])
+(compute-pass :name tonemap :pipeline tonemapPipe :bind-groups [tonemapGroup]
+  :dispatch [64 64 1])
+
+(render-pass :name blit
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline blitPipe :bind-groups [blitGroup]
+  (draw :vertex-count 3))
+
+(frame :name main :before [writeInputs]
+  :perform [updateState updateCamera radiosity accumToLightmap raytrace tonemap blit])

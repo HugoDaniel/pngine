@@ -1,0 +1,206 @@
+; pngine_logo — the PNGine "P" logo: a 13×15 grid of pulsing colour boxes with
+; the letter cut out as a mask, drawn by a single fullscreen-triangle fragment
+; shader. No compute, no storage, no vertex buffer.
+;
+; The 48-byte uniform buffer holds `pngine-inputs` (16 B, written each frame
+; by the queue step) followed by members the host sets by name through the JS
+; runtime's `setUniform`: C and colorShift (pointer-driven wave-phase and
+; palette offsets), dark (the page's dark-mode flag, 0/1, which flips the
+; background palette) and clickX/clickY/clickTime (a ripple centred on the
+; last pointerdown). The bytecode itself writes only the first 16 bytes; the
+; clear colour matches the light background.
+
+(shader-module :name shader :code """
+// ============================================================================
+// Uniforms: pngineInputs (16 bytes) + custom C (16 bytes with padding)
+// ============================================================================
+struct Uniforms {
+    time: f32,
+    width: f32,
+    height: f32,
+    aspect: f32,
+    C: f32,           // Mouse X - additional wave phase offset
+    colorShift: f32,  // Mouse Y - color palette shift
+    dark: f32,        // Dark-mode flag (0 light, 1 dark) — written by name:
+                      // setUniform in the JS runtime, the `dark` member
+                      // convention in --html output
+    _pad3: f32,
+    clickX: f32,      // Last pointerdown X (normalized 0..1)
+    clickY: f32,      // Last pointerdown Y (normalized 0..1)
+    clickTime: f32,   // u.time at the moment of pointerdown; 0 = no click yet
+    _pad4: f32,
+}
+
+@group(0) @binding(0) var<uniform> u: Uniforms;
+
+// ============================================================================
+// Constants
+// ============================================================================
+const PI: f32 = 3.14159265359;
+const bg_col_light = vec3f(0.9, 0.8, 0.7);
+// Linear-space value: the gamma correction at the end lifts it to a warm
+// near-black of ~vec3f(0.07, 0.06, 0.055) on screen.
+const bg_col_dark = vec3f(0.003, 0.002, 0.0017);
+
+const grid_w = 13.0;
+const grid_h = 15.0;
+const grid_x = (grid_w - 1.0) / 2.0;
+const grid_y = (grid_h - 1.0) / 2.0;
+const min_grid = vec2f(-grid_x, -grid_y);
+const max_grid = vec2f( grid_x,  grid_y);
+
+// ============================================================================
+// Color palette (from compute.toys)
+// ============================================================================
+fn palette(t: f32) -> vec3f {
+    let a = vec3f(0.5, 0.5, 0.5);
+    let b = vec3f(0.5, 0.5, 0.5);
+    let c = vec3f(1.0, 1.0, 1.0);
+    let d = vec3f(0.263, 0.416, 0.557);
+    return a + b * cos(6.28318 * (c * t + d));
+}
+
+fn map_range(v: f32, in_min: f32, in_max: f32, out_min: f32, out_max: f32) -> f32 {
+    return out_min + (v - in_min) * (out_max - out_min) / (in_max - in_min);
+}
+
+// ============================================================================
+// Box SDF
+// ============================================================================
+fn box_sdf(p: vec2f, b: vec2f) -> f32 {
+    let d = abs(p) - b;
+    return length(max(d, vec2f(0.0))) + min(max(d.x, d.y), 0.0);
+}
+
+// ============================================================================
+// P mask - defines the PNGine logo shape (returns true for P cells)
+// ============================================================================
+fn is_cell_masked(pos: vec2f) -> bool {
+    if (pos.y == 3.0 && pos.x >= 3.0 && pos.x <= 8.0) { return true; }
+    if (pos.y == 4.0 && ((pos.x >= 3.0 && pos.x <= 4.0) || (pos.x >= 8.0 && pos.x <= 9.0))) { return true; }
+    if (pos.y == 5.0 && ((pos.x >= 3.0 && pos.x <= 4.0) || (pos.x >= 8.0 && pos.x <= 9.0))) { return true; }
+    if (pos.y == 6.0 && ((pos.x >= 3.0 && pos.x <= 4.0) || (pos.x >= 8.0 && pos.x <= 9.0))) { return true; }
+    if (pos.y == 7.0 && ((pos.x >= 3.0 && pos.x <= 4.0) || pos.x == 8.0)) { return true; }
+    if (pos.y == 8.0 && (pos.x >= 3.0 && pos.x <= 7.0)) { return true; }
+    if (pos.y == 9.0 && (pos.x >= 3.0 && pos.x <= 4.0)) { return true; }
+    if (pos.y == 10.0 && (pos.x >= 3.0 && pos.x <= 4.0)) { return true; }
+    if (pos.y == 11.0 && (pos.x >= 3.0 && pos.x <= 4.0)) { return true; }
+    return false;
+}
+
+// ============================================================================
+// Vertex shader - fullscreen triangle
+// ============================================================================
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+    // Oversized triangle that covers the screen with 3 vertices
+    let x = f32(i & 1u) * 4.0 - 1.0;
+    let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+    return vec4f(x, y, 0.0, 1.0);
+}
+
+// ============================================================================
+// Fragment shader
+// ============================================================================
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    // Theme flip. select() rather than mix() so dark == 0 reproduces the light
+    // path bit-for-bit (render snapshots must not move).
+    let bg_col = select(bg_col_light, bg_col_dark, u.dark > 0.5);
+
+    // Normalized UV (0 to 1)
+    let uv01 = vec2f(pos.x / u.width, pos.y / u.height);
+
+    // Center at origin, y-up, normalized by height (like compute.toys)
+    // flip y: (1 - uv01.y) makes y=0 at bottom
+    let uv = vec2f(
+        (uv01.x - 0.5) * u.aspect * 2.0,
+        (1.0 - uv01.y - 0.5) * 2.0
+    );
+
+    // Scale to grid space (0.1 = see ~10 units of grid)
+    let scale = 0.1;
+    var grid_pos = uv / scale;
+
+    // Click ripple: an outward wave centered on the last click point that
+    // decays over ~0.6 s. Warps grid_pos before the cell lookup so the
+    // tangram cells visibly distort near the click.
+    let click_age = u.time - u.clickTime;
+    if (u.clickTime > 0.0 && click_age >= 0.0 && click_age < 0.6) {
+        let cx = (u.clickX - 0.5) * u.aspect * 2.0 / scale;
+        let cy = (1.0 - u.clickY - 0.5) * 2.0 / scale;
+        let to_click = grid_pos - vec2f(cx, cy);
+        let r = length(to_click);
+        let wave_front = click_age * 18.0;
+        let envelope = (1.0 - click_age / 0.6) * exp(-pow(r - wave_front, 2.0) * 0.05);
+        grid_pos = grid_pos + normalize(to_click + vec2f(1e-5)) * envelope * 0.6;
+    }
+
+    let cell_id = floor(grid_pos);
+    let cell_uv = fract(grid_pos) - 0.5;  // -0.5 to 0.5 within cell
+
+    let inside_x = cell_id.x >= min_grid.x && cell_id.x <= max_grid.x;
+    let inside_y = cell_id.y >= min_grid.y && cell_id.y <= max_grid.y;
+
+    // Default: background
+    var color = bg_col;
+
+    if (inside_x && inside_y) {
+        // Convert to 0-indexed grid coordinates (0,0 at top-left of P)
+        let local_grid_pos = vec2f(
+            cell_id.x - min_grid.x,
+            max_grid.y - cell_id.y
+        );
+
+        // Only draw boxes in non-masked cells
+        if (!is_cell_masked(local_grid_pos)) {
+            // Wave phase: time always advances; mouse X adds an offset.
+            let phase = u.time * 0.6 + u.C * 0.5;
+
+            // Wave animation for box size
+            let wave = sin(local_grid_pos.x * 0.5 + local_grid_pos.y * 0.3 + phase);
+            let size_anim = map_range(wave, -1.0, 1.0, 0.1, 0.5);
+            let half_size = size_anim * 0.5;
+
+            // Box SDF
+            let d = box_sdf(cell_uv, vec2f(half_size));
+
+            // Color: position-based + mouse Y shift + time animation
+            let color_t = length(local_grid_pos) * 0.08 + u.colorShift - u.time * 0.1;
+            let box_color = palette(color_t);
+
+            // Anti-aliased edge (smooth transition)
+            let aa = 0.02;
+            let blend = smoothstep(aa, -aa, d);
+            color = mix(bg_col, box_color, blend);
+        }
+    }
+
+    // Gamma correction
+    color = pow(color, vec3f(1.0/2.2));
+
+    return vec4f(color, 1.0);
+}
+""")
+
+(buffer :name uniforms :size 48 :usage [uniform copy-dst])
+
+(queue :name writeInputs
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+(render-pipeline :name pipeline
+  (layout auto)
+  (vertex (module shader) (entry vs))
+  (fragment (module shader) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(bind-group :name mainBindGroup :layout-pipeline pipeline :layout-index 0
+  (entry :binding 0 :buffer uniforms))
+
+(render-pass :name render
+  (color-attachment :view context-current-texture :clear-value [0.9 0.8 0.7 1.0] :load-op clear :store-op store)
+  :pipeline pipeline
+  :bind-groups [mainBindGroup]
+  (draw :vertex-count 3))
+
+(frame :name pngineLogo :perform [writeInputs render])

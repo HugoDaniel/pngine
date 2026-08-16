@@ -1,0 +1,74 @@
+; Two explicit bind-group layouts, where the bind group targets the second one
+; declared (`shade`) by name through :bind-group-layout, and the document's
+; only pipeline is built from a (pipeline-layout …) wrapping that same layout.
+; The first layout (`unusedFirst`) is a decoy of a different shape (one uniform
+; entry vs uniform + sampler + texture), composed into its own pipeline-layout
+; so it stays live — resolving the bind group against the wrong layout is then
+; a validation error, not a coincidence that happens to work.
+;
+; Renders a solid teal: `tint` (0.1, 0.7, 0.6, 1) written from the payload,
+; multiplied by a zero-initialized texture's inverse alpha. Black means the
+; bind group never made it.
+
+(shader-module :name code :code """
+@group(0) @binding(0) var<uniform> tint : vec4f;
+@group(0) @binding(1) var samp : sampler;
+@group(0) @binding(2) var tex : texture_2d<f32>;
+
+@vertex
+fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
+  return vec4f(p[i], 0, 1);
+}
+
+@fragment
+fn fs(@builtin(position) c : vec4f) -> @location(0) vec4f {
+  let s = textureSample(tex, samp, c.xy / vec2f(256.0));
+  // Zero texture → s.a = 0 → the tint survives; referencing s keeps both the
+  // sampler and the texture binding live so the BGL entry types must match.
+  return tint * (1.0 - s.a) + vec4f(s.rgb, 0.0);
+}
+""")
+
+(buffer :name tintBuf :size 16 :usage [uniform copy-dst])
+(texture :name tex :size canvas :format rgba8unorm :usage [texture-binding])
+(sampler :name samp :mag-filter linear :min-filter linear)
+
+; Decoy: declared first, with a different shape from `shade`, and wrapped in
+; its own (pipeline-layout …) so it stays referenced.
+(bind-group-layout :name unusedFirst
+  (entry :binding 0 :visibility [fragment] (buffer :type uniform)))
+
+(pipeline-layout :name unusedPl :bind-group-layouts [unusedFirst])
+
+; The layout the bind group actually uses.
+(bind-group-layout :name shade
+  (entry :binding 0 :visibility [fragment] (buffer :type uniform))
+  (entry :binding 1 :visibility [fragment] (sampler :type filtering))
+  (entry :binding 2 :visibility [fragment]
+    (texture :sample-type float :view-dimension 1 :multisampled false)))
+
+(pipeline-layout :name shadePl :bind-group-layouts [shade])
+
+(render-pipeline :name pipe :pipeline-layout shadePl
+  (vertex (module code) (entry vs))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(bind-group :name g :bind-group-layout shade
+  (entry :binding 0 :buffer tintBuf)
+  (entry :binding 1 :sampler samp)
+  (entry :binding 2 :texture tex))
+
+(data :name tintData :float32 [0.1 0.7 0.6 1.0])
+
+(queue :name writeTint
+  (write-buffer :buffer tintBuf :offset 0 :data tintData))
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipe :bind-groups [g]
+  (draw :vertex-count 3))
+
+(frame :name main :before [writeTint] :perform [draw])

@@ -1,0 +1,29 @@
+; Invalid: (entry …) :offset/:size describe a buffer slice; writing them on a
+; sampler entry is rejected rather than silently dropped.
+
+(sampler :name samp :mag-filter linear)
+
+(shader-module :name code :code """
+    @group(0) @binding(0) var samp: sampler;
+    @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+      return vec4f(p[i], 0.0, 1.0);
+    }
+    @fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+  """)
+
+(render-pipeline :name pipe
+  (layout auto)
+  (vertex (module code) (entry vs))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(bind-group :name g :layout-pipeline pipe :layout-index 0
+  (entry :binding 0 :sampler samp :offset 256))
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipe :bind-groups [g]
+  (draw :vertex-count 3))
+
+(frame :name main :perform [draw])

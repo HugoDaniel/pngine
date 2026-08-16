@@ -1,0 +1,82 @@
+; Vertex colors — one triangle rotating about the origin, each vertex carrying
+; its own colour, interpolated across the face. Exercises a mapped-at-creation
+; vertex buffer with an interleaved pos2+color3 layout (array-stride 20) next
+; to a pngine-inputs uniform. No `(primitive …)` form: the defaults
+; (triangle-list, ccw, no culling) are what it needs.
+
+(data :name vertexData :float32 [
+  0.0 0.5 1.0 0.0 0.0
+  -0.5 -0.5 0.0 1.0 0.0
+  0.5 -0.5 0.0 0.0 1.0
+])
+
+(buffer :name vertexBuffer :size vertexData :usage [vertex] :mapped-at-creation vertexData)
+
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+
+(queue :name writeUniforms
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+(shader-module :name shader :code """
+    struct Uniforms {
+      time: f32,
+      width: f32,
+      height: f32,
+      aspect: f32,
+    }
+    @group(0) @binding(0) var<uniform> u: Uniforms;
+
+    struct VertexInput {
+      @location(0) pos: vec2f,
+      @location(1) color: vec3f,
+    }
+
+    struct VertexOutput {
+      @builtin(position) pos: vec4f,
+      @location(0) color: vec3f,
+    }
+
+    @vertex
+    fn vs(in: VertexInput) -> VertexOutput {
+      // Rotate based on time
+      let angle = u.time * 0.5;
+      let c = cos(angle);
+      let s = sin(angle);
+      let rotated = vec2f(
+        in.pos.x * c - in.pos.y * s,
+        in.pos.x * s + in.pos.y * c
+      );
+
+      var out: VertexOutput;
+      out.pos = vec4f(rotated, 0.0, 1.0);
+      out.color = in.color;
+      return out;
+    }
+
+    @fragment
+    fn fs(in: VertexOutput) -> @location(0) vec4f {
+      return vec4f(in.color, 1.0);
+    }
+  """)
+
+(render-pipeline :name pipeline
+  (layout auto)
+  (vertex (module shader) (entry vs)
+    (buffers
+      (vertex-buffer :array-stride 20
+        (attribute :shader-location 0 :offset 0 :format float32x2)
+        (attribute :shader-location 1 :offset 8 :format float32x3))))
+  (fragment (module shader) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(bind-group :name uniformsBindGroup :layout-pipeline pipeline :layout-index 0
+  (entry :binding 0 :buffer uniforms))
+
+(render-pass :name mainPass
+  (color-attachment :view context-current-texture :clear-value [0.1 0.1 0.1 1] :load-op clear :store-op store)
+  :pipeline pipeline
+  :vertex-buffers [vertexBuffer]
+  :bind-groups [uniformsBindGroup]
+  (draw :vertex-count 3))
+
+(frame :name main :perform [writeUniforms mainPass])

@@ -1,0 +1,37 @@
+; webgpu_hello_triangle — the classic WebGPU hello triangle. Three vertex
+; positions live in an `array<vec2f, 3>` inside the vertex shader, indexed by
+; `@builtin(vertex_index)`; there is no vertex buffer, no uniform and no
+; bind-group — one shader, one pipeline, one render pass, `:vertex-count 3`.
+; The `(primitive (topology triangle-list))` form spells out the WebGPU default
+; explicitly.
+
+(shader-module :name code :code """
+    @vertex
+    fn vs(@builtin(vertex_index) VertexIndex : u32) -> @builtin(position) vec4f {
+      var pos = array<vec2f, 3>(
+        vec2(0.0, 0.5),
+        vec2(-0.5, -0.5),
+        vec2(0.5, -0.5)
+      );
+      return vec4f(pos[VertexIndex], 0.0, 1.0);
+    }
+
+    @fragment
+    fn fs() -> @location(0) vec4f {
+      return vec4(1.0, 0.0, 0.0, 1.0);
+    }
+  """)
+
+(render-pipeline :name pipeline
+  (layout auto)
+  (vertex (module code) (entry vs))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list)))
+
+(render-pass :name pass
+  (color-attachment :view context-current-texture :clear-value [0 0 0 0] :load-op clear :store-op store)
+  :pipeline pipeline
+  (draw :vertex-count 3))
+
+(frame :name main :perform [pass])

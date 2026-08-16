@@ -1,0 +1,24 @@
+; Invalid: a render-bundle may not reference a resource that `(pass …)` or
+; `(init …)` lowering synthesizes; `main__pipe` is the pipeline the pass lowers
+; to, so the bundle reference is rejected.
+
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  return vec4f(0.0, 0.0, 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.0, 0.0, 1.0); }
+""")
+
+(render-pipeline :name decoy (layout auto)
+  (vertex (module code) (entry vs))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(pass-graph
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      return vec4f(0.0, 1.0, 0.0, 1.0);
+    }
+  """))
+
+(render-bundle :name b0 :pipeline main__pipe :draw 3)

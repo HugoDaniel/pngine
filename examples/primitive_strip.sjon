@@ -1,0 +1,40 @@
+; Primitive strip — a quad drawn as one triangle strip of four vertices.
+; Exercises the (primitive …) fields :strip-index-format (the index byte-width
+; WebGPU requires for indexed strip draws) and :unclipped-depth (depth
+; clamping, gated on the depth-clip-control device feature, which both the
+; browser and native backends enable when the adapter has it). Both are
+; validated at pipeline-creation time, so a plain non-indexed strip draw
+; exercises them.
+
+(shader-module :name code :code """
+@vertex
+fn vertexMain(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  // Triangle-strip quad: (-0.5,-0.5) (0.5,-0.5) (-0.5,0.5) (0.5,0.5)
+  var pos = array<vec2f, 4>(
+    vec2(-0.5, -0.5),
+    vec2( 0.5, -0.5),
+    vec2(-0.5,  0.5),
+    vec2( 0.5,  0.5)
+  );
+  return vec4f(pos[i], 0.0, 1.0);
+}
+
+@fragment
+fn fragMain() -> @location(0) vec4f {
+  return vec4(0.2, 0.8, 0.4, 1.0);
+}
+""")
+
+(render-pipeline :name pipeline
+  (layout auto)
+  (vertex (module code) (entry vertexMain))
+  (fragment (module code) (entry fragMain)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-strip) :strip-index-format uint32 :unclipped-depth true))
+
+(render-pass :name drawStrip
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipeline
+  (draw :vertex-count 4))
+
+(frame :name primitiveStrip :perform [drawStrip])

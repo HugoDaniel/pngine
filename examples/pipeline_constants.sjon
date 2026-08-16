@@ -1,0 +1,66 @@
+; Pipeline constants — concentric rings drawn by a fullscreen triangle, with
+; WGSL `override` declarations specialised at compile time via `(constant …)`.
+;
+; An `override` is normally supplied at pipeline creation through
+; GPUProgrammableStage.constants. pngine is an ahead-of-time compiler whose
+; payload cannot recompile, so it resolves the value at build time instead:
+; each `(constant …)` rewrites its `override` into a `const` before the module
+; is validated, minified and shipped. Nothing about constants reaches the
+; wire — `pngine inspect --extract-wgsl` shows `const RINGS: u32 = 5u;` where
+; the source says `override RINGS: u32;`.
+;
+; Covered here: a constant on the vertex stage and on the fragment stage; an
+; `@id(7)` override, named by its identifier rather than its number (the id
+; is a runtime key and no value reaches a runtime); an override with no
+; default, a compile error on its own that the constant makes valid — delete
+; RINGS's `(constant …)` and the document stops compiling; and a value that
+; is a bounded expression over a `(define …)`.
+(define :name BASE_RINGS :value 5)
+
+(shader-module :name code :code """
+override RINGS: u32;
+override SCALE: f32 = 1.0;
+@id(7) override TINT: f32 = 1.0;
+
+struct VSOut {
+  @builtin(position) pos: vec4f,
+  @location(0) uv: vec2f,
+}
+
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  var out: VSOut;
+  out.pos = vec4f(p[i] * SCALE, 0.0, 1.0);
+  out.uv = p[i];
+  return out;
+}
+
+@fragment fn fs(in: VSOut) -> @location(0) vec4f {
+  let d = length(in.uv);
+  var acc = 0.0;
+  for (var r = 0u; r < RINGS; r = r + 1u) {
+    let radius = 0.14 + f32(r) * 0.15;
+    acc = acc + smoothstep(0.035, 0.0, abs(d - radius));
+  }
+  acc = clamp(acc, 0.0, 1.0);
+  return vec4f(acc * TINT, acc * 0.35, 1.0 - acc * 0.8, 1.0);
+}
+""")
+
+(render-pipeline :name pipe (layout auto)
+  (vertex (module code) (entry vs)
+    (constant :name SCALE :value 0.9))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format))
+    ; A bare `(define …)` name resolves only in count slots, so the expression
+    ; wrapper is required here — `:value BASE_RINGS` would not validate.
+    (constant :name RINGS :value (* BASE_RINGS 1))
+    (constant :name TINT :value 0.85)))
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0.02 0.02 0.06 1] :load-op clear :store-op store)
+  :pipeline pipe
+  (draw :vertex-count 3))
+
+(frame :name main :perform [draw])

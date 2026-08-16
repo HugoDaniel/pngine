@@ -1,0 +1,206 @@
+; Image blur — port of the webgpu-samples `imageBlur` sample. A separable box
+; blur as compute: the shader loads a 128-texel tile into workgroup-shared
+; memory (32 threads, a 4x4 block each), barriers, then averages filterDim
+; neighbours; a flip uniform transposes load/store so the same shader runs
+; horizontal then vertical. Upstream swaps bind groups between dispatches in
+; one compute pass; here each (compute-pass …) is one dispatch, so two
+; iterations unroll to four passes ping-ponging blur0/blur1 (src→0, 0→1,
+; 1→0, 0→1); the final blit shows blur1.
+;
+; Params/Flip fields are f32 with in-shader casts because (data …) literals
+; are float32-only. paramsData [16 113] is [FILTER_SIZE+1, 128-FILTER_SIZE]
+; for FILTER_SIZE=15 — a data list takes no expressions, so keep the two in
+; step by hand. Upstream's GUI filterSize/iterations are compile-time here.
+;
+; Image upload is a browser feature; the native `--frame` renderer stubs it,
+; so the source stays empty and the blit shows black there. The compute chain
+; itself (storage textures, workgroup memory) runs everywhere.
+
+(define :name FILTER_SIZE :value 15)
+(define :name IMG :value 512)
+
+(data :name diImage :blob "assets/Di-3d.png" :mime "image/png")
+(image-bitmap :name srcBitmap :image diImage)
+
+(texture :name srcTex :size-from srcBitmap :format rgba8unorm
+  :usage [texture-binding copy-dst render-attachment])
+(texture :name blur0 :width 512 :height 512 :format rgba8unorm
+  :usage [copy-dst storage-binding texture-binding])
+(texture :name blur1 :width 512 :height 512 :format rgba8unorm
+  :usage [copy-dst storage-binding texture-binding])
+
+(sampler :name samp :mag-filter linear :min-filter linear)
+
+; Padded to WebGPU's 16-byte uniform floor.
+(data :name paramsData :float32 [16 113 0 0])
+(buffer :name params :size 16 :usage [uniform] :mapped-at-creation paramsData)
+(data :name flip0Data :float32 [0 0 0 0])
+(data :name flip1Data :float32 [1 0 0 0])
+(buffer :name flip0 :size 16 :usage [uniform] :mapped-at-creation flip0Data)
+(buffer :name flip1 :size 16 :usage [uniform] :mapped-at-creation flip1Data)
+
+(shader-module :name blurCode :code """
+struct Params {
+  filterDim : f32,
+  blockDim : f32,
+}
+
+@group(0) @binding(0) var samp : sampler;
+@group(0) @binding(1) var<uniform> params : Params;
+@group(1) @binding(1) var inputTex : texture_2d<f32>;
+@group(1) @binding(2) var outputTex : texture_storage_2d<rgba8unorm, write>;
+
+struct Flip {
+  value : f32,
+}
+@group(1) @binding(3) var<uniform> flip : Flip;
+
+// 32 threads load 128 texels into 4 rows of shared memory (4x4 block per
+// thread), then average filterDim neighbors. Only the center
+// 128-(filterSize-1) block is valid, hence blockDim-strided dispatch.
+var<workgroup> tile : array<array<vec3f, 128>, 4>;
+
+@compute @workgroup_size(32, 1, 1)
+fn main(
+  @builtin(workgroup_id) WorkGroupID : vec3u,
+  @builtin(local_invocation_id) LocalInvocationID : vec3u
+) {
+  let filterDim = i32(params.filterDim);
+  let blockDim = u32(params.blockDim);
+  let filterOffset = (filterDim - 1) / 2;
+  let dims = vec2i(textureDimensions(inputTex, 0));
+  let baseIndex = vec2i(WorkGroupID.xy * vec2(blockDim, 4u) +
+                            LocalInvocationID.xy * vec2(4u, 1u))
+                  - vec2(filterOffset, 0);
+
+  for (var r = 0; r < 4; r++) {
+    for (var c = 0; c < 4; c++) {
+      var loadIndex = baseIndex + vec2(c, r);
+      if (flip.value != 0.0) {
+        loadIndex = loadIndex.yx;
+      }
+
+      tile[r][4 * LocalInvocationID.x + u32(c)] = textureSampleLevel(
+        inputTex,
+        samp,
+        (vec2f(loadIndex) + vec2f(0.5, 0.5)) / vec2f(dims),
+        0.0
+      ).rgb;
+    }
+  }
+
+  workgroupBarrier();
+
+  for (var r = 0; r < 4; r++) {
+    for (var c = 0; c < 4; c++) {
+      var writeIndex = baseIndex + vec2(c, r);
+      if (flip.value != 0.0) {
+        writeIndex = writeIndex.yx;
+      }
+
+      let center = i32(4 * LocalInvocationID.x) + c;
+      if (center >= filterOffset &&
+          center < 128 - filterOffset &&
+          all(writeIndex < dims)) {
+        var acc = vec3(0.0, 0.0, 0.0);
+        for (var f = 0; f < filterDim; f++) {
+          var i = center + f - filterOffset;
+          acc = acc + (1.0 / f32(filterDim)) * tile[r][i];
+        }
+        textureStore(outputTex, writeIndex, vec4(acc, 1.0));
+      }
+    }
+  }
+}
+""")
+
+(shader-module :name blitCode :code """
+@group(0) @binding(0) var mySampler : sampler;
+@group(0) @binding(1) var myTexture : texture_2d<f32>;
+
+struct VertexOutput {
+  @builtin(position) Position : vec4f,
+  @location(0) fragUV : vec2f,
+}
+
+@vertex
+fn vsMain(@builtin(vertex_index) VertexIndex : u32) -> VertexOutput {
+  var pos = array<vec2f, 6>(
+    vec2( 1.0,  1.0),
+    vec2( 1.0, -1.0),
+    vec2(-1.0, -1.0),
+    vec2( 1.0,  1.0),
+    vec2(-1.0, -1.0),
+    vec2(-1.0,  1.0),
+  );
+
+  var uv = array<vec2f, 6>(
+    vec2(1.0, 0.0),
+    vec2(1.0, 1.0),
+    vec2(0.0, 1.0),
+    vec2(1.0, 0.0),
+    vec2(0.0, 1.0),
+    vec2(0.0, 0.0),
+  );
+
+  var output : VertexOutput;
+  output.Position = vec4(pos[VertexIndex], 0.0, 1.0);
+  output.fragUV = uv[VertexIndex];
+  return output;
+}
+
+@fragment
+fn fsMain(@location(0) fragUV : vec2f) -> @location(0) vec4f {
+  return textureSample(myTexture, mySampler, fragUV);
+}
+""")
+
+(compute-pipeline :name blurPipe :module blurCode :entry main)
+
+(render-pipeline :name blitPipe
+  (layout auto)
+  (vertex (module blitCode) (entry vsMain))
+  (fragment (module blitCode) (entry fsMain)
+    (targets (target :format preferred-canvas-format))))
+
+(bind-group :name constants :layout-pipeline blurPipe :layout-index 0
+  (entry :binding 0 :sampler samp)
+  (entry :binding 1 :buffer params))
+(bind-group :name cbg0 :layout-pipeline blurPipe :layout-index 1
+  (entry :binding 1 :texture srcTex)
+  (entry :binding 2 :texture blur0)
+  (entry :binding 3 :buffer flip0))
+(bind-group :name cbg1 :layout-pipeline blurPipe :layout-index 1
+  (entry :binding 1 :texture blur0)
+  (entry :binding 2 :texture blur1)
+  (entry :binding 3 :buffer flip1))
+(bind-group :name cbg2 :layout-pipeline blurPipe :layout-index 1
+  (entry :binding 1 :texture blur1)
+  (entry :binding 2 :texture blur0)
+  (entry :binding 3 :buffer flip0))
+(bind-group :name showResult :layout-pipeline blitPipe :layout-index 0
+  (entry :binding 0 :sampler samp)
+  (entry :binding 1 :texture blur1))
+
+(queue :name upload
+  (copy-external-image-to-texture :source srcBitmap :texture srcTex))
+
+; Dispatch [ceil(512/113)=5, ceil(512/4)=128, 1] — expression elements keep it
+; tied to FILTER_SIZE. The image is square, so the flipped passes' dispatch is
+; numerically identical.
+(compute-pass :name blurA :pipeline blurPipe :bind-groups [constants cbg0]
+  :dispatch [(ceil (/ IMG (- 128 FILTER_SIZE))) (ceil (/ IMG 4)) 1])
+(compute-pass :name blurB :pipeline blurPipe :bind-groups [constants cbg1]
+  :dispatch [(ceil (/ IMG (- 128 FILTER_SIZE))) (ceil (/ IMG 4)) 1])
+(compute-pass :name blurC :pipeline blurPipe :bind-groups [constants cbg2]
+  :dispatch [(ceil (/ IMG (- 128 FILTER_SIZE))) (ceil (/ IMG 4)) 1])
+(compute-pass :name blurD :pipeline blurPipe :bind-groups [constants cbg1]
+  :dispatch [(ceil (/ IMG (- 128 FILTER_SIZE))) (ceil (/ IMG 4)) 1])
+
+(render-pass :name show
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline blitPipe :bind-groups [showResult]
+  (draw :vertex-count 6))
+
+(frame :name main :perform [upload blurA blurB blurC blurD show])

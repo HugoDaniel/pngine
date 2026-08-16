@@ -1,0 +1,205 @@
+; Textured rotating cube — a rotating cube whose faces sample a PNG image. The
+; image is read from disk at compile time (`(data … :blob …)`), embedded in
+; the payload, decoded into an (image-bitmap …), and uploaded into a texture
+; via a (copy-external-image-to-texture …) queue action; the texture is sized
+; from the bitmap (`:size-from`). The image (examples/assets/Di-3d.png) is the
+; only asset. Image upload is a browser feature; the native `--frame` renderer
+; stubs it, so the cube samples an empty texture there.
+;
+; The field of view is spelled in the WGSL as `(2 * PI) / 5`, not as a
+; `(define …)`: a define feeds numeric slots and never rewrites shader text.
+; PI works as a symbol because the compiler substitutes the math constants
+; PI/TAU/E into WGSL; user-defined names get no such treatment.
+
+(shader-module :name code :code """
+struct PngineInputs {
+  time: f32,
+  canvasW: f32,
+  canvasH: f32,
+  aspect: f32,
+};
+@group(0) @binding(0) var<uniform> inputs : PngineInputs;
+
+struct VertexOutput {
+  @builtin(position) Position : vec4f,
+  @location(0) fragUV : vec2f,
+  @location(1) fragPosition: vec4f,
+}
+
+fn perspective(fieldOfViewY: f32, aspect: f32, zNear: f32, zFar: f32) -> mat4x4<f32> {
+    let f: f32 = tan(0.5 * 3.141592653589793 - 0.5 * fieldOfViewY);
+
+    var A: f32;
+    var B: f32;
+    let rangeInv: f32 = 1.0 / (zNear - zFar);
+    A = zFar * rangeInv;
+    B = zFar * zNear * rangeInv;
+
+    return mat4x4<f32>(
+        vec4<f32>(f / aspect, 0.0,   0.0, 0.0),
+        vec4<f32>(0.0,        f,     0.0, 0.0),
+        vec4<f32>(0.0,        0.0,   A,  -1.0),
+        vec4<f32>(0.0,        0.0,   B,  0.0)
+    );
+}
+
+fn getTransformationMatrix(now: f32, projectionMatrix: mat4x4<f32>) -> mat4x4<f32> {
+    var viewMatrix: mat4x4<f32> = mat4x4<f32>(
+        vec4<f32>(1.0, 0.0, 0.0, 0.0),
+        vec4<f32>(0.0, 1.0, 0.0, 0.0),
+        vec4<f32>(0.0, 0.0, 1.0, 0.0),
+        vec4<f32>(0.0, 0.0, 0.0, 1.0)
+    );
+
+    let translation: mat4x4<f32> = mat4x4<f32>(
+        vec4<f32>(1.0, 0.0, 0.0, 0.0),
+        vec4<f32>(0.0, 1.0, 0.0, 0.0),
+        vec4<f32>(0.0, 0.0, 1.0, 0.0),
+        vec4<f32>(0.0, 0.0, -4.0, 1.0)
+    );
+    viewMatrix = viewMatrix * translation;
+
+    let angle: f32 = 1.0;
+    let axis: vec3<f32> = vec3<f32>(sin(now), cos(now), 0.0);
+    let c: f32 = cos(angle);
+    let s: f32 = sin(angle);
+    let t: f32 = 1.0 - c;
+    let x: f32 = axis.x;
+    let y: f32 = axis.y;
+    let z: f32 = axis.z;
+
+    let rotation: mat4x4<f32> = mat4x4<f32>(
+        vec4<f32>(t * x * x + c,     t * x * y - s * z,   t * x * z + s * y,   0.0),
+        vec4<f32>(t * x * y + s * z,   t * y * y + c,       t * y * z - s * x,   0.0),
+        vec4<f32>(t * x * z - s * y,   t * y * z + s * x,   t * z * z + c,       0.0),
+        vec4<f32>(0.0,               0.0,                 0.0,                 1.0)
+    );
+    viewMatrix = viewMatrix * rotation;
+
+    let modelViewProjectionMatrix: mat4x4<f32> = projectionMatrix * viewMatrix;
+
+    return modelViewProjectionMatrix;
+}
+
+@vertex
+fn vertexMain(
+  @location(0) position : vec4f,
+  @location(1) uv : vec2f
+) -> VertexOutput {
+
+  let projectionMatrix = perspective((2 * PI) / 5, inputs.aspect, 1.0, 100.0);
+  var output : VertexOutput;
+  output.Position = getTransformationMatrix(inputs.time, projectionMatrix) * position;
+  output.fragUV = uv;
+  output.fragPosition = 0.5 * (position + vec4(1.0, 1.0, 1.0, 1.0));
+  return output;
+}
+
+@group(0) @binding(1) var mySampler: sampler;
+@group(0) @binding(2) var myTexture: texture_2d<f32>;
+
+@fragment
+fn fragMain(
+  @location(0) fragUV: vec2f,
+  @location(1) fragPosition: vec4f
+) -> @location(0) vec4f {
+  return textureSample(myTexture, mySampler, fragUV) * fragPosition;
+}
+""")
+
+; float4 position, float4 color, float2 uv — stride 40, 36 verts.
+(data :name cubeVertexArray :float32 [
+  1 -1 1 1   1 0 1 1  0 1
+  -1 -1 1 1  0 0 1 1  1 1
+  -1 -1 -1 1 0 0 0 1  1 0
+  1 -1 -1 1  1 0 0 1  0 0
+  1 -1 1 1   1 0 1 1  0 1
+  -1 -1 -1 1 0 0 0 1  1 0
+
+  1 1 1 1    1 1 1 1  0 1
+  1 -1 1 1   1 0 1 1  1 1
+  1 -1 -1 1  1 0 0 1  1 0
+  1 1 -1 1   1 1 0 1  0 0
+  1 1 1 1    1 1 1 1  0 1
+  1 -1 -1 1  1 0 0 1  1 0
+
+  -1 1 1 1   0 1 1 1  0 1
+  1 1 1 1    1 1 1 1  1 1
+  1 1 -1 1   1 1 0 1  1 0
+  -1 1 -1 1  0 1 0 1  0 0
+  -1 1 1 1   0 1 1 1  0 1
+  1 1 -1 1   1 1 0 1  1 0
+
+  -1 -1 1 1  0 0 1 1  0 1
+  -1 1 1 1   0 1 1 1  1 1
+  -1 1 -1 1  0 1 0 1  1 0
+  -1 -1 -1 1 0 0 0 1  0 0
+  -1 -1 1 1  0 0 1 1  0 1
+  -1 1 -1 1  0 1 0 1  1 0
+
+  1 1 1 1    1 1 1 1  0 1
+  -1 1 1 1   0 1 1 1  1 1
+  -1 -1 1 1  0 0 1 1  1 0
+  -1 -1 1 1  0 0 1 1  1 0
+  1 -1 1 1   1 0 1 1  0 0
+  1 1 1 1    1 1 1 1  0 1
+
+  1 -1 -1 1  1 0 0 1  0 1
+  -1 -1 -1 1 0 0 0 1  1 1
+  -1 1 -1 1  0 1 0 1  1 0
+  1 1 -1 1   1 1 0 1  0 0
+  1 -1 -1 1  1 0 0 1  0 1
+  -1 1 -1 1  0 1 0 1  1 0
+])
+
+; The image blob (read from disk) + its decoded bitmap. The bitmap's size feeds
+; the cube texture below (:size-from), and a queue action uploads it.
+(data :name d3Image :blob "assets/Di-3d.png" :mime "image/png")
+(image-bitmap :name cubeImage :image d3Image)
+
+(buffer :name verticesBuffer :size cubeVertexArray :usage [vertex]
+  :mapped-at-creation cubeVertexArray)
+
+(buffer :name uniformInputsBuffer :size 16 :usage [uniform copy-dst])
+
+(texture :name depthTexture :size canvas :format depth24plus :usage [render-attachment])
+
+(texture :name cubeTexture :size-from cubeImage :format rgba8unorm
+  :usage [texture-binding copy-dst render-attachment])
+
+(sampler :name linearSampler :mag-filter linear :min-filter linear)
+
+(render-pipeline :name renderCube
+  (layout auto)
+  (vertex (module code) (entry vertexMain)
+    (buffers
+      (vertex-buffer :array-stride 40
+        (attribute :shader-location 0 :offset 0 :format float32x4)
+        (attribute :shader-location 1 :offset 32 :format float32x2))))
+  (fragment (module code) (entry fragMain)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list) :cull-mode back)
+  (depth-stencil :depth-write-enabled true :depth-compare less :format depth24plus))
+
+(bind-group :name inputsBinding :layout-pipeline renderCube :layout-index 0
+  (entry :binding 0 :buffer uniformInputsBuffer)
+  (entry :binding 1 :sampler linearSampler)
+  (entry :binding 2 :texture cubeTexture))
+
+(queue :name writeInputUniforms
+  (write-buffer :buffer uniformInputsBuffer :offset 0 :data pngine-inputs))
+
+(queue :name copyTexture
+  (copy-external-image-to-texture :source cubeImage :texture cubeTexture))
+
+(render-pass :name drawCube
+  (color-attachment :view context-current-texture :clear-value [0.5 0.5 0.5 1.0] :load-op clear :store-op store)
+  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  :pipeline renderCube
+  ; bind-groups before vertex-buffers — the emitter honors source order
+  ; (set_bind_group then set_vertex_buffer).
+  :bind-groups [inputsBinding]
+  :vertex-buffers [verticesBuffer]
+  (draw :vertex-count 36))
+
+(frame :name cube :perform [copyTexture writeInputUniforms drawCube])

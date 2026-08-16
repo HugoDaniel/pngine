@@ -1,0 +1,32 @@
+{
+  // Type-checks the JSDoc that src/ already carries. Run by `npm run test:types`
+  // (and by `pretest`, so `npm test` gates on it). Clean as of 2026-07-19.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "checkJs": true,
+    "strict": true,
+
+    // KNOWN GAP, deliberate. In a .js file an unresolved property access is an
+    // "implicit any", so switching this off also switches off TS2339/TS2551 —
+    // the property-typo class. `p.frameCoun` does NOT fail this gate today.
+    // What still works: argument/return mismatches, null-safety, unknown names,
+    // wrong arity, bad object literals — which is what found the #wasmCall
+    // precedent (TS2362 on a precedence bug).
+    //
+    // Cost to turn on, measured 2026-07-19 AFTER the ops bag was typed
+    // (types/gpu-ops.d.ts): 540 errors, down from 678. Of those, 477 are pure
+    // annotation churn (TS7005/7006/7008/7034 — parameters and untyped-init
+    // locals) and 56 are substantive. That second number was 155 before the
+    // bag was typed: naming it cleared 95 property-existence errors on its own,
+    // which is what the Phase 4b plan predicted. What is left is a tractable
+    // burn-down rather than a wall.
+    "noImplicitAny": false,
+
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.js", "types/*.d.ts"]
+}

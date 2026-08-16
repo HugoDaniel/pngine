@@ -1,0 +1,16 @@
+; Invalid: @workgroup_size(512, 1, 1) exceeds WebGPU's default
+; maxComputeWorkgroupSizeX / maxComputeInvocationsPerWorkgroup (256) and no
+; (limits …) form raises them, so the compute pipeline is rejected. The
+; counterpart examples/webgpu_compute_512.sjon adds the limits and compiles.
+(shader-module :name code :code """
+@group(0) @binding(0) var<storage, read_write> data: array<f32>;
+@compute @workgroup_size(512, 1, 1) fn main(@builtin(global_invocation_id) id: vec3u) {
+  data[id.x] = 1.0;
+}
+""")
+(buffer :name buf :size 256 :usage [storage copy-dst])
+(compute-pipeline :name cp :module code :entry main)
+(bind-group :name g0 :layout-pipeline cp :layout-index 0
+  (entry :binding 0 :buffer buf))
+(compute-pass :name step :pipeline cp :bind-groups [g0] :dispatch-workgroups 1)
+(frame :name main :perform [step])

@@ -1,0 +1,15 @@
+; Invalid: the compute shader declares texture_storage_2d<rgba16float, write>
+; but the bound texture is rgba8unorm; a storage texture must match the
+; shader's texel format exactly, so the shader/binding cross-check rejects it.
+(shader-module :name code :code """
+@group(0) @binding(0) var outTex : texture_storage_2d<rgba16float, write>;
+@compute @workgroup_size(8, 8) fn main(@builtin(global_invocation_id) id : vec3u) {
+  textureStore(outTex, vec2i(id.xy), vec4f(1.0));
+}
+""")
+(texture :name img :size canvas :format rgba8unorm :usage [storage-binding])
+(compute-pipeline :name cp :module code :entry main)
+(bind-group :name g :layout-pipeline cp :layout-index 0
+  (entry :binding 0 :texture img))
+(compute-pass :name step :pipeline cp :bind-groups [g] :dispatch-workgroups 8)
+(frame :name main :perform [step])

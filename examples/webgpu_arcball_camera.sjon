@@ -1,0 +1,318 @@
+; Arcball camera — orbit/pan/zoom a cube with the pointer, with all of the
+; camera math in a compute shader. A 1-thread compute pass reads the
+; pngine-inputs and pointer-inputs uniforms, keeps the orthonormal camera frame
+; and orbit state in a persistent 128 B storage buffer (cameraState) and writes
+; the MVP mat4 into a second 64 B storage buffer (mvpBuffer); the render
+; pipeline reads mvpBuffer through a bind group and draws the cube.
+;
+; Controls: left-drag orbits (with inertia), middle-drag or space+left-drag
+; pans, scroll pans, ctrl+scroll (trackpad pinch) zooms.
+;
+; The cube half is the `cube` shape generator (position4+color4+uv2, stride
+; 40, offsets 0/16/32 written as literals because a byte-count slot rejects a
+; bare define name), a depth texture with depth-write/less and cull-mode back.
+
+(define :name CUBE_VERTEX_COUNT :value 36)
+
+(data :name cubeVertexArray (cube :format [position4 color4 uv2]))
+
+(buffer :name verticesBuffer :size cubeVertexArray :usage [vertex]
+  :mapped-at-creation cubeVertexArray)
+(buffer :name timeUniforms :size 16 :usage [uniform copy-dst])
+(buffer :name pointerBuf :size 48 :usage [uniform copy-dst])
+(buffer :name cameraState :size 128 :usage [storage])
+(buffer :name mvpBuffer :size 64 :usage [storage])
+
+(texture :name depthTexture :size canvas :format depth24plus :usage [render-attachment])
+
+(queue :name writeTime (write-buffer :buffer timeUniforms :offset 0 :data pngine-inputs))
+(queue :name writePointer (write-buffer :buffer pointerBuf :offset 0 :data pointer-inputs))
+
+(shader-module :name cameraShader :code """
+struct PngineInputs {
+  time: f32,
+  width: f32,
+  height: f32,
+  aspect: f32,
+}
+
+struct PointerInputs {
+  x: f32,
+  y: f32,
+  clickX: f32,
+  clickY: f32,
+  dx: f32,
+  dy: f32,
+  buttons: f32,
+  pressure: f32,
+  modifiers: f32,
+  scrollX: f32,
+  scrollY: f32,
+  _pad: f32,
+}
+
+// Camera state: 128 bytes
+// [0-3] right (vec4), [4-7] up (vec4), [8-11] back (vec4), [12-15] position (vec4)
+// [16] axis.x, [17] axis.y, [18] axis.z, [19] angularVelocity
+// [20] distance, [21] target.x, [22] target.y, [23] target.z
+// [24] prevTime, [25] initialized, [26-31] padding
+struct CameraState {
+  data: array<f32, 32>,
+}
+
+struct MVP {
+  matrix: mat4x4f,
+}
+
+@group(0) @binding(0) var<uniform> pngine: PngineInputs;
+@group(0) @binding(1) var<uniform> pointer: PointerInputs;
+@group(0) @binding(2) var<storage, read_write> cam: CameraState;
+@group(0) @binding(3) var<storage, read_write> mvp: MVP;
+
+const EPSILON: f32 = 0.0000001;
+const ROTATION_SPEED: f32 = 500.0;
+const ZOOM_SPEED: f32 = 0.1;
+const PAN_SPEED: f32 = 3.0;
+const FRICTION: f32 = 0.999;
+const PI: f32 = 3.14159265;
+
+// Rodrigues' rotation formula: rotate v around axis by angle
+fn rotateVec(v: vec3f, axis: vec3f, angle: f32) -> vec3f {
+  let c = cos(angle);
+  let s = sin(angle);
+  return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
+}
+
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  return mat4x4f(
+    vec4f(f / aspect, 0, 0, 0),
+    vec4f(0, f, 0, 0),
+    vec4f(0, 0, far * nf, -1),
+    vec4f(0, 0, far * near * nf, 0));
+}
+
+// Inverse of orthonormal camera matrix (transpose rotation + negate translation)
+fn inverseCamera(r: vec3f, u: vec3f, b: vec3f, p: vec3f) -> mat4x4f {
+  return mat4x4f(
+    vec4f(r.x, u.x, b.x, 0),
+    vec4f(r.y, u.y, b.y, 0),
+    vec4f(r.z, u.z, b.z, 0),
+    vec4f(-dot(r, p), -dot(u, p), -dot(b, p), 1));
+}
+
+fn getRight() -> vec3f { return vec3f(cam.data[0], cam.data[1], cam.data[2]); }
+fn getUp() -> vec3f { return vec3f(cam.data[4], cam.data[5], cam.data[6]); }
+fn getBack() -> vec3f { return vec3f(cam.data[8], cam.data[9], cam.data[10]); }
+fn getPos() -> vec3f { return vec3f(cam.data[12], cam.data[13], cam.data[14]); }
+fn getAxis() -> vec3f { return vec3f(cam.data[16], cam.data[17], cam.data[18]); }
+fn getTgt() -> vec3f { return vec3f(cam.data[21], cam.data[22], cam.data[23]); }
+
+fn setRight(v: vec3f) { cam.data[0] = v.x; cam.data[1] = v.y; cam.data[2] = v.z; cam.data[3] = 0; }
+fn setUp(v: vec3f) { cam.data[4] = v.x; cam.data[5] = v.y; cam.data[6] = v.z; cam.data[7] = 0; }
+fn setBack(v: vec3f) { cam.data[8] = v.x; cam.data[9] = v.y; cam.data[10] = v.z; cam.data[11] = 0; }
+fn setPos(v: vec3f) { cam.data[12] = v.x; cam.data[13] = v.y; cam.data[14] = v.z; cam.data[15] = 1; }
+fn setAxis(v: vec3f) { cam.data[16] = v.x; cam.data[17] = v.y; cam.data[18] = v.z; }
+fn setTgt(v: vec3f) { cam.data[21] = v.x; cam.data[22] = v.y; cam.data[23] = v.z; }
+
+@compute @workgroup_size(1)
+fn updateCamera() {
+  // ── Initialize on first frame ──
+  if (cam.data[25] < 0.5) {
+    let initPos = vec3f(3.0, 2.0, 5.0);
+    let dist = length(initPos);
+    let back = normalize(initPos);
+    let worldUp = vec3f(0, 1, 0);
+    let right = normalize(cross(worldUp, back));
+    let up = normalize(cross(back, right));
+
+    setRight(right);
+    setUp(up);
+    setBack(back);
+    setPos(initPos);
+    setAxis(vec3f(0, 1, 0));
+    cam.data[19] = 0.0;  // angularVelocity
+    cam.data[20] = dist;  // distance
+    setTgt(vec3f(0, 0, 0));
+    cam.data[24] = pngine.time;  // prevTime
+    cam.data[25] = 1.0;  // initialized
+
+    // Compute initial MVP
+    let viewMatrix = inverseCamera(right, up, back, initPos);
+    let proj = perspective(2.0 * PI / 5.0, pngine.aspect, 1.0, 100.0);
+    mvp.matrix = proj * viewMatrix;
+    return;
+  }
+
+  // ── Compute deltaTime ──
+  let dt = clamp(pngine.time - cam.data[24], 0.0, 0.1);
+  cam.data[24] = pngine.time;
+
+  var right = getRight();
+  var up = getUp();
+  var back = getBack();
+  var axis = getAxis();
+  var angVel = cam.data[19];
+  var dist = cam.data[20];
+  var tgt = getTgt();
+
+  // ── Decode input state ──
+  let buttonsI = u32(pointer.buttons);
+  let modsI = u32(pointer.modifiers);
+  let leftDown = (buttonsI & 1u) != 0u;
+  let middleDown = (buttonsI & 4u) != 0u;
+  let shiftHeld = (modsI & 1u) != 0u;
+  let spaceHeld = (modsI & 16u) != 0u;
+  let touching = leftDown || middleDown;
+
+  // Determine interaction mode
+  let isPanning = (leftDown && spaceHeld) || middleDown;
+  let isOrbiting = leftDown && !isPanning;
+
+  // ── Pan (drag-based) ──
+  if (isPanning && (abs(pointer.dx) > EPSILON || abs(pointer.dy) > EPSILON)) {
+    let panDelta = right * (-pointer.dx * PAN_SPEED * dist) + up * (pointer.dy * PAN_SPEED * dist);
+    tgt += panDelta;
+  }
+
+  // ── Pan (scroll-based) ──
+  // Without Ctrl: scroll pans (trackpad two-finger, shift+scroll, mouse wheel)
+  // With Ctrl: scroll zooms (trackpad pinch, ctrl+scroll)
+  let ctrlHeld = (modsI & 2u) != 0u;
+  if (!ctrlHeld) {
+    if (abs(pointer.scrollX) > EPSILON) {
+      tgt += right * (pointer.scrollX * 0.02 * dist);
+    }
+    if (abs(pointer.scrollY) > EPSILON) {
+      tgt += up * (-pointer.scrollY * 0.02 * dist);
+    }
+  }
+
+  // ── Orbit (arcball rotation) ──
+  if (isOrbiting) {
+    if (touching) {
+      angVel = 0.0;
+    }
+
+    // Calculate movement vector in camera space
+    let movement = right * pointer.dx + up * (-pointer.dy);
+    // Cross with view direction gives rotation axis
+    let crossP = cross(movement, back);
+    let mag = length(crossP);
+
+    if (mag > EPSILON) {
+      axis = crossP / mag;
+      angVel = mag * ROTATION_SPEED;
+    }
+  } else if (!touching) {
+    // Dampen angular velocity when not touching
+    angVel *= pow(1.0 - FRICTION, dt);
+  }
+
+  // Apply rotation
+  let rotAngle = angVel * dt;
+  if (rotAngle > EPSILON) {
+    back = normalize(rotateVec(back, axis, rotAngle));
+    // Recalculate orthonormal frame
+    let worldUp = vec3f(0, 1, 0);
+    let newRight = cross(worldUp, back);
+    if (length(newRight) > EPSILON) {
+      right = normalize(newRight);
+    }
+    up = normalize(cross(back, right));
+  }
+
+  // ── Zoom (ctrl+scroll / trackpad pinch) ──
+  if (ctrlHeld && abs(pointer.scrollY) > EPSILON) {
+    dist *= 1.0 + pointer.scrollY * ZOOM_SPEED;
+    dist = clamp(dist, 0.1, 200.0);
+  }
+
+  // ── Update camera matrix ──
+  let position = tgt + back * dist;
+
+  setRight(right);
+  setUp(up);
+  setBack(back);
+  setPos(position);
+  setAxis(axis);
+  cam.data[19] = angVel;
+  cam.data[20] = dist;
+  setTgt(tgt);
+
+  // ── Compute MVP: projection * view ──
+  let viewMatrix = inverseCamera(right, up, back, position);
+  let proj = perspective(2.0 * PI / 5.0, pngine.aspect, 1.0, 100.0);
+  mvp.matrix = proj * viewMatrix;
+}
+""")
+
+(shader-module :name renderShader :code """
+struct MVP {
+  matrix: mat4x4f,
+}
+
+@group(0) @binding(0) var<storage, read> mvp: MVP;
+
+struct VertexOutput {
+  @builtin(position) position: vec4f,
+  @location(0) color: vec4f,
+}
+
+@vertex
+fn vs(
+  @location(0) position: vec4f,
+  @location(1) color: vec4f,
+  @location(2) uv: vec2f
+) -> VertexOutput {
+  var out: VertexOutput;
+  out.position = mvp.matrix * position;
+  out.color = 0.5 * (position + vec4f(1, 1, 1, 1));
+  return out;
+}
+
+@fragment
+fn fs(@location(0) color: vec4f) -> @location(0) vec4f {
+  return color;
+}
+""")
+
+(compute-pipeline :name cameraUpdate :module cameraShader :entry updateCamera)
+
+(render-pipeline :name renderCube
+  (layout auto)
+  (vertex (module renderShader) (entry vs)
+    (buffers
+      (vertex-buffer :array-stride 40
+        (attribute :shader-location 0 :offset 0 :format float32x4)
+        (attribute :shader-location 1 :offset 16 :format float32x4)
+        (attribute :shader-location 2 :offset 32 :format float32x2))))
+  (fragment (module renderShader) (entry fs)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list) :cull-mode back)
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+(bind-group :name cameraBindGroup :layout-pipeline cameraUpdate :layout-index 0
+  (entry :binding 0 :buffer timeUniforms)
+  (entry :binding 1 :buffer pointerBuf)
+  (entry :binding 2 :buffer cameraState)
+  (entry :binding 3 :buffer mvpBuffer))
+
+(bind-group :name renderBindGroup :layout-pipeline renderCube :layout-index 0
+  (entry :binding 0 :buffer mvpBuffer))
+
+(compute-pass :name updateCameraPass
+  :pipeline cameraUpdate
+  :bind-groups [cameraBindGroup]
+  :dispatch-workgroups 1)
+
+(render-pass :name drawCube
+  (color-attachment :view context-current-texture :clear-value [0.5 0.5 0.5 1.0] :load-op clear :store-op store)
+  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  :pipeline renderCube
+  :vertex-buffers [verticesBuffer]
+  :bind-groups [renderBindGroup]
+  (draw :vertex-count CUBE_VERTEX_COUNT))
+
+(frame :name main :perform [writeTime writePointer updateCameraPass drawCube])

@@ -1,0 +1,230 @@
+; Blend presets — the blend op×factor grid the webgpu-samples `blending`
+; sample teaches. Blend state is per-pipeline, so 8 presets = 8 pipelines,
+; each drawing the same source pattern into its own NDC cell over the same
+; destination pattern:
+;
+;   [0] over          add,  one / one-minus-src-alpha (premultiplied over)
+;   [1] additive      add,  one / one
+;   [2] multiply      add,  dst / one-minus-src-alpha
+;   [3] screen        add,  one / one-minus-src  (s + d·(1−s))
+;   [4] rev-subtract  reverse-subtract, one / one   (dst − src)
+;   [5] min           min   (factors forced one/one by WebGPU validation)
+;   [6] max           max   (factors forced one/one)
+;   [7] dest-over     add,  one-minus-dst-alpha / one
+;
+; The source fragment outputs premultiplied alpha, so its transparent surround
+; contributes nothing to the factor-driven presets; min/max ignore factors and
+; compare raw channel values, so they clamp the whole source quad including
+; the surround — that hard edge is genuine min/max behaviour. Cells 4–6 keep
+; the alpha component on add one/one (a legal per-component split), otherwise
+; the op drives alpha to ~0 and the cell vanishes into the page background.
+;
+; Both patterns are procedural fragments (upstream draws them with Canvas2D at
+; runtime): the destination is striped teal/gold/crimson with a vertical alpha
+; ramp, the source a soft disc with a vertical hue sweep and a horizontal
+; alpha ramp — both channels vary, so every factor has something to bite on.
+; No uniforms: the destination pass draws 8 instances and derives each cell
+; rect from @builtin(instance_index); each source pipeline uses a tiny
+; per-cell @vertex entry wrapping a shared placer, so cell placement is
+; independent of the canvas size. The constant / one-minus-constant factors
+; are covered by webgpu_blend_constant.sjon.
+
+(shader-module :name destShader :code """
+fn cellRect(i: u32) -> vec4f {
+  let col = i % 4u;
+  let row = i / 4u;
+  let minX = -0.98 + f32(col) * 0.5;
+  let minY = select(-0.92, 0.08, row == 0u);
+  return vec4f(minX, minY, minX + 0.47, minY + 0.84);
+}
+
+struct VSOut {
+  @builtin(position) pos: vec4f,
+  @location(0) uv: vec2f,
+}
+
+@vertex fn vs(
+  @builtin(vertex_index) vi: u32,
+  @builtin(instance_index) ii: u32,
+) -> VSOut {
+  var corners = array<vec2f, 6>(
+    vec2f(0, 0), vec2f(1, 0), vec2f(0, 1),
+    vec2f(0, 1), vec2f(1, 0), vec2f(1, 1));
+  let t = corners[vi];
+  let r = cellRect(ii);
+  var out: VSOut;
+  out.pos = vec4f(mix(r.xy, r.zw, t), 0.0, 1.0);
+  out.uv = vec2f(t.x, 1.0 - t.y);
+  return out;
+}
+
+@fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  // Three vertical stripes + top-opaque→bottom-transparent alpha ramp.
+  var color = vec3f(0.1, 0.6, 0.6);          // teal
+  if (uv.x > 0.333) { color = vec3f(0.85, 0.65, 0.15); } // gold
+  if (uv.x > 0.666) { color = vec3f(0.75, 0.15, 0.25); } // crimson
+  let alpha = 1.0 - uv.y * 0.65;
+  return vec4f(color, alpha);
+}
+""")
+
+(shader-module :name srcShader :code """
+struct VSOut {
+  @builtin(position) pos: vec4f,
+  @location(0) uv: vec2f,
+}
+
+fn cellRect(i: u32) -> vec4f {
+  let col = i % 4u;
+  let row = i / 4u;
+  let minX = -0.98 + f32(col) * 0.5;
+  let minY = select(-0.92, 0.08, row == 0u);
+  return vec4f(minX, minY, minX + 0.47, minY + 0.84);
+}
+
+// The source quad covers the inner region of its cell, offset down-right so
+// a strip of pure destination stays visible for reference.
+fn place(cell: u32, vi: u32) -> VSOut {
+  var corners = array<vec2f, 6>(
+    vec2f(0, 0), vec2f(1, 0), vec2f(0, 1),
+    vec2f(0, 1), vec2f(1, 0), vec2f(1, 1));
+  let t = corners[vi];
+  let r = cellRect(cell);
+  let inner = mix(vec2f(0.14, 0.04), vec2f(0.96, 0.86), t);
+  var out: VSOut;
+  out.pos = vec4f(mix(r.xy, r.zw, inner), 0.0, 1.0);
+  out.uv = vec2f(t.x, 1.0 - t.y);
+  return out;
+}
+
+@vertex fn vs0(@builtin(vertex_index) vi: u32) -> VSOut { return place(0u, vi); }
+@vertex fn vs1(@builtin(vertex_index) vi: u32) -> VSOut { return place(1u, vi); }
+@vertex fn vs2(@builtin(vertex_index) vi: u32) -> VSOut { return place(2u, vi); }
+@vertex fn vs3(@builtin(vertex_index) vi: u32) -> VSOut { return place(3u, vi); }
+@vertex fn vs4(@builtin(vertex_index) vi: u32) -> VSOut { return place(4u, vi); }
+@vertex fn vs5(@builtin(vertex_index) vi: u32) -> VSOut { return place(5u, vi); }
+@vertex fn vs6(@builtin(vertex_index) vi: u32) -> VSOut { return place(6u, vi); }
+@vertex fn vs7(@builtin(vertex_index) vi: u32) -> VSOut { return place(7u, vi); }
+
+@fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  // Soft disc, vertical hue sweep, horizontal alpha ramp. PREMULTIPLIED.
+  let d = length(uv - 0.5) * 2.0;
+  let disc = 1.0 - smoothstep(0.82, 0.95, d);
+  let color = mix(vec3f(1.0, 0.55, 0.1), vec3f(0.5, 0.2, 0.9), uv.y);
+  let alpha = disc * mix(0.15, 1.0, uv.x);
+  return vec4f(color * alpha, alpha);
+}
+""")
+
+(render-pipeline :name destPipeline
+  (layout auto)
+  (vertex (module destShader) (entry vs))
+  (fragment (module destShader) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(render-pipeline :name overPipeline
+  (layout auto)
+  (vertex (module srcShader) (entry vs0))
+  (fragment (module srcShader) (entry fs)
+    (targets (target :format preferred-canvas-format
+      (blend
+        (color :src-factor one :dst-factor one-minus-src-alpha :operation add)
+        (alpha :src-factor one :dst-factor one-minus-src-alpha :operation add))))))
+
+(render-pipeline :name additivePipeline
+  (layout auto)
+  (vertex (module srcShader) (entry vs1))
+  (fragment (module srcShader) (entry fs)
+    (targets (target :format preferred-canvas-format
+      (blend
+        (color :src-factor one :dst-factor one :operation add)
+        (alpha :src-factor one :dst-factor one :operation add))))))
+
+(render-pipeline :name multiplyPipeline
+  (layout auto)
+  (vertex (module srcShader) (entry vs2))
+  (fragment (module srcShader) (entry fs)
+    (targets (target :format preferred-canvas-format
+      (blend
+        (color :src-factor dst :dst-factor one-minus-src-alpha :operation add)
+        (alpha :src-factor dst-alpha :dst-factor one-minus-src-alpha :operation add))))))
+
+(render-pipeline :name screenPipeline
+  (layout auto)
+  (vertex (module srcShader) (entry vs3))
+  (fragment (module srcShader) (entry fs)
+    (targets (target :format preferred-canvas-format
+      (blend
+        (color :src-factor one :dst-factor one-minus-src :operation add)
+        (alpha :src-factor one :dst-factor one-minus-src-alpha :operation add))))))
+
+(render-pipeline :name revSubPipeline
+  (layout auto)
+  (vertex (module srcShader) (entry vs4))
+  (fragment (module srcShader) (entry fs)
+    (targets (target :format preferred-canvas-format
+      (blend
+        (color :src-factor one :dst-factor one :operation reverse-subtract)
+        (alpha :src-factor one :dst-factor one :operation add))))))
+
+(render-pipeline :name minPipeline
+  (layout auto)
+  (vertex (module srcShader) (entry vs5))
+  (fragment (module srcShader) (entry fs)
+    (targets (target :format preferred-canvas-format
+      (blend
+        (color :src-factor one :dst-factor one :operation min)
+        (alpha :src-factor one :dst-factor one :operation add))))))
+
+(render-pipeline :name maxPipeline
+  (layout auto)
+  (vertex (module srcShader) (entry vs6))
+  (fragment (module srcShader) (entry fs)
+    (targets (target :format preferred-canvas-format
+      (blend
+        (color :src-factor one :dst-factor one :operation max)
+        (alpha :src-factor one :dst-factor one :operation add))))))
+
+(render-pipeline :name destOverPipeline
+  (layout auto)
+  (vertex (module srcShader) (entry vs7))
+  (fragment (module srcShader) (entry fs)
+    (targets (target :format preferred-canvas-format
+      (blend
+        (color :src-factor one-minus-dst-alpha :dst-factor one :operation add)
+        (alpha :src-factor one-minus-dst-alpha :dst-factor one :operation add))))))
+
+; Destination: one instanced draw fills all 8 cells identically.
+(render-pass :name drawDest
+  (color-attachment :view context-current-texture
+    :clear-value [0.05 0.05 0.07 1] :load-op clear :store-op store)
+  :pipeline destPipeline
+  (draw :vertex-count 6 :instance-count 8))
+
+(render-pass :name blendOver
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  :pipeline overPipeline (draw :vertex-count 6))
+(render-pass :name blendAdditive
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  :pipeline additivePipeline (draw :vertex-count 6))
+(render-pass :name blendMultiply
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  :pipeline multiplyPipeline (draw :vertex-count 6))
+(render-pass :name blendScreen
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  :pipeline screenPipeline (draw :vertex-count 6))
+(render-pass :name blendRevSub
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  :pipeline revSubPipeline (draw :vertex-count 6))
+(render-pass :name blendMin
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  :pipeline minPipeline (draw :vertex-count 6))
+(render-pass :name blendMax
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  :pipeline maxPipeline (draw :vertex-count 6))
+(render-pass :name blendDestOver
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  :pipeline destOverPipeline (draw :vertex-count 6))
+
+(frame :name main :perform [drawDest blendOver blendAdditive blendMultiply
+  blendScreen blendRevSub blendMin blendMax blendDestOver])

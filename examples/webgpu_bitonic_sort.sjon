@@ -1,0 +1,361 @@
+; Bitonic sort — port of the webgpu-samples `bitonicSort` sample, statically
+; unrolled. Upstream is an interactive one-step-at-a-time visualizer driven by
+; a CPU readback loop (mapAsync -> decide -> re-upload), which a payload cannot
+; express. For fixed n the flip/disperse schedule is deterministic, so the
+; whole sort unrolls at compile time: n=4096 (k=12) gives k(k+1)/2 = 78 steps.
+; Each step's (algo, blockHeight) pair lives in its own small uniform seeded
+; :mapped-at-creation — 23 distinct pairs -> 23 buffers, bind groups and pass
+; forms, referenced 78 times from :perform (a repeated name emits each time).
+;
+; Why not interleaved (queue (write-buffer …)) parameter writes: every
+; write-buffer in a frame executes on the GPU queue before the frame's single
+; command-buffer submission, regardless of its position in :perform — so 78
+; dispatches would all see the last written value. Per-step static uniforms
+; are the correct shape.
+;
+; The global compare-and-swap kernel is safe in place (each step touches
+; disjoint pairs); upstream's local shared-memory kernels, swap counter, GUI,
+; hover and timestamps are dropped. The seeder re-hashes with floor(time) so
+; the sort re-scrambles once per second (all 78 steps always run; re-sorting
+; sorted data is idempotent); t=0 is deterministic. The display is a
+; split-screen 64x64 grid — unsorted seed snapshot on the left, sorted on the
+; right; the snapshot is a compute copy pass rather than copy-buffer-to-buffer.
+;
+; Schedule (78 steps): for h = 2, 4, …, 4096: flip h, then disperse h/2,
+; h/4, …, 2.
+
+(define :name N :value 4096)
+
+; Fragment stage reads two storage buffers (seed | sorted halves).
+(limits :max-storage-buffers-in-fragment-stage 2)
+
+(shader-module :name sortCode :code """
+struct Step { algo : f32, blockHeight : f32 }   // 0 = flip, 1 = disperse
+
+@group(0) @binding(0) var<storage, read_write> elems : array<u32>;
+@group(0) @binding(1) var<uniform> stepParams : Step;
+
+fn getFlipIndices(threadId: u32, blockHeight: u32) -> vec2u {
+  let blockOffset = ((2u * threadId) / blockHeight) * blockHeight;
+  let halfHeight = blockHeight / 2u;
+  var idx = vec2u(threadId % halfHeight,
+                  blockHeight - (threadId % halfHeight) - 1u);
+  return idx + blockOffset;
+}
+
+fn getDisperseIndices(threadId: u32, blockHeight: u32) -> vec2u {
+  let blockOffset = ((2u * threadId) / blockHeight) * blockHeight;
+  let halfHeight = blockHeight / 2u;
+  var idx = vec2u(threadId % halfHeight,
+                  (threadId % halfHeight) + halfHeight);
+  return idx + blockOffset;
+}
+
+@compute @workgroup_size(256)
+fn sortStep(@builtin(global_invocation_id) gid : vec3u) {
+  if (gid.x >= 2048u) { return; }
+  let bh = u32(stepParams.blockHeight);
+  var idx : vec2u;
+  if (stepParams.algo < 0.5) {
+    idx = getFlipIndices(gid.x, bh);
+  } else {
+    idx = getDisperseIndices(gid.x, bh);
+  }
+  if (elems[idx.y] < elems[idx.x]) {
+    let t = elems[idx.x];
+    elems[idx.x] = elems[idx.y];
+    elems[idx.y] = t;
+  }
+}
+""")
+
+(shader-module :name seedCode :code """
+struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+
+@group(0) @binding(0) var<storage, read_write> data : array<u32>;
+@group(0) @binding(1) var<uniform> inputs : PngineInputs;
+
+fn hash(n: u32) -> u32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return x;
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid : vec3u) {
+  let i = gid.x;
+  if (i >= 4096u) { return; }
+  // floor(time) in the seed: fresh scramble once per second, t=0 exact.
+  data[i] = hash(i ^ (u32(inputs.time) * 0x9E3779B9u));
+}
+""")
+
+(shader-module :name snapCode :code """
+@group(0) @binding(0) var<storage, read> src : array<u32>;
+@group(0) @binding(1) var<storage, read_write> dst : array<u32>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid : vec3u) {
+  if (gid.x < 4096u) { dst[gid.x] = src[gid.x]; }
+}
+""")
+
+(shader-module :name displayCode :code """
+struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+
+@group(0) @binding(0) var<uniform> inputs : PngineInputs;
+@group(0) @binding(1) var<storage, read> seed : array<u32>;
+@group(0) @binding(2) var<storage, read> elems : array<u32>;
+
+struct VSOut { @builtin(position) pos : vec4f }
+
+@vertex
+fn vs(@builtin(vertex_index) vi : u32) -> VSOut {
+  var p = array<vec2f, 3>(
+    vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return VSOut(vec4f(p[vi], 0.0, 1.0));
+}
+
+// 64x64 grid per half: left = unsorted seed snapshot, right = sorted.
+@fragment
+fn fs(@builtin(position) pos : vec4f) -> @location(0) vec4f {
+  let uv = pos.xy / vec2f(inputs.width, inputs.height);
+  let isLeft = uv.x < 0.5;
+  let gx = select((uv.x - 0.5) * 2.0, uv.x * 2.0, isLeft);
+  let cell = vec2u(min(u32(gx * 64.0), 63u), min(u32(uv.y * 64.0), 63u));
+  let i = cell.y * 64u + cell.x;
+  let v = select(elems[i], seed[i], isLeft);
+  let b = 1.0 - f32(v) / 4294967295.0;
+  let tint = select(vec3f(0.75, 0.95, 0.80), vec3f(0.95, 0.85, 0.70), isLeft);
+  return vec4f(tint * b, 1.0);
+}
+""")
+
+(buffer :name elements :size (* N 4) :usage [storage])
+(buffer :name seedSnapshot :size (* N 4) :usage [storage])
+(buffer :name timeUniform :size 16 :usage [uniform copy-dst])
+
+; 23 static step-parameter uniforms (algo, blockHeight as f32 — exact).
+(data :name flip2Data :float32 [0 2 0 0])
+(data :name flip4Data :float32 [0 4 0 0])
+(data :name flip8Data :float32 [0 8 0 0])
+(data :name flip16Data :float32 [0 16 0 0])
+(data :name flip32Data :float32 [0 32 0 0])
+(data :name flip64Data :float32 [0 64 0 0])
+(data :name flip128Data :float32 [0 128 0 0])
+(data :name flip256Data :float32 [0 256 0 0])
+(data :name flip512Data :float32 [0 512 0 0])
+(data :name flip1024Data :float32 [0 1024 0 0])
+(data :name flip2048Data :float32 [0 2048 0 0])
+(data :name flip4096Data :float32 [0 4096 0 0])
+(data :name disp2Data :float32 [1 2 0 0])
+(data :name disp4Data :float32 [1 4 0 0])
+(data :name disp8Data :float32 [1 8 0 0])
+(data :name disp16Data :float32 [1 16 0 0])
+(data :name disp32Data :float32 [1 32 0 0])
+(data :name disp64Data :float32 [1 64 0 0])
+(data :name disp128Data :float32 [1 128 0 0])
+(data :name disp256Data :float32 [1 256 0 0])
+(data :name disp512Data :float32 [1 512 0 0])
+(data :name disp1024Data :float32 [1 1024 0 0])
+(data :name disp2048Data :float32 [1 2048 0 0])
+
+(buffer :name flip2Buf :size 16 :usage [uniform] :mapped-at-creation flip2Data)
+(buffer :name flip4Buf :size 16 :usage [uniform] :mapped-at-creation flip4Data)
+(buffer :name flip8Buf :size 16 :usage [uniform] :mapped-at-creation flip8Data)
+(buffer :name flip16Buf :size 16 :usage [uniform] :mapped-at-creation flip16Data)
+(buffer :name flip32Buf :size 16 :usage [uniform] :mapped-at-creation flip32Data)
+(buffer :name flip64Buf :size 16 :usage [uniform] :mapped-at-creation flip64Data)
+(buffer :name flip128Buf :size 16 :usage [uniform] :mapped-at-creation flip128Data)
+(buffer :name flip256Buf :size 16 :usage [uniform] :mapped-at-creation flip256Data)
+(buffer :name flip512Buf :size 16 :usage [uniform] :mapped-at-creation flip512Data)
+(buffer :name flip1024Buf :size 16 :usage [uniform] :mapped-at-creation flip1024Data)
+(buffer :name flip2048Buf :size 16 :usage [uniform] :mapped-at-creation flip2048Data)
+(buffer :name flip4096Buf :size 16 :usage [uniform] :mapped-at-creation flip4096Data)
+(buffer :name disp2Buf :size 16 :usage [uniform] :mapped-at-creation disp2Data)
+(buffer :name disp4Buf :size 16 :usage [uniform] :mapped-at-creation disp4Data)
+(buffer :name disp8Buf :size 16 :usage [uniform] :mapped-at-creation disp8Data)
+(buffer :name disp16Buf :size 16 :usage [uniform] :mapped-at-creation disp16Data)
+(buffer :name disp32Buf :size 16 :usage [uniform] :mapped-at-creation disp32Data)
+(buffer :name disp64Buf :size 16 :usage [uniform] :mapped-at-creation disp64Data)
+(buffer :name disp128Buf :size 16 :usage [uniform] :mapped-at-creation disp128Data)
+(buffer :name disp256Buf :size 16 :usage [uniform] :mapped-at-creation disp256Data)
+(buffer :name disp512Buf :size 16 :usage [uniform] :mapped-at-creation disp512Data)
+(buffer :name disp1024Buf :size 16 :usage [uniform] :mapped-at-creation disp1024Data)
+(buffer :name disp2048Buf :size 16 :usage [uniform] :mapped-at-creation disp2048Data)
+
+(compute-pipeline :name sortPipe :module sortCode :entry sortStep)
+(compute-pipeline :name seedPipe :module seedCode :entry main)
+(compute-pipeline :name snapPipe :module snapCode :entry main)
+
+(render-pipeline :name displayPipe
+  (layout auto)
+  (vertex (module displayCode) (entry vs))
+  (fragment (module displayCode) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(bind-group :name flip2BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer flip2Buf))
+(bind-group :name flip4BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer flip4Buf))
+(bind-group :name flip8BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer flip8Buf))
+(bind-group :name flip16BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer flip16Buf))
+(bind-group :name flip32BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer flip32Buf))
+(bind-group :name flip64BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer flip64Buf))
+(bind-group :name flip128BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer flip128Buf))
+(bind-group :name flip256BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer flip256Buf))
+(bind-group :name flip512BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer flip512Buf))
+(bind-group :name flip1024BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer flip1024Buf))
+(bind-group :name flip2048BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer flip2048Buf))
+(bind-group :name flip4096BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer flip4096Buf))
+(bind-group :name disp2BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer disp2Buf))
+(bind-group :name disp4BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer disp4Buf))
+(bind-group :name disp8BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer disp8Buf))
+(bind-group :name disp16BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer disp16Buf))
+(bind-group :name disp32BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer disp32Buf))
+(bind-group :name disp64BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer disp64Buf))
+(bind-group :name disp128BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer disp128Buf))
+(bind-group :name disp256BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer disp256Buf))
+(bind-group :name disp512BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer disp512Buf))
+(bind-group :name disp1024BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer disp1024Buf))
+(bind-group :name disp2048BG :layout-pipeline sortPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer disp2048Buf))
+
+(bind-group :name seedBG :layout-pipeline seedPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer timeUniform))
+
+(bind-group :name snapBG :layout-pipeline snapPipe :layout-index 0
+  (entry :binding 0 :buffer elements)
+  (entry :binding 1 :buffer seedSnapshot))
+
+(bind-group :name displayBG :layout-pipeline displayPipe :layout-index 0
+  (entry :binding 0 :buffer timeUniform)
+  (entry :binding 1 :buffer seedSnapshot)
+  (entry :binding 2 :buffer elements))
+
+(queue :name writeTime
+  (write-buffer :buffer timeUniform :offset 0 :data pngine-inputs))
+
+(compute-pass :name seedPass :pipeline seedPipe :bind-groups [seedBG]
+  :dispatch-workgroups (ceil (/ N 256)))
+
+(compute-pass :name snapSeed :pipeline snapPipe :bind-groups [snapBG]
+  :dispatch-workgroups (ceil (/ N 256)))
+
+; 23 distinct pass forms; the frame references them 78 times in schedule
+; order (each occurrence emits its own dispatch).
+(compute-pass :name passFlip2 :pipeline sortPipe :bind-groups [flip2BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passFlip4 :pipeline sortPipe :bind-groups [flip4BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passFlip8 :pipeline sortPipe :bind-groups [flip8BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passFlip16 :pipeline sortPipe :bind-groups [flip16BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passFlip32 :pipeline sortPipe :bind-groups [flip32BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passFlip64 :pipeline sortPipe :bind-groups [flip64BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passFlip128 :pipeline sortPipe :bind-groups [flip128BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passFlip256 :pipeline sortPipe :bind-groups [flip256BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passFlip512 :pipeline sortPipe :bind-groups [flip512BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passFlip1024 :pipeline sortPipe :bind-groups [flip1024BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passFlip2048 :pipeline sortPipe :bind-groups [flip2048BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passFlip4096 :pipeline sortPipe :bind-groups [flip4096BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passDisp2 :pipeline sortPipe :bind-groups [disp2BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passDisp4 :pipeline sortPipe :bind-groups [disp4BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passDisp8 :pipeline sortPipe :bind-groups [disp8BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passDisp16 :pipeline sortPipe :bind-groups [disp16BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passDisp32 :pipeline sortPipe :bind-groups [disp32BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passDisp64 :pipeline sortPipe :bind-groups [disp64BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passDisp128 :pipeline sortPipe :bind-groups [disp128BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passDisp256 :pipeline sortPipe :bind-groups [disp256BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passDisp512 :pipeline sortPipe :bind-groups [disp512BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passDisp1024 :pipeline sortPipe :bind-groups [disp1024BG]
+  :dispatch-workgroups 8)
+(compute-pass :name passDisp2048 :pipeline sortPipe :bind-groups [disp2048BG]
+  :dispatch-workgroups 8)
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0.05 0.05 0.08 1] :load-op clear :store-op store)
+  :pipeline displayPipe :bind-groups [displayBG]
+  (draw :vertex-count 3))
+
+(frame :name main
+  :perform [writeTime seedPass snapSeed passFlip2 passFlip4 passDisp2 
+            passFlip8 passDisp4 passDisp2 passFlip16 passDisp8 passDisp4 
+            passDisp2 passFlip32 passDisp16 passDisp8 passDisp4 passDisp2 
+            passFlip64 passDisp32 passDisp16 passDisp8 passDisp4 passDisp2 
+            passFlip128 passDisp64 passDisp32 passDisp16 passDisp8 passDisp4 
+            passDisp2 passFlip256 passDisp128 passDisp64 passDisp32 
+            passDisp16 passDisp8 passDisp4 passDisp2 passFlip512 passDisp256 
+            passDisp128 passDisp64 passDisp32 passDisp16 passDisp8 passDisp4 
+            passDisp2 passFlip1024 passDisp512 passDisp256 passDisp128 
+            passDisp64 passDisp32 passDisp16 passDisp8 passDisp4 passDisp2 
+            passFlip2048 passDisp1024 passDisp512 passDisp256 passDisp128 
+            passDisp64 passDisp32 passDisp16 passDisp8 passDisp4 passDisp2 
+            passFlip4096 passDisp2048 passDisp1024 passDisp512 passDisp256 
+            passDisp128 passDisp64 passDisp32 passDisp16 passDisp8 passDisp4 
+            passDisp2 draw])

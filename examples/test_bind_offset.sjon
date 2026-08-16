@@ -1,0 +1,40 @@
+; test_bind_offset — a fullscreen triangle in solid orange, read through a
+; bind-group buffer slice. A 512-byte uniform buffer holds two colors (dark blue
+; at byte 0, orange at byte 256); the bind-group entry binds only 16 bytes at
+; :offset 256, so the shader reads orange. A binding that ignored :offset/:size
+; would read the buffer's start and render dark blue.
+
+(buffer :name colors :size 512 :usage [uniform copy-dst] :mapped-at-creation colorData)
+
+; 256 B of dark blue at offset 0 (64 floats), then orange at offset 256.
+; mapped-at-creation fills from byte 0; only the first vec4 of each half is read.
+(data :name colorData :float32 [
+  0.0 0.0 0.25 1.0  0 0 0 0  0 0 0 0  0 0 0 0  0 0 0 0  0 0 0 0  0 0 0 0  0 0 0 0
+  0 0 0 0  0 0 0 0  0 0 0 0  0 0 0 0  0 0 0 0  0 0 0 0  0 0 0 0  0 0 0 0
+  1.0 0.5 0.0 1.0
+])
+
+(shader-module :name code :code """
+    @group(0) @binding(0) var<uniform> color: vec4f;
+    @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+      return vec4f(p[i], 0.0, 1.0);
+    }
+    @fragment fn fs() -> @location(0) vec4f { return color; }
+  """)
+
+(render-pipeline :name pipe
+  (layout auto)
+  (vertex (module code) (entry vs))
+  (fragment (module code) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(bind-group :name g :layout-pipeline pipe :layout-index 0
+  (entry :binding 0 :buffer colors :offset 256 :size 16))
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipe :bind-groups [g]
+  (draw :vertex-count 3))
+
+(frame :name main :perform [draw])

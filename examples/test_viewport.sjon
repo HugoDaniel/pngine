@@ -1,0 +1,35 @@
+; test_viewport — a fullscreen triangle clipped by both a sub-rect :viewport
+; (4 elements → default min/max depth) and a :scissor-rect.
+;
+; The two rects bind on different axes on purpose. At 128×128 the viewport ends
+; at y=80 and the scissor at y=104, so the bottom edge is the viewport's; the
+; scissor starts at x=24 inside the viewport's x=16, so the left edge is the
+; scissor's. Lit region: x[24,104) × y[24,80). Nesting the scissor wholly
+; inside the viewport would make the viewport invisible.
+;
+; ⚠️ Fixed pixel rects are only valid on a canvas at least that large — WebGPU
+; rejects a scissor not contained in the render target. These rects assume a
+; canvas of at least 128×128.
+
+(shader-module :name shader :code """
+    @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+      return vec4f(p[i], 0.0, 1.0);
+    }
+    @fragment fn fs() -> @location(0) vec4f { return vec4f(0.2, 0.6, 1.0, 1.0); }
+  """)
+
+(render-pipeline :name pipe
+  (layout auto)
+  (vertex (module shader) (entry vs))
+  (fragment (module shader) (entry fs)
+    (targets (target :format preferred-canvas-format))))
+
+(render-pass :name drawPass
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipe
+  :viewport [16 16 96 64]
+  :scissor-rect [24 24 80 80]
+  (draw :vertex-count 3))
+
+(frame :name main :perform [drawPass])

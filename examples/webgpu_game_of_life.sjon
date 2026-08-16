@@ -1,0 +1,158 @@
+; Game of Life — Conway's automaton in the shape of the webgpu-samples
+; `gameOfLife` sample: each cell is an instanced quad (128x128 = 16,384
+; instances; dead cells collapse to zero area in the vertex shader, costing no
+; fragments), a compute pass advances the grid through pool-2 ping-pong
+; storage buffers, and a hand-authored init compute pass seeds it once via
+; frame :init with the [8 8 1] dispatch its 16x16 workgroup wants.
+; samples/17_game_of_life.sjon runs the same kernel with a fullscreen-fragment
+; display instead.
+
+(define :name GRID_SIZE :value 128)
+
+(buffer :name cellBuffer :size (* GRID_SIZE GRID_SIZE 4) :usage [storage] :pool 2)
+
+(shader-module :name initShader :code """
+struct Cells { data: array<u32> }
+@binding(0) @group(0) var<storage, read_write> cells: Cells;
+
+fn hash(n: u32) -> f32 {
+  var x = n;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
+  x = (x >> 16u) ^ x;
+  return f32(x) / f32(0xffffffffu);
+}
+
+const SIZE: u32 = 128u;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= SIZE || id.y >= SIZE) { return; }
+  let idx = id.y * SIZE + id.x;
+  cells.data[idx] = select(0u, 1u, hash(idx) < 0.3);
+}
+""")
+
+(shader-module :name stepShader :code """
+struct Cells { data: array<u32> }
+@binding(0) @group(0) var<storage, read> cellsIn: Cells;
+@binding(1) @group(0) var<storage, read_write> cellsOut: Cells;
+
+const SIZE: u32 = 128u;
+
+fn getCell(x: i32, y: i32) -> u32 {
+  let wx = (x + i32(SIZE)) % i32(SIZE);
+  let wy = (y + i32(SIZE)) % i32(SIZE);
+  return cellsIn.data[u32(wy) * SIZE + u32(wx)];
+}
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= SIZE || id.y >= SIZE) { return; }
+
+  let x = i32(id.x);
+  let y = i32(id.y);
+  let idx = id.y * SIZE + id.x;
+
+  var neighbors = 0u;
+  neighbors += getCell(x - 1, y - 1);
+  neighbors += getCell(x, y - 1);
+  neighbors += getCell(x + 1, y - 1);
+  neighbors += getCell(x - 1, y);
+  neighbors += getCell(x + 1, y);
+  neighbors += getCell(x - 1, y + 1);
+  neighbors += getCell(x, y + 1);
+  neighbors += getCell(x + 1, y + 1);
+
+  let alive = cellsIn.data[idx];
+  var newState = 0u;
+  if (alive == 1u) {
+    newState = select(0u, 1u, neighbors == 2u || neighbors == 3u);
+  } else {
+    newState = select(0u, 1u, neighbors == 3u);
+  }
+  cellsOut.data[idx] = newState;
+}
+""")
+
+(shader-module :name renderShader :code """
+struct Cells { data: array<u32> }
+@group(0) @binding(0) var<storage, read> cells: Cells;
+
+const SIZE: f32 = 128.0;
+
+struct VSOut {
+  @builtin(position) pos : vec4f,
+  @location(0) local : vec2f,
+}
+
+// One quad per cell; dead cells collapse to zero area (no fragments).
+@vertex
+fn vs(@builtin(vertex_index) vi : u32,
+      @builtin(instance_index) ii : u32) -> VSOut {
+  let alive = f32(cells.data[ii]);
+  let cx = f32(ii % 128u);
+  let cy = f32(ii / 128u);
+  var corners = array<vec2f, 6>(
+    vec2f(0.0, 0.0), vec2f(1.0, 0.0), vec2f(1.0, 1.0),
+    vec2f(0.0, 0.0), vec2f(1.0, 1.0), vec2f(0.0, 1.0));
+  // 10% gutter per cell so the grid reads as discrete quads.
+  let cell = (vec2f(cx, cy) + 0.1 + corners[vi] * 0.8) / SIZE;
+  let ndc = vec2f(cell.x * 2.0 - 1.0, 1.0 - cell.y * 2.0);
+  var out : VSOut;
+  out.pos = vec4f(ndc * alive, 0.0, 1.0);
+  out.local = corners[vi];
+  return out;
+}
+
+@fragment
+fn fs(@location(0) local : vec2f) -> @location(0) vec4f {
+  // Soft rounded look inside each quad.
+  let d = length(local - 0.5) * 2.0;
+  let g = mix(0.9, 0.55, d);
+  return vec4f(0.15 * g, g, 0.35 * g, 1.0);
+}
+""")
+
+(compute-pipeline :name initPipeline :module initShader :entry main)
+(compute-pipeline :name stepPipeline :module stepShader :entry main)
+
+(render-pipeline :name renderPipeline
+  (layout auto)
+  (vertex (module renderShader) (entry vs))
+  (fragment (module renderShader) (entry fs)
+    (targets (target :format preferred-canvas-format)))
+  (primitive (topology triangle-list)))
+
+(bind-group :name initBindGroup :layout-pipeline initPipeline :layout-index 0 :pool 2
+  (entry :binding 0 :buffer cellBuffer :ping-pong 0))
+
+(bind-group :name stepBindGroup :layout-pipeline stepPipeline :layout-index 0 :pool 2
+  (entry :binding 0 :buffer cellBuffer :ping-pong 0)
+  (entry :binding 1 :buffer cellBuffer :ping-pong 1))
+
+(bind-group :name renderBindGroup :layout-pipeline renderPipeline :layout-index 0 :pool 2
+  (entry :binding 0 :buffer cellBuffer :ping-pong 1))
+
+; Init: [8 8 1] workgroups of 16x16 = the full 128x128 grid.
+(compute-pass :name initCells :pipeline initPipeline :bind-groups [initBindGroup]
+  :bind-groups-pool-offsets [0]
+  :dispatch [8 8 1])
+
+(compute-pass :name stepPass
+  :pipeline stepPipeline
+  :bind-groups [stepBindGroup]
+  :bind-groups-pool-offsets [0]
+  :dispatch [8 8 1])
+
+(render-pass :name drawPass
+  (color-attachment :view context-current-texture
+    :clear-value [0.07 0.07 0.1 1] :load-op clear :store-op store)
+  :pipeline renderPipeline
+  :bind-groups [renderBindGroup]
+  :bind-groups-pool-offsets [0]
+  (draw :vertex-count 6 :instance-count (* GRID_SIZE GRID_SIZE)))
+
+(frame :name main
+  :init [initCells]
+  :perform [stepPass drawPass])
