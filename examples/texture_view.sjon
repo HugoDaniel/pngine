@@ -1,10 +1,10 @@
 ; Texture view — exercises the explicit (texture-view …) form. A (texture …)
 ; bound directly gets a default 2d view; sampling a 2d-array / 3d / cube
-; texture needs an explicit view whose :view-dimension matches the WGSL
+; texture needs an explicit view whose :dimension matches the WGSL
 ; binding (here texture_2d_array).
 ;
-;   arr — a 2-layer 2d-array texture (:dimension 2 :depth-or-array-layers 2).
-;   arr_view — an explicit view over it (:view-dimension 2 = 2d-array), bound
+;   arr — a 2-layer 2d-array texture (:size [256 256 2], :dimension 2d).
+;   arr_view — an explicit view over it (:dimension 2d-array), bound
 ;              via (entry :texture-view …). The fragment samples layer 0 by a
 ;              fullscreen triangle.
 ;
@@ -28,20 +28,20 @@
     }
 """)
 
-(texture :name arr :width 256 :height 256 :dimension 2 :depth-or-array-layers 2
+(texture :name arr :size [256 256 2] :dimension 2d
   :format rgba8unorm :usage [texture-binding copy-dst])
 
-(texture-view :name arr_view :texture arr :view-dimension 2)
+(texture-view :name arr_view :texture arr :dimension 2d-array)
 
 (sampler :name samp :mag-filter linear :min-filter linear)
 
 (render-pipeline :name pipe
-  (layout auto)
-  (vertex (module code) (entry vs))
-  (fragment (module code) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
 
-(bind-group :name g :layout-pipeline pipe :layout-index 0
+(bind-group :name g :layout pipe :group 0
   (entry :binding 0 :sampler samp)
   (entry :binding 1 :texture-view arr_view))
 

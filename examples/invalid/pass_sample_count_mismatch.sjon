@@ -10,10 +10,10 @@
 @fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
 """)
 (texture :name msaaTex :size canvas :format rgba8unorm :usage [render-attachment] :sample-count 4)
-(render-pipeline :name pipe (layout auto)
-  (vertex (module code) (entry vs))
-  (fragment (module code) (entry fs)
-    (targets (target :format rgba8unorm))))
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format rgba8unorm)))
 (render-pass :name draw :pipeline pipe
   (color-attachment :view msaaTex
     :clear-value [0 0 0 1] :load-op clear :store-op store)

@@ -1,0 +1,25 @@
+; Invalid: :usage [map-read storage]. WebGPU lets MAP_READ combine with
+; COPY_DST and nothing else (and MAP_WRITE with COPY_SRC and nothing else): a
+; mappable buffer is host memory the GPU may only copy into, so binding it as
+; storage is a createBuffer validation error.
+;
+; The usage vector is a symbol list, so the schema can say which symbols exist
+; but not which SUBSETS do. The emitter reads the authored vector -- not the
+; usage it emits, which adds copy-dst for a :data buffer on its own.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+(buffer :name readback :size 16 :usage [map-read storage])
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

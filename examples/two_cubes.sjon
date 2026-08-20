@@ -87,7 +87,7 @@ fn fsMain(
 """)
 
 ; Per-cube params: vec4f(translateX, axisSwapPhase, 0, 0) at bytes 0 and 256.
-; :mapped-at-creation fills from byte 0 with no sparse write, so the gap is
+; :data fills from byte 0 with no sparse write, so the gap is
 ; 60 zero floats — the price of keeping the buffer immutable (no copy-dst).
 (data :name cubeParams :float32 [
   -2 0 0 0
@@ -96,29 +96,28 @@ fn fsMain(
   0 0 0 0  0 0 0 0  0 0 0 0  0 0 0 0  0 0 0 0
   2 1 0 0
 ])
-(buffer :name params :size 272 :usage [uniform] :mapped-at-creation cubeParams)
+(buffer :name params :size 272 :usage [uniform] :data cubeParams)
 (buffer :name inputs :size 16 :usage [uniform copy-dst])
 
 (data :name cubeVerts (cube :format [position4 color4 uv2]))
-(buffer :name vb :size cubeVerts :usage [vertex] :mapped-at-creation cubeVerts)
+(buffer :name vb :usage [vertex] :data cubeVerts)
 (texture :name depth :size canvas :format depth24plus :usage [render-attachment])
 
 (render-pipeline :name pipe
-  (layout auto)
-  (vertex (module code) (entry vsMain)
-    (buffers
-      (vertex-buffer :array-stride 40
-        (attribute :shader-location 0 :offset 0 :format float32x4)
-        (attribute :shader-location 1 :offset 32 :format float32x2))))
-  (fragment (module code) (entry fsMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module code :entry vsMain
+    (vertex-buffer :array-stride 40
+      (attribute :shader-location 0 :offset 0 :format float32x4)
+      (attribute :shader-location 1 :offset 32 :format float32x2)))
+  (fragment :module code :entry fsMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
-(bind-group :name g1 :layout-pipeline pipe :layout-index 0
+(bind-group :name g1 :layout pipe :group 0
   (entry :binding 0 :buffer params :offset 0 :size 16)
   (entry :binding 1 :buffer inputs))
-(bind-group :name g2 :layout-pipeline pipe :layout-index 0
+(bind-group :name g2 :layout pipe :group 0
   (entry :binding 0 :buffer params :offset 256 :size 16)
   (entry :binding 1 :buffer inputs))
 
@@ -128,14 +127,14 @@ fn fsMain(
 (render-pass :name drawLeft
   (color-attachment :view context-current-texture
     :clear-value [0.5 0.5 0.5 1] :load-op clear :store-op store)
-  (depth-attachment :view depth :depth-clear-value 1.0
+  (depth-stencil-attachment :view depth :depth-clear-value 1.0
     :depth-load-op clear :depth-store-op store)
   :pipeline pipe :bind-groups [g1] :vertex-buffers [vb]
   (draw :vertex-count 36))
 
 (render-pass :name drawRight
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depth :depth-load-op load :depth-store-op store)
+  (depth-stencil-attachment :view depth :depth-load-op load :depth-store-op store)
   :pipeline pipe :bind-groups [g2] :vertex-buffers [vb]
   (draw :vertex-count 36))
 

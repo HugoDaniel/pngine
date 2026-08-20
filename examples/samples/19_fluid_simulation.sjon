@@ -1,10 +1,10 @@
-; Fluid simulation — a 96×96 semi-Lagrangian fluid: each frame a compute pass
+; Fluid simulation. A 96×96 semi-Lagrangian fluid: each frame a compute pass
 ; traces velocity and density backward along the flow with bilinear sampling,
 ; adds two rotating force/dye sources and damps the boundary; a fullscreen
 ; triangle then colours velocity direction (HSV hue, speed as value) over
 ; density brightness. Two independent `:pool 2` ping-pong fields (velocity
 ; vec2f, density f32) give the step bind group five entries (uniforms + vel
-; in/out + den in/out with `:ping-pong`); `:dispatch [6 6 1]` over a 16×16
+; in/out + den in/out with `:ping-pong`); `(dispatch :workgroups [6 6 1])` over a 16×16
 ; workgroup. A compute `(init …)` zeroes the velocity field once.
 ;
 ; GRID_SIZE sizes the buffers only; each shader restates the extent as a local
@@ -22,7 +22,7 @@
   (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
 
 ; Zero the velocity field once.
-(init :name initFluid :buffer velocityBuffer :shader initShader :workgroups (ceil (/ (* GRID_SIZE GRID_SIZE) 64)))
+(init :name initFluid :buffer velocityBuffer :module initShader :workgroups [(ceil (/ (* GRID_SIZE GRID_SIZE) 64))])
 
 (shader-module :name initShader :code """
 struct Velocity { data: array<vec2f> }
@@ -146,9 +146,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }
 """)
 
-(compute-pipeline :name stepPipeline :module stepShader :entry main)
+(compute-pipeline :name stepPipeline :layout auto (compute :module stepShader :entry main))
 
-(bind-group :name stepBindGroup :layout-pipeline stepPipeline :layout-index 0 :pool 2
+(bind-group :name stepBindGroup :layout stepPipeline :group 0 :pool 2
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :buffer velocityBuffer :ping-pong 0)
   (entry :binding 2 :buffer velocityBuffer :ping-pong 1)
@@ -159,7 +159,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   :pipeline stepPipeline
   :bind-groups [stepBindGroup]
   :bind-groups-pool-offsets [0]
-  :dispatch [6 6 1])
+  (dispatch :workgroups [6 6 1]))
 
 (shader-module :name renderShader :code """
 struct Uniforms {
@@ -232,12 +232,12 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 """)
 
 (render-pipeline :name renderPipeline
-  (layout auto)
-  (vertex (module renderShader) (entry vs))
-  (fragment (module renderShader) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module renderShader :entry vs)
+  (fragment :module renderShader :entry fs
+    (target :format preferred-canvas-format)))
 
-(bind-group :name renderBindGroup :layout-pipeline renderPipeline :layout-index 0 :pool 2
+(bind-group :name renderBindGroup :layout renderPipeline :group 0 :pool 2
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :buffer densityBuffer :ping-pong 1)
   (entry :binding 2 :buffer velocityBuffer :ping-pong 1))

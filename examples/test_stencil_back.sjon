@@ -39,11 +39,11 @@
 ; The front face is written out at the WebGPU default (always/keep) on purpose:
 ; the left quad's silence is authored, not inherited.
 (render-pipeline :name writePipe
-  (layout auto)
-  (vertex (module shader) (entry writeVs))
-  (fragment (module shader) (entry writeFs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode none :front-face ccw)
+  :layout auto
+  (vertex :module shader :entry writeVs)
+  (fragment :module shader :entry writeFs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode none :front-face ccw)
   (depth-stencil :format depth24plus-stencil8 :depth-write-enabled false :depth-compare always
     (stencil-front :compare always :pass-op keep)
     (stencil-back :compare always :pass-op replace)))
@@ -52,17 +52,17 @@
 ; that gates. Both faces carry the same equal/keep test so the mask cannot
 ; depend on which way that triangle happens to wind.
 (render-pipeline :name testPipe
-  (layout auto)
-  (vertex (module shader) (entry testVs))
-  (fragment (module shader) (entry testFs)
-    (targets (target :format preferred-canvas-format)))
+  :layout auto
+  (vertex :module shader :entry testVs)
+  (fragment :module shader :entry testFs
+    (target :format preferred-canvas-format))
   (depth-stencil :format depth24plus-stencil8 :depth-write-enabled false :depth-compare always
     (stencil-front :compare equal :pass-op keep)
     (stencil-back :compare equal :pass-op keep)))
 
 (render-pass :name writePass
   (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
-  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+  (depth-stencil-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
     :stencil-load-op clear :stencil-store-op store)
   :pipeline writePipe
   :stencil-reference 1
@@ -70,7 +70,7 @@
 
 (render-pass :name testPass
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depthStencilTex :depth-load-op load :depth-store-op store
+  (depth-stencil-attachment :view depthStencilTex :depth-load-op load :depth-store-op store
     :stencil-load-op load :stencil-store-op store)
   :pipeline testPipe
   :stencil-reference 1

@@ -15,7 +15,7 @@
 ; offsets into those buffers, and the pngine-inputs + pointer-inputs uniforms.
 ;
 ; Shape params are kebab-case (`:radial-subdivisions`, `:body-subdivisions`,
-; `:vertical-subdivisions`, `:faceted`). `:workgroups 6` is ceil(356 / 64):
+; `:vertical-subdivisions`, `:faceted`). `:workgroups [6]` is ceil(356 / 64):
 ; 6 masks + 7 × 50 objects over a 64-wide workgroup. The shaders reference no
 ; `(define …)` — they carry their own WGSL consts, plus PI, which the compiler
 ; substitutes into shader text.
@@ -43,14 +43,14 @@
 
 ; One vertex buffer per shape, in the same order as the `(data …)` forms above,
 ; then the two per-instance storage buffers, then the uniforms.
-(buffer :name planeVB    :size planeVerts    :usage [vertex] :mapped-at-creation planeVerts)
-(buffer :name sphereVB   :size sphereVerts   :usage [vertex] :mapped-at-creation sphereVerts)
-(buffer :name cubeVB     :size cubeVerts     :usage [vertex] :mapped-at-creation cubeVerts)
-(buffer :name torusVB    :size torusVerts    :usage [vertex] :mapped-at-creation torusVerts)
-(buffer :name coneVB     :size coneVerts     :usage [vertex] :mapped-at-creation coneVerts)
-(buffer :name cylinderVB :size cylinderVerts :usage [vertex] :mapped-at-creation cylinderVerts)
-(buffer :name jemVB      :size jemVerts      :usage [vertex] :mapped-at-creation jemVerts)
-(buffer :name diceVB     :size diceVerts     :usage [vertex] :mapped-at-creation diceVerts)
+(buffer :name planeVB    :usage [vertex] :data planeVerts)
+(buffer :name sphereVB   :usage [vertex] :data sphereVerts)
+(buffer :name cubeVB     :usage [vertex] :data cubeVerts)
+(buffer :name torusVB    :usage [vertex] :data torusVerts)
+(buffer :name coneVB     :usage [vertex] :data coneVerts)
+(buffer :name cylinderVB :usage [vertex] :data cylinderVerts)
+(buffer :name jemVB      :usage [vertex] :data jemVerts)
+(buffer :name diceVB     :usage [vertex] :data diceVerts)
 (buffer :name transforms :size 22784        :usage [storage])   ; 356 mat4x4f
 (buffer :name colors     :size 5696         :usage [storage])   ; 356 vec4f
 (buffer :name uniforms   :size 16           :usage [uniform copy-dst])
@@ -178,8 +178,8 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }
 """)
 
-(init :name initTransforms :buffer transforms :shader initShader :workgroups 6)
-(init :name initColors :buffer colors :shader initColorShader :workgroups 6)
+(init :name initTransforms :buffer transforms :module initShader :workgroups [6])
+(init :name initColors :buffer colors :module initColorShader :workgroups [6])
 
 ; ── Render Shader ───────────────────────────────────────────────────────────────
 (shader-module :name renderShader :code """
@@ -290,39 +290,37 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
 
 ; ── Pipelines: stencilSet (compare=always passOp=replace) + stencilMask (compare=equal passOp=keep) ──
 (render-pipeline :name stencilSetPipe
-  (layout auto)
-  (vertex (module renderShader) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 24
-        (attribute :shader-location 0 :offset 0 :format float32x3)
-        (attribute :shader-location 1 :offset 12 :format float32x3))))
-  (fragment (module renderShader) (entry fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module renderShader :entry vs
+    (vertex-buffer :array-stride 24
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)))
+  (fragment :module renderShader :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus-stencil8 :depth-write-enabled true :depth-compare less
     (stencil-front :compare always :pass-op replace)))
 
 (render-pipeline :name stencilMaskPipe
-  (layout auto)
-  (vertex (module renderShader) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 24
-        (attribute :shader-location 0 :offset 0 :format float32x3)
-        (attribute :shader-location 1 :offset 12 :format float32x3))))
-  (fragment (module renderShader) (entry fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module renderShader :entry vs
+    (vertex-buffer :array-stride 24
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)))
+  (fragment :module renderShader :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus-stencil8 :depth-write-enabled true :depth-compare less
     (stencil-front :compare equal :pass-op keep)))
 
 ; ── Bind Groups (4 buffer entries each; binding order 0..3 mirrors the shader) ────
-(bind-group :name maskBG :layout-pipeline stencilSetPipe :layout-index 0
+(bind-group :name maskBG :layout stencilSetPipe :group 0
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :buffer pointerBuf)
   (entry :binding 2 :buffer transforms)
   (entry :binding 3 :buffer colors))
 
-(bind-group :name sceneBG :layout-pipeline stencilMaskPipe :layout-index 0
+(bind-group :name sceneBG :layout stencilMaskPipe :group 0
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :buffer pointerBuf)
   (entry :binding 2 :buffer transforms)
@@ -335,7 +333,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
 ; mask0: clear color + depth + stencil, stencilRef=1
 (render-pass :name mask0
   (color-attachment :view context-current-texture :clear-value [0.2 0.2 0.2 1.0] :load-op clear :store-op store)
-  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+  (depth-stencil-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
     :stencil-load-op clear :stencil-store-op store)
   :pipeline stencilSetPipe
   :vertex-buffers [planeVB]
@@ -346,7 +344,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
 ; mask1..5: load color + stencil, clear depth, stencilRef=2..6
 (render-pass :name mask1
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+  (depth-stencil-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
     :stencil-load-op load :stencil-store-op store)
   :pipeline stencilSetPipe
   :vertex-buffers [planeVB]
@@ -356,7 +354,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
 
 (render-pass :name mask2
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+  (depth-stencil-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
     :stencil-load-op load :stencil-store-op store)
   :pipeline stencilSetPipe
   :vertex-buffers [planeVB]
@@ -366,7 +364,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
 
 (render-pass :name mask3
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+  (depth-stencil-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
     :stencil-load-op load :stencil-store-op store)
   :pipeline stencilSetPipe
   :vertex-buffers [planeVB]
@@ -376,7 +374,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
 
 (render-pass :name mask4
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+  (depth-stencil-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
     :stencil-load-op load :stencil-store-op store)
   :pipeline stencilSetPipe
   :vertex-buffers [planeVB]
@@ -386,7 +384,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
 
 (render-pass :name mask5
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+  (depth-stencil-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
     :stencil-load-op load :stencil-store-op store)
   :pipeline stencilSetPipe
   :vertex-buffers [planeVB]
@@ -397,7 +395,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
 ; scene0 (stencilRef=0 — background where no mask was written) — spheres
 (render-pass :name scene0
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+  (depth-stencil-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
     :stencil-load-op load :stencil-store-op store)
   :pipeline stencilMaskPipe
   :vertex-buffers [sphereVB]
@@ -408,7 +406,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
 ; scene1 (stencilRef=1) — cubes
 (render-pass :name scene1
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+  (depth-stencil-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
     :stencil-load-op load :stencil-store-op store)
   :pipeline stencilMaskPipe
   :vertex-buffers [cubeVB]
@@ -419,7 +417,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
 ; scene2 (stencilRef=2) — tori
 (render-pass :name scene2
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+  (depth-stencil-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
     :stencil-load-op load :stencil-store-op store)
   :pipeline stencilMaskPipe
   :vertex-buffers [torusVB]
@@ -430,7 +428,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
 ; scene3 (stencilRef=3) — cones
 (render-pass :name scene3
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+  (depth-stencil-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
     :stencil-load-op load :stencil-store-op store)
   :pipeline stencilMaskPipe
   :vertex-buffers [coneVB]
@@ -441,7 +439,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
 ; scene4 (stencilRef=4) — cylinders
 (render-pass :name scene4
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+  (depth-stencil-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
     :stencil-load-op load :stencil-store-op store)
   :pipeline stencilMaskPipe
   :vertex-buffers [cylinderVB]
@@ -452,7 +450,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
 ; scene5 (stencilRef=5) — jems (faceted spheres)
 (render-pass :name scene5
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+  (depth-stencil-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
     :stencil-load-op load :stencil-store-op store)
   :pipeline stencilMaskPipe
   :vertex-buffers [jemVB]
@@ -463,7 +461,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
 ; scene6 (stencilRef=6) — dice (faceted tori)
 (render-pass :name scene6
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+  (depth-stencil-attachment :view depthStencilTex :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
     :stencil-load-op load :stencil-store-op store)
   :pipeline stencilMaskPipe
   :vertex-buffers [diceVB]

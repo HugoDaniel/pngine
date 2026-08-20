@@ -376,7 +376,11 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !UniformTable {
                 .name_string_id = std.mem.readInt(u16, data[pos + FIELD_OFF_NAME ..][0..2], .little),
                 .offset = std.mem.readInt(u16, data[pos + FIELD_OFF_OFFSET ..][0..2], .little),
                 .size = std.mem.readInt(u16, data[pos + FIELD_OFF_SIZE ..][0..2], .little),
-                .uniform_type = @enumFromInt(data[pos + FIELD_OFF_TYPE]),
+                // A byte that names no `UniformType` (a newer tag, or a hostile
+                // file) is the enum's own `.unknown`, which every consumer
+                // already skips — never `@enumFromInt` into an exhaustive enum,
+                // which is a Debug panic and release UB in every later switch.
+                .uniform_type = std.enums.fromInt(UniformType, data[pos + FIELD_OFF_TYPE]) orelse .unknown,
                 .elem_count = data[pos + FIELD_OFF_ELEM_COUNT],
             };
             pos += FIELD_BYTES;

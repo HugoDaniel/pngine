@@ -785,12 +785,25 @@ if (!DEBUG) {
     // pre-§350, eight reloads of a textured payload overlapped NINE handler
     // bodies, stranded seven decoded ImageBitmaps in replaced dispatchers, and
     // desynced the shared WASM command buffer ("unknown GPU command 0x0").
-    'viewer.mjs': 50200,
-    'dev.mjs': 54800,
-    'core.mjs': 26700,
+    // viewer/dev/core +600 and mini +100 on 2026-08-16 for spec/09 step D: the
+    // render-pass clear value widened from 4×u8 to 4×f32, which means two new
+    // command opcodes (0x53/0x54) decoded alongside the two they replace. The
+    // legacy pair stays because docs/abi.md clause 1 makes opcode layouts
+    // append-only and this runtime decodes every executor ever shipped — so
+    // most of these bytes are the price of NOT breaking old payloads, not the
+    // price of the feature. mini pays less: pNGf is versioned rather than
+    // frozen, so it carries the f32 arm alone and refuses a v1 chunk outright.
+    // viewer/dev +400 each on 2026-08-19 (third leak pass): recovery releases
+    // the stack it replaces, a failed load's dispatcher is not inherited
+    // (`gpuDirty`), self-recovery rides the dispatch FIFO, `scoped()` pops its
+    // error scope in a `finally`, and a failed worker bring-up detaches its
+    // listeners. Lifecycle correctness, ~100–230 B minified.
+    'viewer.mjs': 51200,
+    'dev.mjs': 55800,
+    'core.mjs': 27300,
     'executor.mjs': 2200,
-    'mini.mjs': 7200,
-    'mini-no-audio.mjs': 6500,
+    'mini.mjs': 7300,
+    'mini-no-audio.mjs': 6600,
   };
   // src/gpu.js hand-authored source ceiling. Briefly raised to 42500 on
   // 2026-07-19 to record creep that had already crossed it (42120 B on a clean
@@ -823,7 +836,10 @@ if (!DEBUG) {
   // a user actually pays. Kept (a module that needs 45 KB of source is worth a
   // second look) but set with the ~3% headroom its own "a ceiling one comment
   // can breach is noise" rule implies, not to the current size.
-  const GPU_SOURCE_BUDGET = 45000;
+  // 2026-08-19: 45000 → 46500 — the `scoped()` try/finally and the bind-group
+  // write-order comments of the third leak pass crossed it by 127 B of prose;
+  // re-set at the same ~3% headroom over today's 45.1 KB.
+  const GPU_SOURCE_BUDGET = 46500;
 
   const violations = [];
   for (const [label, file] of files) {

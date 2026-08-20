@@ -68,6 +68,19 @@ pub const gpu_backends = struct {
     // (it runs Backend(T).validate() and emits no code).
     comptime {
         _ = executor_mod.Dispatcher(NativeGPU);
+
+        // …and NullGPU unconditionally, even when it is NOT the selected
+        // backend. `NativeGPU` above is WgpuNativeGPU whenever
+        // `vendor/wgpu-native` is present, which it is on the macOS host every
+        // gate runs on — so the line above validated the native backend and
+        // left the GPU-less one unchecked. The builds that DO select NullGPU
+        // are the ones nobody makes by hand: the six `zig build npm` cross
+        // targets and the public release cut (a fresh clone has no gitignored
+        // `vendor/`). That is how `begin_render_pass` kept four `u8` clear
+        // values after the contract widened them to `u32` bit patterns — it
+        // broke both, while `zig build`, `drift` and the full suite stayed
+        // green (§377). Comptime-only: it emits no code and links nothing.
+        _ = executor_mod.Dispatcher(headless_gpu.NullGPU);
     }
 
     /// Shared GPU context (instance/adapter/device/queue) for the native

@@ -3,17 +3,17 @@
 (data :name largeData :float32 [
   1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0
   9.0 10.0 11.0 12.0 13.0 14.0 15.0 16.0])
-(buffer :name tinyBuffer :size 16 :usage [vertex copy-dst] :mapped-at-creation largeData)
+(buffer :name tinyBuffer :size 16 :usage [vertex copy-dst] :data largeData)
 (shader-module :name code :code """
     @vertex
     fn vertexMain(@location(0) pos: vec4f) -> @builtin(position) vec4f { return pos; }
     @fragment
     fn fragMain() -> @location(0) vec4f { return vec4(1.0, 0.0, 0.0, 1.0); }
 """)
-(render-pipeline :name pipeline (layout auto)
-  (vertex (module code)(entry vertexMain))
-  (fragment (module code)(entry fragMain)(targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list)))
+(render-pipeline :name pipeline :layout auto
+  (vertex :module code :entry vertexMain)
+  (fragment :module code :entry fragMain (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
 (render-pass :name render :pipeline pipeline
   (color-attachment :view context-current-texture :clear-value [0 0 0 0] :load-op clear :store-op store)
   :vertex-buffers [tinyBuffer]

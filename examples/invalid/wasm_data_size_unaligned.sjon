@@ -1,0 +1,30 @@
+; Invalid: a (buffer :file …) whose WASM `l` export is 6 bytes. PNGine fills a
+; buffer's initial contents with queue.writeBuffer, and WebGPU requires the
+; written size to be a multiple of 4 (the same rule the schema already spells
+; on the offset side, `byte-count-4-aligned` on :offset). Six bytes is a
+; writeBuffer validation error in the browser and an abort natively.
+;
+; Not the schema's: the length is not in the document at all. It comes from
+; the WASM's exported global, from a shape generator's index companion (an ODD
+; triangle count with uint16 indices lands here too), or from a (data …) blob.
+; The emitter is the only place that knows it.
+(shader-module :name code :code """
+@group(0) @binding(0) var<storage, read> src : array<u32>;
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0) * f32(src[0]);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+(buffer :name odd :file "odd_size_data.wasm" :usage [storage])
+(bind-group :name g :layout pipe :group 0
+  (entry :binding 0 :buffer odd))
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline pipe :bind-groups [g]
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

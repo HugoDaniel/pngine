@@ -20,16 +20,17 @@
   """)
 
 (render-pipeline :name pipe
-  (layout auto)
-  (vertex (module shader) (entry vs))
-  (fragment (module shader) (entry fs)
-    (targets (target :format preferred-canvas-format)))
+  :layout auto
+  (vertex :module shader :entry vs)
+  (fragment :module shader :entry fs
+    (target :format preferred-canvas-format))
   (depth-stencil :format depth24plus-stencil8 :depth-write-enabled true :depth-compare less
     (stencil-front :compare equal :pass-op keep)))
 
 (render-pass :name draw
   (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
-  (depth-attachment :view dsTex :depth-clear-value 0.4 :stencil-clear-value 7)
+  (depth-stencil-attachment :view dsTex :depth-clear-value 0.4 :depth-load-op clear :depth-store-op store
+    :stencil-clear-value 7 :stencil-load-op clear :stencil-store-op store)
   :pipeline pipe
   :stencil-reference 7
   (draw :vertex-count 12))

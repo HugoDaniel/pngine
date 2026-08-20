@@ -1,0 +1,28 @@
+; INVALID: a (render-bundle ...) that records no draw.
+;
+; A bundle IS a recorded draw -- a pass replays it instead of issuing its own
+; -- so a bundle with no (draw ...) child records nothing and the replaying
+; pass renders nothing (the same opinion as the empty compute pass).
+;
+; It used to be `:draw N` and `:draw-indexed N`, two optional keys. A bundle
+; with neither encoded drawType 0 with a vertex count of 0: a create_render_bundle
+; opcode, an executeBundles that ran it, and a frame that drew nothing, with a
+; zero exit code and no diagnostic anywhere.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.0, 1.0); }
+""")
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+(render-bundle :name b :pipeline pipe
+  :color-formats [preferred-canvas-format])
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :execute-bundles [b])
+(frame :name main :perform [draw])

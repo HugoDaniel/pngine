@@ -20,10 +20,10 @@
   """)
 
 (render-pipeline :name pipe
-  (layout auto)
-  (vertex (module shader) (entry vs))
-  (fragment (module shader) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module shader :entry vs)
+  (fragment :module shader :entry fs
+    (target :format preferred-canvas-format)))
 
 (render-pass :name drawPass
   (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)

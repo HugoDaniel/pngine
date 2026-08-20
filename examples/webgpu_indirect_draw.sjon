@@ -34,20 +34,20 @@ fn fragMain() -> @location(0) vec4f {
 
 (buffer :name drawArgs :size 16 :usage [storage indirect])
 
-(compute-pipeline :name seedPipe :module seedCode :entry seedArgs)
+(compute-pipeline :name seedPipe :layout auto (compute :module seedCode :entry seedArgs))
 
-(bind-group :name seedGroup :layout-pipeline seedPipe :layout-index 0
+(bind-group :name seedGroup :layout seedPipe :group 0
   (entry :binding 0 :buffer drawArgs))
 
 (compute-pass :name seedPass :pipeline seedPipe :bind-groups [seedGroup]
-  :dispatch-workgroups 1)
+  (dispatch :workgroups [1]))
 
 (render-pipeline :name pipeline
-  (layout auto)
-  (vertex (module drawCode) (entry vertexMain))
-  (fragment (module drawCode) (entry fragMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list)))
+  :layout auto
+  (vertex :module drawCode :entry vertexMain)
+  (fragment :module drawCode :entry fragMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
 
 (render-pass :name drawPass
   (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)

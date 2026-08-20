@@ -155,30 +155,42 @@ fn reportFailure(
     diag: *const pngine.dsl_sjon.Compiler.Diag,
     err: anyerror,
 ) u8 {
-    const generic = genericMessage(err);
+    const msg = failureMessage(diag, genericMessage(err));
 
     if (opts.json_output) {
         // `diagnostics` is the structured, located array: SJON structural
         // rejects AND Emitter cross-validation checks both carry real line/col
         // (+ a code / WGSL-module tag), one entry per offending form — a
         // multi-shader document reports every broken shader, not just the first.
-        // (A genuinely unlocatable check — a used-but-unbound binding with no
-        // SJON node — stays an unlocated headline and is omitted from the array;
-        // its `message` still carries the detail.) The top-level `message` stays
-        // the generic class string for a stable envelope shape.
+        // A genuinely unlocatable check — a used-but-unbound binding with no
+        // SJON node, an unreadable file behind a hook-lowered form — stays an
+        // unlocated headline and is omitted from the array, so `message` is
+        // that refusal's whole report and carries the headline, not the class
+        // string. (It used to carry the class string, and a document whose
+        // only fault was a missing file answered `"emit failed"` with an
+        // empty array — indistinguishable, to a gate, from having no answer.)
         var jbuf: [32 * 1024]u8 = undefined;
         const n = diag.writeJson(&jbuf);
-        const line = std.fmt.allocPrint(allocator, "{{\"status\":\"error\",\"message\":\"{s}\",\"diagnostics\":{s}}}\n", .{ generic, jbuf[0..n] }) catch return 1;
+        const quoted = std.json.Stringify.valueAlloc(allocator, msg, .{}) catch return 1;
+        defer allocator.free(quoted);
+        const line = std.fmt.allocPrint(allocator, "{{\"status\":\"error\",\"message\":{s},\"diagnostics\":{s}}}\n", .{ quoted, jbuf[0..n] }) catch return 1;
         defer allocator.free(line);
         utils.writeStdout(io, line) catch {};
     } else {
-        // Human output: prefer the domain-labeled message (real WGSL detail)
-        // when the Emitter captured one; else the generic class string.
-        const msg: []const u8 = if (diag.set) diag.message() else generic;
         std.debug.print("{s}: {s}\n", .{ stdio.displayName(opts.input), msg });
         printLocatedErrors(diag);
     }
     return 1;
+}
+
+/// The headline of a failed validation, for BOTH output modes: the Emitter's
+/// domain-labeled message when it captured one (a WGSL error, an unreadable
+/// file, an unbound binding), else the error class string. Located entries
+/// are the detail; this is the one line that must never say less than the
+/// terminal does.
+fn failureMessage(diag: *const pngine.dsl_sjon.Compiler.Diag, generic: []const u8) []const u8 {
+    std.debug.assert(generic.len > 0);
+    return if (diag.set) diag.message() else generic;
 }
 
 /// Whether `--strict` turns a SUCCESSFUL validation into exit 1.
@@ -335,7 +347,7 @@ fn printHelp() void {
         \\print as warnings and, by default, never change the exit code — pass
         \\--strict to turn any warning into exit 1 (for CI).
         \\
-        \\  An unused BINDING is the one worth acting on: `(layout auto)` strips
+        \\  An unused BINDING is the one worth acting on: `:layout auto` strips
         \\  bindings no entry point uses, which desyncs any (bind-group ...) that
         \\  binds them and otherwise surfaces only as an opaque abort at render
         \\  time.

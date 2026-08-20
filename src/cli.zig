@@ -24,6 +24,7 @@
 //! | 4 | Format error (PNG/PNGB) |
 //! | 5 | Execution error |
 //! | 6 | Validation warning |
+//! | 99 | Internal: memory leaked (Debug/ReleaseSafe builds only — the leak report precedes it) |
 //!
 //! ## Module Organization
 //!
@@ -51,11 +52,35 @@ const stdio = @import("cli/stdio.zig");
 pub const test_utils = @import("test_utils.zig");
 
 /// CLI entry point.
-pub fn main(init: std.process.Init.Minimal) !void {
+///
+/// The exit code is RETURNED, never `std.process.exit`ed from inside the
+/// command: `exit` skips every `defer`, and the old shape (`defer _ =
+/// gpa_state.deinit(); … std.process.exit(code)`) meant the leak checker
+/// never ran and its verdict was discarded when it did — so no spawned e2e
+/// test could ever see a command leak. Now the command runs inside
+/// `mainWithIo`, whose defers release the io context and argv before the
+/// allocator is checked, and a leak in a Debug/ReleaseSafe build is exit 99
+/// after the allocator's own report (ReleaseFast's allocator does not track,
+/// so a shipping binary never pays for or reports this). (Third leak pass)
+pub fn main(init: std.process.Init.Minimal) u8 {
     var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa_state.deinit();
-    const gpa = gpa_state.allocator();
+    const code = mainWithIo(gpa_state.allocator(), init) catch |err| blk: {
+        std.debug.print("Error: {s}\n", .{@errorName(err)});
+        break :blk 1;
+    };
+    if (gpa_state.deinit() == .leak) {
+        std.debug.print("pngine: internal error — memory leaked (report above); exit 99\n", .{});
+        return LEAK_EXIT_CODE;
+    }
+    return code;
+}
 
+/// Exit code for a leak detected at exit (Debug/ReleaseSafe only). Outside the
+/// 0..6 range the commands use, so a test that spawns the binary can tell a
+/// leak from any command outcome.
+pub const LEAK_EXIT_CODE: u8 = 99;
+
+fn mainWithIo(gpa: std.mem.Allocator, init: std.process.Init.Minimal) !u8 {
     var threaded: std.Io.Threaded = .init(gpa, .{
         .environ = init.environ,
         .argv0 = .init(init.args),
@@ -68,15 +93,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     if (args.len < 2) {
         printUsage();
-        std.process.exit(1);
+        return 1;
     }
-
-    const exit_code = try run(gpa, args, io);
-    std.process.exit(exit_code);
+    return run(gpa, args, io);
 }
 
-/// Parse arguments and dispatch to appropriate command.
-fn run(allocator: std.mem.Allocator, args: []const [:0]const u8, io: std.Io) !u8 {
+/// Parse arguments and dispatch to appropriate command. `pub` so the
+/// in-process e2e (tests/zig/cli/inprocess_test.zig) can drive every command
+/// under `std.testing.allocator` — the only leak-checked path through them.
+pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8, io: std.Io) !u8 {
     std.debug.assert(args.len >= 1);
 
     if (args.len < 2) {

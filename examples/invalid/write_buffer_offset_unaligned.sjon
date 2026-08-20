@@ -1,0 +1,30 @@
+; INVALID: a (write-buffer ...) at a byte offset that is not a multiple of 4.
+;
+; GPUQueue.writeBuffer requires bufferOffset % 4 == 0. The schema's description
+; said so; nothing checked it, and the browser rejected the write at frame time.
+; `write-buffer :offset` is now `byte-count-4-aligned` -- `(numeric-bounds
+; :multiple-of 4)`, SJON 1.3 -- so the literal is a located `number_not_multiple`.
+; Same kind on copy-buffer-to-buffer offsets/size and
+; vertex-buffer :array-stride; resolve-query-set :destination-offset is 256-aligned.
+(shader-module :name code :code """
+@group(0) @binding(0) var<uniform> u : vec4f;
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return u; }
+""")
+(buffer :name u :size 16 :usage [uniform copy-dst])
+(data :name d :float32 [1 0 0 1])
+(queue :name upload (write-buffer :buffer u :offset 2 :data d))
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+(bind-group :name g :layout pipe :group 0
+  (entry :binding 0 :buffer u))
+(render-pass :name draw :pipeline pipe :bind-groups [g]
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :before [upload] :perform [draw])

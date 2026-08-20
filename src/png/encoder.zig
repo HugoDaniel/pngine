@@ -237,9 +237,10 @@ fn compress(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     std.debug.assert(data.len > 0);
 
     // Allocate output buffer - compressed size is usually smaller than input,
-    // but worst case for incompressible data is ~0.1% larger plus headers
-    // Use input size + 1KB for headers/overhead as initial estimate
-    const initial_capacity = data.len + 1024;
+    // but incompressible data (noise pixels) expands by ~0.17% at level 6
+    // (measured: +7,079 B for 4 MiB); `len + 1024` overflowed the fixed writer
+    // from ~600 KiB up. 1.5% + 1 KiB is ~9× the measured expansion.
+    const initial_capacity = data.len + data.len / 64 + 1024;
     var output_buf = try allocator.alloc(u8, initial_capacity);
     errdefer allocator.free(output_buf);
 

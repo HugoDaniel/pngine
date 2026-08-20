@@ -1,0 +1,33 @@
+; INVALID: a (render-pipeline ...) and a (compute-pipeline ...) with the same :name.
+;
+; `bind-group-layout-spec` (a bind-group's :layout) accepts either kind. It used
+; to be a union tried render-first, while the emitter kept ONE id table for both
+; kinds in which the LAST declaration won -- so `:layout same` validated
+; against the render pipeline and bound the compute pipeline's layout. Silent
+; wrong output.
+;
+; `bind-group-layout-spec` is now one cross-ref over the three forms it may
+; name (render-pipeline, compute-pipeline, bind-group-layout) -- one
+; namespace -- so the second declaration is a located `duplicate_cross_ref_target`
+; and the reference can never be ambiguous (target groups).
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+@compute @workgroup_size(1) fn cs() {}
+""")
+(render-pipeline :name same :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+(compute-pipeline :name same :layout auto (compute :module code :entry cs))
+(buffer :name u :size 16 :usage [uniform copy-dst])
+(bind-group :name g :layout same :group 0
+  (entry :binding 0 :buffer u))
+(render-pass :name draw :pipeline same
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

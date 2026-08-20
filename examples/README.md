@@ -24,20 +24,23 @@ exercises. Read that header first — it is more specific than this index.
 
 | Group | Files |
 |-------|-------|
-| **Basics** | `simple_triangle`, `simple_triangle_msaa`, `moving_triangle`, `rotating_cube`, `two_cubes`, `uniform_access`, `pipeline_layout`, `pipeline_constants`, `primitive_strip`, `test_viewport`, `test_define_wgsl`, `transparent_canvas` |
+| **Basics** | `simple_triangle`, `simple_triangle_msaa`, `moving_triangle`, `rotating_cube`, `two_cubes`, `uniform_access`, `pipeline_layout`, `pipeline_constants`, `primitive_strip`, `test_viewport`, `test_define_wgsl`, `transparent_canvas`, `test_multi_draw` (several draws in one pass), `test_instanced_simple` / `test_instanced_builtin` (instanced draws with and without vertex buffers), `test_bind_offset` (a bind-group buffer slice) |
 | **Fullscreen fragment** | `circle_avalanche`, `domino_cascade`, `tower_explosion`, `pngine_logo`, `pristine_grid` |
 | **`(pass …)` sugar** | `pass_shader_art`, `pass_bloom`, `pass_postprocess`, `pass_compute_rainbow`, `pass_pointer` |
-| **Compute / simulation** | `boids`, `boids_init_only`, `pngine_background`, `test_compute_dispatch`, `test_init_compute`, `test_storage_buffer`, `test_boids_render` |
+| **Compute / simulation** | `boids`, `boids_init_only`, `pngine_background`, `test_compute_dispatch`, `test_init_compute`, `test_storage_buffer`, `test_boids_render` (and the `boids_*` triangles below) |
 | **Meshes** | `teapot` (Utah teapot), `dragon` (Stanford dragon, ~222 KB payload), `textured_rotating_cube`, `wasm_rotated_cube`, `normal_map`, `cubemap` |
-| **Textures & samplers** | `texture_options`, `texture_view`, `sampler_options`, `image_blur`, `test_stencil`, `test_stencil_back`, `test_copy_buffer`, `test_copy_texture` |
+| **Textures & samplers** | `texture_options`, `texture_view`, `sampler_options`, `image_blur`, `test_cube_view` (a `2d-array` storage view, then a cube view), `test_copy_buffer`, `test_copy_texture` |
+| **Depth, stencil & MSAA** | `test_stencil`, `test_stencil_back`, `test_depth_clear` (depth/stencil clear values), `reversed_z` (reversed-Z depth, a webgpu-samples port), `alpha_to_coverage` (alpha-to-coverage vs blending in one 4x MSAA attachment) |
 | **WASM data buffers** | `test_data_pass`, `test_wasm_data` (+ `test_data.wat` / `.wasm` sources) |
 | **WebGPU sample ports** | `webgpu_*` — ports of the upstream [webgpu-samples](https://webgpu.github.io/webgpu-samples/) gallery, plus a few focused feature programs in the same style |
 
 The `boids_*` family: `boids.sjon` is a compute simulation with ping-pong pool
 buffers and an instanced draw; `boids_init_only` seeds a buffer with an
-`(init …)` compute pass; the remaining `boids_*` files are single hardcoded
-triangles that differ in one detail each (a fragment colour, a define, a data
-generator). The three fullscreen-fragment programs named after physics demos
+`(init …)` compute pass; the remaining five (`boids_minimal`, `boids_simple`,
+`boids_array_only`, `boids_const_data`, `boids_define_only`) are single
+hardcoded triangles that differ in one detail each (a fragment colour, an
+unused define) — despite the names, none has a `(data …)` or a compute pass.
+The three fullscreen-fragment programs named after physics demos
 (`circle_avalanche`, `domino_cascade`, `tower_explosion`) are single-quad SDF
 shaders, not simulations.
 

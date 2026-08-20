@@ -141,6 +141,11 @@ fn operandWidth(cmd: Cmd, data: []const u8, p: u32) !u32 {
             // count + attachments (tex_id:2 load:1 store:1 rgba:4) + depth_id:2
             break :blk 1 + @as(u32, data[p]) * 8 + 2;
         },
+        .begin_render_pass_mrt_f32 => blk: {
+            if (remaining < 1) return error.Truncated;
+            // count + attachments (tex_id:2 load:1 store:1 rgba:16) + depth_id:2
+            break :blk 1 + @as(u32, data[p]) * 20 + 2;
+        },
         .execute_bundles => blk: {
             if (remaining < 1) return error.Truncated;
             break :blk 1 + @as(u32, data[p]) * 2; // count + bundle ids
@@ -165,7 +170,7 @@ fn operandWidth(cmd: Cmd, data: []const u8, p: u32) !u32 {
         .write_buffer, .write_buffer_from_wasm => 14,
         .draw, .set_scissor_rect, .set_blend_constant, .copy_buffer_to_buffer, .resolve_query_set => 16,
         .draw_indexed => 20,
-        .set_viewport => 24,
+        .set_viewport, .begin_render_pass_f32 => 24,
     };
 }
 
@@ -203,6 +208,7 @@ fn parseParams(cmd: Cmd, data: []const u8, pos: *u32) !ParsedCommand.Params {
         => decodeCreateParams(cmd, data, p),
 
         .begin_render_pass,
+        .begin_render_pass_f32,
         .set_pipeline,
         .set_bind_group,
         .set_vertex_buffer,
@@ -281,6 +287,17 @@ fn decodePassParams(cmd: Cmd, data: []const u8, p: u32) ParsedCommand.Params {
             .clear_g = data[p + 7],
             .clear_b = data[p + 8],
             .clear_a = data[p + 9],
+        } },
+        .begin_render_pass_f32 => .{ .begin_render_pass_f32 = .{
+            .color_id = readU16(data, p),
+            .load_op = data[p + 2],
+            .store_op = data[p + 3],
+            .depth_id = readU16(data, p + 4),
+            .clear_r_bits = readU32(data, p + 6),
+            .clear_g_bits = readU32(data, p + 10),
+            .clear_b_bits = readU32(data, p + 14),
+            .clear_a_bits = readU32(data, p + 18),
+            .resolve_id = readU16(data, p + 22),
         } },
         .set_pipeline => .{ .set_pipeline = .{ .id = readU16(data, p) } },
         .set_bind_group => .{ .set_bind_group = .{
@@ -415,7 +432,14 @@ const testing = std.testing;
 /// one property that matters (that they correspond).
 fn writeOneOfEveryCommand(cb: *pngine.command_buffer.CommandBuffer) []const Cmd {
     const Att = pngine.emitter.Emitter.ColorAttachment;
-    const atts = [_]Att{.{ .texture_id = 7, .load_op = .clear, .store_op = .store, .clear_r = 1, .clear_g = 2, .clear_b = 3, .clear_a = 4 }};
+    // Two attachment shapes because there are two MRT opcodes: 0x1B takes 0-255
+    // bytes and 0x54 takes f32 bit patterns (spec/09 step D). The legacy pair is
+    // retired from emission but still decoded, so both belong in a table whose
+    // job is one writer call per opcode.
+    const atts = [_]Att{.{ .texture_id = 7, .load_op = .clear, .store_op = .store, .clear_r_bits = 1, .clear_g_bits = 2, .clear_b_bits = 3, .clear_a_bits = 4 }};
+    const legacy_atts = [_]pngine.command_buffer.CommandBuffer.LegacyColorAttachment{
+        .{ .texture_id = 7, .load_op = 1, .store_op = 0, .clear_r = 1, .clear_g = 2, .clear_b = 3, .clear_a = 4 },
+    };
 
     cb.createBuffer(1, 256, 0x20);
     cb.createTexture(2, 100, 20);
@@ -453,7 +477,13 @@ fn writeOneOfEveryCommand(cb: *pngine.command_buffer.CommandBuffer) []const Cmd 
     cb.executeBundles(&[_]u16{ 13, 30 });
     cb.endPass();
 
-    cb.beginRenderPassMRT(&atts, 31);
+    cb.beginRenderPassMRT(&legacy_atts, 31);
+    cb.endPass();
+
+    cb.beginRenderPassF32(14, 1, 2, 15, 10, 20, 30, 40, 16);
+    cb.endPass();
+
+    cb.beginRenderPassMrtF32(&atts, 31);
     cb.endPass();
 
     cb.beginComputePass();
@@ -486,6 +516,7 @@ fn writeOneOfEveryCommand(cb: *pngine.command_buffer.CommandBuffer) []const Cmd 
         .set_pipeline,              .set_bind_group,                 .set_vertex_buffer,          .set_index_buffer,
         .draw,                      .draw_indexed,                   .draw_indirect,              .draw_indexed_indirect,
         .execute_bundles,           .end_pass,                       .begin_render_pass_mrt,      .end_pass,
+        .begin_render_pass_f32,     .end_pass,                       .begin_render_pass_mrt_f32,  .end_pass,
         .begin_compute_pass,        .dispatch,                       .dispatch_indirect,          .end_pass,
         .write_buffer,              .write_time_uniform,             .write_pointer_uniform,      .copy_buffer_to_buffer,
         .copy_texture_to_texture,   .copy_external_image_to_texture, .write_buffer_from_wasm,     .resolve_query_set,

@@ -1,0 +1,24 @@
+; Invalid: a render-pass with no (color-attachment …) and no
+; (depth-stencil-attachment …). WebGPU's beginRenderPass needs somewhere to
+; write: a descriptor with an empty colorAttachments list and no
+; depthStencilAttachment is a validation error.
+;
+; PNGine used to fill the gap by inventing one -- zero attachments meant "the
+; canvas", an attachment the document never wrote. That is R6's defect (a
+; value the IDL does not default, supplied by the DSL), and no document in the
+; corpus relied on it: all 237 render-passes state their attachments, and the
+; `(pass …)` sugar synthesizes a (color-attachment …) of its own.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline pipe
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

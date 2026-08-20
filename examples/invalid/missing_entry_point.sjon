@@ -10,10 +10,10 @@
     @fragment
     fn fragMain() -> @location(0) vec4f { return vec4(1.0, 0.0, 0.0, 1.0); }
 """)
-(render-pipeline :name pipeline (layout auto)
-  (vertex (module code)(entry nonExistentVertex))
-  (fragment (module code)(entry fragMain)(targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list)))
+(render-pipeline :name pipeline :layout auto
+  (vertex :module code :entry nonExistentVertex)
+  (fragment :module code :entry fragMain (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
 (render-pass :name render :pipeline pipeline
   (color-attachment :view context-current-texture :clear-value [0 0 0 0] :load-op clear :store-op store)
   (draw :vertex-count 3))

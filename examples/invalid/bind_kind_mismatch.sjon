@@ -12,11 +12,11 @@
 }
 """)
 (buffer :name buf :size 256 :usage [storage copy-dst])
-(render-pipeline :name pipe (layout auto)
-  (vertex (module code) (entry vs))
-  (fragment (module code) (entry fs)
-    (targets (target :format preferred-canvas-format))))
-(bind-group :name g0 :layout-pipeline pipe :layout-index 0
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+(bind-group :name g0 :layout pipe :group 0
   (entry :binding 0 :buffer buf))
 (render-pass :name draw :pipeline pipe :bind-groups [g0]
   (color-attachment :view context-current-texture

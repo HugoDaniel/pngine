@@ -9,8 +9,8 @@
 }
 """)
 (buffer :name buf :size 256 :usage [storage copy-dst])
-(compute-pipeline :name cp :module code :entry main)
-(bind-group :name g0 :layout-pipeline cp :layout-index 0
+(compute-pipeline :name cp :layout auto (compute :module code :entry main))
+(bind-group :name g0 :layout cp :group 0
   (entry :binding 0 :buffer buf))
-(compute-pass :name step :pipeline cp :bind-groups [g0] :dispatch-workgroups 1)
+(compute-pass :name step :pipeline cp :bind-groups [g0] (dispatch :workgroups [1]))
 (frame :name main :perform [step])

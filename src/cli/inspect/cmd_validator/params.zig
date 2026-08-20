@@ -232,6 +232,21 @@ pub const CreateShaderParams = struct { id: u16, code_ptr: u32, code_len: u32 };
 pub const CreateBindGroupParams = struct { id: u16, layout_id: u16, entries_ptr: u32, entries_len: u32 };
 pub const CreateTextureViewParams = struct { id: u16, texture_id: u16, desc_ptr: u32, desc_len: u32 };
 pub const BeginRenderPassParams = struct { color_id: u16, load_op: u8, store_op: u8, depth_id: u16, clear_r: u8 = 0, clear_g: u8 = 0, clear_b: u8 = 0, clear_a: u8 = 0 };
+/// BEGIN_RENDER_PASS_F32 (0x53) — the pass every 3.0.0 payload opens with; the
+/// clear value is four f32 bit patterns and a resolve target follows. The
+/// symptom checks read `load_op` from here as they do from the 4×u8 form
+/// (audit 09 C4).
+pub const BeginRenderPassF32Params = struct {
+    color_id: u16,
+    load_op: u8,
+    store_op: u8,
+    depth_id: u16,
+    clear_r_bits: u32 = 0,
+    clear_g_bits: u32 = 0,
+    clear_b_bits: u32 = 0,
+    clear_a_bits: u32 = 0,
+    resolve_id: u16,
+};
 pub const SetPipelineParams = struct { id: u16 };
 pub const SetBindGroupParams = struct { slot: u8, id: u16 };
 pub const SetVertexBufferParams = struct { slot: u8, id: u16 };
@@ -267,6 +282,7 @@ pub const ParsedCommand = struct {
         create_bind_group: CreateBindGroupParams,
         create_texture_view: CreateTextureViewParams,
         begin_render_pass: BeginRenderPassParams,
+        begin_render_pass_f32: BeginRenderPassF32Params,
         set_pipeline: SetPipelineParams,
         set_bind_group: SetBindGroupParams,
         set_vertex_buffer: SetVertexBufferParams,

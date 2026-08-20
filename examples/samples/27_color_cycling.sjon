@@ -1,4 +1,4 @@
-; Color cycling — a fullscreen triangle cycling every few seconds through four
+; Color cycling: a fullscreen triangle cycling every few seconds through four
 ; palette-animated patterns (plasma, concentric rings, diagonal stripes, radial
 ; rainbow), each mapping a pattern index through a time-shifted HSV hue. Driven
 ; by a pngine-inputs uniform.
@@ -85,17 +85,17 @@
   """)
 
 (render-pipeline :name pipeline
-  (layout auto)
-  (vertex (module shader) (entry vs))
-  (fragment (module shader) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module shader :entry vs)
+  (fragment :module shader :entry fs
+    (target :format preferred-canvas-format)))
 
 (buffer :name uniforms :size 16 :usage [uniform copy-dst])
 
 (queue :name writeUniforms
   (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
 
-(bind-group :name uniformsBindGroup :layout-pipeline pipeline :layout-index 0
+(bind-group :name uniformsBindGroup :layout pipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
 (render-pass :name mainPass

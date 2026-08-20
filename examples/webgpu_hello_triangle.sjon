@@ -2,7 +2,7 @@
 ; positions live in an `array<vec2f, 3>` inside the vertex shader, indexed by
 ; `@builtin(vertex_index)`; there is no vertex buffer, no uniform and no
 ; bind-group — one shader, one pipeline, one render pass, `:vertex-count 3`.
-; The `(primitive (topology triangle-list))` form spells out the WebGPU default
+; The `(primitive :topology triangle-list)` form spells out the WebGPU default
 ; explicitly.
 
 (shader-module :name code :code """
@@ -22,16 +22,16 @@
     }
   """)
 
-(render-pipeline :name pipeline
-  (layout auto)
-  (vertex (module code) (entry vs))
-  (fragment (module code) (entry fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list)))
+(render-pipeline :name my-pipeline
+  :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
 
-(render-pass :name pass
+(render-pass :name my-pass
   (color-attachment :view context-current-texture :clear-value [0 0 0 0] :load-op clear :store-op store)
-  :pipeline pipeline
+  :pipeline my-pipeline
   (draw :vertex-count 3))
 
-(frame :name main :perform [pass])
+(frame :name main :perform [my-pass])

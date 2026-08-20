@@ -1,4 +1,4 @@
-; Wireframe cube — a rotating cube drawn as 12 line segments with `line-list`
+; Wireframe cube: a rotating cube drawn as 12 line segments with `line-list`
 ; topology; brightness falls off with depth. Exercises a float32 vertex buffer
 ; consumed as line pairs and a pngine-inputs uniform.
 
@@ -73,8 +73,8 @@
   -1 -1 1    -1 1 1
 ])
 
-(buffer :name vertexBuffer :size lineVertices :usage [vertex]
-  :mapped-at-creation lineVertices)
+(buffer :name vertexBuffer :usage [vertex]
+  :data lineVertices)
 
 (buffer :name uniforms :size 16 :usage [uniform copy-dst])
 
@@ -82,16 +82,15 @@
   (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
 
 (render-pipeline :name pipeline
-  (layout auto)
-  (vertex (module shader) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 12
-        (attribute :shader-location 0 :offset 0 :format float32x3))))
-  (fragment (module shader) (entry fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology line-list)))
+  :layout auto
+  (vertex :module shader :entry vs
+    (vertex-buffer :array-stride 12
+      (attribute :shader-location 0 :offset 0 :format float32x3)))
+  (fragment :module shader :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology line-list))
 
-(bind-group :name uniformsBindGroup :layout-pipeline pipeline :layout-index 0
+(bind-group :name uniformsBindGroup :layout pipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
 (render-pass :name mainPass

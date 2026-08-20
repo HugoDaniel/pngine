@@ -1,8 +1,8 @@
 ; test_compute_dispatch — a compute pass with a single workgroup dispatch writes
 ; a storage buffer, then a plain yellow triangle renders. The triangle does not
-; read the buffer; the file exercises the flat `:module/:entry` compute-pipeline
-; form, a `:layout-pipeline/:layout-index` bind group and
-; `:dispatch-workgroups 1`, with no pool or ping-pong.
+; read the buffer; the file exercises the `(compute :module … :entry …)`
+; compute-pipeline stage, a `:layout`/`:group` bind group and
+; `(dispatch :workgroups [1])`, with no pool or ping-pong.
 
 (shader-module :name computeShader :code """
 struct Data {
@@ -38,21 +38,21 @@ fn fragMain() -> @location(0) vec4f {
 (buffer :name storageBuffer :size 256 :usage [storage])
 
 (render-pipeline :name renderPipeline
-  (layout auto)
-  (vertex (module renderShader) (entry vertexMain))
-  (fragment (module renderShader) (entry fragMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list)))
+  :layout auto
+  (vertex :module renderShader :entry vertexMain)
+  (fragment :module renderShader :entry fragMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
 
-(compute-pipeline :name computePipeline :module computeShader :entry main)
+(compute-pipeline :name computePipeline :layout auto (compute :module computeShader :entry main))
 
-(bind-group :name computeBindGroup :layout-pipeline computePipeline :layout-index 0
+(bind-group :name computeBindGroup :layout computePipeline :group 0
   (entry :binding 0 :buffer storageBuffer))
 
 (compute-pass :name computePass
   :pipeline computePipeline
   :bind-groups [computeBindGroup]
-  :dispatch-workgroups 1)
+  (dispatch :workgroups [1]))
 
 (render-pass :name renderPass
   (color-attachment :view context-current-texture :clear-value [0.0 0.0 0.0 1.0] :load-op clear :store-op store)

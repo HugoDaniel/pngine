@@ -13,7 +13,7 @@
 ; host page.
 
 (data :name planeVerts (plane :format [position3 uv2]))
-(buffer :name vb :size planeVerts :usage [vertex] :mapped-at-creation planeVerts)
+(buffer :name vb :usage [vertex] :data planeVerts)
 (buffer :name inputs :size 16 :usage [uniform copy-dst])
 
 ; lineWidth.xy = minor UV half-width, .zw = major; colors are RGBA.
@@ -23,7 +23,7 @@
   0.35 0.36 0.40 1.0
   0.70 0.75 0.85 1.0
 ])
-(buffer :name gridParams :size 64 :usage [uniform] :mapped-at-creation gridParamsData)
+(buffer :name gridParams :size 64 :usage [uniform] :data gridParamsData)
 
 (shader-module :name code :code """
 struct PngineInputs {
@@ -133,16 +133,15 @@ fn fsMain(
 """)
 
 (render-pipeline :name pipe
-  (layout auto)
-  (vertex (module code) (entry vsMain)
-    (buffers
-      (vertex-buffer :array-stride 20
-        (attribute :shader-location 0 :offset 0 :format float32x3)
-        (attribute :shader-location 1 :offset 12 :format float32x2))))
-  (fragment (module code) (entry fsMain)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module code :entry vsMain
+    (vertex-buffer :array-stride 20
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x2)))
+  (fragment :module code :entry fsMain
+    (target :format preferred-canvas-format)))
 
-(bind-group :name g :layout-pipeline pipe :layout-index 0
+(bind-group :name g :layout pipe :group 0
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :buffer gridParams))
 

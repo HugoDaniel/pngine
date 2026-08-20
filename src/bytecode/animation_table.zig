@@ -30,6 +30,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const opcodes = @import("opcodes.zig");
+const wire = @import("wire_schema.zig");
 
 /// Maximum scenes per animation.
 const MAX_SCENES: u16 = 256;
@@ -206,11 +207,18 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !AnimationTable {
 
     const loop = (flags & 2) != 0;
 
+    // The table is tolerant of TRUNCATION (a short table is an empty table),
+    // and refuses MALFORMATION: a varint that does not fit its u16, a byte that
+    // names no `EndBehavior`. Every varint read is the length-tolerant
+    // `decode_varint_safe` — the asserting decoder, guarded only by `pos <
+    // len`, trapped on a multi-byte lead at EOF. (Third leak pass)
+
     // Read name_string_id
     if (pos >= data.len) return AnimationTable.empty;
-    const name_result = opcodes.decode_varint(data[pos..]);
+    const name_result = opcodes.decode_varint_safe(data[pos..]);
+    if (name_result.len == 0) return AnimationTable.empty;
     pos += name_result.len;
-    const name_string_id: u16 = @intCast(name_result.value);
+    const name_string_id: u16 = wire.narrowU16(name_result.value) catch return error.InvalidAnimationTable;
 
     // Read duration_ms
     if (pos + 4 > data.len) return AnimationTable.empty;
@@ -219,28 +227,34 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !AnimationTable {
 
     // Read end_behavior
     if (pos >= data.len) return AnimationTable.empty;
-    const end_behavior: EndBehavior = @enumFromInt(data[pos]);
+    const end_behavior = std.enums.fromInt(EndBehavior, data[pos]) orelse return error.InvalidAnimationTable;
     pos += 1;
 
     // Read scene_count
     if (pos >= data.len) return AnimationTable.empty;
-    const count_result = opcodes.decode_varint(data[pos..]);
+    const count_result = opcodes.decode_varint_safe(data[pos..]);
+    if (count_result.len == 0) return AnimationTable.empty;
     pos += count_result.len;
     const scene_count: u16 = @intCast(@min(count_result.value, MAX_SCENES));
 
-    // Read scenes
+    // Read scenes. `filled` counts the entries the bytes actually supplied; the
+    // info slice is cut to it, so a declared count that outlives the data never
+    // exposes undefined entries to `findSceneAtTime`.
     var scenes = try allocator.alloc(Scene, scene_count);
     errdefer allocator.free(scenes);
+    var filled: usize = 0;
 
     for (0..scene_count) |i| {
         // id_string_id
         if (pos >= data.len) break;
-        const id_result = opcodes.decode_varint(data[pos..]);
+        const id_result = opcodes.decode_varint_safe(data[pos..]);
+        if (id_result.len == 0) break;
         pos += id_result.len;
 
         // frame_string_id
         if (pos >= data.len) break;
-        const frame_result = opcodes.decode_varint(data[pos..]);
+        const frame_result = opcodes.decode_varint_safe(data[pos..]);
+        if (frame_result.len == 0) break;
         pos += frame_result.len;
 
         // start_ms
@@ -254,12 +268,14 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !AnimationTable {
         pos += 4;
 
         scenes[i] = .{
-            .id_string_id = @intCast(id_result.value),
-            .frame_string_id = @intCast(frame_result.value),
+            .id_string_id = wire.narrowU16(id_result.value) catch return error.InvalidAnimationTable,
+            .frame_string_id = wire.narrowU16(frame_result.value) catch return error.InvalidAnimationTable,
             .start_ms = start_ms,
             .end_ms = end_ms,
         };
+        filled = i + 1;
     }
+    assert(filled <= scenes.len);
 
     return AnimationTable{
         .info = .{
@@ -267,7 +283,7 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !AnimationTable {
             .duration_ms = duration_ms,
             .loop = loop,
             .end_behavior = end_behavior,
-            .scenes = scenes,
+            .scenes = scenes[0..filled],
         },
         .owned_scenes = scenes,
     };

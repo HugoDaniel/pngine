@@ -46,17 +46,17 @@
   0.3894183 0 0.921061 1.120959 0.6140407 0 -0.2596122 0.7088569 0 0.3333333 0 -1 0.8 0.8 0.8 0
   0 -1 0 9.95 1 0 0 0 0 0 1 0 5 5 5 1
 ])
-(buffer :name quads :size quadData :usage [storage] :mapped-at-creation quadData)
+(buffer :name quads :usage [storage] :data quadData)
 (buffer :name accumulation :size (* 256 256 19 16) :usage [storage])
 (buffer :name frameState :size 16 :usage [storage])
 (buffer :name common :size 144 :usage [storage])
 (buffer :name inputs :size 16 :usage [uniform copy-dst])
 
-(texture :name lightmap :width 256 :height 256
-  :dimension 2 :depth-or-array-layers 19
+(texture :name lightmap :size [256 256 19]
+  :dimension 2d
   :format rgba16float :usage [texture-binding storage-binding])
-(texture-view :name lightmapStore :texture lightmap :view-dimension 2)
-(texture-view :name lightmapSample :texture lightmap :view-dimension 2)
+(texture-view :name lightmapStore :texture lightmap :dimension 2d-array)
+(texture-view :name lightmapSample :texture lightmap :dimension 2d-array)
 (texture :name framebuffer :size canvas :format rgba16float
   :usage [texture-binding storage-binding])
 (texture :name screenTex :size canvas :format rgba8unorm
@@ -650,67 +650,67 @@ fn fs(@location(0) uv : vec2f) -> @location(0) vec4f {
 }
 """)
 
-(compute-pipeline :name statePipe :module stateCode :entry main)
-(compute-pipeline :name cameraPipe :module cameraCode :entry main)
-(compute-pipeline :name radiosityPipe :module radiosityCode :entry radiosity)
-(compute-pipeline :name accumPipe :module radiosityCode :entry accumulation_to_lightmap)
-(compute-pipeline :name raytracePipe :module raytraceCode :entry main)
-(compute-pipeline :name tonemapPipe :module tonemapCode :entry main)
+(compute-pipeline :name statePipe :layout auto (compute :module stateCode :entry main))
+(compute-pipeline :name cameraPipe :layout auto (compute :module cameraCode :entry main))
+(compute-pipeline :name radiosityPipe :layout auto (compute :module radiosityCode :entry radiosity))
+(compute-pipeline :name accumPipe :layout auto (compute :module radiosityCode :entry accumulation_to_lightmap))
+(compute-pipeline :name raytracePipe :layout auto (compute :module raytraceCode :entry main))
+(compute-pipeline :name tonemapPipe :layout auto (compute :module tonemapCode :entry main))
 
 (render-pipeline :name blitPipe
-  (layout auto)
-  (vertex (module blitCode) (entry vs))
-  (fragment (module blitCode) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module blitCode :entry vs)
+  (fragment :module blitCode :entry fs
+    (target :format preferred-canvas-format)))
 
-(bind-group :name stateGroup :layout-pipeline statePipe :layout-index 0
+(bind-group :name stateGroup :layout statePipe :group 0
   (entry :binding 0 :buffer frameState))
 
-(bind-group :name cameraGroup :layout-pipeline cameraPipe :layout-index 0
+(bind-group :name cameraGroup :layout cameraPipe :group 0
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :buffer common))
 
-(bind-group :name radiosityGroup :layout-pipeline radiosityPipe :layout-index 0
+(bind-group :name radiosityGroup :layout radiosityPipe :group 0
   (entry :binding 0 :buffer common)
   (entry :binding 1 :buffer quads)
   (entry :binding 2 :buffer accumulation)
   (entry :binding 3 :texture-view lightmapStore))
 
-(bind-group :name accumGroup :layout-pipeline accumPipe :layout-index 0
+(bind-group :name accumGroup :layout accumPipe :group 0
   (entry :binding 2 :buffer accumulation)
   (entry :binding 3 :texture-view lightmapStore)
   (entry :binding 4 :buffer frameState))
 
-(bind-group :name raytraceGroup :layout-pipeline raytracePipe :layout-index 0
+(bind-group :name raytraceGroup :layout raytracePipe :group 0
   (entry :binding 0 :buffer common)
   (entry :binding 1 :buffer quads)
   (entry :binding 2 :texture-view lightmapSample)
   (entry :binding 3 :sampler lmSampler)
   (entry :binding 4 :texture framebuffer))
 
-(bind-group :name tonemapGroup :layout-pipeline tonemapPipe :layout-index 0
+(bind-group :name tonemapGroup :layout tonemapPipe :group 0
   (entry :binding 0 :texture framebuffer)
   (entry :binding 1 :texture screenTex))
 
-(bind-group :name blitGroup :layout-pipeline blitPipe :layout-index 0
+(bind-group :name blitGroup :layout blitPipe :group 0
   (entry :binding 0 :sampler lmSampler)
   (entry :binding 1 :texture screenTex))
 
 (compute-pass :name updateState :pipeline statePipe :bind-groups [stateGroup]
-  :dispatch [1 1 1])
+  (dispatch :workgroups [1 1 1]))
 (compute-pass :name updateCamera :pipeline cameraPipe :bind-groups [cameraGroup]
-  :dispatch [1 1 1])
+  (dispatch :workgroups [1 1 1]))
 (compute-pass :name radiosity :pipeline radiosityPipe :bind-groups [radiosityGroup]
-  :dispatch-workgroups 1024)
+  (dispatch :workgroups [1024]))
 (compute-pass :name accumToLightmap :pipeline accumPipe :bind-groups [accumGroup]
-  :dispatch [16 16 19])
+  (dispatch :workgroups [16 16 19]))
 ; 64x64 workgroups of 16x16 cover up to a 1024^2 canvas (the browser canvas is
 ; devicePixelRatio-scaled); the in-shader bounds checks discard the excess at
 ; smaller sizes.
 (compute-pass :name raytrace :pipeline raytracePipe :bind-groups [raytraceGroup]
-  :dispatch [64 64 1])
+  (dispatch :workgroups [64 64 1]))
 (compute-pass :name tonemap :pipeline tonemapPipe :bind-groups [tonemapGroup]
-  :dispatch [64 64 1])
+  (dispatch :workgroups [64 64 1]))
 
 (render-pass :name blit
   (color-attachment :view context-current-texture

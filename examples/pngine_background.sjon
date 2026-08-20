@@ -14,6 +14,12 @@
 ; Blend is premultiplied-alpha (one / one-minus-src-alpha, add on both colour
 ; and alpha); the fragment shader outputs rgb already multiplied by alpha.
 
+; The canvas composites premultiplied so the page shows through the transparent
+; clear. That used to be the default here and is not since 3.0.0 --
+; GPUCanvasConfiguration.alphaMode is opaque -- so the example that depends on
+; it states it.
+(canvas :alpha-mode premultiplied)
+
 (define :name NUM_PARTICLES :value 384)
 (define :name WORKGROUP_SIZE :value 64)
 
@@ -41,8 +47,8 @@
 
 (buffer :name particleBuffers :size (* NUM_PARTICLES 6 4) :usage [vertex storage] :pool 2)
 
-(buffer :name quadVertexBuffer :size quadVertexData :usage [vertex]
-  :mapped-at-creation quadVertexData)
+(buffer :name quadVertexBuffer :usage [vertex]
+  :data quadVertexData)
 
 (buffer :name uniforms :size 48 :usage [uniform copy-dst])
 
@@ -53,9 +59,9 @@
   (write-buffer :buffer uniforms :offset 16 :data simParamsData))
 
 ; One-shot seed of the particle pool. `:workgroups` takes the same define
-; expression as the compute pass's `:dispatch-workgroups`.
-(init :name initParticles :buffer particleBuffers :shader initShader
-  :workgroups (ceil (/ NUM_PARTICLES WORKGROUP_SIZE)))
+; expression, in the same brackets, as the compute pass's `(dispatch …)`.
+(init :name initParticles :buffer particleBuffers :module initShader
+  :workgroups [(ceil (/ NUM_PARTICLES WORKGROUP_SIZE))])
 
 (shader-module :name initShader :code """
 struct Particle {
@@ -370,42 +376,40 @@ fn fragMain(
 }
 """)
 
-(compute-pipeline :name computeParticles :module computeCode :entry computeMain)
+(compute-pipeline :name computeParticles :layout auto (compute :module computeCode :entry computeMain))
 
-(bind-group :name particleBindGroups :layout-pipeline computeParticles :layout-index 0 :pool 2
+(bind-group :name particleBindGroups :layout computeParticles :group 0 :pool 2
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :buffer particleBuffers :ping-pong 0)
   (entry :binding 2 :buffer particleBuffers :ping-pong 1))
 
 (render-pipeline :name renderParticles
-  (layout auto)
-  (vertex (module renderCode) (entry vertexMain)
-    (buffers
-      ; Instance buffer (particle data: pos, vel, size, age — 6 floats).
-      (vertex-buffer :array-stride (* 6 4) :step-mode instance
-        (attribute :shader-location 0 :offset 0 :format float32x2)
-        (attribute :shader-location 1 :offset (* 2 4) :format float32x2)
-        (attribute :shader-location 2 :offset (* 4 4) :format float32)
-        (attribute :shader-location 3 :offset (* 5 4) :format float32))
-      ; Quad vertices.
-      (vertex-buffer :array-stride (* 2 4) :step-mode vertex
-        (attribute :shader-location 4 :offset 0 :format float32x2))))
-  (fragment (module renderCode) (entry fragMain)
-    (targets
-      (target :format preferred-canvas-format
-        ; Premultiplied-alpha blending.
-        (blend
-          (color :src-factor one :dst-factor one-minus-src-alpha :operation add)
-          (alpha :src-factor one :dst-factor one-minus-src-alpha :operation add)))))
-  (primitive (topology triangle-list)))
+  :layout auto
+  (vertex :module renderCode :entry vertexMain
+    ; Instance buffer (particle data: pos, vel, size, age — 6 floats).
+    (vertex-buffer :array-stride (* 6 4) :step-mode instance
+      (attribute :shader-location 0 :offset 0 :format float32x2)
+      (attribute :shader-location 1 :offset (* 2 4) :format float32x2)
+      (attribute :shader-location 2 :offset (* 4 4) :format float32)
+      (attribute :shader-location 3 :offset (* 5 4) :format float32))
+    ; Quad vertices.
+    (vertex-buffer :array-stride (* 2 4) :step-mode vertex
+      (attribute :shader-location 4 :offset 0 :format float32x2)))
+  (fragment :module renderCode :entry fragMain
+    (target :format preferred-canvas-format
+      ; Premultiplied-alpha blending.
+      (blend
+        (color :src-factor one :dst-factor one-minus-src-alpha :operation add)
+        (alpha :src-factor one :dst-factor one-minus-src-alpha :operation add))))
+  (primitive :topology triangle-list))
 
-(bind-group :name renderBindGroup :layout-pipeline renderParticles :layout-index 0
+(bind-group :name renderBindGroup :layout renderParticles :group 0
   (entry :binding 0 :buffer uniforms))
 
 (compute-pass :name computePass
   :pipeline computeParticles
   :bind-groups [particleBindGroups]
-  :dispatch-workgroups (ceil (/ NUM_PARTICLES WORKGROUP_SIZE)))
+  (dispatch :workgroups [(ceil (/ NUM_PARTICLES WORKGROUP_SIZE))]))
 
 (render-pass :name renderPass
   ; Transparent clear — CSS background shows through (alphaMode premultiplied).

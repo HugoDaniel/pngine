@@ -1,4 +1,4 @@
-; Wave simulation — the 2D wave equation on a 128×128 height field: three
+; Wave simulation. The 2D wave equation on a 128×128 height field: three
 ; moving oscillators excite it, a compute pass integrates the finite-difference
 ; Laplacian with damping each frame, and a fullscreen triangle shades the
 ; height with gradient-derived normals (diffuse + specular) in water colours.
@@ -6,13 +6,13 @@
 ; height, .y previous height); a compute `(init …)` zeroes it once, the step
 ; bind group has three entries (uniforms + wave in/out with `:ping-pong`),
 ; passes select the variant with `:bind-groups-pool-offsets`, the step runs
-; `:dispatch [8 8 1]` over a 16×16 workgroup, and `fs` reads the storage buffer
+; `(dispatch :workgroups [8 8 1])` over a 16×16 workgroup, and `fs` reads the storage buffer
 ; directly.
 ;
 ; GRID_SIZE sizes the buffer; the shaders do not read it. `(define …)` values
 ; are expression-only and never reach WGSL text, so each shader restates the
 ; grid extent as a local `const SIZE: u32 = 128u;` / `const SIZE: f32 = 128.0;`.
-; Both spellings must be kept in step by hand — change one, change the other.
+; Both spellings must be kept in step by hand: change one, change the other.
 
 (define :name GRID_SIZE :value 128)
 
@@ -25,7 +25,7 @@
   (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
 
 ; Zero the wave field once.
-(init :name initWave :buffer waveBuffer :shader initShader :workgroups (ceil (/ (* GRID_SIZE GRID_SIZE) 64)))
+(init :name initWave :buffer waveBuffer :module initShader :workgroups [(ceil (/ (* GRID_SIZE GRID_SIZE) 64))])
 
 (shader-module :name initShader :code """
 struct Wave { data: array<vec2f> }
@@ -123,9 +123,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }
 """)
 
-(compute-pipeline :name stepPipeline :module stepShader :entry main)
+(compute-pipeline :name stepPipeline :layout auto (compute :module stepShader :entry main))
 
-(bind-group :name stepBindGroup :layout-pipeline stepPipeline :layout-index 0 :pool 2
+(bind-group :name stepBindGroup :layout stepPipeline :group 0 :pool 2
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :buffer waveBuffer :ping-pong 0)
   (entry :binding 2 :buffer waveBuffer :ping-pong 1))
@@ -134,7 +134,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   :pipeline stepPipeline
   :bind-groups [stepBindGroup]
   :bind-groups-pool-offsets [0]
-  :dispatch [8 8 1])
+  (dispatch :workgroups [8 8 1]))
 
 (shader-module :name renderShader :code """
 struct Uniforms {
@@ -211,12 +211,12 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 """)
 
 (render-pipeline :name renderPipeline
-  (layout auto)
-  (vertex (module renderShader) (entry vs))
-  (fragment (module renderShader) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module renderShader :entry vs)
+  (fragment :module renderShader :entry fs
+    (target :format preferred-canvas-format)))
 
-(bind-group :name renderBindGroup :layout-pipeline renderPipeline :layout-index 0 :pool 2
+(bind-group :name renderBindGroup :layout renderPipeline :group 0 :pool 2
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :buffer waveBuffer :ping-pong 1))
 

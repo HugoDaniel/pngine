@@ -1,0 +1,27 @@
+; Invalid: a copy-buffer-to-buffer whose :source has no copy-src usage. A
+; buffer can only be read by the copy machinery if it was created saying so --
+; usage is fixed at creation, and WebGPU rejects the encoder call, not the
+; buffer.
+;
+; The schema's own description for :source has said "needs copy-src usage"
+; since the form was written. This makes the sentence enforceable.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(buffer :name src :size 16 :usage [storage])
+(buffer :name dst :size 16 :usage [map-read copy-dst])
+(queue :name readback
+  (copy-buffer-to-buffer :source src :source-offset 0 :destination dst :destination-offset 0 :size 16))
+(frame :name main :perform [draw readback])

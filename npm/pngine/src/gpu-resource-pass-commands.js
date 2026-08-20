@@ -146,7 +146,14 @@ export function dispatchResourcePassCommand(cmd, view, pos, ops) {
       const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
       let off = 0;
 
-      // Parse colorFormats
+      // Parse colorFormats. Count 0 is a LEGACY sentinel, not a live default:
+      // `:color-formats` became required in spec/09 step F, so no payload minted
+      // since then can reach the branch below. It stays because a count-0
+      // descriptor is frozen wire (docs/abi.md §6.5, change policy clause 2) and
+      // this runtime has to keep decoding every executor ever shipped — but it
+      // is the guess that made the key worth requiring: a bundle recorded for an
+      // offscreen target replayed here as if it had been recorded for the
+      // canvas, and only the GPU disagreed.
       const cfCount = d[off++];
       /** @type {GPUTextureFormat[]} */
       const colorFormats = [];
@@ -206,11 +213,21 @@ export function dispatchResourcePassCommand(cmd, view, pos, ops) {
     }
 
     // === Pass Operations (0x10-0x1A) ===
-    case 0x10: { // begin_render_pass (with optional resolveTarget)
+    case 0x10: { // begin_render_pass — LEGACY 4×u8 clear (see 0x53)
+      // `/255` here rather than in ops.colorAttachment: this opcode is the only
+      // place a quantized clear enters, and no payload minted since spec/09
+      // step D carries one. Kept because the JS side decodes every executor
+      // ever shipped (docs/abi.md clause 1).
       const resolveId = view.getUint16(pos + 10, true);
       ops.curPip = -1;
-      ops.beginRenderPass(view.getUint16(pos, true), view.getUint8(pos + 2), view.getUint8(pos + 3), view.getUint16(pos + 4, true), view.getUint8(pos + 6), view.getUint8(pos + 7), view.getUint8(pos + 8), view.getUint8(pos + 9), resolveId);
+      ops.beginRenderPass(view.getUint16(pos, true), view.getUint8(pos + 2), view.getUint8(pos + 3), view.getUint16(pos + 4, true), view.getUint8(pos + 6) / 255, view.getUint8(pos + 7) / 255, view.getUint8(pos + 8) / 255, view.getUint8(pos + 9) / 255, resolveId);
       return pos + 12;
+    }
+    case 0x53: { // begin_render_pass_f32 (with optional resolveTarget)
+      const resolveId = view.getUint16(pos + 22, true);
+      ops.curPip = -1;
+      ops.beginRenderPass(view.getUint16(pos, true), view.getUint8(pos + 2), view.getUint8(pos + 3), view.getUint16(pos + 4, true), view.getFloat32(pos + 6, true), view.getFloat32(pos + 10, true), view.getFloat32(pos + 14, true), view.getFloat32(pos + 18, true), resolveId);
+      return pos + 24;
     }
     case 0x11: { // begin_compute_pass
       ops.curPip = -1;
@@ -300,7 +317,7 @@ export function dispatchResourcePassCommand(cmd, view, pos, ops) {
       if (bundles.length > 0) requirePass(ops, "executeBundles")?.executeBundles(bundles);
       return pos + 1 + count * 2;
     }
-    case 0x1B: { // begin_render_pass_mrt
+    case 0x1B: { // begin_render_pass_mrt — LEGACY 4×u8 clear (see 0x54)
       ops.curPip = -1;
       let off = pos;
       const count = view.getUint8(off++);
@@ -309,8 +326,27 @@ export function dispatchResourcePassCommand(cmd, view, pos, ops) {
         const tid = view.getUint16(off, true); off += 2;
         const load = view.getUint8(off++);
         const store = view.getUint8(off++);
-        const r = view.getUint8(off++), g = view.getUint8(off++);
-        const b = view.getUint8(off++), a = view.getUint8(off++);
+        const r = view.getUint8(off++) / 255, g = view.getUint8(off++) / 255;
+        const b = view.getUint8(off++) / 255, a = view.getUint8(off++) / 255;
+        attachments.push({ tid, load, store, r, g, b, a });
+      }
+      const depthId = view.getUint16(off, true); off += 2;
+      ops.beginRenderPassMRT(attachments, depthId);
+      return off;
+    }
+    case 0x54: { // begin_render_pass_mrt_f32
+      ops.curPip = -1;
+      let off = pos;
+      const count = view.getUint8(off++);
+      const attachments = [];
+      for (let i = 0; i < count; i++) {
+        const tid = view.getUint16(off, true); off += 2;
+        const load = view.getUint8(off++);
+        const store = view.getUint8(off++);
+        const r = view.getFloat32(off, true); off += 4;
+        const g = view.getFloat32(off, true); off += 4;
+        const b = view.getFloat32(off, true); off += 4;
+        const a = view.getFloat32(off, true); off += 4;
         attachments.push({ tid, load, store, r, g, b, a });
       }
       const depthId = view.getUint16(off, true); off += 2;

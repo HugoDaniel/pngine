@@ -1,0 +1,126 @@
+; Invalid: an indexed draw under a STRIP topology whose pipeline omits
+; :strip-index-format. WebGPU derives the primitive-restart value from that
+; format, so drawIndexed on a strip pipeline without it is a validation error
+; in the browser and an abort natively -- it was clean here. The pairing crosses pipeline and pass, so it is the emitter's check,
+; not the schema's.
+;
+; Derived from examples/teapot.sjon: the only change is the topology.
+
+(shader-module :name shader :code """
+struct Inputs {
+  time: f32,
+  canvasW: f32,
+  canvasH: f32,
+  aspect: f32,
+};
+@group(0) @binding(0) var<uniform> u: Inputs;
+
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  return mat4x4f(
+    vec4f(f / aspect, 0, 0, 0),
+    vec4f(0, f, 0, 0),
+    vec4f(0, 0, far * nf, -1),
+    vec4f(0, 0, far * near * nf, 0));
+}
+
+struct VSOut {
+  @builtin(position) pos: vec4f,
+  @location(0) normal: vec3f,
+  @location(1) worldPos: vec3f,
+};
+
+@vertex fn vs(
+  @location(0) position: vec3f,
+  @location(1) normal: vec3f
+) -> VSOut {
+  let t = u.time;
+
+  // Rotate teapot around Y axis
+  let c = cos(t * 0.5);
+  let s = sin(t * 0.5);
+  let rotY = mat4x4f(
+    vec4f(c, 0, s, 0),
+    vec4f(0, 1, 0, 0),
+    vec4f(-s, 0, c, 0),
+    vec4f(0, 0, 0, 1));
+
+  // Scale down and translate (teapot is roughly [-8, 8] range)
+  let scale = 0.18;
+  let model = rotY * mat4x4f(
+    vec4f(scale, 0, 0, 0),
+    vec4f(0, scale, 0, 0),
+    vec4f(0, 0, scale, 0),
+    vec4f(0, -0.5, 0, 1));
+
+  let view = mat4x4f(
+    vec4f(1, 0, 0, 0),
+    vec4f(0, 1, 0, 0),
+    vec4f(0, 0, 1, 0),
+    vec4f(0, 0, -4, 1));
+
+  let proj = perspective(1.0, u.aspect, 0.1, 100.0);
+  let mv = view * model;
+  let worldP = (model * vec4f(position, 1.0)).xyz;
+  let n = normalize((model * vec4f(normal, 0.0)).xyz);
+
+  var out: VSOut;
+  out.pos = proj * mv * vec4f(position, 1.0);
+  out.normal = n;
+  out.worldPos = worldP;
+  return out;
+}
+
+@fragment fn fs(
+  @location(0) normal: vec3f,
+  @location(1) worldPos: vec3f
+) -> @location(0) vec4f {
+  let lightDir = normalize(vec3f(1.0, 2.0, 3.0));
+  let n = normalize(normal);
+  let diffuse = max(dot(n, lightDir), 0.0);
+  let ambient = 0.15;
+  let color = vec3f(0.8, 0.5, 0.2); // warm copper
+  let lit = color * (ambient + diffuse * 0.85);
+  return vec4f(lit, 1.0);
+}
+""")
+
+(data :name teapotMesh (teapot :format [position3 normal3]))
+
+(buffer :name vertexBuffer :usage [vertex]
+  :data teapotMesh)
+
+(buffer :name indexBuffer :index-of teapotMesh :usage [index])
+
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+
+(texture :name depthTexture :size canvas :format depth24plus :usage [render-attachment])
+
+(queue :name writeUniforms
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+(render-pipeline :name teapotPipeline
+  :layout auto
+  (vertex :module shader :entry vs
+    (vertex-buffer :array-stride 24
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)))
+  (fragment :module shader :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-strip :cull-mode back)
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+(bind-group :name teapotBindGroup :layout teapotPipeline :group 0
+  (entry :binding 0 :buffer uniforms))
+
+(render-pass :name drawTeapot
+  (color-attachment :view context-current-texture :clear-value [0.15 0.15 0.2 1] :load-op clear :store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  :pipeline teapotPipeline
+  :vertex-buffers [vertexBuffer]
+  :index-buffer indexBuffer
+  :bind-groups [teapotBindGroup]
+  (draw-indexed :index-count 2976))
+
+(frame :name main :perform [writeUniforms drawTeapot])

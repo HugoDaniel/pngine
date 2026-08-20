@@ -297,7 +297,7 @@ pub const Compiler = struct {
 
         // Evaluate the document's (define …) constants into a lowering env so a
         // lowering hook's `numberEval` can resolve a define-ref expression at
-        // lowering time (e.g. `(init …)` :workgroups (ceil (/ NUM 64))`). The arena
+        // lowering time (e.g. `(init … :workgroups [(ceil (/ NUM 64))])`). The arena
         // owns the parsed tree + bindings; the env is consumed during the
         // validateDocument lowering pass and never referenced after, so it is
         // freed when validate() returns.
@@ -329,10 +329,20 @@ pub const Compiler = struct {
             if (diag) |sink| {
                 collectStructural(sink, &result, source);
             } else {
-                renderDiagnostics(&result, source);
+                renderDiagnostics(&result);
             }
             result.deinit();
             return error.ValidationError;
+        }
+        // A clean result may still carry WARNINGS — SJON's after-the-match
+        // advisories (`deprecated_member`, `union_ambiguous` since SJON 1.2.0,
+        // `numeric_bounds_invalid`). They used to be dropped here, so `pngine
+        // validate` could never show one; now they ride the sink exactly as
+        // wgslender's lint findings do — advisory by default, exit 1 under
+        // `--strict`. No sink (compile/render without `--json`) → silent, as
+        // every other advisory is on that path.
+        if (result.diagnostics.len != 0) {
+            if (diag) |sink| collectStructural(sink, &result, source);
         }
         // A clean result is the emitter's precondition on both counts: it walks
         // `data_forest` and reads spans off the tree, and it never re-checks
@@ -362,62 +372,8 @@ pub const Compiler = struct {
                 end_line = lce.line;
                 end_col = lce.col;
             }
-            var buf: [1024]u8 = undefined;
-            const msg = defineHint(&buf, result, source, d) orelse d.message;
-            sink.addLocated(.sjon, sev, lc.line, lc.col, end_line, end_col, @tagName(d.code), "", msg);
+            sink.addLocated(.sjon, sev, lc.line, lc.col, end_line, end_col, @tagName(d.code), "", d.message);
         }
-    }
-
-    /// `d.message` extended with the define-vs-data-ref hint, or null when the
-    /// diagnostic isn't that collision.
-    ///
-    /// The collision: a slot like `:size` is `union [byte-count data-ref]`, so
-    /// a bare symbol there means "size this buffer from that `(data …)` form".
-    /// Write `:size STRIDE` meaning the constant and the union reports which
-    /// branches it tried — accurate, and no help at all if you don't know the
-    /// slot has a symbol meaning of its own. The document itself says which
-    /// mistake it was: if the symbol names a `(define …)`, the author meant the
-    /// value, and the working spelling is any expression.
-    ///
-    /// Read off the parsed forest rather than the lowering env, which is
-    /// best-effort — a define whose own value doesn't evaluate contributes no
-    /// binding, and that author needs the hint as much as any other.
-    fn defineHint(
-        buf: []u8,
-        result: *const sjon.Host.HostResult,
-        source: []const u8,
-        d: sjon.Host.HostDiagnostic,
-    ) ?[]const u8 {
-        if (d.code != .union_no_branch_matched) return null;
-        if (d.span.end <= d.span.start or d.span.end > source.len) return null;
-        const text = source[d.span.start..d.span.end];
-        if (!namesADefine(result, text)) return null;
-        return std.fmt.bufPrint(
-            buf,
-            "{s} — `{s}` is a `(define …)` constant, and a bare symbol here names a `(data …)` form; write an expression to use its value, e.g. `(* {s} 1)`",
-            .{ d.message, text, text },
-        ) catch null;
-    }
-
-    /// True when `name` is the `:name` of a top-level `(define …)`.
-    /// Walks `tree.root` (always populated after parse) rather than
-    /// `data_forest` (a validation-phase partition), since this runs on
-    /// documents that failed validation.
-    fn namesADefine(result: *const sjon.Host.HostResult, name: []const u8) bool {
-        if (name.len == 0) return false;
-        for (result.tree.root) |idx| {
-            if (result.tree.tagOf(idx) != .form) continue;
-            const hdr = result.tree.formHeader(idx);
-            if (!std.mem.eql(u8, hdr.head, "define")) continue;
-            for (hdr.children) |c| {
-                if (result.tree.tagOf(c) != .kvpair) continue;
-                const kv = result.tree.kvpairHeader(c);
-                if (!std.mem.eql(u8, kv.key, "name")) continue;
-                if (result.tree.tagOf(kv.value) != .symbol) continue;
-                if (std.mem.eql(u8, result.tree.symbolText(kv.value), name)) return true;
-            }
-        }
-        return false;
     }
 
     /// Evaluate the document's top-level `(define :name N :value V)` constants into
@@ -427,13 +383,15 @@ pub const Compiler = struct {
     /// `validateDocument` reports the real diagnostic) — we contribute the constants
     /// that resolve. Mirrors the emitter's post-validation `buildEnv`: the same
     /// core-only eval schema (define values use core expr-funcs like `*`/`/`/`ceil`,
-    /// never pngine forms), and the same in-order accumulation so a define may
-    /// reference an earlier one. Bindings + name slices are owned by `arena`.
+    /// never pngine forms), the same REAL values (02 R7 — a hook that reads a
+    /// constant into a count slot narrows it there), and the same fixed-point
+    /// resolution, so a define may name one declared after it. Bindings + name
+    /// slices are owned by `arena`.
     fn buildLoweringEnv(arena: Allocator, source: [:0]const u8) Expr.Env {
         var tree = sjon.parse(arena, source) catch return .{};
         const eval_schema = sjon.Schema.Schema.init(&.{sjon.plugins.core.plugin});
-        var bindings: std.ArrayList(Expr.Env.Binding) = .empty;
-        var env: Expr.Env = .{};
+        const Pending = struct { name: []const u8, vnode: sjon.Ast.NodeIndex, done: bool };
+        var pending: std.ArrayList(Pending) = .empty;
         for (tree.root) |idx| {
             if (tree.tagOf(idx) != .form) continue;
             const hdr = tree.formHeader(idx);
@@ -451,11 +409,25 @@ pub const Compiler = struct {
             }
             const nm = name orelse continue;
             const vnode = value_node orelse continue;
-            // env = bindings collected so far (an earlier define may be referenced).
-            env = .{ .bindings = bindings.items };
-            const n = values.evalNodeU32(arena, &tree, eval_schema, &env, vnode) catch continue;
-            bindings.append(arena, .{ .name = nm, .value = .{ .number = @floatFromInt(n) } }) catch return .{ .bindings = bindings.items };
+            pending.append(arena, .{ .name = nm, .vnode = vnode, .done = false }) catch return .{};
         }
+        var bindings: std.ArrayList(Expr.Env.Binding) = .empty;
+        var env: Expr.Env = .{};
+        // ≤ pending.len productive passes; a pass that binds nothing ends it
+        // (what is left is a cycle or a bad expression — the emitter's buildEnv
+        // reports it; this env is best-effort).
+        for (0..pending.items.len + 1) |_| {
+            var bound_this_pass: usize = 0;
+            for (pending.items) |*p| {
+                if (p.done) continue;
+                env = .{ .bindings = bindings.items };
+                const n = values.evalDefineValue(arena, &tree, eval_schema, &env, p.vnode) catch continue;
+                bindings.append(arena, .{ .name = p.name, .value = .{ .number = n } }) catch return .{ .bindings = bindings.items };
+                p.done = true;
+                bound_this_pass += 1;
+            }
+            if (bound_this_pass == 0) break;
+        } else unreachable;
         return .{ .bindings = bindings.items };
     }
 
@@ -526,11 +498,11 @@ pub const Compiler = struct {
     /// document coordinates (offset 0), so no rebasing — the byte offset prints
     /// as-is.
     ///
-    /// Carries the same `defineHint` the sink path adds: this is the fallback
-    /// for `compile`/`render` (no `Diag` sink), and a diagnostic that reads
-    /// differently depending on which command produced it is exactly the
-    /// inconsistency this round is about.
-    fn renderDiagnostics(result: *const sjon.Host.HostResult, source: []const u8) void {
+    /// The fallback for `compile`/`render` (no `Diag` sink). It prints SJON's
+    /// message verbatim, exactly as the sink path records it — a diagnostic that
+    /// reads differently depending on which command produced it is the
+    /// inconsistency this path exists to avoid.
+    fn renderDiagnostics(result: *const sjon.Host.HostResult) void {
         // stderr is absent on wasm32-freestanding, and `std.debug.print` would pull
         // `std.Io.Threaded` (getrandom/RandomFile) into the build there. The target
         // check is comptime-known, so on freestanding this whole block is the dead
@@ -541,9 +513,7 @@ pub const Compiler = struct {
             std.debug.print("\nSJON validation errors ({d} diagnostics):\n", .{result.diagnostics.len});
             for (result.diagnostics) |d| {
                 if (d.severity != .err) continue;
-                var buf: [1024]u8 = undefined;
-                const msg = defineHint(&buf, result, source, d) orelse d.message;
-                std.debug.print("  @{d} [{s}/{s}]: {s}\n", .{ d.span.start, @tagName(d.phase), @tagName(d.code), msg });
+                std.debug.print("  @{d} [{s}/{s}]: {s}\n", .{ d.span.start, @tagName(d.phase), @tagName(d.code), d.message });
             }
         }
     }
@@ -584,6 +554,70 @@ fn expectDiagnostic(gpa: Allocator, source: [:0]const u8, code: []const u8) !voi
     std.debug.print("\nexpected diagnostic '{s}', got {d}:\n", .{ code, result.diagnostics.len });
     for (result.diagnostics) |d| std.debug.print("  [{s}] {s}\n", .{ @tagName(d.code), d.message });
     return error.DiagnosticNotFound;
+}
+
+// ── F8: the closed-symbol sweep (05 §4) ─────────────────────────────────────
+// A symbol slot with no member-set and no cross-ref accepts ANY spelling, which
+// is how `:write-mask everything` validated and rendered every channel, and how
+// a `(wasm-call :args [canvas-widht])` typo reached the emitter as a silent
+// 0.0. Both are closed now. The exceptions below are the ones that CANNOT be
+// closed by this schema, and each names something inside an opaque artifact
+// SJON does not parse: a WGSL entry point, a WGSL `override`, a WASM export,
+// and the `:name` keys that DECLARE cross-ref targets rather than reference
+// them. The route for the first two is filed upstream (06 S11,
+// `(cross-ref-provider …)`).
+//
+// The test is the gate the plan asked for: a new loose slot has to be listed
+// here, which is the moment to ask whether it should be closed instead.
+
+const loose_symbol_kinds = [_][]const u8{ "entry-point", "override-name" };
+const primitive_symbol_keys = [_][]const u8{ "name", "func" };
+
+// ── S13 / S14 adoption (05 §2 R7, 05 §5 C8) ─────────────────────────────────
+// SJON answered the two asks this schema was waiting on:
+//
+//   • S13 — a `scalar-or-ref` slot now reports the arm the value's SHAPE
+//     selected instead of collapsing to `union_no_branch_matched`. That is
+//     what lets every numeric kind gain the `(define …)` arm WITHOUT trading
+//     away the bound that rejected the literal. The two tests directly above
+//     are the ratchet: `repr_out_of_range` and `unit_forbidden` are the base
+//     arm's own codes, and `byte-count` is a union now.
+//
+//   • S14 — `(variant :when [a b])`, so `:strip-index-format` is declared once
+//     for the two topologies WebGPU reads it for. It was the emitter's rule
+//     (`checkStripIndexFormat`) only because a key belonged to one variant.
+
+/// Validate `source` and assert NOTHING rejected it — the positive half of
+/// `expectDiagnostic`. A widened slot has to keep accepting what it accepted,
+/// and a two-value `(variant …)` has to accept BOTH values: a test that
+/// exercises one of them cannot tell `:when [a b]` from `:when a`.
+fn expectValidates(gpa: Allocator, source: [:0]const u8) !void {
+    var pre = try Compiler.preloadSchema(gpa);
+    defer pre.deinit();
+    var registry = try hooks.buildRegistry(gpa);
+    defer registry.deinit(gpa);
+    var result = try sjon.validateDocument(gpa, source, .{ .preloaded = &pre, .lowering_registry = &registry });
+    defer result.deinit();
+    var errors: u32 = 0;
+    for (result.diagnostics) |d| {
+        if (d.severity != .err) continue;
+        errors += 1;
+        std.debug.print("  [{s}] {s}\n", .{ @tagName(d.code), d.message });
+    }
+    if (errors != 0) return error.UnexpectedDiagnostic;
+}
+
+/// The `(primitive …)` scaffold C8 is about: one document, one knob.
+fn primitiveDoc(comptime primitive: []const u8) [:0]const u8 {
+    return "(shader-module :name code :code \"@vertex fn v() -> @builtin(position) vec4f { return vec4f(0); } @fragment fn f() -> @location(0) vec4f { return vec4f(1); }\")\n" ++
+        "(render-pipeline :name pipe :layout auto\n" ++
+        "  (vertex :module code :entry v)\n" ++
+        "  (fragment :module code :entry f (target :format preferred-canvas-format))\n" ++
+        "  " ++ primitive ++ ")\n" ++
+        "(render-pass :name draw :pipeline pipe\n" ++
+        "  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)\n" ++
+        "  (draw :vertex-count 3))\n" ++
+        "(frame :name main :perform [draw])";
 }
 
 // ── Device limits (Arc-3 §5.3b) ──────────────────────────────────────────────

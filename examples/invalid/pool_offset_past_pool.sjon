@@ -1,0 +1,15 @@
+; Invalid: `:bind-groups-pool-offsets [2]` on a 2-instance pool. The offset
+; selects `(frame + offset) % pool`, so instance 2 of a pool of 2 is instance 0
+; — almost certainly an off-by-one, and what the wire layer asserted on. The
+; emitter refuses it, located on the offset, naming the pool's size.
+
+(shader-module :name cs :code """
+@group(0) @binding(0) var<storage, read_write> buf: array<f32>;
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) g: vec3u) { buf[g.x] = 1.0; }
+""")
+(buffer :name buf :size 1024 :usage [storage] :pool 2)
+(compute-pipeline :name cp :layout auto (compute :module cs :entry main))
+(bind-group :name g :layout cp :group 0 :pool 2 (entry :binding 0 :buffer buf :ping-pong 0))
+(compute-pass :name step :pipeline cp :bind-groups [g] :bind-groups-pool-offsets [2]
+  (dispatch :workgroups [1 1 1]))
+(frame :name main :perform [step])

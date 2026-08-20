@@ -22,9 +22,9 @@
 (define :name M :value 4096)
 
 (data :name cubeMesh (cube :format [position3 normal3]))
-(buffer :name cubeVB :size cubeMesh :usage [vertex] :mapped-at-creation cubeMesh)
+(buffer :name cubeVB :usage [vertex] :data cubeMesh)
 (data :name groundMesh (plane :format [position3 normal3]))
-(buffer :name groundVB :size groundMesh :usage [vertex] :mapped-at-creation groundMesh)
+(buffer :name groundVB :usage [vertex] :data groundMesh)
 
 (buffer :name instanceData :size (* M 32) :usage [storage])
 (buffer :name visibleInstances :size (* M 4) :usage [storage])
@@ -281,91 +281,89 @@ fn fs(in : VSOut) -> @location(0) vec4f {
 }
 """)
 
-(compute-pipeline :name seedPipe :module seedCode :entry main)
-(compute-pipeline :name cameraPipe :module cameraCode :entry main)
-(compute-pipeline :name clearPipe :module clearCode :entry main)
-(compute-pipeline :name cullPipe :module cullCode :entry cull)
-(compute-pipeline :name argsPipe :module argsCode :entry main)
+(compute-pipeline :name seedPipe :layout auto (compute :module seedCode :entry main))
+(compute-pipeline :name cameraPipe :layout auto (compute :module cameraCode :entry main))
+(compute-pipeline :name clearPipe :layout auto (compute :module clearCode :entry main))
+(compute-pipeline :name cullPipe :layout auto (compute :module cullCode :entry cull))
+(compute-pipeline :name argsPipe :layout auto (compute :module argsCode :entry main))
 
 (render-pipeline :name groundPipe
-  (layout auto)
-  (vertex (module groundCode) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 24
-        (attribute :shader-location 0 :offset 0 :format float32x3)
-        (attribute :shader-location 1 :offset 12 :format float32x3))))
-  (fragment (module groundCode) (entry fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list))
+  :layout auto
+  (vertex :module groundCode :entry vs
+    (vertex-buffer :array-stride 24
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)))
+  (fragment :module groundCode :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
 (render-pipeline :name instancePipe
-  (layout auto)
-  (vertex (module drawCode) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 24
-        (attribute :shader-location 0 :offset 0 :format float32x3)
-        (attribute :shader-location 1 :offset 12 :format float32x3))))
-  (fragment (module drawCode) (entry fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module drawCode :entry vs
+    (vertex-buffer :array-stride 24
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)))
+  (fragment :module drawCode :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
-(bind-group :name seedBG :layout-pipeline seedPipe :layout-index 0
+(bind-group :name seedBG :layout seedPipe :group 0
   (entry :binding 0 :buffer instanceData))
 
-(bind-group :name cameraBG :layout-pipeline cameraPipe :layout-index 0
+(bind-group :name cameraBG :layout cameraPipe :group 0
   (entry :binding 0 :buffer inputsBuf)
   (entry :binding 1 :buffer camFrustum))
 
-(bind-group :name clearBG :layout-pipeline clearPipe :layout-index 0
+(bind-group :name clearBG :layout clearPipe :group 0
   (entry :binding 0 :buffer counters)
   (entry :binding 1 :buffer indirectArgs))
 
-(bind-group :name cullBG :layout-pipeline cullPipe :layout-index 0
+(bind-group :name cullBG :layout cullPipe :group 0
   (entry :binding 0 :buffer instanceData)
   (entry :binding 1 :buffer camFrustum)
   (entry :binding 2 :buffer counters)
   (entry :binding 3 :buffer visibleInstances))
 
-(bind-group :name argsBG :layout-pipeline argsPipe :layout-index 0
+(bind-group :name argsBG :layout argsPipe :group 0
   (entry :binding 0 :buffer counters)
   (entry :binding 1 :buffer indirectArgs))
 
-(bind-group :name groundBG :layout-pipeline groundPipe :layout-index 0
+(bind-group :name groundBG :layout groundPipe :group 0
   (entry :binding 0 :buffer camFrustum))
 
-(bind-group :name drawBG :layout-pipeline instancePipe :layout-index 0
+(bind-group :name drawBG :layout instancePipe :group 0
   (entry :binding 0 :buffer instanceData)
   (entry :binding 1 :buffer camFrustum)
   (entry :binding 2 :buffer visibleInstances))
 
 (compute-pass :name seedPass :pipeline seedPipe :bind-groups [seedBG]
-  :dispatch-workgroups (ceil (/ M 64)))
+  (dispatch :workgroups [(ceil (/ M 64))]))
 
 (compute-pass :name cameraPass :pipeline cameraPipe :bind-groups [cameraBG]
-  :dispatch [1 1 1])
+  (dispatch :workgroups [1 1 1]))
 
 (compute-pass :name clearPass :pipeline clearPipe :bind-groups [clearBG]
-  :dispatch [1 1 1])
+  (dispatch :workgroups [1 1 1]))
 
 (compute-pass :name cullPass :pipeline cullPipe :bind-groups [cullBG]
-  :dispatch-workgroups (ceil (/ M 64)))
+  (dispatch :workgroups [(ceil (/ M 64))]))
 
 (compute-pass :name argsPass :pipeline argsPipe :bind-groups [argsBG]
-  :dispatch [1 1 1])
+  (dispatch :workgroups [1 1 1]))
 
 (render-pass :name envPass
   (color-attachment :view context-current-texture
     :clear-value [0.04 0.05 0.08 1] :load-op clear :store-op store)
-  (depth-attachment :view depthTex :depth-clear-value 1.0
+  (depth-stencil-attachment :view depthTex :depth-clear-value 1.0
     :depth-load-op clear :depth-store-op store)
   :pipeline groundPipe :bind-groups [groundBG] :vertex-buffers [groundVB]
   (draw :vertex-count 6))
 
 (render-pass :name cullDrawPass
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depthTex :depth-load-op load :depth-store-op store)
+  (depth-stencil-attachment :view depthTex :depth-load-op load :depth-store-op store)
   :pipeline instancePipe :bind-groups [drawBG] :vertex-buffers [cubeVB]
   (draw-indirect :buffer indirectArgs))
 

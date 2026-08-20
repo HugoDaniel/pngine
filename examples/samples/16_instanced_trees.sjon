@@ -1,9 +1,9 @@
-; Instanced trees — 400 low-poly trees (a brown trunk quad plus two foliage
+; Instanced trees: 400 low-poly trees (a brown trunk quad plus two foliage
 ; triangles) scattered over a ground plane, swaying in the wind, depth-tested.
 ; A compute `(init …)` fills the per-instance buffer once (position, scale,
 ; rotation, green tint), read by the render pass at a 32-byte instance stride.
 ; The tree mesh is a hand-authored 12-vertex float array uploaded
-; mapped-at-creation; the pass draws it with a two-buffer vertex layout
+; a `:data` fill; the pass draws it with a two-buffer vertex layout
 ; (`:step-mode instance`) and an expression-valued `:instance-count`. The
 ; depth24plus texture is sized `canvas` so it always matches the colour target.
 ; No `(primitive …)` form: the triangle-list defaults are what it needs.
@@ -28,8 +28,8 @@
   0.0 0.95 0.0     0.0 0.0 0.0
 ])
 
-(buffer :name treeBuffer :size treeMesh :usage [vertex]
-  :mapped-at-creation treeMesh)
+(buffer :name treeBuffer :usage [vertex]
+  :data treeMesh)
 
 (buffer :name instanceBuffer :size (* NUM_TREES 8 4) :usage [vertex storage])
 
@@ -38,7 +38,7 @@
 (queue :name writeUniforms
   (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
 
-(init :name initTrees :buffer instanceBuffer :shader initShader :workgroups 7)
+(init :name initTrees :buffer instanceBuffer :module initShader :workgroups [7])
 
 (texture :name depthTexture :format depth24plus :size canvas :usage [render-attachment])
 
@@ -86,11 +86,19 @@
 
       // Simple perspective projection
       let z = pos.z + 3.0;
+      var out: VertexOutput;
+      // A manual divide has no near plane: a vertex at or just in front of
+      // the camera would project to a huge or inverted triangle. Send those
+      // outside the clip volume (z > w) so the rasterizer drops them.
+      if (z < 0.1) {
+        out.pos = vec4f(0.0, 0.0, 2.0, 1.0);
+        out.color = vec3f(0.0);
+        return out;
+      }
       let projX = pos.x / z / u.aspect;
       let projY = pos.y / z;
       let depth = 1.0 - (z / 6.0);
 
-      var out: VertexOutput;
       out.pos = vec4f(projX, projY, depth, 1.0);
 
       // Use local color for trunk, instance tint for foliage
@@ -110,11 +118,17 @@
   """)
 
 (shader-module :name initShader :code """
+    // 32 bytes, matching the render pipeline's instance layout (offsets 0,
+    // 12, 16, 20). The tint is three scalars on purpose: a `vec3f` member
+    // here would align to 16 and push the struct to 48 bytes, so the vertex
+    // stage would read padding as the tint and every third record as garbage.
     struct Tree {
       pos: vec3f,
       scale: f32,
       rotation: f32,
-      colorTint: vec3f,
+      tintR: f32,
+      tintG: f32,
+      tintB: f32,
     }
     struct Trees { data: array<Tree> }
 
@@ -146,36 +160,33 @@
       trees.data[i].rotation = hash(i * 17u) * PI * 2.0;
 
       // Green tint variations
-      trees.data[i].colorTint = vec3f(
-        0.2 + hash(i * 19u) * 0.2,
-        0.5 + hash(i * 23u) * 0.3,
-        0.1 + hash(i * 29u) * 0.15
-      );
+      trees.data[i].tintR = 0.2 + hash(i * 19u) * 0.2;
+      trees.data[i].tintG = 0.5 + hash(i * 23u) * 0.3;
+      trees.data[i].tintB = 0.1 + hash(i * 29u) * 0.15;
     }
   """)
 
 (render-pipeline :name renderPipeline
-  (layout auto)
-  (vertex (module renderShader) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 24 :step-mode vertex
-        (attribute :shader-location 0 :offset 0 :format float32x3)
-        (attribute :shader-location 1 :offset 12 :format float32x3))
-      (vertex-buffer :array-stride 32 :step-mode instance
-        (attribute :shader-location 2 :offset 0 :format float32x3)
-        (attribute :shader-location 3 :offset 12 :format float32)
-        (attribute :shader-location 4 :offset 16 :format float32)
-        (attribute :shader-location 5 :offset 20 :format float32x3))))
-  (fragment (module renderShader) (entry fs)
-    (targets (target :format preferred-canvas-format)))
+  :layout auto
+  (vertex :module renderShader :entry vs
+    (vertex-buffer :array-stride 24 :step-mode vertex
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3))
+    (vertex-buffer :array-stride 32 :step-mode instance
+      (attribute :shader-location 2 :offset 0 :format float32x3)
+      (attribute :shader-location 3 :offset 12 :format float32)
+      (attribute :shader-location 4 :offset 16 :format float32)
+      (attribute :shader-location 5 :offset 20 :format float32x3)))
+  (fragment :module renderShader :entry fs
+    (target :format preferred-canvas-format))
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
-(bind-group :name uniformsBindGroup :layout-pipeline renderPipeline :layout-index 0
+(bind-group :name uniformsBindGroup :layout renderPipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
 (render-pass :name mainPass
   (color-attachment :view context-current-texture :clear-value [0.5 0.7 0.9 1] :load-op clear :store-op store)
-  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   :pipeline renderPipeline
   :vertex-buffers [treeBuffer instanceBuffer]
   :bind-groups [uniformsBindGroup]

@@ -1,0 +1,15 @@
+; Invalid: a (render-bundle …) with a draw and no :pipeline. It used to
+; compile — create_render_bundle was emitted — and is invalid WebGPU: a
+; bundle's descriptor is its own layout and a draw needs a pipeline in it.
+; Every corpus bundle names one. Expected: the schema's missing_required_key
+; on the bundle form.
+(shader-module :name code :code "@vertex fn v() -> @builtin(position) vec4f { return vec4f(0); } @fragment fn f() -> @location(0) vec4f { return vec4f(1); }")
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry v)
+  (fragment :module code :entry f (target :format preferred-canvas-format)))
+(render-bundle :name b :color-formats [preferred-canvas-format]
+  (draw :vertex-count 3))
+(render-pass :name draw
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :execute-bundles [b])
+(frame :name main :perform [draw])

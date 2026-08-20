@@ -29,8 +29,8 @@
 
 ; Bound as both a vertex buffer (solid pass) and vertex-stage storage
 ; (pulling passes). Stride 24 B = 6 floats (position3 normal3).
-(buffer :name meshVerts :size teapotMesh :usage [vertex storage]
-  :mapped-at-creation teapotMesh)
+(buffer :name meshVerts :usage [vertex storage]
+  :data teapotMesh)
 
 ; Bound as both an index buffer (solid pass) and vertex-stage storage
 ; (pulling passes read it as array<u32> and unpack u16 halves).
@@ -223,45 +223,44 @@ fn indexAt(i: u32) -> u32 {
 """)
 
 (render-pipeline :name solidPipeline
-  (layout auto)
-  (vertex (module solidShader) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 24
-        (attribute :shader-location 0 :offset 0 :format float32x3)
-        (attribute :shader-location 1 :offset 12 :format float32x3))))
-  (fragment (module solidShader) (entry fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module solidShader :entry vs
+    (vertex-buffer :array-stride 24
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)))
+  (fragment :module solidShader :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
 (render-pipeline :name baryPipeline
-  (layout auto)
-  (vertex (module baryShader) (entry vs))
-  (fragment (module baryShader) (entry fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module baryShader :entry vs)
+  (fragment :module baryShader :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   ; Negative bias pulls the overlay toward the camera so it wins the
   ; less-compare against the solid pass it retraces.
   (depth-stencil :format depth24plus :depth-write-enabled false :depth-compare less
     :depth-bias -1 :depth-bias-slope-scale -1.0))
 
 (render-pipeline :name linesPipeline
-  (layout auto)
-  (vertex (module linesShader) (entry vs))
-  (fragment (module linesShader) (entry fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology line-list))
+  :layout auto
+  (vertex :module linesShader :entry vs)
+  (fragment :module linesShader :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology line-list)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
-(bind-group :name solidBindGroup :layout-pipeline solidPipeline :layout-index 0
+(bind-group :name solidBindGroup :layout solidPipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
-(bind-group :name baryBindGroup :layout-pipeline baryPipeline :layout-index 0
+(bind-group :name baryBindGroup :layout baryPipeline :group 0
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :buffer meshVerts)
   (entry :binding 2 :buffer meshIndices))
 
-(bind-group :name linesBindGroup :layout-pipeline linesPipeline :layout-index 0
+(bind-group :name linesBindGroup :layout linesPipeline :group 0
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :buffer meshVerts)
   (entry :binding 2 :buffer meshIndices))
@@ -270,7 +269,7 @@ fn indexAt(i: u32) -> u32 {
 (render-pass :name solidPass
   (color-attachment :view context-current-texture
     :clear-value [0.09 0.09 0.12 1] :load-op clear :store-op store)
-  (depth-attachment :view depthTexture :depth-clear-value 1.0
+  (depth-stencil-attachment :view depthTexture :depth-clear-value 1.0
     :depth-load-op clear :depth-store-op store)
   :pipeline solidPipeline
   :vertex-buffers [meshVerts]
@@ -281,7 +280,7 @@ fn indexAt(i: u32) -> u32 {
 ; Pass 2: barycentric-discard overlay retracing the solid (right half).
 (render-pass :name baryPass
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depthTexture :depth-load-op load :depth-store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-load-op load :depth-store-op store)
   :pipeline baryPipeline
   :bind-groups [baryBindGroup]
   (draw :vertex-count 2976))
@@ -289,7 +288,7 @@ fn indexAt(i: u32) -> u32 {
 ; Pass 3: vertex-pulled line-list wireframe (left half).
 (render-pass :name linesPass
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depthTexture :depth-load-op load :depth-store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-load-op load :depth-store-op store)
   :pipeline linesPipeline
   :bind-groups [linesBindGroup]
   (draw :vertex-count 5952))

@@ -5,10 +5,10 @@
 ; bind group.
 ;
 ; Exercises: `(define …)` arithmetic in a buffer size and in the draw's
-; instance count, inline float32 `(data …)` with :mapped-at-creation, a
+; instance count, inline float32 `(data …)` with :data, a
 ; two-buffer vertex layout (step-mode instance + step-mode vertex), and
-; `(init … :workgroups (ceil (/ NUM_PARTICLES 64)))` — the workgroup slot
-; accepts a define-ref expression (32 here).
+; `(init … :workgroups [(ceil (/ NUM_PARTICLES 64))])` — the workgroup vector's
+; elements accept define-ref expressions (32 here).
 
 (define :name NUM_PARTICLES :value 2048)
 
@@ -95,25 +95,24 @@ fn main(@builtin(global_invocation_id) id : vec3u) {
   0.0 0.02
 ])
 
-(buffer :name spriteVertexBuffer :size vertexBufferData :usage [vertex]
-  :mapped-at-creation vertexBufferData)
+(buffer :name spriteVertexBuffer :usage [vertex]
+  :data vertexBufferData)
 
 (buffer :name particleBuffers :size (* NUM_PARTICLES 4 4) :usage [vertex storage])
 
 (render-pipeline :name renderBoids
-  (layout auto)
-  (vertex (module code) (entry vertexMain)
-    (buffers
-      (vertex-buffer :array-stride (* 4 4) :step-mode instance
-        (attribute :shader-location 0 :offset 0 :format float32x2)
-        (attribute :shader-location 1 :offset (* 2 4) :format float32x2))
-      (vertex-buffer :array-stride (* 2 4) :step-mode vertex
-        (attribute :shader-location 2 :offset 0 :format float32x2))))
-  (fragment (module code) (entry fragMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list)))
+  :layout auto
+  (vertex :module code :entry vertexMain
+    (vertex-buffer :array-stride (* 4 4) :step-mode instance
+      (attribute :shader-location 0 :offset 0 :format float32x2)
+      (attribute :shader-location 1 :offset (* 2 4) :format float32x2))
+    (vertex-buffer :array-stride (* 2 4) :step-mode vertex
+      (attribute :shader-location 2 :offset 0 :format float32x2)))
+  (fragment :module code :entry fragMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
 
-(init :name initParticles :buffer particleBuffers :shader initShader :workgroups (ceil (/ NUM_PARTICLES 64)))
+(init :name initParticles :buffer particleBuffers :module initShader :workgroups [(ceil (/ NUM_PARTICLES 64))])
 
 (render-pass :name drawBoidsPass
   (color-attachment :view context-current-texture :clear-value [0.0 0.0 0.0 1.0] :load-op clear :store-op store)

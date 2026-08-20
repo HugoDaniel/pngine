@@ -1,4 +1,4 @@
-; Multiple 3D objects — eight lit cubes of varying size arranged in a ring,
+; Multiple 3D objects: eight lit cubes of varying size arranged in a ring,
 ; each spinning while the ring as a whole orbits; depth-tested with back-face
 ; culling. A compute `(init …)` fills the per-instance buffer once (position,
 ; scale, rotation offset, rainbow colour: 8 floats / 32 bytes each). Exercises
@@ -10,8 +10,8 @@
 
 (data :name cubeVertices (cube :format [position3 normal3]))
 
-(buffer :name vertexBuffer :size cubeVertices :usage [vertex]
-  :mapped-at-creation cubeVertices)
+(buffer :name vertexBuffer :usage [vertex]
+  :data cubeVertices)
 
 (buffer :name instanceBuffer :size (* NUM_OBJECTS 8 4) :usage [vertex storage])
 
@@ -20,7 +20,7 @@
 (queue :name writeUniforms
   (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
 
-(init :name initObjects :buffer instanceBuffer :shader initShader :workgroups 1)
+(init :name initObjects :buffer instanceBuffer :module initShader :workgroups [1])
 
 (texture :name depthTexture :format depth24plus :size canvas :usage [render-attachment])
 
@@ -155,28 +155,27 @@
   """)
 
 (render-pipeline :name pipeline
-  (layout auto)
-  (vertex (module renderShader) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 24 :step-mode vertex
-        (attribute :shader-location 0 :offset 0 :format float32x3)
-        (attribute :shader-location 1 :offset 12 :format float32x3))
-      (vertex-buffer :array-stride 32 :step-mode instance
-        (attribute :shader-location 2 :offset 0 :format float32x3)
-        (attribute :shader-location 3 :offset 12 :format float32)
-        (attribute :shader-location 4 :offset 16 :format float32)
-        (attribute :shader-location 5 :offset 20 :format float32x3))))
-  (fragment (module renderShader) (entry fs)
-    (targets (target :format preferred-canvas-format)))
+  :layout auto
+  (vertex :module renderShader :entry vs
+    (vertex-buffer :array-stride 24 :step-mode vertex
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3))
+    (vertex-buffer :array-stride 32 :step-mode instance
+      (attribute :shader-location 2 :offset 0 :format float32x3)
+      (attribute :shader-location 3 :offset 12 :format float32)
+      (attribute :shader-location 4 :offset 16 :format float32)
+      (attribute :shader-location 5 :offset 20 :format float32x3)))
+  (fragment :module renderShader :entry fs
+    (target :format preferred-canvas-format))
   (primitive :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
-(bind-group :name bindings :layout-pipeline pipeline :layout-index 0
+(bind-group :name bindings :layout pipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
 (render-pass :name mainPass
   (color-attachment :view context-current-texture :clear-value [0.05 0.05 0.1 1] :load-op clear :store-op store)
-  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   :pipeline pipeline
   :vertex-buffers [vertexBuffer instanceBuffer]
   :bind-groups [bindings]

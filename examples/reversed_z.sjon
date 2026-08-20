@@ -32,7 +32,7 @@
    1.5  1 -0.0001 1   0 1 0 1
   -0.5  1 -0.0001 1   0 1 0 1
 ])
-(buffer :name vb :size planesData :usage [vertex] :mapped-at-creation planesData)
+(buffer :name vb :usage [vertex] :data planesData)
 (buffer :name inputs :size 16 :usage [uniform copy-dst])
 (texture :name depth :size canvas :format depth32float :usage [render-attachment])
 
@@ -140,32 +140,30 @@ fn fsMain(@location(0) color : vec4f) -> @location(0) vec4f {
 """)
 
 (render-pipeline :name defaultPipe
-  (layout auto)
-  (vertex (module code) (entry vsDefault)
-    (buffers
-      (vertex-buffer :array-stride 32
-        (attribute :shader-location 0 :offset 0 :format float32x4)
-        (attribute :shader-location 1 :offset 16 :format float32x4))))
-  (fragment (module code) (entry fsMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module code :entry vsDefault
+    (vertex-buffer :array-stride 32
+      (attribute :shader-location 0 :offset 0 :format float32x4)
+      (attribute :shader-location 1 :offset 16 :format float32x4)))
+  (fragment :module code :entry fsMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth32float :depth-write-enabled true :depth-compare less))
 
 (render-pipeline :name reversedPipe
-  (layout auto)
-  (vertex (module code) (entry vsReversed)
-    (buffers
-      (vertex-buffer :array-stride 32
-        (attribute :shader-location 0 :offset 0 :format float32x4)
-        (attribute :shader-location 1 :offset 16 :format float32x4))))
-  (fragment (module code) (entry fsMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module code :entry vsReversed
+    (vertex-buffer :array-stride 32
+      (attribute :shader-location 0 :offset 0 :format float32x4)
+      (attribute :shader-location 1 :offset 16 :format float32x4)))
+  (fragment :module code :entry fsMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth32float :depth-write-enabled true :depth-compare greater))
 
-(bind-group :name gD :layout-pipeline defaultPipe :layout-index 0
+(bind-group :name gD :layout defaultPipe :group 0
   (entry :binding 0 :buffer inputs))
-(bind-group :name gR :layout-pipeline reversedPipe :layout-index 0
+(bind-group :name gR :layout reversedPipe :group 0
   (entry :binding 0 :buffer inputs))
 
 (queue :name writeInputs
@@ -174,14 +172,14 @@ fn fsMain(@location(0) color : vec4f) -> @location(0) vec4f {
 (render-pass :name left
   (color-attachment :view context-current-texture
     :clear-value [0 0 0.5 1] :load-op clear :store-op store)
-  (depth-attachment :view depth :depth-clear-value 1.0
+  (depth-stencil-attachment :view depth :depth-clear-value 1.0
     :depth-load-op clear :depth-store-op store)
   :pipeline defaultPipe :bind-groups [gD] :vertex-buffers [vb]
   (draw :vertex-count 12 :instance-count 5))
 
 (render-pass :name right
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depth :depth-clear-value 0.0
+  (depth-stencil-attachment :view depth :depth-clear-value 0.0
     :depth-load-op clear :depth-store-op store)
   :pipeline reversedPipe :bind-groups [gR] :vertex-buffers [vb]
   (draw :vertex-count 12 :instance-count 5))

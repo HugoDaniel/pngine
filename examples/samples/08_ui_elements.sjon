@@ -1,4 +1,4 @@
-; UI elements — a mock UI (panel with border, title bar, two rounded buttons,
+; UI elements: a mock UI (panel with border, title bar, two rounded buttons,
 ; an animated progress bar, sliders, a round icon, a pulsing status dot) built
 ; from 12 instanced quads. Exercises alpha blending with separate colour and
 ; alpha blend components, per-instance rect+colour vertex data, and
@@ -31,11 +31,11 @@
   0.08 0.24 0.28 0.003 0.3 0.3 0.35 1.0
 ])
 
-(buffer :name quadBuffer :size quadVertices :usage [vertex]
-  :mapped-at-creation quadVertices)
+(buffer :name quadBuffer :usage [vertex]
+  :data quadVertices)
 
-(buffer :name uiBuffer :size uiData :usage [vertex]
-  :mapped-at-creation uiData)
+(buffer :name uiBuffer :usage [vertex]
+  :data uiData)
 
 (buffer :name uniforms :size 16 :usage [uniform copy-dst])
 
@@ -155,22 +155,20 @@
   """)
 
 (render-pipeline :name pipeline
-  (layout auto)
-  (vertex (module shader) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 8 :step-mode vertex
-        (attribute :shader-location 0 :offset 0 :format float32x2))
-      (vertex-buffer :array-stride 32 :step-mode instance
-        (attribute :shader-location 1 :offset 0 :format float32x4)
-        (attribute :shader-location 2 :offset 16 :format float32x4))))
-  (fragment (module shader) (entry fs)
-    (targets
-      (target :format preferred-canvas-format
-        (blend
-          (color :src-factor src-alpha :dst-factor one-minus-src-alpha)
-          (alpha :src-factor one :dst-factor one-minus-src-alpha))))))
+  :layout auto
+  (vertex :module shader :entry vs
+    (vertex-buffer :array-stride 8 :step-mode vertex
+      (attribute :shader-location 0 :offset 0 :format float32x2))
+    (vertex-buffer :array-stride 32 :step-mode instance
+      (attribute :shader-location 1 :offset 0 :format float32x4)
+      (attribute :shader-location 2 :offset 16 :format float32x4)))
+  (fragment :module shader :entry fs
+    (target :format preferred-canvas-format
+      (blend
+        (color :src-factor src-alpha :dst-factor one-minus-src-alpha)
+        (alpha :src-factor one :dst-factor one-minus-src-alpha)))))
 
-(bind-group :name bindings :layout-pipeline pipeline :layout-index 0
+(bind-group :name bindings :layout pipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
 (render-pass :name drawPass

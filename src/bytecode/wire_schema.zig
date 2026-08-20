@@ -112,8 +112,13 @@ const L_COPY_EXT_IMG = Layout{ .head = &.{ nk("bitmap_id", .varint), nk("texture
 const L_VIEWPORT = Layout{ .head = &.{ nk("x", .varint), nk("y", .varint), nk("w", .varint), nk("h", .varint), nk("min_depth", .u32_le), nk("max_depth", .u32_le) } };
 const L_BLEND_CONSTANT = Layout{ .head = &.{ nk("r", .u32_le), nk("g", .u32_le), nk("b", .u32_le), nk("a", .u32_le) } }; // set_blend_constant — 4 f32 bit patterns
 const L_CLEAR_VALUES = Layout{ .head = &.{ nk("depth_bits", .u32_le), nk("stencil_value", .u32_le) } }; // set_pass_clear_values — f32 bit pattern + u32
-const L_BEGIN_RP = Layout{ .head = &.{ nk("color_texture_id", .varint), nk("load_op", .byte), nk("store_op", .byte), nk("depth_texture_id", .varint), nk("clear_r", .byte), nk("clear_g", .byte), nk("clear_b", .byte), nk("clear_a", .byte), nk("resolve_texture_id", .varint) } };
-const L_BEGIN_RP_POOL = Layout{ .head = &.{ nk("base_tex_id", .varint), nk("pool_size", .byte), nk("offset", .byte), nk("load_op", .byte), nk("store_op", .byte), nk("depth_tex_id", .varint), nk("clear_r", .byte), nk("clear_g", .byte), nk("clear_b", .byte), nk("clear_a", .byte) } };
+// The four clear channels are f32 BIT PATTERNS, like set_blend_constant's and
+// set_pass_clear_values' depth. They were four u8s decoding `/255` until
+// spec/09 step D: that quantized every clear to 1/255 and CLAMPED to [0,1],
+// so an out-of-gamut clear on a float target -- legal WebGPU -- silently
+// became white.
+const L_BEGIN_RP = Layout{ .head = &.{ nk("color_texture_id", .varint), nk("load_op", .byte), nk("store_op", .byte), nk("depth_texture_id", .varint), nk("clear_r_bits", .u32_le), nk("clear_g_bits", .u32_le), nk("clear_b_bits", .u32_le), nk("clear_a_bits", .u32_le), nk("resolve_texture_id", .varint) } };
+const L_BEGIN_RP_POOL = Layout{ .head = &.{ nk("base_tex_id", .varint), nk("pool_size", .byte), nk("offset", .byte), nk("load_op", .byte), nk("store_op", .byte), nk("depth_tex_id", .varint), nk("clear_r_bits", .u32_le), nk("clear_g_bits", .u32_le), nk("clear_b_bits", .u32_le), nk("clear_a_bits", .u32_le) } };
 const L_POOL_SET = Layout{ .head = &.{ nk("slot", .byte), nk("base_id", .varint), nk("pool_size", .byte), nk("offset", .byte) } }; // set_*_buffer/bind_group_pool
 const L_SELECT_POOL = Layout{ .head = &.{ nk("slot", .byte), nk("base_id", .varint), nk("offset", .byte) } };
 const L_DEFINE_PASS = Layout{ .head = &.{ nk("pass_id", .varint), nk("pass_type", .byte), nk("descriptor_data_id", .varint) } };
@@ -126,7 +131,7 @@ const L_SHADER_CONCAT = Layout{ .head = &.{nk("shader_id", .varint)}, .rep = .{ 
 // kept them agreeing with each other and disagreeing with `skipParams` above
 // 50_000 ids. `bytecode.MAX_EXECUTE_BUNDLES` now derives from this. (§320)
 const L_EXECUTE_BUNDLES = Layout{ .rep = .{ .count = .varint, .elem = &.{nk("bundle_id", .varint)}, .max = 16 } };
-const L_MRT = Layout{ .rep = .{ .count = .byte, .elem = &.{ nk("texture_id", .varint), nk("load_op", .byte), nk("store_op", .byte), nk("clear_r", .byte), nk("clear_g", .byte), nk("clear_b", .byte), nk("clear_a", .byte) }, .max = 8 }, .tail = &.{nk("depth_texture_id", .varint)} };
+const L_MRT = Layout{ .rep = .{ .count = .byte, .elem = &.{ nk("texture_id", .varint), nk("load_op", .byte), nk("store_op", .byte), nk("clear_r_bits", .u32_le), nk("clear_g_bits", .u32_le), nk("clear_b_bits", .u32_le), nk("clear_a_bits", .u32_le) }, .max = 8 }, .tail = &.{nk("depth_texture_id", .varint)} };
 const L_CALL_WASM = Layout{ .head = &.{ nk("call_id", .varint), nk("module_id", .varint), nk("func_name_id", .varint) }, .rep = .{ .count = .byte, .elem = &.{nk("arg", .wasm_arg)}, .max = 32 } };
 
 // ============================================================================
@@ -309,8 +314,12 @@ fn skipLayout(comptime layout: Layout, bytecode: []const u8, pc_in: u32) u32 {
                 count = bytecode[pc];
                 pc += 1;
             },
+            // The length-tolerant decoder, like `skipKind` below: a truncated
+            // count clamps (pc unchanged, count 0) instead of asserting in
+            // Debug and over-reading 1–3 bytes in the stripped ReleaseSmall
+            // executor — this skipper runs in every shipped binary.
             .varint => if (pc < bytecode.len) {
-                const r = opcodes.decode_varint(bytecode[pc..]);
+                const r = opcodes.decode_varint_safe(bytecode[pc..]);
                 count = r.value;
                 pc += r.len;
             },

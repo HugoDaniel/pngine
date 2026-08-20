@@ -17,8 +17,8 @@
 ; emitting cells — far under MAX_VERTICES 65536 / MAX_INDICES 262144; the
 ; indirect-args stage clamps the index count as the overflow backstop.
 
-; Defines used in buffer :size expressions; byte-count slots like
-; :array-stride take the literal instead.
+; Defines used in buffer :size expressions; :array-stride spells the literal
+; 32 although VERTEX_STRIDE compiles byte-identical.
 (define :name GRID_TOTAL_VERTS :value 35937)
 (define :name MAX_VERTICES :value 65536)
 (define :name MAX_INDICES :value 262144)
@@ -47,8 +47,8 @@
 
 (buffer :name timeUniforms :size 16 :usage [uniform copy-dst])
 
-(buffer :name groundVB :size groundPlane :usage [vertex]
-  :mapped-at-creation groundPlane)
+(buffer :name groundVB :usage [vertex]
+  :data groundPlane)
 
 (buffer :name vertexIdMap :size (* VERTEX_ID_MAP_SIZE 4) :usage [storage])
 
@@ -785,79 +785,77 @@ fn fs(in: VSOut) -> @location(0) vec4f {
 
 ; ── Compute Pipelines ──────────────────────────────────────────────────
 
-(compute-pipeline :name densityPipeline :module densityShader :entry main)
+(compute-pipeline :name densityPipeline :layout auto (compute :module densityShader :entry main))
 
-(compute-pipeline :name cameraPipeline :module cameraShader :entry updateCamera)
+(compute-pipeline :name cameraPipeline :layout auto (compute :module cameraShader :entry updateCamera))
 
-(compute-pipeline :name clearPipeline :module clearShader :entry main)
+(compute-pipeline :name clearPipeline :layout auto (compute :module clearShader :entry main))
 
-(compute-pipeline :name vertexGenPipeline :module vertexGenShader :entry main)
+(compute-pipeline :name vertexGenPipeline :layout auto (compute :module vertexGenShader :entry main))
 
-(compute-pipeline :name indexGenPipeline :module indexGenShader :entry main)
+(compute-pipeline :name indexGenPipeline :layout auto (compute :module indexGenShader :entry main))
 
-(compute-pipeline :name indirectArgsPipeline :module indirectArgsShader :entry main)
+(compute-pipeline :name indirectArgsPipeline :layout auto (compute :module indirectArgsShader :entry main))
 
 
 ; ── Render Pipelines ───────────────────────────────────────────────────
 
 (render-pipeline :name groundRenderPipeline
-  (layout auto)
-  (vertex (module groundRenderShader) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 24
-        (attribute :shader-location 0 :offset 0 :format float32x3)
-        (attribute :shader-location 1 :offset 12 :format float32x3))))
-  (fragment (module groundRenderShader) (entry fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list))
+  :layout auto
+  (vertex :module groundRenderShader :entry vs
+    (vertex-buffer :array-stride 24
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)))
+  (fragment :module groundRenderShader :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
 (render-pipeline :name meshRenderPipeline
-  (layout auto)
-  (vertex (module meshRenderShader) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 32
-        (attribute :shader-location 0 :offset 0 :format float32x4)
-        (attribute :shader-location 1 :offset 16 :format float32x4))))
-  (fragment (module meshRenderShader) (entry fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module meshRenderShader :entry vs
+    (vertex-buffer :array-stride 32
+      (attribute :shader-location 0 :offset 0 :format float32x4)
+      (attribute :shader-location 1 :offset 16 :format float32x4)))
+  (fragment :module meshRenderShader :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
 ; ── Bind Groups ────────────────────────────────────────────────────────
 
-(bind-group :name meshRenderBG :layout-pipeline meshRenderPipeline :layout-index 0
+(bind-group :name meshRenderBG :layout meshRenderPipeline :group 0
   (entry :binding 0 :buffer mvpBuffer))
 
-(bind-group :name groundRenderBG :layout-pipeline groundRenderPipeline :layout-index 0
+(bind-group :name groundRenderBG :layout groundRenderPipeline :group 0
   (entry :binding 0 :buffer mvpBuffer))
 
-(bind-group :name vertexGenBG :layout-pipeline vertexGenPipeline :layout-index 0
+(bind-group :name vertexGenBG :layout vertexGenPipeline :group 0
   (entry :binding 0 :buffer densityBuffer)
   (entry :binding 1 :buffer vertexBuffer)
   (entry :binding 2 :buffer vertexIdMap)
   (entry :binding 3 :buffer atomicCounters)
   (entry :binding 4 :buffer timeUniforms))
 
-(bind-group :name densityBG :layout-pipeline densityPipeline :layout-index 0
+(bind-group :name densityBG :layout densityPipeline :group 0
   (entry :binding 0 :buffer timeUniforms)
   (entry :binding 1 :buffer densityBuffer))
 
-(bind-group :name indirectArgsBG :layout-pipeline indirectArgsPipeline :layout-index 0
+(bind-group :name indirectArgsBG :layout indirectArgsPipeline :group 0
   (entry :binding 0 :buffer atomicCounters)
   (entry :binding 1 :buffer indirectDrawBuffer))
 
-(bind-group :name indexGenBG :layout-pipeline indexGenPipeline :layout-index 0
+(bind-group :name indexGenBG :layout indexGenPipeline :group 0
   (entry :binding 0 :buffer densityBuffer)
   (entry :binding 1 :buffer vertexIdMap)
   (entry :binding 2 :buffer indexBuffer)
   (entry :binding 3 :buffer atomicCounters))
 
-(bind-group :name cameraBG :layout-pipeline cameraPipeline :layout-index 0
+(bind-group :name cameraBG :layout cameraPipeline :group 0
   (entry :binding 0 :buffer timeUniforms)
   (entry :binding 1 :buffer mvpBuffer))
 
-(bind-group :name clearBG :layout-pipeline clearPipeline :layout-index 0
+(bind-group :name clearBG :layout clearPipeline :group 0
   (entry :binding 0 :buffer atomicCounters)
   (entry :binding 1 :buffer indirectDrawBuffer)
   (entry :binding 2 :buffer vertexIdMap))
@@ -865,29 +863,29 @@ fn fs(in: VSOut) -> @location(0) vec4f {
 ; ── Compute Passes ─────────────────────────────────────────────────────
 
 (compute-pass :name cameraPass :pipeline cameraPipeline :bind-groups [cameraBG]
-  :dispatch [1 1 1])
+  (dispatch :workgroups [1 1 1]))
 
 (compute-pass :name clearPass :pipeline clearPipeline :bind-groups [clearBG]
-  :dispatch [384 1 1])
+  (dispatch :workgroups [384 1 1]))
 
 (compute-pass :name densityPass :pipeline densityPipeline :bind-groups [densityBG]
-  :dispatch [141 1 1])
+  (dispatch :workgroups [141 1 1]))
 
 (compute-pass :name vertexPass :pipeline vertexGenPipeline :bind-groups [vertexGenBG]
-  :dispatch [128 1 1])
+  (dispatch :workgroups [128 1 1]))
 
 (compute-pass :name indexPass :pipeline indexGenPipeline :bind-groups [indexGenBG]
-  :dispatch [128 1 1])
+  (dispatch :workgroups [128 1 1]))
 
 (compute-pass :name indirectArgsPass :pipeline indirectArgsPipeline :bind-groups [indirectArgsBG]
-  :dispatch [1 1 1])
+  (dispatch :workgroups [1 1 1]))
 
 ; ── Render Passes ──────────────────────────────────────────────────────
 
 (render-pass :name renderMeshPass
   (color-attachment :view context-current-texture
     :clear-value [0.18 0.18 0.22 1.0] :load-op clear :store-op store)
-  (depth-attachment :view depthTexture
+  (depth-stencil-attachment :view depthTexture
     :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   :pipeline meshRenderPipeline
   :vertex-buffers [vertexBuffer]
@@ -897,7 +895,7 @@ fn fs(in: VSOut) -> @location(0) vec4f {
 
 (render-pass :name renderGroundPass
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depthTexture :depth-load-op load :depth-store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-load-op load :depth-store-op store)
   :pipeline groundRenderPipeline
   :vertex-buffers [groundVB]
   :bind-groups [groundRenderBG]

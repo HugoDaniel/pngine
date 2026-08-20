@@ -1,7 +1,7 @@
 ; Invalid: the shader reads @group(0) @binding(1) but the bind group only binds
 ; binding 0; the shader/binding cross-check rejects the used-but-unbound
 ; binding. Only bindings the entry points actually use count, so a declared but
-; unused binding under (layout auto) is not flagged.
+; unused binding under :layout auto is not flagged.
 (buffer :name buf0 :size 16 :usage [uniform copy-dst])
 (shader-module :name code :code """
     struct Uniforms { color: vec4f, }
@@ -17,12 +17,12 @@
       return u0.color + u1.color;
     }
 """)
-(bind-group :name uniformGroup :layout-pipeline pipeline :layout-index 0
+(bind-group :name uniformGroup :layout pipeline :group 0
   (entry :binding 0 :buffer buf0))
-(render-pipeline :name pipeline (layout auto)
-  (vertex (module code)(entry vertexMain))
-  (fragment (module code)(entry fragMain)(targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list)))
+(render-pipeline :name pipeline :layout auto
+  (vertex :module code :entry vertexMain)
+  (fragment :module code :entry fragMain (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
 (render-pass :name render :pipeline pipeline
   (color-attachment :view context-current-texture :clear-value [0 0 0 0] :load-op clear :store-op store)
   :bind-groups [uniformGroup]

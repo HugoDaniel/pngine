@@ -35,12 +35,12 @@
   :max-anisotropy 4)
 
 (render-pipeline :name pipe
-  (layout auto)
-  (vertex (module code) (entry vs))
-  (fragment (module code) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
 
-(bind-group :name g :layout-pipeline pipe :layout-index 0
+(bind-group :name g :layout pipe :group 0
   (entry :binding 0 :sampler samp)
   (entry :binding 1 :texture tex))
 

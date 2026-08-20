@@ -37,18 +37,18 @@
 (sampler :name samp :mag-filter nearest :min-filter nearest)
 
 (render-pipeline :name paintPipe
-  (layout auto)
-  (vertex (module code) (entry fullscreen))
-  (fragment (module code) (entry paint)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module code :entry fullscreen)
+  (fragment :module code :entry paint
+    (target :format preferred-canvas-format)))
 
 (render-pipeline :name showPipe
-  (layout auto)
-  (vertex (module code) (entry fullscreen))
-  (fragment (module code) (entry show)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module code :entry fullscreen)
+  (fragment :module code :entry show
+    (target :format preferred-canvas-format)))
 
-(bind-group :name showBG :layout-pipeline showPipe :layout-index 0
+(bind-group :name showBG :layout showPipe :group 0
   (entry :binding 0 :sampler samp)
   (entry :binding 1 :texture dstTex))
 
@@ -58,7 +58,7 @@
   (draw :vertex-count 3))
 
 (queue :name copySrcToDst
-  (copy-texture-to-texture :source srcTex :destination dstTex))
+  (copy-texture-to-texture (source :texture srcTex) (destination :texture dstTex)))
 
 (render-pass :name showDst
   (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)

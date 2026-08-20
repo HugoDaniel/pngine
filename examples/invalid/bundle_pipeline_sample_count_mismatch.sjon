@@ -1,0 +1,28 @@
+; INVALID: the bundle records against 1 sample, the pipeline it records is a
+; 4-sample pipeline.
+;
+; sampleCount is part of GPURenderPassLayout, and setPipeline requires the two
+; layouts to be equal -- not merely compatible in their formats. An omitted
+; :sample-count on the bundle is 1, the IDL default, so this disagreement can
+; be written without stating anything at all.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.0, 1.0); }
+""")
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format))
+  (multisample :count 4))
+(render-bundle :name tri :pipeline pipe
+  :color-formats [preferred-canvas-format]
+  :sample-count 1
+  (draw :vertex-count 3))
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :execute-bundles [tri])
+(frame :name main :perform [draw])

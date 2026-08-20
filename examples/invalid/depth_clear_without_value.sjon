@@ -1,0 +1,26 @@
+; Invalid: `:depth-load-op clear` with no `:depth-clear-value`. WebGPU gives
+; depthClearValue no default -- 1.0 was a PNGine opinion baked by the emitter
+; (D9/C6). The emitter refuses it now. Not `(variant :when clear …)`, which
+; is the shape: SJON's variants are positional, so adopting one would make
+; `:depth-load-op` have to be written before `:depth-clear-value` -- a key
+; ORDER rule inside a form, which WebGPU does not have.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+(texture :name depth :size canvas :format depth24plus :usage [render-attachment])
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format))
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (depth-stencil-attachment :view depth
+    :depth-load-op clear :depth-store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

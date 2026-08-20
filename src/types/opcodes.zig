@@ -413,7 +413,7 @@ pub const OpCode = enum(u8) {
 /// Discriminates the TWO id spaces `create_bind_group`'s `layout_id` can name.
 /// Set ⇒ the low bits are a `create_bind_group_layout` id (the group targets an
 /// explicitly authored layout, `:bind-group-layout`); clear ⇒ a pipeline id (the
-/// group targets that pipeline's auto-derived layout, `:layout-pipeline`).
+/// group targets that pipeline's auto-derived layout: `:layout <pipeline>`).
 ///
 /// Both spaces are numbered from 0 and both are capped at 64 entries, so without
 /// this bit the operand is ambiguous and every consumer guessed differently

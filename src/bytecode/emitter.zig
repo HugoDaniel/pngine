@@ -399,10 +399,10 @@ pub const Emitter = struct {
         load_op: LoadOp,
         store_op: StoreOp,
         depth_texture_id: u16,
-        clear_r: u8,
-        clear_g: u8,
-        clear_b: u8,
-        clear_a: u8,
+        clear_r_bits: u32,
+        clear_g_bits: u32,
+        clear_b_bits: u32,
+        clear_a_bits: u32,
         resolve_texture_id: u16,
     ) !void {
         const start_len = self.bytes.items.len;
@@ -411,13 +411,14 @@ pub const Emitter = struct {
         try self.emitByte(allocator, @intFromEnum(load_op));
         try self.emitByte(allocator, @intFromEnum(store_op));
         try self.emitVarint(allocator, depth_texture_id);
-        try self.emitByte(allocator, clear_r);
-        try self.emitByte(allocator, clear_g);
-        try self.emitByte(allocator, clear_b);
-        try self.emitByte(allocator, clear_a);
+        try self.emitRawU32(allocator, clear_r_bits);
+        try self.emitRawU32(allocator, clear_g_bits);
+        try self.emitRawU32(allocator, clear_b_bits);
+        try self.emitRawU32(allocator, clear_a_bits);
         try self.emitVarint(allocator, resolve_texture_id);
-        // Post-condition: opcode + 3 varints (≥1 each) + 6 bytes = at least 10.
-        assert(self.bytes.items.len >= start_len + 10);
+        // Post-condition: opcode + 3 varints (≥1 each) + 2 op bytes + 16 clear
+        // bytes = at least 22.
+        assert(self.bytes.items.len >= start_len + 22);
     }
 
     /// Emit begin_render_pass_pool instruction.
@@ -433,10 +434,10 @@ pub const Emitter = struct {
         load_op: LoadOp,
         store_op: StoreOp,
         depth_texture_id: u16,
-        clear_r: u8,
-        clear_g: u8,
-        clear_b: u8,
-        clear_a: u8,
+        clear_r_bits: u32,
+        clear_g_bits: u32,
+        clear_b_bits: u32,
+        clear_a_bits: u32,
     ) !void {
         // Pre-conditions
         assert(pool_size > 0); // Pool must have at least 1 texture
@@ -450,12 +451,13 @@ pub const Emitter = struct {
         try self.emitByte(allocator, @intFromEnum(load_op));
         try self.emitByte(allocator, @intFromEnum(store_op));
         try self.emitVarint(allocator, depth_texture_id);
-        try self.emitByte(allocator, clear_r);
-        try self.emitByte(allocator, clear_g);
-        try self.emitByte(allocator, clear_b);
-        try self.emitByte(allocator, clear_a);
-        // Post-condition: opcode + 2 varints (≥1 each) + 8 bytes = at least 11.
-        assert(self.bytes.items.len >= start_len + 11);
+        try self.emitRawU32(allocator, clear_r_bits);
+        try self.emitRawU32(allocator, clear_g_bits);
+        try self.emitRawU32(allocator, clear_b_bits);
+        try self.emitRawU32(allocator, clear_a_bits);
+        // Post-condition: opcode + 2 varints (≥1 each) + 4 op/pool bytes + 16
+        // clear bytes = at least 23.
+        assert(self.bytes.items.len >= start_len + 23);
     }
 
     /// Color attachment for MRT render passes.
@@ -463,10 +465,11 @@ pub const Emitter = struct {
         texture_id: u16,
         load_op: LoadOp,
         store_op: StoreOp,
-        clear_r: u8,
-        clear_g: u8,
-        clear_b: u8,
-        clear_a: u8,
+        /// f32 bit patterns, not 0-255 bytes — see L_BEGIN_RP in wire_schema.zig.
+        clear_r_bits: u32,
+        clear_g_bits: u32,
+        clear_b_bits: u32,
+        clear_a_bits: u32,
     };
 
     /// Emit begin_render_pass_mrt instruction for multiple color attachments.
@@ -488,16 +491,16 @@ pub const Emitter = struct {
             try self.emitVarint(allocator, att.texture_id);
             try self.emitByte(allocator, @intFromEnum(att.load_op));
             try self.emitByte(allocator, @intFromEnum(att.store_op));
-            try self.emitByte(allocator, att.clear_r);
-            try self.emitByte(allocator, att.clear_g);
-            try self.emitByte(allocator, att.clear_b);
-            try self.emitByte(allocator, att.clear_a);
+            try self.emitRawU32(allocator, att.clear_r_bits);
+            try self.emitRawU32(allocator, att.clear_g_bits);
+            try self.emitRawU32(allocator, att.clear_b_bits);
+            try self.emitRawU32(allocator, att.clear_a_bits);
         }
 
         try self.emitVarint(allocator, depth_texture_id);
-        // Post-condition: opcode + count byte + depth varint + 7 bytes per attachment
-        // (texture_id varint ≥1 + 6 clear/op bytes).
-        assert(self.bytes.items.len >= start_len + 3 + 7 * attachments.len);
+        // Post-condition: opcode + count byte + depth varint + 19 bytes per
+        // attachment (texture_id varint ≥1 + 2 op bytes + 16 clear bytes).
+        assert(self.bytes.items.len >= start_len + 3 + 19 * attachments.len);
     }
 
     /// Emit begin_compute_pass instruction.
@@ -611,6 +614,11 @@ pub const Emitter = struct {
 
     /// Emit draw instruction with full WebGPU parameters.
     /// Params: vertex_count, instance_count, first_vertex, first_instance
+    ///
+    /// No lower bound on the counts: `draw(0, …)` and `draw(n, 0, …)` are legal
+    /// WebGPU no-ops and schema-legal (`count-value` is `:min 0`). A `> 0` assert
+    /// here once turned `(draw :vertex-count 0)` — validated clean — into an
+    /// abort of `pngine validate`; this layer encodes what it is given.
     pub fn draw(
         self: *Self,
         allocator: Allocator,
@@ -619,10 +627,6 @@ pub const Emitter = struct {
         first_vertex: u32,
         first_instance: u32,
     ) !void {
-        // Pre-conditions
-        assert(vertex_count > 0); // Must draw at least 1 vertex
-        assert(instance_count > 0); // Must draw at least 1 instance
-
         const start_len = self.bytes.items.len;
         try self.emitOpcode(allocator, .draw);
         try self.emitVarint(allocator, vertex_count);
@@ -630,7 +634,8 @@ pub const Emitter = struct {
         try self.emitVarint(allocator, first_vertex);
         try self.emitVarint(allocator, first_instance);
 
-        // Post-condition: at least 5 bytes emitted
+        // Post-conditions: the opcode landed, then at least four varint bytes.
+        assert(self.bytes.items[start_len] == @intFromEnum(OpCode.draw));
         assert(self.bytes.items.len >= start_len + 5);
     }
 
@@ -645,10 +650,7 @@ pub const Emitter = struct {
         base_vertex: u32,
         first_instance: u32,
     ) !void {
-        // Pre-conditions
-        assert(index_count > 0); // Must draw at least 1 index
-        assert(instance_count > 0); // Must draw at least 1 instance
-
+        // No lower bound on the counts — see `draw`.
         const start_len = self.bytes.items.len;
         try self.emitOpcode(allocator, .draw_indexed);
         try self.emitVarint(allocator, index_count);
@@ -657,7 +659,8 @@ pub const Emitter = struct {
         try self.emitVarint(allocator, base_vertex);
         try self.emitVarint(allocator, first_instance);
 
-        // Post-condition: at least 6 bytes emitted
+        // Post-conditions: the opcode landed, then at least five varint bytes.
+        assert(self.bytes.items[start_len] == @intFromEnum(OpCode.draw_indexed));
         assert(self.bytes.items.len >= start_len + 6);
     }
 
@@ -669,18 +672,16 @@ pub const Emitter = struct {
         y: u32,
         z: u32,
     ) !void {
-        // Pre-conditions: workgroup dimensions must be positive
-        assert(x > 0);
-        assert(y > 0);
-        assert(z > 0);
-
+        // No lower bound on the workgroup counts — `dispatchWorkgroups(0, …)`
+        // is a legal WebGPU no-op, like `draw(0)` above.
         const start_len = self.bytes.items.len;
         try self.emitOpcode(allocator, .dispatch);
         try self.emitVarint(allocator, x);
         try self.emitVarint(allocator, y);
         try self.emitVarint(allocator, z);
 
-        // Post-condition: at least 4 bytes emitted
+        // Post-conditions: the opcode landed, then at least three varint bytes.
+        assert(self.bytes.items[start_len] == @intFromEnum(OpCode.dispatch));
         assert(self.bytes.items.len >= start_len + 4);
     }
 

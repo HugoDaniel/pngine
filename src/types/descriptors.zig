@@ -418,6 +418,42 @@ pub const TextureFormat = enum(u8) {
             .preferred_canvas_format, .invalid, _ => "rgba8unorm",
         };
     }
+
+    /// Does this format carry a depth aspect? WebGPU's "has a depth component"
+    /// predicate, which decides whether a GPUDepthStencilState may depth-test or
+    /// depth-write and whether a render pass may state depth ops. The sentinels
+    /// and any unknown code answer false — the caller SKIPS rather than reject.
+    pub fn hasDepth(self: TextureFormat) bool {
+        return switch (self) {
+            .depth24plus, .depth24plus_stencil8, .depth32float, .depth16unorm, .depth32float_stencil8 => true,
+            else => false,
+        };
+    }
+
+    /// Does this format have an alpha channel? WebGPU asks when
+    /// `alphaToCoverageEnabled` is set: the fragment's alpha becomes the coverage
+    /// mask, so target 0 must have one to supply it. `preferred-canvas-format`
+    /// resolves to bgra8unorm or rgba8unorm, both of which do.
+    pub fn hasAlpha(self: TextureFormat) bool {
+        return switch (self) {
+            .rgba8unorm, .rgba8snorm, .rgba8uint, .rgba8sint, .rgba8unorm_srgb => true,
+            .bgra8unorm, .bgra8unorm_srgb, .preferred_canvas_format => true,
+            .rgba16float, .rgba16uint, .rgba16sint, .rgba16unorm, .rgba16snorm => true,
+            .rgba32float, .rgba32uint, .rgba32sint => true,
+            .rgb10a2unorm, .rgb10a2uint => true,
+            else => false,
+        };
+    }
+
+    /// Does this format carry a stencil aspect? The companion of `hasDepth`;
+    /// `stencil8` is the stencil-only member, and the two combined formats have
+    /// both aspects.
+    pub fn hasStencil(self: TextureFormat) bool {
+        return switch (self) {
+            .depth24plus_stencil8, .stencil8, .depth32float_stencil8 => true,
+            else => false,
+        };
+    }
 };
 
 pub const FilterMode = enum(u8) {

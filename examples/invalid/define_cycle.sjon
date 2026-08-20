@@ -1,0 +1,12 @@
+; audit C1: constants resolve document-wide (a define may name a define
+; declared after it), so the only unresolvable shape is a CYCLE. It used to be
+; an unlocated "emit failed" — buildEnv evaluated in document order with a bare
+; `try`. Expected: a located diagnostic at the first constant in the cycle.
+(define :name A :value (* B 2))
+(define :name B :value (+ A 1))
+(shader-module :name cs :code "@compute @workgroup_size(1) fn main() {}")
+(buffer :name b :size A :usage [storage])
+(compute-pipeline :name cp :layout auto (compute :module cs :entry main))
+(bind-group :name g :layout cp :group 0 (entry :binding 0 :buffer b))
+(compute-pass :name step :pipeline cp :bind-groups [g] (dispatch :workgroups [1 1 1]))
+(frame :name main :perform [step])

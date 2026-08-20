@@ -9,15 +9,16 @@
 ; pans, scroll pans, ctrl+scroll (trackpad pinch) zooms.
 ;
 ; The cube half is the `cube` shape generator (position4+color4+uv2, stride
-; 40, offsets 0/16/32 written as literals because a byte-count slot rejects a
-; bare define name), a depth texture with depth-write/less and cull-mode back.
+; 40, offsets 0/16/32 written as literals for legibility — a byte-count slot
+; takes a bare define name too), a depth texture with depth-write/less and
+; cull-mode back.
 
 (define :name CUBE_VERTEX_COUNT :value 36)
 
 (data :name cubeVertexArray (cube :format [position4 color4 uv2]))
 
-(buffer :name verticesBuffer :size cubeVertexArray :usage [vertex]
-  :mapped-at-creation cubeVertexArray)
+(buffer :name verticesBuffer :usage [vertex]
+  :data cubeVertexArray)
 (buffer :name timeUniforms :size 16 :usage [uniform copy-dst])
 (buffer :name pointerBuf :size 48 :usage [uniform copy-dst])
 (buffer :name cameraState :size 128 :usage [storage])
@@ -278,38 +279,37 @@ fn fs(@location(0) color: vec4f) -> @location(0) vec4f {
 }
 """)
 
-(compute-pipeline :name cameraUpdate :module cameraShader :entry updateCamera)
+(compute-pipeline :name cameraUpdate :layout auto (compute :module cameraShader :entry updateCamera))
 
 (render-pipeline :name renderCube
-  (layout auto)
-  (vertex (module renderShader) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 40
-        (attribute :shader-location 0 :offset 0 :format float32x4)
-        (attribute :shader-location 1 :offset 16 :format float32x4)
-        (attribute :shader-location 2 :offset 32 :format float32x2))))
-  (fragment (module renderShader) (entry fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module renderShader :entry vs
+    (vertex-buffer :array-stride 40
+      (attribute :shader-location 0 :offset 0 :format float32x4)
+      (attribute :shader-location 1 :offset 16 :format float32x4)
+      (attribute :shader-location 2 :offset 32 :format float32x2)))
+  (fragment :module renderShader :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
-(bind-group :name cameraBindGroup :layout-pipeline cameraUpdate :layout-index 0
+(bind-group :name cameraBindGroup :layout cameraUpdate :group 0
   (entry :binding 0 :buffer timeUniforms)
   (entry :binding 1 :buffer pointerBuf)
   (entry :binding 2 :buffer cameraState)
   (entry :binding 3 :buffer mvpBuffer))
 
-(bind-group :name renderBindGroup :layout-pipeline renderCube :layout-index 0
+(bind-group :name renderBindGroup :layout renderCube :group 0
   (entry :binding 0 :buffer mvpBuffer))
 
 (compute-pass :name updateCameraPass
   :pipeline cameraUpdate
   :bind-groups [cameraBindGroup]
-  :dispatch-workgroups 1)
+  (dispatch :workgroups [1]))
 
 (render-pass :name drawCube
   (color-attachment :view context-current-texture :clear-value [0.5 0.5 0.5 1.0] :load-op clear :store-op store)
-  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   :pipeline renderCube
   :vertex-buffers [verticesBuffer]
   :bind-groups [renderBindGroup]

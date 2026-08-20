@@ -10,10 +10,10 @@
 """)
 (texture :name msaaTex :size canvas :format rgba8unorm :usage [render-attachment])
 (texture :name resolveTex :size canvas :format rgba16float :usage [render-attachment])
-(render-pipeline :name pipe (layout auto)
-  (vertex (module code) (entry vs))
-  (fragment (module code) (entry fs)
-    (targets (target :format rgba8unorm)))
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format rgba8unorm))
   (multisample :count 4))
 (render-pass :name draw :pipeline pipe
   (color-attachment :view msaaTex :resolve-target resolveTex

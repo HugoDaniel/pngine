@@ -96,7 +96,11 @@ export function decodeTextureViewDescriptor(bytes) {
  * @returns {object} - GPUSamplerDescriptor-shaped object
  */
 export function decodeSamplerDescriptor(bytes) {
-  const desc = /** @type {Record<string, string|number>} */ ({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
+  // Seeded with the GPUSamplerDescriptor defaults (spec/09 step D flipped the
+  // filters from linear). The encoder always writes all four fields, so this
+  // seed only shows through for a descriptor that omits one — which is to say,
+  // never from this compiler.
+  const desc = /** @type {Record<string, string|number>} */ ({ magFilter: "nearest", minFilter: "nearest", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
   const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let off = 2;
   const fc = bytes[1];

@@ -1,4 +1,4 @@
-; Spinning 2D shapes — a fullscreen triangle whose fragment shader draws five
+; Spinning 2D shapes: a fullscreen triangle whose fragment shader draws five
 ; signed-distance shapes (regular polygons, a five-point star, circles) that
 ; orbit and spin over time, with soft edges and a glow. Aspect-corrected using
 ; the pngine-inputs uniform.
@@ -21,12 +21,20 @@
       return vec4f(x, y, 0.0, 1.0);
     }
 
+    // Floor modulo. WGSL's `%` on floats truncates toward zero, keeping the
+    // sign of the dividend (C fmod), so folding an angle from atan2 with it
+    // is only right for positive angles; the negative half of every shape
+    // came out as spikes. GLSL's mod is the floor kind; this is that.
+    fn floorMod(x: f32, y: f32) -> f32 {
+      return x - y * floor(x / y);
+    }
+
     // SDF for regular polygon
     fn sdPolygon(p: vec2f, r: f32, n: f32) -> f32 {
       let an = PI / n;
       let en = PI / n;
       let acs = vec2f(cos(an), sin(an));
-      let bn = (atan2(p.x, p.y) % (2.0 * an)) - an;
+      let bn = floorMod(atan2(p.x, p.y), 2.0 * an) - an;
       let pp = length(p) * vec2f(cos(bn), abs(sin(bn)));
       return pp.x * acs.x + pp.y * acs.y - r;
     }
@@ -37,7 +45,7 @@
       let en = PI / m;
       let acs = vec2f(cos(an), sin(an));
       let ecs = vec2f(cos(en), sin(en));
-      let bn = (atan2(p.x, p.y) % (2.0 * an)) - an;
+      let bn = floorMod(atan2(p.x, p.y), 2.0 * an) - an;
       var pp = length(p) * vec2f(cos(bn), abs(sin(bn)));
       pp -= r * acs;
       pp += ecs * clamp(-dot(pp, ecs), 0.0, r * acs.y / ecs.y);
@@ -100,17 +108,17 @@
   """)
 
 (render-pipeline :name pipeline
-  (layout auto)
-  (vertex (module shader) (entry vs))
-  (fragment (module shader) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module shader :entry vs)
+  (fragment :module shader :entry fs
+    (target :format preferred-canvas-format)))
 
 (buffer :name uniforms :size 16 :usage [uniform copy-dst])
 
 (queue :name writeUniforms
   (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
 
-(bind-group :name uniformsBindGroup :layout-pipeline pipeline :layout-index 0
+(bind-group :name uniformsBindGroup :layout pipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
 (render-pass :name mainPass

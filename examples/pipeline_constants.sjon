@@ -47,13 +47,14 @@ struct VSOut {
 }
 """)
 
-(render-pipeline :name pipe (layout auto)
-  (vertex (module code) (entry vs)
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs
     (constant :name SCALE :value 0.9))
-  (fragment (module code) (entry fs)
-    (targets (target :format preferred-canvas-format))
-    ; A bare `(define …)` name resolves only in count slots, so the expression
-    ; wrapper is required here — `:value BASE_RINGS` would not validate.
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)
+    ; `:value BASE_RINGS` would do the same — a bare `(define …)` name works in
+    ; every numeric slot since 3.0.0; the `(* … 1)` wrapper is the pre-3.0.0
+    ; spelling, kept here so the expression form has a corpus example.
     (constant :name RINGS :value (* BASE_RINGS 1))
     (constant :name TINT :value 0.85)))
 

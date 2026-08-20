@@ -218,22 +218,33 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !DataSection {
     const entries_start = header_size;
     const data_start = metadata_size;
 
-    // Read entries and extract blobs (making owned copies)
+    // Read entries and extract blobs (making owned copies). Two bounds: each
+    // entry inside the section (in u64 — two u32s from the wire must not wrap
+    // on a 32-bit host), and the SUM of every entry's length inside it too.
+    // The serializer lays blobs out back to back, so a well-formed section
+    // never sums past its own bytes; a hostile one that pointed N entries at
+    // the same blob passed the per-entry check N times and was duplicated N
+    // times — 65535 × ~16 MiB from one 16 MiB file. (Third leak pass)
+    const blob_bytes_available: u64 = data.len - data_start;
+    var blob_bytes_total: u64 = 0;
     for (0..data_count) |i| {
         const entry_pos = entries_start + i * 8;
         const blob_offset = std.mem.readInt(u32, data[entry_pos..][0..4], .little);
         const blob_len = std.mem.readInt(u32, data[entry_pos + 4 ..][0..4], .little);
 
-        const blob_start = data_start + blob_offset;
-        const blob_end = blob_start + blob_len;
-
+        const blob_start: u64 = @as(u64, data_start) + blob_offset;
+        const blob_end: u64 = blob_start + blob_len;
         if (blob_end > data.len) return error.InvalidDataSection;
 
+        blob_bytes_total += blob_len;
+        if (blob_bytes_total > blob_bytes_available) return error.InvalidDataSection;
+
         // Make owned copy of blob data
-        const owned = try allocator.dupe(u8, data[blob_start..blob_end]);
+        const owned = try allocator.dupe(u8, data[@intCast(blob_start)..@intCast(blob_end)]);
         section.blobs.appendAssumeCapacity(owned);
         section.total_size += owned.len;
     }
+    assert(blob_bytes_total <= blob_bytes_available);
 
     // Post-condition: loaded correct number of entries
     assert(section.blobs.items.len == data_count);

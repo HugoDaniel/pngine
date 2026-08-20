@@ -90,22 +90,30 @@ export async function pngine(source, options = {}) {
   // Pointer/keyboard tracking — must attach before transferControlToOffscreen.
   const { pointer: ptr, detach: detachListeners } = attachPointerTracking(canvas);
 
-  const offscreen = canvas.transferControlToOffscreen();
-  const worker = new Worker(getWorkerUrl(), { type: "module" });
+  // Until the handle exists the listeners are ours to release — a worker that
+  // fails to come up rejects from this block (see init.js for the full note).
+  let worker, result;
+  try {
+    const offscreen = canvas.transferControlToOffscreen();
+    worker = new Worker(getWorkerUrl(), { type: "module" });
 
-  // Slice bytecode so the original buffer stays alive for extractAudio below.
-  const bc = bytecode.slice();
-  const result = await awaitWorkerReady(
-    worker,
-    {
-      type: "init",
-      canvas: offscreen,
-      bytecode: bc,
-      debug: options.debug || false,
-    },
-    [offscreen, bc.buffer],
-    options
-  );
+    // Slice bytecode so the original buffer stays alive for extractAudio below.
+    const bc = bytecode.slice();
+    result = await awaitWorkerReady(
+      worker,
+      {
+        type: "init",
+        canvas: offscreen,
+        bytecode: bc,
+        debug: options.debug || false,
+      },
+      [offscreen, bc.buffer],
+      options
+    );
+  } catch (err) {
+    detachListeners();
+    throw err;
+  }
 
   // Built BEFORE the audio phase — see init.js for why: by this point the
   // device, the transferred canvas and seven listeners are all committed, and

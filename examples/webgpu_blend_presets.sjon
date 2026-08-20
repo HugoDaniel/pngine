@@ -117,82 +117,82 @@ fn place(cell: u32, vi: u32) -> VSOut {
 """)
 
 (render-pipeline :name destPipeline
-  (layout auto)
-  (vertex (module destShader) (entry vs))
-  (fragment (module destShader) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module destShader :entry vs)
+  (fragment :module destShader :entry fs
+    (target :format preferred-canvas-format)))
 
 (render-pipeline :name overPipeline
-  (layout auto)
-  (vertex (module srcShader) (entry vs0))
-  (fragment (module srcShader) (entry fs)
-    (targets (target :format preferred-canvas-format
+  :layout auto
+  (vertex :module srcShader :entry vs0)
+  (fragment :module srcShader :entry fs
+    (target :format preferred-canvas-format
       (blend
         (color :src-factor one :dst-factor one-minus-src-alpha :operation add)
-        (alpha :src-factor one :dst-factor one-minus-src-alpha :operation add))))))
+        (alpha :src-factor one :dst-factor one-minus-src-alpha :operation add)))))
 
 (render-pipeline :name additivePipeline
-  (layout auto)
-  (vertex (module srcShader) (entry vs1))
-  (fragment (module srcShader) (entry fs)
-    (targets (target :format preferred-canvas-format
+  :layout auto
+  (vertex :module srcShader :entry vs1)
+  (fragment :module srcShader :entry fs
+    (target :format preferred-canvas-format
       (blend
         (color :src-factor one :dst-factor one :operation add)
-        (alpha :src-factor one :dst-factor one :operation add))))))
+        (alpha :src-factor one :dst-factor one :operation add)))))
 
 (render-pipeline :name multiplyPipeline
-  (layout auto)
-  (vertex (module srcShader) (entry vs2))
-  (fragment (module srcShader) (entry fs)
-    (targets (target :format preferred-canvas-format
+  :layout auto
+  (vertex :module srcShader :entry vs2)
+  (fragment :module srcShader :entry fs
+    (target :format preferred-canvas-format
       (blend
         (color :src-factor dst :dst-factor one-minus-src-alpha :operation add)
-        (alpha :src-factor dst-alpha :dst-factor one-minus-src-alpha :operation add))))))
+        (alpha :src-factor dst-alpha :dst-factor one-minus-src-alpha :operation add)))))
 
 (render-pipeline :name screenPipeline
-  (layout auto)
-  (vertex (module srcShader) (entry vs3))
-  (fragment (module srcShader) (entry fs)
-    (targets (target :format preferred-canvas-format
+  :layout auto
+  (vertex :module srcShader :entry vs3)
+  (fragment :module srcShader :entry fs
+    (target :format preferred-canvas-format
       (blend
         (color :src-factor one :dst-factor one-minus-src :operation add)
-        (alpha :src-factor one :dst-factor one-minus-src-alpha :operation add))))))
+        (alpha :src-factor one :dst-factor one-minus-src-alpha :operation add)))))
 
 (render-pipeline :name revSubPipeline
-  (layout auto)
-  (vertex (module srcShader) (entry vs4))
-  (fragment (module srcShader) (entry fs)
-    (targets (target :format preferred-canvas-format
+  :layout auto
+  (vertex :module srcShader :entry vs4)
+  (fragment :module srcShader :entry fs
+    (target :format preferred-canvas-format
       (blend
         (color :src-factor one :dst-factor one :operation reverse-subtract)
-        (alpha :src-factor one :dst-factor one :operation add))))))
+        (alpha :src-factor one :dst-factor one :operation add)))))
 
 (render-pipeline :name minPipeline
-  (layout auto)
-  (vertex (module srcShader) (entry vs5))
-  (fragment (module srcShader) (entry fs)
-    (targets (target :format preferred-canvas-format
+  :layout auto
+  (vertex :module srcShader :entry vs5)
+  (fragment :module srcShader :entry fs
+    (target :format preferred-canvas-format
       (blend
         (color :src-factor one :dst-factor one :operation min)
-        (alpha :src-factor one :dst-factor one :operation add))))))
+        (alpha :src-factor one :dst-factor one :operation add)))))
 
 (render-pipeline :name maxPipeline
-  (layout auto)
-  (vertex (module srcShader) (entry vs6))
-  (fragment (module srcShader) (entry fs)
-    (targets (target :format preferred-canvas-format
+  :layout auto
+  (vertex :module srcShader :entry vs6)
+  (fragment :module srcShader :entry fs
+    (target :format preferred-canvas-format
       (blend
         (color :src-factor one :dst-factor one :operation max)
-        (alpha :src-factor one :dst-factor one :operation add))))))
+        (alpha :src-factor one :dst-factor one :operation add)))))
 
 (render-pipeline :name destOverPipeline
-  (layout auto)
-  (vertex (module srcShader) (entry vs7))
-  (fragment (module srcShader) (entry fs)
-    (targets (target :format preferred-canvas-format
+  :layout auto
+  (vertex :module srcShader :entry vs7)
+  (fragment :module srcShader :entry fs
+    (target :format preferred-canvas-format
       (blend
         (color :src-factor one-minus-dst-alpha :dst-factor one :operation add)
-        (alpha :src-factor one-minus-dst-alpha :dst-factor one :operation add))))))
+        (alpha :src-factor one-minus-dst-alpha :dst-factor one :operation add)))))
 
 ; Destination: one instanced draw fills all 8 cells identically.
 (render-pass :name drawDest

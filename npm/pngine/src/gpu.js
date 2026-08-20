@@ -77,21 +77,24 @@ const PNGB_MAGIC = 0x42474e50; // "PNGB" little-endian
 // flags bit 2 — payload carries an authored device-limits table appended after
 // the animation table; its byte offset lives in the 3 reserved header bytes.
 const PNGB_FLAG_DEVICE_LIMITS = 0x04;
-// flags bit 3 — the author requested an OPAQUE canvas ((canvas :alpha-mode
-// opaque)); clear = the historical premultiplied configure. (spec/04)
-const PNGB_FLAG_OPAQUE_CANVAS = 0x08;
+// flags bit 3 — the author requested a PREMULTIPLIED canvas ((canvas
+// :alpha-mode premultiplied)); clear = "opaque", the GPUCanvasConfiguration
+// default. The bit used to mean the opposite, back when this runtime's own
+// default was premultiplied. (spec/04, spec/09 D)
+const PNGB_FLAG_PREMULTIPLIED_CANVAS = 0x08;
 
 /**
- * Canvas alphaMode the payload requests: "opaque" when header flag bit 3 is
- * set, else the historical "premultiplied" (also for non-PNGB/short buffers).
+ * Canvas alphaMode the payload requests: "premultiplied" when header flag bit 3
+ * is set, else "opaque" — which is also what a non-PNGB or short buffer gets,
+ * since the spec default is the right answer when the payload says nothing.
  * @param {Uint8Array|null|undefined} bytecode
  * @returns {"opaque"|"premultiplied"}
  */
 export function canvasAlphaMode(bytecode) {
-  if (!bytecode || bytecode.length < PNGB_HEADER_SIZE) return "premultiplied";
+  if (!bytecode || bytecode.length < PNGB_HEADER_SIZE) return "opaque";
   const view = new DataView(bytecode.buffer, bytecode.byteOffset, bytecode.byteLength);
-  if (view.getUint32(0, true) !== PNGB_MAGIC) return "premultiplied";
-  return (view.getUint16(6, true) & PNGB_FLAG_OPAQUE_CANVAS) ? "opaque" : "premultiplied";
+  if (view.getUint32(0, true) !== PNGB_MAGIC) return "opaque";
+  return (view.getUint16(6, true) & PNGB_FLAG_PREMULTIPLIED_CANVAS) ? "premultiplied" : "opaque";
 }
 
 /**
@@ -381,14 +384,21 @@ export function createCommandDispatcher(device, ctx) {
   // Skipped entirely when no host is listening, and that is correctness rather
   // than thrift: pushing a scope SUPPRESSES onuncapturederror for the enclosed
   // call, so scoping without reporting would lose the error altogether.
+  //
+  // The pop is in a `finally`: a create that THROWS (a TypeError from a missing
+  // required member on a desynced stream) used to leave the scope pushed, and
+  // a pushed scope captures every later validation error on the device —
+  // onuncapturederror never fired again.
   function scoped(kind, id, make) {
     if (!onError) return make();
     device.pushErrorScope("validation");
-    const resource = make();
-    device.popErrorScope().then((e) => {
-      if (e) onError({ message: `${kind}(${id}) failed validation: ${e.message}`, source: "validation" });
-    });
-    return resource;
+    try {
+      return make();
+    } finally {
+      device.popErrorScope().then((e) => {
+        if (e) onError({ message: `${kind}(${id}) failed validation: ${e.message}`, source: "validation" });
+      });
+    }
   }
 
   // Decode texture format enum - uses centralized lookup from enums.js
@@ -441,7 +451,12 @@ export function createCommandDispatcher(device, ctx) {
       layout: (desc.layoutId !== undefined && ppl[desc.layoutId]) ? ppl[desc.layoutId] : "auto",
       vertex: {
         module: shd[desc.vertex?.shader ?? 0],
-        entryPoint: desc.vertex?.entryPoint ?? "vs_main",
+        // No `?? "vs_main"` fallback: the compiler resolves every stage's entry
+        // point (explicit `:entry`, else the module's sole entry for the
+        // stage) and always writes a real name. A fabricated one here could only
+        // hide a compiler bug behind a driver-level abort. Same below and in
+        // createComputePipeline.
+        entryPoint: desc.vertex.entryPoint,
         buffers: desc.vertex?.buffers ?? [],
       },
       primitive: desc.primitive ?? { topology: "triangle-list" },
@@ -461,7 +476,7 @@ export function createCommandDispatcher(device, ctx) {
       DEBUG && dbg && console.log(`[GPU]   targets:`, JSON.stringify(targets));
       pipeDesc.fragment = {
         module: shd[desc.fragment.shader ?? desc.vertex?.shader ?? 0],
-        entryPoint: desc.fragment.entryPoint ?? "fs_main",
+        entryPoint: desc.fragment.entryPoint,
         targets,
       };
     } else {
@@ -479,7 +494,10 @@ export function createCommandDispatcher(device, ctx) {
     const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const shaderId = v.getUint16(1, true); // bytes 1-2, little endian
     const entryLen = bytes[3];
-    const entryPoint = entryLen > 0 ? new TextDecoder().decode(bytes.slice(4, 4 + entryLen)) : "main";
+    // A zero-length entry is a malformed descriptor, not a request for "main":
+    // the compiler resolves the sole compute entry when `:entry` is omitted.
+    if (entryLen === 0) return emptyDescriptor("createComputePipeline", id);
+    const entryPoint = new TextDecoder().decode(bytes.slice(4, 4 + entryLen));
     DEBUG && dbg && console.log(`[GPU] createComputePipeline(${id}) shader=${shaderId} entry=${entryPoint}`);
     // Check for optional layout ID after entry point bytes
     const layoutOff = 4 + entryLen;
@@ -526,11 +544,15 @@ export function createCommandDispatcher(device, ctx) {
     // rebuilt textures would otherwise leave every cached entry holding a view
     // of a destroyed texture. An explicit-BGL group never rebuilds (see below),
     // so its `alt` stays null.
-    bgd[id] = { layoutId, gi, entries, alt: null };
     DEBUG && dbg && console.log(`[GPU] createBindGroup(${id}) layoutId=${fmtLayoutId(layoutId)} entries=[${entries.map(e => `{b=${e.binding} rt=${e.rt} rid=${e.rid}}`).join(',')}]`);
     const layout = resolveBindGroupLayout(layoutId, gi);
     if (!layout) return;
+    // `bgd` (the rebuild recipe set_bind_group reads) is written only once the
+    // group EXISTS: written first, a throwing createBindGroup left a recipe
+    // with no group behind it, and every later set_bind_group re-threw from
+    // the rebuild — once per frame, an undeduped error post at 60 Hz.
     bg[id] = scoped("createBindGroup", id, () => device.createBindGroup({ layout, entries: buildBindGroupEntries(entries) }));
+    bgd[id] = { layoutId, gi, entries, alt: null };
   }
 
   // `layout_id` names one of two id spaces, discriminated by BGL_TAG: tagged is a
@@ -593,11 +615,14 @@ export function createCommandDispatcher(device, ctx) {
     });
   }
 
-  // Build one color attachment. r/g/b/a are 0-255 bytes; load 1=clear else load,
-  // store 0=store else discard.
+  // Build one color attachment. r/g/b/a are GPUColor channels — plain numbers,
+  // not clamped and not 0-255 bytes. They WERE bytes decoding `/255` until
+  // spec/09 step D; the `/255` now lives in the two legacy opcode cases
+  // (0x10/0x1B), which is where the lossy wire actually is. load 1=clear else
+  // load, store 0=store else discard.
   function colorAttachment(view, load, store, r, g, b, a) {
     return { view, loadOp: load === 1 ? "clear" : "load", storeOp: store === 0 ? "store" : "discard",
-             clearValue: { r: (r || 0) / 255, g: (g || 0) / 255, b: (b || 0) / 255, a: (a || 0) / 255 } };
+             clearValue: { r: r || 0, g: g || 0, b: b || 0, a: a || 0 } };
   }
 
   // Apply pending pass-scoped state (depth-stencil attachment, occlusion query

@@ -114,36 +114,36 @@ fn fs(@location(0) local : vec2f) -> @location(0) vec4f {
 }
 """)
 
-(compute-pipeline :name initPipeline :module initShader :entry main)
-(compute-pipeline :name stepPipeline :module stepShader :entry main)
+(compute-pipeline :name initPipeline :layout auto (compute :module initShader :entry main))
+(compute-pipeline :name stepPipeline :layout auto (compute :module stepShader :entry main))
 
 (render-pipeline :name renderPipeline
-  (layout auto)
-  (vertex (module renderShader) (entry vs))
-  (fragment (module renderShader) (entry fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list)))
+  :layout auto
+  (vertex :module renderShader :entry vs)
+  (fragment :module renderShader :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
 
-(bind-group :name initBindGroup :layout-pipeline initPipeline :layout-index 0 :pool 2
+(bind-group :name initBindGroup :layout initPipeline :group 0 :pool 2
   (entry :binding 0 :buffer cellBuffer :ping-pong 0))
 
-(bind-group :name stepBindGroup :layout-pipeline stepPipeline :layout-index 0 :pool 2
+(bind-group :name stepBindGroup :layout stepPipeline :group 0 :pool 2
   (entry :binding 0 :buffer cellBuffer :ping-pong 0)
   (entry :binding 1 :buffer cellBuffer :ping-pong 1))
 
-(bind-group :name renderBindGroup :layout-pipeline renderPipeline :layout-index 0 :pool 2
+(bind-group :name renderBindGroup :layout renderPipeline :group 0 :pool 2
   (entry :binding 0 :buffer cellBuffer :ping-pong 1))
 
 ; Init: [8 8 1] workgroups of 16x16 = the full 128x128 grid.
 (compute-pass :name initCells :pipeline initPipeline :bind-groups [initBindGroup]
   :bind-groups-pool-offsets [0]
-  :dispatch [8 8 1])
+  (dispatch :workgroups [8 8 1]))
 
 (compute-pass :name stepPass
   :pipeline stepPipeline
   :bind-groups [stepBindGroup]
   :bind-groups-pool-offsets [0]
-  :dispatch [8 8 1])
+  (dispatch :workgroups [8 8 1]))
 
 (render-pass :name drawPass
   (color-attachment :view context-current-texture

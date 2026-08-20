@@ -69,6 +69,15 @@ const fragments = {
              f = navigator.gpu.getPreferredCanvasFormat();
            x.configure({ device: d, format: f });`,
   },
+  canvas_premultiplied: {
+    // Re-configure for an authored `(canvas :alpha-mode premultiplied)`.
+    // Emitted ONLY when PNGB header flag bit 3 is set, so the common (opaque)
+    // page pays nothing. Until spec/09 step D the --html path had no alphaMode
+    // at all, which meant it silently took the WebGPU default and composited
+    // differently from every other runtime; now the default agrees and the
+    // deviation is spelled.
+    code: `x.configure({ device: d, format: f, alphaMode: 'premultiplied' });`,
+  },
   webgpu_init_limits: {
     // Same as webgpu_init but requests authored device limits (Arc-3 §5.3b).
     // The free `L` is emitted by js_codegen as `let L={requiredLimits:{…}}`
@@ -391,6 +400,7 @@ zigConsts.device_lost = ensureSemi(results.device_lost);
 zigConsts.fs_setup = ensureSemi(results.fs_setup);
 zigConsts.webgpu_init = ensureSemi(results.webgpu_init);
 zigConsts.webgpu_init_limits = ensureSemi(results.webgpu_init_limits);
+zigConsts.canvas_premultiplied = ensureSemi(results.canvas_premultiplied);
 zigConsts.decompress = ensureSemi(results.decompress);
 zigConsts.pointer = ensureSemi(results.pointer);
 zigConsts.dark_setup = ensureSemi(results.dark_setup);

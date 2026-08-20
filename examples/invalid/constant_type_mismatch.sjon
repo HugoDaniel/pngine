@@ -5,7 +5,8 @@
 override QUALITY: u32 = 1u;
 @compute @workgroup_size(1) fn cs() { let q = QUALITY; }
 """)
-(compute-pipeline :name cp :module code :entry cs
-  (constant :name QUALITY :value 3.5))
-(compute-pass :name step :pipeline cp :dispatch-workgroups 1)
+(compute-pipeline :name cp :layout auto
+  (compute :module code :entry cs
+    (constant :name QUALITY :value 3.5)))
+(compute-pass :name step :pipeline cp (dispatch :workgroups [1]))
 (frame :name main :perform [step])

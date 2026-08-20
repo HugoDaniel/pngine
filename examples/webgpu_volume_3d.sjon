@@ -1,7 +1,7 @@
 ; Volume rendering, texture_3d — port of the webgpu-samples
 ; `volumeRenderingTexture3D` sample with a procedural volume. A compute pass
 ; in the frame's :init writes a 64^3 rgba8unorm volume through a 3d storage
-; view (:view-dimension 5); a brain-like analytic density stands in for
+; view (:dimension 3d); a brain-like analytic density stands in for
 ; upstream's MRI data. The raymarcher follows upstream: a fullscreen
 ; triangle, per-vertex near/step ray endpoints from the inverse MVP, 64
 ; sampling steps through a linear + anisotropic sampler over a texture_3d,
@@ -14,11 +14,11 @@
 ; Renders in the native `--frame` renderer as well as in the browser: 3d
 ; storage writes and 3d sampled views are both supported there.
 
-(texture :name volume :width 64 :height 64
-  :dimension 3 :depth-or-array-layers 64
+(texture :name volume :size [64 64 64]
+  :dimension 3d
   :format rgba8unorm :usage [texture-binding storage-binding])
-(texture-view :name volumeStore :texture volume :view-dimension 5)   ; 3d, textureStore
-(texture-view :name volumeSample :texture volume :view-dimension 5)  ; 3d, sampled
+(texture-view :name volumeStore :texture volume :dimension 3d)   ; textureStore
+(texture-view :name volumeSample :texture volume :dimension 3d)  ; sampled
 
 (texture :name msaaTex :size canvas :format preferred-canvas-format
   :sample-count 4 :usage [render-attachment])
@@ -167,34 +167,34 @@ fn fragment_main(
 }
 """)
 
-(compute-pipeline :name fillPipe :module fillCode :entry main)
-(compute-pipeline :name cameraPipe :module cameraCode :entry main)
+(compute-pipeline :name fillPipe :layout auto (compute :module fillCode :entry main))
+(compute-pipeline :name cameraPipe :layout auto (compute :module cameraCode :entry main))
 
 (render-pipeline :name volPipe
-  (layout auto)
-  (vertex (module volCode) (entry vertex_main))
-  (fragment (module volCode) (entry fragment_main)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module volCode :entry vertex_main)
+  (fragment :module volCode :entry fragment_main
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (multisample :count 4))
 
-(bind-group :name fillGroup :layout-pipeline fillPipe :layout-index 0
+(bind-group :name fillGroup :layout fillPipe :group 0
   (entry :binding 0 :texture-view volumeStore))
 
-(bind-group :name cameraGroup :layout-pipeline cameraPipe :layout-index 0
+(bind-group :name cameraGroup :layout cameraPipe :group 0
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :buffer cameraBuf))
 
-(bind-group :name volGroup :layout-pipeline volPipe :layout-index 0
+(bind-group :name volGroup :layout volPipe :group 0
   (entry :binding 0 :buffer cameraBuf)
   (entry :binding 1 :sampler volSampler)
   (entry :binding 2 :texture-view volumeSample))
 
 (compute-pass :name fillVolume :pipeline fillPipe :bind-groups [fillGroup]
-  :dispatch [16 16 16])
+  (dispatch :workgroups [16 16 16]))
 
 (compute-pass :name updateCamera :pipeline cameraPipe :bind-groups [cameraGroup]
-  :dispatch [1 1 1])
+  (dispatch :workgroups [1 1 1]))
 
 (render-pass :name draw
   (color-attachment :view msaaTex :clear-value [0 0 0 1]

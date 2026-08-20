@@ -1,0 +1,28 @@
+; Invalid: :depth-write-enabled true with no :depth-compare. WebGPU requires
+; depthCompare whenever the pipeline writes depth (or a stencil face's
+; depthFailOp departs from `keep`): a depth write with no test is a state the
+; API refuses to guess at.
+;
+; Omitting it used to produce a pipeline whose depth comparison was whatever
+; the descriptor's absent field meant downstream, which is exactly the class
+; of silent default this overhaul exists to remove.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+(texture :name depth :size canvas :format depth24plus :usage [render-attachment])
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format))
+  (depth-stencil :format depth24plus :depth-write-enabled true))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (depth-stencil-attachment :view depth
+    :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

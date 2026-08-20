@@ -9,11 +9,11 @@ override TINT: f32 = 1.0;
 }
 @fragment fn fs() -> @location(0) vec4f { return vec4f(TINT, 0.0, 0.0, 1.0); }
 """)
-(render-pipeline :name pipe (layout auto)
-  (vertex (module code) (entry vs)
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs
     (constant :name TINT :value 0.5))
-  (fragment (module code) (entry fs)
-    (targets (target :format preferred-canvas-format))
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)
     (constant :name TINT :value 0.9)))
 (render-pass :name draw
   (color-attachment :view context-current-texture

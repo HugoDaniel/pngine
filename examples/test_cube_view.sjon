@@ -1,17 +1,17 @@
 ; test_cube_view — the cube view dimension end to end. An init compute pass
 ; paints each of a texture's six array layers a distinct flat color through a
-; 2d-array storage view (:view-dimension 2); a fullscreen pass then samples the
-; same texture through a cube view (:view-dimension 3), sweeping the direction
+; 2d-array storage view (:dimension 2d-array); a fullscreen pass then samples the
+; same texture through a cube view (:dimension cube), sweeping the direction
 ; over an equirect mapping, so all six faces show as colored bands.
 ; WebGPU cube face order: +X -X +Y -Y +Z -Z = red green blue yellow magenta
 ; cyan.
 
-(texture :name cubeTex :width 64 :height 64
-  :dimension 2 :depth-or-array-layers 6
+(texture :name cubeTex :size [64 64 6]
+  :dimension 2d
   :format rgba8unorm :usage [storage-binding texture-binding])
 
-(texture-view :name facesView :texture cubeTex :view-dimension 2)  ; 2d-array
-(texture-view :name cubeView :texture cubeTex :view-dimension 3)   ; cube
+(texture-view :name facesView :texture cubeTex :dimension 2d-array)
+(texture-view :name cubeView :texture cubeTex :dimension cube)
 
 (sampler :name samp :mag-filter linear :min-filter linear)
 
@@ -61,23 +61,23 @@ fn fsMain(@location(0) uv : vec2f) -> @location(0) vec4f {
 }
 """)
 
-(compute-pipeline :name paintPipe :module paintCode :entry paint)
+(compute-pipeline :name paintPipe :layout auto (compute :module paintCode :entry paint))
 
 (render-pipeline :name showPipe
-  (layout auto)
-  (vertex (module showCode) (entry vsMain))
-  (fragment (module showCode) (entry fsMain)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module showCode :entry vsMain)
+  (fragment :module showCode :entry fsMain
+    (target :format preferred-canvas-format)))
 
-(bind-group :name paintBind :layout-pipeline paintPipe :layout-index 0
+(bind-group :name paintBind :layout paintPipe :group 0
   (entry :binding 0 :texture-view facesView))
 
-(bind-group :name showBind :layout-pipeline showPipe :layout-index 0
+(bind-group :name showBind :layout showPipe :group 0
   (entry :binding 0 :sampler samp)
   (entry :binding 1 :texture-view cubeView))
 
 (compute-pass :name paint :pipeline paintPipe :bind-groups [paintBind]
-  :dispatch [8 8 6])
+  (dispatch :workgroups [8 8 6]))
 
 (render-pass :name draw
   (color-attachment :view context-current-texture

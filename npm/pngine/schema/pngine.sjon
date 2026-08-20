@@ -1,31 +1,36 @@
-; PNGine WebGPU schema — Phase 1 vertical slice.
+; PNGine WebGPU schema.
 ;
 ; Single source of truth for what a PNGine `.sjon` document may contain. The
-; compiler (`src/dsl_sjon/Compiler.zig`) prepends this manifest to the user
-; source and runs `Host.validateDocument`, so the data forms below are validated
+; compiler (`src/dsl_sjon/Compiler.zig`) preloads this manifest once
+; (`sjon.preloadSchema`) and hands it to every `Host.validateDocument`, so
+; the user document parses at offset 0 and the data forms below are validated
 ; against this plugin with no filesystem (works on wasm32-freestanding). It is
 ; `@embedFile`'d via the `pngine_schema` build import and feeds the web editor's
 ; TS / JSON-Schema export.
 ;
-; Phase 1 covered the minimal core (define, shader-module, data-float32, buffer,
-; queue, bind-group, render/compute pipeline + pass, frame, `init` sugar via the
-; `pngine/init-v1` hook). Phase 2a adds shape generators (cube…dragon), textures
-; (depth subset), depth/stencil pipeline state, and indexed draws. Samplers,
-; imageBitmap, MRT/blend/MSAA and `(pass …)` land in later Phase 2 sub-waves.
+; It grew in phases (the core forms first, then shapes, textures, depth/stencil
+; and indexed draws, then samplers, imageBitmap, MRT/blend/MSAA, queries, copies
+; and `(pass …)`); every one of those is here now, and 3.0.0 re-shaped the
+; whole file against the WebGPU IDL.
 ;
-; ---- Defaults policy (F6) — three DISTINCT notions, never conflated ----
+; ---- Defaults policy — three DISTINCT notions, never conflated ----
 ;   1. Schema `:default V` is a PNGine OPINION. On key absence SJON materializes V
 ;      into the effective view (→ HostResult.materialized_defaults), so the emitter
 ;      always bakes a concrete value into the bytecode. Use it where PNGine commits
-;      to a value even when WebGPU has none — e.g. `load-op :default clear` (WebGPU
-;      REQUIRES loadOp; there is no spec default, so the opinion must ship).
+;      to a value even when WebGPU has none. Note this is NOT a licence to default
+;      a REQUIRED member: `load-op` used to be the example here, and it was the
+;      wrong one — WebGPU requires loadOp precisely so the author states it, and
+;      3.0.0 made it required here too.
 ;   2. A key with NO `:default`, left absent, defers to WebGPU's OWN spec default at
 ;      runtime — the emitter writes nothing and PNGine invents nothing.
 ;   3. js_codegen's omit-when-default (`--html`) is a SIZE ENCODING, not a semantic
 ;      source: it may drop a descriptor field ONLY when the emitted value equals
 ;      WebGPU's spec default (e.g. a buffer-binding offset 0 / size = rest-of-buffer),
 ;      leaning on WebGPU to refill it identically. A materialized OPINION that differs
-;      from the WebGPU default (loadOp/storeOp/clearValue) is NEVER omitted.
+;      from the WebGPU default (a pass-lowered sampler's `linear` filters, or an
+;      authored `:default` on a key whose IDL default is something else) is
+;      NEVER omitted. (loadOp/storeOp/clearValue used to be the example: they
+;      are required / default-less since 3.0.0.)
 (plugin :name pngine :version "0.1.0"
 
   ; ---- numeric refinements ----
@@ -38,13 +43,65 @@
   ; silently wraps it, and SJON's exporter emits the branded `U32` TS alias so the
   ; editor gets real per-field GPU types. Repr checks literals only — expressions
   ; (`:size (* NUM 4 4)`) and define-refs are evaluated later, untouched here.
-  (value-kind :name byte-count
+  ;
+  ; ---- the `x` / `x-value` pair ----
+  ; Every numeric kind here comes in two: `x-value` carries the bounds and the
+  ; repr, and `x` is `(scalar-or-ref-shape :base x-value :ref define-ref)` — a
+  ; literal, a bounded expression, or a bare `(define …)` name. KEYS NAME `x`.
+  ; The pair is `count` / `count-value`'s, applied to the rest: a number slot
+  ; is "literal | expression | checked reference" everywhere, because an author
+  ; who can write `:vertex-count NUM_PARTICLES` and not `:size NUM_PARTICLES`
+  ; is looking at an accident, not a rule.
+  ;
+  ; This could not be written until SJON's union reporting changed. A `scalar-or-ref`
+  ; desugars to a union, and a union that matched nothing used to report only
+  ; its ALTERNATIVE NAMES — so adding the reference arm would have retired every
+  ; bound below it: `:max-anisotropy 32` would have said "no alternative
+  ; matched: anisotropy-value | define-ref" where it used to name 1..16. SJON
+  ; reports the arm the value's SHAPE selected, so the bounds still speak. The
+  ; three inline tests in Compiler.zig are the ratchet.
+  ;
+  ; Two numeric slots have no `define-ref` arm, and neither is an oversight:
+  ; `write-mask` (its symbol arm is the closed member set `all`) and a
+  ; `(wasm-call :args […])` element (`wasm-arg`, whose symbol arm is the
+  ; builtin set `canvas-width` …). A third alternative would put a bare name
+  ; within reach of TWO arms, and SJON's rule declines to guess between them —
+  ; the slot would lose the report it just gained. A constant is written
+  ; `(* MASK 1)` / `(* SCALE 1)` there.
+  (value-kind :name byte-count-value
     :description "Non-negative integer byte size / offset / stride."
     :underlying number
     :numeric (numeric-bounds :min 0 :integer true)
     :unit (unit-shape :reject true)
     :repr (repr-shape :type u32))
-  (value-kind :name pool-size
+  (value-kind :name byte-count
+    :description "Byte size / offset / stride: a literal, a bounded expression, or a bare (define …) reference."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base byte-count-value :ref define-ref))
+  ; WebGPU's alignment rules on byte offsets and sizes, as `:multiple-of`
+  ; bounds (SJON 1.2.0). Like every numeric-bounds, these judge a LITERAL; an
+  ; expression (`:offset (* N 4)`) is evaluated by the emitter, untouched here.
+  (value-kind :name byte-count-4-aligned-value
+    :description "Byte offset / size that WebGPU requires to be a multiple of 4."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :integer true :multiple-of 4)
+    :unit (unit-shape :reject true)
+    :repr (repr-shape :type u32))
+  (value-kind :name byte-count-4-aligned
+    :description "A 4-aligned byte offset / size: a literal, a bounded expression, or a bare (define …) reference."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base byte-count-4-aligned-value :ref define-ref))
+  (value-kind :name byte-count-256-aligned-value
+    :description "Byte offset that WebGPU requires to be a multiple of 256."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :integer true :multiple-of 256)
+    :unit (unit-shape :reject true)
+    :repr (repr-shape :type u32))
+  (value-kind :name byte-count-256-aligned
+    :description "A 256-aligned byte offset: a literal, a bounded expression, or a bare (define …) reference."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base byte-count-256-aligned-value :ref define-ref))
+  (value-kind :name pool-size-value
     :description "Ping-pong pool size (1..255). The ceiling is the wire's: the
                  pool index is a byte everywhere it is encoded, so a larger pool
                  cannot be addressed. Bounds a LITERAL; the emitter re-checks the
@@ -53,24 +110,99 @@
     :numeric (numeric-bounds :min 1 :max 255 :integer true)
     :unit (unit-shape :reject true)
     :repr (repr-shape :type u32))
-  (value-kind :name binding-index
+  (value-kind :name pool-size
+    :description "Ping-pong pool size: a literal, a bounded expression, or a bare (define …) reference."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base pool-size-value :ref define-ref))
+  (value-kind :name binding-index-value
     :description "Non-negative binding / group / pool index. The PNGB wire stores these as u8, so 255 is the ceiling (WebGPU's own maxBindingsPerBindGroup default is 1000, but PNGine's uniform table and descriptor encoding are byte-indexed)."
     :underlying number
     :numeric (numeric-bounds :min 0 :max 255 :integer true)
     :unit (unit-shape :reject true)
     :repr (repr-shape :type u32))
+  (value-kind :name binding-index
+    :description "Binding / group / pool index: a literal, a bounded expression, or a bare (define …) reference."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base binding-index-value :ref define-ref))
   (value-kind :name count-value
     :description "Non-negative integer draw / dispatch count (literals + expressions)."
     :underlying number
     :numeric (numeric-bounds :min 0 :integer true)
     :unit (unit-shape :reject true)
     :repr (repr-shape :type u32))
-  ; A count may also be a bare `#define` reference (a symbol the emitter
-  ; resolves through the expr env), e.g. `:instance-count NUM_PARTICLES`.
+  ; A count may also be a bare `(define …)` reference, e.g.
+  ; `:instance-count NUM_PARTICLES`. The reference half is a cross-ref to the
+  ; define form (SJON 1.2.0 `scalar-or-ref-shape :ref`), so a misspelt constant is
+  ; a located `union_no_branch_matched` at validation — it used to be an
+  ; unlocated "emit failed" from the emitter's env lookup. The emitter still
+  ; resolves the symbol through its expr env; the schema only guarantees the
+  ; name exists.
+  (value-kind :name define-ref
+    :description "Reference to a declared (define :name …) constant."
+    :underlying symbol
+    :cross-ref (cross-ref :target define))
+  ; The unbounded real: the element kind of every numeric vector (clear
+  ; colors, blend constants, float lists) and, since 3.0.0, the
+  ; `(define …)` value. No bounds to keep, but the unit reject stays — `:base
+  ; number` (the primitive shortcut) took `1f` and the reader used its
+  ; magnitude, one reading of the `1.0f` defect the scalar slots close.
+  ;
+  ; On `(define :value …)` the rule holds in full: a constant is a real, negative
+  ; and fractional allowed, and the SLOT that reads it decides integrality and
+  ; range at use — `0.5` is `:vertex-count`'s located reject and legal in
+  ; `:clear-value`. The reference arm lets a constant name another constant,
+  ; declared before or after it; the emitter resolves the set document-wide
+  ; and refuses a cycle with a span.
+  (value-kind :name real-value
+    :description "An unbounded real literal: negative and fractional allowed; a unit suffix is rejected."
+    :underlying number
+    :unit (unit-shape :reject true))
+  (value-kind :name real
+    :description "An unbounded real: a literal, a bounded expression, or a bare (define …) reference."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base real-value :ref define-ref))
   (value-kind :name count
     :description "Draw / dispatch count: a literal, a bounded expression, or a bare (define …) reference."
-    :underlying union
-    :union (union-shape :alternatives [count-value symbol]))
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base count-value :ref define-ref))
+  ; ---- the domain names ----
+  ; `count` names a draw / dispatch count and `byte-count` names bytes; a slot
+  ; that is neither — a sample count, a query index or count, a stencil
+  ; reference or clear value, a pixel rect, a texel origin, a pool offset — is
+  ; the general `u32`, and a bitmask is `mask32` (hex literals read as the
+  ; number they spell: `0xFF` is 255, `pngine inspect` shows the decimal). Same
+  ; bounds and repr as `count`; the name says the domain, and the exported
+  ; `.d.ts` alias follows it.
+  (value-kind :name u32-value
+    :description "Non-negative integer that rides the wire as u32."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :integer true)
+    :unit (unit-shape :reject true)
+    :repr (repr-shape :type u32))
+  (value-kind :name u32
+    :description "A non-negative integer: a literal, a bounded expression, or a bare (define …) reference."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base u32-value :ref define-ref))
+  (value-kind :name query-count-value
+    :description "Number of queries in a (query-set …): an integer in [1, 4096] (GPUQuerySetDescriptor.count's createQuerySet bound)."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :max 4096 :integer true)
+    :unit (unit-shape :reject true)
+    :repr (repr-shape :type u32))
+  (value-kind :name query-count
+    :description "Query-set size: a literal, a bounded expression, or a bare (define …) reference, at most 4096."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base query-count-value :ref define-ref))
+  (value-kind :name mask32-value
+    :description "32-bit bitmask (0..0xFFFFFFFF); a hex literal reads as the number it spells."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :integer true)
+    :unit (unit-shape :reject true)
+    :repr (repr-shape :type u32))
+  (value-kind :name mask32
+    :description "A 32-bit bitmask: a literal (hex welcome), a bounded expression, or a bare (define …) reference."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base mask32-value :ref define-ref))
   ; A WebGPU device-limit value. Non-negative integer, u32-range in the schema
   ; (the PNGB wire carries u64 for forward-compat). Passed VERBATIM to
   ; requiredLimits at device creation — an unsatisfiable request fails loud there
@@ -81,53 +213,108 @@
     :numeric (numeric-bounds :min 0 :integer true)
     :unit (unit-shape :reject true)
     :repr (repr-shape :type u32))
-  (value-kind :name unorm
-    :description "Clear-color component in [0,1]."
+  (value-kind :name device-limit
+    :description "A WebGPU device limit: a literal, a bounded expression, or a bare (define …) reference."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base device-limit-value :ref define-ref))
+  (value-kind :name unorm-value
+    :description "A float in [0,1] (the depth clear value)."
     :underlying number
     :numeric (numeric-bounds :min 0 :max 1)
     :unit (unit-shape :reject true)
     :repr (repr-shape :type f32))
+  (value-kind :name unorm
+    :description "A float in [0,1] (the depth clear value): a literal, a bounded expression, or a bare (define …) reference."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base unorm-value :ref define-ref))
+  ; WebGPU's three bias terms are two different types, and conflating them cost
+  ; this schema a value: `GPUDepthBiasValue` is a `long` (signed 32-bit) while
+  ; `depthBiasSlopeScale` / `depthBiasClamp` are floats. One `f32`-repr kind for
+  ; all three let `:depth-bias -1` through the schema and into a u32 read, which
+  ; dropped it silently (webgpu_wireframe's wireframe pass layered over the solid
+  ; one by exactly that -1, and shipped without it).
+  (value-kind :name depth-bias-int-value
+    :description "Constant depth bias: a signed integer (GPUDepthBiasValue is a long)."
+    :underlying number
+    :numeric (numeric-bounds :integer true)
+    :unit (unit-shape :reject true)
+    :repr (repr-shape :type i32))
+  (value-kind :name depth-bias-int
+    :description "Constant depth bias: a literal, a bounded expression, or a bare (define …) reference."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base depth-bias-int-value :ref define-ref))
   (value-kind :name depth-bias-value
-    :description "Depth bias term: constant (int) or slope-scale / clamp (real)."
+    :description "Depth bias slope-scale / clamp: a real."
     :underlying number
     :unit (unit-shape :reject true)
     :repr (repr-shape :type f32))
-  (value-kind :name lod-clamp
+  (value-kind :name depth-bias
+    :description "Depth bias slope-scale / clamp: a literal, a bounded expression, or a bare (define …) reference."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base depth-bias-value :ref define-ref))
+  (value-kind :name lod-clamp-value
     :description "Sampler mip level-of-detail clamp (non-negative real; WebGPU defaults lodMinClamp 0, lodMaxClamp 32)."
     :underlying number
     :numeric (numeric-bounds :min 0)
     :unit (unit-shape :reject true)
     :repr (repr-shape :type f32))
+  (value-kind :name lod-clamp
+    :description "Sampler LOD clamp: a literal, a bounded expression, or a bare (define …) reference."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base lod-clamp-value :ref define-ref))
   (value-kind :name anisotropy-value
     :description "Sampler max anisotropy (integer in [1,16]; values > 1 require linear mag/min/mipmap filters)."
     :underlying number
     :numeric (numeric-bounds :min 1 :max 16 :integer true)
     :unit (unit-shape :reject true)
     :repr (repr-shape :type u32))
+  (value-kind :name anisotropy
+    :description "Sampler max anisotropy: a literal, a bounded expression, or a bare (define …) reference."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base anisotropy-value :ref define-ref))
+  ; Digit-leading spellings (`1d`, `2d-array`) lex as unit-bearing numbers; SJON
+  ; 1.2.0 lets a symbol member-set declare them and matches on the parsed
+  ; (magnitude, unit) pair, so the value reaches the emitter as a
+  ; `number_with_unit` node, not a symbol — read it with `Reader.memberSpelling`
+  ; and map through `values.textureDimensionCode` / `viewDimensionCode`
+  ; (`Emitter.dimensionCode`), never `Reader.symbol` (which returns null on it).
   (value-kind :name texture-dimension
-    :description "GPUTextureDimension as an integer: 1 = 1d, 2 = 2d (default), 3 = 3d. (`1d`/`2d`/`3d` are not bare symbols in SJON — they lex as number+unit — so the count is authored numerically.)"
-    :underlying number
-    :numeric (numeric-bounds :min 1 :max 3 :integer true)
-    :unit (unit-shape :reject true)
-    :repr (repr-shape :type u32))
-  (value-kind :name subresource-count
-    :description "Positive integer texture subresource count (≥ 1) — mip levels or array/3d layers. Defaults to 1."
+    :description "GPUTextureDimension, spelled as the WebGPU spec spells it: 1d, 2d (default), 3d."
+    :underlying symbol
+    :members (member-set
+      (member :name 1d :description "One-dimensional texture.")
+      (member :name 2d :description "Two-dimensional texture (the default); with a third :size element > 1 it is a 2d array.")
+      (member :name 3d :description "Three-dimensional (volume) texture; the third :size element is its slice count.")))
+  (value-kind :name subresource-count-value
+    :description "Positive integer texture subresource count (≥ 1) — mip levels or array/3d layers. Absent: a texture allocates 1; a texture view exposes every level/layer from its base."
     :underlying number
     :numeric (numeric-bounds :min 1 :integer true)
     :unit (unit-shape :reject true)
     :repr (repr-shape :type u32))
-  (value-kind :name subresource-index
+  (value-kind :name subresource-count
+    :description "Texture subresource count: a literal, a bounded expression, or a bare (define …) reference."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base subresource-count-value :ref define-ref))
+  (value-kind :name subresource-index-value
     :description "Zero-based texture subresource index (≥ 0) — a texture view's base mip level or base array layer. Defaults to 0. (subresource-count is ≥ 1; a base index is ≥ 0.)"
     :underlying number
     :numeric (numeric-bounds :min 0 :integer true)
     :unit (unit-shape :reject true)
     :repr (repr-shape :type u32))
+  (value-kind :name subresource-index
+    :description "Texture subresource index: a literal, a bounded expression, or a bare (define …) reference."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base subresource-index-value :ref define-ref))
   (value-kind :name view-dimension
-    :description "GPUTextureViewDimension as an integer: 0 = 1d, 1 = 2d, 2 = 2d-array, 3 = cube, 4 = cube-array, 5 = 3d. (Authored numerically because `1d`/`2d`/`2d-array`/`3d` lex as number+unit in SJON, not symbols — keeping the whole enum numeric beats mixing symbolic `cube` with numeric `2d`.)"
-    :underlying number
-    :numeric (numeric-bounds :min 0 :max 5 :integer true)
-    :unit (unit-shape :reject true)
-    :repr (repr-shape :type u32))
+    :description "GPUTextureViewDimension, spelled as the WebGPU spec spells it: 1d, 2d, 2d-array, cube, cube-array, 3d."
+    :underlying symbol
+    :members (member-set
+      (member :name 1d :description "One-dimensional view (texture_1d).")
+      (member :name 2d :description "Two-dimensional view (texture_2d) — the default.")
+      (member :name 2d-array :description "Array of 2d layers (texture_2d_array).")
+      (member :name cube :description "Cube map — six 2d layers (texture_cube).")
+      (member :name cube-array :description "Array of cube maps — 6·N layers (texture_cube_array).")
+      (member :name 3d :description "Volume view (texture_3d).")))
   (value-kind :name texture-aspect
     :description "GPUTextureAspect — which aspect(s) of a depth/stencil texture a view exposes."
     :underlying symbol
@@ -157,10 +344,6 @@
     :description "Reference to a declared (compute-pipeline :name …)."
     :underlying symbol
     :cross-ref (cross-ref :target compute-pipeline))
-  (value-kind :name wasm-call-ref
-    :description "Reference to a declared (wasm-call :name …)."
-    :underlying symbol
-    :cross-ref (cross-ref :target wasm-call))
   (value-kind :name bind-group-ref
     :description "Reference to a declared (bind-group :name …)."
     :underlying symbol
@@ -173,20 +356,35 @@
     :description "Reference to a declared (queue :name …)."
     :underlying symbol
     :cross-ref (cross-ref :target queue))
-  (value-kind :name render-pass-ref
-    :description "Reference to a declared (render-pass :name …)."
-    :underlying symbol
-    :cross-ref (cross-ref :target render-pass))
   (value-kind :name compute-pass-ref
     :description "Reference to a declared (compute-pass :name …), including one lowered from (init …) sugar."
     :underlying symbol
     :cross-ref (cross-ref :target compute-pass))
-  ; A bind-group's :layout-pipeline may target either pipeline kind; the union
-  ; tries render first, then falls through to compute on cross-ref miss.
-  (value-kind :name pipeline-ref
-    :description "Reference to a declared render- or compute-pipeline."
-    :underlying union
-    :union (union-shape :alternatives [render-pipeline-ref compute-pipeline-ref]))
+  ; `pipeline-ref` = `(cross-ref :target [render-pipeline compute-pipeline])`
+  ; lived here until the descriptor cut. Its ONE consumer was the bind-group's
+  ; `:layout-pipeline`, and `bind-group-layout-spec` below is the same group
+  ; plus `bind-group-layout` — so the render/compute one-namespace property
+  ; that closed the shared-namespace hole is unchanged, and keeping both meant two buckets over
+  ; overlapping target sets reporting ONE collision twice.
+  ;
+  ; A bind group's `:layout` names the layout it is built against: a pipeline's
+  ; auto-derived layout, or an explicit (bind-group-layout …). One key, because
+  ; GPUBindGroupDescriptor.layout is one member — it was two mutually
+  ; exclusive keys and an exactly-one group.
+  ;
+  ; A TARGET GROUP (`:target [a b c]`), never a union of ref kinds. A union
+  ; resolves first-match while the emitter's tables are separate id spaces, so a
+  ; render-pipeline and a bind-group-layout sharing a name would resolve one way
+  ; here and bind the other downstream — the same hole, closed for `pipeline-ref`
+  ; and `frame-step` the same way on 2026-08-17. As a group the three forms are
+  ; ONE namespace: the collision is a `duplicate_cross_ref_target` at the second
+  ; declaration, so a reference here resolves to exactly one form by
+  ; construction, and the emitter's "did it resolve to a pipeline?" test is a
+  ; lookup in its own tables rather than a guess.
+  (value-kind :name bind-group-layout-spec
+    :description "The layout a bind group is built against: a render-/compute-pipeline whose auto-layout it targets, or an explicit (bind-group-layout …). One namespace across the three."
+    :underlying symbol
+    :cross-ref (cross-ref :target [render-pipeline compute-pipeline bind-group-layout]))
 
   ; ---- runtime builtin data sources (write-buffer :data) ----
   (value-kind :name builtin-data-source
@@ -194,18 +392,27 @@
     :underlying symbol
     :members (member-set
       (member :name pngine-inputs :description "16 B: time, canvasWidth, canvasHeight, aspect (all f32).")
-      (member :name scene-time-inputs :description "12 B: time, canvasWidth, canvasHeight (all f32) — the first 12 bytes of pngine-inputs. True scene timing is a planned extension (docs/plans/spec/01).")
+      (member :name scene-time-inputs :description "12 B: time, canvasWidth, canvasHeight (all f32) — the first 12 bytes of pngine-inputs. True scene timing is not modelled yet.")
       (member :name pointer-inputs :description "48 B: x, y, clickX, clickY, dx, dy, buttons, pressure, modifiers, scrollX, scrollY, _pad (all f32).")))
+  ; The two ref arms are ONE cross-ref target group, never a union of two ref
+  ; kinds: a union resolves first-match while the emitter looks the name up in
+  ; separate id tables. A group gives one namespace — a
+  ; `(data …)` and a `(wasm-call …)` that share a name collide at the second
+  ; declaration, so "which table" is decided by the document, not by arm order.
+  (value-kind :name data-or-wasm-ref
+    :description "Reference to a declared (data :name …) or (wasm-call :name …). One namespace across the two."
+    :underlying symbol
+    :cross-ref (cross-ref :target [data wasm-call]))
   (value-kind :name write-buffer-source
-    :description "write-buffer :data source: a runtime builtin or a (data …) reference."
+    :description "write-buffer :data source: a runtime builtin, a (data …) reference, or a (wasm-call …) whose result is written each frame."
     :underlying union
-    :union (union-shape :alternatives [builtin-data-source data-ref]))
+    :union (union-shape :alternatives [builtin-data-source data-or-wasm-ref]))
 
-  ; ---- size: a byte count / expression OR a data-ref the buffer is sized from ----
-  (value-kind :name byte-size
-    :description "Buffer size: an integer / expression, or a (data …) reference."
-    :underlying union
-    :union (union-shape :alternatives [byte-count data-ref]))
+  ; `byte-size` was `[byte-count data-ref]` — a union whose ref arm meant "size
+  ; this buffer from that data without filling it". Every corpus use of it also
+  ; carried `:mapped-at-creation <the same data>`, naming one thing twice, and
+  ; `:data` sizes the buffer now. The arm is gone; a buffer's `:size` is a byte
+  ; count.
 
   ; ---- enums ----
   (value-kind :name buffer-usage
@@ -220,8 +427,8 @@
       (member :name copy-src :description "Source of copy operations.")
       (member :name indirect :description "Holds indirect draw/dispatch arguments.")
       (member :name query-resolve :description "Receives resolve-query-set results.")
-      (member :name map-read :description "Mappable for CPU readback.")
-      (member :name map-write :description "Mappable for CPU upload (write).")))
+      (member :name map-read :description "Mappable for CPU readback; combines with copy-dst and nothing else.")
+      (member :name map-write :description "Mappable for CPU upload (write); combines with copy-src and nothing else.")))
   (value-kind :name primitive-topology
     :description "GPUPrimitiveTopology — how vertices are assembled into primitives."
     :underlying symbol
@@ -304,8 +511,7 @@
   ; Follows `entry-point`: a free symbol naming something inside opaque WGSL,
   ; which the EMITTER cross-checks against reflection. SJON cannot check it —
   ; the override declarations live inside a `:code` string the validator does
-  ; not parse (see docs/plans/constants/05-lowered-reflection.md for the route
-  ; that would change that, and why it is blocked upstream).
+  ; not parse.
   (value-kind :name override-name
     :description "A WGSL `override` identifier, as written in the shader. An @id(N)-annotated override is still named by its identifier here — pngine resolves the value at compile time, so the numeric id never reaches a runtime."
     :underlying symbol)
@@ -317,6 +523,10 @@
     :description "The value to specialise a WGSL `override` with: an integer or real literal, or a bounded expression over (define …) constants. A bool override takes 0 or 1."
     :underlying number
     :unit (unit-shape :reject true))
+  (value-kind :name override-number
+    :description "An override's value: a literal, a bounded expression, or a bare (define …) reference."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base override-value :ref define-ref))
   (value-kind :name layout-mode
     :description "Pipeline layout mode: auto derives bind-group layouts from the WGSL."
     :underlying symbol
@@ -389,9 +599,16 @@
     :description "Reference to a declared (query-set :name …)."
     :underlying symbol
     :cross-ref (cross-ref :target query-set))
-  (value-kind :name timestamp-writes-item :underlying form :heads (head-set :names [timestamp-writes]))
   ; Heads admitted positionally inside an (occlusion-query …) bracket.
-  (value-kind :name occlusion-draw-item :underlying form :heads (head-set :names [draw draw-indexed]))
+  ; Every draw WebGPU brackets, at least one — the bracket is a plain
+  ; begin/draws/end sequence, and it admits the indirect pair the wire has
+  ; always allowed.
+  (value-kind :name occlusion-draw-item :underlying form :heads (head-set
+    :min-children 1
+    (head :name draw)
+    (head :name draw-indexed)
+    (head :name draw-indirect)
+    (head :name draw-indexed-indirect)))
 
   ; ---- Phase 2a: textures, shape generators, depth/stencil, indexed draws ----
   (value-kind :name texture-ref
@@ -472,6 +689,38 @@
     :underlying symbol
     :members (member-set
       (member :name canvas :description "Track the canvas size at runtime (resizes with it).")))
+  ; One dimension of a GPUExtent3D. `:min 1`, not `:min 0`: a zero-texel
+  ; dimension is invalid GPU in every direction, and the keys this replaces
+  ; (`:width`/`:height`, typed `byte-count`) accepted 0 and encoded it.
+  (value-kind :name extent-value
+    :description "One dimension of a GPUExtent3D, in texels (at least 1)."
+    :underlying number
+    :numeric (numeric-bounds :min 1 :integer true)
+    :unit (unit-shape :reject true)
+    :repr (repr-shape :type u32))
+  (value-kind :name extent
+    :description "One GPUExtent3D dimension: a literal, a bounded expression, or a bare (define …) reference."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base extent-value :ref define-ref))
+  ; GPUExtent3D's sequence form: [w], [w h], [w h d]. The missing dimensions are
+  ; WebGPU's own defaults (height 1, depthOrArrayLayers 1), not pngine's — which
+  ; is why they are absent rather than materialized (see the defaults policy at
+  ; the top of this file). A vector, because a sequence of scalars is a vector;
+  ; three keys, because it was three keys.
+  (value-kind :name extent3
+    :description "Texture size as [width], [width height], or [width height depth-or-array-layers]; the missing dimensions default to 1."
+    :underlying vector
+    :vector (vector-shape :element extent :min-len 1 :max-len 3))
+  ; GPUTextureDescriptor.size is ONE required member, so it is one required key
+  ; over the three things a pngine texture may be sized by. Three
+  ; different underlyings — vector, symbol member, cross-ref — so the union
+  ; cannot be ambiguous. `texture-size-mode` precedes `image-bitmap-ref` because
+  ; both are symbols and `canvas` must be read as the mode; the emitter's
+  ; reserved-name check keeps a form from claiming the name.
+  (value-kind :name texture-size
+    :description "Texture size: an [w h d] extent, `canvas` to track the canvas, or an (image-bitmap …) to take the decoded image's size."
+    :underlying union
+    :union (union-shape :alternatives [extent3 texture-size-mode image-bitmap-ref]))
   (value-kind :name index-format
     :description "GPUIndexFormat — byte width of index-buffer entries."
     :underlying symbol
@@ -549,7 +798,9 @@
       (member :name decrement-clamp :description "Decrement, clamping at 0.")
       (member :name increment-wrap :description "Increment, wrapping to 0 past the maximum.")
       (member :name decrement-wrap :description "Decrement, wrapping to the maximum below 0.")))
-  (value-kind :name depth-stencil-section :underlying form :heads (head-set :names [stencil-front stencil-back]))
+  (value-kind :name depth-stencil-section :underlying form :heads (head-set
+    (head :name stencil-front :max 1)
+    (head :name stencil-back :max 1)))
 
   ; ---- Phase 2d: MRT / MSAA / advanced render state ----
   ; A render-pass attachment view: the canvas (context-current-texture) or a
@@ -594,16 +845,34 @@
     :numeric (numeric-bounds :min 0 :max 15 :integer true)
     :unit (unit-shape :reject true)
     :repr (repr-shape :type u32))
+  ; The symbol half used to be the PRIMITIVE `symbol`, which accepts any
+  ; spelling: `:write-mask everything` validated, and the emitter's "any
+  ; non-numeric means all channels" fallback wrote 0xF — a target the author
+  ; believed was masked rendered every channel, with no diagnostic anywhere.
+  ; One member, closed.
+  (value-kind :name write-mask-symbol
+    :description "The one symbolic write mask: all (every channel, WebGPU's GPUColorWrite.ALL = 15)."
+    :underlying symbol
+    :members (member-set :values [all]))
+  ; A `(scalar-or-ref-shape …)` rather than a hand-written `(union-shape …)` of
+  ; the same two kinds, and the difference is the diagnostic: SJON's arm report
+  ; is gated on the scalar-or-ref flag (a hand-written union keeps the collapsed
+  ; report, deliberately — its alternatives may legitimately overlap). Spelled
+  ; this way, `:write-mask MASK` says `all` is the only symbol it takes; spelled
+  ; as a union it said "no alternative matched: write-mask-value |
+  ; write-mask-symbol". `:ref` need not be a cross-ref kind — the meta-schema
+  ; defines it as "a symbolic reference", and a closed member set is one.
   (value-kind :name write-mask
     :description "Color write mask: an integer bitmask (R=1 G=2 B=4 A=8) or the symbol all (15). Emitter-resolved."
-    :underlying union
-    :union (union-shape :alternatives [write-mask-value symbol]))
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base write-mask-value :ref write-mask-symbol))
 
   ; ---- explicit bind-group-layout (uniform_access feature) ----
-  ; A `#bindGroupLayout` declares the binding layout explicitly (per-entry
-  ; visibility + buffer-binding-type) instead of inferring it from a pipeline's
-  ; auto-layout. visibility is a shader-stage set the emitter ORs into the WebGPU
-  ; descriptor mask (vertex 0x01 / fragment 0x02 / compute 0x04).
+  ; A `(bind-group-layout …)` declares the binding layout explicitly (per-entry
+  ; visibility + one resource sub-form: buffer / sampler / texture /
+  ; storage-texture) instead of inferring it from a pipeline's auto-layout.
+  ; visibility is a shader-stage set the emitter ORs into the WebGPU descriptor
+  ; mask (vertex 0x01 / fragment 0x02 / compute 0x04).
   (value-kind :name visibility
     :description "GPUShaderStage — a shader stage that may access the binding."
     :underlying symbol
@@ -629,14 +898,38 @@
     :description "Reference to a declared (pipeline-layout :name …)."
     :underlying symbol
     :cross-ref (cross-ref :target pipeline-layout))
+  ; GPUPipelineDescriptorBase.layout is ONE required member of type
+  ; `GPUPipelineLayout | "auto"`, so it is ONE key. It was two keys and
+  ; an exclusive-group, which said the same thing in three places and let the
+  ; exported types describe a shape WebGPU does not have.
+  ; `layout-mode` comes FIRST in the union: SJON tries alternatives in order, so
+  ; `auto` is matched as the mode before it could ever be read as a name — which
+  ; is what reserves it (`(pipeline-layout :name auto)` is rejected by the
+  ; emitter's reserved-name check).
+  (value-kind :name pipeline-layout-spec
+    :description "GPUPipelineDescriptorBase.layout: auto (derive from the WGSL), or an explicit (pipeline-layout …)."
+    :underlying union
+    :union (union-shape :alternatives [layout-mode pipeline-layout-ref]))
   ; Positional sub-form heads for the explicit bind-group-layout: an (entry …)
-  ; layout entry and its (buffer …) resource. Both are SLOT-LOCAL forms (F8):
+  ; layout entry and its (buffer …) resource. Both are SLOT-LOCAL forms:
   ; declared inline under their parent form and resolved LOCAL-FIRST, so the
   ; natural names `entry`/`buffer` shadow within scope — no collision with the
   ; global `entry` (render-pipeline stage) or `buffer` (top-level resource) forms.
   ; Extends to local (sampler …)/(texture …) resources later.
   (value-kind :name bgl-entry-item :underlying form :heads (head-set :names [entry]))
-  (value-kind :name bgl-resource   :underlying form :heads (head-set :names [buffer sampler texture storage-texture]))
+  ; Exactly ONE resource per entry (GPUBindGroupLayoutEntry). Both levels are
+  ; stated on purpose. `:min-children 1 :max-children 1` (SJON after 1.2.0)
+  ; counts the WHOLE set — the half per-head bounds cannot express, and what the
+  ; emitter's `requireOneOf` used to carry. The per-head `:max 1`s are then
+  ; arithmetically redundant, and kept for their diagnostic: the set yields to
+  ; the head, so two `(buffer …)` report "at most one `buffer`" (the line to
+  ; delete) rather than the set's weaker "too many resources".
+  (value-kind :name bgl-resource   :underlying form :heads (head-set
+    :min-children 1 :max-children 1
+    (head :name buffer :max 1)
+    (head :name sampler :max 1)
+    (head :name texture :max 1)
+    (head :name storage-texture :max 1)))
   ; The three non-buffer resource kinds. Each symbol member IS its WebGPU spelling,
   ; so the emitter passes it into the descriptor JSON verbatim (like buffer-binding-type).
   (value-kind :name canvas-alpha-mode
@@ -644,7 +937,7 @@
     :underlying symbol
     :members (member-set
       (member :name opaque :description "Alpha is ignored; the canvas composites as opaque (the WebGPU spec default; cheaper, no fringe on colored pages).")
-      (member :name premultiplied :description "Color values are premultiplied by alpha and blend with the page (PNGine's default when the form is absent).")))
+      (member :name premultiplied :description "Color values are premultiplied by alpha and blend with the page, so a transparent clear lets the page show through. Never a default: an absent (canvas …) form is opaque, as the IDL says.")))
   (value-kind :name sampler-binding-type
     :description "GPUSamplerBindingType — how a sampler binding is exposed to WGSL."
     :underlying symbol
@@ -676,24 +969,27 @@
     :string-bounds (string-bounds :format path))
 
   ; ---- vectors ----
-  (value-kind :name float-list :underlying vector :vector (vector-shape :element number))
+  (value-kind :name float-list :underlying vector :vector (vector-shape :element real))
   ; Viewport: the two shapes the emitter accepts — a 5-element rect is invalid.
   (value-kind :name viewport-rect4
     :description "Viewport [x y w h]; minDepth/maxDepth default to 0 and 1."
-    :underlying vector :vector (vector-shape :element number :len 4))
+    :underlying vector :vector (vector-shape :element real :len 4))
   (value-kind :name viewport-rect6
     :description "Viewport [x y w h minDepth maxDepth]; depths in [0,1]."
-    :underlying vector :vector (vector-shape :element number :len 6))
+    :underlying vector :vector (vector-shape :element real :len 6))
   (value-kind :name viewport-rect
     :description "Viewport rectangle: [x y w h] or [x y w h minDepth maxDepth]."
     :underlying union
     :union (union-shape :alternatives [viewport-rect4 viewport-rect6]))
+  ; Integer pixels / texels / indices: `u32` elements (a literal, a bounded
+  ; expression, or a bare (define …) reference — non-negative integer), where
+  ; `real` used to let `[0.5 0 1 1.25]` through to be truncated.
   (value-kind :name pixel-rect
     :description "Rectangle [x y w h] in integer pixels."
-    :underlying vector :vector (vector-shape :element number :len 4))
+    :underlying vector :vector (vector-shape :element u32 :len 4))
   (value-kind :name origin3
-    :description "Copy origin [x y z] in texels; z is the destination array layer / depth slice (default 0)."
-    :underlying vector :vector (vector-shape :element number :max-len 3))
+    :description "Copy origin [x y z] in integer texels; z is the destination array layer / depth slice (default 0)."
+    :underlying vector :vector (vector-shape :element u32 :max-len 3))
   ; A buffer/texture with zero usage flags is invalid GPU — require >= 1 (else the
   ; reader emits a buffer with no usage and no diagnostic). `:min-len 1`.
   (value-kind :name usage-list
@@ -702,13 +998,13 @@
   ; RGBA clear: exactly 4 components (else a 3-element color silently gets alpha 0).
   (value-kind :name clear-color
     :description "RGBA clear color: exactly 4 components."
-    :underlying vector :vector (vector-shape :element number :len 4))
+    :underlying vector :vector (vector-shape :element real :len 4))
   ; RGBA blend-constant: exactly 4 float components, used by the `constant` /
   ; `one-minus-constant` blend factors (setBlendConstant). Same shape as
   ; clear-color; named separately so the description reads for its own role.
   (value-kind :name blend-constant-color
     :description "RGBA blend constant: exactly 4 float components (the `constant` blend factor's value)."
-    :underlying vector :vector (vector-shape :element number :len 4))
+    :underlying vector :vector (vector-shape :element real :len 4))
   (value-kind :name buffer-ref-list
     :description "Declared (buffer …) names, bound to vertex slots 0..N in order."
     :underlying vector :vector (vector-shape :element buffer-ref))
@@ -716,7 +1012,7 @@
     :description "Declared (bind-group …) names, set at @group 0..N in order."
     :underlying vector :vector (vector-shape :element bind-group-ref))
   (value-kind :name bind-group-layout-ref-list
-    :description "Declared (bind-group-layout …) names composing a pipeline layout at @group 0..N in order."
+    :description "Declared (bind-group-layout …) names composing a pipeline layout at @group 0..N in order. At least one — a pngine opinion (WebGPU allows an empty list); an empty pipeline layout is `:layout auto` over a shader with no bindings."
     :underlying vector :vector (vector-shape :element bind-group-layout-ref :min-len 1))
   (value-kind :name render-bundle-ref-list
     :description "Declared (render-bundle …) names replayed by a pass."
@@ -736,72 +1032,187 @@
   (value-kind :name compute-pass-ref-list
     :description "Declared (compute-pass …) / (init …) names, run in order."
     :underlying vector :vector (vector-shape :element compute-pass-ref :max-len 2048))
-  ; One frame step: render-pass tried first, then compute-pass, then queue.
+  ; One frame step. The three forms share ONE namespace (SJON 1.2.0 multi-target
+  ; cross-ref): a pass and a queue with the same :name is a
+  ; `duplicate_cross_ref_target` at the declaration, so a step can never be
+  ; ambiguous. (It used to be a union tried in order, while the emitter kept
+  ; one table for both pass kinds — a collision silently dropped the render pass.)
   (value-kind :name frame-step
-    :description "One frame step: a render-pass, compute-pass, or queue name."
-    :underlying union
-    :union (union-shape :alternatives [render-pass-ref compute-pass-ref queue-ref]))
+    :description "One frame step: a render-pass, compute-pass, or queue name (one namespace across the three)."
+    :underlying symbol
+    :cross-ref (cross-ref :target [render-pass compute-pass queue]))
   (value-kind :name frame-step-list
     :description "Passes and queues run every frame, in order."
     :underlying vector :vector (vector-shape :element frame-step :max-len 2048))
+  ; `:min-len 1` because count 0 is not "no color targets" on the wire — it is
+  ; the frozen legacy sentinel meaning "substitute the preferred canvas format"
+  ; (docs/abi.md §6.5), which is exactly the fabrication 3.0.0 removes.
+  ; A depth-only bundle is legal WebGPU and this descriptor cannot express it;
+  ; saying so is better than accepting `[]` and encoding the canvas guess.
   (value-kind :name texture-format-list
-    :description "Color target formats a (render-bundle …) is recorded against."
-    :underlying vector :vector (vector-shape :element texture-format))
+    :description "Color target formats a (render-bundle …) is recorded against (at least one)."
+    :underlying vector :vector (vector-shape :element texture-format :min-len 1))
   (value-kind :name data-file-list
-    :description "WASM file paths whose data segments become D0, D1, … storage buffers."
+    :description "WASM file paths (a pass's :file) whose data segments become D0, D1, … storage buffers."
     :underlying vector :vector (vector-shape :element file-path))
   (value-kind :name offset-list
     :description "Integer offset list (e.g. per-entry ping-pong pool offsets)."
-    :underlying vector :vector (vector-shape :element number))
+    :underlying vector :vector (vector-shape :element u32))
   (value-kind :name shape-format-list
     :description "Vertex layout of generated shape data, as ordered attribute specifiers."
     :underlying vector :vector (vector-shape :element shape-format))
   (value-kind :name texture-usage-list
     :description "Texture usage flags (at least one)."
     :underlying vector :vector (vector-shape :element texture-usage :min-len 1))
+  ; GPUExtent3D's sequence rule again, one form over: [x], [x y], [x y z], the
+  ; missing dimensions WebGPU's own default of 1. Vector-only — the
+  ; alternative was a union with a bare `:workgroups 64` beside `[16 16 1]`,
+  ; which would leave the grammar with exactly one member that has two shapes
+  ; while texture `:size 512` stays illegal.
+  ;
+  ; The element is `count` — a literal, a bounded expression, or a bare
+  ; `(define …)` name — since 3.0.0 (`[WG 1 1]` works; it used to
+  ; be `count-value`, literals and expressions only, because the element
+  ; reader resolved no symbols, §307).
   (value-kind :name dispatch-size
-    :description "3-element compute dispatch [x y z] in workgroups."
-    :underlying vector :vector (vector-shape :element count-value :len 3))
+    :description "Compute dispatch in workgroups as [x], [x y] or [x y z]; the missing dimensions default to 1. Elements are literals, expressions, or (define …) names."
+    :underlying vector :vector (vector-shape :element count :min-len 1 :max-len 3))
   ; `(wasm-call …)` args: the emitter encodes a type tag per arg (+ 4 value bytes for
   ; literals); the legacy spells the builtins `canvas.width`/etc.
+  ; Same closure as `write-mask`, one form over: the symbol half was the
+  ; primitive, so `:args [canvas-widht]` validated and reached an emitter check
+  ; that had to exist because the schema could not say the four names. The
+  ; emitter's map is still the authority on the ENCODING; the schema is
+  ; the authority on the spelling, and the two are pinned together by
+  ; `values.mapWasmArgType` (a member the map does not know is `internal:`).
+  (value-kind :name wasm-arg-builtin
+    :description "A runtime value the player fills in before each (wasm-call …)."
+    :underlying symbol
+    :members (member-set
+      (member :name canvas-width :description "Canvas width in physical pixels.")
+      (member :name canvas-height :description "Canvas height in physical pixels.")
+      (member :name time-total :description "Seconds since playback started.")
+      (member :name time-delta :description "Seconds since the previous frame.")))
   (value-kind :name wasm-arg
     :description "WASM call argument: a numeric literal, or a runtime builtin the player fills each frame (canvas-width, canvas-height, time-total, time-delta)."
-    :underlying union :union (union-shape :alternatives [symbol number]))
+    :underlying union :union (union-shape :alternatives [wasm-arg-builtin number]))
   (value-kind :name wasm-arg-list
     :description "Arguments passed to a (wasm-call …) function each frame."
     :underlying vector :vector (vector-shape :element wasm-arg))
 
   ; ---- positional head-sets ----
-  (value-kind :name pipeline-section :underlying form :heads (head-set :names [layout vertex fragment primitive depth-stencil multisample]))
-  (value-kind :name vertex-section :underlying form :heads (head-set :names [module entry buffers constant]))
-  (value-kind :name fragment-section :underlying form :heads (head-set :names [module entry targets constant]))
-  ; A compute pipeline has exactly one stage, so `(constant …)` attaches
-  ; directly rather than through an invented `(compute …)` stage form — the
-  ; asymmetry is already in WebGPU's own descriptor shapes.
-  (value-kind :name compute-pipeline-section :underlying form :heads (head-set :names [constant]))
-  (value-kind :name primitive-section :underlying form :heads (head-set :names [topology]))
-  (value-kind :name buffers-item :underlying form :heads (head-set :names [vertex-buffer]))
+  ; Per-head `:min`/`:max` (SJON 1.2.0) carry the IDL's cardinality: a
+  ; GPURenderPipelineDescriptor has exactly one vertex stage and at most one of
+  ; each other state; a compute pipeline has exactly one compute stage. Below
+  ; the floor is `positional_missing` (on the parent), above the ceiling
+  ; `positional_too_many` (on the extra child) — both located, at validation.
+  ; Until 1.3 these were unenforced or hand-checked in the emitter.
+  (value-kind :name pipeline-section :underlying form :heads (head-set
+    (head :name vertex :min 1 :max 1)
+    (head :name fragment :max 1)
+    (head :name primitive :max 1)
+    (head :name depth-stencil :max 1)
+    (head :name multisample :max 1)))
+  ; A stage's module and entry point are SCALARS, so they are keys; what
+  ; is left positional is the stage's sequences — `GPUVertexState.buffers`
+  ; and `GPUFragmentState.targets`, spliced in directly with no wrapper form.
+  (value-kind :name vertex-section :underlying form :heads (head-set
+    (head :name vertex-buffer)
+    (head :name constant)))
+  ; `:min 1` on `target` is a deliberate PNGine narrowing of
+  ; GPUFragmentState.targets, which WebGPU lets be empty (a depth-only fragment
+  ; stage). Removing the wrapper costed as "zero targets becomes legal" — but
+  ; pngine has no runtime that honours it: wgpu_native_gpu's
+  ; pipeline decoder substitutes ONE BGRA8Unorm target when the list is empty,
+  ; and gpu.js passes the empty list through, so the two backends would build
+  ; DIFFERENT pipelines from the same document. That is exactly the fabrication
+  ; 3.0.0 set out to remove, so the floor stays until a backend can
+  ; express a depth-only stage. It also closes a hole the wrapper left open:
+  ; `(targets)` with no children validated and reached the same fabrication.
+  (value-kind :name fragment-section :underlying form :heads (head-set
+    (head :name target :min 1)
+    (head :name constant)))
+  ; One stage per compute pipeline, spelled as a form like the other two. The
+  ; schema used to argue the flat `:module`/`:entry` shape was natural
+  ; here; it is the same GPUProgrammableStage the vertex and fragment stages
+  ; carry, and one rule that holds everywhere beats three shapes that each read
+  ; well alone.
+  (value-kind :name compute-pipeline-section :underlying form :heads (head-set
+    (head :name compute :min 1 :max 1)))
+  (value-kind :name compute-section :underlying form :heads (head-set :names [constant]))
   (value-kind :name attribute-item :underlying form :heads (head-set :names [attribute]))
-  (value-kind :name targets-item :underlying form :heads (head-set :names [target]))
-  (value-kind :name target-section :underlying form :heads (head-set :names [blend]))
-  (value-kind :name blend-section :underlying form :heads (head-set :names [color alpha]))
-  (value-kind :name render-pass-section :underlying form :heads (head-set :names [color-attachment depth-attachment draw draw-indexed draw-indirect draw-indexed-indirect timestamp-writes occlusion-query]))
+  (value-kind :name target-section :underlying form :heads (head-set
+    (head :name blend :max 1)))
+  ; GPUBlendState requires BOTH components — `(blend (color …))` alone used to
+  ; validate and die on the GPU.
+  (value-kind :name blend-section :underlying form :heads (head-set
+    (head :name color :min 1 :max 1)
+    (head :name alpha :min 1 :max 1)))
+  (value-kind :name render-pass-section :underlying form :heads (head-set
+    (head :name color-attachment)
+    (head :name depth-stencil-attachment :max 1)
+    (head :name draw)
+    (head :name draw-indexed)
+    (head :name draw-indirect)
+    (head :name draw-indexed-indirect)
+    (head :name timestamp-writes :max 1)
+    (head :name occlusion-query)))
   (value-kind :name bind-entry-item :underlying form :heads (head-set :names [entry]))
   (value-kind :name queue-action :underlying form :heads (head-set :names [write-buffer copy-texture-to-texture copy-external-image-to-texture resolve-query-set copy-buffer-to-buffer]))
+  ; Both texture copies take exactly one endpoint of each kind. The heads
+  ; are shared but the FORMS are not — each copy declares its own slot-local
+  ; `source`/`destination`, resolved local-first, so `(source :image …)` under
+  ; one is not `(source :texture …)` under the other.
+  (value-kind :name copy-endpoints-section :underlying form :heads (head-set
+    (head :name source :min 1 :max 1)
+    (head :name destination :min 1 :max 1)))
+  ; A compute pass issues at least one command: a pass that dispatches
+  ; nothing is always an authoring slip. WebGPU has no such rule — this is
+  ; pngine's opinion, and it is one line of schema rather than an emitter check.
+  ; Unbounded per head: several dispatches in one pass is legal WebGPU.
+  (value-kind :name compute-pass-command :underlying form :heads (head-set
+    :min-children 1
+    (head :name dispatch)
+    (head :name dispatch-indirect)))
+  ; A bundle records EXACTLY ONE draw, and only a direct one. Not an opinion:
+  ; the create_render_bundle descriptor carries a single `drawType` byte with
+  ; two values, decoded that way by gpu.js, the native backend and the reference
+  ; dispatcher alike. `draw-indirect` in a bundle, and a second draw, arrive
+  ; when that descriptor does.
+  (value-kind :name render-bundle-command :underlying form :heads (head-set
+    :min-children 1
+    :max-children 1
+    (head :name draw :max 1)
+    (head :name draw-indexed :max 1)))
   ; `(data …)` generators: a positional sub-form whose head selects a procedural shape
   ; (cube/sphere/…) or `wasm-data` (a WASM function that returns the vertex bytes).
-  (value-kind :name data-shape-section :underlying form :heads (head-set :names [cube plane sphere torus truncated-cone cylinder teapot dragon wasm-data]))
+  ; At most ONE per (data …) — one byte source, nine spellings. Per-head bounds
+  ; say "at most one of each"; "at most one across the nine" is the ceiling over
+  ; the SET (SJON after 1.2.0 — it replaced the emitter's `requireOneOf`).
+  ; `:max-children` with no floor, since a (data … :float32 […]) / (data …
+  ; :file …) carries no generator at all.
+  (value-kind :name data-shape-section :underlying form :heads (head-set
+    :max-children 1
+    (head :name cube :max 1)
+    (head :name plane :max 1)
+    (head :name sphere :max 1)
+    (head :name torus :max 1)
+    (head :name truncated-cone :max 1)
+    (head :name cylinder :max 1)
+    (head :name teapot :max 1)
+    (head :name dragon :max 1)
+    (head :name wasm-data :max 1)))
 
   ; =====================================================================
-  ; Top-level forms (one per legacy `#macro`)
+  ; Top-level forms
   ; =====================================================================
 
   (form :name define
-    :description "Named numeric constant collected into the emitter's expr env."
+    :description "Named numeric constant, usable in every numeric slot and vector element as a bare name or inside a bounded expression."
     (key :name name :type symbol
-      :description "Constant name, referenced from numeric expression slots and count slots.")
-    (key :name value :type byte-count
-      :description "Non-negative integer value."))
+      :description "Constant name, referenced from numeric slots, vector elements and expressions.")
+    (key :name value :type real
+      :description "The constant's value: a real (negative and fractional allowed), a bounded expression, or another constant's name — the slot that reads the constant decides integrality and range."))
 
   ; Authored WebGPU device requiredLimits. Optional singleton (declare at most
   ; once, no :name). Each present key raises the corresponding GPUSupportedLimits
@@ -812,116 +1223,126 @@
   ; WebGPU GPUSupportedLimits members (kebab here → camelCase on the wire).
   (form :name limits
     :description "Authored WebGPU device requiredLimits (optional singleton)."
-    (key :name max-texture-dimension-1d :type device-limit-value :optional true
+    (key :name max-texture-dimension-1d :type device-limit :optional true
       :description "Max width of a 1D texture (default 8192).")
-    (key :name max-texture-dimension-2d :type device-limit-value :optional true
+    (key :name max-texture-dimension-2d :type device-limit :optional true
       :description "Max width/height of a 2D texture (default 8192).")
-    (key :name max-texture-dimension-3d :type device-limit-value :optional true
+    (key :name max-texture-dimension-3d :type device-limit :optional true
       :description "Max width/height/depth of a 3D texture (default 2048).")
-    (key :name max-texture-array-layers :type device-limit-value :optional true
+    (key :name max-texture-array-layers :type device-limit :optional true
       :description "Max array layers of a 2D texture (default 256).")
-    (key :name max-bind-groups :type device-limit-value :optional true
+    (key :name max-bind-groups :type device-limit :optional true
       :description "Max simultaneous bind groups (default 4).")
-    (key :name max-bind-groups-plus-vertex-buffers :type device-limit-value :optional true
+    (key :name max-bind-groups-plus-vertex-buffers :type device-limit :optional true
       :description "Max bind groups + vertex buffers combined (default 24).")
-    (key :name max-bindings-per-bind-group :type device-limit-value :optional true
+    (key :name max-bindings-per-bind-group :type device-limit :optional true
       :description "Max bindings in a single bind group (default 1000).")
-    (key :name max-dynamic-uniform-buffers-per-pipeline-layout :type device-limit-value :optional true
+    (key :name max-dynamic-uniform-buffers-per-pipeline-layout :type device-limit :optional true
       :description "Max dynamic-offset uniform buffers per pipeline layout (default 8).")
-    (key :name max-dynamic-storage-buffers-per-pipeline-layout :type device-limit-value :optional true
+    (key :name max-dynamic-storage-buffers-per-pipeline-layout :type device-limit :optional true
       :description "Max dynamic-offset storage buffers per pipeline layout (default 4).")
-    (key :name max-sampled-textures-per-shader-stage :type device-limit-value :optional true
+    (key :name max-sampled-textures-per-shader-stage :type device-limit :optional true
       :description "Max sampled textures per shader stage (default 16).")
-    (key :name max-samplers-per-shader-stage :type device-limit-value :optional true
+    (key :name max-samplers-per-shader-stage :type device-limit :optional true
       :description "Max samplers per shader stage (default 16).")
-    (key :name max-storage-buffers-per-shader-stage :type device-limit-value :optional true
+    (key :name max-storage-buffers-per-shader-stage :type device-limit :optional true
       :description "Max storage buffers per shader stage (default 8).")
-    (key :name max-storage-buffers-in-vertex-stage :type device-limit-value :optional true
+    (key :name max-storage-buffers-in-vertex-stage :type device-limit :optional true
       :description "Max storage buffers in the vertex stage (compat split-stage limit; default 8).")
-    (key :name max-storage-buffers-in-fragment-stage :type device-limit-value :optional true
+    (key :name max-storage-buffers-in-fragment-stage :type device-limit :optional true
       :description "Max storage buffers in the fragment stage (compat split-stage limit; default 8).")
-    (key :name max-storage-textures-per-shader-stage :type device-limit-value :optional true
+    (key :name max-storage-textures-per-shader-stage :type device-limit :optional true
       :description "Max storage textures per shader stage (default 4).")
-    (key :name max-storage-textures-in-vertex-stage :type device-limit-value :optional true
+    (key :name max-storage-textures-in-vertex-stage :type device-limit :optional true
       :description "Max storage textures in the vertex stage (compat split-stage limit; default 4).")
-    (key :name max-storage-textures-in-fragment-stage :type device-limit-value :optional true
+    (key :name max-storage-textures-in-fragment-stage :type device-limit :optional true
       :description "Max storage textures in the fragment stage (compat split-stage limit; default 4).")
-    (key :name max-uniform-buffers-per-shader-stage :type device-limit-value :optional true
+    (key :name max-immediate-size :type device-limit :optional true
+      :description "Max size in bytes of a pipeline's immediate-data range; must be a multiple of 4 (default 64).")
+    (key :name max-uniform-buffers-per-shader-stage :type device-limit :optional true
       :description "Max uniform buffers per shader stage (default 12).")
-    (key :name max-uniform-buffer-binding-size :type device-limit-value :optional true
+    (key :name max-uniform-buffer-binding-size :type device-limit :optional true
       :description "Max bound range of a uniform buffer in bytes (default 65536).")
-    (key :name max-storage-buffer-binding-size :type device-limit-value :optional true
+    (key :name max-storage-buffer-binding-size :type device-limit :optional true
       :description "Max bound range of a storage buffer in bytes (default 134217728).")
-    (key :name min-uniform-buffer-offset-alignment :type device-limit-value :optional true
+    (key :name min-uniform-buffer-offset-alignment :type device-limit :optional true
       :description "Required alignment of a dynamic uniform buffer offset (default 256).")
-    (key :name min-storage-buffer-offset-alignment :type device-limit-value :optional true
+    (key :name min-storage-buffer-offset-alignment :type device-limit :optional true
       :description "Required alignment of a dynamic storage buffer offset (default 256).")
-    (key :name max-vertex-buffers :type device-limit-value :optional true
+    (key :name max-vertex-buffers :type device-limit :optional true
       :description "Max vertex buffers in a render pipeline (default 8).")
-    (key :name max-buffer-size :type device-limit-value :optional true
+    (key :name max-buffer-size :type device-limit :optional true
       :description "Max size of a buffer in bytes (default 268435456).")
-    (key :name max-vertex-attributes :type device-limit-value :optional true
+    (key :name max-vertex-attributes :type device-limit :optional true
       :description "Max vertex attributes across all buffers (default 16).")
-    (key :name max-vertex-buffer-array-stride :type device-limit-value :optional true
+    (key :name max-vertex-buffer-array-stride :type device-limit :optional true
       :description "Max stride of a vertex buffer in bytes (default 2048).")
-    (key :name max-inter-stage-shader-variables :type device-limit-value :optional true
+    (key :name max-inter-stage-shader-variables :type device-limit :optional true
       :description "Max inter-stage shader variables (default 16).")
-    (key :name max-color-attachments :type device-limit-value :optional true
+    (key :name max-color-attachments :type device-limit :optional true
       :description "Max color attachments in a render pass (default 8).")
-    (key :name max-color-attachment-bytes-per-sample :type device-limit-value :optional true
+    (key :name max-color-attachment-bytes-per-sample :type device-limit :optional true
       :description "Max total bytes per sample across color attachments (default 32).")
-    (key :name max-compute-workgroup-storage-size :type device-limit-value :optional true
+    (key :name max-compute-workgroup-storage-size :type device-limit :optional true
       :description "Max var<workgroup> storage in bytes (default 16384).")
-    (key :name max-compute-invocations-per-workgroup :type device-limit-value :optional true
+    (key :name max-compute-invocations-per-workgroup :type device-limit :optional true
       :description "Max x*y*z of a compute @workgroup_size (default 256).")
-    (key :name max-compute-workgroup-size-x :type device-limit-value :optional true
+    (key :name max-compute-workgroup-size-x :type device-limit :optional true
       :description "Max X of a compute @workgroup_size (default 256).")
-    (key :name max-compute-workgroup-size-y :type device-limit-value :optional true
+    (key :name max-compute-workgroup-size-y :type device-limit :optional true
       :description "Max Y of a compute @workgroup_size (default 256).")
-    (key :name max-compute-workgroup-size-z :type device-limit-value :optional true
+    (key :name max-compute-workgroup-size-z :type device-limit :optional true
       :description "Max Z of a compute @workgroup_size (default 64).")
-    (key :name max-compute-workgroups-per-dimension :type device-limit-value :optional true
+    (key :name max-compute-workgroups-per-dimension :type device-limit :optional true
       :description "Max dispatchWorkgroups count per dimension (default 65535)."))
 
   (form :name canvas
     :description "Canvas presentation configuration (optional singleton). Carried as a
                   header flag, consumed by the JS runtime at context.configure() before
-                  the executor runs. Form absent → premultiplied (the historical
-                  behavior; the WebGPU spec default is opaque — a pinned deviation).
+                  the executor runs. Form absent → opaque, as
+                  GPUCanvasConfiguration.alphaMode. Write (canvas :alpha-mode
+                  premultiplied) for a canvas the page shows through.
                   Native --frame renders offscreen and ignores it. viewFormats/
-                  colorSpace/toneMapping are deferred: anything list-shaped needs a
-                  chained header table, the 3 reserved header bytes being consumed
-                  by the device-limits offset (docs/plans/spec/04)."
-    (key :name alpha-mode :type canvas-alpha-mode :default premultiplied
-      :description "GPUCanvasConfiguration.alphaMode — opaque or premultiplied (PNGine default: premultiplied; the spec default is opaque)."))
+                  colorSpace/toneMapping are not modelled: anything list-shaped
+                  needs a chained header table, and the 3 reserved header bytes
+                  are consumed by the device-limits offset."
+    (key :name alpha-mode :type canvas-alpha-mode :default opaque
+      :description "GPUCanvasConfiguration.alphaMode — opaque (the default) or premultiplied, which lets the page behind the canvas show through wherever the rendered alpha is below 1."))
 
   (form :name shader-module
     :description "A named WGSL module. The source is opaque text to SJON."
     (key :name name :type symbol
-      :description "Module name referenced by pipeline (module …) stages.")
+      :description "Module name referenced by a pipeline stage's :module key.")
     (key :name code :type string
-      :description "WGSL source text. Triple-quoted strings dedent by common minimum indentation."))
+      :description "WGSL source text, kept verbatim (a triple-quoted string's indentation is part of the shader)."))
 
   (form :name data
     :description "Binary data: an inline float32 array, a positional shape sub-form
-                 (cube/teapot/…) the emitter expands to vertex bytes, or a `:blob`
+                 (cube/teapot/…) the emitter expands to vertex bytes, or a `:file`
                  image file the emitter reads from disk and embeds as
                  [mime_len][mime][bytes] (consumed by an image-bitmap)."
     :positional data-shape-section
     (key :name name :type symbol
-      :description "Data name referenced by buffer :size / :mapped-at-creation / :index-of and image-bitmap :image.")
+      :description "Data name referenced by buffer :data / :index-of and image-bitmap :data.")
     (key :name float32 :type float-list :optional true
       :description "Inline float32 array embedded little-endian in the payload.")
-    (key :name blob :type file-path :optional true
+    (key :name file :type file-path :optional true
       :description "Image file path (relative to the source file) embedded as [mime_len][mime][bytes]; decoded at runtime via createImageBitmap.")
     (key :name mime :type string :optional true
-      :description "MIME type stored with the :blob bytes (e.g. image/png)."))
+      :description "MIME type stored with the :file bytes (e.g. image/png); default application/octet-stream. Ignored when there is no :file.")
+    ; One source per (data …): the inline array OR the file (both used to
+    ; validate and the file won in silence). The third source, a
+    ; positional generator, is a head-set the group cannot count against; the
+    ; emitter refuses a generator beside either key, and a (data …) with none.
+    (exclusive-group :cardinality at-most-one
+      (alt :keys [float32])
+      (alt :keys [file])))
 
   (form :name image-bitmap
-    :description "A decoded image created from a (data … :blob …) entry. Copied into a texture via a (copy-external-image-to-texture …) queue action."
+    :description "A decoded image created from a (data … :file …) entry. Copied into a texture via a (copy-external-image-to-texture …) queue action."
     (key :name name :type symbol)
-    (key :name image :type data-ref
-      :description "The (data … :blob …) entry holding the encoded image bytes."))
+    (key :name data :type data-ref
+      :description "The (data … :file …) entry holding the encoded image bytes."))
 
   ; ---- shape sub-forms (positional children of `(data …)`) ----
   ; `:open true` so generator-specific numeric config (segments, rings, radius,
@@ -954,36 +1375,28 @@
 
   (form :name wasm-data
     :description "Static WASM data generator (positional child of (data …)): the module's :func is called once at buffer-create time and its returned bytes fill the buffer via mappedAtCreation."
-    (key :name url :type file-path
-      :description "WASM file path relative to the source file (the legacy module={url=…} is flattened).")
+    (key :name file :type file-path
+      :description "WASM file path relative to the source file.")
     (key :name func :type symbol
       :description "Exported function called once to produce the bytes.")
     (key :name returns :type string
       :description "Return type → byte count (e.g. array<f32,360> → 1440)."))
 
   (form :name texture
-    :description "GPU texture. `:size canvas` tracks canvas size; `:size-from <image-bitmap>`
-                  sizes from a decoded image; else width/height. `pool` creates N
-                  sequential ping-pong ids."
+    :description "GPU texture. `:size` is an [w h d] extent, `canvas` to track the
+                  canvas size at runtime, or an (image-bitmap …) to take the decoded
+                  image's size. `pool` creates N sequential ping-pong ids."
     (key :name name :type symbol)
-    (key :name size :type texture-size-mode :optional true
-      :description "canvas: track the canvas size at runtime (mutually exclusive with :width/:height).")
-    (key :name size-from :type image-bitmap-ref :optional true
-      :description "Take width/height from a decoded (image-bitmap …) at runtime (mutually exclusive with :size).")
-    (key :name width :type byte-count :optional true
-      :description "Texel width (when not sized by :size canvas or :size-from).")
-    (key :name height :type byte-count :optional true
-      :description "Texel height (when not sized by :size canvas or :size-from).")
+    (key :name size :type texture-size
+      :description "Texel size: [w], [w h] or [w h d]; canvas to track the canvas; or an (image-bitmap …) to size from a decoded image.")
     (key :name format :type texture-format
       :description "Texel format of the texture.")
     (key :name usage :type texture-usage-list
       :description "Allowed texture usages (at least one).")
-    (key :name sample-count :type count-value :optional true
+    (key :name sample-count :type u32 :optional true
       :description "Samples per texel: 1 (default) or 4 (MSAA). >1 requires render-attachment usage and a resolve-target on the pass.")
     (key :name dimension :type texture-dimension :optional true
-      :description "Texture dimensionality: 1 (1d), 2 (2d, default), or 3 (3d). 3d needs :depth-or-array-layers; sampling 1d/3d/array textures needs a matching texture view.")
-    (key :name depth-or-array-layers :type subresource-count :optional true
-      :description "GPUExtent3D depthOrArrayLayers: slice count of a 3d texture or layer count of a 2d array (default 1).")
+      :description "Texture dimensionality: 1d, 2d (default), or 3d. A 3d texture needs a third :size element; sampling 1d/3d/array textures needs a matching texture view.")
     (key :name mip-level-count :type subresource-count :optional true
       :description "GPUTextureDescriptor.mipLevelCount — number of mip levels to allocate (default 1). Levels beyond what's written stay uninitialized until generated.")
     (key :name pool :type pool-size :optional true
@@ -1000,8 +1413,8 @@
     (key :name name :type symbol)
     (key :name texture :type texture-ref
       :description "Source texture this view aliases.")
-    (key :name view-dimension :type view-dimension :optional true
-      :description "How the view is addressed: 0=1d 1=2d 2=2d-array 3=cube 4=cube-array 5=3d. Must match the WGSL binding (texture_2d_array, texture_3d, …). Default: inferred from the texture.")
+    (key :name dimension :type view-dimension :optional true
+      :description "How the view is addressed (GPUTextureViewDescriptor.dimension): 1d, 2d, 2d-array, cube, cube-array or 3d. Must match the WGSL binding (texture_2d_array, texture_3d, …). Default: inferred from the texture.")
     (key :name aspect :type texture-aspect :optional true
       :description "Which aspect(s) of a depth/stencil texture the view exposes (default all).")
     (key :name base-mip-level :type subresource-index :optional true
@@ -1021,20 +1434,20 @@
                   indexed shape's (teapot/dragon) index data — avoids a synthetic
                   `_indices` data symbol the SJON cross-ref validator can't resolve."
     (key :name name :type symbol)
-    (key :name size :type byte-size :optional true
-      :description "Size in bytes: an integer, a bounded expression like (* NUM 4 4), or a (data …) ref the buffer is sized from.")
+    (key :name size :type byte-count :optional true
+      :description "Size in bytes: an integer, a bounded expression like (* NUM 4 4), or a bare (define …) name. Optional only when :data, :index-of or :file supplies the size instead.")
     (key :name usage :type usage-list
-      :description "Allowed buffer usages (at least one).")
+      :description "Allowed buffer usages (at least one). A mappable buffer is host memory the GPU may only copy in or out of: map-read pairs with copy-dst, map-write with copy-src, and neither combines with anything else.")
     (key :name pool :type pool-size :optional true
       :description "Create N sequential buffer ids for ping-pong (actual id = base + (frame + offset) % N).")
-    (key :name mapped-at-creation :type data-ref :optional true
-      :description "(data …) whose bytes fill the buffer at creation via mappedAtCreation.")
+    (key :name data :type data-ref :optional true
+      :description "(data …) whose bytes fill the buffer at creation via mappedAtCreation, and size it when :size is absent.")
     (key :name index-of :type data-ref :optional true
-      :description "Source size, initial bytes, and index-format (uint16/uint32) from an indexed shape's (teapot/dragon) index companion.")
+      :description "Source size, initial bytes, and index-format (uint16/uint32) from an indexed shape's (teapot/dragon) index companion. Beside :data it wins: the index data sizes and fills the buffer, and :data is only length-checked, never written.")
     (key :name index-format :type index-format :optional true
       :description "Index format (uint16/uint32) when the buffer is bound as a pass's :index-buffer without an :index-of source (e.g. GPU-generated indices).")
-    (key :name wasm :type file-path :optional true
-      :description "WASM file path (relative to the source file); its l/s/gen exports supply size + initial bytes — size comes from the WASM, not :size. Synthesized by pngine/pass-v1 for `(pass … :data …)` buffers."))
+    (key :name file :type file-path :optional true
+      :description "WASM file path (relative to the source file); its l/s/gen exports supply size + initial bytes — size comes from the WASM, not :size. Synthesized by pngine/pass-v1 for `(pass … :file …)` buffers."))
 
   ; Emitter packs a [type:u8][count:u16-LE] descriptor blob → create_query_set.
   (form :name query-set
@@ -1042,11 +1455,12 @@
     (key :name name :type symbol)
     (key :name type :type query-type
       :description "What each query measures: occlusion or timestamp.")
-    (key :name count :type count
-      :description "Number of queries in the set (spec max 4096)."))
+    (key :name count :type query-count
+      :description "Number of queries in the set, 1 to 4096 (the createQuerySet bound)."))
 
   (form :name queue
-    :description "Queue action (write-buffer / copy-texture-to-texture) inlined into
+    :description "Queue actions (write-buffer, copy-buffer-to-buffer, copy-texture-to-texture,
+                  copy-external-image-to-texture, resolve-query-set) run in order by the
                   frames that reference it."
     :positional queue-action
     (key :name name :type symbol))
@@ -1055,68 +1469,91 @@
     :description "Queue op: write bytes into a buffer before/within a frame (GPUQueue.writeBuffer)."
     (key :name buffer :type buffer-ref
       :description "Destination buffer (needs copy-dst usage).")
-    (key :name offset :type byte-count :default 0
+    (key :name offset :type byte-count-4-aligned :default 0
       :description "Byte offset into the destination (WebGPU requires a multiple of 4).")
-    (key :name data :type write-buffer-source :optional true
-      :description "Source: a (data …) ref, or a runtime builtin — pngine-inputs (16B time/width/height/aspect), scene-time-inputs (12B), pointer-inputs (48B).")
-    (key :name data-from-wasm :type wasm-call-ref :optional true
-      :description "Write a (wasm-call …) result into the buffer at frame time. Mutually exclusive with :data.")
-    ; Exactly one data source. Declarative replacement for the emit-time check.
-    (exclusive-group :cardinality exactly-one
-      (alt :keys [data])
-      (alt :keys [data-from-wasm])))
+    ; One key for one member. `:data-from-wasm` was a second spelling of
+    ; the same slot, distinguished only by which kind of name it took — so the
+    ; document said twice what the widened union now says once, and the
+    ; exclusive-group existed to stop an author saying both.
+    (key :name data :type write-buffer-source
+      :description "Source: a (data …) ref, a (wasm-call …) whose result is written each frame, or a runtime builtin — pngine-inputs (16B time/width/height/aspect), scene-time-inputs (12B), pointer-inputs (48B)."))
 
+  ; Both ends of a copy are dictionaries in the IDL
+  ; (GPUTexelCopyTextureInfo / GPUCopyExternalImageSourceInfo), so they are
+  ; child forms, and their members are that form's keys: `:mip-level` and
+  ; `:origin` describe the DESTINATION subresource, not the copy. The flat
+  ; `:source X :texture Y` spelling is retired rather than kept as a second one.
+  ; Their heads are SLOT-LOCAL: `source` carries a texture under one copy
+  ; and an image under the other, and neither is a global form.
+  ;
+  ; There is no `:size`: pngine copies the whole source, which is what both
+  ; runtimes do today. A key the bytecode cannot carry would validate and be
+  ; dropped in silence — the texture→texture opcode encodes the two texture
+  ; ids and nothing else (`wire_schema` L_2V); the external-image opcode encodes
+  ; the bitmap id, the texture id and the destination mip level + origin
+  ; (L_COPY_EXT_IMG). Neither carries a size. It arrives when the opcode does.
   (form :name copy-texture-to-texture
     :description "Queue op: GPU texture→texture copy. context-current-texture names the canvas; otherwise a (texture …) name."
-    (key :name source :type attachment-view
-      :description "Source texture: context-current-texture or a (texture …) name.")
-    (key :name destination :type attachment-view
-      :description "Destination texture: context-current-texture or a (texture …) name."))
+    :positional copy-endpoints-section
+    (form :name source
+      :description "Copy source (GPUTexelCopyTextureInfo)."
+      (key :name texture :type attachment-view
+        :description "Source texture: context-current-texture or a (texture …) name."))
+    (form :name destination
+      :description "Copy destination (GPUTexelCopyTextureInfo)."
+      (key :name texture :type attachment-view
+        :description "Destination texture: context-current-texture or a (texture …) name.")))
 
   (form :name copy-external-image-to-texture
     :description "Queue op: upload a decoded image (image-bitmap) into a texture. mip-level / origin default to 0 per the WebGPU spec."
-    (key :name source :type image-bitmap-ref
-      :description "The decoded (image-bitmap …) to upload.")
-    (key :name texture :type texture-ref
-      :description "Destination texture (needs copy-dst usage).")
-    (key :name mip-level :type byte-count :optional true
-      :description "Destination mip level (default 0).")
-    (key :name origin :type origin3 :optional true
-      :description "Destination origin [x y z] in texels (default [0 0 0]; z selects the array layer / depth slice)."))
+    :positional copy-endpoints-section
+    (form :name source
+      :description "Copy source (GPUCopyExternalImageSourceInfo)."
+      (key :name image :type image-bitmap-ref
+        :description "The decoded (image-bitmap …) to upload."))
+    (form :name destination
+      :description "Copy destination (GPUCopyExternalImageDestInfo)."
+      (key :name texture :type texture-ref
+        :description "Destination texture (needs copy-dst usage).")
+      (key :name mip-level :type subresource-index :optional true
+        :description "Destination mip level (default 0).")
+      (key :name origin :type origin3 :optional true
+        :description "Destination origin [x y z] in texels (default [0 0 0]; z selects the array layer / depth slice).")))
 
   (form :name resolve-query-set
     :description "Queue op: copy resolved query results from a query set into a buffer (GPUCommandEncoder.resolveQuerySet)."
     (key :name query-set :type query-set-ref
       :description "The query set to resolve.")
-    (key :name first-query :type count :default 0
+    (key :name first-query :type u32 :default 0
       :description "Index of the first query to resolve.")
-    (key :name query-count :type count
+    (key :name query-count :type u32
       :description "Number of queries to resolve; each resolves to 8 bytes.")
     (key :name destination :type buffer-ref
       :description "Destination buffer; must have query-resolve usage.")
-    (key :name destination-offset :type byte-count :default 0
+    (key :name destination-offset :type byte-count-256-aligned :default 0
       :description "Byte offset into the destination (WebGPU requires a multiple of 256)."))
 
   (form :name copy-buffer-to-buffer
     :description "Queue op: GPU buffer→buffer copy (e.g. resolved queries → a map-read readback buffer)."
     (key :name source :type buffer-ref
       :description "Source buffer (needs copy-src usage).")
-    (key :name source-offset :type byte-count :default 0
+    (key :name source-offset :type byte-count-4-aligned :default 0
       :description "Byte offset into the source (multiple of 4).")
     (key :name destination :type buffer-ref
       :description "Destination buffer (needs copy-dst usage).")
-    (key :name destination-offset :type byte-count :default 0
+    (key :name destination-offset :type byte-count-4-aligned :default 0
       :description "Byte offset into the destination (multiple of 4).")
-    (key :name size :type byte-count
+    (key :name size :type byte-count-4-aligned
       :description "Bytes to copy (multiple of 4)."))
 
-  ; The legacy nests `module={ url=… }`; SJON flattens to `:url` (the `module`
-  ; head is taken by the pipeline stage sub-form).
+  ; The legacy nests `module={ url=… }`; SJON flattens to `:file` — `url`
+  ; promised fetching the descriptor never did, and the kind is `file-path`,
+  ; "relative to the document".
   (form :name wasm-call
-    :description "A runtime WASM call: load the module at :url, call :func with :args each frame; a (write-buffer :data-from-wasm <name>) writes the result into a buffer."
+    :description "A runtime WASM call: load the module at :file, call :func with :args each frame; a (write-buffer :data <name>) writes the result into a buffer."
     (key :name name :type symbol)
-    (key :name url :type file-path
-      :description "WASM file path relative to the source file (modules deduped by url).")
+    (key :name file :type file-path
+      :description "WASM file path relative to the source file (modules deduped by path).")
     (key :name func :type symbol
       :description "Exported function to call at frame time.")
     (key :name returns :type string
@@ -1126,30 +1563,32 @@
 
   (form :name bind-group
     :description "Bind group. `pool` + per-entry `ping-pong` drive ping-pong. The
-                  layout is a pipeline's auto-layout (:layout-pipeline) OR an explicit
-                  (bind-group-layout …) (:bind-group-layout); exactly one is required
-                  (schema-enforced via the exclusive-group below)."
+                  layout is a pipeline's auto-layout or an explicit
+                  (bind-group-layout …) — one required :layout key naming either."
     :positional bind-entry-item
     (key :name name :type symbol)
-    (key :name layout-pipeline :type pipeline-ref :optional true
-      :description "The render- or compute-pipeline whose auto-layout this group targets.")
-    (key :name bind-group-layout :type bind-group-layout-ref :optional true
-      :description "An explicit (bind-group-layout …) this group targets instead of a pipeline's auto-layout.")
-    (key :name layout-index :type binding-index :default 0
-      :description "Which @group index of the pipeline layout this group binds (spec baseline < 4).")
+    (key :name layout :type bind-group-layout-spec
+      :description "The layout this group is built against: a pipeline (its auto-derived layout) or an explicit (bind-group-layout …).")
+    ; `:group` is `@group(N)` in the WGSL — the word WebGPU and WGSL both use,
+    ; and it pairs with the entries' `:binding` the way the shader spells them.
+    ; It was `:layout-index`, which named the mechanism rather than the
+    ; thing. Meaningful for the PIPELINE arm only: that arm resolves the layout
+    ; as `pipeline.getBindGroupLayout(:group)`, while an explicit
+    ; (bind-group-layout …) IS the layout and the index selects nothing. The
+    ; emitter warns rather than rejects — the value is still encoded, so a
+    ; document that states it keeps compiling byte-identically.
+    (key :name group :type binding-index :default 0
+      :description "Which @group index of the pipeline's layout this group binds (spec baseline < 4). Ignored when :layout names an explicit (bind-group-layout …).")
     (key :name pool :type pool-size :optional true
       :description "Create N sequential bind-group ids for ping-pong selection.")
-    ; Exactly one layout source — a pipeline's auto-layout XOR an explicit
-    ; (bind-group-layout …). Declarative replacement for the emit-time check.
-    (exclusive-group :cardinality exactly-one
-      (alt :keys [layout-pipeline])
-      (alt :keys [bind-group-layout]))
-    ; Slot-local (F8) entry form: `(entry :binding N :buffer|:sampler|:texture R)`.
+    ; Slot-local entry form: `(entry :binding N :buffer|:sampler|:texture|:texture-view R)`.
     ; Resolved LOCAL-FIRST under bind-group, so this `entry` is distinct from the
-    ; global render-pipeline stage (entry …) form of the same head.
+    ; bind-group-layout's entry. (A global `entry` stand-in used to sit above
+    ; this form so `:lowering :produces` could name the head; SJON since 1.5 makes
+    ; `:produces` resolve slot-local heads and the stand-in is gone.)
     (form :name entry
-      :description "One bind-group entry: binding → buffer | sampler | texture resource
-                    (exactly one of :buffer/:sampler/:texture, schema-enforced)."
+      :description "One bind-group entry: binding → buffer | sampler | texture | texture-view resource
+                    (exactly one of :buffer/:sampler/:texture/:texture-view, schema-enforced)."
       (key :name binding :type binding-index
         :description "Binding slot matching @binding(N) in the WGSL.")
       (key :name buffer :type buffer-ref :optional true
@@ -1160,9 +1599,11 @@
         :description "Bind a (texture …) at this slot via its default 2d view.")
       (key :name texture-view :type texture-view-ref :optional true
         :description "Bind an explicit (texture-view …) at this slot — for 1d/3d/array/cube sampling.")
-      (key :name offset :type byte-count :optional true
+      ; `:requires [buffer]` (SJON 1.2.0): a slice on a sampler/texture entry is a
+      ; located `dependent_key_missing` at validation, not an emitter reject.
+      (key :name offset :type byte-count :optional true :requires [buffer]
         :description "GPUBufferBinding.offset — byte offset of the bound slice into :buffer (default 0; requires :buffer; must lie inside the declared buffer size — checked at compile time). Dynamic-offset alignment rules apply (uniform 256, storage 256 by default).")
-      (key :name size :type byte-count :optional true
+      (key :name size :type byte-count :optional true :requires [buffer]
         :description "GPUBufferBinding.size — byte size of the bound slice (default: the rest of :buffer from :offset; requires :buffer; :offset + :size must fit the declared buffer size — checked at compile time).")
       (key :name ping-pong :type binding-index :optional true
         :description "Pool offset for this entry: actual id = base + (frame + offset) % pool.")
@@ -1173,31 +1614,14 @@
         (alt :keys [texture])
         (alt :keys [texture-view]))))
 
-  ; Head-resolution target for the `(bind-group-layout entry (storage-texture …))`
-  ; slot-local form below. WebGPU has no standalone storage-texture resource (a
-  ; storage texture is a (texture … :usage [storage-binding])); this global form
-  ; exists only so the `bgl-resource` head-set resolves `storage-texture` to a form,
-  ; exactly as `buffer`/`sampler`/`texture` resolve to their global resource forms.
-  ; It has no emitter phase — never walked at top level — so the real fields live in
-  ; the slot-local form; this one just satisfies the head lookup.
-  (form :name storage-texture
-    :description "Storage-texture layout resource (authored inside (bind-group-layout entry …), not at top level)."
-    (key :name name :type symbol :optional true)
-    (key :name format :type texture-format :optional true
-      :description "Texel format of the storage texture.")
-    (key :name access :type storage-texture-access :optional true
-      :description "Access mode (default write-only).")
-    (key :name view-dimension :type view-dimension :optional true
-      :description "View dimension (default 2d)."))
-
   ; ---- explicit bind-group-layout (uniform_access) ----
   ; → create_bind_group_layout (opcode 0x06), emitted between samplers and
   ; pipelines (the legacy phase position). Buffer, sampler, texture, and storage-
-  ; texture bindings are modeled. Entries and their resource are SLOT-LOCAL forms
-  ; (F8): `(entry …)` and its nested `(buffer|sampler|texture|storage-texture …)`,
+  ; texture bindings are modeled. Entries and their resource are SLOT-LOCAL
+  ; forms: `(entry …)` and its nested `(buffer|sampler|texture|storage-texture …)`,
   ; resolved local-first so the natural names don't collide with the global forms.
   (form :name bind-group-layout
-    :description "Explicit binding layout (per-entry visibility + resource type) targeted by a (bind-group … :bind-group-layout …) instead of a pipeline's auto-layout."
+    :description "Explicit binding layout (per-entry visibility + resource type) named by a (bind-group … :layout …) instead of a pipeline's auto-layout."
     :positional bgl-entry-item
     (key :name name :type symbol)
     (form :name entry
@@ -1207,13 +1631,13 @@
         :description "Binding slot matching @binding(N) in the WGSL.")
       (key :name visibility :type visibility-list
         :description "Shader stages that may access this binding (ORed into the WebGPU mask: vertex 0x1, fragment 0x2, compute 0x4).")
-      ; Nested slot-local (F8) resource form: `(buffer :type T)`. Resolved
+      ; Nested slot-local resource form: `(buffer :type T)`. Resolved
       ; local-first under the layout entry, distinct from the global `buffer`.
       (form :name buffer
         :description "Buffer resource of a layout entry."
-        (key :name type :type buffer-binding-type
-          :description "How the buffer is exposed to WGSL: uniform, storage, or read-only-storage."))
-      ; Non-buffer resources (F8 slot-local, like buffer). Their WebGPU-shape sub-
+        (key :name type :type buffer-binding-type :optional true
+          :description "How the buffer is exposed to WGSL: uniform, storage, or read-only-storage (WebGPU default: uniform)."))
+      ; Non-buffer resources (slot-local, like buffer). Their WebGPU-shape sub-
       ; objects flow verbatim through gpu.js/--html; native's create_bind_group_layout
       ; parser reads each field string-for-string.
       (form :name sampler
@@ -1225,7 +1649,7 @@
         (key :name sample-type :type texture-sample-type :optional true
           :description "Sample type of the bound texture (default float).")
         (key :name view-dimension :type view-dimension :optional true
-          :description "View dimension: 0=1d 1=2d 2=2d-array 3=cube 4=cube-array 5=3d (default 2d).")
+          :description "View dimension: 1d, 2d, 2d-array, cube, cube-array or 3d (default 2d).")
         (key :name multisampled :type boolean :optional true
           :description "Whether the binding is a multisampled texture (default false)."))
       (form :name storage-texture
@@ -1240,24 +1664,24 @@
   ; ---- explicit pipeline-layout ----
   ; → create_pipeline_layout (opcode 0x07), emitted between bind-group-layouts and
   ; pipelines. Composes N (bind-group-layout …) into a GPUPipelineLayout that a
-  ; (render-pipeline …)/(compute-pipeline …) references via :pipeline-layout instead
-  ; of auto-deriving from the WGSL. This is the only way to bind @group 0..N to
+  ; (render-pipeline …)/(compute-pipeline …) names in `:layout` instead of
+  ; `auto` (deriving from the WGSL). This is the only way to bind @group 0..N to
   ; DIFFERENT explicit layouts (auto derives a single implicit layout per pipeline).
   (form :name pipeline-layout
-    :description "Explicit pipeline layout: an ordered list of (bind-group-layout …) at @group 0..N. Referenced by (render-pipeline … :pipeline-layout …)."
+    :description "Explicit pipeline layout: an ordered list of (bind-group-layout …) at @group 0..N. Named by a pipeline's :layout key in place of auto."
     (key :name name :type symbol)
     (key :name bind-group-layouts :type bind-group-layout-ref-list
       :description "The (bind-group-layout …) forms at @group 0, 1, … in order."))
 
   (form :name sampler
-    :description "GPU sampler. PNGine defaults: filters linear, address-mode clamp-to-edge (WebGPU's own defaults are nearest)."
+    :description "GPU sampler. Defaults match GPUSamplerDescriptor: filters nearest, address-mode clamp-to-edge."
     (key :name name :type symbol)
-    (key :name mag-filter :type filter-mode :default linear
-      :description "Magnification filter — sampling when one texel covers many pixels. PNGine default: linear (the WebGPU spec default is nearest).")
-    (key :name min-filter :type filter-mode :default linear
-      :description "Minification filter — sampling when many texels cover one pixel. PNGine default: linear (the WebGPU spec default is nearest).")
+    (key :name mag-filter :type filter-mode :default nearest
+      :description "Magnification filter — sampling when one texel covers many pixels. Default nearest, as GPUSamplerDescriptor.magFilter; write :mag-filter linear for smoothing.")
+    (key :name min-filter :type filter-mode :default nearest
+      :description "Minification filter — sampling when many texels cover one pixel. Default nearest, as GPUSamplerDescriptor.minFilter; write :min-filter linear for smoothing.")
     (key :name address-mode :type address-mode :optional true
-      :description "Addressing for texture coordinates outside [0,1], applied to all three axes (PNGine default: clamp-to-edge). Per-axis :address-mode-u/v/w override it.")
+      :description "Addressing for texture coordinates outside [0,1], applied to all three axes. A PNGine shorthand for the IDL's three separate keys, and like them it defaults to clamp-to-edge. Per-axis :address-mode-u/v/w override it.")
     (key :name address-mode-u :type address-mode :optional true
       :description "Addressing for the U (S) axis; overrides :address-mode for this axis.")
     (key :name address-mode-v :type address-mode :optional true
@@ -1265,12 +1689,12 @@
     (key :name address-mode-w :type address-mode :optional true
       :description "Addressing for the W (R) axis; overrides :address-mode for this axis (3D / cube sampling).")
     (key :name mipmap-filter :type filter-mode :optional true
-      :description "Filter applied between mip levels (only visible with a mipmapped texture).")
+      :description "Filter applied between mip levels (only visible with a mipmapped texture). Default nearest, as GPUSamplerDescriptor.mipmapFilter; :max-anisotropy above 1 requires linear here as well as on :mag-filter and :min-filter.")
     (key :name lod-min-clamp :type lod-clamp :optional true
       :description "Minimum mip level of detail the sampler will use (default 0).")
     (key :name lod-max-clamp :type lod-clamp :optional true
       :description "Maximum mip level of detail the sampler will use (default 32).")
-    (key :name max-anisotropy :type anisotropy-value :optional true
+    (key :name max-anisotropy :type anisotropy :optional true
       :description "Maximum anisotropy for filtering; values > 1 require linear mag/min/mipmap filters.")
     (key :name compare :type compare-function :optional true
       :description "Comparison function — makes this a comparison sampler (e.g. depth shadow sampling)."))
@@ -1279,38 +1703,48 @@
   ; (via EmittedForm positional children), so the render-pipeline descriptor has
   ; one path.
   (form :name render-pipeline
-    :description "GPU render pipeline. Positional (layout …)(vertex …)(fragment …)(primitive …)(depth-stencil …)(multisample …) sections mirror GPURenderPipelineDescriptor."
+    :description "GPU render pipeline. Positional (vertex …)(fragment …)(primitive …)(depth-stencil …)(multisample …) sections mirror GPURenderPipelineDescriptor."
     :positional pipeline-section
     (key :name name :type symbol)
-    (key :name pipeline-layout :type pipeline-layout-ref :optional true
-      :description "An explicit (pipeline-layout …) instead of auto-deriving the layout from the WGSL. Supersedes the (layout auto) positional when present."))
+    ; GPUPipelineDescriptorBase.layout: required, and ONE member — see
+    ; `pipeline-layout-spec`.
+    (key :name layout :type pipeline-layout-spec
+      :description "auto to derive the bind-group layouts from the WGSL, or a declared (pipeline-layout …)."))
 
-  ; compute-pipeline is flat (no positional sections) — natural, not a workaround:
-  ; a compute pipeline is just module + entry, with no vertex/fragment stages to
-  ; nest. The `pngine/init-v1` hook emits one; the flat kvpair shape is correct
-  ; as-is (the positional-slot limitation it once worked around was lifted in SJON
-  ; 2026-06, but compute-pipeline never needed positional children anyway).
   (form :name compute-pipeline
-    :description "GPU compute pipeline: a WGSL module + @compute entry point. Optional positional (constant …) forms specialise the module's `override` declarations."
+    :description "GPU compute pipeline: one positional (compute …) stage naming the WGSL module and its @compute entry point."
     :positional compute-pipeline-section
     (key :name name :type symbol)
+    (key :name layout :type pipeline-layout-spec
+      :description "auto to derive the bind-group layouts from the WGSL, or a declared (pipeline-layout …)."))
+
+  ; ---- pipeline stage sub-forms (source-authored + hook-emitted) ----
+  ; All three are GPUProgrammableStage: a required module, an optional entry
+  ; point, and per-stage `(constant …)` overrides. `(module …)`/`(entry …)` were
+  ; positional atom forms until this cut — a scalar member of a dictionary is a
+  ; key, and spelling it as a form meant two global heads existed for no
+  ; reason but the grammar.
+  (form :name vertex
+    :description "Vertex stage (GPUVertexState): the module + entry point, one (vertex-buffer …) per bound vertex slot, and (constant …) overrides."
+    :positional vertex-section
+    (key :name module :type module-ref
+      :description "The (shader-module …) holding the @vertex entry.")
+    (key :name entry :type entry-point :optional true
+      :description "Entry-point function name (defaults to the module's sole @vertex fn)."))
+  (form :name fragment
+    :description "Fragment stage (GPUFragmentState): the module + entry point, one (target …) per color attachment, and (constant …) overrides."
+    :positional fragment-section
+    (key :name module :type module-ref
+      :description "The (shader-module …) holding the @fragment entry.")
+    (key :name entry :type entry-point :optional true
+      :description "Entry-point function name (defaults to the module's sole @fragment fn)."))
+  (form :name compute
+    :description "Compute stage (GPUProgrammableStage): the module + @compute entry point of a (compute-pipeline …), and (constant …) overrides."
+    :positional compute-section
     (key :name module :type module-ref
       :description "The (shader-module …) holding the @compute entry.")
     (key :name entry :type entry-point :optional true
-      :description "Entry-point function name (defaults to the module's sole @compute fn).")
-    (key :name pipeline-layout :type pipeline-layout-ref :optional true
-      :description "An explicit (pipeline-layout …) instead of auto-deriving the layout from the WGSL."))
-
-  ; ---- render-pipeline sub-forms (source-authored only) ----
-  (form :name layout
-    :description "Pipeline layout: auto derives bind-group layouts from the WGSL."
-    :positional layout-mode)
-  (form :name vertex
-    :description "Vertex stage: (module …)(entry …) and optional (buffers …) vertex-input layout."
-    :positional vertex-section)
-  (form :name fragment
-    :description "Fragment stage: (module …)(entry …) and the (targets …) color targets."
-    :positional fragment-section)
+      :description "Entry-point function name (defaults to the module's sole @compute fn)."))
   ; Authored per STAGE, mirroring WebGPU's GPUProgrammableStage.constants and
   ; the per-entry-point reflection — but RESOLVED per module, because pngine
   ; specialises the shader text at compile time instead of passing a constants
@@ -1320,39 +1754,68 @@
     :description "Specialise a WGSL `override` with a compile-time value. The declaration becomes a `const` in the shipped shader, so the value participates in const-folding and dead-code elimination — an unused branch leaves the payload entirely."
     (key :name name :type override-name
       :description "The WGSL `override` identifier this value is for.")
-    (key :name value :type override-value
+    (key :name value :type override-number
       :description "The value. Must fit the override's declared WGSL type: a fractional value for a u32/i32 override, or anything but 0/1 for a bool, is rejected."))
   (form :name primitive
-    :description "Primitive assembly state: (topology …) plus cull / winding. Mirror the source: omit the whole form when unauthored."
-    :positional primitive-section
+    :description "Primitive assembly state (GPUPrimitiveState). Mirror the source: omit the whole form when unauthored."
+    ; `:default triangle-list` is REQUIRED here, and it is the one default in
+    ; this file the emitter deliberately does not bake. A `(variant …)` needs a
+    ; discriminant it can resolve — SJON answers `missing_discriminant_key` when
+    ; the key is neither authored nor defaulted — while a default is MATERIALIZED
+    ; into the effective view, which the defaults policy at the top of this file
+    ; says the emitter bakes. Both hold: the schema defaults the key so the
+    ; variant below resolves, and `appendPrimitive` emits `topology` only when
+    ; `authorNode` says the author wrote it, so a document that omits it still
+    ; ships no topology (measured: +27 bytes on the one corpus document that
+    ; omits it). The value is WebGPU's own default, so the two readings agree —
+    ; a list topology, which reads no strip index format.
+    ;
+    ; `:strip-index-format` is the conditional key `(variant …)` exists for, and
+    ; SJON's manifest spec uses this exact rule as its worked example. It could
+    ; not be written until SJON 1.5: WebGPU reads stripIndexFormat for TWO
+    ; topologies (triangle-strip and line-strip) and a key belonged to one
+    ; variant (`variant_key_collision`). `(variant :when [a b])` is that fix,
+    ; so the rule is the schema's now and the emitter's
+    ; `checkStripIndexFormat` is gone. Under a list topology the key does not
+    ; exist: `unknown_key`, located, at validation.
+    :discriminant topology
+    (key :name topology :type primitive-topology :optional true :default triangle-list
+      :description "How vertices assemble into primitives (WebGPU default: triangle-list). Selects whether :strip-index-format exists: WebGPU reads a strip index format only for triangle-strip and line-strip.")
     (key :name cull-mode :type cull-mode :optional true
       :description "Which faces are discarded (WebGPU default: none).")
     (key :name front-face :type front-face :optional true
       :description "Winding that counts as front-facing (WebGPU default: ccw).")
-    (key :name strip-index-format :type index-format :optional true
-      :description "Index byte-width (uint16/uint32) for indexed strip draws; WebGPU requires it only when draw-indexed uses a strip topology (triangle-strip/line-strip).")
     (key :name unclipped-depth :type boolean :optional true
-      :description "Disable depth clipping (clamp fragments to [0,1] instead of discarding them); needs the depth-clip-control device feature (WebGPU default: false)."))
-  ; Keys are optional + default-free: the emitter emits only authored keys
-  ; (mirrors the legacy property-by-property JSON build).
+      :description "Disable depth clipping (clamp fragments to [0,1] instead of discarding them); needs the depth-clip-control device feature (WebGPU default: false).")
+    (variant :when [triangle-strip line-strip]
+      (key :name strip-index-format :type index-format :optional true
+        :description "Index byte-width (uint16/uint32) for indexed strip draws. WebGPU reads it only under a strip topology, which is why it is declared here and is an unknown key anywhere else; it becomes REQUIRED once a (draw-indexed …) runs this pipeline (that half crosses pipeline and pass, so it stays the emitter's).")))
+  ; The emitter emits only authored keys (mirroring the legacy
+  ; property-by-property JSON build), but "optional + default-free" is NOT the
+  ; rule this form follows any more: `:format` is required, and
+  ; `:depth-write-enabled` / `:depth-compare` become required from the format's
+  ; aspects, which only the emitter can see.
   (form :name depth-stencil
     :description "Depth/stencil pipeline state. Positional (stencil-front …)/(stencil-back …) carry per-face stencil state."
     :positional depth-stencil-section
-    (key :name format :type texture-format :optional true
-      :description "Format of the depth/stencil attachment this pipeline renders to.")
+    ; REQUIRED, matching GPUDepthStencilState.format. Every other key here is
+    ; genuinely optional; this one only looked optional because the form was
+    ; built "optional + default-free by construction" without checking the IDL.
+    (key :name format :type texture-format
+      :description "Format of the depth/stencil attachment this pipeline renders to; a depth or stencil format, never a colour one.")
     (key :name depth-write-enabled :type boolean :optional true
-      :description "Whether fragments write their depth value.")
+      :description "Whether fragments write their depth value. Required once :format has a depth aspect (the IDL gives it no default); optional only because a stencil-only pipeline omits it.")
     (key :name depth-compare :type compare-function :optional true
-      :description "Comparison the depth test applies (fragment depth vs stored depth).")
-    (key :name depth-bias :type depth-bias-value :optional true
+      :description "Comparison the depth test applies (fragment depth vs stored depth). Required once the pipeline writes depth, or a stencil face states a :depth-fail-op other than keep.")
+    (key :name depth-bias :type depth-bias-int :optional true
       :description "Constant bias added to fragment depth — shadow maps / depth pre-pass (triangles only).")
-    (key :name depth-bias-slope-scale :type depth-bias-value :optional true
+    (key :name depth-bias-slope-scale :type depth-bias :optional true
       :description "Bias that scales with the triangle's depth slope (triangles only).")
-    (key :name depth-bias-clamp :type depth-bias-value :optional true
+    (key :name depth-bias-clamp :type depth-bias :optional true
       :description "Maximum magnitude of the total depth bias (0 = unclamped).")
-    (key :name stencil-read-mask :type byte-count :optional true
+    (key :name stencil-read-mask :type mask32 :optional true
       :description "Bitmask ANDed with stencil values for tests (spec default 0xFFFFFFFF).")
-    (key :name stencil-write-mask :type byte-count :optional true
+    (key :name stencil-write-mask :type mask32 :optional true
       :description "Bitmask ANDed with stencil writes (spec default 0xFFFFFFFF)."))
   ; Same key set for front/back; the head selects which face the emitter writes.
   (form :name stencil-front
@@ -1377,28 +1840,16 @@
       :description "Applied when both stencil and depth tests pass."))
   (form :name multisample
     :description "Multisample pipeline state (MSAA)."
-    (key :name count :type count-value
-      :description "Samples per pixel: 1 or 4; must match the attachment textures' sample-count.")
-    (key :name mask :type count-value :optional true
+    (key :name count :type u32 :optional true
+      :description "Samples per pixel: 1 or 4; must match the attachment textures' sample-count. Absent defers to WebGPU's 1 — a (multisample …) carrying only :mask or :alpha-to-coverage-enabled is legal.")
+    (key :name mask :type mask32 :optional true
       :description "Sample coverage bitmask (spec default 0xFFFFFFFF).")
     (key :name alpha-to-coverage-enabled :type boolean :optional true
-      :description "Fragment alpha generates the coverage mask (requires count > 1)."))
-  (form :name module
-    :description "The (shader-module …) this stage executes."
-    :positional module-ref)
-  (form :name entry
-    :description "Entry-point function name within the stage's module."
-    :positional entry-point)
-  (form :name topology
-    :description "How vertices assemble into primitives (WebGPU default: triangle-list)."
-    :positional primitive-topology)
-  (form :name buffers
-    :description "Vertex input layout: one (vertex-buffer …) per bound vertex buffer slot."
-    :positional buffers-item)
+      :description "Fragment alpha generates the coverage mask. Requires :count above 1, a (fragment …) stage, and a first (target …) whose format has an alpha channel to derive the mask from."))
   (form :name vertex-buffer
     :description "Layout of one vertex buffer slot: stride + step mode + (attribute …) children."
     :positional attribute-item
-    (key :name array-stride :type byte-count
+    (key :name array-stride :type byte-count-4-aligned
       :description "Bytes between consecutive elements; multiple of 4 (spec baseline limit 2048).")
     (key :name step-mode :type step-mode :optional true
       :description "Advance per vertex or per instance (WebGPU default: vertex)."))
@@ -1410,9 +1861,6 @@
       :description "Byte offset of the attribute within one element.")
     (key :name format :type vertex-format
       :description "Wire format of the attribute data."))
-  (form :name targets
-    :description "Color targets of the fragment stage: one (target …) per attachment."
-    :positional targets-item)
   (form :name target
     :description "One color target: format plus optional (blend …) state and write mask."
     :positional target-section
@@ -1421,32 +1869,32 @@
     (key :name write-mask :type write-mask :optional true
       :description "Channel write mask: bitmask R=1 G=2 B=4 A=8, or all (15; the WebGPU default)."))
   (form :name blend
-    :description "Blend state of a color target: (color …) and (alpha …) components."
+    :description "Blend state of a color target: (color …) and (alpha …) components. Only on a blendable target format — never a uint or sint one."
     :positional blend-section)
   (form :name color
     :description "Blend component for RGB: out.rgb = operation(src.rgb * src-factor, dst.rgb * dst-factor)."
-    (key :name src-factor :type blend-factor
-      :description "Multiplier on the fragment's color (WebGPU default: one).")
-    (key :name dst-factor :type blend-factor
-      :description "Multiplier on the attachment's color (WebGPU default: zero).")
+    (key :name src-factor :type blend-factor :optional true
+      :description "Multiplier on the fragment's color (WebGPU default: one). Emitted only when authored.")
+    (key :name dst-factor :type blend-factor :optional true
+      :description "Multiplier on the attachment's color (WebGPU default: zero). Emitted only when authored.")
     (key :name operation :type blend-operation :optional true
       :description "How the factored terms combine (WebGPU default: add). Emitted only when authored."))
   (form :name alpha
     :description "Blend component for alpha: out.a = operation(src.a * src-factor, dst.a * dst-factor)."
-    (key :name src-factor :type blend-factor
-      :description "Multiplier on the fragment's alpha (WebGPU default: one).")
-    (key :name dst-factor :type blend-factor
-      :description "Multiplier on the attachment's alpha (WebGPU default: zero).")
+    (key :name src-factor :type blend-factor :optional true
+      :description "Multiplier on the fragment's alpha (WebGPU default: one). Emitted only when authored.")
+    (key :name dst-factor :type blend-factor :optional true
+      :description "Multiplier on the attachment's alpha (WebGPU default: zero). Emitted only when authored.")
     (key :name operation :type blend-operation :optional true
       :description "How the factored terms combine (WebGPU default: add). Emitted only when authored."))
 
   ; ---- render / compute pass ----
   (form :name render-pass
-    :description "GPU render pass: (color-attachment …)/(depth-attachment …) targets, a pipeline, bound resources, and (draw …)/(draw-indexed …) calls."
+    :description "GPU render pass: (color-attachment …)/(depth-stencil-attachment …) targets, a pipeline, bound resources, and its commands — the four draws (draw / draw-indexed / draw-indirect / draw-indexed-indirect), (occlusion-query …) brackets and one (timestamp-writes …). At least one attachment, of either kind — a pass writes somewhere."
     :positional render-pass-section
     (key :name name :type symbol)
     (key :name occlusion-query-set :type query-set-ref :optional true
-      :description "The (query-set :type occlusion) that (occlusion-query …) brackets in this pass write into.")
+      :description "The (query-set :type occlusion) that (occlusion-query …) brackets in this pass write into. Required once the pass holds a bracket; optional only because a pass may hold none.")
     (key :name pipeline :type render-pipeline-ref :optional true
       :description "The render pipeline this pass draws with. Omit for a pass that only replays :execute-bundles (the bundle records it).")
     (key :name vertex-buffers :type buffer-ref-list :optional true
@@ -1459,7 +1907,7 @@
       :description "Bind groups set at @group 0..N in order.")
     (key :name bind-groups-pool-offsets :type offset-list :optional true
       :description "Per-group ping-pong offsets into each group's pool.")
-    (key :name stencil-reference :type count :optional true
+    (key :name stencil-reference :type u32 :optional true
       :description "Reference value used by stencil compare and the replace operation.")
     (key :name blend-constant :type blend-constant-color :optional true
       :description "[r g b a] blend constant (setBlendConstant); the value the `constant`/`one-minus-constant` blend factors multiply by. Defaults to [0 0 0 0] when unset.")
@@ -1468,8 +1916,17 @@
     (key :name scissor-rect :type pixel-rect :optional true
       :description "[x y w h] in integer pixels; fragments outside are discarded.")
     (key :name execute-bundles :type render-bundle-ref-list :optional true
-      :description "Replay pre-recorded (render-bundle …) forms instead of an inline pipeline/draw."))
+      :description "Replay pre-recorded (render-bundle …) forms instead of an inline pipeline/draw. Each bundle's declared color formats, depth/stencil format and sample count must equal this pass's, which WebGPU derives from its attachments' textures."))
 
+  ; NOT `:discriminant load-op`, though `:clear-value` is exactly the
+  ; conditional key `(variant …)` is for (WebGPU IGNORES a clearValue
+  ; beside `load`, so a document that states one is stating something inert).
+  ; SJON's variant rule is positional — the discriminant kvpair must be written
+  ; BEFORE any variant-only key, in both walkers — and the corpus spells
+  ; `:clear-value [0 0 0 1] :load-op clear` in all 234 of its colour
+  ; attachments. Adopting the variant means a key-ORDER rule inside a form,
+  ; which is not something WebGPU has and not something a 1:1 mapping should
+  ; invent; the check is the emitter's instead, with the same span.
   (form :name color-attachment
     :description "One color target of a render pass."
     (key :name view :type attachment-view
@@ -1477,30 +1934,53 @@
     (key :name resolve-target :type attachment-view :optional true
       :description "Receives the resolved single-sample output when :view is multisampled.")
     (key :name clear-value :type clear-color :optional true
-      :description "RGBA the attachment is cleared to when load-op is clear (ignored for load).")
-    (key :name load-op :type load-op :default clear
+      :description "RGBA the attachment is cleared to when load-op is clear (WebGPU default: transparent black). Stating one beside `:load-op load` is an error — WebGPU would ignore it.")
+    ; REQUIRED, matching GPURenderPassColorAttachment.loadOp/storeOp. WebGPU has
+    ; no default for either: a pass that does not say whether it clears or loads
+    ; is a pass whose contents depend on what happened to be in the texture, and
+    ; the spec makes the author decide. PNGine defaulted them to clear/store,
+    ; which is right often enough that the one time it is wrong reads as a
+    ; rendering bug.
+    (key :name load-op :type load-op
       :description "clear to :clear-value, or load the existing contents.")
-    (key :name store-op :type store-op :default store
+    (key :name store-op :type store-op
       :description "store the pass result, or discard it."))
 
   ; Non-default load/store ops emit a preceding set_pass_depth_stencil_ops
   ; (matches the legacy path).
-  (form :name depth-attachment
+  ; `depthStencilAttachment` is the IDL's word, and the form has carried
+  ; stencil keys since it was written — `depth-attachment` named half of it.
+  ; `:depth-load-op` / `:depth-store-op` no longer carry PNGine defaults
+  ; (clear/store) — that half stands. Making them
+  ; unconditionally REQUIRED, as the first cut did, was wrong in the other
+  ; direction: WebGPU requires the depth pair only when the VIEW's format has a
+  ; depth aspect, and FORBIDS it otherwise, so a `stencil8` attachment became
+  ; unwritable. The requirement is conditional on a format the schema cannot
+  ; reach, so it is the emitter's, in both directions and for both aspects.
+  ;
+  ; `:depth-clear-value` is the emitter's, for the same positional reason the colour
+  ; attachment records: GPURenderPassDepthStencilAttachment gives
+  ; depthClearValue no default at all, so a `clear` without one baked a PNGine
+  ; 1.0 — the single number in a depth pass that decides whether anything is
+  ; visible. Required-when-clearing needs a `(variant :when clear …)`, which
+  ; needs `:depth-load-op` written before `:depth-clear-value` in every
+  ; document. The emitter says it instead, with a span on the attachment.
+  (form :name depth-stencil-attachment
     :description "Depth/stencil target of a render pass."
     (key :name view :type texture-ref
       :description "The depth/stencil (texture …) this pass tests/writes against.")
     (key :name depth-clear-value :type unorm :optional true
-      :description "Depth cleared to when depth-load-op is clear; must be in [0,1].")
-    (key :name depth-load-op :type load-op :default clear
-      :description "clear depth to :depth-clear-value, or load the existing depth.")
-    (key :name depth-store-op :type store-op :default store
-      :description "store the resulting depth, or discard it.")
-    (key :name stencil-clear-value :type byte-count :optional true
+      :description "Depth cleared to when depth-load-op is clear, in [0,1]. Required when it clears — WebGPU has no default for it — and rejected beside `:depth-load-op load`.")
+    (key :name depth-load-op :type load-op :optional true
+      :description "clear depth to :depth-clear-value, or load the existing depth. Required when the view's format has a depth aspect, and rejected when it has none.")
+    (key :name depth-store-op :type store-op :optional true
+      :description "store the resulting depth, or discard it. Required when the view's format has a depth aspect, and rejected when it has none.")
+    (key :name stencil-clear-value :type u32 :optional true
       :description "Stencil cleared to when stencil-load-op is clear.")
     (key :name stencil-load-op :type load-op :optional true
-      :description "clear stencil to :stencil-clear-value, or load the existing stencil.")
+      :description "clear stencil to :stencil-clear-value, or load the existing stencil. Required when the view's format has a stencil aspect, and rejected when it has none.")
     (key :name stencil-store-op :type store-op :optional true
-      :description "store the resulting stencil, or discard it."))
+      :description "store the resulting stencil, or discard it. Required when the view's format has a stencil aspect, and rejected when it has none."))
 
   (form :name draw
     :description "Non-indexed draw call."
@@ -1522,7 +2002,7 @@
     (key :name first-index :type count :default 0
       :description "Offset into the index buffer, in indices.")
     (key :name base-vertex :type count :default 0
-      :description "Added to each index before vertex lookup (signed in WebGPU).")
+      :description "Added to each index before vertex lookup. Signed in WebGPU; pngine carries a u32 and rejects a negative value.")
     (key :name first-instance :type count :default 0
       :description "First instance index."))
 
@@ -1530,73 +2010,95 @@
     :description "Non-indexed indirect draw: the GPUDrawIndirectArgs (4×u32: vertex-count, instance-count, first-vertex, first-instance) are read from :buffer at :offset, typically written by a compute pass. No index buffer needed."
     (key :name buffer :type buffer-ref
       :description "Buffer holding the indirect args (needs indirect usage).")
-    (key :name offset :type byte-count :default 0
-      :description "Byte offset of the args within :buffer."))
+    (key :name offset :type byte-count-4-aligned :default 0
+      :description "Byte offset of the args within :buffer (a multiple of 4, as WebGPU requires of indirectOffset)."))
 
   (form :name draw-indexed-indirect
     :description "Indexed indirect draw: the GPUDrawIndexedIndirectArgs (5×u32) are read from :buffer at :offset, typically written by a compute pass. Requires the pass's :index-buffer."
     (key :name buffer :type buffer-ref
       :description "Buffer holding the indirect args (needs indirect usage).")
-    (key :name offset :type byte-count :default 0
-      :description "Byte offset of the args within :buffer."))
+    (key :name offset :type byte-count-4-aligned :default 0
+      :description "Byte offset of the args within :buffer (a multiple of 4, as WebGPU requires of indirectOffset)."))
 
   ; Emitted as a pre-pass set_pass_timestamp_writes (before begin_render_pass).
+  ; GPURenderPassTimestampWrites, keys spelled as the IDL spells them. The
+  ; two indices are baked (`:default 0` / `:default 1`) where the IDL
+  ; leaves them optional with NO default — "write only the end" is not
+  ; expressible because the opcode carries two u32s and no absent marker. A
+  ; PNGine opinion, ledgered in the conformance harness; the absent-index
+  ; capability and the compute-pass timestamp-writes the IDL also has are not
+  ; expressible here yet.
   (form :name timestamp-writes
     :description "Record GPU timestamps at pass start/end into a (query-set :type timestamp)."
     (key :name query-set :type query-set-ref
       :description "The timestamp query set written into.")
-    (key :name begin :type count :default 0
-      :description "Query index written at pass start.")
-    (key :name end :type count :default 1
-      :description "Query index written at pass end."))
+    (key :name beginning-of-pass-write-index :type u32 :default 0
+      :description "Query index written at pass start (PNGine bakes 0; the IDL leaves it absent = not written).")
+    (key :name end-of-pass-write-index :type u32 :default 1
+      :description "Query index written at pass end (PNGine bakes 1; the IDL leaves it absent = not written)."))
 
   (form :name occlusion-query
     :description "Bracket one or more draws in an occlusion query: the GPU counts samples passing depth/stencil into the pass's :occlusion-query-set at :query-index."
     :positional occlusion-draw-item
-    (key :name query-index :type count :default 0
+    (key :name query-index :type u32 :default 0
       :description "Index within the pass's occlusion query set."))
 
+  ; A dispatch is a COMMAND, and commands are forms — the same shape the
+  ; render pass has used for `(draw …)` all along. It was three keys with a
+  ; precedence rule between them (`:dispatch-indirect` beat `:dispatch` beat
+  ; `:dispatch-workgroups`), which is what a writer had to know to read a pass
+  ; that stated two. Several dispatches per pass are legal WebGPU and now
+  ; expressible; a pass with none is not a pass, which is the head-set's
+  ; `:min-children 1` — a pngine opinion, not an IDL rule.
   (form :name compute-pass
-    :description "GPU compute pass: a compute pipeline + bind groups + one dispatch."
+    :description "GPU compute pass: a compute pipeline + bind groups + one or more (dispatch …) commands."
+    :positional compute-pass-command
     (key :name name :type symbol)
     (key :name pipeline :type compute-pipeline-ref
       :description "The compute pipeline this pass dispatches.")
     (key :name bind-groups :type bind-group-ref-list :optional true
       :description "Bind groups set at @group 0..N in order.")
     (key :name bind-groups-pool-offsets :type offset-list :optional true
-      :description "Per-group ping-pong offsets into each group's pool.")
-    (key :name dispatch-workgroups :type count :optional true
-      :description "1D dispatch: N workgroups → dispatch(N,1,1). Accepts expressions like (ceil (/ NUM 64)).")
-    (key :name dispatch :type dispatch-size :optional true
-      :description "3D dispatch [x y z] in workgroups.")
-    (key :name dispatch-indirect :type buffer-ref :optional true
-      :description "Indirect dispatch: the workgroup counts (3×u32) are read from this buffer at :dispatch-indirect-offset, typically written by an earlier compute pass. Takes precedence over :dispatch / :dispatch-workgroups.")
-    (key :name dispatch-indirect-offset :type byte-count :default 0
-      :description "Byte offset of the dispatch args within :dispatch-indirect."))
+      :description "Per-group ping-pong offsets into each group's pool."))
 
+  (form :name dispatch
+    :description "Compute dispatch command (GPUComputePassEncoder.dispatchWorkgroups)."
+    (key :name workgroups :type dispatch-size
+      :description "Workgroup counts as [x], [x y] or [x y z]; the missing dimensions default to 1. Each element is a literal, an expression like (ceil (/ NUM 64)), or a bare (define …) name."))
+
+  (form :name dispatch-indirect
+    :description "Indirect compute dispatch: the workgroup counts (3×u32) are read from :buffer at :offset, typically written by an earlier compute pass."
+    (key :name buffer :type buffer-ref
+      :description "Buffer holding the dispatch args (needs indirect usage).")
+    (key :name offset :type byte-count-4-aligned :default 0
+      :description "Byte offset of the args within :buffer (a multiple of 4, as WebGPU requires of indirectOffset)."))
+
+  ; The recorded draw is a `(draw …)` / `(draw-indexed …)` CHILD — the same two
+  ; forms a render pass issues, with the same keys. It was `:draw N`
+  ; beside `:instance-count M`, a third spelling of a draw that could not say
+  ; `:first-vertex`, and `:draw-indexed N` which could say nothing else at all.
   (form :name render-bundle
-    :description "Pre-recorded reusable draw sequence (pipeline + buffers + bind groups + one draw), replayed via a render-pass's :execute-bundles."
+    :description "Pre-recorded reusable draw sequence (pipeline + buffers + bind groups + one (draw …)), replayed via a render-pass's :execute-bundles."
+    :positional render-bundle-command
     (key :name name :type symbol)
-    (key :name pipeline :type render-pipeline-ref :optional true
-      :description "Pipeline recorded into the bundle (the executing pass omits its own).")
-    (key :name color-formats :type texture-format-list :optional true
-      :description "Color attachment formats the bundle is recorded against (must match the executing pass).")
+    (key :name pipeline :type render-pipeline-ref
+      :description "Pipeline recorded into the bundle (the executing pass omits its own). Required: a bundle's descriptor is its own layout, and a draw with no pipeline is invalid WebGPU.")
+    ; REQUIRED, matching GPURenderPassLayout.colorFormats. A bundle is validated
+    ; against the layout it declares, so an unstated list is not a shorthand —
+    ; it is a claim the runtime has to invent, and every runtime invented the
+    ; canvas format.
+    (key :name color-formats :type texture-format-list
+      :description "Color attachment formats the bundle is recorded against. Each must be a color format, and the list must equal both the :pipeline's color targets and the replaying pass's color attachments.")
     (key :name depth-stencil-format :type texture-format :optional true
-      :description "Depth/stencil format the bundle is recorded against.")
-    (key :name sample-count :type count :optional true
-      :description "Sample count the bundle is recorded against.")
+      :description "Depth/stencil format the bundle is recorded against. Must be a depth or stencil format, and must be present exactly when the :pipeline declares a (depth-stencil …) and the replaying pass has a (depth-stencil-attachment …).")
+    (key :name sample-count :type u32 :optional true
+      :description "Sample count the bundle is recorded against (default 1). Must equal the :pipeline's (multisample :count …) and the sample count of the replaying pass's attachment textures.")
     (key :name vertex-buffers :type buffer-ref-list :optional true
       :description "Buffers bound to vertex slots 0..N in order.")
     (key :name bind-groups :type bind-group-ref-list :optional true
       :description "Bind groups set at @group 0..N in order.")
     (key :name index-buffer :type buffer-ref :optional true
-      :description "Index buffer when the bundle draws indexed.")
-    (key :name draw :type count :optional true
-      :description "Record a non-indexed draw of this many vertices.")
-    (key :name draw-indexed :type count :optional true
-      :description "Record an indexed draw of this many indices.")
-    (key :name instance-count :type count :optional true
-      :description "Instances for the recorded :draw."))
+      :description "Index buffer when the bundle draws indexed."))
 
   (form :name frame
     :description "Frame program: what runs each frame, in order."
@@ -1611,15 +2113,21 @@
   ; ---- init sugar: lowered to compute-pipeline + bind-group + compute-pass ----
   (form :name init
     :description "One-shot compute init of a storage buffer (first frame only)."
+    ; `entry` here is the bind-group's SLOT-LOCAL entry, and it resolves through
+    ; the dummy global `(entry …)` form declared beside bind-group — see the
+    ; comment there. It used to resolve through the render-pipeline stage's
+    ; `(entry …)`, by accident.
     :lowering (lowering :hook pngine/init-v1
-      :produces [compute-pipeline bind-group entry compute-pass])
+      :produces [compute-pipeline compute bind-group entry compute-pass dispatch])
     (key :name name :type symbol)
     (key :name buffer :type buffer-ref
       :description "The storage buffer the init compute writes (bound at @binding 0).")
-    (key :name shader :type module-ref
+    (key :name module :type module-ref
       :description "The (shader-module …) holding the @compute init entry.")
-    (key :name workgroups :type count
-      :description "Workgroup count. Read at lowering time through the lowering env: a literal or a bounded expression over (define …) constants, e.g. (ceil (/ NUM 64))."))
+    ; Same shape as the `(dispatch :workgroups …)` this lowers to. Sugar is
+    ; spelled like what it expands into, so a change binds both or neither.
+    (key :name workgroups :type dispatch-size
+      :description "Workgroup counts as [x], [x y] or [x y z]. Read at lowering time through the lowering env: literals, bounded expressions over (define …) constants, e.g. [(ceil (/ NUM 64))], or a bare (define …) name."))
 
   ; =====================================================================
   ; `(pass …)` sugar — container-lowered by pngine/pass-v1 (Phase 2f)
@@ -1637,14 +2145,14 @@
     :description "One `(pass …)`: a fullscreen fragment (or compute) shader-art stage.
                   The hook detects features from the WGSL (pngine/pointer/feedback)."
     (key :name name :type symbol)
-    (key :name code :type string :optional true
-      :description "WGSL fragment (or compute) source; the hook injects the binding prelude (pngine uniforms, pointer, sampler, dep/feedback textures, D0… data buffers).")
+    (key :name code :type string
+      :description "WGSL fragment (or compute) source; the hook injects the binding prelude (pngine uniforms, pointer, sampler, dep/feedback textures, D0… data buffers). Required — the hook always refused its absence.")
     (key :name feedback :type boolean :optional true
       :description "Ping-pong texture pair for feedback; the previous frame is readable as prev_<name>.")
     (key :name init :type string :optional true
       :description "One-shot WGSL compute source run on the first frame only.")
-    (key :name data :type data-file-list :optional true
-      :description "WASM file paths → D0, D1, … storage buffers; the hook injects var<storage, read> D{i}: array<f32>."))
+    (key :name file :type data-file-list :optional true
+      :description "WASM file paths (relative to the document) → D0, D1, … storage buffers; the hook injects var<storage, read> D{i}: array<f32>. The same :file every other file-on-disk key spells."))
 
   (form :name pass-graph
     :description "Container of (pass …) children lowered as a unit so resource ids
@@ -1652,7 +2160,7 @@
     :open true
     :positional pass-item
     :lowering (lowering :hook pngine/pass-v1
-      :produces [shader-module buffer texture sampler bind-group
-                 render-pipeline vertex fragment module entry targets target
+      :produces [shader-module buffer texture sampler bind-group entry
+                 render-pipeline vertex fragment target
                  render-pass color-attachment draw frame
-                 compute-pipeline compute-pass queue write-buffer])))
+                 compute-pipeline compute compute-pass dispatch queue write-buffer])))

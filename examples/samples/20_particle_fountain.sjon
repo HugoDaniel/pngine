@@ -1,4 +1,4 @@
-; Particle fountain — 2048 GPU-simulated particles shot upward from a point,
+; Particle fountain: 2048 GPU-simulated particles shot upward from a point,
 ; falling under gravity and respawning when their lifetime ends; drawn as
 ; points that fade yellow → orange → dark red and blend additively (src-alpha
 ; over one). A compute `(init …)` seeds the `:pool 2` particle buffer once with
@@ -9,7 +9,7 @@
 ; [1]`) and draws one point per instance with `point-list` topology.
 ;
 ; Particle layout: pos(3) life(1) vel(3) maxLife(1) = 32 bytes. Both dispatches
-; use a scalar workgroup count of 32 (32 × 64 threads = 2048 particles).
+; use `:workgroups [32]` (32 × 64 threads = 2048 particles).
 
 (define :name NUM_PARTICLES :value 2048)
 
@@ -20,7 +20,7 @@
 (queue :name writeUniforms
   (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
 
-(init :name initParticles :buffer particleBuffer :shader initShader :workgroups 32)
+(init :name initParticles :buffer particleBuffer :module initShader :workgroups [32])
 
 (shader-module :name initShader :code """
 struct Particle {
@@ -124,9 +124,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }
 """)
 
-(compute-pipeline :name stepPipeline :module stepShader :entry main)
+(compute-pipeline :name stepPipeline :layout auto (compute :module stepShader :entry main))
 
-(bind-group :name stepBindGroup :layout-pipeline stepPipeline :layout-index 0 :pool 2
+(bind-group :name stepBindGroup :layout stepPipeline :group 0 :pool 2
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :buffer particleBuffer :ping-pong 0)
   (entry :binding 2 :buffer particleBuffer :ping-pong 1))
@@ -135,7 +135,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   :pipeline stepPipeline
   :bind-groups [stepBindGroup]
   :bind-groups-pool-offsets [0]
-  :dispatch-workgroups 32)
+  (dispatch :workgroups [32]))
 
 (shader-module :name renderShader :code """
 struct Uniforms {
@@ -198,23 +198,21 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
 """)
 
 (render-pipeline :name renderPipeline
-  (layout auto)
-  (vertex (module renderShader) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 32 :step-mode instance
-        (attribute :shader-location 0 :offset 0 :format float32x3)
-        (attribute :shader-location 1 :offset 12 :format float32)
-        (attribute :shader-location 2 :offset 16 :format float32x3)
-        (attribute :shader-location 3 :offset 28 :format float32))))
-  (fragment (module renderShader) (entry fs)
-    (targets
-      (target :format preferred-canvas-format
-        (blend
-          (color :src-factor src-alpha :dst-factor one)
-          (alpha :src-factor one :dst-factor one)))))
-  (primitive (topology point-list)))
+  :layout auto
+  (vertex :module renderShader :entry vs
+    (vertex-buffer :array-stride 32 :step-mode instance
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32)
+      (attribute :shader-location 2 :offset 16 :format float32x3)
+      (attribute :shader-location 3 :offset 28 :format float32)))
+  (fragment :module renderShader :entry fs
+    (target :format preferred-canvas-format
+      (blend
+        (color :src-factor src-alpha :dst-factor one)
+        (alpha :src-factor one :dst-factor one))))
+  (primitive :topology point-list))
 
-(bind-group :name renderBindGroup :layout-pipeline renderPipeline :layout-index 0
+(bind-group :name renderBindGroup :layout renderPipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
 ; drawPass binds the ping-pong particle buffer as its instance vertex buffer.

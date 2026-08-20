@@ -3,14 +3,14 @@
 ; memory (32 threads, a 4x4 block each), barriers, then averages filterDim
 ; neighbours; a flip uniform transposes load/store so the same shader runs
 ; horizontal then vertical. Upstream swaps bind groups between dispatches in
-; one compute pass; here each (compute-pass …) is one dispatch, so two
-; iterations unroll to four passes ping-ponging blur0/blur1 (src→0, 0→1,
-; 1→0, 0→1); the final blit shows blur1.
+; one compute pass; a (compute-pass …) may hold several dispatches but binds
+; its :bind-groups once, so two iterations unroll to four passes ping-ponging
+; blur0/blur1 (src→0, 0→1, 1→0, 0→1); the final blit shows blur1.
 ;
 ; Params/Flip fields are f32 with in-shader casts because (data …) literals
 ; are float32-only. paramsData [16 113] is [FILTER_SIZE+1, 128-FILTER_SIZE]
-; for FILTER_SIZE=15 — a data list takes no expressions, so keep the two in
-; step by hand. Upstream's GUI filterSize/iterations are compile-time here.
+; for FILTER_SIZE=15, written as literals (a data list takes expressions over
+; defines too). Upstream's GUI filterSize/iterations are compile-time here.
 ;
 ; Image upload is a browser feature; the native `--frame` renderer stubs it,
 ; so the source stays empty and the blit shows black there. The compute chain
@@ -19,25 +19,25 @@
 (define :name FILTER_SIZE :value 15)
 (define :name IMG :value 512)
 
-(data :name diImage :blob "assets/Di-3d.png" :mime "image/png")
-(image-bitmap :name srcBitmap :image diImage)
+(data :name diImage :file "assets/Di-3d.png" :mime "image/png")
+(image-bitmap :name srcBitmap :data diImage)
 
-(texture :name srcTex :size-from srcBitmap :format rgba8unorm
+(texture :name srcTex :size srcBitmap :format rgba8unorm
   :usage [texture-binding copy-dst render-attachment])
-(texture :name blur0 :width 512 :height 512 :format rgba8unorm
+(texture :name blur0 :size [512 512] :format rgba8unorm
   :usage [copy-dst storage-binding texture-binding])
-(texture :name blur1 :width 512 :height 512 :format rgba8unorm
+(texture :name blur1 :size [512 512] :format rgba8unorm
   :usage [copy-dst storage-binding texture-binding])
 
 (sampler :name samp :mag-filter linear :min-filter linear)
 
 ; Padded to WebGPU's 16-byte uniform floor.
 (data :name paramsData :float32 [16 113 0 0])
-(buffer :name params :size 16 :usage [uniform] :mapped-at-creation paramsData)
+(buffer :name params :size 16 :usage [uniform] :data paramsData)
 (data :name flip0Data :float32 [0 0 0 0])
 (data :name flip1Data :float32 [1 0 0 0])
-(buffer :name flip0 :size 16 :usage [uniform] :mapped-at-creation flip0Data)
-(buffer :name flip1 :size 16 :usage [uniform] :mapped-at-creation flip1Data)
+(buffer :name flip0 :size 16 :usage [uniform] :data flip0Data)
+(buffer :name flip1 :size 16 :usage [uniform] :data flip1Data)
 
 (shader-module :name blurCode :code """
 struct Params {
@@ -155,47 +155,47 @@ fn fsMain(@location(0) fragUV : vec2f) -> @location(0) vec4f {
 }
 """)
 
-(compute-pipeline :name blurPipe :module blurCode :entry main)
+(compute-pipeline :name blurPipe :layout auto (compute :module blurCode :entry main))
 
 (render-pipeline :name blitPipe
-  (layout auto)
-  (vertex (module blitCode) (entry vsMain))
-  (fragment (module blitCode) (entry fsMain)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module blitCode :entry vsMain)
+  (fragment :module blitCode :entry fsMain
+    (target :format preferred-canvas-format)))
 
-(bind-group :name constants :layout-pipeline blurPipe :layout-index 0
+(bind-group :name constants :layout blurPipe :group 0
   (entry :binding 0 :sampler samp)
   (entry :binding 1 :buffer params))
-(bind-group :name cbg0 :layout-pipeline blurPipe :layout-index 1
+(bind-group :name cbg0 :layout blurPipe :group 1
   (entry :binding 1 :texture srcTex)
   (entry :binding 2 :texture blur0)
   (entry :binding 3 :buffer flip0))
-(bind-group :name cbg1 :layout-pipeline blurPipe :layout-index 1
+(bind-group :name cbg1 :layout blurPipe :group 1
   (entry :binding 1 :texture blur0)
   (entry :binding 2 :texture blur1)
   (entry :binding 3 :buffer flip1))
-(bind-group :name cbg2 :layout-pipeline blurPipe :layout-index 1
+(bind-group :name cbg2 :layout blurPipe :group 1
   (entry :binding 1 :texture blur1)
   (entry :binding 2 :texture blur0)
   (entry :binding 3 :buffer flip0))
-(bind-group :name showResult :layout-pipeline blitPipe :layout-index 0
+(bind-group :name showResult :layout blitPipe :group 0
   (entry :binding 0 :sampler samp)
   (entry :binding 1 :texture blur1))
 
 (queue :name upload
-  (copy-external-image-to-texture :source srcBitmap :texture srcTex))
+  (copy-external-image-to-texture (source :image srcBitmap) (destination :texture srcTex)))
 
 ; Dispatch [ceil(512/113)=5, ceil(512/4)=128, 1] — expression elements keep it
 ; tied to FILTER_SIZE. The image is square, so the flipped passes' dispatch is
 ; numerically identical.
 (compute-pass :name blurA :pipeline blurPipe :bind-groups [constants cbg0]
-  :dispatch [(ceil (/ IMG (- 128 FILTER_SIZE))) (ceil (/ IMG 4)) 1])
+  (dispatch :workgroups [(ceil (/ IMG (- 128 FILTER_SIZE))) (ceil (/ IMG 4)) 1]))
 (compute-pass :name blurB :pipeline blurPipe :bind-groups [constants cbg1]
-  :dispatch [(ceil (/ IMG (- 128 FILTER_SIZE))) (ceil (/ IMG 4)) 1])
+  (dispatch :workgroups [(ceil (/ IMG (- 128 FILTER_SIZE))) (ceil (/ IMG 4)) 1]))
 (compute-pass :name blurC :pipeline blurPipe :bind-groups [constants cbg2]
-  :dispatch [(ceil (/ IMG (- 128 FILTER_SIZE))) (ceil (/ IMG 4)) 1])
+  (dispatch :workgroups [(ceil (/ IMG (- 128 FILTER_SIZE))) (ceil (/ IMG 4)) 1]))
 (compute-pass :name blurD :pipeline blurPipe :bind-groups [constants cbg1]
-  :dispatch [(ceil (/ IMG (- 128 FILTER_SIZE))) (ceil (/ IMG 4)) 1])
+  (dispatch :workgroups [(ceil (/ IMG (- 128 FILTER_SIZE))) (ceil (/ IMG 4)) 1]))
 
 (render-pass :name show
   (color-attachment :view context-current-texture

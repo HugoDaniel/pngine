@@ -7,10 +7,10 @@
 ; `:format rgba8unorm` must equal the shader's
 ; `texture_storage_2d<rgba8unorm, write>` exactly — storage textures have no
 ; scalar-class slack. The compute bind group targets the layout by name
-; (:bind-group-layout fillBgl); the draw bind group uses the render pipeline's
+; (:layout fillBgl); the draw bind group uses the render pipeline's
 ; auto layout.
 
-(texture :name img :width 256 :height 256 :format rgba8unorm
+(texture :name img :size [256 256] :format rgba8unorm
   :usage [storage-binding texture-binding])
 
 (sampler :name samp :mag-filter nearest :min-filter nearest)
@@ -34,19 +34,19 @@ fn main(@builtin(global_invocation_id) id : vec3u) {
 ; `write` and the two must agree.
 (bind-group-layout :name fillBgl
   (entry :binding 0 :visibility [compute]
-    (storage-texture :format rgba8unorm :access write-only :view-dimension 1)))
+    (storage-texture :format rgba8unorm :access write-only :view-dimension 2d)))
 
 (pipeline-layout :name fillPl :bind-group-layouts [fillBgl])
 
-(compute-pipeline :name fillPipe :module fillCode :entry main :pipeline-layout fillPl)
+(compute-pipeline :name fillPipe :layout fillPl (compute :module fillCode :entry main))
 
 ; The bind group names the explicit layout directly.
-(bind-group :name fillBg :bind-group-layout fillBgl :layout-index 0
+(bind-group :name fillBg :layout fillBgl :group 0
   (entry :binding 0 :texture img))
 
 ; 256 / 8 = 32 workgroups per axis. Fixed, because the texture is fixed-size —
 ; the pass does not follow the canvas.
-(compute-pass :name fill :pipeline fillPipe :bind-groups [fillBg] :dispatch [32 32 1])
+(compute-pass :name fill :pipeline fillPipe :bind-groups [fillBg] (dispatch :workgroups [32 32 1]))
 
 (shader-module :name drawCode :code """
 @group(0) @binding(0) var samp : sampler;
@@ -75,12 +75,12 @@ fn fs(in : VSOut) -> @location(0) vec4f {
 """)
 
 (render-pipeline :name drawPipe
-  (layout auto)
-  (vertex (module drawCode) (entry vs))
-  (fragment (module drawCode) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module drawCode :entry vs)
+  (fragment :module drawCode :entry fs
+    (target :format preferred-canvas-format)))
 
-(bind-group :name drawBg :layout-pipeline drawPipe :layout-index 0
+(bind-group :name drawBg :layout drawPipe :group 0
   (entry :binding 0 :sampler samp)
   (entry :binding 1 :texture img))
 

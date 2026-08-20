@@ -26,18 +26,18 @@ fn fragMain() -> @location(0) vec4f {
 """)
 
 (render-pipeline :name pipeline
-  (layout auto)
-  (vertex (module code) (entry vertexMain))
-  (fragment (module code) (entry fragMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list)))
+  :layout auto
+  (vertex :module code :entry vertexMain)
+  (fragment :module code :entry fragMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
 
 (buffer :name uniformInputsBuffer :size 16 :usage [uniform copy-dst])
 
 (queue :name writeInputUniforms
   (write-buffer :buffer uniformInputsBuffer :offset 0 :data pngine-inputs))
 
-(bind-group :name inputsBinding :layout-pipeline pipeline :layout-index 0
+(bind-group :name inputsBinding :layout pipeline :group 0
   (entry :binding 0 :buffer uniformInputsBuffer))
 
 (render-pass :name drawTriangle

@@ -1,11 +1,8 @@
 {
   "$comment": "Generated from external/gpuweb/spec/index.bs by scripts/extract-webgpu-enums.mjs. Do not edit by hand — run `node scripts/extract-webgpu-enums.mjs --regen`. The canonical WebGPU enum/flag vocabulary; tests/npm/webgpu-conformance.test.js checks schema/pngine.sjon + the cross-stack byte tables against it.",
   "source": "external/gpuweb/spec/index.bs",
+  "specRevision": "b8c0fa9cae3125f1620131975c1ed169763db58c",
   "enums": {
-    "GPUPowerPreference": [
-      "low-power",
-      "high-performance"
-    ],
     "GPUFeatureName": [
       "core-features-and-limits",
       "depth-clip-control",
@@ -28,7 +25,12 @@
       "texture-formats-tier1",
       "texture-formats-tier2",
       "primitive-index",
-      "texture-component-swizzle"
+      "texture-component-swizzle",
+      "subgroup-size-control"
+    ],
+    "GPUPowerPreference": [
+      "low-power",
+      "high-performance"
     ],
     "GPUBufferMapState": [
       "unmapped",
@@ -386,287 +388,1063 @@
   },
   "dictionaries": {
     "GPUObjectDescriptorBase": [
-      "label"
+      {
+        "name": "label",
+        "required": false,
+        "default": ""
+      }
     ],
     "GPURequestAdapterOptions": [
-      "featureLevel",
-      "powerPreference",
-      "forceFallbackAdapter",
-      "xrCompatible"
+      {
+        "name": "featureLevel",
+        "required": false,
+        "default": "core"
+      },
+      {
+        "name": "powerPreference",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "forceFallbackAdapter",
+        "required": false,
+        "default": "false"
+      },
+      {
+        "name": "xrCompatible",
+        "required": false,
+        "default": "false"
+      }
     ],
     "GPUDeviceDescriptor": [
-      "requiredFeatures",
-      "requiredLimits",
-      "defaultQueue"
+      {
+        "name": "requiredFeatures",
+        "required": false,
+        "default": "[]"
+      },
+      {
+        "name": "requiredLimits",
+        "required": false,
+        "default": "{}"
+      },
+      {
+        "name": "defaultQueue",
+        "required": false,
+        "default": "{}"
+      }
     ],
     "GPUBufferDescriptor": [
-      "size",
-      "usage",
-      "mappedAtCreation"
+      {
+        "name": "size",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "usage",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "mappedAtCreation",
+        "required": false,
+        "default": "false"
+      }
     ],
     "GPUTextureDescriptor": [
-      "size",
-      "mipLevelCount",
-      "sampleCount",
-      "dimension",
-      "format",
-      "usage",
-      "viewFormats",
-      "textureBindingViewDimension"
+      {
+        "name": "size",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "mipLevelCount",
+        "required": false,
+        "default": "1"
+      },
+      {
+        "name": "sampleCount",
+        "required": false,
+        "default": "1"
+      },
+      {
+        "name": "dimension",
+        "required": false,
+        "default": "2d"
+      },
+      {
+        "name": "format",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "usage",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "viewFormats",
+        "required": false,
+        "default": "[]"
+      },
+      {
+        "name": "textureBindingViewDimension",
+        "required": false,
+        "default": null
+      }
     ],
     "GPUTextureViewDescriptor": [
-      "format",
-      "dimension",
-      "usage",
-      "aspect",
-      "baseMipLevel",
-      "mipLevelCount",
-      "baseArrayLayer",
-      "arrayLayerCount",
-      "swizzle"
+      {
+        "name": "format",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "dimension",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "usage",
+        "required": false,
+        "default": "0"
+      },
+      {
+        "name": "aspect",
+        "required": false,
+        "default": "all"
+      },
+      {
+        "name": "baseMipLevel",
+        "required": false,
+        "default": "0"
+      },
+      {
+        "name": "mipLevelCount",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "baseArrayLayer",
+        "required": false,
+        "default": "0"
+      },
+      {
+        "name": "arrayLayerCount",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "swizzle",
+        "required": false,
+        "default": "rgba"
+      }
     ],
     "GPUExternalTextureDescriptor": [
-      "source",
-      "colorSpace"
+      {
+        "name": "source",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "colorSpace",
+        "required": false,
+        "default": "srgb"
+      }
     ],
     "GPUSamplerDescriptor": [
-      "addressModeU",
-      "addressModeV",
-      "addressModeW",
-      "magFilter",
-      "minFilter",
-      "mipmapFilter",
-      "lodMinClamp",
-      "lodMaxClamp",
-      "compare",
-      "maxAnisotropy"
+      {
+        "name": "addressModeU",
+        "required": false,
+        "default": "clamp-to-edge"
+      },
+      {
+        "name": "addressModeV",
+        "required": false,
+        "default": "clamp-to-edge"
+      },
+      {
+        "name": "addressModeW",
+        "required": false,
+        "default": "clamp-to-edge"
+      },
+      {
+        "name": "magFilter",
+        "required": false,
+        "default": "nearest"
+      },
+      {
+        "name": "minFilter",
+        "required": false,
+        "default": "nearest"
+      },
+      {
+        "name": "mipmapFilter",
+        "required": false,
+        "default": "nearest"
+      },
+      {
+        "name": "lodMinClamp",
+        "required": false,
+        "default": "0"
+      },
+      {
+        "name": "lodMaxClamp",
+        "required": false,
+        "default": "32"
+      },
+      {
+        "name": "compare",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "maxAnisotropy",
+        "required": false,
+        "default": "1"
+      }
     ],
     "GPUBindGroupLayoutDescriptor": [
-      "entries"
+      {
+        "name": "entries",
+        "required": true,
+        "default": null
+      }
     ],
     "GPUBindGroupLayoutEntry": [
-      "binding",
-      "visibility",
-      "buffer",
-      "sampler",
-      "texture",
-      "storageTexture",
-      "externalTexture"
+      {
+        "name": "binding",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "visibility",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "buffer",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "sampler",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "texture",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "storageTexture",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "externalTexture",
+        "required": false,
+        "default": null
+      }
     ],
     "GPUBufferBindingLayout": [
-      "type",
-      "hasDynamicOffset",
-      "minBindingSize"
+      {
+        "name": "type",
+        "required": false,
+        "default": "uniform"
+      },
+      {
+        "name": "hasDynamicOffset",
+        "required": false,
+        "default": "false"
+      },
+      {
+        "name": "minBindingSize",
+        "required": false,
+        "default": "0"
+      }
     ],
     "GPUSamplerBindingLayout": [
-      "type"
+      {
+        "name": "type",
+        "required": false,
+        "default": "filtering"
+      }
     ],
     "GPUTextureBindingLayout": [
-      "sampleType",
-      "viewDimension",
-      "multisampled"
+      {
+        "name": "sampleType",
+        "required": false,
+        "default": "float"
+      },
+      {
+        "name": "viewDimension",
+        "required": false,
+        "default": "2d"
+      },
+      {
+        "name": "multisampled",
+        "required": false,
+        "default": "false"
+      }
     ],
     "GPUStorageTextureBindingLayout": [
-      "access",
-      "format",
-      "viewDimension"
+      {
+        "name": "access",
+        "required": false,
+        "default": "write-only"
+      },
+      {
+        "name": "format",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "viewDimension",
+        "required": false,
+        "default": "2d"
+      }
     ],
     "GPUExternalTextureBindingLayout": [],
     "GPUBindGroupDescriptor": [
-      "layout",
-      "entries"
+      {
+        "name": "layout",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "entries",
+        "required": true,
+        "default": null
+      }
     ],
     "GPUBindGroupEntry": [
-      "binding",
-      "resource"
+      {
+        "name": "binding",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "resource",
+        "required": true,
+        "default": null
+      }
     ],
     "GPUBufferBinding": [
-      "buffer",
-      "offset",
-      "size"
+      {
+        "name": "buffer",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "offset",
+        "required": false,
+        "default": "0"
+      },
+      {
+        "name": "size",
+        "required": false,
+        "default": null
+      }
     ],
     "GPUPipelineLayoutDescriptor": [
-      "bindGroupLayouts"
+      {
+        "name": "bindGroupLayouts",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "immediateSize",
+        "required": false,
+        "default": "0"
+      }
     ],
     "GPUShaderModuleDescriptor": [
-      "code",
-      "compilationHints"
+      {
+        "name": "code",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "compilationHints",
+        "required": false,
+        "default": "[]"
+      }
     ],
     "GPUShaderModuleCompilationHint": [
-      "entryPoint",
-      "layout"
+      {
+        "name": "entryPoint",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "layout",
+        "required": false,
+        "default": null
+      }
     ],
     "GPUPipelineErrorInit": [
-      "reason"
+      {
+        "name": "reason",
+        "required": true,
+        "default": null
+      }
     ],
     "GPUPipelineDescriptorBase": [
-      "layout"
+      {
+        "name": "layout",
+        "required": true,
+        "default": null
+      }
     ],
     "GPUProgrammableStage": [
-      "module",
-      "entryPoint",
-      "constants"
+      {
+        "name": "module",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "entryPoint",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "constants",
+        "required": false,
+        "default": "{}"
+      }
     ],
     "GPUComputePipelineDescriptor": [
-      "compute"
+      {
+        "name": "compute",
+        "required": true,
+        "default": null
+      }
     ],
     "GPURenderPipelineDescriptor": [
-      "vertex",
-      "primitive",
-      "depthStencil",
-      "multisample",
-      "fragment"
+      {
+        "name": "vertex",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "primitive",
+        "required": false,
+        "default": "{}"
+      },
+      {
+        "name": "depthStencil",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "multisample",
+        "required": false,
+        "default": "{}"
+      },
+      {
+        "name": "fragment",
+        "required": false,
+        "default": null
+      }
     ],
     "GPUPrimitiveState": [
-      "topology",
-      "stripIndexFormat",
-      "frontFace",
-      "cullMode",
-      "unclippedDepth"
+      {
+        "name": "topology",
+        "required": false,
+        "default": "triangle-list"
+      },
+      {
+        "name": "stripIndexFormat",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "frontFace",
+        "required": false,
+        "default": "ccw"
+      },
+      {
+        "name": "cullMode",
+        "required": false,
+        "default": "none"
+      },
+      {
+        "name": "unclippedDepth",
+        "required": false,
+        "default": "false"
+      }
     ],
     "GPUMultisampleState": [
-      "count",
-      "mask",
-      "alphaToCoverageEnabled"
+      {
+        "name": "count",
+        "required": false,
+        "default": "1"
+      },
+      {
+        "name": "mask",
+        "required": false,
+        "default": "0xFFFFFFFF"
+      },
+      {
+        "name": "alphaToCoverageEnabled",
+        "required": false,
+        "default": "false"
+      }
     ],
     "GPUFragmentState": [
-      "targets"
+      {
+        "name": "targets",
+        "required": true,
+        "default": null
+      }
     ],
     "GPUColorTargetState": [
-      "format",
-      "blend",
-      "writeMask"
+      {
+        "name": "format",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "blend",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "writeMask",
+        "required": false,
+        "default": "0xF"
+      }
     ],
     "GPUBlendState": [
-      "color",
-      "alpha"
+      {
+        "name": "color",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "alpha",
+        "required": true,
+        "default": null
+      }
     ],
     "GPUBlendComponent": [
-      "operation",
-      "srcFactor",
-      "dstFactor"
+      {
+        "name": "operation",
+        "required": false,
+        "default": "add"
+      },
+      {
+        "name": "srcFactor",
+        "required": false,
+        "default": "one"
+      },
+      {
+        "name": "dstFactor",
+        "required": false,
+        "default": "zero"
+      }
     ],
     "GPUDepthStencilState": [
-      "format",
-      "depthWriteEnabled",
-      "depthCompare",
-      "stencilFront",
-      "stencilBack",
-      "stencilReadMask",
-      "stencilWriteMask",
-      "depthBias",
-      "depthBiasSlopeScale",
-      "depthBiasClamp"
+      {
+        "name": "format",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "depthWriteEnabled",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "depthCompare",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "stencilFront",
+        "required": false,
+        "default": "{}"
+      },
+      {
+        "name": "stencilBack",
+        "required": false,
+        "default": "{}"
+      },
+      {
+        "name": "stencilReadMask",
+        "required": false,
+        "default": "0xFFFFFFFF"
+      },
+      {
+        "name": "stencilWriteMask",
+        "required": false,
+        "default": "0xFFFFFFFF"
+      },
+      {
+        "name": "depthBias",
+        "required": false,
+        "default": "0"
+      },
+      {
+        "name": "depthBiasSlopeScale",
+        "required": false,
+        "default": "0"
+      },
+      {
+        "name": "depthBiasClamp",
+        "required": false,
+        "default": "0"
+      }
     ],
     "GPUStencilFaceState": [
-      "compare",
-      "failOp",
-      "depthFailOp",
-      "passOp"
+      {
+        "name": "compare",
+        "required": false,
+        "default": "always"
+      },
+      {
+        "name": "failOp",
+        "required": false,
+        "default": "keep"
+      },
+      {
+        "name": "depthFailOp",
+        "required": false,
+        "default": "keep"
+      },
+      {
+        "name": "passOp",
+        "required": false,
+        "default": "keep"
+      }
     ],
     "GPUVertexState": [
-      "buffers"
+      {
+        "name": "buffers",
+        "required": false,
+        "default": "[]"
+      }
     ],
     "GPUVertexBufferLayout": [
-      "arrayStride",
-      "stepMode",
-      "attributes"
+      {
+        "name": "arrayStride",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "stepMode",
+        "required": false,
+        "default": "vertex"
+      },
+      {
+        "name": "attributes",
+        "required": true,
+        "default": null
+      }
     ],
     "GPUVertexAttribute": [
-      "format",
-      "offset",
-      "shaderLocation"
+      {
+        "name": "format",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "offset",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "shaderLocation",
+        "required": true,
+        "default": null
+      }
+    ],
+    "GPUTexelCopyBufferLayout": [
+      {
+        "name": "offset",
+        "required": false,
+        "default": "0"
+      },
+      {
+        "name": "bytesPerRow",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "rowsPerImage",
+        "required": false,
+        "default": null
+      }
+    ],
+    "GPUTexelCopyBufferInfo": [
+      {
+        "name": "buffer",
+        "required": true,
+        "default": null
+      }
+    ],
+    "GPUTexelCopyTextureInfo": [
+      {
+        "name": "texture",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "mipLevel",
+        "required": false,
+        "default": "0"
+      },
+      {
+        "name": "origin",
+        "required": false,
+        "default": "{}"
+      },
+      {
+        "name": "aspect",
+        "required": false,
+        "default": "all"
+      }
+    ],
+    "GPUCopyExternalImageDestInfo": [
+      {
+        "name": "colorSpace",
+        "required": false,
+        "default": "srgb"
+      },
+      {
+        "name": "premultipliedAlpha",
+        "required": false,
+        "default": "false"
+      }
+    ],
+    "GPUCopyExternalImageSourceInfo": [
+      {
+        "name": "source",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "origin",
+        "required": false,
+        "default": "{}"
+      },
+      {
+        "name": "flipY",
+        "required": false,
+        "default": "false"
+      }
     ],
     "GPUCommandBufferDescriptor": [],
     "GPUCommandEncoderDescriptor": [],
     "GPUComputePassTimestampWrites": [
-      "querySet",
-      "beginningOfPassWriteIndex",
-      "endOfPassWriteIndex"
+      {
+        "name": "querySet",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "beginningOfPassWriteIndex",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "endOfPassWriteIndex",
+        "required": false,
+        "default": null
+      }
     ],
     "GPUComputePassDescriptor": [
-      "timestampWrites"
+      {
+        "name": "timestampWrites",
+        "required": false,
+        "default": null
+      }
     ],
     "GPURenderPassTimestampWrites": [
-      "querySet",
-      "beginningOfPassWriteIndex",
-      "endOfPassWriteIndex"
+      {
+        "name": "querySet",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "beginningOfPassWriteIndex",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "endOfPassWriteIndex",
+        "required": false,
+        "default": null
+      }
     ],
     "GPURenderPassDescriptor": [
-      "colorAttachments",
-      "depthStencilAttachment",
-      "occlusionQuerySet",
-      "timestampWrites",
-      "maxDrawCount"
+      {
+        "name": "colorAttachments",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "depthStencilAttachment",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "occlusionQuerySet",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "timestampWrites",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "maxDrawCount",
+        "required": false,
+        "default": "50000000"
+      }
     ],
     "GPURenderPassColorAttachment": [
-      "view",
-      "depthSlice",
-      "resolveTarget",
-      "clearValue",
-      "loadOp",
-      "storeOp"
+      {
+        "name": "view",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "depthSlice",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "resolveTarget",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "clearValue",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "loadOp",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "storeOp",
+        "required": true,
+        "default": null
+      }
     ],
     "GPURenderPassDepthStencilAttachment": [
-      "view",
-      "depthClearValue",
-      "depthLoadOp",
-      "depthStoreOp",
-      "depthReadOnly",
-      "stencilClearValue",
-      "stencilLoadOp",
-      "stencilStoreOp",
-      "stencilReadOnly"
+      {
+        "name": "view",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "depthClearValue",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "depthLoadOp",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "depthStoreOp",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "depthReadOnly",
+        "required": false,
+        "default": "false"
+      },
+      {
+        "name": "stencilClearValue",
+        "required": false,
+        "default": "0"
+      },
+      {
+        "name": "stencilLoadOp",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "stencilStoreOp",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "stencilReadOnly",
+        "required": false,
+        "default": "false"
+      }
     ],
     "GPURenderPassLayout": [
-      "colorFormats",
-      "depthStencilFormat",
-      "sampleCount"
+      {
+        "name": "colorFormats",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "depthStencilFormat",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "sampleCount",
+        "required": false,
+        "default": "1"
+      }
     ],
     "GPURenderBundleDescriptor": [],
     "GPURenderBundleEncoderDescriptor": [
-      "depthReadOnly",
-      "stencilReadOnly"
+      {
+        "name": "depthReadOnly",
+        "required": false,
+        "default": "false"
+      },
+      {
+        "name": "stencilReadOnly",
+        "required": false,
+        "default": "false"
+      }
     ],
     "GPUQueueDescriptor": [],
     "GPUQuerySetDescriptor": [
-      "type",
-      "count"
+      {
+        "name": "type",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "count",
+        "required": true,
+        "default": null
+      }
     ],
     "GPUCanvasToneMapping": [
-      "mode"
+      {
+        "name": "mode",
+        "required": false,
+        "default": "standard"
+      }
     ],
     "GPUCanvasConfiguration": [
-      "device",
-      "format",
-      "usage",
-      "viewFormats",
-      "colorSpace",
-      "toneMapping",
-      "alphaMode"
+      {
+        "name": "device",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "format",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "usage",
+        "required": false,
+        "default": "0x10"
+      },
+      {
+        "name": "viewFormats",
+        "required": false,
+        "default": "[]"
+      },
+      {
+        "name": "colorSpace",
+        "required": false,
+        "default": "srgb"
+      },
+      {
+        "name": "toneMapping",
+        "required": false,
+        "default": "{}"
+      },
+      {
+        "name": "alphaMode",
+        "required": false,
+        "default": "opaque"
+      }
     ],
     "GPUUncapturedErrorEventInit": [
-      "error"
+      {
+        "name": "error",
+        "required": true,
+        "default": null
+      }
     ],
     "GPUColorDict": [
-      "r",
-      "g",
-      "b",
-      "a"
+      {
+        "name": "r",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "g",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "b",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "a",
+        "required": true,
+        "default": null
+      }
     ],
     "GPUOrigin2DDict": [
-      "x",
-      "y"
+      {
+        "name": "x",
+        "required": false,
+        "default": "0"
+      },
+      {
+        "name": "y",
+        "required": false,
+        "default": "0"
+      }
     ],
     "GPUOrigin3DDict": [
-      "x",
-      "y",
-      "z"
+      {
+        "name": "x",
+        "required": false,
+        "default": "0"
+      },
+      {
+        "name": "y",
+        "required": false,
+        "default": "0"
+      },
+      {
+        "name": "z",
+        "required": false,
+        "default": "0"
+      }
     ],
     "GPUExtent3DDict": [
-      "width",
-      "height",
-      "depthOrArrayLayers"
+      {
+        "name": "width",
+        "required": true,
+        "default": null
+      },
+      {
+        "name": "height",
+        "required": false,
+        "default": "1"
+      },
+      {
+        "name": "depthOrArrayLayers",
+        "required": false,
+        "default": "1"
+      }
     ]
   },
   "limits": [
@@ -676,6 +1454,7 @@
     "maxTextureArrayLayers",
     "maxBindGroups",
     "maxBindGroupsPlusVertexBuffers",
+    "maxImmediateSize",
     "maxBindingsPerBindGroup",
     "maxDynamicUniformBuffersPerPipelineLayout",
     "maxDynamicStorageBuffersPerPipelineLayout",

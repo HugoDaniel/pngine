@@ -1,8 +1,10 @@
 ; Invalid: a (wasm-call :args …) names a builtin that does not exist
-; (`canvas-widht`). The schema accepts any symbol in an args vector, so the
-; emitter rejects the unknown name rather than encoding it as a literal 0.0.
+; (`canvas-widht`). The symbol half of `wasm-arg` is a four-member set now,
+; so this is a schema reject on the ELEMENT -- it used to be an
+; emitter check anchored on the whole form, which had to exist because the
+; schema said only "some symbol" and an unknown name encoded a literal 0.0.
 
-(wasm-call :name mvp :url "assets/mvp.wasm" :func f :returns "mat4x4"
+(wasm-call :name mvp :file "assets/mvp.wasm" :func f :returns "mat4x4"
   :args [canvas-widht canvas-height time-total])
 
 (shader-module :name code :code """
@@ -13,10 +15,10 @@
 @fragment fn fs() -> @location(0) vec4f { return vec4f(1, 0, 0, 1); }
 """)
 
-(render-pipeline :name pipe (layout auto)
-  (vertex (module code) (entry vs))
-  (fragment (module code) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
 
 (render-pass :name draw
   (color-attachment :view context-current-texture

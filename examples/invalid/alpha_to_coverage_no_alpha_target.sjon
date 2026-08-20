@@ -1,0 +1,27 @@
+; Invalid: :alpha-to-coverage-enabled true with an alpha-less target format.
+; Alpha to coverage derives the coverage mask from the fragment's ALPHA, so
+; WebGPU requires target 0 to be blendable and to have an alpha channel;
+; rg8unorm has neither the channel nor anything to take its place.
+;
+; The count is right here (4 samples, an MSAA texture to match) -- this is the
+; other half of the same rule, and the half a document is more likely to get
+; wrong, because the target format is written three sections away.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec2f { return vec2f(1.0, 0.5); }
+""")
+(texture :name msaa :size canvas :sample-count 4
+  :format rg8unorm :usage [render-attachment])
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format rg8unorm))
+  (multisample :count 4 :alpha-to-coverage-enabled true))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view msaa
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

@@ -1,0 +1,29 @@
+; Invalid: :strip-index-format under a LIST topology. WebGPU's
+; GPUPrimitiveState.stripIndexFormat is meaningful only for a strip
+; (triangle-strip / line-strip); with triangle-list it is ignored, so a
+; document that sets it is saying something the GPU will not do.
+;
+; This is SJON's own worked `(variant :when …)` example, and until SJON 1.5 it
+; could not be written: WebGPU reads stripIndexFormat for triangle-strip AND
+; line-strip, while a key belonged to at most one variant
+; (`variant_key_collision`). `(variant :when [a b])` -- filed as 06 S14 -- is
+; the fix, so the key is declared in the variant and this document is an
+; `unknown_key` at validation. It was the emitter's rule in between, and before
+; that it validated, rode the descriptor, and was dropped by the driver.
+(shader-module :name code :code """
+    @vertex
+    fn vertexMain(@builtin(vertex_index) VertexIndex : u32) -> @builtin(position) vec4f {
+      var pos = array<vec2f, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+      return vec4f(pos[VertexIndex], 0.0, 1.0);
+    }
+    @fragment
+    fn fragMain() -> @location(0) vec4f { return vec4(1.0, 0.0, 0.0, 1.0); }
+""")
+(render-pipeline :name pipeline :layout auto
+  (vertex :module code :entry vertexMain)
+  (fragment :module code :entry fragMain (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :strip-index-format uint16))
+(render-pass :name render :pipeline pipeline
+  (color-attachment :view context-current-texture :clear-value [0 0 0 0] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name stripFormatOnList :perform [render])

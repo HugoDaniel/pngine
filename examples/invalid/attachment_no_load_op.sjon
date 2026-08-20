@@ -1,0 +1,27 @@
+; INVALID: a (color-attachment ...) that does not say whether it clears or loads.
+;
+; GPURenderPassColorAttachment.loadOp and .storeOp are both required, and WebGPU
+; gives neither a default -- deliberately, because "what was already in this
+; texture" is not something a renderer should decide for you. PNGine defaulted
+; them to clear/store until 3.0.0. That is the right answer for a
+; first pass and the wrong one for every pass that composites over an earlier
+; one, and the failure mode is a cleared background rather than an error.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
+  return vec4f(p[i], 0, 1);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1, 0, 0, 1); }
+""")
+
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1])
+  :pipeline pipe
+  (draw :vertex-count 3))
+
+(frame :name main :perform [draw])

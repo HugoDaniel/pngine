@@ -1,0 +1,26 @@
+; INVALID: a count slot naming a (define ...) that does not exist.
+;
+; `:vertex-count NUMM` -- the constant is `NUM`. A bare symbol in a count slot
+; is a define reference; the schema's arm for it used to be the primitive
+; `symbol` (any spelling), so this validated clean and the emitter's env lookup
+; failed as an UNLOCATED "emit failed". `count` is
+; now `(scalar-or-ref-shape :base count-value :ref define-ref)` -- the reference
+; half is a cross-ref to `(define …)` -- so the typo is a located
+; `not_cross_ref` on the value.
+(define :name NUM :value 3)
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count NUMM))
+(frame :name main :perform [draw])

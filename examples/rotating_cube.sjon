@@ -2,9 +2,9 @@
 ; a depth texture with depth/stencil pipeline state, cull mode, and a
 ; pngine-inputs uniform.
 ;
-; Vertex strides and offsets are written as literals (40/0/16/32): a
-; byte-count slot takes a number or an expression but not a bare define name,
-; so a define there would have to be written `(* CUBE_VERTEX_SIZE 1)`.
+; Vertex strides and offsets are written as literals (40/0/16/32) for
+; legibility; a byte-count slot also takes an expression or a bare define
+; name (`:array-stride CUBE_VERTEX_SIZE` compiles byte-identical).
 
 (shader-module :name code :code """
 struct PngineInputs {
@@ -82,8 +82,8 @@ fn fragMain(
 
 (data :name cubeVertexArray (cube :format [position4 color4 uv2]))
 
-(buffer :name verticesBuffer :size cubeVertexArray :usage [vertex]
-  :mapped-at-creation cubeVertexArray)
+(buffer :name verticesBuffer :usage [vertex]
+  :data cubeVertexArray)
 
 (buffer :name uniformInputsBuffer :size 16 :usage [uniform copy-dst])
 
@@ -93,24 +93,23 @@ fn fragMain(
   (write-buffer :buffer uniformInputsBuffer :offset 0 :data pngine-inputs))
 
 (render-pipeline :name renderCube
-  (layout auto)
-  (vertex (module code) (entry vertexMain)
-    (buffers
-      (vertex-buffer :array-stride 40
-        (attribute :shader-location 0 :offset 0 :format float32x4)
-        (attribute :shader-location 1 :offset 16 :format float32x4)
-        (attribute :shader-location 2 :offset 32 :format float32x2))))
-  (fragment (module code) (entry fragMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module code :entry vertexMain
+    (vertex-buffer :array-stride 40
+      (attribute :shader-location 0 :offset 0 :format float32x4)
+      (attribute :shader-location 1 :offset 16 :format float32x4)
+      (attribute :shader-location 2 :offset 32 :format float32x2)))
+  (fragment :module code :entry fragMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
-(bind-group :name inputsBinding :layout-pipeline renderCube :layout-index 0
+(bind-group :name inputsBinding :layout renderCube :group 0
   (entry :binding 0 :buffer uniformInputsBuffer))
 
 (render-pass :name drawCube
   (color-attachment :view context-current-texture :clear-value [0.5 0.5 0.5 1.0] :load-op clear :store-op store)
-  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   :pipeline renderCube
   :vertex-buffers [verticesBuffer]
   :bind-groups [inputsBinding]

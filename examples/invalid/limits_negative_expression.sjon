@@ -1,0 +1,12 @@
+; Invalid: `(limits :max-compute-workgroup-size-x (- 0 5))` evaluates to -5. A
+; device limit is a non-negative integer (the schema says so for literals); an
+; expression evaluates later and must be held to the same bound rather than
+; reaching an unchecked float→integer cast.
+
+(limits
+  :max-compute-workgroup-size-x (- 0 5))
+
+(shader-module :name code :code """
+@compute @workgroup_size(64)
+fn main() {}
+""")

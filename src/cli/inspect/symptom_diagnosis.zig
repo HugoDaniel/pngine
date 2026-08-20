@@ -175,6 +175,35 @@ const Findings = struct {
     }
 };
 
+/// Whether `tag` opens a render pass. Every 3.0.0 payload opens with the F32
+/// form (0x53; MRT 0x54); the 4×u8 pair are decoders for shipped streams.
+/// The checks used to look for `.begin_render_pass` alone, so every current
+/// payload was "No render pass in frame" (audit 09 C4).
+fn opensRenderPass(tag: Cmd) bool {
+    return switch (tag) {
+        .begin_render_pass, .begin_render_pass_mrt, .begin_render_pass_f32, .begin_render_pass_mrt_f32 => true,
+        else => false,
+    };
+}
+
+fn containsRenderPass(cmds: []const ParsedCommand) bool {
+    for (cmds) |c| {
+        if (opensRenderPass(c.cmd)) return true;
+    }
+    return false;
+}
+
+/// The load op of a single-target render-pass opener, from whichever
+/// decoder carried it; null for the MRT forms (per-attachment) and for
+/// anything that is not a pass opener.
+fn renderPassLoadOp(c: ParsedCommand) ?u8 {
+    return switch (c.cmd) {
+        .begin_render_pass => c.params.begin_render_pass.load_op,
+        .begin_render_pass_f32 => c.params.begin_render_pass_f32.load_op,
+        else => null,
+    };
+}
+
 /// True if any command carries this opcode — the scan the diagnosers repeat.
 fn containsCmd(cmds: []const ParsedCommand, tag: Cmd) bool {
     for (cmds) |c| {
@@ -235,7 +264,7 @@ const black_screen_checks = struct {
         .passed = false,
         .severity = .err,
         .message = "No DRAW commands in frame - nothing is rendered",
-        .suggestion = "Add draw=N to your #renderPass or check frame.perform includes the pass",
+        .suggestion = "Add a (draw :vertex-count N) to the (render-pass …), and check the pass is listed in the frame's :perform",
     };
 
     const no_pipeline: DiagnosticCheck = .{
@@ -243,7 +272,7 @@ const black_screen_checks = struct {
         .passed = false,
         .severity = .err,
         .message = "SET_PIPELINE missing before DRAW",
-        .suggestion = "Ensure pipeline is set in render pass: pipeline=pipelineName",
+        .suggestion = "Give the (render-pass …) a :pipeline",
     };
 
     const zero_vertices: DiagnosticCheck = .{
@@ -251,7 +280,7 @@ const black_screen_checks = struct {
         .passed = false,
         .severity = .err,
         .message = "DRAW vertex_count is 0",
-        .suggestion = "Set draw=N where N > 0 (e.g., draw=3 for triangle)",
+        .suggestion = "Set (draw :vertex-count N) with N > 0 (3 for a triangle)",
     };
 
     const no_render_pass: DiagnosticCheck = .{
@@ -259,7 +288,7 @@ const black_screen_checks = struct {
         .passed = false,
         .severity = .err,
         .message = "No BEGIN_RENDER_PASS in frame",
-        .suggestion = "Add a #renderPass and include it in #frame perform=[]",
+        .suggestion = "Add a (render-pass …) and list it in (frame … :perform [name])",
     };
 
     const no_submit: DiagnosticCheck = .{
@@ -267,7 +296,7 @@ const black_screen_checks = struct {
         .passed = false,
         .severity = .err,
         .message = "No SUBMIT command - command buffer not executed",
-        .suggestion = "Ensure #frame is properly defined with perform=[]",
+        .suggestion = "Ensure a (frame … :perform […]) is declared",
     };
 
     const draw_ok: DiagnosticCheck = .{
@@ -310,35 +339,35 @@ const black_screen_causes = struct {
         .probability = "high",
         .cause = "No DRAW command in frame",
         .evidence = "Command buffer has commands but no DRAW",
-        .fix = "Add draw=N to your #renderPass or check frame.perform includes the pass",
+        .fix = "Add a (draw :vertex-count N) to the (render-pass …), and check the pass is listed in the frame's :perform",
     };
 
     const no_render_pass: LikelyCause = .{
         .probability = "high",
         .cause = "No render pass in frame",
         .evidence = "Frame commands have no BEGIN_RENDER_PASS",
-        .fix = "Add a #renderPass and include it in #frame perform=[]",
+        .fix = "Add a (render-pass …) and list it in (frame … :perform [name])",
     };
 
     const no_pipeline: LikelyCause = .{
         .probability = "high",
         .cause = "Pipeline not set before draw",
         .evidence = "DRAW issued without prior SET_PIPELINE",
-        .fix = "Ensure pipeline=pipelineName is set in #renderPass",
+        .fix = "Give the (render-pass …) a :pipeline",
     };
 
     const zero_vertices: LikelyCause = .{
         .probability = "high",
         .cause = "Drawing zero vertices",
         .evidence = "DRAW command has vertex_count=0",
-        .fix = "Set draw=N where N > 0 in #renderPass",
+        .fix = "Set (draw :vertex-count N) with N > 0 in the (render-pass …)",
     };
 
     const no_submit: LikelyCause = .{
         .probability = "medium",
         .cause = "Command buffer not submitted",
         .evidence = "No SUBMIT command found",
-        .fix = "Ensure #frame is defined with perform=[]",
+        .fix = "Ensure a (frame … :perform […]) is declared",
     };
 };
 
@@ -369,8 +398,8 @@ fn diagnoseBlackScreen(
         f.blame(black_screen_checks.no_draw, black_screen_causes.no_draw);
     }
 
-    // Check 2: Has render pass?
-    if (containsCmd(frame_cmds, .begin_render_pass)) {
+    // Check 2: Has render pass? Any of the four opening opcodes.
+    if (containsRenderPass(frame_cmds)) {
         f.note(black_screen_checks.render_pass_ok);
     } else {
         f.blame(black_screen_checks.no_render_pass, black_screen_causes.no_render_pass);
@@ -414,7 +443,7 @@ fn pipelineSetBeforeDraw(frame_cmds: []const ParsedCommand) bool {
     for (frame_cmds) |cmd| {
         switch (cmd.cmd) {
             .set_pipeline => saw_pipeline = true,
-            .begin_render_pass => saw_pipeline = false,
+            .begin_render_pass, .begin_render_pass_mrt, .begin_render_pass_f32, .begin_render_pass_mrt_f32 => saw_pipeline = false,
             .draw, .draw_indexed => if (!saw_pipeline) return false,
             else => {},
         }
@@ -452,14 +481,15 @@ fn diagnoseWrongColors(
 
     // Check the first render pass's load op (1 = clear).
     for (frame_cmds) |cmd| {
-        if (cmd.cmd != .begin_render_pass) continue;
-        if (cmd.params.begin_render_pass.load_op != 1) {
+        if (!opensRenderPass(cmd.cmd)) continue;
+        const load_op = renderPassLoadOp(cmd) orelse break;
+        if (load_op != 1) {
             f.note(.{
                 .check_name = "load_op",
                 .passed = false,
                 .severity = .warning,
                 .message = "Render pass loadOp is not 'clear'",
-                .suggestion = "Use loadOp=clear in colorAttachments",
+                .suggestion = "Use :load-op clear on the (color-attachment …)",
             });
         }
         break;
@@ -479,7 +509,7 @@ fn diagnoseWrongColors(
             .probability = "medium",
             .cause = "Uniforms not written",
             .evidence = "No WRITE_BUFFER commands for uniform data",
-            .fix = "Add #queue with writeBuffer for uniform data",
+            .fix = "Add a (queue … (write-buffer :buffer … :data …)) and list it in the frame's :before",
         });
     }
 
@@ -516,13 +546,13 @@ fn diagnoseBlendIssues(
             .passed = true,
             .severity = .info,
             .message = "Pipeline created - blend state is in pipeline descriptor",
-            .suggestion = "Verify blend state in #renderPipeline targets",
+            .suggestion = "Verify the (blend …) under the (target …) of the (render-pipeline …)",
         });
         f.suspect(.{
             .probability = "medium",
             .cause = "Blend state misconfigured",
             .evidence = "Pipeline exists but blend may not be enabled",
-            .fix = "In #renderPipeline targets, add blend: { color: { ... } alpha: { ... } }",
+            .fix = "Under the (target …), add (blend (color :src-factor … :dst-factor …) (alpha …))",
         });
     } else {
         f.blame(.{
@@ -530,12 +560,12 @@ fn diagnoseBlendIssues(
             .passed = false,
             .severity = .err,
             .message = "No render pipeline created",
-            .suggestion = "Add #renderPipeline with blend state in targets",
+            .suggestion = "Add a (render-pipeline …) whose (target …) carries a (blend …)",
         }, .{
             .probability = "high",
             .cause = "No pipeline for blend configuration",
             .evidence = "No CREATE_RENDER_PIPELINE command found",
-            .fix = "Define #renderPipeline with blend: { ... } in targets",
+            .fix = "Define a (render-pipeline …) with a (blend …) under its (target …)",
         });
     }
 
@@ -577,7 +607,7 @@ fn diagnoseFlickering(
             // exact submit count can't be formatted here without a lifetime owner.
             // (The prior comptimePrint hardcoded "2", which lied for counts > 2.)
             .evidence = "Multiple SUBMIT commands found (see the frame command trace for the count)",
-            .fix = "Consolidate to single SUBMIT at end of #frame",
+            .fix = "One (frame …) submits once — check the pass list is not duplicated",
         });
     }
 
@@ -591,13 +621,13 @@ fn diagnoseFlickering(
             .passed = true,
             .severity = .info,
             .message = "Compute with buffers detected - check ping-pong offsets",
-            .suggestion = "Verify bindGroupsPoolOffsets alternate correctly",
+            .suggestion = "Verify :bind-groups-pool-offsets alternate correctly",
         });
         f.suspect(.{
             .probability = "high",
             .cause = "Ping-pong buffer offset mismatch",
             .evidence = "Compute shader with buffer pools detected",
-            .fix = "In #computePass, ensure bindGroupsPoolOffsets=[1] or similar",
+            .fix = "On the (compute-pass …), set :bind-groups-pool-offsets [1] or similar",
         });
     }
 
@@ -632,12 +662,12 @@ fn diagnoseGeometryIssues(
             .passed = false,
             .severity = .warning,
             .message = "Vertex buffer created but not bound",
-            .suggestion = "Add vertexBuffers=[bufferName] to #renderPass",
+            .suggestion = "Add :vertex-buffers [name] to the (render-pass …)",
         }, .{
             .probability = "high",
             .cause = "Vertex buffer not bound",
             .evidence = "CREATE_BUFFER with VERTEX usage but no SET_VERTEX_BUFFER",
-            .fix = "In #renderPass, add vertexBuffers=[posBuffer]",
+            .fix = "On the (render-pass …), add :vertex-buffers [posBuffer]",
         });
     }
 
@@ -707,4 +737,45 @@ fn failedCheck(result: DiagnosisResult, name: []const u8) bool {
         if (std.mem.eql(u8, c.check_name, name)) return !c.passed;
     }
     return false;
+}
+
+// ── audit 09 C4: the 3.0.0 pass opcodes, and the spelling of the advice ──────
+//
+// Every 3.0.0 render pass opens with BEGIN_RENDER_PASS_F32 (0x53; the MRT form
+// is 0x54) — the 4×u8 predecessors are decoders for already-shipped streams.
+// The black-screen and colour checks looked for `.begin_render_pass` only, so
+// `pngine inspect examples/simple_triangle.sjon --symptom black` reported "No
+// render pass in frame" (high) on every current payload. And every fix string
+// spoke the retired `#renderPass draw=N` syntax.
+
+/// The valid frame every symptom sees, spelled with the CURRENT pass opcode.
+const f32_pass_frame = [_]ParsedCommand{
+    .{ .index = 0, .cmd = .begin_render_pass_f32, .params = .{ .begin_render_pass_f32 = .{ .color_id = 0xFFFF, .load_op = 1, .store_op = 1, .depth_id = 0xFFFF, .resolve_id = 0xFFFF } } },
+    .{ .index = 1, .cmd = .set_pipeline, .params = .{ .set_pipeline = .{ .id = 0 } } },
+    .{ .index = 2, .cmd = .draw, .params = .{ .draw = .{ .vertex_count = 3, .instance_count = 1, .first_vertex = 0, .first_instance = 0 } } },
+    .{ .index = 3, .cmd = .end_pass, .params = .{ .none = {} } },
+    .{ .index = 4, .cmd = .submit, .params = .{ .none = {} } },
+};
+
+/// The retired PBSF spellings no fix or suggestion may use any more: `#form`,
+/// `key=value`, `perform=[…]`, camelCase pngine keys.
+const retired_spellings = [_][]const u8{ "#", "draw=", "pipeline=", "perform=", "loadOp=", "vertexBuffers=", "bindGroupsPoolOffsets", "writeBuffer", "blend: {" };
+
+fn expectCurrentSpelling(result: DiagnosisResult) !void {
+    for (result.checks()) |check| {
+        for (retired_spellings) |bad| {
+            if (std.mem.indexOf(u8, check.suggestion, bad) != null or std.mem.indexOf(u8, check.message, bad) != null) {
+                std.debug.print("\nretired spelling '{s}' in check '{s}': {s} / {s}\n", .{ bad, check.check_name, check.message, check.suggestion });
+                return error.RetiredSpelling;
+            }
+        }
+    }
+    for (result.likelyCauses()) |cause| {
+        for (retired_spellings) |bad| {
+            if (std.mem.indexOf(u8, cause.fix, bad) != null) {
+                std.debug.print("\nretired spelling '{s}' in fix: {s}\n", .{ bad, cause.fix });
+                return error.RetiredSpelling;
+            }
+        }
+    }
 }

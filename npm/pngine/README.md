@@ -166,6 +166,13 @@ const { pngb, errors } = compiler.compile(sjonSource);
 The unbundled `src/` tree ships too, so bundlers can reach individual modules
 (e.g. a `new Worker(new URL(...))` pointed at `pngine/src/worker.js`).
 
+Writing SJON with an LLM agent? The engine repository publishes a compact
+reference for exactly that, with complete programs its test suite validates;
+give the agent this URL:
+`https://raw.githubusercontent.com/HugoDaniel/pngine/main/docs/llms.txt`.
+The full form-by-form reference is
+[`docs/sjon-reference.md`](https://github.com/HugoDaniel/pngine/blob/main/docs/sjon-reference.md).
+
 ## Bundle Sizes
 
 Measured by `node npm/pngine/scripts/bundle.cjs`; `zig build drift` checks

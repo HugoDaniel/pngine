@@ -740,6 +740,20 @@ fn buildPayload(
         try payload.appendSlice(allocator, frag.webgpu_init);
     }
 
+    // An authored `(canvas :alpha-mode premultiplied)` re-configures the context.
+    // Both init fragments configure with the WebGPU default (opaque) and no
+    // alphaMode key, which is why this is a second call rather than a third and
+    // fourth fragment variant: an opaque page — every page until one asks
+    // otherwise — pays zero bytes.
+    //
+    // Before spec/09 step D this path had NO alphaMode at all and no way to
+    // express one, so it composited opaque while gpu.js/mini.js/core.js all
+    // composited premultiplied. The same document rendered two ways depending on
+    // which runtime opened it, and the flag the author set was ignored here.
+    if (module.header.flags.canvas_alpha_premultiplied) {
+        try payload.appendSlice(allocator, frag.canvas_premultiplied);
+    }
+
     // Init section
     try payload.appendSlice(allocator, init_js);
 
@@ -1014,14 +1028,16 @@ fn emitBeginRenderPass(
     try out.appendSlice(allocator, load_str);
     try out.appendSlice(allocator, "',storeOp:'");
     try out.appendSlice(allocator, store_str);
-    // Emit actual clear color from bytecode (RGBA u8 → float)
+    // The clear color arrives as four f32 bit patterns and goes out as the same
+    // four floats. It used to be four u8s printed as `n/255`, which is why a
+    // --html page could not reproduce a clear the browser runtime rendered.
     try out.appendSlice(allocator, "',clearValue:[");
-    var cv_buf: [64]u8 = undefined;
+    var cv_buf: [96]u8 = undefined;
     const cv_str = std.fmt.bufPrint(&cv_buf, "{d},{d},{d},{d}", .{
-        @as(f32, @floatFromInt(p.clear_r)) / 255.0,
-        @as(f32, @floatFromInt(p.clear_g)) / 255.0,
-        @as(f32, @floatFromInt(p.clear_b)) / 255.0,
-        @as(f32, @floatFromInt(p.clear_a)) / 255.0,
+        @as(f32, @bitCast(p.clear_r_bits)),
+        @as(f32, @bitCast(p.clear_g_bits)),
+        @as(f32, @bitCast(p.clear_b_bits)),
+        @as(f32, @bitCast(p.clear_a_bits)),
     }) catch "0,0,0,0";
     try out.appendSlice(allocator, cv_str);
     try out.appendSlice(allocator, "]}]");
@@ -1527,49 +1543,110 @@ const TimeUniformInfo = struct {
     size: u16,
 };
 
-/// Scan PNGB bytecode for all write_time_uniform opcodes (0x2A).
-/// Returns the count of unique occurrences found (up to MAX_TIME_UNIFORMS).
+/// The three per-frame runtime-uniform writes `--html` has to reproduce:
+/// `write_time_uniform` (0x2A), `write_pointer_uniform` (0x2B),
+/// `write_audio_data` (0x2C). MockGPU records them outside its call log, so
+/// the generator recovers them from the bytecode — by WALKING it.
+///
+/// This used to be three raw-byte scans for 0x2A/0x2B/0x2C with no notion of
+/// where an instruction starts (the defect flat.zig's `injectUniformWrites`
+/// names): any OPERAND byte holding one of those values fabricated a record —
+/// a `(draw :vertex-count 42 …)` (42 = 0x2A) made the page write
+/// [time, w, h, aspect] into an unrelated buffer sixty times a second, a
+/// `:first-instance 70000` beside a 44 made the audio scan `@intCast` a
+/// 4-byte varint into its u16 `size` and PANIC `pngine render --html` on a
+/// valid document. Stepping through `wire_schema.skipParams` (the single
+/// source of truth the emitter and both dispatchers follow) is what makes
+/// 0x2A mean the opcode. (Third leak pass)
 const MAX_TIME_UNIFORMS = 16;
+const MAX_POINTER_UNIFORMS = 16;
+const MAX_AUDIO_UNIFORMS = 16;
 const TimeUniformScanResult = struct { items: [MAX_TIME_UNIFORMS]TimeUniformInfo, count: u8 };
+const PointerUniformScanResult = struct { items: [MAX_POINTER_UNIFORMS]TimeUniformInfo, count: u8 };
+const AudioUniformScanResult = struct { items: [MAX_AUDIO_UNIFORMS]TimeUniformInfo, count: u8 };
 
-fn scanAllTimeUniforms(bytecode: []const u8) TimeUniformScanResult {
-    const OPCODE: u8 = 0x2A; // write_time_uniform
-    var result: TimeUniformScanResult = .{ .items = undefined, .count = 0 };
+/// Upper bound on the bytecode walk. Every iteration consumes at least the
+/// opcode byte, so only a stream past the 1 MB the scanner already refuses
+/// could reach it.
+const MAX_BYTECODE_WALK: u32 = 1 << 20;
 
-    for (0..bytecode.len) |i| {
-        if (bytecode[i] == OPCODE and i + 1 < bytecode.len) {
-            const rest = bytecode[i + 1 ..];
-            if (rest.len < 3) continue;
+const RuntimeUniformKind = enum { time, pointer, audio };
 
-            const r1 = decodeVarint(rest);
-            if (r1.len == 0) continue;
-            const r2 = decodeVarint(rest[r1.len..]);
-            if (r2.len == 0) continue;
-            const r3 = decodeVarint(rest[r1.len + r2.len ..]);
-            if (r3.len == 0) continue;
+/// One instruction walk, collecting the `kind` asked for. A record is kept
+/// when its operands fit the emitter's widths (u16 buffer id, u16 size) and —
+/// for time and pointer — name one of the sizes the host stages (12/16 and
+/// 16/32/48); a wider value means the bytecode was not built by the emitter
+/// and the record is skipped, never `@intCast`. Deduplicated by buffer id.
+fn scanRuntimeUniforms(bytecode: []const u8, comptime kind: RuntimeUniformKind, items: []TimeUniformInfo) u8 {
+    std.debug.assert(items.len > 0 and items.len <= 16);
+    const want: pngine.opcodes.OpCode = switch (kind) {
+        .time => .write_time_uniform,
+        .pointer => .write_pointer_uniform,
+        .audio => .write_audio_data,
+    };
+    var count: u8 = 0;
+    var pc: u32 = 0;
+    for (0..MAX_BYTECODE_WALK) |_| {
+        if (pc >= bytecode.len) break;
+        const op: pngine.opcodes.OpCode = @enumFromInt(bytecode[pc]);
+        const operands = pc + 1;
+        // `skipParams` never advances past the buffer and never below
+        // `operands`, so the walk consumes at least the opcode byte and cannot
+        // spin — even on a reserved opcode, which skips nothing.
+        pc = pngine.wire_schema.skipParams(bytecode, operands, op);
+        std.debug.assert(pc >= operands and pc <= bytecode.len);
+        if (op != want) continue;
 
-            // Sanity check: buffer_id should be small, size should be 12 or 16
-            if (r1.value < 256 and (r3.value == 12 or r3.value == 16)) {
-                const info = TimeUniformInfo{
-                    .buffer_id = @intCast(r1.value),
-                    .offset = r2.value,
-                    .size = @intCast(r3.value),
-                };
-                // Deduplicate by buffer_id
-                var dup = false;
-                for (result.items[0..result.count]) |existing| {
-                    if (existing.buffer_id == info.buffer_id) {
-                        dup = true;
-                        break;
-                    }
-                }
-                if (!dup and result.count < MAX_TIME_UNIFORMS) {
-                    result.items[result.count] = info;
-                    result.count += 1;
-                }
+        const r1 = decodeVarint(bytecode[operands..]);
+        if (r1.len == 0) continue;
+        const r2 = decodeVarint(bytecode[operands + r1.len ..]);
+        if (r2.len == 0) continue;
+        const r3 = decodeVarint(bytecode[operands + r1.len + r2.len ..]);
+        if (r3.len == 0) continue;
+        if (r1.value > std.math.maxInt(u16) or r3.value > std.math.maxInt(u16)) continue;
+        const size_ok = switch (kind) {
+            .time => r3.value == 12 or r3.value == 16,
+            .pointer => r3.value == 16 or r3.value == 32 or r3.value == 48,
+            .audio => true,
+        };
+        if (!size_ok) continue;
+
+        const info = TimeUniformInfo{
+            .buffer_id = @intCast(r1.value),
+            .offset = r2.value,
+            .size = @intCast(r3.value),
+        };
+        var dup = false;
+        for (items[0..count]) |existing| {
+            if (existing.buffer_id == info.buffer_id) {
+                dup = true;
+                break;
             }
         }
+        if (!dup and count < items.len) {
+            items[count] = info;
+            count += 1;
+        }
     }
+    std.debug.assert(count <= items.len);
+    return count;
+}
+
+fn scanAllTimeUniforms(bytecode: []const u8) TimeUniformScanResult {
+    var result: TimeUniformScanResult = .{ .items = undefined, .count = 0 };
+    result.count = scanRuntimeUniforms(bytecode, .time, &result.items);
+    return result;
+}
+
+fn scanAllPointerUniforms(bytecode: []const u8) PointerUniformScanResult {
+    var result: PointerUniformScanResult = .{ .items = undefined, .count = 0 };
+    result.count = scanRuntimeUniforms(bytecode, .pointer, &result.items);
+    return result;
+}
+
+fn scanAllAudioUniforms(bytecode: []const u8) AudioUniformScanResult {
+    var result: AudioUniformScanResult = .{ .items = undefined, .count = 0 };
+    result.count = scanRuntimeUniforms(bytecode, .audio, &result.items);
     return result;
 }
 
@@ -1610,94 +1687,6 @@ fn scanDarkUniforms(module: *const format.Module) DarkUniformScanResult {
                     .size = field.size,
                 };
                 result.count += 1;
-            }
-        }
-    }
-    return result;
-}
-
-/// Scan PNGB bytecode for all write_pointer_uniform opcodes (0x2B).
-const MAX_POINTER_UNIFORMS = 16;
-const PointerUniformScanResult = struct { items: [MAX_POINTER_UNIFORMS]TimeUniformInfo, count: u8 };
-
-fn scanAllPointerUniforms(bytecode: []const u8) PointerUniformScanResult {
-    const OPCODE: u8 = 0x2B; // write_pointer_uniform
-    var result: PointerUniformScanResult = .{ .items = undefined, .count = 0 };
-
-    for (0..bytecode.len) |i| {
-        if (bytecode[i] == OPCODE and i + 1 < bytecode.len) {
-            const rest = bytecode[i + 1 ..];
-            if (rest.len < 3) continue;
-
-            const r1 = decodeVarint(rest);
-            if (r1.len == 0) continue;
-            const r2 = decodeVarint(rest[r1.len..]);
-            if (r2.len == 0) continue;
-            const r3 = decodeVarint(rest[r1.len + r2.len ..]);
-            if (r3.len == 0) continue;
-
-            // Sanity check: buffer_id should be small, size should be 16, 32, or 48
-            if (r1.value < 256 and (r3.value == 16 or r3.value == 32 or r3.value == 48)) {
-                const info = TimeUniformInfo{
-                    .buffer_id = @intCast(r1.value),
-                    .offset = r2.value,
-                    .size = @intCast(r3.value),
-                };
-                var dup = false;
-                for (result.items[0..result.count]) |existing| {
-                    if (existing.buffer_id == info.buffer_id) {
-                        dup = true;
-                        break;
-                    }
-                }
-                if (!dup and result.count < MAX_POINTER_UNIFORMS) {
-                    result.items[result.count] = info;
-                    result.count += 1;
-                }
-            }
-        }
-    }
-    return result;
-}
-
-/// Scan PNGB bytecode for all write_audio_data opcodes (0x2C).
-const MAX_AUDIO_UNIFORMS = 16;
-const AudioUniformScanResult = struct { items: [MAX_AUDIO_UNIFORMS]TimeUniformInfo, count: u8 };
-
-fn scanAllAudioUniforms(bytecode: []const u8) AudioUniformScanResult {
-    const OPCODE: u8 = 0x2C; // write_audio_data
-    var result: AudioUniformScanResult = .{ .items = undefined, .count = 0 };
-
-    for (0..bytecode.len) |i| {
-        if (bytecode[i] == OPCODE and i + 1 < bytecode.len) {
-            const rest = bytecode[i + 1 ..];
-            if (rest.len < 3) continue;
-
-            const r1 = decodeVarint(rest);
-            if (r1.len == 0) continue;
-            const r2 = decodeVarint(rest[r1.len..]);
-            if (r2.len == 0) continue;
-            const r3 = decodeVarint(rest[r1.len + r2.len ..]);
-            if (r3.len == 0) continue;
-
-            // Sanity check: buffer_id should be small
-            if (r1.value < 256) {
-                const info = TimeUniformInfo{
-                    .buffer_id = @intCast(r1.value),
-                    .offset = r2.value,
-                    .size = @intCast(r3.value),
-                };
-                var dup = false;
-                for (result.items[0..result.count]) |existing| {
-                    if (existing.buffer_id == info.buffer_id) {
-                        dup = true;
-                        break;
-                    }
-                }
-                if (!dup and result.count < MAX_AUDIO_UNIFORMS) {
-                    result.items[result.count] = info;
-                    result.count += 1;
-                }
             }
         }
     }
@@ -1845,4 +1834,32 @@ fn emitAudioSetupFromGlobal(html: *std.ArrayList(u8), allocator: std.mem.Allocat
     // atob/charCodeAt prefix (23 chars) and prepend our own instantiate call.
     try html.appendSlice(allocator, "let{instance:ai}=await WebAssembly.instantiate(_a,");
     try html.appendSlice(allocator, frag.audio_post[23..]); // from "{m:Math}),am=..."
+}
+
+// ============================================================================
+// Tests — the runtime-uniform walk (third leak pass)
+// ============================================================================
+
+const testing = std.testing;
+
+/// A bytecode body with an honest time write and a draw whose operands spell
+/// the three opcodes: `draw 42 1 0 70000` — 42 = 0x2A, and the trailing
+/// 4-byte varint is what the old audio scan `@intCast` into a u16.
+fn runtimeUniformProbe(gpa: std.mem.Allocator) ![]u8 {
+    var b = pngine.format.Builder.init();
+    defer b.deinit(gpa);
+    const name_id = try b.internString(gpa, "f");
+    const e = b.getEmitter();
+    try e.createBuffer(gpa, 0, 16, .{ .uniform = true, .copy_dst = true });
+    try e.createBuffer(gpa, 1, 44, .{ .storage = true });
+    try e.defineFrame(gpa, 0, name_id.toInt());
+    try e.writeTimeUniform(gpa, 0, 0, 16);
+    // Three draws whose operand bytes spell a time (0x2A), a pointer (0x2B)
+    // and an audio (0x2C) write — with operands the old scans accepted: a
+    // small buffer id, a staged size, and for audio a 4-byte varint.
+    try e.draw(gpa, 42, 1, 0, 16);
+    try e.draw(gpa, 43, 1, 0, 48);
+    try e.draw(gpa, 44, 1, 0, 70000);
+    try e.endFrame(gpa);
+    return b.finalize(gpa);
 }

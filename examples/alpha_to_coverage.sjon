@@ -105,13 +105,13 @@ fn fsMain(@location(0) local : vec2f,
 """)
 
 (render-pipeline :name blendPipe
-  (layout auto)
-  (vertex (module code) (entry vsLeft))
-  (fragment (module code) (entry fsMain)
-    (targets (target :format preferred-canvas-format
+  :layout auto
+  (vertex :module code :entry vsLeft)
+  (fragment :module code :entry fsMain
+    (target :format preferred-canvas-format
       (blend (color :src-factor src-alpha :dst-factor one-minus-src-alpha :operation add)
-             (alpha :src-factor one :dst-factor one-minus-src-alpha :operation add)))))
-  (primitive (topology triangle-list))
+             (alpha :src-factor one :dst-factor one-minus-src-alpha :operation add))))
+  (primitive :topology triangle-list)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less)
   (multisample :count 4))
 
@@ -121,17 +121,17 @@ fn fsMain(@location(0) local : vec2f,
 ; composites premultiplied). The clear's alpha 1 stays put; only color
 ; channels write.
 (render-pipeline :name a2cPipe
-  (layout auto)
-  (vertex (module code) (entry vsRight))
-  (fragment (module code) (entry fsMain)
-    (targets (target :format preferred-canvas-format :write-mask 7)))
-  (primitive (topology triangle-list))
+  :layout auto
+  (vertex :module code :entry vsRight)
+  (fragment :module code :entry fsMain
+    (target :format preferred-canvas-format :write-mask 7))
+  (primitive :topology triangle-list)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less)
   (multisample :count 4 :alpha-to-coverage-enabled true))
 
-(bind-group :name gBlend :layout-pipeline blendPipe :layout-index 0
+(bind-group :name gBlend :layout blendPipe :group 0
   (entry :binding 0 :buffer inputs))
-(bind-group :name gA2c :layout-pipeline a2cPipe :layout-index 0
+(bind-group :name gA2c :layout a2cPipe :group 0
   (entry :binding 0 :buffer inputs))
 
 (queue :name writeInputs
@@ -140,7 +140,7 @@ fn fsMain(@location(0) local : vec2f,
 (render-pass :name left
   (color-attachment :view msaaColor
     :clear-value [0.10 0.10 0.12 1] :load-op clear :store-op store)
-  (depth-attachment :view msaaDepth :depth-clear-value 1.0
+  (depth-stencil-attachment :view msaaDepth :depth-clear-value 1.0
     :depth-load-op clear :depth-store-op store)
   :pipeline blendPipe :bind-groups [gBlend]
   (draw :vertex-count 6 :instance-count 8))
@@ -148,7 +148,7 @@ fn fsMain(@location(0) local : vec2f,
 (render-pass :name right
   (color-attachment :view msaaColor :resolve-target context-current-texture
     :load-op load :store-op discard)
-  (depth-attachment :view msaaDepth :depth-load-op load :depth-store-op store)
+  (depth-stencil-attachment :view msaaDepth :depth-load-op load :depth-store-op store)
   :pipeline a2cPipe :bind-groups [gA2c]
   (draw :vertex-count 6 :instance-count 8))
 

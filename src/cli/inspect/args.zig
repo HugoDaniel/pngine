@@ -34,12 +34,13 @@ pub fn parseSize(s: []const u8) ?[2]u32 {
 ///
 /// Complexity: O(n) where n = s.len
 ///
-/// Pre-condition: s.len > 0
+/// `s` is argv — an empty `--frames ""` or a kilometre-long list is INPUT, so
+/// both are `error.InvalidFormat` (they used to be asserts, a Debug panic from
+/// the command line).
+///
 /// Post-condition: Returns owned slice with 1..100 frame indices (caller must free)
 pub fn parseFrameIndices(allocator: std.mem.Allocator, s: []const u8) ![]u32 {
-    // Pre-conditions
-    std.debug.assert(s.len > 0);
-    std.debug.assert(s.len < 1000); // Reasonable input size
+    if (s.len == 0 or s.len >= 1000) return error.InvalidFormat;
 
     // Count commas to estimate capacity (avoids reallocation)
     var comma_count: u32 = 0;

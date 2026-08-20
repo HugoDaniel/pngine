@@ -109,6 +109,7 @@ append-only; a host must treat an unknown nonzero the same way.
 | `init` | 1 | bytecode shorter than the v0 header |
 | `init` | 2 | bad magic (not `PNGB`) |
 | `init` | 3 | unsupported version |
+| `init` | 4 | malformed header geometry — the executor offset+length overflows u32, the section offsets do not ascend (bytecode ≤ string table ≤ data section ≤ WGSL table), or a section lies past the buffer that should hold it (`wasm_entry.zig init`) |
 | `init` | 5 | out-of-range id in resource creation |
 | `init` | 6 | command buffer overflowed |
 | `frame` | 1 | not initialised — `init()` was not called, or refused |
@@ -195,12 +196,27 @@ commands the buffer had no room for, and a handler's operand reads ran past
 | 0x4F | set_scissor_rect | `[x:u32][y:u32][w:u32][h:u32]` | 16 |
 | 0x50 | set_pass_depth_stencil_ops | `[depth_load:u8][depth_store:u8][stencil_load:u8][stencil_store:u8]` | 4 |
 | 0x51 | set_blend_constant | `[r:f32][g:f32][b:f32][a:f32]` — the `constant`/`one-minus-constant` blend factor value | 16 |
+| 0x52 | set_pass_clear_values | `[depth:f32][stencil:u32]` — pending depth/stencil clear, consumed by the next begin*Pass | 8 |
+| 0x53 | begin_render_pass_f32 | `[color_id:u16][load:u8][store:u8][depth_id:u16][r:f32][g:f32][b:f32][a:f32][resolve_id:u16]` | 24 |
+| 0x54 | begin_render_pass_mrt_f32 | `[count:u8]` then per attachment `[tex_id:u16][load:u8][store:u8][r:f32][g:f32][b:f32][a:f32]` then `[depth_id:u16]` | 1+20n+2 |
 | 0xF0 | submit | — | 0 |
 | 0xFF | end | — | 0 |
 
 Load op encoding: 0=load, 1=clear. Store op: 0=store, 1=discard.
 The 0x40–0x49 gap and all other unassigned values are reserved **forever** —
 never reuse a retired or skipped value.
+
+**0x10 and 0x1B are RETIRED, not removed.** They carry the colour clear value as
+four `u8`s decoding `/255`, which quantizes to 1/255 and clamps to [0,1] — so an
+out-of-gamut clear on a float target, legal WebGPU, arrived saturated. 0x53/0x54
+carry four `f32`s instead. Since 3.0.0 the compiler emits only the
+latter, but the JS decoders keep both under clause 1: this runtime has to run
+every executor ever shipped, and a payload minted before the widening still
+carries 0x10. Nothing new should emit the retired pair.
+
+(0x52 was added with the authored depth/stencil clear values and was
+missing from this table until 3.0.0 — the table said "complete" and had
+been wrong about it for one opcode.)
 
 `call_wasm_func` args blob (as emitted): `[arg_count:u8]` then per arg a
 `[type:u8]` tag followed by that tag's value bytes. The blob is **variable
@@ -219,7 +235,7 @@ whole blob, count byte included, so a zero-arg call sends `args_len` **1**, not
 | 0x06 | `time_delta` | — | player, at call time |
 
 The executor forwards the blob verbatim with the runtime tags **unresolved**, so
-`gpu.js decodeWasmArgs` is the single place a `#wasmCall`'s arguments are
+`gpu.js decodeWasmArgs` is the single place a `(wasm-call …)`'s arguments are
 actually built. An **unknown tag consumes zero value bytes and stops the walk**:
 its width is precisely what is unknown, so no argument after it can be located
 (`WasmArgType.valueByteSize`'s `_ => 0`, mirrored by `decodeWasmArgs`'s
@@ -330,8 +346,8 @@ Resource types: 0=buffer, 1=texture (view created at bind time), 2=sampler.
 
 | Bit 15 | Low 15 bits are | Authored as | Layout to use |
 | --- | --- | --- | --- |
-| 0 | a pipeline id | `:layout-pipeline` | `pipeline.getBindGroupLayout(group_index)` |
-| 1 | a `create_bind_group_layout` id (0x0A) | `:bind-group-layout` | that layout object |
+| 0 | a pipeline id | `:layout` naming a pipeline | `pipeline.getBindGroupLayout(group_index)` |
+| 1 | a `create_bind_group_layout` id (0x0A) | `:layout` naming a `(bind-group-layout …)` | that layout object |
 
 Both spaces are numbered from 0, so the bit is the *only* thing separating them.
 A consumer must resolve in the space the bit names and **must not fall back to
@@ -347,17 +363,25 @@ that does use one requires a runtime new enough to read the bit: the executor
 travels inside the PNG, but `gpu.js` does not, so such a payload loaded by an
 npm runtime that predates this change (≤ 2.1.0) resolves the tagged id in the
 pipeline space, finds nothing, and loses that bind group. That is the one
-backward-compatibility cost of the fix, and it is paid only by documents using
-`:bind-group-layout`.
+backward-compatibility cost of the fix, and it is paid only by documents whose
+bind group's `:layout` names an explicit `(bind-group-layout …)`.
 
 ### 6.5 Render bundle descriptor (binary)
 
-`[cf_count:u8][color_formats:u8 × n (0 entries → preferred canvas)]`
+`[cf_count:u8][color_formats:u8 × n (0 entries → preferred canvas, LEGACY)]`
 `[ds_format:u8 (0xFF=none)][sample_count:u8][pipeline_id:u16]`
 `[bg_count:u8][bg_ids:u16 × n][vb_count:u8][vb_ids:u16 × n]`
 `[has_ib:u8][ib_id:u16?][draw_type:u8 (1=indexed)]`
 then draw args: indexed `[idx:u32][inst:u32][first:u32][base_vtx:i32][first_inst:u32]`,
 else `[vtx:u32][inst:u32][first_vtx:u32][first_inst:u32]`.
+
+`cf_count` 0 is **legacy-only**. `GPURenderPassLayout.colorFormats` is required,
+and `(render-bundle …)`'s `:color-formats` became required with it in 3.0.0
+(`:min-len 1`), so the current compiler cannot mint a count-0 descriptor. JS
+keeps decoding it as the preferred canvas format under clause 2 — existing
+layouts parse forever — which is also why the frontend refuses an empty list
+rather than encoding it: on this wire an authored `[]` and the sentinel are the
+same byte, and one of them means "guess".
 
 ## 7. Change policy
 

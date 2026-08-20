@@ -34,11 +34,16 @@ export function createCoreDispatcher(device, ctx) {
         },
 
         /**
-         * Execute a command buffer at the given pointer.
+         * Execute a command buffer at the given pointer. Returns the
+         * dispatcher's promise, so a host can sequence an init stream that
+         * carries an async create (image bitmap, wasm module) before its first
+         * frame, and a rejection reaches the caller instead of becoming an
+         * unhandled rejection.
          * @param {number} ptr - Command buffer pointer in WASM memory
+         * @returns {Promise<void>|void}
          */
         execute(ptr) {
-            dispatcher.execute(ptr);
+            return dispatcher.execute(ptr);
         },
 
         /**
@@ -127,11 +132,11 @@ export async function getDevice(adapter) {
  * @param {HTMLCanvasElement} canvas
  * @param {GPUDevice} device
  * @param {"opaque"|"premultiplied"} [alphaMode] - pass canvasAlphaMode(bytecode)
- *   to honor an authored `(canvas :alpha-mode …)`; defaults to the historical
- *   premultiplied (spec/04).
+ *   to honor an authored `(canvas :alpha-mode …)`; defaults to the
+ *   GPUCanvasConfiguration default, opaque (spec/04, spec/09 D).
  * @returns {GPUCanvasContext}
  */
-export function configureCanvas(canvas, device, alphaMode = 'premultiplied') {
+export function configureCanvas(canvas, device, alphaMode = 'opaque') {
     const ctx = canvas.getContext('webgpu');
     if (!ctx) {
         throw new Error('Failed to get WebGPU context');

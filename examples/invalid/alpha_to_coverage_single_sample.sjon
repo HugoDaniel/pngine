@@ -1,0 +1,25 @@
+; Invalid: (multisample :alpha-to-coverage-enabled true) at :count 1. Alpha to
+; coverage turns the fragment's alpha into a coverage mask over the samples of
+; a pixel, so at one sample per pixel there is nothing to cover -- WebGPU
+; requires count > 1 and rejects the pipeline otherwise.
+;
+; Local to the (multisample …) section, so the emitter reads one form. Not the
+; schema's: the condition names a NUMBER (> 1), while a `(variant …)`
+; discriminant must be a closed symbol member-set.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format))
+  (multisample :count 1 :alpha-to-coverage-enabled true))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

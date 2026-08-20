@@ -1,0 +1,30 @@
+; INVALID: a (buffer ...) that names no size source.
+;
+; GPUBufferDescriptor.size is REQUIRED. Four keys can supply it -- `:size`
+; (a number or a bounded expression), `:data` (a (data ...) reference the
+; buffer is sized from), `:index-of` (an indexed shape's index companion), or
+; `:file` (a data WASM's segment length) -- so no single key can carry the
+; required flag, and the emitter refuses the form that names none.
+;
+; Naming none of them was already refused, but as a bare "emit failed" with no
+; span: the one thing a diagnostic exists to give you is which form to look at.
+(shader-module :name code :code """
+@group(0) @binding(0) var<uniform> u : vec4f;
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return u; }
+""")
+(buffer :name ub :usage [uniform copy-dst])
+(bind-group :name g :layout pipe :group 0
+  (entry :binding 0 :buffer ub))
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline pipe :bind-groups [g]
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

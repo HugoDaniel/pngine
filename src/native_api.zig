@@ -572,28 +572,17 @@ export fn pngine_render(anim: ?*PngineAnimation, time: f32) callconv(.c) PngineE
 export fn pngine_resize(anim: ?*PngineAnimation, width: u32, height: u32) callconv(.c) void {
     const a = anim orelse return;
 
+    // The backend owns the reconfiguration (one surface configuration, shared
+    // with init — this export used to spell its own, without CopySrc, so a
+    // canvas copy failed validation after the first resize) and abandons any
+    // frame in flight first. A zero dimension is refused like pngine_create
+    // refuses it; the previous size stands.
+    a.gpu.resize(width, height) catch {
+        reportError(.invalid_argument, "pngine_resize: width and height must be non-zero", a);
+        return;
+    };
     a.width = width;
     a.height = height;
-    a.gpu.width = width;
-    a.gpu.height = height;
-
-    // Reconfigure surface if present
-    if (a.gpu.surface) |surface| {
-        const ctx = a.gpu.ctx;
-        const config = c.WGPUSurfaceConfiguration{
-            .device = ctx.device,
-            .format = c.WGPUTextureFormat_BGRA8Unorm,
-            .usage = c.WGPUTextureUsage_RenderAttachment,
-            .width = width,
-            .height = height,
-            .presentMode = c.WGPUPresentMode_Fifo,
-            .alphaMode = c.WGPUCompositeAlphaMode_Auto,
-            .viewFormatCount = 0,
-            .viewFormats = null,
-            .nextInChain = null,
-        };
-        wgpu.surfaceConfigure(surface, &config);
-    }
 }
 
 /// Destroy an animation and release its resources.
@@ -672,6 +661,12 @@ export fn pngine_debug_frame(anim: ?*PngineAnimation, time: f32) callconv(.c) c_
     a.dispatcher.pc = frame_pc;
 
     a.dispatcher.execute_frame_body(global_allocator) catch |err| {
+        // Same unwind as pngine_render (LEAK-01 E): a frame that failed after
+        // a pass opened left the backend wedged, and the next pngine_render
+        // refused with PassNotEnded; one that failed after the surface was
+        // acquired left it latched. Whatever this export reports, the
+        // backend is idle afterwards.
+        a.gpu.abortFrame();
         return switch (err) {
             error.SurfaceTextureUnavailable => -10,
             error.NoSurfaceConfigured => -11,
@@ -954,10 +949,10 @@ const triangle_sjon =
     \\@fragment fn fs() -> @location(0) vec4f { return vec4(1.0, 0.0, 0.0, 1.0); }
     \\""")
     \\(render-pipeline :name pipe
-    \\  (layout auto)
-    \\  (vertex (module code) (entry vs))
-    \\  (fragment (module code) (entry fs)
-    \\    (targets (target :format preferred-canvas-format))))
+    \\  :layout auto
+    \\  (vertex :module code :entry vs)
+    \\  (fragment :module code :entry fs
+    \\    (target :format preferred-canvas-format)))
     \\(render-pass :name pass
     \\  (color-attachment :view context-current-texture
     \\    :clear-value [0 0 0 1] :load-op clear :store-op store)

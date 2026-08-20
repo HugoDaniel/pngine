@@ -56,20 +56,20 @@
   -0.5 0.5 -0.5   0 0 -0.5   1 1   -0.5 0 0   0 0.5 0
   0.5 0.5 -0.5   0 0 -0.5   0 1   -0.5 0 0   0 0.5 0
 ])
-(buffer :name vb :size boxVerts :usage [vertex] :mapped-at-creation boxVerts)
+(buffer :name vb :usage [vertex] :data boxVerts)
 
-(data :name albedoImg :blob "assets/normalmap/brickwall_albedo.png" :mime "image/png")
-(data :name normalImg :blob "assets/normalmap/brickwall_normal.png" :mime "image/png")
-(data :name heightImg :blob "assets/normalmap/brickwall_height.png" :mime "image/png")
-(image-bitmap :name albedoBm :image albedoImg)
-(image-bitmap :name normalBm :image normalImg)
-(image-bitmap :name heightBm :image heightImg)
+(data :name albedoImg :file "assets/normalmap/brickwall_albedo.png" :mime "image/png")
+(data :name normalImg :file "assets/normalmap/brickwall_normal.png" :mime "image/png")
+(data :name heightImg :file "assets/normalmap/brickwall_height.png" :mime "image/png")
+(image-bitmap :name albedoBm :data albedoImg)
+(image-bitmap :name normalBm :data normalImg)
+(image-bitmap :name heightBm :data heightImg)
 
-(texture :name albedoTex :size-from albedoBm :format rgba8unorm
+(texture :name albedoTex :size albedoBm :format rgba8unorm
   :usage [texture-binding copy-dst render-attachment])
-(texture :name normalTex :size-from normalBm :format rgba8unorm
+(texture :name normalTex :size normalBm :format rgba8unorm
   :usage [texture-binding copy-dst render-attachment])
-(texture :name heightTex :size-from heightBm :format rgba8unorm
+(texture :name heightTex :size heightBm :format rgba8unorm
   :usage [texture-binding copy-dst render-attachment])
 
 (sampler :name samp :mag-filter linear :min-filter linear)
@@ -79,7 +79,7 @@
 ; MapInfo, all f32: lightPos.xyz, mode, lightIntensity, depthScale,
 ; depthLayers, pad — upstream GUI defaults, mode seeded 3 (Normal Map).
 (data :name mapInfoData :float32 [1.7 0.7 -1.9  3  5.0 0.05 16 0])
-(buffer :name mapInfo :size 32 :usage [uniform copy-dst] :mapped-at-creation mapInfoData)
+(buffer :name mapInfo :size 32 :usage [uniform copy-dst] :data mapInfoData)
 
 (shader-module :name code :code """
 struct PngineInputs {
@@ -233,40 +233,39 @@ fn fsMain(input: VertexOutput) -> @location(0) vec4f {
 """)
 
 (render-pipeline :name pipe
-  (layout auto)
-  (vertex (module code) (entry vsMain)
-    (buffers
-      (vertex-buffer :array-stride 56
-        (attribute :shader-location 0 :offset 0 :format float32x3)
-        (attribute :shader-location 1 :offset 12 :format float32x3)
-        (attribute :shader-location 2 :offset 24 :format float32x2)
-        (attribute :shader-location 3 :offset 32 :format float32x3)
-        (attribute :shader-location 4 :offset 44 :format float32x3))))
-  (fragment (module code) (entry fsMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module code :entry vsMain
+    (vertex-buffer :array-stride 56
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)
+      (attribute :shader-location 2 :offset 24 :format float32x2)
+      (attribute :shader-location 3 :offset 32 :format float32x3)
+      (attribute :shader-location 4 :offset 44 :format float32x3)))
+  (fragment :module code :entry fsMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
-(bind-group :name frameG :layout-pipeline pipe :layout-index 0
+(bind-group :name frameG :layout pipe :group 0
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :buffer mapInfo))
-(bind-group :name surfaceG :layout-pipeline pipe :layout-index 1
+(bind-group :name surfaceG :layout pipe :group 1
   (entry :binding 0 :sampler samp)
   (entry :binding 1 :texture albedoTex)
   (entry :binding 2 :texture normalTex)
   (entry :binding 3 :texture heightTex))
 
 (queue :name upload
-  (copy-external-image-to-texture :source albedoBm :texture albedoTex)
-  (copy-external-image-to-texture :source normalBm :texture normalTex)
-  (copy-external-image-to-texture :source heightBm :texture heightTex))
+  (copy-external-image-to-texture (source :image albedoBm) (destination :texture albedoTex))
+  (copy-external-image-to-texture (source :image normalBm) (destination :texture normalTex))
+  (copy-external-image-to-texture (source :image heightBm) (destination :texture heightTex)))
 (queue :name writeInputs
   (write-buffer :buffer inputs :offset 0 :data pngine-inputs))
 
 (render-pass :name draw
   (color-attachment :view context-current-texture
     :clear-value [0 0 0 1] :load-op clear :store-op store)
-  (depth-attachment :view depth :depth-clear-value 1.0
+  (depth-stencil-attachment :view depth :depth-clear-value 1.0
     :depth-load-op clear :depth-store-op store)
   :pipeline pipe :bind-groups [frameG surfaceG] :vertex-buffers [vb]
   (draw :vertex-count 36))

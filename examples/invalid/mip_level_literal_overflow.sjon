@@ -1,0 +1,25 @@
+; Invalid: a copy destination's `:mip-level 300`. The wire carries the
+; destination mip level in one byte (and no texture has 300 levels), but the
+; schema's `subresource-index` states only a floor — so the emitter refuses
+; the out-of-range LITERAL too, located on the value.
+
+(data :name img :file "pixel.png" :mime "image/png")
+(image-bitmap :name bmp :data img)
+(texture :name tex :size bmp :format rgba8unorm :usage [texture-binding copy-dst render-attachment])
+
+(queue :name upload
+  (copy-external-image-to-texture
+    (source :image bmp)
+    (destination :texture tex :mip-level 300)))
+
+(shader-module :name code :code """
+@vertex fn v() -> @builtin(position) vec4f { return vec4f(0.0); }
+@fragment fn f() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry v)
+  (fragment :module code :entry f (target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :before [upload] :perform [draw])

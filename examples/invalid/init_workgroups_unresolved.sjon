@@ -1,9 +1,12 @@
-; Invalid: WORKGROUP_TOTAL is defined as `(* NUM_PARTICLES 1)` before
-; NUM_PARTICLES is declared. Defines evaluate in document order, so it never
-; gets a value and the `(init … :workgroups …)` expression is rejected.
+; Invalid: WORKGROUP_TOTAL and NUM_PARTICLES each name the other, so neither
+; ever gets a value and the `(init … :workgroups …)` expression that reads one
+; is rejected by the init hook, with the span on the element. (Until audit 09
+; C1 this fixture pinned a document-ORDER rule — a define naming a later
+; define — which is gone: constants resolve document-wide, and only a cycle
+; is unresolvable.)
 
 (define :name WORKGROUP_TOTAL :value (* NUM_PARTICLES 1))
-(define :name NUM_PARTICLES :value 2048)
+(define :name NUM_PARTICLES :value WORKGROUP_TOTAL)
 
 (shader-module :name initShader :code """
 struct Particle {
@@ -63,13 +66,13 @@ fn fragMain() -> @location(0) vec4f {
 (buffer :name particleBuffer :size (* NUM_PARTICLES 16) :usage [vertex storage])
 
 (render-pipeline :name renderPipeline
-  (layout auto)
-  (vertex (module renderShader) (entry vertexMain))
-  (fragment (module renderShader) (entry fragMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list)))
+  :layout auto
+  (vertex :module renderShader :entry vertexMain)
+  (fragment :module renderShader :entry fragMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
 
-(init :name initParticles :buffer particleBuffer :shader initShader :workgroups (ceil (/ WORKGROUP_TOTAL 64)))
+(init :name initParticles :buffer particleBuffer :module initShader :workgroups [(ceil (/ WORKGROUP_TOTAL 64))])
 
 (render-pass :name renderPass
   (color-attachment :view context-current-texture :clear-value [0.0 0.0 0.0 1.0] :load-op clear :store-op store)

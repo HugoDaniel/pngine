@@ -1,4 +1,4 @@
-; webgpu_indirect_dispatch — exercises `:dispatch-indirect`. A seed compute
+; webgpu_indirect_dispatch — exercises `(dispatch-indirect …)`. A seed compute
 ; pass writes GPUDispatchIndirectArgs = [1,1,1] into a storage+indirect buffer;
 ; a second compute pass takes its workgroup counts from that buffer GPU-side and
 ; writes an RGBA colour into a storage buffer, which a fullscreen render pass
@@ -47,29 +47,29 @@ fn fragMain() -> @location(0) vec4f {
 (buffer :name dispatchArgs :size 12 :usage [storage indirect])
 (buffer :name colourBuf :size 16 :usage [storage])
 
-(compute-pipeline :name seedPipe :module seedCode :entry seedArgs)
-(compute-pipeline :name workPipe :module workCode :entry writeColour)
+(compute-pipeline :name seedPipe :layout auto (compute :module seedCode :entry seedArgs))
+(compute-pipeline :name workPipe :layout auto (compute :module workCode :entry writeColour))
 
-(bind-group :name seedGroup :layout-pipeline seedPipe :layout-index 0
+(bind-group :name seedGroup :layout seedPipe :group 0
   (entry :binding 0 :buffer dispatchArgs))
 
-(bind-group :name workGroup :layout-pipeline workPipe :layout-index 0
+(bind-group :name workGroup :layout workPipe :group 0
   (entry :binding 0 :buffer colourBuf))
 
 (compute-pass :name seedPass :pipeline seedPipe :bind-groups [seedGroup]
-  :dispatch-workgroups 1)
+  (dispatch :workgroups [1]))
 
 (compute-pass :name workPass :pipeline workPipe :bind-groups [workGroup]
-  :dispatch-indirect dispatchArgs)
+  (dispatch-indirect :buffer dispatchArgs))
 
 (render-pipeline :name pipeline
-  (layout auto)
-  (vertex (module drawCode) (entry vertexMain))
-  (fragment (module drawCode) (entry fragMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list)))
+  :layout auto
+  (vertex :module drawCode :entry vertexMain)
+  (fragment :module drawCode :entry fragMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
 
-(bind-group :name drawGroup :layout-pipeline pipeline :layout-index 0
+(bind-group :name drawGroup :layout pipeline :group 0
   (entry :binding 0 :buffer colourBuf))
 
 (render-pass :name drawPass

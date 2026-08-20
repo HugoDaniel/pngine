@@ -1,4 +1,4 @@
-; Sprite rendering — 64 gently floating "sprites" drawn as instanced,
+; Sprite rendering: 64 gently floating "sprites" drawn as instanced,
 ; alpha-blended quads. Despite the name there are no textures: each sprite is a
 ; procedural SDF shape (circle, star, ring or diamond) picked per instance and
 ; evaluated in the fragment shader with a soft edge and glow. A compute
@@ -21,11 +21,11 @@
   -0.5  0.5
 ])
 
-; quadBuffer is mapped-at-creation from the static quad; instanceBuffer is
+; quadBuffer is a `:data` fill from the static quad; instanceBuffer is
 ; storage+vertex and is seeded by the init pass (no mapped data); uniforms
 ; receives pngine-inputs each frame.
-(buffer :name quadBuffer :size quadVertices :usage [vertex]
-  :mapped-at-creation quadVertices)
+(buffer :name quadBuffer :usage [vertex]
+  :data quadVertices)
 
 (buffer :name instanceBuffer :size (* NUM_SPRITES 4 4) :usage [vertex storage])
 
@@ -34,9 +34,10 @@
 (queue :name writeUniforms
   (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
 
-; One-shot seed of the per-instance buffer: a scalar `:workgroups 1` dispatches
-; (1,1,1), and one 64-thread workgroup covers all 64 sprites.
-(init :name initSprites :buffer instanceBuffer :shader initShader :workgroups 1)
+; One-shot seed of the per-instance buffer: `:workgroups [1]` dispatches
+; (1,1,1) — the missing y/z default to 1 — and one 64-thread workgroup covers
+; all 64 sprites.
+(init :name initSprites :buffer instanceBuffer :module initShader :workgroups [1])
 
 (shader-module :name initShader :code """
     struct Instances {
@@ -108,12 +109,18 @@
       return length(p) - r;
     }
 
+    // Floor modulo: WGSL's float `%` truncates toward zero (C fmod), which
+    // folds negative angles the wrong way and turns the star into an arrow.
+    fn floorMod(x: f32, y: f32) -> f32 {
+      return x - y * floor(x / y);
+    }
+
     fn sdStar(p: vec2f, r: f32, n: u32) -> f32 {
       let an = 3.14159 / f32(n);
       let en = 3.14159 / 2.5;
       let acs = vec2f(cos(an), sin(an));
       let ecs = vec2f(cos(en), sin(en));
-      let bn = (atan2(p.x, p.y) % (2.0 * an)) - an;
+      let bn = floorMod(atan2(p.x, p.y), 2.0 * an) - an;
       var pp = length(p) * vec2f(cos(bn), abs(sin(bn)));
       pp -= r * acs;
       pp += ecs * clamp(-dot(pp, ecs), 0.0, r * acs.y / ecs.y);
@@ -157,21 +164,19 @@
 """)
 
 (render-pipeline :name pipeline
-  (layout auto)
-  (vertex (module renderShader) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 8 :step-mode vertex
-        (attribute :shader-location 0 :offset 0 :format float32x2))
-      (vertex-buffer :array-stride 16 :step-mode instance
-        (attribute :shader-location 1 :offset 0 :format float32x4))))
-  (fragment (module renderShader) (entry fs)
-    (targets
-      (target :format preferred-canvas-format
-        (blend
-          (color :src-factor src-alpha :dst-factor one-minus-src-alpha)
-          (alpha :src-factor one :dst-factor one-minus-src-alpha))))))
+  :layout auto
+  (vertex :module renderShader :entry vs
+    (vertex-buffer :array-stride 8 :step-mode vertex
+      (attribute :shader-location 0 :offset 0 :format float32x2))
+    (vertex-buffer :array-stride 16 :step-mode instance
+      (attribute :shader-location 1 :offset 0 :format float32x4)))
+  (fragment :module renderShader :entry fs
+    (target :format preferred-canvas-format
+      (blend
+        (color :src-factor src-alpha :dst-factor one-minus-src-alpha)
+        (alpha :src-factor one :dst-factor one-minus-src-alpha)))))
 
-(bind-group :name bindings :layout-pipeline pipeline :layout-index 0
+(bind-group :name bindings :layout pipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
 (render-pass :name drawPass

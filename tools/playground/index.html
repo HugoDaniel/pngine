@@ -162,7 +162,6 @@
                 <a href="#" data-url="moving_triangle.png">Moving</a>
                 <a href="#" data-url="rotating_cube.png">Cube</a>
                 <a href="#" data-url="boids.png">Boids</a>
-                <a href="#" data-url="demo2025.png">Demo2025</a>
             </div>
             <div class="examples" style="margin-top: 0.5rem;">
                 <span style="color: #666; font-size: 0.75rem;">Physics (preview): </span>
@@ -278,19 +277,26 @@
             }
         }
 
-        // Play/pause toggle
+        // Play/pause toggle. One time-display rAF chain at a time: pausing
+        // cancels the pending callback and playing starts a chain only if none
+        // is pending — a pause→play inside one frame used to leave the old
+        // chain alive (it saw isPlaying true again) beside the new one, one
+        // extra self-perpetuating chain per same-frame toggle.
+        let timeRaf = 0;
         function togglePlay() {
             if (!engine) return;
 
             if (engine.isPlaying) {
                 pause(engine);
+                cancelAnimationFrame(timeRaf);
+                timeRaf = 0;
                 playBtn.textContent = 'Play';
                 playBtn.classList.remove('playing');
             } else {
                 play(engine);
                 playBtn.textContent = 'Pause';
                 playBtn.classList.add('playing');
-                updateTime();
+                if (!timeRaf) updateTime();
             }
         }
 
@@ -305,9 +311,9 @@
 
         // Update time display
         function updateTime() {
-            if (!engine || !engine.isPlaying) return;
+            if (!engine || !engine.isPlaying) { timeRaf = 0; return; }
             timeEl.textContent = `t = ${engine.time.toFixed(2)}s`;
-            requestAnimationFrame(updateTime);
+            timeRaf = requestAnimationFrame(updateTime);
         }
 
         // Event listeners

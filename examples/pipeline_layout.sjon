@@ -1,11 +1,11 @@
 ; Pipeline layout — a fullscreen triangle whose colour and offset come from
 ; two uniform buffers in separate bind groups. Exercises the explicit
 ; (pipeline-layout …) form: two (bind-group-layout …) forms compose into a
-; layout at @group(0)/@group(1) that the render pipeline references via
-; :pipeline-layout instead of deriving one from the WGSL. @group(0) is a
+; layout at @group(0)/@group(1) that the render pipeline names as its
+; :layout instead of deriving one from the WGSL. @group(0) is a
 ; fragment-visible colour uniform, @group(1) a vertex-visible offset uniform —
 ; per-group visibility that only an explicit layout can pin. The bind groups
-; still take their layout from the pipeline (:layout-pipeline pipe), which
+; still take their layout from the pipeline (:layout pipe), which
 ; resolves to the matching explicit layout.
 
 (shader-module :name mod :code """
@@ -36,14 +36,14 @@ struct Offset { xy: vec2f, _pad: vec2f }
 
 (pipeline-layout :name pl :bind-group-layouts [bglColor bglOffset])
 
-(render-pipeline :name pipe :pipeline-layout pl
-  (vertex (module mod) (entry vs))
-  (fragment (module mod) (entry fs)
-    (targets (target :format bgra8unorm))))
+(render-pipeline :name pipe :layout pl
+  (vertex :module mod :entry vs)
+  (fragment :module mod :entry fs
+    (target :format bgra8unorm)))
 
-(bind-group :name gColor :layout-pipeline pipe :layout-index 0
+(bind-group :name gColor :layout pipe :group 0
   (entry :binding 0 :buffer colorBuf))
-(bind-group :name gOffset :layout-pipeline pipe :layout-index 1
+(bind-group :name gOffset :layout pipe :group 1
   (entry :binding 0 :buffer offsetBuf))
 
 (render-pass :name pass

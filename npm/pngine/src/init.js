@@ -33,6 +33,9 @@ let workerUrl = null;
 export async function pngine(source, options = {}) {
   // Resolve source to canvas + bytecode + raw PNG data
   let canvas, bytecode, rawData;
+  // True when initFromImage created the placeholder canvas itself — then it is
+  // ours to remove on destroy (a host-supplied canvas is the host's).
+  let createdCanvas = false;
 
   if (typeof source === "string") {
     // Check for CSS selector (# or . but not relative paths like ./ or ../)
@@ -42,7 +45,7 @@ export async function pngine(source, options = {}) {
       if (!el) throw new Error(`Element not found: ${source}`);
 
       if (el instanceof HTMLImageElement) {
-        ({ canvas, bytecode, rawData } = await initFromImage(el, options));
+        ({ canvas, bytecode, rawData, createdCanvas } = await initFromImage(el, options));
       } else if (el instanceof HTMLCanvasElement) {
         canvas = el;
         throw new Error("Canvas source requires URL or data");
@@ -58,7 +61,7 @@ export async function pngine(source, options = {}) {
       bytecode = await extractBytecode(rawData);
     }
   } else if (source instanceof HTMLImageElement) {
-    ({ canvas, bytecode, rawData } = await initFromImage(source, options));
+    ({ canvas, bytecode, rawData, createdCanvas } = await initFromImage(source, options));
   } else if (
     source instanceof ArrayBuffer ||
     source instanceof Uint8Array ||
@@ -78,34 +81,47 @@ export async function pngine(source, options = {}) {
   // Pointer/keyboard tracking — must attach before transferControlToOffscreen.
   const { pointer: ptr, detach: detachListeners } = attachPointerTracking(canvas);
 
-  // Get OffscreenCanvas
-  const offscreen = canvas.transferControlToOffscreen();
+  // From here until the handle exists, the listeners are ours to release: a
+  // worker that fails to come up (WebGPU unsupported, a refused payload, the
+  // 15 s timeout, `new Worker` throwing under CSP) rejects from inside this
+  // block, and the seven listeners — two of them on `document` — used to
+  // outlive the rejection for the page's life. LEAK-06-C closed the audio
+  // phase one await later; this is the await before it.
+  let worker, result;
+  try {
+    // Get OffscreenCanvas
+    const offscreen = canvas.transferControlToOffscreen();
 
-  // Spawn worker
-  const worker = new Worker(getWorkerUrl(), { type: "module" });
+    // Spawn worker
+    worker = new Worker(getWorkerUrl(), { type: "module" });
 
-  // Compute WASM URL - must be absolute for worker blob context.
-  // ../wasm/ resolves from both src/ (repo dev) and dist/ (published bundle)
-  // to the package's wasm/pngine.wasm fallback.
-  const wasmUrl = options.wasmUrl
-    ? new URL(options.wasmUrl, window.location.href).href
-    : new URL("../wasm/pngine.wasm", import.meta.url).href;
+    // Compute WASM URL - must be absolute for worker blob context.
+    // ../wasm/ resolves from both src/ (repo dev) and dist/ (published bundle)
+    // to the package's wasm/pngine.wasm fallback.
+    const wasmUrl = options.wasmUrl
+      ? new URL(options.wasmUrl, window.location.href).href
+      : new URL("../wasm/pngine.wasm", import.meta.url).href;
 
-  // Wait for ready — slice bytecode so the original buffer stays alive for
-  // extractAudio below.
-  const bc = bytecode.slice();
-  const result = await awaitWorkerReady(
-    worker,
-    {
-      type: "init",
-      canvas: offscreen,
-      bytecode: bc,
-      wasmUrl,
-      debug: options.debug || false,
-    },
-    [offscreen, bc.buffer],
-    options
-  );
+    // Wait for ready — slice bytecode so the original buffer stays alive for
+    // extractAudio below.
+    const bc = bytecode.slice();
+    result = await awaitWorkerReady(
+      worker,
+      {
+        type: "init",
+        canvas: offscreen,
+        bytecode: bc,
+        wasmUrl,
+        debug: options.debug || false,
+      },
+      [offscreen, bc.buffer],
+      options
+    );
+  } catch (err) {
+    detachListeners();
+    if (createdCanvas) canvas.remove?.();
+    throw err;
+  }
 
   // The instance exists BEFORE the audio phase, because the audio phase is the
   // first thing that can fail after the worker reports ready — and by then the
@@ -118,6 +134,7 @@ export async function pngine(source, options = {}) {
   // (Report logical/CSS dimensions, not physical.)
   const p = createPngine({
     canvas,
+    createdCanvas,
     worker,
     pointer: ptr,
     detachListeners,
@@ -205,7 +222,7 @@ async function initFromImage(img, options) {
   const rawData = await resp.arrayBuffer();
   const bytecode = await extractBytecode(rawData);
 
-  return { canvas, bytecode, rawData };
+  return { canvas, bytecode, rawData, createdCanvas: !options.canvas };
 }
 
 // createPngine + destroy are shared with the viewer profile (init-core.js).

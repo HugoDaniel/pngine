@@ -2,9 +2,11 @@
 ; a storage buffer, then a plain cyan triangle renders. The triangle does not
 ; read the buffer; the init compute is the feature under test.
 ;
-; The buffer size `(* NUM_PARTICLES 16)` is an expression over the define, but
-; `(init … :workgroups 32)` is a literal (ceil(2048/64)): the init form is
-; lowered before defines are in scope, so its slots take numbers only.
+; The buffer size `(* NUM_PARTICLES 16)` is an expression over the define;
+; `(init … :workgroups [32])` writes the literal (ceil(2048/64)) for legibility
+; only — the slot is a vector whose elements may be expressions over defines
+; too (`[(ceil (/ NUM_PARTICLES 64))]` compiles byte-identical; see
+; boids_init_only.sjon).
 
 (define :name NUM_PARTICLES :value 2048)
 
@@ -66,13 +68,13 @@ fn fragMain() -> @location(0) vec4f {
 (buffer :name particleBuffer :size (* NUM_PARTICLES 16) :usage [vertex storage])
 
 (render-pipeline :name renderPipeline
-  (layout auto)
-  (vertex (module renderShader) (entry vertexMain))
-  (fragment (module renderShader) (entry fragMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list)))
+  :layout auto
+  (vertex :module renderShader :entry vertexMain)
+  (fragment :module renderShader :entry fragMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
 
-(init :name initParticles :buffer particleBuffer :shader initShader :workgroups 32)
+(init :name initParticles :buffer particleBuffer :module initShader :workgroups [32])
 
 (render-pass :name renderPass
   (color-attachment :view context-current-texture :clear-value [0.0 0.0 0.0 1.0] :load-op clear :store-op store)

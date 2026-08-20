@@ -1,0 +1,27 @@
+; Invalid: a copy that reads past the end of its source. WebGPU requires
+; sourceOffset + size to fit within the source buffer and destinationOffset +
+; size within the destination; 8 + 16 is 24 bytes out of a 16-byte buffer.
+;
+; Both sizes and both offsets are in the document, which is what makes this
+; the emitter's: the schema bounds each number on its own and cannot add two
+; of them together.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(buffer :name src :size 16 :usage [storage copy-src])
+(buffer :name dst :size 32 :usage [map-read copy-dst])
+(queue :name readback
+  (copy-buffer-to-buffer :source src :source-offset 8 :destination dst :destination-offset 0 :size 16))
+(frame :name main :perform [draw readback])

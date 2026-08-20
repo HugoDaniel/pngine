@@ -1,0 +1,18 @@
+; Invalid: `:binding (+ 255 1)` evaluates to 256, past the one-byte wire slot the
+; schema's `binding-index` bound states for literals. The emitter re-checks the
+; evaluated expression and rejects it.
+
+(shader-module :name code :code """
+@group(0) @binding(0) var<uniform> u: vec4f;
+@vertex fn v() -> @builtin(position) vec4f { return u; }
+@fragment fn f() -> @location(0) vec4f { return u; }
+""")
+
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry v)
+  (fragment :module code :entry f (target :format preferred-canvas-format)))
+
+(bind-group :name g :layout pipe :group 0
+  (entry :binding (+ 255 1) :buffer uniforms))

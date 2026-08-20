@@ -1,0 +1,21 @@
+; Invalid: `:group G` names a (define …) whose value is 1000. The schema's
+; `binding-index` bound (0..255, the wire stores a group index in one byte)
+; checks literals only — a define reference or an expression evaluates later,
+; so the emitter re-checks the evaluated value and rejects it, located.
+
+(define :name G :value 1000)
+
+(shader-module :name code :code """
+@group(0) @binding(0) var<uniform> u: vec4f;
+@vertex fn v() -> @builtin(position) vec4f { return u; }
+@fragment fn f() -> @location(0) vec4f { return u; }
+""")
+
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry v)
+  (fragment :module code :entry f (target :format preferred-canvas-format)))
+
+(bind-group :name g :layout pipe :group G
+  (entry :binding 0 :buffer uniforms))

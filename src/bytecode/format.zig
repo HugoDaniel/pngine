@@ -12,7 +12,7 @@
 //! │     bit 0: has_embedded_executor    │
 //! │     bit 1: has_animation_table      │
 //! │     bit 2: has_device_limits        │
-//! │     bit 3: canvas_alpha_opaque      │
+//! │     bit 3: canvas_alpha_premultiplied│
 //! │   plugins: u8 (PluginSet bitfield)  │
 //! │   reserved: [3]u8 = limits offset   │
 //! │     (u24 LE when bit 2 set, else 0) │
@@ -116,14 +116,22 @@ pub const Flags = packed struct(u16) {
     /// 3 `reserved` bytes). Cleared → no table, `reserved` is {0,0,0}, and the
     /// payload is byte-identical to pre-§5.3b output. (Arc-3 §5.3b)
     has_device_limits: bool = false,
-    /// The author requested an OPAQUE canvas (`(canvas :alpha-mode opaque)`).
-    /// Clear → the historical premultiplied configure, byte-identical output
-    /// for form-absent payloads. A 1-bit channel is enough because
-    /// GPUCanvasAlphaMode has exactly two values and the absent-form default
-    /// is premultiplied; anything list-shaped (viewFormats) will need a real
-    /// table mechanism instead — the header's 3 reserved bytes are already
-    /// consumed by the device-limits offset. (docs/plans/spec/04)
-    canvas_alpha_opaque: bool = false,
+    /// The author requested a PREMULTIPLIED canvas
+    /// (`(canvas :alpha-mode premultiplied)`). Clear → the GPUCanvasConfiguration
+    /// default, `opaque`, and byte-identical output for form-absent payloads.
+    ///
+    /// The bit used to mean the opposite (`canvas_alpha_opaque`), because the
+    /// absent-form default was premultiplied. spec/09 step D aligned the default
+    /// with the IDL, so the bit now marks the deviation from it rather than the
+    /// deviation from PNGine's own habit. Payloads minted before that flip
+    /// composite differently under this runtime — the accepted consequence of a
+    /// default change, not a wire break (the layout is unchanged).
+    ///
+    /// A 1-bit channel is enough because GPUCanvasAlphaMode has exactly two
+    /// values; anything list-shaped (viewFormats) will need a real table
+    /// mechanism instead — the header's 3 reserved bytes are already consumed by
+    /// the device-limits offset. (docs/plans/spec/04)
+    canvas_alpha_premultiplied: bool = false,
     /// Reserved for future use.
     reserved: u12 = 0,
 };
@@ -317,8 +325,13 @@ pub const WgslTable = struct {
 };
 
 /// Deserialize WGSL table from bytes.
+/// Every read is the length-tolerant `decode_varint_safe` (a varint lead at
+/// EOF is `error.InvalidWgslTable`, not an assert) and every id is narrowed
+/// through `wire_schema.narrowU16` (a u32 varint past u16 is the same error,
+/// not an `@intCast` trap). The bytes come from a PNG off the network.
 pub fn deserializeWgslTable(allocator: Allocator, data: []const u8) !WgslTable {
     const opcodes = @import("opcodes.zig");
+    const wire = @import("wire_schema.zig");
 
     var table = WgslTable{ .entries = .empty };
     errdefer table.deinit(allocator);
@@ -328,12 +341,13 @@ pub fn deserializeWgslTable(allocator: Allocator, data: []const u8) !WgslTable {
     var pos: usize = 0;
 
     // Read count
-    const count_result = opcodes.decode_varint(data[pos..]);
+    const count_result = opcodes.decode_varint_safe(data[pos..]);
+    if (count_result.len == 0) return error.InvalidWgslTable;
     pos += count_result.len;
-    const entry_count: u16 = @intCast(count_result.value);
+    const entry_count: u16 = wire.narrowU16(count_result.value) catch return error.InvalidWgslTable;
 
     // Pre-allocate entries
-    try table.entries.ensureTotalCapacity(allocator, entry_count);
+    try table.entries.ensureTotalCapacity(allocator, @min(entry_count, MAX_WGSL_MODULES));
 
     // Read entries (bounded loop)
     for (0..@min(entry_count, MAX_WGSL_MODULES)) |_| {
@@ -341,9 +355,10 @@ pub fn deserializeWgslTable(allocator: Allocator, data: []const u8) !WgslTable {
         if (pos >= data.len) break;
 
         // data_id
-        const data_id_result = opcodes.decode_varint(data[pos..]);
+        const data_id_result = opcodes.decode_varint_safe(data[pos..]);
+        if (data_id_result.len == 0) return error.InvalidWgslTable;
         pos += data_id_result.len;
-        const data_id: u16 = @intCast(data_id_result.value);
+        const data_id: u16 = wire.narrowU16(data_id_result.value) catch return error.InvalidWgslTable;
 
         // dep_count - check bounds first
         if (pos >= data.len) {
@@ -351,9 +366,10 @@ pub fn deserializeWgslTable(allocator: Allocator, data: []const u8) !WgslTable {
             table.entries.appendAssumeCapacity(.{ .data_id = data_id, .deps = &[_]u16{} });
             break;
         }
-        const dep_count_result = opcodes.decode_varint(data[pos..]);
+        const dep_count_result = opcodes.decode_varint_safe(data[pos..]);
+        if (dep_count_result.len == 0) return error.InvalidWgslTable;
         pos += dep_count_result.len;
-        const dep_count: u16 = @intCast(dep_count_result.value);
+        const dep_count: u16 = wire.narrowU16(dep_count_result.value) catch return error.InvalidWgslTable;
 
         // deps
         var deps: []u16 = &[_]u16{};
@@ -367,9 +383,10 @@ pub fn deserializeWgslTable(allocator: Allocator, data: []const u8) !WgslTable {
                     deps = &[_]u16{};
                     break;
                 }
-                const dep_result = opcodes.decode_varint(data[pos..]);
+                const dep_result = opcodes.decode_varint_safe(data[pos..]);
+                if (dep_result.len == 0) return error.InvalidWgslTable;
                 pos += dep_result.len;
-                deps[i] = @intCast(dep_result.value);
+                deps[i] = wire.narrowU16(dep_result.value) catch return error.InvalidWgslTable;
             }
         }
 
@@ -427,9 +444,10 @@ pub const SerializeOptions = struct {
     /// Authored device limits. Empty (the default) → no table, `has_device_limits`
     /// clear, byte-identical output. (Arc-3 §5.3b)
     limits: *const LimitsTable = &empty_limits_table,
-    /// The author requested an opaque canvas (header flag bit 3). False (the
-    /// default) → byte-identical output. (docs/plans/spec/04)
-    canvas_alpha_opaque: bool = false,
+    /// The author requested a premultiplied canvas (header flag bit 3). False
+    /// (the default) → the IDL's `opaque`, byte-identical output.
+    /// (docs/plans/spec/04, spec/09 D)
+    canvas_alpha_premultiplied: bool = false,
 };
 
 /// Serialize components to PNGB format (v0 — see `VERSION`).
@@ -532,17 +550,20 @@ fn serializeAllSections(
     };
 }
 
-/// Calculate section offsets for header.
+/// Calculate section offsets for header. The header addresses sections in
+/// u32, so a payload whose sections sum past 4 GiB cannot be described —
+/// `error.PayloadTooLarge`, not an `@intCast` trap (the sum is kept in u64).
 fn calculateSectionOffsets(
     bytecode_len: usize,
     executor_len: usize,
     sections: *const SerializedSections,
-) SectionOffsets {
-    // Pre-condition: valid section data
-    assert(sections.string_bytes.len > 0 or sections.string_bytes.len == 0);
-
+) error{PayloadTooLarge}!SectionOffsets {
     const has_executor = executor_len > 0;
     const executor_offset: u32 = if (has_executor) HEADER_SIZE else 0;
+    const total: u64 = @as(u64, HEADER_SIZE) + executor_len + bytecode_len +
+        sections.string_bytes.len + sections.data_bytes.len + sections.wgsl_bytes.len +
+        sections.uniform_bytes.len + sections.animation_bytes.len + sections.limits_bytes.len;
+    if (total > std.math.maxInt(u32)) return error.PayloadTooLarge;
     const bytecode_start: u32 = @intCast(HEADER_SIZE + executor_len);
     const string_table_offset: u32 = @intCast(bytecode_start + bytecode_len);
     const data_section_offset: u32 = @intCast(string_table_offset + sections.string_bytes.len);
@@ -601,7 +622,7 @@ fn buildHeader(offsets: *const SectionOffsets, options: SerializeOptions, animat
             .has_embedded_executor = has_executor,
             .has_animation_table = animation_bytes_len > 1, // Empty table is just count=0 (1 byte)
             .has_device_limits = has_limits,
-            .canvas_alpha_opaque = options.canvas_alpha_opaque,
+            .canvas_alpha_premultiplied = options.canvas_alpha_premultiplied,
         },
         .plugins = options.plugins,
         .reserved = encodeReserved(has_limits, offsets.limits_table_offset),
@@ -698,7 +719,7 @@ pub fn serializeWithOptions(
     defer sections.deinit(allocator);
 
     // Calculate offsets
-    const offsets = calculateSectionOffsets(bytecode.len, options.executor.len, &sections);
+    const offsets = try calculateSectionOffsets(bytecode.len, options.executor.len, &sections);
 
     // The limits offset is stored in the header's 3 `reserved` bytes (u24). A
     // payload large enough to push it past 16 MiB cannot address the table —
@@ -726,7 +747,7 @@ pub fn serializeWithOptions(
 
 /// Validate header magic, version, and all section offsets.
 /// Returns the parsed header on success.
-fn validateHeaderAndOffsets(data: []const u8) !*const Header {
+fn validateHeaderAndOffsets(data: []const u8) !Header {
     // Pre-condition: minimum data length
     assert(data.len >= HEADER_SIZE);
 
@@ -741,8 +762,11 @@ fn validateHeaderAndOffsets(data: []const u8) !*const Header {
         return error.UnsupportedVersion;
     }
 
-    // Parse header
-    const header: *const Header = @ptrCast(@alignCast(data[0..HEADER_SIZE]));
+    // Parse header — BY VALUE. `data` is whatever the caller holds: an
+    // allocator-aligned buffer internally, an arbitrary host pointer through
+    // `native_api.createImpl`. A `@ptrCast(@alignCast(…))` view trapped on a
+    // payload at an odd address; `bytesToValue` copies 40 bytes and never cares.
+    const header: Header = std.mem.bytesToValue(Header, data[0..HEADER_SIZE]);
     try header.validate();
 
     // Compute where the bytecode starts (after the header and optional
@@ -941,17 +965,17 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !Module {
     const header = try validateHeaderAndOffsets(data);
 
     // Extract executor and bytecode
-    const extracted = try extractExecutorAndBytecode(allocator, data, header);
+    const extracted = try extractExecutorAndBytecode(allocator, data, &header);
     errdefer if (extracted.executor.len > 0) allocator.free(extracted.executor);
 
     // Deserialize all tables
-    const tables = try deserializeAllTables(allocator, data, header);
+    const tables = try deserializeAllTables(allocator, data, &header);
 
     // Post-condition: valid module constructed
     assert(std.mem.eql(u8, &header.magic, MAGIC));
 
     return Module{
-        .header = header.*,
+        .header = header,
         .executor = extracted.executor,
         .bytecode = extracted.bytecode,
         .strings = tables.strings,
@@ -978,10 +1002,11 @@ pub const Builder = struct {
     animation_table: AnimationTable,
     limits_table: LimitsTable,
     emitter: Emitter,
-    /// Header flag bit 3: the author requested an opaque canvas. Set by the
-    /// frontend (`(canvas :alpha-mode opaque)`); folded into the header by
-    /// `finalizeWithOptions` like the limits table. (docs/plans/spec/04)
-    canvas_alpha_opaque: bool,
+    /// Header flag bit 3: the author requested a premultiplied canvas. Set by
+    /// the frontend (`(canvas :alpha-mode premultiplied)`); folded into the
+    /// header by `finalizeWithOptions` like the limits table.
+    /// (docs/plans/spec/04, spec/09 D)
+    canvas_alpha_premultiplied: bool,
 
     pub fn init() Self {
         return .{
@@ -992,7 +1017,7 @@ pub const Builder = struct {
             .animation_table = .empty,
             .limits_table = .empty,
             .emitter = .empty,
-            .canvas_alpha_opaque = false,
+            .canvas_alpha_premultiplied = false,
         };
     }
 
@@ -1080,7 +1105,7 @@ pub const Builder = struct {
     pub fn finalizeWithOptions(self: *Self, allocator: Allocator, options: SerializeOptions) ![]u8 {
         var opts = options;
         opts.limits = &self.limits_table;
-        opts.canvas_alpha_opaque = self.canvas_alpha_opaque;
+        opts.canvas_alpha_premultiplied = self.canvas_alpha_premultiplied;
         return serializeWithOptions(
             allocator,
             self.emitter.bytecode(),

@@ -170,8 +170,8 @@ fn main(@builtin(global_invocation_id) id : vec3u) {
 
 (buffer :name particleBuffers :size (* NUM_PARTICLES 4 4) :usage [vertex storage] :pool 2)
 
-(buffer :name spriteVertexBuffer :size spriteData :usage [vertex]
-  :mapped-at-creation spriteData)
+(buffer :name spriteVertexBuffer :usage [vertex]
+  :data spriteData)
 
 (buffer :name simParamBuffer :size (* 20 4) :usage [uniform copy-dst])
 
@@ -179,28 +179,27 @@ fn main(@builtin(global_invocation_id) id : vec3u) {
   (write-buffer :buffer simParamBuffer :offset 0 :data simParamsData))
 
 (render-pipeline :name renderParticles
-  (layout auto)
-  (vertex (module code) (entry vertexMain)
-    (buffers
-      (vertex-buffer :array-stride (* 4 4) :step-mode instance
-        (attribute :shader-location 0 :offset 0 :format float32x2)
-        (attribute :shader-location 1 :offset (* 2 4) :format float32x2))
-      (vertex-buffer :array-stride (* 2 4) :step-mode vertex
-        (attribute :shader-location 2 :offset 0 :format float32x2))))
-  (fragment (module code) (entry fragMain)
-    (targets (target :format preferred-canvas-format
+  :layout auto
+  (vertex :module code :entry vertexMain
+    (vertex-buffer :array-stride (* 4 4) :step-mode instance
+      (attribute :shader-location 0 :offset 0 :format float32x2)
+      (attribute :shader-location 1 :offset (* 2 4) :format float32x2))
+    (vertex-buffer :array-stride (* 2 4) :step-mode vertex
+      (attribute :shader-location 2 :offset 0 :format float32x2)))
+  (fragment :module code :entry fragMain
+    (target :format preferred-canvas-format
       (blend (color :src-factor one :dst-factor one :operation add)
-             (alpha :src-factor one :dst-factor one :operation add)))))
-  (primitive (topology triangle-list)))
+             (alpha :src-factor one :dst-factor one :operation add))))
+  (primitive :topology triangle-list))
 
-(compute-pipeline :name simPipeline :module code :entry computeMain)
+(compute-pipeline :name simPipeline :layout auto (compute :module code :entry computeMain))
 
-(bind-group :name particleBindGroups :layout-pipeline simPipeline :layout-index 0 :pool 2
+(bind-group :name particleBindGroups :layout simPipeline :group 0 :pool 2
   (entry :binding 0 :buffer simParamBuffer)
   (entry :binding 1 :buffer particleBuffers :ping-pong 0)
   (entry :binding 2 :buffer particleBuffers :ping-pong 1))
 
-(init :name initParticles :buffer particleBuffers :shader initShader :workgroups 64)
+(init :name initParticles :buffer particleBuffers :module initShader :workgroups [64])
 
 (render-pass :name drawPass
   (color-attachment :view context-current-texture
@@ -213,7 +212,7 @@ fn main(@builtin(global_invocation_id) id : vec3u) {
 (compute-pass :name simPass
   :pipeline simPipeline
   :bind-groups [particleBindGroups]
-  :dispatch-workgroups (ceil (/ NUM_PARTICLES 64)))
+  (dispatch :workgroups [(ceil (/ NUM_PARTICLES 64))]))
 
 (frame :name main
   :init [initParticles]

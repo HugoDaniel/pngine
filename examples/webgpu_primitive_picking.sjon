@@ -27,8 +27,8 @@
 ; Storage buffer for picked primitive ID (single u32)
 (buffer :name pickResult :size 4 :usage [storage])
 
-(buffer :name vertexBuffer :size teapotMesh :usage [vertex]
-  :mapped-at-creation teapotMesh)
+(buffer :name vertexBuffer :usage [vertex]
+  :data teapotMesh)
 
 (buffer :name uniforms :size 16 :usage [uniform copy-dst])
 
@@ -200,28 +200,26 @@ struct FragOut {
 ; ── Pipelines ──────────────────────────────────────────────────────────
 
 (render-pipeline :name forwardPipeline
-  (layout auto)
-  (vertex (module forwardShader) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 24
-        (attribute :shader-location 0 :offset 0 :format float32x3)
-        (attribute :shader-location 1 :offset 12 :format float32x3))))
-  (fragment (module forwardShader) (entry fs)
-    (targets
-      (target :format preferred-canvas-format)
-      (target :format r32uint)))
-  (primitive (topology triangle-list) :cull-mode none)
+  :layout auto
+  (vertex :module forwardShader :entry vs
+    (vertex-buffer :array-stride 24
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)))
+  (fragment :module forwardShader :entry fs
+    (target :format preferred-canvas-format)
+    (target :format r32uint))
+  (primitive :topology triangle-list :cull-mode none)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
-(compute-pipeline :name pickPipeline :module pickShader :entry main)
+(compute-pipeline :name pickPipeline :layout auto (compute :module pickShader :entry main))
 
 ; ── Bind Groups ────────────────────────────────────────────────────────
 
-(bind-group :name forwardBG :layout-pipeline forwardPipeline :layout-index 0
+(bind-group :name forwardBG :layout forwardPipeline :group 0
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :buffer pickResult))
 
-(bind-group :name pickBG :layout-pipeline pickPipeline :layout-index 0
+(bind-group :name pickBG :layout pickPipeline :group 0
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :buffer pointerBuf)
   (entry :binding 2 :texture primIdTex)
@@ -234,7 +232,7 @@ struct FragOut {
     :clear-value [0.15 0.15 0.2 1] :load-op clear :store-op store)
   (color-attachment :view primIdTex
     :clear-value [0 0 0 0] :load-op clear :store-op store)
-  (depth-attachment :view depthTexture
+  (depth-stencil-attachment :view depthTexture
     :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   :pipeline forwardPipeline
   :vertex-buffers [vertexBuffer]
@@ -245,7 +243,7 @@ struct FragOut {
 ; ── Compute Pass (picking) ─────────────────────────────────────────────
 
 (compute-pass :name pickPass :pipeline pickPipeline :bind-groups [pickBG]
-  :dispatch [1 1 1])
+  (dispatch :workgroups [1 1 1]))
 
 ; ── Frame ──────────────────────────────────────────────────────────────
 

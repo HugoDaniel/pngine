@@ -53,6 +53,14 @@ pub const AnimationTable = animation_table.AnimationTable;
 /// frontend targets the default shipping executor.
 pub const DEFAULT_MAX_PASSES: u32 = 32;
 
+/// Maximum `(frame …)` definitions the shipping executor indexes by name
+/// (`wasm_entry.zig`'s `frame_entries` table). A frame past this count is
+/// silently skipped by the executor's frame scan — the same asymmetry as
+/// `DEFAULT_MAX_PASSES` (the reference dispatcher has no such table), so the
+/// frontend refuses the document instead of shipping one the browser reads
+/// differently from the preview.
+pub const DEFAULT_MAX_FRAMES: u32 = 64;
+
 /// Maximum render bundles a single `execute_bundles` opcode carries — a hard
 /// wire limit fixed by the opcode's `[16]u16` decode buffer in BOTH the shipping
 /// executor (`wasm_entry.zig`) and the reference dispatcher. Unlike

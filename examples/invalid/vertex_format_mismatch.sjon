@@ -9,13 +9,12 @@
 @fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
 """)
 (buffer :name verts :size 256 :usage [vertex])
-(render-pipeline :name pipe (layout auto)
-  (vertex (module code) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 16
-        (attribute :shader-location 0 :offset 0 :format uint32x4))))
-  (fragment (module code) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs
+    (vertex-buffer :array-stride 16
+      (attribute :shader-location 0 :offset 0 :format uint32x4)))
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
 (render-pass :name draw :pipeline pipe :vertex-buffers [verts]
   (color-attachment :view context-current-texture
     :clear-value [0 0 0 1] :load-op clear :store-op store)

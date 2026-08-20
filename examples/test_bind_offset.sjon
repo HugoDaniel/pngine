@@ -4,10 +4,10 @@
 ; :offset 256, so the shader reads orange. A binding that ignored :offset/:size
 ; would read the buffer's start and render dark blue.
 
-(buffer :name colors :size 512 :usage [uniform copy-dst] :mapped-at-creation colorData)
+(buffer :name colors :size 512 :usage [uniform copy-dst] :data colorData)
 
 ; 256 B of dark blue at offset 0 (64 floats), then orange at offset 256.
-; mapped-at-creation fills from byte 0; only the first vec4 of each half is read.
+; a `:data` fill fills from byte 0; only the first vec4 of each half is read.
 (data :name colorData :float32 [
   0.0 0.0 0.25 1.0  0 0 0 0  0 0 0 0  0 0 0 0  0 0 0 0  0 0 0 0  0 0 0 0  0 0 0 0
   0 0 0 0  0 0 0 0  0 0 0 0  0 0 0 0  0 0 0 0  0 0 0 0  0 0 0 0  0 0 0 0
@@ -24,12 +24,12 @@
   """)
 
 (render-pipeline :name pipe
-  (layout auto)
-  (vertex (module code) (entry vs))
-  (fragment (module code) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
 
-(bind-group :name g :layout-pipeline pipe :layout-index 0
+(bind-group :name g :layout pipe :group 0
   (entry :binding 0 :buffer colors :offset 256 :size 16))
 
 (render-pass :name draw

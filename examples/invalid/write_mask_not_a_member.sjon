@@ -1,0 +1,23 @@
+; Invalid: `:write-mask everything`. The mask is an integer bitmask 0-15 or the
+; single symbol `all`, and the symbol half used to be the PRIMITIVE `symbol` --
+; any spelling at all. So this document validated, and the emitter's
+; "any non-numeric means all channels" fallback wrote 0xF: a target the author
+; thought was masked rendered every channel. The symbol arm is a member-set
+; now, so the typo is a located `not_member` on the value (allowed: `all`).
+(shader-module :name code :code """
+    @vertex
+    fn vertexMain(@builtin(vertex_index) VertexIndex : u32) -> @builtin(position) vec4f {
+      var pos = array<vec2f, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+      return vec4f(pos[VertexIndex], 0.0, 1.0);
+    }
+    @fragment
+    fn fragMain() -> @location(0) vec4f { return vec4(1.0, 0.0, 0.0, 1.0); }
+""")
+(render-pipeline :name pipeline :layout auto
+  (vertex :module code :entry vertexMain)
+  (fragment :module code :entry fragMain
+    (target :format preferred-canvas-format :write-mask everything)))
+(render-pass :name render :pipeline pipeline
+  (color-attachment :view context-current-texture :clear-value [0 0 0 0] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name badWriteMask :perform [render])

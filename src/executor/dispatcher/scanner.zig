@@ -65,10 +65,12 @@ pub const OpcodeScanner = struct {
         return op;
     }
 
-    /// Skip a single varint parameter.
+    /// Skip a single varint parameter. Length-tolerant: a multi-byte lead at
+    /// the end of the buffer leaves pc where it is (the caller's bounded loop
+    /// ends) instead of asserting on hostile bytecode.
     fn skip_varint(self: *Self) void {
         if (self.pc >= self.bytecode.len) return;
-        const result = opcodes.decode_varint(self.bytecode[self.pc..]);
+        const result = opcodes.decode_varint_safe(self.bytecode[self.pc..]);
         self.pc += result.len;
     }
 
@@ -131,10 +133,15 @@ pub const OpcodeScanner = struct {
             const op = scanner.read_opcode() orelse break;
 
             if (op == .define_pass) {
-                // Read pass_id
+                // Read pass_id — length-tolerant, and narrowed: a lead byte at
+                // EOF or an id past u16 ends the scan rather than asserting or
+                // `@intCast`-trapping on a hostile stream (the stream is a PNG
+                // off the network; `pngine inspect` runs it).
                 if (scanner.pc >= bytecode.len) break;
-                const pass_id_result = opcodes.decode_varint(bytecode[scanner.pc..]);
+                const pass_id_result = opcodes.decode_varint_safe(bytecode[scanner.pc..]);
+                if (pass_id_result.len == 0) break;
                 scanner.pc += pass_id_result.len;
+                const pass_id: u16 = std.math.cast(u16, pass_id_result.value) orelse break;
 
                 // Skip pass_type byte
                 scanner.skip_byte();
@@ -148,7 +155,7 @@ pub const OpcodeScanner = struct {
                 for (0..MAX_SCAN_ITERATIONS) |_| {
                     const scan_op = scanner.read_opcode() orelse break;
                     if (scan_op == .end_pass_def) {
-                        try pass_ranges.put(@intCast(pass_id_result.value), .{
+                        try pass_ranges.put(pass_id, .{
                             .start = pass_start,
                             .end = scanner.pc - 1,
                         });

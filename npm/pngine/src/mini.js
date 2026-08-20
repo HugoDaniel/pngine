@@ -50,7 +50,7 @@ async function D(d) {
 // every frame call got an empty one and case 19's rebuild branch could never
 // run (see there).
 function X(d, ds, p, e, V, dv, ctx, fm, bf, sh, pp, cp, bg, tm, W, H, pt, bd, ti) {
-  const R=o=>V.getUint16(o,!0),G=o=>V.getUint32(o,!0);
+  const R=o=>V.getUint16(o,!0),G=o=>V.getUint32(o,!0),F=o=>V.getFloat32(o,!0);
   const rs = (o, l) => new TextDecoder().decode(d.subarray(ds + o, ds + o + l));
   e = p + e; let ps, en, cP = -1;
   while (p < e) {
@@ -75,7 +75,7 @@ function X(d, ds, p, e, V, dv, ctx, fm, bf, sh, pp, cp, bg, tm, W, H, pt, bd, ti
         const id = R(p);
         if (!pp[id]) {
           const dd = JSON.parse(rs(G(p+2), G(p+6)));
-          pp[id] = dv.createRenderPipeline({layout:'auto', vertex:{module:sh[dd.vertex?.shader??0],entryPoint:dd.vertex?.entryPoint??'vs',buffers:dd.vertex?.buffers??[]}, fragment:{module:sh[dd.fragment?.shader??0],entryPoint:dd.fragment?.entryPoint??'fs',targets:[{format:fm}]}, primitive:dd.primitive??{topology:'triangle-list'}});
+          pp[id] = dv.createRenderPipeline({layout:'auto', vertex:{module:sh[dd.vertex?.shader??0],entryPoint:dd.vertex?.entryPoint,buffers:dd.vertex?.buffers??[]}, fragment:{module:sh[dd.fragment?.shader??0],entryPoint:dd.fragment?.entryPoint,targets:[{format:fm}]}, primitive:dd.primitive??{topology:'triangle-list'}});
         }
         p += 10; break;
       }
@@ -83,7 +83,7 @@ function X(d, ds, p, e, V, dv, ctx, fm, bf, sh, pp, cp, bg, tm, W, H, pt, bd, ti
         const id = R(p);
         if (!cp[id]) {
           const dd = JSON.parse(rs(G(p+2), G(p+6)));
-          cp[id] = dv.createComputePipeline({layout:'auto', compute:{module:sh[dd.compute?.shader??0],entryPoint:dd.compute?.entryPoint??'main'}});
+          cp[id] = dv.createComputePipeline({layout:'auto', compute:{module:sh[dd.compute?.shader??0],entryPoint:dd.compute?.entryPoint}});
         }
         p += 10; break;
       }
@@ -113,7 +113,16 @@ function X(d, ds, p, e, V, dv, ctx, fm, bf, sh, pp, cp, bg, tm, W, H, pt, bd, ti
         // `a` caches the per-pipeline auto-layout rebuilds case 19 makes.
         bd[id] = {pl, gi, es, a: /** @type {Record<number, GPUBindGroup>|null} */ (null)}; bg[id] = dv.createBindGroup({layout:(pp[pl]||cp[pl]).getBindGroupLayout(gi),entries:es}); p += 12; break;
       }
-      case 16: cP = -1; en = dv.createCommandEncoder(); ps = en.beginRenderPass({colorAttachments:[{view:ctx.getCurrentTexture().createView(),loadOp:'clear',storeOp:'store',clearValue:[d[p+6]/255,d[p+7]/255,d[p+8]/255,d[p+9]/255]}]}); p += 10; break;
+      // 0x53 begin_render_pass_f32 — the clear value is four f32s, not four
+      // bytes decoding /255 (spec/09 step D). pNGf v1's 0x10 is refused at the
+      // chunk header, so there is no second decoder here.
+      // One encoder per frame, like case 17: an unconditional
+      // createCommandEncoder here REPLACED the encoder a preceding compute
+      // pass was recording into, unfinished and unsubmitted — the compute
+      // pass never reached the GPU and one abandoned encoder was garbage per
+      // frame. The load op honours the wire byte (1 = clear, else load), as
+      // gpu.js does; a two-render-pass frame must not clear twice.
+      case 83: cP = -1; if (!en) en = dv.createCommandEncoder(); ps = en.beginRenderPass({colorAttachments:[{view:ctx.getCurrentTexture().createView(),loadOp:d[p+2]===1?'clear':'load',storeOp:'store',clearValue:[F(p+6),F(p+10),F(p+14),F(p+18)]}]}); p += 22; break;
       case 17: cP = -1; if (!en) en = dv.createCommandEncoder(); ps = en.beginComputePass(); break;
       case 18: { const pid = R(p); cP = pid; ps.setPipeline(pp[pid]||cp[pid]); p += 2; break; }
       // Auto-layout rebuild, cached per (bind group, pipeline) in `dd.a` —
@@ -213,7 +222,7 @@ export async function miniPngine(canvas, source, opts) {
   // and dv.destroy() twice — and it is also what keeps play() from resurrecting
   // the loop, since WebGPU calls on a destroyed device do not throw
   // synchronously and frame()'s try/catch would never have fired.
-  let on = 0, t0 = 0, tm = 0, raf = 0, dead = 0;
+  let on = 0, t0 = 0, tm = 0, raf = 0, dead = 0, lost = 0;
   let ax, ab2, sr, ctx;
   const teardown = () => {
     if (dead) return; dead = 1;
@@ -231,10 +240,18 @@ export async function miniPngine(canvas, source, opts) {
   };
 
   try {
+    // pNGf version (fl[0], the payload's own header — the chunk wrapper's two
+    // bytes are already stripped). mini follows flat.zig's command set exactly
+    // and carries no legacy decoders, so an unrecognised version has to be
+    // refused: a v1 payload's begin_render_pass (0x10) would otherwise fall
+    // through the switch mid-stream and desync everything after it. Nothing
+    // read this byte before spec/09 step D.
+    if (fl[0] !== 2) throw new Error(`pngine/mini: pNGf version ${fl[0]} is not supported by this player (expected 2)`);
     ctx = /** @type {GPUCanvasContext} */ (canvas.getContext('webgpu'));
     const fm = navigator.gpu.getPreferredCanvasFormat();
-    // pNGf flags bit 0 = opaque canvas (mirrors the PNGB header flag; spec/04).
-    ctx.configure({device: dv, format: fm, alphaMode: fl[1] & 1 ? 'opaque' : 'premultiplied'});
+    // pNGf flags bit 0 = premultiplied canvas (mirrors the PNGB header flag).
+    // Clear = 'opaque', the GPUCanvasConfiguration default. (spec/04, spec/09 D)
+    ctx.configure({device: dv, format: fm, alphaMode: fl[1] & 1 ? 'premultiplied' : 'opaque'});
 
     const W = canvas.width, H = canvas.height;
     const V = new DataView(fl.buffer, fl.byteOffset, fl.byteLength);
@@ -269,9 +286,13 @@ export async function miniPngine(canvas, source, opts) {
     // teardown — ignore it, and so is anything arriving after `dead` (a device can
     // be lost for another reason in the same turn we tear it down). mini keeps no
     // self-recovery (size play); the host decides whether to re-create the player.
+    // `lost` goes up too: play() checks it, and without it a host play button
+    // after the device-lost error restarted the rAF chain at 60 Hz on a lost
+    // device for the page's life (LEAK-05-D's other trigger). Not `dead` —
+    // that is teardown's own latch, and destroy() after a loss must still run.
     dv.lost.then(info => {
       if (dead || info.reason === 'destroyed') return;
-      on = 0; cancelAnimationFrame(raf);
+      on = 0; lost = 1; cancelAnimationFrame(raf);
       report(gpuError('pngine/mini: WebGPU device lost — ' + (info.message || info.reason || 'unknown'), 'device-lost'));
     });
 
@@ -309,7 +330,7 @@ export async function miniPngine(canvas, source, opts) {
       // reschedules at 60Hz for the page's life, retaining the canvas, the payload
       // and every closure in this function.
       play() {
-        if (on || dead) return;
+        if (on || dead || lost) return;
         on = 1; t0 = performance.now() - tm * 1e3;
         if (AUDIO && ax) { if (ax.state === 'suspended') ax.resume(); sr = ax.createBufferSource(); sr.buffer = ab2; sr.connect(ax.destination); sr.start(0, tm); }
         frame();

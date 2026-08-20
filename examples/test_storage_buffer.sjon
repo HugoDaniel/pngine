@@ -23,11 +23,11 @@ fn fragMain() -> @location(0) vec4f {
 (buffer :name storageBuffer :size 1024 :usage [storage])
 
 (render-pipeline :name trianglePipeline
-  (layout auto)
-  (vertex (module shader) (entry vertexMain))
-  (fragment (module shader) (entry fragMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list)))
+  :layout auto
+  (vertex :module shader :entry vertexMain)
+  (fragment :module shader :entry fragMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
 
 (render-pass :name drawPass
   (color-attachment :view context-current-texture :clear-value [0.0 0.0 0.0 1.0] :load-op clear :store-op store)

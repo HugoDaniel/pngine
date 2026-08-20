@@ -40,28 +40,31 @@ pub fn handle(
     assert(is_pool_opcode(op));
 
     switch (op) {
+        // The pooled id is `base + (frame_counter + offset) % pool_size`, in
+        // u32; `narrowU16` at the end is the only step that can fail — a base
+        // id past u16 from a hostile stream (the operand is a varint) is
+        // `InvalidResourceId`, never an `@intCast` trap. `frame_counter` is
+        // host-settable, so the sum wraps rather than overflowing.
         .set_vertex_buffer_pool => {
             const p = try wire.readOperands(wire.layoutOf(.set_vertex_buffer_pool), self);
             if (p.pool_size == 0) return error.InvalidResourceId; // avoid division by zero
-            // Actual buffer ID: base + (frame_counter + offset) % pool_size
-            const actual_id: u16 = @intCast(p.base_id + (self.frame_counter + p.offset) % p.pool_size);
+            const actual_id = try wire.narrowU16(p.base_id +% (self.frame_counter +% p.offset) % p.pool_size);
             try self.backend.set_vertex_buffer(allocator, p.slot, actual_id);
         },
 
         .set_bind_group_pool => {
             const p = try wire.readOperands(wire.layoutOf(.set_bind_group_pool), self);
             if (p.pool_size == 0) return error.InvalidResourceId; // avoid division by zero
-            // Actual bind group ID: base + (frame_counter + offset) % pool_size
-            const actual_id: u16 = @intCast(p.base_id + (self.frame_counter + p.offset) % p.pool_size);
+            const actual_id = try wire.narrowU16(p.base_id +% (self.frame_counter +% p.offset) % p.pool_size);
             try self.backend.set_bind_group(allocator, p.slot, actual_id);
         },
 
         .begin_render_pass_pool => {
             const p = try wire.readOperands(wire.layoutOf(.begin_render_pass_pool), self);
             if (p.pool_size == 0) return error.InvalidResourceId; // avoid division by zero
-            // Actual texture ID: base + (frame_counter + offset) % pool_size
-            const actual_id: u16 = @intCast(p.base_tex_id + (self.frame_counter + p.offset) % p.pool_size);
-            try self.backend.begin_render_pass(allocator, actual_id, p.load_op, p.store_op, @intCast(p.depth_tex_id), p.clear_r, p.clear_g, p.clear_b, p.clear_a, 0xFFFF);
+            const actual_id = try wire.narrowU16(p.base_tex_id +% (self.frame_counter +% p.offset) % p.pool_size);
+            const depth_tex_id = try wire.narrowU16(p.depth_tex_id);
+            try self.backend.begin_render_pass(allocator, actual_id, p.load_op, p.store_op, depth_tex_id, p.clear_r_bits, p.clear_g_bits, p.clear_b_bits, p.clear_a_bits, 0xFFFF);
         },
 
         else => return false,

@@ -1,0 +1,6 @@
+; Invalid: a (pass …) without :code. The schema said :optional true while
+; the pass-v1 hook refused its absence — the two disagreed about one key.
+; :code is required now (every corpus pass has one); the hook's check is the
+; "internal:" shape. Expected: the schema's missing_required_key on the pass.
+(pass-graph
+  (pass :name main))

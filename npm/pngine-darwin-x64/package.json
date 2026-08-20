@@ -1,12 +1,12 @@
 {
   "name": "@pngine/darwin-x64",
-  "version": "2.2.0",
+  "version": "3.0.0",
   "description": "PNGine native binary for macOS x64 (Intel)",
   "author": "Hugo Daniel",
   "license": "CC0-1.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/HugoDaniel/pngine"
+    "url": "git+https://github.com/HugoDaniel/pngine.git"
   },
   "os": ["darwin"],
   "cpu": ["x64"],

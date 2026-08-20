@@ -282,7 +282,7 @@ fn convertDiagnostics(
 /// extended — they encode opinions the example corpus has never been held to.
 ///
 /// `no-unused-binding` is the one that earns its keep on its own: a binding
-/// declared but unused by any entry point is exactly what `(layout auto)`
+/// declared but unused by any entry point is exactly what `:layout auto`
 /// strips, which desyncs the bind group and today surfaces only as an opaque
 /// wgpu-native abort at render time (CONTRIBUTING pitfall 37).
 pub fn lintNative(gpa: Allocator, wgsl_source: []const u8, line_offset: i32) LintError!LintResult {

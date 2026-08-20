@@ -8,8 +8,8 @@
 //! ## pNGf Format
 //!
 //! ```
-//! [version: u8]       = 1
-//! [flags: u8]         bit 0: opaque canvas (mirrors PNGB canvas_alpha_opaque)
+//! [version: u8]       = 2
+//! [flags: u8]         bit 0: premultiplied canvas (mirrors PNGB canvas_alpha_premultiplied)
 //! [init_len: u32 LE]  Length of init commands
 //! [frame_len: u32 LE] Length of frame commands
 //! [data_len: u32 LE]  Length of data section
@@ -42,7 +42,11 @@ const Dispatcher = pngine.Dispatcher;
 const Cmd = pngine.command_buffer.Cmd;
 const call_split = @import("call_split.zig");
 
-const PNGF_VERSION: u8 = 1;
+// 2 since spec/09 step D: begin_render_pass became 0x53 with an f32 clear
+// value, so a v1 payload's 0x10 is not a command this format's reader knows any
+// more. mini.js refuses a version it does not recognise rather than walking a
+// stream whose first pass command it would misparse.
+const PNGF_VERSION: u8 = 2;
 const PNGF_HEADER_SIZE: usize = 14;
 
 pub const FlattenError = error{
@@ -149,7 +153,7 @@ pub fn flattenPayload(allocator: std.mem.Allocator, bytecode: []const u8, diag: 
 
     const output = try packPayload(
         allocator,
-        module.header.flags.canvas_alpha_opaque,
+        module.header.flags.canvas_alpha_premultiplied,
         init_cmds.items,
         frame_cmds.items,
         data_section.items,
@@ -162,7 +166,7 @@ pub fn flattenPayload(allocator: std.mem.Allocator, bytecode: []const u8, diag: 
 ///
 /// Defined by what STARTS the frame rather than by what ends the prologue. The
 /// negative spelling ("run while the call is a create") looks equivalent and is
-/// not: `:mapped-at-creation` captures create_buffer, **write_buffer**, and only
+/// not: `:data` captures create_buffer, **write_buffer**, and only
 /// then the shader module and pipeline, so a single write in the middle of an
 /// ordinary prologue put every later create in the per-frame range — a create
 /// mini replays at 60Hz. It has never shipped only because write_buffer is
@@ -229,15 +233,15 @@ fn serializeRange(
 /// the right answer whenever the source form and the command share a name.
 fn featureNameFor(call_type: CallType) ?[]const u8 {
     return switch (call_type) {
-        // Nobody writes `write_buffer`: they write `:mapped-at-creation` or
+        // Nobody writes `write_buffer`: they write `:data` or
         // `(write-buffer :data …)`, and both mean "this buffer starts with
         // these bytes" — which pNGf's create_buffer (id, size, usage) has
         // nowhere to put.
-        .write_buffer => "initial buffer contents (:mapped-at-creation / (write-buffer :data …))",
+        .write_buffer => "initial buffer contents (:data / (write-buffer :data …))",
         // The only way a create_bind_group reaches the refusal is an explicit
-        // layout — `(bind-group … :layout-pipeline …)` serializes fine. Naming the
+        // layout — `(bind-group … :layout <pipeline> …)` serializes fine. Naming the
         // form beats naming the opcode, which the author never typed.
-        .create_bind_group => "an explicit (bind-group-layout …) as a bind group's layout (:bind-group-layout)",
+        .create_bind_group => "an explicit (bind-group-layout …) as a bind group's :layout",
         else => null,
     };
 }
@@ -306,7 +310,7 @@ fn injectUniformWrites(
 /// wire order. Caller owns the returned buffer.
 fn packPayload(
     allocator: std.mem.Allocator,
-    opaque_canvas: bool,
+    premultiplied_canvas: bool,
     init_cmds: []const u8,
     frame_cmds: []const u8,
     data: []const u8,
@@ -316,10 +320,12 @@ fn packPayload(
     const output = allocator.alloc(u8, total) catch return FlattenError.OutOfMemory;
     errdefer allocator.free(output);
 
-    // Header. Flags bit 0 mirrors the PNGB header's canvas_alpha_opaque (bit
-    // 3): the mini runtime configures the canvas opaque when set (spec/04).
+    // Header. Flags bit 0 mirrors the PNGB header's canvas_alpha_premultiplied
+    // (bit 3): the mini runtime configures the canvas premultiplied when set,
+    // and opaque (the GPUCanvasConfiguration default) when clear.
+    // (spec/04, spec/09 D)
     output[0] = PNGF_VERSION;
-    output[1] = if (opaque_canvas) 1 else 0;
+    output[1] = if (premultiplied_canvas) 1 else 0;
     std.mem.writeInt(u32, output[2..6], @intCast(init_cmds.len), .little);
     std.mem.writeInt(u32, output[6..10], @intCast(frame_cmds.len), .little);
     std.mem.writeInt(u32, output[10..14], @intCast(data.len), .little);
@@ -635,15 +641,15 @@ fn serializePassCall(
     switch (call.call_type) {
         .begin_render_pass => {
             const p = call.params.begin_render_pass;
-            try cmds.append(allocator, @intFromEnum(Cmd.begin_render_pass));
+            try cmds.append(allocator, @intFromEnum(Cmd.begin_render_pass_f32));
             try appendU16(allocator, cmds, p.color_texture_id);
             try cmds.append(allocator, p.load_op);
             try cmds.append(allocator, p.store_op);
             try appendU16(allocator, cmds, p.depth_texture_id);
-            try cmds.append(allocator, p.clear_r);
-            try cmds.append(allocator, p.clear_g);
-            try cmds.append(allocator, p.clear_b);
-            try cmds.append(allocator, p.clear_a);
+            try appendU32(allocator, cmds, p.clear_r_bits);
+            try appendU32(allocator, cmds, p.clear_g_bits);
+            try appendU32(allocator, cmds, p.clear_b_bits);
+            try appendU32(allocator, cmds, p.clear_a_bits);
         },
         .begin_compute_pass => try cmds.append(allocator, @intFromEnum(Cmd.begin_compute_pass)),
         .end_pass => try cmds.append(allocator, @intFromEnum(Cmd.end_pass)),

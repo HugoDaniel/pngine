@@ -231,12 +231,14 @@ fn executeWasm(
     defer validator.deinit();
     try configureValidator(&validator, &runtime, &module);
 
-    // Init runs first and unconditionally as far as this function is concerned:
-    // the frame phase depends on the resources it creates. A non-zero return
-    // from either phase is fatal, so both report it and stop.
-    if (opts.phase == .init or opts.phase == .both) {
-        if (!try runInitPhase(allocator, &runtime, &validator, result)) return;
-    }
+    // Init runs first and UNCONDITIONALLY: the frame phase depends on the
+    // resources it creates, and the executor's `frame()` refuses (status 1)
+    // before `init()`. `--phase` selects what the REPORT shows — both output
+    // layers filter on it — not what runs; gating init on it here made
+    // `--phase frame` report "[E011] WASM frame() returned error" on every
+    // valid document. A non-zero return from either phase is fatal, so both
+    // report it and stop.
+    if (!try runInitPhase(allocator, &runtime, &validator, result)) return;
     if (opts.phase == .frame or opts.phase == .both) {
         if (!try runFramePhases(allocator, &runtime, &validator, result, opts)) return;
     }
@@ -377,6 +379,9 @@ fn runFramePhases(
 
         const cmd_data = try runtime.readMemory(cmd_ptr, cmd_len);
         const frame_commands = try cmd_validator.parseCommands(allocator, cmd_data);
+        // Owned by nobody until the append lands: a failing append leaked it
+        // (`ValidationResult.deinit` frees only what is IN frame_results).
+        errdefer allocator.free(frame_commands);
 
         try result.frame_results.append(allocator, .{
             .frame_index = frame_idx,

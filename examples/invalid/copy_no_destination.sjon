@@ -1,0 +1,31 @@
+; INVALID: a (copy-texture-to-texture ...) that names only its source.
+;
+; Both ends of a copy are dictionaries in the IDL -- GPUTexelCopyTextureInfo on
+; each side -- so D5 makes them child forms, and the head-set floors say each
+; appears exactly once. Before the move both ends were keys, and a copy missing
+; one of them reached the emitter, where `r.symbol(ctt, "destination")` answered
+; null and the whole queue action was refused with an unlocated "emit failed".
+;
+; The reject is now a positional floor on the form itself, with a span.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.0, 0.0, 1.0); }
+""")
+(texture :name srcTex :size canvas :format rgba8unorm
+  :usage [render-attachment copy-src])
+(texture :name dstTex :size canvas :format rgba8unorm
+  :usage [texture-binding copy-dst])
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format rgba8unorm)))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view srcTex
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(queue :name copySrcToDst
+  (copy-texture-to-texture (source :texture srcTex)))
+(frame :name main :perform [draw copySrcToDst])

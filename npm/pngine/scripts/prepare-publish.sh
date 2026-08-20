@@ -1,63 +1,51 @@
-#!/bin/bash
-# Prepare npm packages for publishing
+#!/usr/bin/env bash
+# Stage the built binaries and executor into the npm package directories.
 #
-# This script copies built binaries from zig-out/npm to npm/ packages
+#   zig build npm                            # cross-compile all platform binaries
+#   ./npm/pngine/scripts/prepare-publish.sh  # copy them into npm/pngine-*/bin
 #
-# Usage:
-#   zig build npm                    # Build all platform binaries
-#   ./npm/pngine/scripts/prepare-publish.sh  # Prepare for publish
+# The platform set is the set of `npm/pngine-<os>-<cpu>/` directories — the
+# same source of truth sync-versions.mjs and check-npm-metadata.mjs derive
+# from — so adding a platform package is one directory, not three lists.
+# A missing binary is an error: a platform package published without its
+# binary installs a wrapper that resolves nothing.
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 ZIG_OUT="$ROOT_DIR/zig-out/npm"
 NPM_DIR="$ROOT_DIR/npm"
 
-echo "Preparing npm packages for publishing..."
-echo ""
-
-# Platform packages
-PLATFORMS=(
-    "darwin-arm64:pngine"
-    "darwin-x64:pngine"
-    "linux-arm64:pngine"
-    "linux-x64:pngine"
-    "win32-arm64:pngine.exe"
-    "win32-x64:pngine.exe"
-)
-
-for entry in "${PLATFORMS[@]}"; do
-    platform="${entry%%:*}"
-    binary="${entry##*:}"
+missing=0
+for dir in "$NPM_DIR"/pngine-*/; do
+    platform="$(basename "$dir")"          # pngine-darwin-arm64
+    platform="${platform#pngine-}"         # darwin-arm64
+    binary=pngine
+    case "$platform" in win32-*) binary=pngine.exe ;; esac
 
     src="$ZIG_OUT/pngine-$platform/bin/$binary"
     dst="$NPM_DIR/pngine-$platform/bin/$binary"
-
     if [ -f "$src" ]; then
         mkdir -p "$(dirname "$dst")"
         cp "$src" "$dst"
-        echo "  Copied: pngine-$platform/bin/$binary ($(du -h "$dst" | cut -f1))"
+        echo "  pngine-$platform/bin/$binary ($(du -h "$dst" | cut -f1))"
     else
-        echo "  Warning: $src not found"
+        echo "  ERROR: $src not found — run \`zig build npm\`" >&2
+        missing=1
     fi
 done
 
-# WASM
+# The runtime-fallback executor. `zig build npm` installs it here too; the
+# committed copy is drift-gated against the build, so this is normally a no-op.
 if [ -f "$ZIG_OUT/pngine/wasm/pngine.wasm" ]; then
     mkdir -p "$NPM_DIR/pngine/wasm"
     cp "$ZIG_OUT/pngine/wasm/pngine.wasm" "$NPM_DIR/pngine/wasm/"
-    echo "  Copied: pngine/wasm/pngine.wasm ($(du -h "$NPM_DIR/pngine/wasm/pngine.wasm" | cut -f1))"
+    echo "  pngine/wasm/pngine.wasm ($(du -h "$NPM_DIR/pngine/wasm/pngine.wasm" | cut -f1))"
+else
+    echo "  ERROR: $ZIG_OUT/pngine/wasm/pngine.wasm not found — run \`zig build npm\`" >&2
+    missing=1
 fi
 
-echo ""
-echo "Done! Packages ready for publishing:"
-echo ""
-echo "  # Publish platform packages first (order doesn't matter)"
-for entry in "${PLATFORMS[@]}"; do
-    platform="${entry%%:*}"
-    echo "  cd $NPM_DIR/pngine-$platform && npm publish --access public"
-done
-echo ""
-echo "  # Then publish main package"
-echo "  cd $NPM_DIR/pngine && npm publish"
+[ "$missing" = 0 ] || exit 1
+echo "staged. Publish with ./npm/publish.sh (see docs/publishing.md)."

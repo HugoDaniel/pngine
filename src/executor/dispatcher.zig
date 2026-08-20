@@ -70,6 +70,10 @@ pub const ExecuteError = error{
     /// elements, so a larger count leaves the pc mid-operand and every following
     /// opcode is read out of the previous instruction's body.
     RepCountOverCap,
+    /// A count-prefixed opcode declared ZERO elements where the instruction
+    /// is meaningless without one: an MRT pass with no colour attachment (the
+    /// backends took it as an empty slice; the native one asserted on it).
+    RepCountEmpty,
     /// One execution asked for more instructions than it is allowed: more than
     /// `MAX_TOP_LEVEL_STEPS` at the top level, or more than `MAX_TOTAL_STEPS`
     /// counted across every nesting level (LEAK-09 B).
@@ -97,6 +101,11 @@ pub const ExecuteError = error{
     ShaderCompilationFailed,
     /// Pipeline creation failed.
     PipelineCreationFailed,
+    /// A descriptor omits a member the WebGPU IDL marks `required`. The
+    /// compiler enforces required-ness (spec/09), so this is a malformed
+    /// payload, not a document — and refusing it is what keeps the native
+    /// backend from substituting a value the browser would have rejected.
+    MissingRequiredMember,
 };
 
 /// Instruction budget for one top-level execution pass. Bounds the linear walk
@@ -107,6 +116,15 @@ pub const ExecuteError = error{
 /// see the `else` branch in `execute_from_pc` for why the distinction matters
 /// here and not in loops whose bound the input cannot reach.
 pub const MAX_TOP_LEVEL_STEPS: u32 = 10_000;
+
+/// Instruction budget for ONE pass body (`frame.zig executePass`). Above the
+/// compiler's own ceiling — `MAX_FRAME_STEPS = 2048` commands per pass form,
+/// each a few opcodes — so no compiled document reaches it, and reaching it is
+/// a refusal (`error.InstructionBudgetExhausted`), not a silent stop: the old
+/// `for (0..1000)` fell through, running the first 1000 ops of a longer pass and
+/// dropping its `end_pass`. The product across nesting levels is bounded
+/// separately by `MAX_TOTAL_STEPS`. (Third leak pass)
+pub const PASS_MAX_ITERATIONS: u32 = 16_384;
 
 /// Instruction budget for ONE execution counted across every nesting level —
 /// the bound `MAX_TOP_LEVEL_STEPS` and frame.zig's per-pass caps cannot express
@@ -159,7 +177,7 @@ pub const CONTRACT = [_]MethodSpec{
     .{ .name = "create_render_bundle", .params = &.{ u16, u16 } },
 
     // Pass operations (dispatcher/pass.zig)
-    .{ .name = "begin_render_pass", .params = &.{ u16, u8, u8, u16, u8, u8, u8, u8, u16 } },
+    .{ .name = "begin_render_pass", .params = &.{ u16, u8, u8, u16, u32, u32, u32, u32, u16 } },
     .{ .name = "begin_render_pass_mrt", .params = &.{ []const ColorAttachment, u16 } },
     .{ .name = "begin_compute_pass" },
     .{ .name = "set_pipeline", .params = &.{u16} },

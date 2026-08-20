@@ -1,0 +1,18 @@
+; INVALID: a (render-pipeline …) with no (vertex …) stage.
+;
+; GPURenderPipelineDescriptor.vertex is REQUIRED in the WebGPU IDL. The stage
+; is a positional child (02 R3), so the requirement is a floor on the head:
+; `(head :name vertex :min 1 :max 1)` on `pipeline-section`, a located
+; positional_missing at validation — the conformance ledger says so
+; (`enforced.vertex`), and this fixture is the negative that ledger entry
+; lacked.
+(shader-module :name code :code """
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+(render-pipeline :name pipe :layout auto
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

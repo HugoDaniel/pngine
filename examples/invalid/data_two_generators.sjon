@@ -1,0 +1,26 @@
+; INVALID: a (data ...) with two shape generators.
+;
+; A (data ...) is ONE byte source. `emitData` returns on the first generator
+; child it finds, so `(cube …) (sphere …)` validated clean and produced the
+; cube -- the sphere was decoration. SJON 1.3's per-head bounds say "at most
+; one of EACH"; "at most one across the nine" is a count over the whole set,
+; which SJON 1.4 spells `:max-children 1` on the head-set itself.
+; `positional_too_many` names the set and is
+; located on the second generator; the emitter's `requireOneOf` is gone.
+(shader-module :name code :code """
+@vertex fn vs(@location(0) p : vec3f) -> @builtin(position) vec4f { return vec4f(p, 1.0); }
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+(data :name verts (cube :size 1) (sphere :radius 1))
+(buffer :name vb :usage [vertex] :data verts)
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs
+    (vertex-buffer :array-stride 12
+      (attribute :shader-location 0 :offset 0 :format float32x3)))
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline pipe :vertex-buffers [vb]
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 36))
+(frame :name main :perform [draw])

@@ -24,7 +24,7 @@
 
 (texture :name depthTexture :size canvas :format depth24plus :usage [render-attachment])
 
-(texture :name spriteTex :width 64 :height 64 :format rgba8unorm
+(texture :name spriteTex :size [64 64] :format rgba8unorm
   :usage [storage-binding texture-binding])
 
 (sampler :name spriteSampler :mag-filter linear :min-filter linear)
@@ -167,40 +167,38 @@ fn quadCorner(vNdx: u32) -> vec2f {
 }
 """)
 
-(compute-pipeline :name spritePipeline :module spriteShader :entry main)
+(compute-pipeline :name spritePipeline :layout auto (compute :module spriteShader :entry main))
 
 (render-pipeline :name fixedPipeline
-  (layout auto)
-  (vertex (module code) (entry vsFixed))
-  (fragment (module code) (entry fs)
-    (targets
-      (target :format preferred-canvas-format
-        ; Premultiplied-alpha blend.
-        (blend
-          (color :src-factor one :dst-factor one-minus-src-alpha)
-          (alpha :src-factor one :dst-factor one-minus-src-alpha)))))
+  :layout auto
+  (vertex :module code :entry vsFixed)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format
+      ; Premultiplied-alpha blend.
+      (blend
+        (color :src-factor one :dst-factor one-minus-src-alpha)
+        (alpha :src-factor one :dst-factor one-minus-src-alpha))))
   (depth-stencil :format depth24plus :depth-write-enabled false :depth-compare less))
 
 (render-pipeline :name perspPipeline
-  (layout auto)
-  (vertex (module code) (entry vsPersp))
-  (fragment (module code) (entry fs)
-    (targets
-      (target :format preferred-canvas-format
-        (blend
-          (color :src-factor one :dst-factor one-minus-src-alpha)
-          (alpha :src-factor one :dst-factor one-minus-src-alpha)))))
+  :layout auto
+  (vertex :module code :entry vsPersp)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format
+      (blend
+        (color :src-factor one :dst-factor one-minus-src-alpha)
+        (alpha :src-factor one :dst-factor one-minus-src-alpha))))
   (depth-stencil :format depth24plus :depth-write-enabled false :depth-compare less))
 
-(bind-group :name spriteBindGroup :layout-pipeline spritePipeline :layout-index 0
+(bind-group :name spriteBindGroup :layout spritePipeline :group 0
   (entry :binding 0 :texture spriteTex))
 
-(bind-group :name fixedBindGroup :layout-pipeline fixedPipeline :layout-index 0
+(bind-group :name fixedBindGroup :layout fixedPipeline :group 0
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :sampler spriteSampler)
   (entry :binding 2 :texture spriteTex))
 
-(bind-group :name perspBindGroup :layout-pipeline perspPipeline :layout-index 0
+(bind-group :name perspBindGroup :layout perspPipeline :group 0
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :sampler spriteSampler)
   (entry :binding 2 :texture spriteTex))
@@ -208,18 +206,18 @@ fn quadCorner(vNdx: u32) -> vec2f {
 ; One-time sprite bake (64×64 / 8×8 workgroups → [8 8 1]).
 (compute-pass :name bakeSprite :pipeline spritePipeline
   :bind-groups [spriteBindGroup]
-  :dispatch [8 8 1])
+  (dispatch :workgroups [8 8 1]))
 
 (render-pass :name fixedPass
   (color-attachment :view context-current-texture :clear-value [0.05 0.05 0.08 1] :load-op clear :store-op store)
-  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   :pipeline fixedPipeline
   :bind-groups [fixedBindGroup]
   (draw :vertex-count 6 :instance-count NUM_POINTS))
 
 (render-pass :name perspPass
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depthTexture :depth-load-op load :depth-store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-load-op load :depth-store-op store)
   :pipeline perspPipeline
   :bind-groups [perspBindGroup]
   (draw :vertex-count 6 :instance-count NUM_POINTS))

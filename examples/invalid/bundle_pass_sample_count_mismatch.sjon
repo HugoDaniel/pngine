@@ -1,0 +1,28 @@
+; INVALID: the pass renders into a 4-sample attachment and replays a bundle
+; recorded for 1 sample.
+;
+; The pass's layout takes its sampleCount from the attachment's TEXTURE, not
+; from anything written in the pass, so this disagreement is spelled three
+; forms away from the bundle that loses to it. The bundle and its pipeline
+; agree at 1 sample, the IDL default neither of them states.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.0, 1.0); }
+""")
+(texture :name msaaTex :size canvas :format rgba8unorm
+  :sample-count 4 :usage [render-attachment])
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format rgba8unorm)))
+(render-bundle :name tri :pipeline pipe
+  :color-formats [rgba8unorm]
+  (draw :vertex-count 3))
+(render-pass :name draw
+  (color-attachment :view msaaTex
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :execute-bundles [tri])
+(frame :name main :perform [draw])

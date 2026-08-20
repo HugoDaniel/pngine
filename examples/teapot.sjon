@@ -89,8 +89,8 @@ struct VSOut {
 
 (data :name teapotMesh (teapot :format [position3 normal3]))
 
-(buffer :name vertexBuffer :size teapotMesh :usage [vertex]
-  :mapped-at-creation teapotMesh)
+(buffer :name vertexBuffer :usage [vertex]
+  :data teapotMesh)
 
 (buffer :name indexBuffer :index-of teapotMesh :usage [index])
 
@@ -102,23 +102,22 @@ struct VSOut {
   (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
 
 (render-pipeline :name teapotPipeline
-  (layout auto)
-  (vertex (module shader) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 24
-        (attribute :shader-location 0 :offset 0 :format float32x3)
-        (attribute :shader-location 1 :offset 12 :format float32x3))))
-  (fragment (module shader) (entry fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module shader :entry vs
+    (vertex-buffer :array-stride 24
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)))
+  (fragment :module shader :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
-(bind-group :name teapotBindGroup :layout-pipeline teapotPipeline :layout-index 0
+(bind-group :name teapotBindGroup :layout teapotPipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
 (render-pass :name drawTeapot
   (color-attachment :view context-current-texture :clear-value [0.15 0.15 0.2 1] :load-op clear :store-op store)
-  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   :pipeline teapotPipeline
   :vertex-buffers [vertexBuffer]
   :index-buffer indexBuffer

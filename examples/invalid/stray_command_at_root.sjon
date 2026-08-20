@@ -1,0 +1,14 @@
+; audit C3: a slot-only form at the DOCUMENT ROOT. SJON has no root
+; restriction, so `(draw …)` validated here and the emitter — which walks by
+; head — skipped it: the document compiled with two draws intended and one
+; emitted. Expected: a located diagnostic on the stray form naming the forms
+; that admit it (`(render-pass …)`, `(render-bundle …)`, `(occlusion-query …)`).
+(shader-module :name code :code "@vertex fn v() -> @builtin(position) vec4f { return vec4f(0); } @fragment fn f() -> @location(0) vec4f { return vec4f(1); }")
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry v)
+  (fragment :module code :entry f (target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(draw :vertex-count 6)
+(frame :name main :perform [draw])

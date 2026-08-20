@@ -1,0 +1,78 @@
+; test_multi_draw -- several draw commands in ONE render pass.
+;
+; A render pass records a command stream, so it may issue as many draws as it
+; likes between begin and end: bind the state once, draw the parts. PNGine
+; emitted exactly ONE, picked from the pass's children by a priority over the
+; four draw heads -- `draw` first, then `draw-indexed`, then the indirect pair.
+; A pass with two draws drew the first and dropped the rest, silently; a pass
+; whose children were `(draw-indexed …)` then `(draw …)` drew the NON-indexed
+; one no matter which the author wrote first.
+;
+; The pass below issues three, and the head priority would have picked the
+; wrong one twice over:
+;
+;   draw-indexed  the teapot, through :index-buffer
+;   draw          three vertices of the same buffer, unindexed
+;   draw          three more, from :first-vertex 3
+;
+; A trace with one `draw` call is the old behaviour; a trace with three, in
+; this order, is the fix.
+
+(shader-module :name code :code """
+struct Uniforms { time : f32, width : f32, height : f32, aspect : f32 }
+@group(0) @binding(0) var<uniform> u : Uniforms;
+
+struct VSOut {
+  @builtin(position) pos : vec4f,
+  @location(0) normal : vec3f,
+}
+
+@vertex fn vs(@location(0) position : vec3f, @location(1) normal : vec3f) -> VSOut {
+  let c = cos(u.time);
+  let s = sin(u.time);
+  let p = vec3f(position.x * c - position.z * s, position.y, position.x * s + position.z * c);
+  var out : VSOut;
+  out.pos = vec4f(p.x * 0.6 / u.aspect, p.y * 0.6, p.z * 0.1 + 0.5, 1.0);
+  out.normal = normal;
+  return out;
+}
+
+@fragment fn fs(in : VSOut) -> @location(0) vec4f {
+  let l = clamp(dot(normalize(in.normal), normalize(vec3f(0.4, 0.8, 0.5))), 0.0, 1.0);
+  return vec4f(vec3f(0.2, 0.5, 0.9) * (0.2 + 0.8 * l), 1.0);
+}
+""")
+
+; The teapot is the smallest INDEXED shape (792 vertices, 992 triangles), and
+; an index buffer is what makes the `(draw-indexed …)` below different from its
+; two neighbours rather than a second spelling of them.
+(data :name mesh (teapot :format [position3 normal3]))
+
+(buffer :name vertexBuffer :usage [vertex] :data mesh)
+(buffer :name indexBuffer :index-of mesh :usage [index])
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+
+(bind-group :name bg :layout pipe :group 0
+  (entry :binding 0 :buffer uniforms))
+
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs
+    (vertex-buffer :array-stride 24
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)))
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back))
+
+(queue :name writeInputs
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+(render-pass :name draw :pipeline pipe
+  :vertex-buffers [vertexBuffer] :index-buffer indexBuffer :bind-groups [bg]
+  (color-attachment :view context-current-texture
+    :clear-value [0.05 0.05 0.08 1] :load-op clear :store-op store)
+  (draw-indexed :index-count 2976)
+  (draw :vertex-count 3)
+  (draw :vertex-count 3 :first-vertex 3))
+
+(frame :name main :before [writeInputs] :perform [draw])

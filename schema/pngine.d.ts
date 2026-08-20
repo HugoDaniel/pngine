@@ -3,95 +3,121 @@
 // Describes the canonical JSON shape of `sjon to-json`.
 //
 // Export warnings:
-//   [info numeric_bounds_emitted_via_min_max] value-kind `byte-count` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
+//   [info union_emitted_via_anyof] value-kind `real` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [warn cross_ref_unenforceable] value-kind `define-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
+//   [info cross_ref_annotation_only] value-kind `define-ref` cross-ref annotation surfaces target-form=`define` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
+//   [info union_emitted_via_anyof] value-kind `device-limit` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
 //   [info numeric_bounds_emitted_via_min_max] value-kind `device-limit-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
 //   [info rich_members_emitted_with_annotations] value-kind `canvas-alpha-mode` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
 //   [info string_bounds_emitted_via_keywords] value-kind `file-path` string bounds emitted via `minLength`/`maxLength`/`pattern`/`format`; codepoint-vs-UTF16 length and SJON-deferred regex semantics carry their own caveats
 //   [info head_set_emitted_via_oneof_refs] value-kind `data-shape-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
+//   [info exclusive_group_unenforceable] form `data` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only
 //   [warn cross_ref_unenforceable] value-kind `data-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
 //   [info cross_ref_annotation_only] value-kind `data-ref` cross-ref annotation surfaces target-form=`data` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
 //   [info rich_members_emitted_with_annotations] value-kind `shape-format` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
+//   [info union_emitted_via_anyof] value-kind `texture-size` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info union_emitted_via_anyof] value-kind `extent` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info numeric_bounds_emitted_via_min_max] value-kind `extent-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
 //   [info rich_members_emitted_with_annotations] value-kind `texture-size-mode` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
 //   [warn cross_ref_unenforceable] value-kind `image-bitmap-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
 //   [info cross_ref_annotation_only] value-kind `image-bitmap-ref` cross-ref annotation surfaces target-form=`image-bitmap` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
 //   [info rich_members_emitted_with_annotations] value-kind `texture-format` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
 //   [info rich_members_emitted_with_annotations] value-kind `texture-usage` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
-//   [info numeric_bounds_emitted_via_min_max] value-kind `count-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
-//   [info numeric_bounds_emitted_via_min_max] value-kind `texture-dimension` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
-//   [info numeric_bounds_emitted_via_min_max] value-kind `subresource-count` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
-//   [info numeric_bounds_emitted_via_min_max] value-kind `pool-size` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
+//   [info union_emitted_via_anyof] value-kind `u32` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info numeric_bounds_emitted_via_min_max] value-kind `u32-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
+//   [info rich_members_emitted_with_annotations] value-kind `texture-dimension` member-set carries rich metadata and digit-leading spellings — emitted as per-member `oneOf` with title/description/deprecated annotations and `$num` wire shapes
+//   [info union_emitted_via_anyof] value-kind `subresource-count` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info numeric_bounds_emitted_via_min_max] value-kind `subresource-count-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
+//   [info union_emitted_via_anyof] value-kind `pool-size` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info numeric_bounds_emitted_via_min_max] value-kind `pool-size-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
 //   [warn cross_ref_unenforceable] value-kind `texture-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
 //   [info cross_ref_annotation_only] value-kind `texture-ref` cross-ref annotation surfaces target-form=`texture` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
-//   [info numeric_bounds_emitted_via_min_max] value-kind `view-dimension` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
+//   [info rich_members_emitted_with_annotations] value-kind `view-dimension` member-set carries rich metadata and digit-leading spellings — emitted as per-member `oneOf` with title/description/deprecated annotations and `$num` wire shapes
 //   [info rich_members_emitted_with_annotations] value-kind `texture-aspect` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
-//   [info numeric_bounds_emitted_via_min_max] value-kind `subresource-index` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
-//   [info union_emitted_via_anyof] value-kind `byte-size` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info union_emitted_via_anyof] value-kind `subresource-index` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info numeric_bounds_emitted_via_min_max] value-kind `subresource-index-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
+//   [info union_emitted_via_anyof] value-kind `byte-count` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info numeric_bounds_emitted_via_min_max] value-kind `byte-count-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
 //   [info rich_members_emitted_with_annotations] value-kind `buffer-usage` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
 //   [info rich_members_emitted_with_annotations] value-kind `index-format` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
 //   [info rich_members_emitted_with_annotations] value-kind `query-type` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
-//   [info union_emitted_via_anyof] value-kind `count` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info union_emitted_via_anyof] value-kind `query-count` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info numeric_bounds_emitted_via_min_max] value-kind `query-count-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
 //   [info head_set_emitted_via_oneof_refs] value-kind `queue-action` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [warn cross_ref_unenforceable] value-kind `buffer-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
 //   [info cross_ref_annotation_only] value-kind `buffer-ref` cross-ref annotation surfaces target-form=`buffer` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
+//   [info union_emitted_via_anyof] value-kind `byte-count-4-aligned` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info numeric_bounds_emitted_via_min_max] value-kind `byte-count-4-aligned-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
 //   [info union_emitted_via_anyof] value-kind `write-buffer-source` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
 //   [info rich_members_emitted_with_annotations] value-kind `builtin-data-source` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
-//   [warn cross_ref_unenforceable] value-kind `wasm-call-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
-//   [info cross_ref_annotation_only] value-kind `wasm-call-ref` cross-ref annotation surfaces target-form=`wasm-call` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
-//   [info exclusive_group_unenforceable] form `write-buffer` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only
+//   [warn cross_ref_unenforceable] value-kind `data-or-wasm-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
+//   [info cross_ref_annotation_only] value-kind `data-or-wasm-ref` cross-ref annotation surfaces target-form=`data | wasm-call` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
 //   [info union_emitted_via_anyof] value-kind `attachment-view` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
 //   [info rich_members_emitted_with_annotations] value-kind `view-source` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
+//   [info head_set_emitted_via_oneof_refs] value-kind `copy-endpoints-section` head-set emitted as a closed `oneOf` — 2 of 2 head(s) resolve to slot-local forms and are emitted inline, the rest as `$ref`s into `#/$defs/form.<plugin>.<head>`
+//   [info local_forms_emitted_inline] positional slot on form `copy-texture-to-texture` declares 2 local form(s) behind a 2-head head-set — emitted as a closed inline union with no global fallback branch; a head outside the set is `not_head_member`
+//   [info head_set_emitted_via_oneof_refs] value-kind `copy-endpoints-section` head-set emitted as a closed `oneOf` — 2 of 2 head(s) resolve to slot-local forms and are emitted inline, the rest as `$ref`s into `#/$defs/form.<plugin>.<head>`
+//   [info local_forms_emitted_inline] positional slot on form `copy-external-image-to-texture` declares 2 local form(s) behind a 2-head head-set — emitted as a closed inline union with no global fallback branch; a head outside the set is `not_head_member`
 //   [warn cross_ref_unenforceable] value-kind `query-set-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
 //   [info cross_ref_annotation_only] value-kind `query-set-ref` cross-ref annotation surfaces target-form=`query-set` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
+//   [info union_emitted_via_anyof] value-kind `byte-count-256-aligned` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info numeric_bounds_emitted_via_min_max] value-kind `byte-count-256-aligned-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
 //   [info union_emitted_via_anyof] value-kind `wasm-arg` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
-//   [info union_emitted_via_anyof] value-kind `pipeline-ref` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
-//   [warn cross_ref_unenforceable] value-kind `render-pipeline-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
-//   [info cross_ref_annotation_only] value-kind `render-pipeline-ref` cross-ref annotation surfaces target-form=`render-pipeline` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
-//   [warn cross_ref_unenforceable] value-kind `compute-pipeline-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
-//   [info cross_ref_annotation_only] value-kind `compute-pipeline-ref` cross-ref annotation surfaces target-form=`compute-pipeline` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
-//   [warn cross_ref_unenforceable] value-kind `bind-group-layout-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
-//   [info cross_ref_annotation_only] value-kind `bind-group-layout-ref` cross-ref annotation surfaces target-form=`bind-group-layout` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
-//   [info numeric_bounds_emitted_via_min_max] value-kind `binding-index` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
-//   [info head_set_emitted_via_oneof_refs] value-kind `bind-entry-item` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
+//   [info rich_members_emitted_with_annotations] value-kind `wasm-arg-builtin` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
+//   [warn cross_ref_unenforceable] value-kind `bind-group-layout-spec` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
+//   [info cross_ref_annotation_only] value-kind `bind-group-layout-spec` cross-ref annotation surfaces target-form=`render-pipeline | compute-pipeline | bind-group-layout` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
+//   [info union_emitted_via_anyof] value-kind `binding-index` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info numeric_bounds_emitted_via_min_max] value-kind `binding-index-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
 //   [warn cross_ref_unenforceable] value-kind `sampler-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
 //   [info cross_ref_annotation_only] value-kind `sampler-ref` cross-ref annotation surfaces target-form=`sampler` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
 //   [warn cross_ref_unenforceable] value-kind `texture-view-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
 //   [info cross_ref_annotation_only] value-kind `texture-view-ref` cross-ref annotation surfaces target-form=`texture-view` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
 //   [info exclusive_group_unenforceable] form `entry` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only
-//   [info local_forms_emitted_inline] positional slot on form `bind-group` declares 1 local form(s) — emitted as an inline union plus an open generic branch for the additive global fallback; local-first/global resolution order is SJON-only
-//   [info exclusive_group_unenforceable] form `bind-group` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only
-//   [info rich_members_emitted_with_annotations] value-kind `storage-texture-access` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
-//   [info head_set_emitted_via_oneof_refs] value-kind `bgl-entry-item` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
+//   [info head_set_emitted_via_oneof_refs] value-kind `bind-entry-item` head-set emitted as a closed `oneOf` — 1 of 1 head(s) resolve to slot-local forms and are emitted inline, the rest as `$ref`s into `#/$defs/form.<plugin>.<head>`
+//   [info local_forms_emitted_inline] positional slot on form `bind-group` declares 1 local form(s) behind a 1-head head-set — emitted as a closed inline union with no global fallback branch; a head outside the set is `not_head_member`
 //   [info rich_members_emitted_with_annotations] value-kind `visibility` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
-//   [info head_set_emitted_via_oneof_refs] value-kind `bgl-resource` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [info rich_members_emitted_with_annotations] value-kind `buffer-binding-type` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
 //   [info rich_members_emitted_with_annotations] value-kind `sampler-binding-type` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
 //   [info rich_members_emitted_with_annotations] value-kind `texture-sample-type` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
-//   [info local_forms_emitted_inline] positional slot on form `entry` declares 4 local form(s) — emitted as an inline union plus an open generic branch for the additive global fallback; local-first/global resolution order is SJON-only
-//   [info local_forms_emitted_inline] positional slot on form `bind-group-layout` declares 1 local form(s) — emitted as an inline union plus an open generic branch for the additive global fallback; local-first/global resolution order is SJON-only
+//   [info rich_members_emitted_with_annotations] value-kind `storage-texture-access` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
+//   [info head_set_emitted_via_oneof_refs] value-kind `bgl-resource` head-set emitted as a closed `oneOf` — 4 of 4 head(s) resolve to slot-local forms and are emitted inline, the rest as `$ref`s into `#/$defs/form.<plugin>.<head>`
+//   [info local_forms_emitted_inline] positional slot on form `entry` declares 4 local form(s) behind a 4-head head-set — emitted as a closed inline union with no global fallback branch; a head outside the set is `not_head_member`
+//   [info head_set_emitted_via_oneof_refs] value-kind `bgl-entry-item` head-set emitted as a closed `oneOf` — 1 of 1 head(s) resolve to slot-local forms and are emitted inline, the rest as `$ref`s into `#/$defs/form.<plugin>.<head>`
+//   [info local_forms_emitted_inline] positional slot on form `bind-group-layout` declares 1 local form(s) behind a 1-head head-set — emitted as a closed inline union with no global fallback branch; a head outside the set is `not_head_member`
+//   [warn cross_ref_unenforceable] value-kind `bind-group-layout-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
+//   [info cross_ref_annotation_only] value-kind `bind-group-layout-ref` cross-ref annotation surfaces target-form=`bind-group-layout` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
 //   [info rich_members_emitted_with_annotations] value-kind `filter-mode` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
 //   [info rich_members_emitted_with_annotations] value-kind `address-mode` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
-//   [info numeric_bounds_emitted_via_min_max] value-kind `lod-clamp` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=false); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
+//   [info union_emitted_via_anyof] value-kind `lod-clamp` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info numeric_bounds_emitted_via_min_max] value-kind `lod-clamp-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=false); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
+//   [info union_emitted_via_anyof] value-kind `anisotropy` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
 //   [info numeric_bounds_emitted_via_min_max] value-kind `anisotropy-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
 //   [info rich_members_emitted_with_annotations] value-kind `compare-function` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
+//   [info union_emitted_via_anyof] value-kind `pipeline-layout-spec` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
 //   [warn cross_ref_unenforceable] value-kind `pipeline-layout-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
 //   [info cross_ref_annotation_only] value-kind `pipeline-layout-ref` cross-ref annotation surfaces target-form=`pipeline-layout` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
 //   [info head_set_emitted_via_oneof_refs] value-kind `pipeline-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
+//   [info head_set_emitted_via_oneof_refs] value-kind `compute-pipeline-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [warn cross_ref_unenforceable] value-kind `module-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
 //   [info cross_ref_annotation_only] value-kind `module-ref` cross-ref annotation surfaces target-form=`shader-module` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
-//   [info head_set_emitted_via_oneof_refs] value-kind `compute-pipeline-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [info head_set_emitted_via_oneof_refs] value-kind `vertex-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [info head_set_emitted_via_oneof_refs] value-kind `fragment-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
+//   [info head_set_emitted_via_oneof_refs] value-kind `compute-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
+//   [info union_emitted_via_anyof] value-kind `override-number` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info rich_members_emitted_with_annotations] value-kind `primitive-topology` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
 //   [info rich_members_emitted_with_annotations] value-kind `cull-mode` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
 //   [info rich_members_emitted_with_annotations] value-kind `front-face` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
-//   [info head_set_emitted_via_oneof_refs] value-kind `primitive-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
+//   [info variants_emitted_via_if_then] discriminated form `primitive` — variants emitted as allOf+if/then; source-order (variant keys must follow the discriminant) is not enforced by JSON Schema
+//   [info union_emitted_via_anyof] value-kind `depth-bias-int` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info numeric_bounds_emitted_via_min_max] value-kind `depth-bias-int-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
+//   [info union_emitted_via_anyof] value-kind `depth-bias` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info union_emitted_via_anyof] value-kind `mask32` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info numeric_bounds_emitted_via_min_max] value-kind `mask32-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
 //   [info head_set_emitted_via_oneof_refs] value-kind `depth-stencil-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [info rich_members_emitted_with_annotations] value-kind `stencil-operation` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
-//   [info rich_members_emitted_with_annotations] value-kind `primitive-topology` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
-//   [info head_set_emitted_via_oneof_refs] value-kind `buffers-item` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [info rich_members_emitted_with_annotations] value-kind `step-mode` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
 //   [info head_set_emitted_via_oneof_refs] value-kind `attribute-item` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [info rich_members_emitted_with_annotations] value-kind `vertex-format` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
-//   [info head_set_emitted_via_oneof_refs] value-kind `targets-item` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [info rich_members_emitted_with_annotations] value-kind `color-target-format` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
 //   [info union_emitted_via_anyof] value-kind `write-mask` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
 //   [info numeric_bounds_emitted_via_min_max] value-kind `write-mask-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
@@ -99,6 +125,8 @@
 //   [info head_set_emitted_via_oneof_refs] value-kind `blend-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [info rich_members_emitted_with_annotations] value-kind `blend-factor` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
 //   [info rich_members_emitted_with_annotations] value-kind `blend-operation` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
+//   [warn cross_ref_unenforceable] value-kind `render-pipeline-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
+//   [info cross_ref_annotation_only] value-kind `render-pipeline-ref` cross-ref annotation surfaces target-form=`render-pipeline` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
 //   [warn cross_ref_unenforceable] value-kind `bind-group-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
 //   [info cross_ref_annotation_only] value-kind `bind-group-ref` cross-ref annotation surfaces target-form=`bind-group` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
 //   [info union_emitted_via_anyof] value-kind `viewport-rect` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
@@ -107,17 +135,22 @@
 //   [info head_set_emitted_via_oneof_refs] value-kind `render-pass-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [info rich_members_emitted_with_annotations] value-kind `load-op` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
 //   [info rich_members_emitted_with_annotations] value-kind `store-op` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
-//   [info numeric_bounds_emitted_via_min_max] value-kind `unorm` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=false); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
+//   [info union_emitted_via_anyof] value-kind `unorm` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info numeric_bounds_emitted_via_min_max] value-kind `unorm-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=false); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
+//   [info union_emitted_via_anyof] value-kind `count` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info numeric_bounds_emitted_via_min_max] value-kind `count-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
 //   [info head_set_emitted_via_oneof_refs] value-kind `occlusion-draw-item` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
+//   [warn cross_ref_unenforceable] value-kind `compute-pipeline-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
+//   [info cross_ref_annotation_only] value-kind `compute-pipeline-ref` cross-ref annotation surfaces target-form=`compute-pipeline` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
+//   [info head_set_emitted_via_oneof_refs] value-kind `compute-pass-command` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
+//   [info head_set_emitted_via_oneof_refs] value-kind `render-bundle-command` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [warn cross_ref_unenforceable] value-kind `compute-pass-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
 //   [info cross_ref_annotation_only] value-kind `compute-pass-ref` cross-ref annotation surfaces target-form=`compute-pass` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
 //   [warn cross_ref_unenforceable] value-kind `queue-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
 //   [info cross_ref_annotation_only] value-kind `queue-ref` cross-ref annotation surfaces target-form=`queue` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
-//   [info union_emitted_via_anyof] value-kind `frame-step` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
-//   [warn cross_ref_unenforceable] value-kind `render-pass-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
-//   [info cross_ref_annotation_only] value-kind `render-pass-ref` cross-ref annotation surfaces target-form=`render-pass` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
+//   [warn cross_ref_unenforceable] value-kind `frame-step` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
+//   [info cross_ref_annotation_only] value-kind `frame-step` cross-ref annotation surfaces target-form=`render-pass | compute-pass | queue` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
 //   [info head_set_emitted_via_oneof_refs] value-kind `pass-item` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
-//   [info head_set_emitted_via_oneof_refs] value-kind `timestamp-writes-item` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 
 export type Keyword<S extends string = string> = { readonly $kw: S };
 export type Symbol_<S extends string = string> = { readonly $sym: S };
@@ -134,251 +167,110 @@ export type F16 = number & { readonly __sjonRepr?: "f16" };
 
 // ----- plugin: pngine -----
 
-/** Named numeric constant collected into the emitter's expr env. */
+/** Named numeric constant, usable in every numeric slot and vector element as a bare name or inside a bounded expression. */
 export interface Pngine_Define {
   $form: "define";
   $ns: "pngine";
-  /** Constant name, referenced from numeric expression slots and count slots. */
+  /** Constant name, referenced from numeric slots, vector elements and expressions. */
   name: Symbol_;
-  /**
-   * Non-negative integer value.
-   * @minimum 0
-   * @sjon-integer true
-   */
-  value: U32;
+  /** The constant's value: a real (negative and fractional allowed), a bounded expression, or another constant's name — the slot that reads the constant decides integrality and range. */
+  value: number | CrossRef<"define">;
 }
 
 /** Authored WebGPU device requiredLimits (optional singleton). */
 export interface Pngine_Limits {
   $form: "limits";
   $ns: "pngine";
-  /**
-   * Max simultaneous bind groups (default 4).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-bind-groups"?: U32;
-  /**
-   * Max bind groups + vertex buffers combined (default 24).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-bind-groups-plus-vertex-buffers"?: U32;
-  /**
-   * Max bindings in a single bind group (default 1000).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-bindings-per-bind-group"?: U32;
-  /**
-   * Max size of a buffer in bytes (default 268435456).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-buffer-size"?: U32;
-  /**
-   * Max total bytes per sample across color attachments (default 32).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-color-attachment-bytes-per-sample"?: U32;
-  /**
-   * Max color attachments in a render pass (default 8).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-color-attachments"?: U32;
-  /**
-   * Max x*y*z of a compute @workgroup_size (default 256).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-compute-invocations-per-workgroup"?: U32;
-  /**
-   * Max X of a compute @workgroup_size (default 256).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-compute-workgroup-size-x"?: U32;
-  /**
-   * Max Y of a compute @workgroup_size (default 256).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-compute-workgroup-size-y"?: U32;
-  /**
-   * Max Z of a compute @workgroup_size (default 64).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-compute-workgroup-size-z"?: U32;
-  /**
-   * Max var<workgroup> storage in bytes (default 16384).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-compute-workgroup-storage-size"?: U32;
-  /**
-   * Max dispatchWorkgroups count per dimension (default 65535).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-compute-workgroups-per-dimension"?: U32;
-  /**
-   * Max dynamic-offset storage buffers per pipeline layout (default 4).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-dynamic-storage-buffers-per-pipeline-layout"?: U32;
-  /**
-   * Max dynamic-offset uniform buffers per pipeline layout (default 8).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-dynamic-uniform-buffers-per-pipeline-layout"?: U32;
-  /**
-   * Max inter-stage shader variables (default 16).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-inter-stage-shader-variables"?: U32;
-  /**
-   * Max sampled textures per shader stage (default 16).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-sampled-textures-per-shader-stage"?: U32;
-  /**
-   * Max samplers per shader stage (default 16).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-samplers-per-shader-stage"?: U32;
-  /**
-   * Max bound range of a storage buffer in bytes (default 134217728).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-storage-buffer-binding-size"?: U32;
-  /**
-   * Max storage buffers in the fragment stage (compat split-stage limit; default 8).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-storage-buffers-in-fragment-stage"?: U32;
-  /**
-   * Max storage buffers in the vertex stage (compat split-stage limit; default 8).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-storage-buffers-in-vertex-stage"?: U32;
-  /**
-   * Max storage buffers per shader stage (default 8).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-storage-buffers-per-shader-stage"?: U32;
-  /**
-   * Max storage textures in the fragment stage (compat split-stage limit; default 4).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-storage-textures-in-fragment-stage"?: U32;
-  /**
-   * Max storage textures in the vertex stage (compat split-stage limit; default 4).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-storage-textures-in-vertex-stage"?: U32;
-  /**
-   * Max storage textures per shader stage (default 4).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-storage-textures-per-shader-stage"?: U32;
-  /**
-   * Max array layers of a 2D texture (default 256).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-texture-array-layers"?: U32;
-  /**
-   * Max width of a 1D texture (default 8192).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-texture-dimension-1d"?: U32;
-  /**
-   * Max width/height of a 2D texture (default 8192).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-texture-dimension-2d"?: U32;
-  /**
-   * Max width/height/depth of a 3D texture (default 2048).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-texture-dimension-3d"?: U32;
-  /**
-   * Max bound range of a uniform buffer in bytes (default 65536).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-uniform-buffer-binding-size"?: U32;
-  /**
-   * Max uniform buffers per shader stage (default 12).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-uniform-buffers-per-shader-stage"?: U32;
-  /**
-   * Max vertex attributes across all buffers (default 16).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-vertex-attributes"?: U32;
-  /**
-   * Max stride of a vertex buffer in bytes (default 2048).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-vertex-buffer-array-stride"?: U32;
-  /**
-   * Max vertex buffers in a render pipeline (default 8).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "max-vertex-buffers"?: U32;
-  /**
-   * Required alignment of a dynamic storage buffer offset (default 256).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "min-storage-buffer-offset-alignment"?: U32;
-  /**
-   * Required alignment of a dynamic uniform buffer offset (default 256).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "min-uniform-buffer-offset-alignment"?: U32;
+  /** Max simultaneous bind groups (default 4). */
+  "max-bind-groups"?: U32 | CrossRef<"define">;
+  /** Max bind groups + vertex buffers combined (default 24). */
+  "max-bind-groups-plus-vertex-buffers"?: U32 | CrossRef<"define">;
+  /** Max bindings in a single bind group (default 1000). */
+  "max-bindings-per-bind-group"?: U32 | CrossRef<"define">;
+  /** Max size of a buffer in bytes (default 268435456). */
+  "max-buffer-size"?: U32 | CrossRef<"define">;
+  /** Max total bytes per sample across color attachments (default 32). */
+  "max-color-attachment-bytes-per-sample"?: U32 | CrossRef<"define">;
+  /** Max color attachments in a render pass (default 8). */
+  "max-color-attachments"?: U32 | CrossRef<"define">;
+  /** Max x*y*z of a compute @workgroup_size (default 256). */
+  "max-compute-invocations-per-workgroup"?: U32 | CrossRef<"define">;
+  /** Max X of a compute @workgroup_size (default 256). */
+  "max-compute-workgroup-size-x"?: U32 | CrossRef<"define">;
+  /** Max Y of a compute @workgroup_size (default 256). */
+  "max-compute-workgroup-size-y"?: U32 | CrossRef<"define">;
+  /** Max Z of a compute @workgroup_size (default 64). */
+  "max-compute-workgroup-size-z"?: U32 | CrossRef<"define">;
+  /** Max var<workgroup> storage in bytes (default 16384). */
+  "max-compute-workgroup-storage-size"?: U32 | CrossRef<"define">;
+  /** Max dispatchWorkgroups count per dimension (default 65535). */
+  "max-compute-workgroups-per-dimension"?: U32 | CrossRef<"define">;
+  /** Max dynamic-offset storage buffers per pipeline layout (default 4). */
+  "max-dynamic-storage-buffers-per-pipeline-layout"?: U32 | CrossRef<"define">;
+  /** Max dynamic-offset uniform buffers per pipeline layout (default 8). */
+  "max-dynamic-uniform-buffers-per-pipeline-layout"?: U32 | CrossRef<"define">;
+  /** Max size in bytes of a pipeline's immediate-data range; must be a multiple of 4 (default 64). */
+  "max-immediate-size"?: U32 | CrossRef<"define">;
+  /** Max inter-stage shader variables (default 16). */
+  "max-inter-stage-shader-variables"?: U32 | CrossRef<"define">;
+  /** Max sampled textures per shader stage (default 16). */
+  "max-sampled-textures-per-shader-stage"?: U32 | CrossRef<"define">;
+  /** Max samplers per shader stage (default 16). */
+  "max-samplers-per-shader-stage"?: U32 | CrossRef<"define">;
+  /** Max bound range of a storage buffer in bytes (default 134217728). */
+  "max-storage-buffer-binding-size"?: U32 | CrossRef<"define">;
+  /** Max storage buffers in the fragment stage (compat split-stage limit; default 8). */
+  "max-storage-buffers-in-fragment-stage"?: U32 | CrossRef<"define">;
+  /** Max storage buffers in the vertex stage (compat split-stage limit; default 8). */
+  "max-storage-buffers-in-vertex-stage"?: U32 | CrossRef<"define">;
+  /** Max storage buffers per shader stage (default 8). */
+  "max-storage-buffers-per-shader-stage"?: U32 | CrossRef<"define">;
+  /** Max storage textures in the fragment stage (compat split-stage limit; default 4). */
+  "max-storage-textures-in-fragment-stage"?: U32 | CrossRef<"define">;
+  /** Max storage textures in the vertex stage (compat split-stage limit; default 4). */
+  "max-storage-textures-in-vertex-stage"?: U32 | CrossRef<"define">;
+  /** Max storage textures per shader stage (default 4). */
+  "max-storage-textures-per-shader-stage"?: U32 | CrossRef<"define">;
+  /** Max array layers of a 2D texture (default 256). */
+  "max-texture-array-layers"?: U32 | CrossRef<"define">;
+  /** Max width of a 1D texture (default 8192). */
+  "max-texture-dimension-1d"?: U32 | CrossRef<"define">;
+  /** Max width/height of a 2D texture (default 8192). */
+  "max-texture-dimension-2d"?: U32 | CrossRef<"define">;
+  /** Max width/height/depth of a 3D texture (default 2048). */
+  "max-texture-dimension-3d"?: U32 | CrossRef<"define">;
+  /** Max bound range of a uniform buffer in bytes (default 65536). */
+  "max-uniform-buffer-binding-size"?: U32 | CrossRef<"define">;
+  /** Max uniform buffers per shader stage (default 12). */
+  "max-uniform-buffers-per-shader-stage"?: U32 | CrossRef<"define">;
+  /** Max vertex attributes across all buffers (default 16). */
+  "max-vertex-attributes"?: U32 | CrossRef<"define">;
+  /** Max stride of a vertex buffer in bytes (default 2048). */
+  "max-vertex-buffer-array-stride"?: U32 | CrossRef<"define">;
+  /** Max vertex buffers in a render pipeline (default 8). */
+  "max-vertex-buffers"?: U32 | CrossRef<"define">;
+  /** Required alignment of a dynamic storage buffer offset (default 256). */
+  "min-storage-buffer-offset-alignment"?: U32 | CrossRef<"define">;
+  /** Required alignment of a dynamic uniform buffer offset (default 256). */
+  "min-uniform-buffer-offset-alignment"?: U32 | CrossRef<"define">;
 }
 
 /** Canvas presentation configuration (optional singleton). Carried as a
                   header flag, consumed by the JS runtime at context.configure() before
-                  the executor runs. Form absent → premultiplied (the historical
-                  behavior; the WebGPU spec default is opaque — a pinned deviation).
+                  the executor runs. Form absent → opaque, as
+                  GPUCanvasConfiguration.alphaMode. Write (canvas :alpha-mode
+                  premultiplied) for a canvas the page shows through.
                   Native --frame renders offscreen and ignores it. viewFormats/
-                  colorSpace/toneMapping are deferred: anything list-shaped needs a
-                  chained header table, the 3 reserved header bytes being consumed
-                  by the device-limits offset (docs/plans/spec/04). */
+                  colorSpace/toneMapping are not modelled: anything list-shaped
+                  needs a chained header table, and the 3 reserved header bytes
+                  are consumed by the device-limits offset. */
 export interface Pngine_Canvas {
   $form: "canvas";
   $ns: "pngine";
   /**
-   * GPUCanvasConfiguration.alphaMode — opaque or premultiplied (PNGine default: premultiplied; the spec default is opaque).
+   * GPUCanvasConfiguration.alphaMode — opaque (the default) or premultiplied, which lets the page behind the canvas show through wherever the rendered alpha is below 1.
    * @member opaque: Alpha is ignored; the canvas composites as opaque (the WebGPU spec default; cheaper, no fringe on colored pages).
-   * @member premultiplied: Color values are premultiplied by alpha and blend with the page (PNGine's default when the form is absent).
+   * @member premultiplied: Color values are premultiplied by alpha and blend with the page, so a transparent clear lets the page show through. Never a default: an absent (canvas …) form is opaque, as the IDL says.
    */
   "alpha-mode"?: Symbol_<"opaque"> | Symbol_<"premultiplied">;
 }
@@ -387,16 +279,20 @@ export interface Pngine_Canvas {
 export interface Pngine_ShaderModule {
   $form: "shader-module";
   $ns: "pngine";
-  /** WGSL source text. Triple-quoted strings dedent by common minimum indentation. */
+  /** WGSL source text, kept verbatim (a triple-quoted string's indentation is part of the shader). */
   code: string;
-  /** Module name referenced by pipeline (module …) stages. */
+  /** Module name referenced by a pipeline stage's :module key. */
   name: Symbol_;
 }
 
-/** Binary data: an inline float32 array, a positional shape sub-form
-                 (cube/teapot/…) the emitter expands to vertex bytes, or a `:blob`
+/**
+ * Binary data: an inline float32 array, a positional shape sub-form
+                 (cube/teapot/…) the emitter expands to vertex bytes, or a `:file`
                  image file the emitter reads from disk and embeds as
-                 [mime_len][mime][bytes] (consumed by an image-bitmap). */
+                 [mime_len][mime][bytes] (consumed by an image-bitmap).
+ *
+ * @sjon-exclusive-group at-most-one [float32, file]
+ */
 export interface Pngine_Data {
   $form: "data";
   $ns: "pngine";
@@ -404,25 +300,26 @@ export interface Pngine_Data {
    * Image file path (relative to the source file) embedded as [mime_len][mime][bytes]; decoded at runtime via createImageBitmap.
    * @format path
    */
-  blob?: string;
+  file?: string;
   /** Inline float32 array embedded little-endian in the payload. */
-  float32?: Array<number>;
-  /** MIME type stored with the :blob bytes (e.g. image/png). */
+  float32?: Array<number | CrossRef<"define">>;
+  /** MIME type stored with the :file bytes (e.g. image/png); default application/octet-stream. Ignored when there is no :file. */
   mime?: string;
-  /** Data name referenced by buffer :size / :mapped-at-creation / :index-of and image-bitmap :image. */
+  /** Data name referenced by buffer :data / :index-of and image-bitmap :data. */
   name: Symbol_;
+  /** Positional counts (not expressible in TS): cube: 0..1; plane: 0..1; sphere: 0..1; torus: 0..1; truncated-cone: 0..1; cylinder: 0..1; teapot: 0..1; dragon: 0..1; wasm-data: 0..1; any of the set: 0..1 */
   $children?: Array<{ readonly $form: "cube" } | { readonly $form: "plane" } | { readonly $form: "sphere" } | { readonly $form: "torus" } | { readonly $form: "truncated-cone" } | { readonly $form: "cylinder" } | { readonly $form: "teapot" } | { readonly $form: "dragon" } | { readonly $form: "wasm-data" }>;
 }
 
-/** A decoded image created from a (data … :blob …) entry. Copied into a texture via a (copy-external-image-to-texture …) queue action. */
+/** A decoded image created from a (data … :file …) entry. Copied into a texture via a (copy-external-image-to-texture …) queue action. */
 export interface Pngine_ImageBitmap {
   $form: "image-bitmap";
   $ns: "pngine";
   /**
-   * The (data … :blob …) entry holding the encoded image bytes.
+   * The (data … :file …) entry holding the encoded image bytes.
    * @sjon-cross-ref target=`data` name-key=`name` acyclic=false
    */
-  image: CrossRef<"data">;
+  data: CrossRef<"data">;
   name: Symbol_;
 }
 
@@ -494,36 +391,30 @@ export interface Pngine_Dragon {
 export interface Pngine_WasmData {
   $form: "wasm-data";
   $ns: "pngine";
+  /**
+   * WASM file path relative to the source file.
+   * @format path
+   */
+  file: string;
   /** Exported function called once to produce the bytes. */
   func: Symbol_;
   /** Return type → byte count (e.g. array<f32,360> → 1440). */
   returns: string;
-  /**
-   * WASM file path relative to the source file (the legacy module={url=…} is flattened).
-   * @format path
-   */
-  url: string;
 }
 
-/** GPU texture. `:size canvas` tracks canvas size; `:size-from <image-bitmap>`
-                  sizes from a decoded image; else width/height. `pool` creates N
-                  sequential ping-pong ids. */
+/** GPU texture. `:size` is an [w h d] extent, `canvas` to track the
+                  canvas size at runtime, or an (image-bitmap …) to take the decoded
+                  image's size. `pool` creates N sequential ping-pong ids. */
 export interface Pngine_Texture {
   $form: "texture";
   $ns: "pngine";
   /**
-   * GPUExtent3D depthOrArrayLayers: slice count of a 3d texture or layer count of a 2d array (default 1).
-   * @minimum 1
-   * @sjon-integer true
+   * Texture dimensionality: 1d, 2d (default), or 3d. A 3d texture needs a third :size element; sampling 1d/3d/array textures needs a matching texture view.
+   * @member 1d: One-dimensional texture.
+   * @member 2d: Two-dimensional texture (the default); with a third :size element > 1 it is a 2d array.
+   * @member 3d: Three-dimensional (volume) texture; the third :size element is its slice count.
    */
-  "depth-or-array-layers"?: U32;
-  /**
-   * Texture dimensionality: 1 (1d), 2 (2d, default), or 3 (3d). 3d needs :depth-or-array-layers; sampling 1d/3d/array textures needs a matching texture view.
-   * @minimum 1
-   * @maximum 3
-   * @sjon-integer true
-   */
-  dimension?: U32;
+  dimension?: readonly [1, "d"] | readonly [2, "d"] | readonly [3, "d"];
   /**
    * Texel format of the texture.
    * @member rgba8unorm: 4×8-bit unorm; renderable, filterable, blendable.
@@ -578,50 +469,17 @@ export interface Pngine_Texture {
    * @member preferred-canvas-format: Resolved at runtime to the platform's canvas format.
    */
   format: Symbol_<"rgba8unorm"> | Symbol_<"rgba8snorm"> | Symbol_<"bgra8unorm"> | Symbol_<"rgba16float"> | Symbol_<"rgba32float"> | Symbol_<"depth24plus"> | Symbol_<"depth24plus-stencil8"> | Symbol_<"depth32float"> | Symbol_<"stencil8"> | Symbol_<"depth16unorm"> | Symbol_<"r8unorm"> | Symbol_<"rg8unorm"> | Symbol_<"r16float"> | Symbol_<"rg16float"> | Symbol_<"r32float"> | Symbol_<"r32uint"> | Symbol_<"rgba8unorm-srgb"> | Symbol_<"rgba8uint"> | Symbol_<"rgba8sint"> | Symbol_<"r8snorm"> | Symbol_<"r8uint"> | Symbol_<"r8sint"> | Symbol_<"rg8snorm"> | Symbol_<"rg8uint"> | Symbol_<"rg8sint"> | Symbol_<"r16uint"> | Symbol_<"r16sint"> | Symbol_<"rg16uint"> | Symbol_<"rg16sint"> | Symbol_<"r32sint"> | Symbol_<"rg32uint"> | Symbol_<"rg32sint"> | Symbol_<"rg32float"> | Symbol_<"rgba16uint"> | Symbol_<"rgba16sint"> | Symbol_<"rgba32uint"> | Symbol_<"rgba32sint"> | Symbol_<"rgb10a2unorm"> | Symbol_<"rgb10a2uint"> | Symbol_<"rg11b10ufloat"> | Symbol_<"rgb9e5ufloat"> | Symbol_<"bgra8unorm-srgb"> | Symbol_<"r16unorm"> | Symbol_<"r16snorm"> | Symbol_<"rg16unorm"> | Symbol_<"rg16snorm"> | Symbol_<"rgba16unorm"> | Symbol_<"rgba16snorm"> | Symbol_<"depth32float-stencil8"> | Symbol_<"preferred-canvas-format">;
-  /**
-   * Texel height (when not sized by :size canvas or :size-from).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  height?: U32;
-  /**
-   * GPUTextureDescriptor.mipLevelCount — number of mip levels to allocate (default 1). Levels beyond what's written stay uninitialized until generated.
-   * @minimum 1
-   * @sjon-integer true
-   */
-  "mip-level-count"?: U32;
+  /** GPUTextureDescriptor.mipLevelCount — number of mip levels to allocate (default 1). Levels beyond what's written stay uninitialized until generated. */
+  "mip-level-count"?: U32 | CrossRef<"define">;
   name: Symbol_;
-  /**
-   * Create N sequential texture ids for ping-pong (actual id = base + (frame + offset) % N).
-   * @minimum 1
-   * @maximum 255
-   * @sjon-integer true
-   */
-  pool?: U32;
-  /**
-   * Samples per texel: 1 (default) or 4 (MSAA). >1 requires render-attachment usage and a resolve-target on the pass.
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "sample-count"?: U32;
-  /**
-   * canvas: track the canvas size at runtime (mutually exclusive with :width/:height).
-   * @member canvas: Track the canvas size at runtime (resizes with it).
-   */
-  size?: Symbol_<"canvas">;
-  /**
-   * Take width/height from a decoded (image-bitmap …) at runtime (mutually exclusive with :size).
-   * @sjon-cross-ref target=`image-bitmap` name-key=`name` acyclic=false
-   */
-  "size-from"?: CrossRef<"image-bitmap">;
+  /** Create N sequential texture ids for ping-pong (actual id = base + (frame + offset) % N). */
+  pool?: U32 | CrossRef<"define">;
+  /** Samples per texel: 1 (default) or 4 (MSAA). >1 requires render-attachment usage and a resolve-target on the pass. */
+  "sample-count"?: U32 | CrossRef<"define">;
+  /** Texel size: [w], [w h] or [w h d]; canvas to track the canvas; or an (image-bitmap …) to size from a decoded image. */
+  size: Array<U32 | CrossRef<"define">> | Symbol_<"canvas"> | CrossRef<"image-bitmap">;
   /** Allowed texture usages (at least one). */
   usage: Array<Symbol_<"copy-src"> | Symbol_<"copy-dst"> | Symbol_<"texture-binding"> | Symbol_<"storage-binding"> | Symbol_<"render-attachment">>;
-  /**
-   * Texel width (when not sized by :size canvas or :size-from).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  width?: U32;
 }
 
 /** Explicit GPUTextureView over a (texture …). Required to SAMPLE a 1d/3d/array/cube
@@ -630,12 +488,8 @@ export interface Pngine_Texture {
 export interface Pngine_TextureView {
   $form: "texture-view";
   $ns: "pngine";
-  /**
-   * Number of array layers the view exposes (default: all layers from base-array-layer).
-   * @minimum 1
-   * @sjon-integer true
-   */
-  "array-layer-count"?: U32;
+  /** Number of array layers the view exposes (default: all layers from base-array-layer). */
+  "array-layer-count"?: U32 | CrossRef<"define">;
   /**
    * Which aspect(s) of a depth/stencil texture the view exposes (default all).
    * @member all: All available aspects (color, or depth+stencil).
@@ -643,18 +497,20 @@ export interface Pngine_TextureView {
    * @member depth-only: Only the depth aspect of a depth-stencil texture.
    */
   aspect?: Symbol_<"all"> | Symbol_<"stencil-only"> | Symbol_<"depth-only">;
+  /** First array layer the view exposes (default 0). */
+  "base-array-layer"?: U32 | CrossRef<"define">;
+  /** First mip level the view exposes (default 0). */
+  "base-mip-level"?: U32 | CrossRef<"define">;
   /**
-   * First array layer the view exposes (default 0).
-   * @minimum 0
-   * @sjon-integer true
+   * How the view is addressed (GPUTextureViewDescriptor.dimension): 1d, 2d, 2d-array, cube, cube-array or 3d. Must match the WGSL binding (texture_2d_array, texture_3d, …). Default: inferred from the texture.
+   * @member 1d: One-dimensional view (texture_1d).
+   * @member 2d: Two-dimensional view (texture_2d) — the default.
+   * @member 2d-array: Array of 2d layers (texture_2d_array).
+   * @member cube: Cube map — six 2d layers (texture_cube).
+   * @member cube-array: Array of cube maps — 6·N layers (texture_cube_array).
+   * @member 3d: Volume view (texture_3d).
    */
-  "base-array-layer"?: U32;
-  /**
-   * First mip level the view exposes (default 0).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "base-mip-level"?: U32;
+  dimension?: readonly [1, "d"] | readonly [2, "d"] | readonly [2, "d-array"] | Symbol_<"cube"> | Symbol_<"cube-array"> | readonly [3, "d"];
   /**
    * Reinterpret the texel format (e.g. an -srgb view of a linear texture); default is the texture's own format.
    * @member rgba8unorm: 4×8-bit unorm; renderable, filterable, blendable.
@@ -709,25 +565,14 @@ export interface Pngine_TextureView {
    * @member preferred-canvas-format: Resolved at runtime to the platform's canvas format.
    */
   format?: Symbol_<"rgba8unorm"> | Symbol_<"rgba8snorm"> | Symbol_<"bgra8unorm"> | Symbol_<"rgba16float"> | Symbol_<"rgba32float"> | Symbol_<"depth24plus"> | Symbol_<"depth24plus-stencil8"> | Symbol_<"depth32float"> | Symbol_<"stencil8"> | Symbol_<"depth16unorm"> | Symbol_<"r8unorm"> | Symbol_<"rg8unorm"> | Symbol_<"r16float"> | Symbol_<"rg16float"> | Symbol_<"r32float"> | Symbol_<"r32uint"> | Symbol_<"rgba8unorm-srgb"> | Symbol_<"rgba8uint"> | Symbol_<"rgba8sint"> | Symbol_<"r8snorm"> | Symbol_<"r8uint"> | Symbol_<"r8sint"> | Symbol_<"rg8snorm"> | Symbol_<"rg8uint"> | Symbol_<"rg8sint"> | Symbol_<"r16uint"> | Symbol_<"r16sint"> | Symbol_<"rg16uint"> | Symbol_<"rg16sint"> | Symbol_<"r32sint"> | Symbol_<"rg32uint"> | Symbol_<"rg32sint"> | Symbol_<"rg32float"> | Symbol_<"rgba16uint"> | Symbol_<"rgba16sint"> | Symbol_<"rgba32uint"> | Symbol_<"rgba32sint"> | Symbol_<"rgb10a2unorm"> | Symbol_<"rgb10a2uint"> | Symbol_<"rg11b10ufloat"> | Symbol_<"rgb9e5ufloat"> | Symbol_<"bgra8unorm-srgb"> | Symbol_<"r16unorm"> | Symbol_<"r16snorm"> | Symbol_<"rg16unorm"> | Symbol_<"rg16snorm"> | Symbol_<"rgba16unorm"> | Symbol_<"rgba16snorm"> | Symbol_<"depth32float-stencil8"> | Symbol_<"preferred-canvas-format">;
-  /**
-   * Number of mip levels the view exposes (default: all levels from base-mip-level).
-   * @minimum 1
-   * @sjon-integer true
-   */
-  "mip-level-count"?: U32;
+  /** Number of mip levels the view exposes (default: all levels from base-mip-level). */
+  "mip-level-count"?: U32 | CrossRef<"define">;
   name: Symbol_;
   /**
    * Source texture this view aliases.
    * @sjon-cross-ref target=`texture` name-key=`name` acyclic=false
    */
   texture: CrossRef<"texture">;
-  /**
-   * How the view is addressed: 0=1d 1=2d 2=2d-array 3=cube 4=cube-array 5=3d. Must match the WGSL binding (texture_2d_array, texture_3d, …). Default: inferred from the texture.
-   * @minimum 0
-   * @maximum 5
-   * @sjon-integer true
-   */
-  "view-dimension"?: U32;
 }
 
 /** GPU buffer. `pool` creates N sequential ping-pong ids.
@@ -738,46 +583,41 @@ export interface Pngine_Buffer {
   $form: "buffer";
   $ns: "pngine";
   /**
+   * (data …) whose bytes fill the buffer at creation via mappedAtCreation, and size it when :size is absent.
+   * @sjon-cross-ref target=`data` name-key=`name` acyclic=false
+   */
+  data?: CrossRef<"data">;
+  /**
+   * WASM file path (relative to the source file); its l/s/gen exports supply size + initial bytes — size comes from the WASM, not :size. Synthesized by pngine/pass-v1 for `(pass … :file …)` buffers.
+   * @format path
+   */
+  file?: string;
+  /**
    * Index format (uint16/uint32) when the buffer is bound as a pass's :index-buffer without an :index-of source (e.g. GPU-generated indices).
    * @member uint16: 16-bit indices (primitive-restart value 0xFFFF).
    * @member uint32: 32-bit indices (primitive-restart value 0xFFFFFFFF).
    */
   "index-format"?: Symbol_<"uint16"> | Symbol_<"uint32">;
   /**
-   * Source size, initial bytes, and index-format (uint16/uint32) from an indexed shape's (teapot/dragon) index companion.
+   * Source size, initial bytes, and index-format (uint16/uint32) from an indexed shape's (teapot/dragon) index companion. Beside :data it wins: the index data sizes and fills the buffer, and :data is only length-checked, never written.
    * @sjon-cross-ref target=`data` name-key=`name` acyclic=false
    */
   "index-of"?: CrossRef<"data">;
-  /**
-   * (data …) whose bytes fill the buffer at creation via mappedAtCreation.
-   * @sjon-cross-ref target=`data` name-key=`name` acyclic=false
-   */
-  "mapped-at-creation"?: CrossRef<"data">;
   name: Symbol_;
-  /**
-   * Create N sequential buffer ids for ping-pong (actual id = base + (frame + offset) % N).
-   * @minimum 1
-   * @maximum 255
-   * @sjon-integer true
-   */
-  pool?: U32;
-  /** Size in bytes: an integer, a bounded expression like (* NUM 4 4), or a (data …) ref the buffer is sized from. */
-  size?: U32 | CrossRef<"data">;
-  /** Allowed buffer usages (at least one). */
+  /** Create N sequential buffer ids for ping-pong (actual id = base + (frame + offset) % N). */
+  pool?: U32 | CrossRef<"define">;
+  /** Size in bytes: an integer, a bounded expression like (* NUM 4 4), or a bare (define …) name. Optional only when :data, :index-of or :file supplies the size instead. */
+  size?: U32 | CrossRef<"define">;
+  /** Allowed buffer usages (at least one). A mappable buffer is host memory the GPU may only copy in or out of: map-read pairs with copy-dst, map-write with copy-src, and neither combines with anything else. */
   usage: Array<Symbol_<"vertex"> | Symbol_<"index"> | Symbol_<"uniform"> | Symbol_<"storage"> | Symbol_<"copy-dst"> | Symbol_<"copy-src"> | Symbol_<"indirect"> | Symbol_<"query-resolve"> | Symbol_<"map-read"> | Symbol_<"map-write">>;
-  /**
-   * WASM file path (relative to the source file); its l/s/gen exports supply size + initial bytes — size comes from the WASM, not :size. Synthesized by pngine/pass-v1 for `(pass … :data …)` buffers.
-   * @format path
-   */
-  wasm?: string;
 }
 
 /** GPU query set: a pool of :count queries of :type. A render-pass writes it via (timestamp-writes …) or :occlusion-query-set; a (resolve-query-set …) queue op copies results to a buffer. */
 export interface Pngine_QuerySet {
   $form: "query-set";
   $ns: "pngine";
-  /** Number of queries in the set (spec max 4096). */
-  count: U32 | Symbol_;
+  /** Number of queries in the set, 1 to 4096 (the createQuerySet bound). */
+  count: U32 | CrossRef<"define">;
   name: Symbol_;
   /**
    * What each query measures: occlusion or timestamp.
@@ -787,7 +627,8 @@ export interface Pngine_QuerySet {
   type: Symbol_<"occlusion"> | Symbol_<"timestamp">;
 }
 
-/** Queue action (write-buffer / copy-texture-to-texture) inlined into
+/** Queue actions (write-buffer, copy-buffer-to-buffer, copy-texture-to-texture,
+                  copy-external-image-to-texture, resolve-query-set) run in order by the
                   frames that reference it. */
 export interface Pngine_Queue {
   $form: "queue";
@@ -796,11 +637,7 @@ export interface Pngine_Queue {
   $children?: Array<{ readonly $form: "write-buffer" } | { readonly $form: "copy-texture-to-texture" } | { readonly $form: "copy-external-image-to-texture" } | { readonly $form: "resolve-query-set" } | { readonly $form: "copy-buffer-to-buffer" }>;
 }
 
-/**
- * Queue op: write bytes into a buffer before/within a frame (GPUQueue.writeBuffer).
- *
- * @sjon-exclusive-group exactly-one [data, data-from-wasm]
- */
+/** Queue op: write bytes into a buffer before/within a frame (GPUQueue.writeBuffer). */
 export interface Pngine_WriteBuffer {
   $form: "write-buffer";
   $ns: "pngine";
@@ -809,53 +646,26 @@ export interface Pngine_WriteBuffer {
    * @sjon-cross-ref target=`buffer` name-key=`name` acyclic=false
    */
   buffer: CrossRef<"buffer">;
-  /** Source: a (data …) ref, or a runtime builtin — pngine-inputs (16B time/width/height/aspect), scene-time-inputs (12B), pointer-inputs (48B). */
-  data?: Symbol_<"pngine-inputs"> | Symbol_<"scene-time-inputs"> | Symbol_<"pointer-inputs"> | CrossRef<"data">;
-  /**
-   * Write a (wasm-call …) result into the buffer at frame time. Mutually exclusive with :data.
-   * @sjon-cross-ref target=`wasm-call` name-key=`name` acyclic=false
-   */
-  "data-from-wasm"?: CrossRef<"wasm-call">;
-  /**
-   * Byte offset into the destination (WebGPU requires a multiple of 4).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  offset?: U32;
+  /** Source: a (data …) ref, a (wasm-call …) whose result is written each frame, or a runtime builtin — pngine-inputs (16B time/width/height/aspect), scene-time-inputs (12B), pointer-inputs (48B). */
+  data: Symbol_<"pngine-inputs"> | Symbol_<"scene-time-inputs"> | Symbol_<"pointer-inputs"> | CrossRef<"data"> | CrossRef<"wasm-call">;
+  /** Byte offset into the destination (WebGPU requires a multiple of 4). */
+  offset?: U32 | CrossRef<"define">;
 }
 
 /** Queue op: GPU texture→texture copy. context-current-texture names the canvas; otherwise a (texture …) name. */
 export interface Pngine_CopyTextureToTexture {
   $form: "copy-texture-to-texture";
   $ns: "pngine";
-  /** Destination texture: context-current-texture or a (texture …) name. */
-  destination: Symbol_<"context-current-texture"> | CrossRef<"texture">;
-  /** Source texture: context-current-texture or a (texture …) name. */
-  source: Symbol_<"context-current-texture"> | CrossRef<"texture">;
+  /** Positional counts (not expressible in TS): source: 1; destination: 1 */
+  $children?: Array<{ $form: "source"; $ns?: string; texture: Symbol_<"context-current-texture"> | CrossRef<"texture">; } | { $form: "destination"; $ns?: string; texture: Symbol_<"context-current-texture"> | CrossRef<"texture">; }>;
 }
 
 /** Queue op: upload a decoded image (image-bitmap) into a texture. mip-level / origin default to 0 per the WebGPU spec. */
 export interface Pngine_CopyExternalImageToTexture {
   $form: "copy-external-image-to-texture";
   $ns: "pngine";
-  /**
-   * Destination mip level (default 0).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "mip-level"?: U32;
-  /** Destination origin [x y z] in texels (default [0 0 0]; z selects the array layer / depth slice). */
-  origin?: Array<number>;
-  /**
-   * The decoded (image-bitmap …) to upload.
-   * @sjon-cross-ref target=`image-bitmap` name-key=`name` acyclic=false
-   */
-  source: CrossRef<"image-bitmap">;
-  /**
-   * Destination texture (needs copy-dst usage).
-   * @sjon-cross-ref target=`texture` name-key=`name` acyclic=false
-   */
-  texture: CrossRef<"texture">;
+  /** Positional counts (not expressible in TS): source: 1; destination: 1 */
+  $children?: Array<{ $form: "source"; $ns?: string; image: CrossRef<"image-bitmap">; } | { $form: "destination"; $ns?: string; "mip-level"?: U32 | CrossRef<"define">; origin?: Array<U32 | CrossRef<"define">>; texture: CrossRef<"texture">; }>;
 }
 
 /** Queue op: copy resolved query results from a query set into a buffer (GPUCommandEncoder.resolveQuerySet). */
@@ -867,16 +677,12 @@ export interface Pngine_ResolveQuerySet {
    * @sjon-cross-ref target=`buffer` name-key=`name` acyclic=false
    */
   destination: CrossRef<"buffer">;
-  /**
-   * Byte offset into the destination (WebGPU requires a multiple of 256).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "destination-offset"?: U32;
+  /** Byte offset into the destination (WebGPU requires a multiple of 256). */
+  "destination-offset"?: U32 | CrossRef<"define">;
   /** Index of the first query to resolve. */
-  "first-query"?: U32 | Symbol_;
+  "first-query"?: U32 | CrossRef<"define">;
   /** Number of queries to resolve; each resolves to 8 bytes. */
-  "query-count": U32 | Symbol_;
+  "query-count": U32 | CrossRef<"define">;
   /**
    * The query set to resolve.
    * @sjon-cross-ref target=`query-set` name-key=`name` acyclic=false
@@ -893,169 +699,65 @@ export interface Pngine_CopyBufferToBuffer {
    * @sjon-cross-ref target=`buffer` name-key=`name` acyclic=false
    */
   destination: CrossRef<"buffer">;
-  /**
-   * Byte offset into the destination (multiple of 4).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "destination-offset"?: U32;
-  /**
-   * Bytes to copy (multiple of 4).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  size: U32;
+  /** Byte offset into the destination (multiple of 4). */
+  "destination-offset"?: U32 | CrossRef<"define">;
+  /** Bytes to copy (multiple of 4). */
+  size: U32 | CrossRef<"define">;
   /**
    * Source buffer (needs copy-src usage).
    * @sjon-cross-ref target=`buffer` name-key=`name` acyclic=false
    */
   source: CrossRef<"buffer">;
-  /**
-   * Byte offset into the source (multiple of 4).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "source-offset"?: U32;
+  /** Byte offset into the source (multiple of 4). */
+  "source-offset"?: U32 | CrossRef<"define">;
 }
 
-/** A runtime WASM call: load the module at :url, call :func with :args each frame; a (write-buffer :data-from-wasm <name>) writes the result into a buffer. */
+/** A runtime WASM call: load the module at :file, call :func with :args each frame; a (write-buffer :data <name>) writes the result into a buffer. */
 export interface Pngine_WasmCall {
   $form: "wasm-call";
   $ns: "pngine";
   /** Per-frame arguments: numeric literals or runtime builtins. */
-  args?: Array<Symbol_ | number>;
+  args?: Array<Symbol_<"canvas-width"> | Symbol_<"canvas-height"> | Symbol_<"time-total"> | Symbol_<"time-delta"> | number>;
+  /**
+   * WASM file path relative to the source file (modules deduped by path).
+   * @format path
+   */
+  file: string;
   /** Exported function to call at frame time. */
   func: Symbol_;
   name: Symbol_;
   /** Result type → byte count (mat4x4→64, vec4→16, f32→4, …). */
   returns: string;
-  /**
-   * WASM file path relative to the source file (modules deduped by url).
-   * @format path
-   */
-  url: string;
 }
 
-/**
- * Bind group. `pool` + per-entry `ping-pong` drive ping-pong. The
-                  layout is a pipeline's auto-layout (:layout-pipeline) OR an explicit
-                  (bind-group-layout …) (:bind-group-layout); exactly one is required
-                  (schema-enforced via the exclusive-group below).
- *
- * @sjon-exclusive-group exactly-one [layout-pipeline, bind-group-layout]
- */
+/** Bind group. `pool` + per-entry `ping-pong` drive ping-pong. The
+                  layout is a pipeline's auto-layout or an explicit
+                  (bind-group-layout …) — one required :layout key naming either. */
 export interface Pngine_BindGroup {
   $form: "bind-group";
   $ns: "pngine";
+  /** Which @group index of the pipeline's layout this group binds (spec baseline < 4). Ignored when :layout names an explicit (bind-group-layout …). */
+  group?: U32 | CrossRef<"define">;
   /**
-   * An explicit (bind-group-layout …) this group targets instead of a pipeline's auto-layout.
-   * @sjon-cross-ref target=`bind-group-layout` name-key=`name` acyclic=false
+   * The layout this group is built against: a pipeline (its auto-derived layout) or an explicit (bind-group-layout …).
+   * @sjon-cross-ref target=`render-pipeline | compute-pipeline | bind-group-layout` name-key=`name` acyclic=false
    */
-  "bind-group-layout"?: CrossRef<"bind-group-layout">;
-  /**
-   * Which @group index of the pipeline layout this group binds (spec baseline < 4).
-   * @minimum 0
-   * @maximum 255
-   * @sjon-integer true
-   */
-  "layout-index"?: U32;
-  /** The render- or compute-pipeline whose auto-layout this group targets. */
-  "layout-pipeline"?: CrossRef<"render-pipeline"> | CrossRef<"compute-pipeline">;
+  layout: CrossRef<"render-pipeline"> | CrossRef<"compute-pipeline"> | CrossRef<"bind-group-layout">;
   name: Symbol_;
-  /**
-   * Create N sequential bind-group ids for ping-pong selection.
-   * @minimum 1
-   * @maximum 255
-   * @sjon-integer true
-   */
-  pool?: U32;
-  $children?: Array<{ $form: "entry"; $ns?: string; binding: U32; buffer?: CrossRef<"buffer">; offset?: U32; "ping-pong"?: U32; sampler?: CrossRef<"sampler">; size?: U32; texture?: CrossRef<"texture">; "texture-view"?: CrossRef<"texture-view">; } | { readonly $form: string; readonly $ns?: string }>;
+  /** Create N sequential bind-group ids for ping-pong selection. */
+  pool?: U32 | CrossRef<"define">;
+  $children?: Array<{ $form: "entry"; $ns?: string; binding: U32 | CrossRef<"define">; buffer?: CrossRef<"buffer">; offset?: U32 | CrossRef<"define">; "ping-pong"?: U32 | CrossRef<"define">; sampler?: CrossRef<"sampler">; size?: U32 | CrossRef<"define">; texture?: CrossRef<"texture">; "texture-view"?: CrossRef<"texture-view">; }>;
 }
 
-/** Storage-texture layout resource (authored inside (bind-group-layout entry …), not at top level). */
-export interface Pngine_StorageTexture {
-  $form: "storage-texture";
-  $ns: "pngine";
-  /**
-   * Access mode (default write-only).
-   * @member write-only: texture_storage_*<…, write> (default).
-   * @member read-only: texture_storage_*<…, read>.
-   * @member read-write: texture_storage_*<…, read_write>.
-   */
-  access?: Symbol_<"write-only"> | Symbol_<"read-only"> | Symbol_<"read-write">;
-  /**
-   * Texel format of the storage texture.
-   * @member rgba8unorm: 4×8-bit unorm; renderable, filterable, blendable.
-   * @member rgba8snorm: 4×8-bit signed norm in [-1,1]; filterable, not baseline-renderable.
-   * @member bgra8unorm: 4×8-bit unorm, BGRA order; common canvas format.
-   * @member rgba16float: 4×16-bit float; renderable, filterable, blendable.
-   * @member rgba32float: 4×32-bit float; renderable; filterable only with the float32-filterable feature.
-   * @member depth24plus: At least 24-bit depth; depth-comparison only, not filterable.
-   * @member depth24plus-stencil8: At least 24-bit depth plus 8-bit stencil.
-   * @member depth32float: 32-bit float depth.
-   * @member stencil8: 8-bit stencil only; no depth aspect.
-   * @member depth16unorm: 16-bit unorm depth; depth-comparison only, not filterable.
-   * @member r8unorm: 1×8-bit unorm; renderable, filterable.
-   * @member rg8unorm: 2×8-bit unorm; renderable, filterable.
-   * @member r16float: 1×16-bit float; renderable, filterable.
-   * @member rg16float: 2×16-bit float; renderable, filterable.
-   * @member r32float: 1×32-bit float; renderable; filterable only with the float32-filterable feature.
-   * @member r32uint: 1×32-bit unsigned int; not filterable.
-   * @member rgba8unorm-srgb: 4×8-bit unorm, sRGB-encoded; renderable, filterable, blendable.
-   * @member rgba8uint: 4×8-bit unsigned int; renderable, not filterable.
-   * @member rgba8sint: 4×8-bit signed int; renderable, not filterable.
-   * @member r8snorm: 1×8-bit signed norm in [-1,1]; filterable, not baseline-renderable.
-   * @member r8uint: 1×8-bit unsigned int; renderable, not filterable.
-   * @member r8sint: 1×8-bit signed int; renderable, not filterable.
-   * @member rg8snorm: 2×8-bit signed norm; filterable, not baseline-renderable.
-   * @member rg8uint: 2×8-bit unsigned int; renderable, not filterable.
-   * @member rg8sint: 2×8-bit signed int; renderable, not filterable.
-   * @member r16uint: 1×16-bit unsigned int; renderable, not filterable.
-   * @member r16sint: 1×16-bit signed int; renderable, not filterable.
-   * @member rg16uint: 2×16-bit unsigned int; renderable, not filterable.
-   * @member rg16sint: 2×16-bit signed int; renderable, not filterable.
-   * @member r32sint: 1×32-bit signed int; renderable, not filterable.
-   * @member rg32uint: 2×32-bit unsigned int; renderable, not filterable.
-   * @member rg32sint: 2×32-bit signed int; renderable, not filterable.
-   * @member rg32float: 2×32-bit float; renderable; filterable only with the float32-filterable feature.
-   * @member rgba16uint: 4×16-bit unsigned int; renderable, not filterable.
-   * @member rgba16sint: 4×16-bit signed int; renderable, not filterable.
-   * @member rgba32uint: 4×32-bit unsigned int; renderable, not filterable.
-   * @member rgba32sint: 4×32-bit signed int; renderable, not filterable.
-   * @member rgb10a2unorm: Packed 10/10/10/2-bit unorm; renderable, filterable, blendable.
-   * @member rgb10a2uint: Packed 10/10/10/2-bit unsigned int; renderable, not filterable.
-   * @member rg11b10ufloat: Packed 11/11/10-bit unsigned float; filterable; renderable only with the rg11b10ufloat-renderable feature.
-   * @member rgb9e5ufloat: Packed 9/9/9-bit float, shared 5-bit exponent; filterable, not renderable.
-   * @member bgra8unorm-srgb: 4×8-bit unorm, BGRA order, sRGB-encoded; needs core-features-and-limits (present on any core, non-compat device).
-   * @member r16unorm: 1×16-bit unorm; needs texture-formats-tier1. Renderable + blendable when enabled.
-   * @member r16snorm: 1×16-bit signed norm; needs texture-formats-tier1. Renderable + blendable when enabled.
-   * @member rg16unorm: 2×16-bit unorm; needs texture-formats-tier1. Renderable + blendable when enabled.
-   * @member rg16snorm: 2×16-bit signed norm; needs texture-formats-tier1. Renderable + blendable when enabled.
-   * @member rgba16unorm: 4×16-bit unorm; needs texture-formats-tier1. Renderable + blendable when enabled.
-   * @member rgba16snorm: 4×16-bit signed norm; needs texture-formats-tier1. Renderable + blendable when enabled.
-   * @member depth32float-stencil8: 32-bit float depth plus 8-bit stencil; needs the depth32float-stencil8 device feature.
-   * @member preferred-canvas-format: Resolved at runtime to the platform's canvas format.
-   */
-  format?: Symbol_<"rgba8unorm"> | Symbol_<"rgba8snorm"> | Symbol_<"bgra8unorm"> | Symbol_<"rgba16float"> | Symbol_<"rgba32float"> | Symbol_<"depth24plus"> | Symbol_<"depth24plus-stencil8"> | Symbol_<"depth32float"> | Symbol_<"stencil8"> | Symbol_<"depth16unorm"> | Symbol_<"r8unorm"> | Symbol_<"rg8unorm"> | Symbol_<"r16float"> | Symbol_<"rg16float"> | Symbol_<"r32float"> | Symbol_<"r32uint"> | Symbol_<"rgba8unorm-srgb"> | Symbol_<"rgba8uint"> | Symbol_<"rgba8sint"> | Symbol_<"r8snorm"> | Symbol_<"r8uint"> | Symbol_<"r8sint"> | Symbol_<"rg8snorm"> | Symbol_<"rg8uint"> | Symbol_<"rg8sint"> | Symbol_<"r16uint"> | Symbol_<"r16sint"> | Symbol_<"rg16uint"> | Symbol_<"rg16sint"> | Symbol_<"r32sint"> | Symbol_<"rg32uint"> | Symbol_<"rg32sint"> | Symbol_<"rg32float"> | Symbol_<"rgba16uint"> | Symbol_<"rgba16sint"> | Symbol_<"rgba32uint"> | Symbol_<"rgba32sint"> | Symbol_<"rgb10a2unorm"> | Symbol_<"rgb10a2uint"> | Symbol_<"rg11b10ufloat"> | Symbol_<"rgb9e5ufloat"> | Symbol_<"bgra8unorm-srgb"> | Symbol_<"r16unorm"> | Symbol_<"r16snorm"> | Symbol_<"rg16unorm"> | Symbol_<"rg16snorm"> | Symbol_<"rgba16unorm"> | Symbol_<"rgba16snorm"> | Symbol_<"depth32float-stencil8"> | Symbol_<"preferred-canvas-format">;
-  name?: Symbol_;
-  /**
-   * View dimension (default 2d).
-   * @minimum 0
-   * @maximum 5
-   * @sjon-integer true
-   */
-  "view-dimension"?: U32;
-}
-
-/** Explicit binding layout (per-entry visibility + resource type) targeted by a (bind-group … :bind-group-layout …) instead of a pipeline's auto-layout. */
+/** Explicit binding layout (per-entry visibility + resource type) named by a (bind-group … :layout …) instead of a pipeline's auto-layout. */
 export interface Pngine_BindGroupLayout {
   $form: "bind-group-layout";
   $ns: "pngine";
   name: Symbol_;
-  $children?: Array<{ $form: "entry"; $ns?: string; binding: U32; visibility: Array<Symbol_<"vertex"> | Symbol_<"fragment"> | Symbol_<"compute">>; $children?: Array<{ $form: "buffer"; $ns?: string; type: Symbol_<"uniform"> | Symbol_<"storage"> | Symbol_<"read-only-storage">; } | { $form: "sampler"; $ns?: string; type?: Symbol_<"filtering"> | Symbol_<"non-filtering"> | Symbol_<"comparison">; } | { $form: "texture"; $ns?: string; multisampled?: boolean; "sample-type"?: Symbol_<"float"> | Symbol_<"unfilterable-float"> | Symbol_<"depth"> | Symbol_<"sint"> | Symbol_<"uint">; "view-dimension"?: U32; } | { $form: "storage-texture"; $ns?: string; access?: Symbol_<"write-only"> | Symbol_<"read-only"> | Symbol_<"read-write">; format: Symbol_<"rgba8unorm"> | Symbol_<"rgba8snorm"> | Symbol_<"bgra8unorm"> | Symbol_<"rgba16float"> | Symbol_<"rgba32float"> | Symbol_<"depth24plus"> | Symbol_<"depth24plus-stencil8"> | Symbol_<"depth32float"> | Symbol_<"stencil8"> | Symbol_<"depth16unorm"> | Symbol_<"r8unorm"> | Symbol_<"rg8unorm"> | Symbol_<"r16float"> | Symbol_<"rg16float"> | Symbol_<"r32float"> | Symbol_<"r32uint"> | Symbol_<"rgba8unorm-srgb"> | Symbol_<"rgba8uint"> | Symbol_<"rgba8sint"> | Symbol_<"r8snorm"> | Symbol_<"r8uint"> | Symbol_<"r8sint"> | Symbol_<"rg8snorm"> | Symbol_<"rg8uint"> | Symbol_<"rg8sint"> | Symbol_<"r16uint"> | Symbol_<"r16sint"> | Symbol_<"rg16uint"> | Symbol_<"rg16sint"> | Symbol_<"r32sint"> | Symbol_<"rg32uint"> | Symbol_<"rg32sint"> | Symbol_<"rg32float"> | Symbol_<"rgba16uint"> | Symbol_<"rgba16sint"> | Symbol_<"rgba32uint"> | Symbol_<"rgba32sint"> | Symbol_<"rgb10a2unorm"> | Symbol_<"rgb10a2uint"> | Symbol_<"rg11b10ufloat"> | Symbol_<"rgb9e5ufloat"> | Symbol_<"bgra8unorm-srgb"> | Symbol_<"r16unorm"> | Symbol_<"r16snorm"> | Symbol_<"rg16unorm"> | Symbol_<"rg16snorm"> | Symbol_<"rgba16unorm"> | Symbol_<"rgba16snorm"> | Symbol_<"depth32float-stencil8"> | Symbol_<"preferred-canvas-format">; "view-dimension"?: U32; } | { readonly $form: string; readonly $ns?: string }>; } | { readonly $form: string; readonly $ns?: string }>;
+  $children?: Array<{ $form: "entry"; $ns?: string; binding: U32 | CrossRef<"define">; visibility: Array<Symbol_<"vertex"> | Symbol_<"fragment"> | Symbol_<"compute">>; $children?: Array<{ $form: "buffer"; $ns?: string; type?: Symbol_<"uniform"> | Symbol_<"storage"> | Symbol_<"read-only-storage">; } | { $form: "sampler"; $ns?: string; type?: Symbol_<"filtering"> | Symbol_<"non-filtering"> | Symbol_<"comparison">; } | { $form: "texture"; $ns?: string; multisampled?: boolean; "sample-type"?: Symbol_<"float"> | Symbol_<"unfilterable-float"> | Symbol_<"depth"> | Symbol_<"sint"> | Symbol_<"uint">; "view-dimension"?: readonly [1, "d"] | readonly [2, "d"] | readonly [2, "d-array"] | Symbol_<"cube"> | Symbol_<"cube-array"> | readonly [3, "d"]; } | { $form: "storage-texture"; $ns?: string; access?: Symbol_<"write-only"> | Symbol_<"read-only"> | Symbol_<"read-write">; format: Symbol_<"rgba8unorm"> | Symbol_<"rgba8snorm"> | Symbol_<"bgra8unorm"> | Symbol_<"rgba16float"> | Symbol_<"rgba32float"> | Symbol_<"depth24plus"> | Symbol_<"depth24plus-stencil8"> | Symbol_<"depth32float"> | Symbol_<"stencil8"> | Symbol_<"depth16unorm"> | Symbol_<"r8unorm"> | Symbol_<"rg8unorm"> | Symbol_<"r16float"> | Symbol_<"rg16float"> | Symbol_<"r32float"> | Symbol_<"r32uint"> | Symbol_<"rgba8unorm-srgb"> | Symbol_<"rgba8uint"> | Symbol_<"rgba8sint"> | Symbol_<"r8snorm"> | Symbol_<"r8uint"> | Symbol_<"r8sint"> | Symbol_<"rg8snorm"> | Symbol_<"rg8uint"> | Symbol_<"rg8sint"> | Symbol_<"r16uint"> | Symbol_<"r16sint"> | Symbol_<"rg16uint"> | Symbol_<"rg16sint"> | Symbol_<"r32sint"> | Symbol_<"rg32uint"> | Symbol_<"rg32sint"> | Symbol_<"rg32float"> | Symbol_<"rgba16uint"> | Symbol_<"rgba16sint"> | Symbol_<"rgba32uint"> | Symbol_<"rgba32sint"> | Symbol_<"rgb10a2unorm"> | Symbol_<"rgb10a2uint"> | Symbol_<"rg11b10ufloat"> | Symbol_<"rgb9e5ufloat"> | Symbol_<"bgra8unorm-srgb"> | Symbol_<"r16unorm"> | Symbol_<"r16snorm"> | Symbol_<"rg16unorm"> | Symbol_<"rg16snorm"> | Symbol_<"rgba16unorm"> | Symbol_<"rgba16snorm"> | Symbol_<"depth32float-stencil8"> | Symbol_<"preferred-canvas-format">; "view-dimension"?: readonly [1, "d"] | readonly [2, "d"] | readonly [2, "d-array"] | Symbol_<"cube"> | Symbol_<"cube-array"> | readonly [3, "d"]; }>; }>;
 }
 
-/** Explicit pipeline layout: an ordered list of (bind-group-layout …) at @group 0..N. Referenced by (render-pipeline … :pipeline-layout …). */
+/** Explicit pipeline layout: an ordered list of (bind-group-layout …) at @group 0..N. Named by a pipeline's :layout key in place of auto. */
 export interface Pngine_PipelineLayout {
   $form: "pipeline-layout";
   $ns: "pngine";
@@ -1064,12 +766,12 @@ export interface Pngine_PipelineLayout {
   name: Symbol_;
 }
 
-/** GPU sampler. PNGine defaults: filters linear, address-mode clamp-to-edge (WebGPU's own defaults are nearest). */
+/** GPU sampler. Defaults match GPUSamplerDescriptor: filters nearest, address-mode clamp-to-edge. */
 export interface Pngine_Sampler {
   $form: "sampler";
   $ns: "pngine";
   /**
-   * Addressing for texture coordinates outside [0,1], applied to all three axes (PNGine default: clamp-to-edge). Per-axis :address-mode-u/v/w override it.
+   * Addressing for texture coordinates outside [0,1], applied to all three axes. A PNGine shorthand for the IDL's three separate keys, and like them it defaults to clamp-to-edge. Per-axis :address-mode-u/v/w override it.
    * @member clamp-to-edge: Clamp coordinates to the edge texel.
    * @member repeat: Wrap around to the opposite side.
    * @member mirror-repeat: Wrap, mirroring the texture on odd repeats.
@@ -1108,37 +810,26 @@ export interface Pngine_Sampler {
    * @member always: Always passes.
    */
   compare?: Symbol_<"never"> | Symbol_<"less"> | Symbol_<"equal"> | Symbol_<"less-equal"> | Symbol_<"greater"> | Symbol_<"not-equal"> | Symbol_<"greater-equal"> | Symbol_<"always">;
+  /** Maximum mip level of detail the sampler will use (default 32). */
+  "lod-max-clamp"?: F32 | CrossRef<"define">;
+  /** Minimum mip level of detail the sampler will use (default 0). */
+  "lod-min-clamp"?: F32 | CrossRef<"define">;
   /**
-   * Maximum mip level of detail the sampler will use (default 32).
-   * @minimum 0
-   */
-  "lod-max-clamp"?: F32;
-  /**
-   * Minimum mip level of detail the sampler will use (default 0).
-   * @minimum 0
-   */
-  "lod-min-clamp"?: F32;
-  /**
-   * Magnification filter — sampling when one texel covers many pixels. PNGine default: linear (the WebGPU spec default is nearest).
+   * Magnification filter — sampling when one texel covers many pixels. Default nearest, as GPUSamplerDescriptor.magFilter; write :mag-filter linear for smoothing.
    * @member nearest: Sample the texel nearest to the coordinates.
    * @member linear: Linearly interpolate between neighboring texels.
    */
   "mag-filter"?: Symbol_<"nearest"> | Symbol_<"linear">;
+  /** Maximum anisotropy for filtering; values > 1 require linear mag/min/mipmap filters. */
+  "max-anisotropy"?: U32 | CrossRef<"define">;
   /**
-   * Maximum anisotropy for filtering; values > 1 require linear mag/min/mipmap filters.
-   * @minimum 1
-   * @maximum 16
-   * @sjon-integer true
-   */
-  "max-anisotropy"?: U32;
-  /**
-   * Minification filter — sampling when many texels cover one pixel. PNGine default: linear (the WebGPU spec default is nearest).
+   * Minification filter — sampling when many texels cover one pixel. Default nearest, as GPUSamplerDescriptor.minFilter; write :min-filter linear for smoothing.
    * @member nearest: Sample the texel nearest to the coordinates.
    * @member linear: Linearly interpolate between neighboring texels.
    */
   "min-filter"?: Symbol_<"nearest"> | Symbol_<"linear">;
   /**
-   * Filter applied between mip levels (only visible with a mipmapped texture).
+   * Filter applied between mip levels (only visible with a mipmapped texture). Default nearest, as GPUSamplerDescriptor.mipmapFilter; :max-anisotropy above 1 requires linear here as well as on :mag-filter and :min-filter.
    * @member nearest: Sample the texel nearest to the coordinates.
    * @member linear: Linearly interpolate between neighboring texels.
    */
@@ -1146,22 +837,60 @@ export interface Pngine_Sampler {
   name: Symbol_;
 }
 
-/** GPU render pipeline. Positional (layout …)(vertex …)(fragment …)(primitive …)(depth-stencil …)(multisample …) sections mirror GPURenderPipelineDescriptor. */
+/** GPU render pipeline. Positional (vertex …)(fragment …)(primitive …)(depth-stencil …)(multisample …) sections mirror GPURenderPipelineDescriptor. */
 export interface Pngine_RenderPipeline {
   $form: "render-pipeline";
   $ns: "pngine";
+  /** auto to derive the bind-group layouts from the WGSL, or a declared (pipeline-layout …). */
+  layout: Symbol_<"auto"> | CrossRef<"pipeline-layout">;
   name: Symbol_;
-  /**
-   * An explicit (pipeline-layout …) instead of auto-deriving the layout from the WGSL. Supersedes the (layout auto) positional when present.
-   * @sjon-cross-ref target=`pipeline-layout` name-key=`name` acyclic=false
-   */
-  "pipeline-layout"?: CrossRef<"pipeline-layout">;
-  $children?: Array<{ readonly $form: "layout" } | { readonly $form: "vertex" } | { readonly $form: "fragment" } | { readonly $form: "primitive" } | { readonly $form: "depth-stencil" } | { readonly $form: "multisample" }>;
+  /** Positional counts (not expressible in TS): vertex: 1; fragment: 0..1; primitive: 0..1; depth-stencil: 0..1; multisample: 0..1 */
+  $children?: Array<{ readonly $form: "vertex" } | { readonly $form: "fragment" } | { readonly $form: "primitive" } | { readonly $form: "depth-stencil" } | { readonly $form: "multisample" }>;
 }
 
-/** GPU compute pipeline: a WGSL module + @compute entry point. Optional positional (constant …) forms specialise the module's `override` declarations. */
+/** GPU compute pipeline: one positional (compute …) stage naming the WGSL module and its @compute entry point. */
 export interface Pngine_ComputePipeline {
   $form: "compute-pipeline";
+  $ns: "pngine";
+  /** auto to derive the bind-group layouts from the WGSL, or a declared (pipeline-layout …). */
+  layout: Symbol_<"auto"> | CrossRef<"pipeline-layout">;
+  name: Symbol_;
+  /** Positional counts (not expressible in TS): compute: 1 */
+  $children?: Array<{ readonly $form: "compute" }>;
+}
+
+/** Vertex stage (GPUVertexState): the module + entry point, one (vertex-buffer …) per bound vertex slot, and (constant …) overrides. */
+export interface Pngine_Vertex {
+  $form: "vertex";
+  $ns: "pngine";
+  /** Entry-point function name (defaults to the module's sole @vertex fn). */
+  entry?: Symbol_;
+  /**
+   * The (shader-module …) holding the @vertex entry.
+   * @sjon-cross-ref target=`shader-module` name-key=`name` acyclic=false
+   */
+  module: CrossRef<"shader-module">;
+  $children?: Array<{ readonly $form: "vertex-buffer" } | { readonly $form: "constant" }>;
+}
+
+/** Fragment stage (GPUFragmentState): the module + entry point, one (target …) per color attachment, and (constant …) overrides. */
+export interface Pngine_Fragment {
+  $form: "fragment";
+  $ns: "pngine";
+  /** Entry-point function name (defaults to the module's sole @fragment fn). */
+  entry?: Symbol_;
+  /**
+   * The (shader-module …) holding the @fragment entry.
+   * @sjon-cross-ref target=`shader-module` name-key=`name` acyclic=false
+   */
+  module: CrossRef<"shader-module">;
+  /** Positional counts (not expressible in TS): target: 1.. */
+  $children?: Array<{ readonly $form: "target" } | { readonly $form: "constant" }>;
+}
+
+/** Compute stage (GPUProgrammableStage): the module + @compute entry point of a (compute-pipeline …), and (constant …) overrides. */
+export interface Pngine_Compute {
+  $form: "compute";
   $ns: "pngine";
   /** Entry-point function name (defaults to the module's sole @compute fn). */
   entry?: Symbol_;
@@ -1170,34 +899,7 @@ export interface Pngine_ComputePipeline {
    * @sjon-cross-ref target=`shader-module` name-key=`name` acyclic=false
    */
   module: CrossRef<"shader-module">;
-  name: Symbol_;
-  /**
-   * An explicit (pipeline-layout …) instead of auto-deriving the layout from the WGSL.
-   * @sjon-cross-ref target=`pipeline-layout` name-key=`name` acyclic=false
-   */
-  "pipeline-layout"?: CrossRef<"pipeline-layout">;
   $children?: Array<{ readonly $form: "constant" }>;
-}
-
-/** Pipeline layout: auto derives bind-group layouts from the WGSL. */
-export interface Pngine_Layout {
-  $form: "layout";
-  $ns: "pngine";
-  $children?: Array<Symbol_<"auto">>;
-}
-
-/** Vertex stage: (module …)(entry …) and optional (buffers …) vertex-input layout. */
-export interface Pngine_Vertex {
-  $form: "vertex";
-  $ns: "pngine";
-  $children?: Array<{ readonly $form: "module" } | { readonly $form: "entry" } | { readonly $form: "buffers" } | { readonly $form: "constant" }>;
-}
-
-/** Fragment stage: (module …)(entry …) and the (targets …) color targets. */
-export interface Pngine_Fragment {
-  $form: "fragment";
-  $ns: "pngine";
-  $children?: Array<{ readonly $form: "module" } | { readonly $form: "entry" } | { readonly $form: "targets" } | { readonly $form: "constant" }>;
 }
 
 /** Specialise a WGSL `override` with a compile-time value. The declaration becomes a `const` in the shipped shader, so the value participates in const-folding and dead-code elimination — an unused branch leaves the payload entirely. */
@@ -1207,55 +909,72 @@ export interface Pngine_Constant {
   /** The WGSL `override` identifier this value is for. */
   name: Symbol_;
   /** The value. Must fit the override's declared WGSL type: a fractional value for a u32/i32 override, or anything but 0/1 for a bool, is rejected. */
-  value: number;
+  value: number | CrossRef<"define">;
 }
 
-/** Primitive assembly state: (topology …) plus cull / winding. Mirror the source: omit the whole form when unauthored. */
-export interface Pngine_Primitive {
-  $form: "primitive";
-  $ns: "pngine";
-  /**
-   * Which faces are discarded (WebGPU default: none).
-   * @member none: Draw all polygons.
-   * @member front: Discard front-facing polygons.
-   * @member back: Discard back-facing polygons.
-   */
-  "cull-mode"?: Symbol_<"none"> | Symbol_<"front"> | Symbol_<"back">;
-  /**
-   * Winding that counts as front-facing (WebGPU default: ccw).
-   * @member ccw: Counter-clockwise winding is front-facing.
-   * @member cw: Clockwise winding is front-facing.
-   */
-  "front-face"?: Symbol_<"ccw"> | Symbol_<"cw">;
-  /**
-   * Index byte-width (uint16/uint32) for indexed strip draws; WebGPU requires it only when draw-indexed uses a strip topology (triangle-strip/line-strip).
-   * @member uint16: 16-bit indices (primitive-restart value 0xFFFF).
-   * @member uint32: 32-bit indices (primitive-restart value 0xFFFFFFFF).
-   */
-  "strip-index-format"?: Symbol_<"uint16"> | Symbol_<"uint32">;
-  /** Disable depth clipping (clamp fragments to [0,1] instead of discarding them); needs the depth-clip-control device feature (WebGPU default: false). */
-  "unclipped-depth"?: boolean;
-  $children?: Array<{ readonly $form: "topology" }>;
-}
+/** Primitive assembly state (GPUPrimitiveState). Mirror the source: omit the whole form when unauthored. */
+export type Pngine_Primitive =
+  | {
+      $form: "primitive";
+      $ns: "pngine";
+      /**
+       * Which faces are discarded (WebGPU default: none).
+       * @member none: Draw all polygons.
+       * @member front: Discard front-facing polygons.
+       * @member back: Discard back-facing polygons.
+       */
+      "cull-mode"?: Symbol_<"none"> | Symbol_<"front"> | Symbol_<"back">;
+      /**
+       * Winding that counts as front-facing (WebGPU default: ccw).
+       * @member ccw: Counter-clockwise winding is front-facing.
+       * @member cw: Clockwise winding is front-facing.
+       */
+      "front-face"?: Symbol_<"ccw"> | Symbol_<"cw">;
+      /** How vertices assemble into primitives (WebGPU default: triangle-list). Selects whether :strip-index-format exists: WebGPU reads a strip index format only for triangle-strip and line-strip. */
+      topology: Symbol_<"triangle-strip" | "line-strip">;
+      /** Disable depth clipping (clamp fragments to [0,1] instead of discarding them); needs the depth-clip-control device feature (WebGPU default: false). */
+      "unclipped-depth"?: boolean;
+      /**
+       * Index byte-width (uint16/uint32) for indexed strip draws. WebGPU reads it only under a strip topology, which is why it is declared here and is an unknown key anywhere else; it becomes REQUIRED once a (draw-indexed …) runs this pipeline (that half crosses pipeline and pass, so it stays the emitter's).
+       * @member uint16: 16-bit indices (primitive-restart value 0xFFFF).
+       * @member uint32: 32-bit indices (primitive-restart value 0xFFFFFFFF).
+       */
+      "strip-index-format"?: Symbol_<"uint16"> | Symbol_<"uint32">;
+    }
+  | {
+      $form: "primitive";
+      $ns: "pngine";
+      /**
+       * Which faces are discarded (WebGPU default: none).
+       * @member none: Draw all polygons.
+       * @member front: Discard front-facing polygons.
+       * @member back: Discard back-facing polygons.
+       */
+      "cull-mode"?: Symbol_<"none"> | Symbol_<"front"> | Symbol_<"back">;
+      /**
+       * Winding that counts as front-facing (WebGPU default: ccw).
+       * @member ccw: Counter-clockwise winding is front-facing.
+       * @member cw: Clockwise winding is front-facing.
+       */
+      "front-face"?: Symbol_<"ccw"> | Symbol_<"cw">;
+      /** How vertices assemble into primitives (WebGPU default: triangle-list). Selects whether :strip-index-format exists: WebGPU reads a strip index format only for triangle-strip and line-strip. */
+      topology: Symbol_<"triangle-list" | "line-list" | "point-list">;
+      /** Disable depth clipping (clamp fragments to [0,1] instead of discarding them); needs the depth-clip-control device feature (WebGPU default: false). */
+      "unclipped-depth"?: boolean;
+    };
 
 /** Depth/stencil pipeline state. Positional (stencil-front …)/(stencil-back …) carry per-face stencil state. */
 export interface Pngine_DepthStencil {
   $form: "depth-stencil";
   $ns: "pngine";
+  /** Constant bias added to fragment depth — shadow maps / depth pre-pass (triangles only). */
+  "depth-bias"?: I32 | CrossRef<"define">;
+  /** Maximum magnitude of the total depth bias (0 = unclamped). */
+  "depth-bias-clamp"?: F32 | CrossRef<"define">;
+  /** Bias that scales with the triangle's depth slope (triangles only). */
+  "depth-bias-slope-scale"?: F32 | CrossRef<"define">;
   /**
-   * Constant bias added to fragment depth — shadow maps / depth pre-pass (triangles only).
-   */
-  "depth-bias"?: F32;
-  /**
-   * Maximum magnitude of the total depth bias (0 = unclamped).
-   */
-  "depth-bias-clamp"?: F32;
-  /**
-   * Bias that scales with the triangle's depth slope (triangles only).
-   */
-  "depth-bias-slope-scale"?: F32;
-  /**
-   * Comparison the depth test applies (fragment depth vs stored depth).
+   * Comparison the depth test applies (fragment depth vs stored depth). Required once the pipeline writes depth, or a stencil face states a :depth-fail-op other than keep.
    * @member never: Never passes.
    * @member less: Passes if provided value < stored value.
    * @member equal: Passes if provided value = stored value.
@@ -1266,10 +985,10 @@ export interface Pngine_DepthStencil {
    * @member always: Always passes.
    */
   "depth-compare"?: Symbol_<"never"> | Symbol_<"less"> | Symbol_<"equal"> | Symbol_<"less-equal"> | Symbol_<"greater"> | Symbol_<"not-equal"> | Symbol_<"greater-equal"> | Symbol_<"always">;
-  /** Whether fragments write their depth value. */
+  /** Whether fragments write their depth value. Required once :format has a depth aspect (the IDL gives it no default); optional only because a stencil-only pipeline omits it. */
   "depth-write-enabled"?: boolean;
   /**
-   * Format of the depth/stencil attachment this pipeline renders to.
+   * Format of the depth/stencil attachment this pipeline renders to; a depth or stencil format, never a colour one.
    * @member rgba8unorm: 4×8-bit unorm; renderable, filterable, blendable.
    * @member rgba8snorm: 4×8-bit signed norm in [-1,1]; filterable, not baseline-renderable.
    * @member bgra8unorm: 4×8-bit unorm, BGRA order; common canvas format.
@@ -1321,19 +1040,12 @@ export interface Pngine_DepthStencil {
    * @member depth32float-stencil8: 32-bit float depth plus 8-bit stencil; needs the depth32float-stencil8 device feature.
    * @member preferred-canvas-format: Resolved at runtime to the platform's canvas format.
    */
-  format?: Symbol_<"rgba8unorm"> | Symbol_<"rgba8snorm"> | Symbol_<"bgra8unorm"> | Symbol_<"rgba16float"> | Symbol_<"rgba32float"> | Symbol_<"depth24plus"> | Symbol_<"depth24plus-stencil8"> | Symbol_<"depth32float"> | Symbol_<"stencil8"> | Symbol_<"depth16unorm"> | Symbol_<"r8unorm"> | Symbol_<"rg8unorm"> | Symbol_<"r16float"> | Symbol_<"rg16float"> | Symbol_<"r32float"> | Symbol_<"r32uint"> | Symbol_<"rgba8unorm-srgb"> | Symbol_<"rgba8uint"> | Symbol_<"rgba8sint"> | Symbol_<"r8snorm"> | Symbol_<"r8uint"> | Symbol_<"r8sint"> | Symbol_<"rg8snorm"> | Symbol_<"rg8uint"> | Symbol_<"rg8sint"> | Symbol_<"r16uint"> | Symbol_<"r16sint"> | Symbol_<"rg16uint"> | Symbol_<"rg16sint"> | Symbol_<"r32sint"> | Symbol_<"rg32uint"> | Symbol_<"rg32sint"> | Symbol_<"rg32float"> | Symbol_<"rgba16uint"> | Symbol_<"rgba16sint"> | Symbol_<"rgba32uint"> | Symbol_<"rgba32sint"> | Symbol_<"rgb10a2unorm"> | Symbol_<"rgb10a2uint"> | Symbol_<"rg11b10ufloat"> | Symbol_<"rgb9e5ufloat"> | Symbol_<"bgra8unorm-srgb"> | Symbol_<"r16unorm"> | Symbol_<"r16snorm"> | Symbol_<"rg16unorm"> | Symbol_<"rg16snorm"> | Symbol_<"rgba16unorm"> | Symbol_<"rgba16snorm"> | Symbol_<"depth32float-stencil8"> | Symbol_<"preferred-canvas-format">;
-  /**
-   * Bitmask ANDed with stencil values for tests (spec default 0xFFFFFFFF).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "stencil-read-mask"?: U32;
-  /**
-   * Bitmask ANDed with stencil writes (spec default 0xFFFFFFFF).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "stencil-write-mask"?: U32;
+  format: Symbol_<"rgba8unorm"> | Symbol_<"rgba8snorm"> | Symbol_<"bgra8unorm"> | Symbol_<"rgba16float"> | Symbol_<"rgba32float"> | Symbol_<"depth24plus"> | Symbol_<"depth24plus-stencil8"> | Symbol_<"depth32float"> | Symbol_<"stencil8"> | Symbol_<"depth16unorm"> | Symbol_<"r8unorm"> | Symbol_<"rg8unorm"> | Symbol_<"r16float"> | Symbol_<"rg16float"> | Symbol_<"r32float"> | Symbol_<"r32uint"> | Symbol_<"rgba8unorm-srgb"> | Symbol_<"rgba8uint"> | Symbol_<"rgba8sint"> | Symbol_<"r8snorm"> | Symbol_<"r8uint"> | Symbol_<"r8sint"> | Symbol_<"rg8snorm"> | Symbol_<"rg8uint"> | Symbol_<"rg8sint"> | Symbol_<"r16uint"> | Symbol_<"r16sint"> | Symbol_<"rg16uint"> | Symbol_<"rg16sint"> | Symbol_<"r32sint"> | Symbol_<"rg32uint"> | Symbol_<"rg32sint"> | Symbol_<"rg32float"> | Symbol_<"rgba16uint"> | Symbol_<"rgba16sint"> | Symbol_<"rgba32uint"> | Symbol_<"rgba32sint"> | Symbol_<"rgb10a2unorm"> | Symbol_<"rgb10a2uint"> | Symbol_<"rg11b10ufloat"> | Symbol_<"rgb9e5ufloat"> | Symbol_<"bgra8unorm-srgb"> | Symbol_<"r16unorm"> | Symbol_<"r16snorm"> | Symbol_<"rg16unorm"> | Symbol_<"rg16snorm"> | Symbol_<"rgba16unorm"> | Symbol_<"rgba16snorm"> | Symbol_<"depth32float-stencil8"> | Symbol_<"preferred-canvas-format">;
+  /** Bitmask ANDed with stencil values for tests (spec default 0xFFFFFFFF). */
+  "stencil-read-mask"?: U32 | CrossRef<"define">;
+  /** Bitmask ANDed with stencil writes (spec default 0xFFFFFFFF). */
+  "stencil-write-mask"?: U32 | CrossRef<"define">;
+  /** Positional counts (not expressible in TS): stencil-front: 0..1; stencil-back: 0..1 */
   $children?: Array<{ readonly $form: "stencil-front" } | { readonly $form: "stencil-back" }>;
 }
 
@@ -1449,60 +1161,20 @@ export interface Pngine_StencilBack {
 export interface Pngine_Multisample {
   $form: "multisample";
   $ns: "pngine";
-  /** Fragment alpha generates the coverage mask (requires count > 1). */
+  /** Fragment alpha generates the coverage mask. Requires :count above 1, a (fragment …) stage, and a first (target …) whose format has an alpha channel to derive the mask from. */
   "alpha-to-coverage-enabled"?: boolean;
-  /**
-   * Samples per pixel: 1 or 4; must match the attachment textures' sample-count.
-   * @minimum 0
-   * @sjon-integer true
-   */
-  count: U32;
-  /**
-   * Sample coverage bitmask (spec default 0xFFFFFFFF).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  mask?: U32;
-}
-
-/** The (shader-module …) this stage executes. */
-export interface Pngine_Module {
-  $form: "module";
-  $ns: "pngine";
-  $children?: Array<CrossRef<"shader-module">>;
-}
-
-/** Entry-point function name within the stage's module. */
-export interface Pngine_Entry {
-  $form: "entry";
-  $ns: "pngine";
-  $children?: Array<Symbol_>;
-}
-
-/** How vertices assemble into primitives (WebGPU default: triangle-list). */
-export interface Pngine_Topology {
-  $form: "topology";
-  $ns: "pngine";
-  $children?: Array<Symbol_<"triangle-list"> | Symbol_<"triangle-strip"> | Symbol_<"line-list"> | Symbol_<"line-strip"> | Symbol_<"point-list">>;
-}
-
-/** Vertex input layout: one (vertex-buffer …) per bound vertex buffer slot. */
-export interface Pngine_Buffers {
-  $form: "buffers";
-  $ns: "pngine";
-  $children?: Array<{ readonly $form: "vertex-buffer" }>;
+  /** Samples per pixel: 1 or 4; must match the attachment textures' sample-count. Absent defers to WebGPU's 1 — a (multisample …) carrying only :mask or :alpha-to-coverage-enabled is legal. */
+  count?: U32 | CrossRef<"define">;
+  /** Sample coverage bitmask (spec default 0xFFFFFFFF). */
+  mask?: U32 | CrossRef<"define">;
 }
 
 /** Layout of one vertex buffer slot: stride + step mode + (attribute …) children. */
 export interface Pngine_VertexBuffer {
   $form: "vertex-buffer";
   $ns: "pngine";
-  /**
-   * Bytes between consecutive elements; multiple of 4 (spec baseline limit 2048).
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "array-stride": U32;
+  /** Bytes between consecutive elements; multiple of 4 (spec baseline limit 2048). */
+  "array-stride": U32 | CrossRef<"define">;
   /**
    * Advance per vertex or per instance (WebGPU default: vertex).
    * @member vertex: Advance by array-stride per vertex (resets each instance).
@@ -1561,26 +1233,10 @@ export interface Pngine_Attribute {
    * @member unorm8x4-bgra: Four 8-bit unsigned normalized in BGRA order (4 B) → vec4f in [0,1].
    */
   format: Symbol_<"uint8"> | Symbol_<"uint8x2"> | Symbol_<"uint8x4"> | Symbol_<"sint8"> | Symbol_<"sint8x2"> | Symbol_<"sint8x4"> | Symbol_<"unorm8"> | Symbol_<"unorm8x2"> | Symbol_<"unorm8x4"> | Symbol_<"snorm8"> | Symbol_<"snorm8x2"> | Symbol_<"snorm8x4"> | Symbol_<"uint16"> | Symbol_<"uint16x2"> | Symbol_<"uint16x4"> | Symbol_<"sint16"> | Symbol_<"sint16x2"> | Symbol_<"sint16x4"> | Symbol_<"unorm16"> | Symbol_<"unorm16x2"> | Symbol_<"unorm16x4"> | Symbol_<"snorm16"> | Symbol_<"snorm16x2"> | Symbol_<"snorm16x4"> | Symbol_<"float16"> | Symbol_<"float16x2"> | Symbol_<"float16x4"> | Symbol_<"float32"> | Symbol_<"float32x2"> | Symbol_<"float32x3"> | Symbol_<"float32x4"> | Symbol_<"uint32"> | Symbol_<"uint32x2"> | Symbol_<"uint32x3"> | Symbol_<"uint32x4"> | Symbol_<"sint32"> | Symbol_<"sint32x2"> | Symbol_<"sint32x3"> | Symbol_<"sint32x4"> | Symbol_<"unorm10-10-10-2"> | Symbol_<"unorm8x4-bgra">;
-  /**
-   * Byte offset of the attribute within one element.
-   * @minimum 0
-   * @sjon-integer true
-   */
-  offset: U32;
-  /**
-   * @location(N) in the vertex shader (spec baseline < 16).
-   * @minimum 0
-   * @maximum 255
-   * @sjon-integer true
-   */
-  "shader-location": U32;
-}
-
-/** Color targets of the fragment stage: one (target …) per attachment. */
-export interface Pngine_Targets {
-  $form: "targets";
-  $ns: "pngine";
-  $children?: Array<{ readonly $form: "target" }>;
+  /** Byte offset of the attribute within one element. */
+  offset: U32 | CrossRef<"define">;
+  /** @location(N) in the vertex shader (spec baseline < 16). */
+  "shader-location": U32 | CrossRef<"define">;
 }
 
 /** One color target: format plus optional (blend …) state and write mask. */
@@ -1635,14 +1291,16 @@ export interface Pngine_Target {
    */
   format: Symbol_<"preferred-canvas-format"> | Symbol_<"bgra8unorm"> | Symbol_<"rgba8unorm"> | Symbol_<"rgba16float"> | Symbol_<"r32uint"> | Symbol_<"r8unorm"> | Symbol_<"r8uint"> | Symbol_<"r8sint"> | Symbol_<"rg8unorm"> | Symbol_<"rg8uint"> | Symbol_<"rg8sint"> | Symbol_<"rgba8unorm-srgb"> | Symbol_<"rgba8uint"> | Symbol_<"rgba8sint"> | Symbol_<"r16uint"> | Symbol_<"r16sint"> | Symbol_<"r16float"> | Symbol_<"rg16uint"> | Symbol_<"rg16sint"> | Symbol_<"rg16float"> | Symbol_<"r32sint"> | Symbol_<"r32float"> | Symbol_<"rg32uint"> | Symbol_<"rg32sint"> | Symbol_<"rg32float"> | Symbol_<"rgba16uint"> | Symbol_<"rgba16sint"> | Symbol_<"rgba32uint"> | Symbol_<"rgba32sint"> | Symbol_<"rgba32float"> | Symbol_<"rgb10a2uint"> | Symbol_<"rgb10a2unorm"> | Symbol_<"r8snorm"> | Symbol_<"rg8snorm"> | Symbol_<"rgba8snorm"> | Symbol_<"rg11b10ufloat"> | Symbol_<"bgra8unorm-srgb"> | Symbol_<"r16unorm"> | Symbol_<"r16snorm"> | Symbol_<"rg16unorm"> | Symbol_<"rg16snorm"> | Symbol_<"rgba16unorm"> | Symbol_<"rgba16snorm">;
   /** Channel write mask: bitmask R=1 G=2 B=4 A=8, or all (15; the WebGPU default). */
-  "write-mask"?: U32 | Symbol_;
+  "write-mask"?: U32 | Symbol_<"all">;
+  /** Positional counts (not expressible in TS): blend: 0..1 */
   $children?: Array<{ readonly $form: "blend" }>;
 }
 
-/** Blend state of a color target: (color …) and (alpha …) components. */
+/** Blend state of a color target: (color …) and (alpha …) components. Only on a blendable target format — never a uint or sint one. */
 export interface Pngine_Blend {
   $form: "blend";
   $ns: "pngine";
+  /** Positional counts (not expressible in TS): color: 1; alpha: 1 */
   $children?: Array<{ readonly $form: "color" } | { readonly $form: "alpha" }>;
 }
 
@@ -1651,7 +1309,7 @@ export interface Pngine_Color {
   $form: "color";
   $ns: "pngine";
   /**
-   * Multiplier on the attachment's color (WebGPU default: zero).
+   * Multiplier on the attachment's color (WebGPU default: zero). Emitted only when authored.
    * @member zero: (0, 0, 0, 0)
    * @member one: (1, 1, 1, 1)
    * @member src: (Rs, Gs, Bs, As) — the fragment's color.
@@ -1670,7 +1328,7 @@ export interface Pngine_Color {
    * @member src1-alpha: (As1, As1, As1, As1) — the second output's alpha; needs dual-source-blending.
    * @member one-minus-src1-alpha: (1-As1, 1-As1, 1-As1, 1-As1) — needs dual-source-blending.
    */
-  "dst-factor": Symbol_<"zero"> | Symbol_<"one"> | Symbol_<"src"> | Symbol_<"dst"> | Symbol_<"src-alpha"> | Symbol_<"dst-alpha"> | Symbol_<"one-minus-src"> | Symbol_<"one-minus-dst"> | Symbol_<"one-minus-src-alpha"> | Symbol_<"one-minus-dst-alpha"> | Symbol_<"src-alpha-saturated"> | Symbol_<"constant"> | Symbol_<"one-minus-constant"> | Symbol_<"src1"> | Symbol_<"one-minus-src1"> | Symbol_<"src1-alpha"> | Symbol_<"one-minus-src1-alpha">;
+  "dst-factor"?: Symbol_<"zero"> | Symbol_<"one"> | Symbol_<"src"> | Symbol_<"dst"> | Symbol_<"src-alpha"> | Symbol_<"dst-alpha"> | Symbol_<"one-minus-src"> | Symbol_<"one-minus-dst"> | Symbol_<"one-minus-src-alpha"> | Symbol_<"one-minus-dst-alpha"> | Symbol_<"src-alpha-saturated"> | Symbol_<"constant"> | Symbol_<"one-minus-constant"> | Symbol_<"src1"> | Symbol_<"one-minus-src1"> | Symbol_<"src1-alpha"> | Symbol_<"one-minus-src1-alpha">;
   /**
    * How the factored terms combine (WebGPU default: add). Emitted only when authored.
    * @member add: src*srcFactor + dst*dstFactor
@@ -1681,7 +1339,7 @@ export interface Pngine_Color {
    */
   operation?: Symbol_<"add"> | Symbol_<"subtract"> | Symbol_<"reverse-subtract"> | Symbol_<"min"> | Symbol_<"max">;
   /**
-   * Multiplier on the fragment's color (WebGPU default: one).
+   * Multiplier on the fragment's color (WebGPU default: one). Emitted only when authored.
    * @member zero: (0, 0, 0, 0)
    * @member one: (1, 1, 1, 1)
    * @member src: (Rs, Gs, Bs, As) — the fragment's color.
@@ -1700,7 +1358,7 @@ export interface Pngine_Color {
    * @member src1-alpha: (As1, As1, As1, As1) — the second output's alpha; needs dual-source-blending.
    * @member one-minus-src1-alpha: (1-As1, 1-As1, 1-As1, 1-As1) — needs dual-source-blending.
    */
-  "src-factor": Symbol_<"zero"> | Symbol_<"one"> | Symbol_<"src"> | Symbol_<"dst"> | Symbol_<"src-alpha"> | Symbol_<"dst-alpha"> | Symbol_<"one-minus-src"> | Symbol_<"one-minus-dst"> | Symbol_<"one-minus-src-alpha"> | Symbol_<"one-minus-dst-alpha"> | Symbol_<"src-alpha-saturated"> | Symbol_<"constant"> | Symbol_<"one-minus-constant"> | Symbol_<"src1"> | Symbol_<"one-minus-src1"> | Symbol_<"src1-alpha"> | Symbol_<"one-minus-src1-alpha">;
+  "src-factor"?: Symbol_<"zero"> | Symbol_<"one"> | Symbol_<"src"> | Symbol_<"dst"> | Symbol_<"src-alpha"> | Symbol_<"dst-alpha"> | Symbol_<"one-minus-src"> | Symbol_<"one-minus-dst"> | Symbol_<"one-minus-src-alpha"> | Symbol_<"one-minus-dst-alpha"> | Symbol_<"src-alpha-saturated"> | Symbol_<"constant"> | Symbol_<"one-minus-constant"> | Symbol_<"src1"> | Symbol_<"one-minus-src1"> | Symbol_<"src1-alpha"> | Symbol_<"one-minus-src1-alpha">;
 }
 
 /** Blend component for alpha: out.a = operation(src.a * src-factor, dst.a * dst-factor). */
@@ -1708,7 +1366,7 @@ export interface Pngine_Alpha {
   $form: "alpha";
   $ns: "pngine";
   /**
-   * Multiplier on the attachment's alpha (WebGPU default: zero).
+   * Multiplier on the attachment's alpha (WebGPU default: zero). Emitted only when authored.
    * @member zero: (0, 0, 0, 0)
    * @member one: (1, 1, 1, 1)
    * @member src: (Rs, Gs, Bs, As) — the fragment's color.
@@ -1727,7 +1385,7 @@ export interface Pngine_Alpha {
    * @member src1-alpha: (As1, As1, As1, As1) — the second output's alpha; needs dual-source-blending.
    * @member one-minus-src1-alpha: (1-As1, 1-As1, 1-As1, 1-As1) — needs dual-source-blending.
    */
-  "dst-factor": Symbol_<"zero"> | Symbol_<"one"> | Symbol_<"src"> | Symbol_<"dst"> | Symbol_<"src-alpha"> | Symbol_<"dst-alpha"> | Symbol_<"one-minus-src"> | Symbol_<"one-minus-dst"> | Symbol_<"one-minus-src-alpha"> | Symbol_<"one-minus-dst-alpha"> | Symbol_<"src-alpha-saturated"> | Symbol_<"constant"> | Symbol_<"one-minus-constant"> | Symbol_<"src1"> | Symbol_<"one-minus-src1"> | Symbol_<"src1-alpha"> | Symbol_<"one-minus-src1-alpha">;
+  "dst-factor"?: Symbol_<"zero"> | Symbol_<"one"> | Symbol_<"src"> | Symbol_<"dst"> | Symbol_<"src-alpha"> | Symbol_<"dst-alpha"> | Symbol_<"one-minus-src"> | Symbol_<"one-minus-dst"> | Symbol_<"one-minus-src-alpha"> | Symbol_<"one-minus-dst-alpha"> | Symbol_<"src-alpha-saturated"> | Symbol_<"constant"> | Symbol_<"one-minus-constant"> | Symbol_<"src1"> | Symbol_<"one-minus-src1"> | Symbol_<"src1-alpha"> | Symbol_<"one-minus-src1-alpha">;
   /**
    * How the factored terms combine (WebGPU default: add). Emitted only when authored.
    * @member add: src*srcFactor + dst*dstFactor
@@ -1738,7 +1396,7 @@ export interface Pngine_Alpha {
    */
   operation?: Symbol_<"add"> | Symbol_<"subtract"> | Symbol_<"reverse-subtract"> | Symbol_<"min"> | Symbol_<"max">;
   /**
-   * Multiplier on the fragment's alpha (WebGPU default: one).
+   * Multiplier on the fragment's alpha (WebGPU default: one). Emitted only when authored.
    * @member zero: (0, 0, 0, 0)
    * @member one: (1, 1, 1, 1)
    * @member src: (Rs, Gs, Bs, As) — the fragment's color.
@@ -1757,20 +1415,20 @@ export interface Pngine_Alpha {
    * @member src1-alpha: (As1, As1, As1, As1) — the second output's alpha; needs dual-source-blending.
    * @member one-minus-src1-alpha: (1-As1, 1-As1, 1-As1, 1-As1) — needs dual-source-blending.
    */
-  "src-factor": Symbol_<"zero"> | Symbol_<"one"> | Symbol_<"src"> | Symbol_<"dst"> | Symbol_<"src-alpha"> | Symbol_<"dst-alpha"> | Symbol_<"one-minus-src"> | Symbol_<"one-minus-dst"> | Symbol_<"one-minus-src-alpha"> | Symbol_<"one-minus-dst-alpha"> | Symbol_<"src-alpha-saturated"> | Symbol_<"constant"> | Symbol_<"one-minus-constant"> | Symbol_<"src1"> | Symbol_<"one-minus-src1"> | Symbol_<"src1-alpha"> | Symbol_<"one-minus-src1-alpha">;
+  "src-factor"?: Symbol_<"zero"> | Symbol_<"one"> | Symbol_<"src"> | Symbol_<"dst"> | Symbol_<"src-alpha"> | Symbol_<"dst-alpha"> | Symbol_<"one-minus-src"> | Symbol_<"one-minus-dst"> | Symbol_<"one-minus-src-alpha"> | Symbol_<"one-minus-dst-alpha"> | Symbol_<"src-alpha-saturated"> | Symbol_<"constant"> | Symbol_<"one-minus-constant"> | Symbol_<"src1"> | Symbol_<"one-minus-src1"> | Symbol_<"src1-alpha"> | Symbol_<"one-minus-src1-alpha">;
 }
 
-/** GPU render pass: (color-attachment …)/(depth-attachment …) targets, a pipeline, bound resources, and (draw …)/(draw-indexed …) calls. */
+/** GPU render pass: (color-attachment …)/(depth-stencil-attachment …) targets, a pipeline, bound resources, and its commands — the four draws (draw / draw-indexed / draw-indirect / draw-indexed-indirect), (occlusion-query …) brackets and one (timestamp-writes …). At least one attachment, of either kind — a pass writes somewhere. */
 export interface Pngine_RenderPass {
   $form: "render-pass";
   $ns: "pngine";
   /** Bind groups set at @group 0..N in order. */
   "bind-groups"?: Array<CrossRef<"bind-group">>;
   /** Per-group ping-pong offsets into each group's pool. */
-  "bind-groups-pool-offsets"?: Array<number>;
+  "bind-groups-pool-offsets"?: Array<U32 | CrossRef<"define">>;
   /** [r g b a] blend constant (setBlendConstant); the value the `constant`/`one-minus-constant` blend factors multiply by. Defaults to [0 0 0 0] when unset. */
-  "blend-constant"?: readonly [number, number, number, number];
-  /** Replay pre-recorded (render-bundle …) forms instead of an inline pipeline/draw. */
+  "blend-constant"?: readonly [number | CrossRef<"define">, number | CrossRef<"define">, number | CrossRef<"define">, number | CrossRef<"define">];
+  /** Replay pre-recorded (render-bundle …) forms instead of an inline pipeline/draw. Each bundle's declared color formats, depth/stencil format and sample count must equal this pass's, which WebGPU derives from its attachments' textures. */
   "execute-bundles"?: Array<CrossRef<"render-bundle">>;
   /**
    * Index buffer for (draw-indexed …); index format propagates from the buffer's :index-of source.
@@ -1779,7 +1437,7 @@ export interface Pngine_RenderPass {
   "index-buffer"?: CrossRef<"buffer">;
   name: Symbol_;
   /**
-   * The (query-set :type occlusion) that (occlusion-query …) brackets in this pass write into.
+   * The (query-set :type occlusion) that (occlusion-query …) brackets in this pass write into. Required once the pass holds a bracket; optional only because a pass may hold none.
    * @sjon-cross-ref target=`query-set` name-key=`name` acyclic=false
    */
   "occlusion-query-set"?: CrossRef<"query-set">;
@@ -1789,30 +1447,31 @@ export interface Pngine_RenderPass {
    */
   pipeline?: CrossRef<"render-pipeline">;
   /** [x y w h] in integer pixels; fragments outside are discarded. */
-  "scissor-rect"?: readonly [number, number, number, number];
+  "scissor-rect"?: readonly [U32 | CrossRef<"define">, U32 | CrossRef<"define">, U32 | CrossRef<"define">, U32 | CrossRef<"define">];
   /** Reference value used by stencil compare and the replace operation. */
-  "stencil-reference"?: U32 | Symbol_;
+  "stencil-reference"?: U32 | CrossRef<"define">;
   /** Buffers bound to vertex slots 0..N in order. */
   "vertex-buffers"?: Array<CrossRef<"buffer">>;
   /** Per-slot ping-pong offsets into each buffer's pool. */
-  "vertex-buffers-pool-offsets"?: Array<number>;
+  "vertex-buffers-pool-offsets"?: Array<U32 | CrossRef<"define">>;
   /** [x y w h] or [x y w h minDepth maxDepth]; depths default to 0 and 1. */
-  viewport?: readonly [number, number, number, number] | readonly [number, number, number, number, number, number];
-  $children?: Array<{ readonly $form: "color-attachment" } | { readonly $form: "depth-attachment" } | { readonly $form: "draw" } | { readonly $form: "draw-indexed" } | { readonly $form: "draw-indirect" } | { readonly $form: "draw-indexed-indirect" } | { readonly $form: "timestamp-writes" } | { readonly $form: "occlusion-query" }>;
+  viewport?: readonly [number | CrossRef<"define">, number | CrossRef<"define">, number | CrossRef<"define">, number | CrossRef<"define">] | readonly [number | CrossRef<"define">, number | CrossRef<"define">, number | CrossRef<"define">, number | CrossRef<"define">, number | CrossRef<"define">, number | CrossRef<"define">];
+  /** Positional counts (not expressible in TS): depth-stencil-attachment: 0..1; timestamp-writes: 0..1 */
+  $children?: Array<{ readonly $form: "color-attachment" } | { readonly $form: "depth-stencil-attachment" } | { readonly $form: "draw" } | { readonly $form: "draw-indexed" } | { readonly $form: "draw-indirect" } | { readonly $form: "draw-indexed-indirect" } | { readonly $form: "timestamp-writes" } | { readonly $form: "occlusion-query" }>;
 }
 
 /** One color target of a render pass. */
 export interface Pngine_ColorAttachment {
   $form: "color-attachment";
   $ns: "pngine";
-  /** RGBA the attachment is cleared to when load-op is clear (ignored for load). */
-  "clear-value"?: readonly [number, number, number, number];
+  /** RGBA the attachment is cleared to when load-op is clear (WebGPU default: transparent black). Stating one beside `:load-op load` is an error — WebGPU would ignore it. */
+  "clear-value"?: readonly [number | CrossRef<"define">, number | CrossRef<"define">, number | CrossRef<"define">, number | CrossRef<"define">];
   /**
    * clear to :clear-value, or load the existing contents.
    * @member clear: Clear the attachment to the clear value at pass start.
    * @member load: Preserve the attachment's existing contents.
    */
-  "load-op"?: Symbol_<"clear"> | Symbol_<"load">;
+  "load-op": Symbol_<"clear"> | Symbol_<"load">;
   /** Receives the resolved single-sample output when :view is multisampled. */
   "resolve-target"?: Symbol_<"context-current-texture"> | CrossRef<"texture">;
   /**
@@ -1820,47 +1479,39 @@ export interface Pngine_ColorAttachment {
    * @member store: Keep the pass result in the attachment.
    * @member discard: Discard the result (the attachment reads back as cleared).
    */
-  "store-op"?: Symbol_<"store"> | Symbol_<"discard">;
+  "store-op": Symbol_<"store"> | Symbol_<"discard">;
   /** Texture written by this pass: the canvas (context-current-texture) or a (texture …). */
   view: Symbol_<"context-current-texture"> | CrossRef<"texture">;
 }
 
 /** Depth/stencil target of a render pass. */
-export interface Pngine_DepthAttachment {
-  $form: "depth-attachment";
+export interface Pngine_DepthStencilAttachment {
+  $form: "depth-stencil-attachment";
   $ns: "pngine";
+  /** Depth cleared to when depth-load-op is clear, in [0,1]. Required when it clears — WebGPU has no default for it — and rejected beside `:depth-load-op load`. */
+  "depth-clear-value"?: F32 | CrossRef<"define">;
   /**
-   * Depth cleared to when depth-load-op is clear; must be in [0,1].
-   * @minimum 0
-   * @maximum 1
-   */
-  "depth-clear-value"?: F32;
-  /**
-   * clear depth to :depth-clear-value, or load the existing depth.
+   * clear depth to :depth-clear-value, or load the existing depth. Required when the view's format has a depth aspect, and rejected when it has none.
    * @member clear: Clear the attachment to the clear value at pass start.
    * @member load: Preserve the attachment's existing contents.
    */
   "depth-load-op"?: Symbol_<"clear"> | Symbol_<"load">;
   /**
-   * store the resulting depth, or discard it.
+   * store the resulting depth, or discard it. Required when the view's format has a depth aspect, and rejected when it has none.
    * @member store: Keep the pass result in the attachment.
    * @member discard: Discard the result (the attachment reads back as cleared).
    */
   "depth-store-op"?: Symbol_<"store"> | Symbol_<"discard">;
+  /** Stencil cleared to when stencil-load-op is clear. */
+  "stencil-clear-value"?: U32 | CrossRef<"define">;
   /**
-   * Stencil cleared to when stencil-load-op is clear.
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "stencil-clear-value"?: U32;
-  /**
-   * clear stencil to :stencil-clear-value, or load the existing stencil.
+   * clear stencil to :stencil-clear-value, or load the existing stencil. Required when the view's format has a stencil aspect, and rejected when it has none.
    * @member clear: Clear the attachment to the clear value at pass start.
    * @member load: Preserve the attachment's existing contents.
    */
   "stencil-load-op"?: Symbol_<"clear"> | Symbol_<"load">;
   /**
-   * store the resulting stencil, or discard it.
+   * store the resulting stencil, or discard it. Required when the view's format has a stencil aspect, and rejected when it has none.
    * @member store: Keep the pass result in the attachment.
    * @member discard: Discard the result (the attachment reads back as cleared).
    */
@@ -1877,29 +1528,29 @@ export interface Pngine_Draw {
   $form: "draw";
   $ns: "pngine";
   /** First instance index. */
-  "first-instance"?: U32 | Symbol_;
+  "first-instance"?: U32 | CrossRef<"define">;
   /** Offset into the vertex buffers, in vertices. */
-  "first-vertex"?: U32 | Symbol_;
+  "first-vertex"?: U32 | CrossRef<"define">;
   /** Instances to draw. */
-  "instance-count"?: U32 | Symbol_;
+  "instance-count"?: U32 | CrossRef<"define">;
   /** Vertices to draw. */
-  "vertex-count": U32 | Symbol_;
+  "vertex-count": U32 | CrossRef<"define">;
 }
 
 /** Indexed draw call (requires the pass's :index-buffer). */
 export interface Pngine_DrawIndexed {
   $form: "draw-indexed";
   $ns: "pngine";
-  /** Added to each index before vertex lookup (signed in WebGPU). */
-  "base-vertex"?: U32 | Symbol_;
+  /** Added to each index before vertex lookup. Signed in WebGPU; pngine carries a u32 and rejects a negative value. */
+  "base-vertex"?: U32 | CrossRef<"define">;
   /** Offset into the index buffer, in indices. */
-  "first-index"?: U32 | Symbol_;
+  "first-index"?: U32 | CrossRef<"define">;
   /** First instance index. */
-  "first-instance"?: U32 | Symbol_;
+  "first-instance"?: U32 | CrossRef<"define">;
   /** Indices to draw. */
-  "index-count": U32 | Symbol_;
+  "index-count": U32 | CrossRef<"define">;
   /** Instances to draw. */
-  "instance-count"?: U32 | Symbol_;
+  "instance-count"?: U32 | CrossRef<"define">;
 }
 
 /** Non-indexed indirect draw: the GPUDrawIndirectArgs (4×u32: vertex-count, instance-count, first-vertex, first-instance) are read from :buffer at :offset, typically written by a compute pass. No index buffer needed. */
@@ -1911,12 +1562,8 @@ export interface Pngine_DrawIndirect {
    * @sjon-cross-ref target=`buffer` name-key=`name` acyclic=false
    */
   buffer: CrossRef<"buffer">;
-  /**
-   * Byte offset of the args within :buffer.
-   * @minimum 0
-   * @sjon-integer true
-   */
-  offset?: U32;
+  /** Byte offset of the args within :buffer (a multiple of 4, as WebGPU requires of indirectOffset). */
+  offset?: U32 | CrossRef<"define">;
 }
 
 /** Indexed indirect draw: the GPUDrawIndexedIndirectArgs (5×u32) are read from :buffer at :offset, typically written by a compute pass. Requires the pass's :index-buffer. */
@@ -1928,22 +1575,18 @@ export interface Pngine_DrawIndexedIndirect {
    * @sjon-cross-ref target=`buffer` name-key=`name` acyclic=false
    */
   buffer: CrossRef<"buffer">;
-  /**
-   * Byte offset of the args within :buffer.
-   * @minimum 0
-   * @sjon-integer true
-   */
-  offset?: U32;
+  /** Byte offset of the args within :buffer (a multiple of 4, as WebGPU requires of indirectOffset). */
+  offset?: U32 | CrossRef<"define">;
 }
 
 /** Record GPU timestamps at pass start/end into a (query-set :type timestamp). */
 export interface Pngine_TimestampWrites {
   $form: "timestamp-writes";
   $ns: "pngine";
-  /** Query index written at pass start. */
-  begin?: U32 | Symbol_;
-  /** Query index written at pass end. */
-  end?: U32 | Symbol_;
+  /** Query index written at pass start (PNGine bakes 0; the IDL leaves it absent = not written). */
+  "beginning-of-pass-write-index"?: U32 | CrossRef<"define">;
+  /** Query index written at pass end (PNGine bakes 1; the IDL leaves it absent = not written). */
+  "end-of-pass-write-index"?: U32 | CrossRef<"define">;
   /**
    * The timestamp query set written into.
    * @sjon-cross-ref target=`query-set` name-key=`name` acyclic=false
@@ -1956,51 +1599,60 @@ export interface Pngine_OcclusionQuery {
   $form: "occlusion-query";
   $ns: "pngine";
   /** Index within the pass's occlusion query set. */
-  "query-index"?: U32 | Symbol_;
-  $children?: Array<{ readonly $form: "draw" } | { readonly $form: "draw-indexed" }>;
+  "query-index"?: U32 | CrossRef<"define">;
+  /** Positional counts (not expressible in TS): any of the set: 1.. */
+  $children?: Array<{ readonly $form: "draw" } | { readonly $form: "draw-indexed" } | { readonly $form: "draw-indirect" } | { readonly $form: "draw-indexed-indirect" }>;
 }
 
-/** GPU compute pass: a compute pipeline + bind groups + one dispatch. */
+/** GPU compute pass: a compute pipeline + bind groups + one or more (dispatch …) commands. */
 export interface Pngine_ComputePass {
   $form: "compute-pass";
   $ns: "pngine";
   /** Bind groups set at @group 0..N in order. */
   "bind-groups"?: Array<CrossRef<"bind-group">>;
   /** Per-group ping-pong offsets into each group's pool. */
-  "bind-groups-pool-offsets"?: Array<number>;
-  /** 3D dispatch [x y z] in workgroups. */
-  dispatch?: readonly [U32, U32, U32];
-  /**
-   * Indirect dispatch: the workgroup counts (3×u32) are read from this buffer at :dispatch-indirect-offset, typically written by an earlier compute pass. Takes precedence over :dispatch / :dispatch-workgroups.
-   * @sjon-cross-ref target=`buffer` name-key=`name` acyclic=false
-   */
-  "dispatch-indirect"?: CrossRef<"buffer">;
-  /**
-   * Byte offset of the dispatch args within :dispatch-indirect.
-   * @minimum 0
-   * @sjon-integer true
-   */
-  "dispatch-indirect-offset"?: U32;
-  /** 1D dispatch: N workgroups → dispatch(N,1,1). Accepts expressions like (ceil (/ NUM 64)). */
-  "dispatch-workgroups"?: U32 | Symbol_;
+  "bind-groups-pool-offsets"?: Array<U32 | CrossRef<"define">>;
   name: Symbol_;
   /**
    * The compute pipeline this pass dispatches.
    * @sjon-cross-ref target=`compute-pipeline` name-key=`name` acyclic=false
    */
   pipeline: CrossRef<"compute-pipeline">;
+  /** Positional counts (not expressible in TS): any of the set: 1.. */
+  $children?: Array<{ readonly $form: "dispatch" } | { readonly $form: "dispatch-indirect" }>;
 }
 
-/** Pre-recorded reusable draw sequence (pipeline + buffers + bind groups + one draw), replayed via a render-pass's :execute-bundles. */
+/** Compute dispatch command (GPUComputePassEncoder.dispatchWorkgroups). */
+export interface Pngine_Dispatch {
+  $form: "dispatch";
+  $ns: "pngine";
+  /** Workgroup counts as [x], [x y] or [x y z]; the missing dimensions default to 1. Each element is a literal, an expression like (ceil (/ NUM 64)), or a bare (define …) name. */
+  workgroups: Array<U32 | CrossRef<"define">>;
+}
+
+/** Indirect compute dispatch: the workgroup counts (3×u32) are read from :buffer at :offset, typically written by an earlier compute pass. */
+export interface Pngine_DispatchIndirect {
+  $form: "dispatch-indirect";
+  $ns: "pngine";
+  /**
+   * Buffer holding the dispatch args (needs indirect usage).
+   * @sjon-cross-ref target=`buffer` name-key=`name` acyclic=false
+   */
+  buffer: CrossRef<"buffer">;
+  /** Byte offset of the args within :buffer (a multiple of 4, as WebGPU requires of indirectOffset). */
+  offset?: U32 | CrossRef<"define">;
+}
+
+/** Pre-recorded reusable draw sequence (pipeline + buffers + bind groups + one (draw …)), replayed via a render-pass's :execute-bundles. */
 export interface Pngine_RenderBundle {
   $form: "render-bundle";
   $ns: "pngine";
   /** Bind groups set at @group 0..N in order. */
   "bind-groups"?: Array<CrossRef<"bind-group">>;
-  /** Color attachment formats the bundle is recorded against (must match the executing pass). */
-  "color-formats"?: Array<Symbol_<"rgba8unorm"> | Symbol_<"rgba8snorm"> | Symbol_<"bgra8unorm"> | Symbol_<"rgba16float"> | Symbol_<"rgba32float"> | Symbol_<"depth24plus"> | Symbol_<"depth24plus-stencil8"> | Symbol_<"depth32float"> | Symbol_<"stencil8"> | Symbol_<"depth16unorm"> | Symbol_<"r8unorm"> | Symbol_<"rg8unorm"> | Symbol_<"r16float"> | Symbol_<"rg16float"> | Symbol_<"r32float"> | Symbol_<"r32uint"> | Symbol_<"rgba8unorm-srgb"> | Symbol_<"rgba8uint"> | Symbol_<"rgba8sint"> | Symbol_<"r8snorm"> | Symbol_<"r8uint"> | Symbol_<"r8sint"> | Symbol_<"rg8snorm"> | Symbol_<"rg8uint"> | Symbol_<"rg8sint"> | Symbol_<"r16uint"> | Symbol_<"r16sint"> | Symbol_<"rg16uint"> | Symbol_<"rg16sint"> | Symbol_<"r32sint"> | Symbol_<"rg32uint"> | Symbol_<"rg32sint"> | Symbol_<"rg32float"> | Symbol_<"rgba16uint"> | Symbol_<"rgba16sint"> | Symbol_<"rgba32uint"> | Symbol_<"rgba32sint"> | Symbol_<"rgb10a2unorm"> | Symbol_<"rgb10a2uint"> | Symbol_<"rg11b10ufloat"> | Symbol_<"rgb9e5ufloat"> | Symbol_<"bgra8unorm-srgb"> | Symbol_<"r16unorm"> | Symbol_<"r16snorm"> | Symbol_<"rg16unorm"> | Symbol_<"rg16snorm"> | Symbol_<"rgba16unorm"> | Symbol_<"rgba16snorm"> | Symbol_<"depth32float-stencil8"> | Symbol_<"preferred-canvas-format">>;
+  /** Color attachment formats the bundle is recorded against. Each must be a color format, and the list must equal both the :pipeline's color targets and the replaying pass's color attachments. */
+  "color-formats": Array<Symbol_<"rgba8unorm"> | Symbol_<"rgba8snorm"> | Symbol_<"bgra8unorm"> | Symbol_<"rgba16float"> | Symbol_<"rgba32float"> | Symbol_<"depth24plus"> | Symbol_<"depth24plus-stencil8"> | Symbol_<"depth32float"> | Symbol_<"stencil8"> | Symbol_<"depth16unorm"> | Symbol_<"r8unorm"> | Symbol_<"rg8unorm"> | Symbol_<"r16float"> | Symbol_<"rg16float"> | Symbol_<"r32float"> | Symbol_<"r32uint"> | Symbol_<"rgba8unorm-srgb"> | Symbol_<"rgba8uint"> | Symbol_<"rgba8sint"> | Symbol_<"r8snorm"> | Symbol_<"r8uint"> | Symbol_<"r8sint"> | Symbol_<"rg8snorm"> | Symbol_<"rg8uint"> | Symbol_<"rg8sint"> | Symbol_<"r16uint"> | Symbol_<"r16sint"> | Symbol_<"rg16uint"> | Symbol_<"rg16sint"> | Symbol_<"r32sint"> | Symbol_<"rg32uint"> | Symbol_<"rg32sint"> | Symbol_<"rg32float"> | Symbol_<"rgba16uint"> | Symbol_<"rgba16sint"> | Symbol_<"rgba32uint"> | Symbol_<"rgba32sint"> | Symbol_<"rgb10a2unorm"> | Symbol_<"rgb10a2uint"> | Symbol_<"rg11b10ufloat"> | Symbol_<"rgb9e5ufloat"> | Symbol_<"bgra8unorm-srgb"> | Symbol_<"r16unorm"> | Symbol_<"r16snorm"> | Symbol_<"rg16unorm"> | Symbol_<"rg16snorm"> | Symbol_<"rgba16unorm"> | Symbol_<"rgba16snorm"> | Symbol_<"depth32float-stencil8"> | Symbol_<"preferred-canvas-format">>;
   /**
-   * Depth/stencil format the bundle is recorded against.
+   * Depth/stencil format the bundle is recorded against. Must be a depth or stencil format, and must be present exactly when the :pipeline declares a (depth-stencil …) and the replaying pass has a (depth-stencil-attachment …).
    * @member rgba8unorm: 4×8-bit unorm; renderable, filterable, blendable.
    * @member rgba8snorm: 4×8-bit signed norm in [-1,1]; filterable, not baseline-renderable.
    * @member bgra8unorm: 4×8-bit unorm, BGRA order; common canvas format.
@@ -2053,27 +1705,23 @@ export interface Pngine_RenderBundle {
    * @member preferred-canvas-format: Resolved at runtime to the platform's canvas format.
    */
   "depth-stencil-format"?: Symbol_<"rgba8unorm"> | Symbol_<"rgba8snorm"> | Symbol_<"bgra8unorm"> | Symbol_<"rgba16float"> | Symbol_<"rgba32float"> | Symbol_<"depth24plus"> | Symbol_<"depth24plus-stencil8"> | Symbol_<"depth32float"> | Symbol_<"stencil8"> | Symbol_<"depth16unorm"> | Symbol_<"r8unorm"> | Symbol_<"rg8unorm"> | Symbol_<"r16float"> | Symbol_<"rg16float"> | Symbol_<"r32float"> | Symbol_<"r32uint"> | Symbol_<"rgba8unorm-srgb"> | Symbol_<"rgba8uint"> | Symbol_<"rgba8sint"> | Symbol_<"r8snorm"> | Symbol_<"r8uint"> | Symbol_<"r8sint"> | Symbol_<"rg8snorm"> | Symbol_<"rg8uint"> | Symbol_<"rg8sint"> | Symbol_<"r16uint"> | Symbol_<"r16sint"> | Symbol_<"rg16uint"> | Symbol_<"rg16sint"> | Symbol_<"r32sint"> | Symbol_<"rg32uint"> | Symbol_<"rg32sint"> | Symbol_<"rg32float"> | Symbol_<"rgba16uint"> | Symbol_<"rgba16sint"> | Symbol_<"rgba32uint"> | Symbol_<"rgba32sint"> | Symbol_<"rgb10a2unorm"> | Symbol_<"rgb10a2uint"> | Symbol_<"rg11b10ufloat"> | Symbol_<"rgb9e5ufloat"> | Symbol_<"bgra8unorm-srgb"> | Symbol_<"r16unorm"> | Symbol_<"r16snorm"> | Symbol_<"rg16unorm"> | Symbol_<"rg16snorm"> | Symbol_<"rgba16unorm"> | Symbol_<"rgba16snorm"> | Symbol_<"depth32float-stencil8"> | Symbol_<"preferred-canvas-format">;
-  /** Record a non-indexed draw of this many vertices. */
-  draw?: U32 | Symbol_;
-  /** Record an indexed draw of this many indices. */
-  "draw-indexed"?: U32 | Symbol_;
   /**
    * Index buffer when the bundle draws indexed.
    * @sjon-cross-ref target=`buffer` name-key=`name` acyclic=false
    */
   "index-buffer"?: CrossRef<"buffer">;
-  /** Instances for the recorded :draw. */
-  "instance-count"?: U32 | Symbol_;
   name: Symbol_;
   /**
-   * Pipeline recorded into the bundle (the executing pass omits its own).
+   * Pipeline recorded into the bundle (the executing pass omits its own). Required: a bundle's descriptor is its own layout, and a draw with no pipeline is invalid WebGPU.
    * @sjon-cross-ref target=`render-pipeline` name-key=`name` acyclic=false
    */
-  pipeline?: CrossRef<"render-pipeline">;
-  /** Sample count the bundle is recorded against. */
-  "sample-count"?: U32 | Symbol_;
+  pipeline: CrossRef<"render-pipeline">;
+  /** Sample count the bundle is recorded against (default 1). Must equal the :pipeline's (multisample :count …) and the sample count of the replaying pass's attachment textures. */
+  "sample-count"?: U32 | CrossRef<"define">;
   /** Buffers bound to vertex slots 0..N in order. */
   "vertex-buffers"?: Array<CrossRef<"buffer">>;
+  /** Positional counts (not expressible in TS): draw: 0..1; draw-indexed: 0..1; any of the set: 1 */
+  $children?: Array<{ readonly $form: "draw" } | { readonly $form: "draw-indexed" }>;
 }
 
 /** Frame program: what runs each frame, in order. */
@@ -2098,14 +1746,14 @@ export interface Pngine_Init {
    * @sjon-cross-ref target=`buffer` name-key=`name` acyclic=false
    */
   buffer: CrossRef<"buffer">;
-  name: Symbol_;
   /**
    * The (shader-module …) holding the @compute init entry.
    * @sjon-cross-ref target=`shader-module` name-key=`name` acyclic=false
    */
-  shader: CrossRef<"shader-module">;
-  /** Workgroup count. Read at lowering time through the lowering env: a literal or a bounded expression over (define …) constants, e.g. (ceil (/ NUM 64)). */
-  workgroups: U32 | Symbol_;
+  module: CrossRef<"shader-module">;
+  name: Symbol_;
+  /** Workgroup counts as [x], [x y] or [x y z]. Read at lowering time through the lowering env: literals, bounded expressions over (define …) constants, e.g. [(ceil (/ NUM 64))], or a bare (define …) name. */
+  workgroups: Array<U32 | CrossRef<"define">>;
 }
 
 /** One `(pass …)`: a fullscreen fragment (or compute) shader-art stage.
@@ -2113,12 +1761,12 @@ export interface Pngine_Init {
 export interface Pngine_Pass {
   $form: "pass";
   $ns: "pngine";
-  /** WGSL fragment (or compute) source; the hook injects the binding prelude (pngine uniforms, pointer, sampler, dep/feedback textures, D0… data buffers). */
-  code?: string;
-  /** WASM file paths → D0, D1, … storage buffers; the hook injects var<storage, read> D{i}: array<f32>. */
-  data?: Array<string>;
+  /** WGSL fragment (or compute) source; the hook injects the binding prelude (pngine uniforms, pointer, sampler, dep/feedback textures, D0… data buffers). Required — the hook always refused its absence. */
+  code: string;
   /** Ping-pong texture pair for feedback; the previous frame is readable as prev_<name>. */
   feedback?: boolean;
+  /** WASM file paths (relative to the document) → D0, D1, … storage buffers; the hook injects var<storage, read> D{i}: array<f32>. The same :file every other file-on-disk key spells. */
+  file?: Array<string>;
   /** One-shot WGSL compute source run on the first frame only. */
   init?: string;
   name: Symbol_;
@@ -2161,35 +1809,29 @@ export type SjonPngine =
   | Pngine_CopyBufferToBuffer
   | Pngine_WasmCall
   | Pngine_BindGroup
-  | Pngine_StorageTexture
   | Pngine_BindGroupLayout
   | Pngine_PipelineLayout
   | Pngine_Sampler
   | Pngine_RenderPipeline
   | Pngine_ComputePipeline
-  | Pngine_Layout
   | Pngine_Vertex
   | Pngine_Fragment
+  | Pngine_Compute
   | Pngine_Constant
   | Pngine_Primitive
   | Pngine_DepthStencil
   | Pngine_StencilFront
   | Pngine_StencilBack
   | Pngine_Multisample
-  | Pngine_Module
-  | Pngine_Entry
-  | Pngine_Topology
-  | Pngine_Buffers
   | Pngine_VertexBuffer
   | Pngine_Attribute
-  | Pngine_Targets
   | Pngine_Target
   | Pngine_Blend
   | Pngine_Color
   | Pngine_Alpha
   | Pngine_RenderPass
   | Pngine_ColorAttachment
-  | Pngine_DepthAttachment
+  | Pngine_DepthStencilAttachment
   | Pngine_Draw
   | Pngine_DrawIndexed
   | Pngine_DrawIndirect
@@ -2197,6 +1839,8 @@ export type SjonPngine =
   | Pngine_TimestampWrites
   | Pngine_OcclusionQuery
   | Pngine_ComputePass
+  | Pngine_Dispatch
+  | Pngine_DispatchIndirect
   | Pngine_RenderBundle
   | Pngine_Frame
   | Pngine_Init

@@ -176,7 +176,7 @@ included, reducing WASM size.
 | `core` | Always | Bytecode parsing, buffer creation, command emission |
 | `render` | `(render-pipeline …)`, `(render-pass …)` | Render pipelines, draw commands |
 | `compute` | `(compute-pipeline …)`, `(compute-pass …)` | Compute pipelines, dispatch |
-| `wasm` | WASM data buffers (`:data`, `(data … wasm)`) | Nested WASM execution |
+| `wasm` | WASM data buffers (`(data … (wasm-data …))`, `(wasm-call …)`, `(pass … :file …)`) | Nested WASM execution |
 | `animation` | Animation/scene forms | Scene timeline, transitions |
 | `texture` | `(texture …)` with external source | Image/video texture loading |
 
@@ -298,8 +298,11 @@ change. Add a new chunk → add its row here and a `chunkRole` label in
   macOS host has `vendor/wgpu-native/lib/libwgpu_native.a`; the published npm
   binaries are cross-compiled without it and `--frame` hard-errors there with
   rebuild instructions.
-- `tools/viewers/native/` — desktop viewer, WAMR-hosted. It traces command
-  buffers; it does not render.
+- `tools/viewers/desktop/` — desktop viewer, WAMR-hosted (`zig build
+  desktop-viewer`). It traces command buffers; it does not render. (The
+  older `tools/viewers/native/` — a pre-`--frame` native renderer — was in
+  no build target, did not compile against its own loader, and was removed
+  in the third leak pass.)
 - The runtime for wasm is WAMR, and the GPU API is wgpu-native.
 
 ---
@@ -431,19 +434,19 @@ The SJON forms provide 1:1 mapping to WebGPU concepts with ergonomic syntax
 | SJON Form | WebGPU Concept | Example |
 |-----------|----------------|---------|
 | `(buffer …)` | `GPUBuffer` | `(buffer :name vb :size 1024 :usage [vertex])` |
-| `(texture …)` | `GPUTexture` | `(texture :name depth :format depth24plus)` |
+| `(texture …)` | `GPUTexture` | `(texture :name depth :size canvas :format depth24plus :usage [render-attachment])` |
 | `(sampler …)` | `GPUSampler` | `(sampler :name samp :mag-filter linear)` |
 | `(shader-module …)` | `GPUShaderModule` | `(shader-module :name code :code """…""")` |
 | `(bind-group …)` | `GPUBindGroup` | `(bind-group :name bg … (entry :binding 0 :buffer u))` |
 | `(render-pipeline …)` | `GPURenderPipeline` | `(render-pipeline :name pipe (vertex …) …)` |
-| `(compute-pipeline …)` | `GPUComputePipeline` | `(compute-pipeline :name cp :module code :entry main)` |
+| `(compute-pipeline …)` | `GPUComputePipeline` | `(compute-pipeline :name cp :layout auto (compute :module code :entry main))` |
 
 ### Pass Forms
 
 | SJON Form | WebGPU Concept | Key Properties |
 |-----------|----------------|----------------|
 | `(render-pass …)` | `GPURenderPassEncoder` | `(color-attachment …)`, `:pipeline`, `(draw …)` |
-| `(compute-pass …)` | `GPUComputePassEncoder` | `:pipeline`, `:dispatch-workgroups` |
+| `(compute-pass …)` | `GPUComputePassEncoder` | `:pipeline`, `(dispatch …)` |
 | `(queue …)` | `GPUQueue.writeBuffer()` | `(write-buffer :buffer … :data …)` |
 
 ### Frame Form
@@ -454,7 +457,7 @@ The SJON forms provide 1:1 mapping to WebGPU concepts with ergonomic syntax
 
 ### Execution Model
 
-```
+```sjon
 (frame :name main
   :before [setupQueue]              ; queue ops run before each frame
   :init [initCompute]               ; run once (exec_pass_once)
@@ -484,18 +487,21 @@ Per-frame loop:
 
 **Simple Triangle (examples/simple_triangle.sjon):**
 
-```
+```sjon
 (shader-module :name code :code """
-@vertex fn vertexMain(...) -> @builtin(position) vec4f { ... }
-@fragment fn fragMain() -> @location(0) vec4f { ... }
+@vertex fn vertexMain(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var pos = array<vec2f, 3>(vec2(0.0, 0.5), vec2(-0.5, -0.5), vec2(0.5, -0.5));
+  return vec4f(pos[i], 0.0, 1.0);
+}
+@fragment fn fragMain() -> @location(0) vec4f { return vec4(1.0, 0.0, 0.0, 1.0); }
 """)
 
 (render-pipeline :name pipeline
-  (layout auto)
-  (vertex (module code) (entry vertexMain))
-  (fragment (module code) (entry fragMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list)))
+  :layout auto
+  (vertex :module code :entry vertexMain)
+  (fragment :module code :entry fragMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
 
 (render-pass :name renderPipeline
   (color-attachment :view context-current-texture :clear-value [0 0 0 0] :load-op clear :store-op store)
@@ -540,14 +546,14 @@ Per-frame loop:
 For compute simulations (boids, particles), use pool buffers:
 
 **SJON:**
-```
+```sjon
 (buffer :name particles
   :size 32768
   :usage [vertex storage]
   :pool 2)                  ; creates particles_0, particles_1
 
 (bind-group :name simBindGroup
-  :layout-pipeline computePipe :layout-index 0 :pool 2  ; alternates each frame
+  :layout computePipe :group 0 :pool 2  ; alternates each frame
   (entry :binding 0 :buffer particles :ping-pong 0)   ; read from
   (entry :binding 1 :buffer particles :ping-pong 1))  ; write to
 ```
@@ -733,7 +739,7 @@ not the WGSL table index.
 **Bug**: Creating 12-byte buffer for 16-byte `pngine-inputs`.
 
 **Fix**: Always size uniform buffers to exactly 16 bytes:
-```
+```sjon
 (buffer :name uniforms :size 16 :usage [uniform copy-dst])
 ```
 

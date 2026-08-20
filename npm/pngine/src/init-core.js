@@ -344,6 +344,12 @@ export function destroy(p) {
     worker.postMessage({ type: "destroy" });
   }
 
+  // A placeholder canvas initFromImage created is removed from the DOM, not
+  // merely forgotten: each `pngine("#img")`/destroy cycle used to stack one
+  // more absolutely-positioned canvas over the image, holding its last frame.
+  if (i.createdCanvas) i.canvas?.remove?.();
+  i.createdCanvas = false;
+
   // Empty the bag the getters read through — this is what actually releases the
   // instance, however long the host holds `p`.
   i.worker = null;

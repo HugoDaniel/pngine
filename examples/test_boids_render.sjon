@@ -3,9 +3,11 @@
 ; particle from two vertex buffers (per-instance position/velocity, per-vertex
 ; sprite). There is no per-frame compute: the particles never move.
 ;
-; The buffer size `(* NUM_PARTICLES 16)` is an expression over the define, but
-; `(init … :workgroups 32)` is a literal (ceil(2048/64)): the init form is
-; lowered before defines are in scope, so its slots take numbers only.
+; The buffer size `(* NUM_PARTICLES 16)` is an expression over the define;
+; `(init … :workgroups [32])` writes the literal (ceil(2048/64)) for legibility
+; only — the slot is a vector whose elements may be expressions over defines
+; too (`[(ceil (/ NUM_PARTICLES 64))]` compiles byte-identical; see
+; boids_init_only.sjon).
 
 (define :name NUM_PARTICLES :value 2048)
 
@@ -90,23 +92,22 @@ fn main(@builtin(global_invocation_id) id : vec3u) {
 
 (buffer :name particleBuffer :size (* NUM_PARTICLES 16) :usage [vertex storage])
 
-(buffer :name spriteBuffer :size spriteData :usage [vertex]
-  :mapped-at-creation spriteData)
+(buffer :name spriteBuffer :usage [vertex]
+  :data spriteData)
 
 (render-pipeline :name renderPipeline
-  (layout auto)
-  (vertex (module code) (entry vertexMain)
-    (buffers
-      (vertex-buffer :array-stride (* 4 4) :step-mode instance
-        (attribute :shader-location 0 :offset 0 :format float32x2)
-        (attribute :shader-location 1 :offset (* 2 4) :format float32x2))
-      (vertex-buffer :array-stride (* 2 4) :step-mode vertex
-        (attribute :shader-location 2 :offset 0 :format float32x2))))
-  (fragment (module code) (entry fragMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list)))
+  :layout auto
+  (vertex :module code :entry vertexMain
+    (vertex-buffer :array-stride (* 4 4) :step-mode instance
+      (attribute :shader-location 0 :offset 0 :format float32x2)
+      (attribute :shader-location 1 :offset (* 2 4) :format float32x2))
+    (vertex-buffer :array-stride (* 2 4) :step-mode vertex
+      (attribute :shader-location 2 :offset 0 :format float32x2)))
+  (fragment :module code :entry fragMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
 
-(init :name initParticles :buffer particleBuffer :shader initShader :workgroups 32)
+(init :name initParticles :buffer particleBuffer :module initShader :workgroups [32])
 
 (render-pass :name renderPass
   (color-attachment :view context-current-texture :clear-value [0.0 0.0 0.0 1.0] :load-op clear :store-op store)

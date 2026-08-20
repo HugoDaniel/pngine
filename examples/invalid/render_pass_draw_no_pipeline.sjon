@@ -1,0 +1,11 @@
+; Invalid: a render-pass that draws and names no `:pipeline`. WebGPU's draw
+; calls are validated against the pass's current pipeline, and a pass that
+; never called setPipeline fails at the first draw. `:pipeline` is optional
+; on a render pass ONLY for a pass that replays bundles (`:execute-bundles`),
+; which carry their own; a pass with a draw of its own needs the pipeline it
+; runs under. This compiled to begin_render_pass → draw → end_pass until audit
+; 09's prose sweep probed it.
+(render-pass :name draw
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

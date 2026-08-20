@@ -1,7 +1,7 @@
 ; Explicit bind-group-layout with sampler and texture entries — a
 ; (bind-group-layout …) authoring the (sampler …) and (texture …) entry
-; sub-forms, composed into a (pipeline-layout …) that the render pipeline uses
-; via :pipeline-layout instead of (layout auto).
+; sub-forms, composed into a (pipeline-layout …) that the render pipeline
+; names as its :layout instead of `:layout auto`.
 ;
 ; The fragment samples `tex` through `samp`, so the entry types must match the
 ; WGSL (a filtering sampler + a float 2d texture); a mismatch is rejected at
@@ -36,16 +36,16 @@
 (bind-group-layout :name bgl
   (entry :binding 0 :visibility [fragment] (sampler :type filtering))
   (entry :binding 1 :visibility [fragment]
-    (texture :sample-type float :view-dimension 1 :multisampled false)))
+    (texture :sample-type float :view-dimension 2d :multisampled false)))
 
 (pipeline-layout :name pl :bind-group-layouts [bgl])
 
-(render-pipeline :name pipe :pipeline-layout pl
-  (vertex (module code) (entry vs))
-  (fragment (module code) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+(render-pipeline :name pipe :layout pl
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
 
-(bind-group :name g :bind-group-layout bgl
+(bind-group :name g :layout bgl
   (entry :binding 0 :sampler samp)
   (entry :binding 1 :texture tex))
 

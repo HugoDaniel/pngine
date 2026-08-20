@@ -6,13 +6,13 @@
 //! This retires `emitter/init.zig` (~325 LOC) and (Phase 2) `emitter/pass_sugar.zig`.
 //!
 //! `EmittedForm.children` is a positional `[]const EmittedValue` (SJON 2026-06-07),
-//! so a hook can synthesize positional shapes like `(module shader)`. The render
-//! pipeline hooks below emit the canonical `(vertex (module …)(entry …))(fragment …
-//! (targets (target :format …)))` positional form — the same shape a hand-authored
+//! so a hook can synthesize child forms like `(entry :binding 0 :buffer b)`. The render
+//! pipeline hooks below emit the canonical `(vertex :module … :entry …)(fragment
+//! :module … :entry … (target :format …))` form — the same shape a hand-authored
 //! pipeline uses, so the emitter's single descriptor path serves both (§86 retired
 //! the legacy flat `flat-module`/… kvpair shape and its parallel emitter branch).
-//! `compute-pipeline`'s flat kvpairs stay (module + entry, no nested stages — not a
-//! workaround).
+//! `compute-pipeline` carries a `(compute …)` stage, the same GPUProgrammableStage
+//! the other two are (docs/plans/overhaul/02 R2).
 
 const std = @import("std");
 const sjon = @import("sjon");
@@ -28,7 +28,8 @@ const EmittedKvpair = Lowering.EmittedKvpair;
 const EmittedValue = Lowering.EmittedValue;
 
 /// Shared linear sampler name (legacy `ensureSharedSampler`: created once,
-/// unconditionally, before any pass — even passes that never sample).
+/// unconditionally, before any pass — even passes that never sample). Its
+/// filters are authored explicitly at the emission site, not defaulted.
 const PASS_SAMPLER = "__pass_sampler";
 
 /// The auto-injected fullscreen-triangle vertex shader (entry `vs`), shared by
@@ -97,10 +98,11 @@ const PassRef = struct {
 ///
 /// Scope: fullscreen fragment passes with optional `pngine`/`pointer` uniforms,
 /// `@fragment fn post()` post-processing (main → intermediate texture → canvas),
-/// `feedback=true` ping-pong (a `pool=2` output texture + `prev_<name>` binding,
-/// rendered via begin_render_pass_pool), and cross-pass dependencies (a later pass
-/// samples an earlier pass's output, ping-ponged when that output is pooled).
-/// Data buffers / compute mains land in later iterations.
+/// `:feedback true` ping-pong (a `:pool 2` output texture + `prev_<name>` binding,
+/// rendered via begin_render_pass_pool), cross-pass dependencies (a later pass
+/// samples an earlier pass's output, ping-ponged when that output is pooled),
+/// `:file […]` WASM data buffers (`D0`, `D1`, …), and `@compute` mains (a storage
+/// `screen` texture + an auto-blit; `lowerComputePass`).
 pub fn passV1(
     arena: std.mem.Allocator,
     input: *const Lowering.LoweringInput,
@@ -110,10 +112,16 @@ pub fn passV1(
     const container = input.form_idx;
     const hdr = view.tree.formHeader(container);
 
-    // Shared sampler first (defaults → linear/linear/clamp-to-edge, matching
-    // the legacy encodeSampler).
+    // Shared sampler first. The filters are SPELLED OUT rather than left to the
+    // schema default: this sampler exists to read the previous pass's texture,
+    // where smoothing is the whole point, and the default is nearest since
+    // spec/09 step D. Riding the default here is how a feedback chain would have
+    // gone blocky the day the default moved — the sugar authors on the user's
+    // behalf, so it states what it means.
     try appendForm(arena, out, container, "sampler", &.{
         .{ .key = "name", .value = .{ .symbol = PASS_SAMPLER } },
+        .{ .key = "mag-filter", .value = .{ .symbol = "linear" } },
+        .{ .key = "min-filter", .value = .{ .symbol = "linear" } },
     }, &.{});
 
     // Collect the (pass …) children up front so each knows whether it is the
@@ -168,8 +176,10 @@ fn lowerOnePass(
     const pass_span = view.tree.formHeader(pass).head_span;
     const name = (try childSymbol(arena, view, pass, "name")) orelse
         return out.failAt(arena, pass_span, "`(pass …)` has no `:name`", .{});
+    // `:code` is required in the schema (audit 09 D26), so this is the
+    // "internal:" shape — reachable only by a registry-less caller.
     const code = (try childString(arena, view, pass, "code")) orelse
-        return out.failAt(arena, pass_span, "pass `{s}` has no `:code`", .{name});
+        return out.failAt(arena, pass_span, "internal: pass `{s}` has no `:code`", .{name});
     std.debug.assert(name.len > 0); // pre: named pass
 
     // Detect entry-point kind via the reused scanner. A compute main lowers to a
@@ -234,22 +244,27 @@ const PassFeatures = struct {
 
 /// Detect a fragment pass's features from its user WGSL. Detection runs on the
 /// post-stripped code so post()'s refs (samp, textureSample) don't leak into the
-/// main pass's prelude/bindings. A sampler is also needed when the pass samples a
-/// dependency or its own feedback texture (legacy `prior_passes.len > 0 or
-/// feedback`), even if the WGSL never literally spells `samp` / `textureSample`.
+/// main pass's prelude/bindings.
+///
+/// The sampler is bound iff the WGSL names it (`samp` / `textureSample`). It
+/// used to be forced by a dependency or `:feedback true` as well — but the bind
+/// group is laid out by the pipeline's `:layout auto`, and an auto layout holds
+/// only the bindings the entry point statically uses: a pass that read its
+/// feedback texture with `textureLoad` got a `samp` entry in the bind group
+/// that the layout did not have, and WebGPU refused the group (wgpu: "Number
+/// of bindings in bind group descriptor (2) does not match … (1)"; lint W0003
+/// was the only compile-time sign). Overhaul/09 §8's doc-fence gate found it.
 fn detectPassFeatures(
     view: EffectiveView,
     pass: Ast.NodeIndex,
     code: []const u8,
     is_main: bool,
-    prior_passes: []const PassRef,
 ) Lowering.LoweringError!PassFeatures {
     std.debug.assert(code.len > 0); // pre: pass has WGSL (scanner already found an entry)
     const feedback = (try childBoolean(view, pass, "feedback")) orelse false;
     const post_fn: ?[]const u8 = if (is_main) extractPostFunction(code) else null;
     const main_code = if (post_fn) |pf| code[0 .. @intFromPtr(pf.ptr) - @intFromPtr(code.ptr)] else code;
-    const needs_sampler = prior_passes.len > 0 or feedback or
-        std.mem.indexOf(u8, main_code, "textureSample") != null or
+    const needs_sampler = std.mem.indexOf(u8, main_code, "textureSample") != null or
         std.mem.indexOf(u8, main_code, "samp") != null;
     return .{
         .feedback = feedback,
@@ -261,7 +276,7 @@ fn detectPassFeatures(
     };
 }
 
-/// Data storage buffers (`data=["a.wasm" …]`) → D0, D1, …, emitted between the
+/// Data storage buffers (`:file ["a.wasm" …]`) → D0, D1, …, emitted between the
 /// pointer buffer and the output texture (legacy `loadDataWasm` create position).
 /// The emitter reads each WASM file, sizes the buffer, and fills it; the prelude
 /// declares `D{i}: array<f32>` and the bind group binds them (after deps/feedback).
@@ -274,7 +289,10 @@ fn emitPassDataBuffers(
     name: []const u8,
 ) Lowering.LoweringError!std.ArrayList([]const u8) {
     std.debug.assert(name.len > 0); // pre: named pass (data buffer names derive from it)
-    const data_files = (try childStringVector(arena, out, view, pass, "data")) orelse &.{};
+    // `:file [paths]` — the pass's WASM data files, spelled like every other
+    // file on disk (F12; audit 09 D18 — it was `:data [paths]`, the one key
+    // that names a `(data …)` reference everywhere else).
+    const data_files = (try childStringVector(arena, out, view, pass, "file")) orelse &.{};
     var data_bufs: std.ArrayList([]const u8) = .empty;
     for (data_files, 0..) |wasm_path, di| {
         const dname = try std.fmt.allocPrint(arena, "{s}__d{d}", .{ name, di });
@@ -303,7 +321,20 @@ fn lowerFragmentPass(
     std.debug.assert(name.len > 0); // pre: named pass
     std.debug.assert(code.len > 0); // pre: pass has WGSL
 
-    const feat = try detectPassFeatures(view, pass, code, is_main, prior_passes);
+    const feat = try detectPassFeatures(view, pass, code, is_main);
+    // The last pass renders to the canvas, and WebGPU keeps no previous canvas
+    // texture to read: `:feedback true` there has nothing to feed from. This
+    // used to lower anyway — a pooled rgba8unorm target under a canvas-format
+    // pipeline, which the GPU refuses at the first set_pipeline and nothing
+    // reaches the canvas. Refuse at the pass, naming the shape that works
+    // (pass_bloom.sjon: an earlier pass feeds back, the last one reads it).
+    if (is_main and feat.feedback) return out.failAt(
+        arena,
+        view.tree.formHeader(pass).head_span,
+        "pass `{s}`: the last pass of a (pass-graph …) renders to the canvas and cannot feed back — " ++
+            "feed back in an earlier pass and read it from this one (`textureLoad({s}, …)` or `textureSample({s}, samp, uv)`)",
+        .{ name, name, name },
+    );
 
     const ubuf = try std.fmt.allocPrint(arena, "{s}__ubuf", .{name});
     const pbuf = try std.fmt.allocPrint(arena, "{s}__pbuf", .{name});
@@ -313,7 +344,7 @@ fn lowerFragmentPass(
     const bg = try std.fmt.allocPrint(arena, "{s}__bg", .{name});
 
     // Resources in legacy `(pass …)` order: ubuf, [pbuf], texture(s), shader,
-    // pipeline, bind-group, render-pass. A feedback pass's output is a `pool=2`
+    // pipeline, bind-group, render-pass. A feedback pass's output is a `:pool 2`
     // ping-pong pair (this frame renders one, samples the other).
     if (feat.needs_uniform) try appendBuffer(arena, out, container, ubuf, 16);
     if (feat.needs_pointer) try appendBuffer(arena, out, container, pbuf, 48);
@@ -404,8 +435,8 @@ fn lowerPostPass(
     try entries.append(arena, try beTexture(arena, container, binding, intermediate_tex));
     try appendForm(arena, out, container, "bind-group", &.{
         .{ .key = "name", .value = .{ .symbol = bg } },
-        .{ .key = "layout-pipeline", .value = .{ .symbol = pipe } },
-        .{ .key = "layout-index", .value = .{ .number = 0 } },
+        .{ .key = "layout", .value = .{ .symbol = pipe } },
+        .{ .key = "group", .value = .{ .number = 0 } },
     }, try entries.toOwnedSlice(arena));
 
     try appendRenderPass(arena, out, container, pass, pipe, bg, "context-current-texture");
@@ -509,8 +540,8 @@ fn lowerBlitPass(
     entries[1] = try beSampler(arena, container, 1, PASS_SAMPLER);
     try appendForm(arena, out, container, "bind-group", &.{
         .{ .key = "name", .value = .{ .symbol = bg } },
-        .{ .key = "layout-pipeline", .value = .{ .symbol = pipe } },
-        .{ .key = "layout-index", .value = .{ .number = 0 } },
+        .{ .key = "layout", .value = .{ .symbol = pipe } },
+        .{ .key = "group", .value = .{ .number = 0 } },
     }, entries);
 
     try appendRenderPass(arena, out, container, blit, pipe, bg, "context-current-texture");
@@ -546,9 +577,12 @@ fn appendComputePipelineEntry(
 ) Lowering.LoweringError!void {
     try appendForm(arena, out, container, "compute-pipeline", &.{
         .{ .key = "name", .value = .{ .symbol = name } },
-        .{ .key = "module", .value = .{ .symbol = module } },
-        .{ .key = "entry", .value = .{ .symbol = entry } },
-    }, &.{});
+        // GPUPipelineDescriptorBase.layout is required, and a lowered pass always
+        // derives it from the WGSL. A kvpair is emittable where the old
+        // positional `(layout auto)` was not — which is why it was never stated
+        // here, and why nothing enforced it (spec/09 C.2).
+        .{ .key = "layout", .value = .{ .symbol = "auto" } },
+    }, &.{try stageForm(arena, container, "compute", module, entry, null)});
 }
 
 /// The compute bind group (port of `buildComputeBindGroupDescriptor`): uniform?,
@@ -578,8 +612,8 @@ fn appendComputeBindGroup(
     try entries.append(arena, try beTexture(arena, container, binding, screen_tex));
     try appendForm(arena, out, container, "bind-group", &.{
         .{ .key = "name", .value = .{ .symbol = name } },
-        .{ .key = "layout-pipeline", .value = .{ .symbol = pipe } },
-        .{ .key = "layout-index", .value = .{ .number = 0 } },
+        .{ .key = "layout", .value = .{ .symbol = pipe } },
+        .{ .key = "group", .value = .{ .number = 0 } },
     }, try entries.toOwnedSlice(arena));
 }
 
@@ -600,12 +634,16 @@ fn appendComputePassDispatch(
         .{ .number = @floatFromInt(dispatch[2]) },
     });
     const bgs = try arena.dupe(EmittedValue, &.{.{ .symbol = bg }});
+    const dispatch_child = try arena.dupe(EmittedForm, &.{.{
+        .head = "dispatch",
+        .kvpairs = try arena.dupe(EmittedKvpair, &.{.{ .key = "workgroups", .value = .{ .vector = dvec } }}),
+        .source_form_idx = container,
+    }});
     try appendForm(arena, out, container, "compute-pass", &.{
         .{ .key = "name", .value = .{ .symbol = name } },
         .{ .key = "pipeline", .value = .{ .symbol = pipe } },
         .{ .key = "bind-groups", .value = .{ .vector = bgs } },
-        .{ .key = "dispatch", .value = .{ .vector = dvec } },
-    }, &.{});
+    }, dispatch_child);
 }
 
 /// Compute the dispatch grid from a workgroup size (port of
@@ -727,9 +765,10 @@ fn appendUniformWriteSteps(
     }
 }
 
-/// A `(pass … :data …)` storage buffer (`storage|copy-dst`) whose size + initial bytes
+/// A `(pass … :file …)` storage buffer (`storage|copy-dst`) whose size + initial bytes
 /// the emitter derives from the WASM file at `wasm_path` (no `:size`). The emitter's
-/// `:wasm` branch reads/parses the file and emits the WASM init/copy opcodes.
+/// `:file` branch (`emitWasmDataBuffer`) reads/parses the file and emits the WASM
+/// init/copy opcodes.
 fn appendDataBuffer(
     arena: std.mem.Allocator,
     out: *Lowering.LoweringOutput,
@@ -740,7 +779,7 @@ fn appendDataBuffer(
     const usage = try arena.dupe(EmittedValue, &.{ .{ .symbol = "storage" }, .{ .symbol = "copy-dst" } });
     try appendForm(arena, out, container, "buffer", &.{
         .{ .key = "name", .value = .{ .symbol = name } },
-        .{ .key = "wasm", .value = .{ .string = wasm_path } },
+        .{ .key = "file", .value = .{ .string = wasm_path } },
         .{ .key = "usage", .value = .{ .vector = usage } },
     }, &.{});
 }
@@ -773,7 +812,7 @@ fn appendTextureForm(
 }
 
 /// A fragment pass's output texture (texture_binding|render_attachment), mirroring
-/// legacy `emitCanvasTexture(is_fragment=true)`. Feedback passes the `pool=2` pair.
+/// legacy `emitCanvasTexture(is_fragment=true)`. Feedback passes the `:pool 2` pair.
 fn appendOutputTexture(
     arena: std.mem.Allocator,
     out: *Lowering.LoweringOutput,
@@ -798,27 +837,9 @@ fn appendScreenTexture(
     try appendTextureForm(arena, out, container, name, pool, usage);
 }
 
-/// `(head positional)` — a form whose sole child is one bare positional symbol,
-/// e.g. `(module shader)` or `(entry vs)`, the shape an author writes for a render
-/// pipeline stage's module/entry.
-fn positionalForm(
-    arena: std.mem.Allocator,
-    container: Ast.NodeIndex,
-    head: []const u8,
-    positional: []const u8,
-) Lowering.LoweringError!EmittedForm {
-    return .{
-        .head = head,
-        .children = try arena.dupe(EmittedValue, &.{.{ .symbol = positional }}),
-        .source_form_idx = container,
-    };
-}
-
-/// A render-pipeline stage `(vertex|fragment (module M)(entry E) [(targets (target
-/// :format F))])`. A non-null `target_format` adds the fragment's color target; null
-/// omits the targets child — a canvas-rendering pass, where the emitter writes no
-/// target key and gpu.js defaults to the preferred canvas format (the descriptor is
-/// then byte-identical to a bare fragment stage).
+/// A pipeline stage: `(vertex :module M :entry E)` or
+/// `(fragment :module M :entry E (target :format F))`. `target_format` is read
+/// on the fragment stage only, and null there means the canvas format.
 fn stageForm(
     arena: std.mem.Allocator,
     container: Ast.NodeIndex,
@@ -828,26 +849,37 @@ fn stageForm(
     target_format: ?[]const u8,
 ) Lowering.LoweringError!EmittedForm {
     var children: std.ArrayList(EmittedValue) = .empty;
-    try children.append(arena, .{ .form = try positionalForm(arena, container, "module", module) });
-    try children.append(arena, .{ .form = try positionalForm(arena, container, "entry", entry) });
-    if (target_format) |tf| {
+    // Only a FRAGMENT stage carries targets; `GPUFragmentState.targets` is
+    // required, so a null `target_format` now means "the canvas format", spelled
+    // out as `preferred-canvas-format`, rather than omitting the child and
+    // leaving gpu.js to substitute one. Same resulting pipeline — the emitter
+    // encodes `preferred-canvas-format` as an empty target object, which every
+    // runtime already resolves — but the descriptor now SAYS what it renders to.
+    // (spec/09 step B). The `(targets …)` wrapper that held it went with 02 R3.
+    if (std.mem.eql(u8, head, "fragment")) {
         const target = EmittedForm{
             .head = "target",
-            .kvpairs = try arena.dupe(EmittedKvpair, &.{.{ .key = "format", .value = .{ .symbol = tf } }}),
+            .kvpairs = try arena.dupe(EmittedKvpair, &.{.{
+                .key = "format",
+                .value = .{ .symbol = target_format orelse "preferred-canvas-format" },
+            }}),
             .source_form_idx = container,
         };
-        const targets = EmittedForm{
-            .head = "targets",
-            .children = try arena.dupe(EmittedValue, &.{.{ .form = target }}),
-            .source_form_idx = container,
-        };
-        try children.append(arena, .{ .form = targets });
+        try children.append(arena, .{ .form = target });
     }
-    return .{ .head = head, .children = try children.toOwnedSlice(arena), .source_form_idx = container };
+    return .{
+        .head = head,
+        .kvpairs = try arena.dupe(EmittedKvpair, &.{
+            .{ .key = "module", .value = .{ .symbol = module } },
+            .{ .key = "entry", .value = .{ .symbol = entry } },
+        }),
+        .children = try children.toOwnedSlice(arena),
+        .source_form_idx = container,
+    };
 }
 
-/// A canonical render pipeline for a `(pass …)`: positional `(vertex (module M)(entry vs))`
-/// + `(fragment (module M)(entry FE) [(targets (target :format FMT))])`. This is the
+/// A canonical render pipeline for a `(pass …)`: positional `(vertex :module M :entry vs)`
+/// + `(fragment :module M :entry FE (target :format FMT))`. This is the
 /// same shape a hand-authored pipeline uses, so the emitter's single authored
 /// descriptor path builds it (§86 replaced the legacy flat `:flat-module` keys; the
 /// runtime is unchanged — gpu.js normalizes the old `targetFormat` string and the
@@ -865,17 +897,18 @@ fn appendPipeline(
     const fragment = try stageForm(arena, container, "fragment", module, fragment_entry, target_format);
     try appendForm(arena, out, container, "render-pipeline", &.{
         .{ .key = "name", .value = .{ .symbol = name } },
+        .{ .key = "layout", .value = .{ .symbol = "auto" } }, // required; see appendComputePipeline
     }, &.{ vertex, fragment });
 }
 
 /// A bind group in canonical pass binding order: uniform, pointer, the shared
 /// sampler (when sampling), then a texture-view per dependency, then the feedback
-/// texture, then the `(pass … :data …)` storage buffers (D0, D1, …). With `has_post` the
+/// texture, then the `(pass … :file …)` storage buffers (D0, D1, …). With `has_post` the
 /// prelude declares `samp` without `needs_sampler` — that slot is a gap the bind
 /// group skips (no entry), so bindings still line up.
 ///
 /// When the pass feeds back, or samples a *pooled* dependency, the bind group
-/// becomes a `pool=2` A/B pair: dependency entries carry `:ping-pong 0` (read the
+/// becomes a `:pool 2` A/B pair: dependency entries carry `:ping-pong 0` (read the
 /// partner written this frame), the feedback entry `:ping-pong 1` (read last
 /// frame's output). The emitter resolves each per pool instance; the render pass
 /// alternates them via setBindGroupPool.
@@ -943,7 +976,7 @@ fn appendBindGroup(
 }
 
 /// Assemble the `(bind-group …)` form from its computed entries: name /
-/// layout-pipeline / layout-index kvpairs (+ a `pool` kvpair when ping-ponged);
+/// layout / group kvpairs (+ a `pool` kvpair when ping-ponged);
 /// the children are the entry forms. Split out of appendBindGroup to keep it
 /// within the ≤70-line budget (item 4.1).
 fn appendBindGroupForm(
@@ -960,9 +993,9 @@ fn appendBindGroupForm(
     var n: usize = 0;
     kvs[n] = .{ .key = "name", .value = .{ .symbol = name } };
     n += 1;
-    kvs[n] = .{ .key = "layout-pipeline", .value = .{ .symbol = pipe } };
+    kvs[n] = .{ .key = "layout", .value = .{ .symbol = pipe } };
     n += 1;
-    kvs[n] = .{ .key = "layout-index", .value = .{ .number = 0 } };
+    kvs[n] = .{ .key = "group", .value = .{ .number = 0 } };
     n += 1;
     if (pool_size > 1) {
         kvs[n] = .{ .key = "pool", .value = .{ .number = @floatFromInt(pool_size) } };
@@ -1144,7 +1177,7 @@ fn buildPrelude(
         try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "@group(0) @binding({d}) var prev_{s}: texture_2d<f32>;\n", .{ binding, name }));
         binding += 1;
     }
-    // Data storage buffers (`D0`, `D1`, … — `(pass … :data …)`), declared after the
+    // Data storage buffers (`D0`, `D1`, … — `(pass … :file …)`), declared after the
     // deps / feedback bindings, before `postTex` (legacy prelude order).
     for (data_bufs, 0..) |_, di| {
         try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "@group(0) @binding({d}) var<storage, read> D{d}: array<f32>;\n", .{ binding, di }));
@@ -1241,8 +1274,8 @@ fn childString(arena: std.mem.Allocator, view: EffectiveView, form_idx: Ast.Node
     return try arena.dupe(u8, s);
 }
 
-/// Read a vector-of-strings child key (`:data ["a.wasm" …]`) into a slice of file
-/// paths. Returns null when the key is absent (no `data=`). A non-string element is a
+/// Read a vector-of-strings child key (`:file ["a.wasm" …]`) into a slice of file
+/// paths. Returns null when the key is absent. A non-string element is a
 /// hook error (the schema's `data-file-list` shape — a vector of `string` — should
 /// already guarantee well-formedness; a non-vector reads as absent, since the shape
 /// forbids it before lowering).
@@ -1265,6 +1298,56 @@ fn childStringVector(
         paths[i] = try arena.dupe(u8, view.tree.stringText(e));
     }
     return paths;
+}
+
+/// Read `(init … :workgroups [x y z])` as a 1..3 grid, missing dimensions 1.
+///
+/// `LoweringInput.numberEval` reads a SCALAR key; D11 made `:workgroups` a
+/// vector, so each element is evaluated the way `numberEval` evaluates a scalar
+/// — literal fast path, otherwise `Expr.eval` against the host lowering env, so
+/// `[(ceil (/ NUM 64))]` resolves at lowering time exactly as it did when the
+/// key was a bare count.
+///
+/// A bad element is blamed AT THAT ELEMENT, not at the whole `:workgroups`
+/// value: the vector is the reason there can be more than one, so the squiggle
+/// has to say which. Returns null when the key is absent.
+fn workgroupsVector(
+    arena: std.mem.Allocator,
+    out: *Lowering.LoweringOutput,
+    input: *const Lowering.LoweringInput,
+    name: []const u8,
+) Lowering.LoweringError!?[3]u32 {
+    const elems = Reader.initFromView(input.view).vectorNodes(input.form_idx, "workgroups") orelse return null;
+    std.debug.assert(elems.len >= 1 and elems.len <= 3); // schema: dispatch-size is 1..3
+    var wg: [3]u32 = .{ 1, 1, 1 };
+    for (elems, 0..) |e, i| {
+        const n: ?f64 = switch (input.view.tree.tagOf(e)) {
+            .number, .number_i64, .number_u64 => input.view.tree.numberOf(e),
+            else => blk: {
+                var r = sjon.Expr.eval(input.arena, input.view.tree, e, input.env, input.schema.*) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => break :blk null,
+                };
+                defer r.deinit();
+                break :blk switch (r.value) {
+                    .number => |v| v,
+                    else => null,
+                };
+            },
+        };
+        // The same rule as every count slot (02 R7, `values.narrowF64`): a
+        // non-negative integer, float noise forgiven — a fraction, a negative
+        // and an over-u32 value are refused here with the span on the element.
+        const ok = n != null and n.? >= 0 and n.? <= @as(f64, @floatFromInt(std.math.maxInt(u32))) and @abs(n.? - @round(n.?)) <= 1e-9 * @max(1.0, @abs(n.?));
+        if (!ok) return out.failAt(
+            arena,
+            input.view.tree.spanOf(e),
+            "init `{s}`: `:workgroups` element {d} did not evaluate to a workgroup count — each element is a literal, a `(define …)` constant, or a bounded expression over them, and it has to be a non-negative integer",
+            .{ name, i },
+        );
+        wg[i] = @intFromFloat(@round(n.?));
+    }
+    return wg;
 }
 
 /// The span of `key`'s VALUE in `form_idx`, for a diagnostic that blames one
@@ -1301,7 +1384,7 @@ fn childBoolean(view: EffectiveView, form_idx: Ast.NodeIndex, key: []const u8) L
     return Reader.initFromView(view).boolean(form_idx, key);
 }
 
-/// `pngine/init-v1` — `(init :name N :buffer B :shader S :workgroups W)` lowers
+/// `pngine/init-v1` — `(init :name N :buffer B :module S :workgroups W)` lowers
 /// to a one-shot compute init: a compute pipeline + a bind group wiring the
 /// target storage buffer at binding 0 + a compute pass dispatched `W` workgroups.
 ///
@@ -1314,52 +1397,54 @@ pub fn initV1(
     input: *const Lowering.LoweringInput,
     out: *Lowering.LoweringOutput,
 ) Lowering.LoweringError!void {
-    const view = input.view;
-    const src_form = input.form_idx;
     const name = (try input.symbol("name")) orelse
         return out.fail(arena, "`(init …)` has no `:name`", .{});
     const buffer = (try input.symbol("buffer")) orelse
         return out.fail(arena, "init `{s}` has no `:buffer` to initialize", .{name});
-    const shader = (try input.symbol("shader")) orelse
-        return out.fail(arena, "init `{s}` has no `:shader` to run", .{name});
-    // `numberEval` (not `number`): resolves a define-ref expression against the
-    // host lowering env (`Compiler.buildLoweringEnv`), so `:workgroups (ceil (/
-    // NUM 64))` works at lowering time — unifying this with the emitter-time
-    // `:dispatch-workgroups` rule (§52). A plain literal takes the fast path.
+    // Unreachable through the schema (`:module` is required) — an "internal:"
+    // shape, kept because a registry-less caller could reach it. It said
+    // `:shader` until audit 09 C5, a spelling retired in 3.0.0.
+    const shader = (try input.symbol("module")) orelse
+        return out.fail(arena, "internal: init `{s}` has no `:module` to run", .{name});
+    // Evaluated against the host lowering env (`Compiler.buildLoweringEnv`), so
+    // `:workgroups [(ceil (/ NUM 64))]` works at lowering time — the same rule
+    // the emitter applies to the `(dispatch :workgroups …)` this lowers to (§52).
+    // A plain literal element takes the fast path.
     //
-    // The failure that authors actually hit arrives as an ERROR from inside
-    // `numberEval` (an unbound name raises `UnknownBinding`, a non-numeric
-    // result folds the same way), not as the `orelse` — which fires only when
-    // the key is absent. Catching is therefore load-bearing: a `try` here
-    // would let the generic diagnostic straight through, and the cause this
-    // hook sets would never be read. The two arms say different things
-    // because they ARE different mistakes.
-    const workgroups = (input.numberEval("workgroups") catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.HookFailed => return failSlot(
-            arena,
-            out,
-            view,
-            src_form,
-            "workgroups",
-            "init `{s}`: `:workgroups` did not evaluate to a number — every name in it must be a `(define …)` declared before the define that uses it",
-            .{name},
-        ),
-    }) orelse return out.fail(arena, "init `{s}` has no `:workgroups`", .{name});
+    // The failure authors actually hit is an element that does not evaluate (an
+    // unbound name raises `UnknownBinding`, a non-numeric result folds the same
+    // way); `workgroupsVector` blames that element, with its own span. The
+    // `orelse` below is the other mistake — the key absent entirely — and says
+    // so differently, because it IS different.
+    const workgroups = (try workgroupsVector(arena, out, input, name)) orelse
+        return out.fail(arena, "init `{s}` has no `:workgroups`", .{name});
 
     const pipe_name = try std.fmt.allocPrint(arena, "{s}-init-pipe", .{name});
     const bg_name = try std.fmt.allocPrint(arena, "{s}-init-bg", .{name});
     const src = input.form_idx;
 
-    // (compute-pipeline :name <N>-init-pipe :module S)
+    // (compute-pipeline :name <N>-init-pipe :layout auto (compute :module S))
+    // No `:entry` on the stage: an init module names its own compute entry, and
+    // the emitter infers the module's sole one (WebGPU's own rule for an absent
+    // GPUProgrammableStage.entryPoint) rather than this hook guessing a name.
     {
+        const stage_kvs = try arena.alloc(EmittedKvpair, 1);
+        stage_kvs[0] = .{ .key = "module", .value = .{ .symbol = shader } };
+        const stage = try arena.alloc(EmittedForm, 1);
+        stage[0] = .{ .head = "compute", .kvpairs = stage_kvs, .source_form_idx = src };
+
         const kvs = try arena.alloc(EmittedKvpair, 2);
         kvs[0] = .{ .key = "name", .value = .{ .symbol = pipe_name } };
-        kvs[1] = .{ .key = "module", .value = .{ .symbol = shader } };
-        try out.append(arena, .{ .head = "compute-pipeline", .kvpairs = kvs, .source_form_idx = src });
+        kvs[1] = .{ .key = "layout", .value = .{ .symbol = "auto" } };
+        try out.append(arena, .{
+            .head = "compute-pipeline",
+            .kvpairs = kvs,
+            .children = try formChildren(arena, stage),
+            .source_form_idx = src,
+        });
     }
 
-    // (bind-group :name <N>-init-bg :layout-pipeline <N>-init-pipe :layout-index 0
+    // (bind-group :name <N>-init-bg :layout <N>-init-pipe :group 0
     //   (entry :binding 0 :buffer B))
     {
         const be_kvs = try arena.alloc(EmittedKvpair, 2);
@@ -1370,8 +1455,8 @@ pub fn initV1(
 
         const kvs = try arena.alloc(EmittedKvpair, 3);
         kvs[0] = .{ .key = "name", .value = .{ .symbol = bg_name } };
-        kvs[1] = .{ .key = "layout-pipeline", .value = .{ .symbol = pipe_name } };
-        kvs[2] = .{ .key = "layout-index", .value = .{ .number = 0 } };
+        kvs[1] = .{ .key = "layout", .value = .{ .symbol = pipe_name } };
+        kvs[2] = .{ .key = "group", .value = .{ .number = 0 } };
         try out.append(arena, .{
             .head = "bind-group",
             .kvpairs = kvs,
@@ -1381,16 +1466,27 @@ pub fn initV1(
     }
 
     // (compute-pass :name <N> :pipeline <N>-init-pipe :bind-groups [<N>-init-bg]
-    //   :dispatch-workgroups W)
+    //   (dispatch :workgroups [W]))
     {
         const bg_vec = try arena.alloc(EmittedValue, 1);
         bg_vec[0] = .{ .symbol = bg_name };
-        const kvs = try arena.alloc(EmittedKvpair, 4);
+        const kvs = try arena.alloc(EmittedKvpair, 3);
         kvs[0] = .{ .key = "name", .value = .{ .symbol = name } };
         kvs[1] = .{ .key = "pipeline", .value = .{ .symbol = pipe_name } };
         kvs[2] = .{ .key = "bind-groups", .value = .{ .vector = bg_vec } };
-        kvs[3] = .{ .key = "dispatch-workgroups", .value = .{ .number = workgroups } };
-        try out.append(arena, .{ .head = "compute-pass", .kvpairs = kvs, .source_form_idx = src });
+        const wg_vec = try arena.alloc(EmittedValue, 3);
+        for (workgroups, 0..) |n, i| wg_vec[i] = .{ .number = @floatFromInt(n) };
+        const dispatch_child = try arena.dupe(EmittedForm, &.{.{
+            .head = "dispatch",
+            .kvpairs = try arena.dupe(EmittedKvpair, &.{.{ .key = "workgroups", .value = .{ .vector = wg_vec } }}),
+            .source_form_idx = src,
+        }});
+        try out.append(arena, .{
+            .head = "compute-pass",
+            .kvpairs = kvs,
+            .children = try formChildren(arena, dispatch_child),
+            .source_form_idx = src,
+        });
     }
 }
 

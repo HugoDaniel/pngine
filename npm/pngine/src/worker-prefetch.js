@@ -60,7 +60,7 @@ export function createPrefetch(host) {
   // pipelines/buffers/bind groups stay valid across target swaps; the only
   // per-target variance is which context resolves the canvas-magic id. The
   // canvas survives a device loss, so reuse it across recoveries.
-  function configure(device, format, alphaMode = "premultiplied") {
+  function configure(device, format, alphaMode = "opaque") {
     const canvas = host.getCanvas();
     if (!prefetchCanvas) prefetchCanvas = env.makeOffscreen(canvas.width, canvas.height);
     prefetchCtx = prefetchCanvas.getContext("webgpu");
@@ -142,9 +142,14 @@ export function createPrefetch(host) {
     if (!prefetchCtx || !prefetchCanvas) return;
     if (prefetchQueue.size === 0) return;
     prefetchDraining = true;
-    const gpu = host.getGpu();
     try {
       while (prefetchQueue.size > 0 && host.loaded()) {
+        // Read the dispatcher INSIDE the loop: this drain yields between
+        // thumbnails, and a `load` landing in that yield replaces worker-core's
+        // dispatcher — a reference captured once would route the next
+        // thumbnail's render target onto a dispatcher the live draw no longer
+        // uses, or set the prefetch context on a destroyed one.
+        const gpu = host.getGpu();
         // The queue is a Map (index → uniforms): read its uniforms before delete.
         const idx = prefetchQueue.keys().next().value;
         const uniforms = prefetchQueue.get(idx);

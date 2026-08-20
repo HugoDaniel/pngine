@@ -1,0 +1,31 @@
+; INVALID: a (bind-group-layout ...) entry declaring NO resource sub-form.
+;
+; GPUBindGroupLayoutEntry takes exactly one of buffer / sampler / texture /
+; storageTexture. An entry with none used to emit `"buffer":{}` -- a uniform
+; buffer binding the author never wrote, the same "absent required value
+; replaced by a plausible constant" class 3.0.0 closed elsewhere. The schema's
+; `:min-children 1` over the resource head-set (SJON 1.4) rejects it now
+; -- `positional_missing`, located on the (entry ...) head.
+(shader-module :name code :code """
+@group(0) @binding(0) var<uniform> u : vec4f;
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return u; }
+""")
+(buffer :name u :size 16 :usage [uniform copy-dst])
+(bind-group-layout :name bgl
+  (entry :binding 0 :visibility [fragment]))
+(pipeline-layout :name pl :bind-group-layouts [bgl])
+(render-pipeline :name pipe :layout pl
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+(bind-group :name g :layout bgl
+  (entry :binding 0 :buffer u))
+(render-pass :name draw :pipeline pipe :bind-groups [g]
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

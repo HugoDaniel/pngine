@@ -1,0 +1,31 @@
+; INVALID: the pass has two color attachments, the bundle it replays was
+; recorded against one.
+;
+; GPURenderPassLayout.colorFormats is a LIST, and two layouts are equal only if
+; their lists are equal ignoring trailing nulls. A bundle recorded for one
+; target writes @location(0) alone, so replaying it in a two-attachment pass
+; leaves the second attachment untouched -- which is a validation error, not a
+; silent no-op.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.0, 1.0); }
+""")
+(texture :name colorA :size canvas :format rgba8unorm :usage [render-attachment])
+(texture :name colorB :size canvas :format rgba8unorm :usage [render-attachment])
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format rgba8unorm)))
+(render-bundle :name tri :pipeline pipe
+  :color-formats [rgba8unorm]
+  (draw :vertex-count 3))
+(render-pass :name draw
+  (color-attachment :view colorA
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (color-attachment :view colorB
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :execute-bundles [tri])
+(frame :name main :perform [draw])

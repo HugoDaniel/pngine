@@ -52,10 +52,10 @@ pub fn handle(
                 p.load_op,
                 p.store_op,
                 try wire.narrowU16(p.depth_texture_id),
-                p.clear_r,
-                p.clear_g,
-                p.clear_b,
-                p.clear_a,
+                p.clear_r_bits,
+                p.clear_g_bits,
+                p.clear_b_bits,
+                p.clear_a_bits,
                 try wire.narrowU16(p.resolve_texture_id),
             );
         },
@@ -73,17 +73,22 @@ pub fn handle(
                     .texture_id = try wire.narrowU16(try self.read_varint()),
                     .load_op = @enumFromInt(try self.read_byte()),
                     .store_op = @enumFromInt(try self.read_byte()),
-                    .clear_r = try self.read_byte(),
-                    .clear_g = try self.read_byte(),
-                    .clear_b = try self.read_byte(),
-                    .clear_a = try self.read_byte(),
+                    .clear_r_bits = try self.read_raw_u32(),
+                    .clear_g_bits = try self.read_raw_u32(),
+                    .clear_b_bits = try self.read_raw_u32(),
+                    .clear_a_bits = try self.read_raw_u32(),
                 };
             }
-            const depth_texture_id = try self.read_varint();
+            // Narrowed like the colour ids above: a depth id past u16 is
+            // `InvalidResourceId`, not an `@intCast` trap. A zero-attachment
+            // pass is invalid WebGPU and refused here rather than handed to a
+            // backend as an empty slice (the native one asserted on it).
+            const depth_texture_id = try wire.narrowU16(try self.read_varint());
+            if (count == 0) return error.RepCountEmpty;
             try self.backend.begin_render_pass_mrt(
                 allocator,
                 attachments[0..count],
-                @intCast(depth_texture_id),
+                depth_texture_id,
             );
         },
 

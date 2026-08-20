@@ -1,7 +1,7 @@
 ; Invalid: a (wasm-call …) with 33 :args, one past the 32 the call opcode can
-; carry; the emitter rejects the declaration (the :url is never fetched).
+; carry; the emitter rejects the declaration (the :file is never read).
 
-(wasm-call :name over :url "assets/mvp.wasm" :func f :returns "mat4x4"
+(wasm-call :name over :file "assets/mvp.wasm" :func f :returns "mat4x4"
   :args [canvas-width canvas-width canvas-width canvas-width canvas-width canvas-width canvas-width canvas-width
          canvas-width canvas-width canvas-width canvas-width canvas-width canvas-width canvas-width canvas-width
          canvas-width canvas-width canvas-width canvas-width canvas-width canvas-width canvas-width canvas-width
@@ -16,10 +16,10 @@
 @fragment fn fs() -> @location(0) vec4f { return vec4f(1, 0, 0, 1); }
 """)
 
-(render-pipeline :name pipe (layout auto)
-  (vertex (module code) (entry vs))
-  (fragment (module code) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
 
 (render-pass :name draw
   (color-attachment :view context-current-texture

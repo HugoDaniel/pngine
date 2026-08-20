@@ -9,15 +9,15 @@
 @fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
 """)
 (texture :name depth :size canvas :format depth24plus :usage [render-attachment])
-(render-pipeline :name pipe (layout auto)
-  (vertex (module code) (entry vs))
-  (fragment (module code) (entry fs)
-    (targets (target :format preferred-canvas-format)))
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format))
   (depth-stencil :format depth32float :depth-write-enabled true :depth-compare less))
 (render-pass :name draw :pipeline pipe
   (color-attachment :view context-current-texture
     :clear-value [0 0 0 1] :load-op clear :store-op store)
-  (depth-attachment :view depth
+  (depth-stencil-attachment :view depth
     :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   (draw :vertex-count 3))
 (frame :name main :perform [draw])

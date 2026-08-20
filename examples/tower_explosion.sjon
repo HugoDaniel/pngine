@@ -133,12 +133,12 @@
   (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
 
 (render-pipeline :name pipeline
-  (layout auto)
-  (vertex (module shader) (entry vs))
-  (fragment (module shader) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module shader :entry vs)
+  (fragment :module shader :entry fs
+    (target :format preferred-canvas-format)))
 
-(bind-group :name uniformsBindGroup :layout-pipeline pipeline :layout-index 0
+(bind-group :name uniformsBindGroup :layout pipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
 (render-pass :name mainPass

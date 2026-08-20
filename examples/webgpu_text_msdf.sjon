@@ -16,10 +16,10 @@
 ; renderer treats the atlas upload and render-bundle replay as no-ops, so a
 ; CLI-rendered frame shows only the cube; the text needs the browser.
 
-(data :name fontAtlas :blob "assets/ya-hei-ascii.png" :mime "image/png")
-(image-bitmap :name fontImg :image fontAtlas)
+(data :name fontAtlas :file "assets/ya-hei-ascii.png" :mime "image/png")
+(image-bitmap :name fontImg :data fontAtlas)
 
-(texture :name fontTex :size-from fontImg :format rgba8unorm
+(texture :name fontTex :size fontImg :format rgba8unorm
   :usage [texture-binding copy-dst render-attachment])
 (texture :name depthTex :size canvas :format depth24plus :usage [render-attachment])
 (sampler :name fontSamp :mag-filter linear :min-filter linear
@@ -82,7 +82,7 @@
   0.3886719 0.0683594 0.046875 0.0527344 24 27 -1 -13
   0.1640625 0.4648438 0.0507813 0.0722656 26 37 -2 -13
 ])
-(buffer :name glyphBuf :size glyphTable :usage [storage] :mapped-at-creation glyphTable)
+(buffer :name glyphBuf :usage [storage] :data glyphTable)
 
 ; Per-block data: 24-f32 header (base transform mat4, color vec4, scale,
 ; mode, 2 pad) then 4 f32 per printed char (x, y, glyphIndex, 0).
@@ -804,21 +804,21 @@
   382 -1260 4 0
 ])
 
-(buffer :name frontBuf :size frontData :usage [storage] :mapped-at-creation frontData)
-(buffer :name backBuf :size backData :usage [storage] :mapped-at-creation backData)
-(buffer :name rightBuf :size rightData :usage [storage] :mapped-at-creation rightData)
-(buffer :name leftBuf :size leftData :usage [storage] :mapped-at-creation leftData)
-(buffer :name topBuf :size topData :usage [storage] :mapped-at-creation topData)
-(buffer :name bottomBuf :size bottomData :usage [storage] :mapped-at-creation bottomData)
-(buffer :name titleBuf :size titleData :usage [storage] :mapped-at-creation titleData)
-(buffer :name bodyBuf :size bodyData :usage [storage] :mapped-at-creation bodyData)
+(buffer :name frontBuf :usage [storage] :data frontData)
+(buffer :name backBuf :usage [storage] :data backData)
+(buffer :name rightBuf :usage [storage] :data rightData)
+(buffer :name leftBuf :usage [storage] :data leftData)
+(buffer :name topBuf :usage [storage] :data topData)
+(buffer :name bottomBuf :usage [storage] :data bottomData)
+(buffer :name titleBuf :usage [storage] :data titleData)
+(buffer :name bodyBuf :usage [storage] :data bodyData)
 
 (buffer :name inputs :size 16 :usage [uniform copy-dst])
 (data :name cubeVerts (cube :format [position4 color4 uv2]))
-(buffer :name cubeVB :size cubeVerts :usage [vertex] :mapped-at-creation cubeVerts)
+(buffer :name cubeVB :usage [vertex] :data cubeVerts)
 
 (queue :name copyAtlas
-  (copy-external-image-to-texture :source fontImg :texture fontTex))
+  (copy-external-image-to-texture (source :image fontImg) (destination :texture fontTex)))
 (queue :name writeInputs
   (write-buffer :buffer inputs :offset 0 :data pngine-inputs))
 
@@ -1019,113 +1019,120 @@ fn fragMain(@location(0) fragPosition : vec4f) -> @location(0) vec4f {
 """)
 
 (render-pipeline :name cubePipe
-  (layout auto)
-  (vertex (module cubeCode) (entry vertexMain)
-    (buffers
-      (vertex-buffer :array-stride 40
-        (attribute :shader-location 0 :offset 0 :format float32x4)
-        (attribute :shader-location 1 :offset 16 :format float32x4)
-        (attribute :shader-location 2 :offset 32 :format float32x2))))
-  (fragment (module cubeCode) (entry fragMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module cubeCode :entry vertexMain
+    (vertex-buffer :array-stride 40
+      (attribute :shader-location 0 :offset 0 :format float32x4)
+      (attribute :shader-location 1 :offset 16 :format float32x4)
+      (attribute :shader-location 2 :offset 32 :format float32x2)))
+  (fragment :module cubeCode :entry fragMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
 (render-pipeline :name textPipe
-  (layout auto)
-  (vertex (module textCode) (entry vertexMain))
-  (fragment (module textCode) (entry fragmentMain)
-    (targets (target :format preferred-canvas-format
+  :layout auto
+  (vertex :module textCode :entry vertexMain)
+  (fragment :module textCode :entry fragmentMain
+    (target :format preferred-canvas-format
       (blend (color :src-factor src-alpha :dst-factor one-minus-src-alpha :operation add)
-             (alpha :src-factor one :dst-factor one :operation add)))))
-  (primitive (topology triangle-strip))
+             (alpha :src-factor one :dst-factor one :operation add))))
+  (primitive :topology triangle-strip)
   (depth-stencil :format depth24plus :depth-write-enabled false :depth-compare less))
 
-(bind-group :name fontGroup :layout-pipeline textPipe :layout-index 0
+(bind-group :name fontGroup :layout textPipe :group 0
   (entry :binding 0 :texture fontTex)
   (entry :binding 1 :sampler fontSamp)
   (entry :binding 2 :buffer glyphBuf))
 
-(bind-group :name frontGroup :layout-pipeline textPipe :layout-index 1
+(bind-group :name frontGroup :layout textPipe :group 1
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :buffer frontBuf))
-(bind-group :name backGroup :layout-pipeline textPipe :layout-index 1
+(bind-group :name backGroup :layout textPipe :group 1
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :buffer backBuf))
-(bind-group :name rightGroup :layout-pipeline textPipe :layout-index 1
+(bind-group :name rightGroup :layout textPipe :group 1
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :buffer rightBuf))
-(bind-group :name leftGroup :layout-pipeline textPipe :layout-index 1
+(bind-group :name leftGroup :layout textPipe :group 1
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :buffer leftBuf))
-(bind-group :name topGroup :layout-pipeline textPipe :layout-index 1
+(bind-group :name topGroup :layout textPipe :group 1
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :buffer topBuf))
-(bind-group :name bottomGroup :layout-pipeline textPipe :layout-index 1
+(bind-group :name bottomGroup :layout textPipe :group 1
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :buffer bottomBuf))
-(bind-group :name titleGroup :layout-pipeline textPipe :layout-index 1
+(bind-group :name titleGroup :layout textPipe :group 1
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :buffer titleBuf))
-(bind-group :name bodyGroup :layout-pipeline textPipe :layout-index 1
+(bind-group :name bodyGroup :layout textPipe :group 1
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :buffer bodyBuf))
 
-(bind-group :name cubeGroup :layout-pipeline cubePipe :layout-index 0
+(bind-group :name cubeGroup :layout cubePipe :group 0
   (entry :binding 0 :buffer inputs))
 
 (render-bundle :name frontBundle
   :pipeline textPipe
+  :color-formats [preferred-canvas-format]
   :depth-stencil-format depth24plus
   :bind-groups [fontGroup frontGroup]
-  :draw 4 :instance-count 5)
+  (draw :vertex-count 4 :instance-count 5))
 (render-bundle :name backBundle
   :pipeline textPipe
+  :color-formats [preferred-canvas-format]
   :depth-stencil-format depth24plus
   :bind-groups [fontGroup backGroup]
-  :draw 4 :instance-count 4)
+  (draw :vertex-count 4 :instance-count 4))
 (render-bundle :name rightBundle
   :pipeline textPipe
+  :color-formats [preferred-canvas-format]
   :depth-stencil-format depth24plus
   :bind-groups [fontGroup rightGroup]
-  :draw 4 :instance-count 5)
+  (draw :vertex-count 4 :instance-count 5))
 (render-bundle :name leftBundle
   :pipeline textPipe
+  :color-formats [preferred-canvas-format]
   :depth-stencil-format depth24plus
   :bind-groups [fontGroup leftGroup]
-  :draw 4 :instance-count 4)
+  (draw :vertex-count 4 :instance-count 4))
 (render-bundle :name topBundle
   :pipeline textPipe
+  :color-formats [preferred-canvas-format]
   :depth-stencil-format depth24plus
   :bind-groups [fontGroup topGroup]
-  :draw 4 :instance-count 3)
+  (draw :vertex-count 4 :instance-count 3))
 (render-bundle :name bottomBundle
   :pipeline textPipe
+  :color-formats [preferred-canvas-format]
   :depth-stencil-format depth24plus
   :bind-groups [fontGroup bottomGroup]
-  :draw 4 :instance-count 6)
+  (draw :vertex-count 4 :instance-count 6))
 (render-bundle :name titleBundle
   :pipeline textPipe
+  :color-formats [preferred-canvas-format]
   :depth-stencil-format depth24plus
   :bind-groups [fontGroup titleGroup]
-  :draw 4 :instance-count 6)
+  (draw :vertex-count 4 :instance-count 6))
 (render-bundle :name bodyBundle
   :pipeline textPipe
+  :color-formats [preferred-canvas-format]
   :depth-stencil-format depth24plus
   :bind-groups [fontGroup bodyGroup]
-  :draw 4 :instance-count 1317)
+  (draw :vertex-count 4 :instance-count 1317))
 
 (render-pass :name drawCube
   (color-attachment :view context-current-texture
     :clear-value [0 0 0 1] :load-op clear :store-op store)
-  (depth-attachment :view depthTex :depth-clear-value 1.0
+  (depth-stencil-attachment :view depthTex :depth-clear-value 1.0
     :depth-load-op clear :depth-store-op store)
   :pipeline cubePipe :bind-groups [cubeGroup] :vertex-buffers [cubeVB]
   (draw :vertex-count 36))
 
 (render-pass :name drawText
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depthTex :depth-load-op load :depth-store-op store)
+  (depth-stencil-attachment :view depthTex :depth-load-op load :depth-store-op store)
   :execute-bundles [frontBundle backBundle rightBundle leftBundle topBundle bottomBundle titleBundle bodyBundle])
 
 (frame :name main :perform [copyAtlas writeInputs drawCube drawText])

@@ -3,21 +3,21 @@
 ; color4+uv2, array-stride 40, attributes at offsets 0/16/32) drawn with
 ; `:instance-count 16`; the per-instance grid offset and rotation come from
 ; `@builtin(instance_index)` and all MVP math runs in the vertex shader. Also
-; uses a depth texture, `:cull-mode back`, `:mapped-at-creation` and a
+; uses a depth texture, `:cull-mode back`, `:data` and a
 ; pngine-inputs uniform.
 ;
-; `:vertex-count` / `:instance-count` are count slots and accept a bare define
-; name (CUBE_VERTEX_COUNT, NUM_INSTANCES). The vertex-layout numbers (stride 40,
-; offsets 0/16/32) sit in byte-count slots, which take a number or an expression
-; but not a bare symbol, so they are written as literals.
+; `:vertex-count` / `:instance-count` take the bare define names
+; (CUBE_VERTEX_COUNT, NUM_INSTANCES). The vertex-layout numbers (stride 40,
+; offsets 0/16/32) could too — every numeric slot accepts a bare define since
+; 3.0.0 — and are written as literals for legibility.
 
 (define :name CUBE_VERTEX_COUNT :value 36)
 (define :name NUM_INSTANCES :value 16)
 
 (data :name cubeVertexArray (cube :format [position4 color4 uv2]))
 
-(buffer :name verticesBuffer :size cubeVertexArray :usage [vertex]
-  :mapped-at-creation cubeVertexArray)
+(buffer :name verticesBuffer :usage [vertex]
+  :data cubeVertexArray)
 
 (buffer :name uniforms :size 16 :usage [uniform copy-dst])
 
@@ -130,24 +130,23 @@
   """)
 
 (render-pipeline :name pipeline
-  (layout auto)
-  (vertex (module code) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 40
-        (attribute :shader-location 0 :offset 0 :format float32x4)
-        (attribute :shader-location 1 :offset 16 :format float32x4)
-        (attribute :shader-location 2 :offset 32 :format float32x2))))
-  (fragment (module code) (entry fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module code :entry vs
+    (vertex-buffer :array-stride 40
+      (attribute :shader-location 0 :offset 0 :format float32x4)
+      (attribute :shader-location 1 :offset 16 :format float32x4)
+      (attribute :shader-location 2 :offset 32 :format float32x2)))
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
-(bind-group :name mainBindGroup :layout-pipeline pipeline :layout-index 0
+(bind-group :name mainBindGroup :layout pipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
 (render-pass :name renderPass
   (color-attachment :view context-current-texture :clear-value [128 128 128 255] :load-op clear :store-op store)
-  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   :pipeline pipeline
   :vertex-buffers [verticesBuffer]
   :bind-groups [mainBindGroup]

@@ -1,0 +1,9 @@
+; Invalid: `:max-anisotropy A` names a (define …) whose value is 70000;
+; GPUSamplerDescriptor.maxAnisotropy is 1..16 and the wire carries it as u16.
+; The schema's `anisotropy` bound checks literals only; the emitter re-checks
+; the evaluated reference and rejects it.
+
+(define :name A :value 70000)
+
+(sampler :name samp :mag-filter linear :min-filter linear :mipmap-filter linear
+  :max-anisotropy A)

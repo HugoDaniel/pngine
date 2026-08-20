@@ -373,14 +373,25 @@ fn findIEND(png_data: []const u8) ?usize {
 /// Post-conditions:
 /// - Returns valid raw DEFLATE stream with len > 0
 /// - Caller owns returned slice
+/// Output capacity for a DEFLATE of `len` bytes: the input, 1.5% for the
+/// expansion incompressible input suffers, and 1 KiB of block headers.
+/// Shared by the three fixed-writer compressors (here, the PNG encoder's zlib
+/// stream, the ZIP writer) in spirit — each spells the same sum.
+pub fn compressedCapacity(len: usize) usize {
+    return len + len / 64 + 1024;
+}
+
 fn compressDeflateRaw(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     // Pre-condition: data is not empty
     std.debug.assert(data.len > 0);
 
     // Allocate output buffer larger than input because incompressible data
-    // expands slightly (~0.1%) plus DEFLATE block headers. 1KB overhead
-    // covers worst case for typical bytecode sizes (<1MB).
-    const initial_capacity = data.len + 1024;
+    // expands. Measured against std's flate at level 6: +1,738 B for 1 MiB of
+    // random bytes, +7,079 B for 4 MiB (~0.17%) — so `len + 1024` overflowed
+    // the fixed writer from ~600 KiB up, and an embedded JPEG/PNG texture made
+    // `render` fail with CompressionFailed. `len / 64` (1.5%) is ~9× that
+    // measurement, plus the 1 KiB of headers. (Third leak pass)
+    const initial_capacity = compressedCapacity(data.len);
     var output_buf = try allocator.alloc(u8, initial_capacity);
     errdefer allocator.free(output_buf);
 

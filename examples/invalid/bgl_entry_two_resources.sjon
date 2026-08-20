@@ -1,0 +1,32 @@
+; INVALID: a (bind-group-layout ...) entry declaring TWO resource sub-forms.
+;
+; GPUBindGroupLayoutEntry takes exactly one of buffer / sampler / texture /
+; storageTexture. This validated clean and `appendBglEntry` emitted whichever
+; it tested first (the buffer) -- the sampler was decoration. SJON 1.3's
+; per-head bounds say "at most one of EACH"; "one across the four" is a count
+; over the whole set, which SJON 1.4 spells `:max-children 1` on the head-set
+; itself. `positional_too_many` names the set and
+; is located on the second resource; the emitter's `requireOneOf` is gone.
+(shader-module :name code :code """
+@group(0) @binding(0) var<uniform> u : vec4f;
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return u; }
+""")
+(buffer :name u :size 16 :usage [uniform copy-dst])
+(bind-group-layout :name bgl
+  (entry :binding 0 :visibility [fragment] (buffer :type uniform) (sampler :type filtering)))
+(pipeline-layout :name pl :bind-group-layouts [bgl])
+(render-pipeline :name pipe :layout pl
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+(bind-group :name g :layout bgl
+  (entry :binding 0 :buffer u))
+(render-pass :name draw :pipeline pipe :bind-groups [g]
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

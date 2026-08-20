@@ -1,0 +1,25 @@
+; Invalid: :alpha-to-coverage-enabled true on a pipeline with no (fragment …).
+; The coverage mask comes from the fragment's alpha, and a depth-only pipeline
+; has no fragment stage to produce one -- WebGPU requires the fragment state
+; and its target 0 to exist.
+;
+; A depth pre-pass is exactly the shape that acquires this by copy-paste: drop
+; the (fragment …) to make the pass depth-only, keep the (multisample …) block
+; that came with it.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+""")
+(texture :name msaaDepth :size canvas :sample-count 4
+  :format depth24plus :usage [render-attachment])
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less)
+  (multisample :count 4 :alpha-to-coverage-enabled true))
+(render-pass :name draw :pipeline pipe
+  (depth-stencil-attachment :view msaaDepth
+    :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

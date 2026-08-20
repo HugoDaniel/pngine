@@ -321,7 +321,10 @@ fn printHelp() void {
 
 /// Print verbose GPU call trace (matches gpu.js debug output format).
 fn printVerboseTrace(calls: []const Call) void {
-    std.debug.assert(calls.len <= 65536);
+    // The log is bounded by MockGPU's own `CALL_BUDGET` (a refusal, not an
+    // assert); stating a SMALLER bound here was an assert on input — a
+    // 70,000-call stream inside the budget panicked `--verbose` in Debug.
+    std.debug.assert(calls.len <= MockGPU.CALL_BUDGET);
 
     var buf: [256]u8 = undefined;
     for (calls) |call| {
@@ -343,6 +346,17 @@ fn handleLoadError(err: anyerror, input: []const u8) u8 {
         stdio.Error.StdinTooLarge,
         error.UnsupportedFormat,
         => return stdio.reportReadError(err, input),
+        // A PNG that carries no payload, or a payload that is not PNGB, is a
+        // FORMAT error (exit 4, like `extract`), not a compilation failure —
+        // nothing was compiled.
+        error.NoPngbChunk => {
+            std.debug.print("Error: '{s}' has no embedded bytecode (missing pNGb chunk)\n", .{stdio.displayName(input)});
+            return 4;
+        },
+        error.InvalidPng, error.InvalidPngbVersion, error.InvalidPngbFormat, error.DecompressionFailed => {
+            std.debug.print("Error: '{s}' is not a valid PNGine PNG: {s}\n", .{ stdio.displayName(input), @errorName(err) });
+            return 4;
+        },
         else => {
             std.debug.print("Error: compilation failed: {}\n", .{err});
             return 3;
@@ -363,7 +377,17 @@ fn validateAndDeserialize(allocator: std.mem.Allocator, bytecode: []const u8) !f
     }
 
     const module = try format.deserialize(allocator, bytecode);
-    std.debug.assert(module.bytecode.len > 0);
+    // A payload with no bytecode is a document that declared nothing the
+    // emitter walks — `(define …)` alone, say. Reachable from valid input, so
+    // a refusal with a sentence, not an assertion (audit 09 C3: this was a
+    // panic, and a `(pass …)` outside its graph reached it until the emitter
+    // learned to refuse stray root forms).
+    if (module.bytecode.len == 0) {
+        std.debug.print("Error: the payload carries no bytecode — the document declares no resource, pass or frame for the executor to run\n", .{});
+        var m = module;
+        m.deinit(allocator);
+        return error.InvalidFormat;
+    }
     return module;
 }
 
@@ -469,7 +493,7 @@ fn printExecutionSummary(
     const bind_group_warnings = validateBindGroupSetup(calls);
     if (bind_group_warnings > 0) {
         std.debug.print("\nWarning: {d} draw call(s) may have missing bind groups\n", .{bind_group_warnings});
-        std.debug.print("  Ensure bindGroups=[...] is set in render passes\n", .{});
+        std.debug.print("  Ensure the (render-pass …) lists its :bind-groups [name …]\n", .{});
         if (strict) return 1;
     }
 

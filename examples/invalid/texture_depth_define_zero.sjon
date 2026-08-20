@@ -1,0 +1,8 @@
+; Invalid: `:size [256 256 Z]` with Z a (define …) of 0. A GPUExtent3D
+; dimension is at least 1 (`extent` is `:min 1` for literals); the emitter
+; re-checks the evaluated reference instead of handing 0 to the descriptor
+; encoder, which asserted on it.
+
+(define :name Z :value 0)
+
+(texture :name tex :size [256 256 Z] :format rgba8unorm :usage [texture-binding])

@@ -1,0 +1,25 @@
+; Invalid: a copy-texture-to-texture whose source texture has no copy-src
+; usage. Textures carry the same fixed-at-creation usage rule as buffers, and
+; the canvas is exempt only because the runtime configures it.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(texture :name a :size canvas :format rgba8unorm :usage [render-attachment])
+(texture :name b :size canvas :format rgba8unorm :usage [copy-dst render-attachment])
+(queue :name blit
+  (copy-texture-to-texture
+    (source :texture a)
+    (destination :texture b)))
+(frame :name main :perform [draw blit])

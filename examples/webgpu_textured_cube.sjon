@@ -4,7 +4,7 @@
 ; backface culling. The image `assets/Di-3d.png` is read at compile time,
 ; embedded in the payload, decoded into an `(image-bitmap …)` and uploaded
 ; with `(copy-external-image-to-texture …)`; the texture is sized from that
-; bitmap (`:size-from`).
+; bitmap (`:size <image-bitmap>`).
 ;
 ; Notes:
 ;  - The FOV is spelled out in the WGSL as `(2 * PI) / 5`: a `(define …)`
@@ -12,8 +12,9 @@
 ;    only names substituted into WGSL.
 ;  - `:clear-value [128 128 128 255]` clears to opaque white, not mid-grey:
 ;    clear channels are floats in 0..1 and every component >= 1 saturates.
-;  - Vertex strides and offsets are literals (40 / 0 / 16 / 32): a byte-count
-;    slot takes a number or an expression but not a bare define name.
+;  - Vertex strides and offsets are literals (40 / 0 / 16 / 32) for
+;    legibility; a byte-count slot takes a bare define name or an expression
+;    just as well.
 
 (shader-module :name code :code """
     struct PngineInputs {
@@ -87,17 +88,17 @@
 
 (data :name cubeVertexArray (cube :format [position4 color4 uv2]))
 
-(buffer :name verticesBuffer :size cubeVertexArray :usage [vertex]
-  :mapped-at-creation cubeVertexArray)
+(buffer :name verticesBuffer :usage [vertex]
+  :data cubeVertexArray)
 
 (buffer :name uniforms :size 16 :usage [uniform copy-dst])
 
 ; Image blob (read from disk) + its decoded bitmap. The bitmap's size feeds
-; the cube texture (:size-from) and a queue action uploads it.
-(data :name cubeImageData :blob "assets/Di-3d.png" :mime "image/png")
-(image-bitmap :name cubeImage :image cubeImageData)
+; the cube texture (:size naming an image-bitmap) and a queue action uploads it.
+(data :name cubeImageData :file "assets/Di-3d.png" :mime "image/png")
+(image-bitmap :name cubeImage :data cubeImageData)
 
-(texture :name cubeTexture :size-from cubeImage :format rgba8unorm
+(texture :name cubeTexture :size cubeImage :format rgba8unorm
   :usage [texture-binding copy-dst render-attachment])
 
 (sampler :name linearSampler :mag-filter linear :min-filter linear)
@@ -105,19 +106,18 @@
 (texture :name depthTexture :size canvas :format depth24plus :usage [render-attachment])
 
 (render-pipeline :name pipeline
-  (layout auto)
-  (vertex (module code) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 40
-        (attribute :shader-location 0 :offset 0 :format float32x4)
-        (attribute :shader-location 1 :offset 16 :format float32x4)
-        (attribute :shader-location 2 :offset 32 :format float32x2))))
-  (fragment (module code) (entry fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module code :entry vs
+    (vertex-buffer :array-stride 40
+      (attribute :shader-location 0 :offset 0 :format float32x4)
+      (attribute :shader-location 1 :offset 16 :format float32x4)
+      (attribute :shader-location 2 :offset 32 :format float32x2)))
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :depth-write-enabled true :depth-compare less :format depth24plus))
 
-(bind-group :name mainBindGroup :layout-pipeline pipeline :layout-index 0
+(bind-group :name mainBindGroup :layout pipeline :group 0
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :sampler linearSampler)
   (entry :binding 2 :texture cubeTexture))
@@ -126,11 +126,11 @@
   (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
 
 (queue :name copyTexture
-  (copy-external-image-to-texture :source cubeImage :texture cubeTexture))
+  (copy-external-image-to-texture (source :image cubeImage) (destination :texture cubeTexture)))
 
 (render-pass :name drawCube
   (color-attachment :view context-current-texture :clear-value [128 128 128 255] :load-op clear :store-op store)
-  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   :pipeline pipeline
   :vertex-buffers [verticesBuffer]
   :bind-groups [mainBindGroup]

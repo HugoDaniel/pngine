@@ -83,7 +83,7 @@ pub fn isCreateCall(call_type: CallType) bool {
 ///
 /// Defined by what STARTS the frame rather than by what ends the prologue. The
 /// negative spelling ("run while the call is a create") looks equivalent and is
-/// not: `:mapped-at-creation` captures create_buffer, **write_buffer**, and only
+/// not: `:data` captures create_buffer, **write_buffer**, and only
 /// then the shader module and pipeline, so a single write in the middle of an
 /// ordinary prologue puts every later create after the split.
 pub fn firstFrameCall(calls: []const Call) usize {

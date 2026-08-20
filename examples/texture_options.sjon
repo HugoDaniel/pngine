@@ -1,10 +1,10 @@
 ; Texture options — exercises the extended (texture …) keys: :dimension
-; (1d/2d/3d as 1/2/3), :depth-or-array-layers and :mip-level-count. Two
-; textures cover the set:
+; (`1d` / `2d` / `3d`, the GPUTextureDimension spellings), :size's third
+; element and :mip-level-count. Two textures cover the set:
 ;
 ;   mip_tex — a mipmapped 2D texture (:mip-level-count 4), sampled through its
 ;             default view (level 0) by a fullscreen triangle.
-;   vol     — a 3D texture (:dimension 3 :depth-or-array-layers 8). Sampling
+;   vol     — a 3D texture (:size [16 16 8], :dimension 3d). Sampling
 ;             a 3D texture needs a matching (texture-view …), so it is declared
 ;             but not bound (texture_view.sjon covers explicit views).
 ;
@@ -29,21 +29,21 @@
     }
 """)
 
-(texture :name mip_tex :width 256 :height 256 :mip-level-count 4
+(texture :name mip_tex :size [256 256] :mip-level-count 4
   :format rgba8unorm :usage [texture-binding copy-dst])
 
-(texture :name vol :width 16 :height 16 :dimension 3 :depth-or-array-layers 8
+(texture :name vol :size [16 16 8] :dimension 3d
   :format rgba8unorm :usage [texture-binding copy-dst])
 
 (sampler :name samp :mag-filter linear :min-filter linear :mipmap-filter linear)
 
 (render-pipeline :name pipe
-  (layout auto)
-  (vertex (module code) (entry vs))
-  (fragment (module code) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
 
-(bind-group :name g :layout-pipeline pipe :layout-index 0
+(bind-group :name g :layout pipe :group 0
   (entry :binding 0 :sampler samp)
   (entry :binding 1 :texture mip_tex))
 

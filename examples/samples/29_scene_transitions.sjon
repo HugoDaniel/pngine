@@ -1,4 +1,4 @@
-; Scene transitions — a fullscreen triangle cycling through four procedural
+; Scene transitions: a fullscreen triangle cycling through four procedural
 ; scenes (plasma, tunnel, metaballs, starfield), each 5 s long, with a 1 s
 ; transition into the next: fade, horizontal wipe, noise dissolve or circle
 ; reveal, chosen by the outgoing scene. Both scenes are evaluated per pixel and
@@ -182,17 +182,17 @@
   """)
 
 (render-pipeline :name pipeline
-  (layout auto)
-  (vertex (module shader) (entry vs))
-  (fragment (module shader) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module shader :entry vs)
+  (fragment :module shader :entry fs
+    (target :format preferred-canvas-format)))
 
 (buffer :name uniforms :size 16 :usage [uniform copy-dst])
 
 (queue :name writeUniforms
   (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
 
-(bind-group :name bindings :layout-pipeline pipeline :layout-index 0
+(bind-group :name bindings :layout pipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
 (render-pass :name mainPass

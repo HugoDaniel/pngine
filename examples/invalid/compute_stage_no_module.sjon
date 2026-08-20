@@ -1,0 +1,21 @@
+; INVALID: a (compute ...) stage that names no module.
+;
+; GPUProgrammableStage.module is REQUIRED, and since the overhaul's descriptor
+; cut a compute pipeline states its stage the same way the render stages do --
+; a (compute ...) sub-form. The key
+; is required on all three stage forms, so this is one diagnostic shape rather
+; than a compute-shaped special case.
+;
+; Before the cut the module was a key ON the pipeline, and the same omission
+; read as a missing key on (compute-pipeline ...) -- which is where an author
+; would then look for it, one level above where the stage actually lives.
+(shader-module :name code :code """
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id : vec3u) {}
+""")
+(buffer :name parts :size 1024 :usage [storage])
+(compute-pipeline :name cp :layout auto
+  (compute :entry main))
+(bind-group :name g :layout cp :group 0
+  (entry :binding 0 :buffer parts))
+(compute-pass :name step :pipeline cp :bind-groups [g] (dispatch :workgroups [16]))
+(frame :name main :perform [step])

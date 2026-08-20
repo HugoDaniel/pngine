@@ -831,28 +831,53 @@ pub const WgpuNativeGPU = struct {
         };
 
         // Configure surface if provided
-        if (surface) |s| {
-            const config = c.WGPUSurfaceConfiguration{
-                .device = ctx.device,
-                .format = c.WGPUTextureFormat_BGRA8Unorm,
-                // CopySrc matches what the browser configures its canvas context
-                // with (core.js:143, worker-core.js:211) — without it a
-                // `copy-texture-to-texture :source context-current-texture` is a
-                // validation error on a windowed instance and works headless,
-                // which is the worst of both.
-                .usage = c.WGPUTextureUsage_RenderAttachment | c.WGPUTextureUsage_CopySrc,
-                .width = width,
-                .height = height,
-                .presentMode = c.WGPUPresentMode_Fifo,
-                .alphaMode = c.WGPUCompositeAlphaMode_Auto,
-                .viewFormatCount = 0,
-                .viewFormats = null,
-                .nextInChain = null,
-            };
-            wgpu.surfaceConfigure(s, &config);
-        }
+        if (surface) |s| configureSurface(ctx, s, width, height);
 
         return self;
+    }
+
+    /// The one surface configuration, shared by init and `resize` — `resize`
+    /// used to spell its own with RenderAttachment alone, so after a window
+    /// resize a canvas copy became a validation error it had not been before.
+    ///
+    /// CopySrc matches what the browser configures its canvas context with
+    /// (core.js:143, worker-core.js:211) — without it a
+    /// `(copy-texture-to-texture (source :texture context-current-texture) …)`
+    /// is a validation error on a windowed instance and works headless, which
+    /// is the worst of both.
+    fn configureSurface(ctx: *const Context, surface: wgpu.Surface, width: u32, height: u32) void {
+        assert(width > 0 and height > 0);
+        const config = c.WGPUSurfaceConfiguration{
+            .device = ctx.device,
+            .format = c.WGPUTextureFormat_BGRA8Unorm,
+            .usage = c.WGPUTextureUsage_RenderAttachment | c.WGPUTextureUsage_CopySrc,
+            .width = width,
+            .height = height,
+            .presentMode = c.WGPUPresentMode_Fifo,
+            .alphaMode = c.WGPUCompositeAlphaMode_Auto,
+            .viewFormatCount = 0,
+            .viewFormats = null,
+            .nextInChain = null,
+        };
+        wgpu.surfaceConfigure(surface, &config);
+    }
+
+    /// Resize the render target. Windowed: abandon any frame in flight (its
+    /// swapchain texture belongs to the OLD configuration and must be given
+    /// back before the surface is reconfigured), then reconfigure with the
+    /// same usage init chose. Headless: the offscreen target keeps its size —
+    /// `--frame` never resizes. Canvas-sized textures a document declared
+    /// (`:size canvas`) are NOT recreated here; that is the browser's
+    /// `resizeCanvasBound` and an open item for this backend.
+    ///
+    /// A zero dimension is refused the way `pngine_create` refuses it.
+    pub fn resize(self: *Self, width: u32, height: u32) error{ZeroDimensions}!void {
+        if (width == 0 or height == 0) return error.ZeroDimensions;
+        self.abortFrame();
+        self.width = width;
+        self.height = height;
+        if (self.surface) |s| configureSurface(self.ctx, s, width, height);
+        assert(self.current_surface_texture == null);
     }
 
     /// Release all resources.
@@ -1024,8 +1049,8 @@ pub const WgpuNativeGPU = struct {
                         else => {},
                     },
                     .enum_val => switch (tf) {
-                        .format => tex_format = decodeTextureFormat(@intCast(field.scalar)),
-                        .usage => tex_usage = decodeTextureUsage(@intCast(field.scalar)),
+                        .format => tex_format = decodeTextureFormat(tlvByte(field.scalar)),
+                        .usage => tex_usage = decodeTextureUsage(tlvByte(field.scalar)),
                         .dimension => dimension = switch (field.scalar) {
                             0 => c.WGPUTextureDimension_1D,
                             2 => c.WGPUTextureDimension_3D,
@@ -1058,6 +1083,14 @@ pub const WgpuNativeGPU = struct {
     // Byte → wgpu-native enum. Kept in lockstep with descriptors.zig TextureFormat
     // (the encoder) and the JS/codegen decoders; the npm conformance test pins the
     // JS side, this one is the native viewer's decoder for the same byte codes.
+    /// A TLV enum field as the byte its decoder switches on. The wire says u8
+    /// but a hostile descriptor can carry a u32 scalar; saturating lands it in
+    /// every decoder's `else` default (the wgpu-native default for that
+    /// member) instead of trapping on the narrow.
+    fn tlvByte(scalar: u32) u8 {
+        return std.math.lossyCast(u8, scalar);
+    }
+
     fn decodeTextureFormat(val: u8) c_uint {
         return switch (val) {
             0x00 => c.WGPUTextureFormat_RGBA8Unorm,
@@ -1180,9 +1213,9 @@ pub const WgpuNativeGPU = struct {
             while (reader.next()) |field| {
                 const vf = std.enums.fromInt(descriptors.TextureViewField, field.id) orelse continue;
                 switch (vf) {
-                    .format => descriptor.format = decodeTextureFormat(@intCast(field.scalar)),
-                    .dimension => descriptor.dimension = mapViewDimension(@intCast(field.scalar)),
-                    .aspect => descriptor.aspect = decodeTextureAspect(@intCast(field.scalar)),
+                    .format => descriptor.format = decodeTextureFormat(tlvByte(field.scalar)),
+                    .dimension => descriptor.dimension = mapViewDimension(tlvByte(field.scalar)),
+                    .aspect => descriptor.aspect = decodeTextureAspect(tlvByte(field.scalar)),
                     .base_mip_level => descriptor.baseMipLevel = field.scalar,
                     .mip_level_count => descriptor.mipLevelCount = field.scalar,
                     .base_array_layer => descriptor.baseArrayLayer = field.scalar,
@@ -1229,9 +1262,14 @@ pub const WgpuNativeGPU = struct {
             .addressModeU = c.WGPUAddressMode_ClampToEdge,
             .addressModeV = c.WGPUAddressMode_ClampToEdge,
             .addressModeW = c.WGPUAddressMode_ClampToEdge,
-            .magFilter = c.WGPUFilterMode_Linear,
-            .minFilter = c.WGPUFilterMode_Linear,
-            .mipmapFilter = c.WGPUMipmapFilterMode_Linear,
+            // GPUSamplerDescriptor's own defaults. All three used to seed Linear,
+            // which the browser path never did: gpu.js seeds nearest for the two
+            // filters and leaves mipmapFilter absent, so WebGPU applied nearest.
+            // The same descriptor sampled differently on the two backends
+            // (spec/09 step D; the shape C.1 found in parseDepthStencilState).
+            .magFilter = c.WGPUFilterMode_Nearest,
+            .minFilter = c.WGPUFilterMode_Nearest,
+            .mipmapFilter = c.WGPUMipmapFilterMode_Nearest,
             .lodMinClamp = 0.0,
             .lodMaxClamp = 32.0,
             .compare = c.WGPUCompareFunction_Undefined,
@@ -1243,14 +1281,14 @@ pub const WgpuNativeGPU = struct {
             while (reader.next()) |field| {
                 const sf = std.enums.fromInt(descriptors.SamplerField, field.id) orelse continue;
                 switch (sf) {
-                    .address_mode_u => descriptor.addressModeU = decodeAddressMode(@intCast(field.scalar)),
-                    .address_mode_v => descriptor.addressModeV = decodeAddressMode(@intCast(field.scalar)),
-                    .address_mode_w => descriptor.addressModeW = decodeAddressMode(@intCast(field.scalar)),
-                    .mag_filter => descriptor.magFilter = decodeFilterMode(@intCast(field.scalar)),
-                    .min_filter => descriptor.minFilter = decodeFilterMode(@intCast(field.scalar)),
-                    .mipmap_filter => descriptor.mipmapFilter = decodeMipmapFilterMode(@intCast(field.scalar)),
-                    .compare => descriptor.compare = decodeSamplerCompare(@intCast(field.scalar)),
-                    .max_anisotropy => descriptor.maxAnisotropy = @intCast(field.scalar),
+                    .address_mode_u => descriptor.addressModeU = decodeAddressMode(tlvByte(field.scalar)),
+                    .address_mode_v => descriptor.addressModeV = decodeAddressMode(tlvByte(field.scalar)),
+                    .address_mode_w => descriptor.addressModeW = decodeAddressMode(tlvByte(field.scalar)),
+                    .mag_filter => descriptor.magFilter = decodeFilterMode(tlvByte(field.scalar)),
+                    .min_filter => descriptor.minFilter = decodeFilterMode(tlvByte(field.scalar)),
+                    .mipmap_filter => descriptor.mipmapFilter = decodeMipmapFilterMode(tlvByte(field.scalar)),
+                    .compare => descriptor.compare = decodeSamplerCompare(tlvByte(field.scalar)),
+                    .max_anisotropy => descriptor.maxAnisotropy = std.math.lossyCast(u16, field.scalar),
                     // Lod clamps are f32; TlvReader carries the value as its bit pattern.
                     .lod_min_clamp => descriptor.lodMinClamp = @bitCast(field.scalar),
                     .lod_max_clamp => descriptor.lodMaxClamp = @bitCast(field.scalar),
@@ -1473,13 +1511,13 @@ pub const WgpuNativeGPU = struct {
 
         // Parse primitive and depth stencil states using helpers
         const primitive = parsePrimitiveState(root);
-        var depth_stencil = parseDepthStencilState(root);
+        var depth_stencil = try parseDepthStencilState(root);
 
         // Create pipeline descriptor
         var descriptor = std.mem.zeroes(c.WGPURenderPipelineDescriptor);
         descriptor.label = .{ .data = null, .length = 0 };
         // Explicit pipeline layout when the descriptor carries a `layoutId` (a
-        // (render-pipeline … :pipeline-layout …) reference); otherwise null = auto.
+        // (render-pipeline … :layout <pipeline-layout>) reference); otherwise null = auto.
         descriptor.layout = if (root.get("layoutId")) |lid|
             (self.pipeline_layouts[try tableId(lid, MAX_PIPELINE_LAYOUTS)] orelse null)
         else
@@ -1911,7 +1949,14 @@ pub const WgpuNativeGPU = struct {
     }
 
     /// Parse depth stencil state from JSON descriptor.
-    pub fn parseDepthStencilState(root: std.json.ObjectMap) DepthStencilResult {
+    ///
+    /// `format` is REQUIRED (`GPUDepthStencilState.format`) and the compiler
+    /// enforces it, so its absence here is a malformed descriptor rather than a
+    /// document to be rendered. Substituting Depth24Plus — which this did until
+    /// spec/09 C.1 — made the two backends disagree: gpu.js hands
+    /// `desc.depthStencil` to createRenderPipeline untouched, so the browser
+    /// raised a validation error on exactly the descriptor native drew.
+    pub fn parseDepthStencilState(root: std.json.ObjectMap) error{MissingRequiredMember}!DepthStencilResult {
         var result = DepthStencilResult{
             .state = undefined,
             .has_depth_stencil = false,
@@ -1922,10 +1967,8 @@ pub const WgpuNativeGPU = struct {
         result.has_depth_stencil = true;
 
         result.state = std.mem.zeroes(c.WGPUDepthStencilState);
-        result.state.format = if (ds_obj.get("format")) |fmt|
-            parseDepthFormat(fmt.string)
-        else
-            c.WGPUTextureFormat_Depth24Plus;
+        const fmt = ds_obj.get("format") orelse return error.MissingRequiredMember;
+        result.state.format = parseDepthFormat(fmt.string);
         result.state.depthWriteEnabled = if (ds_obj.get("depthWriteEnabled")) |dwe|
             @intFromBool(dwe.bool)
         else
@@ -2012,33 +2055,9 @@ pub const WgpuNativeGPU = struct {
                     .is_surface = false,
                 };
             }
-            const surface = self.surface.?;
-            var surface_texture: wgpu.SurfaceTexture = undefined;
-            wgpu.surfaceGetCurrentTexture(surface, &surface_texture);
-
-            // From here on the acquisition is OWNED — every exit must either
-            // latch it (so submit/abort/deinit release it) or release it here.
-            // wgpu can hand back a texture alongside a non-success status
-            // (Timeout, Outdated), so the error paths release rather than assume
-            // null.
-            errdefer if (surface_texture.texture != null) wgpu.textureRelease(surface_texture.texture);
-
-            const status = surface_texture.status;
-            if (status != c.WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal and
-                status != c.WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal)
-            {
-                return error.SurfaceTextureUnavailable;
-            }
-
-            if (surface_texture.texture == null) return error.SurfaceTextureUnavailable;
-            const view = wgpu.textureCreateView(surface_texture.texture, null);
+            const texture = try self.acquireSurfaceTexture();
+            const view = wgpu.textureCreateView(texture, null);
             if (view == null) return error.SurfaceTextureUnavailable;
-
-            // Release-before-overwrite: two passes in one frame that both target
-            // the surface (a `load`-op second pass over the canvas) would
-            // otherwise strand the first acquisition.
-            self.releaseSurfaceTexture();
-            self.current_surface_texture = surface_texture.texture;
             return .{ .view = view, .is_surface = true };
         }
 
@@ -2071,8 +2090,47 @@ pub const WgpuNativeGPU = struct {
         return error.TextureNotFound;
     }
 
+    /// This frame's swapchain texture — acquired ONCE per frame and latched in
+    /// `current_surface_texture`; every later reference to 0xFFFE in the same
+    /// frame (a second canvas pass, an MSAA resolve, a copy out of the canvas)
+    /// borrows it. That is the browser's semantics (`getCurrentTexture()` hands
+    /// back one texture until present) and it is the only legal one: wgpu-core
+    /// refuses a second acquisition before a present, and wgpu-native turns the
+    /// refusal into `handle_error_fatal` — "Surface image is already acquired",
+    /// process ABORTED. Until this helper existed every reference acquired
+    /// anew and the LEAK-01 latch was consulted only afterwards, so any frame
+    /// with two canvas passes (16 corpus fixtures) or a canvas copy killed a
+    /// windowed viewer. (Third leak pass)
+    ///
+    /// The reference is owned by the latch: submit()/abortFrame()/deinit()
+    /// release it through `releaseSurfaceTexture`.
+    fn acquireSurfaceTexture(self: *Self) !wgpu.Texture {
+        if (self.current_surface_texture) |t| return t;
+        const surface = self.surface orelse return error.NoSurfaceConfigured;
+
+        var surface_texture: wgpu.SurfaceTexture = undefined;
+        wgpu.surfaceGetCurrentTexture(surface, &surface_texture);
+
+        // From here on the acquisition is OWNED — every exit must either latch
+        // it (so submit/abort/deinit release it) or release it here. wgpu can
+        // hand back a texture alongside a non-success status (Timeout,
+        // Outdated), so the error paths release rather than assume null.
+        errdefer if (surface_texture.texture != null) wgpu.textureRelease(surface_texture.texture);
+
+        const status = surface_texture.status;
+        if (status != c.WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal and
+            status != c.WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal)
+        {
+            return error.SurfaceTextureUnavailable;
+        }
+        const texture = surface_texture.texture orelse return error.SurfaceTextureUnavailable;
+        self.current_surface_texture = texture;
+        assert(self.current_surface_texture != null);
+        return texture;
+    }
+
     /// Release the latched swapchain texture, if any. Idempotent — every frame
-    /// exit (submit, abortFrame, deinit, a second acquisition) calls it.
+    /// exit (submit, abortFrame, deinit) calls it.
     fn releaseSurfaceTexture(self: *Self) void {
         if (self.current_surface_texture) |t| {
             wgpu.textureRelease(t);
@@ -2210,16 +2268,18 @@ pub const WgpuNativeGPU = struct {
         if (compute_shader_id >= MAX_SHADERS) return error.InvalidResourceId; // id from data
         const entry_len = desc_data[3];
 
-        // Default entry point if none specified
-        var entry_point: []const u8 = "main";
-        if (entry_len > 0 and desc_data.len >= 4 + entry_len) {
-            entry_point = desc_data[4..][0..entry_len];
-        }
+        // A zero-length (or truncated) entry is a MALFORMED descriptor, not a
+        // request for "main": the compiler resolves an omitted `:entry` to the
+        // module's sole compute entry and always writes a real name. Substituting
+        // one here would put a fourth fabricated spelling in the stack, behind a
+        // driver-level abort. (spec/09 step C.3)
+        if (entry_len == 0 or desc_data.len < 4 + @as(usize, entry_len)) return error.InvalidResourceId;
+        const entry_point: []const u8 = desc_data[4..][0..entry_len];
 
         const compute_shader = self.shaders[compute_shader_id] orelse return error.InvalidResourceId;
 
         // Optional trailing u16 pipeline-layout id at offset 4+entry_len (a
-        // (compute-pipeline … :pipeline-layout …) reference); absent → auto layout.
+        // (compute-pipeline … :layout <pipeline-layout>) reference); absent → auto layout.
         // Same slot gpu.js probes past the entry point.
         var layout: c.WGPUPipelineLayout = null;
         const layout_off: usize = 4 + @as(usize, entry_len);
@@ -2762,7 +2822,18 @@ pub const WgpuNativeGPU = struct {
         if (self.render_pass != null or self.compute_pass != null) return error.PassNotEnded;
     }
 
-    pub fn begin_render_pass(self: *Self, allocator: Allocator, color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16, clear_r: u8, clear_g: u8, clear_b: u8, clear_a: u8, resolve_texture_id: u16) !void {
+    /// One clear channel: an f32 bit pattern widened to the f64 `WGPUColor` takes.
+    /// No range check — a clear outside [0,1] is legal on a float target, and
+    /// clamping it here is what the 4×u8 wire used to do implicitly.
+    fn f64FromBits(bits: u32) f64 {
+        return @as(f64, @as(f32, @bitCast(bits)));
+    }
+
+    fn clearColor(r: u32, g: u32, b: u32, a: u32) c.WGPUColor {
+        return .{ .r = f64FromBits(r), .g = f64FromBits(g), .b = f64FromBits(b), .a = f64FromBits(a) };
+    }
+
+    pub fn begin_render_pass(self: *Self, allocator: Allocator, color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16, clear_r_bits: u32, clear_g_bits: u32, clear_b_bits: u32, clear_a_bits: u32, resolve_texture_id: u16) !void {
         _ = allocator;
 
         // Pre-condition assertions (Zig Mastery Compliance)
@@ -2800,7 +2871,7 @@ pub const WgpuNativeGPU = struct {
             color_attachment.depthSlice = c.WGPU_DEPTH_SLICE_UNDEFINED;
             color_attachment.loadOp = wgpu_load_op;
             color_attachment.storeOp = wgpu_store_op;
-            color_attachment.clearValue = .{ .r = @as(f64, @floatFromInt(clear_r)) / 255.0, .g = @as(f64, @floatFromInt(clear_g)) / 255.0, .b = @as(f64, @floatFromInt(clear_b)) / 255.0, .a = @as(f64, @floatFromInt(clear_a)) / 255.0 };
+            color_attachment.clearValue = clearColor(clear_r_bits, clear_g_bits, clear_b_bits, clear_a_bits);
 
             // MSAA resolve target: 0xFFFF = none (single-sample pass). Otherwise the
             // multisampled color is resolved into this single-sample view. In headless
@@ -3170,21 +3241,23 @@ pub const WgpuNativeGPU = struct {
     ///
     /// `0xFFFE` is the canvas sentinel, the same one `getColorTargetView` reads —
     /// headless it is the persistent offscreen target, windowed it is the
-    /// surface's current texture. The surface branch hands back a reference the
-    /// CALLER releases (`owned = true`); the offscreen and table branches do not,
-    /// because those textures outlive the copy.
+    /// frame's latched surface texture. No branch hands back an OWNED reference
+    /// today (the surface one is the latch's, released at submit/abort); the
+    /// flag stays so a future owning branch has somewhere to say so.
     const CopyTextureResult = struct { texture: wgpu.Texture, owned: bool };
 
     fn getCopyTexture(self: *Self, texture_id: u16) ?CopyTextureResult {
         if (texture_id == 0xFFFE) {
-            const surface = self.surface orelse {
+            if (self.surface == null) {
                 const t = self.offscreen_texture orelse return null;
                 return .{ .texture = t, .owned = false };
-            };
-            var surface_texture: wgpu.SurfaceTexture = undefined;
-            wgpu.surfaceGetCurrentTexture(surface, &surface_texture);
-            const t = surface_texture.texture orelse return null;
-            return .{ .texture = t, .owned = true };
+            }
+            // Windowed: the frame's ONE surface texture, borrowed from the latch
+            // (acquired here if this copy is the frame's first reference). Never
+            // owned — a second acquisition aborts the process, and releasing an
+            // owned copy after the copy would not undo the acquisition anyway.
+            const t = self.acquireSurfaceTexture() catch return null;
+            return .{ .texture = t, .owned = false };
         }
         if (texture_id >= MAX_TEXTURES) return null; // untrusted id
         const t = self.textures[texture_id] orelse return null;
@@ -3581,10 +3654,10 @@ pub const WgpuNativeGPU = struct {
             color_attachments[i].loadOp = wgpu_load_op;
             color_attachments[i].storeOp = wgpu_store_op;
             color_attachments[i].clearValue = .{
-                .r = @as(f64, @floatFromInt(a.clear_r)) / 255.0,
-                .g = @as(f64, @floatFromInt(a.clear_g)) / 255.0,
-                .b = @as(f64, @floatFromInt(a.clear_b)) / 255.0,
-                .a = @as(f64, @floatFromInt(a.clear_a)) / 255.0,
+                .r = f64FromBits(a.clear_r_bits),
+                .g = f64FromBits(a.clear_g_bits),
+                .b = f64FromBits(a.clear_b_bits),
+                .a = f64FromBits(a.clear_a_bits),
             };
         }
 

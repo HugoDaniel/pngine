@@ -5,9 +5,9 @@ import cubeUrl from "./shaders/cube.png"
 import boidsUrl from "./shaders/boids.png"
 
 // A 12-canvas scrolling gallery with visibility-driven playback — the
-// pngine answer to webgpu-samples' multipleCanvases
-// (docs/plans/wgpu-samples/23-multiple-canvases.md). The honest scale
-// statement: pngine's unit is one instance = one canvas = one worker = one
+// pngine answer to webgpu-samples' multipleCanvases.
+// The honest scale statement: pngine's unit is one instance = one canvas =
+// one worker = one
 // DEVICE, so a page budgets device count, not draw calls — ~12 canvases is
 // comfortable everywhere, 200 shared-device canvases is upstream's design
 // and out of this architecture's scope. Instances are constructed lazily on

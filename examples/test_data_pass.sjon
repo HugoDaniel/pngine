@@ -1,12 +1,12 @@
-; test_data_pass — `(pass … :data …)`: a single fragment `(pass …)` whose
-; `:data` lists a WASM file. The pass lowering emits a storage buffer filled
+; test_data_pass — `(pass … :file …)`: a single fragment `(pass …)` whose
+; `:file` lists a WASM file. The pass lowering emits a storage buffer filled
 ; from the file's data segment (its `l` export is the byte length, `s` the start
 ; offset), declares `var<storage, read> D0: array<f32>` in the shader prelude
 ; and binds it at binding 0. test_data.wasm holds 3 f32s — orange RGB — so the
 ; canvas is solid orange.
 
 (pass-graph
-  (pass :name main :data ["test_data.wasm"] :code """
+  (pass :name main :file ["test_data.wasm"] :code """
     @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       return vec4f(D0[0], D0[1], D0[2], 1.0);
     }

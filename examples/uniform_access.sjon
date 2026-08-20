@@ -1,13 +1,12 @@
 ; Uniform access — a fullscreen triangle whose fragment shader reads fields
 ; from three uniform structs (camera, light, scene) in one bind group.
 ; Exercises an explicit (bind-group-layout …) with per-entry visibility and
-; buffer binding type, a (bind-group …) that targets it via
-; :bind-group-layout, and a (pipeline-layout …) that the render pipeline
-; consumes via :pipeline-layout.
+; buffer binding type, a (bind-group …) that targets it via :layout, and a
+; (pipeline-layout …) that the render pipeline consumes as its :layout.
 ;
 ; The explicit pipeline layout is required, not decorative: WebGPU makes an
 ; auto-derived layout exclusive to its own pipeline and an explicitly created
-; one incompatible with any (layout auto) pipeline, so a bind group built on
+; one incompatible with any :layout auto pipeline, so a bind group built on
 ; layout0 can only be used by a pipeline whose layout also references layout0.
 ;
 ; The three uniform buffers (32/32/24 bytes) are declared but never written,
@@ -93,17 +92,17 @@ fn calculateLighting(normal: vec3f, viewDir: vec3f) -> vec3f {
   (entry :binding 1 :visibility [fragment] (buffer :type uniform))
   (entry :binding 2 :visibility [vertex fragment] (buffer :type uniform)))
 
-(bind-group :name group0 :bind-group-layout layout0
+(bind-group :name group0 :layout layout0
   (entry :binding 0 :buffer cameraBuffer)
   (entry :binding 1 :buffer lightBuffer)
   (entry :binding 2 :buffer sceneBuffer))
 
 (pipeline-layout :name layout0Pl :bind-group-layouts [layout0])
 
-(render-pipeline :name pipeline :pipeline-layout layout0Pl
-  (vertex (module shaderMod) (entry vertexMain))
-  (fragment (module shaderMod) (entry fragmentMain)
-    (targets (target :format bgra8unorm))))
+(render-pipeline :name pipeline :layout layout0Pl
+  (vertex :module shaderMod :entry vertexMain)
+  (fragment :module shaderMod :entry fragmentMain
+    (target :format bgra8unorm)))
 
 (render-pass :name mainPass
   (color-attachment :view context-current-texture :clear-value [0.1 0.1 0.15 1] :load-op clear :store-op store)

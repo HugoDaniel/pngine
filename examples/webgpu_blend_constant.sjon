@@ -28,14 +28,13 @@ fn fs() -> @location(0) vec4f {
 }
 """)
 
-(render-pipeline :name pipe (layout auto)
-  (vertex (module code) (entry vs))
-  (fragment (module code) (entry fs)
-    (targets
-      (target :format preferred-canvas-format
-        (blend
-          (color :src-factor constant :dst-factor one-minus-constant :operation add)
-          (alpha :src-factor one :dst-factor zero :operation add))))))
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format
+      (blend
+        (color :src-factor constant :dst-factor one-minus-constant :operation add)
+        (alpha :src-factor one :dst-factor zero :operation add)))))
 
 (render-pass :name draw
   (color-attachment :view context-current-texture

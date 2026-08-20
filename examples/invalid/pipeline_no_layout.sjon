@@ -1,0 +1,34 @@
+; INVALID: a (render-pipeline ...) that states no layout.
+;
+; GPUPipelineDescriptorBase.layout is REQUIRED, and it is ONE member of type
+; `GPUPipelineLayout | "auto"` -- so pngine spells it as ONE required key whose
+; type is that union (`pipeline-layout-spec`), and this is a plain
+; missing_required_key.
+;
+; It has been three shapes in three cuts, each one a lesson. The positional
+; `(layout auto)` required nothing at all -- head-sets had no cardinality then,
+; and the `pngine/pass-v1` hook emitted no layout form, so every `(pass ...)`
+; document produced a pipeline with no layout whatsoever and the corpus's
+; `(layout auto)` was decoration the compiler never read. Then it
+; was two keys and an exactly-one exclusive-group, which enforced the right
+; thing while describing a shape WebGPU does not have: two members where the
+; IDL has one. The union says it once.
+;
+; `pipeline_both_layouts.sjon` retired with that group -- with one key there is
+; no way to state both arms, so there is nothing left to reject.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+(render-pipeline :name pipe
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

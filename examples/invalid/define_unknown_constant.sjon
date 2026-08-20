@@ -1,0 +1,16 @@
+; INVALID: a `(define …)` whose expression names a constant nothing declares.
+;
+; Constants resolve to a fixed point (audit C1), so a define that stays
+; unresolved after every pass is either a cycle or a misspelling — and the
+; message used to call both a cycle ("a misspelt name inside the expression
+; reads the same way"). The two are told apart now: a name that no (define …)
+; declares at all is named, located on the value; only a genuine cycle is
+; called one.
+(shader-module :name cs :code "@compute @workgroup_size(1) fn main() {}")
+(define :name A :value (* BB 2))
+(define :name B :value 4)
+(buffer :name b :size A :usage [storage])
+(compute-pipeline :name cp :layout auto (compute :module cs :entry main))
+(bind-group :name g :layout cp :group 0 (entry :binding 0 :buffer b))
+(compute-pass :name step :pipeline cp :bind-groups [g] (dispatch :workgroups [1 1 1]))
+(frame :name main :perform [step])

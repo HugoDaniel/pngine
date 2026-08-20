@@ -1,8 +1,8 @@
 ; Textured rotating cube — a rotating cube whose faces sample a PNG image. The
-; image is read from disk at compile time (`(data … :blob …)`), embedded in
+; image is read from disk at compile time (`(data … :file …)`), embedded in
 ; the payload, decoded into an (image-bitmap …), and uploaded into a texture
 ; via a (copy-external-image-to-texture …) queue action; the texture is sized
-; from the bitmap (`:size-from`). The image (examples/assets/Di-3d.png) is the
+; from the bitmap (`:size <image-bitmap>`). The image (examples/assets/Di-3d.png) is the
 ; only asset. Image upload is a browser feature; the native `--frame` renderer
 ; stubs it, so the cube samples an empty texture there.
 ;
@@ -153,35 +153,34 @@ fn fragMain(
 ])
 
 ; The image blob (read from disk) + its decoded bitmap. The bitmap's size feeds
-; the cube texture below (:size-from), and a queue action uploads it.
-(data :name d3Image :blob "assets/Di-3d.png" :mime "image/png")
-(image-bitmap :name cubeImage :image d3Image)
+; the cube texture below (:size naming an image-bitmap), and a queue action uploads it.
+(data :name d3Image :file "assets/Di-3d.png" :mime "image/png")
+(image-bitmap :name cubeImage :data d3Image)
 
-(buffer :name verticesBuffer :size cubeVertexArray :usage [vertex]
-  :mapped-at-creation cubeVertexArray)
+(buffer :name verticesBuffer :usage [vertex]
+  :data cubeVertexArray)
 
 (buffer :name uniformInputsBuffer :size 16 :usage [uniform copy-dst])
 
 (texture :name depthTexture :size canvas :format depth24plus :usage [render-attachment])
 
-(texture :name cubeTexture :size-from cubeImage :format rgba8unorm
+(texture :name cubeTexture :size cubeImage :format rgba8unorm
   :usage [texture-binding copy-dst render-attachment])
 
 (sampler :name linearSampler :mag-filter linear :min-filter linear)
 
 (render-pipeline :name renderCube
-  (layout auto)
-  (vertex (module code) (entry vertexMain)
-    (buffers
-      (vertex-buffer :array-stride 40
-        (attribute :shader-location 0 :offset 0 :format float32x4)
-        (attribute :shader-location 1 :offset 32 :format float32x2))))
-  (fragment (module code) (entry fragMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module code :entry vertexMain
+    (vertex-buffer :array-stride 40
+      (attribute :shader-location 0 :offset 0 :format float32x4)
+      (attribute :shader-location 1 :offset 32 :format float32x2)))
+  (fragment :module code :entry fragMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :depth-write-enabled true :depth-compare less :format depth24plus))
 
-(bind-group :name inputsBinding :layout-pipeline renderCube :layout-index 0
+(bind-group :name inputsBinding :layout renderCube :group 0
   (entry :binding 0 :buffer uniformInputsBuffer)
   (entry :binding 1 :sampler linearSampler)
   (entry :binding 2 :texture cubeTexture))
@@ -190,11 +189,11 @@ fn fragMain(
   (write-buffer :buffer uniformInputsBuffer :offset 0 :data pngine-inputs))
 
 (queue :name copyTexture
-  (copy-external-image-to-texture :source cubeImage :texture cubeTexture))
+  (copy-external-image-to-texture (source :image cubeImage) (destination :texture cubeTexture)))
 
 (render-pass :name drawCube
   (color-attachment :view context-current-texture :clear-value [0.5 0.5 0.5 1.0] :load-op clear :store-op store)
-  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   :pipeline renderCube
   ; bind-groups before vertex-buffers — the emitter honors source order
   ; (set_bind_group then set_vertex_buffer).

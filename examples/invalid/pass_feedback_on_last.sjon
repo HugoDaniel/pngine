@@ -1,0 +1,13 @@
+; Invalid: `:feedback true` on the LAST `(pass …)` of a `(pass-graph …)`. The
+; last pass renders to the canvas, and WebGPU keeps no previous canvas texture
+; to read, so there is nothing for `prev_trail` to be. The hook used to lower
+; it anyway (a pooled rgba8unorm target under a canvas-format pipeline — a GPU
+; validation error and a black canvas). Feed back in an earlier pass and let
+; the last one read it: `textureLoad(<name>, …)` / `textureSample(<name>, samp, uv)`.
+
+(pass-graph
+  (pass :name trail :feedback true :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      return textureLoad(prev_trail, vec2i(pos.xy), 0) * 0.98;
+    }
+  """))

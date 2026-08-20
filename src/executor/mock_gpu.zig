@@ -131,10 +131,10 @@ pub const Call = struct {
             load_op: u8,
             store_op: u8,
             depth_texture_id: u16,
-            clear_r: u8,
-            clear_g: u8,
-            clear_b: u8,
-            clear_a: u8,
+            clear_r_bits: u32,
+            clear_g_bits: u32,
+            clear_b_bits: u32,
+            clear_a_bits: u32,
             resolve_texture_id: u16 = 0xFFFF,
         },
         begin_render_pass_mrt: struct {
@@ -782,7 +782,7 @@ pub const MockGPU = struct {
     // Pass Operations
     // ========================================================================
 
-    pub fn begin_render_pass(self: *Self, allocator: Allocator, color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16, clear_r: u8, clear_g: u8, clear_b: u8, clear_a: u8, resolve_texture_id: u16) !void {
+    pub fn begin_render_pass(self: *Self, allocator: Allocator, color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16, clear_r_bits: u32, clear_g_bits: u32, clear_b_bits: u32, clear_a_bits: u32, resolve_texture_id: u16) !void {
         // Latched, not asserted: this is input, not a caller bug.
         self.notePassState(!self.in_render_pass and !self.in_compute_pass);
 
@@ -796,10 +796,10 @@ pub const MockGPU = struct {
                 .load_op = load_op,
                 .store_op = store_op,
                 .depth_texture_id = depth_texture_id,
-                .clear_r = clear_r,
-                .clear_g = clear_g,
-                .clear_b = clear_b,
-                .clear_a = clear_a,
+                .clear_r_bits = clear_r_bits,
+                .clear_g_bits = clear_g_bits,
+                .clear_b_bits = clear_b_bits,
+                .clear_a_bits = clear_a_bits,
                 .resolve_texture_id = resolve_texture_id,
             } },
         });

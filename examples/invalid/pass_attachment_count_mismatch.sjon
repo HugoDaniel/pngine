@@ -12,12 +12,11 @@ struct FOut {
 }
 @fragment fn fs() -> FOut { return FOut(vec4f(1.0), vec4f(0.5)); }
 """)
-(render-pipeline :name pipe (layout auto)
-  (vertex (module code) (entry vs))
-  (fragment (module code) (entry fs)
-    (targets
-      (target :format preferred-canvas-format)
-      (target :format preferred-canvas-format))))
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)
+    (target :format preferred-canvas-format)))
 (render-pass :name draw :pipeline pipe
   (color-attachment :view context-current-texture
     :clear-value [0 0 0 1] :load-op clear :store-op store)

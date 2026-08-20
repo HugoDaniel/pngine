@@ -10,7 +10,7 @@
 ; The opaque depth is bound as an unfilterable-float texture through an
 ; explicit bind-group layout — auto layout would infer filterable float and
 ; reject the depth view. All bind groups target their pipeline via
-; :layout-pipeline (translucentBG through translucentPipe's layout).
+; :layout naming a pipeline (translucentBG through translucentPipe's layout).
 ;
 ; Differences from upstream: the device-limit-driven slice machinery
 ; (maxStorageBufferBindingSize division, dynamic uniform offsets, per-slice
@@ -29,8 +29,8 @@
 (limits :max-storage-buffers-in-fragment-stage 2)
 
 (data :name teapotMesh (teapot :format [position3]))
-(buffer :name teapotVB :size teapotMesh :usage [vertex]
-  :mapped-at-creation teapotMesh)
+(buffer :name teapotVB :usage [vertex]
+  :data teapotMesh)
 (buffer :name teapotIB :index-of teapotMesh :usage [index])
 
 (buffer :name inputsBuf :size 16 :usage [uniform copy-dst])
@@ -301,18 +301,17 @@ fn main_fs(@builtin(position) position : vec4f) -> @location(0) vec4f {
 }
 """)
 
-(compute-pipeline :name cameraPipe :module cameraCode :entry main)
-(compute-pipeline :name clearPipe :module clearCode :entry main)
+(compute-pipeline :name cameraPipe :layout auto (compute :module cameraCode :entry main))
+(compute-pipeline :name clearPipe :layout auto (compute :module clearCode :entry main))
 
 (render-pipeline :name opaquePipe
-  (layout auto)
-  (vertex (module opaqueCode) (entry main_vs)
-    (buffers
-      (vertex-buffer :array-stride 12
-        (attribute :shader-location 0 :offset 0 :format float32x3))))
-  (fragment (module opaqueCode) (entry main_fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list))
+  :layout auto
+  (vertex :module opaqueCode :entry main_vs
+    (vertex-buffer :array-stride 12
+      (attribute :shader-location 0 :offset 0 :format float32x3)))
+  (fragment :module opaqueCode :entry main_fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
 ; Explicit BGL: the opaque depth is sampled as unfilterable-float, which
@@ -323,59 +322,58 @@ fn main_fs(@builtin(position) position : vec4f) -> @location(0) vec4f {
   (entry :binding 2 :visibility [fragment] (buffer :type storage))
   (entry :binding 3 :visibility [fragment] (buffer :type storage))
   (entry :binding 4 :visibility [fragment]
-    (texture :sample-type unfilterable-float :view-dimension 1)))
+    (texture :sample-type unfilterable-float :view-dimension 2d)))
 (pipeline-layout :name translucentPL :bind-group-layouts [translucentBGL])
 
-(render-pipeline :name translucentPipe :pipeline-layout translucentPL
-  (vertex (module translucentCode) (entry main_vs)
-    (buffers
-      (vertex-buffer :array-stride 12
-        (attribute :shader-location 0 :offset 0 :format float32x3))))
-  (fragment (module translucentCode) (entry main_fs)
-    (targets (target :format preferred-canvas-format :write-mask 0)))
-  (primitive (topology triangle-list)))
+(render-pipeline :name translucentPipe :layout translucentPL
+  (vertex :module translucentCode :entry main_vs
+    (vertex-buffer :array-stride 12
+      (attribute :shader-location 0 :offset 0 :format float32x3)))
+  (fragment :module translucentCode :entry main_fs
+    (target :format preferred-canvas-format :write-mask 0))
+  (primitive :topology triangle-list))
 
 (render-pipeline :name compositePipe
-  (layout auto)
-  (vertex (module compositeCode) (entry main_vs))
-  (fragment (module compositeCode) (entry main_fs)
-    (targets (target :format preferred-canvas-format
+  :layout auto
+  (vertex :module compositeCode :entry main_vs)
+  (fragment :module compositeCode :entry main_fs
+    (target :format preferred-canvas-format
       (blend (color :src-factor one :dst-factor one-minus-src-alpha :operation add)
-             (alpha :src-factor one :dst-factor zero :operation add)))))
-  (primitive (topology triangle-list)))
+             (alpha :src-factor one :dst-factor zero :operation add))))
+  (primitive :topology triangle-list))
 
-(bind-group :name cameraBG :layout-pipeline cameraPipe :layout-index 0
+(bind-group :name cameraBG :layout cameraPipe :group 0
   (entry :binding 0 :buffer inputsBuf)
   (entry :binding 1 :buffer camBuf))
 
-(bind-group :name clearBG :layout-pipeline clearPipe :layout-index 0
+(bind-group :name clearBG :layout clearPipe :group 0
   (entry :binding 0 :buffer heads))
 
-(bind-group :name opaqueBG :layout-pipeline opaquePipe :layout-index 0
+(bind-group :name opaqueBG :layout opaquePipe :group 0
   (entry :binding 0 :buffer camBuf))
 
-(bind-group :name translucentBG :layout-pipeline translucentPipe :layout-index 0
+(bind-group :name translucentBG :layout translucentPipe :group 0
   (entry :binding 0 :buffer camBuf)
   (entry :binding 1 :buffer inputsBuf)
   (entry :binding 2 :buffer heads)
   (entry :binding 3 :buffer linkedList)
   (entry :binding 4 :texture depthTex))
 
-(bind-group :name compositeBG :layout-pipeline compositePipe :layout-index 0
+(bind-group :name compositeBG :layout compositePipe :group 0
   (entry :binding 0 :buffer inputsBuf)
   (entry :binding 1 :buffer heads)
   (entry :binding 2 :buffer linkedList))
 
 (compute-pass :name cameraPass :pipeline cameraPipe :bind-groups [cameraBG]
-  :dispatch [1 1 1])
+  (dispatch :workgroups [1 1 1]))
 
 (compute-pass :name clearHeads :pipeline clearPipe :bind-groups [clearBG]
-  :dispatch-workgroups (ceil (/ (* BUDGET_W BUDGET_H) 256)))
+  (dispatch :workgroups [(ceil (/ (* BUDGET_W BUDGET_H) 256))]))
 
 (render-pass :name opaquePass
   (color-attachment :view context-current-texture
     :clear-value [0 0 0 1] :load-op clear :store-op store)
-  (depth-attachment :view depthTex :depth-clear-value 1.0
+  (depth-stencil-attachment :view depthTex :depth-clear-value 1.0
     :depth-load-op clear :depth-store-op store)
   :pipeline opaquePipe :bind-groups [opaqueBG]
   :vertex-buffers [teapotVB] :index-buffer teapotIB

@@ -1,0 +1,26 @@
+; INVALID: a (dispatch) with no :workgroups.
+;
+; GPUComputePassEncoder.dispatchWorkgroups(x, y, z) has no argument it can
+; default -- x is required in the IDL -- so the form's one key is required too.
+; The reject is a missing_required_key on the (dispatch ...)
+; form, located.
+;
+; The key it replaced could not carry that: `:dispatch-workgroups` was optional
+; alongside two other optional dispatch keys, because "exactly one of these
+; three" is not something three independent keys can say.
+(define :name NUM :value 2048)
+(shader-module :name code :code """
+@group(0) @binding(0) var<storage, read_write> data : array<vec4f>;
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id : vec3u) {
+  if (id.x >= arrayLength(&data)) { return; }
+  data[id.x] = vec4f(f32(id.x), 0.0, 0.0, 1.0);
+}
+""")
+(buffer :name particles :size (* NUM 4 4) :usage [storage])
+(compute-pipeline :name cp :layout auto
+  (compute :module code :entry main))
+(bind-group :name g :layout cp :group 0
+  (entry :binding 0 :buffer particles))
+(compute-pass :name step :pipeline cp :bind-groups [g]
+  (dispatch))
+(frame :name main :perform [step])

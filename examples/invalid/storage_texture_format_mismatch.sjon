@@ -8,8 +8,8 @@
 }
 """)
 (texture :name img :size canvas :format rgba8unorm :usage [storage-binding])
-(compute-pipeline :name cp :module code :entry main)
-(bind-group :name g :layout-pipeline cp :layout-index 0
+(compute-pipeline :name cp :layout auto (compute :module code :entry main))
+(bind-group :name g :layout cp :group 0
   (entry :binding 0 :texture img))
-(compute-pass :name step :pipeline cp :bind-groups [g] :dispatch-workgroups 8)
+(compute-pass :name step :pipeline cp :bind-groups [g] (dispatch :workgroups [8]))
 (frame :name main :perform [step])

@@ -7,4 +7,4 @@
     :radial-subdivisions 2000
     :vertical-subdivisions 2000))
 
-(buffer :name verts :size mesh :usage [vertex] :mapped-at-creation mesh)
+(buffer :name verts :usage [vertex] :data mesh)

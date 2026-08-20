@@ -1,0 +1,34 @@
+; INVALID: a (buffer ...) and a (texture ...) that share a :name.
+;
+; SJON checks duplicate names per cross-ref BUCKET, and a bucket is the set of
+; forms a slot can target. `buffer-ref` and `texture-ref` are different buckets,
+; so nothing upstream sees this collision: each reference resolves to its own
+; kind and the document validates clean.
+;
+; It still reads wrong. In 3.0.0 a :name is one
+; namespace across EVERY named form in a document -- a name is a name, whatever
+; kind declared it -- so `shared` naming two resources is an authoring slip, and
+; the reader of `:view shared` two screens down should not have to know which
+; buckets exist to know what it points at.
+;
+; The emitter owns this half (plan 05 section 1): one pass over the lowered
+; forest, (name, head, span) per named form, a repeat is a located reject naming
+; BOTH declarations.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+(buffer :name shared :size 16 :usage [uniform copy-dst])
+(texture :name shared :size canvas :format rgba8unorm :usage [texture-binding render-attachment])
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

@@ -1,0 +1,28 @@
+; Invalid: a (wasm-data …) whose :file does not exist. The other three file
+; readers — (data … :file), (buffer :file), (wasm-call :file) — report
+; "cannot read '<path>': FileNotFound" with the form's span. This one swallowed
+; the error and surfaced as a bare `emit failed` with an empty diagnostics
+; array, which is the shape 3.0.0's "every refusal carries a span" promised
+; was gone. Found by the docs site's fence gate, which now fails a refusal
+; that carries no diagnostic instead of reading the empty array as clean.
+(shader-module :name code :code """
+@group(0) @binding(0) var<storage, read> src : array<f32>;
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0) * src[0];
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+(data :name verts (wasm-data :file "does_not_exist.wasm" :func gen :returns "array<f32, 3>"))
+(buffer :name b :data verts :usage [storage])
+(bind-group :name g :layout pipe :group 0
+  (entry :binding 0 :buffer b))
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline pipe :bind-groups [g]
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

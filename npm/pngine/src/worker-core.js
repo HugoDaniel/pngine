@@ -100,6 +100,9 @@ export function createWorkerHandlers(env, opts = {}) {
   let canvas, device, context, gpu, wasm, memory;
   let initialized = false;
   let moduleLoaded = false;
+  // True once the current dispatcher has executed a command stream — the
+  // reset key for loadBytecode (a FAILED init leaves it dirty too).
+  let gpuDirty = false;
   let frameCount = 0;
   let debugMode = false;
   // Executor↔host ABI version (docs/abi.md); binaries without the export are v1.
@@ -206,13 +209,14 @@ export function createWorkerHandlers(env, opts = {}) {
 
     context = canvas.getContext("webgpu");
     const format = env.gpu.getPreferredCanvasFormat();
-    // Header flag bit 3 → "opaque"; default stays the historical "premultiplied".
-    const alphaMode = bytecode ? canvasAlphaMode(toU8(bytecode)) : "premultiplied";
+    // Header flag bit 3 → "premultiplied"; no payload → the spec default.
+    const alphaMode = bytecode ? canvasAlphaMode(toU8(bytecode)) : "opaque";
     context.configure({ device, format, alphaMode, usage: env.gpuTextureUsage.RENDER_ATTACHMENT | env.gpuTextureUsage.COPY_SRC });
 
     prefetch?.configure(device, format, alphaMode);
 
     wireDispatcher();
+    gpuDirty = false;
   }
 
   // Attach a one-shot lost handler. `reason === 'destroyed'` is our own
@@ -231,9 +235,11 @@ export function createWorkerHandlers(env, opts = {}) {
           const nowMs = env.now();
           if (nowMs - lastRecoverAt > RECOVER_COOLDOWN_MS) {
             lastRecoverAt = nowMs;
-            recoverDevice().catch((err) => {
-              post({ type: MSG.ERROR, message: `GPU recovery failed: ${err.message}` });
-            });
+            // Through the FIFO, like every other state change: a direct call
+            // ran recovery beside the dispatch chain, and a LOAD landing while
+            // it awaited its device saw `deviceLost` still true and began a
+            // second one — two devices for one loss, one never destroyed.
+            dispatch({ type: MSG.RESTART });
           }
         }
       })
@@ -241,8 +247,16 @@ export function createWorkerHandlers(env, opts = {}) {
   }
 
   // Rebuild the GPU stack on a fresh device and reload a shader — the new one if
-  // supplied, else the last good bytecode — then report ready. The dead device's
-  // resources are abandoned, so clear moduleLoaded first for a clean build.
+  // supplied, else the last good bytecode — then report ready.
+  //
+  // The stack being replaced is RELEASED first, not abandoned: the old
+  // dispatcher's destroy() closes its bitmaps, drops its tables and flips
+  // `alive` so a create still suspended in it lands nowhere; the old device's
+  // destroy() is a spec no-op on a lost device and frees a LIVE one — the
+  // limits-exceed reload replaces a device nothing lost, and every buffer and
+  // texture of the previous payload stayed allocated with it until GC.
+  // `watchDeviceLost` ignores the resulting `destroyed` reason. (Third leak
+  // pass, LEAK-06's edge)
   async function recoverDevice(bytecode) {
     if (!initialized) return;
     const bc = bytecode ?? lastBytecode;
@@ -251,6 +265,9 @@ export function createWorkerHandlers(env, opts = {}) {
     // rebuilds an empty stack unconditionally, matching the original workers.
     if (!bc && selfRecover) return;
     moduleLoaded = false;
+    gpu?.destroy();
+    gpuDirty = false;
+    device?.destroy();
     await setupGpuStack(bc); // fresh device clears deviceLost; re-applies authored limits
     if (bc) await loadBytecode(bc);
     post({ type: MSG.DEVICE_RESTORED });
@@ -373,13 +390,19 @@ export function createWorkerHandlers(env, opts = {}) {
   // for input, init() to emit resource-creation commands, frame() to render,
   // getCommandPtr/getCommandLen for the command-buffer output.
   async function loadBytecode(bytecode) {
-    // Reset GPU state if reloading
-    if (moduleLoaded) {
+    // Reset GPU state if the dispatcher has executed anything. Keyed on
+    // `gpuDirty`, not `moduleLoaded`: the latter is set only on SUCCESS, so a
+    // load whose init stream rejected midway (an undecodable image blob, a
+    // refused wasm module) left its half-filled dispatcher in place and the
+    // next load ran on it — every create guard then skipped the new payload's
+    // resources for ids the failed one had filled. (Third leak pass)
+    if (gpuDirty) {
       gpu.destroy();
       wireDispatcher();
-      moduleLoaded = false;
-      uniformMap = null;
+      gpuDirty = false;
     }
+    moduleLoaded = false;
+    uniformMap = null;
 
     // Split PNGB: bytecode (small) → bytecodePtr, data section (large) → dataPtr
     const bytecodeArray = bytecode instanceof Uint8Array ? bytecode : new Uint8Array(bytecode);
@@ -393,13 +416,16 @@ export function createWorkerHandlers(env, opts = {}) {
     new Uint8Array(memory.buffer, bytecodePtr, dataOffset).set(bytecodeArray.subarray(0, dataOffset));
     wasm.setBytecodeLen(dataOffset);
 
-    // Data section → separate data buffer (avoids bytecode buffer overflow for large payloads)
+    // Data section → separate data buffer (avoids bytecode buffer overflow for large payloads).
+    // setDataLen is called EVERY load — with 0 for an empty section, which the
+    // ABI defines as single-buffer mode — so a reload never inherits the
+    // previous payload's data length.
     const dataLen = dataEnd - dataOffset;
     if (dataLen > 0) {
       const dataPtr = wasm.getDataPtr();
       new Uint8Array(memory.buffer, dataPtr, dataLen).set(bytecodeArray.subarray(dataOffset, dataEnd));
-      wasm.setDataLen(dataLen);
     }
+    wasm.setDataLen(dataLen);
 
     // Parse uniform table from bytecode before init (for runtime reflection)
     const { uniforms } = parseUniformTable(bytecodeArray);
@@ -414,10 +440,12 @@ export function createWorkerHandlers(env, opts = {}) {
       throw new Error(`Init failed: ${initResult}`);
     }
 
-    // Execute the init command buffer (creates GPU resources)
+    // Execute the init command buffer (creates GPU resources). The dispatcher
+    // is dirty from here on, whether or not the stream completes.
     const initPtr = wasm.getCommandPtr();
     const initLen = wasm.getCommandLen();
     if (initPtr && initLen > 0) {
+      gpuDirty = true;
       await gpu.execute(initPtr);
     }
 
@@ -621,7 +649,11 @@ export function createWorkerHandlers(env, opts = {}) {
           await handleLoad(data);
           break;
         case MSG.RESTART:
-          await recoverDevice(data.bytecode);
+          try {
+            await recoverDevice(data.bytecode);
+          } catch (err) {
+            throw new Error(`GPU recovery failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
           break;
         case MSG.DESTROY:
           handleDestroy();

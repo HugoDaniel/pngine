@@ -127,13 +127,18 @@ fn resolveGlobal(globals: *const [MAX_GLOBALS]?i32, parsed_count: u32, idx: u32)
 fn readLeb128(data: []const u8, pos: *usize) ?u32 {
     var result: u32 = 0;
     var shift: u5 = 0;
-    while (pos.* < data.len) {
+    // A u32 LEB128 is at most 5 bytes (shifts 0, 7, 14, 21, 28). The guard is
+    // on the NEXT shift, before it is taken: the old `shift +%= 7; if (shift >
+    // 28)` wrapped a u5 past 28 back to 3 and fired on the tenth byte instead
+    // of refusing the sixth — harmless (bounded by `data.len`) but wrong.
+    for (0..5) |_| {
+        if (pos.* >= data.len) return null;
         const byte = data[pos.*];
         pos.* += 1;
         result |= @as(u32, byte & 0x7F) << shift;
         if (byte & 0x80 == 0) return result;
-        shift +%= 7;
-        if (shift > 28) return null; // overflow
+        if (shift == 28) return null; // a sixth continuation byte: not a u32
+        shift += 7;
     }
     return null;
 }

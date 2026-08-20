@@ -9,10 +9,10 @@
 @fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.0, 0.0, 1.0); }
 """)
 
-(render-pipeline :name decoy (layout auto)
-  (vertex (module code) (entry vs))
-  (fragment (module code) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+(render-pipeline :name decoy :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
 
 (pass-graph
   (pass :name main :code """
@@ -21,4 +21,4 @@
     }
   """))
 
-(render-bundle :name b0 :pipeline main__pipe :draw 3)
+(render-bundle :name b0 :pipeline main__pipe :color-formats [preferred-canvas-format] (draw :vertex-count 3))

@@ -1,0 +1,24 @@
+; INVALID: a (blend ...) with a (color ...) component and no (alpha ...).
+;
+; GPUBlendState requires BOTH `color` and `alpha`. This used to validate clean --
+; SJON's head-set could say which heads a (blend ...) admits, not how many of
+; each -- and the pipeline was refused by the GPU at createRenderPipeline.
+; `blend-section` now carries `(head :name alpha :min 1 :max 1)`, so the missing
+; component is a located `positional_missing` on the (blend ...) form.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 1.0, 1.0, 0.5); }
+""")
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format
+      (blend (color :src-factor src-alpha :dst-factor one-minus-src-alpha)))))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

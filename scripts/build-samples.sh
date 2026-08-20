@@ -39,10 +39,15 @@ $CLI examples/webgpu_marching_cubes.sjon    -o $OUT/marching_cubes.png
 # --- Front-page demo examples (index.html links these by filename). They MUST be
 # rebuilt here or they rot: stale PNGs carry an old embedded executor/bytecode and
 # render black / throw at runtime (journal §205). rotating_cube + boids above
-# double as front-page examples; demo2025.png is a multi-file demo
-# (examples/demo2025/) with no single-.sjon build and is left as a committed artifact.
+# double as front-page examples. The three physics previews were linked but never
+# built here — a fresh checkout's loader 404'd them until audit 09 §5 (the stale
+# copies in an old zig-out/ hid it); demo2025 (examples/demo2025/) is a multi-file
+# demo with no single-.sjon build and nothing commits its PNG, so it is no longer linked.
 $CLI examples/simple_triangle.sjon          -o $OUT/simple_triangle.png
 $CLI examples/moving_triangle.sjon          -o $OUT/moving_triangle.png
+$CLI examples/domino_cascade.sjon           -o $OUT/domino_cascade.png
+$CLI examples/tower_explosion.sjon          -o $OUT/tower_explosion.png
+$CLI examples/circle_avalanche.sjon         -o $OUT/circle_avalanche.png
 
 # The one pNGf (--flat) payload the served tree carries. mini.js is the tier the
 # leak gates could not reach until §349 — it has no getStats() and no worker, so

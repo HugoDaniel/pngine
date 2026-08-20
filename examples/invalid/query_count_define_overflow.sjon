@@ -1,0 +1,8 @@
+; Invalid: `(query-set :count C)` with C a (define …) of 70000.
+; GPUQuerySetDescriptor.count is at most 4096 (`query-count` is `:max 4096` for
+; literals); the emitter re-checks the evaluated reference instead of writing
+; the low 16 bits of it into the descriptor.
+
+(define :name C :value 70000)
+
+(query-set :name qs :type occlusion :count C)

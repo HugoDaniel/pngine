@@ -204,7 +204,7 @@ pub const DescriptorEncoder = struct {
     };
 
     /// Full texture descriptor inputs. `format` and `usage` are always emitted;
-    /// every extended field (depth-or-array-layers, dimension, mip-level-count,
+    /// every extended field (the extent's depth, dimension, mip-level-count,
     /// sample-count) is emitted ONLY when it differs from the WebGPU default, so a
     /// texture that authors none of the new keys is byte-for-byte identical to the
     /// historical encoding — the golden traces depend on this. Decoders walk by
@@ -427,8 +427,8 @@ pub const DescriptorEncoder = struct {
     /// depend on this. New fields append after the base set (decoders walk by field
     /// id, so order is free); the append-only field-id table is the wire contract.
     pub const SamplerOptions = struct {
-        mag_filter: FilterMode = .linear,
-        min_filter: FilterMode = .linear,
+        mag_filter: FilterMode = .nearest,
+        min_filter: FilterMode = .nearest,
         address_mode_u: AddressMode = .clamp_to_edge,
         address_mode_v: AddressMode = .clamp_to_edge,
         address_mode_w: ?AddressMode = null,

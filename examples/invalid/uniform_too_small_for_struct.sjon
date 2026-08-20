@@ -18,12 +18,12 @@
       return u.a + u.b;
     }
 """)
-(bind-group :name uniformGroup :layout-pipeline pipeline :layout-index 0
+(bind-group :name uniformGroup :layout pipeline :group 0
   (entry :binding 0 :buffer uniformBuffer))
-(render-pipeline :name pipeline (layout auto)
-  (vertex (module code)(entry vertexMain))
-  (fragment (module code)(entry fragMain)(targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list)))
+(render-pipeline :name pipeline :layout auto
+  (vertex :module code :entry vertexMain)
+  (fragment :module code :entry fragMain (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
 (render-pass :name render :pipeline pipeline
   (color-attachment :view context-current-texture :clear-value [0 0 0 0] :load-op clear :store-op store)
   :bind-groups [uniformGroup]

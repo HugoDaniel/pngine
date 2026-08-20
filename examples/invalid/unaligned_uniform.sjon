@@ -2,7 +2,7 @@
 ; 16-byte minimum uniform size; the undersized-uniform check rejects it. There
 ; is no multiple-of-16 rule: a 28-byte all-f32 uniform is valid.
 (data :name uniforms :float32 [1.0 2.0 3.0])
-(buffer :name uniformBuffer :size 12 :usage [uniform copy-dst] :mapped-at-creation uniforms)
+(buffer :name uniformBuffer :size 12 :usage [uniform copy-dst] :data uniforms)
 (shader-module :name code :code """
     struct Uniforms {
         values: vec3f,
@@ -20,12 +20,12 @@
 """)
 (bind-group-layout :name uniformLayout
   (entry :binding 0 :visibility [fragment] (buffer :type uniform)))
-(bind-group :name uniformGroup :bind-group-layout uniformLayout
+(bind-group :name uniformGroup :layout uniformLayout
   (entry :binding 0 :buffer uniformBuffer))
-(render-pipeline :name pipeline (layout auto)
-  (vertex (module code)(entry vertexMain))
-  (fragment (module code)(entry fragMain)(targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list)))
+(render-pipeline :name pipeline :layout auto
+  (vertex :module code :entry vertexMain)
+  (fragment :module code :entry fragMain (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
 (render-pass :name render :pipeline pipeline
   (color-attachment :view context-current-texture :clear-value [0 0 0 0] :load-op clear :store-op store)
   :bind-groups [uniformGroup]

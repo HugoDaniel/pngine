@@ -1,0 +1,27 @@
+; INVALID: a (render-bundle ...) whose :color-formats names a DEPTH format.
+;
+; GPURenderPassLayout.colorFormats is a list of COLOR attachment formats, and
+; createRenderBundleEncoder requires each non-null entry to be a color
+; renderable format. depth24plus is not one: it can only ever be the
+; :depth-stencil-format. A bundle recorded this way is invalid on its own,
+; before any pass replays it -- which is why this is a rule about the bundle's
+; own descriptor rather than a join with the pass.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.0, 1.0); }
+""")
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+(render-bundle :name tri :pipeline pipe
+  :color-formats [depth24plus]
+  (draw :vertex-count 3))
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :execute-bundles [tri])
+(frame :name main :perform [draw])

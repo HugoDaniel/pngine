@@ -25,8 +25,8 @@
 (data :name sphereVerts (sphere :format [position3 normal3] :segments 16 :rings 8))
 (data :name planeVerts (plane :format [position3 normal3]))
 
-(buffer :name sphereVB :size sphereVerts :usage [vertex] :mapped-at-creation sphereVerts)
-(buffer :name planeVB :size planeVerts :usage [vertex] :mapped-at-creation planeVerts)
+(buffer :name sphereVB :usage [vertex] :data sphereVerts)
+(buffer :name planeVB :usage [vertex] :data planeVerts)
 (buffer :name lights :size (* NUM_LIGHTS 32) :usage [storage])
 (buffer :name clusterBounds :size (* NUM_CLUSTERS 32) :usage [storage])
 (buffer :name clusterLights :size (* NUM_CLUSTERS (+ 4 (* MAX_PER_CLUSTER 4))) :usage [storage])
@@ -357,81 +357,79 @@ fn fs(in: VSOut) -> @location(0) vec4f {
 }
 """)
 
-(compute-pipeline :name updatePipe :module updateCode :entry main)
-(compute-pipeline :name boundsPipe :module boundsCode :entry main)
-(compute-pipeline :name cullPipe :module cullCode :entry main)
+(compute-pipeline :name updatePipe :layout auto (compute :module updateCode :entry main))
+(compute-pipeline :name boundsPipe :layout auto (compute :module boundsCode :entry main))
+(compute-pipeline :name cullPipe :layout auto (compute :module cullCode :entry main))
 
 (render-pipeline :name planePipe
-  (layout auto)
-  (vertex (module sceneCode) (entry vsPlane)
-    (buffers
-      (vertex-buffer :array-stride 24
-        (attribute :shader-location 0 :offset 0 :format float32x3)
-        (attribute :shader-location 1 :offset 12 :format float32x3))))
-  (fragment (module sceneCode) (entry fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list))
+  :layout auto
+  (vertex :module sceneCode :entry vsPlane
+    (vertex-buffer :array-stride 24
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)))
+  (fragment :module sceneCode :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
 (render-pipeline :name spherePipe
-  (layout auto)
-  (vertex (module sceneCode) (entry vsSphere)
-    (buffers
-      (vertex-buffer :array-stride 24
-        (attribute :shader-location 0 :offset 0 :format float32x3)
-        (attribute :shader-location 1 :offset 12 :format float32x3))))
-  (fragment (module sceneCode) (entry fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module sceneCode :entry vsSphere
+    (vertex-buffer :array-stride 24
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)))
+  (fragment :module sceneCode :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
-(bind-group :name updateBG :layout-pipeline updatePipe :layout-index 0
+(bind-group :name updateBG :layout updatePipe :group 0
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :buffer lights))
 
-(bind-group :name boundsBG :layout-pipeline boundsPipe :layout-index 0
+(bind-group :name boundsBG :layout boundsPipe :group 0
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :buffer clusterBounds))
 
-(bind-group :name cullBG :layout-pipeline cullPipe :layout-index 0
+(bind-group :name cullBG :layout cullPipe :group 0
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :buffer clusterBounds)
   (entry :binding 2 :buffer lights)
   (entry :binding 3 :buffer clusterLights))
 
-(bind-group :name planeBG :layout-pipeline planePipe :layout-index 0
+(bind-group :name planeBG :layout planePipe :group 0
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :buffer lights)
   (entry :binding 2 :buffer clusterLights))
 
-(bind-group :name sphereBG :layout-pipeline spherePipe :layout-index 0
+(bind-group :name sphereBG :layout spherePipe :group 0
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :buffer lights)
   (entry :binding 2 :buffer clusterLights))
 
-(init :name seedLights :buffer lights :shader seedCode
-  :workgroups (ceil (/ NUM_LIGHTS 64)))
+(init :name seedLights :buffer lights :module seedCode
+  :workgroups [(ceil (/ NUM_LIGHTS 64))])
 
 (compute-pass :name updateLights :pipeline updatePipe :bind-groups [updateBG]
-  :dispatch-workgroups (ceil (/ NUM_LIGHTS 64)))
+  (dispatch :workgroups [(ceil (/ NUM_LIGHTS 64))]))
 
 (compute-pass :name clusterBoundsPass :pipeline boundsPipe :bind-groups [boundsBG]
-  :dispatch-workgroups (ceil (/ NUM_CLUSTERS 64)))
+  (dispatch :workgroups [(ceil (/ NUM_CLUSTERS 64))]))
 
 (compute-pass :name cullLights :pipeline cullPipe :bind-groups [cullBG]
-  :dispatch-workgroups (ceil (/ NUM_CLUSTERS 64)))
+  (dispatch :workgroups [(ceil (/ NUM_CLUSTERS 64))]))
 
 (render-pass :name drawFloor
   (color-attachment :view context-current-texture
     :clear-value [0.015 0.015 0.02 1] :load-op clear :store-op store)
-  (depth-attachment :view depthTex :depth-clear-value 1.0
+  (depth-stencil-attachment :view depthTex :depth-clear-value 1.0
     :depth-load-op clear :depth-store-op store)
   :pipeline planePipe :bind-groups [planeBG] :vertex-buffers [planeVB]
   (draw :vertex-count 6))
 
 (render-pass :name drawSpheres
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depthTex :depth-load-op load :depth-store-op store)
+  (depth-stencil-attachment :view depthTex :depth-load-op load :depth-store-op store)
   :pipeline spherePipe :bind-groups [sphereBG] :vertex-buffers [sphereVB]
   (draw :vertex-count 768 :instance-count 24))
 

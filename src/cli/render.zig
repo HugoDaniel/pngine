@@ -594,13 +594,17 @@ fn executeFlatPipeline(
     const png_result = generatePng(allocator, bytecode, width, height, 0.0, false, null, false);
     if (png_result.exit_code != 0) return png_result.exit_code;
 
-    // Embed pNGf chunk instead of pNGb
+    // Embed pNGf chunk instead of pNGb. `png_data` is owned from here to the
+    // end — one `defer`, tracking the audio swap below, the same shape as
+    // `executePipeline`. It used to be freed only on the success path, so a
+    // missing audio file, a refused audio chunk or a failed write leaked it.
     var png_data = pngine.png.embedFlat(allocator, png_result.png_data, flat_payload.data) catch |err| {
         std.debug.print("Error: failed to embed flat data: {}\n", .{err});
         allocator.free(png_result.png_data);
         return 4;
     };
     allocator.free(png_result.png_data);
+    defer allocator.free(png_data);
 
     // Optionally embed audio
     if (audio_path) |apath| {
@@ -625,7 +629,6 @@ fn executeFlatPipeline(
 
     std.debug.print("Created: {s} ({d} bytes, flat pNGf format)\n", .{ stdio.outName(output), png_data.len });
     std.debug.print("  pNGf payload: {d} bytes\n", .{flat_payload.data.len});
-    allocator.free(png_data);
     return 0;
 }
 
@@ -1101,9 +1104,14 @@ fn scanForFrameByNameId(bytecode: []const u8, target_name_id: u16) ?FrameRange {
         pc += 1;
 
         if (op == .define_frame) {
-            const frame_id_result = opcodes.decode_varint(bytecode[pc..]);
+            // Length-tolerant reads: a `define_frame` at the very end of a
+            // hostile stream has no operands, and the asserting decoder on an
+            // empty slice was a Debug panic / ReleaseFast over-read here.
+            const frame_id_result = opcodes.decode_varint_safe(bytecode[pc..]);
+            if (frame_id_result.len == 0) break;
             pc += frame_id_result.len;
-            const name_result = opcodes.decode_varint(bytecode[pc..]);
+            const name_result = opcodes.decode_varint_safe(bytecode[pc..]);
+            if (name_result.len == 0) break;
             pc += name_result.len;
 
             // Scan for end_frame to find frame boundaries

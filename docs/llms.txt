@@ -1,0 +1,304 @@
+# PNGine
+
+> PNGine is declarative WebGPU in S-expressions. A `.sjon` document (SJON, an
+> S-expression language) describes buffers, pipelines and passes as forms
+> validated against a WebGPU schema; the compiler turns it into PNGB, a compact
+> bytecode that a 9 to 13 KB WASM runtime (the executor, sized per program;
+> measured 2026-08-16) plays in any browser with WebGPU. The bytecode is plain
+> data, so by default it is bundled inside a PNG, in a `pNGb` chunk, together
+> with the executor: one file that is both the image and the program that
+> draws it.
+
+## How to use this file
+
+You are probably an LLM agent asked to write or fix a `.sjon` program. This
+file is the compact reference: the syntax, every top-level form, the rules that
+are easy to get wrong, and two complete programs. It is deliberately short; the
+full reference (every form and every key, gated against the schema) is one
+fetch away in "Further reading" below.
+
+The loop that works:
+
+1. Write the program (start from the complete examples below).
+2. Run `npx pngine validate file.sjon --json` (no install needed). It reports
+   every diagnostic at once, each with a line and column, including WGSL
+   shader errors. `status: "ok"` with an empty `diagnostics` array is clean.
+3. Fix and repeat. `npx pngine file.sjon -o out.png` compiles and bundles;
+   `npx pngine inspect file.sjon --symptom black --json` diagnoses a black
+   canvas without a browser.
+
+Every ```sjon fence in this file is a complete program that the engine's own
+test suite runs through `pngine validate`; copy them as-is.
+
+## Quick facts
+
+- File extension: `.sjon`. Output: PNGB bytecode, embedded in a PNG `pNGb` chunk.
+- Every form is `(form-name :key value … (child …))`. Keywords are `:kebab-case`.
+- Bare identifiers are cross-references, resolved document-wide by name.
+- `schema/pngine.sjon` in the engine repo is the single source of truth.
+- SJON is the host language: https://hugodaniel.com/pages/sjon/
+- Shaders are WGSL, opaque to SJON. Uniforms are declared in WGSL and reflected.
+- Multi-file imports are deferred; keep documents single-file.
+
+## Syntax
+
+```text
+(buffer :name particles :size (* NUM 4 4) :usage [vertex storage] :pool 2)
+ └form   └cross-ref name  └expression      └symbol list         └keyword
+```
+
+Strings are `"…"` or `"""…multi-line…"""`. Vectors are `[a b c]`. Comments
+start with `;`.
+
+## Top-level forms
+
+**Constants & device**: `(define :name N :value 2048)`, `(limits …)`, `(canvas …)`
+
+**Shaders & data**
+- `(shader-module :name code :code """<wgsl>""")`
+- `(data :name verts (cube :format [position4 color4 uv2]))`: shape generator
+- `(data :name v (wasm-data :file "cube.wasm" :func cube :returns "array<f32, 360>"))`:
+  bytes produced once at buffer-create time by a WASM export
+- `(data :name img :file "photo.png" :mime "image/png")` then
+  `(image-bitmap :name bmp :data img)`; upload via `(copy-external-image-to-texture …)`
+
+**Resources**
+- `(buffer :name b :size N :usage [vertex storage] :pool 2)`; `:pool 2` allocates
+  a ping-pong pair. `:size` is a byte count (literal, expression or constant
+  name); `(buffer :name vb :data verts :usage [vertex])` sizes and fills the
+  buffer from a `(data …)` instead.
+- `(texture :name t :size canvas :format depth24plus :usage [render-attachment])`;
+  `:size` is required: `canvas`, or `[w h]` / `[w h layers]`
+- `(texture-view :name v :texture t)`, `(sampler :name s :mag-filter linear)`
+- `(query-set :name q :type timestamp :count N)`
+
+Buffer usage flags: `vertex index uniform storage copy-src copy-dst indirect
+query-resolve map-read map-write`. Texture usage flags: `copy-src copy-dst
+texture-binding storage-binding render-attachment`. At least one is required.
+
+**Binding & pipelines**
+- `(bind-group :name g :layout pipe :group 0 (entry :binding 0 :buffer uniforms))`
+- `(bind-group-layout :name l (entry :binding 0 …))`, `(pipeline-layout :name pl …)`
+- `(render-pipeline :name pipe :layout auto (vertex :module code :entry vsMain) (fragment …))`
+- `(compute-pipeline :name cp :layout auto (compute :module code :entry main))`
+
+**Passes & frames**
+- `(render-pass :name draw (color-attachment …) :pipeline pipe :bind-groups [g] (draw :vertex-count 3))`
+- `(compute-pass :name step :pipeline cp :bind-groups [g] (dispatch :workgroups [(ceil (/ N 64))]))`
+- `(render-bundle :name rb …)`
+- `(queue :name q (write-buffer :buffer u :offset 0 :data pngine-inputs))`
+- `(frame :name main :init [setup] :before [q] :perform [step draw])`
+
+**Sugar** (lowered to the forms above before emission)
+- `(init :name setup :buffer particles :module initShader :workgroups [(ceil (/ N 64))])`:
+  one-shot compute on the first frame. Its `:module` must bind the target buffer
+  at `@binding(0)`, so give it its own module rather than reusing a per-frame one.
+- `(pass-graph (pass :name main :code """<wgsl>"""))`
+
+Queue children: `write-buffer`, `copy-buffer-to-buffer`, `copy-texture-to-texture`,
+`copy-external-image-to-texture`, `resolve-query-set`. `(wasm-call :name mvp
+:file "mvp.wasm" :func build :returns "mat4x4" :args [time-total])` is a
+top-level form that runs every frame; a `(write-buffer … :data mvp)` names it.
+
+Shape generators inside `(data …)`: `cube`, `plane`, `sphere`, `torus`,
+`truncated-cone`, `cylinder` (procedural, deindexed) and `teapot`, `dragon`
+(static indexed meshes; pair with `(buffer :name ib :index-of theMesh :usage [index])`).
+
+## Cross-references
+
+Bare identifiers resolve to whatever form declares that `:name`, document-wide.
+The schema types each slot, so `:pipeline nope` fails with the expected kind
+named. Reserved values, not cross-refs: `auto`, `context-current-texture`,
+`preferred-canvas-format`, load/store ops (`clear`, `load`, `store`, `discard`),
+topologies (`triangle-list`, …), and the built-in data sources below.
+
+## Expressions
+
+Numeric slots accept bounded expressions over `(define …)` constants, prefix
+form like everything else. The heads are SJON's core table: `+ - * /` and
+`mod`, `min max clamp abs sign`, `floor ceil round fract`, `sqrt pow`,
+`sin cos tan atan2 pi`, `lerp step smoothstep`, comparisons and `if`. An
+unknown head is `unknown_form`; `/` needs two arguments.
+
+```text
+:size (* NUM 4 4)
+:workgroups [(ceil (/ NUM 64))]
+```
+
+A bare `(define …)` name is a value in EVERY numeric slot and vector element:
+`:size NUM`, `:array-stride STRIDE`, `:workgroups [WG 1 1]`, a texture
+`:size [W W]`, `:clear-value [R G B 1]`. A misspelt name is a located
+`not_cross_ref`. The exceptions are the two slots whose symbol spelling is
+already a member set, `:write-mask` (`all`) and a `wasm-call`'s `:args`
+(`canvas-width` and friends): write `(* NAME 1)` there.
+
+A constant is a real: `(define :name HALF :value 0.5)`, `:value -1`, or another
+constant's name, declared before or after it (constants resolve document-wide;
+only a cycle is refused). The SLOT decides integrality: `0.5` is fine in
+`:clear-value` and a located refusal in `:vertex-count`. An expression that
+evaluates negative or fractional in an integer slot is refused with the value
+named, never clamped or truncated.
+
+## Built-in data sources
+
+Runtime-provided uniform data for `write-buffer`:
+
+| Identifier | Size | Layout (all f32) |
+|---|---|---|
+| `pngine-inputs` | 16B | time, width, height, aspect |
+| `scene-time-inputs` | 12B | time, width, height |
+| `pointer-inputs` | 48B | x, y, clickX, clickY, dx, dy, buttons, pressure, modifiers, scrollX, scrollY, pad |
+
+## `(pass …)` sugar
+
+A fullscreen shader with every resource auto-generated. Write passes inside one
+`(pass-graph …)` so cross-pass texture ids sequence coherently. The prelude
+injects `@binding(N)` declarations for whatever the WGSL actually references:
+`pngine` (uniforms), `pointer`, the sampler `samp`, prior-pass textures (by pass
+name), the `prev_<name>` feedback texture, and `D0`/`D1`/… storage buffers from
+`:file`.
+
+```sjon
+(pass-graph
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return vec4f(uv, 0.5 + 0.5 * sin(pngine.time), 1);
+    }
+  """))
+```
+
+Optional keys: `:feedback true` (ping-pong texture; on an earlier pass, never
+the last one, which renders to the canvas), `:file ["a.wasm"]`,
+`:init "<wgsl compute>"`.
+
+## Complete example: triangle
+
+```sjon
+(shader-module :name code :code """
+  @vertex fn vsMain(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+    var pos = array<vec2f, 3>(vec2f(0, 0.5), vec2f(-0.5, -0.5), vec2f(0.5, -0.5));
+    return vec4f(pos[i], 0, 1);
+  }
+  @fragment fn fsMain() -> @location(0) vec4f { return vec4f(1, 0, 0, 1); }
+""")
+
+(render-pipeline :name pipe
+  :layout auto
+  (vertex :module code :entry vsMain)
+  (fragment :module code :entry fsMain
+    (target :format preferred-canvas-format)))
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipe
+  (draw :vertex-count 3))
+
+(frame :name main :perform [draw])
+```
+
+## Complete example: compute over a storage buffer
+
+```sjon
+(define :name NUM :value 2048)
+
+(shader-module :name code :code """
+  struct Inputs { time: f32, width: f32, height: f32, aspect: f32 }
+  @group(0) @binding(0) var<uniform> pngine: Inputs;
+  @group(0) @binding(1) var<storage, read_write> particles: array<vec4f>;
+
+  @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3u) {
+    let i = id.x;
+    if (i >= arrayLength(&particles)) { return; }
+    particles[i] += vec4f(0, 0.001 * pngine.time, 0, 0);
+  }
+""")
+
+(buffer :name particles :size (* NUM 4 4) :usage [storage])
+(buffer :name uniforms  :size 16 :usage [uniform copy-dst])
+
+(compute-pipeline :name sim :layout auto (compute :module code :entry main))
+
+(bind-group :name g :layout sim :group 0
+  (entry :binding 0 :buffer uniforms)
+  (entry :binding 1 :buffer particles))
+
+(compute-pass :name step :pipeline sim :bind-groups [g]
+  (dispatch :workgroups [(ceil (/ NUM 64))]))
+
+(queue :name writeInputs
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+(frame :name main :before [writeInputs] :perform [step])
+```
+
+Buffer usage is checked against how the WGSL actually binds it: a buffer bound
+as `var<uniform>` whose `:usage` lacks `uniform` is an error, not a warning.
+
+## Validation
+
+Diagnostics are collected, not fatal on first hit; you get them all at once,
+each with a line/column span. Real codes:
+
+| Code | Cause |
+|---|---|
+| `unknown_form` | No such form in the schema |
+| `missing_required_key` | A required `:keyword` was omitted |
+| `not_cross_ref` | Bare identifier names nothing, or the wrong kind of form |
+| `not_member` | Value outside an enum's allowed members |
+| `duplicate_cross_ref_target` | Two forms declare the same `:name` |
+
+`pngine validate file.sjon --json` emits them as structured JSON. WGSL is
+validated too; shader errors report the line and column inside the shader.
+
+## Caps
+
+Compile-time rejections: ≤ 32 passes per document, ≤ 16 bundles per
+`:execute-bundles`, ≤ 32 args per `(wasm-call …)`, ≤ 8 color attachments per
+multiple-render-target pass.
+CLI input ≤ 16 MiB. The in-browser compiler silently truncates source past
+256 KiB; native `pngine validate` accepting the same bytes is the tell.
+
+## Output
+
+PNGB bytecode in PNG ancillary chunks: `pNGb` (bytecode, executor embedded by
+default), `pNGm` (metadata), `pNGa` (audio WASM), `pNGf` (flat format for the
+minimal main-thread player, written by `--flat`, which omits `pNGb`), `pNGw`
+(compressed WGSL for `--html` output).
+
+## CLI
+
+```bash
+pngine shader.sjon                       # compile + embed → PNG
+pngine shader.sjon --frame -s 512x512    # render an actual frame
+pngine compile shader.sjon --minify      # → .pngb, minified WGSL
+pngine validate shader.sjon --json       # structured diagnostics
+pngine inspect shader.sjon --verbose     # GPU call trace
+pngine inspect shader.sjon --symptom black --json   # diagnose a black canvas
+pngine extract image.png -o out.pngb     # pull bytecode back out
+pngine diff a.png b.png                  # pixel-compare
+```
+
+Browser runtime: `import { pngine, play } from "pngine"`, then `await pngine("shader.png", { canvas })`.
+
+## Further reading
+
+Plain-text URLs an agent can fetch directly, all from the public engine
+repository (https://github.com/HugoDaniel/pngine):
+
+- Full SJON reference, every form and every key, gated against the schema:
+  https://raw.githubusercontent.com/HugoDaniel/pngine/main/docs/sjon-reference.md
+- The schema itself (what the validator enforces):
+  https://raw.githubusercontent.com/HugoDaniel/pngine/main/schema/pngine.sjon
+- Architecture (compiler, bytecode, runtime pipeline, opcode sets, ID systems):
+  https://raw.githubusercontent.com/HugoDaniel/pngine/main/docs/architecture.md
+- The example corpus, over a hundred working programs, indexed:
+  https://raw.githubusercontent.com/HugoDaniel/pngine/main/examples/README.md
+- The engine README (install, quick start, browser runtime profiles):
+  https://raw.githubusercontent.com/HugoDaniel/pngine/main/README.md
+- The SJON language (reader, validator, syntax) that PNGine hosts:
+  https://hugodaniel.com/pages/sjon/
+
+This file: https://raw.githubusercontent.com/HugoDaniel/pngine/main/docs/llms.txt
+(also served by the docs site as `/pages/pngine/llms.txt`).

@@ -1,0 +1,26 @@
+; Invalid: :depth-write-enabled true on :format stencil8. WebGPU allows a
+; depth write (or a depth compare other than `always`) only when the format
+; has a depth component, and stencil8 is the stencil-ONLY member.
+;
+; The trap is that the document reads plausibly: every other depth format in
+; the corpus writes depth, and the one that cannot is spelled almost the same.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+(texture :name depth :size canvas :format stencil8 :usage [render-attachment])
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format))
+  (depth-stencil :format stencil8 :depth-write-enabled true))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (depth-stencil-attachment :view depth
+    :stencil-clear-value 0 :stencil-load-op clear :stencil-store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

@@ -24,7 +24,7 @@
 ; density, which shifts every texel:pixel ratio (and thus the selected mips)
 ; one level down — expected, not a defect.
 
-(texture :name mipTex :width 64 :height 64 :format rgba8unorm
+(texture :name mipTex :size [64 64] :format rgba8unorm
   :mip-level-count 4
   :usage [texture-binding storage-binding])
 
@@ -97,46 +97,50 @@ fn quadAt(ii: u32, vi: u32, yCenter: f32) -> VSOut {
 }
 """)
 
-(compute-pipeline :name bakePipeline :module bakeShader :entry main)
+(compute-pipeline :name bakePipeline :layout auto (compute :module bakeShader :entry main))
 
 (render-pipeline :name nearestRowPipeline
-  (layout auto)
-  (vertex (module viewShader) (entry vsTop))
-  (fragment (module viewShader) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module viewShader :entry vsTop)
+  (fragment :module viewShader :entry fs
+    (target :format preferred-canvas-format)))
 
 (render-pipeline :name trilinearRowPipeline
-  (layout auto)
-  (vertex (module viewShader) (entry vsBottom))
-  (fragment (module viewShader) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module viewShader :entry vsBottom)
+  (fragment :module viewShader :entry fs
+    (target :format preferred-canvas-format)))
 
-(bind-group :name bakeBg0 :layout-pipeline bakePipeline :layout-index 0
+(bind-group :name bakeBg0 :layout bakePipeline :group 0
   (entry :binding 0 :texture-view mip0))
-(bind-group :name bakeBg1 :layout-pipeline bakePipeline :layout-index 0
+(bind-group :name bakeBg1 :layout bakePipeline :group 0
   (entry :binding 0 :texture-view mip1))
-(bind-group :name bakeBg2 :layout-pipeline bakePipeline :layout-index 0
+(bind-group :name bakeBg2 :layout bakePipeline :group 0
   (entry :binding 0 :texture-view mip2))
-(bind-group :name bakeBg3 :layout-pipeline bakePipeline :layout-index 0
+(bind-group :name bakeBg3 :layout bakePipeline :group 0
   (entry :binding 0 :texture-view mip3))
 
 ; The display samples mipTex's default view — all 4 levels, as mip
 ; selection requires.
-(bind-group :name nearestBg :layout-pipeline nearestRowPipeline :layout-index 0
+(bind-group :name nearestBg :layout nearestRowPipeline :group 0
   (entry :binding 0 :sampler sampNearestMip)
   (entry :binding 1 :texture mipTex))
-(bind-group :name trilinearBg :layout-pipeline trilinearRowPipeline :layout-index 0
+(bind-group :name trilinearBg :layout trilinearRowPipeline :group 0
   (entry :binding 0 :sampler sampTrilinear)
   (entry :binding 1 :texture mipTex))
 
 (compute-pass :name bakeMip0 :pipeline bakePipeline
-  :bind-groups [bakeBg0] :dispatch [8 8 1])
+  :bind-groups [bakeBg0]
+  (dispatch :workgroups [8 8 1]))
 (compute-pass :name bakeMip1 :pipeline bakePipeline
-  :bind-groups [bakeBg1] :dispatch [4 4 1])
+  :bind-groups [bakeBg1]
+  (dispatch :workgroups [4 4 1]))
 (compute-pass :name bakeMip2 :pipeline bakePipeline
-  :bind-groups [bakeBg2] :dispatch [2 2 1])
+  :bind-groups [bakeBg2]
+  (dispatch :workgroups [2 2 1]))
 (compute-pass :name bakeMip3 :pipeline bakePipeline
-  :bind-groups [bakeBg3] :dispatch [1 1 1])
+  :bind-groups [bakeBg3]
+  (dispatch :workgroups [1 1 1]))
 
 (render-pass :name drawNearestRow
   (color-attachment :view context-current-texture

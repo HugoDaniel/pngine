@@ -1,4 +1,4 @@
-; Simple lighting — a rotating cube shaded with Blinn-Phong (ambient + diffuse
+; Simple lighting: a rotating cube shaded with Blinn-Phong (ambient + diffuse
 ; + specular) under an orbiting light, depth-tested with back-face culling.
 ; Exercises the `cube` shape generator with a three-attribute interleaved
 ; layout (position3 normal3 color3, array-stride 36), depth-stencil pipeline
@@ -10,8 +10,8 @@
 
 (data :name cubeVertices (cube :format [position3 normal3 color3]))
 
-(buffer :name vertexBuffer :size cubeVertices :usage [vertex]
-  :mapped-at-creation cubeVertices)
+(buffer :name vertexBuffer :usage [vertex]
+  :data cubeVertices)
 
 (buffer :name uniforms :size 128 :usage [uniform copy-dst])
 
@@ -110,24 +110,23 @@
   """)
 
 (render-pipeline :name pipeline
-  (layout auto)
-  (vertex (module shader) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 36
-        (attribute :shader-location 0 :offset 0 :format float32x3)
-        (attribute :shader-location 1 :offset 12 :format float32x3)
-        (attribute :shader-location 2 :offset 24 :format float32x3))))
-  (fragment (module shader) (entry fs)
-    (targets (target :format preferred-canvas-format)))
+  :layout auto
+  (vertex :module shader :entry vs
+    (vertex-buffer :array-stride 36
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)
+      (attribute :shader-location 2 :offset 24 :format float32x3)))
+  (fragment :module shader :entry fs
+    (target :format preferred-canvas-format))
   (primitive :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
-(bind-group :name uniformsBindGroup :layout-pipeline pipeline :layout-index 0
+(bind-group :name uniformsBindGroup :layout pipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
 (render-pass :name mainPass
   (color-attachment :view context-current-texture :clear-value [0.1 0.1 0.15 1] :load-op clear :store-op store)
-  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   :pipeline pipeline
   :vertex-buffers [vertexBuffer]
   :bind-groups [uniformsBindGroup]

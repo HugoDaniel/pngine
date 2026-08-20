@@ -1,0 +1,36 @@
+; INVALID: a fragment stage that declares no (target ...).
+;
+; GPUFragmentState.targets is REQUIRED in the WebGPU IDL. The `(targets ...)`
+; wrapper that used to carry it is gone (a
+; sequence of dictionaries is repeated children, not a wrapper), so the
+; requirement is now a floor on the head itself: `(head :name target :min 1)`
+; on `fragment-section`, a located positional_missing at validation rather than
+; an emitter reject.
+;
+; The floor is a deliberate narrowing: WebGPU allows an EMPTY targets list (a
+; depth-only fragment stage), and plan 02 costed the wrapper's removal as
+; making that legal here. It cannot be, yet -- wgpu_native_gpu substitutes one
+; BGRA8Unorm target for an empty list while gpu.js passes the empty list
+; through, so the two backends would build different pipelines from the same
+; document. Lift the floor the day a backend can express a depth-only stage.
+;
+; This used to compile, and then every runtime substituted a guess: gpu.js
+; filled in [{format: preferredCanvasFormat}]. The pipeline "worked" for as
+; long as nobody looked at which attachment it wrote to. Note the wrapper left
+; the same hole open at a different spelling -- an empty `(targets)` validated
+; and reached the identical fabrication.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

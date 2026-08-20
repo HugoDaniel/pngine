@@ -130,37 +130,36 @@ fn fragmentMain(@location(0) weights : vec4f) -> @location(0) vec4f {
   12 1 2 3 0 0 1 0 0 0
   12 -1 2 3 0 0 1 0 0 0
 ])
-(buffer :name gridVB :size gridData :usage [vertex] :mapped-at-creation gridData)
+(buffer :name gridVB :usage [vertex] :data gridData)
 (buffer :name paletteBuf :size 256 :usage [storage])
 (buffer :name inputs :size 16 :usage [uniform copy-dst])
 
 (queue :name writeInputs
   (write-buffer :buffer inputs :offset 0 :data pngine-inputs))
 
-(compute-pipeline :name palettePipe :module paletteCode :entry main)
+(compute-pipeline :name palettePipe :layout auto (compute :module paletteCode :entry main))
 
 (render-pipeline :name gridPipe
-  (layout auto)
-  (vertex (module gridCode) (entry vertexMain)
-    (buffers
-      (vertex-buffer :array-stride 40
-        (attribute :shader-location 0 :offset 0 :format float32x2)
-        (attribute :shader-location 1 :offset 8 :format float32x4)
-        (attribute :shader-location 2 :offset 24 :format float32x4))))
-  (fragment (module gridCode) (entry fragmentMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology line-list)))
+  :layout auto
+  (vertex :module gridCode :entry vertexMain
+    (vertex-buffer :array-stride 40
+      (attribute :shader-location 0 :offset 0 :format float32x2)
+      (attribute :shader-location 1 :offset 8 :format float32x4)
+      (attribute :shader-location 2 :offset 24 :format float32x4)))
+  (fragment :module gridCode :entry fragmentMain
+    (target :format preferred-canvas-format))
+  (primitive :topology line-list))
 
-(bind-group :name paletteBG :layout-pipeline palettePipe :layout-index 0
+(bind-group :name paletteBG :layout palettePipe :group 0
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :buffer paletteBuf))
 
-(bind-group :name gridBG :layout-pipeline gridPipe :layout-index 0
+(bind-group :name gridBG :layout gridPipe :group 0
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :buffer paletteBuf))
 
 (compute-pass :name updatePalette :pipeline palettePipe :bind-groups [paletteBG]
-  :dispatch [1 1 1])
+  (dispatch :workgroups [1 1 1]))
 
 (render-pass :name drawGrid
   (color-attachment :view context-current-texture

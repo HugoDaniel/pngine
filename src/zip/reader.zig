@@ -196,9 +196,13 @@ pub const ZipReader = struct {
         // Decompress based on method
         const result = switch (entry.compression) {
             @intFromEnum(format.Compression.store) => blk: {
-                const copy = self.allocator.alloc(u8, entry.uncompressed_size) catch
+                // A stored entry IS its bytes: the two sizes must agree, or the
+                // central directory is lying — `alloc(uncompressed_size)` +
+                // `@memcpy(compressed_size)` was a length-mismatch trap, and at
+                // 0xFFFFFFFF a 4 GiB allocation, from a field nothing checked.
+                if (entry.uncompressed_size != entry.compressed_size) return Error.InvalidZip;
+                const copy = self.allocator.dupe(u8, compressed_data) catch
                     return Error.OutOfMemory;
-                @memcpy(copy, compressed_data);
                 break :blk copy;
             },
             @intFromEnum(format.Compression.deflate) => blk: {
@@ -222,20 +226,22 @@ pub const ZipReader = struct {
     fn findEocd(data: []const u8) ?usize {
         if (data.len < format.EndOfCentralDir.FIXED_SIZE) return null;
 
-        // EOCD is at end of file (possibly preceded by comment)
-        // Scan backwards from end, limited to max comment size
-        const search_limit = @min(data.len, MAX_SEARCH_OFFSET);
+        // EOCD is at end of file (possibly preceded by a comment): scan
+        // backwards from the last place a 22-byte EOCD fits, down to the
+        // earliest position the maximum comment allows — and never below 0.
+        // The old loop subtracted a 0..65558 offset from `len - 22` and
+        // underflowed on any buffer shorter than that with no EOCD in it.
         const start_offset = data.len - format.EndOfCentralDir.FIXED_SIZE;
+        const lowest = start_offset -| MAX_SEARCH_OFFSET;
 
-        var offset: usize = 0;
-        while (offset < search_limit) : (offset += 1) {
-            const pos = start_offset - offset;
-            if (pos + 4 > data.len) continue;
-
+        var pos = start_offset;
+        for (0..MAX_SEARCH_OFFSET + 1) |_| {
             const sig = std.mem.readInt(u32, data[pos..][0..4], .little);
             if (sig == format.END_OF_CENTRAL_DIR_SIGNATURE) {
                 return pos;
             }
+            if (pos == lowest) break;
+            pos -= 1;
         }
 
         return null;

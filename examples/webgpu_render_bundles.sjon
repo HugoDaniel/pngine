@@ -12,8 +12,8 @@
 
 (data :name cubeVertexArray (cube :format [position4 color4 uv2]))
 
-(buffer :name vertices :size cubeVertexArray :usage [vertex]
-  :mapped-at-creation cubeVertexArray)
+(buffer :name vertices :usage [vertex]
+  :data cubeVertexArray)
 
 ; 500 × mat4x4f (64 B) transforms, filled by the compute `(init …)`.
 (buffer :name transforms :size (* NUM_ASTEROIDS 64) :usage [storage])
@@ -26,8 +26,8 @@
 (texture :name depthTex :size canvas :format depth24plus :usage [render-attachment])
 
 ; One-shot compute: spiral the 500 transforms into the storage buffer (first frame).
-(init :name initTransforms :buffer transforms :shader initShader
-  :workgroups (ceil (/ NUM_ASTEROIDS 64)))
+(init :name initTransforms :buffer transforms :module initShader
+  :workgroups [(ceil (/ NUM_ASTEROIDS 64))])
 
 (shader-module :name initShader :code """
 struct Transforms { m: array<mat4x4f> }
@@ -133,36 +133,35 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
 """)
 
 (render-pipeline :name renderPipeline
-  (layout auto)
-  (vertex (module renderShader) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 40
-        (attribute :shader-location 0 :offset 0 :format float32x4)
-        (attribute :shader-location 1 :offset 16 :format float32x4)
-        (attribute :shader-location 2 :offset 32 :format float32x2))))
-  (fragment (module renderShader) (entry fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module renderShader :entry vs
+    (vertex-buffer :array-stride 40
+      (attribute :shader-location 0 :offset 0 :format float32x4)
+      (attribute :shader-location 1 :offset 16 :format float32x4)
+      (attribute :shader-location 2 :offset 32 :format float32x2)))
+  (fragment :module renderShader :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
-(bind-group :name renderBG :layout-pipeline renderPipeline :layout-index 0
+(bind-group :name renderBG :layout renderPipeline :group 0
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :buffer transforms))
 
 ; Pre-recorded bundle: the recorded instanced draw replays all 500 asteroids.
 (render-bundle :name asteroidBundle
   :pipeline renderPipeline
+  :color-formats [preferred-canvas-format]
   :depth-stencil-format depth24plus
   :vertex-buffers [vertices]
   :bind-groups [renderBG]
-  :draw CUBE_VERTEX_COUNT
-  :instance-count NUM_ASTEROIDS)
+  (draw :vertex-count CUBE_VERTEX_COUNT :instance-count NUM_ASTEROIDS))
 
 ; The pass replays the bundle (execute_bundles) instead of an inline pipeline/draw.
 (render-pass :name drawScene
   (color-attachment :view context-current-texture
     :clear-value [0 0 0 1] :load-op clear :store-op store)
-  (depth-attachment :view depthTex
+  (depth-stencil-attachment :view depthTex
     :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   :execute-bundles [asteroidBundle])
 

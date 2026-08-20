@@ -12,12 +12,12 @@
   return vec4<f32>(textureLoad(tex, vec2i(0, 0), 0));
 }
 """)
-(texture :name texFloat :format rgba8unorm :width 4 :height 4 :usage [texture-binding])
-(render-pipeline :name pipe (layout auto)
-  (vertex (module code) (entry vs))
-  (fragment (module code) (entry fs)
-    (targets (target :format preferred-canvas-format))))
-(bind-group :name g0 :layout-pipeline pipe :layout-index 0
+(texture :name texFloat :format rgba8unorm :size [4 4] :usage [texture-binding])
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+(bind-group :name g0 :layout pipe :group 0
   (entry :binding 0 :texture texFloat))
 (render-pass :name draw :pipeline pipe :bind-groups [g0]
   (color-attachment :view context-current-texture

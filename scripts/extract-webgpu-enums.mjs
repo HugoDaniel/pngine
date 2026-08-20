@@ -28,6 +28,7 @@
 // never a dependency — external/ is gitignored, and the clones that lived there
 // left the repo in 2026-08.
 
+import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,6 +37,20 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
 const SPEC_PATH = resolve(REPO_ROOT, 'external/gpuweb/spec/index.bs');
 const OUT_PATH = resolve(REPO_ROOT, 'schema/webgpu-enums.json');
+
+/**
+ * An IDL member default as a plain JS-comparable value: string literals lose
+ * their quotes (`"ccw"` → `ccw`), everything else (`0x10`, `{}`, `[]`, `false`)
+ * stays verbatim, and an absent default is `null` rather than undefined so the
+ * key is always present in the snapshot.
+ */
+function normalizeDefault(raw) {
+  if (raw == null) return null;
+  const t = raw.trim();
+  if (t === '') return null;
+  const quoted = /^"(.*)"$/.exec(t);
+  return quoted ? quoted[1] : t;
+}
 
 /** Strip a `//`-to-end-of-line comment (IDL has no `//` inside string values). */
 function stripLineComment(line) {
@@ -128,8 +143,13 @@ function parseSpec(text) {
       // `required GPUFoo bar;` / `GPUFoo bar = default;` / `sequence<T> bar = [];`
       // / `[Clamp] unsigned short bar = 1;` — the member name is the last
       // identifier before `;` or `=`; a leading `[ExtAttr]` is skipped.
-      const m = body.match(/^\s*(?:\[[^\]]*\]\s*)?(?:required\s+)?[\w<>() ,?]+?\s(\w+)\s*(?:=[^;]*)?;/);
-      if (m) bucket.push(m[1]);
+      //
+      // Since spec/09 the `required` keyword and the default expression are
+      // KEPT rather than stripped: they are the two facts the field ratchet
+      // needs to check more than member presence. A member is
+      // `{ name, required, default }`, default `null` when the IDL gives none.
+      const m = body.match(/^\s*(?:\[[^\]]*\]\s*)?(required\s+)?[\w<>() ,?]+?\s(\w+)\s*(?:=\s*([^;]*?))?\s*;/);
+      if (m) bucket.push({ name: m[2], required: !!m[1], default: normalizeDefault(m[3]) });
     } else if (mode === 'limits') {
       const m = body.match(/^\s*readonly attribute [\w ]+\s(\w+);/);
       if (m) bucket.push(m[1]);
@@ -140,7 +160,20 @@ function parseSpec(text) {
   }
   if (mode !== null) throw new Error(`unterminated ${mode} block '${name}' in spec`);
   if (!limits) throw new Error('GPUSupportedLimits interface not found in spec');
-  return { enums, flags, dictionaries, limits };
+  return { enums, flags, dictionaries, limits, specRevision: specRevision() };
+}
+
+/**
+ * The gpuweb checkout's HEAD commit. Fails loud rather than emitting a
+ * provenance-less snapshot: a snapshot that cannot say which spec it came from
+ * is exactly the failure mode step E exists to end.
+ */
+function specRevision() {
+  const sha = execFileSync('git', ['-C', resolve(REPO_ROOT, 'external/gpuweb'), 'rev-parse', 'HEAD'], {
+    encoding: 'utf8',
+  }).trim();
+  if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`unexpected gpuweb rev-parse output: ${JSON.stringify(sha)}`);
+  return sha;
 }
 
 function render(parsed) {
@@ -152,6 +185,11 @@ function render(parsed) {
       'enum/flag vocabulary; tests/npm/webgpu-conformance.test.js checks ' +
       'schema/pngine.sjon + the cross-stack byte tables against it.',
     source: 'external/gpuweb/spec/index.bs',
+    // The gpuweb commit this snapshot was extracted from (spec/09 step E).
+    // `external/` is gitignored scratch, so the gate cannot demand the clone —
+    // but recording the revision makes a stale snapshot VISIBLE instead of
+    // silent, which plan 06's "remember to regen" note could not do.
+    specRevision: parsed.specRevision,
     enums: parsed.enums,
     flags: parsed.flags,
     dictionaries: parsed.dictionaries,
@@ -173,7 +211,26 @@ if (!existsSync(SPEC_PATH)) {
   process.exit(0);
 }
 
-const next = render(parseSpec(readFileSync(SPEC_PATH, 'utf8')));
+/**
+ * Read the spec with its Bikeshed includes expanded in place. `index.bs`
+ * carries `<pre class=include>\npath: sections/copies.bs\n</pre>` blocks
+ * since the 2026-08 split, and every texel-copy dictionary
+ * (GPUTexelCopyTextureInfo, GPUCopyExternalImageSourceInfo, …) lives in one
+ * of them — reading `index.bs` alone silently dropped five dictionaries from
+ * the snapshot, which is how the copy endpoints escaped FORM_DICT_MAP
+ * (overhaul/09 D20). One level, no recursion: the sections include nothing.
+ */
+function readSpecWithIncludes(path) {
+  const text = readFileSync(path, 'utf8');
+  const dir = dirname(path);
+  return text.replace(/<pre class=include>\s*\npath:\s*(\S+)\s*\n<\/pre>/g, (_, rel) => {
+    const inc = resolve(dir, rel);
+    if (!existsSync(inc)) throw new Error(`[webgpu-enums] include not found: ${inc}`);
+    return readFileSync(inc, 'utf8');
+  });
+}
+
+const next = render(parseSpec(readSpecWithIncludes(SPEC_PATH)));
 
 if (regen) {
   writeFileSync(OUT_PATH, next);

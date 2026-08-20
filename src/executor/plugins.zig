@@ -106,6 +106,8 @@ pub fn commandPlugin(cmd: Cmd) ?Plugin {
         .create_render_bundle,
         .begin_render_pass,
         .begin_render_pass_mrt,
+        .begin_render_pass_f32,
+        .begin_render_pass_mrt_f32,
         .set_pipeline, // Shared with compute, but render handles it
         .set_bind_group,
         .set_vertex_buffer,

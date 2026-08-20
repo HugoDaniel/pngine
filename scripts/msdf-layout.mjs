@@ -10,7 +10,9 @@
 //   node scripts/msdf-layout.mjs <ya-hei-ascii-msdf.json> > examples/webgpu_text_msdf.sjon
 import { readFileSync } from 'node:fs';
 
-const json = JSON.parse(readFileSync(process.argv[2] ?? new URL('../../llm/repositories/webgpu-samples/public/assets/font/ya-hei-ascii-msdf.json', import.meta.url), 'utf8'));
+// Default JSON: the sibling webgpu-samples clone at ~/llm/repositories (this
+// file lives at <repo>/scripts/, so three `..` reach the parent of ~/Dev).
+const json = JSON.parse(readFileSync(process.argv[2] ?? new URL('../../../llm/repositories/webgpu-samples/public/assets/font/ya-hei-ascii-msdf.json', import.meta.url), 'utf8'));
 
 const { lineHeight, scaleW, scaleH } = json.common;
 const u = 1 / scaleW, v = 1 / scaleH;
@@ -170,11 +172,11 @@ const wrap = (floats, indent = '  ') => {
 const dataForms = laid.map(b =>
   `(data :name ${b.name}Data :float32 [\n${wrap(b.floats)}\n])`).join('\n');
 const bufForms = laid.map(b =>
-  `(buffer :name ${b.name}Buf :size ${b.name}Data :usage [storage] :mapped-at-creation ${b.name}Data)`).join('\n');
+  `(buffer :name ${b.name}Buf :usage [storage] :data ${b.name}Data)`).join('\n');
 const bgForms = laid.map(b =>
-  `(bind-group :name ${b.name}Group :layout-pipeline textPipe :layout-index 1\n  (entry :binding 0 :buffer inputs)\n  (entry :binding 1 :buffer ${b.name}Buf))`).join('\n');
+  `(bind-group :name ${b.name}Group :layout textPipe :group 1\n  (entry :binding 0 :buffer inputs)\n  (entry :binding 1 :buffer ${b.name}Buf))`).join('\n');
 const bundleForms = laid.map(b =>
-  `(render-bundle :name ${b.name}Bundle\n  :pipeline textPipe\n  :depth-stencil-format depth24plus\n  :bind-groups [fontGroup ${b.name}Group]\n  :draw 4 :instance-count ${b.count})`).join('\n');
+  `(render-bundle :name ${b.name}Bundle\n  :pipeline textPipe\n  :color-formats [preferred-canvas-format]\n  :depth-stencil-format depth24plus\n  :bind-groups [fontGroup ${b.name}Group]\n  (draw :vertex-count 4 :instance-count ${b.count}))`).join('\n');
 const bundleList = laid.map(b => `${b.name}Bundle`).join(' ');
 
 const fixture = `; MSDF text rendering — port of the webgpu-samples \`textRenderingMsdf\` sample.
@@ -195,10 +197,10 @@ const fixture = `; MSDF text rendering — port of the webgpu-samples \`textRend
 ; renderer treats the atlas upload and render-bundle replay as no-ops, so a
 ; CLI-rendered frame shows only the cube; the text needs the browser.
 
-(data :name fontAtlas :blob "assets/ya-hei-ascii.png" :mime "image/png")
-(image-bitmap :name fontImg :image fontAtlas)
+(data :name fontAtlas :file "assets/ya-hei-ascii.png" :mime "image/png")
+(image-bitmap :name fontImg :data fontAtlas)
 
-(texture :name fontTex :size-from fontImg :format rgba8unorm
+(texture :name fontTex :size fontImg :format rgba8unorm
   :usage [texture-binding copy-dst render-attachment])
 (texture :name depthTex :size canvas :format depth24plus :usage [render-attachment])
 (sampler :name fontSamp :mag-filter linear :min-filter linear
@@ -210,7 +212,7 @@ const fixture = `; MSDF text rendering — port of the webgpu-samples \`textRend
 (data :name glyphTable :float32 [
 ${wrap(glyphFloats)}
 ])
-(buffer :name glyphBuf :size glyphTable :usage [storage] :mapped-at-creation glyphTable)
+(buffer :name glyphBuf :usage [storage] :data glyphTable)
 
 ; Per-block data: 24-f32 header (base transform mat4, color vec4, scale,
 ; mode, 2 pad) then 4 f32 per printed char (x, y, glyphIndex, 0).
@@ -220,10 +222,10 @@ ${bufForms}
 
 (buffer :name inputs :size 16 :usage [uniform copy-dst])
 (data :name cubeVerts (cube :format [position4 color4 uv2]))
-(buffer :name cubeVB :size cubeVerts :usage [vertex] :mapped-at-creation cubeVerts)
+(buffer :name cubeVB :usage [vertex] :data cubeVerts)
 
 (queue :name copyAtlas
-  (copy-external-image-to-texture :source fontImg :texture fontTex))
+  (copy-external-image-to-texture (source :image fontImg) (destination :texture fontTex)))
 (queue :name writeInputs
   (write-buffer :buffer inputs :offset 0 :data pngine-inputs))
 
@@ -424,36 +426,35 @@ fn fragMain(@location(0) fragPosition : vec4f) -> @location(0) vec4f {
 """)
 
 (render-pipeline :name cubePipe
-  (layout auto)
-  (vertex (module cubeCode) (entry vertexMain)
-    (buffers
-      (vertex-buffer :array-stride 40
-        (attribute :shader-location 0 :offset 0 :format float32x4)
-        (attribute :shader-location 1 :offset 16 :format float32x4)
-        (attribute :shader-location 2 :offset 32 :format float32x2))))
-  (fragment (module cubeCode) (entry fragMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module cubeCode :entry vertexMain
+    (vertex-buffer :array-stride 40
+      (attribute :shader-location 0 :offset 0 :format float32x4)
+      (attribute :shader-location 1 :offset 16 :format float32x4)
+      (attribute :shader-location 2 :offset 32 :format float32x2)))
+  (fragment :module cubeCode :entry fragMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
 (render-pipeline :name textPipe
-  (layout auto)
-  (vertex (module textCode) (entry vertexMain))
-  (fragment (module textCode) (entry fragmentMain)
-    (targets (target :format preferred-canvas-format
+  :layout auto
+  (vertex :module textCode :entry vertexMain)
+  (fragment :module textCode :entry fragmentMain
+    (target :format preferred-canvas-format
       (blend (color :src-factor src-alpha :dst-factor one-minus-src-alpha :operation add)
-             (alpha :src-factor one :dst-factor one :operation add)))))
-  (primitive (topology triangle-strip))
+             (alpha :src-factor one :dst-factor one :operation add))))
+  (primitive :topology triangle-strip)
   (depth-stencil :format depth24plus :depth-write-enabled false :depth-compare less))
 
-(bind-group :name fontGroup :layout-pipeline textPipe :layout-index 0
+(bind-group :name fontGroup :layout textPipe :group 0
   (entry :binding 0 :texture fontTex)
   (entry :binding 1 :sampler fontSamp)
   (entry :binding 2 :buffer glyphBuf))
 
 ${bgForms}
 
-(bind-group :name cubeGroup :layout-pipeline cubePipe :layout-index 0
+(bind-group :name cubeGroup :layout cubePipe :group 0
   (entry :binding 0 :buffer inputs))
 
 ${bundleForms}
@@ -461,14 +462,14 @@ ${bundleForms}
 (render-pass :name drawCube
   (color-attachment :view context-current-texture
     :clear-value [0 0 0 1] :load-op clear :store-op store)
-  (depth-attachment :view depthTex :depth-clear-value 1.0
+  (depth-stencil-attachment :view depthTex :depth-clear-value 1.0
     :depth-load-op clear :depth-store-op store)
   :pipeline cubePipe :bind-groups [cubeGroup] :vertex-buffers [cubeVB]
   (draw :vertex-count 36))
 
 (render-pass :name drawText
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  (depth-attachment :view depthTex :depth-load-op load :depth-store-op store)
+  (depth-stencil-attachment :view depthTex :depth-load-op load :depth-store-op store)
   :execute-bundles [${bundleList}])
 
 (frame :name main :perform [copyAtlas writeInputs drawCube drawText])

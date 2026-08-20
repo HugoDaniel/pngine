@@ -30,11 +30,11 @@
 (texture :name tex :size canvas :format preferred-canvas-format :sample-count 4 :usage [render-attachment])
 
 (render-pipeline :name pipeline
-  (layout auto)
-  (vertex (module code) (entry vertexMain))
-  (fragment (module code) (entry fragMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list))
+  :layout auto
+  (vertex :module code :entry vertexMain)
+  (fragment :module code :entry fragMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list)
   (multisample :count 4))
 
 (render-pass :name renderIt

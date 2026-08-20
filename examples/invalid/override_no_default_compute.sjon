@@ -9,6 +9,6 @@ override NEEDED: f32;
   let unused = NEEDED;
 }
 """)
-(compute-pipeline :name cp :module code :entry cs)
-(compute-pass :name step :pipeline cp :dispatch-workgroups 4)
+(compute-pipeline :name cp :layout auto (compute :module code :entry cs))
+(compute-pass :name step :pipeline cp (dispatch :workgroups [4]))
 (frame :name main :perform [step])

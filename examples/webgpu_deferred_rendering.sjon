@@ -10,7 +10,7 @@
 
 (data :name dragonMesh (dragon :format [position3 normal3]))
 
-(buffer :name dragonVB :size dragonMesh :usage [vertex] :mapped-at-creation dragonMesh)
+(buffer :name dragonVB :usage [vertex] :data dragonMesh)
 (buffer :name dragonIB :index-of dragonMesh :usage [index])
 (buffer :name lights :size (* NUM_LIGHTS 32) :usage [storage])
 (buffer :name uniforms :size 16 :usage [uniform copy-dst])
@@ -86,13 +86,13 @@ fn updateLights(@builtin(global_invocation_id) id: vec3u) {
 }
 """)
 
-(compute-pipeline :name lightUpdatePipeline :module lightUpdateShader :entry updateLights)
+(compute-pipeline :name lightUpdatePipeline :layout auto (compute :module lightUpdateShader :entry updateLights))
 
-(bind-group :name lightUpdateBG :layout-pipeline lightUpdatePipeline :layout-index 0
+(bind-group :name lightUpdateBG :layout lightUpdatePipeline :group 0
   (entry :binding 0 :buffer lights))
 
 (compute-pass :name lightUpdatePass :pipeline lightUpdatePipeline :bind-groups [lightUpdateBG]
-  :dispatch-workgroups 2)
+  (dispatch :workgroups [2]))
 
 (shader-module :name gBufferShader :code """
 struct Inputs {
@@ -205,40 +205,37 @@ fn groundPos(i: u32) -> vec3f {
 """)
 
 (render-pipeline :name gBufferPipeline
-  (layout auto)
-  (vertex (module gBufferShader) (entry gbuffer_vs)
-    (buffers
-      (vertex-buffer :array-stride (* 4 6)
-        (attribute :shader-location 0 :offset 0 :format float32x3)
-        (attribute :shader-location 1 :offset 12 :format float32x3))))
-  (fragment (module gBufferShader) (entry gbuffer_fs)
-    (targets
-      (target :format rgba16float)
-      (target :format rgba8unorm)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module gBufferShader :entry gbuffer_vs
+    (vertex-buffer :array-stride (* 4 6)
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)))
+  (fragment :module gBufferShader :entry gbuffer_fs
+    (target :format rgba16float)
+    (target :format rgba8unorm))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :depth-write-enabled true :depth-compare less :format depth32float))
 
 ; Ground plane G-buffer pipeline (no vertex buffer).
 (render-pipeline :name groundGBufPipeline
-  (layout auto)
-  (vertex (module gBufferShader) (entry ground_gbuffer_vs))
-  (fragment (module gBufferShader) (entry ground_gbuffer_fs)
-    (targets
-      (target :format rgba16float)
-      (target :format rgba8unorm)))
-  (primitive (topology triangle-list))
+  :layout auto
+  (vertex :module gBufferShader :entry ground_gbuffer_vs)
+  (fragment :module gBufferShader :entry ground_gbuffer_fs
+    (target :format rgba16float)
+    (target :format rgba8unorm))
+  (primitive :topology triangle-list)
   (depth-stencil :depth-write-enabled true :depth-compare less :format depth32float))
 
-(bind-group :name gBufferBG :layout-pipeline gBufferPipeline :layout-index 0
+(bind-group :name gBufferBG :layout gBufferPipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
-(bind-group :name groundGBufBG :layout-pipeline groundGBufPipeline :layout-index 0
+(bind-group :name groundGBufBG :layout groundGBufPipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
 (render-pass :name gBufferPass
   (color-attachment :view normalTex :clear-value [0 0 0 0] :load-op clear :store-op store)
   (color-attachment :view albedoTex :clear-value [0 0 0 1] :load-op clear :store-op store)
-  (depth-attachment :view gBufferDepth :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  (depth-stencil-attachment :view gBufferDepth :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   :pipeline gBufferPipeline
   :vertex-buffers [dragonVB]
   :index-buffer dragonIB
@@ -249,7 +246,7 @@ fn groundPos(i: u32) -> vec3f {
 (render-pass :name groundGBufPass
   (color-attachment :view normalTex :load-op load :store-op store)
   (color-attachment :view albedoTex :load-op load :store-op store)
-  (depth-attachment :view gBufferDepth :depth-load-op load :depth-store-op store)
+  (depth-stencil-attachment :view gBufferDepth :depth-load-op load :depth-store-op store)
   :pipeline groundGBufPipeline
   :bind-groups [groundGBufBG]
   (draw :vertex-count 6))
@@ -453,13 +450,13 @@ fn worldFromScreenCoord(coord: vec2f, depth: f32, invVP: mat4x4f) -> vec3f {
 """)
 
 (render-pipeline :name deferredPipeline
-  (layout auto)
-  (vertex (module deferredShader) (entry deferred_vs))
-  (fragment (module deferredShader) (entry deferred_fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list)))
+  :layout auto
+  (vertex :module deferredShader :entry deferred_vs)
+  (fragment :module deferredShader :entry deferred_fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
 
-(bind-group :name deferredBG :layout-pipeline deferredPipeline :layout-index 0
+(bind-group :name deferredBG :layout deferredPipeline :group 0
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :buffer pointerBuf)
   (entry :binding 2 :texture normalTex)

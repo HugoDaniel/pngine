@@ -1,0 +1,28 @@
+; INVALID: a (compute-pass ...) that issues no command.
+;
+; A pass exists to do something, so a compute pass with no (dispatch ...) is
+; always an authoring slip. WebGPU itself has no such rule --
+; beginComputePass()/end() with nothing between them is legal and does nothing
+; -- so this is a PNGine opinion, and the schema states it as one:
+; `:min-children 1` on the command head-set.
+;
+; Before commands were forms it could not be stated at all. The three dispatch
+; KEYS were each optional, and a pass carrying none fell through to a default
+; of `dispatch(1,1,1)` -- one workgroup, invented by the emitter, which for a
+; @workgroup_size(64) shader over 2048 particles moved 64 of them and left the
+; rest untouched. That reads as a physics bug, not a missing line.
+(define :name NUM :value 2048)
+(shader-module :name code :code """
+@group(0) @binding(0) var<storage, read_write> data : array<vec4f>;
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id : vec3u) {
+  if (id.x >= arrayLength(&data)) { return; }
+  data[id.x] = vec4f(f32(id.x), 0.0, 0.0, 1.0);
+}
+""")
+(buffer :name particles :size (* NUM 4 4) :usage [storage])
+(compute-pipeline :name cp :layout auto
+  (compute :module code :entry main))
+(bind-group :name g :layout cp :group 0
+  (entry :binding 0 :buffer particles))
+(compute-pass :name step :pipeline cp :bind-groups [g])
+(frame :name main :perform [step])

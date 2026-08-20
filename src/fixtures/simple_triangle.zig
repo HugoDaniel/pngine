@@ -28,11 +28,11 @@ pub const simple_triangle_sjon: [:0]const u8 =
     \\""")
     \\
     \\(render-pipeline :name pipeline
-    \\  (layout auto)
-    \\  (vertex (module code) (entry vertexMain))
-    \\  (fragment (module code) (entry fragMain)
-    \\    (targets (target :format preferred-canvas-format)))
-    \\  (primitive (topology triangle-list)))
+    \\  :layout auto
+    \\  (vertex :module code :entry vertexMain)
+    \\  (fragment :module code :entry fragMain
+    \\    (target :format preferred-canvas-format))
+    \\  (primitive :topology triangle-list))
     \\
     \\(render-pass :name renderPipeline
     \\  (color-attachment :view context-current-texture :clear-value [0 0 0 0] :load-op clear :store-op store)

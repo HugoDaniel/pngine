@@ -19,8 +19,8 @@
 
 (data :name cubeVerts (cube :format [position3 normal3]))
 
-(buffer :name vertexBuffer :size cubeVerts :usage [vertex]
-  :mapped-at-creation cubeVerts)
+(buffer :name vertexBuffer :usage [vertex]
+  :data cubeVerts)
 
 (buffer :name uniforms :size 16 :usage [uniform copy-dst])
 
@@ -152,23 +152,22 @@
   """)
 
 (render-pipeline :name pipeline
-  (layout auto)
-  (vertex (module code) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 24
-        (attribute :shader-location 0 :offset 0 :format float32x3)
-        (attribute :shader-location 1 :offset 12 :format float32x3))))
-  (fragment (module code) (entry fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module code :entry vs
+    (vertex-buffer :array-stride 24
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)))
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
-(bind-group :name mainBG :layout-pipeline pipeline :layout-index 0
+(bind-group :name mainBG :layout pipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
 (render-pass :name renderPass
   (color-attachment :view context-current-texture :clear-value [128 128 128 255] :load-op clear :store-op store)
-  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   :occlusion-query-set occQS
   :pipeline pipeline
   :vertex-buffers [vertexBuffer]

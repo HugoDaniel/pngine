@@ -1,6 +1,6 @@
 ; Cubemap skybox — port of the webgpu-samples `cubemap` sample. Six JPEG faces
 ; upload into the layers of one 512x512x6 2d texture (:origin [0 0 i]); a
-; fullscreen triangle samples it through a cube view (:view-dimension 3),
+; fullscreen triangle samples it through a cube view (:dimension cube),
 ; with the view direction transformed by the inverse view-projection. That
 ; inverse is computed in closed form in the vertex shader
 ; (rotY(-yaw)·rotX(-pitch)·P^-1) where upstream inverts on the CPU each
@@ -13,26 +13,26 @@
 ; Assets: upstream's faces re-encoded to 512x512 JPEG (~232 KB total).
 ; Credit: examples/assets/cubemap/credit.txt.
 
-(data :name facePX :blob "assets/cubemap/posx.jpg" :mime "image/jpeg")
-(data :name faceNX :blob "assets/cubemap/negx.jpg" :mime "image/jpeg")
-(data :name facePY :blob "assets/cubemap/posy.jpg" :mime "image/jpeg")
-(data :name faceNY :blob "assets/cubemap/negy.jpg" :mime "image/jpeg")
-(data :name facePZ :blob "assets/cubemap/posz.jpg" :mime "image/jpeg")
-(data :name faceNZ :blob "assets/cubemap/negz.jpg" :mime "image/jpeg")
+(data :name facePX :file "assets/cubemap/posx.jpg" :mime "image/jpeg")
+(data :name faceNX :file "assets/cubemap/negx.jpg" :mime "image/jpeg")
+(data :name facePY :file "assets/cubemap/posy.jpg" :mime "image/jpeg")
+(data :name faceNY :file "assets/cubemap/negy.jpg" :mime "image/jpeg")
+(data :name facePZ :file "assets/cubemap/posz.jpg" :mime "image/jpeg")
+(data :name faceNZ :file "assets/cubemap/negz.jpg" :mime "image/jpeg")
 
-(image-bitmap :name bmPX :image facePX)
-(image-bitmap :name bmNX :image faceNX)
-(image-bitmap :name bmPY :image facePY)
-(image-bitmap :name bmNY :image faceNY)
-(image-bitmap :name bmPZ :image facePZ)
-(image-bitmap :name bmNZ :image faceNZ)
+(image-bitmap :name bmPX :data facePX)
+(image-bitmap :name bmNX :data faceNX)
+(image-bitmap :name bmPY :data facePY)
+(image-bitmap :name bmNY :data faceNY)
+(image-bitmap :name bmPZ :data facePZ)
+(image-bitmap :name bmNZ :data faceNZ)
 
-; Explicit dims, not :size-from — the 6-layer count must ride this descriptor.
-(texture :name cubeTex :width 512 :height 512
-  :dimension 2 :depth-or-array-layers 6
+; Explicit dims, not :size naming an image-bitmap — the 6-layer count must ride this descriptor.
+(texture :name cubeTex :size [512 512 6]
+  :dimension 2d
   :format rgba8unorm :usage [texture-binding copy-dst render-attachment])
 
-(texture-view :name cubeView :texture cubeTex :view-dimension 3)  ; 3 = cube
+(texture-view :name cubeView :texture cubeTex :dimension cube)
 
 (sampler :name samp :mag-filter linear :min-filter linear)
 (buffer :name inputs :size 16 :usage [uniform copy-dst])
@@ -112,24 +112,24 @@ fn fsMain(@location(0) dir : vec4f) -> @location(0) vec4f {
 """)
 
 (render-pipeline :name pipe
-  (layout auto)
-  (vertex (module code) (entry vsMain))
-  (fragment (module code) (entry fsMain)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module code :entry vsMain)
+  (fragment :module code :entry fsMain
+    (target :format preferred-canvas-format)))
 
-(bind-group :name g :layout-pipeline pipe :layout-index 0
+(bind-group :name g :layout pipe :group 0
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :sampler samp)
   (entry :binding 2 :texture-view cubeView))
 
 ; WebGPU cube layer order: +X -X +Y -Y +Z -Z.
 (queue :name upload
-  (copy-external-image-to-texture :source bmPX :texture cubeTex :origin [0 0 0])
-  (copy-external-image-to-texture :source bmNX :texture cubeTex :origin [0 0 1])
-  (copy-external-image-to-texture :source bmPY :texture cubeTex :origin [0 0 2])
-  (copy-external-image-to-texture :source bmNY :texture cubeTex :origin [0 0 3])
-  (copy-external-image-to-texture :source bmPZ :texture cubeTex :origin [0 0 4])
-  (copy-external-image-to-texture :source bmNZ :texture cubeTex :origin [0 0 5]))
+  (copy-external-image-to-texture (source :image bmPX) (destination :texture cubeTex :origin [0 0 0]))
+  (copy-external-image-to-texture (source :image bmNX) (destination :texture cubeTex :origin [0 0 1]))
+  (copy-external-image-to-texture (source :image bmPY) (destination :texture cubeTex :origin [0 0 2]))
+  (copy-external-image-to-texture (source :image bmNY) (destination :texture cubeTex :origin [0 0 3]))
+  (copy-external-image-to-texture (source :image bmPZ) (destination :texture cubeTex :origin [0 0 4]))
+  (copy-external-image-to-texture (source :image bmNZ) (destination :texture cubeTex :origin [0 0 5])))
 
 (queue :name writeInputs
   (write-buffer :buffer inputs :offset 0 :data pngine-inputs))

@@ -9,7 +9,7 @@
 ; rotating trilinear cube whose ring colors visibly shift with mip selection
 ; as faces recede.
 
-(texture :name mipTex :width 256 :height 256 :format rgba8unorm
+(texture :name mipTex :size [256 256] :format rgba8unorm
   :mip-level-count 9
   :usage [texture-binding storage-binding])
 
@@ -148,80 +148,79 @@ fn fragMain(@location(0) fragUV : vec2f) -> @location(0) vec4f {
 """)
 
 (data :name cubeVerts (cube :format [position4 color4 uv2]))
-(buffer :name cubeVB :size cubeVerts :usage [vertex] :mapped-at-creation cubeVerts)
+(buffer :name cubeVB :usage [vertex] :data cubeVerts)
 
-(compute-pipeline :name cardPipe :module cardCode :entry paint)
-(compute-pipeline :name mipPipe :module mipCode :entry downsample)
+(compute-pipeline :name cardPipe :layout auto (compute :module cardCode :entry paint))
+(compute-pipeline :name mipPipe :layout auto (compute :module mipCode :entry downsample))
 
 (render-pipeline :name cubePipe
-  (layout auto)
-  (vertex (module cubeCode) (entry vertexMain)
-    (buffers
-      (vertex-buffer :array-stride 40
-        (attribute :shader-location 0 :offset 0 :format float32x4)
-        (attribute :shader-location 1 :offset 32 :format float32x2))))
-  (fragment (module cubeCode) (entry fragMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module cubeCode :entry vertexMain
+    (vertex-buffer :array-stride 40
+      (attribute :shader-location 0 :offset 0 :format float32x4)
+      (attribute :shader-location 1 :offset 32 :format float32x2)))
+  (fragment :module cubeCode :entry fragMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
-(bind-group :name cardBG :layout-pipeline cardPipe :layout-index 0
+(bind-group :name cardBG :layout cardPipe :group 0
   (entry :binding 0 :texture-view dst0))
 
-(bind-group :name mipBG1 :layout-pipeline mipPipe :layout-index 0
+(bind-group :name mipBG1 :layout mipPipe :group 0
   (entry :binding 0 :texture-view src0)
   (entry :binding 1 :texture-view dst1))
-(bind-group :name mipBG2 :layout-pipeline mipPipe :layout-index 0
+(bind-group :name mipBG2 :layout mipPipe :group 0
   (entry :binding 0 :texture-view src1)
   (entry :binding 1 :texture-view dst2))
-(bind-group :name mipBG3 :layout-pipeline mipPipe :layout-index 0
+(bind-group :name mipBG3 :layout mipPipe :group 0
   (entry :binding 0 :texture-view src2)
   (entry :binding 1 :texture-view dst3))
-(bind-group :name mipBG4 :layout-pipeline mipPipe :layout-index 0
+(bind-group :name mipBG4 :layout mipPipe :group 0
   (entry :binding 0 :texture-view src3)
   (entry :binding 1 :texture-view dst4))
-(bind-group :name mipBG5 :layout-pipeline mipPipe :layout-index 0
+(bind-group :name mipBG5 :layout mipPipe :group 0
   (entry :binding 0 :texture-view src4)
   (entry :binding 1 :texture-view dst5))
-(bind-group :name mipBG6 :layout-pipeline mipPipe :layout-index 0
+(bind-group :name mipBG6 :layout mipPipe :group 0
   (entry :binding 0 :texture-view src5)
   (entry :binding 1 :texture-view dst6))
-(bind-group :name mipBG7 :layout-pipeline mipPipe :layout-index 0
+(bind-group :name mipBG7 :layout mipPipe :group 0
   (entry :binding 0 :texture-view src6)
   (entry :binding 1 :texture-view dst7))
-(bind-group :name mipBG8 :layout-pipeline mipPipe :layout-index 0
+(bind-group :name mipBG8 :layout mipPipe :group 0
   (entry :binding 0 :texture-view src7)
   (entry :binding 1 :texture-view dst8))
 
-(bind-group :name cubeBG :layout-pipeline cubePipe :layout-index 0
+(bind-group :name cubeBG :layout cubePipe :group 0
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :sampler trilinear)
   (entry :binding 2 :texture mipTex))
 
 (compute-pass :name paintCard :pipeline cardPipe :bind-groups [cardBG]
-  :dispatch [32 32 1])
+  (dispatch :workgroups [32 32 1]))
 
 (compute-pass :name mip1 :pipeline mipPipe :bind-groups [mipBG1]
-  :dispatch [16 16 1])
+  (dispatch :workgroups [16 16 1]))
 (compute-pass :name mip2 :pipeline mipPipe :bind-groups [mipBG2]
-  :dispatch [8 8 1])
+  (dispatch :workgroups [8 8 1]))
 (compute-pass :name mip3 :pipeline mipPipe :bind-groups [mipBG3]
-  :dispatch [4 4 1])
+  (dispatch :workgroups [4 4 1]))
 (compute-pass :name mip4 :pipeline mipPipe :bind-groups [mipBG4]
-  :dispatch [2 2 1])
+  (dispatch :workgroups [2 2 1]))
 (compute-pass :name mip5 :pipeline mipPipe :bind-groups [mipBG5]
-  :dispatch [1 1 1])
+  (dispatch :workgroups [1 1 1]))
 (compute-pass :name mip6 :pipeline mipPipe :bind-groups [mipBG6]
-  :dispatch [1 1 1])
+  (dispatch :workgroups [1 1 1]))
 (compute-pass :name mip7 :pipeline mipPipe :bind-groups [mipBG7]
-  :dispatch [1 1 1])
+  (dispatch :workgroups [1 1 1]))
 (compute-pass :name mip8 :pipeline mipPipe :bind-groups [mipBG8]
-  :dispatch [1 1 1])
+  (dispatch :workgroups [1 1 1]))
 
 (render-pass :name drawCube
   (color-attachment :view context-current-texture
     :clear-value [0.3 0.3 0.3 1] :load-op clear :store-op store)
-  (depth-attachment :view depthTex :depth-clear-value 1.0
+  (depth-stencil-attachment :view depthTex :depth-clear-value 1.0
     :depth-load-op clear :depth-store-op store)
   :pipeline cubePipe :bind-groups [cubeBG] :vertex-buffers [cubeVB]
   (draw :vertex-count 36))

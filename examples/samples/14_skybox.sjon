@@ -1,4 +1,4 @@
-; Procedural skybox — an animated sky (gradient, sun with glow, fbm noise
+; Procedural skybox: an animated sky (gradient, sun with glow, fbm noise
 ; clouds, sunset tint near the horizon, tone-mapped) painted by a fullscreen
 ; triangle whose fragment shader turns screen UV into a slowly rotating
 ; spherical view direction. Despite the name there is no cubemap and no
@@ -138,12 +138,12 @@
   """)
 
 (render-pipeline :name pipeline
-  (layout auto)
-  (vertex (module shader) (entry vs))
-  (fragment (module shader) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module shader :entry vs)
+  (fragment :module shader :entry fs
+    (target :format preferred-canvas-format)))
 
-(bind-group :name bindings :layout-pipeline pipeline :layout-index 0
+(bind-group :name bindings :layout pipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
 (render-pass :name mainPass

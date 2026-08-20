@@ -248,8 +248,9 @@ pub const Validator = struct {
     /// Pre-condition: self was initialized.
     /// Post-condition: All memory freed, self is undefined.
     pub fn deinit(self: *Self) void {
-        // Pre-condition: allocator must be valid (implicit via init)
-        std.debug.assert(self.issues.items.len <= MAX_COMMANDS);
+        // No assert on `issues.len` here: the list grows with whatever the
+        // stream under inspection did wrong (several per malformed command),
+        // and a bound on INPUT is not an invariant to assert at teardown.
 
         self.buffers.deinit(self.allocator);
         self.textures.deinit(self.allocator);
@@ -404,6 +405,15 @@ pub const Validator = struct {
 
             // Pass operations
             .begin_render_pass => try self.validateBeginRenderPass(cmd.params.begin_render_pass),
+            // The f32-clear forms (spec/09 D) open a pass exactly as their 4×u8
+            // predecessors do; the pass-state machine never looked at the clear
+            // value, which is why they share the arms rather than the decoders.
+            .begin_render_pass_f32 => try self.beginRenderPassState(
+                "BEGIN_RENDER_PASS_F32 inside active pass - nested passes not allowed",
+            ),
+            .begin_render_pass_mrt_f32 => try self.beginRenderPassState(
+                "BEGIN_RENDER_PASS_MRT_F32 inside active pass - nested passes not allowed",
+            ),
             .begin_compute_pass => try self.validateBeginComputePass(),
             .end_pass => try self.validateEndPass(),
             .set_pipeline => try self.validateSetPipeline(cmd.params.set_pipeline),
@@ -703,7 +713,7 @@ pub const Validator = struct {
         // Walk the fields with the shared TlvReader rather than a local switch
         // over value types. The hand-rolled walk this replaces understood only
         // u32_val and enum_val and *broke out of the loop* on anything else, so
-        // a `:size-from` texture — whose leading `size_from_image_bitmap` field
+        // a texture sized from an image-bitmap — whose leading `size_from_image_bitmap` field
         // is a u16_val — aborted the walk at field 0. Every later field, `usage`
         // among them, was left at its zero default, and the caller still marked
         // the descriptor "parsed": a texture declared `:usage [texture-binding

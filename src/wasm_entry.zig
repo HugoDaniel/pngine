@@ -200,7 +200,7 @@ var data_in_bytecode: bool = false;
 const MAX_SCENES: u32 = 256;
 
 /// Maximum frames that can be defined in bytecode.
-const MAX_FRAMES: u32 = 64;
+const MAX_FRAMES: u32 = bytecode_mod.DEFAULT_MAX_FRAMES;
 
 /// Scene data (without string table lookup - just IDs and time ranges).
 const SceneEntry = struct {
@@ -316,10 +316,19 @@ pub export fn init() u32 {
     // Pre-condition: bytecode was written by host.
     assert(bytecode_len <= MAX_BYTECODE_SIZE);
 
-    // Reset state
+    // Reset state — ALL of it, first. `initialized` goes false here so a
+    // refused re-init (a host that reloads one instance) cannot leave the
+    // previous payload runnable: the section offsets below are written before
+    // the checks that can refuse, and `frame()` used to run the new start with
+    // the old end and lengths. `pass_ranges` is wiped for the same reason — a
+    // payload defining only pass 5 left passes 0..4 pointing into the previous
+    // payload's bytes. (ABI §4: `frame` == 1 when init "was not called, or
+    // refused" — for every init, not only the first.)
+    initialized = false;
     frame_counter = 0;
     resources_created = false;
     pass_count = 0;
+    pass_ranges = [_]PassRange{.{ .start = 0, .end = 0 }} ** MAX_PASSES;
     pass_executed_once = @splat(false);
     frame_count = 0;
     has_animation = false;
@@ -467,7 +476,7 @@ pub export fn frame(time: f32, width: u32, height: u32) u32 {
 
     // Post-condition: frame counter advances.
     const prev_frame = frame_counter;
-    frame_counter += 1;
+    frame_counter +%= 1; // host-settable (setFrameCounter), so it wraps rather than traps
     assert(frame_counter == prev_frame + 1);
 
     // A frame opcode carried an out-of-range id (hostile/corrupt stream only).
@@ -600,7 +609,16 @@ fn executeFrame(cmds: *CommandBuffer, time: f32, width: u32, height: u32) void {
     const bytecode = bytecode_buffer[bytecode_start..bytecode_end];
 
     // Convert time to milliseconds for scene lookup
-    const time_ms: u32 = @intFromFloat(@max(0.0, time * 1000.0));
+    // A host may hand us any f32 — negative, NaN, past u32 milliseconds. The
+    // wasm target lowers @intFromFloat saturating, the native test harness does
+    // not; saturate explicitly, as the reference dispatcher does.
+    const scaled = time * 1000.0;
+    const time_ms: u32 = if (!(scaled > 0.0))
+        0
+    else if (scaled >= 4_294_967_000.0)
+        std.math.maxInt(u32)
+    else
+        @intFromFloat(scaled);
 
     // Try to find the appropriate frame for this time
     var pc: usize = 0;
@@ -671,15 +689,19 @@ fn executeFrame(cmds: *CommandBuffer, time: f32, width: u32, height: u32) void {
             continue;
         }
 
-        // Handle time uniform specially
+        // Handle time uniform specially. The size operand rides through (the
+        // emitter writes 12 for `scene-time-inputs`, 16 for `pngine-inputs`);
+        // it used to be read and dropped, so every time write was 16 bytes and
+        // a 12-byte buffer got an over-long `writeBuffer` in the browser. The
+        // host clamps to its 16-byte staging either way, so a size past 16 is
+        // saturated rather than wrapped into the u16 field.
         if (op == .write_time_uniform) {
             const buffer_id = read_varint(bytecode, &pc);
             const offset = read_varint(bytecode, &pc);
             const size = read_varint(bytecode, &pc);
-            _ = size;
             _ = width;
             _ = height;
-            cmds.writeTimeUniform(narrowId(buffer_id), @intCast(offset), 16);
+            cmds.writeTimeUniform(narrowId(buffer_id), @intCast(offset), @intCast(@min(size, 16)));
             continue;
         }
 
@@ -983,15 +1005,15 @@ fn execRenderPass(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: Op
         .begin_render_pass => {
             if (comptime plugins.isEnabled(.render)) {
                 const o = readOps(.begin_render_pass, bytecode, pc);
-                cmds.beginRenderPass(
+                cmds.beginRenderPassF32(
                     narrowId(o.color_texture_id),
                     o.load_op,
                     o.store_op,
                     narrowId(o.depth_texture_id),
-                    o.clear_r,
-                    o.clear_g,
-                    o.clear_b,
-                    o.clear_a,
+                    o.clear_r_bits,
+                    o.clear_g_bits,
+                    o.clear_b_bits,
+                    o.clear_a_bits,
                     narrowId(o.resolve_texture_id),
                 );
             } else {
@@ -1014,22 +1036,24 @@ fn execRenderPass(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: Op
                     const tex_id = read_varint(bytecode, pc);
                     const load_op = readByteClamped(bytecode, pc);
                     const store_op = readByteClamped(bytecode, pc);
-                    const clear_r = readByteClamped(bytecode, pc);
-                    const clear_g = readByteClamped(bytecode, pc);
-                    const clear_b = readByteClamped(bytecode, pc);
-                    const clear_a = readByteClamped(bytecode, pc);
+                    // The clear channels arrive as raw f32 bit patterns (u32_le),
+                    // like set_blend_constant's — see wire_schema's L_MRT.
+                    const clear_r = readRawU32(bytecode, pc);
+                    const clear_g = readRawU32(bytecode, pc);
+                    const clear_b = readRawU32(bytecode, pc);
+                    const clear_a = readRawU32(bytecode, pc);
                     attachments[i] = .{
                         .texture_id = narrowId(tex_id),
                         .load_op = @enumFromInt(load_op),
                         .store_op = @enumFromInt(store_op),
-                        .clear_r = clear_r,
-                        .clear_g = clear_g,
-                        .clear_b = clear_b,
-                        .clear_a = clear_a,
+                        .clear_r_bits = clear_r,
+                        .clear_g_bits = clear_g,
+                        .clear_b_bits = clear_b,
+                        .clear_a_bits = clear_a,
                     };
                 }
                 const depth_id = read_varint(bytecode, pc);
-                cmds.beginRenderPassMRT(attachments[0..n], narrowId(depth_id));
+                cmds.beginRenderPassMrtF32(attachments[0..n], narrowId(depth_id));
             } else {
                 skipOpcodeParams(bytecode, pc, op);
             }
@@ -1413,7 +1437,7 @@ fn execPool(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) 
             // already consumed, so pc stays correct for the caller.
             if (o.pool_size == 0) return;
             // Calculate actual buffer ID: base_id + (frame_counter + offset) % pool_size
-            const actual_id: u16 = narrowId(o.base_id + (frame_counter + o.offset) % o.pool_size);
+            const actual_id: u16 = narrowId(o.base_id +% (frame_counter +% o.offset) % o.pool_size);
             cmds.setVertexBuffer(o.slot, actual_id);
         },
         .set_bind_group_pool => {
@@ -1422,7 +1446,7 @@ fn execPool(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) 
             // Guard `% pool_size`: hostile pool_size==0 would trap. Skip the op.
             if (o.pool_size == 0) return;
             // Calculate actual bind group ID: base_id + (frame_counter + offset) % pool_size
-            const actual_id: u16 = narrowId(o.base_id + (frame_counter + o.offset) % o.pool_size);
+            const actual_id: u16 = narrowId(o.base_id +% (frame_counter +% o.offset) % o.pool_size);
             cmds.setBindGroup(o.slot, actual_id);
         },
         .begin_render_pass_pool => {
@@ -1431,8 +1455,8 @@ fn execPool(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) 
             // Guard `% pool_size`: hostile pool_size==0 would trap. Skip the op.
             if (o.pool_size == 0) return;
             // Calculate actual texture ID: base_tex_id + (frame_counter + offset) % pool_size
-            const actual_id: u16 = narrowId(o.base_tex_id + (frame_counter + o.offset) % o.pool_size);
-            cmds.beginRenderPass(actual_id, o.load_op, o.store_op, narrowId(o.depth_tex_id), o.clear_r, o.clear_g, o.clear_b, o.clear_a, 0xFFFF);
+            const actual_id: u16 = narrowId(o.base_tex_id +% (frame_counter +% o.offset) % o.pool_size);
+            cmds.beginRenderPassF32(actual_id, o.load_op, o.store_op, narrowId(o.depth_tex_id), o.clear_r_bits, o.clear_g_bits, o.clear_b_bits, o.clear_a_bits, 0xFFFF);
         },
         else => {},
     }
@@ -1479,10 +1503,19 @@ fn parseAnimationTable(offset: u32) void {
 
     anim_loop = (flags & 2) != 0;
 
+    // Every varint below goes through `read_varint` — the length-tolerant
+    // decoder. The asserting `decode_varint`, guarded only by `pos < len`, read
+    // 1–3 bytes past a multi-byte lead at the end of the table: a stripped
+    // assert in the shipping ReleaseSmall build, an over-read of linear memory.
+    // A truncated table is an empty one (the same rule the native twin keeps);
+    // a declared scene count that outlives the bytes leaves `anim_scene_count`
+    // at the FILLED count, never at the declared one. (Third leak pass)
+
     // Read name_string_id (skip - we don't need the name)
     if (pos >= data.len) return;
-    const name_result = opcodes.decode_varint(data[pos..]);
-    pos += name_result.len;
+    const name_before = pos;
+    _ = read_varint(data, &pos);
+    if (pos == name_before) return; // lead byte at EOF
 
     // Read duration_ms
     if (pos + 4 > data.len) return;
@@ -1496,20 +1529,25 @@ fn parseAnimationTable(offset: u32) void {
 
     // Read scene_count
     if (pos >= data.len) return;
-    const count_result = opcodes.decode_varint(data[pos..]);
-    pos += count_result.len;
-    anim_scene_count = @min(count_result.value, MAX_SCENES);
+    const count_before = pos;
+    const declared = read_varint(data, &pos);
+    if (pos == count_before) return;
+    const scene_cap: usize = @min(declared, MAX_SCENES);
 
     // Read scenes (bounded loop)
-    for (0..anim_scene_count) |i| {
+    var filled: u32 = 0;
+    for (0..scene_cap) |i| {
         // id_string_id (skip - we don't need scene ID)
         if (pos >= data.len) break;
-        pos += opcodes.decode_varint(data[pos..]).len;
+        const id_before = pos;
+        _ = read_varint(data, &pos);
+        if (pos == id_before) break;
 
         // frame_string_id (this maps to a #frame name)
         if (pos >= data.len) break;
-        const frame_result = opcodes.decode_varint(data[pos..]);
-        pos += frame_result.len;
+        const frame_before = pos;
+        const frame_id = read_varint(data, &pos);
+        if (pos == frame_before) break;
 
         // start_ms
         if (pos + 4 > data.len) break;
@@ -1522,14 +1560,18 @@ fn parseAnimationTable(offset: u32) void {
         pos += 4;
 
         anim_scenes[i] = .{
-            .frame_string_id = @intCast(frame_result.value),
+            // A frame id past u16 names nothing; `narrowId` latches the
+            // malformed flag and yields the never-matching 0xFFFF.
+            .frame_string_id = narrowId(frame_id),
             .start_ms = start_ms,
             .end_ms = end_ms,
         };
+        filled = @intCast(i + 1);
 
         // Debug: log each scene
-        dbg("scene[{d}] frame_id={d} {d}-{d}ms", .{ i, frame_result.value, start_ms, end_ms });
+        dbg("scene[{d}] frame_id={d} {d}-{d}ms", .{ i, frame_id, start_ms, end_ms });
     }
+    anim_scene_count = filled;
 
     has_animation = anim_scene_count > 0;
 
@@ -1598,9 +1640,11 @@ fn scanFrameDefinitions() void {
             // Read name_string_id (we need this for matching)
             const name_id = read_varint(bytecode, &pc);
 
-            // Store frame entry: name_string_id → current PC (after params)
+            // Store frame entry: name_string_id → current PC (after params).
+            // A name id past u16 names no string; `narrowId` latches the
+            // malformed flag and the 0xFFFF entry matches no frame.
             frame_entries[frame_count] = .{
-                .name_string_id = @intCast(name_id),
+                .name_string_id = narrowId(name_id),
                 .pc_offset = @intCast(pc), // Points to first opcode inside frame body
             };
             frame_count += 1;

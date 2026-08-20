@@ -125,7 +125,8 @@ fn parsePngbChunk(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
 /// - data.len >= 1 (empty streams are invalid)
 ///
 /// Post-conditions:
-/// - Returns decompressed data with len > 0
+/// - Returns decompressed data with len > 0 (a stream that inflates to nothing
+///   is `InvalidPngbFormat`)
 /// - Caller owns returned slice
 fn decompressDeflateRaw(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     // Pre-condition: need at least minimal deflate data (header byte)
@@ -142,9 +143,13 @@ fn decompressDeflateRaw(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
         return error.DecompressionFailed;
     };
 
-    // Post-condition: decompression produced output (valid DEFLATE always produces data)
-    std.debug.assert(result.len > 0);
-
+    // A stream that inflates to nothing (`03 00` is valid DEFLATE of zero
+    // bytes) is a malformed payload, not an invariant — it was asserted here
+    // and aborted every PNG-input command on a crafted chunk.
+    if (result.len == 0) {
+        allocator.free(result);
+        return error.InvalidPngbFormat;
+    }
     return result;
 }
 
@@ -290,6 +295,17 @@ pub fn enumerateChunks(allocator: std.mem.Allocator, png_data: []const u8) Error
 // ============================================================================
 // Fuzz/Property Tests
 // ============================================================================
+
+/// A corpus seed as `std.testing.fuzz` replays it OUTSIDE fuzz mode: each entry
+/// is fed to the callback as the Smith's whole input, and `Smith.slice` reads a
+/// u32 little-endian LENGTH PREFIX before the bytes. Bare seeds were therefore
+/// replayed as inputs of 0–2 bytes (the first four bytes of "PNGB" read as a
+/// length of ~1.1 G, clamped to what was left) — none of them reached the code
+/// they were written to seed. (Third leak pass)
+fn fuzzSeed(comptime bytes: []const u8) []const u8 {
+    const len_le = std.mem.toBytes(std.mem.nativeToLittle(u32, @as(u32, @intCast(bytes.len))));
+    return &(len_le ++ bytes[0..bytes.len].*);
+}
 
 fn fuzzExtractProperties(_: @TypeOf({}), smith: *std.testing.Smith) !void {
     var buf: [4096]u8 = undefined;

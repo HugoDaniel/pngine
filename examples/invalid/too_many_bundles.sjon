@@ -10,12 +10,12 @@
 @fragment fn fs() -> @location(0) vec4f { return vec4f(1, 0, 0, 1); }
 """)
 
-(render-pipeline :name pipe (layout auto)
-  (vertex (module code) (entry vs))
-  (fragment (module code) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
 
-(render-bundle :name tri :pipeline pipe :draw 3)
+(render-bundle :name tri :pipeline pipe :color-formats [preferred-canvas-format] (draw :vertex-count 3))
 
 (render-pass :name draw
   (color-attachment :view context-current-texture

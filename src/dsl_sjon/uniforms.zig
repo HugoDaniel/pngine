@@ -220,7 +220,7 @@ pub fn leafType(
 /// R1 check ②: is a reflected binding referenced by any entry point's transitive
 /// call graph (i.e. a resource the shader actually uses)? Filters the "used but
 /// unbound" diagnostic to bindings that matter, so a declared-but-unused binding
-/// under `(layout auto)` is never a false positive. Pure over ReflectionData.
+/// under `:layout auto` is never a false positive. Pure over ReflectionData.
 pub fn bindingUsedByAnyEntry(rd: *const reflect.ReflectionData, binding_name: []const u8) bool {
     for (rd.entry_points) |ep| {
         for (ep.resources) |res| {

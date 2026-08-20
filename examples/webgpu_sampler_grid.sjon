@@ -16,7 +16,7 @@
 ; The checkerboard is deliberately asymmetric (a horizontal cream→orange tint
 ; on the light checks): a symmetric board mirrors into itself and cells 3/4
 ; would be indistinguishable. Cells are NDC rectangles from per-cell static
-; uniforms (one `:mapped-at-creation` buffer each — parameter writes to a
+; uniforms (one `:data` buffer each — parameter writes to a
 ; shared buffer within one frame would collapse to the last value), placed in
 ; the vertex shader rather than with a viewport, whose fixed pixel rects would
 ; tie the grid to one canvas size. Upstream's live GUI knobs have no
@@ -31,14 +31,14 @@
 (data :name cell4 :float32 [-0.31 -0.84  0.31 -0.12  -0.75 -0.75 1.75 1.75])
 (data :name cell5 :float32 [ 0.36 -0.84  0.98 -0.12  -0.75 -0.75 1.75 1.75])
 
-(buffer :name cell0Buf :size cell0 :usage [uniform] :mapped-at-creation cell0)
-(buffer :name cell1Buf :size cell1 :usage [uniform] :mapped-at-creation cell1)
-(buffer :name cell2Buf :size cell2 :usage [uniform] :mapped-at-creation cell2)
-(buffer :name cell3Buf :size cell3 :usage [uniform] :mapped-at-creation cell3)
-(buffer :name cell4Buf :size cell4 :usage [uniform] :mapped-at-creation cell4)
-(buffer :name cell5Buf :size cell5 :usage [uniform] :mapped-at-creation cell5)
+(buffer :name cell0Buf :usage [uniform] :data cell0)
+(buffer :name cell1Buf :usage [uniform] :data cell1)
+(buffer :name cell2Buf :usage [uniform] :data cell2)
+(buffer :name cell3Buf :usage [uniform] :data cell3)
+(buffer :name cell4Buf :usage [uniform] :data cell4)
+(buffer :name cell5Buf :usage [uniform] :data cell5)
 
-(texture :name checkerTex :width 64 :height 64 :format rgba8unorm
+(texture :name checkerTex :size [64 64] :format rgba8unorm
   :usage [storage-binding texture-binding])
 
 (sampler :name sampNearest :mag-filter nearest :min-filter nearest)
@@ -102,45 +102,45 @@ struct VSOut {
 }
 """)
 
-(compute-pipeline :name bakePipeline :module bakeShader :entry main)
+(compute-pipeline :name bakePipeline :layout auto (compute :module bakeShader :entry main))
 
 (render-pipeline :name gridPipeline
-  (layout auto)
-  (vertex (module gridShader) (entry vs))
-  (fragment (module gridShader) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module gridShader :entry vs)
+  (fragment :module gridShader :entry fs
+    (target :format preferred-canvas-format)))
 
-(bind-group :name bakeBindGroup :layout-pipeline bakePipeline :layout-index 0
+(bind-group :name bakeBindGroup :layout bakePipeline :group 0
   (entry :binding 0 :texture checkerTex))
 
-(bind-group :name bg0 :layout-pipeline gridPipeline :layout-index 0
+(bind-group :name bg0 :layout gridPipeline :group 0
   (entry :binding 0 :buffer cell0Buf)
   (entry :binding 1 :sampler sampNearest)
   (entry :binding 2 :texture checkerTex))
-(bind-group :name bg1 :layout-pipeline gridPipeline :layout-index 0
+(bind-group :name bg1 :layout gridPipeline :group 0
   (entry :binding 0 :buffer cell1Buf)
   (entry :binding 1 :sampler sampLinear)
   (entry :binding 2 :texture checkerTex))
-(bind-group :name bg2 :layout-pipeline gridPipeline :layout-index 0
+(bind-group :name bg2 :layout gridPipeline :group 0
   (entry :binding 0 :buffer cell2Buf)
   (entry :binding 1 :sampler sampLinear)
   (entry :binding 2 :texture checkerTex))
-(bind-group :name bg3 :layout-pipeline gridPipeline :layout-index 0
+(bind-group :name bg3 :layout gridPipeline :group 0
   (entry :binding 0 :buffer cell3Buf)
   (entry :binding 1 :sampler sampRepeat)
   (entry :binding 2 :texture checkerTex))
-(bind-group :name bg4 :layout-pipeline gridPipeline :layout-index 0
+(bind-group :name bg4 :layout gridPipeline :group 0
   (entry :binding 0 :buffer cell4Buf)
   (entry :binding 1 :sampler sampMirror)
   (entry :binding 2 :texture checkerTex))
-(bind-group :name bg5 :layout-pipeline gridPipeline :layout-index 0
+(bind-group :name bg5 :layout gridPipeline :group 0
   (entry :binding 0 :buffer cell5Buf)
   (entry :binding 1 :sampler sampClamp)
   (entry :binding 2 :texture checkerTex))
 
 (compute-pass :name bakeChecker :pipeline bakePipeline
   :bind-groups [bakeBindGroup]
-  :dispatch [8 8 1])
+  (dispatch :workgroups [8 8 1]))
 
 (render-pass :name drawCell0
   (color-attachment :view context-current-texture

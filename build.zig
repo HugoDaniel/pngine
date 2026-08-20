@@ -240,18 +240,24 @@ pub fn build(b: *std.Build) void {
         // Re-derived at Arc-3 §5.4: id-narrowing hardening (the noinline `narrowId`
         // guard + its ~57 call sites) grew the shipping executor ~730 B (full
         // 12198→12929) — a deliberate, loud-over-silent trade recorded here.
+        // Re-derived again at spec/09 step D: widening the render-pass clear value
+        // from 4×u8 to 4×f32 cost +110 B (compute) to +382 B (render-wasm), ~3%.
+        // Most of it is the skip table, which is why even the render-less variants
+        // moved. Measured, not estimated: deleting the retired 0x10/0x1B writers
+        // changed nothing, so the linker was already dropping them and the growth
+        // is the wider wire itself.
         max_bytes: u32,
     };
 
     const executor_variants = [_]ExecutorVariant{
-        .{ .name = "core", .render = false, .compute = false, .wasm = false, .animation = false, .texture = false, .max_bytes = 9200 },
-        .{ .name = "render", .render = true, .compute = false, .wasm = false, .animation = false, .texture = false, .max_bytes = 11800 },
-        .{ .name = "compute", .render = false, .compute = true, .wasm = false, .animation = false, .texture = false, .max_bytes = 9500 },
-        .{ .name = "render-compute", .render = true, .compute = true, .wasm = false, .animation = false, .texture = false, .max_bytes = 12100 },
-        .{ .name = "render-anim", .render = true, .compute = false, .wasm = false, .animation = true, .texture = false, .max_bytes = 11800 },
-        .{ .name = "render-compute-anim", .render = true, .compute = true, .wasm = false, .animation = true, .texture = false, .max_bytes = 12100 },
-        .{ .name = "render-wasm", .render = true, .compute = false, .wasm = true, .animation = false, .texture = false, .max_bytes = 12600 },
-        .{ .name = "full", .render = true, .compute = true, .wasm = true, .animation = true, .texture = true, .max_bytes = 13600 },
+        .{ .name = "core", .render = false, .compute = false, .wasm = false, .animation = false, .texture = false, .max_bytes = 9550 },
+        .{ .name = "render", .render = true, .compute = false, .wasm = false, .animation = false, .texture = false, .max_bytes = 12350 },
+        .{ .name = "compute", .render = false, .compute = true, .wasm = false, .animation = false, .texture = false, .max_bytes = 9850 },
+        .{ .name = "render-compute", .render = true, .compute = true, .wasm = false, .animation = false, .texture = false, .max_bytes = 12650 },
+        .{ .name = "render-anim", .render = true, .compute = false, .wasm = false, .animation = true, .texture = false, .max_bytes = 12350 },
+        .{ .name = "render-compute-anim", .render = true, .compute = true, .wasm = false, .animation = true, .texture = false, .max_bytes = 12650 },
+        .{ .name = "render-wasm", .render = true, .compute = false, .wasm = true, .animation = false, .texture = false, .max_bytes = 13200 },
+        .{ .name = "full", .render = true, .compute = true, .wasm = true, .animation = true, .texture = true, .max_bytes = 14150 },
     };
 
     const ExecutorArtifact = struct {
@@ -945,7 +951,7 @@ pub fn build(b: *std.Build) void {
     const sjon_invalid_mod = stdModule(b, target, optimize, "tests/zig/sjon_invalid.zig", &.{
         .{ .name = "dsl_sjon", .module = sjon_test_mod },
     });
-    inline for (.{ "bad_wgsl_syntax", "missing_entry_point", "buffer_too_small", "missing_bind_group", "unaligned_uniform", "bad_scissor_rect", "uniform_too_small_for_struct", "missing_uniform_bind", "address_space_mismatch", "workgroup_too_large", "bind_kind_mismatch", "vertex_location_unbound", "texture_sample_type_mismatch", "sampler_comparison_mismatch", "vertex_format_mismatch", "fragment_output_type_mismatch", "fragment_output_unbound", "pass_attachment_count_mismatch", "pass_attachment_format_mismatch", "pass_depth_missing_in_pipeline", "pass_depth_missing_in_pass", "pass_depth_format_mismatch", "pass_resolve_format_mismatch", "pass_sample_count_mismatch", "storage_texture_format_mismatch", "too_many_passes", "too_many_bundles", "sampler_anisotropy_out_of_range", "texture_dimension_out_of_range", "texture_view_dimension_out_of_range", "pipeline_layout_dangling_bgl", "primitive_strip_index_format", "workgroup_512_no_limits", "bind_offset_without_buffer", "bind_slice_past_end", "bind_offset_at_end", "bundle_ref_lowered", "too_many_wasm_args", "unknown_wasm_arg", "pass_mixed_stages", "pass_no_entry_point", "pass_graph_empty", "pass_too_many_entries", "init_workgroups_unresolved", "size_names_a_define", "override_no_default", "override_no_default_compute", "constant_unknown_override", "constant_type_mismatch", "constant_conflict", "pool_overflow", "pool_expression_overflow", "shape_sphere_zero", "shape_cone_bomb", "define_overflow", "pass_shader_name_collision" }) |name| {
+    inline for (.{ "bad_wgsl_syntax", "missing_entry_point", "buffer_too_small", "missing_bind_group", "unaligned_uniform", "bad_scissor_rect", "uniform_too_small_for_struct", "missing_uniform_bind", "address_space_mismatch", "workgroup_too_large", "bind_kind_mismatch", "vertex_location_unbound", "texture_sample_type_mismatch", "sampler_comparison_mismatch", "vertex_format_mismatch", "fragment_output_type_mismatch", "fragment_output_unbound", "pass_attachment_count_mismatch", "pass_attachment_format_mismatch", "pass_depth_missing_in_pipeline", "pass_depth_missing_in_pass", "pass_depth_format_mismatch", "pass_resolve_format_mismatch", "pass_sample_count_mismatch", "storage_texture_format_mismatch", "too_many_passes", "too_many_bundles", "sampler_anisotropy_out_of_range", "texture_dimension_numeric", "texture_view_dimension_not_a_member", "pipeline_layout_dangling_bgl", "primitive_strip_index_format", "workgroup_512_no_limits", "bind_offset_without_buffer", "bind_slice_past_end", "bind_offset_at_end", "bundle_ref_lowered", "too_many_wasm_args", "unknown_wasm_arg", "pass_mixed_stages", "pass_no_entry_point", "pass_graph_empty", "pass_too_many_entries", "init_workgroups_unresolved", "override_no_default", "override_no_default_compute", "constant_unknown_override", "constant_type_mismatch", "constant_conflict", "pool_overflow", "pool_expression_overflow", "shape_sphere_zero", "shape_cone_bomb", "define_overflow", "pass_shader_name_collision", "fragment_no_targets", "stage_no_module", "depth_stencil_no_format", "texture_no_size", "buffer_no_size", "pipeline_no_layout", "compute_stage_no_module", "bundle_no_color_formats", "attachment_no_load_op", "pipeline_two_vertex_stages", "blend_missing_alpha", "pipeline_name_shared_across_kinds", "define_ref_typo", "write_buffer_offset_unaligned", "bgl_entry_two_resources", "bgl_entry_no_resource", "data_two_generators", "dup_name_cross_kind", "reserved_name_builtin", "copy_no_destination", "compute_pass_no_dispatch", "dispatch_no_workgroups", "bundle_no_draw", "write_mask_not_a_member", "pipeline_two_primitive", "depth_stencil_two_stencil_front", "strip_index_format_on_list_topology", "strip_topology_indexed_draw", "clear_value_with_load_op", "depth_clear_without_value", "depth_attachment_no_store_op", "alpha_to_coverage_single_sample", "render_pass_no_attachments", "occlusion_query_no_set", "anisotropy_without_linear_filters", "map_read_extra_usage", "wasm_data_size_unaligned", "wasm_data_missing_file", "data_file_missing", "depth_stencil_colour_format", "depth_write_on_stencil_only_format", "stencil_state_on_depth_only_format", "depth_format_no_write_enabled", "depth_compare_missing_with_write", "depth_bias_on_line_topology", "blend_on_integer_target", "alpha_to_coverage_no_alpha_target", "alpha_to_coverage_no_fragment", "depth_ops_on_stencil_only_attachment", "stencil_ops_missing_on_combined_attachment", "stencil_ops_on_depth_only_attachment", "msaa_texture_mipped", "msaa_texture_not_attachment", "msaa_texture_sample_count_two", "volume_texture_multisampled", "attachment_texture_1d", "copy_source_without_copy_src", "copy_destination_without_copy_dst", "copy_past_end_of_buffer", "write_buffer_target_without_copy_dst", "copy_texture_source_without_copy_src", "bundle_color_format_is_depth", "bundle_depth_format_is_colour", "bundle_pipeline_format_mismatch", "bundle_pipeline_sample_count_mismatch", "bundle_pipeline_depth_mismatch", "bundle_pass_format_mismatch", "bundle_pass_attachment_count", "bundle_pass_depth_missing", "bundle_pass_sample_count_mismatch", "define_ref_fractional_in_count", "define_cycle", "expression_negative", "count_expression_overflow", "stray_command_at_root", "pass_outside_pass_graph", "bundle_no_pipeline", "pass_no_code", "pass_feedback_on_last", "render_pass_draw_no_pipeline", "draw_indirect_offset_unaligned", "query_set_count_over_max", "expression_unknown_constant", "define_unknown_constant", "pipeline_no_vertex", "bind_group_index_define_overflow", "binding_expression_overflow", "anisotropy_define_overflow", "limits_negative_expression", "texture_depth_define_zero", "mip_level_literal_overflow", "origin_define_overflow", "pool_offset_define_overflow", "query_count_define_overflow", "pool_offset_past_pool" }) |name| {
         sjon_invalid_mod.addAnonymousImport(name ++ "_invalid", .{ .root_source_file = b.path("examples/invalid/" ++ name ++ ".sjon") });
     }
     const sjon_invalid_step = b.step("test-sjon-invalid", "Run SJON invalid-negatives rejection tests");
@@ -961,12 +967,59 @@ pub fn build(b: *std.Build) void {
     const sjon_oom_mod = stdModule(b, target, optimize, "tests/zig/sjon_oom.zig", &.{
         .{ .name = "dsl_sjon", .module = sjon_test_mod },
         .{ .name = "bytecode", .module = bytecode_mod },
+        // The `.png` lane: the browser's `compileToPng()` = compileWithPlugins +
+        // PNG encode + pNGb embed, swept end to end.
+        .{ .name = "png", .module = png_test_mod },
+        // The read-side lane: `format.deserialize` + `Dispatcher(MockGPU)`,
+        // the `inspect` path, swept the same way.
+        .{ .name = "executor", .module = executor_mod },
     });
-    inline for (.{ "pass_shader_art", "pipeline_constants", "rotating_cube" }) |name| {
-        sjon_oom_mod.addAnonymousImport(name ++ "_sjon", .{ .root_source_file = b.path("examples/" ++ name ++ ".sjon") });
+    // The corpus lane imports the SAME globbed fixture set the golden gate does
+    // (third leak pass): every `examples/**/*.sjon` as `<name>_sjon`, plus the
+    // generated name list. `-Doom-corpus=true` sweeps all of them exhaustively
+    // (minutes); the default sweeps the `corpus_sample` the harness picks.
+    const oom_corpus = b.option(bool, "oom-corpus", "OOM sweep: walk EVERY example fixture, not the sample (slow)") orelse false;
+    const oom_options = b.addOptions();
+    oom_options.addOption(bool, "corpus", oom_corpus);
+    sjon_oom_mod.addImport("oom_options", oom_options.createModule());
+    sjon_oom_mod.addAnonymousImport("fixture_list", .{ .root_source_file = fixture_list });
+    for ([_]struct { dir: []const u8, names: []const []const u8 }{
+        .{ .dir = "examples", .names = sjon_root_fixtures },
+        .{ .dir = "examples/samples", .names = sjon_sample_fixtures },
+    }) |group| {
+        for (group.names) |name| {
+            const src = b.path(b.fmt("{s}/{s}.sjon", .{ group.dir, name }));
+            sjon_oom_mod.addAnonymousImport(b.fmt("{s}_sjon", .{name}), .{ .root_source_file = src });
+        }
     }
-    const sjon_oom_step = b.step("test-sjon-oom", "Run the compile-pipeline OOM-injection sweep");
+    const sjon_oom_step = b.step("test-sjon-oom", "Run the compile-pipeline OOM-injection sweep (-Doom-corpus=true for every fixture)");
     addStandaloneTest(b, standalone_step, sjon_oom_step, "sjon-oom", sjon_oom_mod);
+
+    // ========================================================================
+    // Mutation sweep (third leak pass). The corpus is not a fuzzer (pitfall
+    // 44): every example, mutated token-by-token (edge numbers, swapped
+    // symbols, deleted keys, duplicated/deleted forms, truncation), must come
+    // back from the compiler as a result or a named error — never a panic,
+    // never a leak. Seeded by `testing.random_seed`, so `--seed` reproduces.
+    const sjon_mutate_mod = stdModule(b, target, optimize, "tests/zig/sjon_mutate.zig", &.{
+        .{ .name = "dsl_sjon", .module = sjon_test_mod },
+    });
+    const mutate_verbose = b.option(bool, "mutate-verbose", "Mutation sweep: print every mutant before compiling it (to read the one that crashed)") orelse false;
+    const mutate_options = b.addOptions();
+    mutate_options.addOption(bool, "verbose", mutate_verbose);
+    sjon_mutate_mod.addImport("mutate_options", mutate_options.createModule());
+    sjon_mutate_mod.addAnonymousImport("fixture_list", .{ .root_source_file = fixture_list });
+    for ([_]struct { dir: []const u8, names: []const []const u8 }{
+        .{ .dir = "examples", .names = sjon_root_fixtures },
+        .{ .dir = "examples/samples", .names = sjon_sample_fixtures },
+    }) |group| {
+        for (group.names) |name| {
+            const src = b.path(b.fmt("{s}/{s}.sjon", .{ group.dir, name }));
+            sjon_mutate_mod.addAnonymousImport(b.fmt("{s}_sjon", .{name}), .{ .root_source_file = src });
+        }
+    }
+    const sjon_mutate_step = b.step("test-sjon-mutate", "Run the corpus mutation sweep over the compile pipeline");
+    addStandaloneTest(b, standalone_step, sjon_mutate_step, "sjon-mutate", sjon_mutate_mod);
 
     // ========================================================================
     // Native GPU render tests + snapshot/coverage gates (Phase 2 + 3 of the
@@ -1497,11 +1550,12 @@ pub fn build(b: *std.Build) void {
     // rewriting the artifact it is supposed to be judging. Regenerating is
     // always the sibling step's job, named in each comment.
     //
-    // Requires Node.js (seven of the ten gates are node scripts). That is why
-    // this hangs off `test`, the full developer suite, and not off
+    // Requires Node.js (all but the schema export are node scripts). That is
+    // why this hangs off `test`, the full developer suite, and not off
     // `test-standalone`/`test-fast`, which stay pure-Zig and fast.
     //
-    // Five of the ten skip cleanly when their input is absent, and say so.
+    // Several skip cleanly when their input is absent, and say so (each says
+    // which input in its own comment below).
     // `test` depends on `drift`, so without that a release clone fails its own
     // suite on things it was never meant to carry: journal-toc and
     // check-bundle-doc and check-sjon-reference read files `.mirrorignore`
@@ -1509,7 +1563,7 @@ pub fn build(b: *std.Build) void {
     // needs terser out of node_modules. A skip is never total —
     // check-bundle-doc errors if EVERY table it knows about is gone, and
     // check-sjon-reference errors if it parses no forms out of the schema.
-    const drift_step = b.step("drift", "Verify every generated artifact is current (schema, journal index, npm versions+metadata, executor wasm + its no-allocator property, wgpu wrapper coverage, npm schema, bundle doc, js fragments, webgpu enums, sjon reference, cli flags)");
+    const drift_step = b.step("drift", "Verify every generated artifact is current (schema, journal index, npm versions+metadata, executor wasm + its no-allocator property, wgpu wrapper coverage, npm schema, bundle doc, js fragments, webgpu enums, sjon reference, cli flags, llms.txt, doc fences, overhaul shape)");
 
     // schema/pngine.{d.ts,schema.json} <- `zig build schema-export -- --regen`
     const drift_schema = b.addRunArtifact(schema_export_exe);
@@ -1641,6 +1695,58 @@ pub fn build(b: *std.Build) void {
     // force fabricated matches (min1-03, §340).
     const drift_cli_flags = b.addSystemCommand(&.{ "node", "scripts/check-cli-flags.mjs", "--check" });
     drift_step.dependOn(&drift_cli_flags.step);
+
+    // docs/llms.txt <- the built CLI, run over the file's own programs.
+    //
+    // The fourth prose gate, and the first that runs the engine over its
+    // documentation instead of scanning for spellings: docs/llms.txt is the
+    // LLM-facing SJON reference, fetched whole and copied from, so every
+    // ```sjon fence in it must be a complete program that `pngine validate`
+    // accepts with zero diagnostics, every fence must be tagged (a fragment
+    // must not pose as a program), and every raw-GitHub URL must name a file
+    // the release cut ships. Its predecessor in the docs site described a
+    // retired DSL for months; nothing read it (§360). The CLI is the freshly
+    // built artifact — this is the one drift gate that builds something.
+    const drift_llms_txt = b.addSystemCommand(&.{ "node", "scripts/check-llms-txt.mjs", "--check", "--cli" });
+    drift_llms_txt.addArtifactArg(cli);
+    drift_step.dependOn(&drift_llms_txt.step);
+
+    // README.md / docs/sjon-reference.md / docs/architecture.md / CONTRIBUTING.md
+    // <- the built CLI, run over every ```sjon fence.
+    //
+    // The fifth prose gate, the site's scripts/check-fences.mjs ported: the
+    // llms.txt gate above runs three complete programs; this one runs the
+    // fifty-odd fences in the engine's own prose under the site's fragment rules
+    // (four diagnostics a fragment may carry, `; invalid:` negatives must be
+    // refused as marked, an untagged fence that opens a form is an error). The
+    // README's headline example declared a pipeline and a frame both named
+    // `main` from the one-namespace commit until audit 09 read it (§8): nothing
+    // had run `validate` over it. Its first run also found two pass-hook
+    // defects behind the reference's feedback examples (§373). CONTRIBUTING.md
+    // is held back from the release cut and is skipped there; the other three
+    // ship. Same CLI artifact as the llms.txt gate.
+    const drift_doc_fences = b.addSystemCommand(&.{ "node", "scripts/check-doc-fences.mjs", "--check", "--cli" });
+    drift_doc_fences.addArtifactArg(cli);
+    drift_step.dependOn(&drift_doc_fences.step);
+
+    // The corpus keeps the post-overhaul SHAPE <- scripts/codemod-overhaul.mjs
+    //
+    // Two halves, both of which the overhaul needs and neither of which any
+    // other gate reaches. The corpus half re-runs the migration's own tokenizer
+    // in `--check` mode: if it would still rewrite a file, that file carries a
+    // pre-overhaul spelling. The schema half proves the five retired heads
+    // (`layout`, `module`, `topology`, `buffers`, `targets`) are not declarable
+    // again — a document scan can only prove nobody writes them today.
+    //
+    // A named path that is absent is skipped, so this survives the release cut
+    // stripping CLAUDE.md (plan 07 §5).
+    const drift_overhaul_shape = b.addSystemCommand(&.{
+        "node",      "scripts/codemod-overhaul.mjs", "--check",
+        "examples",  "src",                          "tests",
+        "docs",      "npm",                          "scripts",
+        "README.md", "CLAUDE.md",                    "CONTRIBUTING.md",
+    });
+    drift_step.dependOn(&drift_overhaul_shape.step);
 
     test_step.dependOn(drift_step);
 

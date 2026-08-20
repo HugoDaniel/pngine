@@ -1,0 +1,14 @@
+; audit C1: a (define …) value is a real, so a
+; FRACTIONAL constant is legal to declare — and the count slot that reads it
+; is what refuses it. It used to be a schema reject on the define itself
+; (`byte-count`), which is the wrong place: the same constant is fine in
+; :clear-value. Expected: a located diagnostic at the :vertex-count value.
+(define :name H :value 0.5)
+(shader-module :name code :code "@vertex fn v() -> @builtin(position) vec4f { return vec4f(0); } @fragment fn f() -> @location(0) vec4f { return vec4f(1); }")
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry v)
+  (fragment :module code :entry f (target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count H))
+(frame :name main :perform [draw])

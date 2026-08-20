@@ -86,8 +86,8 @@ struct VSOut {
 
 (data :name dragonMesh (dragon :format [position3 normal3 uv2]))
 
-(buffer :name vertexBuffer :size dragonMesh :usage [vertex]
-  :mapped-at-creation dragonMesh)
+(buffer :name vertexBuffer :usage [vertex]
+  :data dragonMesh)
 
 (buffer :name indexBuffer :index-of dragonMesh :usage [index])
 
@@ -99,24 +99,23 @@ struct VSOut {
   (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
 
 (render-pipeline :name dragonPipeline
-  (layout auto)
-  (vertex (module shader) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 32
-        (attribute :shader-location 0 :offset 0 :format float32x3)
-        (attribute :shader-location 1 :offset 12 :format float32x3)
-        (attribute :shader-location 2 :offset 24 :format float32x2))))
-  (fragment (module shader) (entry fs)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module shader :entry vs
+    (vertex-buffer :array-stride 32
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)
+      (attribute :shader-location 2 :offset 24 :format float32x2)))
+  (fragment :module shader :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
-(bind-group :name dragonBindGroup :layout-pipeline dragonPipeline :layout-index 0
+(bind-group :name dragonBindGroup :layout dragonPipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
 (render-pass :name drawDragon
   (color-attachment :view context-current-texture :clear-value [0.1 0.1 0.15 1] :load-op clear :store-op store)
-  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   :pipeline dragonPipeline
   :vertex-buffers [vertexBuffer]
   :index-buffer indexBuffer

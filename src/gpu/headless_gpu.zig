@@ -26,7 +26,11 @@
 //! ## Invariants
 //! - Implements the same interface as MockGPU/WgpuNativeGPU. Enforced at
 //!   comptime by `Backend(T).validate()` via main.zig's `Dispatcher(NullGPU)`
-//!   instantiation — not by the tests below.
+//!   instantiation — not by the tests below. That instantiation is deliberately
+//!   UNCONDITIONAL: until §377 main.zig only validated whichever backend the
+//!   build selected, so on a host with vendored wgpu-native (the default, and
+//!   what every gate runs on) this file went unchecked and drifted four clear
+//!   values behind the contract.
 //! - read_pixels returns the init-zeroed buffer (opaque black), never a fake
 //!   render.
 
@@ -329,16 +333,16 @@ pub const NullGPU = struct {
     // Pass Operations
     // ========================================================================
 
-    pub fn begin_render_pass(self: *Self, allocator: Allocator, color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16, clear_r: u8, clear_g: u8, clear_b: u8, clear_a: u8, resolve_texture_id: u16) !void {
+    pub fn begin_render_pass(self: *Self, allocator: Allocator, color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16, clear_r_bits: u32, clear_g_bits: u32, clear_b_bits: u32, clear_a_bits: u32, resolve_texture_id: u16) !void {
         _ = allocator;
         _ = color_texture_id;
         _ = load_op;
         _ = store_op;
         _ = depth_texture_id;
-        _ = clear_r;
-        _ = clear_g;
-        _ = clear_b;
-        _ = clear_a;
+        _ = clear_r_bits;
+        _ = clear_g_bits;
+        _ = clear_b_bits;
+        _ = clear_a_bits;
         _ = resolve_texture_id;
 
         assert(!self.in_render_pass and !self.in_compute_pass);

@@ -80,6 +80,14 @@ pub const Cmd = enum(u8) {
     set_pass_depth_stencil_ops = 0x50,
     set_blend_constant = 0x51,
     set_pass_clear_values = 0x52,
+    // Full-precision replacements for 0x10/0x1B: the clear value travels as four
+    // f32s instead of four u8s decoding `/255`. Appended rather than widening the
+    // originals because docs/abi.md clause 1 forbids changing an existing
+    // layout -- this runtime's JS must keep decoding every executor ever shipped.
+    // The compiler emits only these two; 0x10/0x1B survive as decode paths.
+    // (spec/09 step D)
+    begin_render_pass_f32 = 0x53,
+    begin_render_pass_mrt_f32 = 0x54,
 
     // Queue Operations (0x20-0x2F)
     write_buffer = 0x20,
@@ -307,7 +315,47 @@ pub const CommandBuffer = struct {
         self.writeU32(entries_len);
     }
 
+    /// BEGIN_RENDER_PASS_F32: [color_id:u16] [load:u8] [store:u8] [depth_id:u16]
+    /// [r:f32] [g:f32] [b:f32] [a:f32] [resolve_id:u16]
+    ///
+    /// The clear value is four f32 bit patterns. `beginRenderPass` below is the
+    /// 4×u8 predecessor, kept only so already-shipped streams keep a decoder.
+    pub fn beginRenderPassF32(self: *Self, color_id: u16, load_op: u8, store_op: u8, depth_id: u16, clear_r_bits: u32, clear_g_bits: u32, clear_b_bits: u32, clear_a_bits: u32, resolve_id: u16) void {
+        self.writeCmd(.begin_render_pass_f32);
+        self.writeU16(color_id);
+        self.writeU8(load_op);
+        self.writeU8(store_op);
+        self.writeU16(depth_id);
+        self.writeU32(clear_r_bits);
+        self.writeU32(clear_g_bits);
+        self.writeU32(clear_b_bits);
+        self.writeU32(clear_a_bits);
+        self.writeU16(resolve_id);
+    }
+
+    /// BEGIN_RENDER_PASS_MRT_F32: [count:u8] [att0: tex_id:u16 load:u8 store:u8
+    /// r:f32 g:f32 b:f32 a:f32] ... [depth_id:u16]
+    pub fn beginRenderPassMrtF32(self: *Self, attachments: []const bytecode_emitter_types.ColorAttachment, depth_id: u16) void {
+        self.writeCmd(.begin_render_pass_mrt_f32);
+        self.writeU8(@intCast(attachments.len));
+        for (attachments) |att| {
+            self.writeU16(att.texture_id);
+            self.writeU8(@intFromEnum(att.load_op));
+            self.writeU8(@intFromEnum(att.store_op));
+            self.writeU32(att.clear_r_bits);
+            self.writeU32(att.clear_g_bits);
+            self.writeU32(att.clear_b_bits);
+            self.writeU32(att.clear_a_bits);
+        }
+        self.writeU16(depth_id);
+    }
+
     /// BEGIN_RENDER_PASS: [color_id:u16] [load:u8] [store:u8] [depth_id:u16] [r:u8] [g:u8] [b:u8] [a:u8] [resolve_id:u16]
+    ///
+    /// LEGACY (spec/09 step D). Nothing emits this any more -- the clear value it
+    /// carries is quantized to 1/255 and clamped to [0,1]. It stays because the
+    /// opcode table is append-only and the JS side has to decode payloads minted
+    /// before the widening; the ABI-freeze test is its only caller here.
     pub fn beginRenderPass(self: *Self, color_id: u16, load_op: u8, store_op: u8, depth_id: u16, clear_r: u8, clear_g: u8, clear_b: u8, clear_a: u8, resolve_id: u16) void {
         self.writeCmd(.begin_render_pass);
         self.writeU16(color_id);
@@ -322,13 +370,18 @@ pub const CommandBuffer = struct {
     }
 
     /// BEGIN_RENDER_PASS_MRT: [count:u8] [att0: tex_id:u16 load:u8 store:u8 r:u8 g:u8 b:u8 a:u8] ... [depth_id:u16]
-    pub fn beginRenderPassMRT(self: *Self, attachments: []const bytecode_emitter_types.ColorAttachment, depth_id: u16) void {
+    ///
+    /// LEGACY, for the same reason as `beginRenderPass` above. It takes explicit
+    /// 0-255 bytes rather than a ColorAttachment, because ColorAttachment now
+    /// carries f32 bit patterns and quantizing them here would put the lossy
+    /// conversion back on the live path.
+    pub fn beginRenderPassMRT(self: *Self, attachments: []const LegacyColorAttachment, depth_id: u16) void {
         self.writeCmd(.begin_render_pass_mrt);
         self.writeU8(@intCast(attachments.len));
         for (attachments) |att| {
             self.writeU16(att.texture_id);
-            self.writeU8(@intFromEnum(att.load_op));
-            self.writeU8(@intFromEnum(att.store_op));
+            self.writeU8(att.load_op);
+            self.writeU8(att.store_op);
             self.writeU8(att.clear_r);
             self.writeU8(att.clear_g);
             self.writeU8(att.clear_b);
@@ -336,6 +389,17 @@ pub const CommandBuffer = struct {
         }
         self.writeU16(depth_id);
     }
+
+    /// The 4×u8 attachment shape `beginRenderPassMRT` (0x1B) writes.
+    pub const LegacyColorAttachment = struct {
+        texture_id: u16,
+        load_op: u8,
+        store_op: u8,
+        clear_r: u8,
+        clear_g: u8,
+        clear_b: u8,
+        clear_a: u8,
+    };
 
     /// BEGIN_COMPUTE_PASS: (no args)
     pub fn beginComputePass(self: *Self) void {

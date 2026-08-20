@@ -1,0 +1,12 @@
+; INVALID: a (query-set …) with more than 4096 queries.
+;
+; GPUQuerySetDescriptor.count must be ≤ 4096 (createQuerySet validation). The
+; key was an unbounded `u32` whose description merely said "(spec max 4096)";
+; it is `query-count` now, bounded, so the literal is a located
+; `number_above_max`.
+(query-set :name occ :type occlusion :count 5000)
+(buffer :name results :size 40960 :usage [query-resolve copy-src])
+(queue :name readback
+  (resolve-query-set :query-set occ :first-query 0 :query-count 1
+    :destination results :destination-offset 0))
+(frame :name main :perform [readback])

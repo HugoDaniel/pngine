@@ -1,0 +1,28 @@
+; Invalid: a (blend …) on an integer colour target. WebGPU requires a target's
+; format to be BLENDABLE once blend state is provided, and no uint or sint
+; format is -- blending is arithmetic on normalized/float values, and there is
+; nothing to interpolate between two integers.
+;
+; The pipeline is rejected outright by createRenderPipeline, so the whole
+; document renders nothing; a picking or id G-buffer that acquires a blend
+; block by copy-paste fails this way.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4u { return vec4u(1u); }
+""")
+(texture :name ids :size canvas :format r32uint :usage [render-attachment])
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format r32uint
+      (blend
+        (color :src-factor src-alpha :dst-factor one-minus-src-alpha :operation add)
+        (alpha :src-factor one :dst-factor zero :operation add)))))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view ids
+    :clear-value [0 0 0 0] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

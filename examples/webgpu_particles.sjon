@@ -21,7 +21,7 @@
 ;
 ; Sizes and counts derive from the two defines rather than being written out:
 ; `:size (* NUM_PARTICLES 12 4)` (12 floats per record) and
-; `:dispatch-workgroups (ceil (/ NUM_PARTICLES WORKGROUP_SIZE))`.
+; `(dispatch :workgroups [(ceil (/ NUM_PARTICLES WORKGROUP_SIZE))])`.
 
 (define :name NUM_PARTICLES :value 10000)
 (define :name WORKGROUP_SIZE :value 64)
@@ -37,8 +37,8 @@
 ; and compute storage. size = NUM_PARTICLES * (12 * 4) = 480000.
 (buffer :name particles :size (* NUM_PARTICLES 12 4) :usage [vertex storage])
 
-(buffer :name quadBuffer :size quadVerts :usage [vertex]
-  :mapped-at-creation quadVerts)
+(buffer :name quadBuffer :usage [vertex]
+  :data quadVerts)
 
 (buffer :name renderUniforms :size 16 :usage [uniform copy-dst])
 
@@ -165,38 +165,36 @@
   """)
 
 (render-pipeline :name renderPipeline
-  (layout auto)
-  (vertex (module renderShader) (entry vs)
-    (buffers
-      ; per-instance particle data (position@0 float32x3, color@16 float32x4)
-      (vertex-buffer :array-stride (* 12 4) :step-mode instance
-        (attribute :shader-location 0 :offset 0 :format float32x3)
-        (attribute :shader-location 1 :offset 16 :format float32x4))
-      ; per-vertex quad corner (quad_pos@0 float32x2)
-      (vertex-buffer :array-stride 8 :step-mode vertex
-        (attribute :shader-location 2 :offset 0 :format float32x2))))
-  (fragment (module renderShader) (entry fs)
-    (targets
-      (target :format preferred-canvas-format
-        ; additive blend: color = src-alpha*src + one*dst; alpha = zero + one*dst
-        (blend
-          (color :src-factor src-alpha :dst-factor one :operation add)
-          (alpha :src-factor zero :dst-factor one :operation add)))))
-  (primitive (topology triangle-list))
+  :layout auto
+  (vertex :module renderShader :entry vs
+    ; per-instance particle data (position@0 float32x3, color@16 float32x4)
+    (vertex-buffer :array-stride (* 12 4) :step-mode instance
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 16 :format float32x4))
+    ; per-vertex quad corner (quad_pos@0 float32x2)
+    (vertex-buffer :array-stride 8 :step-mode vertex
+      (attribute :shader-location 2 :offset 0 :format float32x2)))
+  (fragment :module renderShader :entry fs
+    (target :format preferred-canvas-format
+      ; additive blend: color = src-alpha*src + one*dst; alpha = zero + one*dst
+      (blend
+        (color :src-factor src-alpha :dst-factor one :operation add)
+        (alpha :src-factor zero :dst-factor one :operation add))))
+  (primitive :topology triangle-list)
   (depth-stencil :format depth24plus :depth-write-enabled false :depth-compare less))
 
-(compute-pipeline :name computePipeline :module computeShader :entry simulate)
+(compute-pipeline :name computePipeline :layout auto (compute :module computeShader :entry simulate))
 
-(bind-group :name renderBindGroup :layout-pipeline renderPipeline :layout-index 0
+(bind-group :name renderBindGroup :layout renderPipeline :group 0
   (entry :binding 0 :buffer renderUniforms))
 
-(bind-group :name simBindGroup :layout-pipeline computePipeline :layout-index 0
+(bind-group :name simBindGroup :layout computePipeline :group 0
   (entry :binding 0 :buffer renderUniforms)
   (entry :binding 1 :buffer particles))
 
 (render-pass :name drawParticles
   (color-attachment :view context-current-texture :clear-value [0 0 0 255] :load-op clear :store-op store)
-  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   :pipeline renderPipeline
   :vertex-buffers [particles quadBuffer]
   :bind-groups [renderBindGroup]
@@ -205,6 +203,6 @@
 (compute-pass :name simulateParticles
   :pipeline computePipeline
   :bind-groups [simBindGroup]
-  :dispatch-workgroups (ceil (/ NUM_PARTICLES WORKGROUP_SIZE)))
+  (dispatch :workgroups [(ceil (/ NUM_PARTICLES WORKGROUP_SIZE))]))
 
 (frame :name main :perform [writeRenderUniforms simulateParticles drawParticles])

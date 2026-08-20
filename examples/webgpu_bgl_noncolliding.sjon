@@ -1,5 +1,5 @@
 ; Two explicit bind-group layouts, where the bind group targets the second one
-; declared (`shade`) by name through :bind-group-layout, and the document's
+; declared (`shade`) by name through :layout, and the document's
 ; only pipeline is built from a (pipeline-layout …) wrapping that same layout.
 ; The first layout (`unusedFirst`) is a decoy of a different shape (one uniform
 ; entry vs uniform + sampler + texture), composed into its own pipeline-layout
@@ -46,16 +46,16 @@ fn fs(@builtin(position) c : vec4f) -> @location(0) vec4f {
   (entry :binding 0 :visibility [fragment] (buffer :type uniform))
   (entry :binding 1 :visibility [fragment] (sampler :type filtering))
   (entry :binding 2 :visibility [fragment]
-    (texture :sample-type float :view-dimension 1 :multisampled false)))
+    (texture :sample-type float :view-dimension 2d :multisampled false)))
 
 (pipeline-layout :name shadePl :bind-group-layouts [shade])
 
-(render-pipeline :name pipe :pipeline-layout shadePl
-  (vertex (module code) (entry vs))
-  (fragment (module code) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+(render-pipeline :name pipe :layout shadePl
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
 
-(bind-group :name g :bind-group-layout shade
+(bind-group :name g :layout shade
   (entry :binding 0 :buffer tintBuf)
   (entry :binding 1 :sampler samp)
   (entry :binding 2 :texture tex))

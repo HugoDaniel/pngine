@@ -1,0 +1,10 @@
+; audit C2: a numeric expression that evaluates below zero used to SATURATE
+; to 0 in `values.narrowF64` (`@max(0, n)`) — this was a 0-byte buffer that
+; compiled clean, while the literal `-5` is a schema `number_below_min`.
+; Expected: a located diagnostic at the :size expression naming the value.
+(shader-module :name cs :code "@compute @workgroup_size(1) fn main() {}")
+(buffer :name b :size (- 5 10) :usage [storage])
+(compute-pipeline :name cp :layout auto (compute :module cs :entry main))
+(bind-group :name g :layout cp :group 0 (entry :binding 0 :buffer b))
+(compute-pass :name step :pipeline cp :bind-groups [g] (dispatch :workgroups [1 1 1]))
+(frame :name main :perform [step])

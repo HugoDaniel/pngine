@@ -1,4 +1,4 @@
-; Procedural normal mapping — a lit, bumpy disc painted by a fullscreen
+; Procedural normal mapping: a lit, bumpy disc painted by a fullscreen
 ; triangle: the fragment shader derives a normal from finite differences of an
 ; fbm height field, then applies Phong diffuse + specular under an orbiting
 ; light. Despite the name there is no normal-map or diffuse texture and no
@@ -120,12 +120,12 @@
   """)
 
 (render-pipeline :name pipeline
-  (layout auto)
-  (vertex (module shader) (entry vs))
-  (fragment (module shader) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module shader :entry vs)
+  (fragment :module shader :entry fs
+    (target :format preferred-canvas-format)))
 
-(bind-group :name bindings :layout-pipeline pipeline :layout-index 0
+(bind-group :name bindings :layout pipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
 (render-pass :name mainPass

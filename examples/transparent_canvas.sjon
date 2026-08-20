@@ -8,11 +8,12 @@
 ;
 ; The fragment output must be premultiplied alpha; the cube is fully opaque
 ; (alpha 1) so that holds trivially — the transparency is all in the clear.
-; (canvas :alpha-mode premultiplied) is pngine's default (the WebGPU spec
-; default is opaque), spelled out here so the compositing this file depends
-; on is stated rather than inherited; deleting the line changes nothing in
-; the payload. The alpha mode is consumed by the JS runtime at
-; context.configure(), before the first opcode runs.
+; (canvas :alpha-mode premultiplied) is NOT the default — the schema follows
+; GPUCanvasConfiguration.alphaMode and defaults to opaque —
+; so the file that depends on it states it. Deleting the line flips the
+; header's flags byte (0x08 → 0x00) and the page stops showing through. The
+; alpha mode is consumed by the JS runtime at context.configure(), before the
+; first opcode runs.
 
 (canvas :alpha-mode premultiplied)
 
@@ -92,8 +93,8 @@ fn fragMain(
 
 (data :name cubeVertexArray (cube :format [position4 color4 uv2]))
 
-(buffer :name verticesBuffer :size cubeVertexArray :usage [vertex]
-  :mapped-at-creation cubeVertexArray)
+(buffer :name verticesBuffer :usage [vertex]
+  :data cubeVertexArray)
 
 (buffer :name uniformInputsBuffer :size 16 :usage [uniform copy-dst])
 
@@ -103,24 +104,23 @@ fn fragMain(
   (write-buffer :buffer uniformInputsBuffer :offset 0 :data pngine-inputs))
 
 (render-pipeline :name renderCube
-  (layout auto)
-  (vertex (module code) (entry vertexMain)
-    (buffers
-      (vertex-buffer :array-stride 40
-        (attribute :shader-location 0 :offset 0 :format float32x4)
-        (attribute :shader-location 1 :offset 16 :format float32x4)
-        (attribute :shader-location 2 :offset 32 :format float32x2))))
-  (fragment (module code) (entry fragMain)
-    (targets (target :format preferred-canvas-format)))
-  (primitive (topology triangle-list) :cull-mode back)
+  :layout auto
+  (vertex :module code :entry vertexMain
+    (vertex-buffer :array-stride 40
+      (attribute :shader-location 0 :offset 0 :format float32x4)
+      (attribute :shader-location 1 :offset 16 :format float32x4)
+      (attribute :shader-location 2 :offset 32 :format float32x2)))
+  (fragment :module code :entry fragMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
-(bind-group :name inputsBinding :layout-pipeline renderCube :layout-index 0
+(bind-group :name inputsBinding :layout renderCube :group 0
   (entry :binding 0 :buffer uniformInputsBuffer))
 
 (render-pass :name drawCube
   (color-attachment :view context-current-texture :clear-value [0 0 0 0] :load-op clear :store-op store)
-  (depth-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   :pipeline renderCube
   :vertex-buffers [verticesBuffer]
   :bind-groups [inputsBinding]

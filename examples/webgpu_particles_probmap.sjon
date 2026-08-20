@@ -31,7 +31,7 @@
 
 (buffer :name uniforms :size 16 :usage [uniform copy-dst])
 
-(texture :name srcTex :width 64 :height 64 :format rgba8unorm
+(texture :name srcTex :size [64 64] :format rgba8unorm
   :usage [storage-binding texture-binding])
 
 (queue :name writeUniforms
@@ -252,71 +252,79 @@ struct VSOut {
 }
 """)
 
-(compute-pipeline :name bakePipeline :module bakeShader :entry main)
-(compute-pipeline :name importPipeline :module mapShader :entry importLevel)
-(compute-pipeline :name export0Pipeline :module mapShader :entry export0)
-(compute-pipeline :name export1Pipeline :module mapShader :entry export1)
-(compute-pipeline :name export2Pipeline :module mapShader :entry export2)
-(compute-pipeline :name export3Pipeline :module mapShader :entry export3)
-(compute-pipeline :name export4Pipeline :module mapShader :entry export4)
-(compute-pipeline :name export5Pipeline :module mapShader :entry export5)
-(compute-pipeline :name simPipeline :module simShader :entry simulate)
+(compute-pipeline :name bakePipeline :layout auto (compute :module bakeShader :entry main))
+(compute-pipeline :name importPipeline :layout auto (compute :module mapShader :entry importLevel))
+(compute-pipeline :name export0Pipeline :layout auto (compute :module mapShader :entry export0))
+(compute-pipeline :name export1Pipeline :layout auto (compute :module mapShader :entry export1))
+(compute-pipeline :name export2Pipeline :layout auto (compute :module mapShader :entry export2))
+(compute-pipeline :name export3Pipeline :layout auto (compute :module mapShader :entry export3))
+(compute-pipeline :name export4Pipeline :layout auto (compute :module mapShader :entry export4))
+(compute-pipeline :name export5Pipeline :layout auto (compute :module mapShader :entry export5))
+(compute-pipeline :name simPipeline :layout auto (compute :module simShader :entry simulate))
 
 (render-pipeline :name drawPipeline
-  (layout auto)
-  (vertex (module drawShader) (entry vs))
-  (fragment (module drawShader) (entry fs)
-    (targets
-      (target :format preferred-canvas-format
-        (blend
-          (color :src-factor one :dst-factor one :operation add)
-          (alpha :src-factor one :dst-factor one :operation add))))))
+  :layout auto
+  (vertex :module drawShader :entry vs)
+  (fragment :module drawShader :entry fs
+    (target :format preferred-canvas-format
+      (blend
+        (color :src-factor one :dst-factor one :operation add)
+        (alpha :src-factor one :dst-factor one :operation add)))))
 
-(bind-group :name bakeBg :layout-pipeline bakePipeline :layout-index 0
+(bind-group :name bakeBg :layout bakePipeline :group 0
   (entry :binding 0 :texture srcTex))
-(bind-group :name importBg :layout-pipeline importPipeline :layout-index 0
+(bind-group :name importBg :layout importPipeline :group 0
   (entry :binding 0 :texture srcTex)
   (entry :binding 1 :buffer weights))
-(bind-group :name export0Bg :layout-pipeline export0Pipeline :layout-index 0
+(bind-group :name export0Bg :layout export0Pipeline :group 0
   (entry :binding 1 :buffer weights))
-(bind-group :name export1Bg :layout-pipeline export1Pipeline :layout-index 0
+(bind-group :name export1Bg :layout export1Pipeline :group 0
   (entry :binding 1 :buffer weights))
-(bind-group :name export2Bg :layout-pipeline export2Pipeline :layout-index 0
+(bind-group :name export2Bg :layout export2Pipeline :group 0
   (entry :binding 1 :buffer weights))
-(bind-group :name export3Bg :layout-pipeline export3Pipeline :layout-index 0
+(bind-group :name export3Bg :layout export3Pipeline :group 0
   (entry :binding 1 :buffer weights))
-(bind-group :name export4Bg :layout-pipeline export4Pipeline :layout-index 0
+(bind-group :name export4Bg :layout export4Pipeline :group 0
   (entry :binding 1 :buffer weights))
-(bind-group :name export5Bg :layout-pipeline export5Pipeline :layout-index 0
+(bind-group :name export5Bg :layout export5Pipeline :group 0
   (entry :binding 1 :buffer weights))
-(bind-group :name simBg :layout-pipeline simPipeline :layout-index 0
+(bind-group :name simBg :layout simPipeline :group 0
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :buffer particles)
   (entry :binding 2 :buffer weights)
   (entry :binding 3 :texture srcTex))
-(bind-group :name drawBg :layout-pipeline drawPipeline :layout-index 0
+(bind-group :name drawBg :layout drawPipeline :group 0
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :buffer particles))
 
 (compute-pass :name bakeSource :pipeline bakePipeline
-  :bind-groups [bakeBg] :dispatch [8 8 1])
+  :bind-groups [bakeBg]
+  (dispatch :workgroups [8 8 1]))
 (compute-pass :name importPass :pipeline importPipeline
-  :bind-groups [importBg] :dispatch [8 8 1])
+  :bind-groups [importBg]
+  (dispatch :workgroups [8 8 1]))
 (compute-pass :name exportPass0 :pipeline export0Pipeline
-  :bind-groups [export0Bg] :dispatch [4 4 1])
+  :bind-groups [export0Bg]
+  (dispatch :workgroups [4 4 1]))
 (compute-pass :name exportPass1 :pipeline export1Pipeline
-  :bind-groups [export1Bg] :dispatch [2 2 1])
+  :bind-groups [export1Bg]
+  (dispatch :workgroups [2 2 1]))
 (compute-pass :name exportPass2 :pipeline export2Pipeline
-  :bind-groups [export2Bg] :dispatch [1 1 1])
+  :bind-groups [export2Bg]
+  (dispatch :workgroups [1 1 1]))
 (compute-pass :name exportPass3 :pipeline export3Pipeline
-  :bind-groups [export3Bg] :dispatch [1 1 1])
+  :bind-groups [export3Bg]
+  (dispatch :workgroups [1 1 1]))
 (compute-pass :name exportPass4 :pipeline export4Pipeline
-  :bind-groups [export4Bg] :dispatch [1 1 1])
+  :bind-groups [export4Bg]
+  (dispatch :workgroups [1 1 1]))
 (compute-pass :name exportPass5 :pipeline export5Pipeline
-  :bind-groups [export5Bg] :dispatch [1 1 1])
+  :bind-groups [export5Bg]
+  (dispatch :workgroups [1 1 1]))
 
 (compute-pass :name simulatePass :pipeline simPipeline
-  :bind-groups [simBg] :dispatch-workgroups 125)
+  :bind-groups [simBg]
+  (dispatch :workgroups [125]))
 
 (render-pass :name drawPass
   (color-attachment :view context-current-texture

@@ -1,5 +1,5 @@
-; Vertex colors — one triangle rotating about the origin, each vertex carrying
-; its own colour, interpolated across the face. Exercises a mapped-at-creation
+; Vertex colors: one triangle rotating about the origin, each vertex carrying
+; its own colour, interpolated across the face. Exercises a `:data` fill
 ; vertex buffer with an interleaved pos2+color3 layout (array-stride 20) next
 ; to a pngine-inputs uniform. No `(primitive …)` form: the defaults
 ; (triangle-list, ccw, no culling) are what it needs.
@@ -10,7 +10,7 @@
   0.5 -0.5 0.0 0.0 1.0
 ])
 
-(buffer :name vertexBuffer :size vertexData :usage [vertex] :mapped-at-creation vertexData)
+(buffer :name vertexBuffer :usage [vertex] :data vertexData)
 
 (buffer :name uniforms :size 16 :usage [uniform copy-dst])
 
@@ -60,16 +60,15 @@
   """)
 
 (render-pipeline :name pipeline
-  (layout auto)
-  (vertex (module shader) (entry vs)
-    (buffers
-      (vertex-buffer :array-stride 20
-        (attribute :shader-location 0 :offset 0 :format float32x2)
-        (attribute :shader-location 1 :offset 8 :format float32x3))))
-  (fragment (module shader) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module shader :entry vs
+    (vertex-buffer :array-stride 20
+      (attribute :shader-location 0 :offset 0 :format float32x2)
+      (attribute :shader-location 1 :offset 8 :format float32x3)))
+  (fragment :module shader :entry fs
+    (target :format preferred-canvas-format)))
 
-(bind-group :name uniformsBindGroup :layout-pipeline pipeline :layout-index 0
+(bind-group :name uniformsBindGroup :layout pipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
 (render-pass :name mainPass

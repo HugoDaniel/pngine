@@ -1,0 +1,27 @@
+; Invalid: two (stencil-front …) faces in one (depth-stencil …). The descriptor
+; has one stencilFront and one stencilBack; the head-set says `:max 1` each, so
+; the second is a `positional_too_many`. Without it the emitter encoded the
+; first and dropped the second silently -- two contradictory stencil states in
+; one document, one of them inert.
+(shader-module :name code :code """
+    @vertex
+    fn vertexMain(@builtin(vertex_index) VertexIndex : u32) -> @builtin(position) vec4f {
+      var pos = array<vec2f, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+      return vec4f(pos[VertexIndex], 0.0, 1.0);
+    }
+    @fragment
+    fn fragMain() -> @location(0) vec4f { return vec4(1.0, 0.0, 0.0, 1.0); }
+""")
+(texture :name depth :size [64 64] :format depth24plus-stencil8 :usage [render-attachment])
+(render-pipeline :name pipeline :layout auto
+  (vertex :module code :entry vertexMain)
+  (fragment :module code :entry fragMain (target :format preferred-canvas-format))
+  (depth-stencil :format depth24plus-stencil8 :depth-write-enabled true :depth-compare less
+    (stencil-front :compare always :pass-op replace)
+    (stencil-front :compare never :pass-op keep)))
+(render-pass :name render :pipeline pipeline
+  (color-attachment :view context-current-texture :clear-value [0 0 0 0] :load-op clear :store-op store)
+  (depth-stencil-attachment :view depth :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store
+    :stencil-clear-value 0 :stencil-load-op clear :stencil-store-op store)
+  (draw :vertex-count 3))
+(frame :name twoStencilFronts :perform [render])

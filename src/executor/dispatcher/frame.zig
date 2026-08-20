@@ -36,10 +36,15 @@ const scanner_mod = @import("scanner.zig");
 const OpcodeScanner = scanner_mod.OpcodeScanner;
 
 /// Maximum iterations for pass execution loop.
-const PASS_MAX_ITERATIONS: u32 = 1000;
+const PASS_MAX_ITERATIONS = @import("../dispatcher.zig").PASS_MAX_ITERATIONS;
 
 /// Maximum iterations for scanning within define_pass.
-const SCAN_MAX_ITERATIONS: u32 = 10000;
+/// Bound for the pass-body scan: one op more than the body may execute, so a
+/// body at the per-pass cap still finds its `end_pass_def`. Exhausting it is a
+/// refusal (below) — the old silent fall-through left a >10,000-op body HALF
+/// scanned: no range recorded, and the rest of the body then ran as top-level
+/// opcodes outside any pass.
+const SCAN_MAX_ITERATIONS: u32 = PASS_MAX_ITERATIONS + 1;
 
 /// Maximum nesting depth of executePass. Passes legitimately nest (a frame runs
 /// several passes, and a pass body may exec_pass another), but a cyclic
@@ -139,11 +144,18 @@ fn executePass(
     const saved_pc = self.pc;
     defer self.pc = saved_pc;
 
-    // Execute pass bytecode
+    // Execute pass bytecode. The per-pass bound is a REFUSAL when reached:
+    // this loop used to fall out of `for (0..1000)` silently, and a valid
+    // document with 1001 ops in one pass (the compiler allows 2048) rendered
+    // its first 1000 and left the pass open — on native `--frame` and in
+    // `pngine inspect`, while the browser executor ran it whole. (LEAK-09 B
+    // bounds the product across levels; this is the per-level cap.)
     self.pc = range.start;
     for (0..PASS_MAX_ITERATIONS) |_| {
         if (self.pc >= range.end) break;
         try self.step(allocator);
+    } else {
+        if (self.pc < range.end) return error.InstructionBudgetExhausted;
     }
 }
 
@@ -183,6 +195,10 @@ fn scanToEndPassDef(
         }
 
         scanner.skip_params(scan_op);
+    } else {
+        // The body outran the scan bound without an `end_pass_def`: refuse,
+        // never leave the pc mid-body for the top level to execute.
+        return error.InstructionBudgetExhausted;
     }
 
     // Update dispatcher's pc to match scanner

@@ -67,8 +67,11 @@ zig build npm
 node npm/pngine/scripts/bundle.cjs         # Production (minified)
 node npm/pngine/scripts/bundle.cjs --debug # Debug (source maps, no minify)
 
-# Prepare for publishing (copies binaries from zig-out to npm/)
+# Stage binaries for publishing (zig-out/npm → npm/pngine-*/bin)
 ./npm/pngine/scripts/prepare-publish.sh
+
+# Gates → build → stage → dry-run → publish (see Publishing Workflow)
+./npm/publish.sh
 ```
 
 ## Published Surface Beyond the Bundles
@@ -108,12 +111,12 @@ will drift; the budget is what holds them.
 
 | Bundle | Subpath | Profile | Size (gz) | Budget |
 | ------ | ------- | ------- | --------- | ------ |
-| `viewer.mjs` | `pngine` (browser), `pngine/viewer` | Lean production viewer; embedded-executor payloads only, worker inlined | 49.0 KB (16.9) | 50200 |
-| `dev.mjs` | `pngine/dev` | Full-feature browser API: shared `pngine.wasm` fallback, prefetch, diagnostics | 53.5 KB (18.5) | 54800 |
-| `core.mjs` | `pngine/core` | Low-level runtime API (dispatcher + loader), no main-thread wrapper | 26.0 KB (8.9) | 26700 |
+| `viewer.mjs` | `pngine` (browser), `pngine/viewer` | Lean production viewer; embedded-executor payloads only, worker inlined | 49.7 KB (17.0) | 51200 |
+| `dev.mjs` | `pngine/dev` | Full-feature browser API: shared `pngine.wasm` fallback, prefetch, diagnostics | 54.3 KB (18.6) | 55800 |
+| `core.mjs` | `pngine/core` | Low-level runtime API (dispatcher + loader), no main-thread wrapper | 26.6 KB (9.0) | 27300 |
 | `executor.mjs` | `pngine/executor` | Executor helpers — `parsePayload`, `createExecutor`, imports | 1.9 KB (0.9) | 2200 |
-| `mini.mjs` | `pngine/mini` | Flat pNGf main-thread player, with the Sointu audio worklet | 7.0 KB (3.2) | 7200 |
-| `mini-no-audio.mjs` | `pngine/mini-no-audio` | `mini.js` built with `AUDIO=false` — the audio path is DCE'd, not branched around | 6.3 KB (2.9) | 6500 |
+| `mini.mjs` | `pngine/mini` | Flat pNGf main-thread player, with the Sointu audio worklet | 7.1 KB (3.3) | 7300 |
+| `mini-no-audio.mjs` | `pngine/mini-no-audio` | `mini.js` built with `AUDIO=false` — the audio path is DCE'd, not branched around | 6.4 KB (3.0) | 6600 |
 | `index.mjs` / `index.cjs` | `pngine` (node) | Generated stubs; every export throws "browser only" | 2.8 KB | — |
 | `*.d.ts` | `types` per subpath | Hand-authored type text emitted by `writeTypeDefs()` | — | — |
 
@@ -216,22 +219,42 @@ gitignored `dist/` and runs its vitest suite).
 changelog's newest released heading to match the package version, so a bump
 without an entry fails the gate.
 
+`npm/publish.sh` is the whole procedure:
+
 ```bash
-# 1. Build everything
-zig build npm
-node npm/pngine/scripts/bundle.cjs
-./npm/pngine/scripts/prepare-publish.sh
+./npm/publish.sh --prepare   # gates (the pre-push set) → zig build npm/web/wasm-compiler
+                             # → stage binaries → npm publish --dry-run for every package
+./npm/publish.sh --publish   # publish, from a terminal: platform packages first, then pngine
+./npm/publish.sh             # both in one run
+```
 
-# 2. Publish platform packages first (order doesn't matter)
-cd npm/pngine-darwin-arm64 && npm publish --access public
-cd npm/pngine-darwin-x64 && npm publish --access public
-cd npm/pngine-linux-x64 && npm publish --access public
-cd npm/pngine-linux-arm64 && npm publish --access public
-cd npm/pngine-win32-x64 && npm publish --access public
-cd npm/pngine-win32-arm64 && npm publish --access public
+What it refuses, and why:
 
-# 3. Publish main package (after platform packages)
-cd npm/pngine && npm publish
+- uncommitted changes under `npm/`, `src/`, `schema/` or `build.zig` — what
+  ships must be a commit (`--allow-dirty` overrides);
+- `pngine@<version>` already on the registry — bump first;
+- `gen-render-snapshots` moving `tests/zig/render/` — the committed snapshots
+  were stale;
+- a staged host binary that does not report `pngine <version>` — a stale
+  `zig-out` or a build from before the bump;
+- any `npm warn publish` in the dry run — a manifest npm would otherwise
+  auto-correct at publish time (a non-canonical `repository.url` was one).
+
+Publishing needs a terminal: the account has 2FA on writes, so each `npm
+publish` authenticates in the browser. **Re-running is safe** — a version
+already on the registry is skipped, so a run that stopped after platform
+package five continues at six instead of failing on "cannot publish over a
+previously published version". Platform packages go first because `pngine`
+pins them as `optionalDependencies` and a consumer installing between the two
+silently drops all six.
+
+The steps the script runs, for doing them by hand:
+
+```bash
+zig build npm && zig build web && zig build wasm-compiler
+./npm/pngine/scripts/prepare-publish.sh          # zig-out/npm → npm/pngine-*/bin
+for p in npm/pngine-*/; do (cd "$p" && npm publish --access public); done
+(cd npm/pngine && npm publish)                   # prepublishOnly bundles + checks lockstep
 ```
 
 ## Usage

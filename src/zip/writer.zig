@@ -193,9 +193,12 @@ pub const ZipWriter = struct {
     fn compressDeflate(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
         const flate = std.compress.flate;
 
-        // Allocate output buffer - compressed size may be larger for incompressible data
-        // Even empty data needs at least 2 bytes for deflate end marker
-        const initial_capacity = @max(data.len, 64) + 1024;
+        // Allocate output buffer - compressed size may be larger for
+        // incompressible data: ~0.17% at level 6 (measured +7,079 B for 4 MiB),
+        // so `len + 1024` overflowed the fixed writer from ~600 KiB up. 1.5% +
+        // 1 KiB is ~9× that. Even empty data needs at least 2 bytes for the
+        // deflate end marker.
+        const initial_capacity = @max(data.len, 64) + data.len / 64 + 1024;
         var output_buf = try allocator.alloc(u8, initial_capacity);
         errdefer allocator.free(output_buf);
 

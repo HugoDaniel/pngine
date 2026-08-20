@@ -8,10 +8,10 @@
 }
 @fragment fn fs() -> @location(0) vec4<u32> { return vec4<u32>(1u); }
 """)
-(render-pipeline :name pipe (layout auto)
-  (vertex (module code) (entry vs))
-  (fragment (module code) (entry fs)
-    (targets (target :format rgba8unorm))))
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format rgba8unorm)))
 (render-pass :name draw :pipeline pipe
   (color-attachment :view context-current-texture
     :clear-value [0 0 0 1] :load-op clear :store-op store)

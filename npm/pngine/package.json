@@ -1,6 +1,6 @@
 {
   "name": "pngine",
-  "version": "2.2.0",
+  "version": "3.0.0",
   "description": "WebGPU spec mapped 1:1 to s-expressions that can be packed in a png",
   "type": "module",
   "scripts": {
@@ -14,7 +14,7 @@
   "license": "CC0-1.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/HugoDaniel/pngine"
+    "url": "git+https://github.com/HugoDaniel/pngine.git"
   },
   "homepage": "https://github.com/HugoDaniel/pngine",
   "main": "dist/index.cjs",
@@ -89,12 +89,12 @@
     "./schema/pngine.sjon": "./schema/pngine.sjon"
   },
   "optionalDependencies": {
-    "@pngine/darwin-arm64": "2.2.0",
-    "@pngine/darwin-x64": "2.2.0",
-    "@pngine/linux-x64": "2.2.0",
-    "@pngine/linux-arm64": "2.2.0",
-    "@pngine/win32-x64": "2.2.0",
-    "@pngine/win32-arm64": "2.2.0"
+    "@pngine/darwin-arm64": "3.0.0",
+    "@pngine/darwin-x64": "3.0.0",
+    "@pngine/linux-x64": "3.0.0",
+    "@pngine/linux-arm64": "3.0.0",
+    "@pngine/win32-x64": "3.0.0",
+    "@pngine/win32-arm64": "3.0.0"
   },
   "files": ["dist/", "bin/", "src/", "wasm/", "schema/", "README.md"],
   "keywords": [

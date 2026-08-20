@@ -117,7 +117,7 @@ PNG, instantiates the WASM, and connects it to WebGPU.
 
 ## SJON Example
 
-```
+```sjon
 (shader-module :name shader :code """
   @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
     var pos = array<vec2f, 3>(vec2f(0, 0.5), vec2f(-0.5, -0.5), vec2f(0.5, -0.5));
@@ -129,25 +129,33 @@ PNG, instantiates the WASM, and connects it to WebGPU.
   }
 """)
 
-(render-pipeline :name main
-  (layout auto)
-  (vertex (module shader) (entry vs))
-  (fragment (module shader) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+(render-pipeline :name pipe
+  :layout auto
+  (vertex :module shader :entry vs)
+  (fragment :module shader :entry fs
+    (target :format preferred-canvas-format)))
 
 (render-pass :name draw
   (color-attachment :view context-current-texture :load-op clear :store-op store)
-  :pipeline main
+  :pipeline pipe
   (draw :vertex-count 3))
 
 (frame :name main :perform [draw])
 ```
 
-This compiles to 505 bytes of bytecode. `.sjon` is validated against the
+This compiles to 517 bytes of bytecode. `.sjon` is validated against the
 WebGPU schema in [`schema/pngine.sjon`](schema/pngine.sjon); bare identifiers
-(`shader`, `main`) are cross-references resolved at compile time. The full
+(`shader`, `pipe`) are cross-references resolved at compile time. The full
 authoring reference is [`docs/sjon-reference.md`](docs/sjon-reference.md);
 [`examples/`](examples/README.md) holds over a hundred working programs.
+
+Writing SJON with an LLM agent? Give it [`docs/llms.txt`](docs/llms.txt): a
+compact reference with complete programs the test suite validates, at a URL it
+can fetch whole:
+
+```
+https://raw.githubusercontent.com/HugoDaniel/pngine/main/docs/llms.txt
+```
 
 ## CLI
 
@@ -244,6 +252,7 @@ journal section (`§N`).
 Reference docs:
 
 - [`docs/sjon-reference.md`](docs/sjon-reference.md) — every `.sjon` form
+- [`docs/llms.txt`](docs/llms.txt) — the compact reference for LLM agents; its programs run through `pngine validate` in `zig build drift`
 - [`docs/architecture.md`](docs/architecture.md) — compiler, bytecode, runtime pipeline
 - [`docs/abi.md`](docs/abi.md) — the frozen executor WASM↔JS ABI
 - [`docs/publishing.md`](docs/publishing.md) — npm package layout and publishing

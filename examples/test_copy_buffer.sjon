@@ -1,7 +1,7 @@
 ; test_copy_buffer — exercises copy-buffer-to-buffer, with the result read back
 ; in the same frame:
 ;
-;   srcBuf  seeded orange via :mapped-at-creation
+;   srcBuf  seeded orange via :data
 ;   queue   copy srcBuf → dstBuf
 ;   pass    fragment shader returns dstBuf, bound as a uniform
 ;
@@ -11,7 +11,7 @@
 (data :name orange :float32 [1 0.5 0 1])
 
 ; Source: seeded at creation, never written again.
-(buffer :name srcBuf :size 16 :usage [copy-src] :mapped-at-creation orange)
+(buffer :name srcBuf :size 16 :usage [copy-src] :data orange)
 
 ; Destination: written only by the copy, then read as a uniform.
 (buffer :name dstBuf :size 16 :usage [uniform copy-dst])
@@ -31,12 +31,12 @@
   """)
 
 (render-pipeline :name pipe
-  (layout auto)
-  (vertex (module code) (entry fullscreen))
-  (fragment (module code) (entry show)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module code :entry fullscreen)
+  (fragment :module code :entry show
+    (target :format preferred-canvas-format)))
 
-(bind-group :name bg :layout-pipeline pipe :layout-index 0
+(bind-group :name bg :layout pipe :group 0
   (entry :binding 0 :buffer dstBuf))
 
 (queue :name copySrcToDst

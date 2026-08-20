@@ -248,8 +248,8 @@ fn vertexFormatComponents(fmt: []const u8) u8 {
 /// classify identically, and a newly-added format is picked up here for free
 /// (rather than a parallel prefix table that could drift — `rgb10a2unorm`,
 /// `rg11b10ufloat`, `rgb9e5ufloat` all trap a naive `startsWith` matcher).
-/// `preferred-canvas-format` (the implied default when a target omits `:format`)
-/// resolves to a float canvas format; an unknown spelling maps to `.invalid` →
+/// `preferred-canvas-format` (the canvas's own format, the spelling pass-v1 writes
+/// for its canvas target) resolves to a float canvas format; an unknown spelling maps to `.invalid` →
 /// null. Pure. Used by the Emitter's `checkFragmentTargets` join.
 pub fn colorTargetFormatClass(fmt: []const u8) ?ScalarClass {
     return textureFormatClass(values.mapTextureFormat(fmt));

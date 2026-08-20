@@ -28,10 +28,10 @@ fn fs(@builtin(position) pos : vec4f) -> @location(0) vec4f {
 """)
 
 (render-pipeline :name pipe
-  (layout auto)
-  (vertex (module code) (entry vs))
-  (fragment (module code) (entry fs)
-    (targets (target :format preferred-canvas-format))))
+  :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
 
 (render-pass :name draw
   (color-attachment :view context-current-texture
