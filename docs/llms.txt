@@ -85,6 +85,10 @@ texture-binding storage-binding render-attachment`. At least one is required.
 **Passes & frames**
 - `(render-pass :name draw (color-attachment …) :pipeline pipe :bind-groups [g] (draw :vertex-count 3))`
 - `(compute-pass :name step :pipeline cp :bind-groups [g] (dispatch :workgroups [(ceil (/ N 64))]))`
+- Draw variants: `(draw-indexed :index-count N)` needs the pass's `:index-buffer`;
+  `(draw-indirect :buffer b)`, `(draw-indexed-indirect :buffer b)` and
+  `(dispatch-indirect :buffer b)` read GPU-written counts from a buffer with
+  `indirect` usage (`:offset` defaults to 0)
 - `(render-bundle :name rb …)`
 - `(queue :name q (write-buffer :buffer u :offset 0 :data pngine-inputs))`
 - `(frame :name main :init [setup] :before [q] :perform [step draw])`

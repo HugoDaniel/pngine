@@ -1,0 +1,252 @@
+; compute_subdivision - CPU seed mesh, GPU amplification, four stages in one file.
+;
+; The whole pipeline a modern renderer wants, written as data:
+;
+;   (data ...)         24 vertices of octahedron, typed out by hand below
+;        |             8 triangles, 72 floats, the only geometry the CPU knows
+;   (compute-pass)     subdivides each seed triangle into SUBDIV^2 and pushes
+;        |             every lattice point onto the unit sphere. Runs once.
+;   (vertex ...)       displaces the sphere with a travelling wave and builds
+;        |             the shading normal from the displaced surface itself
+;   (fragment ...)     lambert plus rim, tinted by which of the 8 seed faces
+;                      the fragment descends from
+;
+; 8 seed triangles become 512, and the 72 floats never grow: the subdivided
+; mesh is written by the GPU into a storage buffer the CPU never sees. The
+; vertex stage pulls from that buffer by @builtin(vertex_index), so there is no
+; vertex buffer and no attribute layout to keep in sync.
+;
+; SUBDIV is declared once. It sizes the mesh buffer, sets the dispatch, sets
+; the draw count, and reaches the shader as a pipeline-overridable constant, so
+; raising it to 16 changes one line and stays consistent everywhere.
+
+(define :name SUBDIV :value 8)                          ; lattice steps per seed edge
+(define :name SEED_TRIS :value 8)                       ; octahedron faces
+(define :name SUB_TRIS :value (* SUBDIV SUBDIV))        ; sub-triangles per seed face
+(define :name WG :value 64)
+
+; The CPU geometry: an octahedron, 3 floats per vertex, wound counter-clockwise
+; seen from outside. This is the entire mesh the payload carries.
+(data :name octahedron :float32 [
+   1  0  0    0  1  0    0  0  1
+   1  0  0    0  0 -1    0  1  0
+   1  0  0    0  0  1    0 -1  0
+   1  0  0    0 -1  0    0  0 -1
+  -1  0  0    0  0  1    0  1  0
+  -1  0  0    0  1  0    0  0 -1
+  -1  0  0    0 -1  0    0  0  1
+  -1  0  0    0  0 -1    0 -1  0
+])
+
+(buffer :name seed :usage [storage] :data octahedron)
+
+; The amplified mesh: one vec4f per vertex, xyz on the unit sphere and w
+; carrying the seed face it came from.
+(buffer :name mesh :usage [storage] :size (* SEED_TRIS SUB_TRIS 3 16))
+
+(buffer :name uniforms :usage [uniform copy-dst] :size 16)
+(queue :name writeInputs
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+(texture :name depth :size canvas :format depth24plus :usage [render-attachment])
+
+(shader-module :name subdivide :code """
+override SUBDIV : u32 = 8u;
+
+@group(0) @binding(0) var<storage, read> seed : array<f32>;
+@group(0) @binding(1) var<storage, read_write> mesh : array<vec4f>;
+
+fn seedVertex(i : u32) -> vec3f {
+  return vec3f(seed[i * 3u], seed[i * 3u + 1u], seed[i * 3u + 2u]);
+}
+
+// Barycentric lattice point (i, j) of the triangle abc, 0 <= j <= i <= SUBDIV.
+// Row 0 is the apex a, row SUBDIV is the edge bc.
+fn lattice(a : vec3f, b : vec3f, c : vec3f, i : u32, j : u32) -> vec3f {
+  let n = f32(SUBDIV);
+  let u = (f32(i) - f32(j)) / n;
+  let v = f32(j) / n;
+  return a * (1.0 - u - v) + b * u + c * v;
+}
+
+// Row r of the lattice holds 2r+1 sub-triangles: r+1 pointing the same way as
+// the seed face and r pointing against it. So sub-triangle s sits in row
+// floor(sqrt(s)), and the remainder picks which one.
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid : vec3u) {
+  let per = SUBDIV * SUBDIV;
+  let faces = arrayLength(&seed) / 9u;
+  if (gid.x >= faces * per) { return; }
+
+  let face = gid.x / per;
+  let s = gid.x % per;
+
+  // floor(sqrt(s)), corrected in both directions: f32 sqrt at a perfect square
+  // may land either side of the integer, and being one row off silently folds
+  // two sub-triangles onto each other.
+  var row = u32(sqrt(f32(s)));
+  if (row * row > s) { row -= 1u; }
+  if ((row + 1u) * (row + 1u) <= s) { row += 1u; }
+
+  let k = s - row * row;
+  let i = k >> 1u;
+  let flipped = (k & 1u) == 1u;
+
+  let a = seedVertex(face * 3u);
+  let b = seedVertex(face * 3u + 1u);
+  let c = seedVertex(face * 3u + 2u);
+
+  var p0 : vec3f;
+  var p1 : vec3f;
+  var p2 : vec3f;
+  if (flipped) {
+    p0 = lattice(a, b, c, row, i);
+    p1 = lattice(a, b, c, row + 1u, i + 1u);
+    p2 = lattice(a, b, c, row, i + 1u);
+  } else {
+    p0 = lattice(a, b, c, row, i);
+    p1 = lattice(a, b, c, row + 1u, i);
+    p2 = lattice(a, b, c, row + 1u, i + 1u);
+  }
+
+  // Pushing every lattice point onto the unit sphere is what turns 8 flat
+  // faces into a smooth surface. Winding survives it.
+  let o = gid.x * 3u;
+  let tag = f32(face);
+  mesh[o + 0u] = vec4f(normalize(p0), tag);
+  mesh[o + 1u] = vec4f(normalize(p1), tag);
+  mesh[o + 2u] = vec4f(normalize(p2), tag);
+}
+""")
+
+(compute-pipeline :name subdividePipe :layout auto
+  (compute :module subdivide :entry main
+    (constant :name SUBDIV :value SUBDIV)))
+
+(bind-group :name subdivideBG :layout subdividePipe :group 0
+  (entry :binding 0 :buffer seed)
+  (entry :binding 1 :buffer mesh))
+
+(compute-pass :name amplify :pipeline subdividePipe :bind-groups [subdivideBG]
+  (dispatch :workgroups [(ceil (/ (* SEED_TRIS SUB_TRIS) WG))]))
+
+(shader-module :name draw :code """
+struct Inputs { time : f32, width : f32, height : f32, aspect : f32 }
+
+@group(0) @binding(0) var<uniform> inputs : Inputs;
+@group(0) @binding(1) var<storage, read> mesh : array<vec4f>;
+
+// The travelling wave the vertex stage applies. Everything the surface does
+// lives in this one function, which is why the normal below can be exact.
+fn displace(n : vec3f, t : f32) -> vec3f {
+  let w = 0.13 * sin(n.x * 4.0 + t * 1.7)
+                * sin(n.y * 4.0 + t * 1.3)
+                * sin(n.z * 4.0 + t * 1.1)
+        + 0.05 * sin(n.y * 9.0 - t * 2.1);
+  return n * (1.0 + w);
+}
+
+fn perspective(fovy : f32, aspect : f32, near : f32, far : f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  return mat4x4f(
+    vec4f(f / aspect, 0, 0, 0),
+    vec4f(0, f, 0, 0),
+    vec4f(0, 0, far * nf, -1),
+    vec4f(0, 0, far * near * nf, 0));
+}
+
+struct VSOut {
+  @builtin(position) pos : vec4f,
+  @location(0) normal : vec3f,
+  @location(1) bary : vec3f,
+  @location(2) @interpolate(flat) face : u32,
+}
+
+@vertex
+fn vs(@builtin(vertex_index) vi : u32) -> VSOut {
+  let v = mesh[vi];
+  let n = v.xyz;
+  let t = inputs.time;
+
+  // The displaced normal, from two neighbours on the sphere pushed through the
+  // same displacement. A radial wave tilts the surface, and reusing n as the
+  // normal would light a sphere that is not there any more.
+  let axis = select(vec3f(0, 1, 0), vec3f(1, 0, 0), abs(n.y) > 0.9);
+  let t1 = normalize(cross(axis, n));
+  let t2 = cross(n, t1);
+  let e = 0.02;
+  let p = displace(n, t);
+  let pa = displace(normalize(n + t1 * e), t);
+  let pb = displace(normalize(n + t2 * e), t);
+  let nrm = normalize(cross(pa - p, pb - p));
+
+  let a = t * 0.35;
+  let ca = cos(a);
+  let sa = sin(a);
+  let spun = vec3f(p.x * ca + p.z * sa, p.y, p.z * ca - p.x * sa);
+  let spunN = vec3f(nrm.x * ca + nrm.z * sa, nrm.y, nrm.z * ca - nrm.x * sa);
+
+  let view = spun + vec3f(0, 0, -3.2);
+
+  var out : VSOut;
+  out.pos = perspective(1.1, inputs.aspect, 0.1, 20.0) * vec4f(view, 1.0);
+  out.normal = spunN;
+  // Every sub-triangle is 3 consecutive vertices, so the corner index is just
+  // vi % 3 and the barycentrics are free. The fragment stage draws the lattice
+  // with them, which is the whole point: you can count what the compute pass
+  // made.
+  let corner = vi % 3u;
+  out.bary = vec3f(f32(corner == 0u), f32(corner == 1u), f32(corner == 2u));
+  out.face = u32(v.w + 0.5);
+  return out;
+}
+
+const light = vec3f(0.48, 0.62, 0.62);
+
+// One hue per octahedron face, so the smooth surface still shows which of the
+// 8 hand-written triangles each patch grew out of.
+fn faceTint(face : u32) -> vec3f {
+  let h = f32(face) * 0.7853982;
+  let hue = 0.55 + 0.45 * vec3f(cos(h), cos(h - 2.0944), cos(h + 2.0944));
+  return mix(vec3f(0.82, 0.84, 0.9), hue, 0.5);
+}
+
+@fragment
+fn fs(in : VSOut) -> @location(0) vec4f {
+  let n = normalize(in.normal);
+  let diffuse = max(dot(n, light), 0.0);
+  let rim = pow(1.0 - abs(n.z), 3.0);
+  let base = faceTint(in.face);
+  var lit = base * (0.2 + 0.8 * diffuse) + vec3f(0.35, 0.45, 0.7) * rim * 0.8;
+
+  // Wireframe from the barycentrics: fwidth keeps the line one pixel wide
+  // wherever the triangle lands on screen.
+  let d = min(min(in.bary.x, in.bary.y), in.bary.z);
+  let edge = 1.0 - smoothstep(0.0, fwidth(d) * 1.5, d);
+  lit = mix(lit, lit * 0.25, edge * 0.55);
+
+  return vec4f(lit, 1.0);
+}
+""")
+
+(render-pipeline :name drawPipe :layout auto
+  (vertex :module draw :entry vs)
+  (fragment :module draw :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+(bind-group :name drawBG :layout drawPipe :group 0
+  (entry :binding 0 :buffer uniforms)
+  (entry :binding 1 :buffer mesh))
+
+(render-pass :name shade
+  (color-attachment :view context-current-texture
+    :clear-value [0.02 0.02 0.05 1] :load-op clear :store-op store)
+  (depth-stencil-attachment :view depth
+    :depth-clear-value 1 :depth-load-op clear :depth-store-op store)
+  :pipeline drawPipe :bind-groups [drawBG]
+  (draw :vertex-count (* SEED_TRIS SUB_TRIS 3)))
+
+(frame :name main :init [amplify] :before [writeInputs] :perform [shade])

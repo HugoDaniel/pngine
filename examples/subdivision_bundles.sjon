@@ -1,0 +1,302 @@
+; subdivision_bundles - the same amplified mesh, now drawn from pre-recorded
+; render bundles.
+;
+; compute_subdivision.sjon turns 8 hand-written triangles into 512 on the GPU
+; and draws them with an inline pipeline and draw call. This file keeps the
+; amplification and changes how the drawing is expressed: the pass declares no
+; pipeline and no draw at all. It replays two bundles.
+;
+;   (render-bundle solid)   pipeline + bind group + instanced draw, recorded
+;   (render-bundle halo)    a second pipeline over the SAME mesh buffer:
+;                           inflated along the normal, additive, depth-tested
+;                           but not depth-writing
+;   (render-pass ... :execute-bundles [solid halo])
+;
+; A bundle is a GPURenderBundle: a pipeline, its bound resources, its vertex
+; and index buffers and exactly one draw, recorded once and replayed by any
+; pass whose attachments match. WebGPU checks that match against
+; GPURenderPassLayout, which is where the three :color-formats /
+; :depth-stencil-format / :sample-count keys come from. The compiler checks the
+; same agreement between bundle, pipeline and pass at compile time, so a
+; mismatch is a diagnostic rather than a validation error at first frame.
+;
+; The two bundles share one storage buffer and disagree about everything else:
+; different pipelines, different blend state, different depth behaviour, their
+; own bind groups. That is the useful shape. A pass is a list of recorded
+; programs, not one program.
+
+(define :name SUBDIV :value 6)
+(define :name SEED_TRIS :value 8)
+(define :name SUB_TRIS :value (* SUBDIV SUBDIV))
+(define :name INSTANCES :value 12)
+(define :name WG :value 64)
+
+(data :name octahedron :float32 [
+   1  0  0    0  1  0    0  0  1
+   1  0  0    0  0 -1    0  1  0
+   1  0  0    0  0  1    0 -1  0
+   1  0  0    0 -1  0    0  0 -1
+  -1  0  0    0  0  1    0  1  0
+  -1  0  0    0  1  0    0  0 -1
+  -1  0  0    0 -1  0    0  0  1
+  -1  0  0    0  0 -1    0 -1  0
+])
+
+(buffer :name seed :usage [storage] :data octahedron)
+(buffer :name mesh :usage [storage] :size (* SEED_TRIS SUB_TRIS 3 16))
+(buffer :name uniforms :usage [uniform copy-dst] :size 16)
+
+(queue :name writeInputs
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+(texture :name depth :size canvas :format depth24plus :usage [render-attachment])
+
+(shader-module :name subdivide :code """
+override SUBDIV : u32 = 6u;
+
+@group(0) @binding(0) var<storage, read> seed : array<f32>;
+@group(0) @binding(1) var<storage, read_write> mesh : array<vec4f>;
+
+fn seedVertex(i : u32) -> vec3f {
+  return vec3f(seed[i * 3u], seed[i * 3u + 1u], seed[i * 3u + 2u]);
+}
+
+fn lattice(a : vec3f, b : vec3f, c : vec3f, i : u32, j : u32) -> vec3f {
+  let n = f32(SUBDIV);
+  let u = (f32(i) - f32(j)) / n;
+  let v = f32(j) / n;
+  return a * (1.0 - u - v) + b * u + c * v;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid : vec3u) {
+  let per = SUBDIV * SUBDIV;
+  let faces = arrayLength(&seed) / 9u;
+  if (gid.x >= faces * per) { return; }
+
+  let face = gid.x / per;
+  let s = gid.x % per;
+
+  var row = u32(sqrt(f32(s)));
+  if (row * row > s) { row -= 1u; }
+  if ((row + 1u) * (row + 1u) <= s) { row += 1u; }
+
+  let k = s - row * row;
+  let i = k >> 1u;
+  let flipped = (k & 1u) == 1u;
+
+  let a = seedVertex(face * 3u);
+  let b = seedVertex(face * 3u + 1u);
+  let c = seedVertex(face * 3u + 2u);
+
+  var p0 : vec3f;
+  var p1 : vec3f;
+  var p2 : vec3f;
+  if (flipped) {
+    p0 = lattice(a, b, c, row, i);
+    p1 = lattice(a, b, c, row + 1u, i + 1u);
+    p2 = lattice(a, b, c, row, i + 1u);
+  } else {
+    p0 = lattice(a, b, c, row, i);
+    p1 = lattice(a, b, c, row + 1u, i);
+    p2 = lattice(a, b, c, row + 1u, i + 1u);
+  }
+
+  let o = gid.x * 3u;
+  let tag = f32(face);
+  mesh[o + 0u] = vec4f(normalize(p0), tag);
+  mesh[o + 1u] = vec4f(normalize(p1), tag);
+  mesh[o + 2u] = vec4f(normalize(p2), tag);
+}
+""")
+
+(compute-pipeline :name subdividePipe :layout auto
+  (compute :module subdivide :entry main
+    (constant :name SUBDIV :value SUBDIV)))
+
+(bind-group :name subdivideBG :layout subdividePipe :group 0
+  (entry :binding 0 :buffer seed)
+  (entry :binding 1 :buffer mesh))
+
+(compute-pass :name amplify :pipeline subdividePipe :bind-groups [subdivideBG]
+  (dispatch :workgroups [(ceil (/ (* SEED_TRIS SUB_TRIS) WG))]))
+
+; Both pipelines read this module, through their own entry points. The surface
+; maths lives in one function, `place`, so the halo really is the same surface:
+; the shell would drift off the solid the moment the two copies disagreed.
+(shader-module :name draw :code """
+struct Inputs { time : f32, width : f32, height : f32, aspect : f32 }
+
+@group(0) @binding(0) var<uniform> inputs : Inputs;
+@group(0) @binding(1) var<storage, read> mesh : array<vec4f>;
+
+fn displace(n : vec3f, t : f32, seedPhase : f32) -> vec3f {
+  let w = 0.14 * sin(n.x * 3.0 + t * 1.6 + seedPhase)
+                * sin(n.y * 3.0 + t * 1.2 + seedPhase)
+        + 0.06 * sin(n.z * 7.0 - t * 2.0);
+  return n * (1.0 + w);
+}
+
+fn perspective(fovy : f32, aspect : f32, near : f32, far : f32) -> mat4x4f {
+  let f = 1.0 / tan(fovy * 0.5);
+  let nf = 1.0 / (near - far);
+  return mat4x4f(
+    vec4f(f / aspect, 0, 0, 0),
+    vec4f(0, f, 0, 0),
+    vec4f(0, 0, far * nf, -1),
+    vec4f(0, 0, far * near * nf, 0));
+}
+
+struct Placed {
+  world : vec3f,
+  normal : vec3f,
+}
+
+// Where instance `inst` puts the vertex `n` of the shared mesh at time `t`.
+// `inflate` pushes the vertex out along its own normal, which is the only
+// difference between the two bundles' geometry.
+fn place(n : vec3f, inst : u32, t : f32, inflate : f32) -> Placed {
+  let phase = f32(inst) * 2.399963;
+  let orbit = f32(inst) / f32(12u) * 6.2831853 + t * 0.25;
+  let ring = 1.55 + 0.25 * sin(t * 0.7 + phase);
+  let centre = vec3f(cos(orbit) * ring,
+                     sin(orbit * 2.0 + phase) * 0.42,
+                     sin(orbit) * ring);
+  let scale = 0.30 + 0.08 * sin(t * 1.1 + phase);
+
+  let axis = select(vec3f(0, 1, 0), vec3f(1, 0, 0), abs(n.y) > 0.9);
+  let t1 = normalize(cross(axis, n));
+  let t2 = cross(n, t1);
+  let e = 0.03;
+  let p = displace(n, t, phase);
+  let pa = displace(normalize(n + t1 * e), t, phase);
+  let pb = displace(normalize(n + t2 * e), t, phase);
+  let nrm = normalize(cross(pa - p, pb - p));
+
+  var out : Placed;
+  out.normal = nrm;
+  out.world = centre + (p + nrm * inflate) * scale;
+  return out;
+}
+
+struct VSOut {
+  @builtin(position) pos : vec4f,
+  @location(0) normal : vec3f,
+  @location(1) @interpolate(flat) face : u32,
+}
+
+fn run(vi : u32, inst : u32, inflate : f32) -> VSOut {
+  let v = mesh[vi];
+  let t = inputs.time;
+  let placed = place(v.xyz, inst, t, inflate);
+
+  let a = t * 0.2;
+  let ca = cos(a);
+  let sa = sin(a);
+  let w = placed.world;
+  let spun = vec3f(w.x * ca + w.z * sa, w.y, w.z * ca - w.x * sa);
+  let n = placed.normal;
+  let spunN = vec3f(n.x * ca + n.z * sa, n.y, n.z * ca - n.x * sa);
+
+  var out : VSOut;
+  out.pos = perspective(1.1, inputs.aspect, 0.1, 30.0)
+          * vec4f(spun + vec3f(0, 0, -4.4), 1.0);
+  out.normal = spunN;
+  out.face = u32(v.w + 0.5);
+  return out;
+}
+
+// Two entry points, one body. A pipeline picks its geometry by :entry, which is
+// what lets the two bundles disagree about the surface while sharing every line
+// of the maths that produces it.
+@vertex
+fn vsSolid(@builtin(vertex_index) vi : u32, @builtin(instance_index) inst : u32) -> VSOut {
+  return run(vi, inst, 0.0);
+}
+
+@vertex
+fn vsHalo(@builtin(vertex_index) vi : u32, @builtin(instance_index) inst : u32) -> VSOut {
+  return run(vi, inst, 0.07);
+}
+
+const light = vec3f(0.48, 0.62, 0.62);
+
+fn faceTint(face : u32) -> vec3f {
+  let h = f32(face) * 0.7853982;
+  let hue = 0.55 + 0.45 * vec3f(cos(h), cos(h - 2.0944), cos(h + 2.0944));
+  return mix(vec3f(0.8, 0.83, 0.9), hue, 0.45);
+}
+
+@fragment
+fn fsSolid(in : VSOut) -> @location(0) vec4f {
+  let n = normalize(in.normal);
+  let diffuse = max(dot(n, light), 0.0);
+  let base = faceTint(in.face);
+  return vec4f(base * (0.2 + 0.8 * diffuse), 1.0);
+}
+
+// The halo bundle's fragment stage: edge-on fragments glow, face-on ones fade
+// out, so the inflated copy reads as a shell around the solid rather than a
+// bigger solid.
+@fragment
+fn fsHalo(in : VSOut) -> @location(0) vec4f {
+  let n = normalize(in.normal);
+  let rim = pow(1.0 - abs(n.z), 2.5);
+  let tint = faceTint(in.face);
+  return vec4f(mix(vec3f(0.3, 0.5, 0.95), tint, 0.35) * rim * 1.35, 1.0);
+}
+""")
+
+(render-pipeline :name solidPipe :layout auto
+  (vertex :module draw :entry vsSolid)
+  (fragment :module draw :entry fsSolid
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+; Same module, the entry point that inflates along the normal, additive, and it
+; does not write depth: a shell over the solid, still occluded by anything in
+; front of it.
+(render-pipeline :name haloPipe :layout auto
+  (vertex :module draw :entry vsHalo)
+  (fragment :module draw :entry fsHalo
+    (target :format preferred-canvas-format
+      (blend
+        (color :src-factor one :dst-factor one :operation add)
+        (alpha :src-factor one :dst-factor one :operation add))))
+  (primitive :topology triangle-list :cull-mode back)
+  (depth-stencil :format depth24plus :depth-write-enabled false :depth-compare less))
+
+(bind-group :name solidBG :layout solidPipe :group 0
+  (entry :binding 0 :buffer uniforms)
+  (entry :binding 1 :buffer mesh))
+
+(bind-group :name haloBG :layout haloPipe :group 0
+  (entry :binding 0 :buffer uniforms)
+  (entry :binding 1 :buffer mesh))
+
+; The recorded programs. :color-formats, :depth-stencil-format and the default
+; :sample-count 1 are the layout every replaying pass has to match.
+(render-bundle :name solidBundle
+  :pipeline solidPipe
+  :color-formats [preferred-canvas-format]
+  :depth-stencil-format depth24plus
+  :bind-groups [solidBG]
+  (draw :vertex-count (* SEED_TRIS SUB_TRIS 3) :instance-count INSTANCES))
+
+(render-bundle :name haloBundle
+  :pipeline haloPipe
+  :color-formats [preferred-canvas-format]
+  :depth-stencil-format depth24plus
+  :bind-groups [haloBG]
+  (draw :vertex-count (* SEED_TRIS SUB_TRIS 3) :instance-count INSTANCES))
+
+; No :pipeline, no (draw ...). The pass is the replay list.
+(render-pass :name shade
+  (color-attachment :view context-current-texture
+    :clear-value [0.02 0.02 0.05 1] :load-op clear :store-op store)
+  (depth-stencil-attachment :view depth
+    :depth-clear-value 1 :depth-load-op clear :depth-store-op store)
+  :execute-bundles [solidBundle haloBundle])
+
+(frame :name main :init [amplify] :before [writeInputs] :perform [shade])

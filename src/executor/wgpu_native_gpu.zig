@@ -448,15 +448,28 @@ pub const Context = struct {
         }
         const adapter = adapter_result.adapter.?;
 
-        // Opportunistically enable depth-clip-control (mirrors gpu.js
-        // OPTIONAL_DEVICE_FEATURES): gate on adapter support, since requesting a
-        // feature the adapter lacks rejects the device request. It powers
-        // `(primitive :unclipped-depth true)`; inert for every other pipeline.
-        var required_features = [_]c.WGPUFeatureName{c.WGPUFeatureName_DepthClipControl};
+        // Opportunistically enable the optional features the corpus can use
+        // (mirrors gpu.js OPTIONAL_DEVICE_FEATURES). Each is gated on adapter
+        // support, since requesting a feature the adapter lacks rejects the
+        // device request outright; requesting an unused one is harmless.
+        //   depth-clip-control    powers `(primitive :unclipped-depth true)`
+        //   dual-source-blending  powers `enable dual_source_blending;` +
+        //                         @blend_src outputs + the src1* blend factors
+        const optional_features = [_]c.WGPUFeatureName{
+            c.WGPUFeatureName_DepthClipControl,
+            c.WGPUFeatureName_DualSourceBlending,
+        };
+        var required_features: [optional_features.len]c.WGPUFeatureName = undefined;
+        var feature_count: usize = 0;
+        for (optional_features) |feature| {
+            if (c.wgpuAdapterHasFeature(adapter, feature) == 0) continue;
+            required_features[feature_count] = feature;
+            feature_count += 1;
+        }
+        std.debug.assert(feature_count <= optional_features.len);
         var device_desc = std.mem.zeroes(c.WGPUDeviceDescriptor);
-        const want_depth_clip = c.wgpuAdapterHasFeature(adapter, c.WGPUFeatureName_DepthClipControl) != 0;
-        if (want_depth_clip) {
-            device_desc.requiredFeatureCount = required_features.len;
+        if (feature_count > 0) {
+            device_desc.requiredFeatureCount = feature_count;
             device_desc.requiredFeatures = &required_features;
         }
         // Install the uncaptured-error callback (Arc-3 §1.1) so a validation
@@ -1771,11 +1784,18 @@ pub const WgpuNativeGPU = struct {
         if (std.mem.eql(u8, name, "src-alpha-saturated")) return c.WGPUBlendFactor_SrcAlphaSaturated;
         if (std.mem.eql(u8, name, "constant")) return c.WGPUBlendFactor_Constant;
         if (std.mem.eql(u8, name, "one-minus-constant")) return c.WGPUBlendFactor_OneMinusConstant;
-        // The four dual-source src1* factors are absent from the vendored
-        // wgpu-native header until the vendor bump (ledgered by the native
-        // conformance gate, spec/05). Fail loud, don't blend-wrong silently:
-        // parse runs once per pipeline, so a per-occurrence print is fine, and
-        // `stub` reclassifies the render under --strict-native-stubs.
+        // The four dual-source src1* factors. They need the dual-source-blending
+        // device feature, requested opportunistically in init above; a shader
+        // using them also carries `enable dual_source_blending;`, which naga
+        // rejects outright when the device lacks the capability, so a pipeline
+        // never reaches here with the feature missing.
+        if (std.mem.eql(u8, name, "src1")) return c.WGPUBlendFactor_Src1;
+        if (std.mem.eql(u8, name, "one-minus-src1")) return c.WGPUBlendFactor_OneMinusSrc1;
+        if (std.mem.eql(u8, name, "src1-alpha")) return c.WGPUBlendFactor_Src1Alpha;
+        if (std.mem.eql(u8, name, "one-minus-src1-alpha")) return c.WGPUBlendFactor_OneMinusSrc1Alpha;
+        // Fail loud, don't blend-wrong silently: parse runs once per pipeline,
+        // so a per-occurrence print is fine, and `stub` reclassifies the render
+        // under --strict-native-stubs.
         std.debug.print("[native] unsupported blend-factor '{s}' — using one\n", .{name});
         stub.note("blend-factor (unsupported)");
         return c.WGPUBlendFactor_One;

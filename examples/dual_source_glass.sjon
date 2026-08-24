@@ -1,0 +1,182 @@
+; dual_source_glass - a fragment that adds light and absorbs light selectively,
+; in one draw, using the dual-source blending feature.
+;
+; Ordinary blending gives a fragment ONE source colour. The blend equation can
+; multiply the destination by it, or add it to the destination, but both terms
+; come out of that same value:
+;
+;   out = src * srcFactor + dst * dstFactor
+;
+; So a multiply blend can tint what is behind the glass, an additive blend can
+; put a highlight on it, and one draw cannot do both. Coloured glass wants both
+; at once: a red pane passes red and swallows blue, AND carries a white
+; specular highlight that is not red at all.
+;
+; WebGPU lets a fragment shader emit a SECOND colour at the same @location,
+; tagged @blend_src(1), which the blend state may then name as a factor. The
+; two terms become independent:
+;
+;   (color :src-factor one :dst-factor src1)
+;
+;     out.rgb = emission.rgb  +  dst.rgb * transmission.rgb
+;               ^ blend_src(0)             ^ blend_src(1), per channel
+;
+; Three discs, one draw, three instances, no sorting and no second pass. The
+; absorption is Beer-Lambert through each disc's thickness, so it is per
+; channel and per pixel, and where two discs overlap the destination is
+; multiplied by both transmissions. Multiplication commutes, so the tint of an
+; overlap does not depend on which disc was drawn first. The highlights do
+; depend on it, and should: a highlight drawn before a disc that covers it is
+; absorbed by that disc, which is what looking through two pieces of glass
+; does.
+;
+; Three pieces make this work and each lives somewhere different:
+;
+;   enable dual_source_blending;   a WGSL directive, first line of the module
+;   @blend_src(0) / @blend_src(1)  attributes on the fragment output struct
+;   :dst-factor src1               a field of the pipeline descriptor
+;
+; The runtime asks the adapter for the dual-source-blending feature whenever
+; the adapter reports it, so nothing has to be requested by hand. Leave the
+; enable out and the shader fails to parse, which is the useful failure: the
+; message names the directive.
+
+
+(buffer :name uniforms :usage [uniform copy-dst] :size 16)
+(queue :name writeInputs
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+; The thing being looked through: a hue sweep crossed by white bands. The white
+; bands read a pane's transmission directly, the sweep shows what it does to
+; every other colour.
+(shader-module :name backdrop :code """
+struct Inputs { time : f32, width : f32, height : f32, aspect : f32 }
+@group(0) @binding(0) var<uniform> inputs : Inputs;
+
+@vertex
+fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -3.0), vec2f(-1.0, 1.0), vec2f(3.0, 1.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+
+@fragment
+fn fs(@builtin(position) frag : vec4f) -> @location(0) vec4f {
+  let uv = frag.xy / vec2f(inputs.width, inputs.height);
+  let h = uv.x * 6.2831853 + inputs.time * 0.25;
+  let sweep = 0.5 + 0.5 * vec3f(cos(h), cos(h - 2.0944), cos(h + 2.0944));
+  let white = (u32(uv.y * 9.0) % 2u) == 1u;
+  return vec4f(select(sweep, vec3f(0.95), white), 1.0);
+}
+""")
+
+(shader-module :name glass :code """
+enable dual_source_blending;
+
+struct Inputs { time : f32, width : f32, height : f32, aspect : f32 }
+@group(0) @binding(0) var<uniform> inputs : Inputs;
+
+struct VSOut {
+  @builtin(position) pos : vec4f,
+  @location(0) local : vec2f,
+  @location(1) @interpolate(flat) pane : u32,
+}
+
+@vertex
+fn vs(@builtin(vertex_index) vi : u32, @builtin(instance_index) inst : u32) -> VSOut {
+  var quad = array<vec2f, 6>(
+    vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
+    vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0));
+
+  let phase = f32(inst) * 2.0943951;
+  let t = inputs.time;
+  let centre = vec2f(cos(t * 0.53 + phase), sin(t * 0.41 + phase)) * 0.34;
+  let radius = 0.5;
+
+  var out : VSOut;
+  out.pos = vec4f(centre + quad[vi] * vec2f(radius / inputs.aspect, radius), 0.0, 1.0);
+  out.local = quad[vi];
+  out.pane = inst;
+  return out;
+}
+
+// What each disc lets through, per channel, at full thickness. The red disc
+// passes 95% of red and 7% of blue, which is the whole demonstration.
+fn transmission(pane : u32) -> vec3f {
+  if (pane == 0u) { return vec3f(0.95, 0.13, 0.07); }
+  if (pane == 1u) { return vec3f(0.10, 0.93, 0.18); }
+  return vec3f(0.08, 0.20, 0.96);
+}
+
+// Two colours at one location. blend_src(0) is what the disc ADDS, blend_src(1)
+// is what it LETS THROUGH, and the pipeline's blend state below wires the
+// second one straight into the destination factor. They are independent, which
+// is the point: the highlight below is white while the absorption is coloured.
+struct Glass {
+  @location(0) @blend_src(0) emission : vec4f,
+  @location(0) @blend_src(1) transmission : vec4f,
+}
+
+const lightDir = vec3f(-0.42, 0.55, 0.72);
+
+@fragment
+fn fs(in : VSOut) -> Glass {
+  let d = length(in.local);
+  let inside = select(0.0, 1.0, d < 1.0);
+
+  // Read the disc as a sphere seen head on: the distance light travels through
+  // the glass is the chord, so the middle absorbs hard and the rim barely at
+  // all. It reaches zero exactly at d = 1, so outside the disc both outputs
+  // below are the blend's identity. No discard, no second draw.
+  let thickness = sqrt(max(1.0 - d * d, 0.0));
+  let tint = transmission(in.pane);
+
+  // Beer-Lambert. A zero exponent gives 1, so the rim transmits everything and
+  // the fade back to the untouched image needs no mask of its own.
+  let through = pow(tint, vec3f(thickness * 2.2));
+
+  // What the disc adds: a white specular highlight off the sphere normal, plus
+  // a tinted rim glow. A single-source blend cannot have this while `through`
+  // is also doing its job, because there would be one colour to spend on both.
+  let normal = vec3f(in.local, thickness);
+  let spec = pow(max(dot(normal, normalize(lightDir)), 0.0), 42.0);
+  let rim = pow(1.0 - thickness, 3.0);
+
+  var out : Glass;
+  out.emission = vec4f((vec3f(0.95) * spec + tint * rim * 0.28) * inside, 0.0);
+  out.transmission = vec4f(through, 1.0);
+  return out;
+}
+""")
+
+(render-pipeline :name backdropPipe :layout auto
+  (vertex :module backdrop :entry vs)
+  (fragment :module backdrop :entry fs
+    (target :format preferred-canvas-format)))
+
+(render-pipeline :name glassPipe :layout auto
+  (vertex :module glass :entry vs)
+  (fragment :module glass :entry fs
+    (target :format preferred-canvas-format
+      ; dst is multiplied by the fragment's SECOND output, channel by channel.
+      (blend
+        (color :src-factor one :dst-factor src1 :operation add)
+        (alpha :src-factor zero :dst-factor one :operation add)))))
+
+(bind-group :name backdropBG :layout backdropPipe :group 0
+  (entry :binding 0 :buffer uniforms))
+
+(bind-group :name glassBG :layout glassPipe :group 0
+  (entry :binding 0 :buffer uniforms))
+
+(render-pass :name paintBackdrop
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline backdropPipe :bind-groups [backdropBG]
+  (draw :vertex-count 3))
+
+(render-pass :name paintGlass
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  :pipeline glassPipe :bind-groups [glassBG]
+  (draw :vertex-count 6 :instance-count 3))
+
+(frame :name main :before [writeInputs] :perform [paintBackdrop paintGlass])

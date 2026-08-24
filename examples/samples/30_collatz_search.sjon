@@ -1,0 +1,134 @@
+; Collatz search. A program with nothing to draw: two compute passes and a
+; buffer copy, no render pass and no canvas. The GPU runs the Collatz sequence
+; for every starting number below 131072, a second pass reduces the 131072
+; results to a winner and a sum inside one workgroup, and a `(queue …)` copies
+; that result buffer into a `map-read` buffer, which is host memory the GPU may
+; only copy into. The browser runtime maps it after each submit and hands the
+; contents to the page through the `onQueryResult` option:
+;
+;   const p = await pngine(url, { canvas, onQueryResult: (lanes) => {
+;     const [bound, winner, steps, total] = lanes;
+;     hud.textContent = `${winner} takes ${steps} steps; mean ${total / bound}`;
+;   }});
+;
+; It prints 106239 / 353 / 110.30, which is checkable against the literature.
+; A payload cannot consume its own readback, so what to do with the answer is
+; the host page's job. The native `--frame` renderer runs both passes and the
+; copy but maps nothing, so it writes a fully transparent PNG: the picture is
+; empty because the program never had a picture.
+;
+; SEARCH_MAX stops at 131072 because WGSL has no 64-bit integer type: 159487's
+; sequence climbs past 2^32 and would wrap silently in `u32`. Every start below
+; 131072 peaks at 2482111348, which still fits.
+;
+; The reduction packs each candidate into one `u32` as `(steps << 20) | n`, so
+; a plain `max` finds the longest sequence and carries the number that produced
+; it. n needs 17 bits and steps needs 9, so both fit either side of the split.
+;
+; SEARCH_MAX sizes the buffer only; `(define …)` values never reach WGSL, so
+; each shader restates the bound as a local `const`. Keep them in step.
+
+(define :name SEARCH_MAX :value 131072)
+
+; steps[n] is the number of Collatz steps n takes to reach 1.
+(buffer :name steps :size (* SEARCH_MAX 4) :usage [storage])
+
+; Four 64-bit lanes: search bound, winning number, its step count, total steps.
+(buffer :name result :size 32 :usage [storage copy-src])
+
+; The readback: `map-read` pairs with `copy-dst` and nothing else.
+(buffer :name readback :size 32 :usage [map-read copy-dst])
+
+(shader-module :name climbModule :code """
+const SEARCH_MAX: u32 = 131072u;
+
+@group(0) @binding(0) var<storage, read_write> steps: array<u32>;
+
+// One thread per starting number. 0 and 1 are defined to take no steps.
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+  let n = gid.x;
+  if (n >= SEARCH_MAX) { return; }
+
+  var v = n;
+  var count = 0u;
+  // The longest sequence under SEARCH_MAX is 353 steps, so 1024 is a ceiling
+  // no start reaches. It is here so a thread cannot loop forever on a GPU
+  // with no way to interrupt it.
+  for (var i = 0u; i < 1024u; i += 1u) {
+    if (v <= 1u) { break; }
+    if ((v & 1u) == 0u) { v = v >> 1u; } else { v = 3u * v + 1u; }
+    count += 1u;
+  }
+  steps[n] = count;
+}
+""")
+
+(shader-module :name foldModule :code """
+const SEARCH_MAX: u32 = 131072u;
+const THREADS: u32 = 256u;
+
+@group(0) @binding(0) var<storage, read> steps: array<u32>;
+@group(0) @binding(1) var<storage, read_write> result: array<vec2u>;
+
+var<workgroup> best: array<u32, 256>;
+var<workgroup> total: array<u32, 256>;
+
+// A single workgroup reduces the whole array: each thread strides across it,
+// then the 256 partial answers collapse pairwise in log2(256) = 8 rounds.
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) lid: vec3u) {
+  var b = 0u;
+  var t = 0u;
+  for (var n = lid.x; n < SEARCH_MAX; n += THREADS) {
+    let s = steps[n];
+    t += s;
+    b = max(b, (s << 20u) | n);
+  }
+  best[lid.x] = b;
+  total[lid.x] = t;
+  workgroupBarrier();
+
+  for (var stride = THREADS / 2u; stride > 0u; stride = stride >> 1u) {
+    if (lid.x < stride) {
+      best[lid.x] = max(best[lid.x], best[lid.x + stride]);
+      total[lid.x] = total[lid.x] + total[lid.x + stride];
+    }
+    workgroupBarrier();
+  }
+
+  // The readback channel is 64 bits wide per lane, so each answer goes in the
+  // low half of a vec2u and the high half stays zero.
+  if (lid.x == 0u) {
+    result[0] = vec2u(SEARCH_MAX, 0u);
+    result[1] = vec2u(best[0] & 0xFFFFFu, 0u);
+    result[2] = vec2u(best[0] >> 20u, 0u);
+    result[3] = vec2u(total[0], 0u);
+  }
+}
+""")
+
+(compute-pipeline :name climbPipeline :layout auto
+  (compute :module climbModule :entry main))
+
+(compute-pipeline :name foldPipeline :layout auto
+  (compute :module foldModule :entry main))
+
+(bind-group :name climbBindGroup :layout climbPipeline :group 0
+  (entry :binding 0 :buffer steps))
+
+(bind-group :name foldBindGroup :layout foldPipeline :group 0
+  (entry :binding 0 :buffer steps)
+  (entry :binding 1 :buffer result))
+
+(compute-pass :name climb :pipeline climbPipeline :bind-groups [climbBindGroup]
+  (dispatch :workgroups [(ceil (/ SEARCH_MAX 64))]))
+
+(compute-pass :name fold :pipeline foldPipeline :bind-groups [foldBindGroup]
+  (dispatch :workgroups [1]))
+
+(queue :name readOut
+  (copy-buffer-to-buffer :source result :source-offset 0
+    :destination readback :destination-offset 0 :size 32))
+
+(frame :name main :perform [climb fold readOut])

@@ -35,8 +35,8 @@
   (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
 
 ; One-shot seed of the per-instance buffer: `:workgroups [1]` dispatches
-; (1,1,1) — the missing y/z default to 1 — and one 64-thread workgroup covers
-; all 64 sprites.
+; (1,1,1), the missing y/z default to 1. One 64-thread workgroup covers all
+; 64 sprites.
 (init :name initSprites :buffer instanceBuffer :module initShader :workgroups [1])
 
 (shader-module :name initShader :code """

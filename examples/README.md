@@ -28,9 +28,11 @@ exercises. Read that header first — it is more specific than this index.
 | **Fullscreen fragment** | `circle_avalanche`, `domino_cascade`, `tower_explosion`, `pngine_logo`, `pristine_grid` |
 | **`(pass …)` sugar** | `pass_shader_art`, `pass_bloom`, `pass_postprocess`, `pass_compute_rainbow`, `pass_pointer` |
 | **Compute / simulation** | `boids`, `boids_init_only`, `pngine_background`, `test_compute_dispatch`, `test_init_compute`, `test_storage_buffer`, `test_boids_render` (and the `boids_*` triangles below) |
-| **Meshes** | `teapot` (Utah teapot), `dragon` (Stanford dragon, ~222 KB payload), `textured_rotating_cube`, `wasm_rotated_cube`, `normal_map`, `cubemap` |
+| **Meshes** | `teapot` (Utah teapot), `dragon` (Stanford dragon, ~222 KB payload), `textured_rotating_cube`, `wasm_rotated_cube`, `normal_map`, `cubemap`, `compute_subdivision` (a hand-written octahedron subdivided on the GPU, then displaced in the vertex stage) |
 | **Textures & samplers** | `texture_options`, `texture_view`, `sampler_options`, `image_blur`, `test_cube_view` (a `2d-array` storage view, then a cube view), `test_copy_buffer`, `test_copy_texture` |
 | **Depth, stencil & MSAA** | `test_stencil`, `test_stencil_back`, `test_depth_clear` (depth/stencil clear values), `reversed_z` (reversed-Z depth, a webgpu-samples port), `alpha_to_coverage` (alpha-to-coverage vs blending in one 4x MSAA attachment) |
+| **Blending** | `dual_source_glass` (`@blend_src` plus the `src1` blend factor: per-channel absorption and an independent highlight in one draw, needs the dual-source-blending feature) |
+| **Render bundles** | `subdivision_bundles` (two pre-recorded bundles over one storage buffer, replayed by a pass that declares no pipeline of its own) |
 | **WASM data buffers** | `test_data_pass`, `test_wasm_data` (+ `test_data.wat` / `.wasm` sources) |
 | **WebGPU sample ports** | `webgpu_*` — ports of the upstream [webgpu-samples](https://webgpu.github.io/webgpu-samples/) gallery, plus a few focused feature programs in the same style |
 
@@ -48,7 +50,7 @@ shaders, not simulations.
 
 | Directory | What it is |
 |-----------|-----------|
-| `samples/` | A numbered series of small programs (`01_`–`29_`): gradient background, plasma, sprite rendering, lighting, skybox, game of life, fluid, wave simulation, … |
+| `samples/` | A numbered series of small programs (`01_`–`30_`): gradient background, plasma, sprite rendering, lighting, skybox, game of life, fluid, wave simulation, and `30_collatz_search`, which has no render pass at all. |
 | `invalid/` | Programs that **must** fail `pngine validate` — one per rejected condition. |
 | `assets/` | Shared binary assets (textures, `.wasm` data modules, video). |
 | `vite-basic/` | Minimal Vite app consuming the npm runtime. |

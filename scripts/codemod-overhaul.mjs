@@ -283,11 +283,22 @@ function dedent(text, n) {
 
 /// Heads whose positional-atom children become keys, by parent head.
 /// `(vertex (module code) (entry vsMain) …)` → `(vertex :module code :entry vsMain …)`
+///
+/// The two pipeline heads were missing until 2026-08-20, which made this
+/// script's `--check` lie to a consumer: `layout` sat in RETIRED_FORM_HEADS
+/// (below) but that list only asserts the SCHEMA dropped the form, and it is
+/// skipped when `schema/pngine.sjon` is absent — i.e. in exactly the corpus a
+/// consumer runs this over. pngine's own examples were clean because the
+/// schema cuts rewrote them, not because a rule here fired. pstudio's
+/// migration found four documents still carrying `(layout auto)` after
+/// `--check` reported a clean corpus.
 const ATOM_FORM_TO_KEY = {
   vertex: ['module', 'entry'],
   fragment: ['module', 'entry'],
   compute: ['module', 'entry'],
   primitive: ['topology'],
+  'render-pipeline': ['layout'],
+  'compute-pipeline': ['layout'],
 };
 
 /// Wrappers that R3 drops: the children splice into the parent in place.
@@ -389,7 +400,13 @@ export function rewrite(src, groups = GROUPS) {
         e.deleteWithGap(child, nodeEnd(form.items[idx - 1]), `${head}/(${key} …)→:${key}`);
       }
       if (moved.length) {
-        const at = nodeEnd(form.items[0]);
+        // After the head — or after a leading `:name …`, so a pipeline reads
+        // `(render-pipeline :name p :layout auto …)` the way every corpus
+        // document writes it. The four stage forms that had this rule before
+        // carry no `:name` (they are GPUProgrammableStage/GPUPrimitiveState),
+        // so for them this is the same offset it always was.
+        const named = kvOf(form, 'name');
+        const at = named?.value ? nodeEnd(named.value) : nodeEnd(form.items[0]);
         e.splice(at, at, moved.map((m) => ` :${m.key} ${m.text}`).join(''), `${head}/keys`);
       }
     }

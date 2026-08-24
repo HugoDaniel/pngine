@@ -13,6 +13,18 @@ identifiers are cross-references the validator resolves document-wide.
 See `schema/pngine.sjon` for the authoritative vocabulary and `examples/*.sjon`
 for worked programs (`simple_triangle`, `moving_triangle`, `boids`).
 
+The vocabulary is WebGPU's, re-spelled: a form is a descriptor
+(`GPUBufferDescriptor` is `(buffer …)`), a key is one of its members (`size`
+is `:size`, `frontFace` is `:front-face`), a symbol value is an enum string or
+a flag constant (`GPUBufferUsage.COPY_DST` is `copy-dst`). Which kind spells
+which enum, which form mirrors which dictionary, which keys are PNGine's own
+(`:name`, `:pool`, `:file`, …) and which spec values the engine leaves out is
+declared in `schema/webgpu-mapping.mjs`, and `tests/npm/webgpu-conformance.test.js`
+holds that map against the IDL snapshot in `schema/webgpu-enums.json`, so the
+answer to "where does this word come from" is a lookup, not a guess. The docs
+site generates a per-key table from the same files at the end of every form's
+page.
+
 ```sjon
 ; Named constant → collected into the emitter's expression env.
 (define :name NUM :value 2048)
@@ -312,32 +324,8 @@ pass writes the indices itself, declare the format explicitly with
 ```
 
 See `examples/webgpu_marching_cubes.sjon` for a full per-frame GPU meshing
-pipeline built on both.
-
-**Non-indexed indirect draws + indirect dispatch**: the draw/dispatch count can
-also come from a GPU-written argument buffer without an index buffer.
-`(draw-indirect :buffer :offset)` reads a `GPUDrawIndirectArgs` (4×u32:
-vertexCount, instanceCount, firstVertex, firstInstance); a compute pass's
-`(dispatch-indirect :buffer :offset)` reads a `GPUDispatchIndirectArgs` (3×u32)
-instead of the literal counts a `(dispatch …)` carries. Same two keys either
-way, and both are commands, so a pass may issue several.
-
-```sjon
-(buffer :name drawArgs     :size 16 :usage [storage indirect])   ; 4×u32
-(buffer :name dispatchArgs :size 12 :usage [storage indirect])   ; 3×u32
-
-(render-pass :name draw
-  ; …
-  (draw-indirect :buffer drawArgs))          ; :offset defaults to 0
-
-(compute-pass :name step :pipeline cp :bind-groups [g]
-  (dispatch-indirect :buffer dispatchArgs))           ; :offset defaults to 0
-```
-
-See `examples/webgpu_indirect_draw.sjon` and `webgpu_indirect_dispatch.sjon`
-(a seed compute pass writes the args, the indirect pass reads them). All three
-indirect forms execute on the viewer, `--html`, and native tiers; the `mini`
-(pNGf) tier refuses them at write.
+pipeline built on both. The argument-buffer forms themselves (all three of
+them) are covered in the Indirect Draws and Dispatch section below.
 
 **Format specifiers**: `position3`, `position4`, `normal3`, `color3`, `color4`,
 `uv2`. For indexed meshes, UVs are computed via XY-plane projection if `uv2` is
@@ -943,9 +931,11 @@ output, so keeping the 4× buffer costs bandwidth for nothing. See
 
 ### Draw Calls
 
-`(draw …)` and `(draw-indexed …)` are positional children of a
-`(render-pass …)`. Beyond the required count, every key defaults the WebGPU way
-and is emitted only when authored:
+A render pass draws through four heads: `(draw …)`, `(draw-indexed …)`, and
+their indirect twins `(draw-indirect …)` / `(draw-indexed-indirect …)` (next
+section). All four are positional children of the `(render-pass …)`. For the
+direct pair, beyond the required count every key defaults the WebGPU way and
+is emitted only when authored:
 
 ```sjon
 (render-pass :name draw
@@ -962,6 +952,9 @@ and is emitted only when authored:
   `:first-index` (an offset **in indices**), `:base-vertex` (added to each index
   before vertex lookup; signed), `:first-instance`. It needs the pass's
   `:index-buffer`.
+- `(draw-indirect …)` / `(draw-indexed-indirect …)`: no counts in the document
+  at all; `:buffer` and `:offset` name GPU-written arguments instead. See the
+  next section.
 
 Instancing reads per-instance attributes from a vertex buffer declared
 `:step-mode instance` — see the Vertex Input Layout section above.
@@ -983,6 +976,42 @@ count as draws and take their place in the same order.
 PNGine used to emit exactly one draw per pass, chosen by a fixed priority over
 the four draw heads rather than by document order, so the second and later ones
 were dropped in silence. See `examples/test_multi_draw.sjon`.
+
+### Indirect Draws and Dispatch
+
+The draw or dispatch counts can come from a GPU-written argument buffer
+instead of the document, which lets a compute pass decide how much geometry
+the frame draws. `(draw-indirect :buffer :offset)` reads a
+`GPUDrawIndirectArgs` (4×u32: vertexCount, instanceCount, firstVertex,
+firstInstance); `(draw-indexed-indirect :buffer :offset)` reads a
+`GPUDrawIndexedIndirectArgs` (5×u32) and needs the pass's `:index-buffer`; a
+compute pass's `(dispatch-indirect :buffer :offset)` reads a
+`GPUDispatchIndirectArgs` (3×u32) instead of the literal counts a
+`(dispatch …)` carries. The same two keys every time: `:buffer` names a buffer
+with `indirect` usage, and `:offset` (default 0) is a byte offset that WebGPU
+requires to be a multiple of 4. All three are commands like their direct
+counterparts, so a pass may issue several, and render bundles admit the draw
+pair too.
+
+```sjon
+(buffer :name drawArgs     :size 16 :usage [storage indirect])   ; 4×u32
+(buffer :name dispatchArgs :size 12 :usage [storage indirect])   ; 3×u32
+
+(render-pass :name draw
+  ; …
+  (draw-indirect :buffer drawArgs))          ; :offset defaults to 0
+
+(compute-pass :name step :pipeline cp :bind-groups [g]
+  (dispatch-indirect :buffer dispatchArgs))           ; :offset defaults to 0
+```
+
+See `examples/webgpu_indirect_draw.sjon` and `webgpu_indirect_dispatch.sjon`
+(a seed compute pass writes the args, the indirect pass reads them), and
+`examples/webgpu_marching_cubes.sjon` for the pattern at scale: its compute
+pipeline counts the indices it emitted and writes the argument buffer a
+`(draw-indexed-indirect …)` then reads, every frame. All three indirect forms
+execute on the viewer, `--html`, and native tiers; the `mini` (pNGf) tier
+refuses them at write.
 
 ### Viewport, Scissor and Render Bundles
 

@@ -386,6 +386,15 @@ export const extractBytecode = browserOnly;
   fs.writeFileSync(path.join(DIST_DIR, 'index.mjs'), nodeStubEsm);
 }
 
+// Every block below is a TEMPLATE LITERAL, so a backtick inside a doc comment
+// ends the string and the script dies with a SyntaxError somewhere further
+// down. Escape it (\`map-read\`), the way the getStats doc already does.
+//
+// These interfaces are the published API surface for TypeScript callers, and
+// the only thing keeping them honest is reading the runtime: an option missing
+// here is an option an object literal cannot pass, because excess-property
+// checks reject it. The authoritative list is the JSDoc on
+// src/viewer-init.js and src/init.js, which share src/init-core.js.
 function writeTypeDefs() {
   console.log('6. Creating TypeScript definitions...');
 
@@ -448,11 +457,36 @@ export interface ViewerOptions {
   canvas: HTMLCanvasElement;
   debug?: boolean;
   dpr?: number;
+  /**
+   * Leave the canvas CSS size to the page and keep the backing store synced to
+   * its rendered size (responsive). Off by default (fixed size); a DPR change
+   * re-sharpens the backing store either way.
+   */
+  autoResize?: boolean;
+  /**
+   * REJECTED at runtime, and declared here deliberately. The viewer throws
+   * Error("viewer pngine() does not support wasmUrl; use embedded executor
+   * payloads"). A caller moving over from pngine/dev needs that message, not an
+   * excess-property error from their bundler, so the rejection is part of this
+   * interface rather than hidden from it.
+   */
+  wasmUrl?: string | URL;
   onError?: (error: Error) => void;
+  /**
+   * Receives the contents of every \`map-read\` buffer the frame copies into,
+   * once per submit, as one number per 64-bit lane. The path was written for
+   * timestamp and occlusion query results, which are 64-bit; a compute readback
+   * has to write 64-bit lanes, \`vec2u(value, 0u)\`, to survive it.
+   */
+  onQueryResult?: (values: number[]) => void;
 }
 
 export function pngine(
-  source: ArrayBuffer | Uint8Array | Blob | string,
+  // HTMLImageElement is in the union for the reason wasmUrl is in the options:
+  // the viewer rejects it at runtime with a message naming pngine/dev, and that
+  // message is more use to a caller than a compile error. A CSS-selector string
+  // is rejected the same way and needs no arm of its own, being a string.
+  source: ArrayBuffer | Uint8Array | Blob | string | HTMLImageElement,
   options: ViewerOptions
 ): Promise<PngineInstance>;
 ${sharedTypes}
@@ -463,8 +497,21 @@ export interface DevOptions {
   canvas?: HTMLCanvasElement;
   debug?: boolean;
   dpr?: number;
+  /**
+   * Leave the canvas CSS size to the page and keep the backing store synced to
+   * its rendered size (responsive). Off by default (fixed size); a DPR change
+   * re-sharpens the backing store either way.
+   */
+  autoResize?: boolean;
   wasmUrl?: string | URL;
   onError?: (error: Error) => void;
+  /**
+   * Receives the contents of every \`map-read\` buffer the frame copies into,
+   * once per submit, as one number per 64-bit lane. The path was written for
+   * timestamp and occlusion query results, which are 64-bit; a compute readback
+   * has to write 64-bit lanes, \`vec2u(value, 0u)\`, to survive it.
+   */
+  onQueryResult?: (values: number[]) => void;
 }
 
 export function pngine(
@@ -622,6 +669,12 @@ export function getExecutorVariantName(plugins: PayloadInfo['plugins']): string;
   const miniTypes = `
 export interface MiniOptions {
   autoplay?: boolean;
+  /**
+   * Runtime faults after the promise resolves (an undecodable opcode mid-frame,
+   * a WebGPU validation error, device loss). Setup failures reject instead.
+   * Without a handler they are console.error'd.
+   */
+  onError?: (error: Error) => void;
 }
 
 export interface MiniInstance {

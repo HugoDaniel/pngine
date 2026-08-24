@@ -28,6 +28,10 @@ let workerUrl = null;
  * @param {(err: Error) => void} [options.onError] - Receives worker errors,
  *   WGSL compilation errors (name "PngineShaderError", with lineNum/linePos/context),
  *   and WebGPU uncaptured errors (name "PngineGPUError")
+ * @param {(values: number[]) => void} [options.onQueryResult] - Receives the
+ *   contents of every `map-read` buffer the frame copies into, once per submit,
+ *   as one number per 64-bit lane. Written for timestamp and occlusion query
+ *   results; a compute readback has to write 64-bit lanes to survive it.
  * @returns {Promise<Pngine>}
  */
 export async function pngine(source, options = {}) {

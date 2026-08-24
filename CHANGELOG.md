@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [3.0.1] - 2026-08-24
+
+A patch on the published type declarations, the native backend's blend
+factors and the migration tool, plus four samples and the vocabulary map the
+documentation site now reads.
+
+### Added
+
+- `schema/webgpu-mapping.mjs` ships: the map from every schema value-kind to
+  the WebGPU enum or flag namespace it spells, from every mirrored form to its
+  dictionary, with the keys that are PNGine's own and the spec values the
+  engine leaves out. It lived inside the conformance test, which the release
+  cut strips. The documentation site generates the "Where these words come
+  from" table at the end of every reference page from it.
+- Native `--frame` renders dual-source blending: the four `src1*` blend
+  factors are honoured, and `dual-source-blending` is requested from an
+  adapter that has it. The native ledger of unsupported blend factors is
+  empty, and the conformance gate keeps it that way.
+- Four samples: `compute_subdivision` (a 24-vertex octahedron amplified to
+  512 triangles by a compute pass and drawn by `vertex_index` out of the
+  storage buffer), `subdivision_bundles` (the same mesh drawn from two
+  `(render-bundle …)` forms through `:execute-bundles` alone),
+  `dual_source_glass` (three coloured panes in one unsorted draw, each with
+  its own transmission and highlight) and `30_collatz_search` (two compute
+  passes and a copy, no render pass, the result read back through a
+  `map-read` buffer).
+
+### Fixed
+
+- The published type declarations were missing options the runtime reads:
+  `autoResize` and `onQueryResult` on `ViewerOptions` and `DevOptions`,
+  `onError` on `MiniOptions`. A typed caller could not pass an option the
+  documentation told it to pass.
+- `ViewerOptions` declares `wasmUrl`, and the viewer's source union includes
+  `HTMLImageElement`, so the two inputs `pngine/viewer` rejects on purpose
+  reach the runtime's named error instead of a compile error at the call site.
+- `scripts/codemod-overhaul.mjs` rewrites the positional `(layout auto)` to
+  `:layout auto`, the one 3.0.0 spelling change it did not migrate; `--check`
+  had reported such a document as already migrated.
+
+### Changed
+
+- `docs/sjon-reference.md` documents the indirect draw and dispatch forms
+  under their own heading, and states the spelling rule that maps the
+  vocabulary onto WebGPU's.
+
 ## [3.0.0] - 2026-08-19
 
 The WebGPU IDL becomes binding, and `tests/npm/webgpu-conformance.test.js`

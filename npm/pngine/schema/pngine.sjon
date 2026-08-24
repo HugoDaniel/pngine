@@ -1073,7 +1073,7 @@
   ; The element is `count` — a literal, a bounded expression, or a bare
   ; `(define …)` name — since 3.0.0 (`[WG 1 1]` works; it used to
   ; be `count-value`, literals and expressions only, because the element
-  ; reader resolved no symbols, §307).
+  ; reader resolved no symbols).
   (value-kind :name dispatch-size
     :description "Compute dispatch in workgroups as [x], [x y] or [x y z]; the missing dimensions default to 1. Elements are literals, expressions, or (define …) names."
     :underlying vector :vector (vector-shape :element count :min-len 1 :max-len 3))
