@@ -17,7 +17,6 @@
 //! - Call IDs are used to correlate call results with buffer writes
 
 const std = @import("std");
-const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
 const bytecode_mod = @import("bytecode");
@@ -46,15 +45,12 @@ pub fn handle(
     comptime Self: type,
     self: *Self,
     op: OpCode,
-    allocator: Allocator,
+    gpa: Allocator,
 ) !bool {
-    // Pre-condition: valid opcode for this handler
-    assert(is_wasm_opcode(op));
-
     switch (op) {
         .init_wasm_module => {
             const p = try wire.readOperands(wire.layoutOf(.init_wasm_module), self);
-            try self.backend.init_wasm_module(allocator, try wire.narrowU16(p.v0), try wire.narrowU16(p.v1));
+            try self.backend.init_wasm_module(gpa, try wire.narrowU16(p.v0), try wire.narrowU16(p.v1));
         },
 
         .call_wasm_func => {
@@ -94,7 +90,7 @@ pub fn handle(
             }
 
             try self.backend.call_wasm_func(
-                allocator,
+                gpa,
                 try wire.narrowU16(call_id),
                 try wire.narrowU16(module_id),
                 try wire.narrowU16(func_name_id),
@@ -104,22 +100,11 @@ pub fn handle(
 
         .write_buffer_from_wasm => {
             const p = try wire.readOperands(wire.layoutOf(.write_buffer_from_wasm), self);
-            try self.backend.write_buffer_from_wasm(allocator, try wire.narrowU16(p.v0), try wire.narrowU16(p.v1), p.v2, p.v3);
+            try self.backend.write_buffer_from_wasm(gpa, try wire.narrowU16(p.v0), try wire.narrowU16(p.v1), p.v2, p.v3);
         },
 
         else => return false,
     }
 
     return true;
-}
-
-/// Check if opcode is a WASM operation opcode.
-pub fn is_wasm_opcode(op: OpCode) bool {
-    return switch (op) {
-        .init_wasm_module,
-        .call_wasm_func,
-        .write_buffer_from_wasm,
-        => true,
-        else => false,
-    };
 }

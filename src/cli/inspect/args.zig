@@ -2,6 +2,7 @@
 //! (phase / symptom / size / frame-index list). Consumed by inspect.zig.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const types = @import("types.zig");
 const Phase = types.Phase;
 const Symptom = types.Symptom;
@@ -39,7 +40,7 @@ pub fn parseSize(s: []const u8) ?[2]u32 {
 /// the command line).
 ///
 /// Post-condition: Returns owned slice with 1..100 frame indices (caller must free)
-pub fn parseFrameIndices(allocator: std.mem.Allocator, s: []const u8) ![]u32 {
+pub fn parseFrameIndices(gpa: Allocator, s: []const u8) ![]u32 {
     if (s.len == 0 or s.len >= 1000) return error.InvalidFormat;
 
     // Count commas to estimate capacity (avoids reallocation)
@@ -48,8 +49,8 @@ pub fn parseFrameIndices(allocator: std.mem.Allocator, s: []const u8) ![]u32 {
         if (c == ',') comma_count += 1;
     }
 
-    var indices = try allocator.alloc(u32, comma_count + 1);
-    errdefer allocator.free(indices);
+    var indices = try gpa.alloc(u32, comma_count + 1);
+    errdefer gpa.free(indices);
 
     var idx: u32 = 0;
     var start: u32 = 0;
@@ -77,7 +78,7 @@ pub fn parseFrameIndices(allocator: std.mem.Allocator, s: []const u8) ![]u32 {
 
     // Shrink to actual size
     if (idx < indices.len) {
-        const result = try allocator.realloc(indices, idx);
+        const result = try gpa.realloc(indices, idx);
         // Post-condition: bounded result
         std.debug.assert(result.len > 0 and result.len <= 100);
         return result;

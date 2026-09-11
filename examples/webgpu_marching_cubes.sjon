@@ -523,7 +523,13 @@ fn fs(in: VSOut) -> @location(0) vec4f {
 
 ; ── Shader: Camera (arcball) ──────────────────────────────────────
 
-(shader-module :name cameraShader :code """
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+
+(wgsl :name inverseCamera :file "./lib/inverse_camera.wgsl")
+
+(wgsl :name rotateVec :file "./lib/rotate_vec.wgsl")
+
+(shader-module :name cameraShader :imports [perspective inverseCamera rotateVec] :code """
 struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
 struct PointerInputs {
   x: f32, y: f32, clickX: f32, clickY: f32,
@@ -544,24 +550,6 @@ const ZOOM_SPEED: f32 = 0.1;
 const PAN_SPEED: f32 = 3.0;
 const FRICTION: f32 = 0.999;
 const PI: f32 = 3.14159265;
-
-fn rotateVec(v: vec3f, axis: vec3f, angle: f32) -> vec3f {
-  let c = cos(angle); let s = sin(angle);
-  return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
-}
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0, 0, 0), vec4f(0, f, 0, 0),
-    vec4f(0, 0, far * nf, -1), vec4f(0, 0, far * near * nf, 0));
-}
-fn inverseCamera(r: vec3f, u: vec3f, b: vec3f, p: vec3f) -> mat4x4f {
-  return mat4x4f(
-    vec4f(r.x, u.x, b.x, 0), vec4f(r.y, u.y, b.y, 0),
-    vec4f(r.z, u.z, b.z, 0),
-    vec4f(-dot(r, p), -dot(u, p), -dot(b, p), 1));
-}
 fn getRight() -> vec3f { return vec3f(cam.data[0], cam.data[1], cam.data[2]); }
 fn getUp() -> vec3f { return vec3f(cam.data[4], cam.data[5], cam.data[6]); }
 fn getBack() -> vec3f { return vec3f(cam.data[8], cam.data[9], cam.data[10]); }

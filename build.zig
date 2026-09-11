@@ -830,6 +830,16 @@ pub fn build(b: *std.Build) void {
     const cli_stdio_mod = stdModule(b, target, optimize, "src/cli/stdio.zig", &.{});
     addStandaloneTest(b, standalone_step, cli_stdio_step, "cli-stdio", cli_stdio_mod);
 
+    // cli utils: `deriveSiblingPath`, the one place the `<dir>/<stem><suffix>`
+    // shape lives after r3-06 folded six near-identical `derive*Path` functions
+    // into it. Its table test absorbed the six `deriveTypesPath` cases, which
+    // ran in `test-types-gen` before — rooting utils here keeps them in a fast
+    // lane instead of demoting them to the ~7-minute `zig build test`.
+    // Pure std, like arg_reader and stdio.
+    const cli_utils_step = b.step("test-cli-utils", "Run CLI path-derivation unit tests");
+    const cli_utils_mod = stdModule(b, target, optimize, "src/cli/utils.zig", &.{});
+    addStandaloneTest(b, standalone_step, cli_utils_step, "cli-utils", cli_utils_mod);
+
     // WAMR wrapper. It has always had inline tests and they have never RUN:
     // the module is a leaf, rooted only by the desktop-viewer executable, and a
     // Zig test binary discovers tests in compilation roots. So the buffer
@@ -951,7 +961,7 @@ pub fn build(b: *std.Build) void {
     const sjon_invalid_mod = stdModule(b, target, optimize, "tests/zig/sjon_invalid.zig", &.{
         .{ .name = "dsl_sjon", .module = sjon_test_mod },
     });
-    inline for (.{ "bad_wgsl_syntax", "missing_entry_point", "buffer_too_small", "missing_bind_group", "unaligned_uniform", "bad_scissor_rect", "uniform_too_small_for_struct", "missing_uniform_bind", "address_space_mismatch", "workgroup_too_large", "bind_kind_mismatch", "vertex_location_unbound", "texture_sample_type_mismatch", "sampler_comparison_mismatch", "vertex_format_mismatch", "fragment_output_type_mismatch", "fragment_output_unbound", "pass_attachment_count_mismatch", "pass_attachment_format_mismatch", "pass_depth_missing_in_pipeline", "pass_depth_missing_in_pass", "pass_depth_format_mismatch", "pass_resolve_format_mismatch", "pass_sample_count_mismatch", "storage_texture_format_mismatch", "too_many_passes", "too_many_bundles", "sampler_anisotropy_out_of_range", "texture_dimension_numeric", "texture_view_dimension_not_a_member", "pipeline_layout_dangling_bgl", "primitive_strip_index_format", "workgroup_512_no_limits", "bind_offset_without_buffer", "bind_slice_past_end", "bind_offset_at_end", "bundle_ref_lowered", "too_many_wasm_args", "unknown_wasm_arg", "pass_mixed_stages", "pass_no_entry_point", "pass_graph_empty", "pass_too_many_entries", "init_workgroups_unresolved", "override_no_default", "override_no_default_compute", "constant_unknown_override", "constant_type_mismatch", "constant_conflict", "pool_overflow", "pool_expression_overflow", "shape_sphere_zero", "shape_cone_bomb", "define_overflow", "pass_shader_name_collision", "fragment_no_targets", "stage_no_module", "depth_stencil_no_format", "texture_no_size", "buffer_no_size", "pipeline_no_layout", "compute_stage_no_module", "bundle_no_color_formats", "attachment_no_load_op", "pipeline_two_vertex_stages", "blend_missing_alpha", "pipeline_name_shared_across_kinds", "define_ref_typo", "write_buffer_offset_unaligned", "bgl_entry_two_resources", "bgl_entry_no_resource", "data_two_generators", "dup_name_cross_kind", "reserved_name_builtin", "copy_no_destination", "compute_pass_no_dispatch", "dispatch_no_workgroups", "bundle_no_draw", "write_mask_not_a_member", "pipeline_two_primitive", "depth_stencil_two_stencil_front", "strip_index_format_on_list_topology", "strip_topology_indexed_draw", "clear_value_with_load_op", "depth_clear_without_value", "depth_attachment_no_store_op", "alpha_to_coverage_single_sample", "render_pass_no_attachments", "occlusion_query_no_set", "anisotropy_without_linear_filters", "map_read_extra_usage", "wasm_data_size_unaligned", "wasm_data_missing_file", "data_file_missing", "depth_stencil_colour_format", "depth_write_on_stencil_only_format", "stencil_state_on_depth_only_format", "depth_format_no_write_enabled", "depth_compare_missing_with_write", "depth_bias_on_line_topology", "blend_on_integer_target", "alpha_to_coverage_no_alpha_target", "alpha_to_coverage_no_fragment", "depth_ops_on_stencil_only_attachment", "stencil_ops_missing_on_combined_attachment", "stencil_ops_on_depth_only_attachment", "msaa_texture_mipped", "msaa_texture_not_attachment", "msaa_texture_sample_count_two", "volume_texture_multisampled", "attachment_texture_1d", "copy_source_without_copy_src", "copy_destination_without_copy_dst", "copy_past_end_of_buffer", "write_buffer_target_without_copy_dst", "copy_texture_source_without_copy_src", "bundle_color_format_is_depth", "bundle_depth_format_is_colour", "bundle_pipeline_format_mismatch", "bundle_pipeline_sample_count_mismatch", "bundle_pipeline_depth_mismatch", "bundle_pass_format_mismatch", "bundle_pass_attachment_count", "bundle_pass_depth_missing", "bundle_pass_sample_count_mismatch", "define_ref_fractional_in_count", "define_cycle", "expression_negative", "count_expression_overflow", "stray_command_at_root", "pass_outside_pass_graph", "bundle_no_pipeline", "pass_no_code", "pass_feedback_on_last", "render_pass_draw_no_pipeline", "draw_indirect_offset_unaligned", "query_set_count_over_max", "expression_unknown_constant", "define_unknown_constant", "pipeline_no_vertex", "bind_group_index_define_overflow", "binding_expression_overflow", "anisotropy_define_overflow", "limits_negative_expression", "texture_depth_define_zero", "mip_level_literal_overflow", "origin_define_overflow", "pool_offset_define_overflow", "query_count_define_overflow", "pool_offset_past_pool" }) |name| {
+    inline for (.{ "bad_wgsl_syntax", "missing_entry_point", "buffer_too_small", "missing_bind_group", "unaligned_uniform", "bad_scissor_rect", "uniform_too_small_for_struct", "missing_uniform_bind", "address_space_mismatch", "workgroup_too_large", "bind_kind_mismatch", "vertex_location_unbound", "texture_sample_type_mismatch", "sampler_comparison_mismatch", "vertex_format_mismatch", "fragment_output_type_mismatch", "fragment_output_unbound", "pass_attachment_count_mismatch", "pass_attachment_format_mismatch", "pass_depth_missing_in_pipeline", "pass_depth_missing_in_pass", "pass_depth_format_mismatch", "pass_resolve_format_mismatch", "pass_sample_count_mismatch", "storage_texture_format_mismatch", "too_many_passes", "too_many_bundles", "sampler_anisotropy_out_of_range", "texture_dimension_numeric", "texture_view_dimension_not_a_member", "pipeline_layout_dangling_bgl", "primitive_strip_index_format", "workgroup_512_no_limits", "bind_offset_without_buffer", "bind_slice_past_end", "bind_offset_at_end", "bundle_ref_lowered", "too_many_wasm_args", "unknown_wasm_arg", "pass_mixed_stages", "pass_no_entry_point", "pass_graph_empty", "pass_too_many_entries", "init_workgroups_unresolved", "override_no_default", "override_no_default_compute", "constant_unknown_override", "constant_type_mismatch", "constant_conflict", "pool_overflow", "pool_expression_overflow", "shape_sphere_zero", "shape_cone_bomb", "define_overflow", "pass_shader_name_collision", "fragment_no_targets", "stage_no_module", "depth_stencil_no_format", "texture_no_size", "buffer_no_size", "pipeline_no_layout", "compute_stage_no_module", "bundle_no_color_formats", "attachment_no_load_op", "pipeline_two_vertex_stages", "blend_missing_alpha", "pipeline_name_shared_across_kinds", "define_ref_typo", "write_buffer_offset_unaligned", "bgl_entry_two_resources", "bgl_entry_no_resource", "data_two_generators", "dup_name_cross_kind", "reserved_name_builtin", "copy_no_destination", "compute_pass_no_dispatch", "dispatch_no_workgroups", "bundle_no_draw", "write_mask_not_a_member", "pipeline_two_primitive", "depth_stencil_two_stencil_front", "strip_index_format_on_list_topology", "strip_topology_indexed_draw", "clear_value_with_load_op", "depth_clear_without_value", "depth_attachment_no_store_op", "alpha_to_coverage_single_sample", "render_pass_no_attachments", "occlusion_query_no_set", "anisotropy_without_linear_filters", "map_read_extra_usage", "wasm_data_size_unaligned", "wasm_gen_memory_name", "wasm_data_missing_file", "data_file_missing", "data_bytes_and_float32", "data_bytes_both_sources", "data_bytes_bad_base64", "data_bytes_file_missing", "data_bytes_empty", "depth_stencil_colour_format", "depth_write_on_stencil_only_format", "stencil_state_on_depth_only_format", "depth_format_no_write_enabled", "depth_compare_missing_with_write", "depth_bias_on_line_topology", "blend_on_integer_target", "alpha_to_coverage_no_alpha_target", "alpha_to_coverage_no_fragment", "depth_ops_on_stencil_only_attachment", "stencil_ops_missing_on_combined_attachment", "stencil_ops_on_depth_only_attachment", "msaa_texture_mipped", "msaa_texture_not_attachment", "msaa_texture_sample_count_two", "volume_texture_multisampled", "attachment_texture_1d", "copy_source_without_copy_src", "copy_destination_without_copy_dst", "copy_past_end_of_buffer", "write_buffer_target_without_copy_dst", "copy_texture_source_without_copy_src", "bundle_color_format_is_depth", "bundle_depth_format_is_colour", "bundle_pipeline_format_mismatch", "bundle_pipeline_sample_count_mismatch", "bundle_pipeline_depth_mismatch", "bundle_pass_format_mismatch", "bundle_pass_attachment_count", "bundle_pass_depth_missing", "bundle_pass_sample_count_mismatch", "define_ref_fractional_in_count", "define_cycle", "expression_negative", "count_expression_overflow", "stray_command_at_root", "pass_outside_pass_graph", "bundle_no_pipeline", "pass_no_code", "pass_feedback_on_last", "pass_format_on_canvas_pass", "pass_format_depth", "pass_format_on_compute", "pass_format_unfilterable", "pass_reads_unused", "pass_reads_no_texture_binding", "pass_reads_multisampled", "pass_reads_volume", "pass_reads_array_layers", "pass_reads_stencil", "pass_reads_depth_sampled", "pass_reads_name_collision", "pass_scale_on_compute", "pass_scale_on_canvas_pass", "texture_scale_without_canvas", "texture_scale_narrows_to_zero", "pass_graph_second_frame", "render_pass_draw_no_pipeline", "draw_indirect_offset_unaligned", "query_set_count_over_max", "expression_unknown_constant", "define_unknown_constant", "pipeline_no_vertex", "bind_group_index_define_overflow", "binding_expression_overflow", "anisotropy_define_overflow", "limits_negative_expression", "texture_depth_define_zero", "mip_level_literal_overflow", "origin_define_overflow", "pool_offset_define_overflow", "query_count_define_overflow", "pool_offset_past_pool", "wgsl_cycle", "wgsl_entry_in_fragment", "wgsl_both_code_and_file", "wgsl_neither_code_nor_file", "wgsl_dangling_import", "wgsl_missing_hole", "wgsl_binding_in_pass_fragment", "wgsl_broken_fragment_located", "wgsl_missing_file", "wgsl_escapes_dir", "unbound_binding_reached_by_pipeline", "prune_unused_on_explicit_layout", "prune_unused_empties_group", "bind_kind_mismatch_scoped", "derived_group_prune_unused_redundant", "derived_group_explicit_pipeline_layout", "derived_group_empties_below_reach", "derived_group_omitted_in_bundle", "draw_graph_attachment_unknown_texture", "draw_graph_duplicate_stage", "draw_graph_fragment_without_color", "draw_graph_geometry_no_in", "draw_graph_group_index_gap", "draw_graph_group_layout", "draw_graph_group_prune_unused", "draw_graph_multisampled_attachment", "draw_graph_name_collision", "draw_graph_no_draw", "draw_graph_no_geometry", "draw_graph_no_stage", "draw_graph_second_frame", "draw_graph_stage_no_attachment", "draw_graph_target_count", "draw_graph_stage_unused", "draw_graph_two_draws", "graph_named_no_frame", "graph_named_before", "graph_two_unnamed", "step_group_cycle", "draw_graph_unknown_stage", "draw_graph_with_pass_graph", "draw_graph_sample_count_overflow", "draw_graph_group_define_ref", "bind_group_entries_over_255", "wgsl_entry_in_file_fragment", "wasm_data_length_over_budget", "write_buffer_frame_inputs_too_small", "bind_group_pool_over_native_cap", "render_pass_too_many_attachments" }) |name| {
         sjon_invalid_mod.addAnonymousImport(name ++ "_invalid", .{ .root_source_file = b.path("examples/invalid/" ++ name ++ ".sjon") });
     }
     const sjon_invalid_step = b.step("test-sjon-invalid", "Run SJON invalid-negatives rejection tests");
@@ -996,6 +1006,42 @@ pub fn build(b: *std.Build) void {
     addStandaloneTest(b, standalone_step, sjon_oom_step, "sjon-oom", sjon_oom_mod);
 
     // ========================================================================
+    // Peak-memory measurement at the entry boundary (R3-04). The OOM sweep
+    // above proves nothing LEAKS; it says nothing about how much is HELD. This
+    // one compiles a spread of fixtures under a counting allocator in both
+    // regimes — the manual frees shipping today, and one `ArenaAllocator` per
+    // call — and prints the two peaks side by side. `PEAK_CEILING` in the
+    // harness turns that into a watched number: a change that materially
+    // raises the compiler's peak fails here instead of being found in a
+    // profiler. Seconds, so it rides `test-standalone`.
+    const sjon_arena_mod = stdModule(b, target, optimize, "tests/zig/sjon_arena.zig", &.{
+        .{ .name = "dsl_sjon", .module = sjon_test_mod },
+        // The `minifyWgsl` lane goes straight at the minifier, the way that
+        // export does — no compile around it.
+        .{ .name = "reflect", .module = reflect_module },
+    });
+    for ([_][]const u8{
+        "simple_triangle",
+        "rotating_cube",
+        "teapot",
+        "dragon",
+        "webgpu_shadow_mapping_graph",
+        "webgpu_marching_cubes",
+    }) |name| {
+        sjon_arena_mod.addAnonymousImport(b.fmt("{s}_sjon", .{name}), .{
+            .root_source_file = b.path(b.fmt("examples/{s}.sjon", .{name})),
+        });
+    }
+    // The fragments the `minifyWgsl` lane assembles into one real shader.
+    for ([_][]const u8{ "perspective", "look_at", "shadow_scene", "shadow_pcf", "shadow_lit" }) |name| {
+        sjon_arena_mod.addAnonymousImport(b.fmt("{s}_wgsl", .{name}), .{
+            .root_source_file = b.path(b.fmt("examples/lib/{s}.wgsl", .{name})),
+        });
+    }
+    const sjon_arena_step = b.step("test-sjon-arena", "Measure compiler peak memory: manual frees vs one arena per call (R3-04)");
+    addStandaloneTest(b, standalone_step, sjon_arena_step, "sjon-arena", sjon_arena_mod);
+
+    // ========================================================================
     // Mutation sweep (third leak pass). The corpus is not a fuzzer (pitfall
     // 44): every example, mutated token-by-token (edge numbers, swapped
     // symbols, deleted keys, duplicated/deleted forms, truncation), must come
@@ -1020,6 +1066,30 @@ pub fn build(b: *std.Build) void {
     }
     const sjon_mutate_step = b.step("test-sjon-mutate", "Run the corpus mutation sweep over the compile pipeline");
     addStandaloneTest(b, standalone_step, sjon_mutate_step, "sjon-mutate", sjon_mutate_mod);
+
+    // ========================================================================
+    // The empty-registry gate (sugar-tier-ledger.md step 3). Compiles the SAME
+    // globbed corpus with NO lowering hooks registered: every document either
+    // compiles byte-identically to its ordinary compile (it is core, and the
+    // sugar tier contributed nothing) or is refused with `lowering_hook_missing`
+    // (it is sugar, and SJON says so at the form). That is the standing proof
+    // that half A of the schema stands without half B — on every build, since
+    // `test-standalone` is a dependency of `zig build test`.
+    const sjon_core_mod = stdModule(b, target, optimize, "tests/zig/sjon_core.zig", &.{
+        .{ .name = "dsl_sjon", .module = sjon_test_mod },
+    });
+    sjon_core_mod.addAnonymousImport("fixture_list", .{ .root_source_file = fixture_list });
+    for ([_]struct { dir: []const u8, names: []const []const u8 }{
+        .{ .dir = "examples", .names = sjon_root_fixtures },
+        .{ .dir = "examples/samples", .names = sjon_sample_fixtures },
+    }) |group| {
+        for (group.names) |name| {
+            const src = b.path(b.fmt("{s}/{s}.sjon", .{ group.dir, name }));
+            sjon_core_mod.addAnonymousImport(b.fmt("{s}_sjon", .{name}), .{ .root_source_file = src });
+        }
+    }
+    const sjon_core_step = b.step("test-core", "Compile every example with an EMPTY lowering registry (the core stands without the sugar)");
+    addStandaloneTest(b, standalone_step, sjon_core_step, "core", sjon_core_mod);
 
     // ========================================================================
     // Native GPU render tests + snapshot/coverage gates (Phase 2 + 3 of the
@@ -1055,14 +1125,38 @@ pub fn build(b: *std.Build) void {
             .{ "teapot_sjon", "examples/teapot.sjon" },
             .{ "pass_postprocess_sjon", "examples/pass_postprocess.sjon" },
             .{ "pass_bloom_sjon", "examples/pass_bloom.sjon" },
+            .{ "pass_bloom_hand_sjon", "examples/pass_bloom_hand.sjon" },
+            .{ "pass_acid_cubes_sjon", "examples/pass_acid_cubes.sjon" },
+            .{ "pass_acid_cubes_hand_sjon", "examples/pass_acid_cubes_hand.sjon" },
+            .{ "pass_hdr_tonemap_sjon", "examples/pass_hdr_tonemap.sjon" },
+            .{ "pass_hdr_tonemap_hand_sjon", "examples/pass_hdr_tonemap_hand.sjon" },
+            .{ "pass_reads_depth_sjon", "examples/pass_reads_depth.sjon" },
+            .{ "pass_reads_depth_hand_sjon", "examples/pass_reads_depth_hand.sjon" },
+            .{ "pass_half_res_sjon", "examples/pass_half_res.sjon" },
+            .{ "pass_half_res_hand_sjon", "examples/pass_half_res_hand.sjon" },
+            .{ "pass_fbm_noise_sjon", "examples/pass_fbm_noise.sjon" },
+            .{ "pass_fbm_noise_fragments_sjon", "examples/pass_fbm_noise_fragments.sjon" },
+            .{ "test_wgsl_imports_sjon", "examples/test_wgsl_imports.sjon" },
+            .{ "test_prune_unused_sjon", "examples/test_prune_unused.sjon" },
+            .{ "test_derived_bind_groups_sjon", "examples/test_derived_bind_groups.sjon" },
             .{ "webgpu_deferred_rendering_sjon", "examples/webgpu_deferred_rendering.sjon" },
+            .{ "webgpu_deferred_rendering_fragments_sjon", "examples/webgpu_deferred_rendering_fragments.sjon" },
             .{ "simple_triangle_msaa_sjon", "examples/simple_triangle_msaa.sjon" },
             .{ "sample_11_simple_lighting_sjon", "examples/samples/11_simple_lighting.sjon" },
             .{ "test_stencil_sjon", "examples/test_stencil.sjon" },
             .{ "test_stencil_back_sjon", "examples/test_stencil_back.sjon" },
             .{ "test_depth_clear_sjon", "examples/test_depth_clear.sjon" },
             .{ "webgpu_shadow_mapping_sjon", "examples/webgpu_shadow_mapping.sjon" },
+            .{ "webgpu_shadow_mapping_fragments_sjon", "examples/webgpu_shadow_mapping_fragments.sjon" },
+            .{ "webgpu_shadow_mapping_graph_sjon", "examples/webgpu_shadow_mapping_graph.sjon" },
+            .{ "draw_graph_offscreen_sjon", "examples/draw_graph_offscreen.sjon" },
+            .{ "draw_graph_blend_sjon", "examples/draw_graph_blend.sjon" },
+            .{ "frame_index_sjon", "examples/frame_index.sjon" },
+            .{ "graph_compose_sjon", "examples/graph_compose.sjon" },
+            .{ "graph_compose_hand_sjon", "examples/graph_compose_hand.sjon" },
             .{ "sample_20_particle_fountain_sjon", "examples/samples/20_particle_fountain.sjon" },
+            .{ "boids_init_only_sjon", "examples/boids_init_only.sjon" },
+            .{ "boids_init_only_hand_sjon", "examples/boids_init_only_hand.sjon" },
             .{ "webgpu_indirect_draw_sjon", "examples/webgpu_indirect_draw.sjon" },
             .{ "webgpu_indirect_dispatch_sjon", "examples/webgpu_indirect_dispatch.sjon" },
             .{ "webgpu_blend_constant_sjon", "examples/webgpu_blend_constant.sjon" },
@@ -1073,23 +1167,44 @@ pub fn build(b: *std.Build) void {
             .{ "test_copy_buffer_sjon", "examples/test_copy_buffer.sjon" },
             .{ "test_viewport_sjon", "examples/test_viewport.sjon" },
             .{ "pipeline_constants_sjon", "examples/pipeline_constants.sjon" },
+            .{ "draw_graph_after_sjon", "examples/draw_graph_after.sjon" },
+            .{ "draw_graph_after_hand_sjon", "examples/draw_graph_after_hand.sjon" },
+            .{ "test_data_pass_sjon", "examples/test_data_pass.sjon" },
+            .{ "test_data_pass_hand_sjon", "examples/test_data_pass_hand.sjon" },
+            .{ "pass_game_of_life_sjon", "examples/pass_game_of_life.sjon" },
+            .{ "pass_game_of_life_hand_sjon", "examples/pass_game_of_life_hand.sjon" },
         };
         // Committed reference PNGs — embedded by the TEST binary only (the regen
         // exe writes them, so it must compile before they exist).
         const render_snapshot_labels = .{
-            "simple_triangle",               "moving_triangle_t0",
-            "moving_triangle_t1",            "pass_shader_art",
-            "webgpu_hello_triangle",         "pass_compute_rainbow",
-            "sample_01_gradient_background", "sample_02_shader_art",
-            "rotating_cube",                 "teapot",
-            "pass_postprocess",              "pass_bloom",
-            "webgpu_deferred_rendering",     "simple_triangle_msaa",
-            "sample_11_simple_lighting",     "test_stencil",
-            "test_stencil_back",             "test_depth_clear",
-            "webgpu_shadow_mapping",         "webgpu_indirect_draw",
-            "webgpu_indirect_dispatch",      "webgpu_blend_constant",
-            "webgpu_bgl_resources",          "webgpu_bgl_storage_texture",
-            "pipeline_constants",
+            "simple_triangle",                     "moving_triangle_t0",
+            "moving_triangle_t1",                  "pass_shader_art",
+            "webgpu_hello_triangle",               "pass_compute_rainbow",
+            "sample_01_gradient_background",       "sample_02_shader_art",
+            "rotating_cube",                       "teapot",
+            "pass_postprocess",                    "pass_bloom",
+            "webgpu_deferred_rendering",           "simple_triangle_msaa",
+            "sample_11_simple_lighting",           "test_stencil",
+            "test_stencil_back",                   "test_depth_clear",
+            "webgpu_shadow_mapping",               "webgpu_indirect_draw",
+            "webgpu_indirect_dispatch",            "webgpu_blend_constant",
+            "webgpu_bgl_resources",                "webgpu_bgl_storage_texture",
+            "pipeline_constants",                  "pass_fbm_noise",
+            "pass_fbm_noise_fragments",            "test_wgsl_imports",
+            "test_prune_unused",                   "webgpu_shadow_mapping_fragments",
+            "webgpu_deferred_rendering_fragments", "test_derived_bind_groups",
+            "pass_hdr_tonemap",                    "pass_reads_depth",
+            "pass_half_res",                       "pass_half_res_hand",
+            "webgpu_shadow_mapping_graph",         "draw_graph_offscreen",
+            "draw_graph_blend",                    "frame_index",
+            "graph_compose",                       "graph_compose_hand",
+            "pass_reads_depth_hand",               "boids_init_only",
+            "boids_init_only_hand",                "pass_hdr_tonemap_hand",
+            "draw_graph_after",                    "pass_game_of_life",
+            "pass_bloom_hand",                     "pass_acid_cubes",
+            "pass_acid_cubes_hand",                "draw_graph_after_hand",
+            "pass_game_of_life_hand",              "test_data_pass",
+            "test_data_pass_hand",
         };
 
         // --- test-render: structural + snapshot gate (in-process) ---
@@ -1563,7 +1678,7 @@ pub fn build(b: *std.Build) void {
     // needs terser out of node_modules. A skip is never total —
     // check-bundle-doc errors if EVERY table it knows about is gone, and
     // check-sjon-reference errors if it parses no forms out of the schema.
-    const drift_step = b.step("drift", "Verify every generated artifact is current (schema, journal index, npm versions+metadata, executor wasm + its no-allocator property, wgpu wrapper coverage, npm schema, bundle doc, js fragments, webgpu enums, sjon reference, cli flags, llms.txt, doc fences, overhaul shape)");
+    const drift_step = b.step("drift", "Verify every generated artifact is current (schema, journal index, npm versions+metadata, executor wasm + its no-allocator property, wgpu wrapper coverage, npm schema, bundle doc, js fragments, webgpu enums, sjon reference, sugar ledger, cli flags, llms.txt, doc fences, overhaul shape)");
 
     // schema/pngine.{d.ts,schema.json} <- `zig build schema-export -- --regen`
     const drift_schema = b.addRunArtifact(schema_export_exe);
@@ -1685,6 +1800,25 @@ pub fn build(b: *std.Build) void {
     const drift_sjon_reference = b.addSystemCommand(&.{ "node", "scripts/check-sjon-reference.mjs", "--check" });
     drift_step.dependOn(&drift_sjon_reference.step);
 
+    // schema/sugar-ledger.mjs <- the SUGAR TIER of schema/pngine.sjon.
+    //
+    // The WebGPU half of the schema is held against the gpuweb IDL snapshot
+    // bidirectionally (tests/npm/webgpu-conformance.test.js). The half pngine
+    // invented had nothing: grep its ten forms against schema/webgpu-mapping.mjs
+    // and you get zero hits, all ten, so every key on them landed because
+    // someone decided it should. Four of the last fifteen CONTRIBUTING pitfalls
+    // are one each from a recent `(pass …)` key.
+    //
+    // Sugar's anchor is the hand-written twin: a hook's `:produces` names only
+    // core forms, so its output is by definition a document a human could have
+    // written. The gate derives the sugar form set from the schema (`:lowering`
+    // plus the positional closure, minus every produced head), so a new sugar
+    // form or a new key on an old one fails until the ledger states what it
+    // desugars to and either names a twin or admits there is none.
+    // docs/plans/sugar-tier-ledger.md, §425.
+    const drift_sugar_ledger = b.addSystemCommand(&.{ "node", "scripts/check-sugar-ledger.mjs", "--check" });
+    drift_step.dependOn(&drift_sugar_ledger.step);
+
     // CLAUDE.md's CLI options tables <- the `src/cli/*.zig` parsers.
     //
     // The third prose gate. Ten gates and not one read the CLI tables, so the
@@ -1695,6 +1829,17 @@ pub fn build(b: *std.Build) void {
     // force fabricated matches (min1-03, §340).
     const drift_cli_flags = b.addSystemCommand(&.{ "node", "scripts/check-cli-flags.mjs", "--check" });
     drift_step.dependOn(&drift_cli_flags.step);
+
+    // One name for the allocator, one spelling for its type.
+    //
+    // The tree grew three names for the same parameter and two spellings of
+    // `std.mem.Allocator` because nothing enforced either; R3-05 unified them.
+    // Lexical, not textual: the gate skips comments and literals, so prose
+    // about "the caller's allocator" is not a finding. NAME at a binding site
+    // only — whether a given allocator should have been an arena is a
+    // judgement, and gating it would produce a decoration.
+    const drift_alloc_names = b.addSystemCommand(&.{ "node", "scripts/check-allocator-names.mjs", "--check" });
+    drift_step.dependOn(&drift_alloc_names.step);
 
     // docs/llms.txt <- the built CLI, run over the file's own programs.
     //
@@ -1816,8 +1961,13 @@ pub fn build(b: *std.Build) void {
             .vendored = dslSjonVendored(b, cross_target, .ReleaseFast, cross_types),
         });
 
-        // Create library module for this target
-        const cross_lib = b.addModule("pngine", .{
+        // Create library module for this target. `createModule`, not
+        // `addModule`: a second `addModule("pngine", …)` REPLACES the public
+        // module a path-dependency consumer receives through
+        // `dep.module("pngine")`, so every consumer silently got the last
+        // cross target (aarch64-windows, ReleaseFast) instead of its own.
+        // Only the cross CLI below imports this one.
+        const cross_lib = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = cross_target,
             .optimize = .ReleaseFast,

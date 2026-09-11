@@ -5,8 +5,8 @@
 //!
 //! ## Usage
 //! ```zig
-//! const png_data = try encoder.encode(allocator, pixels, 512, 512);
-//! defer allocator.free(png_data);
+//! const png_data = try encoder.encode(gpa, pixels, 512, 512);
+//! defer gpa.free(png_data);
 //! ```
 //!
 //! ## Invariants
@@ -15,6 +15,7 @@
 //! - Caller owns returned memory
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const chunk = @import("chunk.zig");
 const flate = std.compress.flate;
 
@@ -55,7 +56,7 @@ const Filter = struct {
 ///
 /// Complexity: O(width * height) for filtering + compression
 pub fn encode(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     pixels: []const u8,
     width: u32,
     height: u32,
@@ -76,25 +77,25 @@ pub fn encode(
     std.debug.assert(pixels.len == expected_size);
 
     var result: std.ArrayList(u8) = .empty;
-    errdefer result.deinit(allocator);
+    errdefer result.deinit(gpa);
 
     // PNG signature - required magic bytes that identify file as PNG (RFC 2083)
-    result.appendSlice(allocator, &chunk.PNG_SIGNATURE) catch {
+    result.appendSlice(gpa, &chunk.PNG_SIGNATURE) catch {
         return Error.OutOfMemory;
     };
 
     // IHDR must be first chunk - contains critical image dimensions and format
-    try writeIHDR(&result, allocator, width, height);
+    try writeIHDR(&result, gpa, width, height);
 
     // IDAT contains compressed pixel data - this is where most bytes go
-    try writeIDAT(&result, allocator, pixels, width, height);
+    try writeIDAT(&result, gpa, pixels, width, height);
 
     // IEND marks end of file - required for valid PNG structure
-    chunk.writeChunk(&result, allocator, chunk.ChunkType.IEND, "") catch {
+    chunk.writeChunk(&result, gpa, chunk.ChunkType.IEND, "") catch {
         return Error.OutOfMemory;
     };
 
-    const output = result.toOwnedSlice(allocator) catch {
+    const output = result.toOwnedSlice(gpa) catch {
         return Error.OutOfMemory;
     };
 
@@ -111,7 +112,7 @@ pub fn encode(
 /// are big-endian per PNG spec requirements.
 fn writeIHDR(
     result: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     width: u32,
     height: u32,
 ) Error!void {
@@ -136,7 +137,7 @@ fn writeIHDR(
     // No interlacing - simpler and smaller for generated images
     ihdr[12] = 0;
 
-    chunk.writeChunk(result, allocator, chunk.ChunkType.IHDR, &ihdr) catch {
+    chunk.writeChunk(result, gpa, chunk.ChunkType.IHDR, &ihdr) catch {
         return Error.OutOfMemory;
     };
 
@@ -147,7 +148,7 @@ fn writeIHDR(
 /// Write IDAT chunk(s) with compressed pixel data.
 fn writeIDAT(
     result: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     pixels: []const u8,
     width: u32,
     height: u32,
@@ -158,19 +159,19 @@ fn writeIDAT(
     std.debug.assert(pixels.len == @as(usize, width) * @as(usize, height) * 4);
 
     // Add filter bytes to pixel data
-    const filtered = addFilterBytes(allocator, pixels, width, height) catch {
+    const filtered = addFilterBytes(gpa, pixels, width, height) catch {
         return Error.OutOfMemory;
     };
-    defer allocator.free(filtered);
+    defer gpa.free(filtered);
 
     // Compress with deflate
-    const compressed = compress(allocator, filtered) catch {
+    const compressed = compress(gpa, filtered) catch {
         return Error.CompressionFailed;
     };
-    defer allocator.free(compressed);
+    defer gpa.free(compressed);
 
     // Write as IDAT chunk
-    chunk.writeChunk(result, allocator, chunk.ChunkType.IDAT, compressed) catch {
+    chunk.writeChunk(result, gpa, chunk.ChunkType.IDAT, compressed) catch {
         return Error.OutOfMemory;
     };
 
@@ -183,7 +184,7 @@ fn writeIDAT(
 /// PNG requires a filter byte (0-4) before each scanline.
 /// We use filter 0 (None) for simplicity - each row is prepended with 0x00.
 fn addFilterBytes(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     pixels: []const u8,
     width: u32,
     height: u32,
@@ -196,8 +197,8 @@ fn addFilterBytes(
     const filtered_row_size = row_size + 1; // +1 for filter byte
     const filtered_size = @as(usize, height) * filtered_row_size;
 
-    const filtered = try allocator.alloc(u8, filtered_size);
-    errdefer allocator.free(filtered);
+    const filtered = try gpa.alloc(u8, filtered_size);
+    errdefer gpa.free(filtered);
 
     // Process each row (bounded loop)
     const height_usize: usize = @intCast(height);
@@ -232,7 +233,7 @@ fn addFilterBytes(
 /// Post-conditions:
 /// - Returns valid zlib-compressed data
 /// - Caller owns returned slice
-fn compress(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+fn compress(gpa: Allocator, data: []const u8) ![]u8 {
     // Pre-condition: data is not empty
     std.debug.assert(data.len > 0);
 
@@ -241,8 +242,8 @@ fn compress(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     // (measured: +7,079 B for 4 MiB); `len + 1024` overflowed the fixed writer
     // from ~600 KiB up. 1.5% + 1 KiB is ~9× the measured expansion.
     const initial_capacity = data.len + data.len / 64 + 1024;
-    var output_buf = try allocator.alloc(u8, initial_capacity);
-    errdefer allocator.free(output_buf);
+    var output_buf = try gpa.alloc(u8, initial_capacity);
+    errdefer gpa.free(output_buf);
 
     // Window buffer for compression (32KB history window)
     var window_buf: [flate.max_window_len]u8 = undefined;
@@ -274,9 +275,9 @@ fn compress(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     const compressed_len = output_writer.end;
 
     // Create result with exact size
-    const result = try allocator.alloc(u8, compressed_len);
+    const result = try gpa.alloc(u8, compressed_len);
     @memcpy(result, output_buf[0..compressed_len]);
-    allocator.free(output_buf);
+    gpa.free(output_buf);
 
     // Post-condition: output starts with zlib header (0x78)
     std.debug.assert(result.len > 0);
@@ -288,8 +289,10 @@ fn compress(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
 /// Encode BGRA pixels to PNG (common format from GPU readbacks).
 ///
 /// Converts BGRA to RGBA before encoding.
+///
+/// Caller owns the returned PNG bytes.
 pub fn encodeBGRA(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     pixels: []const u8,
     width: u32,
     height: u32,
@@ -308,10 +311,10 @@ pub fn encodeBGRA(
     std.debug.assert(height > 0);
 
     // Convert BGRA to RGBA
-    const rgba = allocator.alloc(u8, pixels.len) catch {
+    const rgba = gpa.alloc(u8, pixels.len) catch {
         return Error.OutOfMemory;
     };
-    defer allocator.free(rgba);
+    defer gpa.free(rgba);
 
     // Process each pixel (bounded loop)
     const pixel_count = pixels.len / 4;
@@ -326,7 +329,7 @@ pub fn encodeBGRA(
     // Post-condition: converted all pixels
     std.debug.assert(rgba.len == pixels.len);
 
-    return encode(allocator, rgba, width, height);
+    return encode(gpa, rgba, width, height);
 }
 
 // ============================================================================

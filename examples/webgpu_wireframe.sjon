@@ -43,24 +43,16 @@
 (queue :name writeUniforms
   (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
 
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+
 ; Shared WGSL prelude (transform shape follows teapot.sjon: rotY(t·0.5),
 ; y −0.5, view z −4, fovy 1.0 — but scale 0.08 instead of 0.18 and a
 ; 0.5·aspect projection: the model must fit its half, because the clip-space
 ; squeeze remaps overflow that a full-canvas frustum would have clipped into
 ; the neighbouring half).
-(shader-module :name solidShader :code """
+(shader-module :name solidShader :imports [perspective] :code """
 struct Inputs { time: f32, width: f32, height: f32, aspect: f32 }
 @group(0) @binding(0) var<uniform> u: Inputs;
-
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0, 0, 0),
-    vec4f(0, f, 0, 0),
-    vec4f(0, 0, far * nf, -1),
-    vec4f(0, 0, far * near * nf, 0));
-}
 
 fn mvp(t: f32, aspect: f32) -> mat4x4f {
   let c = cos(t * 0.5); let s = sin(t * 0.5);
@@ -104,21 +96,11 @@ struct VSOut {
 
 ; Technique 2 — barycentric-discard overlay (right half). Non-indexed draw
 ; of 2976 verts pulling both storage buffers.
-(shader-module :name baryShader :code """
+(shader-module :name baryShader :imports [perspective] :code """
 struct Inputs { time: f32, width: f32, height: f32, aspect: f32 }
 @group(0) @binding(0) var<uniform> u: Inputs;
 @group(0) @binding(1) var<storage, read> verts: array<f32>;
 @group(0) @binding(2) var<storage, read> tris: array<u32>;
-
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0, 0, 0),
-    vec4f(0, f, 0, 0),
-    vec4f(0, 0, far * nf, -1),
-    vec4f(0, 0, far * near * nf, 0));
-}
 
 fn mvp(t: f32, aspect: f32) -> mat4x4f {
   let c = cos(t * 0.5); let s = sin(t * 0.5);
@@ -169,21 +151,11 @@ struct VSOut {
 
 ; Technique 1 — vertex-pulled line-list expansion (left half).
 ; 992 triangles × 3 edges × 2 endpoints = 5952 vertices.
-(shader-module :name linesShader :code """
+(shader-module :name linesShader :imports [perspective] :code """
 struct Inputs { time: f32, width: f32, height: f32, aspect: f32 }
 @group(0) @binding(0) var<uniform> u: Inputs;
 @group(0) @binding(1) var<storage, read> verts: array<f32>;
 @group(0) @binding(2) var<storage, read> tris: array<u32>;
-
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0, 0, 0),
-    vec4f(0, f, 0, 0),
-    vec4f(0, 0, far * nf, -1),
-    vec4f(0, 0, far * near * nf, 0));
-}
 
 fn mvp(t: f32, aspect: f32) -> mat4x4f {
   let c = cos(t * 0.5); let s = sin(t * 0.5);
@@ -255,12 +227,11 @@ fn indexAt(i: u32) -> u32 {
 (bind-group :name solidBindGroup :layout solidPipeline :group 0
   (entry :binding 0 :buffer uniforms))
 
-(bind-group :name baryBindGroup :layout baryPipeline :group 0
-  (entry :binding 0 :buffer uniforms)
-  (entry :binding 1 :buffer meshVerts)
-  (entry :binding 2 :buffer meshIndices))
-
-(bind-group :name linesBindGroup :layout linesPipeline :group 0
+; One resource set, two pipelines. With no `:layout` the compiler derives one
+; GPU bind group per pipeline that binds it, pruned to what that pipeline's
+; entry points reach — so the two forms that differed only in the pipeline they
+; named became one. Compiles to the same bytes as the pair did.
+(bind-group :name meshBindGroup :group 0
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :buffer meshVerts)
   (entry :binding 2 :buffer meshIndices))
@@ -282,7 +253,7 @@ fn indexAt(i: u32) -> u32 {
   (color-attachment :view context-current-texture :load-op load :store-op store)
   (depth-stencil-attachment :view depthTexture :depth-load-op load :depth-store-op store)
   :pipeline baryPipeline
-  :bind-groups [baryBindGroup]
+  :bind-groups [meshBindGroup]
   (draw :vertex-count 2976))
 
 ; Pass 3: vertex-pulled line-list wireframe (left half).
@@ -290,7 +261,7 @@ fn indexAt(i: u32) -> u32 {
   (color-attachment :view context-current-texture :load-op load :store-op store)
   (depth-stencil-attachment :view depthTexture :depth-load-op load :depth-store-op store)
   :pipeline linesPipeline
-  :bind-groups [linesBindGroup]
+  :bind-groups [meshBindGroup]
   (draw :vertex-count 5952))
 
 (frame :name main :perform [writeUniforms solidPass baryPass linesPass])

@@ -1,0 +1,12 @@
+; A data WASM with no `gen` export is read at COMPILE time: the emitter
+; allocates `l` bytes, zeroes them, and ships the result in the payload. `l` is
+; whatever non-negative i32 the FILE declares, and nothing held it to anything
+; — the 57-byte companion here declares 2 GiB and took 6.4 GB of resident
+; memory before dying in the PNG writer (§437).
+;
+; The budget it answers to is the shape generators', which asks the same
+; question: how many bytes one compile may materialise for a payload. The `gen`
+; shape is deliberately NOT bounded by it — those bytes are computed at runtime
+; into a GPU buffer, so a large one is an ordinary request rather than a
+; compile-time allocation. examples/test_data_gen.sjon is that positive.
+(buffer :name big :file "./oversized_l_data.wasm" :usage [storage copy-dst])

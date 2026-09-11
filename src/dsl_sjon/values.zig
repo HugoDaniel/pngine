@@ -13,6 +13,7 @@
 //! evaluated with `Expr.eval` against the `#define` environment.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const sjon = @import("sjon");
 
 const Ast = sjon.Ast;
@@ -276,7 +277,7 @@ pub const Reader = struct {
     /// `orelse` for genuinely absent elements.
     pub fn elemEval(
         self: Reader,
-        gpa: std.mem.Allocator,
+        gpa: Allocator,
         schema: Schema.Schema,
         env: *const Env,
         elem: NodeIndex,
@@ -296,7 +297,7 @@ pub const Reader = struct {
     /// (audit 09 C2).
     pub fn elemU32(
         self: Reader,
-        gpa: std.mem.Allocator,
+        gpa: Allocator,
         schema: Schema.Schema,
         env: *const Env,
         elem: NodeIndex,
@@ -317,7 +318,7 @@ pub const Reader = struct {
     /// emit error).
     pub fn evalU32(
         self: Reader,
-        gpa: std.mem.Allocator,
+        gpa: Allocator,
         schema: Schema.Schema,
         env: *const Env,
         form: NodeIndex,
@@ -342,7 +343,7 @@ pub const Reader = struct {
     /// narrowed to u32.
     pub fn evalF64(
         self: Reader,
-        gpa: std.mem.Allocator,
+        gpa: Allocator,
         schema: Schema.Schema,
         env: *const Env,
         form: NodeIndex,
@@ -424,7 +425,7 @@ fn narrowU64(u: u64) NarrowError!u32 {
 /// `evalNodeU32` for slots whose wire form is a float (clear colors, blend
 /// constants, inline float32 data) or whose call site does its own narrowing.
 pub fn evalNodeF64(
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     tree: *const Ast.Tree,
     schema: Schema.Schema,
     env: *const Env,
@@ -448,7 +449,7 @@ pub fn evalNodeF64(
 /// just not to a number. The failure path is the only caller, so the second
 /// evaluation is free.
 pub fn evalFailure(
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     tree: *const Ast.Tree,
     schema: Schema.Schema,
     env: *const Env,
@@ -523,7 +524,7 @@ pub fn firstUnboundSymbol(tree: *const Ast.Tree, env: *const Env, root: NodeInde
 /// Evaluate an arbitrary value node to u32 against `env`. A value that does
 /// not fit is the `NarrowError` tag that says why (see `narrowF64`).
 pub fn evalNodeU32(
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     tree: *const Ast.Tree,
     schema: Schema.Schema,
     env: *const Env,
@@ -549,7 +550,7 @@ pub fn evalNodeU32(
 /// ones that named something not bound yet. Everything else is `EmitError`.
 pub const DefineEvalError = error{ OutOfMemory, UnknownBinding, EmitError };
 pub fn evalDefineValue(
-    gpa: std.mem.Allocator,
+    gpa: Allocator,
     tree: *const Ast.Tree,
     schema: Schema.Schema,
     env: *const Env,
@@ -579,8 +580,14 @@ pub const DataSource = union(enum) {
 };
 
 pub fn mapDataSource(name: []const u8) ?DataSource {
+    // Three windows on ONE payload, not three payloads: the opcode writes
+    // `min(size, PAYLOAD)` bytes of the runtime's block, so a source's size IS
+    // the prefix it wants. That is also why `frameIndex` sits at the END —
+    // appending is the only way to add a field without moving anyone else's,
+    // and every size below 20 keeps the bytes it had before 20 existed.
     if (std.mem.eql(u8, name, "pngine-inputs")) return .{ .time_uniform = 16 };
     if (std.mem.eql(u8, name, "scene-time-inputs")) return .{ .time_uniform = 12 };
+    if (std.mem.eql(u8, name, "pngine-frame-inputs")) return .{ .time_uniform = 20 };
     if (std.mem.eql(u8, name, "pointer-inputs")) return .{ .pointer_uniform = 48 };
     return null;
 }
@@ -836,7 +843,7 @@ fn matchesConstant(code: []const u8, pos: usize, name: []const u8) bool {
 /// emitter so `.sjon` shaders compile to the same module the GPU executes.
 /// Returns an owned copy the caller frees, or null when no constant is present
 /// (the common case → caller emits the original slice, no allocation).
-pub fn substituteMathConstants(gpa: std.mem.Allocator, code: []const u8) !?[]u8 {
+pub fn substituteMathConstants(gpa: Allocator, code: []const u8) !?[]u8 {
     std.debug.assert(code.len < std.math.maxInt(u32));
     var present = false;
     for (0..code.len) |i| {

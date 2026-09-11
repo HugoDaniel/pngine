@@ -1,0 +1,6 @@
+; R5: a path may not climb out of the document's directory. Caught by counting,
+; in FileResolver.read, before any implementation opens anything.
+(wgsl :name lib :file "../escaped.wgsl")
+(shader-module :name m :imports [lib] :code """
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")

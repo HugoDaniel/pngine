@@ -24,7 +24,9 @@
 (texture :name albedoTex :size canvas :format rgba8unorm :usage [render-attachment texture-binding])
 (texture :name gBufferDepth :size canvas :format depth32float :usage [render-attachment texture-binding])
 
-(shader-module :name lightUpdateShader :code """
+(wgsl :name hash :file "./lib/hash.wgsl")
+
+(shader-module :name lightUpdateShader :imports [hash] :code """
 struct Light {
   position: vec3f,
   radius: f32,
@@ -37,14 +39,6 @@ struct Lights {
 }
 
 @group(0) @binding(0) var<storage, read_write> lights: Lights;
-
-fn hash(n: u32) -> f32 {
-  var x = n;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = (x >> 16u) ^ x;
-  return f32(x) / f32(0xffffffffu);
-}
 
 // Light extent matching original sample around dragon's natural position
 const Y_MIN = 0.0;
@@ -94,7 +88,10 @@ fn updateLights(@builtin(global_invocation_id) id: vec3u) {
 (compute-pass :name lightUpdatePass :pipeline lightUpdatePipeline :bind-groups [lightUpdateBG]
   (dispatch :workgroups [2]))
 
-(shader-module :name gBufferShader :code """
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+(wgsl :name lookAt :file "./lib/look_at.wgsl")
+
+(shader-module :name gBufferShader :imports [perspective lookAt] :code """
 struct Inputs {
   time: f32,
   width: f32,
@@ -103,27 +100,6 @@ struct Inputs {
 }
 
 @group(0) @binding(0) var<uniform> u: Inputs;
-
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0.0, 0.0, 0.0),
-    vec4f(0.0, f, 0.0, 0.0),
-    vec4f(0.0, 0.0, far * nf, -1.0),
-    vec4f(0.0, 0.0, far * near * nf, 0.0));
-}
-
-fn lookAt(eye: vec3f, center: vec3f, up: vec3f) -> mat4x4f {
-  let fwd = normalize(center - eye);
-  let right = normalize(cross(fwd, up));
-  let u2 = cross(right, fwd);
-  return mat4x4f(
-    vec4f(right.x, u2.x, -fwd.x, 0.0),
-    vec4f(right.y, u2.y, -fwd.y, 0.0),
-    vec4f(right.z, u2.z, -fwd.z, 0.0),
-    vec4f(-dot(right, eye), -dot(u2, eye), dot(fwd, eye), 1.0));
-}
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -226,10 +202,11 @@ fn groundPos(i: u32) -> vec3f {
   (primitive :topology triangle-list)
   (depth-stencil :depth-write-enabled true :depth-compare less :format depth32float))
 
-(bind-group :name gBufferBG :layout gBufferPipeline :group 0
-  (entry :binding 0 :buffer uniforms))
-
-(bind-group :name groundGBufBG :layout groundGBufPipeline :group 0
+; One resource set, two pipelines. With no `:layout` the compiler derives one
+; GPU bind group per pipeline that binds it, pruned to what that pipeline's
+; entry points reach — so the two forms that differed only in the pipeline they
+; named became one. Compiles to the same bytes as the pair did.
+(bind-group :name gBufferBG :group 0
   (entry :binding 0 :buffer uniforms))
 
 (render-pass :name gBufferPass
@@ -248,10 +225,10 @@ fn groundPos(i: u32) -> vec3f {
   (color-attachment :view albedoTex :load-op load :store-op store)
   (depth-stencil-attachment :view gBufferDepth :depth-load-op load :depth-store-op store)
   :pipeline groundGBufPipeline
-  :bind-groups [groundGBufBG]
+  :bind-groups [gBufferBG]
   (draw :vertex-count 6))
 
-(shader-module :name deferredShader :code """
+(shader-module :name deferredShader :imports [perspective lookAt] :code """
 struct Inputs {
   time: f32,
   width: f32,
@@ -292,28 +269,7 @@ struct Lights {
 @group(0) @binding(4) var depthTex: texture_depth_2d;
 @group(0) @binding(5) var<storage, read> lights: Lights;
 
-// ── Matrix utilities (must match gBufferShader exactly) ──
-
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0.0, 0.0, 0.0),
-    vec4f(0.0, f, 0.0, 0.0),
-    vec4f(0.0, 0.0, far * nf, -1.0),
-    vec4f(0.0, 0.0, far * near * nf, 0.0));
-}
-
-fn lookAt(eye: vec3f, center: vec3f, up: vec3f) -> mat4x4f {
-  let fwd = normalize(center - eye);
-  let right = normalize(cross(fwd, up));
-  let u2 = cross(right, fwd);
-  return mat4x4f(
-    vec4f(right.x, u2.x, -fwd.x, 0.0),
-    vec4f(right.y, u2.y, -fwd.y, 0.0),
-    vec4f(right.z, u2.z, -fwd.z, 0.0),
-    vec4f(-dot(right, eye), -dot(u2, eye), dot(fwd, eye), 1.0));
-}
+// ── Camera (eye, target and fov must match gBufferShader exactly) ──
 
 fn getCameraVP(t: f32, aspect: f32) -> mat4x4f {
   let angle = t * 0.2;

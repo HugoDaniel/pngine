@@ -1,0 +1,159 @@
+; The hand-written twin of examples/pass_game_of_life.sjon: Conway's Life with
+; `(pass-graph …)` expanded by hand into the core forms it lowers to.
+; `schema/sugar-ledger.mjs` names this file for `(pass …)`'s `:init`, and
+; `tests/zig/render/render_test.zig` holds the pair pixel-equal every run
+; (`twin_of = "pass_game_of_life"`).
+;
+; `:init` is the one-shot seed, and it lowers to what a top-level `(init …)`
+; lowers to, one resource kind over: a module whose prelude binds the pass's own
+; target as `screen`, a compute pipeline and bind group, and a compute pass
+; named into the emitted frame's `:init` list. Written out, it is five forms —
+; and the fifth, `(frame … :init …)`, is the one that makes it a SEED rather
+; than a step: `:init` steps run once per loaded payload, ahead of `:before` and
+; `:perform`.
+;
+; The one place the key reaches a GPU descriptor is the target's usage, which
+; gains `storage-binding` below: a render attachment a compute shader also
+; stores into. By CONTRIBUTING's "the sugar tier pays the core's toll" that is
+; the whole reason the key owes this file.
+;
+; The document also carries `:feedback true`'s wiring, already twinned by
+; pass_bloom_hand.sjon — a `:pool 2` texture, `:pool 2` bind groups,
+; `:ping-pong 1` for the pass's own slot and `:ping-pong 0` for its consumer's.
+; The seed binds `:ping-pong 1` for the same reason the pass does: it writes the
+; instance frame 0 will read as `prev_life`.
+;
+; Nothing here names `pngine` — no uniform buffer, no per-frame queue write —
+; which is what makes every frame reproducible on any device, and is also why
+; `:init` refuses a seed that names it (the buffer is still zeroes that early).
+;
+; Equivalence reached: PIXEL, for the two reasons every `(pass …)` twin is pixel
+; rather than byte: the sugar names the frame and the last render pass alike
+; (`duplicate name 'main'` by hand, hence `(frame :name draw …)`), and the
+; emitter walks authored forms grouped by kind against lowered forms in emission
+; order.
+
+(sampler :name __pass_sampler :mag-filter linear :min-filter linear)
+
+; ---- pass `life` -> a ping-pong pair it seeds once and then steps ----------
+
+; `storage-binding` is `:init`'s doing. Without the seed this is the ordinary
+; `[texture-binding render-attachment]` a feedback pass gets.
+(texture :name life__tex :size canvas :format rgba8unorm
+  :usage [texture-binding render-attachment storage-binding] :pool 2)
+
+(shader-module :name life__shader :code """@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let x = f32(i & 1u) * 4.0 - 1.0;
+  let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+  return vec4f(x, y, 0, 1);
+}
+@group(0) @binding(0) var prev_life: texture_2d<f32>;
+
+      @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+        // `prev_life` is the prelude's `:feedback true` binding: last frame's
+        // output. Read by texel, not sampled — Life counts neighbours, and a
+        // linear filter would average them into fractions.
+        let dim = vec2i(textureDimensions(prev_life));
+        let p = vec2i(pos.xy);
+        var n = 0;
+        for (var dy = -1; dy <= 1; dy++) {
+          for (var dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) { continue; }
+            // Wrapped, so the grid is a torus and nothing dies of being at an edge.
+            let q = (p + vec2i(dx, dy) + dim) % dim;
+            n += select(0, 1, textureLoad(prev_life, q, 0).r > 0.5);
+          }
+        }
+        let was = textureLoad(prev_life, p, 0).r > 0.5;
+        let alive = (was && (n == 2 || n == 3)) || (!was && n == 3);
+        return vec4f(vec3f(select(0.0, 1.0, alive)), 1.0);
+      }
+    """)
+
+(render-pipeline :name life__pipe :layout auto
+  (vertex :module life__shader :entry vs)
+  (fragment :module life__shader :entry fs
+    (target :format rgba8unorm)))
+
+(bind-group :name life__bg :layout life__pipe :group 0 :pool 2
+  (entry :binding 0 :texture life__tex :ping-pong 1))
+
+(render-pass :name life :pipeline life__pipe :bind-groups [life__bg]
+  (color-attachment :view life__tex :clear-value [0 0 0 1]
+    :load-op clear :store-op store)
+  (draw :vertex-count 3))
+
+; ---- the seed: `:init`, written out ----------------------------------------
+
+; The seed's prelude is the compute one — no fullscreen vertex shader, and
+; `screen` is the pass's own target as a storage texture. Its format is the
+; texture's, which WGSL demands and the emitter cross-checks.
+(shader-module :name life__init_shader :code """@group(0) @binding(0) var screen: texture_storage_2d<rgba8unorm, write>;
+
+      @compute @workgroup_size(8, 8) fn seed(@builtin(global_invocation_id) id: vec3u) {
+        let dim = textureDimensions(screen);
+        if (id.x >= dim.x || id.y >= dim.y) { return; }
+        // A deterministic integer hash, so the seeded grid is identical on every
+        // device and the render snapshot is a fact rather than a sample.
+        var h = id.x * 1973u + id.y * 9277u + 26699u;
+        h = (h ^ (h >> 15u)) * 2246822519u;
+        h = (h ^ (h >> 13u)) * 3266489917u;
+        h = h ^ (h >> 16u);
+        // ~28% alive: dense enough to keep gliders and blinkers running, sparse
+        // enough that the first generation does not overcrowd itself to death.
+        let alive = f32(h % 100u < 28u);
+        textureStore(screen, vec2i(id.xy), vec4f(alive, alive, alive, 1.0));
+      }
+    """)
+
+(compute-pipeline :name life__init_pipe0 :layout auto
+  (compute :module life__init_shader :entry seed))
+
+; `:ping-pong 1` writes `base + (0 + 1) % 2`, which is the instance frame 0
+; reads as `prev_life`. Seeding the other slot would seed the one frame 0
+; overwrites.
+(bind-group :name life__init_bg :layout life__init_pipe0 :group 0
+  (entry :binding 0 :texture life__tex :ping-pong 1))
+
+; The grid is pngine's reference extent (512) over the seed's
+; `@workgroup_size(8, 8)`. The seed's own bounds guard is what keeps a smaller
+; canvas in range.
+(compute-pass :name life__init0 :pipeline life__init_pipe0
+  :bind-groups [life__init_bg]
+  (dispatch :workgroups [64 64]))
+
+; ---- pass `main` -> the canvas ---------------------------------------------
+
+(shader-module :name main__shader :code """@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let x = f32(i & 1u) * 4.0 - 1.0;
+  let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+  return vec4f(x, y, 0, 1);
+}
+@group(0) @binding(0) var life: texture_2d<f32>;
+
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let v = textureLoad(life, vec2i(pos.xy), 0).r;
+      // Living cells warm, dead ones a deep blue rather than black: an unseeded
+      // grid then reads as a flat colour, which is a different failure from
+      // nothing having rendered at all.
+      return vec4f(mix(vec3f(0.04, 0.05, 0.12), vec3f(1.0, 0.72, 0.28), v), 1.0);
+    }
+  """)
+
+(render-pipeline :name main__pipe :layout auto
+  (vertex :module main__shader :entry vs)
+  (fragment :module main__shader :entry fs
+    (target :format preferred-canvas-format)))
+
+; Pooled because its producer is: a fixed group would sample whichever slot it
+; was built against, half the frames stale.
+(bind-group :name main__bg :layout main__pipe :group 0 :pool 2
+  (entry :binding 0 :texture life__tex :ping-pong 0))
+
+(render-pass :name main :pipeline main__pipe :bind-groups [main__bg]
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1]
+    :load-op clear :store-op store)
+  (draw :vertex-count 3))
+
+; `:init` runs once per loaded payload, before the first frame's steps.
+(frame :name draw :init [life__init0] :perform [life main])

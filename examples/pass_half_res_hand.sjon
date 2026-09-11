@@ -1,0 +1,117 @@
+; The hand-written twin of examples/pass_half_res.sjon: the same program with
+; `(pass-graph …)` expanded by hand into the core forms it lowers to.
+;
+; A twin is the sugar tier's anchor. A hook's `:produces` names only ordinary
+; core forms, so a sugar document is by definition one somebody could have
+; written by hand — and a sugar key with no hand-written twin is not sugar, it
+; is a core capability wearing a sugar spelling. `schema/sugar-ledger.mjs`
+; names this file for `(pass …)`'s `:name`, `:code` and `:scale`, and
+; `tests/zig/render/render_test.zig` holds the pair pixel-equal every run
+; (`twin_of = "pass_half_res"`).
+;
+; `:scale 0.25` lands on ONE core key: `(texture :size canvas :scale 0.25)`.
+; The prelude's `const PASS_SCALE` is the only other thing it produces, and a
+; hand-written pass declares it itself.
+;
+; Equivalence reached: PIXEL. BYTE is unreachable, for two reasons that have
+; nothing to do with `:scale`:
+;
+;   1. The sugar names the frame `main` AND the last pass's render pass `main`.
+;      Written by hand that is `duplicate name 'main'` and validate exits 1 —
+;      lowered forms never face the check. Hence `(frame :name draw …)` below.
+;   2. The emitter walks AUTHORED forms grouped by kind and LOWERED forms in
+;      emission order, so the create sequence is shader,shader,buffer,buffer,
+;      texture,sampler,… here against sampler,buffer,texture,shader,… there.
+;      Same resources, same ids, identical frame; different bytes.
+
+(sampler :name __pass_sampler :mag-filter linear :min-filter linear)
+
+; ---- pass `coarse` -> a quarter-canvas intermediate ------------------------
+
+(buffer :name coarse__ubuf :size 16 :usage [uniform copy-dst])
+
+(texture :name coarse__tex :size canvas :format rgba8unorm
+  :usage [texture-binding render-attachment] :scale 0.25)
+
+(shader-module :name coarse__shader :code """struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+@group(0) @binding(0) var<uniform> pngine: PngineInputs;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let x = f32(i & 1u) * 4.0 - 1.0;
+  let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+  return vec4f(x, y, 0, 1);
+}
+const PASS_SCALE: f32 = 0.25;
+
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      // In THIS target's texels, of which there are a quarter of the canvas's.
+      let cell = floor(pos.xy / 8.0);
+      let dark = fract((cell.x + cell.y) * 0.5) < 0.25;
+      // The pass's own extent: the canvas times its scale.
+      let uv = pos.xy / (vec2f(pngine.width, pngine.height) * PASS_SCALE);
+      let lit = vec3f(uv.x, 0.35 + 0.45 * uv.y, 0.9 - 0.5 * uv.x);
+      return vec4f(select(lit, lit * 0.25, dark), 1.0);
+    }
+  """)
+
+(render-pipeline :name coarse__pipe :layout auto
+  (vertex :module coarse__shader :entry vs)
+  (fragment :module coarse__shader :entry fs
+    (target :format rgba8unorm)))
+
+(bind-group :name coarse__bg :layout coarse__pipe :group 0
+  (entry :binding 0 :buffer coarse__ubuf))
+
+(render-pass :name coarse :pipeline coarse__pipe :bind-groups [coarse__bg]
+  (color-attachment :view coarse__tex :clear-value [0 0 0 1]
+    :load-op clear :store-op store)
+  (draw :vertex-count 3))
+
+(queue :name coarse__uq
+  (write-buffer :buffer coarse__ubuf :offset 0 :data pngine-inputs))
+
+; ---- pass `main` -> the canvas ---------------------------------------------
+
+(buffer :name main__ubuf :size 16 :usage [uniform copy-dst])
+
+; No `main__tex` here. A last pass with no `post()` routes its render pass
+; straight to `context-current-texture`, so the hook used to allocate a
+; canvas-sized attachment nothing read — found by hand-writing this very file
+; and fixed in §425 (CONTRIBUTING pitfall 114). The twin tracks the hook.
+
+(shader-module :name main__shader :code """struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+@group(0) @binding(0) var<uniform> pngine: PngineInputs;
+@group(0) @binding(1) var samp: sampler;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let x = f32(i & 1u) * 4.0 - 1.0;
+  let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+  return vec4f(x, y, 0, 1);
+}
+@group(0) @binding(2) var coarse: texture_2d<f32>;
+
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      // Sampled back up to canvas resolution through the shared linear sampler,
+      // so the quarter-size checker arrives soft-edged.
+      return textureSample(coarse, samp, uv);
+    }
+  """)
+
+(render-pipeline :name main__pipe :layout auto
+  (vertex :module main__shader :entry vs)
+  (fragment :module main__shader :entry fs
+    (target :format preferred-canvas-format)))
+
+(bind-group :name main__bg :layout main__pipe :group 0
+  (entry :binding 0 :buffer main__ubuf)
+  (entry :binding 1 :sampler __pass_sampler)
+  (entry :binding 2 :texture coarse__tex :ping-pong 0))
+
+(render-pass :name main :pipeline main__pipe :bind-groups [main__bg]
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1]
+    :load-op clear :store-op store)
+  (draw :vertex-count 3))
+
+(queue :name main__uq
+  (write-buffer :buffer main__ubuf :offset 0 :data pngine-inputs))
+
+(frame :name draw :perform [coarse__uq coarse main__uq main])

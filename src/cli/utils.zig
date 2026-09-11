@@ -3,6 +3,7 @@
 //! Provides common functionality used across all CLI subcommands.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 
 /// Maximum input file size (16 MiB).
 /// Prevents DoS via memory exhaustion from malicious inputs.
@@ -16,7 +17,7 @@ pub const max_file_size: u32 = 16 * 1024 * 1024;
 ///
 /// Complexity: O(n) where n = file size
 /// Post-condition: Returns owned slice with file contents
-pub fn readFileFromDir(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8) ![]u8 {
+pub fn readFileFromDir(gpa: Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8) ![]u8 {
     const file = try dir.openFile(io, path, .{});
     defer file.close(io);
 
@@ -26,8 +27,8 @@ pub fn readFileFromDir(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir
     else
         @intCast(stat.size);
 
-    const buffer = try allocator.alloc(u8, size);
-    errdefer allocator.free(buffer);
+    const buffer = try gpa.alloc(u8, size);
+    errdefer gpa.free(buffer);
 
     var bytes_read: u32 = 0;
     for (0..size + 1) |_| {
@@ -48,9 +49,9 @@ pub fn readFileFromDir(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir
 ///
 /// Pre-condition: path.len > 0
 /// Post-condition: Returns owned slice with file contents
-pub fn readBinaryFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
+pub fn readBinaryFile(gpa: Allocator, io: std.Io, path: []const u8) ![]u8 {
     std.debug.assert(path.len > 0);
-    return readFileFromDir(allocator, io, std.Io.Dir.cwd(), path);
+    return readFileFromDir(gpa, io, std.Io.Dir.cwd(), path);
 }
 
 /// Read entire file into sentinel-terminated buffer.
@@ -60,7 +61,7 @@ pub fn readBinaryFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8
 ///
 /// Pre-condition: path.len > 0
 /// Post-condition: returned slice is null-terminated at index [len]
-pub fn readSourceFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![:0]const u8 {
+pub fn readSourceFile(gpa: Allocator, io: std.Io, path: []const u8) ![:0]const u8 {
     std.debug.assert(path.len > 0);
 
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
@@ -72,8 +73,8 @@ pub fn readSourceFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8
     else
         @intCast(stat.size);
 
-    const buffer = try allocator.allocSentinel(u8, size, 0);
-    errdefer allocator.free(buffer);
+    const buffer = try gpa.allocSentinel(u8, size, 0);
+    errdefer gpa.free(buffer);
 
     var bytes_read: u32 = 0;
     for (0..size + 1) |_| {
@@ -111,64 +112,36 @@ pub fn writeStdout(io: std.Io, data: []const u8) !void {
     try std.Io.File.stdout().writeStreamingAll(io, data);
 }
 
-/// Derive output path from input path by replacing extension with .pngb.
+/// `<dir>/<stem><suffix>` — the sibling of `input` with a new ending.
 ///
-/// Caller owns returned memory.
+/// The one place the stem+dirname+suffix shape lives. Six near-identical
+/// `derive*Path` functions across three files collapsed into this call with a
+/// literal suffix: `".pngb"` (compile, extract), `"_embedded.png"` (embed),
+/// `".zip"` (bundle), `".png"` (render), `".d.ts"` (the `--types` sidecar).
+///
+/// Caller owns the returned path.
+/// Complexity: O(n) where n = input.len
 /// Examples:
-///   "input.sjon" -> "input.pngb"
-///   "path/to/file.sjon" -> "path/to/file.pngb"
-pub fn deriveOutputPath(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
+///   ("input.sjon", ".pngb")   -> "input.pngb"
+///   ("path/to/x.png", ".zip") -> "path/to/x.zip"
+pub fn deriveSiblingPath(gpa: Allocator, input: []const u8, suffix: []const u8) ![]u8 {
+    // Pre-conditions
     std.debug.assert(input.len > 0);
+    std.debug.assert(suffix.len > 0);
 
     const stem = std.fs.path.stem(input);
     const dir = std.fs.path.dirname(input);
 
     const result = if (dir) |d|
-        try std.fmt.allocPrint(allocator, "{s}/{s}.pngb", .{ d, stem })
+        try std.fmt.allocPrint(gpa, "{s}/{s}{s}", .{ d, stem, suffix })
     else
-        try std.fmt.allocPrint(allocator, "{s}.pngb", .{stem});
+        try std.fmt.allocPrint(gpa, "{s}{s}", .{ stem, suffix });
 
-    std.debug.assert(std.mem.endsWith(u8, result, ".pngb"));
+    // Post-condition: the caller's suffix is what the path ends in. Three of
+    // the six originals had this assert (`.pngb`, `.png`, `.d.ts`); the three
+    // that did not are exactly the three suffixes it now also covers.
+    std.debug.assert(std.mem.endsWith(u8, result, suffix));
     return result;
-}
-
-/// Derive output path for embed: input.png -> input_embedded.png
-pub fn deriveEmbedOutputPath(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
-    std.debug.assert(input.len > 0);
-
-    const stem = std.fs.path.stem(input);
-    const dir = std.fs.path.dirname(input);
-
-    return if (dir) |d|
-        try std.fmt.allocPrint(allocator, "{s}/{s}_embedded.png", .{ d, stem })
-    else
-        try std.fmt.allocPrint(allocator, "{s}_embedded.png", .{stem});
-}
-
-/// Derive output path for extract: input.png -> input.pngb
-pub fn deriveExtractOutputPath(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
-    std.debug.assert(input.len > 0);
-
-    const stem = std.fs.path.stem(input);
-    const dir = std.fs.path.dirname(input);
-
-    return if (dir) |d|
-        try std.fmt.allocPrint(allocator, "{s}/{s}.pngb", .{ d, stem })
-    else
-        try std.fmt.allocPrint(allocator, "{s}.pngb", .{stem});
-}
-
-/// Derive output path for bundle: input.sjon -> input.zip
-pub fn deriveBundleOutputPath(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
-    std.debug.assert(input.len > 0);
-
-    const stem = std.fs.path.stem(input);
-    const dir = std.fs.path.dirname(input);
-
-    return if (dir) |d|
-        try std.fmt.allocPrint(allocator, "{s}/{s}.zip", .{ d, stem })
-    else
-        try std.fmt.allocPrint(allocator, "{s}.zip", .{stem});
 }
 
 /// Map error to exit code and print message.

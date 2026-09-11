@@ -1,0 +1,62 @@
+; test_data_gen — the `gen` half of `(buffer … :file …)`.
+;
+; A data WASM has two shapes and the exports decide which. With `l` (byte
+; length) and `s` (where those bytes sit in the module's memory) alone, the
+; module is a container: the compiler reads its data segments at build time and
+; ships the bytes, nothing else (examples/test_data_pass.sjon). Export a `gen`
+; function beside them and the module becomes a program: it is embedded whole,
+; the runtime calls `gen` once when the buffer is created, and `gen` returns the
+; pointer its bytes were written to.
+;
+; assets/gen_ramp.wasm takes the second shape and carries NO data segment at
+; all — read statically it is twelve zero bytes. `gen` computes i * 0.5 for
+; i in 0..2, so a canvas that is azure (0, 0.5, 1) is one where the runtime ran
+; the module, and a BLACK canvas is one where it did not. That is the whole
+; assertion, and nothing else in the corpus was making it: every other `:file`
+; document takes the container shape.
+;
+; `s` is 16 here rather than 0, which is the other thing this fixture pins. `s`
+; addresses the MODULE's memory; the GPU buffer is exactly `l` bytes long and is
+; always written from 0. The two offsets meet in `write_buffer_from_wasm`, whose
+; frozen operand (docs/abi.md §6, `buffer_off`) is the destination — so passing
+; `s` there wrote past the end of a buffer that had no room for it, silently
+; correct for every fixture that had `s` = 0 and wrong for the first one that
+; did not. §435 found the same shape of defect one operand to the left.
+;
+; The native backend stubs the three `[wasm]` opcodes, so this document renders
+; black under `--frame`; its gate is the frozen MockGPU trace
+; (tests/zig/golden/test_data_gen.trace), which pins the operands, and the
+; browser, which pins the pixels.
+
+; No `:size`: `l` is the length. The bind group leaves `:layout` out and is
+; derived from the one pipeline that binds it.
+(buffer :name ramp :file "assets/gen_ramp.wasm" :usage [storage copy-dst])
+
+(shader-module :name code :code """
+@group(0) @binding(0) var<storage, read> ramp: array<f32>;
+
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let x = f32(i & 1u) * 4.0 - 1.0;
+  let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+  return vec4f(x, y, 0, 1);
+}
+
+@fragment fn fs() -> @location(0) vec4f {
+  return vec4f(ramp[0], ramp[1], ramp[2], 1.0);
+}
+""")
+
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format preferred-canvas-format)))
+
+(bind-group :name bg :group 0
+  (entry :binding 0 :buffer ramp))
+
+(render-pass :name draw :pipeline pipe :bind-groups [bg]
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1]
+    :load-op clear :store-op store)
+  (draw :vertex-count 3))
+
+(frame :name main :perform [draw])

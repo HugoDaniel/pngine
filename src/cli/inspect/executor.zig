@@ -3,6 +3,7 @@
 //! Uses WAMR with AOT-compiled executor for native performance.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const pngine = @import("pngine");
 const format = pngine.format;
 const build_options = @import("build_options");
@@ -37,16 +38,16 @@ pub fn isAvailable() bool {
 
 /// Validate bytecode structure and content.
 pub fn validateBytecode(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     bytecode: []const u8,
     result: *ValidationResult,
     opts: *const Options,
 ) !void {
-    const version = try checkHeader(allocator, bytecode, result) orelse return;
+    const version = try checkHeader(gpa, bytecode, result) orelse return;
 
     // Deserialize the full module for analysis
-    const module = format.deserialize(allocator, bytecode) catch |err| {
-        try result.errors.append(allocator, .{
+    const module = format.deserialize(gpa, bytecode) catch |err| {
+        try result.errors.append(gpa, .{
             .code = "E004",
             .severity = .err,
             .message = switch (err) {
@@ -60,14 +61,14 @@ pub fn validateBytecode(
         result.status = .err;
         return;
     };
-    defer @constCast(&module).deinit(allocator);
+    defer @constCast(&module).deinit(gpa);
 
     // Extract WGSL from module structure (WGSL Table → Data Section)
-    try extractWgslFromModule(allocator, result, &module, opts.extract_wgsl);
+    try extractWgslFromModule(gpa, result, &module, opts.extract_wgsl);
 
     result.module_info = moduleInfoOf(&module, version);
-    try checkModuleContents(allocator, &module, result);
-    try runWasmOrWarn(allocator, bytecode, result, opts);
+    try checkModuleContents(gpa, &module, result);
+    try runWasmOrWarn(gpa, bytecode, result, opts);
 }
 
 /// The `"module"` block of the report: pure projection of the parsed module.
@@ -92,14 +93,14 @@ fn moduleInfoOf(module: *const format.Module, version: u16) types.ModuleInfo {
 /// static checks above already passed, so an unavailable or failing runtime
 /// costs coverage, not validity. Hence warning, never error.
 fn runWasmOrWarn(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     bytecode: []const u8,
     result: *ValidationResult,
     opts: *const Options,
 ) !void {
     if (isAvailable()) {
-        executeWasm(allocator, bytecode, result, opts) catch |err| {
-            try result.warnings.append(allocator, .{
+        executeWasm(gpa, bytecode, result, opts) catch |err| {
+            try result.warnings.append(gpa, .{
                 .code = "W100",
                 .severity = .warning,
                 .message = switch (err) {
@@ -122,7 +123,7 @@ fn runWasmOrWarn(
 
     // Why it could not run is only worth saying when the user asked for detail.
     if (!opts.quiet and opts.verbose) {
-        try result.warnings.append(allocator, .{
+        try result.warnings.append(gpa, .{
             .code = "W100",
             .severity = .warning,
             .message = if (!WamrRuntime.isAvailable())
@@ -142,12 +143,12 @@ fn runWasmOrWarn(
 /// this out is what keeps the three near-identical bail-outs from making the
 /// rest of `validateBytecode` hard to see.
 fn checkHeader(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     bytecode: []const u8,
     result: *ValidationResult,
 ) !?u16 {
     const fatal = struct {
-        fn f(a: std.mem.Allocator, r: *ValidationResult, code: []const u8, msg: []const u8) !void {
+        fn f(a: Allocator, r: *ValidationResult, code: []const u8, msg: []const u8) !void {
             try r.errors.append(a, .{
                 .code = code,
                 .severity = .err,
@@ -159,17 +160,17 @@ fn checkHeader(
     }.f;
 
     if (bytecode.len < format.HEADER_SIZE) {
-        try fatal(allocator, result, "E001", "Bytecode too small - missing header");
+        try fatal(gpa, result, "E001", "Bytecode too small - missing header");
         return null;
     }
     if (!std.mem.eql(u8, bytecode[0..4], format.MAGIC)) {
-        try fatal(allocator, result, "E002", "Invalid magic bytes - not a PNGB file");
+        try fatal(gpa, result, "E002", "Invalid magic bytes - not a PNGB file");
         return null;
     }
 
     const version = std.mem.readInt(u16, bytecode[4..6], .little);
     if (version != format.VERSION) {
-        try fatal(allocator, result, "E003", "Unsupported PNGB version");
+        try fatal(gpa, result, "E003", "Unsupported PNGB version");
         return null;
     }
 
@@ -179,12 +180,12 @@ fn checkHeader(
 
 /// Warn about a module that parsed cleanly but has nothing in it.
 fn checkModuleContents(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     module: *const format.Module,
     result: *ValidationResult,
 ) !void {
     const warn = struct {
-        fn f(a: std.mem.Allocator, r: *ValidationResult, code: []const u8, msg: []const u8) !void {
+        fn f(a: Allocator, r: *ValidationResult, code: []const u8, msg: []const u8) !void {
             try r.warnings.append(a, .{
                 .code = code,
                 .severity = .warning,
@@ -195,8 +196,8 @@ fn checkModuleContents(
         }
     }.f;
 
-    if (module.bytecode.len == 0) try warn(allocator, result, "W001", "Empty bytecode section");
-    if (module.wgsl.entries.items.len == 0) try warn(allocator, result, "W002", "No WGSL shaders defined");
+    if (module.bytecode.len == 0) try warn(gpa, result, "W001", "Empty bytecode section");
+    if (module.wgsl.entries.items.len == 0) try warn(gpa, result, "W002", "No WGSL shaders defined");
 }
 
 /// Execute WASM to capture command buffer output.
@@ -209,7 +210,7 @@ fn checkModuleContents(
 /// Pre-condition: bytecode is valid PNGB format
 /// Post-condition: result contains all frame data and validation issues
 fn executeWasm(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     bytecode: []const u8,
     result: *ValidationResult,
     opts: *const Options,
@@ -221,13 +222,13 @@ fn executeWasm(
     wamr.WamrRuntime.setVerbose(opts.verbose);
 
     // 1MB stack and 1MB heap.
-    var runtime = try WamrRuntime.init(allocator, 1024 * 1024, 1024 * 1024);
+    var runtime = try WamrRuntime.init(gpa, 1024 * 1024, 1024 * 1024);
     defer runtime.deinit();
 
-    const module = try loadIntoRuntime(allocator, &runtime, bytecode);
-    defer @constCast(&module).deinit(allocator);
+    const module = try loadIntoRuntime(gpa, &runtime, bytecode);
+    defer @constCast(&module).deinit(gpa);
 
-    var validator = Validator.init(allocator);
+    var validator = Validator.init(gpa);
     defer validator.deinit();
     try configureValidator(&validator, &runtime, &module);
 
@@ -238,12 +239,12 @@ fn executeWasm(
     // `--phase frame` report "[E011] WASM frame() returned error" on every
     // valid document. A non-zero return from either phase is fatal, so both
     // report it and stop.
-    if (!try runInitPhase(allocator, &runtime, &validator, result)) return;
+    if (!try runInitPhase(gpa, &runtime, &validator, result)) return;
     if (opts.phase == .frame or opts.phase == .both) {
-        if (!try runFramePhases(allocator, &runtime, &validator, result, opts)) return;
+        if (!try runFramePhases(gpa, &runtime, &validator, result, opts)) return;
     }
 
-    try collectFindings(allocator, &validator, result, opts);
+    try collectFindings(gpa, &validator, result, opts);
 
     // Post-condition: frame_results populated if frame phase was run
     if (opts.phase == .frame or opts.phase == .both) {
@@ -254,7 +255,7 @@ fn executeWasm(
 /// Copy the bytecode and its data section into WASM memory, and hand back the
 /// deserialized module (which the caller owns).
 fn loadIntoRuntime(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     runtime: *WamrRuntime,
     bytecode: []const u8,
 ) !format.Module {
@@ -269,8 +270,8 @@ fn loadIntoRuntime(
     try runtime.writeMemory(bytecode_ptr, bytecode);
     try runtime.callSetLen("setBytecodeLen", @intCast(bytecode.len));
 
-    const module = try format.deserialize(allocator, bytecode);
-    errdefer @constCast(&module).deinit(allocator);
+    const module = try format.deserialize(gpa, bytecode);
+    errdefer @constCast(&module).deinit(gpa);
 
     // The data section runs to the WGSL table, or to end-of-file when there
     // isn't one.
@@ -318,13 +319,13 @@ fn configureValidator(
 /// Returns false when init failed, meaning the caller must stop: everything
 /// downstream assumes the resources it creates exist.
 fn runInitPhase(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     runtime: *WamrRuntime,
     validator: *Validator,
     result: *ValidationResult,
 ) !bool {
     if (try runtime.callInit() != 0) {
-        try result.errors.append(allocator, .{
+        try result.errors.append(gpa, .{
             .code = "E010",
             .severity = .err,
             .message = "WASM init() returned error",
@@ -338,9 +339,9 @@ fn runInitPhase(
     const cmd_len = try runtime.callGetPtr("getCommandLen");
     if (cmd_len > 0) {
         const cmd_data = try runtime.readMemory(cmd_ptr, cmd_len);
-        result.init_commands = try cmd_validator.parseCommands(allocator, cmd_data);
+        result.init_commands = try cmd_validator.parseCommands(gpa, cmd_data);
         try validator.validate(result.init_commands);
-        try crossValidateWgslPipelines(allocator, result);
+        try crossValidateWgslPipelines(gpa, result);
     }
     return true;
 }
@@ -350,7 +351,7 @@ fn runInitPhase(
 ///
 /// Returns false when a frame failed, for the same reason `runInitPhase` does.
 fn runFramePhases(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     runtime: *WamrRuntime,
     validator: *Validator,
     result: *ValidationResult,
@@ -363,7 +364,7 @@ fn runFramePhases(
         const frame_time = opts.time + @as(f32, @floatFromInt(frame_idx)) * opts.time_step;
 
         if (try runtime.callFrame(frame_time, opts.width, opts.height) != 0) {
-            try result.errors.append(allocator, .{
+            try result.errors.append(gpa, .{
                 .code = "E011",
                 .severity = .err,
                 .message = "WASM frame() returned error",
@@ -378,12 +379,12 @@ fn runFramePhases(
         if (cmd_len == 0) continue;
 
         const cmd_data = try runtime.readMemory(cmd_ptr, cmd_len);
-        const frame_commands = try cmd_validator.parseCommands(allocator, cmd_data);
+        const frame_commands = try cmd_validator.parseCommands(gpa, cmd_data);
         // Owned by nobody until the append lands: a failing append leaked it
         // (`ValidationResult.deinit` frees only what is IN frame_results).
-        errdefer allocator.free(frame_commands);
+        errdefer gpa.free(frame_commands);
 
-        try result.frame_results.append(allocator, .{
+        try result.frame_results.append(gpa, .{
             .frame_index = frame_idx,
             .time = frame_time,
             .commands = frame_commands,
@@ -408,7 +409,7 @@ fn runFramePhases(
 
 /// Move everything the validator accumulated into the report.
 fn collectFindings(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     validator: *Validator,
     result: *ValidationResult,
     opts: *const Options,
@@ -418,14 +419,14 @@ fn collectFindings(
     // forwarding `issue.severity`.
     for (validator.issues.items) |issue| {
         if (issue.severity == .err) {
-            try result.errors.append(allocator, .{
+            try result.errors.append(gpa, .{
                 .code = issue.code,
                 .severity = .err,
                 .message = issue.message,
                 .command_index = issue.command_index,
             });
         } else {
-            try result.warnings.append(allocator, .{
+            try result.warnings.append(gpa, .{
                 .code = issue.code,
                 .severity = .warning,
                 .message = issue.message,
@@ -595,7 +596,7 @@ pub fn analyzeFrameDiff(frames: []const FrameResult) FrameDiff {
 /// Pre-condition: module has been deserialized
 /// Post-condition: result.wgsl_shaders populated with parsed info
 fn extractWgslFromModule(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     result: *ValidationResult,
     module: *const format.Module,
     extract_source: bool,
@@ -605,7 +606,7 @@ fn extractWgslFromModule(
 
     // One arena for every shader's reflection, owned by the result.
     if (result.wgsl_arena == null) {
-        result.wgsl_arena = std.heap.ArenaAllocator.init(allocator);
+        result.wgsl_arena = std.heap.ArenaAllocator.init(gpa);
     }
     const arena = result.wgsl_arena.?.allocator();
 
@@ -628,7 +629,7 @@ fn extractWgslFromModule(
         // Store source if requested (for --extract-wgsl flag)
         var source_copy: ?[]const u8 = null;
         if (extract_source) {
-            source_copy = allocator.dupe(u8, wgsl_source) catch null;
+            source_copy = gpa.dupe(u8, wgsl_source) catch null;
         }
 
         // Add to result (bounded by MAX_SHADERS)
@@ -659,28 +660,28 @@ fn extractWgslFromModule(
 /// Pre-condition: extractWgslShaders has been called
 /// Post-condition: warnings added to result.warnings if issues found
 fn crossValidateWgslPipelines(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     result: *ValidationResult,
 ) !void {
     const wgsl_shaders = result.getWgslShaders();
     if (wgsl_shaders.len == 0) return;
 
-    const stages = try collectShaderStages(allocator, result, wgsl_shaders);
+    const stages = try collectShaderStages(gpa, result, wgsl_shaders);
     const pipelines = countPipelineKinds(result.init_commands);
 
     if (pipelines.render > 0) {
-        if (!stages.vertex) try warnMissingStage(allocator, result, "W202", "Render pipeline exists but no @vertex entry point found in shaders");
-        if (!stages.fragment) try warnMissingStage(allocator, result, "W203", "Render pipeline exists but no @fragment entry point found in shaders");
+        if (!stages.vertex) try warnMissingStage(gpa, result, "W202", "Render pipeline exists but no @vertex entry point found in shaders");
+        if (!stages.fragment) try warnMissingStage(gpa, result, "W203", "Render pipeline exists but no @fragment entry point found in shaders");
     }
     if (pipelines.compute > 0 and !stages.compute) {
-        try warnMissingStage(allocator, result, "W204", "Compute pipeline exists but no @compute entry point found in shaders");
+        try warnMissingStage(gpa, result, "W204", "Compute pipeline exists but no @compute entry point found in shaders");
     }
 }
 
 /// Which shader stages the module's WGSL actually provides, warning (W201)
 /// about any shader that reflects to nothing.
 fn collectShaderStages(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     result: *ValidationResult,
     shaders: anytype,
 ) !struct { vertex: bool, fragment: bool, compute: bool } {
@@ -691,7 +692,7 @@ fn collectShaderStages(
     for (shaders) |shader| {
         const entry_points = shader.getEntryPoints();
         if (entry_points.len == 0) {
-            try warnMissingStage(allocator, result, "W201", "Shader has no entry points - may not be valid WGSL");
+            try warnMissingStage(gpa, result, "W201", "Shader has no entry points - may not be valid WGSL");
             continue;
         }
         for (entry_points) |ep| switch (ep.stage) {
@@ -725,12 +726,12 @@ fn countPipelineKinds(init_commands: []const CommandInfo) struct { render: u32, 
 /// Append a W2xx shader/pipeline mismatch warning and lift the status to
 /// `.warning` if nothing worse has been found yet.
 fn warnMissingStage(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     result: *ValidationResult,
     code: []const u8,
     message: []const u8,
 ) !void {
-    try result.warnings.append(allocator, .{
+    try result.warnings.append(gpa, .{
         .code = code,
         .severity = .warning,
         .message = message,

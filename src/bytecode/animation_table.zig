@@ -85,9 +85,9 @@ pub const AnimationTable = struct {
         .owned_scenes = null,
     };
 
-    pub fn deinit(self: *AnimationTable, allocator: Allocator) void {
+    pub fn deinit(self: *AnimationTable, gpa: Allocator) void {
         if (self.owned_scenes) |scenes| {
-            allocator.free(scenes);
+            gpa.free(scenes);
         }
         self.* = undefined;
     }
@@ -136,36 +136,38 @@ pub const AnimationTable = struct {
     }
 
     /// Serialize to bytes.
-    pub fn serialize(self: *const AnimationTable, allocator: Allocator) ![]u8 {
+    ///
+    /// Caller owns the returned bytes.
+    pub fn serialize(self: *const AnimationTable, gpa: Allocator) ![]u8 {
         var result = std.ArrayList(u8).empty;
-        errdefer result.deinit(allocator);
+        errdefer result.deinit(gpa);
 
         var buf: [4]u8 = undefined;
 
         const info = self.info orelse {
             // No animation - just write flags byte with bit 0 = 0
-            try result.append(allocator, 0);
-            return result.toOwnedSlice(allocator);
+            try result.append(gpa, 0);
+            return result.toOwnedSlice(gpa);
         };
 
         // Flags: bit 0 = has_animation, bit 1 = loop
         var flags: u8 = 1; // has_animation
         if (info.loop) flags |= 2;
-        try result.append(allocator, flags);
+        try result.append(gpa, flags);
 
         // name_string_id
         const name_len = opcodes.encodeVarint(info.name_string_id, &buf);
-        try result.appendSlice(allocator, buf[0..name_len]);
+        try result.appendSlice(gpa, buf[0..name_len]);
 
         // duration_ms (fixed u32)
-        try result.appendSlice(allocator, std.mem.asBytes(&info.duration_ms));
+        try result.appendSlice(gpa, std.mem.asBytes(&info.duration_ms));
 
         // end_behavior
-        try result.append(allocator, @intFromEnum(info.end_behavior));
+        try result.append(gpa, @intFromEnum(info.end_behavior));
 
         // scene_count
         const count_len = opcodes.encodeVarint(@intCast(info.scenes.len), &buf);
-        try result.appendSlice(allocator, buf[0..count_len]);
+        try result.appendSlice(gpa, buf[0..count_len]);
 
         // scenes (bounded loop)
         for (info.scenes, 0..) |scene, i| {
@@ -173,25 +175,25 @@ pub const AnimationTable = struct {
 
             // id_string_id
             const id_len = opcodes.encodeVarint(scene.id_string_id, &buf);
-            try result.appendSlice(allocator, buf[0..id_len]);
+            try result.appendSlice(gpa, buf[0..id_len]);
 
             // frame_string_id
             const frame_len = opcodes.encodeVarint(scene.frame_string_id, &buf);
-            try result.appendSlice(allocator, buf[0..frame_len]);
+            try result.appendSlice(gpa, buf[0..frame_len]);
 
             // start_ms (fixed u32)
-            try result.appendSlice(allocator, std.mem.asBytes(&scene.start_ms));
+            try result.appendSlice(gpa, std.mem.asBytes(&scene.start_ms));
 
             // end_ms (fixed u32)
-            try result.appendSlice(allocator, std.mem.asBytes(&scene.end_ms));
+            try result.appendSlice(gpa, std.mem.asBytes(&scene.end_ms));
         }
 
-        return result.toOwnedSlice(allocator);
+        return result.toOwnedSlice(gpa);
     }
 };
 
 /// Deserialize animation table from bytes.
-pub fn deserialize(allocator: Allocator, data: []const u8) !AnimationTable {
+pub fn deserialize(gpa: Allocator, data: []const u8) !AnimationTable {
     if (data.len == 0) return AnimationTable.empty;
 
     var pos: usize = 0;
@@ -240,8 +242,8 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !AnimationTable {
     // Read scenes. `filled` counts the entries the bytes actually supplied; the
     // info slice is cut to it, so a declared count that outlives the data never
     // exposes undefined entries to `findSceneAtTime`.
-    var scenes = try allocator.alloc(Scene, scene_count);
-    errdefer allocator.free(scenes);
+    var scenes = try gpa.alloc(Scene, scene_count);
+    errdefer gpa.free(scenes);
     var filled: usize = 0;
 
     for (0..scene_count) |i| {

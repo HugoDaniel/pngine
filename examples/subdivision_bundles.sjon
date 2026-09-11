@@ -121,10 +121,12 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
 (compute-pass :name amplify :pipeline subdividePipe :bind-groups [subdivideBG]
   (dispatch :workgroups [(ceil (/ (* SEED_TRIS SUB_TRIS) WG))]))
 
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+
 ; Both pipelines read this module, through their own entry points. The surface
 ; maths lives in one function, `place`, so the halo really is the same surface:
 ; the shell would drift off the solid the moment the two copies disagreed.
-(shader-module :name draw :code """
+(shader-module :name draw :imports [perspective] :code """
 struct Inputs { time : f32, width : f32, height : f32, aspect : f32 }
 
 @group(0) @binding(0) var<uniform> inputs : Inputs;
@@ -135,16 +137,6 @@ fn displace(n : vec3f, t : f32, seedPhase : f32) -> vec3f {
                 * sin(n.y * 3.0 + t * 1.2 + seedPhase)
         + 0.06 * sin(n.z * 7.0 - t * 2.0);
   return n * (1.0 + w);
-}
-
-fn perspective(fovy : f32, aspect : f32, near : f32, far : f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0, 0, 0),
-    vec4f(0, f, 0, 0),
-    vec4f(0, 0, far * nf, -1),
-    vec4f(0, 0, far * near * nf, 0));
 }
 
 struct Placed {
@@ -267,11 +259,11 @@ fn fsHalo(in : VSOut) -> @location(0) vec4f {
   (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled false :depth-compare less))
 
-(bind-group :name solidBG :layout solidPipe :group 0
-  (entry :binding 0 :buffer uniforms)
-  (entry :binding 1 :buffer mesh))
-
-(bind-group :name haloBG :layout haloPipe :group 0
+; One resource set, two pipelines. With no `:layout` the compiler derives one
+; GPU bind group per pipeline that binds it, pruned to what that pipeline's
+; entry points reach — so the two forms that differed only in the pipeline they
+; named became one. Compiles to the same bytes as the pair did.
+(bind-group :name meshBG :group 0
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :buffer mesh))
 
@@ -281,14 +273,14 @@ fn fsHalo(in : VSOut) -> @location(0) vec4f {
   :pipeline solidPipe
   :color-formats [preferred-canvas-format]
   :depth-stencil-format depth24plus
-  :bind-groups [solidBG]
+  :bind-groups [meshBG]
   (draw :vertex-count (* SEED_TRIS SUB_TRIS 3) :instance-count INSTANCES))
 
 (render-bundle :name haloBundle
   :pipeline haloPipe
   :color-formats [preferred-canvas-format]
   :depth-stencil-format depth24plus
-  :bind-groups [haloBG]
+  :bind-groups [meshBG]
   (draw :vertex-count (* SEED_TRIS SUB_TRIS 3) :instance-count INSTANCES))
 
 ; No :pipeline, no (draw ...). The pass is the replay list.

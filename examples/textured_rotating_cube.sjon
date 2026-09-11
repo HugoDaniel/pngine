@@ -11,7 +11,9 @@
 ; PI works as a symbol because the compiler substitutes the math constants
 ; PI/TAU/E into WGSL; user-defined names get no such treatment.
 
-(shader-module :name code :code """
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+
+(shader-module :name code :imports [perspective] :code """
 struct PngineInputs {
   time: f32,
   canvasW: f32,
@@ -24,23 +26,6 @@ struct VertexOutput {
   @builtin(position) Position : vec4f,
   @location(0) fragUV : vec2f,
   @location(1) fragPosition: vec4f,
-}
-
-fn perspective(fieldOfViewY: f32, aspect: f32, zNear: f32, zFar: f32) -> mat4x4<f32> {
-    let f: f32 = tan(0.5 * 3.141592653589793 - 0.5 * fieldOfViewY);
-
-    var A: f32;
-    var B: f32;
-    let rangeInv: f32 = 1.0 / (zNear - zFar);
-    A = zFar * rangeInv;
-    B = zFar * zNear * rangeInv;
-
-    return mat4x4<f32>(
-        vec4<f32>(f / aspect, 0.0,   0.0, 0.0),
-        vec4<f32>(0.0,        f,     0.0, 0.0),
-        vec4<f32>(0.0,        0.0,   A,  -1.0),
-        vec4<f32>(0.0,        0.0,   B,  0.0)
-    );
 }
 
 fn getTransformationMatrix(now: f32, projectionMatrix: mat4x4<f32>) -> mat4x4<f32> {

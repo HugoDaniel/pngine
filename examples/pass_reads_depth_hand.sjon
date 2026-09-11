@@ -1,0 +1,114 @@
+; The hand-written twin of examples/pass_reads_depth.sjon: the same program
+; with `(pass-graph :before [geo] …)` expanded by hand into the core forms it
+; lowers to.
+;
+; `schema/sugar-ledger.mjs` names this file for `(pass-graph … :before)`, and
+; `tests/zig/render/render_test.zig` holds the pair pixel-equal every run
+; (`twin_of = "pass_reads_depth"`).
+;
+; `:before [geo]` is the key this twin is here for, and it is the smallest one
+; in the tier: it puts the named steps at the HEAD of the frame the graph emits.
+; An unnamed graph owns that frame, so without the key nothing else in the
+; document can run at all — which is why the expansion below is simply
+; `(frame :name draw :perform [geo main__uq main])` with `geo` first. Written
+; out, the key stops looking like an option and starts looking like the only
+; way an unnamed graph composes with anything.
+;
+; What the twin also shows for free, because `:reads` is how the two halves
+; meet: a depth texture read back is typed from the texture's own `:format`.
+; `gDepth` is `depth32float`, so the prelude declares `texture_depth_2d` and
+; `textureLoad` returns a bare f32, while `gColor` arrives as a
+; `texture_2d<f32>` the shared linear sampler can filter. Sampling the depth
+; one would be a bind group Chrome refuses (pitfall 110) and the compiler
+; refuses it first.
+;
+; Equivalence: PIXEL. BYTE is out of reach for every sugar twin — see the
+; header of examples/pass_half_res_hand.sjon.
+
+(shader-module :name scene :code """
+struct VSOut { @builtin(position) pos : vec4f, @location(0) tint : vec3f }
+// Two triangles at different depths, so the depth buffer this document reads
+// back has more than one value in it.
+@vertex fn vs(@builtin(vertex_index) i : u32) -> VSOut {
+  var p = array<vec2f, 6>(
+    vec2f(-0.8, -0.6), vec2f(0.2, -0.6), vec2f(-0.3, 0.7),
+    vec2f(-0.2, -0.8), vec2f(0.8, -0.8), vec2f(0.3, 0.5));
+  var o : VSOut;
+  let far = i >= 3u;
+  o.pos = vec4f(p[i], select(0.25, 0.75, far), 1.0);
+  o.tint = select(vec3f(0.95, 0.45, 0.15), vec3f(0.15, 0.55, 0.95), far);
+  return o;
+}
+@fragment fn fs(in : VSOut) -> @location(0) vec4f { return vec4f(in.tint, 1.0); }
+""")
+
+(texture :name gColor :size canvas :format rgba8unorm
+  :usage [render-attachment texture-binding])
+(texture :name gDepth :size canvas :format depth32float
+  :usage [render-attachment texture-binding])
+
+(render-pipeline :name geoPipe :layout auto
+  (vertex :module scene :entry vs)
+  (fragment :module scene :entry fs (target :format rgba8unorm))
+  (depth-stencil :format depth32float :depth-write-enabled true :depth-compare less))
+
+(render-pass :name geo
+  (color-attachment :view gColor :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (depth-stencil-attachment :view gDepth
+    :depth-clear-value 1 :depth-load-op clear :depth-store-op store)
+  :pipeline geoPipe
+  (draw :vertex-count 6))
+
+; ---- the pass `main`, expanded --------------------------------------------
+
+(sampler :name __pass_sampler :mag-filter linear :min-filter linear)
+
+(buffer :name main__ubuf :size 16 :usage [uniform copy-dst])
+
+; The prelude the hook writes above the author's text. The last two lines are
+; `:reads [gColor gDepth]`, in the order they were listed and typed one each
+; from the texture they name.
+(shader-module :name main__shader :code """struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+@group(0) @binding(0) var<uniform> pngine: PngineInputs;
+@group(0) @binding(1) var samp: sampler;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let x = f32(i & 1u) * 4.0 - 1.0;
+  let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+  return vec4f(x, y, 0, 1);
+}
+@group(0) @binding(2) var gColor: texture_2d<f32>;
+@group(0) @binding(3) var gDepth: texture_depth_2d;
+
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      let colour = textureSample(gColor, samp, uv).rgb;
+      // Depth comes back as one f32. Nothing was drawn where it is still 1,
+      // so this fogs the geometry by distance and tints the background.
+      let d = textureLoad(gDepth, vec2i(pos.xy), 0);
+      let fog = vec3f(0.05, 0.06, 0.12);
+      return vec4f(mix(colour, fog, clamp(d, 0.0, 1.0)), 1.0);
+    }
+  """)
+
+(render-pipeline :name main__pipe :layout auto
+  (vertex :module main__shader :entry vs)
+  (fragment :module main__shader :entry fs
+    (target :format preferred-canvas-format)))
+
+(bind-group :name main__bg :layout main__pipe :group 0
+  (entry :binding 0 :buffer main__ubuf)
+  (entry :binding 1 :sampler __pass_sampler)
+  (entry :binding 2 :texture gColor)
+  (entry :binding 3 :texture gDepth))
+
+(render-pass :name main :pipeline main__pipe :bind-groups [main__bg]
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1]
+    :load-op clear :store-op store)
+  (draw :vertex-count 3))
+
+(queue :name main__uq
+  (write-buffer :buffer main__ubuf :offset 0 :data pngine-inputs))
+
+; ---- and `:before [geo]`, which is just this ordering -----------------------
+
+(frame :name draw :perform [geo main__uq main])

@@ -178,7 +178,9 @@ pub fn checkConfig(shape: ShapeType, config: ShapeConfig) ?ConfigViolation {
 /// Generate cube vertices with specified format.
 /// Returns byte array with vertex data.
 /// Cube is centered at origin with side length 2 (vertices at ±1).
-pub fn generateCube(allocator: Allocator, config: ShapeConfig) ![]u8 {
+///
+/// Caller owns the returned bytes.
+pub fn generateCube(gpa: Allocator, config: ShapeConfig) ![]u8 {
     // Pre-conditions
     std.debug.assert(config.formats.len > 0);
     std.debug.assert(config.formats.len <= MAX_ATTRIBUTES);
@@ -190,8 +192,8 @@ pub fn generateCube(allocator: Allocator, config: ShapeConfig) ![]u8 {
     }
 
     const total_floats = vertex_count * stride;
-    const bytes = try allocator.alloc(u8, total_floats * 4);
-    errdefer allocator.free(bytes);
+    const bytes = try gpa.alloc(u8, total_floats * 4);
+    errdefer gpa.free(bytes);
 
     // Cast to f32 slice for easier writing
     const floats = std.mem.bytesAsSlice(f32, bytes);
@@ -307,7 +309,9 @@ pub fn generateCube(allocator: Allocator, config: ShapeConfig) ![]u8 {
 
 /// Generate plane vertices (single quad on XY plane).
 /// Plane is centered at origin with configurable width and height.
-pub fn generatePlane(allocator: Allocator, config: ShapeConfig) ![]u8 {
+///
+/// Caller owns the returned bytes.
+pub fn generatePlane(gpa: Allocator, config: ShapeConfig) ![]u8 {
     // Pre-conditions
     std.debug.assert(config.formats.len > 0);
     std.debug.assert(config.formats.len <= MAX_ATTRIBUTES);
@@ -319,8 +323,8 @@ pub fn generatePlane(allocator: Allocator, config: ShapeConfig) ![]u8 {
     }
 
     const total_floats = vertex_count * stride;
-    const bytes = try allocator.alloc(u8, total_floats * 4);
-    errdefer allocator.free(bytes);
+    const bytes = try gpa.alloc(u8, total_floats * 4);
+    errdefer gpa.free(bytes);
 
     const floats = std.mem.bytesAsSlice(f32, bytes);
 
@@ -401,7 +405,9 @@ pub fn generatePlane(allocator: Allocator, config: ShapeConfig) ![]u8 {
 
 /// Generate sphere vertices (UV sphere, deindexed).
 /// Sphere centered at origin with configurable segments (longitude) and rings (latitude).
-pub fn generateSphere(allocator: Allocator, config: ShapeConfig) ![]u8 {
+///
+/// Caller owns the returned bytes.
+pub fn generateSphere(gpa: Allocator, config: ShapeConfig) ![]u8 {
     std.debug.assert(config.formats.len > 0);
     std.debug.assert(config.formats.len <= MAX_ATTRIBUTES);
     if (checkConfig(.sphere, config) != null) return error.InvalidShapeConfig;
@@ -422,8 +428,8 @@ pub fn generateSphere(allocator: Allocator, config: ShapeConfig) ![]u8 {
 
     // Allocate indexed vertices
     const indexed_count = (segs + 1) * (rings + 1);
-    const indexed = try allocator.alloc(f32, indexed_count * 6); // pos3 + normal3
-    defer allocator.free(indexed);
+    const indexed = try gpa.alloc(f32, indexed_count * 6); // pos3 + normal3
+    defer gpa.free(indexed);
 
     // Generate indexed vertices with smooth normals
     var vi: usize = 0;
@@ -452,8 +458,8 @@ pub fn generateSphere(allocator: Allocator, config: ShapeConfig) ![]u8 {
     std.debug.assert(vi == indexed_count * 6);
 
     // Generate indices
-    const indices = try allocator.alloc(u32, num_indices);
-    defer allocator.free(indices);
+    const indices = try gpa.alloc(u32, num_indices);
+    defer gpa.free(indices);
     const verts_around: u32 = segs + 1;
     var ii: usize = 0;
     for (0..segs) |x| {
@@ -471,12 +477,14 @@ pub fn generateSphere(allocator: Allocator, config: ShapeConfig) ![]u8 {
     }
     std.debug.assert(ii == num_indices);
 
-    return deindexAndEmit(allocator, config, indexed, 6, indices, num_indices);
+    return deindexAndEmit(gpa, config, indexed, 6, indices, num_indices);
 }
 
 /// Generate torus vertices (deindexed).
 /// Torus centered at origin on XZ plane with configurable radius, thickness, subdivisions.
-pub fn generateTorus(allocator: Allocator, config: ShapeConfig) ![]u8 {
+///
+/// Caller owns the returned bytes.
+pub fn generateTorus(gpa: Allocator, config: ShapeConfig) ![]u8 {
     std.debug.assert(config.formats.len > 0);
     std.debug.assert(config.formats.len <= MAX_ATTRIBUTES);
     if (checkConfig(.torus, config) != null) return error.InvalidShapeConfig;
@@ -492,8 +500,8 @@ pub fn generateTorus(allocator: Allocator, config: ShapeConfig) ![]u8 {
     const num_indices = radial * body * 6;
     if (num_indices > MAX_VERTICES) return error.ShapeTooLarge;
 
-    const indexed = try allocator.alloc(f32, indexed_count * 6);
-    defer allocator.free(indexed);
+    const indexed = try gpa.alloc(f32, indexed_count * 6);
+    defer gpa.free(indexed);
 
     var vi: usize = 0;
     for (0..body_parts) |slice| {
@@ -519,8 +527,8 @@ pub fn generateTorus(allocator: Allocator, config: ShapeConfig) ![]u8 {
     }
     std.debug.assert(vi == indexed_count * 6);
 
-    const indices = try allocator.alloc(u32, num_indices);
-    defer allocator.free(indices);
+    const indices = try gpa.alloc(u32, num_indices);
+    defer gpa.free(indices);
     var ii: usize = 0;
     for (0..body) |slice| {
         for (0..radial) |ring| {
@@ -537,12 +545,14 @@ pub fn generateTorus(allocator: Allocator, config: ShapeConfig) ![]u8 {
     }
     std.debug.assert(ii == num_indices);
 
-    return deindexAndEmit(allocator, config, indexed, 6, indices, num_indices);
+    return deindexAndEmit(gpa, config, indexed, 6, indices, num_indices);
 }
 
 /// Generate truncated cone vertices (deindexed).
 /// Centered at origin along Y axis. topRadius=0 gives a cone, topRadius=bottomRadius gives a cylinder.
-pub fn generateTruncatedCone(allocator: Allocator, config: ShapeConfig) ![]u8 {
+///
+/// Caller owns the returned bytes.
+pub fn generateTruncatedCone(gpa: Allocator, config: ShapeConfig) ![]u8 {
     std.debug.assert(config.formats.len > 0);
     std.debug.assert(config.formats.len <= MAX_ATTRIBUTES);
     if (checkConfig(.truncated_cone, config) != null) return error.InvalidShapeConfig;
@@ -589,8 +599,8 @@ pub fn generateTruncatedCone(allocator: Allocator, config: ShapeConfig) ![]u8 {
         num_indices = @intCast(wide);
     }
 
-    const indexed = try allocator.alloc(f32, indexed_count * 6);
-    defer allocator.free(indexed);
+    const indexed = try gpa.alloc(f32, indexed_count * 6);
+    defer gpa.free(indexed);
 
     var vi: usize = 0;
     var yy = start_i;
@@ -648,8 +658,8 @@ pub fn generateTruncatedCone(allocator: Allocator, config: ShapeConfig) ![]u8 {
     std.debug.assert(vi == indexed_count * 6);
 
     // (index count + cap: computed above, before the vertex allocation)
-    const indices = try allocator.alloc(u32, num_indices);
-    defer allocator.free(indices);
+    const indices = try gpa.alloc(u32, num_indices);
+    defer gpa.free(indices);
     var ii: usize = 0;
     for (0..total_rings_for_idx) |yy_idx| {
         if ((yy_idx == 1 and has_top) or (yy_idx == total_rings_for_idx - 2 and has_bot)) continue;
@@ -667,16 +677,18 @@ pub fn generateTruncatedCone(allocator: Allocator, config: ShapeConfig) ![]u8 {
     }
     std.debug.assert(ii == num_indices);
 
-    return deindexAndEmit(allocator, config, indexed, 6, indices, num_indices);
+    return deindexAndEmit(gpa, config, indexed, 6, indices, num_indices);
 }
 
 /// Generate cylinder vertices (wrapper around truncated cone with equal radii).
-pub fn generateCylinder(allocator: Allocator, config: ShapeConfig) ![]u8 {
+///
+/// Caller owns the returned bytes.
+pub fn generateCylinder(gpa: Allocator, config: ShapeConfig) ![]u8 {
     var cone_config = config;
     cone_config.top_radius = config.radius;
     cone_config.bottom_radius = config.radius;
     cone_config.cone_height = config.cone_height;
-    return generateTruncatedCone(allocator, cone_config);
+    return generateTruncatedCone(gpa, cone_config);
 }
 
 // ============================================================================
@@ -759,7 +771,7 @@ fn emitVertex(
 /// `indexed` contains interleaved pos3+normal3 per vertex (6 floats each).
 /// `src_stride` is floats per indexed vertex (always 6 for pos3+normal3).
 fn deindexAndEmit(
-    allocator: Allocator,
+    gpa: Allocator,
     config: ShapeConfig,
     indexed: []const f32,
     src_stride: u32,
@@ -774,8 +786,8 @@ fn deindexAndEmit(
     for (config.formats) |fmt| out_stride += fmt.floatCount();
 
     const total_floats = num_indices * out_stride;
-    const bytes = try allocator.alloc(u8, total_floats * 4);
-    errdefer allocator.free(bytes);
+    const bytes = try gpa.alloc(u8, total_floats * 4);
+    errdefer gpa.free(bytes);
     const floats = std.mem.bytesAsSlice(f32, bytes);
 
     var offset: usize = 0;
@@ -942,7 +954,7 @@ fn computeProjectedPlaneUVs(
 /// Generate indexed mesh from embedded binary data.
 /// Emits interleaved vertex data according to format, plus raw index bytes.
 fn generateIndexedMesh(
-    allocator: Allocator,
+    gpa: Allocator,
     config: ShapeConfig,
     bin_data: []const u8,
 ) !IndexedMeshResult {
@@ -967,10 +979,10 @@ fn generateIndexedMesh(
     std.debug.assert(bin_data.len >= idx_offset + idx_bytes_len);
 
     // Copy positions and normals to aligned buffers for safe f32 access
-    const pos_floats = try allocator.alloc(f32, vc * 3);
-    defer allocator.free(pos_floats);
-    const norm_floats = try allocator.alloc(f32, vc * 3);
-    defer allocator.free(norm_floats);
+    const pos_floats = try gpa.alloc(f32, vc * 3);
+    defer gpa.free(pos_floats);
+    const norm_floats = try gpa.alloc(f32, vc * 3);
+    defer gpa.free(norm_floats);
 
     for (0..vc * 3) |i| {
         const p_off = pos_offset + i * 4;
@@ -989,10 +1001,10 @@ fn generateIndexedMesh(
     }
 
     var uvs: ?[]f32 = null;
-    defer if (uvs) |u| allocator.free(u);
+    defer if (uvs) |u| gpa.free(u);
 
     if (has_uv) {
-        uvs = try allocator.alloc(f32, vc * 2);
+        uvs = try gpa.alloc(f32, vc * 2);
         computeProjectedPlaneUVs(pos_floats, vc, uvs.?);
     }
 
@@ -1001,8 +1013,8 @@ fn generateIndexedMesh(
     for (config.formats) |fmt| out_stride += fmt.floatCount();
 
     const total_floats = vc * out_stride;
-    const vertex_bytes = try allocator.alloc(u8, total_floats * 4);
-    errdefer allocator.free(vertex_bytes);
+    const vertex_bytes = try gpa.alloc(u8, total_floats * 4);
+    errdefer gpa.free(vertex_bytes);
     const floats: []f32 = @as([*]f32, @ptrCast(@alignCast(vertex_bytes.ptr)))[0..total_floats];
 
     // Emit interleaved vertex data
@@ -1061,8 +1073,8 @@ fn generateIndexedMesh(
     std.debug.assert(offset == total_floats);
 
     // Copy index bytes (already in correct binary format)
-    const index_bytes = try allocator.alloc(u8, idx_bytes_len);
-    errdefer allocator.free(index_bytes);
+    const index_bytes = try gpa.alloc(u8, idx_bytes_len);
+    errdefer gpa.free(index_bytes);
     @memcpy(index_bytes, bin_data[idx_offset .. idx_offset + idx_bytes_len]);
 
     return .{
@@ -1075,13 +1087,13 @@ fn generateIndexedMesh(
 }
 
 /// Generate teapot mesh (792 vertices, 992 triangles, u16 indices).
-pub fn generateTeapot(allocator: Allocator, config: ShapeConfig) !IndexedMeshResult {
-    return generateIndexedMesh(allocator, config, teapot_bin);
+pub fn generateTeapot(gpa: Allocator, config: ShapeConfig) !IndexedMeshResult {
+    return generateIndexedMesh(gpa, config, teapot_bin);
 }
 
 /// Generate Stanford dragon mesh (6710 vertices, 11102 triangles, u16 indices).
-pub fn generateDragon(allocator: Allocator, config: ShapeConfig) !IndexedMeshResult {
-    return generateIndexedMesh(allocator, config, dragon_bin);
+pub fn generateDragon(gpa: Allocator, config: ShapeConfig) !IndexedMeshResult {
+    return generateIndexedMesh(gpa, config, dragon_bin);
 }
 
 /// Vertex count for indexed meshes (reads from embedded binary header).

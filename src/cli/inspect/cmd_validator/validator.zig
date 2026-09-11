@@ -2,6 +2,7 @@
 //! single-file cmd_validator.zig; re-exported by ../cmd_validator.zig.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const pngine = @import("pngine");
 const Cmd = pngine.command_buffer.Cmd;
 const desc = pngine.types.descriptors;
@@ -65,7 +66,7 @@ const WriteBufferFromWasmParams = cv_shared.WriteBufferFromWasmParams;
 /// ## Usage
 ///
 /// ```zig
-/// var validator = Validator.init(allocator);
+/// var validator = Validator.init(gpa);
 /// defer validator.deinit();
 /// try validator.validate(commands);
 /// if (validator.hasErrors()) {
@@ -78,13 +79,15 @@ const WriteBufferFromWasmParams = cv_shared.WriteBufferFromWasmParams;
 /// - `pass_state` transitions: none → render/compute → none
 /// - `current_pipeline` is null when `pass_state` is none
 /// - Resource maps grow monotonically (resources never removed)
+///
+/// Stores its own allocator; `deinit()` takes none.
 pub const Validator = struct {
     // ========================================================================
     // Fields (ordered by cache access pattern)
     // ========================================================================
 
     /// Allocator for dynamic data structures.
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
 
     /// Current pass state (none, render, or compute).
     ///
@@ -202,11 +205,11 @@ pub const Validator = struct {
     ///
     /// Complexity: O(1)
     ///
-    /// Pre-condition: allocator is valid.
+    /// Pre-condition: gpa is valid.
     /// Post-condition: All maps empty, pass_state is none.
-    pub fn init(allocator: std.mem.Allocator) Self {
+    pub fn init(gpa: Allocator) Self {
         const self = Self{
-            .allocator = allocator,
+            .gpa = gpa,
             .pass_state = .none,
             .current_pipeline = null,
             .pipeline_is_render = false,
@@ -252,20 +255,20 @@ pub const Validator = struct {
         // stream under inspection did wrong (several per malformed command),
         // and a bound on INPUT is not an invariant to assert at teardown.
 
-        self.buffers.deinit(self.allocator);
-        self.textures.deinit(self.allocator);
-        self.samplers.deinit(self.allocator);
-        self.shaders.deinit(self.allocator);
-        self.render_pipelines.deinit(self.allocator);
-        self.compute_pipelines.deinit(self.allocator);
-        self.bind_group_layouts.deinit(self.allocator);
-        self.bind_group_layout_refs.deinit(self.allocator);
-        self.bind_groups.deinit(self.allocator);
-        self.texture_views.deinit(self.allocator);
-        self.image_bitmaps.deinit(self.allocator);
-        self.wasm_modules.deinit(self.allocator);
-        self.issues.deinit(self.allocator);
-        self.uniform_buffer_ids.deinit(self.allocator);
+        self.buffers.deinit(self.gpa);
+        self.textures.deinit(self.gpa);
+        self.samplers.deinit(self.gpa);
+        self.shaders.deinit(self.gpa);
+        self.render_pipelines.deinit(self.gpa);
+        self.compute_pipelines.deinit(self.gpa);
+        self.bind_group_layouts.deinit(self.gpa);
+        self.bind_group_layout_refs.deinit(self.gpa);
+        self.bind_groups.deinit(self.gpa);
+        self.texture_views.deinit(self.gpa);
+        self.image_bitmaps.deinit(self.gpa);
+        self.wasm_modules.deinit(self.gpa);
+        self.issues.deinit(self.gpa);
+        self.uniform_buffer_ids.deinit(self.gpa);
 
         // Post-condition: mark as undefined to catch use-after-free
         self.* = undefined;
@@ -306,7 +309,7 @@ pub const Validator = struct {
     /// Post-condition: uniform_buffer_ids is populated
     pub fn setUniformBufferIds(self: *Self, buffer_ids: []const u16) !void {
         for (buffer_ids) |id| {
-            try self.uniform_buffer_ids.put(self.allocator, id, {});
+            try self.uniform_buffer_ids.put(self.gpa, id, {});
         }
     }
 
@@ -395,7 +398,7 @@ pub const Validator = struct {
             .create_image_bitmap => try self.validateCreateImageBitmap(cmd.params.create_resource),
             // Tracked only so validateCreateBindGroup can resolve a tagged layout_id.
             .create_bind_group_layout => try self.bind_group_layouts.put(
-                self.allocator,
+                self.gpa,
                 cmd.params.create_resource.id,
                 {},
             ),
@@ -521,7 +524,7 @@ pub const Validator = struct {
         try self.checkBufferUsage(params.usage, params.id);
 
         // Post-condition: buffer is tracked
-        try self.buffers.put(self.allocator, params.id, .{
+        try self.buffers.put(self.gpa, params.id, .{
             .size = params.size,
             .usage = params.usage,
             .created_at = self.command_index,
@@ -607,7 +610,7 @@ pub const Validator = struct {
         try self.validateTextureDescriptor(&texture_info, params.id, descriptor_parsed);
 
         // Post-condition: texture is tracked
-        try self.textures.put(self.allocator, params.id, texture_info);
+        try self.textures.put(self.gpa, params.id, texture_info);
 
         // Post-condition: texture entry exists
         std.debug.assert(self.textures.contains(params.id));
@@ -736,7 +739,12 @@ pub const Validator = struct {
                     @TypeOf(info.dimension),
                     @as(u8, @truncate(f.scalar)),
                 ) orelse info.dimension,
-                .view_formats, .size_from_image_bitmap => {},
+                // Neither changes what this validator checks: `view_formats`
+                // is a list it does not read, `size_from_image_bitmap` and
+                // `size_canvas_scale` are runtime size resolution, and the
+                // width/height it validates are the placeholder 1×1 for every
+                // canvas-tracking texture already.
+                .view_formats, .size_from_image_bitmap, .size_canvas_scale => {},
             }
         } else {
             // Field-count bound reached - valid parse.
@@ -767,7 +775,7 @@ pub const Validator = struct {
         try self.validateTextureDescriptor(&info, id, true);
 
         // Track texture
-        try self.textures.put(self.allocator, id, info);
+        try self.textures.put(self.gpa, id, info);
         return true;
     }
 
@@ -1723,8 +1731,10 @@ pub const Validator = struct {
         }
 
         /// Serialize to JSON string using allocator.
-        pub fn toJsonAlloc(self: LikelyCause, allocator: std.mem.Allocator) ![]u8 {
-            var aw: std.Io.Writer.Allocating = .init(allocator);
+        ///
+        /// Caller owns the returned bytes.
+        pub fn toJsonAlloc(self: LikelyCause, gpa: Allocator) ![]u8 {
+            var aw: std.Io.Writer.Allocating = .init(gpa);
             errdefer aw.deinit();
             try self.writeJson(&aw.writer);
             return aw.toOwnedSlice();
@@ -1793,8 +1803,10 @@ pub const Validator = struct {
 
         /// Serialize to JSON string using allocator.
         /// Causes are sorted by probability (descending) before output.
-        pub fn toJsonAlloc(self: *const LikelyCausesResult, allocator: std.mem.Allocator) ![]u8 {
-            var aw: std.Io.Writer.Allocating = .init(allocator);
+        ///
+        /// Caller owns the returned bytes.
+        pub fn toJsonAlloc(self: *const LikelyCausesResult, gpa: Allocator) ![]u8 {
+            var aw: std.Io.Writer.Allocating = .init(gpa);
             errdefer aw.deinit();
             try self.writeJson(&aw.writer);
             return aw.toOwnedSlice();
@@ -1951,7 +1963,7 @@ pub const Validator = struct {
             try self.addErrorWithId("E005", "Sampler ID already in use", params.id);
             return;
         }
-        try self.samplers.put(self.allocator, params.id, .{ .created_at = self.command_index });
+        try self.samplers.put(self.gpa, params.id, .{ .created_at = self.command_index });
     }
 
     fn validateCreateShader(self: *Self, params: CreateShaderParams) !void {
@@ -1967,7 +1979,7 @@ pub const Validator = struct {
             "CREATE_SHADER code_ptr + code_len exceeds WASM memory",
         );
 
-        try self.shaders.put(self.allocator, params.id, .{ .created_at = self.command_index });
+        try self.shaders.put(self.gpa, params.id, .{ .created_at = self.command_index });
     }
 
     fn validateCreateRenderPipeline(self: *Self, params: CreateResourceParams) !void {
@@ -1975,7 +1987,7 @@ pub const Validator = struct {
             try self.addErrorWithId("E005", "Render pipeline ID already in use", params.id);
             return;
         }
-        try self.render_pipelines.put(self.allocator, params.id, .{
+        try self.render_pipelines.put(self.gpa, params.id, .{
             .is_render = true,
             .created_at = self.command_index,
         });
@@ -1986,7 +1998,7 @@ pub const Validator = struct {
             try self.addErrorWithId("E005", "Compute pipeline ID already in use", params.id);
             return;
         }
-        try self.compute_pipelines.put(self.allocator, params.id, .{
+        try self.compute_pipelines.put(self.gpa, params.id, .{
             .is_render = false,
             .created_at = self.command_index,
         });
@@ -2007,12 +2019,12 @@ pub const Validator = struct {
 
         // Remember the layout reference; it is checked after the whole stream is
         // walked, not here — see checkBindGroupLayoutsResolve.
-        try self.bind_group_layout_refs.append(self.allocator, .{
+        try self.bind_group_layout_refs.append(self.gpa, .{
             .layout_id = params.layout_id,
             .command_index = self.command_index,
         });
 
-        try self.bind_groups.put(self.allocator, params.id, .{ .created_at = self.command_index });
+        try self.bind_groups.put(self.gpa, params.id, .{ .created_at = self.command_index });
     }
 
     /// E009 — every `create_bind_group` must name a layout that exists in the id
@@ -2057,7 +2069,7 @@ pub const Validator = struct {
         if (!is_special_texture and !self.textures.contains(params.texture_id)) {
             try self.addErrorWithId("E001", "Texture view references non-existent texture", params.texture_id);
         }
-        try self.texture_views.put(self.allocator, params.id, .{ .created_at = self.command_index });
+        try self.texture_views.put(self.gpa, params.id, .{ .created_at = self.command_index });
     }
 
     fn validateCreateImageBitmap(self: *Self, params: CreateResourceParams) !void {
@@ -2065,7 +2077,7 @@ pub const Validator = struct {
             try self.addErrorWithId("E005", "Image bitmap ID already in use", params.id);
             return;
         }
-        try self.image_bitmaps.put(self.allocator, params.id, .{ .created_at = self.command_index });
+        try self.image_bitmaps.put(self.gpa, params.id, .{ .created_at = self.command_index });
     }
 
     fn validateInitWasmModule(self: *Self, params: InitWasmModuleParams) !void {
@@ -2081,7 +2093,7 @@ pub const Validator = struct {
             "INIT_WASM_MODULE data_ptr + data_len exceeds WASM memory",
         );
 
-        try self.wasm_modules.put(self.allocator, params.module_id, .{ .created_at = self.command_index });
+        try self.wasm_modules.put(self.gpa, params.module_id, .{ .created_at = self.command_index });
     }
 
     // ========================================================================
@@ -2550,7 +2562,7 @@ pub const Validator = struct {
     // ========================================================================
 
     fn addError(self: *Self, code: []const u8, message: []const u8) !void {
-        try self.issues.append(self.allocator, .{
+        try self.issues.append(self.gpa, .{
             .code = code,
             .severity = .err,
             .message = message,
@@ -2559,7 +2571,7 @@ pub const Validator = struct {
     }
 
     fn addErrorWithId(self: *Self, code: []const u8, message: []const u8, resource_id: u16) !void {
-        try self.issues.append(self.allocator, .{
+        try self.issues.append(self.gpa, .{
             .code = code,
             .severity = .err,
             .message = message,
@@ -2569,7 +2581,7 @@ pub const Validator = struct {
     }
 
     fn addWarning(self: *Self, code: []const u8, message: []const u8) !void {
-        try self.issues.append(self.allocator, .{
+        try self.issues.append(self.gpa, .{
             .code = code,
             .severity = .warning,
             .message = message,
@@ -2578,7 +2590,7 @@ pub const Validator = struct {
     }
 
     fn addWarningWithContext(self: *Self, code: []const u8, message: []const u8, resource_id: u16) !void {
-        try self.issues.append(self.allocator, .{
+        try self.issues.append(self.gpa, .{
             .code = code,
             .severity = .warning,
             .message = message,

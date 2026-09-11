@@ -2,7 +2,7 @@
 //!
 //! ## Usage
 //! ```zig
-//! var writer = ZipWriter.init(allocator);
+//! var writer = ZipWriter.init(gpa);
 //! defer writer.deinit();
 //!
 //! try writer.addFile("manifest.json", json_data, .deflate);
@@ -10,7 +10,7 @@
 //! try writer.addFile("texture.png", image_data, .store);
 //!
 //! const zip_data = try writer.finish();
-//! defer allocator.free(zip_data);
+//! defer gpa.free(zip_data);
 //! ```
 //!
 //! ## Invariants
@@ -19,6 +19,7 @@
 //! - All filenames must be valid UTF-8 without null bytes
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const format = @import("format.zig");
 
 pub const Error = error{
@@ -46,9 +47,11 @@ const WrittenEntry = struct {
     local_header_offset: u32,
 };
 
-/// ZIP archive writer
+/// ZIP archive writer.
+///
+/// Stores its own allocator; `deinit()` takes none.
 pub const ZipWriter = struct {
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     buffer: std.ArrayList(u8),
     entries: std.ArrayList(WrittenEntry),
     filenames: std.ArrayList(u8),
@@ -56,9 +59,9 @@ pub const ZipWriter = struct {
     const MAX_ENTRIES: usize = 65535;
     const MAX_FILENAME_LEN: usize = 4096;
 
-    pub fn init(allocator: std.mem.Allocator) ZipWriter {
+    pub fn init(gpa: Allocator) ZipWriter {
         return ZipWriter{
-            .allocator = allocator,
+            .gpa = gpa,
             .buffer = .empty,
             .entries = .empty,
             .filenames = .empty,
@@ -66,9 +69,9 @@ pub const ZipWriter = struct {
     }
 
     pub fn deinit(self: *ZipWriter) void {
-        self.buffer.deinit(self.allocator);
-        self.entries.deinit(self.allocator);
-        self.filenames.deinit(self.allocator);
+        self.buffer.deinit(self.gpa);
+        self.entries.deinit(self.gpa);
+        self.filenames.deinit(self.gpa);
     }
 
     /// Add a file to the archive
@@ -98,19 +101,19 @@ pub const ZipWriter = struct {
         const compressed_data: []const u8 = switch (method) {
             .store => data,
             .deflate => blk: {
-                const compressed = compressDeflate(self.allocator, data) catch
+                const compressed = compressDeflate(self.gpa, data) catch
                     return Error.CompressionFailed;
                 break :blk compressed;
             },
         };
-        defer if (method == .deflate) self.allocator.free(compressed_data);
+        defer if (method == .deflate) self.gpa.free(compressed_data);
 
         // Record local header offset
         const local_header_offset: u32 = @intCast(self.buffer.items.len);
 
         // Store filename (as offset+len to avoid slice invalidation on realloc)
         const filename_offset: u32 = @intCast(self.filenames.items.len);
-        self.filenames.appendSlice(self.allocator, filename) catch return Error.OutOfMemory;
+        self.filenames.appendSlice(self.gpa, filename) catch return Error.OutOfMemory;
 
         // Write local file header
         const local_header = format.LocalFileHeader{
@@ -124,12 +127,12 @@ pub const ZipWriter = struct {
         var header_buf: [format.LocalFileHeader.FIXED_SIZE]u8 = undefined;
         local_header.writeToBuffer(&header_buf);
 
-        self.buffer.appendSlice(self.allocator, &header_buf) catch return Error.OutOfMemory;
-        self.buffer.appendSlice(self.allocator, filename) catch return Error.OutOfMemory;
-        self.buffer.appendSlice(self.allocator, compressed_data) catch return Error.OutOfMemory;
+        self.buffer.appendSlice(self.gpa, &header_buf) catch return Error.OutOfMemory;
+        self.buffer.appendSlice(self.gpa, filename) catch return Error.OutOfMemory;
+        self.buffer.appendSlice(self.gpa, compressed_data) catch return Error.OutOfMemory;
 
         // Record entry
-        self.entries.append(self.allocator, WrittenEntry{
+        self.entries.append(self.gpa, WrittenEntry{
             .filename_offset = filename_offset,
             .filename_len = @intCast(filename.len),
             .crc32 = crc32,
@@ -162,8 +165,8 @@ pub const ZipWriter = struct {
             var header_buf: [format.CentralDirHeader.FIXED_SIZE]u8 = undefined;
             header.writeToBuffer(&header_buf);
 
-            self.buffer.appendSlice(self.allocator, &header_buf) catch return Error.OutOfMemory;
-            self.buffer.appendSlice(self.allocator, filename) catch return Error.OutOfMemory;
+            self.buffer.appendSlice(self.gpa, &header_buf) catch return Error.OutOfMemory;
+            self.buffer.appendSlice(self.gpa, filename) catch return Error.OutOfMemory;
         }
 
         const central_dir_size: u32 = @intCast(self.buffer.items.len - central_dir_offset);
@@ -179,10 +182,10 @@ pub const ZipWriter = struct {
         var eocd_buf: [format.EndOfCentralDir.FIXED_SIZE]u8 = undefined;
         eocd.writeToBuffer(&eocd_buf);
 
-        self.buffer.appendSlice(self.allocator, &eocd_buf) catch return Error.OutOfMemory;
+        self.buffer.appendSlice(self.gpa, &eocd_buf) catch return Error.OutOfMemory;
 
         // Return owned copy
-        const result = self.allocator.dupe(u8, self.buffer.items) catch return Error.OutOfMemory;
+        const result = self.gpa.dupe(u8, self.buffer.items) catch return Error.OutOfMemory;
         return result;
     }
 
@@ -190,7 +193,7 @@ pub const ZipWriter = struct {
     ///
     /// Uses std.compress.flate for real LZ77+Huffman compression.
     /// Produces raw DEFLATE (no zlib header) as required by ZIP.
-    fn compressDeflate(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+    fn compressDeflate(gpa: Allocator, data: []const u8) ![]u8 {
         const flate = std.compress.flate;
 
         // Allocate output buffer - compressed size may be larger for
@@ -199,8 +202,8 @@ pub const ZipWriter = struct {
         // 1 KiB is ~9× that. Even empty data needs at least 2 bytes for the
         // deflate end marker.
         const initial_capacity = @max(data.len, 64) + data.len / 64 + 1024;
-        var output_buf = try allocator.alloc(u8, initial_capacity);
-        errdefer allocator.free(output_buf);
+        var output_buf = try gpa.alloc(u8, initial_capacity);
+        errdefer gpa.free(output_buf);
 
         // Window buffer for compression (32KB history window)
         var window_buf: [flate.max_window_len]u8 = undefined;
@@ -232,9 +235,9 @@ pub const ZipWriter = struct {
         const compressed_len = output_writer.end;
 
         // Create result with exact size
-        const result = try allocator.alloc(u8, compressed_len);
+        const result = try gpa.alloc(u8, compressed_len);
         @memcpy(result, output_buf[0..compressed_len]);
-        allocator.free(output_buf);
+        gpa.free(output_buf);
 
         return result;
     }

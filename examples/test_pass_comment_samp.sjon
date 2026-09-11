@@ -1,0 +1,20 @@
+; A fragment `(pass …)` whose only mention of `samp` is inside a comment.
+;
+; The pass sugar decides what to declare and bind by reading the author's WGSL.
+; While that read was `std.mem.indexOf`, a comment counted: this document got a
+; `samp: sampler` in its prelude and a matching sampler entry in its bind group,
+; while the pipeline's `:layout auto` — which holds only what the entry point
+; statically uses — had no slot for it. wgpu refuses the group at render time
+; ("Number of bindings in bind group descriptor (2) does not match … (1)"), so
+; the document compiled, validated, and aborted at `--frame`.
+;
+; The predicate is `namesIdent` now, which skips comments, so nothing here is
+; sampled and nothing here is bound.
+(pass-graph
+  (pass :name main :code """
+    // A gradient. There is no texture to samp anything from.
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return vec4f(uv, sin(pngine.time) * .5 + .5, 1);
+    }
+  """))

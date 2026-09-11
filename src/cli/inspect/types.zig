@@ -3,6 +3,7 @@
 //! Shared type definitions for the validate command modules.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const cmd_validator = @import("cmd_validator.zig");
 const symptom_diagnosis = @import("symptom_diagnosis.zig");
 const wgsl_reflect = @import("wgsl_reflect.zig");
@@ -209,26 +210,26 @@ pub const ValidationResult = struct {
         return null;
     }
 
-    pub fn deinit(self: *ValidationResult, allocator: std.mem.Allocator) void {
-        if (self.init_commands.len > 0) allocator.free(self.init_commands);
+    pub fn deinit(self: *ValidationResult, gpa: Allocator) void {
+        if (self.init_commands.len > 0) gpa.free(self.init_commands);
         // Free frame_commands only if it's not shared with frame_results[0]
         const first_frame_cmd_ptr = if (self.frame_results.items.len > 0)
             self.frame_results.items[0].commands.ptr
         else
             null;
         if (self.frame_commands.len > 0 and self.frame_commands.ptr != first_frame_cmd_ptr) {
-            allocator.free(self.frame_commands);
+            gpa.free(self.frame_commands);
         }
         for (self.frame_results.items) |fr| {
-            if (fr.commands.len > 0) allocator.free(fr.commands);
+            if (fr.commands.len > 0) gpa.free(fr.commands);
         }
-        self.frame_results.deinit(allocator);
-        self.errors.deinit(allocator);
-        self.warnings.deinit(allocator);
+        self.frame_results.deinit(gpa);
+        self.errors.deinit(gpa);
+        self.warnings.deinit(gpa);
         // Free WGSL source strings if allocated
         for (self.wgsl_shaders[0..self.wgsl_shader_count]) |shader| {
             if (shader.source) |src| {
-                allocator.free(src);
+                gpa.free(src);
             }
         }
         // Releases every entry point / binding slice in one shot.

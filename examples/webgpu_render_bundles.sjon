@@ -29,17 +29,11 @@
 (init :name initTransforms :buffer transforms :module initShader
   :workgroups [(ceil (/ NUM_ASTEROIDS 64))])
 
-(shader-module :name initShader :code """
+(wgsl :name hash :file "./lib/hash.wgsl")
+
+(shader-module :name initShader :imports [hash] :code """
 struct Transforms { m: array<mat4x4f> }
 @binding(0) @group(0) var<storage, read_write> data: Transforms;
-
-fn hash(n: u32) -> f32 {
-  var x = n;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = (x >> 16u) ^ x;
-  return f32(x) / f32(0xffffffffu);
-}
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -70,22 +64,14 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }
 """)
 
-(shader-module :name renderShader :code """
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+
+(shader-module :name renderShader :imports [perspective] :code """
 struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
 struct Transforms { m: array<mat4x4f> }
 
 @group(0) @binding(0) var<uniform> pngine: PngineInputs;
 @group(0) @binding(1) var<storage, read> xforms: Transforms;
-
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0, 0, 0),
-    vec4f(0, f, 0, 0),
-    vec4f(0, 0, far * nf, -1),
-    vec4f(0, 0, far * near * nf, 0));
-}
 
 struct VertexOutput {
   @builtin(position) position: vec4f,

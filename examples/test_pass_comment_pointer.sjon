@@ -1,0 +1,21 @@
+; A compute `(pass …)` whose only mention of `pointer` is inside a comment.
+;
+; The sibling of `test_pass_comment_samp.sjon` on the compute path: the same
+; substring read decided whether to emit the 48-byte pointer buffer and declare
+; it in the prelude. A comment was enough, so this document bound three entries
+; (uniform, pointer, `screen`) against an auto layout holding two, and aborted
+; inside wgpu-native at `--frame` while every other gate passed it.
+;
+; `namesIdent` skips comments, so only the uniform and `screen` are bound.
+(pass-graph
+  (pass :name main :code """
+    // Time-driven only: no pointer is read anywhere below.
+    @compute @workgroup_size(16, 16)
+    fn main_image(@builtin(global_invocation_id) id: vec3u) {
+      let screen_size = textureDimensions(screen);
+      if (id.x >= screen_size.x || id.y >= screen_size.y) { return; }
+      let uv = vec2f(id.xy) / vec2f(screen_size);
+      let col = .5 + .5 * cos(pngine.time + uv.xyx + vec3f(0., 2., 4.));
+      textureStore(screen, id.xy, vec4f(col, 1.));
+    }
+  """))

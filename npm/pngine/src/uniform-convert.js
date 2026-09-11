@@ -36,6 +36,48 @@ const UT_LANES = {
   [UT_MAT3X3F]: 9, // row-major input, padded to 48B on convert
   [UT_MAT4X4F]: 16,
 };
+// The tags by name, as WGSL spells them and uniform_table.zig's enum names
+// them — what getUniforms reports and what a refusal message says. Indexed
+// by tag: the enum is contiguous from 0, and uniform-type-lanes.test.js holds
+// this order to the Zig file. A tag past the table — 255, the word the
+// compiler writes for a type it could not reflect, or one newer than this
+// runtime — reads as "unknown".
+const UT_NAMES = "f32 i32 u32 vec2f vec3f vec4f mat3x3f mat4x4f vec2i vec3i vec4i vec2u vec3u vec4u".split(" ");
+
+/**
+ * A wire type tag's WGSL name.
+ * @param {number} tag - UniformType enum value
+ * @returns {string}
+ */
+export function uniformTypeName(tag) {
+  return UT_NAMES[tag] ?? "unknown";
+}
+
+/**
+ * The public description of a reflected uniform table — what getUniforms
+ * resolves to. The wire map carries a dispatcher buffer id and a type tag,
+ * neither of which anything public accepts; the description carries the
+ * buffer's `(buffer :name …)` — the name writeBuffer and getBuffers speak —
+ * and the type's WGSL name. A pool's members are consecutive ids from the
+ * block's base. `buffer` is null when the payload names nothing: one minted
+ * before the buffer-name block (3.0.1 and earlier), or a buffer the block
+ * does not list.
+ * @param {Map<string, {bufferId: number, offset: number, size: number, type: number, elemCount: number}>} uniforms
+ * @param {Map<string, {id: number, pool?: number}>} buffers - the buffer-name block
+ * @returns {Record<string, {type: string, size: number, buffer: string | null, offset: number, elemCount: number}>}
+ */
+export function describeUniforms(uniforms, buffers) {
+  const nameOf = (id) => {
+    for (const [name, b] of buffers) if (id >= b.id && id < b.id + (b.pool || 1)) return name;
+    return null;
+  };
+  /** @type {Record<string, {type: string, size: number, buffer: string | null, offset: number, elemCount: number}>} */
+  const out = {};
+  for (const [name, info] of uniforms) {
+    out[name] = { type: uniformTypeName(info.type), size: info.size, buffer: nameOf(info.bufferId), offset: info.offset, elemCount: info.elemCount };
+  }
+  return out;
+}
 
 /**
  * Convert JS value to a TypedArray-backed byte view based on UniformType.

@@ -36,7 +36,10 @@
 ; Comparison sampler → WGSL sampler_comparison (textureSampleCompare).
 (sampler :name shadowSampler :compare less :mag-filter linear :min-filter linear)
 
-(shader-module :name shader :code """
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+(wgsl :name lookAt :file "./lib/look_at.wgsl")
+
+(shader-module :name shader :imports [perspective lookAt] :code """
 const LIGHT_POS = vec3f(80.0, 50.0, -60.0);
 const SHADOW_SIZE_F = 1024.0;
 
@@ -51,16 +54,6 @@ struct Inputs {
 @group(0) @binding(1) var t_shadow: texture_depth_2d;
 @group(0) @binding(2) var s_shadow: sampler_comparison;
 
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0.0, 0.0, 0.0),
-    vec4f(0.0, f, 0.0, 0.0),
-    vec4f(0.0, 0.0, far * nf, -1.0),
-    vec4f(0.0, 0.0, far * near * nf, 0.0));
-}
-
 fn ortho(l: f32, r: f32, b: f32, tp: f32, n: f32, f: f32) -> mat4x4f {
   let rml = 1.0 / (r - l);
   let tmb = 1.0 / (tp - b);
@@ -70,17 +63,6 @@ fn ortho(l: f32, r: f32, b: f32, tp: f32, n: f32, f: f32) -> mat4x4f {
     vec4f(0.0, 2.0 * tmb, 0.0, 0.0),
     vec4f(0.0, 0.0, -fmn, 0.0),
     vec4f(-(r + l) * rml, -(tp + b) * tmb, -n * fmn, 1.0));
-}
-
-fn lookAt(eye: vec3f, center: vec3f, up: vec3f) -> mat4x4f {
-  let fwd = normalize(center - eye);
-  let right = normalize(cross(fwd, up));
-  let u2 = cross(right, fwd);
-  return mat4x4f(
-    vec4f(right.x, u2.x, -fwd.x, 0.0),
-    vec4f(right.y, u2.y, -fwd.y, 0.0),
-    vec4f(right.z, u2.z, -fwd.z, 0.0),
-    vec4f(-dot(right, eye), -dot(u2, eye), dot(fwd, eye), 1.0));
 }
 
 fn getLightVP() -> mat4x4f {

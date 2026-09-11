@@ -19,6 +19,7 @@
 //! - All multi-byte integers are big-endian
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const crc32 = @import("crc32.zig");
 
 /// PNG file signature (8 bytes).
@@ -209,12 +210,12 @@ pub fn writeChunkToBuffer(buffer: []u8, chunk_type: [4]u8, data: []const u8) usi
 }
 
 /// Serialize a chunk using ArrayList writer.
-pub fn writeChunk(list: *std.ArrayList(u8), allocator: std.mem.Allocator, chunk_type: [4]u8, data: []const u8) !void {
+pub fn writeChunk(list: *std.ArrayList(u8), gpa: Allocator, chunk_type: [4]u8, data: []const u8) !void {
     // Pre-condition: data size fits in u32
     std.debug.assert(data.len <= std.math.maxInt(u32));
 
     const total_size = chunkSize(data.len);
-    try list.ensureUnusedCapacity(allocator, total_size);
+    try list.ensureUnusedCapacity(gpa, total_size);
 
     // Length (4 bytes, big-endian)
     var len_bytes: [4]u8 = undefined;

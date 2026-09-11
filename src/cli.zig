@@ -37,6 +37,7 @@
 //! - `cli/utils.zig` - Shared utilities (file I/O, path handling)
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const build_options = @import("build_options");
 
 // Subcommand modules (pub for test access via module import)
@@ -80,7 +81,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 /// leak from any command outcome.
 pub const LEAK_EXIT_CODE: u8 = 99;
 
-fn mainWithIo(gpa: std.mem.Allocator, init: std.process.Init.Minimal) !u8 {
+fn mainWithIo(gpa: Allocator, init: std.process.Init.Minimal) !u8 {
     var threaded: std.Io.Threaded = .init(gpa, .{
         .environ = init.environ,
         .argv0 = .init(init.args),
@@ -101,7 +102,7 @@ fn mainWithIo(gpa: std.mem.Allocator, init: std.process.Init.Minimal) !u8 {
 /// Parse arguments and dispatch to appropriate command. `pub` so the
 /// in-process e2e (tests/zig/cli/inprocess_test.zig) can drive every command
 /// under `std.testing.allocator` — the only leak-checked path through them.
-pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8, io: std.Io) !u8 {
+pub fn run(gpa: Allocator, args: []const [:0]const u8, io: std.Io) !u8 {
     std.debug.assert(args.len >= 1);
 
     if (args.len < 2) {
@@ -115,32 +116,32 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8, io: std.Io)
     // A bare `-` is the stdin spelling of the same thing: `pngine - < a.sjon`
     // must mean what `pngine a.sjon` means, not "unknown command".
     if (stdio.isSjonPath(command)) {
-        return render_cmd.run(allocator, io, args[1..]);
+        return render_cmd.run(gpa, io, args[1..]);
     }
 
     // Dispatch to subcommand
     if (std.mem.eql(u8, command, "compile")) {
-        return compile_cmd.run(allocator, io, args[2..]);
+        return compile_cmd.run(gpa, io, args[2..]);
     } else if (std.mem.eql(u8, command, "validate")) {
-        return validate_cmd.run(allocator, io, args[2..]);
+        return validate_cmd.run(gpa, io, args[2..]);
     } else if (std.mem.eql(u8, command, "inspect")) {
-        return inspect_cmd.run(allocator, io, args[2..]);
+        return inspect_cmd.run(gpa, io, args[2..]);
     } else if (std.mem.eql(u8, command, "check")) {
         // Deprecated alias for inspect
         std.debug.print("Note: 'check' is now 'inspect'. This alias will be removed in a future version.\n\n", .{});
-        return inspect_cmd.run(allocator, io, args[2..]);
+        return inspect_cmd.run(gpa, io, args[2..]);
     } else if (std.mem.eql(u8, command, "render")) {
-        return render_cmd.run(allocator, io, args[2..]);
+        return render_cmd.run(gpa, io, args[2..]);
     } else if (std.mem.eql(u8, command, "embed")) {
-        return embed_cmd.runEmbed(allocator, io, args[2..]);
+        return embed_cmd.runEmbed(gpa, io, args[2..]);
     } else if (std.mem.eql(u8, command, "extract")) {
-        return embed_cmd.runExtract(allocator, io, args[2..]);
+        return embed_cmd.runExtract(gpa, io, args[2..]);
     } else if (std.mem.eql(u8, command, "bundle")) {
-        return bundle_cmd.runBundle(allocator, io, args[2..]);
+        return bundle_cmd.runBundle(gpa, io, args[2..]);
     } else if (std.mem.eql(u8, command, "list")) {
-        return bundle_cmd.runList(allocator, io, args[2..]);
+        return bundle_cmd.runList(gpa, io, args[2..]);
     } else if (std.mem.eql(u8, command, "diff")) {
-        return diff_cmd.run(allocator, io, args[2..]);
+        return diff_cmd.run(gpa, io, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or
         std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h"))
     {

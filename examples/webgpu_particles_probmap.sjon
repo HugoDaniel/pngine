@@ -276,17 +276,11 @@ struct VSOut {
 (bind-group :name importBg :layout importPipeline :group 0
   (entry :binding 0 :texture srcTex)
   (entry :binding 1 :buffer weights))
-(bind-group :name export0Bg :layout export0Pipeline :group 0
-  (entry :binding 1 :buffer weights))
-(bind-group :name export1Bg :layout export1Pipeline :group 0
-  (entry :binding 1 :buffer weights))
-(bind-group :name export2Bg :layout export2Pipeline :group 0
-  (entry :binding 1 :buffer weights))
-(bind-group :name export3Bg :layout export3Pipeline :group 0
-  (entry :binding 1 :buffer weights))
-(bind-group :name export4Bg :layout export4Pipeline :group 0
-  (entry :binding 1 :buffer weights))
-(bind-group :name export5Bg :layout export5Pipeline :group 0
+; One resource set for all six export pipelines. With no `:layout` the compiler
+; derives one GPU bind group per pipeline that binds it, pruned to what that
+; pipeline's entry points reach — which is why six forms saying the same thing
+; and differing only in the pipeline they name became one.
+(bind-group :name exportBg :group 0
   (entry :binding 1 :buffer weights))
 (bind-group :name simBg :layout simPipeline :group 0
   (entry :binding 0 :buffer uniforms)
@@ -304,22 +298,22 @@ struct VSOut {
   :bind-groups [importBg]
   (dispatch :workgroups [8 8 1]))
 (compute-pass :name exportPass0 :pipeline export0Pipeline
-  :bind-groups [export0Bg]
+  :bind-groups [exportBg]
   (dispatch :workgroups [4 4 1]))
 (compute-pass :name exportPass1 :pipeline export1Pipeline
-  :bind-groups [export1Bg]
+  :bind-groups [exportBg]
   (dispatch :workgroups [2 2 1]))
 (compute-pass :name exportPass2 :pipeline export2Pipeline
-  :bind-groups [export2Bg]
+  :bind-groups [exportBg]
   (dispatch :workgroups [1 1 1]))
 (compute-pass :name exportPass3 :pipeline export3Pipeline
-  :bind-groups [export3Bg]
+  :bind-groups [exportBg]
   (dispatch :workgroups [1 1 1]))
 (compute-pass :name exportPass4 :pipeline export4Pipeline
-  :bind-groups [export4Bg]
+  :bind-groups [exportBg]
   (dispatch :workgroups [1 1 1]))
 (compute-pass :name exportPass5 :pipeline export5Pipeline
-  :bind-groups [export5Bg]
+  :bind-groups [exportBg]
   (dispatch :workgroups [1 1 1]))
 
 (compute-pass :name simulatePass :pipeline simPipeline

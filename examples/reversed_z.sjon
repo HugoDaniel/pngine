@@ -36,7 +36,9 @@
 (buffer :name inputs :size 16 :usage [uniform copy-dst])
 (texture :name depth :size canvas :format depth32float :usage [render-attachment])
 
-(shader-module :name code :code """
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+
+(shader-module :name code :imports [perspective] :code """
 struct PngineInputs {
   time: f32,
   canvasW: f32,
@@ -44,16 +46,6 @@ struct PngineInputs {
   aspect: f32,
 };
 @group(0) @binding(0) var<uniform> inputs : PngineInputs;
-
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0, 0, 0),
-    vec4f(0, f, 0, 0),
-    vec4f(0, 0, far * nf, -1),
-    vec4f(0, 0, far * near * nf, 0));
-}
 
 // viewProj: perspective(2pi/5, half-width aspect, 5, 9999) * translate(0,0,-12).
 // The 0.5 factor matches upstream's half-canvas viewport; the in-shader split
@@ -161,9 +153,11 @@ fn fsMain(@location(0) color : vec4f) -> @location(0) vec4f {
   (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth32float :depth-write-enabled true :depth-compare greater))
 
-(bind-group :name gD :layout defaultPipe :group 0
-  (entry :binding 0 :buffer inputs))
-(bind-group :name gR :layout reversedPipe :group 0
+; One resource set, two pipelines. With no `:layout` the compiler derives one
+; GPU bind group per pipeline that binds it, pruned to what that pipeline's
+; entry points reach — so the two forms that differed only in the pipeline they
+; named became one. Compiles to the same bytes as the pair did.
+(bind-group :name gDepth :group 0
   (entry :binding 0 :buffer inputs))
 
 (queue :name writeInputs
@@ -174,14 +168,14 @@ fn fsMain(@location(0) color : vec4f) -> @location(0) vec4f {
     :clear-value [0 0 0.5 1] :load-op clear :store-op store)
   (depth-stencil-attachment :view depth :depth-clear-value 1.0
     :depth-load-op clear :depth-store-op store)
-  :pipeline defaultPipe :bind-groups [gD] :vertex-buffers [vb]
+  :pipeline defaultPipe :bind-groups [gDepth] :vertex-buffers [vb]
   (draw :vertex-count 12 :instance-count 5))
 
 (render-pass :name right
   (color-attachment :view context-current-texture :load-op load :store-op store)
   (depth-stencil-attachment :view depth :depth-clear-value 0.0
     :depth-load-op clear :depth-store-op store)
-  :pipeline reversedPipe :bind-groups [gR] :vertex-buffers [vb]
+  :pipeline reversedPipe :bind-groups [gDepth] :vertex-buffers [vb]
   (draw :vertex-count 12 :instance-count 5))
 
 (frame :name main :perform [writeInputs left right])

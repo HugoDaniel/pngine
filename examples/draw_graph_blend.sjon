@@ -1,0 +1,112 @@
+; draw_graph_blend — a `(draw-graph …)` stage that blends, and the shape that
+; makes blending a STAGE property rather than a per-draw one.
+;
+; Three overlapping discs are drawn additively over an opaque background. The
+; background is opaque and the discs are not, so they are two stages over the
+; SAME attachment: stage `base` clears it, stage `glow` loads it and blends
+; into it. That is the same rule `(depth-stencil …)` already follows — a stage
+; whose geometries wanted different pipeline state is two stages — and it costs
+; nothing, because the load/store rewrite is per stage: `base` clears and
+; stores, `glow` loads and stores, and the two compose without either saying
+; anything about the other.
+;
+;                  stage base            stage glow
+;   geometry bg      art/bgVs + bgFs       —
+;   geometry discs   —                     art/discVs + discFs (additive)
+;
+; The `(target …)` on stage `glow` is the whole new form. It is slot-local and
+; carries no `:format`: a stage's targets pair with its `(color-attachment …)`
+; children by position, and the format is read off the attachment, so stating
+; it here would be the one thing said twice. Everything else a colour target
+; carries — the blend state, the write mask — has nowhere else to live, since a
+; stage owns the attachments a target describes.
+
+(shader-module :name art :code """
+struct Inputs { time : f32, width : f32, height : f32, aspect : f32 }
+@group(0) @binding(0) var<uniform> inputs : Inputs;
+
+struct VsOut { @builtin(position) pos : vec4f, @location(0) uv : vec2f }
+
+// A fullscreen triangle, reused by both stages. The disc stage instances it
+// three times and offsets each copy in the fragment stage instead of moving
+// vertices, which keeps the geometry (and so the vertex layout) shared.
+@vertex fn bgVs(@builtin(vertex_index) i : u32) -> VsOut {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  var out : VsOut;
+  out.pos = vec4f(p[i], 0.0, 1.0);
+  out.uv = p[i];
+  return out;
+}
+
+@fragment fn bgFs(in : VsOut) -> @location(0) vec4f {
+  // A dark vertical ramp, so the additive discs have something to add to.
+  return vec4f(0.04, 0.05, 0.12 + in.uv.y * 0.06, 1.0);
+}
+
+struct DiscOut {
+  @builtin(position) pos : vec4f,
+  @location(0) uv : vec2f,
+  @location(1) @interpolate(flat) which : u32,
+}
+
+@vertex fn discVs(@builtin(vertex_index) i : u32,
+                  @builtin(instance_index) inst : u32) -> DiscOut {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  var out : DiscOut;
+  out.pos = vec4f(p[i], 0.0, 1.0);
+  out.uv = p[i];
+  out.which = inst;
+  return out;
+}
+
+@fragment fn discFs(in : DiscOut) -> @location(0) vec4f {
+  let a = f32(in.which) * 2.0943951 + inputs.time;
+  let centre = vec2f(cos(a), sin(a) * inputs.aspect) * 0.32;
+  let d = distance(in.uv, centre);
+  let mask = 1.0 - smoothstep(0.22, 0.52, d);
+  var tint = vec3f(0.95, 0.35, 0.12);
+  if (in.which == 1u) { tint = vec3f(0.15, 0.75, 0.55); }
+  if (in.which == 2u) { tint = vec3f(0.35, 0.35, 0.95); }
+  // Premultiplied by the mask: with `one`/`one` the alpha channel is what the
+  // write mask below drops, so only RGB accumulates.
+  return vec4f(tint * mask, mask);
+}
+""")
+
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+(queue :name writeUniforms
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+(draw-graph :before [writeUniforms]
+  (stage :name base
+    (color-attachment :view context-current-texture
+      :clear-value [0 0 0 1] :load-op clear :store-op store)
+    (primitive :topology triangle-list))
+
+  (stage :name glow
+    ; The same attachment, loaded rather than cleared: the stage before it drew
+    ; the background, and this one adds to what is there.
+    (color-attachment :view context-current-texture
+      :load-op load :store-op store)
+    ; Additive, and alpha left alone. `:write-mask 7` is R|G|B — the canvas
+    ; alpha stays 1 from the base stage's clear, so the frame is opaque no
+    ; matter how many discs overlap.
+    (target :write-mask 7
+      (blend
+        (color :src-factor one :dst-factor one :operation add)
+        (alpha :src-factor zero :dst-factor one :operation add)))
+    (primitive :topology triangle-list)
+    (bind-group :name discBG :group 0
+      (entry :binding 0 :buffer uniforms)))
+
+  (geometry :name bg
+    (draw :vertex-count 3)
+    (in :stage base
+      (vertex :module art :entry bgVs)
+      (fragment :module art :entry bgFs)))
+
+  (geometry :name discs
+    (draw :vertex-count 3 :instance-count 3)
+    (in :stage glow
+      (vertex :module art :entry discVs)
+      (fragment :module art :entry discFs))))

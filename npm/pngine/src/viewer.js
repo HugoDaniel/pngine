@@ -1,5 +1,5 @@
 // PNGine Viewer API (lean production profile)
 
 export { pngine, destroy } from "./viewer-init.js";
-export { draw, play, pause, stop, seek, setFrame, setUniform, setUniforms, getUniforms, getStats, restart } from "./anim.js";
+export { draw, play, pause, stop, seek, setFrame, setUniform, setUniforms, getUniforms, writeBuffer, getBuffers, getStats, restart } from "./anim.js";
 export { extractBytecode, detectFormat, isPng, isZip, isPngb } from "./extract.js";

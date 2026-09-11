@@ -1,0 +1,29 @@
+; invalid: `pngine-frame-inputs` is 20 bytes (the 16 of `pngine-inputs`, plus the
+; frame counter as a u32), and this buffer is 16. The uniform floor check passes
+; — 16 IS the floor — so the document validated clean and WebGPU refused the
+; write at runtime, where it reads as "the animation does not animate" rather
+; than as an error. Pitfall 2's fourth path.
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+(shader-module :name code :code """
+struct Inputs { time : f32, width : f32, height : f32, aspect : f32 }
+@group(0) @binding(0) var<uniform> inputs : Inputs;
+@vertex fn vsMain(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  return vec4f(f32(i) * 0.5 + inputs.time * 0.0, 0.0, 0.0, 1.0);
+}
+@fragment fn fsMain() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.0, 1.0); }
+""")
+(bind-group :name g :layout pipe :group 0
+  (entry :binding 0 :buffer uniforms))
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vsMain)
+  (fragment :module code :entry fsMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipe :bind-groups [g]
+  (draw :vertex-count 3))
+(queue :name writeInputs
+  (write-buffer :buffer uniforms :offset 0 :data pngine-frame-inputs))
+(frame :name main :before [writeInputs] :perform [draw])

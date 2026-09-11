@@ -1,0 +1,18 @@
+; Invalid: a document that declares its own `(frame …)` beside a
+; `(pass-graph …)`. The graph emits the document's frame itself, so this is a
+; SECOND one — and the runtime runs the first, which means one of the two never
+; executes and which one is not visible in the source. Steps that must run
+; before the graph go in `(pass-graph :before […])`, which puts them at the head
+; of the frame the graph emits.
+
+(buffer :name scratch :size 16 :usage [uniform copy-dst])
+(queue :name upload
+  (write-buffer :buffer scratch :offset 0 :data pngine-inputs))
+(frame :name mine :perform [upload])
+(pass-graph
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return vec4f(uv, 0.0, 1.0);
+    }
+  """))

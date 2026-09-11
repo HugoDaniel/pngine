@@ -133,7 +133,12 @@ export const KNOWN_UNSUPPORTED = {
 // Deliberately absent (PNGine restructures rather than mirrors — absence is a
 // decision, not an accident): `frame`, `render-pass`/`compute-pass` proper
 // (PNGB pass model), `shader-module` (code inline vs GPUShaderModuleDescriptor
-// hints), pool machinery, `(pass …)`/`(init …)` sugar, `(limits …)` (an
+// hints), `(wgsl …)` fragments (a build-time preprocessor — a fragment is
+// never a GPUShaderModule and WebGPU has no dictionary for one; what reaches
+// createShaderModule is the assembled text), `(import …)` (the same, one level
+// up — it composes DOCUMENTS before validation and is consumed there, so
+// nothing it names survives to reach a WebGPU call), pool machinery,
+// `(pass …)`/`(init …)` sugar, `(limits …)` (an
 // interface, ratcheted by the device-limits block of the test), and
 // GPUCanvasConfiguration (`(canvas …)` carries alphaMode alone, as a header
 // flag the JS runtime reads at configure(); device/format/usage are the
@@ -145,7 +150,11 @@ export const camel = (k) => k.replace(/-(\w)/g, (_, c) => c.toUpperCase());
 export const FORM_DICT_MAP = [
   {
     form: 'texture', dict: 'GPUTextureDescriptor',
-    sentinels: ['name', 'pool'],
+    // `:scale` joins them as a third compile-time key (§420): it narrows a
+    // `:size canvas` texture to a fraction of the canvas and is resolved into
+    // the `size` member before any descriptor exists, so it is not a member and
+    // never will be.
+    sentinels: ['name', 'pool', 'scale'],
     // `:size` IS the one `size` member, schema-required, with three spellings
     // (an extent vector, `canvas`, an image-bitmap ref) inside one kind — so the
     // plain `satisfied` path covers it. It was `:width`/`:height`/`:size-from`

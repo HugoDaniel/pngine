@@ -1,0 +1,30 @@
+; A render bundle's :bind-groups is a DENSE list on the wire (entry i is slot i),
+; so a derived instance that is omitted for the bundle's pipeline cannot be
+; skipped the way a pass skips its set_bind_group. Refused: `depthPipe` reaches
+; nothing at @group(1), so `mat` derives nothing for it, and the author drops it
+; from this bundle's list. The same document as a pass instead of a bundle
+; compiles, with nothing set at slot 1 (Emitter_test pins both).
+(shader-module :name code :code """
+@group(0) @binding(0) var<uniform> cam: vec4f;
+@group(1) @binding(0) var<uniform> tint: vec4f;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let p = array(vec2f(-1.0, -3.0), vec2f(-1.0, 1.0), vec2f(3.0, 1.0));
+  return cam * vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn depthOnlyFs() -> @location(0) vec4f { return vec4f(1.0); }
+@fragment fn litFs() -> @location(0) vec4f { return tint; }
+""")
+(buffer :name camBuf :size 16 :usage [uniform copy-dst])
+(buffer :name tintBuf :size 16 :usage [uniform copy-dst])
+(render-pipeline :name depthPipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry depthOnlyFs (target :format preferred-canvas-format)))
+(bind-group :name scene :group 0 (entry :binding 0 :buffer camBuf))
+(bind-group :name mat :group 1 (entry :binding 0 :buffer tintBuf))
+(render-bundle :name b :pipeline depthPipe :color-formats [preferred-canvas-format]
+  :bind-groups [scene mat]
+  (draw :vertex-count 3))
+(render-pass :name p
+  (color-attachment :view context-current-texture :load-op clear :clear-value [0 0 0 1] :store-op store)
+  :execute-bundles [b])
+(frame :name main :perform [p])

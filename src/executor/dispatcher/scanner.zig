@@ -120,12 +120,12 @@ pub const OpcodeScanner = struct {
     /// Complexity: O(bytecode.len)
     pub fn scan_pass_definitions(
         bytecode: []const u8,
-        allocator: Allocator,
+        gpa: Allocator,
     ) Allocator.Error!std.AutoHashMap(u16, PassRange) {
         // Pre-conditions
         assert(bytecode.len <= 1024 * 1024); // 1MB max
 
-        var pass_ranges = std.AutoHashMap(u16, PassRange).init(allocator);
+        var pass_ranges = std.AutoHashMap(u16, PassRange).init(gpa);
         errdefer pass_ranges.deinit();
         var scanner = OpcodeScanner.init(bytecode, 0);
 

@@ -13,6 +13,7 @@
 //! │     bit 1: has_animation_table      │
 //! │     bit 2: has_device_limits        │
 //! │     bit 3: canvas_alpha_premultiplied│
+//! │     bit 4: has_buffer_names         │
 //! │   plugins: u8 (PluginSet bitfield)  │
 //! │   reserved: [3]u8 = limits offset   │
 //! │     (u24 LE when bit 2 set, else 0) │
@@ -132,8 +133,16 @@ pub const Flags = packed struct(u16) {
     /// mechanism instead — the header's 3 reserved bytes are already consumed by
     /// the device-limits offset. (docs/plans/spec/04)
     canvas_alpha_premultiplied: bool = false,
+    /// The uniform-table section carries a buffer-name block after its
+    /// bindings (uniform_table.zig `BufferName`): every `(buffer :name …)` by
+    /// its SJON name, for host writes by name. Clear → no block, and the
+    /// section is byte-identical to pre-block output. No offset needed: the
+    /// block sits inside a section the header already bounds — which is why
+    /// it is a bit and not a table offset (the 3 reserved bytes are spent).
+    /// (docs/plans/public-write-buffer.md D2)
+    has_buffer_names: bool = false,
     /// Reserved for future use.
-    reserved: u12 = 0,
+    reserved: u11 = 0,
 };
 
 /// PNGB file header (v0, 40 bytes).
@@ -242,32 +251,32 @@ pub const WgslTable = struct {
 
     pub const empty: WgslTable = .{ .entries = .empty };
 
-    pub fn deinit(self: *WgslTable, allocator: Allocator) void {
+    pub fn deinit(self: *WgslTable, gpa: Allocator) void {
         for (self.entries.items) |entry| {
             if (entry.deps.len > 0) {
-                allocator.free(entry.deps);
+                gpa.free(entry.deps);
             }
         }
-        self.entries.deinit(allocator);
+        self.entries.deinit(gpa);
         self.* = undefined;
     }
 
     /// Add a WGSL module entry.
     /// Returns the assigned wgsl_id.
     /// Pre-condition: deps slice is caller-owned, will be duplicated.
-    pub fn add(self: *WgslTable, allocator: Allocator, data_id: u16, deps: []const u16) !u16 {
+    pub fn add(self: *WgslTable, gpa: Allocator, data_id: u16, deps: []const u16) !u16 {
         // Pre-conditions
         assert(self.entries.items.len < MAX_WGSL_MODULES);
         assert(deps.len <= MAX_WGSL_DEPS);
 
         const id: u16 = @intCast(self.entries.items.len);
         const deps_copy = if (deps.len > 0)
-            try allocator.dupe(u16, deps)
+            try gpa.dupe(u16, deps)
         else
             &[_]u16{};
-        errdefer if (deps.len > 0) allocator.free(deps_copy);
+        errdefer if (deps.len > 0) gpa.free(deps_copy);
 
-        try self.entries.append(allocator, .{ .data_id = data_id, .deps = deps_copy });
+        try self.entries.append(gpa, .{ .data_id = data_id, .deps = deps_copy });
 
         // Post-condition: entry was added
         assert(self.entries.items.len == id + 1);
@@ -288,17 +297,19 @@ pub const WgslTable = struct {
 
     /// Serialize WGSL table to bytes.
     /// Format: count(varint) + entries[count]{ data_id(varint) + dep_count(varint) + deps[dep_count](varint) }
-    pub fn serialize(self: *const WgslTable, allocator: Allocator) ![]u8 {
+    ///
+    /// Caller owns the returned bytes.
+    pub fn serialize(self: *const WgslTable, gpa: Allocator) ![]u8 {
         const opcodes = @import("opcodes.zig");
 
         var result = std.ArrayList(u8).empty;
-        errdefer result.deinit(allocator);
+        errdefer result.deinit(gpa);
 
         var buf: [4]u8 = undefined;
 
         // Write count
         const count_len = opcodes.encodeVarint(@intCast(self.entries.items.len), &buf);
-        try result.appendSlice(allocator, buf[0..count_len]);
+        try result.appendSlice(gpa, buf[0..count_len]);
 
         // Write entries (bounded loop)
         for (self.entries.items, 0..) |entry, i| {
@@ -306,21 +317,21 @@ pub const WgslTable = struct {
 
             // data_id
             const data_len = opcodes.encodeVarint(entry.data_id, &buf);
-            try result.appendSlice(allocator, buf[0..data_len]);
+            try result.appendSlice(gpa, buf[0..data_len]);
 
             // dep_count
             const dep_count_len = opcodes.encodeVarint(@intCast(entry.deps.len), &buf);
-            try result.appendSlice(allocator, buf[0..dep_count_len]);
+            try result.appendSlice(gpa, buf[0..dep_count_len]);
 
             // deps (bounded loop)
             for (entry.deps, 0..) |dep, j| {
                 if (j >= MAX_WGSL_DEPS) break;
                 const dep_len = opcodes.encodeVarint(dep, &buf);
-                try result.appendSlice(allocator, buf[0..dep_len]);
+                try result.appendSlice(gpa, buf[0..dep_len]);
             }
         }
 
-        return result.toOwnedSlice(allocator);
+        return result.toOwnedSlice(gpa);
     }
 };
 
@@ -329,12 +340,12 @@ pub const WgslTable = struct {
 /// EOF is `error.InvalidWgslTable`, not an assert) and every id is narrowed
 /// through `wire_schema.narrowU16` (a u32 varint past u16 is the same error,
 /// not an `@intCast` trap). The bytes come from a PNG off the network.
-pub fn deserializeWgslTable(allocator: Allocator, data: []const u8) !WgslTable {
+pub fn deserializeWgslTable(gpa: Allocator, data: []const u8) !WgslTable {
     const opcodes = @import("opcodes.zig");
     const wire = @import("wire_schema.zig");
 
     var table = WgslTable{ .entries = .empty };
-    errdefer table.deinit(allocator);
+    errdefer table.deinit(gpa);
 
     if (data.len == 0) return table;
 
@@ -347,7 +358,7 @@ pub fn deserializeWgslTable(allocator: Allocator, data: []const u8) !WgslTable {
     const entry_count: u16 = wire.narrowU16(count_result.value) catch return error.InvalidWgslTable;
 
     // Pre-allocate entries
-    try table.entries.ensureTotalCapacity(allocator, @min(entry_count, MAX_WGSL_MODULES));
+    try table.entries.ensureTotalCapacity(gpa, @min(entry_count, MAX_WGSL_MODULES));
 
     // Read entries (bounded loop)
     for (0..@min(entry_count, MAX_WGSL_MODULES)) |_| {
@@ -374,12 +385,12 @@ pub fn deserializeWgslTable(allocator: Allocator, data: []const u8) !WgslTable {
         // deps
         var deps: []u16 = &[_]u16{};
         if (dep_count > 0 and dep_count <= MAX_WGSL_DEPS) {
-            deps = try allocator.alloc(u16, dep_count);
-            errdefer allocator.free(deps);
+            deps = try gpa.alloc(u16, dep_count);
+            errdefer gpa.free(deps);
             for (0..dep_count) |i| {
                 if (pos >= data.len) {
                     // Truncated deps - free and use empty
-                    allocator.free(deps);
+                    gpa.free(deps);
                     deps = &[_]u16{};
                     break;
                 }
@@ -421,16 +432,16 @@ pub const Module = struct {
         return self.header.plugins;
     }
 
-    pub fn deinit(self: *Module, allocator: Allocator) void {
+    pub fn deinit(self: *Module, gpa: Allocator) void {
         if (self.executor.len > 0) {
-            allocator.free(self.executor);
+            gpa.free(self.executor);
         }
-        self.strings.deinit(allocator);
-        self.data.deinit(allocator);
-        self.wgsl.deinit(allocator);
-        self.uniforms.deinit(allocator);
-        self.animation.deinit(allocator);
-        self.limits.deinit(allocator);
+        self.strings.deinit(gpa);
+        self.data.deinit(gpa);
+        self.wgsl.deinit(gpa);
+        self.uniforms.deinit(gpa);
+        self.animation.deinit(gpa);
+        self.limits.deinit(gpa);
         self.* = undefined;
     }
 };
@@ -459,8 +470,10 @@ pub const SerializeOptions = struct {
 /// Post-conditions:
 /// - Returns valid PNGB v0 format
 /// - Caller owns returned slice
+///
+/// Caller owns the returned bytes.
 pub fn serialize(
-    allocator: Allocator,
+    gpa: Allocator,
     bytecode: []const u8,
     strings: *const StringTable,
     data: *const DataSection,
@@ -468,7 +481,7 @@ pub fn serialize(
     uniforms: *const UniformTable,
     animation: *const AnimationTable,
 ) ![]u8 {
-    return serializeWithOptions(allocator, bytecode, strings, data, wgsl, uniforms, animation, .{});
+    return serializeWithOptions(gpa, bytecode, strings, data, wgsl, uniforms, animation, .{});
 }
 
 /// Serialized section data for assembly.
@@ -481,13 +494,13 @@ const SerializedSections = struct {
     /// Device-limits table bytes (empty slice when no limits authored). (§5.3b)
     limits_bytes: []u8,
 
-    fn deinit(self: *SerializedSections, allocator: Allocator) void {
-        allocator.free(self.string_bytes);
-        allocator.free(self.data_bytes);
-        allocator.free(self.wgsl_bytes);
-        allocator.free(self.uniform_bytes);
-        allocator.free(self.animation_bytes);
-        allocator.free(self.limits_bytes);
+    fn deinit(self: *SerializedSections, gpa: Allocator) void {
+        gpa.free(self.string_bytes);
+        gpa.free(self.data_bytes);
+        gpa.free(self.wgsl_bytes);
+        gpa.free(self.uniform_bytes);
+        gpa.free(self.animation_bytes);
+        gpa.free(self.limits_bytes);
     }
 };
 
@@ -508,7 +521,7 @@ const SectionOffsets = struct {
 /// Serialize all tables to bytes.
 /// Caller owns returned sections and must call deinit.
 fn serializeAllSections(
-    allocator: Allocator,
+    gpa: Allocator,
     strings: *const StringTable,
     data: *const DataSection,
     wgsl: *const WgslTable,
@@ -520,22 +533,22 @@ fn serializeAllSections(
     assert(@intFromPtr(strings) != 0);
     assert(@intFromPtr(data) != 0);
 
-    const string_bytes = try strings.serialize(allocator);
-    errdefer allocator.free(string_bytes);
+    const string_bytes = try strings.serialize(gpa);
+    errdefer gpa.free(string_bytes);
 
-    const data_bytes = try data.serialize(allocator);
-    errdefer allocator.free(data_bytes);
+    const data_bytes = try data.serialize(gpa);
+    errdefer gpa.free(data_bytes);
 
-    const wgsl_bytes = try wgsl.serialize(allocator);
-    errdefer allocator.free(wgsl_bytes);
+    const wgsl_bytes = try wgsl.serialize(gpa);
+    errdefer gpa.free(wgsl_bytes);
 
-    const uniform_bytes = try uniforms.serialize(allocator);
-    errdefer allocator.free(uniform_bytes);
+    const uniform_bytes = try uniforms.serialize(gpa);
+    errdefer gpa.free(uniform_bytes);
 
-    const animation_bytes = try animation.serialize(allocator);
-    errdefer allocator.free(animation_bytes);
+    const animation_bytes = try animation.serialize(gpa);
+    errdefer gpa.free(animation_bytes);
 
-    const limits_bytes = try limits.serialize(allocator);
+    const limits_bytes = try limits.serialize(gpa);
 
     // Post-condition: all sections serialized
     assert(string_bytes.len > 0 or strings.count() == 0);
@@ -607,7 +620,7 @@ fn encodeReserved(has_limits: bool, limits_offset: u32) [3]u8 {
 }
 
 /// Build PNGB header from offsets and options.
-fn buildHeader(offsets: *const SectionOffsets, options: SerializeOptions, animation_bytes_len: usize, limits_bytes_len: usize) Header {
+fn buildHeader(offsets: *const SectionOffsets, options: SerializeOptions, animation_bytes_len: usize, limits_bytes_len: usize, has_buffer_names: bool) Header {
     // Pre-condition: offsets are valid
     assert(offsets.string_table_offset >= HEADER_SIZE);
     assert(offsets.total_size > HEADER_SIZE);
@@ -623,6 +636,7 @@ fn buildHeader(offsets: *const SectionOffsets, options: SerializeOptions, animat
             .has_animation_table = animation_bytes_len > 1, // Empty table is just count=0 (1 byte)
             .has_device_limits = has_limits,
             .canvas_alpha_premultiplied = options.canvas_alpha_premultiplied,
+            .has_buffer_names = has_buffer_names,
         },
         .plugins = options.plugins,
         .reserved = encodeReserved(has_limits, offsets.limits_table_offset),
@@ -702,7 +716,7 @@ fn writeSectionsToOutput(
 /// - Returns valid PNGB v0 format
 /// - Caller owns returned slice
 pub fn serializeWithOptions(
-    allocator: Allocator,
+    gpa: Allocator,
     bytecode: []const u8,
     strings: *const StringTable,
     data: *const DataSection,
@@ -715,8 +729,8 @@ pub fn serializeWithOptions(
     assert(@intFromPtr(strings) != 0);
 
     // Serialize all tables
-    var sections = try serializeAllSections(allocator, strings, data, wgsl, uniforms, animation, options.limits);
-    defer sections.deinit(allocator);
+    var sections = try serializeAllSections(gpa, strings, data, wgsl, uniforms, animation, options.limits);
+    defer sections.deinit(gpa);
 
     // Calculate offsets
     const offsets = try calculateSectionOffsets(bytecode.len, options.executor.len, &sections);
@@ -730,11 +744,11 @@ pub fn serializeWithOptions(
     }
 
     // Build header
-    const header = buildHeader(&offsets, options, sections.animation_bytes.len, sections.limits_bytes.len);
+    const header = buildHeader(&offsets, options, sections.animation_bytes.len, sections.limits_bytes.len, uniforms.hasBufferNames());
 
     // Allocate output buffer
-    const output = try allocator.alloc(u8, offsets.total_size);
-    errdefer allocator.free(output);
+    const output = try gpa.alloc(u8, offsets.total_size);
+    errdefer gpa.free(output);
 
     // Write all sections
     const final_offset = writeSectionsToOutput(output, &header, bytecode, &sections, options.executor);
@@ -830,7 +844,7 @@ fn validateHeaderAndOffsets(data: []const u8) !Header {
 /// Extract executor and bytecode slices from data.
 /// Returns executor (owned, caller must free) and bytecode (slice into data).
 fn extractExecutorAndBytecode(
-    allocator: Allocator,
+    gpa: Allocator,
     data: []const u8,
     header: *const Header,
 ) !struct { executor: []const u8, bytecode: []const u8 } {
@@ -843,7 +857,7 @@ fn extractExecutorAndBytecode(
         if (header.executor_offset + header.executor_length > data.len) {
             return error.InvalidOffset;
         }
-        executor = try allocator.dupe(u8, data[header.executor_offset..][0..header.executor_length]);
+        executor = try gpa.dupe(u8, data[header.executor_offset..][0..header.executor_length]);
     }
 
     // Calculate bytecode bounds
@@ -871,41 +885,41 @@ const DeserializedTables = struct {
 };
 
 /// Deserialize all tables from data using header offsets.
-fn deserializeAllTables(allocator: Allocator, data: []const u8, header: *const Header) !DeserializedTables {
+fn deserializeAllTables(gpa: Allocator, data: []const u8, header: *const Header) !DeserializedTables {
     // Pre-condition: header offsets are valid
     assert(header.string_table_offset <= data.len);
     assert(header.data_section_offset <= data.len);
 
     // Deserialize string table
     const string_data = data[header.string_table_offset..header.data_section_offset];
-    const strings = try @import("string_table.zig").deserialize(allocator, string_data);
+    const strings = try @import("string_table.zig").deserialize(gpa, string_data);
     errdefer {
         var s = strings;
-        s.deinit(allocator);
+        s.deinit(gpa);
     }
 
     // Deserialize data section
     const data_section_data = data[header.data_section_offset..header.wgsl_table_offset];
-    const data_section = try @import("data_section.zig").deserialize(allocator, data_section_data);
+    const data_section = try @import("data_section.zig").deserialize(gpa, data_section_data);
     errdefer {
         var ds = data_section;
-        ds.deinit(allocator);
+        ds.deinit(gpa);
     }
 
     // Deserialize WGSL table
     const wgsl_data = data[header.wgsl_table_offset..header.uniform_table_offset];
-    const wgsl = try deserializeWgslTable(allocator, wgsl_data);
+    const wgsl = try deserializeWgslTable(gpa, wgsl_data);
     errdefer {
         var w = wgsl;
-        w.deinit(allocator);
+        w.deinit(gpa);
     }
 
     // Deserialize uniform table
     const uniform_data = data[header.uniform_table_offset..header.animation_table_offset];
-    const uniforms = try uniform_table_mod.deserialize(allocator, uniform_data);
+    const uniforms = try uniform_table_mod.deserialize(gpa, uniform_data, header.flags.has_buffer_names);
     errdefer {
         var u = uniforms;
-        u.deinit(allocator);
+        u.deinit(gpa);
     }
 
     // Deserialize animation table. When a device-limits table follows it, the
@@ -917,10 +931,10 @@ fn deserializeAllTables(allocator: Allocator, data: []const u8, header: *const H
     else
         data.len;
     const animation_data = data[header.animation_table_offset..animation_end];
-    const animation = try animation_table_mod.deserialize(allocator, animation_data);
+    const animation = try animation_table_mod.deserialize(gpa, animation_data);
     errdefer {
         var a = animation;
-        a.deinit(allocator);
+        a.deinit(gpa);
     }
 
     // Deserialize device-limits table (frontend-only; empty when the flag is
@@ -930,7 +944,7 @@ fn deserializeAllTables(allocator: Allocator, data: []const u8, header: *const H
         data[header.limitsTableOffset()..]
     else
         &.{};
-    const limits = try limits_table_mod.deserialize(allocator, limits_data);
+    const limits = try limits_table_mod.deserialize(gpa, limits_data);
 
     // Post-condition: all tables deserialized
     assert(@intFromPtr(&strings) != 0);
@@ -957,7 +971,7 @@ fn deserializeAllTables(allocator: Allocator, data: []const u8, header: *const H
 /// - Bytecode slice references input data
 ///
 /// Note: The returned module references the input data - caller must ensure data outlives module.
-pub fn deserialize(allocator: Allocator, data: []const u8) !Module {
+pub fn deserialize(gpa: Allocator, data: []const u8) !Module {
     // Pre-condition: at least header present
     if (data.len < HEADER_SIZE) return error.InvalidFormat;
 
@@ -965,11 +979,11 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !Module {
     const header = try validateHeaderAndOffsets(data);
 
     // Extract executor and bytecode
-    const extracted = try extractExecutorAndBytecode(allocator, data, &header);
-    errdefer if (extracted.executor.len > 0) allocator.free(extracted.executor);
+    const extracted = try extractExecutorAndBytecode(gpa, data, &header);
+    errdefer if (extracted.executor.len > 0) gpa.free(extracted.executor);
 
     // Deserialize all tables
-    const tables = try deserializeAllTables(allocator, data, &header);
+    const tables = try deserializeAllTables(gpa, data, &header);
 
     // Post-condition: valid module constructed
     assert(std.mem.eql(u8, &header.magic, MAGIC));
@@ -1021,25 +1035,25 @@ pub const Builder = struct {
         };
     }
 
-    pub fn deinit(self: *Self, allocator: Allocator) void {
-        self.strings.deinit(allocator);
-        self.data.deinit(allocator);
-        self.wgsl_table.deinit(allocator);
-        self.uniform_table.deinit(allocator);
-        self.animation_table.deinit(allocator);
-        self.limits_table.deinit(allocator);
-        self.emitter.deinit(allocator);
+    pub fn deinit(self: *Self, gpa: Allocator) void {
+        self.strings.deinit(gpa);
+        self.data.deinit(gpa);
+        self.wgsl_table.deinit(gpa);
+        self.uniform_table.deinit(gpa);
+        self.animation_table.deinit(gpa);
+        self.limits_table.deinit(gpa);
+        self.emitter.deinit(gpa);
         self.* = undefined;
     }
 
     /// Intern a string and return its ID.
-    pub fn internString(self: *Self, allocator: Allocator, str: []const u8) !@import("string_table.zig").StringId {
-        return self.strings.intern(allocator, str);
+    pub fn internString(self: *Self, gpa: Allocator, str: []const u8) !@import("string_table.zig").StringId {
+        return self.strings.intern(gpa, str);
     }
 
     /// Add data and return its ID.
-    pub fn addData(self: *Self, allocator: Allocator, data: []const u8) !@import("data_section.zig").DataId {
-        return self.data.add(allocator, data);
+    pub fn addData(self: *Self, gpa: Allocator, data: []const u8) !@import("data_section.zig").DataId {
+        return self.data.add(gpa, data);
     }
 
     /// Get the size of a data entry by ID.
@@ -1055,26 +1069,32 @@ pub const Builder = struct {
 
     /// Add a WGSL module entry and return its ID.
     /// Pre-condition: data_id must be a valid ID in the data section.
-    pub fn addWgsl(self: *Self, allocator: Allocator, data_id: u16, deps: []const u16) !u16 {
-        return self.wgsl_table.add(allocator, data_id, deps);
+    pub fn addWgsl(self: *Self, gpa: Allocator, data_id: u16, deps: []const u16) !u16 {
+        return self.wgsl_table.add(gpa, data_id, deps);
     }
 
     /// Add a uniform binding with fields to the uniform table.
     pub fn addUniformBinding(
         self: *Self,
-        allocator: Allocator,
+        gpa: Allocator,
         buffer_id: u16,
         name_string_id: u16,
         group: u8,
         binding_index: u8,
         fields: []const uniform_table_mod.UniformField,
     ) !void {
-        return self.uniform_table.addBinding(allocator, buffer_id, name_string_id, group, binding_index, fields);
+        return self.uniform_table.addBinding(gpa, buffer_id, name_string_id, group, binding_index, fields);
     }
 
     /// Get uniform table for direct manipulation.
     pub fn getUniformTable(self: *Self) *UniformTable {
         return &self.uniform_table;
+    }
+
+    /// Name a buffer for host writes by its SJON name (already interned).
+    /// The header's `has_buffer_names` follows from the table being non-empty.
+    pub fn addBufferName(self: *Self, gpa: Allocator, buffer_id: u16, name_string_id: u16, pool: u8, frame_written: bool) !void {
+        return self.uniform_table.addBufferName(gpa, buffer_id, name_string_id, pool, frame_written);
     }
 
     /// Get animation table for direct manipulation.
@@ -1084,8 +1104,8 @@ pub const Builder = struct {
 
     /// Add an authored device limit (WebGPU camelCase name already interned).
     /// Fed into `requiredLimits` at device creation by the frontend. (§5.3b)
-    pub fn addDeviceLimit(self: *Self, allocator: Allocator, name_string_id: u16, value: u64) !void {
-        return self.limits_table.add(allocator, name_string_id, value);
+    pub fn addDeviceLimit(self: *Self, gpa: Allocator, name_string_id: u16, value: u64) !void {
+        return self.limits_table.add(gpa, name_string_id, value);
     }
 
     /// Get limits table for direct manipulation.
@@ -1094,20 +1114,24 @@ pub const Builder = struct {
     }
 
     /// Finalize and serialize to PNGB format.
-    pub fn finalize(self: *Self, allocator: Allocator) ![]u8 {
-        return self.finalizeWithOptions(allocator, .{});
+    ///
+    /// Caller owns the returned bytes.
+    pub fn finalize(self: *Self, gpa: Allocator) ![]u8 {
+        return self.finalizeWithOptions(gpa, .{});
     }
 
     /// Finalize and serialize to PNGB format with options.
     /// Supports embedding executor WASM and setting plugin flags. The builder's
     /// own limits table and canvas flag are always used (callers set
     /// executor/plugins only).
-    pub fn finalizeWithOptions(self: *Self, allocator: Allocator, options: SerializeOptions) ![]u8 {
+    ///
+    /// Caller owns the returned bytes.
+    pub fn finalizeWithOptions(self: *Self, gpa: Allocator, options: SerializeOptions) ![]u8 {
         var opts = options;
         opts.limits = &self.limits_table;
         opts.canvas_alpha_premultiplied = self.canvas_alpha_premultiplied;
         return serializeWithOptions(
-            allocator,
+            gpa,
             self.emitter.bytecode(),
             &self.strings,
             &self.data,
@@ -1146,27 +1170,53 @@ fn buildSimpleModuleBytes() ![]u8 {
 /// Build a minimal one-shader module. `add_limits` toggles the limits table so
 /// the byte-identity test can compare with/without on an otherwise identical
 /// build.
-fn buildLimitsFixture(allocator: Allocator, add_limits: bool) ![]u8 {
+fn buildLimitsFixture(gpa: Allocator, add_limits: bool) ![]u8 {
     var builder = Builder.init();
-    defer builder.deinit(allocator);
+    defer builder.deinit(gpa);
 
-    const frame_name = try builder.internString(allocator, "main");
+    const frame_name = try builder.internString(gpa, "main");
     // Intern the WebGPU camelCase limit names so the entries reference the
     // string table (the "zero JS name map" design).
-    const wg_x = try builder.internString(allocator, "maxComputeWorkgroupSizeX");
-    const buf_sz = try builder.internString(allocator, "maxBufferSize");
-    const shader_data = try builder.addData(allocator, "@vertex fn vs() {}");
+    const wg_x = try builder.internString(gpa, "maxComputeWorkgroupSizeX");
+    const buf_sz = try builder.internString(gpa, "maxBufferSize");
+    const shader_data = try builder.addData(gpa, "@vertex fn vs() {}");
 
     const emitter = builder.getEmitter();
-    try emitter.createShaderModule(allocator, 0, shader_data.toInt());
-    try emitter.defineFrame(allocator, 0, frame_name.toInt());
-    try emitter.endFrame(allocator);
+    try emitter.createShaderModule(gpa, 0, shader_data.toInt());
+    try emitter.defineFrame(gpa, 0, frame_name.toInt());
+    try emitter.endFrame(gpa);
 
     if (add_limits) {
-        try builder.addDeviceLimit(allocator, @intCast(@intFromEnum(wg_x)), 512);
+        try builder.addDeviceLimit(gpa, @intCast(@intFromEnum(wg_x)), 512);
         // A value beyond u32 — proves the u64 channel end to end.
-        try builder.addDeviceLimit(allocator, @intCast(@intFromEnum(buf_sz)), 0x2_0000_0000);
+        try builder.addDeviceLimit(gpa, @intCast(@intFromEnum(buf_sz)), 0x2_0000_0000);
     }
 
-    return builder.finalize(allocator);
+    return builder.finalize(gpa);
+}
+
+// ── Buffer-name block (docs/plans/public-write-buffer.md D2) ─────────────────
+
+/// A one-shader module with two named buffers, or none — the with/without
+/// pair the byte-identity test compares.
+fn buildBufferNamesFixture(gpa: Allocator, add_names: bool) ![]u8 {
+    var builder = Builder.init();
+    defer builder.deinit(gpa);
+
+    const frame_name = try builder.internString(gpa, "main");
+    const shader_data = try builder.addData(gpa, "@vertex fn vs() {}");
+    const emitter = builder.getEmitter();
+    try emitter.createShaderModule(gpa, 0, shader_data.toInt());
+    try emitter.createBuffer(gpa, 0, 16384, .{ .storage = true });
+    try emitter.createBuffer(gpa, 1, 16, .{ .uniform = true, .copy_dst = true });
+    try emitter.defineFrame(gpa, 0, frame_name.toInt());
+    try emitter.endFrame(gpa);
+
+    if (add_names) {
+        const particles = try builder.internString(gpa, "particles");
+        const uniforms = try builder.internString(gpa, "uniforms");
+        try builder.addBufferName(gpa, 0, particles.toInt(), 1, false);
+        try builder.addBufferName(gpa, 1, uniforms.toInt(), 1, true);
+    }
+    return builder.finalize(gpa);
 }

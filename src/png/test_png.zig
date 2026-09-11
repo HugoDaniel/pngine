@@ -6,6 +6,7 @@
 //! fixture that can silently drift, so it lives here once.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const chunk = @import("chunk.zig");
 
 /// Build the smallest valid PNG: signature + IHDR + IDAT + IEND.
@@ -14,11 +15,11 @@ const chunk = @import("chunk.zig");
 /// that the file is well-formed and ends in IEND.
 ///
 /// Caller owns the returned slice.
-pub fn createMinimalPng(allocator: std.mem.Allocator) ![]u8 {
+pub fn createMinimalPng(gpa: Allocator) ![]u8 {
     var png_buf: std.ArrayList(u8) = .empty;
-    errdefer png_buf.deinit(allocator);
+    errdefer png_buf.deinit(gpa);
 
-    try png_buf.appendSlice(allocator, &chunk.PNG_SIGNATURE);
+    try png_buf.appendSlice(gpa, &chunk.PNG_SIGNATURE);
 
     // IHDR chunk (1x1 grayscale)
     const ihdr_data = [13]u8{
@@ -30,14 +31,14 @@ pub fn createMinimalPng(allocator: std.mem.Allocator) ![]u8 {
         0x00, // filter = 0
         0x00, // interlace = 0
     };
-    try chunk.writeChunk(&png_buf, allocator, chunk.ChunkType.IHDR, &ihdr_data);
+    try chunk.writeChunk(&png_buf, gpa, chunk.ChunkType.IHDR, &ihdr_data);
 
     // Minimal IDAT (compressed single gray pixel)
     const idat_data = [_]u8{ 0x08, 0xD7, 0x63, 0x60, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01 };
-    try chunk.writeChunk(&png_buf, allocator, chunk.ChunkType.IDAT, &idat_data);
+    try chunk.writeChunk(&png_buf, gpa, chunk.ChunkType.IDAT, &idat_data);
 
     // IEND
-    try chunk.writeChunk(&png_buf, allocator, chunk.ChunkType.IEND, "");
+    try chunk.writeChunk(&png_buf, gpa, chunk.ChunkType.IEND, "");
 
-    return png_buf.toOwnedSlice(allocator);
+    return png_buf.toOwnedSlice(gpa);
 }

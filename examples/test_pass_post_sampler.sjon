@@ -1,0 +1,33 @@
+; A `(pass …)` with a `post()` that samples its input without reading `pngine`.
+;
+; This did not compile before §393's second half. The pass sugar numbers each
+; pipeline's prelude from 0 INDEPENDENTLY, so:
+;
+;   main shader: pngine at 0, samp at 1 (declared for post(), unused by fs()),
+;                postTex at 2 — its group binds only the uniform at 0
+;   post shader: no uniform, so samp at 0 and postTex at 1 — its group binds both
+;
+; Both are internally consistent. The bind-kind check joined them through a
+; document-wide (group, binding) key with no pipeline in it, read (0,1) as "a
+; texture" from the post group, and compared it against `samp` reflected out of
+; the MAIN shader:
+;
+;   binding 'samp' (@group(0) @binding(1)) is bound as a texture in SJON
+;   but the shader declares a sampler
+;
+; Nothing in this document is wrong; the join was. Adding `pngine.width` to
+; post() used to make it compile, which is the tell — the trigger was the post
+; shader's numbering shifting down by one.
+(pass-graph
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return vec4f(uv, sin(pngine.time) * .5 + .5, 1);
+    }
+
+    @fragment fn post(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(512., 512.);
+      let c = textureSample(postTex, samp, uv);
+      return vec4f(c.rgb * 1.2, 1);
+    }
+  """))

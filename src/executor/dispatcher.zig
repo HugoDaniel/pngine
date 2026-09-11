@@ -29,6 +29,9 @@
 //! - pool.zig: set_*_pool operations
 //! - wasm_ops.zig: init_wasm_module, call_wasm_func
 //! - scanner.zig: OpcodeScanner for pass definition discovery
+//! - opcode_class.zig: which of the above owns which opcode — ONE table, total
+//!   over `OpCode`, asked once by `step()`. It replaced six `is_*_opcode`
+//!   predicates that were a second copy of each handler's own switch (§441).
 //!
 //! ## Invariants
 //!
@@ -46,6 +49,7 @@ const Allocator = std.mem.Allocator;
 const bytecode_mod = @import("bytecode");
 const opcodes = bytecode_mod.opcodes;
 const OpCode = opcodes.OpCode;
+const wire = bytecode_mod.wire_schema;
 const format = bytecode_mod.format;
 const Module = format.Module;
 
@@ -55,6 +59,7 @@ const MockGPU = @import("mock_gpu.zig").MockGPU;
 pub const handlers = @import("dispatcher/handlers.zig");
 const OpcodeScanner = handlers.OpcodeScanner;
 const PassRange = handlers.PassRange;
+const opcode_class = handlers.opcode_class;
 
 /// Execution error types.
 pub const ExecuteError = error{
@@ -144,7 +149,7 @@ pub const PASS_MAX_ITERATIONS: u32 = 16_384;
 pub const MAX_TOTAL_STEPS: u32 = 1_000_000;
 
 /// One entry in the backend contract: a method name plus the parameter types
-/// that follow the universal `self: *T, allocator: Allocator` prefix.
+/// that follow the universal `self: *T, gpa: Allocator` prefix.
 ///
 /// Every contract method has the shape `fn(*Self, Allocator, ...) !void`, so
 /// only the tail varies and only the tail is spelled out here.
@@ -267,12 +272,12 @@ pub fn Backend(comptime T: type) type {
                     " must be a function, found " ++ @typeName(Fn),
             };
 
-            // self + allocator + the spec tail.
+            // self + gpa + the spec tail.
             const want_len = 2 + spec.params.len;
             if (info.params.len != want_len) {
                 return std.fmt.comptimePrint(
                     "backend {s}.{s} takes {d} parameter(s), contract requires {d} " ++
-                        "(self, allocator, and {d} operand(s))",
+                        "(self, gpa, and {d} operand(s))",
                     .{ @typeName(T), spec.name, info.params.len, want_len, spec.params.len },
                 );
             }
@@ -331,6 +336,8 @@ pub const FrameEntry = struct {
 };
 
 /// Bytecode dispatcher.
+///
+/// The returned type stores its own allocator; `deinit()` takes none.
 pub fn Dispatcher(comptime BackendType: type) type {
     // Validate backend at comptime
     Backend(BackendType).validate();
@@ -392,14 +399,14 @@ pub fn Dispatcher(comptime BackendType: type) type {
         steps_remaining: u32,
 
         /// Allocator for internal data structures (pass_ranges map).
-        allocator: Allocator,
+        gpa: Allocator,
 
         /// Initialize dispatcher with default frame counter.
         ///
         /// Complexity: O(1)
         /// Memory: Allocates hashmap for pass ranges (grows on demand).
-        pub fn init(allocator: Allocator, backend: *BackendType, module: *const Module) Self {
-            return init_with_frame(allocator, backend, module, 0);
+        pub fn init(gpa: Allocator, backend: *BackendType, module: *const Module) Self {
+            return init_with_frame(gpa, backend, module, 0);
         }
 
         /// Initialize with a specific frame counter (for animation loops).
@@ -408,7 +415,7 @@ pub fn Dispatcher(comptime BackendType: type) type {
         /// actual_id = base_id + (frame_counter + offset) % pool_size
         ///
         /// Complexity: O(1)
-        pub fn init_with_frame(allocator: Allocator, backend: *BackendType, module: *const Module, initial_frame: u32) Self {
+        pub fn init_with_frame(gpa: Allocator, backend: *BackendType, module: *const Module, initial_frame: u32) Self {
             // Pre-conditions
             assert(module.bytecode.len <= 1024 * 1024); // 1MB max bytecode
 
@@ -418,15 +425,15 @@ pub fn Dispatcher(comptime BackendType: type) type {
                 .pc = 0,
                 .in_pass_def = false,
                 .in_frame_def = false,
-                .pass_ranges = std.AutoHashMap(u16, PassRange).init(allocator),
-                .executed_once = std.AutoHashMap(u16, void).init(allocator),
+                .pass_ranges = std.AutoHashMap(u16, PassRange).init(gpa),
+                .executed_once = std.AutoHashMap(u16, void).init(gpa),
                 .frame_entries = .empty,
                 .current_pass_id = null,
                 .current_pass_start = 0,
                 .frame_counter = initial_frame,
                 .pass_exec_depth = 0,
                 .steps_remaining = MAX_TOTAL_STEPS,
-                .allocator = allocator,
+                .gpa = gpa,
             };
         }
 
@@ -434,7 +441,7 @@ pub fn Dispatcher(comptime BackendType: type) type {
         pub fn deinit(self: *Self) void {
             self.pass_ranges.deinit();
             self.executed_once.deinit();
-            self.frame_entries.deinit(self.allocator);
+            self.frame_entries.deinit(self.gpa);
         }
 
         /// Scan bytecode for pass definitions and populate pass_ranges.
@@ -451,7 +458,7 @@ pub fn Dispatcher(comptime BackendType: type) type {
             assert(self.module.bytecode.len <= 1024 * 1024);
 
             // Delegate to OpcodeScanner
-            var scanned = try OpcodeScanner.scan_pass_definitions(self.module.bytecode, self.allocator);
+            var scanned = try OpcodeScanner.scan_pass_definitions(self.module.bytecode, self.gpa);
             defer scanned.deinit();
 
             // Merge scanned ranges into our map
@@ -498,7 +505,7 @@ pub fn Dispatcher(comptime BackendType: type) type {
         /// later `exec_pass` from inside a frame body resolvable.
         ///
         /// Complexity: O(init region + bytecode.len)
-        pub fn execute_init(self: *Self, allocator: Allocator) ExecuteError!void {
+        pub fn execute_init(self: *Self, gpa: Allocator) ExecuteError!void {
             const bytecode = self.module.bytecode;
             self.pc = 0;
             self.steps_remaining = MAX_TOTAL_STEPS;
@@ -507,7 +514,7 @@ pub fn Dispatcher(comptime BackendType: type) type {
                 if (self.pc >= bytecode.len) break;
                 const op: OpCode = @enumFromInt(bytecode[self.pc]);
                 if (op == .define_frame) break;
-                try self.step(allocator);
+                try self.step(gpa);
             } else {
                 // Same reasoning as execute_from_pc: the bound is one step per
                 // opcode byte, so a long enough payload reaches it by
@@ -553,7 +560,7 @@ pub fn Dispatcher(comptime BackendType: type) type {
                 if (name.len == 0) break;
                 pc += @intCast(name.len);
 
-                try self.frame_entries.append(self.allocator, .{
+                try self.frame_entries.append(self.gpa, .{
                     .name_string_id = @truncate(name.value),
                     .pc = pc,
                 });
@@ -608,7 +615,7 @@ pub fn Dispatcher(comptime BackendType: type) type {
         /// advanced it once per `define_frame` in the whole document, so a
         /// two-scene payload inverted every pooled binding on native and not in
         /// the browser.
-        pub fn execute_frame_body(self: *Self, allocator: Allocator) ExecuteError!void {
+        pub fn execute_frame_body(self: *Self, gpa: Allocator) ExecuteError!void {
             const bytecode = self.module.bytecode;
 
             // Pre-condition: a pc from select_frame_pc, or the end.
@@ -619,7 +626,7 @@ pub fn Dispatcher(comptime BackendType: type) type {
             for (0..MAX_TOP_LEVEL_STEPS) |_| {
                 if (self.pc >= bytecode.len) break;
                 const op: OpCode = @enumFromInt(bytecode[self.pc]);
-                try self.step(allocator);
+                try self.step(gpa);
                 if (op == .end_frame) break;
             } else {
                 return error.InstructionBudgetExhausted;
@@ -630,11 +637,11 @@ pub fn Dispatcher(comptime BackendType: type) type {
         }
 
         /// Execute all bytecode.
-        pub fn execute_all(self: *Self, allocator: Allocator) ExecuteError!void {
+        pub fn execute_all(self: *Self, gpa: Allocator) ExecuteError!void {
             // Pre-condition: start at beginning
             assert(self.pc == 0);
 
-            try self.execute_from_pc(allocator);
+            try self.execute_from_pc(gpa);
 
             // Post-condition: consumed all bytecode
             assert(self.pc == self.module.bytecode.len);
@@ -642,7 +649,7 @@ pub fn Dispatcher(comptime BackendType: type) type {
 
         /// Execute bytecode from current PC to end.
         /// Use this when starting from a non-zero position (e.g., skipping resource creation).
-        pub fn execute_from_pc(self: *Self, allocator: Allocator) ExecuteError!void {
+        pub fn execute_from_pc(self: *Self, gpa: Allocator) ExecuteError!void {
             // Pre-condition: pc within bounds or at end
             assert(self.pc <= self.module.bytecode.len);
             self.steps_remaining = MAX_TOTAL_STEPS;
@@ -651,7 +658,7 @@ pub fn Dispatcher(comptime BackendType: type) type {
 
             for (0..MAX_TOP_LEVEL_STEPS) |_| {
                 if (self.pc >= bytecode.len) break;
-                try self.step(allocator);
+                try self.step(gpa);
             } else {
                 // NOT `unreachable`. The mastery rule's `for (0..MAX) else
                 // unreachable` is for bounds nothing outside the code can move;
@@ -670,11 +677,13 @@ pub fn Dispatcher(comptime BackendType: type) type {
 
         /// Execute single instruction.
         ///
-        /// Reads the opcode byte, then dispatches to the handler module for its
-        /// category. Each handler arm decodes its operands through the shared
-        /// wire schema (`wire_schema.readOperands`) and calls the backend — the
-        /// decode/effect split — so this function stays a thin category router.
-        pub fn step(self: *Self, allocator: Allocator) ExecuteError!void {
+        /// Reads the opcode byte, asks `opcode_class.classOf` which handler owns
+        /// it, and calls that one. Each handler arm decodes its operands through
+        /// the shared wire schema (`wire_schema.readOperands`) and calls the
+        /// backend — the decode/effect split — so this function stays a thin
+        /// router over two comptime-total tables: `classOf` for WHO handles the
+        /// opcode, `wire_schema.layoutOf` for what its operands look like.
+        pub fn step(self: *Self, gpa: Allocator) ExecuteError!void {
             const bytecode = self.module.bytecode;
 
             // Both refusals come BEFORE the monotonic-pc `defer` below: neither
@@ -695,53 +704,57 @@ pub fn Dispatcher(comptime BackendType: type) type {
             const op: OpCode = @enumFromInt(bytecode[self.pc]);
             self.pc += 1;
 
-            // Try each handler in priority order
-            // Resource creation
-            if (handlers.resource.is_resource_opcode(op)) {
-                _ = try handlers.resource.handle(Self, self, op, allocator);
-                return;
-            }
+            // ONE question, asked once. `classOf` is the single source of truth
+            // for which handler owns an opcode (dispatcher/opcode_class.zig);
+            // the six `is_*_opcode` predicates it replaced were a second copy of
+            // each handler's own switch, with nothing holding the two in step.
+            // There is no priority order to preserve — the classes are disjoint.
+            const class = opcode_class.classOf(op) orelse return error.InvalidOpcode;
 
-            // Pass operations
-            if (handlers.pass.is_pass_opcode(op)) {
-                _ = try handlers.pass.handle(Self, self, op, allocator);
-                return;
-            }
+            // A handler's `false` means "my switch has no arm for this opcode",
+            // i.e. it disagrees with `classOf`. That is a refusal, NOT something
+            // to discard: `_ = try …` returned successfully having executed
+            // nothing, with the pc advanced past the opcode byte only — so the
+            // operands were read as opcodes and the rest of the stream desynced.
+            // Measured, on a tree where the two lists agreed: `pngine inspect`
+            // printed "Execution OK" over a garbage descriptor (r3-02 step 0).
+            const handled = switch (class) {
+                .resource => try handlers.resource.handle(Self, self, op, gpa),
+                .pass => try handlers.pass.handle(Self, self, op, gpa),
+                .queue => try handlers.queue.handle(Self, self, op, gpa),
+                .frame => try handlers.frame.handle(Self, self, op, gpa),
+                .pool => try handlers.pool.handle(Self, self, op, gpa),
+                .wasm => try handlers.wasm_ops.handle(Self, self, op, gpa),
 
-            // Queue operations
-            if (handlers.queue.is_queue_opcode(op)) {
-                _ = try handlers.queue.handle(Self, self, op, allocator);
-                return;
-            }
+                // `nop` executes nothing; `create_shader_concat` and
+                // `select_from_pool` are RESERVED-INERT (never emitted, refused
+                // by design — see types/opcodes.zig). Their operands still have
+                // layouts so every SKIPPER walks them; only execution refuses.
+                .special => op == .nop,
+            };
+            if (!handled) return error.InvalidOpcode;
 
-            // Frame control
-            if (handlers.frame.is_frame_opcode(op)) {
-                _ = try handlers.frame.handle(Self, self, op, allocator);
-                return;
-            }
-
-            // Pool operations
-            if (handlers.pool.is_pool_opcode(op)) {
-                _ = try handlers.pool.handle(Self, self, op, allocator);
-                return;
-            }
-
-            // WASM operations
-            if (handlers.wasm_ops.is_wasm_opcode(op)) {
-                _ = try handlers.wasm_ops.handle(Self, self, op, allocator);
-                return;
-            }
-
-            // Special cases
-            switch (op) {
-                .nop => {},
-
-                // Unimplemented opcodes
-                .create_shader_concat,
-                .select_from_pool,
-                => return error.InvalidOpcode,
-
-                else => return error.InvalidOpcode,
+            // The replacement for the six `assert(is_*_opcode(op))` this commit
+            // deleted — one assertion that CAN fire, in place of six that could
+            // not. A handler must consume exactly the operand bytes
+            // `wire_schema.skipParams` walks: the SKIPPER is the authority (the
+            // pass scanner and every other consumer follow it), so a handler
+            // that stops anywhere else leaves the next opcode read out of the
+            // middle of this instruction. That is the desync class §319/§320
+            // cost two releases, and `step()`'s own post-condition only says the
+            // pc moved, not that it moved the agreed distance.
+            //
+            // `.frame` is EXCLUDED, and it is the only exclusion: its handler is
+            // the one that legitimately moves the pc somewhere the skipper does
+            // not. `define_pass` scans forward to `end_pass_def` and consumes the
+            // whole pass body (measured: pc 50 vs the skipper's 10 on
+            // simple_triangle); `exec_pass`/`exec_pass_once` jump INTO a recorded
+            // body and return elsewhere. For the other five classes the handler
+            // is a pure operand decode, so the distance is an obligation.
+            //
+            // Debug/ReleaseSafe only, which is every test run and the native CLI.
+            if (class != .frame) {
+                assert(self.pc == wire.skipParams(bytecode, pc_start + 1, op));
             }
         }
 

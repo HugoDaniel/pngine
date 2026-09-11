@@ -1,0 +1,19 @@
+; Invalid: a `:reads` texture whose name is also a `(pass …)` in the graph. The
+; prelude binds a prior pass by ITS name, so `blur` would have to declare two
+; different bindings, and one would shadow the other. Nothing else catches this:
+; a texture and a pass may share a name today, and they never meet until a
+; `:reads` list puts both in one prelude.
+
+(texture :name blur :size canvas :format rgba8unorm :usage [texture-binding copy-dst])
+(pass-graph
+  (pass :name blur :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      return vec4f(0.2, 0.3, 0.4, 1.0);
+    }
+  """)
+  (pass :name main :reads [blur] :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return textureSample(blur, samp, uv);
+    }
+  """))

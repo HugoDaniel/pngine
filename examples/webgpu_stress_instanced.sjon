@@ -6,15 +6,9 @@
 ; resolved and copied to a MAP_READ buffer. This arm renders natively; the
 ; measurement recipe and numbers are in the bundle file's header.
 
-(shader-module :name instCode :code """
-fn hash(n: u32) -> f32 {
-  var x = n;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = (x >> 16u) ^ x;
-  return f32(x) / f32(0xffffffffu);
-}
+(wgsl :name hash :file "./lib/hash.wgsl")
 
+(shader-module :name instCode :imports [hash] :code """
 struct VSOut {
   @builtin(position) pos : vec4f,
   @location(0) color : vec3f,

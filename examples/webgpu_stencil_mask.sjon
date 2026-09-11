@@ -63,17 +63,11 @@
 (texture :name depthStencilTex :size canvas :format depth24plus-stencil8 :usage [render-attachment])
 
 ; ── Compute Init: fill transforms + colors ──────────────────────────────────────
-(shader-module :name initShader :code """
+(wgsl :name hash :file "./lib/hash.wgsl")
+
+(shader-module :name initShader :imports [hash] :code """
 struct Transforms { m: array<mat4x4f> }
 @binding(0) @group(0) var<storage, read_write> data: Transforms;
-
-fn hash(n: u32) -> f32 {
-  var x = n;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = (x >> 16u) ^ x;
-  return f32(x) / f32(0xffffffffu);
-}
 
 fn rotX(a: f32) -> mat4x4f {
   let c = cos(a); let s = sin(a);
@@ -134,17 +128,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }
 """)
 
-(shader-module :name initColorShader :code """
+(shader-module :name initColorShader :imports [hash] :code """
 struct Colors { c: array<vec4f> }
 @binding(0) @group(0) var<storage, read_write> data: Colors;
-
-fn hash(n: u32) -> f32 {
-  var x = n;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = (x >> 16u) ^ x;
-  return f32(x) / f32(0xffffffffu);
-}
 
 // HSL to RGB conversion
 fn hsl2rgb(h: f32, s: f32, l: f32) -> vec3f {
@@ -181,8 +167,11 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 (init :name initTransforms :buffer transforms :module initShader :workgroups [6])
 (init :name initColors :buffer colors :module initColorShader :workgroups [6])
 
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+(wgsl :name lookAt :file "./lib/look_at.wgsl")
+
 ; ── Render Shader ───────────────────────────────────────────────────────────────
-(shader-module :name renderShader :code """
+(shader-module :name renderShader :imports [perspective lookAt] :code """
 struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
 struct PointerInputs { x: f32, y: f32, clickX: f32, clickY: f32, dx: f32, dy: f32, buttons: f32, pressure: f32, modifiers: f32, scrollX: f32, scrollY: f32, _pad: f32 }
 struct Transforms { m: array<mat4x4f> }
@@ -193,25 +182,6 @@ struct Colors { c: array<vec4f> }
 @group(0) @binding(2) var<storage, read> xforms: Transforms;
 @group(0) @binding(3) var<storage, read> colors: Colors;
 
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0, 0, 0),
-    vec4f(0, f, 0, 0),
-    vec4f(0, 0, far * nf, -1),
-    vec4f(0, 0, far * near * nf, 0));
-}
-fn lookAt(eye: vec3f, tgt: vec3f, up: vec3f) -> mat4x4f {
-  let f = normalize(tgt - eye);
-  let s = normalize(cross(f, up));
-  let u = cross(s, f);
-  return mat4x4f(
-    vec4f(s.x, u.x, -f.x, 0),
-    vec4f(s.y, u.y, -f.y, 0),
-    vec4f(s.z, u.z, -f.z, 0),
-    vec4f(-dot(s, eye), -dot(u, eye), dot(f, eye), 1));
-}
 fn translate(t: vec3f) -> mat4x4f {
   return mat4x4f(vec4f(1,0,0,0), vec4f(0,1,0,0), vec4f(0,0,1,0), vec4f(t, 1));
 }
@@ -314,13 +284,11 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
     (stencil-front :compare equal :pass-op keep)))
 
 ; ── Bind Groups (4 buffer entries each; binding order 0..3 mirrors the shader) ────
-(bind-group :name maskBG :layout stencilSetPipe :group 0
-  (entry :binding 0 :buffer uniforms)
-  (entry :binding 1 :buffer pointerBuf)
-  (entry :binding 2 :buffer transforms)
-  (entry :binding 3 :buffer colors))
-
-(bind-group :name sceneBG :layout stencilMaskPipe :group 0
+; One resource set, two pipelines. With no `:layout` the compiler derives one
+; GPU bind group per pipeline that binds it, pruned to what that pipeline's
+; entry points reach — so the two forms that differed only in the pipeline they
+; named became one. Compiles to the same bytes as the pair did.
+(bind-group :name sceneBG :group 0
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :buffer pointerBuf)
   (entry :binding 2 :buffer transforms)
@@ -337,7 +305,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
     :stencil-load-op clear :stencil-store-op store)
   :pipeline stencilSetPipe
   :vertex-buffers [planeVB]
-  :bind-groups [maskBG]
+  :bind-groups [sceneBG]
   :stencil-reference 1
   (draw :vertex-count PLANE_VERTEX_COUNT :instance-count 1 :first-instance 0))
 
@@ -348,7 +316,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
     :stencil-load-op load :stencil-store-op store)
   :pipeline stencilSetPipe
   :vertex-buffers [planeVB]
-  :bind-groups [maskBG]
+  :bind-groups [sceneBG]
   :stencil-reference 2
   (draw :vertex-count PLANE_VERTEX_COUNT :instance-count 1 :first-instance 1))
 
@@ -358,7 +326,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
     :stencil-load-op load :stencil-store-op store)
   :pipeline stencilSetPipe
   :vertex-buffers [planeVB]
-  :bind-groups [maskBG]
+  :bind-groups [sceneBG]
   :stencil-reference 3
   (draw :vertex-count PLANE_VERTEX_COUNT :instance-count 1 :first-instance 2))
 
@@ -368,7 +336,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
     :stencil-load-op load :stencil-store-op store)
   :pipeline stencilSetPipe
   :vertex-buffers [planeVB]
-  :bind-groups [maskBG]
+  :bind-groups [sceneBG]
   :stencil-reference 4
   (draw :vertex-count PLANE_VERTEX_COUNT :instance-count 1 :first-instance 3))
 
@@ -378,7 +346,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
     :stencil-load-op load :stencil-store-op store)
   :pipeline stencilSetPipe
   :vertex-buffers [planeVB]
-  :bind-groups [maskBG]
+  :bind-groups [sceneBG]
   :stencil-reference 5
   (draw :vertex-count PLANE_VERTEX_COUNT :instance-count 1 :first-instance 4))
 
@@ -388,7 +356,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
     :stencil-load-op load :stencil-store-op store)
   :pipeline stencilSetPipe
   :vertex-buffers [planeVB]
-  :bind-groups [maskBG]
+  :bind-groups [sceneBG]
   :stencil-reference 6
   (draw :vertex-count PLANE_VERTEX_COUNT :instance-count 1 :first-instance 5))
 

@@ -1,0 +1,15 @@
+; Invalid: `:format` on a `(pass …)` that renders straight to the canvas. The
+; key names the format of the INTERMEDIATE texture a pass renders into, and
+; this pass has none — it is the last of its graph and carries no `post()`, so
+; its target is the context's current texture, in the context's own format.
+; Honoring the key is impossible and ignoring it is worse, so it is refused.
+; Give the pass a `post()` (which makes it write an intermediate) or move the
+; key to an earlier pass.
+
+(pass-graph
+  (pass :name main :format rgba16float :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return vec4f(uv, 0.0, 1.0);
+    }
+  """))

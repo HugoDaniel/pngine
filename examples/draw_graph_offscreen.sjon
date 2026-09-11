@@ -1,0 +1,97 @@
+; draw_graph_offscreen — a `(draw-graph …)` stage that renders into a
+; `(texture …)` instead of into the canvas, and a second stage that reads it.
+;
+; This document was an INVALID fixture until 2026-08-28. A stage's colour
+; attachment had to be `context-current-texture`, for a reason that was about
+; SJON rather than about the graph: SJON validates a container's children on
+; their own before calling its lowering hook, `attachment-view` is a union of a
+; member set and `texture-ref`, and the ref arm could not resolve in a sub-tree
+; holding no textures — so the union failed as a shape error, the hook was
+; skipped, and the document compiled to a payload with no pipeline, no pass and
+; no frame while saying nothing at all. Fixed upstream (SJON ask 19: a fragment
+; does not adjudicate names), which makes the two stages below expressible.
+;
+;                  stage scene              stage present
+;   geometry tri     scene/vs + scene/fs      —
+;   geometry quad    —                        blit/vs + blit/fs
+;
+; The two things worth watching. Each stage's `(target :format …)` is DERIVED
+; from the attachment it writes — `rgba8unorm` from the texture for `scene`,
+; `preferred-canvas-format` for `present` — so the format is stated once, on
+; the texture, and the two pipelines differ in it without either saying so. And
+; the graph is stage-major, so `scene__tri` runs before `present__quad`: the
+; texture is written and then sampled inside one frame, with the ordering
+; falling out of the table rather than out of a `:perform` list.
+
+(shader-module :name scene :code """
+struct Inputs { time : f32, width : f32, height : f32, aspect : f32 }
+@group(0) @binding(0) var<uniform> inputs : Inputs;
+
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  let a = f32(i) * 2.0943951 + inputs.time;
+  return vec4f(cos(a) * 0.7, sin(a) * 0.7 * inputs.aspect, 0.0, 1.0);
+}
+
+@fragment fn fs() -> @location(0) vec4f { return vec4f(0.95, 0.45, 0.1, 1.0); }
+""")
+
+(shader-module :name blit :code """
+@group(0) @binding(0) var scene : texture_2d<f32>;
+@group(0) @binding(1) var samp : sampler;
+
+struct VsOut { @builtin(position) pos : vec4f, @location(0) uv : vec2f }
+
+@vertex fn vs(@builtin(vertex_index) i : u32) -> VsOut {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  var out : VsOut;
+  out.pos = vec4f(p[i], 0.0, 1.0);
+  out.uv = vec2f((p[i].x + 1.0) * 0.5, (1.0 - p[i].y) * 0.5);
+  return out;
+}
+
+@fragment fn fs(in : VsOut) -> @location(0) vec4f {
+  let c = textureSample(scene, samp, in.uv);
+  // A visible transform, so the canvas cannot be mistaken for the scene pass
+  // having drawn there directly: the triangle keeps its colour, the ground
+  // behind it turns deep blue.
+  return vec4f(c.rgb + vec3f(0.0, 0.0, 0.35) * (1.0 - c.a), 1.0);
+}
+""")
+
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+(queue :name writeUniforms
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+; The intermediate. Its `:format` is the one the `scene` stage's colour target
+; takes; nothing else in the document states it.
+(texture :name sceneColor :size canvas :format rgba8unorm
+  :usage [render-attachment texture-binding])
+(sampler :name samp :mag-filter linear :min-filter linear)
+
+(draw-graph :before [writeUniforms]
+  (stage :name scene
+    (color-attachment :view sceneColor
+      :clear-value [0 0 0 0] :load-op clear :store-op store)
+    (primitive :topology triangle-list)
+    (bind-group :name sceneBG :group 0
+      (entry :binding 0 :buffer uniforms)))
+
+  (stage :name present
+    (color-attachment :view context-current-texture
+      :clear-value [0 0 0 1] :load-op clear :store-op store)
+    (primitive :topology triangle-list)
+    (bind-group :name blitBG :group 0
+      (entry :binding 0 :texture sceneColor)
+      (entry :binding 1 :sampler samp)))
+
+  (geometry :name tri
+    (draw :vertex-count 3)
+    (in :stage scene
+      (vertex :module scene :entry vs)
+      (fragment :module scene :entry fs)))
+
+  (geometry :name quad
+    (draw :vertex-count 3)
+    (in :stage present
+      (vertex :module blit :entry vs)
+      (fragment :module blit :entry fs))))

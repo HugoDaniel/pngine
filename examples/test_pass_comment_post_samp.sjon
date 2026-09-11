@@ -1,0 +1,23 @@
+; A `(pass …)` whose `post()` mentions `samp` in a comment and reads its input
+; with `textureLoad` instead.
+;
+; The third site of the same substring read, and the one `test_pass_post_sampler`
+; leaves uncovered: that fixture's `post()` genuinely samples. Here the post
+; shader's prelude declared a sampler its own `:layout auto` had dropped, so the
+; post bind group carried one entry too many and wgpu refused it — the main pass
+; being entirely well-formed.
+;
+; `namesIdent` skips comments, so the post group is (uniform, postTex).
+(pass-graph
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return vec4f(uv, sin(pngine.time) * .5 + .5, 1);
+    }
+
+    @fragment fn post(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      // textureLoad reads the texel directly; no samp is involved.
+      let c = textureLoad(postTex, vec2i(pos.xy), 0);
+      return vec4f(c.rgb * vec3f(1.2, 1., .8) * pngine.aspect, 1);
+    }
+  """))

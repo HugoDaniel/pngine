@@ -2,7 +2,7 @@
 //!
 //! ## Usage
 //! ```zig
-//! var reader = try ZipReader.init(allocator, zip_data);
+//! var reader = try ZipReader.init(gpa, zip_data);
 //! defer reader.deinit();
 //!
 //! // List files
@@ -12,7 +12,7 @@
 //!
 //! // Extract file
 //! const data = try reader.extract("manifest.json");
-//! defer allocator.free(data);
+//! defer gpa.free(data);
 //! ```
 //!
 //! ## Invariants
@@ -21,6 +21,7 @@
 //! - Filenames are validated (no null bytes, reasonable length)
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const format = @import("format.zig");
 
 pub const Error = error{
@@ -49,9 +50,11 @@ pub const Entry = struct {
     local_header_offset: u32,
 };
 
-/// ZIP archive reader
+/// ZIP archive reader.
+///
+/// Stores its own allocator; `deinit()` takes none.
 pub const ZipReader = struct {
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     data: []const u8,
     entries: []Entry,
     filenames: []u8,
@@ -60,7 +63,7 @@ pub const ZipReader = struct {
     const MAX_FILENAME_LEN: usize = 4096;
     const MAX_SEARCH_OFFSET: usize = 65536 + 22; // Max comment + EOCD size
 
-    pub fn init(allocator: std.mem.Allocator, data: []const u8) Error!ZipReader {
+    pub fn init(gpa: Allocator, data: []const u8) Error!ZipReader {
         // Input validation - data must be at least EOCD size
         if (data.len < format.EndOfCentralDir.FIXED_SIZE) return Error.InvalidZip;
 
@@ -73,8 +76,8 @@ pub const ZipReader = struct {
         if (eocd.total_entries > MAX_ENTRIES) return Error.InvalidZip;
 
         // Parse central directory
-        var entries = allocator.alloc(Entry, eocd.total_entries) catch return Error.OutOfMemory;
-        errdefer allocator.free(entries);
+        var entries = gpa.alloc(Entry, eocd.total_entries) catch return Error.OutOfMemory;
+        errdefer gpa.free(entries);
 
         // Allocate space for all filenames - first pass to calculate total length
         // Note: These use usize for slice indexing compatibility, but values are
@@ -103,8 +106,8 @@ pub const ZipReader = struct {
             offset += header.totalSize();
         }
 
-        var filenames = allocator.alloc(u8, total_filename_len) catch return Error.OutOfMemory;
-        errdefer allocator.free(filenames);
+        var filenames = gpa.alloc(u8, total_filename_len) catch return Error.OutOfMemory;
+        errdefer gpa.free(filenames);
 
         // Second pass: populate entries
         offset = eocd.central_dir_offset;
@@ -142,7 +145,7 @@ pub const ZipReader = struct {
         std.debug.assert(filename_offset == total_filename_len);
 
         return ZipReader{
-            .allocator = allocator,
+            .gpa = gpa,
             .data = data,
             .entries = entries,
             .filenames = filenames,
@@ -150,8 +153,8 @@ pub const ZipReader = struct {
     }
 
     pub fn deinit(self: *ZipReader) void {
-        self.allocator.free(self.entries);
-        self.allocator.free(self.filenames);
+        self.gpa.free(self.entries);
+        self.gpa.free(self.filenames);
     }
 
     /// Get all entries in the archive
@@ -201,12 +204,12 @@ pub const ZipReader = struct {
                 // `@memcpy(compressed_size)` was a length-mismatch trap, and at
                 // 0xFFFFFFFF a 4 GiB allocation, from a field nothing checked.
                 if (entry.uncompressed_size != entry.compressed_size) return Error.InvalidZip;
-                const copy = self.allocator.dupe(u8, compressed_data) catch
+                const copy = self.gpa.dupe(u8, compressed_data) catch
                     return Error.OutOfMemory;
                 break :blk copy;
             },
             @intFromEnum(format.Compression.deflate) => blk: {
-                break :blk decompressDeflate(self.allocator, compressed_data, entry.uncompressed_size) catch
+                break :blk decompressDeflate(self.gpa, compressed_data, entry.uncompressed_size) catch
                     return Error.DecompressionFailed;
             },
             else => return Error.UnsupportedCompression,
@@ -215,7 +218,7 @@ pub const ZipReader = struct {
         // Verify CRC
         const computed_crc = std.hash.Crc32.hash(result);
         if (computed_crc != entry.crc32) {
-            self.allocator.free(result);
+            self.gpa.free(result);
             return Error.InvalidCrc;
         }
 
@@ -250,7 +253,7 @@ pub const ZipReader = struct {
     /// Decompress DEFLATE data using std.compress.flate.
     ///
     /// Uses raw DEFLATE format (no zlib header) as required by ZIP.
-    fn decompressDeflate(allocator: std.mem.Allocator, compressed: []const u8, uncompressed_size: u32) ![]u8 {
+    fn decompressDeflate(gpa: Allocator, compressed: []const u8, uncompressed_size: u32) ![]u8 {
         // Minimum valid deflate stream is 2 bytes (final stored block with 0 bytes)
         if (compressed.len < 2) {
             return error.DecompressionFailed;
@@ -274,13 +277,13 @@ pub const ZipReader = struct {
         // rule): a longer stream → StreamTooLong, a shorter one → the exact-size
         // check below. (Arc-3 §2.3)
         if (uncompressed_size > MAX_DECOMPRESSED) return error.DecompressionFailed;
-        const result = decompressor.reader.allocRemaining(allocator, .limited(@as(usize, uncompressed_size) + 1)) catch {
+        const result = decompressor.reader.allocRemaining(gpa, .limited(@as(usize, uncompressed_size) + 1)) catch {
             return error.DecompressionFailed;
         };
 
         // Verify size matches expected
         if (result.len != uncompressed_size) {
-            allocator.free(result);
+            gpa.free(result);
             return error.DecompressionFailed;
         }
 

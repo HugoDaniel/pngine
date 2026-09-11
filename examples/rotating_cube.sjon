@@ -6,7 +6,15 @@
 ; legibility; a byte-count slot also takes an expression or a bare define
 ; name (`:array-stride CUBE_VERTEX_SIZE` compiles byte-identical).
 
-(shader-module :name code :code """
+; The background is named rather than written into the attachment, because
+; transparent_canvas.sjon is this document with these two rebound and nothing
+; else: a mid grey at full alpha here, nothing at all there.
+(define :name CLEAR_LEVEL :value 0.5)
+(define :name CLEAR_ALPHA :value 1.0)
+
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+
+(shader-module :name code :imports [perspective] :code """
 struct PngineInputs {
   time: f32,
   canvasW: f32,
@@ -14,16 +22,6 @@ struct PngineInputs {
   aspect: f32,
 };
 @group(0) @binding(0) var<uniform> inputs : PngineInputs;
-
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0, 0, 0),
-    vec4f(0, f, 0, 0),
-    vec4f(0, 0, far * nf, -1),
-    vec4f(0, 0, far * near * nf, 0));
-}
 
 fn getMVP() -> mat4x4f {
   let now = inputs.time;
@@ -108,7 +106,7 @@ fn fragMain(
   (entry :binding 0 :buffer uniformInputsBuffer))
 
 (render-pass :name drawCube
-  (color-attachment :view context-current-texture :clear-value [0.5 0.5 0.5 1.0] :load-op clear :store-op store)
+  (color-attachment :view context-current-texture :clear-value [CLEAR_LEVEL CLEAR_LEVEL CLEAR_LEVEL CLEAR_ALPHA] :load-op clear :store-op store)
   (depth-stencil-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   :pipeline renderCube
   :vertex-buffers [verticesBuffer]

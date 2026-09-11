@@ -1,0 +1,85 @@
+; `:before` on a named graph has nothing to sit before: the graph does not emit
+; the frame, so the `(frame …)` that performs it is where order is stated. A key
+; that also stated it would be a second answer to one question.
+(define :name COUNT :value 3)
+
+(shader-module :name sceneShader :code """
+// `pngine-inputs` is positional, so the MEMBER NAMES are the author's. They are
+// prefixed here because the pass graph below builds its own uniform buffer with
+// the conventional time/width/height/aspect, and `setUniform("time")` cannot
+// tell two buffers apart by field name: sharing them makes the JS API ambiguous
+// and `validate` says so.
+struct Inputs { sceneTime : f32, sceneW : f32, sceneH : f32, sceneAspect : f32 }
+@group(0) @binding(0) var<uniform> inputs : Inputs;
+
+struct VsOut { @builtin(position) pos : vec4f, @location(0) shade : f32 }
+
+@vertex fn vs(@location(0) p : vec3f, @location(1) n : vec3f,
+              @builtin(instance_index) inst : u32) -> VsOut {
+  let a = inputs.sceneTime * 0.6 + f32(inst) * 2.0943951;
+  let c = cos(a); let s = sin(a);
+  // Spin about Y, then push each instance out along its own angle.
+  let r = vec3f(p.x * c + p.z * s, p.y, -p.x * s + p.z * c) * 0.28;
+  let off = vec2f(cos(a) * 0.45, sin(a) * 0.45 * inputs.sceneAspect);
+  let rn = vec3f(n.x * c + n.z * s, n.y, -n.x * s + n.z * c);
+
+  var out : VsOut;
+  out.pos = vec4f(r.xy + off, r.z * 0.5 + 0.5, 1.0);
+  out.shade = clamp(dot(rn, normalize(vec3f(0.4, 0.7, 0.6))), 0.15, 1.0);
+  return out;
+}
+
+@fragment fn fs(in : VsOut) -> @location(0) vec4f {
+  return vec4f(vec3f(0.95, 0.6, 0.25) * in.shade, 1.0);
+}
+""")
+
+(data :name cubeMesh (cube :format [position3 normal3]))
+(buffer :name cubeVB :usage [vertex] :data cubeMesh)
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+(queue :name writeUniforms
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+(texture :name sceneColor :size canvas :format rgba8unorm
+  :usage [render-attachment texture-binding])
+(texture :name sceneDepth :size canvas :format depth24plus
+  :usage [render-attachment])
+
+; --- The scene, as a draw graph. Named, so it is a step rather than a frame. ---
+(draw-graph :name scene
+  (stage :name main
+    (color-attachment :view sceneColor
+      :clear-value [0.02 0.02 0.05 1] :load-op clear :store-op store)
+    (depth-stencil-attachment :view sceneDepth
+      :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+    (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less)
+    (primitive :topology triangle-list :cull-mode back)
+    (bind-group :name sceneBG :group 0
+      (entry :binding 0 :buffer uniforms)))
+
+  (geometry :name cubes :vertex-buffers [cubeVB]
+    (vertex-buffer :array-stride (* 4 6)
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3))
+    (draw :vertex-count 36 :instance-count COUNT)
+    (in :stage main
+      (vertex :module sceneShader :entry vs)
+      (fragment :module sceneShader :entry fs))))
+
+; --- The post chain, as a pass graph. Named for the same reason. The pass
+; sugar writes its own pipeline, bind group and pass; `:reads` binds the draw
+; graph's intermediate by its own name. ---
+(pass-graph :name post :before [writeUniforms]
+  (pass :name vignette :reads [sceneColor] :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      let c = textureSample(sceneColor, samp, uv).rgb;
+      // A vignette and a cool tint, so the frame cannot be mistaken for the
+      // draw graph's own output: corners darken and shadows go blue.
+      let d = distance(uv, vec2f(0.5, 0.5));
+      let vig = 1.0 - smoothstep(0.35, 0.85, d);
+      return vec4f(c * vig + vec3f(0.02, 0.05, 0.14) * (1.0 - vig), 1.0);
+    }
+  """))
+
+(frame :name main :perform [writeUniforms scene post])

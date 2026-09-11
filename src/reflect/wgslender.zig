@@ -6,8 +6,8 @@
 //! ## Usage
 //!
 //! ```zig
-//! const reflection = try Wgslender.reflect(allocator, wgsl_source);
-//! defer reflection.deinit(allocator);
+//! const reflection = try Wgslender.reflect(gpa, wgsl_source);
+//! defer reflection.deinit(gpa);
 //!
 //! // Get buffer size for a uniform binding
 //! if (reflection.getBinding(0, 0)) |binding| {
@@ -362,11 +362,11 @@ pub const Wgslender = struct {
     /// Parse JSON reflection output into ReflectionData.
     /// Kept for backward compatibility with JSON-based unit tests.
     pub fn parseJson(gpa: Allocator, json_data: []const u8) Error!ReflectionData {
-        var arena = std.heap.ArenaAllocator.init(gpa);
-        errdefer arena.deinit();
-        const alloc = arena.allocator();
+        var arena_state = std.heap.ArenaAllocator.init(gpa);
+        errdefer arena_state.deinit();
+        const arena = arena_state.allocator();
 
-        var parsed = json.parseFromSlice(json.Value, alloc, json_data, .{}) catch {
+        var parsed = json.parseFromSlice(json.Value, arena, json_data, .{}) catch {
             return error.InvalidJson;
         };
         defer parsed.deinit();
@@ -380,8 +380,8 @@ pub const Wgslender = struct {
         if (obj.get("bindings")) |bindings_val| {
             if (bindings_val == .array) {
                 for (bindings_val.array.items) |item| {
-                    if (parseBinding(alloc, item)) |binding| {
-                        bindings.append(alloc, binding) catch return error.OutOfMemory;
+                    if (parseBinding(arena, item)) |binding| {
+                        bindings.append(arena, binding) catch return error.OutOfMemory;
                     }
                 }
             }
@@ -393,9 +393,9 @@ pub const Wgslender = struct {
             if (structs_val == .object) {
                 var iter = structs_val.object.iterator();
                 while (iter.next()) |entry| {
-                    if (parseLayout(alloc, entry.value_ptr.*)) |layout| {
-                        const name = alloc.dupe(u8, entry.key_ptr.*) catch return error.OutOfMemory;
-                        structs.put(alloc, name, layout) catch return error.OutOfMemory;
+                    if (parseLayout(arena, entry.value_ptr.*)) |layout| {
+                        const name = arena.dupe(u8, entry.key_ptr.*) catch return error.OutOfMemory;
+                        structs.put(arena, name, layout) catch return error.OutOfMemory;
                     }
                 }
             }
@@ -406,8 +406,8 @@ pub const Wgslender = struct {
         if (obj.get("entryPoints")) |eps_val| {
             if (eps_val == .array) {
                 for (eps_val.array.items) |item| {
-                    if (parseEntryPoint(alloc, item)) |ep| {
-                        entry_points.append(alloc, ep) catch return error.OutOfMemory;
+                    if (parseEntryPoint(arena, item)) |ep| {
+                        entry_points.append(arena, ep) catch return error.OutOfMemory;
                     }
                 }
             }
@@ -418,39 +418,39 @@ pub const Wgslender = struct {
         if (obj.get("errors")) |errors_val| {
             if (errors_val == .array) {
                 for (errors_val.array.items) |item| {
-                    if (parseParseError(alloc, item)) |err| {
-                        errors.append(alloc, err) catch return error.OutOfMemory;
+                    if (parseParseError(arena, item)) |err| {
+                        errors.append(arena, err) catch return error.OutOfMemory;
                     }
                 }
             }
         }
 
         return ReflectionData{
-            .bindings = bindings.toOwnedSlice(alloc) catch return error.OutOfMemory,
+            .bindings = bindings.toOwnedSlice(arena) catch return error.OutOfMemory,
             .structs = structs,
-            .entry_points = entry_points.toOwnedSlice(alloc) catch return error.OutOfMemory,
-            .errors = errors.toOwnedSlice(alloc) catch return error.OutOfMemory,
-            .arena = arena,
+            .entry_points = entry_points.toOwnedSlice(arena) catch return error.OutOfMemory,
+            .errors = errors.toOwnedSlice(arena) catch return error.OutOfMemory,
+            .arena = arena_state,
         };
     }
 
-    fn parseBinding(alloc: Allocator, val: json.Value) ?Binding {
+    fn parseBinding(arena: Allocator, val: json.Value) ?Binding {
         if (val != .object) return null;
         const obj = val.object;
 
-        const layout = if (obj.get("layout")) |l| parseLayout(alloc, l) orelse return null else return null;
+        const layout = if (obj.get("layout")) |l| parseLayout(arena, l) orelse return null else return null;
 
         return Binding{
             .group = @intCast(obj.get("group").?.integer),
             .binding = @intCast(obj.get("binding").?.integer),
-            .name = alloc.dupe(u8, obj.get("name").?.string) catch return null,
+            .name = arena.dupe(u8, obj.get("name").?.string) catch return null,
             .address_space = Binding.AddressSpace.fromString(obj.get("addressSpace").?.string),
-            .type = alloc.dupe(u8, obj.get("type").?.string) catch return null,
+            .type = arena.dupe(u8, obj.get("type").?.string) catch return null,
             .layout = layout,
         };
     }
 
-    fn parseLayout(alloc: Allocator, val: json.Value) ?Layout {
+    fn parseLayout(arena: Allocator, val: json.Value) ?Layout {
         if (val != .object) return null;
         const obj = val.object;
 
@@ -458,8 +458,8 @@ pub const Wgslender = struct {
         if (obj.get("fields")) |fields_val| {
             if (fields_val == .array) {
                 for (fields_val.array.items) |item| {
-                    if (parseField(alloc, item)) |field| {
-                        fields.append(alloc, field) catch return null;
+                    if (parseField(arena, item)) |field| {
+                        fields.append(arena, field) catch return null;
                     }
                 }
             }
@@ -468,39 +468,39 @@ pub const Wgslender = struct {
         return Layout{
             .size = @intCast(obj.get("size").?.integer),
             .alignment = @intCast(obj.get("alignment").?.integer),
-            .fields = fields.toOwnedSlice(alloc) catch return null,
+            .fields = fields.toOwnedSlice(arena) catch return null,
         };
     }
 
-    fn parseField(alloc: Allocator, val: json.Value) ?Field {
+    fn parseField(arena: Allocator, val: json.Value) ?Field {
         if (val != .object) return null;
         const obj = val.object;
 
         return Field{
-            .name = alloc.dupe(u8, obj.get("name").?.string) catch return null,
-            .type = alloc.dupe(u8, obj.get("type").?.string) catch return null,
+            .name = arena.dupe(u8, obj.get("name").?.string) catch return null,
+            .type = arena.dupe(u8, obj.get("type").?.string) catch return null,
             .offset = @intCast(obj.get("offset").?.integer),
             .size = @intCast(obj.get("size").?.integer),
             .alignment = @intCast(obj.get("alignment").?.integer),
         };
     }
 
-    fn parseEntryPoint(alloc: Allocator, val: json.Value) ?EntryPoint {
+    fn parseEntryPoint(arena: Allocator, val: json.Value) ?EntryPoint {
         if (val != .object) return null;
         const obj = val.object;
 
         return EntryPoint{
-            .name = alloc.dupe(u8, obj.get("name").?.string) catch return null,
+            .name = arena.dupe(u8, obj.get("name").?.string) catch return null,
             .stage = EntryPoint.Stage.fromString(obj.get("stage").?.string),
         };
     }
 
-    fn parseParseError(alloc: Allocator, val: json.Value) ?ParseError {
+    fn parseParseError(arena: Allocator, val: json.Value) ?ParseError {
         if (val != .object) return null;
         const obj = val.object;
 
         return ParseError{
-            .message = alloc.dupe(u8, obj.get("message").?.string) catch return null,
+            .message = arena.dupe(u8, obj.get("message").?.string) catch return null,
             .line = @intCast(obj.get("line").?.integer),
             .column = @intCast(obj.get("column").?.integer),
         };

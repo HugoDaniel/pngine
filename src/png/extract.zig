@@ -7,8 +7,8 @@
 //!
 //! ## Usage
 //! ```zig
-//! const bytecode = try extract.extract(allocator, png_data);
-//! defer allocator.free(bytecode);
+//! const bytecode = try extract.extract(gpa, png_data);
+//! defer gpa.free(bytecode);
 //! // bytecode is now valid PNGB that can be executed
 //! ```
 //!
@@ -22,6 +22,7 @@
 //! - Caller owns returned memory
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const chunk = @import("chunk.zig");
 const createMinimalPng = @import("test_png.zig").createMinimalPng;
 const embed = @import("embed.zig");
@@ -49,7 +50,7 @@ pub const Error = error{
 /// - Caller owns returned slice and must free it
 ///
 /// Complexity: O(png_data.len) to find chunk
-pub fn extract(allocator: std.mem.Allocator, png_data: []const u8) Error![]u8 {
+pub fn extract(gpa: Allocator, png_data: []const u8) Error![]u8 {
     // Validate PNG signature
     if (png_data.len < 8 or !std.mem.eql(u8, png_data[0..8], &chunk.PNG_SIGNATURE)) {
         return Error.InvalidPng;
@@ -68,7 +69,7 @@ pub fn extract(allocator: std.mem.Allocator, png_data: []const u8) Error![]u8 {
         return Error.InvalidPng;
     }) |c| {
         if (std.mem.eql(u8, &c.chunk_type, &embed.PNGB_CHUNK_TYPE)) {
-            return parsePngbChunk(allocator, c.data);
+            return parsePngbChunk(gpa, c.data);
         }
     }
 
@@ -76,7 +77,7 @@ pub fn extract(allocator: std.mem.Allocator, png_data: []const u8) Error![]u8 {
 }
 
 /// Parse pNGb chunk data.
-fn parsePngbChunk(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
+fn parsePngbChunk(gpa: Allocator, data: []const u8) Error![]u8 {
     // Minimum: version (1) + flags (1) + some payload
     if (data.len < 3) {
         return Error.InvalidPngbFormat;
@@ -99,13 +100,13 @@ fn parsePngbChunk(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
 
     if (is_compressed) {
         // Decompress raw DEFLATE payload
-        return decompressDeflateRaw(allocator, payload) catch {
+        return decompressDeflateRaw(gpa, payload) catch {
             return Error.DecompressionFailed;
         };
     }
 
     // Return copy of raw payload
-    const result = allocator.alloc(u8, payload.len) catch {
+    const result = gpa.alloc(u8, payload.len) catch {
         return Error.OutOfMemory;
     };
     @memcpy(result, payload);
@@ -128,7 +129,7 @@ fn parsePngbChunk(allocator: std.mem.Allocator, data: []const u8) Error![]u8 {
 /// - Returns decompressed data with len > 0 (a stream that inflates to nothing
 ///   is `InvalidPngbFormat`)
 /// - Caller owns returned slice
-fn decompressDeflateRaw(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+fn decompressDeflateRaw(gpa: Allocator, data: []const u8) ![]u8 {
     // Pre-condition: need at least minimal deflate data (header byte)
     if (data.len < 1) {
         return error.InvalidFormat;
@@ -139,7 +140,7 @@ fn decompressDeflateRaw(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     // expand into a multi-GB OOM (the old `.unlimited` here claimed to be
     // "bounded by format" — it was not). No externally-known size for this
     // chunk, so use the module's absolute cap. (Arc-3 §2.3)
-    const result = inflate.decompressCapped(allocator, data, .raw, inflate.MAX_DECOMPRESSED) catch {
+    const result = inflate.decompressCapped(gpa, data, .raw, inflate.MAX_DECOMPRESSED) catch {
         return error.DecompressionFailed;
     };
 
@@ -147,7 +148,7 @@ fn decompressDeflateRaw(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     // bytes) is a malformed payload, not an invariant — it was asserted here
     // and aborted every PNG-input command on a crafted chunk.
     if (result.len == 0) {
-        allocator.free(result);
+        gpa.free(result);
         return error.InvalidPngbFormat;
     }
     return result;
@@ -253,14 +254,14 @@ pub const ChunkEntry = struct {
 /// Pre-condition: `png_data` starts with the PNG signature.
 /// Post-condition: caller owns the returned slice (empty if no PNGine chunks).
 /// Complexity: O(png_data.len).
-pub fn enumerateChunks(allocator: std.mem.Allocator, png_data: []const u8) Error![]ChunkEntry {
+pub fn enumerateChunks(gpa: Allocator, png_data: []const u8) Error![]ChunkEntry {
     if (png_data.len < 8 or !std.mem.eql(u8, png_data[0..8], &chunk.PNG_SIGNATURE)) {
         return Error.InvalidPng;
     }
     std.debug.assert(std.mem.eql(u8, png_data[0..8], &chunk.PNG_SIGNATURE));
 
     var list: std.ArrayList(ChunkEntry) = .empty;
-    errdefer list.deinit(allocator);
+    errdefer list.deinit(gpa);
 
     var iter = chunk.parseChunks(png_data) catch return Error.InvalidPng;
     while (iter.next() catch return Error.InvalidPng) |c| {
@@ -268,7 +269,7 @@ pub fn enumerateChunks(allocator: std.mem.Allocator, png_data: []const u8) Error
         // (IHDR/IDAT/IEND/…) — only our ancillary chunks are enumerated.
         if (!std.mem.eql(u8, c.chunk_type[0..3], "pNG")) continue;
         const has_header = c.data.len >= 2;
-        list.append(allocator, .{
+        list.append(gpa, .{
             .chunk_type = c.chunk_type,
             .total_size = c.total_size,
             .payload_size = if (has_header) c.data.len - 2 else c.data.len,
@@ -277,7 +278,7 @@ pub fn enumerateChunks(allocator: std.mem.Allocator, png_data: []const u8) Error
         }) catch return Error.OutOfMemory;
     }
 
-    return list.toOwnedSlice(allocator) catch return Error.OutOfMemory;
+    return list.toOwnedSlice(gpa) catch return Error.OutOfMemory;
 }
 
 // ============================================================================
@@ -311,13 +312,13 @@ fn fuzzExtractProperties(_: @TypeOf({}), smith: *std.testing.Smith) !void {
     var buf: [4096]u8 = undefined;
     const len = smith.slice(&buf);
     const input = buf[0..len];
-    const allocator = std.testing.allocator;
+    const gpa = std.testing.allocator;
 
     // Property: extract never crashes on any input
-    const result = extract(allocator, input);
+    const result = extract(gpa, input);
 
     if (result) |data| {
-        defer allocator.free(data);
+        defer gpa.free(data);
         // Property: if extraction succeeds, result starts with PNGB
         try std.testing.expect(data.len >= 4);
     } else |_| {

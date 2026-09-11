@@ -22,6 +22,7 @@
 //! - Bounded: at most MAX_ENTRY_POINTS / MAX_BINDINGS are reported per shader.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const pngine = @import("pngine");
 
 const reflect = pngine.reflect;
@@ -145,7 +146,7 @@ fn addressSpaceOf(b: *const reflect.Binding) AddressSpace {
 /// what that flag does and does not tell you.
 ///
 /// Complexity: O(source length) in wgslender, then O(entries + bindings).
-pub fn reflectShader(arena: std.mem.Allocator, wgsl_source: []const u8) ShaderReflection {
+pub fn reflectShader(arena: Allocator, wgsl_source: []const u8) ShaderReflection {
     // Pre-condition: reflect() asserts a non-empty source.
     if (wgsl_source.len == 0) return .{ .valid = false };
 

@@ -130,7 +130,9 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
 (compute-pass :name amplify :pipeline subdividePipe :bind-groups [subdivideBG]
   (dispatch :workgroups [(ceil (/ (* SEED_TRIS SUB_TRIS) WG))]))
 
-(shader-module :name draw :code """
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+
+(shader-module :name draw :imports [perspective] :code """
 struct Inputs { time : f32, width : f32, height : f32, aspect : f32 }
 
 @group(0) @binding(0) var<uniform> inputs : Inputs;
@@ -144,16 +146,6 @@ fn displace(n : vec3f, t : f32) -> vec3f {
                 * sin(n.z * 4.0 + t * 1.1)
         + 0.05 * sin(n.y * 9.0 - t * 2.1);
   return n * (1.0 + w);
-}
-
-fn perspective(fovy : f32, aspect : f32, near : f32, far : f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0, 0, 0),
-    vec4f(0, f, 0, 0),
-    vec4f(0, 0, far * nf, -1),
-    vec4f(0, 0, far * near * nf, 0));
 }
 
 struct VSOut {

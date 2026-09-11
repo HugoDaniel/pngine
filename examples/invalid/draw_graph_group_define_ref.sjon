@@ -1,0 +1,33 @@
+(define :name G1 :value 1)
+; A stage bind-group whose `:group` arrives as a `(define …)` reference.
+;
+; The literal spelling of this document is refused (the stage declares one
+; group, so the only legal index is 0). The define-ref spelling used to
+; COMPILE: a hook reads keys with `Reader.number`, which is documented "NOT FOR
+; EMIT SITES" because it reads literals only, so the reference read as absent
+; and defaulted to 0 — passing the dense-index check while the EMITTER, which
+; does evaluate the key, went on to emit at group 1. A bind group set at slot 0
+; against the layout of slot 1, from a document that validated clean (§437,
+; pitfall 82's shape). The hook now refuses what it cannot evaluate.
+(shader-module :name m :code """
+@group(0) @binding(0) var<uniform> c: vec4f;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return c; }
+""")
+(buffer :name cb :size 16 :usage [uniform copy-dst])
+(texture :name msaaDepth :size canvas :format depth24plus
+  :usage [render-attachment])
+(draw-graph
+  (stage :name s
+    (color-attachment :view context-current-texture
+      :clear-value [0 0 0 1] :load-op clear :store-op store)
+    (depth-stencil-attachment :view msaaDepth
+      :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+    (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less)
+    (bind-group :name g :group G1 (entry :binding 0 :buffer cb)))
+  (geometry :name a (draw :vertex-count 3)
+    (in :stage s (vertex :module m :entry vs) (fragment :module m :entry fs)))
+  )

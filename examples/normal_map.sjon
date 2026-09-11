@@ -81,7 +81,10 @@
 (data :name mapInfoData :float32 [1.7 0.7 -1.9  3  5.0 0.05 16 0])
 (buffer :name mapInfo :size 32 :usage [uniform copy-dst] :data mapInfoData)
 
-(shader-module :name code :code """
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+(wgsl :name lookAt :file "./lib/look_at.wgsl")
+
+(shader-module :name code :imports [perspective lookAt] :code """
 struct PngineInputs {
   time: f32,
   canvasW: f32,
@@ -102,27 +105,6 @@ struct MapInfo {
 @group(1) @binding(1) var albedoTexture : texture_2d<f32>;
 @group(1) @binding(2) var normalTexture : texture_2d<f32>;
 @group(1) @binding(3) var depthTexture : texture_2d<f32>;
-
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0, 0, 0),
-    vec4f(0, f, 0, 0),
-    vec4f(0, 0, far * nf, -1),
-    vec4f(0, 0, far * near * nf, 0));
-}
-
-fn lookAt(eye: vec3f, focus: vec3f, up: vec3f) -> mat4x4f {
-  let fwd = normalize(focus - eye);
-  let s = normalize(cross(fwd, up));
-  let u = cross(s, fwd);
-  return mat4x4f(
-    vec4f(s.x, u.x, -fwd.x, 0),
-    vec4f(s.y, u.y, -fwd.y, 0),
-    vec4f(s.z, u.z, -fwd.z, 0),
-    vec4f(-dot(s, eye), -dot(u, eye), dot(fwd, eye), 1));
-}
 
 // Upstream's fixed camera GUI default; the technique/light knobs stay live
 // through the mapInfo uniform instead.

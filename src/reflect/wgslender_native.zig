@@ -172,19 +172,19 @@ pub fn validateNativeWithOffset(
     defer result.deinit();
 
     // Convert to PNGine types
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    errdefer arena.deinit();
-    const alloc = arena.allocator();
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    errdefer arena_state.deinit();
+    const arena = arena_state.allocator();
 
     return .{
         .valid = result.valid,
-        .diagnostics = try convertDiagnostics(alloc, result.diagnostics.diagnostics.items),
-        .arena = arena,
+        .diagnostics = try convertDiagnostics(arena, result.diagnostics.diagnostics.items),
+        .arena = arena_state,
     };
 }
 
 /// Convert a wgslender diagnostic list into PNGine's `ValidationDiagnostic`
-/// slice, allocating everything from `alloc` (an arena owned by the caller's
+/// slice, allocating everything from `arena` (an arena owned by the caller's
 /// result).
 ///
 /// Shared by `validateNativeWithOffset` and `lintNative` — the validator and
@@ -192,7 +192,7 @@ pub fn validateNativeWithOffset(
 /// diagnostic in every respect that matters here. Keeping one converter is what
 /// makes `.fix` and `.data` reach lint findings for free.
 fn convertDiagnostics(
-    alloc: Allocator,
+    arena: Allocator,
     entries: []const wgslender.Diagnostic.Entry,
 ) Error![]const ValidationDiagnostic {
     var diags = std.ArrayList(ValidationDiagnostic).empty;
@@ -208,17 +208,17 @@ fn convertDiagnostics(
         // Convert related locations
         var related_list = std.ArrayList(RelatedDiagnostic).empty;
         for (entry.related) |rel| {
-            related_list.append(alloc, .{
+            related_list.append(arena, .{
                 .line = rel.range.start.line,
                 .column = rel.range.start.column,
-                .message = alloc.dupe(u8, rel.message) catch return error.OutOfMemory,
+                .message = arena.dupe(u8, rel.message) catch return error.OutOfMemory,
             }) catch return error.OutOfMemory;
         }
 
         // Convert optional inline fix
         var fix_out: ?Fix = null;
         if (entry.fix) |f| {
-            const text = alloc.dupe(u8, f.text) catch return error.OutOfMemory;
+            const text = arena.dupe(u8, f.text) catch return error.OutOfMemory;
             fix_out = Fix{
                 .range = .{
                     .start = .{ .line = f.range.start.line, .column = f.range.start.column },
@@ -231,9 +231,9 @@ fn convertDiagnostics(
         // Convert structured quickfix hint
         const data_out: QuickFix = switch (entry.data) {
             .none => .none,
-            .did_you_mean => |s| .{ .did_you_mean = alloc.dupe(u8, s) catch return error.OutOfMemory },
-            .unused_symbol => |s| .{ .unused_symbol = alloc.dupe(u8, s) catch return error.OutOfMemory },
-            .feature_not_enabled => |s| .{ .feature_not_enabled = alloc.dupe(u8, s) catch return error.OutOfMemory },
+            .did_you_mean => |s| .{ .did_you_mean = arena.dupe(u8, s) catch return error.OutOfMemory },
+            .unused_symbol => |s| .{ .unused_symbol = arena.dupe(u8, s) catch return error.OutOfMemory },
+            .feature_not_enabled => |s| .{ .feature_not_enabled = arena.dupe(u8, s) catch return error.OutOfMemory },
             .duplicate_location => |n| .{ .duplicate_location = n },
             .vertex_missing_builtin_position => .vertex_missing_builtin_position,
             // type_mismatch is not yet exposed through the adapter; collapse
@@ -248,22 +248,22 @@ fn convertDiagnostics(
             .lint_fix => .none,
         };
 
-        diags.append(alloc, .{
+        diags.append(arena, .{
             .severity = severity,
-            .message = alloc.dupe(u8, entry.message) catch return error.OutOfMemory,
+            .message = arena.dupe(u8, entry.message) catch return error.OutOfMemory,
             .line = entry.range.start.line,
             .column = entry.range.start.column,
             .end_line = entry.range.end.line,
             .end_column = entry.range.end.column,
-            .code = if (entry.code.len > 0) alloc.dupe(u8, entry.code) catch return error.OutOfMemory else "",
-            .related = related_list.toOwnedSlice(alloc) catch return error.OutOfMemory,
-            .spec_ref = if (entry.spec_ref.len > 0) alloc.dupe(u8, entry.spec_ref) catch return error.OutOfMemory else "",
+            .code = if (entry.code.len > 0) arena.dupe(u8, entry.code) catch return error.OutOfMemory else "",
+            .related = related_list.toOwnedSlice(arena) catch return error.OutOfMemory,
+            .spec_ref = if (entry.spec_ref.len > 0) arena.dupe(u8, entry.spec_ref) catch return error.OutOfMemory else "",
             .fix = fix_out,
             .data = data_out,
         }) catch return error.OutOfMemory;
     }
 
-    return diags.toOwnedSlice(alloc) catch return error.OutOfMemory;
+    return diags.toOwnedSlice(arena) catch return error.OutOfMemory;
 }
 
 /// Lint WGSL source with wgslender's rule engine, on top of the same analysis
@@ -302,16 +302,16 @@ pub fn lintNative(gpa: Allocator, wgsl_source: []const u8, line_offset: i32) Lin
     }) catch return error.ReflectFailed;
     defer result.deinit(gpa);
 
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    errdefer arena.deinit();
-    const alloc = arena.allocator();
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    errdefer arena_state.deinit();
+    const arena = arena_state.allocator();
 
     return .{
         .valid = result.analysis.valid,
-        .diagnostics = try convertDiagnostics(alloc, result.analysis.diagnostics.diagnostics.items),
-        .lint = try convertDiagnostics(alloc, result.lint.diagnostics.diagnostics.items),
+        .diagnostics = try convertDiagnostics(arena, result.analysis.diagnostics.diagnostics.items),
+        .lint = try convertDiagnostics(arena, result.lint.diagnostics.diagnostics.items),
         .fixable_count = result.lint.fixable_count,
-        .arena = arena,
+        .arena = arena_state,
     };
 }
 
@@ -552,9 +552,9 @@ pub fn minifyAndReflectNative(
 
 /// Convert wgslender ReflectResult → PNGine ReflectionData.
 fn convertReflectResult(gpa: Allocator, result: *const wgslender.Reflect.ReflectResult) Error!ReflectionData {
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    errdefer arena.deinit();
-    const alloc = arena.allocator();
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    errdefer arena_state.deinit();
+    const arena = arena_state.allocator();
 
     // Convert bindings
     var bindings = std.ArrayList(Binding).empty;
@@ -562,22 +562,22 @@ fn convertReflectResult(gpa: Allocator, result: *const wgslender.Reflect.Reflect
         // A bare (non-struct) binding has no StructLayout; its physical size
         // still exists on the structured type tree — carry it so consumers
         // (e.g. the uniform table's bare-binding leaf) see a real byte size.
-        const layout = if (b.layout) |*l| convertLayout(alloc, l) catch return error.OutOfMemory else Layout{
+        const layout = if (b.layout) |*l| convertLayout(arena, l) catch return error.OutOfMemory else Layout{
             .size = typeInfoSize(b.type_info),
             .alignment = 0,
             .fields = &.{},
         };
 
-        const arr = arrayElemInfo(alloc, b.type_info) catch return error.OutOfMemory;
-        bindings.append(alloc, .{
+        const arr = arrayElemInfo(arena, b.type_info) catch return error.OutOfMemory;
+        bindings.append(arena, .{
             .group = @intCast(b.group),
             .binding = @intCast(b.binding),
-            .name = alloc.dupe(u8, b.name) catch return error.OutOfMemory,
+            .name = arena.dupe(u8, b.name) catch return error.OutOfMemory,
             .address_space = Binding.AddressSpace.fromString(b.address_space),
-            .type = resolvedTypeName(alloc, b.type_info, b.typ) catch return error.OutOfMemory,
+            .type = resolvedTypeName(arena, b.type_info, b.typ) catch return error.OutOfMemory,
             .layout = layout,
-            .resource = convertResource(alloc, b.type_info) catch return error.OutOfMemory,
-            .access_mode = alloc.dupe(u8, b.access_mode) catch return error.OutOfMemory,
+            .resource = convertResource(arena, b.type_info) catch return error.OutOfMemory,
+            .access_mode = arena.dupe(u8, b.access_mode) catch return error.OutOfMemory,
             .elem_type = arr.elem_type,
             .elem_count = arr.elem_count,
         }) catch return error.OutOfMemory;
@@ -587,9 +587,9 @@ fn convertReflectResult(gpa: Allocator, result: *const wgslender.Reflect.Reflect
     var structs = std.StringHashMapUnmanaged(Layout){};
     var struct_iter = result.structs.iterator();
     while (struct_iter.next()) |entry| {
-        const name = alloc.dupe(u8, entry.key_ptr.*) catch return error.OutOfMemory;
-        const layout = convertLayout(alloc, &entry.value_ptr.*) catch return error.OutOfMemory;
-        structs.put(alloc, name, layout) catch return error.OutOfMemory;
+        const name = arena.dupe(u8, entry.key_ptr.*) catch return error.OutOfMemory;
+        const layout = convertLayout(arena, &entry.value_ptr.*) catch return error.OutOfMemory;
+        structs.put(arena, name, layout) catch return error.OutOfMemory;
     }
 
     // Convert entry points
@@ -598,8 +598,8 @@ fn convertReflectResult(gpa: Allocator, result: *const wgslender.Reflect.Reflect
         // Dupe the per-entry resource var-name usage list (arena-owned upstream).
         var res_names = std.ArrayList([]const u8).empty;
         for (ep.resources.items) |rname| {
-            const duped = alloc.dupe(u8, rname) catch return error.OutOfMemory;
-            res_names.append(alloc, duped) catch return error.OutOfMemory;
+            const duped = arena.dupe(u8, rname) catch return error.OutOfMemory;
+            res_names.append(arena, duped) catch return error.OutOfMemory;
         }
 
         // Same for the per-entry override names. Upstream this list is the
@@ -609,19 +609,19 @@ fn convertReflectResult(gpa: Allocator, result: *const wgslender.Reflect.Reflect
         // calls it.
         var ov_names = std.ArrayList([]const u8).empty;
         for (ep.overrides.items) |oname| {
-            const duped = alloc.dupe(u8, oname) catch return error.OutOfMemory;
-            ov_names.append(alloc, duped) catch return error.OutOfMemory;
+            const duped = arena.dupe(u8, oname) catch return error.OutOfMemory;
+            ov_names.append(arena, duped) catch return error.OutOfMemory;
         }
 
-        entry_points.append(alloc, .{
-            .name = alloc.dupe(u8, ep.name) catch return error.OutOfMemory,
+        entry_points.append(arena, .{
+            .name = arena.dupe(u8, ep.name) catch return error.OutOfMemory,
             .stage = EntryPoint.Stage.fromString(ep.stage),
             .workgroup_size = ep.workgroup_size,
             .has_workgroup_size = ep.has_workgroup_size,
-            .resources = res_names.toOwnedSlice(alloc) catch return error.OutOfMemory,
-            .inputs = try convertIoVars(alloc, ep.inputs.items),
-            .outputs = try convertIoVars(alloc, ep.outputs.items),
-            .overrides = ov_names.toOwnedSlice(alloc) catch return error.OutOfMemory,
+            .resources = res_names.toOwnedSlice(arena) catch return error.OutOfMemory,
+            .inputs = try convertIoVars(arena, ep.inputs.items),
+            .outputs = try convertIoVars(arena, ep.outputs.items),
+            .overrides = ov_names.toOwnedSlice(arena) catch return error.OutOfMemory,
         }) catch return error.OutOfMemory;
     }
 
@@ -630,16 +630,16 @@ fn convertReflectResult(gpa: Allocator, result: *const wgslender.Reflect.Reflect
     // the text itself is what a compile-time specialisation would substitute.
     var overrides = std.ArrayList(wgslender_mod.Override).empty;
     for (result.overrides.items) |*o| {
-        overrides.append(alloc, .{
-            .name = alloc.dupe(u8, o.name) catch return error.OutOfMemory,
+        overrides.append(arena, .{
+            .name = arena.dupe(u8, o.name) catch return error.OutOfMemory,
             .id = o.id,
             // An override's type may be omitted and inferred from its
             // initializer, so this is legitimately empty — unlike a binding's,
             // it is not a reflection gap. Resolve through the structured tree
             // for the same reason bindings do (§342): an aliased override type
             // spells as the alias name.
-            .typ = resolvedTypeName(alloc, o.type_info, o.typ) catch return error.OutOfMemory,
-            .default = alloc.dupe(u8, o.default) catch return error.OutOfMemory,
+            .typ = resolvedTypeName(arena, o.type_info, o.typ) catch return error.OutOfMemory,
+            .default = arena.dupe(u8, o.default) catch return error.OutOfMemory,
             .decl_start = o.decl_span.start,
             .decl_end = o.decl_span.end,
         }) catch return error.OutOfMemory;
@@ -648,36 +648,36 @@ fn convertReflectResult(gpa: Allocator, result: *const wgslender.Reflect.Reflect
     // Convert errors
     var errors = std.ArrayList(wgslender_mod.ParseError).empty;
     for (result.errors.items) |err_msg| {
-        errors.append(alloc, .{
-            .message = alloc.dupe(u8, err_msg) catch return error.OutOfMemory,
+        errors.append(arena, .{
+            .message = arena.dupe(u8, err_msg) catch return error.OutOfMemory,
             .line = 0,
             .column = 0,
         }) catch return error.OutOfMemory;
     }
 
     return ReflectionData{
-        .bindings = bindings.toOwnedSlice(alloc) catch return error.OutOfMemory,
+        .bindings = bindings.toOwnedSlice(arena) catch return error.OutOfMemory,
         .structs = structs,
-        .entry_points = entry_points.toOwnedSlice(alloc) catch return error.OutOfMemory,
-        .overrides = overrides.toOwnedSlice(alloc) catch return error.OutOfMemory,
-        .errors = errors.toOwnedSlice(alloc) catch return error.OutOfMemory,
-        .arena = arena,
+        .entry_points = entry_points.toOwnedSlice(arena) catch return error.OutOfMemory,
+        .overrides = overrides.toOwnedSlice(arena) catch return error.OutOfMemory,
+        .errors = errors.toOwnedSlice(arena) catch return error.OutOfMemory,
+        .arena = arena_state,
     };
 }
 
 /// Map a wgslender binding's structured type → PNGine's Resource tag.
 /// Buffers (uniform/storage, or any non-handle type) → `.buffer`; handle
 /// types → `.texture`/`.sampler` with descriptive fields. Arena-owned
-/// strings (format, sample_type) are duped into `alloc`; enum spellings
+/// strings (format, sample_type) are duped into `arena`; enum spellings
 /// (`@tagName`, `AccessMode.string()`) are static and referenced directly.
-fn convertResource(alloc: Allocator, type_info: ?*const wgslender.Reflect.TypeInfo) Error!Resource {
+fn convertResource(arena: Allocator, type_info: ?*const wgslender.Reflect.TypeInfo) Error!Resource {
     const ti = type_info orelse return .buffer;
     switch (ti.*) {
         .texture => |tex| return .{ .texture = .{
             .dim = @tagName(tex.dim),
             .kind = @tagName(tex.kind),
-            .sample_type = alloc.dupe(u8, tex.sample_type) catch return error.OutOfMemory,
-            .format = alloc.dupe(u8, tex.format) catch return error.OutOfMemory,
+            .sample_type = arena.dupe(u8, tex.sample_type) catch return error.OutOfMemory,
+            .format = arena.dupe(u8, tex.format) catch return error.OutOfMemory,
             .access = tex.access.string(),
         } },
         .sampler => |samp| return .{ .sampler = .{ .comparison = samp.comparison } },
@@ -686,28 +686,28 @@ fn convertResource(alloc: Allocator, type_info: ?*const wgslender.Reflect.TypeIn
 }
 
 /// Map a wgslender entry point's I/O slot list → PNGine IoVar slice.
-/// All strings are duped into `alloc` (arena-owned upstream).
-fn convertIoVars(alloc: Allocator, items: []const wgslender.Reflect.InputOutputInfo) Error![]const IoVar {
+/// All strings are duped into `arena` (arena-owned upstream).
+fn convertIoVars(arena: Allocator, items: []const wgslender.Reflect.InputOutputInfo) Error![]const IoVar {
     var list = std.ArrayList(IoVar).empty;
     for (items) |*io| {
-        list.append(alloc, .{
-            .name = alloc.dupe(u8, io.name) catch return error.OutOfMemory,
+        list.append(arena, .{
+            .name = arena.dupe(u8, io.name) catch return error.OutOfMemory,
             .location = io.location,
-            .builtin = alloc.dupe(u8, io.builtin) catch return error.OutOfMemory,
-            .typ = resolvedTypeName(alloc, io.type_info, io.typ) catch return error.OutOfMemory,
+            .builtin = arena.dupe(u8, io.builtin) catch return error.OutOfMemory,
+            .typ = resolvedTypeName(arena, io.type_info, io.typ) catch return error.OutOfMemory,
         }) catch return error.OutOfMemory;
     }
-    return list.toOwnedSlice(alloc) catch return error.OutOfMemory;
+    return list.toOwnedSlice(arena) catch return error.OutOfMemory;
 }
 
 /// Convert wgslender StructLayout → PNGine Layout.
-fn convertLayout(alloc: Allocator, layout: *const wgslender.Reflect.StructLayout) !Layout {
+fn convertLayout(arena: Allocator, layout: *const wgslender.Reflect.StructLayout) !Layout {
     var fields = std.ArrayList(Field).empty;
     for (layout.fields.items) |*f| {
-        const arr = arrayElemInfo(alloc, f.type_info) catch return error.OutOfMemory;
-        fields.append(alloc, .{
-            .name = try alloc.dupe(u8, f.name),
-            .type = try resolvedTypeName(alloc, f.type_info, f.typ),
+        const arr = arrayElemInfo(arena, f.type_info) catch return error.OutOfMemory;
+        fields.append(arena, .{
+            .name = try arena.dupe(u8, f.name),
+            .type = try resolvedTypeName(arena, f.type_info, f.typ),
             .offset = f.offset,
             .size = f.size,
             .alignment = f.alignment,
@@ -719,7 +719,7 @@ fn convertLayout(alloc: Allocator, layout: *const wgslender.Reflect.StructLayout
     return Layout{
         .size = layout.size,
         .alignment = layout.alignment,
-        .fields = fields.toOwnedSlice(alloc) catch return error.OutOfMemory,
+        .fields = fields.toOwnedSlice(arena) catch return error.OutOfMemory,
     };
 }
 
@@ -735,14 +735,14 @@ const ArrayElem = struct {
 /// types (`alias L = array<vec4f, 3>`) and const-expression counts
 /// (`array<vec4f, N>`) arrive resolved.
 fn arrayElemInfo(
-    alloc: Allocator,
+    arena: Allocator,
     type_info: ?*const wgslender.Reflect.TypeInfo,
 ) Allocator.Error!ArrayElem {
     const ti = type_info orelse return .{};
     if (ti.* != .array) return .{};
     const arr = ti.array;
     const count = arr.count orelse return .{}; // runtime-sized → no info
-    const elem = typeInfoName(alloc, arr.format) catch return error.OutOfMemory;
+    const elem = typeInfoName(arena, arr.format) catch return error.OutOfMemory;
     if (elem.len == 0) return .{}; // unrepresentable element (nested array, …)
     return .{ .elem_type = elem, .elem_count = count };
 }
@@ -759,6 +759,26 @@ fn typeInfoSize(type_info: ?*const wgslender.Reflect.TypeInfo) u32 {
         .array => |a| a.size orelse 0,
         .@"struct" => |s| s.size,
         .atomic, .texture, .sampler, .ptr => 0,
+        // A type name that resolved to no builtin, no handle spelling and no
+        // struct in this module. `UnresolvedInfo` carries the NAME and nothing
+        // else — no size, no alignment, because wgslender never computed one —
+        // so 0 here is the absence of an answer, not a measurement. It gets its
+        // own arm rather than joining the handle types above precisely because
+        // the two zeros mean different things, and folding them together is the
+        // shape wgslender just stopped reporting (it used to arrive as a
+        // zero-size `scalar`, which is a scalar no consumer was told to expect).
+        //
+        // pngine needs nothing further from it. An unresolved name is a WGSL
+        // error, and wgslender's validator refuses it ("unknown type 'Nope'")
+        // before any consumer of this size runs; the one place a zero size is
+        // read as meaningful — `Emitter.warnBareBindingSkip`, where 0 means
+        // "runtime-sized storage array, stay silent" — is gated on the same
+        // `validate_shaders` flag that would have let the bad type through, so
+        // a misread there is unreachable in both settings. The other solo
+        // reflection, `Emitter.checkFragmentAlone`, expects unresolved names (a
+        // fragment leaning on its importer's types is the point) and reads only
+        // entry-point and binding COUNTS, never a type.
+        .unresolved => 0,
     };
 }
 
@@ -781,33 +801,33 @@ fn typeInfoSize(type_info: ?*const wgslender.Reflect.TypeInfo) u32 {
 /// spell arrays, atomics, textures, samplers and pointers, and those keep their
 /// declared spelling (`Emitter.warnBareBindingSkip` matches `"array<"` on it).
 fn resolvedTypeName(
-    alloc: Allocator,
+    arena: Allocator,
     type_info: ?*const wgslender.Reflect.TypeInfo,
     declared: []const u8,
 ) Allocator.Error![]const u8 {
     if (type_info) |ti| {
-        const spelled = try typeInfoName(alloc, ti);
+        const spelled = try typeInfoName(arena, ti);
         if (spelled.len > 0) return spelled;
     }
-    return alloc.dupe(u8, declared);
+    return arena.dupe(u8, declared);
 }
 
 /// Spell a `TypeInfo` leaf as the WGSL type name `UniformType.fromWgslType`
 /// understands: scalars/structs by name, vectors/matrices in template form
 /// ("vec4<f32>", "mat4x4<f32>"). Empty for shapes with no flat spelling
 /// (nested arrays, atomics, textures, samplers, pointers).
-fn typeInfoName(alloc: Allocator, ti: *const wgslender.Reflect.TypeInfo) Allocator.Error![]const u8 {
+fn typeInfoName(arena: Allocator, ti: *const wgslender.Reflect.TypeInfo) Allocator.Error![]const u8 {
     switch (ti.*) {
-        .scalar => |s| return alloc.dupe(u8, s.name),
+        .scalar => |s| return arena.dupe(u8, s.name),
         .vec => |v| {
             const inner = if (v.format.* == .scalar) v.format.scalar.name else return "";
-            return std.fmt.allocPrint(alloc, "vec{d}<{s}>", .{ v.width, inner });
+            return std.fmt.allocPrint(arena, "vec{d}<{s}>", .{ v.width, inner });
         },
         .mat => |m| {
             const inner = if (m.format.* == .scalar) m.format.scalar.name else return "";
-            return std.fmt.allocPrint(alloc, "mat{d}x{d}<{s}>", .{ m.cols, m.rows, inner });
+            return std.fmt.allocPrint(arena, "mat{d}x{d}<{s}>", .{ m.cols, m.rows, inner });
         },
-        .@"struct" => |s| return alloc.dupe(u8, s.name),
+        .@"struct" => |s| return arena.dupe(u8, s.name),
         else => return "",
     }
 }

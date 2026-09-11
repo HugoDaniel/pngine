@@ -18,6 +18,7 @@
 //! inspect`.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const pngine = @import("pngine");
 const utils = @import("utils.zig");
 const stdio = @import("stdio.zig");
@@ -27,7 +28,7 @@ const arg_reader = @import("arg_reader.zig");
 ///
 /// Pre-condition: args is the slice after "validate" command.
 /// Post-condition: Returns exit code (0 = success, 1 = errors found).
-pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+pub fn run(gpa: Allocator, io: std.Io, args: []const []const u8) !u8 {
     std.debug.assert(args.len <= 1024);
 
     // Parse arguments (shared plumbing via ArgReader).
@@ -65,7 +66,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         return 1;
     }
 
-    return runValidation(allocator, io, opts);
+    return runValidation(gpa, io, opts);
 }
 
 const Options = struct {
@@ -80,20 +81,20 @@ const Options = struct {
 
 /// Read the source and run the SJON validator. `run()` has already
 /// restricted the extension to `.sjon`.
-fn runValidation(allocator: std.mem.Allocator, io: std.Io, opts: Options) !u8 {
-    const in = stdio.readInput(allocator, io, opts.input) catch |err| {
+fn runValidation(gpa: Allocator, io: std.Io, opts: Options) !u8 {
+    const in = stdio.readInput(gpa, io, opts.input) catch |err| {
         if (opts.json_output) {
             // The JSON envelope is the contract for `--json`; a read failure
             // has to arrive in it too, or a consumer sees an empty stdout and
             // an exit code with no explanation it can parse.
-            const line = std.fmt.allocPrint(allocator, "{{\"status\":\"error\",\"message\":\"failed to read input: {s}\"}}\n", .{@errorName(err)}) catch return 2;
-            defer allocator.free(line);
+            const line = std.fmt.allocPrint(gpa, "{{\"status\":\"error\",\"message\":\"failed to read input: {s}\"}}\n", .{@errorName(err)}) catch return 2;
+            defer gpa.free(line);
             utils.writeStdout(io, line) catch {};
             return 2;
         }
         return stdio.reportReadError(err, opts.input);
     };
-    defer in.deinit(allocator);
+    defer in.deinit(gpa);
 
     if (in.kind != .sjon) {
         std.debug.print("Error: validate expects SJON source, got {t} on stdin\n", .{in.kind});
@@ -106,7 +107,7 @@ fn runValidation(allocator: std.mem.Allocator, io: std.Io, opts: Options) !u8 {
         std.debug.print("Read: {d} bytes\n", .{source.len});
     }
 
-    return runSjonValidation(allocator, io, opts, source);
+    return runSjonValidation(gpa, io, opts, source);
 }
 
 /// Validate `.sjon` source through the SJON host pipeline. `compileWithOptions`
@@ -116,11 +117,11 @@ fn runValidation(allocator: std.mem.Allocator, io: std.Io, opts: Options) !u8 {
 /// NO stderr dump, so `--json` writes clean structured output to stdout and the
 /// human path prints one domain-labeled line. The bytecode is discarded;
 /// validation only cares that emission succeeds.
-fn runSjonValidation(allocator: std.mem.Allocator, io: std.Io, opts: Options, source: [:0]const u8) !u8 {
+fn runSjonValidation(gpa: Allocator, io: std.Io, opts: Options, source: [:0]const u8) !u8 {
     const base_dir = stdio.baseDir(opts.input);
 
     var diag: pngine.dsl_sjon.Compiler.Diag = .{};
-    const bytecode = pngine.dsl_sjon.Compiler.compileWithOptions(allocator, source, .{
+    const bytecode = pngine.dsl_sjon.Compiler.compileWithOptions(gpa, source, .{
         .base_dir = base_dir,
         .validate_shaders = true,
         // `validate` is the one command where a human is explicitly asking for a
@@ -129,10 +130,10 @@ fn runSjonValidation(allocator: std.mem.Allocator, io: std.Io, opts: Options, so
         .lint_shaders = true,
         .io = io,
         .diag = &diag,
-    }) catch |err| return reportFailure(allocator, io, opts, &diag, err);
-    allocator.free(bytecode);
+    }) catch |err| return reportFailure(gpa, io, opts, &diag, err);
+    gpa.free(bytecode);
 
-    return reportSuccess(allocator, io, opts, &diag);
+    return reportSuccess(gpa, io, opts, &diag);
 }
 
 /// The class of a compile failure, for the JSON envelope's `message`.
@@ -149,7 +150,7 @@ fn genericMessage(err: anyerror) []const u8 {
 
 /// Render a failed validation. Always exit 1.
 fn reportFailure(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     io: std.Io,
     opts: Options,
     diag: *const pngine.dsl_sjon.Compiler.Diag,
@@ -171,10 +172,12 @@ fn reportFailure(
         // empty array — indistinguishable, to a gate, from having no answer.)
         var jbuf: [32 * 1024]u8 = undefined;
         const n = diag.writeJson(&jbuf);
-        const quoted = std.json.Stringify.valueAlloc(allocator, msg, .{}) catch return 1;
-        defer allocator.free(quoted);
-        const line = std.fmt.allocPrint(allocator, "{{\"status\":\"error\",\"message\":{s},\"diagnostics\":{s}}}\n", .{ quoted, jbuf[0..n] }) catch return 1;
-        defer allocator.free(line);
+        const quoted = std.json.Stringify.valueAlloc(gpa, msg, .{}) catch return 1;
+        defer gpa.free(quoted);
+        var ubuf: [32 * 1024]u8 = undefined;
+        const un = diag.writeJsonUnlocated(&ubuf);
+        const line = std.fmt.allocPrint(gpa, "{{\"status\":\"error\",\"message\":{s},\"diagnostics\":{s},\"unlocated\":{s}}}\n", .{ quoted, jbuf[0..n], ubuf[0..un] }) catch return 1;
+        defer gpa.free(line);
         utils.writeStdout(io, line) catch {};
     } else {
         std.debug.print("{s}: {s}\n", .{ stdio.displayName(opts.input), msg });
@@ -225,7 +228,7 @@ fn warningCount(diag: *const pngine.dsl_sjon.Compiler.Diag) u32 {
 /// whose job is answering "is this document sound?" to answer "I could not
 /// check". `inspect` had `--strict` for the same reason; `validate` did not.
 fn reportSuccess(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     io: std.Io,
     opts: Options,
     diag: *const pngine.dsl_sjon.Compiler.Diag,
@@ -243,17 +246,22 @@ fn reportSuccess(
         // serialize the sink instead of hardcoding `[]`.
         var jbuf: [32 * 1024]u8 = undefined;
         const n = diag.writeJson(&jbuf);
+        // The warnings with no source location ride their own array. They are
+        // counted by `--strict` and were in NO array at all, so a CI run could
+        // exit 1 against a report showing nothing to fix (§438).
+        var ubuf: [32 * 1024]u8 = undefined;
+        const un = diag.writeJsonUnlocated(&ubuf);
         // `dropped` rides the envelope because `writeJson` emits a bare array.
         // It is not decoration: `Diag` caps at 64 entries, which was ample when
         // only errors and a few uniform-table notes landed here, and is reachable
         // now that advisory lint findings do too. A consumer that sees
         // `"dropped": 7` knows the array is a prefix, not the whole story.
         const line = std.fmt.allocPrint(
-            allocator,
-            "{{\"status\":\"ok\",\"diagnostics\":{s},\"dropped\":{d}}}\n",
-            .{ jbuf[0..n], diag.dropped },
+            gpa,
+            "{{\"status\":\"ok\",\"diagnostics\":{s},\"unlocated\":{s},\"dropped\":{d},\"suppressed\":{d}}}\n",
+            .{ jbuf[0..n], ubuf[0..un], diag.dropped, diag.suppressed },
         ) catch return 0;
-        defer allocator.free(line);
+        defer gpa.free(line);
         utils.writeStdout(io, line) catch {};
         // `--strict` changes ONLY the exit code; the envelope keeps `status:
         // "ok"` because the document IS valid — the warnings are already in
@@ -277,6 +285,18 @@ fn reportSuccess(
             .{ diag.dropped, pngine.dsl_sjon.Compiler.Diag.MAX_ENTRIES },
         );
     }
+    // Suppressed advisories are NOT warnings and must not read as any: they are
+    // findings about an imported library, not about this document, and the
+    // whole point is that a clean document reports clean. `--verbose` is where
+    // someone asking what the linter did gets told; `--json` always carries the
+    // count. Deliberately outside the `--strict` tally below.
+    if (opts.verbose and diag.suppressed > 0) {
+        std.debug.print(
+            "  ({d} advisory finding(s) inside imported fragments not reported — " ++
+                "a library declaration this document does not reach is not a finding about it)\n",
+            .{diag.suppressed},
+        );
+    }
     // Say WHY the exit code disagrees with the "OK" above — a CI log showing a
     // successful report and a failing command, with nothing joining them, is
     // how a flag like this gets blamed for flakiness.
@@ -287,6 +307,43 @@ fn reportSuccess(
         );
     }
     return if (strict_fail) 1 else 0;
+}
+
+/// What a located entry's `line`:`col` is measured against, or empty when that
+/// is the document the user named on the command line.
+///
+/// Two entry fields can answer, and they are not interchangeable. `shader` is a
+/// WGSL module TAG and comes with a message that already spells the fragment
+/// path ("WGSL error in './lib/x.wgsl' at 12:3 (assembled into …)"), so it wins
+/// when both are set. `file` is a real path, and until `(import …)` it was only
+/// ever set on entries of that first kind — which is why nothing printed it and
+/// nothing missed it.
+///
+/// An imported document broke that: its diagnostics are SJON's own, worded
+/// without any path, so an unlabelled `3:32` was printed under a headline
+/// naming the ROOT — pointing at line 3 of a file that has two lines. The
+/// location was right and the filename it implied was wrong, which is worse
+/// than either alone (§411, verified by probe — no gate reads a line number).
+fn locationPrefix(shader: []const u8, file: []const u8) []const u8 {
+    return if (shader.len != 0) shader else file;
+}
+
+/// Whether an entry that repeats the headline word for word is still worth
+/// printing, because it names a file the headline does not.
+///
+/// The refusals `(import …)` raises are written by the composer, which is the
+/// FIRST writer, so the headline is that sentence and the entry is a duplicate
+/// of it. Ordinarily that means "skip". But a refusal about an import nested
+/// two documents deep is reported under a headline naming the ROOT — "top.sjon:
+/// cannot read './ghost.sjon'" when it is `mid.sjon` that asks for it — and the
+/// entry is the only thing that knows which document to open.
+///
+/// A shader tag disqualifies the repeat: on that path the message already reads
+/// "WGSL error in './lib/x.wgsl' at 12:3", so reprinting adds a second copy of
+/// what the reader just read. So does an empty file: the position is in the
+/// document the headline already named.
+fn repeatAddsAFile(shader: []const u8, file: []const u8) bool {
+    return shader.len == 0 and file.len != 0;
 }
 
 /// Print the collected LOCATED error entries under the headline.
@@ -300,7 +357,9 @@ fn reportSuccess(
 /// human's whole report. The success path already prints its warnings this
 /// way; the failure path just never printed its errors.
 ///
-/// An entry repeating the headline is skipped — the WGSL path fills both.
+/// An entry repeating the headline is skipped — the WGSL path fills both, and
+/// its message already spells its own file and line. The exception is
+/// `repeatAddsAFile` below.
 fn printLocatedErrors(diag: *const pngine.dsl_sjon.Compiler.Diag) void {
     std.debug.assert(diag.count <= pngine.dsl_sjon.Compiler.Diag.MAX_ENTRIES);
     var i: u32 = 0;
@@ -308,10 +367,13 @@ fn printLocatedErrors(diag: *const pngine.dsl_sjon.Compiler.Diag) void {
         const e = diag.entries[i];
         if (e.severity != .err or e.line == 0) continue;
         const m = diag.entryMessage(e);
-        if (diag.set and std.mem.eql(u8, m, diag.message())) continue;
         const shader = diag.entryShader(e);
-        if (shader.len != 0) {
-            std.debug.print("  {s}:{d}:{d}: {s}\n", .{ shader, e.line, e.col, m });
+        const file = diag.entryFile(e);
+        if (diag.set and std.mem.eql(u8, m, diag.message()) and
+            !repeatAddsAFile(shader, file)) continue;
+        const where = locationPrefix(shader, file);
+        if (where.len != 0) {
+            std.debug.print("  {s}:{d}:{d}: {s}\n", .{ where, e.line, e.col, m });
         } else {
             std.debug.print("  {d}:{d}: {s}\n", .{ e.line, e.col, m });
         }

@@ -60,6 +60,14 @@ const FIELD_OFF_TYPE: usize = 8;
 /// elem_count 0 = "not an array", old readers skip the byte — compatible in
 /// both directions with no version bump.
 const FIELD_OFF_ELEM_COUNT: usize = 9;
+/// One entry of the buffer-name block that follows the bindings when the
+/// header's `has_buffer_names` is set (docs/plans/public-write-buffer.md D2):
+/// `[buffer_id: u16][name_string_id: u16][pool: u8][flags: u8]`. Named by the
+/// SJON `(buffer :name …)`, not the WGSL binding, so a host can address a
+/// buffer by the name the author wrote — including the ones no binding
+/// reflects (a bare `array<T>`, a vertex buffer, an indirect buffer).
+pub const BUFFER_NAME_BYTES: usize = 6;
+
 comptime {
     assert(FIELD_OFF_NAME == FIELD_OFF_SLOT + 2);
     assert(FIELD_OFF_OFFSET == FIELD_OFF_NAME + 2);
@@ -70,12 +78,16 @@ comptime {
 }
 
 /// Uniform field types (matches WGSL types).
-// ⚠️ Downstream coupling: pstudio's visual bus maps these tags to pacer lane
+// ⚠️ Downstream coupling: pstudio's visual bus maps these types to pacer lane
 // counts (`editor/src/lib/preview/registries.ts` LANES_BY_TYPE, in
-// git.hugodaniel.com/hugo/pstudio.git) — an array field whose tag it doesn't
-// know silently DROPS there. Adding a tag here means teaching that map (or
-// deliberately classifying the tag as undrivable). No build edge crosses the
-// repo boundary; tests/npm/uniform-type-lanes.test.js gates this side of it.
+// git.hugodaniel.com/hugo/pstudio.git) — an array field whose type it doesn't
+// know silently DROPS there. Adding a member here means teaching that map (or
+// deliberately classifying the type as undrivable). The runtime reports each
+// member by its NAME below (`getUniforms` → `type: "vec4f"`, since §452; the
+// raw tag through 3.0.1), so the JS name table in
+// npm/pngine/src/uniform-convert.js follows this enum in order. No build edge
+// crosses the repo boundary; tests/npm/uniform-type-lanes.test.js gates this
+// side of it.
 pub const UniformType = enum(u8) {
     f32 = 0,
     i32 = 1,
@@ -175,15 +187,42 @@ pub const UniformBinding = struct {
     fields: []const UniformField,
 };
 
+/// The `flags` byte of a buffer-name entry. Bits this reader does not know
+/// round-trip untouched; a newer writer's bit is not this reader's to clear.
+pub const BufferNameFlags = packed struct(u8) {
+    /// The frame's own queue ops write this buffer every draw, AFTER any host
+    /// write lands, so a host write to it is refused (plan D7). Set for every
+    /// `(write-buffer …)` target and copy / query-resolve destination reached
+    /// from a frame's `:before`/`:perform` steps; never for an `:init` seed.
+    frame_written: bool = false,
+    reserved: u7 = 0,
+};
+
+/// One `(buffer :name …)`: its pool's BASE id and member count (1 unless
+/// `:pool N`), the interned SJON name, and the flags above.
+pub const BufferName = struct {
+    buffer_id: u16,
+    name_string_id: u16,
+    pool: u8,
+    flags: BufferNameFlags,
+};
+
 /// Uniform table for runtime reflection.
 pub const UniformTable = struct {
     bindings: std.ArrayList(UniformBinding),
+    /// The buffer-name block, in buffer-id order. Empty → no block is written
+    /// and the header flag stays clear (byte-identical to pre-block output).
+    buffer_names: std.ArrayList(BufferName),
     /// Arena for field allocations.
     arena: ?std.heap.ArenaAllocator,
 
-    pub const empty: UniformTable = .{ .bindings = .empty, .arena = null };
+    pub const empty: UniformTable = .{ .bindings = .empty, .buffer_names = .empty, .arena = null };
 
-    pub fn deinit(self: *UniformTable, allocator: Allocator) void {
+    /// The field slices have TWO owners, and `arena` says which. `deserialize`
+    /// allocates them from the table's own arena; `addBinding` dupes them from
+    /// the caller's `gpa`. Allocate a field slice from the wrong one here and
+    /// nothing complains at the call site — it leaks, or it double-frees.
+    pub fn deinit(self: *UniformTable, gpa: Allocator) void {
         // Free field slices if we have an arena
         if (self.arena) |*arena| {
             arena.deinit();
@@ -191,19 +230,38 @@ pub const UniformTable = struct {
             // Manual cleanup (for bindings added via addBinding)
             for (self.bindings.items) |binding| {
                 if (binding.fields.len > 0) {
-                    allocator.free(binding.fields);
+                    gpa.free(binding.fields);
                 }
             }
         }
-        self.bindings.deinit(allocator);
+        self.bindings.deinit(gpa);
+        self.buffer_names.deinit(gpa);
         self.* = undefined;
+    }
+
+    /// Name a buffer for host writes. `pool` is the member count (1 for an
+    /// ordinary buffer); `buffer_id` the pool's base.
+    pub fn addBufferName(self: *UniformTable, gpa: Allocator, buffer_id: u16, name_string_id: u16, pool: u8, frame_written: bool) !void {
+        assert(pool > 0); // pre: a pool of nothing is not a resource
+        try self.buffer_names.append(gpa, .{
+            .buffer_id = buffer_id,
+            .name_string_id = name_string_id,
+            .pool = pool,
+            .flags = .{ .frame_written = frame_written },
+        });
+    }
+
+    /// Whether serialize() writes the block — and so whether the header's
+    /// `has_buffer_names` must be set for a reader to find it.
+    pub fn hasBufferNames(self: *const UniformTable) bool {
+        return self.buffer_names.items.len > 0;
     }
 
     /// Add a binding with fields.
     /// Pre-condition: fields slice is copied, caller retains ownership of original.
     pub fn addBinding(
         self: *UniformTable,
-        allocator: Allocator,
+        gpa: Allocator,
         buffer_id: u16,
         name_string_id: u16,
         group: u8,
@@ -216,12 +274,12 @@ pub const UniformTable = struct {
         assert(group <= 3); // WebGPU limit
 
         const fields_copy = if (fields.len > 0)
-            try allocator.dupe(UniformField, fields)
+            try gpa.dupe(UniformField, fields)
         else
             &[_]UniformField{};
-        errdefer if (fields.len > 0) allocator.free(fields_copy);
+        errdefer if (fields.len > 0) gpa.free(fields_copy);
 
-        try self.bindings.append(allocator, .{
+        try self.bindings.append(gpa, .{
             .buffer_id = buffer_id,
             .name_string_id = name_string_id,
             .group = group,
@@ -282,27 +340,29 @@ pub const UniformTable = struct {
     }
 
     /// Serialize uniform table to bytes.
-    pub fn serialize(self: *const UniformTable, allocator: Allocator) ![]u8 {
+    ///
+    /// Caller owns the returned bytes.
+    pub fn serialize(self: *const UniformTable, gpa: Allocator) ![]u8 {
         var result = std.ArrayList(u8).empty;
-        errdefer result.deinit(allocator);
+        errdefer result.deinit(gpa);
 
         // Binding count (u16 LE)
         const binding_count: u16 = @intCast(self.bindings.items.len);
-        try result.appendSlice(allocator, &std.mem.toBytes(binding_count));
+        try result.appendSlice(gpa, &std.mem.toBytes(binding_count));
 
         // Each binding
         for (self.bindings.items) |binding| {
             // buffer_id (u16 LE)
-            try result.appendSlice(allocator, &std.mem.toBytes(binding.buffer_id));
+            try result.appendSlice(gpa, &std.mem.toBytes(binding.buffer_id));
             // name_string_id (u16 LE)
-            try result.appendSlice(allocator, &std.mem.toBytes(binding.name_string_id));
+            try result.appendSlice(gpa, &std.mem.toBytes(binding.name_string_id));
             // group (u8)
-            try result.append(allocator, binding.group);
+            try result.append(gpa, binding.group);
             // binding_index (u8)
-            try result.append(allocator, binding.binding_index);
+            try result.append(gpa, binding.binding_index);
             // field_count (u16 LE)
             const field_count: u16 = @intCast(binding.fields.len);
-            try result.appendSlice(allocator, &std.mem.toBytes(field_count));
+            try result.appendSlice(gpa, &std.mem.toBytes(field_count));
 
             // Fields (FIELD_BYTES each). Write into a fixed record addressed by
             // the same offset constants the reader uses — read/write can't drift.
@@ -314,26 +374,47 @@ pub const UniformTable = struct {
                 std.mem.writeInt(u16, rec[FIELD_OFF_SIZE..][0..2], field.size, .little);
                 rec[FIELD_OFF_TYPE] = @intFromEnum(field.uniform_type);
                 rec[FIELD_OFF_ELEM_COUNT] = field.elem_count;
-                try result.appendSlice(allocator, &rec);
+                try result.appendSlice(gpa, &rec);
             }
         }
 
-        return result.toOwnedSlice(allocator);
+        // The buffer-name block, after the last binding. Every reader before
+        // it stopped at `binding_count` bindings and ignored what followed;
+        // one that knows the header flag reads on. Absent when empty, so a
+        // document without buffers serializes exactly as it always did.
+        if (self.buffer_names.items.len > 0) {
+            const name_count: u16 = @intCast(self.buffer_names.items.len);
+            try result.appendSlice(gpa, &std.mem.toBytes(name_count));
+            for (self.buffer_names.items) |bn| {
+                var rec = [_]u8{0} ** BUFFER_NAME_BYTES;
+                std.mem.writeInt(u16, rec[0..2], bn.buffer_id, .little);
+                std.mem.writeInt(u16, rec[2..4], bn.name_string_id, .little);
+                rec[4] = bn.pool;
+                rec[5] = @bitCast(bn.flags);
+                try result.appendSlice(gpa, &rec);
+            }
+        }
+
+        return result.toOwnedSlice(gpa);
     }
 };
 
-/// Deserialize uniform table from bytes.
-pub fn deserialize(allocator: Allocator, data: []const u8) !UniformTable {
+/// Deserialize uniform table from bytes. `has_buffer_names` is the header's
+/// flag bit: only then is the block after the bindings read — the bytes are
+/// otherwise the section's tail, which every pre-block reader ignored.
+pub fn deserialize(gpa: Allocator, data: []const u8, has_buffer_names: bool) !UniformTable {
     var table = UniformTable{
         .bindings = .empty,
-        .arena = std.heap.ArenaAllocator.init(allocator),
+        .buffer_names = .empty,
+        .arena = std.heap.ArenaAllocator.init(gpa),
     };
     errdefer {
         if (table.arena) |*arena| arena.deinit();
-        table.bindings.deinit(allocator);
+        table.bindings.deinit(gpa);
+        table.buffer_names.deinit(gpa);
     }
 
-    const alloc = table.arena.?.allocator();
+    const arena = table.arena.?.allocator();
 
     if (data.len < 2) {
         // Empty table
@@ -347,7 +428,7 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !UniformTable {
     pos += 2;
 
     // Pre-allocate
-    try table.bindings.ensureTotalCapacity(allocator, @min(binding_count, MAX_BINDINGS));
+    try table.bindings.ensureTotalCapacity(gpa, @min(binding_count, MAX_BINDINGS));
 
     // Read bindings
     for (0..@min(binding_count, MAX_BINDINGS)) |_| {
@@ -365,7 +446,7 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !UniformTable {
         pos += 2;
 
         // Read fields (FIELD_BYTES each) at the shared record offsets.
-        var fields = try alloc.alloc(UniformField, @min(field_count, MAX_FIELDS));
+        var fields = try arena.alloc(UniformField, @min(field_count, MAX_FIELDS));
         var actual_field_count: usize = 0;
 
         for (0..@min(field_count, MAX_FIELDS)) |i| {
@@ -396,6 +477,26 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !UniformTable {
         });
     }
 
+    // The buffer-name block. A torn entry at the end is dropped, like a torn
+    // binding above. The count is the file's word; the bytes that follow are
+    // the bound — a count of 65535 over an empty tail reserves nothing.
+    if (has_buffer_names and pos + 2 <= data.len) {
+        const name_count = std.mem.readInt(u16, data[pos..][0..2], .little);
+        pos += 2;
+        const fit: usize = @min(name_count, (data.len - pos) / BUFFER_NAME_BYTES);
+        try table.buffer_names.ensureTotalCapacity(gpa, fit);
+        for (0..fit) |_| {
+            std.debug.assert(pos + BUFFER_NAME_BYTES <= data.len);
+            table.buffer_names.appendAssumeCapacity(.{
+                .buffer_id = std.mem.readInt(u16, data[pos..][0..2], .little),
+                .name_string_id = std.mem.readInt(u16, data[pos + 2 ..][0..2], .little),
+                .pool = data[pos + 4],
+                .flags = @bitCast(data[pos + 5]),
+            });
+            pos += BUFFER_NAME_BYTES;
+        }
+    }
+
     return table;
 }
 
@@ -404,3 +505,5 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !UniformTable {
 // ============================================================================
 
 const testing = std.testing;
+
+// ── Buffer-name block (docs/plans/public-write-buffer.md D2) ─────────────────

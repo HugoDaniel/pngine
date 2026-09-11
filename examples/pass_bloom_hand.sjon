@@ -1,0 +1,129 @@
+; The hand-written twin of examples/pass_bloom.sjon: the same temporal-feedback
+; program with `(pass-graph …)` expanded by hand into the core forms it lowers
+; to. `schema/sugar-ledger.mjs` names this file for `(pass …)`'s `:feedback`,
+; and `tests/zig/render/render_test.zig` holds the pair pixel-equal every run
+; (`twin_of = "pass_bloom"`).
+;
+; `:feedback true` lands on FOUR core spellings, and this file is where they
+; are visible one at a time:
+;
+;   1. `(texture … :pool 2)` — the ping-pong pair the pass alternates between.
+;   2. `(bind-group … :pool 2)` — an A/B pair of groups, one per pool slot.
+;   3. `(entry … :ping-pong 1)` on the pass's own texture: instance i reads
+;      `base + (frame + 1) % 2`, which is LAST frame's output. The consumer's
+;      entry carries `:ping-pong 0` — the partner written THIS frame.
+;   4. `prev_pass0` in the prelude, the name the author's WGSL samples.
+;
+; The plan asked how a hand-written document alternates an ATTACHMENT at all,
+; since `(color-attachment …)` has no pool-offset key the way `(render-pass …)`
+; has `:bind-groups-pool-offsets`. It does not need one: a single colour
+; attachment whose `:view` names a pooled texture IS the ping-pong target, and
+; the emitter turns it into `begin_render_pass_pool(base, size, 0)` on its own
+; (Emitter.zig `beginPassForAttachments`). The offset is the pool's phase, not
+; the attachment's, so there is nothing left for the author to say.
+;
+; Equivalence reached: PIXEL, for the two reasons every `(pass …)` twin is
+; pixel rather than byte — the sugar names the frame and the last render pass
+; alike (`duplicate name 'main'` when written by hand, hence `(frame :name
+; draw …)`), and the emitter walks authored forms grouped by kind against
+; lowered forms in emission order.
+
+(sampler :name __pass_sampler :mag-filter linear :min-filter linear)
+
+; ---- pass `pass0` -> a ping-pong pair it both writes and reads -------------
+
+(buffer :name pass0__ubuf :size 16 :usage [uniform copy-dst])
+
+(texture :name pass0__tex :size canvas :format rgba8unorm
+  :usage [texture-binding render-attachment] :pool 2)
+
+(shader-module :name pass0__shader :code """struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+@group(0) @binding(0) var<uniform> pngine: PngineInputs;
+@group(0) @binding(1) var samp: sampler;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let x = f32(i & 1u) * 4.0 - 1.0;
+  let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+  return vec4f(x, y, 0, 1);
+}
+@group(0) @binding(2) var prev_pass0: texture_2d<f32>;
+
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      let history = textureSample(prev_pass0, samp, uv).rgb;
+      let t = pngine.time;
+      let c = vec2f(sin(t) * .3 + .5, cos(t * .7) * .3 + .5);
+      let d = length(uv - c);
+      let glow = smoothstep(.15, .0, d);
+      let col = .5 + .5 * cos(t * 2. + vec3f(0., 2., 4.) + d * 10.);
+      let current = col * glow;
+      return vec4f(mix(current, history, 0.92), 1);
+    }
+  """)
+
+(render-pipeline :name pass0__pipe :layout auto
+  (vertex :module pass0__shader :entry vs)
+  (fragment :module pass0__shader :entry fs
+    (target :format rgba8unorm)))
+
+; The A/B pair. Entry 2 reads the slot the NEXT frame will write over, which is
+; the one this frame did not: that is the whole of the feedback.
+(bind-group :name pass0__bg :layout pass0__pipe :group 0 :pool 2
+  (entry :binding 0 :buffer pass0__ubuf)
+  (entry :binding 1 :sampler __pass_sampler)
+  (entry :binding 2 :texture pass0__tex :ping-pong 1))
+
+; `:view pass0__tex` names the POOL, so this is the ping-pong render target.
+(render-pass :name pass0 :pipeline pass0__pipe :bind-groups [pass0__bg]
+  (color-attachment :view pass0__tex :clear-value [0 0 0 1]
+    :load-op clear :store-op store)
+  (draw :vertex-count 3))
+
+(queue :name pass0__uq
+  (write-buffer :buffer pass0__ubuf :offset 0 :data pngine-inputs))
+
+; ---- pass `main` -> the canvas ---------------------------------------------
+
+(buffer :name main__ubuf :size 16 :usage [uniform copy-dst])
+
+; No `main__tex`: a last pass with no `post()` renders straight to
+; `context-current-texture` (§425, CONTRIBUTING pitfall 114).
+
+(shader-module :name main__shader :code """struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+@group(0) @binding(0) var<uniform> pngine: PngineInputs;
+@group(0) @binding(1) var samp: sampler;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let x = f32(i & 1u) * 4.0 - 1.0;
+  let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+  return vec4f(x, y, 0, 1);
+}
+@group(0) @binding(2) var pass0: texture_2d<f32>;
+
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      let scene = textureSample(pass0, samp, uv).rgb;
+      let vignette = smoothstep(1.2, 0.3, length(uv - 0.5));
+      return vec4f(scene * vignette, 1);
+    }
+  """)
+
+(render-pipeline :name main__pipe :layout auto
+  (vertex :module main__shader :entry vs)
+  (fragment :module main__shader :entry fs
+    (target :format preferred-canvas-format)))
+
+; A consumer of a pooled producer is pooled too — otherwise one fixed group
+; would sample whichever slot it was built against, half the frames stale.
+(bind-group :name main__bg :layout main__pipe :group 0 :pool 2
+  (entry :binding 0 :buffer main__ubuf)
+  (entry :binding 1 :sampler __pass_sampler)
+  (entry :binding 2 :texture pass0__tex :ping-pong 0))
+
+(render-pass :name main :pipeline main__pipe :bind-groups [main__bg]
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1]
+    :load-op clear :store-op store)
+  (draw :vertex-count 3))
+
+(queue :name main__uq
+  (write-buffer :buffer main__ubuf :offset 0 :data pngine-inputs))
+
+(frame :name draw :perform [pass0__uq pass0 main__uq main])

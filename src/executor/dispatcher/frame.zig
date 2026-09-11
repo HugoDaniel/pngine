@@ -24,7 +24,6 @@
 //! - exec_pass must reference a previously defined pass
 
 const std = @import("std");
-const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
 const bytecode_mod = @import("bytecode");
@@ -60,11 +59,8 @@ pub fn handle(
     comptime Self: type,
     self: *Self,
     op: OpCode,
-    allocator: Allocator,
+    gpa: Allocator,
 ) !bool {
-    // Pre-condition: valid opcode for this handler
-    assert(is_frame_opcode(op));
-
     switch (op) {
         .define_frame => {
             _ = try self.read_varint(); // frame_id
@@ -79,14 +75,14 @@ pub fn handle(
 
         .exec_pass => {
             const pass_id: u16 = try wire.narrowU16(try self.read_varint());
-            try executePass(Self, self, pass_id, allocator);
+            try executePass(Self, self, pass_id, gpa);
         },
 
         .exec_pass_once => {
             const pass_id: u16 = try wire.narrowU16(try self.read_varint());
             // Only execute if not already executed
             if (self.executed_once.get(pass_id) == null) {
-                try executePass(Self, self, pass_id, allocator);
+                try executePass(Self, self, pass_id, gpa);
                 try self.executed_once.put(pass_id, {});
             }
         },
@@ -118,7 +114,7 @@ fn executePass(
     comptime Self: type,
     self: *Self,
     pass_id: u16,
-    allocator: Allocator,
+    gpa: Allocator,
 ) !void {
     // Pre-condition: pass must exist in pass_ranges
     const range = self.pass_ranges.get(pass_id) orelse return;
@@ -153,7 +149,7 @@ fn executePass(
     self.pc = range.start;
     for (0..PASS_MAX_ITERATIONS) |_| {
         if (self.pc >= range.end) break;
-        try self.step(allocator);
+        try self.step(gpa);
     } else {
         if (self.pc < range.end) return error.InstructionBudgetExhausted;
     }
@@ -203,18 +199,4 @@ fn scanToEndPassDef(
 
     // Update dispatcher's pc to match scanner
     self.pc = scanner.pc;
-}
-
-/// Check if opcode is a frame control opcode.
-pub fn is_frame_opcode(op: OpCode) bool {
-    return switch (op) {
-        .define_frame,
-        .end_frame,
-        .define_pass,
-        .end_pass_def,
-        .exec_pass,
-        .exec_pass_once,
-        => true,
-        else => false,
-    };
 }

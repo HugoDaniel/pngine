@@ -1,0 +1,15 @@
+; Invalid: `:reads` names a texture the pass's WGSL never uses. This is
+; CONTRIBUTING pitfall 37's exact shape: the pipeline's `:layout auto` holds
+; only the bindings its entry points statically reach, so a bind group carrying
+; an entry the layout does not have is one WebGPU refuses ("Number of bindings
+; in bind group descriptor does not match…") — at render time, as a blank
+; canvas. Use the texture or drop it from the list.
+
+(texture :name noise :size canvas :format rgba8unorm :usage [texture-binding copy-dst])
+(pass-graph
+  (pass :name main :reads [noise] :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return vec4f(uv, 0.0, 1.0);
+    }
+  """))

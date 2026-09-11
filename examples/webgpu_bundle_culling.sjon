@@ -38,7 +38,9 @@
 (queue :name writeInputs
   (write-buffer :buffer inputsBuf :offset 0 :data pngine-inputs))
 
-(shader-module :name seedCode :code """
+(wgsl :name hash :file "./lib/hash.wgsl")
+
+(shader-module :name seedCode :imports [hash] :code """
 struct Instance {
   pos : vec3f,
   scale : f32,
@@ -47,14 +49,6 @@ struct Instance {
 struct Instances { instances : array<Instance> }
 
 @binding(0) @group(0) var<storage, read_write> data : Instances;
-
-fn hash(n: u32) -> f32 {
-  var x = n;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = (x >> 16u) ^ x;
-  return f32(x) / f32(0xffffffffu);
-}
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid : vec3u) {
@@ -74,7 +68,10 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
 }
 """)
 
-(shader-module :name cameraCode :code """
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+(wgsl :name lookAt :file "./lib/look_at.wgsl")
+
+(shader-module :name cameraCode :imports [perspective lookAt] :code """
 struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
 struct CamFrustum {
   viewProj : mat4x4f,
@@ -84,25 +81,6 @@ struct CamFrustum {
 @group(0) @binding(0) var<uniform> inputs : PngineInputs;
 @group(0) @binding(1) var<storage, read_write> cam : CamFrustum;
 
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0, 0, 0),
-    vec4f(0, f, 0, 0),
-    vec4f(0, 0, far * nf, -1),
-    vec4f(0, 0, far * near * nf, 0));
-}
-fn lookAt(eye: vec3f, focus: vec3f, up: vec3f) -> mat4x4f {
-  let fwd = normalize(focus - eye);
-  let s = normalize(cross(fwd, up));
-  let u = cross(s, fwd);
-  return mat4x4f(
-    vec4f(s.x, u.x, -fwd.x, 0),
-    vec4f(s.y, u.y, -fwd.y, 0),
-    vec4f(s.z, u.z, -fwd.z, 0),
-    vec4f(-dot(s, eye), -dot(u, eye), dot(fwd, eye), 1));
-}
 
 fn row(m: mat4x4f, i: u32) -> vec4f {
   return vec4f(m[0][i], m[1][i], m[2][i], m[3][i]);

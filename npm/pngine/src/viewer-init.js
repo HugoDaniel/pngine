@@ -27,6 +27,8 @@ let workerUrl = null;
  * HTMLImageElement, a wasmUrl fallback). Those are named in the types below
  * because rejecting them is part of this function's contract — a caller coming
  * from dev needs the error, not an "argument of type never" from its bundler.
+ * Each rejection is a TypeError: the call is the wrong shape, which is what
+ * every verb says about an argument of the wrong kind.
  *
  * @param {string|ArrayBuffer|Uint8Array|Blob|HTMLImageElement} source
  * @param {Object} [options]
@@ -52,11 +54,11 @@ let workerUrl = null;
 export async function pngine(source, options = {}) {
   const canvas = options.canvas;
   if (!canvas) {
-    throw new Error("viewer pngine() requires options.canvas");
+    throw new TypeError("viewer pngine() requires options.canvas");
   }
 
   if (options.wasmUrl) {
-    throw new Error("viewer pngine() does not support wasmUrl; use embedded executor payloads");
+    throw new TypeError("viewer pngine() does not support wasmUrl; use embedded executor payloads");
   }
 
   let bytecode, rawData;
@@ -65,7 +67,7 @@ export async function pngine(source, options = {}) {
     // CSS selector shortcuts are intentionally dev-only to keep viewer API strict.
     const isSelector = source.startsWith("#") || (source.startsWith(".") && !source.startsWith("./") && !source.startsWith(".."));
     if (isSelector) {
-      throw new Error("viewer pngine() does not support selector sources; use URL/bytes or pngine/dev");
+      throw new TypeError("viewer pngine() does not support selector sources; use URL/bytes or pngine/dev");
     }
 
     const resp = await fetch(source);
@@ -80,9 +82,9 @@ export async function pngine(source, options = {}) {
     rawData = source instanceof Blob ? await source.arrayBuffer() : source;
     bytecode = await extractBytecode(rawData);
   } else if (typeof HTMLImageElement !== "undefined" && source instanceof HTMLImageElement) {
-    throw new Error("viewer pngine() does not support HTMLImageElement sources; use pngine/dev");
+    throw new TypeError("viewer pngine() does not support HTMLImageElement sources; use pngine/dev");
   } else {
-    throw new Error("viewer pngine() source must be URL string or byte buffer");
+    throw new TypeError("viewer pngine() source must be URL string or byte buffer");
   }
 
   // Viewer contract: only embedded-executor payloads are accepted.
@@ -130,8 +132,6 @@ export async function pngine(source, options = {}) {
     width: logicalW,
     height: logicalH,
     frameCount: result.frameCount,
-    animation: result.animation || null,
-    ready: true,
     pb: initialPlayback(),
     animationId: null,
     audio: null,

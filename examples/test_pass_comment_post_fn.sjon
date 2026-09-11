@@ -1,0 +1,26 @@
+; A `(pass …)` whose `post()` is commented out.
+;
+; The fourth site of the comment blindness §407 fixed at the other three, and
+; the only one that is not a binding: `extractPostFunction` walked the body for
+; the substring `@fragment`, so the disabled text below still built a second
+; shader module, a second pipeline and a second render pass — and THAT pass, not
+; `fs`, is what reached the canvas. The document rendered the inverted image at
+; exit 0, with two W0003 warnings (`samp` and `postTex` declared and never used
+; in the main module) as the only sign anything was wrong.
+;
+; The extractor reads `wgsl_scan`'s trivia and entry points now, so this is one
+; pass drawing one gradient. (journal §408.)
+(pass-graph
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return vec4f(uv, sin(pngine.time) * .5 + .5, 1);
+    }
+
+    /* Disabled while the gradient is tuned:
+    @fragment fn post(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let c = textureLoad(postTex, vec2i(pos.xy), 0);
+      return vec4f(1. - c.rgb, 1.);
+    }
+    */
+  """))

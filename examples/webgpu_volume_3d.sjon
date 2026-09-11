@@ -60,25 +60,14 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
 }
 """)
 
-(shader-module :name cameraCode :code """
+(wgsl :name invPerspective :file "./lib/inv_perspective.wgsl")
+
+(shader-module :name cameraCode :imports [invPerspective] :code """
 struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
 struct CameraData { invMVP : mat4x4f }
 
 @group(0) @binding(0) var<uniform> pngine : PngineInputs;
 @group(0) @binding(1) var<storage, read_write> cam : CameraData;
-
-// Analytic inverse of the corpus perspective helper (verified P * invP = I).
-fn invPerspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  let a = far * nf;
-  let b = far * near * nf;
-  return mat4x4f(
-    vec4f(aspect / f, 0, 0, 0),
-    vec4f(0, 1.0 / f, 0, 0),
-    vec4f(0, 0, 0, 1.0 / b),
-    vec4f(0, 0, -1, a / b));
-}
 
 fn rotate(axis: vec3f, ang: f32) -> mat4x4f {
   let c = cos(ang);

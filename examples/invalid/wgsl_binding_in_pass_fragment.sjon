@@ -1,0 +1,12 @@
+; R12: a fragment imported by a `(pass …)` declares no resource binding. The
+; pass prelude numbers @group(0) itself and emits bind groups for it, so this
+; binding has nowhere to be bound. The same fragment is legal under a
+; `(shader-module …)`, whose bind groups the author writes.
+(wgsl :name bad :code """
+@group(0) @binding(9) var<uniform> mine: vec4f;
+fn useIt() -> f32 { return mine.x; }
+""")
+(pass-graph :name g
+  (pass :name main :imports [bad] :code """
+@fragment fn fs(@builtin(position) c: vec4f) -> @location(0) vec4f { return vec4f(useIt()); }
+"""))

@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const Allocator = std.mem.Allocator;
 
 const decoder = @import("decoder.zig");
 const compare = @import("compare.zig");
@@ -54,15 +55,15 @@ pub const Outcome = union(enum) {
 /// assumed here — an empty or corrupt stream returns a typed `Error`).
 /// Post-condition: on `.compared`, the match fraction is in [0, 1].
 pub fn diffEncoded(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     png_a: []const u8,
     png_b: []const u8,
     config: Config,
 ) Error!Outcome {
-    var img_a = try decoder.decode(allocator, png_a);
-    defer img_a.deinit(allocator);
-    var img_b = try decoder.decode(allocator, png_b);
-    defer img_b.deinit(allocator);
+    var img_a = try decoder.decode(gpa, png_a);
+    defer img_a.deinit(gpa);
+    var img_b = try decoder.decode(gpa, png_b);
+    defer img_b.deinit(gpa);
 
     // Decoder post-conditions we rely on (RGBA8, tight buffer).
     assert(img_a.pixels.len == @as(usize, img_a.width) * img_a.height * 4);
@@ -99,9 +100,9 @@ const testing = std.testing;
 const encoder = @import("encoder.zig");
 
 /// Encode a solid-color `w`×`h` RGBA image. Caller frees the returned PNG.
-fn encodeSolid(allocator: std.mem.Allocator, w: u32, h: u32, rgba: [4]u8) ![]u8 {
-    const pixels = try allocator.alloc(u8, @as(usize, w) * h * 4);
-    defer allocator.free(pixels);
+fn encodeSolid(gpa: Allocator, w: u32, h: u32, rgba: [4]u8) ![]u8 {
+    const pixels = try gpa.alloc(u8, @as(usize, w) * h * 4);
+    defer gpa.free(pixels);
     for (0..@as(usize, w) * h) |p| {
         const base = p * 4;
         pixels[base + 0] = rgba[0];
@@ -109,14 +110,14 @@ fn encodeSolid(allocator: std.mem.Allocator, w: u32, h: u32, rgba: [4]u8) ![]u8 
         pixels[base + 2] = rgba[2];
         pixels[base + 3] = rgba[3];
     }
-    return encoder.encode(allocator, pixels, w, h);
+    return encoder.encode(gpa, pixels, w, h);
 }
 
 /// Encode an image that is solid `rgba` except pixel 0, whose red channel is
 /// bumped by `delta`. Exercises the "one differing pixel" path.
-fn encodeSolidWithBlemish(allocator: std.mem.Allocator, w: u32, h: u32, rgba: [4]u8, delta: u8) ![]u8 {
-    const pixels = try allocator.alloc(u8, @as(usize, w) * h * 4);
-    defer allocator.free(pixels);
+fn encodeSolidWithBlemish(gpa: Allocator, w: u32, h: u32, rgba: [4]u8, delta: u8) ![]u8 {
+    const pixels = try gpa.alloc(u8, @as(usize, w) * h * 4);
+    defer gpa.free(pixels);
     for (0..@as(usize, w) * h) |p| {
         const base = p * 4;
         pixels[base + 0] = rgba[0];
@@ -125,5 +126,5 @@ fn encodeSolidWithBlemish(allocator: std.mem.Allocator, w: u32, h: u32, rgba: [4
         pixels[base + 3] = rgba[3];
     }
     pixels[0] +%= delta;
-    return encoder.encode(allocator, pixels, w, h);
+    return encoder.encode(gpa, pixels, w, h);
 }

@@ -1,0 +1,14 @@
+; Invalid: `:scale` on a COMPUTE `(pass …)`. The key sizes the texture a
+; fragment pass renders into. A compute main writes into a `screen` storage
+; texture at the dispatch grid pngine chooses, and pngine's blit samples that
+; texture to the canvas; a fraction here would size nothing the shader knows
+; about. Write the texture, the pipeline and the blit by hand for a compute
+; stage at another resolution.
+
+(pass-graph
+  (pass :name main :scale 0.5 :code """
+    @compute @workgroup_size(8, 8) fn cs(@builtin(global_invocation_id) id: vec3u) {
+      let uv = vec2f(f32(id.x), f32(id.y)) / vec2f(pngine.width, pngine.height);
+      textureStore(screen, vec2i(id.xy), vec4f(uv, 0.0, 1.0));
+    }
+  """))

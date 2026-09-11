@@ -29,6 +29,7 @@ const executor = @import("executor");
 const Emitter = @import("Emitter.zig").Emitter;
 const hooks = @import("hooks.zig");
 const values = @import("values.zig");
+const document_import = @import("document_import.zig");
 const Expr = sjon.Expr;
 
 /// The PNGine WebGPU schema, embedded as a portable SJON manifest. Provided as
@@ -44,6 +45,11 @@ pub const PluginSet = bytecode.format.PluginSet;
 /// dependency on the executor module directly. The variant→WASM-bytes table
 /// stays module-local (each module `@embedFile`s its own executor copies).
 pub const selectVariant = executor.selectVariant;
+/// The canonical variant table, re-exported so a consumer can DERIVE its
+/// per-variant table (the embedded-executor blobs) from it rather than
+/// hand-repeating the eight names. build.zig names each blob import
+/// `executor_<name>` from this same list.
+pub const VARIANTS = executor.variant.VARIANTS;
 
 /// Re-export the vendored descriptor encoder so top-level `pngine` can expose it
 /// (consumed by `cli/inspect.zig` for its `DescriptorType` enum) without
@@ -65,12 +71,26 @@ pub const Compiler = struct {
     /// generic error-class string. Defined in `diag.zig` (the Emitter writes into it).
     pub const Diag = @import("diag.zig").Diag;
 
+    /// The file-read seam, re-exported so a caller (the wasm compiler) can build
+    /// a `TableResolver` and hand it to `Options.resolver` without a direct
+    /// import of a file inside this module.
+    pub const file_resolver = @import("file_resolver.zig");
+    pub const FileResolver = file_resolver.FileResolver;
+    pub const TableResolver = file_resolver.TableResolver;
+    pub const Needs = file_resolver.Needs;
+
     /// The F9 preloaded schema (borrowed, must outlive every `HostResult` validated
     /// against it). Re-exported here (like `Diag`) so a long-lived caller (the wasm
     /// compiler / editor) can hold one across compiles via `dsl_sjon.Compiler.*`
     /// without a direct `sjon` build-graph edge. Build one with `preloadSchema`,
     /// hand it back via `Options.schema_cache`, and `deinit` after the last compile.
     pub const PreloadedSchema = sjon.Host.PreloadedSchema;
+
+    /// The lowering registry `Options.lowering_registry` takes, re-exported for
+    /// the same reason as `PreloadedSchema`: a caller reaches it through
+    /// `dsl_sjon.Compiler.*` without its own build-graph edge to `sjon`. An
+    /// empty one is `.{}` — that is what `tests/zig/sjon_core.zig` injects.
+    pub const LoweringRegistry = sjon.Lowering.LoweringRegistry;
 
     /// Compilation options. Mirrors the legacy `dsl/Compiler.zig` shape so the
     /// CLI/WASM call sites stay frontend-agnostic. Trimmed to the fields the SJON
@@ -106,11 +126,35 @@ pub const Compiler = struct {
         /// The bytes are borrowed (static/`@embedFile`), never freed here.
         resolve_executor: ?*const fn (PluginSet) []const u8 = null,
         io: ?std.Io = null,
+        /// Optional injected file resolver. When null and `base_dir`+`io` are
+        /// both set, the Emitter builds a filesystem one from them — which is
+        /// the CLI and every test harness, unchanged. The in-browser compiler
+        /// injects a `file_resolver.TableResolver` over bytes JavaScript handed
+        /// in, which is how a `:file` key works with no filesystem at all.
+        resolver: ?file_resolver.FileResolver = null,
+        /// Optional caller-owned list of files the host could not supply,
+        /// complete after ONE compile (`file_resolver.Needs`). Null skips the
+        /// pre-pass entirely, which is the CLI and every harness: the walk's own
+        /// refusal is unchanged either way, so a caller that never asks pays
+        /// nothing. The browser compiler asks, because it must be told what to
+        /// fetch before it can compile at all.
+        needs: ?*file_resolver.Needs = null,
         /// Optional domain-labeled diagnostic sink. When non-null and an
         /// Emitter-phase WGSL/entry check fails, the specific message lands here
         /// (see `Diag`); the caller surfaces it instead of the generic error class.
         /// Null on the golden/parity paths — the message is unused there.
         diag: ?*Diag = null,
+        /// Optional caller-owned lowering registry, borrowed for the call. Null
+        /// registers every PNGine hook (`hooks.buildRegistry`) — the CLI, the
+        /// in-browser compiler and every harness, unchanged.
+        ///
+        /// The sugar tier enters the compile through this one field and nowhere
+        /// else, so injecting an EMPTY registry removes it: a `:lowering` form
+        /// is then refused (`lowering_hook_missing`) instead of expanding, and
+        /// every document that never named one must compile byte-identically.
+        /// That is the whole of `zig build test-core` — the standing proof that
+        /// the core forms stand without the sugar (sugar-tier-ledger.md step 3).
+        lowering_registry: ?*sjon.Lowering.LoweringRegistry = null,
         /// Optional preloaded schema (F9), borrowed for the duration of the call.
         /// A long-lived caller (the wasm compiler / editor) preloads the manifest
         /// once via `preloadSchema` and threads it here so keystroke revalidation
@@ -140,18 +184,37 @@ pub const Compiler = struct {
     /// freed AFTER — `result`. Null when the caller supplied a cache (borrowed, not
     /// owned). The user `source` also backs the tree and is the caller's to keep
     /// alive across the compile call (it always is).
+    ///
+    /// Stores its own allocator; `deinit()` takes none.
     const Validated = struct {
         result: sjon.Host.HostResult,
         owned_schema: ?sjon.Host.PreloadedSchema,
         gpa: Allocator,
+        /// The composition, when this document imported anything (05). It owns
+        /// the bytes the tree was parsed from, so it is freed AFTER the result.
+        composed: ?document_import.Composed,
+        /// The source the tree was actually built from: the caller's when
+        /// nothing was imported, the composition's when something was. Every
+        /// span in `result` is an offset into THIS, which is why the emitter
+        /// must be handed it rather than the caller's original.
+        source: [:0]const u8,
+
+        /// A stable pointer to the composition, or null. Taken off the field in
+        /// place, so it stays valid for as long as the `Validated` does.
+        fn composedPtr(self: *const Validated) ?*const document_import.Composed {
+            return if (self.composed) |*c| c else null;
+        }
 
         fn deinit(self: *Validated) void {
             self.result.deinit();
             if (self.owned_schema) |*s| s.deinit();
+            if (self.composed) |*c| c.deinit(self.gpa);
         }
     };
 
     /// Compile `.sjon` source to PNGB bytecode.
+    ///
+    /// Caller owns the returned bytecode.
     pub fn compile(gpa: Allocator, source: [:0]const u8) Error![]u8 {
         return compileWithOptions(gpa, source, .{});
     }
@@ -166,22 +229,38 @@ pub const Compiler = struct {
     /// coordinates — the Emitter's `locate` resolves them against `user_source`
     /// with no prefix to subtract. Callers own the returned Emitter:
     /// `defer em.deinit(); try em.run();`.
-    fn initEmitter(gpa: Allocator, result: *const sjon.Host.HostResult, options: Options, source: [:0]const u8) Emitter {
+    fn initEmitter(
+        gpa: Allocator,
+        result: *const sjon.Host.HostResult,
+        options: Options,
+        source: [:0]const u8,
+        composed: ?*const document_import.Composed,
+    ) Emitter {
         // lint implies validate: the lint path IS the validation path (one
         // analysis pass serves both), so asking for lint without validation is
         // not a state the Emitter can be in.
-        var em = Emitter.init(gpa, result, options.base_dir, options.io, options.validate_shaders or options.lint_shaders);
+        var em = Emitter.init(gpa, result, .{
+            .base_dir = options.base_dir,
+            .io = options.io,
+            .resolver = options.resolver,
+            .needs = options.needs,
+            .validate_shaders = options.validate_shaders or options.lint_shaders,
+        });
         em.lint_shaders = options.lint_shaders;
         em.minify_shaders = options.minify_shaders;
         em.diag = options.diag;
         em.user_source = source;
+        em.composed = composed;
         return em;
     }
 
+    /// Compile with options. Caller owns the returned bytecode.
     pub fn compileWithOptions(gpa: Allocator, source: [:0]const u8, options: Options) Error![]u8 {
-        var v = try validate(gpa, source, options.diag, options.schema_cache);
+        var v = try validate(gpa, source, options);
         defer v.deinit();
-        var em = initEmitter(gpa, &v.result, options, source);
+        // `v.source`, not `source`: when the document imported anything, every
+        // span in `v.result` is an offset into the composition.
+        var em = initEmitter(gpa, &v.result, options, v.source, v.composedPtr());
         defer em.deinit();
         try em.run();
         const pngb = em.builder.finalize(gpa) catch return error.OutOfMemory;
@@ -196,10 +275,10 @@ pub const Compiler = struct {
     /// Compile and return bytecode with detected plugins + selected executor
     /// variant (used when embedding the executor in the payload).
     pub fn compileWithPlugins(gpa: Allocator, source: [:0]const u8, options: Options) Error!CompileWithPluginsResult {
-        var v = try validate(gpa, source, options.diag, options.schema_cache);
+        var v = try validate(gpa, source, options);
         defer v.deinit();
 
-        var em = initEmitter(gpa, &v.result, options, source);
+        var em = initEmitter(gpa, &v.result, options, v.source, v.composedPtr());
         defer em.deinit();
         try em.run();
 
@@ -283,7 +362,23 @@ pub const Compiler = struct {
     /// document on success; the caller emits from it. `cache` is a borrowed
     /// long-lived schema (editor); null preloads one owned by the returned
     /// `Validated` (freed after its `HostResult`).
-    fn validate(gpa: Allocator, source: [:0]const u8, diag: ?*Diag, cache: ?*const sjon.Host.PreloadedSchema) Error!Validated {
+    fn validate(gpa: Allocator, user_source: [:0]const u8, options: Options) Error!Validated {
+        const diag = options.diag;
+        const cache = options.schema_cache;
+
+        // 05: `(import …)` is resolved ABOVE SJON, before anything parses for
+        // real. `compose` returns null — having allocated nothing — for a
+        // document with no import, which is every document that existed before
+        // this feature, so their trees and goldens are untouched.
+        var composed = composeImports(gpa, user_source, options) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // `document_import.report` has already said what went wrong, on
+            // stderr or into the sink; this only picks the error class.
+            error.ImportError => return error.ValidationError,
+        };
+        errdefer if (composed) |*c| c.deinit(gpa);
+        const source: [:0]const u8 = if (composed) |c| c.source else user_source;
+
         // F9: preload the schema (borrowed by the HostResult) instead of prepending
         // it to the source. `owned_schema` holds our own when no cache was supplied;
         // it is moved into the returned `Validated` on success (arena buffers don't
@@ -305,18 +400,34 @@ pub const Compiler = struct {
         defer env_arena.deinit();
         const lowering_env = buildLoweringEnv(env_arena.allocator(), source);
 
-        var registry = hooks.buildRegistry(gpa) catch return error.OutOfMemory;
+        // The hooks are INJECTED, not assumed: `options.lowering_registry` is
+        // the caller's (borrowed, never freed here) and null builds our own.
+        // See the field's doc comment for why the seam exists.
+        var owned_registry: ?sjon.Lowering.LoweringRegistry = null;
+        // One teardown, not two. A registry we built is live only between here
+        // and the end of lowering, so the `errdefer` covers exactly that window
+        // and the free below disarms it by clearing the optional. Written as a
+        // `defer` instead it would outlive the lowering it exists for; written
+        // as two explicit frees — one in the `catch`, one after — it was correct
+        // and had to be re-verified line by line on every edit.
+        errdefer if (owned_registry) |*r| r.deinit(gpa);
+        const registry: *sjon.Lowering.LoweringRegistry = options.lowering_registry orelse blk: {
+            owned_registry = hooks.buildRegistry(gpa) catch return error.OutOfMemory;
+            break :blk &owned_registry.?;
+        };
         var result = sjon.validateDocument(gpa, source, .{
             .preloaded = preloaded,
-            .lowering_registry = &registry,
+            .lowering_registry = registry,
             .lowering_env = &lowering_env,
         }) catch |err| switch (err) {
-            error.OutOfMemory => {
-                registry.deinit(gpa);
-                return error.OutOfMemory;
-            },
+            error.OutOfMemory => return error.OutOfMemory,
         };
-        registry.deinit(gpa); // lowering is done; the registry is no longer referenced
+        // Lowering is done; a registry we built is no longer referenced. `registry`
+        // points into `owned_registry`, so neither may be touched past this point.
+        if (owned_registry) |*r| {
+            r.deinit(gpa);
+            owned_registry = null;
+        }
 
         if (result.hasErrors()) {
             // A sink owns rendering (validate.zig prints `diag.message()`; the
@@ -327,7 +438,7 @@ pub const Compiler = struct {
             // runs on a structural reject, so this is where these enter the sink.
             // No sink → `renderDiagnostics` is the CLI human fallback (compile/render).
             if (diag) |sink| {
-                collectStructural(sink, &result, source);
+                collectStructural(sink, &result, source, composedPtrOf(&composed));
             } else {
                 renderDiagnostics(&result);
             }
@@ -342,14 +453,48 @@ pub const Compiler = struct {
         // `--strict`. No sink (compile/render without `--json`) → silent, as
         // every other advisory is on that path.
         if (result.diagnostics.len != 0) {
-            if (diag) |sink| collectStructural(sink, &result, source);
+            if (diag) |sink| collectStructural(sink, &result, source, composedPtrOf(&composed));
         }
         // A clean result is the emitter's precondition on both counts: it walks
         // `data_forest` and reads spans off the tree, and it never re-checks
         // either. Returning an error-free-but-empty result would emit an empty
         // payload rather than reject the document.
         std.debug.assert(!result.hasErrors());
-        return .{ .result = result, .owned_schema = owned_schema, .gpa = gpa };
+        return .{
+            .result = result,
+            .owned_schema = owned_schema,
+            .gpa = gpa,
+            .composed = composed,
+            .source = source,
+        };
+    }
+
+    /// Resolve the document's `(import …)` forms into one composed source (05).
+    ///
+    /// The resolver is picked exactly as the Emitter picks its own: an injected
+    /// one wins (the browser's table), otherwise a filesystem one is built from
+    /// `base_dir` + `io` (the CLI and every harness). A host with neither gets
+    /// null, and `compose` refuses an import rather than dropping it.
+    fn composeImports(
+        gpa: Allocator,
+        source: [:0]const u8,
+        options: Options,
+    ) document_import.Error!?document_import.Composed {
+        var opts: document_import.Options = .{
+            .diag = options.diag,
+            .needs = options.needs,
+            .root_path = rootRelativePath(options),
+        };
+        if (options.resolver) |r| {
+            opts.injected = true;
+            return document_import.compose(gpa, source, r, opts);
+        }
+        // `FilesystemResolver` holds an `std.Io`; both halves must be present
+        // or there is no filesystem to read through.
+        const base = options.base_dir orelse ".";
+        const io = options.io orelse return document_import.compose(gpa, source, null, opts);
+        var fs = file_resolver.FilesystemResolver{ .base_dir = base, .io = io };
+        return document_import.compose(gpa, source, fs.resolver(), opts);
     }
 
     /// Merge `HostResult.diagnostics` into `sink` as LOCATED collect-all entries.
@@ -361,19 +506,41 @@ pub const Compiler = struct {
         sink: *Diag,
         result: *const sjon.Host.HostResult,
         source: []const u8,
+        composed: ?*const document_import.Composed,
     ) void {
         for (result.diagnostics) |d| {
             const sev: Diag.Severity = if (d.severity == .warning) .warning else .err;
-            const lc = Diag.lineColOf(source, d.span.start);
+            // 05: `source` is the COMPOSITION when this document imported
+            // anything, so count the line against the region the span fell in,
+            // not against the concatenation — and say which file that was.
+            const text, const base, const file = localiseSpan(source, composed, d.span.start);
+            const lc = Diag.lineColOf(text, d.span.start - base);
             var end_line: u32 = 0;
             var end_col: u32 = 0;
-            if (d.span.end > d.span.start) {
-                const lce = Diag.lineColOf(source, d.span.end);
+            if (d.span.end > d.span.start and d.span.end - base <= text.len) {
+                const lce = Diag.lineColOf(text, d.span.end - base);
                 end_line = lce.line;
                 end_col = lce.col;
             }
-            sink.addLocated(.sjon, sev, lc.line, lc.col, end_line, end_col, @tagName(d.code), "", d.message);
+            sink.addLocatedIn(.sjon, sev, lc.line, lc.col, end_line, end_col, @tagName(d.code), "", file, d.message);
         }
+    }
+
+    /// The text a composed-source offset should be counted against, the offset
+    /// that text starts at, and the file to name. The twin of
+    /// `Emitter.localiseSpan`, which does the same for the emitter's own spans;
+    /// both are one `for` over at most `MAX_DOCUMENTS` regions.
+    fn localiseSpan(
+        source: []const u8,
+        composed: ?*const document_import.Composed,
+        offset: u32,
+    ) struct { []const u8, u32, []const u8 } {
+        const c = composed orelse return .{ source, 0, "" };
+        for (c.regions) |reg| {
+            if (offset < reg.start or offset >= reg.end) continue;
+            return .{ c.source[reg.start..reg.end], reg.start, reg.path };
+        }
+        return .{ source, 0, "" };
     }
 
     /// Evaluate the document's top-level `(define :name N :value V)` constants into
@@ -429,6 +596,35 @@ pub const Compiler = struct {
             if (bound_this_pass == 0) break;
         } else unreachable;
         return .{ .bindings = bindings.items };
+    }
+
+    /// A stable pointer to an optional composition held in a local. The
+    /// diagnostic path needs one and the local is not going anywhere.
+    fn composedPtrOf(c: *const ?document_import.Composed) ?*const document_import.Composed {
+        return if (c.*) |*v| v else null;
+    }
+
+    /// The root document's path as an IMPORT would spell it: relative to the
+    /// resolver's root, which is `base_dir`.
+    ///
+    /// `Options.file_path` is the path as typed on the command line
+    /// (`examples/foo.sjon`), while an import inside that document is resolved
+    /// against `base_dir` (`examples`), so the two live in different coordinate
+    /// systems and the raw `file_path` would never match one. Stripping the
+    /// base is what puts them in the same one, which is what lets a document
+    /// that imports itself be recognised as the root rather than fetched again.
+    ///
+    /// Null when they cannot be reconciled; the cost is a cycle reported as a
+    /// duplicate declaration instead, never a hang.
+    fn rootRelativePath(options: Options) ?[]const u8 {
+        const full = options.file_path orelse return null;
+        const base = options.base_dir orelse return full;
+        if (base.len == 0 or std.mem.eql(u8, base, ".")) return full;
+        if (!std.mem.startsWith(u8, full, base)) return null;
+        const rest = full[base.len..];
+        if (rest.len == 0 or rest[0] != '/') return null;
+        const rel = rest[1..];
+        return if (rel.len == 0) null else rel;
     }
 
     /// Read the executor WASM for `variant_name` from `executors_dir`
@@ -570,7 +766,7 @@ fn expectDiagnostic(gpa: Allocator, source: [:0]const u8, code: []const u8) !voi
 // The test is the gate the plan asked for: a new loose slot has to be listed
 // here, which is the moment to ask whether it should be closed instead.
 
-const loose_symbol_kinds = [_][]const u8{ "entry-point", "override-name" };
+const loose_symbol_kinds = [_][]const u8{ "entry-point", "override-name", "wgsl-name" };
 const primitive_symbol_keys = [_][]const u8{ "name", "func" };
 
 // ── S13 / S14 adoption (05 §2 R7, 05 §5 C8) ─────────────────────────────────
@@ -630,4 +826,155 @@ var seen_plugins: ?PluginSet = null;
 fn recordingResolver(plugins: PluginSet) []const u8 {
     seen_plugins = plugins;
     return &[_]u8{}; // no bytes to embed; the payload just has no executor
+}
+
+/// Compile `source` with `files` injected as a table resolver and return the
+/// first diagnostic's (line, col, file). The whole point of these three tests
+/// is the FILE and the LINE, which is what a composition can get wrong without
+/// anything else noticing: the payload is correct and the squiggle is not.
+fn firstLocation(
+    gpa: Allocator,
+    source: [:0]const u8,
+    files: []const Compiler.TableResolver.Entry,
+) !struct { line: u32, col: u32, file: []const u8 } {
+    var table = Compiler.TableResolver{ .entries = files };
+    var sink: Compiler.Diag = .{};
+    const r = Compiler.compileWithOptions(gpa, source, .{
+        .resolver = table.resolver(),
+        .diag = &sink,
+        .validate_shaders = true,
+    });
+    if (r) |pngb| {
+        gpa.free(pngb);
+        return error.ExpectedDiagnostic;
+    } else |_| {}
+    if (sink.count == 0) return error.ExpectedDiagnostic;
+    const e = sink.entries[0];
+    return .{ .line = e.line, .col = e.col, .file = sink.entryFile(e) };
+}
+
+/// A complete program over one fragment, with the fragment's body line
+/// supplied — so the base and "the base with the fragment swapped by hand"
+/// differ in exactly that line and nothing else.
+fn rebindBase(comptime body_line: []const u8) [:0]const u8 {
+    return (
+        \\(wgsl :name body :code """
+        \\fn body() -> f32 {
+        \\
+    ) ++ body_line ++ "\n" ++ (
+        \\}
+        \\""")
+        \\(shader-module :name m :imports [body] :code """
+        \\@group(0) @binding(0) var<storage, read_write> out: array<f32>;
+        \\@compute @workgroup_size(1) fn main() { out[0] = body(); }
+        \\""")
+        \\(buffer :name b :size 16 :usage [storage])
+        \\(bind-group :name g :layout cp :group 0 (entry :binding 0 :buffer b))
+        \\(compute-pipeline :name cp :layout auto (compute :module m :entry main))
+        \\(compute-pass :name p :pipeline cp :bind-groups [g] (dispatch :workgroups [1]))
+        \\(frame :name main :perform [p])
+        \\
+    );
+}
+
+/// Compile `source` with `files` injected as a table resolver; the payload, or
+/// the compile's own error.
+fn compileWithTable(gpa: Allocator, source: [:0]const u8, files: []const Compiler.TableResolver.Entry) ![]u8 {
+    var table = Compiler.TableResolver{ .entries = files };
+    return Compiler.compileWithOptions(gpa, source, .{ .resolver = table.resolver(), .validate_shaders = true });
+}
+
+// ── §421: `(draw-graph …)` ──────────────────────────────────────────────────
+
+/// The shader both documents below share: one vertex entry and two fragment
+/// entries, each reaching the single uniform, so nothing prunes and the two
+/// generated groups hold the same entry.
+const graph_module: []const u8 =
+    \\(shader-module :name m :code """
+    \\@group(0) @binding(0) var<uniform> c: vec4f;
+    \\@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+    \\  var p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
+    \\  return vec4f(p[i], 0.0, 1.0);
+    \\}
+    \\@fragment fn fsA() -> @location(0) vec4f { return c; }
+    \\@fragment fn fsB() -> @location(0) vec4f { return c.yxzw; }
+    \\""")
+    \\(buffer :name cb :size 16 :usage [uniform copy-dst])
+    \\
+;
+
+// ── Buffer names (docs/plans/public-write-buffer.md, step 3) ─────────────────
+
+/// CLAUDE.md's quick skeleton, verbatim: `particles` seeded once by `:init`,
+/// `uniforms` written every frame by `:before [writeInputs]`.
+const skeleton_source: [:0]const u8 =
+    \\(define :name NUM :value 2048)
+    \\(shader-module :name code :code """
+    \\struct Inputs { time : f32, width : f32, height : f32, aspect : f32 }
+    \\@group(0) @binding(0) var<uniform> inputs : Inputs;
+    \\@group(0) @binding(1) var<storage, read> particles : array<vec2f>;
+    \\@vertex fn vsMain(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+    \\  return vec4f(particles[i] * vec2f(1.0, inputs.aspect), 0.0, 1.0);
+    \\}
+    \\@fragment fn fsMain() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.0, 1.0); }
+    \\""")
+    \\(shader-module :name sim :code """
+    \\@group(0) @binding(0) var<storage, read_write> particles : array<vec2f>;
+    \\@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id : vec3u) {
+    \\  let p = (particles[id.x] + 1.0) * 0.5 + vec2f(0.003, 0.001);
+    \\  particles[id.x] = fract(p) * 2.0 - 1.0;
+    \\}
+    \\""")
+    \\(shader-module :name seed :code """
+    \\@group(0) @binding(0) var<storage, read_write> particles : array<vec2f>;
+    \\@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id : vec3u) {
+    \\  let a = f32(id.x) * 0.003;
+    \\  particles[id.x] = vec2f(cos(a), sin(a)) * 0.8;
+    \\}
+    \\""")
+    \\(buffer :name particles :size (* NUM 2 4) :usage [storage])
+    \\(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+    \\(texture :name depth :size canvas :format depth24plus :usage [render-attachment])
+    \\(sampler :name samp :mag-filter linear :min-filter linear)
+    \\(bind-group :name g :layout pipe :group 0
+    \\  (entry :binding 0 :buffer uniforms)
+    \\  (entry :binding 1 :buffer particles))
+    \\(bind-group :name gSim :layout cp :group 0
+    \\  (entry :binding 0 :buffer particles))
+    \\(render-pipeline :name pipe :layout auto
+    \\  (vertex :module code :entry vsMain)
+    \\  (fragment :module code :entry fsMain
+    \\    (target :format preferred-canvas-format))
+    \\  (primitive :topology point-list)
+    \\  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+    \\(compute-pipeline :name cp :layout auto (compute :module sim :entry main))
+    \\(render-pass :name draw
+    \\  (color-attachment :view context-current-texture
+    \\    :clear-value [0 0 0 1] :load-op clear :store-op store)
+    \\  (depth-stencil-attachment :view depth
+    \\    :depth-clear-value 1 :depth-load-op clear :depth-store-op store)
+    \\  :pipeline pipe :bind-groups [g]
+    \\  (draw :vertex-count NUM))
+    \\(compute-pass :name step :pipeline cp :bind-groups [gSim]
+    \\  (dispatch :workgroups [(ceil (/ NUM 64))]))
+    \\(queue :name writeInputs
+    \\  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+    \\(init :name setup :buffer particles :module seed :workgroups [(ceil (/ NUM 64))])
+    \\(frame :name main :init [setup] :before [writeInputs] :perform [step draw])
+;
+
+/// The block's entries as (name, pool, frame_written), in wire order.
+const NamedBuffer = struct { name: []const u8, buffer_id: u16, pool: u8, frame_written: bool };
+fn namedBuffers(gpa: Allocator, module: *const bytecode.format.Module) ![]NamedBuffer {
+    var out: std.ArrayList(NamedBuffer) = .empty;
+    errdefer out.deinit(gpa);
+    for (module.uniforms.buffer_names.items) |e| {
+        try out.append(gpa, .{
+            .name = module.strings.get(@enumFromInt(e.name_string_id)),
+            .buffer_id = e.buffer_id,
+            .pool = e.pool,
+            .frame_written = e.flags.frame_written,
+        });
+    }
+    return out.toOwnedSlice(gpa);
 }

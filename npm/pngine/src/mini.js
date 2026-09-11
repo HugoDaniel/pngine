@@ -13,7 +13,8 @@ import { deinterleaveStereo } from "./audio.js";
 if (typeof AUDIO === "undefined") globalThis.AUDIO = true;
 
 async function P(ab) {
-  const b = new Uint8Array(ab);
+  // A view is read as the window it covers; a bare buffer is wrapped whole.
+  const b = ab instanceof Uint8Array ? ab : new Uint8Array(ab);
   let au, fl;
   for (const c of walkChunks(b)) {
     if (c.type[0] === 0x70 && c.type[1] === 0x4E && c.type[2] === 0x47) {
@@ -178,9 +179,12 @@ function X(d, ds, p, e, V, dv, ctx, fm, bf, sh, pp, cp, bg, tm, W, H, pt, bd, ti
  * @param {{autoplay?: boolean, onError?: (err: Error) => void}} [opts]
  */
 export async function miniPngine(canvas, source, opts) {
+  // A Uint8Array goes through as the view it is — `.buffer` would be the
+  // whole underlying allocation from byte 0, so a subarray out of a larger
+  // buffer walked the wrong bytes (audit finding 4).
   const ab = typeof source === 'string'
     ? await (await fetch(source)).arrayBuffer()
-    : source instanceof Uint8Array ? source.buffer : source;
+    : source;
 
   const {au, fl} = await P(ab);
   if (!fl) throw new Error('No pNGf chunk found');

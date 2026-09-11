@@ -20,6 +20,7 @@
 //! - Embedded bytecode + executor creates self-contained executable images
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const pngine = @import("pngine");
 const format = pngine.format;
 const types_gen = @import("types_gen.zig");
@@ -35,29 +36,18 @@ const build_options = @import("build_options");
 // Build-time embedded WASM runtime
 const embedded_wasm: []const u8 = if (build_options.has_embedded_wasm) @embedFile("embedded_wasm") else "";
 
-// Build-time embedded executor variants (all targets, WASM is target-independent)
+// Build-time embedded executor variants (all targets, WASM is target-independent).
+//
+// The eight names are NOT repeated here. build.zig derives each anonymous
+// import name as `executor_<variant>` from `executor/variant.zig:VARIANTS`, so
+// this reads the same table: adding a variant there needs no edit here, and a
+// name can never drift between the two.
 const embedded_executors = if (build_options.has_embedded_wasm) struct {
-    const core: []const u8 = @embedFile("executor_core");
-    const render: []const u8 = @embedFile("executor_render");
-    const compute: []const u8 = @embedFile("executor_compute");
-    const render_compute: []const u8 = @embedFile("executor_render-compute");
-    const render_anim: []const u8 = @embedFile("executor_render-anim");
-    const render_compute_anim: []const u8 = @embedFile("executor_render-compute-anim");
-    const render_wasm: []const u8 = @embedFile("executor_render-wasm");
-    const full: []const u8 = @embedFile("executor_full");
-
     fn get(name: []const u8) ?[]const u8 {
-        const map = std.StaticStringMap([]const u8).initComptime(.{
-            .{ "core", core },
-            .{ "render", render },
-            .{ "compute", compute },
-            .{ "render-compute", render_compute },
-            .{ "render-anim", render_anim },
-            .{ "render-compute-anim", render_compute_anim },
-            .{ "render-wasm", render_wasm },
-            .{ "full", full },
-        });
-        return map.get(name);
+        inline for (pngine.variant.VARIANTS) |v| {
+            if (std.mem.eql(u8, name, v.name)) return @embedFile("executor_" ++ v.name);
+        }
+        return null;
     }
 } else struct {
     fn get(_: []const u8) ?[]const u8 {
@@ -109,7 +99,7 @@ pub const Options = struct {
 ///
 /// Pre-condition: args is the slice after "render" command.
 /// Post-condition: Returns exit code (0 = success).
-pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+pub fn run(gpa: Allocator, io: std.Io, args: []const []const u8) !u8 {
     // Parse arguments
     var opts = Options{
         .input_path = "",
@@ -141,11 +131,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     else if (stdio.isStd(opts.input_path))
         .borrowed(stdio.std_path)
     else
-        .owned(deriveOutputPath(allocator, opts.input_path) catch |err| {
+        .owned(utils.deriveSiblingPath(gpa, opts.input_path, ".png") catch |err| {
             std.debug.print("Error: failed to derive output path: {}\n", .{err});
             return 2;
         });
-    defer dest.deinit(allocator);
+    defer dest.deinit(gpa);
     const output = dest.path;
 
     // `--types` names its sidecar after the output file, so there is nowhere to
@@ -160,7 +150,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     }
 
     // Execute render pipeline
-    return executePipeline(allocator, io, opts, output);
+    return executePipeline(gpa, io, opts, output);
 }
 
 /// A flag whose whole effect is setting boolean fields.
@@ -303,7 +293,7 @@ fn parseTimeValue(time_str: []const u8, opts: *Options) u8 {
 
 /// Execute the render pipeline: compile -> (optionally execute) -> encode -> write.
 fn executePipeline(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     io: std.Io,
     opts: Options,
     output: []const u8,
@@ -314,10 +304,10 @@ fn executePipeline(
 
     // Read and compile source (with plugin detection if embedding executor)
     var plugins: ?pngine.PluginSet = null;
-    const bytecode = compileForRender(allocator, io, opts, &plugins) catch |compile_err| {
+    const bytecode = compileForRender(gpa, io, opts, &plugins) catch |compile_err| {
         return handleCompileError(compile_err, opts.input_path);
     };
-    defer allocator.free(bytecode);
+    defer gpa.free(bytecode);
 
     if (bytecode.len < format.HEADER_SIZE or !std.mem.eql(u8, bytecode[0..4], format.MAGIC)) {
         std.debug.print("Error: compilation produced invalid bytecode\n", .{});
@@ -325,31 +315,31 @@ fn executePipeline(
     }
 
     // Optionally embed executor WASM in bytecode (creates v5 format)
-    const embedded = embedExecutorIfRequested(allocator, io, bytecode, opts, plugins);
+    const embedded = embedExecutorIfRequested(gpa, io, bytecode, opts, plugins);
     if (embedded.exit_code != 0) return embedded.exit_code;
     const final_bytecode = embedded.bytes;
     const executor_embedded = embedded.owned;
-    defer if (executor_embedded) allocator.free(final_bytecode);
+    defer if (executor_embedded) gpa.free(final_bytecode);
 
     // HTML mode: JS codegen with raw WGSL strings (no base64 for shaders in pack mode)
     if (opts.html_mode) {
-        return executeHtmlCodegen(allocator, io, output, opts.width, opts.height, bytecode, opts.audio_path, opts.audio_js_path, opts.fullscreen, opts.unpack);
+        return executeHtmlCodegen(gpa, io, output, opts.width, opts.height, bytecode, opts.audio_path, opts.audio_js_path, opts.fullscreen, opts.unpack);
     }
 
     // Flat mode: flatten bytecode into pNGf format
     if (opts.flat_mode) {
-        return executeFlatPipeline(allocator, io, opts.input_path, output, opts.width, opts.height, bytecode, opts.audio_path);
+        return executeFlatPipeline(gpa, io, opts.input_path, output, opts.width, opts.height, bytecode, opts.audio_path);
     }
 
     // Render (or stub) the PNG and attach the pNGb chunk.
-    const png_result = producePng(allocator, final_bytecode, opts);
+    const png_result = producePng(gpa, final_bytecode, opts);
     if (png_result.exit_code != 0) return png_result.exit_code;
     var png_data = png_result.png_data;
-    defer allocator.free(png_data);
+    defer gpa.free(png_data);
 
     // Optionally embed audio WASM in PNG (pNGa chunk)
     if (opts.audio_path) |apath| {
-        const audio_code = attachAudio(allocator, io, &png_data, apath);
+        const audio_code = attachAudio(gpa, io, &png_data, apath);
         if (audio_code != 0) return audio_code;
     }
 
@@ -357,7 +347,7 @@ fn executePipeline(
     stdio.writeOutput(io, output, png_data, true) catch |err| return stdio.reportWriteError(err, output);
 
     if (opts.generate_types) {
-        const types_code = writeTypesSidecar(allocator, io, output, final_bytecode);
+        const types_code = writeTypesSidecar(gpa, io, output, final_bytecode);
         if (types_code != 0) return types_code;
     }
 
@@ -381,7 +371,7 @@ const FinalBytecode = struct {
 /// detected — the two conditions together, since the variant to embed is
 /// chosen from the plugins.
 fn embedExecutorIfRequested(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     io: std.Io,
     bytecode: []u8,
     opts: Options,
@@ -392,7 +382,7 @@ fn embedExecutorIfRequested(
     if (!opts.embed_executor) return .{ .bytes = bytecode, .owned = false };
     const p = plugins orelse return .{ .bytes = bytecode, .owned = false };
 
-    const with_executor = embedExecutorInBytecode(allocator, io, bytecode, p) catch |err| {
+    const with_executor = embedExecutorInBytecode(gpa, io, bytecode, p) catch |err| {
         std.debug.print("Error: failed to embed executor: {}\n", .{err});
         return .{ .bytes = bytecode, .owned = false, .exit_code = 4 };
     };
@@ -402,17 +392,17 @@ fn embedExecutorIfRequested(
 
 /// Produce the PNG bytes: a rendered frame or the 1x1 transparent stub, with
 /// the pNGb chunk attached unless `--no-embed`.
-fn producePng(allocator: std.mem.Allocator, final_bytecode: []const u8, opts: Options) PngResult {
+fn producePng(gpa: Allocator, final_bytecode: []const u8, opts: Options) PngResult {
     std.debug.assert(final_bytecode.len >= format.HEADER_SIZE);
     std.debug.assert(opts.width > 0 and opts.height > 0);
 
-    const rendered = generatePng(allocator, final_bytecode, opts.width, opts.height, opts.time, opts.render_frame, opts.scene_name, opts.strict_native_stubs);
+    const rendered = generatePng(gpa, final_bytecode, opts.width, opts.height, opts.time, opts.render_frame, opts.scene_name, opts.strict_native_stubs);
     if (rendered.exit_code != 0) return rendered;
     if (!opts.embed_bytecode) return rendered;
 
-    const with_bytecode = embedBytecodeInPng(allocator, rendered.png_data, final_bytecode) catch |err| {
+    const with_bytecode = embedBytecodeInPng(gpa, rendered.png_data, final_bytecode) catch |err| {
         std.debug.print("Error: failed to embed bytecode: {}\n", .{err});
-        allocator.free(rendered.png_data);
+        gpa.free(rendered.png_data);
         return .{ .png_data = undefined, .exit_code = 4 };
     };
     return .{ .png_data = with_bytecode, .exit_code = 0 };
@@ -423,7 +413,7 @@ fn producePng(allocator: std.mem.Allocator, final_bytecode: []const u8, opts: Op
 /// Plugin detection is only run when the executor is going to be embedded —
 /// that is the only consumer of the set, and detecting costs a second pass.
 fn compileForRender(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     io: std.Io,
     opts: Options,
     plugins: *?pngine.PluginSet,
@@ -432,30 +422,30 @@ fn compileForRender(
     std.debug.assert(plugins.* == null);
 
     if (!opts.embed_executor) {
-        return compileFromFile(allocator, io, opts.input_path, opts.minify_shaders, opts.validate_shaders);
+        return compileFromFile(gpa, io, opts.input_path, opts.minify_shaders, opts.validate_shaders);
     }
-    const result = try compileFromFileWithPlugins(allocator, io, opts.input_path, opts.minify_shaders, opts.validate_shaders);
+    const result = try compileFromFileWithPlugins(gpa, io, opts.input_path, opts.minify_shaders, opts.validate_shaders);
     plugins.* = result.plugins;
     return result.pngb;
 }
 
 /// Re-wrap `png_data` with a pNGa audio chunk. Returns 0, or an exit code
 /// after printing its own message.
-fn attachAudio(allocator: std.mem.Allocator, io: std.Io, png_data: *[]u8, audio_path: []const u8) u8 {
+fn attachAudio(gpa: Allocator, io: std.Io, png_data: *[]u8, audio_path: []const u8) u8 {
     std.debug.assert(png_data.*.len > 0);
     std.debug.assert(audio_path.len > 0);
 
-    const audio_wasm = utils.readBinaryFile(allocator, io, audio_path) catch |err| {
+    const audio_wasm = utils.readBinaryFile(gpa, io, audio_path) catch |err| {
         std.debug.print("Error: failed to read audio '{s}': {}\n", .{ audio_path, err });
         return 2;
     };
-    defer allocator.free(audio_wasm);
+    defer gpa.free(audio_wasm);
 
-    const with_audio = pngine.png.embedAudio(allocator, png_data.*, audio_wasm) catch |err| {
+    const with_audio = pngine.png.embedAudio(gpa, png_data.*, audio_wasm) catch |err| {
         std.debug.print("Error: failed to embed audio: {}\n", .{err});
         return 4;
     };
-    allocator.free(png_data.*);
+    gpa.free(png_data.*);
     png_data.* = with_audio;
 
     std.debug.print("  Audio: {s} ({d} bytes)\n", .{ audio_path, audio_wasm.len });
@@ -464,23 +454,23 @@ fn attachAudio(allocator: std.mem.Allocator, io: std.Io, png_data: *[]u8, audio_
 
 /// Write the `--types` TypeScript sidecar beside `output`. Returns 0, or an
 /// exit code after printing its own message.
-fn writeTypesSidecar(allocator: std.mem.Allocator, io: std.Io, output: []const u8, bytecode: []const u8) u8 {
+fn writeTypesSidecar(gpa: Allocator, io: std.Io, output: []const u8, bytecode: []const u8) u8 {
     // `run` has already rejected `--types` with a stream destination, so
     // `output` is a real path to hang the sidecar off.
     std.debug.assert(!stdio.isStd(output));
     std.debug.assert(bytecode.len > 0);
 
-    const types_path = types_gen.deriveTypesPath(allocator, output) catch |err| {
+    const types_path = utils.deriveSiblingPath(gpa, output, ".d.ts") catch |err| {
         std.debug.print("Error: failed to derive types path: {}\n", .{err});
         return 5;
     };
-    defer allocator.free(types_path);
+    defer gpa.free(types_path);
 
-    const types_content = types_gen.generateFromBytecode(allocator, bytecode) catch |err| {
+    const types_content = types_gen.generateFromBytecode(gpa, bytecode) catch |err| {
         std.debug.print("Error: failed to generate TypeScript types: {}\n", .{err});
         return 5;
     };
-    defer allocator.free(types_content);
+    defer gpa.free(types_content);
 
     types_gen.writeToFile(io, types_path, types_content) catch |err| {
         std.debug.print("Error: failed to write '{s}': {}\n", .{ types_path, err });
@@ -493,7 +483,7 @@ fn writeTypesSidecar(allocator: std.mem.Allocator, io: std.Io, output: []const u
 
 /// Execute HTML codegen pipeline: compile → MockGPU → emit JS directly.
 fn executeHtmlCodegen(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     io: std.Io,
     output: []const u8,
     width: u32,
@@ -507,25 +497,25 @@ fn executeHtmlCodegen(
     // Read audio WASM if present
     var audio_wasm_data: ?[]const u8 = null;
     if (audio_path) |apath| {
-        audio_wasm_data = utils.readBinaryFile(allocator, io, apath) catch |err| {
+        audio_wasm_data = utils.readBinaryFile(gpa, io, apath) catch |err| {
             std.debug.print("Error: failed to read audio '{s}': {}\n", .{ apath, err });
             return 2;
         };
     }
-    defer if (audio_wasm_data) |awd| allocator.free(awd);
+    defer if (audio_wasm_data) |awd| gpa.free(awd);
 
     // Read audio JS if present
     var audio_js_data: ?[]const u8 = null;
     if (audio_js_path) |jpath| {
-        audio_js_data = utils.readBinaryFile(allocator, io, jpath) catch |err| {
+        audio_js_data = utils.readBinaryFile(gpa, io, jpath) catch |err| {
             std.debug.print("Error: failed to read audio JS '{s}': {}\n", .{ jpath, err });
             return 2;
         };
     }
-    defer if (audio_js_data) |ajd| allocator.free(ajd);
+    defer if (audio_js_data) |ajd| gpa.free(ajd);
 
     var diag: js_codegen.Diag = .{};
-    var codegen_result = js_codegen.generate(allocator, bytecode, width, height, audio_wasm_data, audio_js_data, fullscreen, !unpack, &diag) catch |err| {
+    var codegen_result = js_codegen.generate(gpa, bytecode, width, height, audio_wasm_data, audio_js_data, fullscreen, !unpack, &diag) catch |err| {
         if (err == error.UnsupportedByHtml) {
             const cmd = if (diag.unsupported) |ct| @tagName(ct) else "unknown";
             // A command this codegen cannot emit at all, versus one it emits
@@ -550,7 +540,7 @@ fn executeHtmlCodegen(
         }
         return 4;
     };
-    defer codegen_result.deinit(allocator);
+    defer codegen_result.deinit(gpa);
 
     // Write HTML. Text, so `--html -o -` may go to a terminal — piping a page
     // into a browser or a static-site build is a reasonable thing to want.
@@ -562,7 +552,7 @@ fn executeHtmlCodegen(
 
 /// Execute flat pipeline: compile → flatten → embed pNGf.
 fn executeFlatPipeline(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     io: std.Io,
     _: []const u8,
     output: []const u8,
@@ -573,7 +563,7 @@ fn executeFlatPipeline(
 ) !u8 {
     // Flatten bytecode into pNGf format
     var diag: flat.Diag = .{};
-    var flat_payload = flat.flattenPayload(allocator, bytecode, &diag) catch |err| {
+    var flat_payload = flat.flattenPayload(gpa, bytecode, &diag) catch |err| {
         if (err == error.UnsupportedByMini) {
             // A non-command feature (authored device limits, §5.3b) is named
             // directly; otherwise the offending command's tag.
@@ -588,37 +578,37 @@ fn executeFlatPipeline(
         }
         return 4;
     };
-    defer flat_payload.deinit(allocator);
+    defer flat_payload.deinit(gpa);
 
     // Generate 1x1 transparent pixel PNG (no GPU render → strict-stub flag moot)
-    const png_result = generatePng(allocator, bytecode, width, height, 0.0, false, null, false);
+    const png_result = generatePng(gpa, bytecode, width, height, 0.0, false, null, false);
     if (png_result.exit_code != 0) return png_result.exit_code;
 
     // Embed pNGf chunk instead of pNGb. `png_data` is owned from here to the
     // end — one `defer`, tracking the audio swap below, the same shape as
     // `executePipeline`. It used to be freed only on the success path, so a
     // missing audio file, a refused audio chunk or a failed write leaked it.
-    var png_data = pngine.png.embedFlat(allocator, png_result.png_data, flat_payload.data) catch |err| {
+    var png_data = pngine.png.embedFlat(gpa, png_result.png_data, flat_payload.data) catch |err| {
         std.debug.print("Error: failed to embed flat data: {}\n", .{err});
-        allocator.free(png_result.png_data);
+        gpa.free(png_result.png_data);
         return 4;
     };
-    allocator.free(png_result.png_data);
-    defer allocator.free(png_data);
+    gpa.free(png_result.png_data);
+    defer gpa.free(png_data);
 
     // Optionally embed audio
     if (audio_path) |apath| {
-        const audio_wasm = utils.readBinaryFile(allocator, io, apath) catch |err| {
+        const audio_wasm = utils.readBinaryFile(gpa, io, apath) catch |err| {
             std.debug.print("Error: failed to read audio '{s}': {}\n", .{ apath, err });
             return 2;
         };
-        defer allocator.free(audio_wasm);
+        defer gpa.free(audio_wasm);
 
-        const with_audio = pngine.png.embedAudio(allocator, png_data, audio_wasm) catch |err| {
+        const with_audio = pngine.png.embedAudio(gpa, png_data, audio_wasm) catch |err| {
             std.debug.print("Error: failed to embed audio: {}\n", .{err});
             return 4;
         };
-        allocator.free(png_data);
+        gpa.free(png_data);
         png_data = with_audio;
 
         std.debug.print("  Audio: {s} ({d} bytes)\n", .{ apath, audio_wasm.len });
@@ -633,11 +623,11 @@ fn executeFlatPipeline(
 }
 
 /// Compile source file to bytecode.
-fn compileFromFile(allocator: std.mem.Allocator, io: std.Io, input: []const u8, minify_shaders: bool, validate_shaders: bool) ![]u8 {
-    const in = try stdio.readInput(allocator, io, input);
-    defer in.deinit(allocator);
+fn compileFromFile(gpa: Allocator, io: std.Io, input: []const u8, minify_shaders: bool, validate_shaders: bool) ![]u8 {
+    const in = try stdio.readInput(gpa, io, input);
+    defer in.deinit(gpa);
     if (in.kind != .sjon) return error.UnsupportedFormat;
-    return compileSource(allocator, io, input, in.bytes, minify_shaders, validate_shaders);
+    return compileSource(gpa, io, input, in.bytes, minify_shaders, validate_shaders);
 }
 
 /// Bytecode + detected plugins — the only two fields the render pipeline reads
@@ -652,9 +642,9 @@ const CompiledWithPlugins = struct {
 };
 
 /// Compile source file and return bytecode with detected plugins.
-fn compileFromFileWithPlugins(allocator: std.mem.Allocator, io: std.Io, input: []const u8, minify_shaders: bool, validate_shaders: bool) !CompiledWithPlugins {
-    const in = try stdio.readInput(allocator, io, input);
-    defer in.deinit(allocator);
+fn compileFromFileWithPlugins(gpa: Allocator, io: std.Io, input: []const u8, minify_shaders: bool, validate_shaders: bool) !CompiledWithPlugins {
+    const in = try stdio.readInput(gpa, io, input);
+    defer in.deinit(gpa);
     const source = in.bytes;
 
     const base_dir = stdio.baseDir(input);
@@ -662,7 +652,7 @@ fn compileFromFileWithPlugins(allocator: std.mem.Allocator, io: std.Io, input: [
     if (in.kind == .sjon) {
         // SJON-backed compiler (PNGine as a SJON host). Plain bytecode + plugins;
         // the executor is embedded afterwards by embedExecutorInBytecode.
-        const result = try pngine.dsl_sjon.compileWithPlugins(allocator, source, .{
+        const result = try pngine.dsl_sjon.compileWithPlugins(gpa, source, .{
             .base_dir = base_dir,
             .minify_shaders = minify_shaders,
             .validate_shaders = validate_shaders,
@@ -681,7 +671,7 @@ fn compileFromFileWithPlugins(allocator: std.mem.Allocator, io: std.Io, input: [
 ///
 /// Loads the appropriate pre-built executor based on detected plugins,
 /// then re-serializes the bytecode with the executor embedded.
-fn embedExecutorInBytecode(allocator: std.mem.Allocator, io: std.Io, bytecode: []const u8, plugins: pngine.PluginSet) ![]u8 {
+fn embedExecutorInBytecode(gpa: Allocator, io: std.Io, bytecode: []const u8, plugins: pngine.PluginSet) ![]u8 {
     // Pre-conditions
     std.debug.assert(bytecode.len >= format.HEADER_SIZE);
     std.debug.assert(std.mem.eql(u8, bytecode[0..4], format.MAGIC));
@@ -697,7 +687,7 @@ fn embedExecutorInBytecode(allocator: std.mem.Allocator, io: std.Io, bytecode: [
             break :blk .{ wasm, true };
         }
         // Try filesystem (development builds, custom executor dirs)
-        if (loadExecutorWasm(allocator, io, variant_name)) |wasm| {
+        if (loadExecutorWasm(gpa, io, variant_name)) |wasm| {
             break :blk .{ wasm, false };
         } else |_| {}
         // Last resort: generic embedded WASM
@@ -708,7 +698,7 @@ fn embedExecutorInBytecode(allocator: std.mem.Allocator, io: std.Io, bytecode: [
         std.debug.print("Hint: Run 'zig build executors' to build executor variants\n", .{});
         return error.FileNotFound;
     };
-    defer if (!executor_is_embedded) allocator.free(executor_wasm);
+    defer if (!executor_is_embedded) gpa.free(executor_wasm);
 
     // Validate WASM magic
     if (executor_wasm.len < 8 or !std.mem.eql(u8, executor_wasm[0..4], &[_]u8{ 0x00, 0x61, 0x73, 0x6d })) {
@@ -717,15 +707,15 @@ fn embedExecutorInBytecode(allocator: std.mem.Allocator, io: std.Io, bytecode: [
     }
 
     // Deserialize original bytecode
-    var module = format.deserialize(allocator, bytecode) catch |err| {
+    var module = format.deserialize(gpa, bytecode) catch |err| {
         std.debug.print("Error: failed to deserialize bytecode: {}\n", .{err});
         return err;
     };
-    defer module.deinit(allocator);
+    defer module.deinit(gpa);
 
     // Re-serialize with executor embedded
     const result = format.serializeWithOptions(
-        allocator,
+        gpa,
         module.bytecode,
         &module.strings,
         &module.data,
@@ -757,7 +747,7 @@ fn embedExecutorInBytecode(allocator: std.mem.Allocator, io: std.Io, bytecode: [
 /// 1. zig-out/executors/pngine-{variant}.wasm relative to CWD (development)
 /// 2. ../wasm/pngine.wasm relative to binary (npm package)
 /// 3. ../../pngine/wasm/pngine.wasm relative to binary (pnpm/hoisted)
-fn loadExecutorWasm(allocator: std.mem.Allocator, io: std.Io, variant_name: []const u8) ![]u8 {
+fn loadExecutorWasm(gpa: Allocator, io: std.Io, variant_name: []const u8) ![]u8 {
     // Pre-condition
     std.debug.assert(variant_name.len > 0);
 
@@ -769,11 +759,11 @@ fn loadExecutorWasm(allocator: std.mem.Allocator, io: std.Io, variant_name: []co
 
     const cwd = std.Io.Dir.cwd();
 
-    if (utils.readFileFromDir(allocator, io, cwd, dev_path)) |buf| return buf else |_| {}
+    if (utils.readFileFromDir(gpa, io, cwd, dev_path)) |buf| return buf else |_| {}
 
     // Try paths relative to the binary location (npm package layout)
     if (std.process.executableDirPath(io, &path_buf)) |len| {
-        if (loadExecutorFromNpmPaths(allocator, io, cwd, path_buf[0..len])) |buf| return buf else |_| {}
+        if (loadExecutorFromNpmPaths(gpa, io, cwd, path_buf[0..len])) |buf| return buf else |_| {}
     } else |_| {}
 
     return error.FileNotFound;
@@ -785,7 +775,7 @@ fn loadExecutorWasm(allocator: std.mem.Allocator, io: std.Io, variant_name: []co
 ///               node_modules/pngine/wasm/pngine.wasm
 ///               → bin_dir/../wasm/pngine.wasm (co-located)
 ///               → bin_dir/../../pngine/wasm/pngine.wasm (sibling package)
-fn loadExecutorFromNpmPaths(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, bin_dir: []const u8) ![]u8 {
+fn loadExecutorFromNpmPaths(gpa: Allocator, io: std.Io, cwd: std.Io.Dir, bin_dir: []const u8) ![]u8 {
     std.debug.assert(bin_dir.len > 0);
 
     var search_buf: [512]u8 = undefined;
@@ -800,7 +790,7 @@ fn loadExecutorFromNpmPaths(allocator: std.mem.Allocator, io: std.Io, cwd: std.I
             @memcpy(search_buf[0..bin_dir.len], bin_dir);
             @memcpy(search_buf[bin_dir.len..][0..suffix.len], suffix);
             const full_path = search_buf[0 .. bin_dir.len + suffix.len];
-            if (utils.readFileFromDir(allocator, io, cwd, full_path)) |buf| return buf else |_| {}
+            if (utils.readFileFromDir(gpa, io, cwd, full_path)) |buf| return buf else |_| {}
         }
     }
 
@@ -829,7 +819,7 @@ const PngResult = struct {
 
 /// Generate PNG data - either rendered frame or 1x1 transparent pixel.
 fn generatePng(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     bytecode: []const u8,
     width: u32,
     height: u32,
@@ -839,10 +829,10 @@ fn generatePng(
     strict_native_stubs: bool,
 ) PngResult {
     if (render_frame) {
-        return renderWithGpu(allocator, bytecode, width, height, time, scene_name, strict_native_stubs);
+        return renderWithGpu(gpa, bytecode, width, height, time, scene_name, strict_native_stubs);
     }
     // 1x1 transparent pixel - minimal PNG container for bytecode
-    const png_data = createTransparentPixel(allocator) catch |err| {
+    const png_data = createTransparentPixel(gpa) catch |err| {
         std.debug.print("Error: failed to create PNG: {}\n", .{err});
         return .{ .png_data = undefined, .exit_code = 4 };
     };
@@ -850,9 +840,9 @@ fn generatePng(
 }
 
 /// Embed bytecode in PNG, freeing original PNG data.
-fn embedBytecodeInPng(allocator: std.mem.Allocator, png_data: []u8, bytecode: []const u8) ![]u8 {
-    const embedded = try pngine.png.embedBytecode(allocator, png_data, bytecode);
-    allocator.free(png_data);
+fn embedBytecodeInPng(gpa: Allocator, png_data: []u8, bytecode: []const u8) ![]u8 {
+    const embedded = try pngine.png.embedBytecode(gpa, png_data, bytecode);
+    gpa.free(png_data);
     return embedded;
 }
 
@@ -905,7 +895,7 @@ fn printSuccessMessage(
 /// cross binary, or any host build with `-Dgpu-native=false`) hard-error here
 /// with a rebuild hint instead of emitting a placeholder, so `--frame` output is
 /// always either a genuine render or an explicit failure — never a fake.
-fn renderWithGpu(allocator: std.mem.Allocator, bytecode: []const u8, width: u32, height: u32, time: f32, scene_name: ?[]const u8, strict_native_stubs: bool) PngResult {
+fn renderWithGpu(gpa: Allocator, bytecode: []const u8, width: u32, height: u32, time: f32, scene_name: ?[]const u8, strict_native_stubs: bool) PngResult {
     // Pre-conditions
     std.debug.assert(bytecode.len >= format.HEADER_SIZE);
     std.debug.assert(width > 0 and height > 0);
@@ -921,12 +911,12 @@ fn renderWithGpu(allocator: std.mem.Allocator, bytecode: []const u8, width: u32,
         return .{ .png_data = undefined, .exit_code = 7 };
     }
 
-    return renderWithGpuNative(allocator, bytecode, width, height, time, scene_name, strict_native_stubs);
+    return renderWithGpuNative(gpa, bytecode, width, height, time, scene_name, strict_native_stubs);
 }
 
 /// The real render path — only reachable (and only analyzed) when
 /// `has_wgpu_native` is true, so it may freely use `WgpuNativeGPU`/`Context`.
-fn renderWithGpuNative(allocator: std.mem.Allocator, bytecode: []const u8, width: u32, height: u32, time: f32, scene_name: ?[]const u8, strict_native_stubs: bool) PngResult {
+fn renderWithGpuNative(gpa: Allocator, bytecode: []const u8, width: u32, height: u32, time: f32, scene_name: ?[]const u8, strict_native_stubs: bool) PngResult {
     const NativeGPU = pngine.gpu_backends.NativeGPU;
     const Context = pngine.gpu_backends.Context;
     const RequiredLimits = pngine.gpu_backends.RequiredLimits;
@@ -934,11 +924,11 @@ fn renderWithGpuNative(allocator: std.mem.Allocator, bytecode: []const u8, width
     std.debug.assert(bytecode.len >= format.HEADER_SIZE);
     std.debug.assert(width > 0 and height > 0);
 
-    var module = format.deserialize(allocator, bytecode) catch |err| {
+    var module = format.deserialize(gpa, bytecode) catch |err| {
         std.debug.print("Error: failed to load bytecode: {}\n", .{err});
         return .{ .png_data = undefined, .exit_code = 3 };
     };
-    defer module.deinit(allocator);
+    defer module.deinit(gpa);
 
     // Shared GPU context (blocks ~100-200ms acquiring adapter + device). Authored
     // device limits (Arc-3 §5.3b) become requestDevice's requiredLimits — the
@@ -967,22 +957,22 @@ fn renderWithGpuNative(allocator: std.mem.Allocator, bytecode: []const u8, width
     gpu.setModule(&module);
     gpu.setTime(time);
 
-    var dispatcher = pngine.Dispatcher(NativeGPU).init(allocator, &gpu, &module);
+    var dispatcher = pngine.Dispatcher(NativeGPU).init(gpa, &gpu, &module);
     defer dispatcher.deinit();
 
-    const exec_code = runFrames(&dispatcher, &module, scene_name, allocator);
+    const exec_code = runFrames(&dispatcher, &module, scene_name, gpa);
     if (exec_code != 0) return .{ .png_data = undefined, .exit_code = exec_code };
 
-    const pixels = gpu.read_pixels(allocator) catch |err| {
+    const pixels = gpu.read_pixels(gpa) catch |err| {
         std.debug.print("Error: failed to read pixels: {}\n", .{err});
         return .{ .png_data = undefined, .exit_code = 5 };
     };
-    defer allocator.free(pixels);
+    defer gpa.free(pixels);
 
     const honesty = nativeHonestyCode(strict_native_stubs);
     if (honesty != 0) return .{ .png_data = undefined, .exit_code = honesty };
 
-    const png_data = pngine.png.encode(allocator, pixels, width, height) catch |err| {
+    const png_data = pngine.png.encode(gpa, pixels, width, height) catch |err| {
         std.debug.print("Error: failed to encode PNG: {}\n", .{err});
         return .{ .png_data = undefined, .exit_code = 4 };
     };
@@ -998,15 +988,15 @@ fn runFrames(
     dispatcher: anytype,
     module: *const format.Module,
     scene_name: ?[]const u8,
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
 ) u8 {
     std.debug.assert(module.bytecode.len > 0);
 
     if (scene_name) |name| {
         std.debug.assert(name.len > 0);
-        return executeFrameByName(dispatcher, module, name, allocator);
+        return executeFrameByName(dispatcher, module, name, gpa);
     }
-    dispatcher.execute_all(allocator) catch |err| {
+    dispatcher.execute_all(gpa) catch |err| {
         std.debug.print("Error: execution failed: {}\n", .{err});
         return 5;
     };
@@ -1040,7 +1030,7 @@ fn nativeHonestyCode(strict_native_stubs: bool) u8 {
 
 /// Execute a specific frame by name.
 /// Returns 0 on success, error code on failure.
-fn executeFrameByName(dispatcher: anytype, module: *const format.Module, name: []const u8, allocator: std.mem.Allocator) u8 {
+fn executeFrameByName(dispatcher: anytype, module: *const format.Module, name: []const u8, gpa: Allocator) u8 {
     const opcodes = pngine.opcodes;
 
     // Find string ID for the name
@@ -1075,7 +1065,7 @@ fn executeFrameByName(dispatcher: anytype, module: *const format.Module, name: [
     const max_iterations: usize = 10000;
     for (0..max_iterations) |_| {
         if (dispatcher.pc >= @as(@TypeOf(dispatcher.pc), @intCast(frame_range.end))) break;
-        dispatcher.step(allocator) catch |err| {
+        dispatcher.step(gpa) catch |err| {
             std.debug.print("Error: execution failed: {}\n", .{err});
             return 5;
         };
@@ -1148,10 +1138,10 @@ fn skip_opcode_params_at(bytecode: []const u8, pc: *usize, op: pngine.opcodes.Op
 }
 
 /// Create a 1x1 transparent PNG image.
-fn createTransparentPixel(allocator: std.mem.Allocator) ![]u8 {
+fn createTransparentPixel(gpa: Allocator) ![]u8 {
     // Single RGBA pixel: transparent (0, 0, 0, 0)
     const pixels = [_]u8{ 0, 0, 0, 0 };
-    const result = try pngine.png.encode(allocator, &pixels, 1, 1);
+    const result = try pngine.png.encode(gpa, &pixels, 1, 1);
 
     // Post-condition
     std.debug.assert(result.len > 0);
@@ -1209,33 +1199,14 @@ pub fn printUsage() void {
     , .{});
 }
 
-/// Derive output path: input.sjon -> input.png
-fn deriveOutputPath(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
-    // Pre-condition
-    std.debug.assert(input.len > 0);
-
-    const stem = std.fs.path.stem(input);
-    const dir = std.fs.path.dirname(input);
-
-    const result = if (dir) |d|
-        try std.fmt.allocPrint(allocator, "{s}/{s}.png", .{ d, stem })
-    else
-        try std.fmt.allocPrint(allocator, "{s}.png", .{stem});
-
-    // Post-condition
-    std.debug.assert(std.mem.endsWith(u8, result, ".png"));
-
-    return result;
-}
-
-fn compileSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8, source: [:0]const u8, minify_shaders: bool, validate_shaders: bool) ![]u8 {
+fn compileSource(gpa: Allocator, io: std.Io, path: []const u8, source: [:0]const u8, minify_shaders: bool, validate_shaders: bool) ![]u8 {
     // `-` is source too — its kind came from sniffing, not from a name.
     if (stdio.isSjonPath(path)) {
         // SJON format (PNGine as a SJON host). Bytecode-only path (no executor),
         // reached on --no-executor; the self-contained path uses
         // compileFromFileWithPlugins above.
         const base_dir = stdio.baseDir(path);
-        return pngine.dsl_sjon.compileWithOptions(allocator, source, .{
+        return pngine.dsl_sjon.compileWithOptions(gpa, source, .{
             .base_dir = base_dir,
             .minify_shaders = minify_shaders,
             .validate_shaders = validate_shaders,

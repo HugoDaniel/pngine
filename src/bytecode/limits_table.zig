@@ -49,8 +49,8 @@ pub const LimitsTable = struct {
 
     pub const empty: LimitsTable = .{ .entries = .empty };
 
-    pub fn deinit(self: *LimitsTable, allocator: Allocator) void {
-        self.entries.deinit(allocator);
+    pub fn deinit(self: *LimitsTable, gpa: Allocator) void {
+        self.entries.deinit(gpa);
         self.* = undefined;
     }
 
@@ -61,35 +61,37 @@ pub const LimitsTable = struct {
     }
 
     /// Append a limit. Pre-condition: room remains under MAX_LIMITS.
-    pub fn add(self: *LimitsTable, allocator: Allocator, name_string_id: u16, value: u64) !void {
+    pub fn add(self: *LimitsTable, gpa: Allocator, name_string_id: u16, value: u64) !void {
         assert(self.entries.items.len < MAX_LIMITS);
-        try self.entries.append(allocator, .{ .name_string_id = name_string_id, .value = value });
+        try self.entries.append(gpa, .{ .name_string_id = name_string_id, .value = value });
         assert(self.entries.items.len <= MAX_LIMITS);
     }
 
     /// Serialize. EMPTY → zero bytes (see the byte-identity invariant); the
     /// header omits the section and clears `has_device_limits`.
-    pub fn serialize(self: *const LimitsTable, allocator: Allocator) ![]u8 {
+    ///
+    /// Caller owns the returned bytes.
+    pub fn serialize(self: *const LimitsTable, gpa: Allocator) ![]u8 {
         assert(self.entries.items.len <= MAX_LIMITS);
-        if (self.entries.items.len == 0) return allocator.alloc(u8, 0);
+        if (self.entries.items.len == 0) return gpa.alloc(u8, 0);
 
         var result = std.ArrayList(u8).empty;
-        errdefer result.deinit(allocator);
+        errdefer result.deinit(gpa);
 
-        try result.append(allocator, @intCast(self.entries.items.len));
+        try result.append(gpa, @intCast(self.entries.items.len));
         for (self.entries.items, 0..) |entry, i| {
             if (i >= MAX_LIMITS) break;
             var name_buf: [2]u8 = undefined;
             std.mem.writeInt(u16, &name_buf, entry.name_string_id, .little);
-            try result.appendSlice(allocator, &name_buf);
+            try result.appendSlice(gpa, &name_buf);
             var val_buf: [8]u8 = undefined;
             std.mem.writeInt(u64, &val_buf, entry.value, .little);
-            try result.appendSlice(allocator, &val_buf);
+            try result.appendSlice(gpa, &val_buf);
         }
 
         // Post-condition: exact serialized length.
         assert(result.items.len == 1 + @as(usize, self.entries.items.len) * ENTRY_BYTES);
-        return result.toOwnedSlice(allocator);
+        return result.toOwnedSlice(gpa);
     }
 };
 
@@ -99,9 +101,9 @@ pub const LimitsTable = struct {
 ///
 /// Hostile-input safe: a declared count over MAX_LIMITS or a section too short
 /// to hold `count` entries is a clean `error.InvalidLimitsTable`, never a trap.
-pub fn deserialize(allocator: Allocator, data: []const u8) !LimitsTable {
+pub fn deserialize(gpa: Allocator, data: []const u8) !LimitsTable {
     var table = LimitsTable{ .entries = .empty };
-    errdefer table.deinit(allocator);
+    errdefer table.deinit(gpa);
 
     if (data.len == 0) return table;
 
@@ -112,7 +114,7 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !LimitsTable {
     const need = 1 + @as(usize, declared) * ENTRY_BYTES;
     if (data.len < need) return error.InvalidLimitsTable;
 
-    try table.entries.ensureTotalCapacity(allocator, declared);
+    try table.entries.ensureTotalCapacity(gpa, declared);
     var pos: usize = 1;
     for (0..declared) |_| {
         const name_string_id = std.mem.readInt(u16, data[pos..][0..2], .little);

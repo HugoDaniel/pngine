@@ -1,0 +1,14 @@
+; Invalid: a `:reads` texture in a stencil-only format. WGSL reads stencil as
+; `texture_2d<u32>` through a view whose `:aspect` is stencil-only; the prelude
+; builds no view and would declare a colour binding over a format that has no
+; colour aspect.
+
+(texture :name mask :size canvas :format stencil8
+  :usage [render-attachment texture-binding])
+(pass-graph
+  (pass :name main :reads [mask] :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return vec4f(vec3f(textureSample(mask, samp, uv)), 1.0);
+    }
+  """))

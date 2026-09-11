@@ -1,0 +1,45 @@
+; test_data_base64 — the twin of test_data_bytes, one key different.
+;
+; The same sixteen palette bytes, carried inline instead of in a sidecar, for a
+; document that must stand alone (a generated piece, a lowering hook's output).
+; It compiles to a BYTE-IDENTICAL payload — that equality is the point of the
+; pair, and `zig build test-sjon-golden` holds it as two identical traces.
+
+(data :name palette (bytes :base64 "/4AA/wCAgP//AP///////w=="))
+
+; No `:size` — the entry sizes the buffer, which is the half `(data … :file …)`
+; deliberately cannot do.
+(buffer :name paletteBuf :usage [uniform copy-dst] :data palette)
+
+(shader-module :name code :code """
+    @vertex fn fullscreen(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+      return vec4f(p[i], 0.0, 1.0);
+    }
+
+    @group(0) @binding(0) var<uniform> palette: vec4u;
+
+    // Alpha is forced so an all-zero (never filled) buffer reads as opaque
+    // black rather than transparent — the difference must land in the RGB
+    // channels the snapshot compares.
+    @fragment fn show() -> @location(0) vec4f {
+      return vec4f(unpack4x8unorm(palette.x).rgb, 1.0);
+    }
+""")
+
+(bind-group :name g :layout pipe :group 0
+  (entry :binding 0 :buffer paletteBuf))
+
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry fullscreen)
+  (fragment :module code :entry show
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipe :bind-groups [g]
+  (draw :vertex-count 3))
+
+(frame :name main :perform [draw])

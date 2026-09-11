@@ -1,0 +1,64 @@
+; `(pass … :reads …)` — a fullscreen stage over textures the graph did not
+; produce, which is the shape every post-processing effect has: a geometry pass
+; writes colour and depth, and a fullscreen pass reads both back.
+;
+; Two things make it work together. `:reads` binds a declared `(texture …)` by
+; its own name, typed from that texture's `:format` — `gDepth` is
+; `depth32float`, so the prelude declares `texture_depth_2d` and `textureLoad`
+; returns a bare f32, while `gColor` comes back as a `texture_2d<f32>` the
+; shared sampler can filter. And `(pass-graph :before [geo])` puts the
+; hand-authored pass at the head of the frame the graph emits, because the graph
+; owns that frame: without the key there is no way for anything else to run.
+;
+; The depth read is a `textureLoad`, not a `textureSample`. A sampler used with
+; a depth texture is `non-filtering` in the pipeline's auto layout, and the
+; prelude's `samp` is linear, so sampling one is a bind group Chrome refuses
+; (wgpu-native accepts it, which is how the divergence stayed hidden). The
+; compiler refuses it too, naming this line.
+
+(shader-module :name scene :code """
+struct VSOut { @builtin(position) pos : vec4f, @location(0) tint : vec3f }
+// Two triangles at different depths, so the depth buffer this document reads
+// back has more than one value in it.
+@vertex fn vs(@builtin(vertex_index) i : u32) -> VSOut {
+  var p = array<vec2f, 6>(
+    vec2f(-0.8, -0.6), vec2f(0.2, -0.6), vec2f(-0.3, 0.7),
+    vec2f(-0.2, -0.8), vec2f(0.8, -0.8), vec2f(0.3, 0.5));
+  var o : VSOut;
+  let far = i >= 3u;
+  o.pos = vec4f(p[i], select(0.25, 0.75, far), 1.0);
+  o.tint = select(vec3f(0.95, 0.45, 0.15), vec3f(0.15, 0.55, 0.95), far);
+  return o;
+}
+@fragment fn fs(in : VSOut) -> @location(0) vec4f { return vec4f(in.tint, 1.0); }
+""")
+
+(texture :name gColor :size canvas :format rgba8unorm
+  :usage [render-attachment texture-binding])
+(texture :name gDepth :size canvas :format depth32float
+  :usage [render-attachment texture-binding])
+
+(render-pipeline :name geoPipe :layout auto
+  (vertex :module scene :entry vs)
+  (fragment :module scene :entry fs (target :format rgba8unorm))
+  (depth-stencil :format depth32float :depth-write-enabled true :depth-compare less))
+
+(render-pass :name geo
+  (color-attachment :view gColor :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (depth-stencil-attachment :view gDepth
+    :depth-clear-value 1 :depth-load-op clear :depth-store-op store)
+  :pipeline geoPipe
+  (draw :vertex-count 6))
+
+(pass-graph :before [geo]
+  (pass :name main :reads [gColor gDepth] :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      let colour = textureSample(gColor, samp, uv).rgb;
+      // Depth comes back as one f32. Nothing was drawn where it is still 1,
+      // so this fogs the geometry by distance and tints the background.
+      let d = textureLoad(gDepth, vec2i(pos.xy), 0);
+      let fog = vec3f(0.05, 0.06, 0.12);
+      return vec4f(mix(colour, fog, clamp(d, 0.0, 1.0)), 1.0);
+    }
+  """))

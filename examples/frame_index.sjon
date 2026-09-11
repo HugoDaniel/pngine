@@ -1,0 +1,78 @@
+; frame_index — `pngine-frame-inputs`, the builtin that carries the executor's
+; frame counter.
+;
+; Time is a float and says WHEN; the frame index is an integer and says WHICH.
+; Anything that rotates through a fixed sequence needs the second one: the
+; jitter offsets of temporal anti-aliasing, a per-frame sample of a blue-noise
+; table, a round-robin over N history slots. Derived from time it would drift,
+; because a dropped frame moves time and not the sequence.
+;
+; The three time sources are three WINDOWS on one payload, not three payloads,
+; because the opcode writes `min(size, 20)` bytes of the runtime's block:
+;
+;   scene-time-inputs   12 B   time, width, height
+;   pngine-inputs       16 B   … and aspect
+;   pngine-frame-inputs 20 B   … and frameIndex (u32)
+;
+; So a document that wants the frame index asks for the wider window and gets
+; everything the narrower ones carry, in the same places. The struct below is
+; `pngine-inputs`' with one member appended.
+;
+; The buffer is 32 bytes, not 20: WGSL rounds a uniform struct's size up to a
+; multiple of 16, so the write covers 20 of 32 and the rest is padding nobody
+; reads. Only the write size is 20, and it is the SOURCE that chooses it.
+;
+; What you see: four vertical bars, one per frame in the cycle, each lit in turn
+; as `frameIndex % 4` advances. At frame 0 (which is what a `--frame` render is)
+; the leftmost bar is lit.
+
+(shader-module :name m :code """
+struct Inputs {
+  time : f32,
+  width : f32,
+  height : f32,
+  aspect : f32,
+  frame : u32,
+}
+@group(0) @binding(0) var<uniform> inputs : Inputs;
+
+struct VsOut { @builtin(position) pos : vec4f, @location(0) uv : vec2f }
+
+@vertex fn vs(@builtin(vertex_index) i : u32) -> VsOut {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  var out : VsOut;
+  out.pos = vec4f(p[i], 0.0, 1.0);
+  out.uv = (p[i] + 1.0) * 0.5;
+  return out;
+}
+
+@fragment fn fs(in : VsOut) -> @location(0) vec4f {
+  let bar = u32(in.uv.x * 4.0);
+  let lit = bar == (inputs.frame % 4u);
+  // The unlit bars step in brightness so the four positions are legible in a
+  // SINGLE frame: without that they are one dark block and the picture cannot
+  // show which of four the lit one is.
+  let dim = 0.08 + f32(bar) * 0.07;
+  let level = select(dim, 0.95, lit);
+  return vec4f(level, level * 0.55, 0.15 + level * 0.25, 1.0);
+}
+""")
+
+(buffer :name inputs :size 32 :usage [uniform copy-dst])
+(queue :name writeInputs
+  (write-buffer :buffer inputs :offset 0 :data pngine-frame-inputs))
+
+(bind-group :name g :layout pipe :group 0
+  (entry :binding 0 :buffer inputs))
+
+(render-pipeline :name pipe :layout auto
+  (vertex :module m :entry vs)
+  (fragment :module m :entry fs
+    (target :format preferred-canvas-format)))
+
+(render-pass :name draw :pipeline pipe :bind-groups [g]
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+
+(frame :name main :before [writeInputs] :perform [draw])

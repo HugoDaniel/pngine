@@ -32,6 +32,7 @@
 //! - Init commands include resource creation; frame commands include passes
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const pngine = @import("pngine");
 const format = pngine.format;
 const mock_gpu = pngine.mock_gpu;
@@ -80,8 +81,8 @@ pub const Diag = struct {
 pub const FlatPayload = struct {
     data: []u8,
 
-    pub fn deinit(self: *FlatPayload, allocator: std.mem.Allocator) void {
-        allocator.free(self.data);
+    pub fn deinit(self: *FlatPayload, gpa: Allocator) void {
+        gpa.free(self.data);
     }
 };
 
@@ -99,15 +100,15 @@ const Ctx = struct {
 ///
 /// Runs the dispatcher with MockGPU to capture all GPU calls, then
 /// serializes them as command buffers with inline data.
-pub fn flattenPayload(allocator: std.mem.Allocator, bytecode: []const u8, diag: ?*Diag) FlattenError!FlatPayload {
+pub fn flattenPayload(gpa: Allocator, bytecode: []const u8, diag: ?*Diag) FlattenError!FlatPayload {
     if (bytecode.len < format.HEADER_SIZE or !std.mem.eql(u8, bytecode[0..4], format.MAGIC)) {
         return FlattenError.InvalidBytecode;
     }
 
-    var module = format.deserialize(allocator, bytecode) catch {
+    var module = format.deserialize(gpa, bytecode) catch {
         return FlattenError.InvalidBytecode;
     };
-    defer module.deinit(allocator);
+    defer module.deinit(gpa);
 
     // Authored device limits (Arc-3 §5.3b) can't be requested by the mini
     // runtime (it does a bare requestDevice, and Decision 2 keeps mini tiny) —
@@ -120,11 +121,11 @@ pub fn flattenPayload(allocator: std.mem.Allocator, bytecode: []const u8, diag: 
 
     // Execute bytecode with MockGPU to capture call sequence
     var gpu: MockGPU = .empty;
-    defer gpu.deinit(allocator);
+    defer gpu.deinit(gpa);
 
-    var dispatcher = Dispatcher(MockGPU).init(allocator, &gpu, &module);
+    var dispatcher = Dispatcher(MockGPU).init(gpa, &gpu, &module);
     defer dispatcher.deinit();
-    dispatcher.execute_all(allocator) catch {
+    dispatcher.execute_all(gpa) catch {
         return FlattenError.ExecutionFailed;
     };
 
@@ -133,26 +134,26 @@ pub fn flattenPayload(allocator: std.mem.Allocator, bytecode: []const u8, diag: 
     std.debug.assert(split_idx <= calls.len);
 
     var data_section = std.ArrayList(u8).empty;
-    defer data_section.deinit(allocator);
+    defer data_section.deinit(gpa);
 
     var init_cmds = std.ArrayList(u8).empty;
-    defer init_cmds.deinit(allocator);
+    defer init_cmds.deinit(gpa);
 
     var frame_cmds = std.ArrayList(u8).empty;
-    defer frame_cmds.deinit(allocator);
+    defer frame_cmds.deinit(gpa);
 
     // Map from data_id to data section offset
     var data_map = std.AutoHashMapUnmanaged(u16, u32){};
-    defer data_map.deinit(allocator);
+    defer data_map.deinit(gpa);
 
     const ctx = Ctx{ .data_section = &data_section, .data_map = &data_map, .module = &module };
 
-    try serializeRange(allocator, &init_cmds, ctx, calls[0..split_idx], diag);
-    try injectUniformWrites(allocator, &frame_cmds, &module);
-    try serializeRange(allocator, &frame_cmds, ctx, calls[split_idx..], diag);
+    try serializeRange(gpa, &init_cmds, ctx, calls[0..split_idx], diag);
+    try injectUniformWrites(gpa, &frame_cmds, &module, diag);
+    try serializeRange(gpa, &frame_cmds, ctx, calls[split_idx..], diag);
 
     const output = try packPayload(
-        allocator,
+        gpa,
         module.header.flags.canvas_alpha_premultiplied,
         init_cmds.items,
         frame_cmds.items,
@@ -209,7 +210,7 @@ pub fn splitInitFromFrame(calls: []const Call, diag: ?*Diag) FlattenError!usize 
 /// Serialize one contiguous run of captured calls, naming the first command the
 /// mini runtime can't play in `diag` before propagating the refusal.
 fn serializeRange(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     cmds: *std.ArrayList(u8),
     ctx: Ctx,
     calls: []const Call,
@@ -217,7 +218,7 @@ fn serializeRange(
 ) FlattenError!void {
     std.debug.assert(ctx.data_section.items.len <= std.math.maxInt(u32));
     for (calls) |call| {
-        serializeCall(allocator, cmds, ctx, call) catch |err| {
+        serializeCall(gpa, cmds, ctx, call) catch |err| {
             if (err == error.UnsupportedByMini) if (diag) |d| {
                 d.unsupported = call.call_type;
                 d.unsupported_feature = featureNameFor(call.call_type);
@@ -268,9 +269,10 @@ const MAX_BYTECODE_WALK: u32 = 1 << 20;
 /// instruction through `wire_schema.skipParams` (the single source of truth the
 /// emitter and both dispatchers follow) is what makes 0x2A mean the opcode.
 fn injectUniformWrites(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     cmds: *std.ArrayList(u8),
     module: *const format.Module,
+    diag: ?*Diag,
 ) !void {
     std.debug.assert(cmds.items.len == 0); // injected before any frame command
     const bc = module.bytecode;
@@ -298,10 +300,22 @@ fn injectUniformWrites(
         if (r1.value > std.math.maxInt(u16) or r3.value > std.math.maxInt(u16)) {
             return FlattenError.InvalidBytecode;
         }
-        try cmds.append(allocator, @intFromEnum(cmd));
-        try appendU16(allocator, cmds, @intCast(r1.value));
-        try appendU32(allocator, cmds, r2.value);
-        try appendU16(allocator, cmds, @intCast(r3.value));
+        // The mini player stages a fixed 16-byte time block and writes it whole,
+        // ignoring `size` — which is what keeps it at its budget. A 20-byte
+        // `pngine-frame-inputs` window would therefore lose its frame index
+        // SILENTLY, reading 0 every frame. Refuse the export instead; the
+        // viewer runtime honours the size.
+        if (op == .write_time_uniform and r3.value > 16) {
+            // No `unsupported` CallType: these two opcodes never reach the
+            // call log (that is why this walk exists), so there is no call
+            // type to name. The feature string carries the whole sentence.
+            if (diag) |d| d.unsupported_feature = "`pngine-frame-inputs` (the minimal player writes a fixed 16-byte time block, so the frame index would silently read 0)";
+            return FlattenError.UnsupportedByMini;
+        }
+        try cmds.append(gpa, @intFromEnum(cmd));
+        try appendU16(gpa, cmds, @intCast(r1.value));
+        try appendU32(gpa, cmds, r2.value);
+        try appendU16(gpa, cmds, @intCast(r3.value));
     }
     std.debug.assert(cmds.items.len % 9 == 0); // whole 1+2+4+2 records only
 }
@@ -309,7 +323,7 @@ fn injectUniformWrites(
 /// Build the finished pNGf image: fixed header, then the three sections in
 /// wire order. Caller owns the returned buffer.
 fn packPayload(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     premultiplied_canvas: bool,
     init_cmds: []const u8,
     frame_cmds: []const u8,
@@ -317,8 +331,8 @@ fn packPayload(
 ) FlattenError![]u8 {
     const total = PNGF_HEADER_SIZE + init_cmds.len + frame_cmds.len + data.len;
     std.debug.assert(total >= PNGF_HEADER_SIZE);
-    const output = allocator.alloc(u8, total) catch return FlattenError.OutOfMemory;
-    errdefer allocator.free(output);
+    const output = gpa.alloc(u8, total) catch return FlattenError.OutOfMemory;
+    errdefer gpa.free(output);
 
     // Header. Flags bit 0 mirrors the PNGB header's canvas_alpha_premultiplied
     // (bit 3): the mini runtime configures the canvas premultiplied when set,
@@ -342,14 +356,14 @@ fn packPayload(
 }
 
 /// Resolve a data_id to its offset in the data section, adding it if needed.
-fn resolveData(allocator: std.mem.Allocator, ctx: Ctx, data_id: u16) !u32 {
+fn resolveData(gpa: Allocator, ctx: Ctx, data_id: u16) !u32 {
     std.debug.assert(ctx.data_section.items.len <= std.math.maxInt(u32));
     if (ctx.data_map.get(data_id)) |offset| return offset;
 
     const data = ctx.module.data.get(@enumFromInt(data_id));
     const offset: u32 = @intCast(ctx.data_section.items.len);
-    try ctx.data_map.put(allocator, data_id, offset);
-    try ctx.data_section.appendSlice(allocator, data);
+    try ctx.data_map.put(gpa, data_id, offset);
+    try ctx.data_section.appendSlice(gpa, data);
     std.debug.assert(ctx.data_section.items.len >= offset);
     return offset;
 }
@@ -379,7 +393,7 @@ fn wgslEntryFor(module: *const format.Module, id: u16) ?u16 {
 /// Iterative (mastery rule 1: no recursion) — a node with unmet deps is pushed
 /// back under them, so it is only appended once everything it needs is in.
 fn collectIncludeOrder(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     module: *const format.Module,
     root: u16,
     order: *std.ArrayList(u16),
@@ -387,10 +401,10 @@ fn collectIncludeOrder(
     std.debug.assert(order.items.len == 0);
 
     var included = std.AutoHashMapUnmanaged(u16, void){};
-    defer included.deinit(allocator);
+    defer included.deinit(gpa);
     var stack = std.ArrayList(u16).empty;
-    defer stack.deinit(allocator);
-    try stack.append(allocator, root);
+    defer stack.deinit(gpa);
+    try stack.append(gpa, root);
 
     for (0..MAX_WGSL_WALK) |_| {
         if (stack.items.len == 0) break;
@@ -408,12 +422,12 @@ fn collectIncludeOrder(
         }
 
         if (all_deps_ready) {
-            try included.put(allocator, current, {});
-            try order.append(allocator, current);
+            try included.put(gpa, current, {});
+            try order.append(gpa, current);
         } else {
-            try stack.append(allocator, current);
+            try stack.append(gpa, current);
             for (entry.deps) |dep| {
-                if (!included.contains(dep)) try stack.append(allocator, dep);
+                if (!included.contains(dep)) try stack.append(gpa, dep);
             }
         }
     }
@@ -427,7 +441,7 @@ fn collectIncludeOrder(
 
 /// Resolve WGSL data (with imports) to its offset in the data section.
 /// Uses two map keys per WGSL: offset at (wgsl_id | 0x8000), length at (wgsl_id | 0xC000).
-fn resolveWgsl(allocator: std.mem.Allocator, ctx: Ctx, wgsl_id: u16) !struct { offset: u32, len: u32 } {
+fn resolveWgsl(gpa: Allocator, ctx: Ctx, wgsl_id: u16) !struct { offset: u32, len: u32 } {
     std.debug.assert(ctx.data_section.items.len <= std.math.maxInt(u32));
 
     const offset_key: u16 = wgsl_id | 0x8000;
@@ -441,25 +455,25 @@ fn resolveWgsl(allocator: std.mem.Allocator, ctx: Ctx, wgsl_id: u16) !struct { o
         // which have no imports to splice.
         const data = ctx.module.data.get(@enumFromInt(wgsl_id));
         const offset: u32 = @intCast(ctx.data_section.items.len);
-        try ctx.data_section.appendSlice(allocator, data);
-        try ctx.data_map.put(allocator, offset_key, offset);
-        try ctx.data_map.put(allocator, len_key, @intCast(data.len));
+        try ctx.data_section.appendSlice(gpa, data);
+        try ctx.data_map.put(gpa, offset_key, offset);
+        try ctx.data_map.put(gpa, len_key, @intCast(data.len));
         return .{ .offset = offset, .len = @intCast(data.len) };
     };
 
     var order = std.ArrayList(u16).empty;
-    defer order.deinit(allocator);
-    try collectIncludeOrder(allocator, ctx.module, root, &order);
+    defer order.deinit(gpa);
+    try collectIncludeOrder(gpa, ctx.module, root, &order);
 
     const offset: u32 = @intCast(ctx.data_section.items.len);
     for (order.items) |id| {
         const entry = ctx.module.wgsl.get(id) orelse continue;
-        try ctx.data_section.appendSlice(allocator, ctx.module.data.get(@enumFromInt(entry.data_id)));
+        try ctx.data_section.appendSlice(gpa, ctx.module.data.get(@enumFromInt(entry.data_id)));
     }
     const total_size: u32 = @intCast(ctx.data_section.items.len - offset);
 
-    try ctx.data_map.put(allocator, offset_key, offset);
-    try ctx.data_map.put(allocator, len_key, total_size);
+    try ctx.data_map.put(gpa, offset_key, offset);
+    try ctx.data_map.put(gpa, len_key, total_size);
     return .{ .offset = offset, .len = total_size };
 }
 
@@ -469,7 +483,7 @@ fn resolveWgsl(allocator: std.mem.Allocator, ctx: Ctx, wgsl_id: u16) !struct { o
 /// which calls have no pNGf spelling at all. The per-family emitters below hold
 /// the wire layouts.
 fn serializeCall(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     cmds: *std.ArrayList(u8),
     ctx: Ctx,
     call: Call,
@@ -481,7 +495,7 @@ fn serializeCall(
         .create_render_pipeline,
         .create_compute_pipeline,
         .create_bind_group,
-        => try serializeResourceCall(allocator, cmds, ctx, call),
+        => try serializeResourceCall(gpa, cmds, ctx, call),
 
         .begin_render_pass,
         .begin_compute_pass,
@@ -493,7 +507,7 @@ fn serializeCall(
         .draw_indexed,
         .dispatch,
         .submit,
-        => try serializePassCall(allocator, cmds, call),
+        => try serializePassCall(gpa, cmds, call),
 
         // Every command the mini (pNGf) runtime cannot decode. Emitting any of
         // these would either desync mini's opcode stream (create_texture/sampler/
@@ -557,7 +571,7 @@ fn serializeCall(
 /// Resource creation: the calls that place bytes in the data section and refer
 /// to them by (offset, length).
 fn serializeResourceCall(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     cmds: *std.ArrayList(u8),
     ctx: Ctx,
     call: Call,
@@ -566,18 +580,18 @@ fn serializeResourceCall(
     switch (call.call_type) {
         .create_buffer => {
             const p = call.params.create_buffer;
-            try cmds.append(allocator, @intFromEnum(Cmd.create_buffer));
-            try appendU16(allocator, cmds, p.buffer_id);
-            try appendU32(allocator, cmds, p.size);
-            try appendU16(allocator, cmds, p.usage);
+            try cmds.append(gpa, @intFromEnum(Cmd.create_buffer));
+            try appendU16(gpa, cmds, p.buffer_id);
+            try appendU32(gpa, cmds, p.size);
+            try appendU16(gpa, cmds, p.usage);
         },
         .create_shader_module => {
             const p = call.params.create_shader_module;
-            const wgsl = try resolveWgsl(allocator, ctx, p.code_data_id);
-            try cmds.append(allocator, @intFromEnum(Cmd.create_shader));
-            try appendU16(allocator, cmds, p.shader_id);
-            try appendU32(allocator, cmds, wgsl.offset);
-            try appendU32(allocator, cmds, wgsl.len);
+            const wgsl = try resolveWgsl(gpa, ctx, p.code_data_id);
+            try cmds.append(gpa, @intFromEnum(Cmd.create_shader));
+            try appendU16(gpa, cmds, p.shader_id);
+            try appendU32(gpa, cmds, wgsl.offset);
+            try appendU32(gpa, cmds, wgsl.len);
         },
         // The (offset, length) pairs below are written out per arm rather than
         // funnelled through a shared helper on purpose: `mini-conformance.test.js`
@@ -587,21 +601,21 @@ fn serializeResourceCall(
         // them would silently under-count the width and retire the pin.
         .create_render_pipeline => {
             const p = call.params.create_render_pipeline;
-            const offset = try resolveData(allocator, ctx, p.descriptor_data_id);
+            const offset = try resolveData(gpa, ctx, p.descriptor_data_id);
             const data = ctx.module.data.get(@enumFromInt(p.descriptor_data_id));
-            try cmds.append(allocator, @intFromEnum(Cmd.create_render_pipeline));
-            try appendU16(allocator, cmds, p.pipeline_id);
-            try appendU32(allocator, cmds, offset);
-            try appendU32(allocator, cmds, @intCast(data.len));
+            try cmds.append(gpa, @intFromEnum(Cmd.create_render_pipeline));
+            try appendU16(gpa, cmds, p.pipeline_id);
+            try appendU32(gpa, cmds, offset);
+            try appendU32(gpa, cmds, @intCast(data.len));
         },
         .create_compute_pipeline => {
             const p = call.params.create_compute_pipeline;
-            const offset = try resolveData(allocator, ctx, p.descriptor_data_id);
+            const offset = try resolveData(gpa, ctx, p.descriptor_data_id);
             const data = ctx.module.data.get(@enumFromInt(p.descriptor_data_id));
-            try cmds.append(allocator, @intFromEnum(Cmd.create_compute_pipeline));
-            try appendU16(allocator, cmds, p.pipeline_id);
-            try appendU32(allocator, cmds, offset);
-            try appendU32(allocator, cmds, @intCast(data.len));
+            try cmds.append(gpa, @intFromEnum(Cmd.create_compute_pipeline));
+            try appendU16(gpa, cmds, p.pipeline_id);
+            try appendU32(gpa, cmds, offset);
+            try appendU32(gpa, cmds, @intCast(data.len));
         },
         .create_bind_group => {
             const p = call.params.create_bind_group;
@@ -619,13 +633,13 @@ fn serializeResourceCall(
             // vanish and this one would be the only thing standing between a tagged id
             // and the wrong layout. Decision 2 / pitfall 58. §339.
             if (pngine.opcodes.layoutIdIsBindGroupLayout(p.layout_id)) return error.UnsupportedByMini;
-            const offset = try resolveData(allocator, ctx, p.entry_data_id);
+            const offset = try resolveData(gpa, ctx, p.entry_data_id);
             const data = ctx.module.data.get(@enumFromInt(p.entry_data_id));
-            try cmds.append(allocator, @intFromEnum(Cmd.create_bind_group));
-            try appendU16(allocator, cmds, p.group_id);
-            try appendU16(allocator, cmds, p.layout_id);
-            try appendU32(allocator, cmds, offset);
-            try appendU32(allocator, cmds, @intCast(data.len));
+            try cmds.append(gpa, @intFromEnum(Cmd.create_bind_group));
+            try appendU16(gpa, cmds, p.group_id);
+            try appendU16(gpa, cmds, p.layout_id);
+            try appendU32(gpa, cmds, offset);
+            try appendU32(gpa, cmds, @intCast(data.len));
         },
         else => unreachable, // routed by serializeCall
     }
@@ -634,81 +648,81 @@ fn serializeResourceCall(
 /// Pass and queue commands: everything that references resources by id only,
 /// so none of them touch the data section.
 fn serializePassCall(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     cmds: *std.ArrayList(u8),
     call: Call,
 ) !void {
     switch (call.call_type) {
         .begin_render_pass => {
             const p = call.params.begin_render_pass;
-            try cmds.append(allocator, @intFromEnum(Cmd.begin_render_pass_f32));
-            try appendU16(allocator, cmds, p.color_texture_id);
-            try cmds.append(allocator, p.load_op);
-            try cmds.append(allocator, p.store_op);
-            try appendU16(allocator, cmds, p.depth_texture_id);
-            try appendU32(allocator, cmds, p.clear_r_bits);
-            try appendU32(allocator, cmds, p.clear_g_bits);
-            try appendU32(allocator, cmds, p.clear_b_bits);
-            try appendU32(allocator, cmds, p.clear_a_bits);
+            try cmds.append(gpa, @intFromEnum(Cmd.begin_render_pass_f32));
+            try appendU16(gpa, cmds, p.color_texture_id);
+            try cmds.append(gpa, p.load_op);
+            try cmds.append(gpa, p.store_op);
+            try appendU16(gpa, cmds, p.depth_texture_id);
+            try appendU32(gpa, cmds, p.clear_r_bits);
+            try appendU32(gpa, cmds, p.clear_g_bits);
+            try appendU32(gpa, cmds, p.clear_b_bits);
+            try appendU32(gpa, cmds, p.clear_a_bits);
         },
-        .begin_compute_pass => try cmds.append(allocator, @intFromEnum(Cmd.begin_compute_pass)),
-        .end_pass => try cmds.append(allocator, @intFromEnum(Cmd.end_pass)),
-        .submit => try cmds.append(allocator, @intFromEnum(Cmd.submit)),
+        .begin_compute_pass => try cmds.append(gpa, @intFromEnum(Cmd.begin_compute_pass)),
+        .end_pass => try cmds.append(gpa, @intFromEnum(Cmd.end_pass)),
+        .submit => try cmds.append(gpa, @intFromEnum(Cmd.submit)),
         .set_pipeline => {
             const p = call.params.set_pipeline;
-            try cmds.append(allocator, @intFromEnum(Cmd.set_pipeline));
-            try appendU16(allocator, cmds, p.pipeline_id);
+            try cmds.append(gpa, @intFromEnum(Cmd.set_pipeline));
+            try appendU16(gpa, cmds, p.pipeline_id);
         },
         .set_bind_group => {
             const p = call.params.set_bind_group;
-            try cmds.append(allocator, @intFromEnum(Cmd.set_bind_group));
-            try cmds.append(allocator, p.slot);
-            try appendU16(allocator, cmds, p.group_id);
+            try cmds.append(gpa, @intFromEnum(Cmd.set_bind_group));
+            try cmds.append(gpa, p.slot);
+            try appendU16(gpa, cmds, p.group_id);
         },
         .set_vertex_buffer => {
             const p = call.params.set_vertex_buffer;
-            try cmds.append(allocator, @intFromEnum(Cmd.set_vertex_buffer));
-            try cmds.append(allocator, p.slot);
-            try appendU16(allocator, cmds, p.buffer_id);
+            try cmds.append(gpa, @intFromEnum(Cmd.set_vertex_buffer));
+            try cmds.append(gpa, p.slot);
+            try appendU16(gpa, cmds, p.buffer_id);
         },
         .draw => {
             const p = call.params.draw;
-            try cmds.append(allocator, @intFromEnum(Cmd.draw));
-            try appendU32(allocator, cmds, p.vertex_count);
-            try appendU32(allocator, cmds, p.instance_count);
-            try appendU32(allocator, cmds, p.first_vertex);
-            try appendU32(allocator, cmds, p.first_instance);
+            try cmds.append(gpa, @intFromEnum(Cmd.draw));
+            try appendU32(gpa, cmds, p.vertex_count);
+            try appendU32(gpa, cmds, p.instance_count);
+            try appendU32(gpa, cmds, p.first_vertex);
+            try appendU32(gpa, cmds, p.first_instance);
         },
         .draw_indexed => {
             const p = call.params.draw_indexed;
-            try cmds.append(allocator, @intFromEnum(Cmd.draw_indexed));
-            try appendU32(allocator, cmds, p.index_count);
-            try appendU32(allocator, cmds, p.instance_count);
-            try appendU32(allocator, cmds, p.first_index);
-            try appendU32(allocator, cmds, p.base_vertex);
-            try appendU32(allocator, cmds, p.first_instance);
+            try cmds.append(gpa, @intFromEnum(Cmd.draw_indexed));
+            try appendU32(gpa, cmds, p.index_count);
+            try appendU32(gpa, cmds, p.instance_count);
+            try appendU32(gpa, cmds, p.first_index);
+            try appendU32(gpa, cmds, p.base_vertex);
+            try appendU32(gpa, cmds, p.first_instance);
         },
         .dispatch => {
             const p = call.params.dispatch;
-            try cmds.append(allocator, @intFromEnum(Cmd.dispatch));
-            try appendU32(allocator, cmds, p.x);
-            try appendU32(allocator, cmds, p.y);
-            try appendU32(allocator, cmds, p.z);
+            try cmds.append(gpa, @intFromEnum(Cmd.dispatch));
+            try appendU32(gpa, cmds, p.x);
+            try appendU32(gpa, cmds, p.y);
+            try appendU32(gpa, cmds, p.z);
         },
         else => unreachable, // routed by serializeCall
     }
 }
 
-fn appendU16(allocator: std.mem.Allocator, list: *std.ArrayList(u8), value: u16) !void {
+fn appendU16(gpa: Allocator, list: *std.ArrayList(u8), value: u16) !void {
     var buf: [2]u8 = undefined;
     std.mem.writeInt(u16, &buf, value, .little);
-    try list.appendSlice(allocator, &buf);
+    try list.appendSlice(gpa, &buf);
 }
 
-fn appendU32(allocator: std.mem.Allocator, list: *std.ArrayList(u8), value: u32) !void {
+fn appendU32(gpa: Allocator, list: *std.ArrayList(u8), value: u32) !void {
     var buf: [4]u8 = undefined;
     std.mem.writeInt(u32, &buf, value, .little);
-    try list.appendSlice(allocator, &buf);
+    try list.appendSlice(gpa, &buf);
 }
 
 /// Length-tolerant varint decode over possibly-truncated bytecode.

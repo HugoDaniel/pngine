@@ -1,0 +1,15 @@
+; `:prune-unused` needs an auto-derived layout to prune against. An explicit
+; (bind-group-layout …) IS the layout being bound, so there is no reachable set
+; to compute and nothing the key could do. Refused rather than ignored: a key
+; that reads as applied and did nothing is the failure mode this whole feature
+; exists to prevent.
+(shader-module :name code :code """
+@group(0) @binding(0) var<uniform> u: vec4f;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f { return u; }
+@fragment fn fs() -> @location(0) vec4f { return u; }
+""")
+(buffer :name buf :size 16 :usage [uniform copy-dst])
+(bind-group-layout :name bgl
+  (entry :binding 0 :visibility [vertex fragment] (buffer :type uniform)))
+(bind-group :name g :layout bgl :prune-unused true
+  (entry :binding 0 :buffer buf))

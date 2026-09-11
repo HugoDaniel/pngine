@@ -1,0 +1,14 @@
+; Invalid: `:format` on a COMPUTE `(pass …)`. A compute main writes into a
+; `screen` STORAGE texture, whose format the prelude has to spell inside
+; `texture_storage_2d<…, write>` (a narrower set than `texture-format`), and
+; pngine's own blit then samples that texture as `texture_2d<f32>` through a
+; linear sampler. The key is a fragment pass's; a compute pass that wants
+; another format writes the texture, the pipeline and the blit by hand.
+
+(pass-graph
+  (pass :name main :format rgba16float :code """
+    @compute @workgroup_size(8, 8) fn cs(@builtin(global_invocation_id) id: vec3u) {
+      let uv = vec2f(f32(id.x), f32(id.y)) / vec2f(pngine.width, pngine.height);
+      textureStore(screen, vec2i(id.xy), vec4f(uv, 0.0, 1.0));
+    }
+  """))

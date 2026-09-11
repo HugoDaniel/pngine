@@ -1,0 +1,9 @@
+; R10: every name a fragment `:requires` must be declared by the module that
+; imports it, reached or not — validation runs before dead-code elimination.
+; Nothing here declares `noise2`.
+(wgsl :name fbm :requires [noise2] :code """
+fn fbm(p: vec2f) -> f32 { return noise2(p) + noise2(p * 2.0) * 0.5; }
+""")
+(shader-module :name m :imports [fbm] :code """
+@fragment fn fs(@builtin(position) c: vec4f) -> @location(0) vec4f { return vec4f(fbm(c.xy)); }
+""")

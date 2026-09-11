@@ -1,0 +1,152 @@
+; The hand-written twin of examples/boids_init_only.sjon: the same program with
+; its `(init …)` expanded by hand into the core forms it lowers to.
+;
+; `schema/sugar-ledger.mjs` names this file for all four `(init …)` keys —
+; `:name`, `:buffer`, `:module`, `:workgroups` — and
+; `tests/zig/render/render_test.zig` holds the pair pixel-equal every run
+; (`twin_of = "boids_init_only"`).
+;
+; One line becomes three forms and nothing else:
+;
+;   (init :name N :buffer B :module M :workgroups [W])
+;     ->  (compute-pipeline :name N__pipe :layout auto (compute :module M :entry main))
+;         (bind-group :name N__bg :layout N__pipe :group 0 (entry :binding 0 :buffer B))
+;         (compute-pass :name N :pipeline N__pipe :bind-groups [N__bg] (dispatch :workgroups [W]))
+;
+; `:name` lands on the COMPUTE PASS rather than on the pipeline, because the
+; pass is the step a frame can name: `(frame … :init [initParticles])` below
+; resolves to it. `:buffer` becomes binding 0 of a group with exactly one
+; entry, which is the whole of what an init hook assumes about a seeding
+; shader — a shader wanting two buffers cannot be written as an `(init …)` at
+; all. `:module` supplies the compute pipeline, entry `main`. `:workgroups`
+; is the dispatch, and the expression survives: `[(ceil (/ NUM_PARTICLES 64))]`
+; is 32 here and is written the same way on both sides.
+;
+; This fixture is the twin rather than a livelier one for a reason worth
+; recording. `20_particle_fountain` also has an `(init …)`, and deleting it
+; there changes ZERO pixels at t=0 — the step shader respawns every particle
+; whose life has run out, and an unseeded buffer is all zeroes, so the first
+; step reseeds what the init would have seeded. A pixel gate over that pair
+; would have proved nothing about any of these four keys. Here the init is the
+; ONLY thing that ever writes the particle buffer: drop it and all 2048 sprites
+; sit at the origin.
+;
+; Equivalence: PIXEL. BYTE is out of reach for every sugar twin — see the
+; header of examples/pass_half_res_hand.sjon.
+
+(define :name NUM_PARTICLES :value 2048)
+
+(shader-module :name code :code """
+struct VertexOutput {
+  @builtin(position) position : vec4f,
+  @location(4) color : vec4f,
+}
+
+@vertex
+fn vertexMain(
+  @location(0) a_particlePos : vec2f,
+  @location(1) a_particleVel : vec2f,
+  @location(2) a_pos : vec2f
+) -> VertexOutput {
+  let angle = -atan2(a_particleVel.x, a_particleVel.y);
+  let pos = vec2(
+    (a_pos.x * cos(angle)) - (a_pos.y * sin(angle)),
+    (a_pos.x * sin(angle)) + (a_pos.y * cos(angle))
+  );
+
+  var output : VertexOutput;
+  output.position = vec4(pos + a_particlePos, 0.0, 1.0);
+  output.color = vec4(
+    1.0 - sin(angle + 1.0) - a_particleVel.y,
+    pos.x * 100.0 - a_particleVel.y + 0.1,
+    a_particleVel.x + cos(angle + 0.5),
+    1.0
+  );
+  return output;
+}
+
+@fragment
+fn fragMain(@location(4) color : vec4f) -> @location(0) vec4f {
+  return color;
+}
+""")
+
+(wgsl :name hash :file "./lib/hash.wgsl")
+
+(shader-module :name initShader :imports [hash] :code """
+struct Particle {
+  pos : vec2f,
+  vel : vec2f,
+}
+
+struct Particles {
+  particles : array<Particle>,
+}
+
+@binding(0) @group(0) var<storage, read_write> data : Particles;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id : vec3u) {
+  let i = id.x;
+  let total = arrayLength(&data.particles);
+  if (i >= total) { return; }
+
+  let t = f32(i) / f32(total);
+  let angle = t * 6.283185;  // 2 * PI
+  let radius = sqrt(t);
+
+  // Spiral pattern for initial positions
+  data.particles[i].pos = vec2f(cos(angle) * radius, sin(angle) * radius);
+
+  // Random velocities
+  data.particles[i].vel = vec2f(
+    (hash(i * 2u) - 0.5) * 0.1,
+    (hash(i * 2u + 1u) - 0.5) * 0.1
+  );
+}
+""")
+
+(data :name vertexBufferData :float32 [
+  -0.01 -0.02
+  0.01 -0.02
+  0.0 0.02
+])
+
+(buffer :name spriteVertexBuffer :usage [vertex]
+  :data vertexBufferData)
+
+(buffer :name particleBuffers :size (* NUM_PARTICLES 4 4) :usage [vertex storage])
+
+(render-pipeline :name renderBoids
+  :layout auto
+  (vertex :module code :entry vertexMain
+    (vertex-buffer :array-stride (* 4 4) :step-mode instance
+      (attribute :shader-location 0 :offset 0 :format float32x2)
+      (attribute :shader-location 1 :offset (* 2 4) :format float32x2))
+    (vertex-buffer :array-stride (* 2 4) :step-mode vertex
+      (attribute :shader-location 2 :offset 0 :format float32x2)))
+  (fragment :module code :entry fragMain
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
+
+; --- `(init …)`, expanded ---------------------------------------------------
+
+(compute-pipeline :name initParticles__pipe :layout auto
+  (compute :module initShader :entry main))
+
+(bind-group :name initParticles__bg :layout initParticles__pipe :group 0
+  (entry :binding 0 :buffer particleBuffers))
+
+(compute-pass :name initParticles
+  :pipeline initParticles__pipe :bind-groups [initParticles__bg]
+  (dispatch :workgroups [(ceil (/ NUM_PARTICLES 64))]))
+
+(render-pass :name drawBoidsPass
+  (color-attachment :view context-current-texture :clear-value [0.0 0.0 0.0 1.0] :load-op clear :store-op store)
+  :pipeline renderBoids
+  :vertex-buffers [particleBuffers spriteVertexBuffer]
+  (draw :vertex-count 3 :instance-count NUM_PARTICLES :first-vertex 0 :first-instance 0))
+
+(frame :name boids
+  :init [initParticles]
+  :perform [drawBoidsPass])

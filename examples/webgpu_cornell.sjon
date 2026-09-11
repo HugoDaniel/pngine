@@ -92,7 +92,12 @@ fn main() {
 }
 """)
 
-(shader-module :name cameraCode :code """
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+(wgsl :name lookAt :file "./lib/look_at.wgsl")
+
+(wgsl :name invPerspective :file "./lib/inv_perspective.wgsl")
+
+(shader-module :name cameraCode :imports [perspective lookAt invPerspective] :code """
 struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
 struct CommonUniforms {
   mvp : mat4x4f,
@@ -101,27 +106,6 @@ struct CommonUniforms {
 }
 @group(0) @binding(0) var<uniform> inputs : PngineInputs;
 @group(0) @binding(1) var<storage, read_write> common_out : CommonUniforms;
-
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0, 0, 0),
-    vec4f(0, f, 0, 0),
-    vec4f(0, 0, far * nf, -1),
-    vec4f(0, 0, far * near * nf, 0));
-}
-fn invPerspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  let a = far * nf;
-  let b = far * near * nf;
-  return mat4x4f(
-    vec4f(aspect / f, 0, 0, 0),
-    vec4f(0, 1.0 / f, 0, 0),
-    vec4f(0, 0, 0, 1.0 / b),
-    vec4f(0, 0, -1, a / b));
-}
 
 fn hashU(n: u32) -> u32 {
   var x = n;

@@ -1,0 +1,101 @@
+; draw_graph_after — `(draw-graph :after …)`: hand-authored steps at the TAIL of
+; the frame a graph emits.
+;
+; A `(draw-graph …)` with no `:name` emits the document's `(frame …)` itself, so
+; a hand-authored `(render-pass …)` has no way into that list: a frame step is
+; one name and a graph is several passes, and a stage name cannot BE a frame
+; step (cross-refs resolve over the lowered forest, where a consumed container's
+; children do not appear). `:before` and `:after` are the two doors. This
+; document is the second one — the graph draws the scene, then `overlay`
+; composites a border over what the graph left in the canvas.
+;
+; The order is not a preference, it is the whole point. The stage clears its
+; attachment, so moving `overlay` into `:before` draws it and then wipes it, and
+; the frame comes out identical to the graph alone; deleting `:after` gets there
+; by the other route. Either way the border is gone, which is what makes this a
+; witness rather than a decoration.
+;
+; `:before` carries the uniform write for the same reason, and it is the pairing
+; that makes the two keys legible side by side: one step ahead of every pass the
+; graph builds, one step behind them all.
+
+(shader-module :name scene :code """
+struct Inputs { time : f32, width : f32, height : f32, aspect : f32 }
+@group(0) @binding(0) var<uniform> inputs : Inputs;
+
+struct VsOut { @builtin(position) pos : vec4f, @location(0) tint : vec3f }
+
+@vertex fn vs(@builtin(vertex_index) i : u32,
+              @builtin(instance_index) inst : u32) -> VsOut {
+  var corner = array<vec2f, 3>(vec2f(0.0, 0.34), vec2f(-0.3, -0.22), vec2f(0.3, -0.22));
+  let a = inputs.time * 0.7 + f32(inst) * 2.0943951;
+  let c = cos(a);
+  let s = sin(a);
+  let p = corner[i];
+  // Spin the blade about its own centre, then swing it out along the same angle.
+  let r = vec2f(p.x * c - p.y * s, p.x * s + p.y * c);
+  let off = vec2f(cos(a) * 0.42, sin(a) * 0.42 * inputs.aspect);
+
+  var out : VsOut;
+  out.pos = vec4f(r + off, 0.0, 1.0);
+  out.tint = vec3f(0.95, 0.55, 0.2) + f32(inst) * vec3f(-0.3, 0.1, 0.35);
+  return out;
+}
+
+@fragment fn fs(in : VsOut) -> @location(0) vec4f { return vec4f(in.tint, 1.0); }
+""")
+
+(shader-module :name border :code """
+struct VsOut { @builtin(position) pos : vec4f, @location(0) uv : vec2f }
+
+@vertex fn vs(@builtin(vertex_index) i : u32) -> VsOut {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  var out : VsOut;
+  out.pos = vec4f(p[i], 0.0, 1.0);
+  out.uv = p[i] * 0.5 + vec2f(0.5);
+  return out;
+}
+
+// A border and nothing else: alpha is 1 within 0.06 of an edge and 0 inside, so
+// the blend below leaves every pixel the graph drew in the middle untouched.
+// That is what makes the overlay legible AS an overlay rather than as a frame
+// the graph could have drawn itself.
+@fragment fn fs(in : VsOut) -> @location(0) vec4f {
+  let d = min(min(in.uv.x, 1.0 - in.uv.x), min(in.uv.y, 1.0 - in.uv.y));
+  return vec4f(0.1, 0.85, 0.75, 1.0 - step(0.06, d));
+}
+""")
+
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+(queue :name writeUniforms
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+; The tail step, written by hand: its own pipeline, its own blend, and
+; `:load-op load` because by the time it runs the canvas already holds the
+; graph's output.
+(render-pipeline :name borderPipe :layout auto
+  (vertex :module border :entry vs)
+  (fragment :module border :entry fs
+    (target :format preferred-canvas-format
+      (blend
+        (color :src-factor src-alpha :dst-factor one-minus-src-alpha :operation add)
+        (alpha :src-factor one :dst-factor one-minus-src-alpha :operation add))))
+  (primitive :topology triangle-list))
+
+(render-pass :name overlay :pipeline borderPipe
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (draw :vertex-count 3))
+
+(draw-graph :before [writeUniforms] :after [overlay]
+  (stage :name main
+    (color-attachment :view context-current-texture
+      :clear-value [0.03 0.03 0.06 1] :load-op clear :store-op store)
+    (primitive :topology triangle-list)
+    (bind-group :name sceneBG :group 0
+      (entry :binding 0 :buffer uniforms)))
+
+  (geometry :name blades
+    (draw :vertex-count 3 :instance-count 3)
+    (in :stage main
+      (vertex :module scene :entry vs)
+      (fragment :module scene :entry fs))))

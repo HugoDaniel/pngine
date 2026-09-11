@@ -3,7 +3,9 @@
 ; `:index-of` index buffer, a depth texture and draw-indexed, here with a
 ; position3+normal3+uv2 vertex format (stride 32).
 
-(shader-module :name shader :code """
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+
+(shader-module :name shader :imports [perspective] :code """
 struct Inputs {
   time: f32,
   canvasW: f32,
@@ -11,16 +13,6 @@ struct Inputs {
   aspect: f32,
 };
 @group(0) @binding(0) var<uniform> u: Inputs;
-
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0, 0, 0),
-    vec4f(0, f, 0, 0),
-    vec4f(0, 0, far * nf, -1),
-    vec4f(0, 0, far * near * nf, 0));
-}
 
 struct VSOut {
   @builtin(position) pos: vec4f,

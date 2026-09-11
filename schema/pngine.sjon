@@ -328,6 +328,14 @@
     :description "Reference to a declared (shader-module :name …)."
     :underlying symbol
     :cross-ref (cross-ref :target shader-module))
+  ; A fragment reference names the `wgsl` group and ONLY that group — never a
+  ; union with `shader-module`. A reference slot names one target group (the
+  ; overhaul's ref-kind rule), and the two are different things: a fragment is
+  ; text to be assembled, a module is a GPUShaderModule.
+  (value-kind :name wgsl-ref
+    :description "Reference to a declared (wgsl :name …) fragment."
+    :underlying symbol
+    :cross-ref (cross-ref :target wgsl))
   (value-kind :name buffer-ref
     :description "Reference to a declared (buffer :name …)."
     :underlying symbol
@@ -393,6 +401,7 @@
     :members (member-set
       (member :name pngine-inputs :description "16 B: time, canvasWidth, canvasHeight, aspect (all f32).")
       (member :name scene-time-inputs :description "12 B: time, canvasWidth, canvasHeight (all f32) — the first 12 bytes of pngine-inputs. True scene timing is not modelled yet.")
+      (member :name pngine-frame-inputs :description "20 B: the 16 B of pngine-inputs, then frameIndex (u32) — the executor's frame counter, which is also the ping-pong pool phase. For a jitter sequence (TAA) or any per-frame rotation.")
       (member :name pointer-inputs :description "48 B: x, y, clickX, clickY, dx, dy, buttons, pressure, modifiers, scrollX, scrollY, _pad (all f32).")))
   ; The two ref arms are ONE cross-ref target group, never a union of two ref
   ; kinds: a union resolves first-match while the emitter looks the name up in
@@ -721,6 +730,22 @@
     :description "Texture size: an [w h d] extent, `canvas` to track the canvas, or an (image-bitmap …) to take the decoded image's size."
     :underlying union
     :union (union-shape :alternatives [extent3 texture-size-mode image-bitmap-ref]))
+  ; A canvas-tracking texture at a FRACTION of the canvas — half-resolution
+  ; ambient occlusion, a quarter-resolution bloom chain. It is a pngine concept,
+  ; like `canvas` itself: WebGPU has no relative extent, the runtime resolves
+  ; both at create time and again on resize. `:exclusive-min true` because a
+  ; zero-texel texture is invalid GPU in every direction; the 8 is a sanity
+  ; ceiling on supersampling, not a device limit.
+  (value-kind :name canvas-scale-value
+    :description "Fraction of the canvas, per dimension, for a `:size canvas` texture (0.5 = half resolution). Rounded to whole texels, never below 1."
+    :underlying number
+    :numeric (numeric-bounds :min 0 :max 8 :exclusive-min true)
+    :unit (unit-shape :reject true)
+    :repr (repr-shape :type f32))
+  (value-kind :name canvas-scale
+    :description "Canvas scale: a literal, a bounded expression, or a bare (define …) reference."
+    :underlying scalar-or-ref
+    :scalar-or-ref (scalar-or-ref-shape :base canvas-scale-value :ref define-ref))
   (value-kind :name index-format
     :description "GPUIndexFormat — byte width of index-buffer entries."
     :underlying symbol
@@ -967,6 +992,15 @@
     :description "File path relative to the source document (non-empty, no newlines)."
     :underlying string
     :string-bounds (string-bounds :format path))
+  ; The one string kind that carries CONTENT rather than a name or a path.
+  ; SJON's `:format` set is email|uri|path|uuid|semver, so there is no schema
+  ; check for base64 — the emitter decodes and reports `data_base64_invalid`
+  ; with the offending offset, which is a better diagnostic than a format
+  ; mismatch could be anyway. ASCII whitespace is stripped before decoding, so
+  ; a wrapped triple-quoted literal is legal and diffs by line.
+  (value-kind :name base64-text
+    :description "Standard base64 (RFC 4648, padded). ASCII whitespace is ignored, so the text may be wrapped across lines."
+    :underlying string)
 
   ; ---- vectors ----
   (value-kind :name float-list :underlying vector :vector (vector-shape :element real))
@@ -1038,9 +1072,9 @@
   ; ambiguous. (It used to be a union tried in order, while the emitter kept
   ; one table for both pass kinds — a collision silently dropped the render pass.)
   (value-kind :name frame-step
-    :description "One frame step: a render-pass, compute-pass, or queue name (one namespace across the three)."
+    :description "One frame step: a render-pass, compute-pass, queue or step-group name (one namespace across the four)."
     :underlying symbol
-    :cross-ref (cross-ref :target [render-pass compute-pass queue]))
+    :cross-ref (cross-ref :target [render-pass compute-pass queue step-group]))
   (value-kind :name frame-step-list
     :description "Passes and queues run every frame, in order."
     :underlying vector :vector (vector-shape :element frame-step :max-len 2048))
@@ -1052,6 +1086,30 @@
   (value-kind :name texture-format-list
     :description "Color target formats a (render-bundle …) is recorded against (at least one)."
     :underlying vector :vector (vector-shape :element texture-format :min-len 1))
+  ; A `(pass … :reads …)` binds one sampled texture per entry, into the same
+  ; group 0 the prelude owns. `:max-len 16` is `maxSampledTexturesPerShaderStage`,
+  ; WebGPU's own default limit — the ceiling the whole group shares, so a list at
+  ; the bound already leaves nothing for the pass's dependencies.
+  (value-kind :name texture-ref-list
+    :description "Declared (texture …) names a (pass …) samples, bound after its prior-pass dependencies in this order."
+    :underlying vector :vector (vector-shape :element texture-ref :min-len 1 :max-len 16))
+  ; 64 is MAX_WGSL_DEPS (src/bytecode/format.zig), reused as a schema bound so
+  ; the wire's limit and the authoring limit cannot drift apart.
+  (value-kind :name wgsl-ref-list
+    :description "Fragments a module or pass assembles before its own text, in dependency order."
+    :underlying vector :vector (vector-shape :element wgsl-ref :min-len 1 :max-len 64))
+  ; NOT a cross-ref list: these are WGSL identifiers, not names of SJON forms.
+  ; The emitter checks them against the assembled module's own declarations.
+  ; `wgsl-name` is named rather than the bare `symbol` primitive for the same
+  ; reason `entry-point` and `override-name` are (F8): a slot that names
+  ; something inside an artifact SJON does not parse still gets a name, so the
+  ; closed-symbol sweep records it as a deliberate exception.
+  (value-kind :name wgsl-name
+    :description "An identifier declared inside WGSL — a function, struct, alias or module-scope constant. Opaque to SJON, checked by the emitter against the assembled module's reflection."
+    :underlying symbol)
+  (value-kind :name wgsl-name-list
+    :description "WGSL identifiers a fragment uses but does not declare (its holes), which the importing module must supply."
+    :underlying vector :vector (vector-shape :element wgsl-name :min-len 1 :max-len 64))
   (value-kind :name data-file-list
     :description "WASM file paths (a pass's :file) whose data segments become D0, D1, … storage buffers."
     :underlying vector :vector (vector-shape :element file-path))
@@ -1140,6 +1198,14 @@
   (value-kind :name compute-pipeline-section :underlying form :heads (head-set
     (head :name compute :min 1 :max 1)))
   (value-kind :name compute-section :underlying form :heads (head-set :names [constant]))
+  ; What an `(import …)` rebinds: the imported document's CONSUMED forms — its
+  ; `(define …)` constants and its `(wgsl …)` fragments — spelled as the same
+  ; form they replace. A name→value record is repeated child forms, not a key
+  ; holding a list — the rule overhaul 02 set and §409 relearned. No `:min`: an
+  ; import with no children is the whole document, verbatim. An emitting form
+  ; (a texture, a pipeline) is not admitted: it has an emission position, and
+  ; re-declaring one at top level is `duplicate_cross_ref_target` anyway.
+  (value-kind :name import-section :underlying form :heads (head-set :names [define wgsl]))
   (value-kind :name attribute-item :underlying form :heads (head-set :names [attribute]))
   (value-kind :name target-section :underlying form :heads (head-set
     (head :name blend :max 1)))
@@ -1157,6 +1223,53 @@
     (head :name draw-indexed-indirect)
     (head :name timestamp-writes :max 1)
     (head :name occlusion-query)))
+  ; ---- (draw-graph …) head-sets ----
+  ; Every head below names the GLOBAL form of that name — the same
+  ; `(depth-stencil …)`, `(bind-group …)`, `(vertex-buffer …)` a pipeline, a
+  ; group and a vertex stage already take — so the hook clones what the author
+  ; wrote and a key added to one of those forms reaches the graph with no edit
+  ; here. The two exceptions are `(vertex …)` / `(fragment …)`, declared
+  ; slot-local under `(in …)`: see the comment there.
+  (value-kind :name stage-ref
+    :description "Reference to a (stage :name …) of the same (draw-graph …)."
+    :underlying symbol
+    :cross-ref (cross-ref :target stage))
+  (value-kind :name draw-graph-section :underlying form :heads (head-set
+    (head :name stage)
+    (head :name geometry)))
+  ; A stage is a pass's attachments plus the pipeline state every geometry in
+  ; it shares. Its `(bind-group …)` children carry no `:layout` — the graph
+  ; fills one in per generated pipeline — which is the spelling §416 gave a
+  ; group whose pipeline is left open.
+  (value-kind :name stage-section :underlying form :heads (head-set
+    (head :name color-attachment)
+    (head :name target)
+    (head :name depth-stencil-attachment :max 1)
+    (head :name depth-stencil :max 1)
+    (head :name primitive :max 1)
+    (head :name bind-group)))
+  ; A geometry is its buffers, its vertex layout, ONE draw command, and one
+  ; `(in …)` per stage it appears in. The head-set cannot say "exactly one of
+  ; these four", so the hook does.
+  (value-kind :name geometry-section :underlying form :heads (head-set
+    (head :name vertex-buffer)
+    (head :name draw :max 1)
+    (head :name draw-indexed :max 1)
+    (head :name draw-indirect :max 1)
+    (head :name draw-indexed-indirect :max 1)
+    (head :name in)))
+  (value-kind :name in-section :underlying form :heads (head-set
+    (head :name vertex :min 1 :max 1)
+    (head :name fragment :max 1)
+    (head :name primitive :max 1)))
+  ; What an `(in …)`'s stage forms may hold: overrides, and nothing else. The
+  ; global `(vertex …)` also admits `(vertex-buffer …)` and the global
+  ; `(fragment …)` REQUIRES at least one `(target …)`; here the geometry owns
+  ; the vertex layout and the stage's color attachments derive the targets, so
+  ; both absences are the narrowing, enforced by this head-set rather than by
+  ; the hook.
+  (value-kind :name in-stage-section :underlying form :heads (head-set
+    (head :name constant)))
   (value-kind :name bind-entry-item :underlying form :heads (head-set :names [entry]))
   (value-kind :name queue-action :underlying form :heads (head-set :names [write-buffer copy-texture-to-texture copy-external-image-to-texture resolve-query-set copy-buffer-to-buffer]))
   ; Both texture copies take exactly one endpoint of each kind. The heads
@@ -1201,11 +1314,32 @@
     (head :name cylinder :max 1)
     (head :name teapot :max 1)
     (head :name dragon :max 1)
-    (head :name wasm-data :max 1)))
+    (head :name wasm-data :max 1)
+    (head :name bytes :max 1)))
 
   ; =====================================================================
   ; Top-level forms
   ; =====================================================================
+
+  ; This document is another document plus a rebinding of its consumed forms.
+  ; The imported forms come first, then this document's own; the `(import …)`
+  ; form itself is CONSUMED before validation, like a `(wgsl …)` fragment, so
+  ; it lowers to nothing and never reaches the emitter.
+  ;
+  ; Only a consumed form — `(define …)`, `(wgsl …)` — may be rebound, and that
+  ; is not a restriction the emitter has to enforce: two documents declaring
+  ; one texture is `duplicate_cross_ref_target` from SJON, reported on the
+  ; second declaration. A consumed form has no emission position (moving a
+  ; define or a fragment is byte-identical, both probed), so a rebinding
+  ; perturbs nothing — the composed document emits exactly what the imported
+  ; one emits, with the value or the fragment's text changed. Rebinding a name
+  ; the imported document does not declare under that head is refused, which
+  ; is what makes a typo loud.
+  (form :name import
+    :description "Compile another document ahead of this one, rebinding its (define …) constants and (wgsl …) fragments. The imported forms come first; the import itself is consumed and emits nothing."
+    :positional import-section
+    (key :name file :type file-path
+      :description "Path to the .sjon document this one extends, resolved like every other :file — relative, no climbing out of the compile's root."))
 
   (form :name define
     :description "Named numeric constant, usable in every numeric slot and vector element as a bare name or inside a bounded expression."
@@ -1309,18 +1443,55 @@
     (key :name alpha-mode :type canvas-alpha-mode :default opaque
       :description "GPUCanvasConfiguration.alphaMode — opaque (the default) or premultiplied, which lets the page behind the canvas show through wherever the rendered alpha is below 1."))
 
+  ; A FRAGMENT: named WGSL that is not a GPU object. It exists only to be
+  ; imported, is never validated, minified or shipped on its own, and lowers to
+  ; nothing — the assembled module that imports it is what reaches wgslender.
+  ;
+  ; A fragment may reference names it does not declare (its HOLES), because WGSL
+  ; is order-independent at module scope: the assembled text is one unit, so
+  ; whichever import or root declares the name satisfies it. That is what lets
+  ; one `fbm` fragment be instantiated over three different `noise` functions
+  ; without a WGSL extension. `:requires` declares the holes so a missing one is
+  ; reported against the fragment rather than as an unresolved identifier
+  ; somewhere in an assembled module the author never wrote.
+  (form :name wgsl
+    :description "A named WGSL fragment, from inline :code or a :file, assembled into the modules that :imports it. Not a GPU object: never validated, minified or shipped alone."
+    (key :name name :type symbol
+      :description "Fragment name referenced by another fragment's, a (shader-module …)'s or a (pass …)'s :imports.")
+    (key :name code :type string :optional true
+      :description "WGSL source text, kept verbatim. Exactly one of :code or :file.")
+    (key :name file :type file-path :optional true
+      :description "Path to a .wgsl file, relative to the source document. Exactly one of :code or :file.")
+    (key :name imports :type wgsl-ref-list :optional true
+      :description "Fragments this one is assembled behind, in dependency order. The graph must be acyclic and each fragment appears once per assembled module.")
+    (key :name requires :type wgsl-name-list :optional true
+      :description "WGSL identifiers this fragment uses but does not declare. Every one must be declared by the module that imports it (or by a sibling fragment) — reached or not, since validation runs before dead-code elimination. `validate` checks the list against the fragment's own text and warns both ways: a listed name never used as a hole, a hole never listed.")
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [code])
+      (alt :keys [file])))
+
   (form :name shader-module
-    :description "A named WGSL module. The source is opaque text to SJON."
+    :description "A named WGSL module. The source is opaque text to SJON. With :imports it is the ROOT of an assembled module: its fragments' text in dependency order, then its own."
     (key :name name :type symbol
       :description "Module name referenced by a pipeline stage's :module key.")
-    (key :name code :type string
-      :description "WGSL source text, kept verbatim (a triple-quoted string's indentation is part of the shader)."))
+    (key :name code :type string :optional true
+      :description "WGSL source text, kept verbatim (a triple-quoted string's indentation is part of the shader). Exactly one of :code or :file.")
+    (key :name file :type file-path :optional true
+      :description "Path to a .wgsl file, relative to the source document. Exactly one of :code or :file.")
+    (key :name imports :type wgsl-ref-list :optional true
+      :description "Fragments assembled ahead of this module's own text. Minification and dead-code elimination run once over the whole assembled module, so names stay consistent across fragment boundaries and unreached fragment code is dropped.")
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [code])
+      (alt :keys [file])))
 
   (form :name data
-    :description "Binary data: an inline float32 array, a positional shape sub-form
-                 (cube/teapot/…) the emitter expands to vertex bytes, or a `:file`
-                 image file the emitter reads from disk and embeds as
-                 [mime_len][mime][bytes] (consumed by an image-bitmap)."
+    :description "Binary data, from exactly one source: an inline float32 array, a
+                 positional shape sub-form (cube/teapot/…) the emitter expands to
+                 vertex bytes, a positional `(bytes …)` carrying verbatim bytes
+                 from a sidecar file or inline base64, or a `:file` image file the
+                 emitter reads from disk and embeds as [mime_len][mime][bytes]
+                 (consumed by an image-bitmap). Only the image source is wrapped,
+                 and only it cannot size a buffer."
     :positional data-shape-section
     (key :name name :type symbol
       :description "Data name referenced by buffer :data / :index-of and image-bitmap :data.")
@@ -1331,9 +1502,10 @@
     (key :name mime :type string :optional true
       :description "MIME type stored with the :file bytes (e.g. image/png); default application/octet-stream. Ignored when there is no :file.")
     ; One source per (data …): the inline array OR the file (both used to
-    ; validate and the file won in silence). The third source, a
-    ; positional generator, is a head-set the group cannot count against; the
-    ; emitter refuses a generator beside either key, and a (data …) with none.
+    ; validate and the file won in silence). The remaining sources are
+    ; positional — the eight shape generators, `(wasm-data …)` and `(bytes …)` —
+    ; and a head-set is something the group cannot count against; the emitter
+    ; refuses a positional source beside either key, and a (data …) with none.
     (exclusive-group :cardinality at-most-one
       (alt :keys [float32])
       (alt :keys [file])))
@@ -1373,6 +1545,22 @@
     :description "Stanford dragon, indexed static mesh: 6710 vertices, 11102 triangles (~222KB; exceeds the <50KB payload target)."
     :open true (key :name format :type shape-format-list :optional true))
 
+  ; Verbatim bytes. The other eight positional sources COMPUTE their bytes and
+  ; `:file` on the parent WRAPS its bytes in `[mime_len][mime]` for an
+  ; image-bitmap; this one does neither, which is the whole of it. It is also
+  ; the only `(data …)` source a host can reach from a lowering hook: a hook
+  ; emits forms, so it emits a path (or the base64) and the compiler reads the
+  ; bytes — `Compiler.Options.resolver` supplies them with no filesystem at all.
+  (form :name bytes
+    :description "Verbatim bytes as a (data …) source: a sidecar file read at compile time, or inline base64. Stored with no MIME prefix and sized like an inline array, so a buffer's :data can size and fill from it — which (data … :file …) deliberately cannot."
+    (key :name file :type file-path :optional true
+      :description "Binary file path relative to the source document, embedded byte-for-byte. Exactly one of :file or :base64.")
+    (key :name base64 :type base64-text :optional true
+      :description "The bytes inline, base64-encoded, for a document that carries its own data. Exactly one of :file or :base64.")
+    (exclusive-group :cardinality exactly-one
+      (alt :keys [file])
+      (alt :keys [base64])))
+
   (form :name wasm-data
     :description "Static WASM data generator (positional child of (data …)): the module's :func is called once at buffer-create time and its returned bytes fill the buffer via mappedAtCreation."
     (key :name file :type file-path
@@ -1399,6 +1587,11 @@
       :description "Texture dimensionality: 1d, 2d (default), or 3d. A 3d texture needs a third :size element; sampling 1d/3d/array textures needs a matching texture view.")
     (key :name mip-level-count :type subresource-count :optional true
       :description "GPUTextureDescriptor.mipLevelCount — number of mip levels to allocate (default 1). Levels beyond what's written stay uninitialized until generated.")
+    ; Only meaningful beside `:size canvas`: an explicit extent is already the
+    ; size the author wants, and an (image-bitmap …) is the image's. Refused on
+    ; either, rather than silently ignored.
+    (key :name scale :type canvas-scale :optional true
+      :description "Fraction of the canvas this texture takes in each dimension (requires :size canvas). The runtime rounds and clamps to at least 1 texel, at create time and on every resize.")
     (key :name pool :type pool-size :optional true
       :description "Create N sequential texture ids for ping-pong (actual id = base + (frame + offset) % N)."))
 
@@ -1476,7 +1669,7 @@
     ; document said twice what the widened union now says once, and the
     ; exclusive-group existed to stop an author saying both.
     (key :name data :type write-buffer-source
-      :description "Source: a (data …) ref, a (wasm-call …) whose result is written each frame, or a runtime builtin — pngine-inputs (16B time/width/height/aspect), scene-time-inputs (12B), pointer-inputs (48B)."))
+      :description "Source: a (data …) ref, a (wasm-call …) whose result is written each frame, or a runtime builtin — pngine-inputs (16B time/width/height/aspect), scene-time-inputs (12B), pngine-frame-inputs (20B, + frameIndex), pointer-inputs (48B)."))
 
   ; Both ends of a copy are dictionaries in the IDL
   ; (GPUTexelCopyTextureInfo / GPUCopyExternalImageSourceInfo), so they are
@@ -1564,11 +1757,18 @@
   (form :name bind-group
     :description "Bind group. `pool` + per-entry `ping-pong` drive ping-pong. The
                   layout is a pipeline's auto-layout or an explicit
-                  (bind-group-layout …) — one required :layout key naming either."
+                  (bind-group-layout …), named by :layout — or left open: with
+                  no :layout the emitter derives one GPU bind group per pipeline
+                  that binds the group, pruned to what that pipeline reaches."
     :positional bind-entry-item
     (key :name name :type symbol)
-    (key :name layout :type bind-group-layout-spec
-      :description "The layout this group is built against: a pipeline (its auto-derived layout) or an explicit (bind-group-layout …).")
+    ; Optional since the polymorphism queue's item 2 (§416). Absent, the group is
+    ; the effect annotation with the pipeline left open: one wire instance per
+    ; pipeline a pass or bundle binds it under, each pruned to the entries that
+    ; pipeline's entry points reach — the same inference `:layout auto` runs,
+    ; from the same reflection. The key itself is the authored escape hatch.
+    (key :name layout :type bind-group-layout-spec :optional true
+      :description "The layout this group is built against: a pipeline (its auto-derived layout) or an explicit (bind-group-layout …). Omit it to derive one bind group per pipeline that binds the group (through a render-pass, compute-pass or render-bundle), each pruned to what that pipeline's entry points reach; a pipeline with an explicit (pipeline-layout …) cannot bind such a group.")
     ; `:group` is `@group(N)` in the WGSL — the word WebGPU and WGSL both use,
     ; and it pairs with the entries' `:binding` the way the shader spells them.
     ; It was `:layout-index`, which named the mechanism rather than the
@@ -1581,6 +1781,16 @@
       :description "Which @group index of the pipeline's layout this group binds (spec baseline < 4). Ignored when :layout names an explicit (bind-group-layout …).")
     (key :name pool :type pool-size :optional true
       :description "Create N sequential bind-group ids for ping-pong selection.")
+    ; CONTRIBUTING pitfall 37, retired for anyone who opts in. `:layout auto`
+    ; keeps only the bindings the pipeline's entry points statically reach, so a
+    ; group that also binds an unreached resource desyncs from the layout and
+    ; ABORTS at the first set_bind_group — a runtime failure with no compile-time
+    ; symptom. With this true the emitter drops those entries instead, which is
+    ; what lets one bind-group description serve several variants of a material.
+    ; Only meaningful on the PIPELINE arm: an explicit (bind-group-layout …) is
+    ; the layout, so there is nothing to derive a reachable set from.
+    (key :name prune-unused :type boolean :default false
+      :description "Drop each (entry …) whose (group, binding) no entry point of the :layout pipeline reaches. Prevents the bind-group/auto-layout desync that aborts at set_bind_group. Ignored when :layout names an explicit (bind-group-layout …); refused as redundant on a group with no :layout, which is pruned per pipeline already.")
     ; Slot-local entry form: `(entry :binding N :buffer|:sampler|:texture|:texture-view R)`.
     ; Resolved LOCAL-FIRST under bind-group, so this `entry` is distinct from the
     ; bind-group-layout's entry. (A global `entry` stand-in used to sit above
@@ -1751,7 +1961,7 @@
   ; dict to a runtime. Two stages that specialise one module differently are
   ; refused rather than silently duplicating the module.
   (form :name constant
-    :description "Specialise a WGSL `override` with a compile-time value. The declaration becomes a `const` in the shipped shader, so the value participates in const-folding and dead-code elimination — an unused branch leaves the payload entirely."
+    :description "Specialise a WGSL `override` with a compile-time value. The declaration becomes a `const` in the shipped shader, so the value is fixed at build time and the name is free to be minified. It does NOT remove an untaken branch: wgslender's dead-code elimination works by reachability from entry points, not by folding conditions, so `if (QUALITY > 1u)` keeps both arms (measured, journal §343). Specialisation is per assembled MODULE, so two roots importing one fragment may fix its override at two different values."
     (key :name name :type override-name
       :description "The WGSL `override` identifier this value is for.")
     (key :name value :type override-number
@@ -2100,6 +2310,18 @@
     (key :name index-buffer :type buffer-ref :optional true
       :description "Index buffer when the bundle draws indexed."))
 
+  ; A named sequence of frame steps, expanded WHERE IT IS NAMED. This is what a
+  ; `(draw-graph …)` or `(pass-graph …)` with a `:name` emits instead of a
+  ; frame: a graph is several passes, so without a name for the set there is no
+  ; way for one frame to run two graphs, and the containers each had to own the
+  ; document's only frame and refuse the other. Nothing reaches the wire — the
+  ; emitter inlines a group's steps into the frame that names it, so a frame
+  ; over groups emits exactly the ops the same frame written out by hand does.
+  (form :name step-group
+    :description "A named sequence of frame steps, inlined wherever a (frame …) or another group names it. Emitted by a named (draw-graph …) / (pass-graph …); writable by hand to name a sequence once and run it in several frames."
+    (key :name name :type symbol)
+    (key :name perform :type frame-step-list
+      :description "The steps this group stands for, in order."))
   (form :name frame
     :description "Frame program: what runs each frame, in order."
     (key :name name :type symbol)
@@ -2141,26 +2363,220 @@
   ; NO :lowering — consumed by the container, so they never reach the emitter.
   (value-kind :name pass-item :underlying form :heads (head-set :names [pass]))
 
+  ; A `(pass …)` carries `(constant …)` children exactly as a hand-authored
+  ; stage does. It needs its own section because a pass has no stage form to
+  ; hang them on — the hook builds the `(vertex …)`/`(fragment …)`/`(compute …)`
+  ; itself — so the author writes them on the pass and the hook decides which of
+  ; the modules it builds from their text each one reaches. That forwarding rule
+  ; is stated on the `(pass …)` form below; `constant` is in `:produces`
+  ; because of it.
+  (value-kind :name pass-section :underlying form :heads (head-set :names [constant]))
+
   (form :name pass
     :description "One `(pass …)`: a fullscreen fragment (or compute) shader-art stage.
-                  The hook detects features from the WGSL (pngine/pointer/feedback)."
+                  The hook detects features from the WGSL (pngine/pointer/feedback).
+                  Positional (constant …) children specialise the `override`s of
+                  the modules built from this pass's text."
+    ; The `(constant …)` children. A pass's modules are built BY the hook, so
+    ; the author has no stage form to write them on; they sit on the pass and
+    ; are forwarded onto every stage of every pipeline built from the author's
+    ; text — never onto pngine's own blit shader, exactly like `:imports`.
+    ;
+    ; A pass builds at most two such modules: the main one (the whole `:code`,
+    ; prelude and all) and, when the code declares `@fragment fn post(…)`, the
+    ; post one — which is a prelude, the fullscreen vertex shader and the post
+    ; function, nothing else. A function body cannot hold a module-scope
+    ; `override`, so an override the POST module declares can only have come
+    ; from `:imports`, and both modules import the same list. That is the whole
+    ; forwarding rule: a constant naming an override the `:code` itself declares
+    ; reaches the main module only — the post module has no such declaration and
+    ; specialising it there would refuse — and every other constant reaches
+    ; both. A pass with no `:imports` at all naming an override its own code
+    ; does not declare is refused by the hook, which can still name the pass;
+    ; once fragments are in play only the emitter knows, and it names the module.
+    :positional pass-section
     (key :name name :type symbol)
     (key :name code :type string
       :description "WGSL fragment (or compute) source; the hook injects the binding prelude (pngine uniforms, pointer, sampler, dep/feedback textures, D0… data buffers). Required — the hook always refused its absence.")
     (key :name feedback :type boolean :optional true
       :description "Ping-pong texture pair for feedback; the previous frame is readable as prev_<name>.")
+    ; The intermediate's texel format, which is ONE value in WebGPU terms: the
+    ; texture this pass renders into and the (target :format …) of the pipeline
+    ; that renders it. Refused on a pass that draws straight to the canvas
+    ; (there is no intermediate, and the canvas format is the context's), on a
+    ; depth/stencil format (a pass writes a COLOR attachment), and on a compute
+    ; pass (its `screen` is a storage texture whose WGSL format is a narrower
+    ; set, and pngine's blit samples it as texture_2d<f32>).
+    (key :name format :type texture-format :optional true
+      :description "Texel format of the texture this pass renders into, and of its pipeline's color target (default rgba8unorm). A later pass reading it gets a texture_2d<T> whose T follows this format's sample class.")
+    ; The one-shot seed: compute WGSL that writes the texture this pass renders
+    ; into, ONCE per loaded payload, before the first frame's steps. It is what
+    ; gives a `:feedback true` chain a starting state — an unseeded pool is
+    ; zeroes, and a pass that reads what it wrote last frame reads nothing
+    ; forever. It lowers to what `(init …)` lowers to: a module whose prelude
+    ; binds that texture as `screen`, a compute pipeline and bind group, and a
+    ; compute pass named into the emitted frame's `:init` list.
+    ;
+    ; Four refusals, each naming what it could not do. The seed may not name
+    ; `pngine` (`:init` steps run ahead of the `(queue …)` step that fills the
+    ; uniform buffer, so every field would read 0 — `textureDimensions(screen)`
+    ; is the extent a seed wants). It may not sit on a pass that draws straight
+    ; to the canvas (there is no intermediate to seed). It may not sit in a
+    ; NAMED `(pass-graph …)`, which emits a `(step-group …)`, and only a
+    ; `(frame …)` has an `:init` list. And the pass's `:format` must be one of
+    ; WebGPU's core storage formats, because seeding adds `storage-binding` to
+    ; that texture's usage — the one place this key reaches a GPU descriptor.
     (key :name init :type string :optional true
-      :description "One-shot WGSL compute source run on the first frame only.")
+      :description "One-shot WGSL compute source, run once per loaded payload before the first frame, writing this pass's own target as `screen`.")
     (key :name file :type data-file-list :optional true
-      :description "WASM file paths (relative to the document) → D0, D1, … storage buffers; the hook injects var<storage, read> D{i}: array<f32>. The same :file every other file-on-disk key spells."))
+      :description "WASM file paths (relative to the document) → D0, D1, … storage buffers; the hook injects var<storage, read> D{i}: array<f32>. The same :file every other file-on-disk key spells.")
+    ; Textures this pass samples that no pass in the graph produced — a depth
+    ; buffer or G-buffer a hand-authored (render-pass …) wrote, which is what
+    ; makes a fullscreen post-processing stage expressible as sugar at all. The
+    ; prelude declares one binding per entry, by the TEXTURE's name, typed from
+    ; its :format (texture_depth_2d for a depth format), after the prior-pass
+    ; dependency bindings; the bind group binds the same set. An entry the pass's
+    ; WGSL never names is refused, not dropped: the pipeline's :layout auto holds
+    ; only what its entry points reach, so a dropped-but-bound entry is the bind
+    ; group WebGPU refuses (CONTRIBUTING pitfall 37).
+    ; The pass's intermediate at a fraction of the canvas, which is what a
+    ; half-resolution ambient-occlusion or a quarter-resolution bloom stage is.
+    ; It lowers to `:scale` on the `(texture …)` the pass renders into, spelled
+    ; the same way, and the prelude gains `const PASS_SCALE` so the shader can
+    ; find its own extent — `pngine.width`/`height` stay the CANVAS.
+    (key :name scale :type canvas-scale :optional true
+      :description "Render this pass's intermediate at a fraction of the canvas in each dimension. The prelude declares `const PASS_SCALE: f32` when this is set; pngine.width/height keep meaning the canvas.")
+    (key :name reads :type texture-ref-list :optional true
+      :description "Declared (texture …) forms this pass samples, bound after its prior-pass dependencies. Each must carry texture-binding usage, be a single-layer 2d texture, be unmultisampled, and be named by this pass's WGSL.")
+    ; Forwarded onto the three modules the hook builds from the author's text,
+    ; never onto pngine's own blit shader. A fragment imported here may NOT
+    ; declare a @group/@binding variable: the prelude numbers group 0 itself and
+    ; no bind group exists for any other group. Feature detection still reads
+    ; the pass BODY only, so a fragment mentioning `pngine.time` does not make
+    ; the prelude declare the uniform.
+    (key :name imports :type wgsl-ref-list :optional true
+      :description "Fragments assembled ahead of this pass's code. They may declare functions, structs and constants, but no resource bindings — the prelude owns group 0."))
 
   (form :name pass-graph
     :description "Container of (pass …) children lowered as a unit so resource ids
                   (esp. cross-pass textures) sequence coherently across all passes."
     :open true
     :positional pass-item
+    ; Named, the graph is a `(step-group …)` and the document writes its own
+    ; `(frame …)` naming it — which is how a pass graph and a draw graph run in
+    ; one frame. Unnamed, it emits the frame itself, as it always has, and is
+    ; then the document's only one.
+    (key :name name :type symbol :optional true
+      :description "Makes this graph a (step-group …) of that name instead of the document's (frame …). A document with two graphs names both.")
+    ; The graph emits the document's frame, so a hand-authored step has no way
+    ; into it — and a document that declares its own (frame …) beside a
+    ; (pass-graph …) compiles TWO, of which the runtime runs the first. This key
+    ; is the way in: the steps land at the head of the emitted frame's :perform,
+    ; ahead of every pass the graph builds, which is what lets a (pass … :reads …)
+    ; read a texture a hand-authored pass wrote this frame.
+    (key :name before :type frame-step-list :optional true
+      :description "Passes and queues run each frame BEFORE the graph's own steps, in this order — they become the head of the emitted (frame …)'s :perform.")
     :lowering (lowering :hook pngine/pass-v1
       :produces [shader-module buffer texture sampler bind-group entry
-                 render-pipeline vertex fragment target
-                 render-pass color-attachment draw frame
-                 compute-pipeline compute compute-pass dispatch queue write-buffer])))
+                 render-pipeline vertex fragment target constant
+                 render-pass color-attachment draw frame step-group
+                 compute-pipeline compute compute-pass dispatch queue write-buffer]))
+
+  ; =====================================================================
+  ; `(draw-graph …)` sugar — container-lowered by pngine/draw-v1
+  ; =====================================================================
+  ; One conceptual draw into many concrete draws: the author writes a table of
+  ; stages (what to draw INTO, and the pipeline state a stage shares) and
+  ; geometries (what to draw, and which stages it appears in), and the hook
+  ; emits the cross product — one pipeline, one bind group per stage group, and
+  ; one render pass per (stage, geometry). `webgpu_shadow_mapping_fragments`
+  ; was four fifths pipeline / pass / bind-group forms saying the same thing
+  ; four times; this is that document's other half of the critique.
+  ;
+  ; The carrier is a pass per draw, not a render bundle per draw: `:color-formats`
+  ; cannot be empty on this wire (docs/abi.md §6.5, cf_count 0 is the frozen
+  ; "guess the canvas" sentinel), so a depth-only stage has no bundle, and the
+  ; native backend stubs bundles outright, which would leave the whole feature
+  ; without a `test-render` gate. The load/store rewrite that carrier needs —
+  ; the stage's ops on the first pass, `load` on the rest, the stage's store-op
+  ; on the last — is written once here instead of by every author.
+  (form :name stage
+    :description "One stage of a (draw-graph …): the attachments a pass writes, plus the pipeline state every geometry drawn in it shares. Becomes one (render-pass …) per geometry."
+    :positional stage-section
+    (key :name name :type symbol)
+    ; Slot-local `(target …)`, and the narrowing is the missing `:format`: a
+    ; stage's targets pair positionally with its `(color-attachment …)`
+    ; children, and the format is read off the attachment, so stating it here
+    ; would be the one thing said twice that D3 exists to prevent. Everything
+    ; else a colour target carries — the blend state and the write mask — has
+    ; nowhere else to live, since a stage owns the attachments a target
+    ; describes. Optional as a group: declare none and every target is the
+    ; derived format alone, exactly as before this key existed.
+    (form :name target
+      :description "Blend state and write mask for one of this stage's colour targets, paired with the (color-attachment …) at the same position. The format is derived from that attachment, so it is not stated here."
+      :positional target-section
+      (key :name write-mask :type write-mask :optional true
+        :description "Channel write mask: bitmask R=1 G=2 B=4 A=8, or all (15; the WebGPU default).")))
+  (form :name geometry
+    :description "One thing a (draw-graph …) draws: its buffers, its vertex layout, one draw command, and an (in …) per stage it appears in."
+    :positional geometry-section
+    (key :name name :type symbol)
+    (key :name vertex-buffers :type buffer-ref-list :optional true
+      :description "Buffers bound to vertex slots 0..N in order, on every pass this geometry generates.")
+    (key :name index-buffer :type buffer-ref :optional true
+      :description "Index buffer for a (draw-indexed …); index format propagates from the buffer's :index-of source."))
+  (form :name in
+    :description "This geometry, drawn in that stage: the entry points, and any state that overrides the stage's."
+    :positional in-section
+    ; A real cross-ref, and it does the checking: a `(stage :name …)` inside
+    ; this container registers as a target, so an unknown or duplicated stage
+    ; name is `not_cross_ref` / `duplicate_cross_ref_target` before the hook
+    ; runs. The hook keeps its own refusal as a backstop for a registry-less
+    ; caller, and because it can name the stages that DO exist.
+    (key :name stage :type stage-ref
+      :description "Name of the (stage …) of this graph this geometry is drawn in.")
+    ; Slot-local `(vertex …)` / `(fragment …)`: the same two keys the global
+    ; stages carry, with a positional section that admits `(constant …)` only.
+    ; See `in-stage-section` for why they cannot be the global forms.
+    (form :name vertex
+      :description "Vertex stage of this (stage, geometry) pipeline: the module + entry point, and (constant …) overrides. The geometry's (vertex-buffer …) children become this stage's buffers."
+      :positional in-stage-section
+      (key :name module :type module-ref
+        :description "The (shader-module …) holding the @vertex entry.")
+      (key :name entry :type entry-point :optional true
+        :description "Entry-point function name (defaults to the module's sole @vertex fn)."))
+    (form :name fragment
+      :description "Fragment stage of this (stage, geometry) pipeline: the module + entry point, and (constant …) overrides. Omit it for a depth-only draw. The stage's color attachments derive the (target …) list."
+      :positional in-stage-section
+      (key :name module :type module-ref
+        :description "The (shader-module …) holding the @fragment entry.")
+      (key :name entry :type entry-point :optional true
+        :description "Entry-point function name (defaults to the module's sole @fragment fn).")))
+
+  (form :name draw-graph
+    :description "Container of (stage …) and (geometry …) children lowered as a unit into the
+                  cross product: one (render-pipeline …), one (bind-group …) per stage group and
+                  one (render-pass …) for each (stage, geometry) pair, in stage-major order."
+    :positional draw-graph-section
+    ; See `(pass-graph :name …)`: named, this graph becomes a `(step-group …)`
+    ; and the document owns its frame; unnamed, it emits the frame itself.
+    (key :name name :type symbol :optional true
+      :description "Makes this graph a (step-group …) of that name instead of the document's (frame …). A document with two graphs names both.")
+    ; The graph emits the document's (frame …) — a stage is several passes, so
+    ; a hand-authored frame could not name one in a single step, and a stage
+    ; name cannot BE a frame step (cross-refs resolve over the lowered forest,
+    ; where a consumed container's children do not appear). These two keys are
+    ; the way in and the way out; a document that declares its own (frame …),
+    ; or a (pass-graph …) beside this one, is refused rather than silently
+    ; compiled to two frames of which the runtime runs the first.
+    (key :name before :type frame-step-list :optional true
+      :description "Passes and queues run each frame BEFORE the graph's own steps — the head of the emitted (frame …)'s :perform.")
+    (key :name after :type frame-step-list :optional true
+      :description "Passes and queues run each frame AFTER the graph's own steps — the tail of the emitted (frame …)'s :perform.")
+    :lowering (lowering :hook pngine/draw-v1
+      :produces [render-pipeline vertex fragment target blend color alpha
+                 constant vertex-buffer attribute primitive depth-stencil
+                 bind-group entry
+                 render-pass color-attachment depth-stencil-attachment
+                 draw draw-indexed draw-indirect draw-indexed-indirect
+                 frame step-group])))

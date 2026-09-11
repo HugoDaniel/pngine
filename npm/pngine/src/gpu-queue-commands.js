@@ -39,14 +39,18 @@ export function dispatchQueueCommand(cmd, view, pos, ops) {
     }
     case 0x21: { // write_time_uniform
       const id = view.getUint16(pos, true), offset = view.getUint32(pos + 2, true), size = view.getUint16(pos + 6, true);
-      const { time, cw, ch } = ops.clock();
-      DEBUG && ops.debug() && console.log(`[GPU] writeTimeUniform buf[${id}] time=${time} cw=${cw} ch=${ch}`);
+      const { time, cw, ch, frame } = ops.clock();
+      DEBUG && ops.debug() && console.log(`[GPU] writeTimeUniform buf[${id}] time=${time} cw=${cw} ch=${ch} frame=${frame}`);
       if (ops.buf[id]) {
         // Staged through the dispatcher's own scratch rather than a fresh
         // Float32Array per write: this runs every frame, once per queue step.
+        // `size` picks the window: 12 (scene-time-inputs), 16 (pngine-inputs),
+        // 20 (pngine-frame-inputs). Filling all 20 regardless costs one store
+        // and keeps the three sources one payload rather than three branches.
         const s = ops.scratch;
         s.time[0] = time; s.time[1] = cw; s.time[2] = ch; s.time[3] = cw / (ch || 1);
-        ops.device.queue.writeBuffer(ops.buf[id], offset, s.timeBytes, 0, Math.min(size, 16));
+        s.frame[0] = frame;
+        ops.device.queue.writeBuffer(ops.buf[id], offset, s.timeBytes, 0, Math.min(size, 20));
       }
       return pos + 8;
     }

@@ -1,0 +1,85 @@
+; pass_game_of_life — `(pass … :init …)`: the one-shot seed.
+;
+; Conway's Life is the shape the key exists for. A `:feedback true` pass reads
+; what it wrote last frame, so on frame 0 it reads its pool's initial contents —
+; zeroes. An unseeded Life grid is a dead Life grid, forever. `:init` is the
+; compute program that writes that texture ONCE per loaded payload, before the
+; first frame's steps run, which is the only moment at which a feedback chain
+; can be given a starting state.
+;
+; The key lowers to what a top-level `(init …)` lowers to, one resource kind
+; over: a module whose prelude binds this pass's own target as `screen`, a
+; compute pipeline and bind group, and a compute pass named into the emitted
+; frame's `:init` list. The one place it reaches a GPU descriptor is the target's
+; usage, which gains `storage-binding` — a render attachment a compute shader
+; also stores into.
+;
+; Delete `:init` and the canvas comes out a flat deep blue: every cell dead, the
+; grid never seeded. That is the fail-probe, and it is why this document is the
+; key's witness rather than a decoration.
+;
+; Two things the seed may not do, both refused with a message rather than
+; silently served:
+;
+;   - It may not name `pngine`. `:init` steps run ahead of `:before` and
+;     `:perform`, so the uniform buffer a `(queue …)` step fills is still zeroes
+;     and `pngine.width` would read 0. `textureDimensions(screen)` is the extent
+;     a seed actually wants, and it needs no binding.
+;   - It may not sit in a NAMED `(pass-graph …)`. A named graph emits a
+;     `(step-group …)`, and only a `(frame …)` has an `:init` list.
+;
+; Nothing here reads `pngine` at all, so the document has no uniform buffer and
+; no per-frame queue write: the whole animation is the feedback pool stepping
+; itself, which also makes every frame of it reproducible on any device.
+
+(pass-graph
+  (pass :name life :feedback true
+    ; The dispatch grid is pngine's reference extent (512x512) over this
+    ; `@workgroup_size`, so the guard below is what keeps a smaller canvas in
+    ; bounds — and what a larger one leaves unseeded outside that square.
+    :init """
+      @compute @workgroup_size(8, 8) fn seed(@builtin(global_invocation_id) id: vec3u) {
+        let dim = textureDimensions(screen);
+        if (id.x >= dim.x || id.y >= dim.y) { return; }
+        // A deterministic integer hash, so the seeded grid is identical on every
+        // device and the render snapshot is a fact rather than a sample.
+        var h = id.x * 1973u + id.y * 9277u + 26699u;
+        h = (h ^ (h >> 15u)) * 2246822519u;
+        h = (h ^ (h >> 13u)) * 3266489917u;
+        h = h ^ (h >> 16u);
+        // ~28% alive: dense enough to keep gliders and blinkers running, sparse
+        // enough that the first generation does not overcrowd itself to death.
+        let alive = f32(h % 100u < 28u);
+        textureStore(screen, vec2i(id.xy), vec4f(alive, alive, alive, 1.0));
+      }
+    """
+    :code """
+      @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+        // `prev_life` is the prelude's `:feedback true` binding: last frame's
+        // output. Read by texel, not sampled — Life counts neighbours, and a
+        // linear filter would average them into fractions.
+        let dim = vec2i(textureDimensions(prev_life));
+        let p = vec2i(pos.xy);
+        var n = 0;
+        for (var dy = -1; dy <= 1; dy++) {
+          for (var dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) { continue; }
+            // Wrapped, so the grid is a torus and nothing dies of being at an edge.
+            let q = (p + vec2i(dx, dy) + dim) % dim;
+            n += select(0, 1, textureLoad(prev_life, q, 0).r > 0.5);
+          }
+        }
+        let was = textureLoad(prev_life, p, 0).r > 0.5;
+        let alive = (was && (n == 2 || n == 3)) || (!was && n == 3);
+        return vec4f(vec3f(select(0.0, 1.0, alive)), 1.0);
+      }
+    """)
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let v = textureLoad(life, vec2i(pos.xy), 0).r;
+      // Living cells warm, dead ones a deep blue rather than black: an unseeded
+      // grid then reads as a flat colour, which is a different failure from
+      // nothing having rendered at all.
+      return vec4f(mix(vec3f(0.04, 0.05, 0.12), vec3f(1.0, 0.72, 0.28), v), 1.0);
+    }
+  """))

@@ -1,0 +1,136 @@
+; The same three noise panels as `pass_fbm_noise.sjon`, written over fragments
+; instead of by copy. The pair is the proof that a fragment changes nothing
+; downstream: both documents render the same image.
+;
+; `fbm` calls a `noise` it never declares. That is the HOLE, and it is what
+; makes one library serve three variants without a WGSL extension: WGSL does not
+; care what order module-scope declarations appear in, so an assembled module is
+; one unit and whichever instance a pass imports fills the name.
+;
+;   value  - bilinear value noise over hash2, 2 octaves
+;   worley - distance to the nearest feature point, 3x3 cell scan, 4 octaves
+;   ridged - 1 - |2 * value - 1|, 6 octaves
+;
+; The three producers read nothing, so the graph fans in: `main` is the only
+; pass that samples, and it samples all three.
+;
+; The octave counts are the second thing the hole buys, and this document is
+; where it shows: `OCTAVES` is declared ONCE, in the `fbm` fragment below, and
+; each pass fixes it at its own value with a `(constant …)` child. Specialisation
+; is per assembled module, so the three passes ship three copies of `fbm` with
+; three different `const OCTAVES` — one library, three depths, no WGSL extension
+; and no second copy of the source. In `pass_fbm_noise.sjon` the same three
+; values have to sit beside three hand-copied declarations of the override.
+
+; -- the library ------------------------------------------------------------
+
+(wgsl :name hash :code """
+fn hash2(p: vec2f) -> f32 { return fract(sin(dot(p, vec2f(127.1, 311.7))) * 43758.5453); }
+""")
+
+; `:requires [noise]` names the hole. Without it a pass that forgets to supply
+; one gets wgslender's unresolved-identifier error somewhere in text nobody
+; wrote; with it, the refusal says which fragment wanted the name.
+(wgsl :name fbm :imports [hash] :requires [noise] :code """
+override OCTAVES: u32 = 5u;
+fn fbm(p: vec2f) -> f32 {
+  var v = 0.0; var a = 0.5; var q = p;
+  for (var i = 0u; i < OCTAVES; i++) { v += a * noise(q); q = q * 2.0 + 17.0; a *= 0.5; }
+  return v;
+}
+""")
+
+; -- the three instances ----------------------------------------------------
+;
+; Each declares `noise`, which is the name `fbm` left open. They import `hash`
+; themselves rather than relying on `fbm` to have pulled it in: a fragment
+; should say what it uses.
+
+(wgsl :name valueNoise :imports [hash] :code """
+fn noise(p: vec2f) -> f32 {
+  let i = floor(p); let f = fract(p);
+  let u = f * f * (3.0 - 2.0 * f);
+  let a = hash2(i);                   let b = hash2(i + vec2f(1.0, 0.0));
+  let c = hash2(i + vec2f(0.0, 1.0)); let d = hash2(i + vec2f(1.0, 1.0));
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+""")
+
+(wgsl :name worleyNoise :imports [hash] :code """
+fn noise(p: vec2f) -> f32 {
+  let i = floor(p); let f = fract(p);
+  var best = 8.0;
+  for (var y = -1; y <= 1; y++) {
+    for (var x = -1; x <= 1; x++) {
+      let g = vec2f(f32(x), f32(y));
+      let cell = i + g;
+      let feature = g + vec2f(hash2(cell), hash2(cell + 7.3)) - f;
+      best = min(best, dot(feature, feature));
+    }
+  }
+  return clamp(sqrt(best), 0.0, 1.0);
+}
+""")
+
+; `vnoise`, not `value`: `value` is the first pass's name, and a pass that reads
+; a prior pass gets `var value: texture_2d<f32>` injected by the prelude. A
+; fragment inherits that collision, since assembly is one namespace.
+(wgsl :name ridgedNoise :imports [hash] :code """
+fn vnoise(p: vec2f) -> f32 {
+  let i = floor(p); let f = fract(p);
+  let u = f * f * (3.0 - 2.0 * f);
+  let a = hash2(i);                   let b = hash2(i + vec2f(1.0, 0.0));
+  let c = hash2(i + vec2f(0.0, 1.0)); let d = hash2(i + vec2f(1.0, 1.0));
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+fn noise(p: vec2f) -> f32 { return 1.0 - abs(2.0 * vnoise(p) - 1.0); }
+""")
+
+; -- the passes -------------------------------------------------------------
+;
+; Every producer is now four lines: the fragment shader and nothing else. The
+; instance it imports is the only thing that differs between them, which is the
+; whole claim the hole makes.
+
+(pass-graph
+  (pass :name value :imports [valueNoise fbm] :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      // The composite shows this texture in one third of the canvas width:
+      // compress the domain so the panel's pixels come out square.
+      let q = vec2f(uv.x * pngine.aspect / 3.0, uv.y) * 8.0 + pngine.time * 0.1;
+      return vec4f(vec3f(fbm(q)), 1.0);
+    }
+  """
+    (constant :name OCTAVES :value 2))
+  (pass :name worley :imports [worleyNoise fbm] :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      let q = vec2f(uv.x * pngine.aspect / 3.0, uv.y) * 8.0 + pngine.time * 0.1;
+      return vec4f(vec3f(fbm(q)), 1.0);
+    }
+  """
+    (constant :name OCTAVES :value 4))
+  (pass :name ridged :imports [ridgedNoise fbm] :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      let q = vec2f(uv.x * pngine.aspect / 3.0, uv.y) * 8.0 + pngine.time * 0.1;
+      return vec4f(vec3f(fbm(q)), 1.0);
+    }
+  """
+    (constant :name OCTAVES :value 6))
+  ; The composite imports nothing: it samples the three textures the passes
+  ; above wrote, which the prelude binds for it.
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      let panel = u32(uv.x * 3.0);
+      let p = vec2f(fract(uv.x * 3.0), uv.y);
+      // textureSampleLevel, not textureSample: `panel` is per-fragment, so the
+      // branches are non-uniform control flow, where implicit-derivative
+      // sampling is a WGSL uniformity error.
+      if (panel == 0u) { return textureSampleLevel(value, samp, p, 0.0); }
+      if (panel == 1u) { return textureSampleLevel(worley, samp, p, 0.0); }
+      return textureSampleLevel(ridged, samp, p, 0.0);
+    }
+  """))

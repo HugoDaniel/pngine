@@ -1,0 +1,14 @@
+; Invalid: a `:reads` texture with more than one array layer. Its default view
+; is `2d-array`, and the prelude declares a plain `texture_2d`. A layered
+; texture needs an explicit `(texture-view …)` naming the layer, which this
+; sugar does not build.
+
+(texture :name shadowCascades :size [512 512 4] :format rgba8unorm
+  :usage [texture-binding copy-dst])
+(pass-graph
+  (pass :name main :reads [shadowCascades] :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return textureSample(shadowCascades, samp, uv);
+    }
+  """))

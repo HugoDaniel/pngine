@@ -14,12 +14,12 @@
 //! const zip = @import("zip.zig");
 //!
 //! // Read ZIP
-//! var reader = try zip.ZipReader.init(allocator, data);
+//! var reader = try zip.ZipReader.init(gpa, data);
 //! defer reader.deinit();
 //! const bytecode = try reader.extract("main.pngb");
 //!
 //! // Write ZIP
-//! var writer = zip.ZipWriter.init(allocator);
+//! var writer = zip.ZipWriter.init(gpa);
 //! defer writer.deinit();
 //! try writer.addFile("main.pngb", bytecode, .deflate);
 //! const zip_data = try writer.finish();

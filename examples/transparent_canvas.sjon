@@ -6,6 +6,10 @@
 ; content only, so observe the effect over a non-black page (the playground
 ; loader page works, as does any `--html` codegen page with a styled body).
 ;
+; This file used to say all of that by copying rotating_cube.sjon and changing
+; one clear value. It says it by importing instead, which is the same claim
+; written once: the cube, cleared to nothing, on a premultiplied canvas.
+;
 ; The fragment output must be premultiplied alpha; the cube is fully opaque
 ; (alpha 1) so that holds trivially — the transparency is all in the clear.
 ; (canvas :alpha-mode premultiplied) is NOT the default — the schema follows
@@ -13,117 +17,12 @@
 ; so the file that depends on it states it. Deleting the line flips the
 ; header's flags byte (0x08 → 0x00) and the page stops showing through. The
 ; alpha mode is consumed by the JS runtime at context.configure(), before the
-; first opcode runs.
+; first opcode runs. It is declared HERE rather than rebound, because the
+; imported document does not declare one at all: an import adds this
+; document's own forms to the imported ones, and only `(define …)` replaces.
+
+(import :file "./rotating_cube.sjon"
+  (define :name CLEAR_LEVEL :value 0)
+  (define :name CLEAR_ALPHA :value 0))
 
 (canvas :alpha-mode premultiplied)
-
-(shader-module :name code :code """
-struct PngineInputs {
-  time: f32,
-  canvasW: f32,
-  canvasH: f32,
-  aspect: f32,
-};
-@group(0) @binding(0) var<uniform> inputs : PngineInputs;
-
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0, 0, 0),
-    vec4f(0, f, 0, 0),
-    vec4f(0, 0, far * nf, -1),
-    vec4f(0, 0, far * near * nf, 0));
-}
-
-fn getMVP() -> mat4x4f {
-  let now = inputs.time;
-
-  // Translate z=-4
-  var view = mat4x4f(
-    vec4f(1, 0, 0, 0),
-    vec4f(0, 1, 0, 0),
-    vec4f(0, 0, 1, 0),
-    vec4f(0, 0, -4, 1));
-
-  // Rotate around axis (sin(t), cos(t), 0) by angle=1 radian
-  let axis = vec3f(sin(now), cos(now), 0.0);
-  let c = cos(1.0);
-  let s = sin(1.0);
-  let t = 1.0 - c;
-  let x = axis.x;
-  let y = axis.y;
-  let rot = mat4x4f(
-    vec4f(t*x*x+c,     t*x*y,       s*y, 0),
-    vec4f(t*x*y,        t*y*y+c,    -s*x, 0),
-    vec4f(-s*y,         s*x,         c,   0),
-    vec4f(0, 0, 0, 1));
-  view = view * rot;
-
-  return perspective(1.2566, inputs.aspect, 1.0, 100.0) * view;
-}
-
-struct VertexOutput {
-  @builtin(position) Position : vec4f,
-  @location(0) fragUV : vec2f,
-  @location(1) fragPosition : vec4f,
-};
-
-@vertex
-fn vertexMain(
-  @location(0) position : vec4f,
-  @location(1) color : vec4f,
-  @location(2) uv : vec2f
-) -> VertexOutput {
-  var output : VertexOutput;
-  output.Position = getMVP() * position;
-  output.fragUV = uv;
-  output.fragPosition = 0.5 * (position + vec4f(1.0, 1.0, 1.0, 1.0));
-  return output;
-}
-
-@fragment
-fn fragMain(
-  @location(0) fragUV : vec2f,
-  @location(1) fragPosition : vec4f
-) -> @location(0) vec4f {
-  return fragPosition;
-}
-""")
-
-(data :name cubeVertexArray (cube :format [position4 color4 uv2]))
-
-(buffer :name verticesBuffer :usage [vertex]
-  :data cubeVertexArray)
-
-(buffer :name uniformInputsBuffer :size 16 :usage [uniform copy-dst])
-
-(texture :name depthTexture :size canvas :format depth24plus :usage [render-attachment])
-
-(queue :name writeInputUniforms
-  (write-buffer :buffer uniformInputsBuffer :offset 0 :data pngine-inputs))
-
-(render-pipeline :name renderCube
-  :layout auto
-  (vertex :module code :entry vertexMain
-    (vertex-buffer :array-stride 40
-      (attribute :shader-location 0 :offset 0 :format float32x4)
-      (attribute :shader-location 1 :offset 16 :format float32x4)
-      (attribute :shader-location 2 :offset 32 :format float32x2)))
-  (fragment :module code :entry fragMain
-    (target :format preferred-canvas-format))
-  (primitive :topology triangle-list :cull-mode back)
-  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
-
-(bind-group :name inputsBinding :layout renderCube :group 0
-  (entry :binding 0 :buffer uniformInputsBuffer))
-
-(render-pass :name drawCube
-  (color-attachment :view context-current-texture :clear-value [0 0 0 0] :load-op clear :store-op store)
-  (depth-stencil-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
-  :pipeline renderCube
-  :vertex-buffers [verticesBuffer]
-  :bind-groups [inputsBinding]
-  (draw :vertex-count 36))
-
-(frame :name cube :perform [writeInputUniforms drawCube])

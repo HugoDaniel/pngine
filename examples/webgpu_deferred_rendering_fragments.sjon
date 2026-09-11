@@ -1,0 +1,337 @@
+; webgpu_deferred_rendering_fragments — webgpu_deferred_rendering.sjon over
+; fragments and roots. Same G-buffer, same lights, same pixels; what changes is
+; that the three things its four shader stages have to agree about are written
+; once and imported, instead of copied and watched.
+;
+; The critique this plan set answers says a single draw is a poor unit for
+; modern rendering, because one conceptual draw lowers into several concrete
+; ones on their own targets, and the shaders then have to become polymorphic.
+; A deferred renderer is that shape: the dragon and the ground both write the
+; same two G-buffer attachments through different geometry, and a fullscreen
+; pass reads them back. Here each of those is its own ROOT over a shared
+; library, which is what "polymorphic" turns into when the variants are
+; enumerated at compile time.
+;
+;   lib/perspective.wgsl  perspective (also imported by the shadow-mapping
+;   lib/look_at.wgsl      lookAt        pair, and by 35 other documents)
+;   lib/gbuffer.wgsl      Inputs, VSOut, GBufferOut, getCameraVP, the ground quad
+;   lib/lights.wgsl       Light, Lights
+;   lib/reconstruct.wgsl  inverse4x4, worldFromScreenCoord
+;
+; The camera is the one that matters. The original carries `getCameraVP`'s body
+; three times — twice inline in the two G-buffer vertex shaders, once as a
+; function in the deferred shader — under a comment reading "must match
+; gBufferShader exactly", because the lighting pass reconstructs world positions
+; by inverting the very matrix the write passes projected with. A hand-kept
+; invariant across three copies becomes one function three roots import.
+;
+; The roots stay inline in this file: they are what differs, and there is only
+; one document, so there is nothing to share them with. The shadow-mapping port
+; is the other spelling, where a twin imports the roots as files too.
+;
+; Hold a mouse button (pointer-inputs) to see a depth | normal | albedo debug
+; split, as in the original.
+
+(define :name NUM_LIGHTS :value 128)
+
+(data :name dragonMesh (dragon :format [position3 normal3]))
+
+(buffer :name dragonVB :usage [vertex] :data dragonMesh)
+(buffer :name dragonIB :index-of dragonMesh :usage [index])
+(buffer :name lights :size (* NUM_LIGHTS 32) :usage [storage])
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+(buffer :name pointerBuf :size 48 :usage [uniform copy-dst])
+
+(queue :name writeUniforms (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+(queue :name writePointer (write-buffer :buffer pointerBuf :offset 0 :data pointer-inputs))
+
+; G-buffer render targets (sampled in the deferred pass → texture-binding too).
+(texture :name normalTex :size canvas :format rgba16float :usage [render-attachment texture-binding])
+(texture :name albedoTex :size canvas :format rgba8unorm :usage [render-attachment texture-binding])
+(texture :name gBufferDepth :size canvas :format depth32float :usage [render-attachment texture-binding])
+
+; --- The library ---
+
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+(wgsl :name lookAt :file "./lib/look_at.wgsl")
+(wgsl :name gbuffer :file "./lib/gbuffer.wgsl" :imports [perspective lookAt])
+(wgsl :name lightList :file "./lib/lights.wgsl")
+(wgsl :name reconstruct :file "./lib/reconstruct.wgsl")
+(wgsl :name hash :file "./lib/hash.wgsl")
+
+; --- Root 1: the light simulation ---
+;
+; It binds the light array `read_write`; the lighting root below binds the same
+; array `read`. The layout the two agree on is in lib/lights.wgsl, the access
+; mode is each root's own business — which is a hole over a VARIABLE, and the
+; reason lib/lights.wgsl declares no binding of its own.
+
+(shader-module :name lightUpdateShader :imports [lightList hash] :code """
+@group(0) @binding(0) var<storage, read_write> lights: Lights;
+
+// Light extent matching original sample around dragon's natural position
+const Y_MIN = 0.0;
+const Y_MAX = 100.0;
+
+@compute @workgroup_size(64)
+fn updateLights(@builtin(global_invocation_id) id: vec3u) {
+  let i = id.x;
+  if (i >= arrayLength(&lights.l)) { return; }
+
+  // First frame: buffer is zeroed, so radius==0 means uninitialized
+  if (lights.l[i].radius == 0.0) {
+    // Initialize: spread in [-50..50] x [Y_MIN..Y_MAX] x [-50..50]
+    lights.l[i].position = vec3f(
+      (hash(i * 3u + 0u) - 0.5) * 100.0,
+      Y_MIN + hash(i * 3u + 1u) * (Y_MAX - Y_MIN),
+      (hash(i * 3u + 2u) - 0.5) * 100.0
+    );
+    lights.l[i].radius = 30.0;
+
+    // Random colors in [0, 2] per channel (matching original)
+    lights.l[i].color = vec3f(
+      hash(i * 7u + 3u) * 2.0,
+      hash(i * 7u + 5u) * 2.0,
+      hash(i * 7u + 9u) * 2.0
+    );
+    lights.l[i].pad = 0.0;
+    return;
+  }
+
+  // Per-frame: move lights downward at varied speeds (like original)
+  let speed = 0.5 + 0.003 * (f32(i) - 64.0 * floor(f32(i) / 64.0));
+  lights.l[i].position.y -= speed;
+
+  // Wrap around at bottom
+  if (lights.l[i].position.y < Y_MIN) {
+    lights.l[i].position.y = Y_MAX;
+  }
+}
+""")
+
+(compute-pipeline :name lightUpdatePipeline :layout auto (compute :module lightUpdateShader :entry updateLights))
+
+(bind-group :name lightUpdateBG :layout lightUpdatePipeline :group 0
+  (entry :binding 0 :buffer lights))
+
+(compute-pass :name lightUpdatePass :pipeline lightUpdatePipeline :bind-groups [lightUpdateBG]
+  (dispatch :workgroups [2]))
+
+; --- Root 2: the dragon writes the G-buffer ---
+
+(shader-module :name gBufferShader :imports [gbuffer] :code """
+@group(0) @binding(0) var<uniform> u: Inputs;
+
+@vertex fn gbuffer_vs(
+  @location(0) position: vec3f,
+  @location(1) normal: vec3f
+) -> VSOut {
+  var out: VSOut;
+  out.pos = getCameraVP(u.time, u.aspect) * vec4f(position, 1.0);
+  out.normal = normal;
+  out.worldPos = position;
+  return out;
+}
+
+@fragment fn gbuffer_fs(in: VSOut) -> GBufferOut {
+  let n = normalize(in.normal);
+  var out: GBufferOut;
+  out.normal = vec4f(n, 1.0);
+  out.albedo = vec4f(0.9, 0.9, 0.9, 1.0);
+  return out;
+}
+""")
+
+; --- Root 3: the ground writes the same G-buffer ---
+;
+; The same two attachments, the same uniform, different geometry and a
+; different albedo. In the original this is two more entry points inside the
+; module above; here it is the second concrete draw of one conceptual pass, and
+; it says so by being its own root over the same import.
+
+(shader-module :name groundGBufShader :imports [gbuffer] :code """
+@group(0) @binding(0) var<uniform> u: Inputs;
+
+@vertex fn ground_gbuffer_vs(@builtin(vertex_index) i: u32) -> VSOut {
+  let pos = groundPos(i);
+  var out: VSOut;
+  out.pos = getCameraVP(u.time, u.aspect) * vec4f(pos, 1.0);
+  out.normal = vec3f(0.0, 1.0, 0.0);
+  out.worldPos = pos;
+  return out;
+}
+
+@fragment fn ground_gbuffer_fs(in: VSOut) -> GBufferOut {
+  // Checkerboard pattern on ground
+  let uv = floor(in.worldPos.xz * 0.1);
+  let checker = ((uv.x + uv.y) % 2.0 + 2.0) % 2.0;
+  let c = mix(0.3, 0.6, checker);
+
+  var out: GBufferOut;
+  out.normal = vec4f(0.0, 1.0, 0.0, 1.0);
+  out.albedo = vec4f(c, c, c, 1.0);
+  return out;
+}
+""")
+
+(render-pipeline :name gBufferPipeline
+  :layout auto
+  (vertex :module gBufferShader :entry gbuffer_vs
+    (vertex-buffer :array-stride (* 4 6)
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)))
+  (fragment :module gBufferShader :entry gbuffer_fs
+    (target :format rgba16float)
+    (target :format rgba8unorm))
+  (primitive :topology triangle-list :cull-mode back)
+  (depth-stencil :depth-write-enabled true :depth-compare less :format depth32float))
+
+; Ground plane G-buffer pipeline (no vertex buffer).
+(render-pipeline :name groundGBufPipeline
+  :layout auto
+  (vertex :module groundGBufShader :entry ground_gbuffer_vs)
+  (fragment :module groundGBufShader :entry ground_gbuffer_fs
+    (target :format rgba16float)
+    (target :format rgba8unorm))
+  (primitive :topology triangle-list)
+  (depth-stencil :depth-write-enabled true :depth-compare less :format depth32float))
+
+; One resource set, two pipelines. With no `:layout` the compiler derives one
+; GPU bind group per pipeline that binds it, pruned to what that pipeline's
+; entry points reach — so the two forms that differed only in the pipeline they
+; named became one. Compiles to the same bytes as the pair did.
+(bind-group :name gBufferBG :group 0
+  (entry :binding 0 :buffer uniforms))
+
+(render-pass :name gBufferPass
+  (color-attachment :view normalTex :clear-value [0 0 0 0] :load-op clear :store-op store)
+  (color-attachment :view albedoTex :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (depth-stencil-attachment :view gBufferDepth :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  :pipeline gBufferPipeline
+  :vertex-buffers [dragonVB]
+  :index-buffer dragonIB
+  :bind-groups [gBufferBG]
+  (draw-indexed :index-count 33306))
+
+; Ground plane G-buffer pass (loads existing MRT + depth).
+(render-pass :name groundGBufPass
+  (color-attachment :view normalTex :load-op load :store-op store)
+  (color-attachment :view albedoTex :load-op load :store-op store)
+  (depth-stencil-attachment :view gBufferDepth :depth-load-op load :depth-store-op store)
+  :pipeline groundGBufPipeline
+  :bind-groups [gBufferBG]
+  (draw :vertex-count 6))
+
+; --- Root 4: the deferred lighting pass ---
+;
+; It reads the two colour attachments and the depth target the roots above
+; wrote, inverts the camera matrix they projected with, and accumulates 128
+; point lights. It is the only root that imports lib/reconstruct.wgsl.
+
+(shader-module :name deferredShader :imports [gbuffer lightList reconstruct] :code """
+struct PointerInputs {
+  x: f32,
+  y: f32,
+  clickX: f32,
+  clickY: f32,
+  dx: f32,
+  dy: f32,
+  buttons: f32,
+  pressure: f32,
+  modifiers: f32,
+  scrollX: f32,
+  scrollY: f32,
+  _pad: f32,
+}
+
+@group(0) @binding(0) var<uniform> u: Inputs;
+@group(0) @binding(1) var<uniform> pointer: PointerInputs;
+@group(0) @binding(2) var normalTex: texture_2d<f32>;
+@group(0) @binding(3) var albedoTex: texture_2d<f32>;
+@group(0) @binding(4) var depthTex: texture_depth_2d;
+@group(0) @binding(5) var<storage, read> lights: Lights;
+
+@vertex fn deferred_vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let x = f32((i << 1u) & 2u);
+  let y = f32(i & 2u);
+  return vec4f(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+}
+
+@fragment fn deferred_fs(@builtin(position) fragPos: vec4f) -> @location(0) vec4f {
+  let coord = vec2u(fragPos.xy);
+  let screenUV = fragPos.xy / vec2f(u.width, u.height);
+
+  let normal = textureLoad(normalTex, coord, 0).xyz;
+  let albedo = textureLoad(albedoTex, coord, 0).rgb;
+  let depth = textureLoad(depthTex, coord, 0);
+
+  // Hold mouse button → show G-buffer debug split view
+  if (pointer.buttons > 0.0) {
+    if (screenUV.x < 0.333) {
+      // Left: depth visualization (inverted + scaled for visibility)
+      let d = (1.0 - depth) * 50.0;
+      return vec4f(d, d, d, 1.0);
+    } else if (screenUV.x < 0.666) {
+      // Middle: normal visualization (remap from [-1,1] to [0,1])
+      return vec4f(normal * 0.5 + 0.5, 1.0);
+    } else {
+      // Right: albedo
+      return vec4f(albedo, 1.0);
+    }
+  }
+
+  // Background (no geometry drawn at this pixel)
+  if (depth >= 1.0) {
+    return vec4f(0.1, 0.1, 0.15, 1.0);
+  }
+
+  // Reconstruct world position — inverting the matrix lib/gbuffer.wgsl gave
+  // the write roots, which is why it is a shared function and not a copy.
+  let invVP = inverse4x4(getCameraVP(u.time, u.aspect));
+  let worldPos = worldFromScreenCoord(screenUV, depth, invVP);
+
+  // Accumulate light contributions
+  let n = normalize(normal);
+  var result = vec3f(0.0);
+  let numLights = arrayLength(&lights.l);
+
+  for (var i = 0u; i < numLights; i++) {
+    let light = lights.l[i];
+    let lightVec = light.position - worldPos;
+    let dist = length(lightVec);
+    if (dist > light.radius) { continue; }
+
+    let lightDir = lightVec / dist;
+    let lambert = max(dot(n, lightDir), 0.0);
+    let attenuation = 1.0 - dist / light.radius;
+    result += light.color * lambert * attenuation * attenuation;
+  }
+
+  // Ambient + final composite (matching original: flat 0.2 ambient)
+  result = albedo * result + vec3f(0.2);
+  return vec4f(result, 1.0);
+}
+""")
+
+(render-pipeline :name deferredPipeline
+  :layout auto
+  (vertex :module deferredShader :entry deferred_vs)
+  (fragment :module deferredShader :entry deferred_fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
+
+(bind-group :name deferredBG :layout deferredPipeline :group 0
+  (entry :binding 0 :buffer uniforms)
+  (entry :binding 1 :buffer pointerBuf)
+  (entry :binding 2 :texture normalTex)
+  (entry :binding 3 :texture albedoTex)
+  (entry :binding 4 :texture gBufferDepth)
+  (entry :binding 5 :buffer lights))
+
+(render-pass :name deferredPass
+  (color-attachment :view context-current-texture :clear-value [0.1 0.1 0.15 1] :load-op clear :store-op store)
+  :pipeline deferredPipeline
+  :bind-groups [deferredBG]
+  (draw :vertex-count 3))
+
+(frame :name main :perform [writeUniforms writePointer lightUpdatePass gBufferPass groundGBufPass deferredPass])

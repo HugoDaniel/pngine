@@ -68,7 +68,7 @@ const WGSL_COMPLEX =
 ;
 
 fn runBenchmark(comptime name: []const u8, wgsl: []const u8, iterations: u32) !void {
-    const allocator = std.testing.allocator;
+    const gpa = std.testing.allocator;
 
     var total_ns: u64 = 0;
     var min_ns: u64 = std.math.maxInt(u64);
@@ -76,14 +76,14 @@ fn runBenchmark(comptime name: []const u8, wgsl: []const u8, iterations: u32) !v
 
     // Warmup
     for (0..3) |_| {
-        var r = wgslender_native.reflectNative(allocator, wgsl) catch continue;
+        var r = wgslender_native.reflectNative(gpa, wgsl) catch continue;
         r.deinit();
     }
 
     // Benchmark
     for (0..iterations) |_| {
         const start = nanotime();
-        var reflection = try wgslender_native.reflectNative(allocator, wgsl);
+        var reflection = try wgslender_native.reflectNative(gpa, wgsl);
         const elapsed = nanotime() - start;
         reflection.deinit();
 

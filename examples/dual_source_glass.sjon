@@ -41,7 +41,6 @@
 ; enable out and the shader fails to parse, which is the useful failure: the
 ; message names the directive.
 
-
 (buffer :name uniforms :usage [uniform copy-dst] :size 16)
 (queue :name writeInputs
   (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
@@ -162,21 +161,22 @@ fn fs(in : VSOut) -> Glass {
         (color :src-factor one :dst-factor src1 :operation add)
         (alpha :src-factor zero :dst-factor one :operation add)))))
 
-(bind-group :name backdropBG :layout backdropPipe :group 0
-  (entry :binding 0 :buffer uniforms))
-
-(bind-group :name glassBG :layout glassPipe :group 0
+; One resource set, two pipelines. With no `:layout` the compiler derives one
+; GPU bind group per pipeline that binds it, pruned to what that pipeline's
+; entry points reach — so the two forms that differed only in the pipeline they
+; named became one. Compiles to the same bytes as the pair did.
+(bind-group :name paneBG :group 0
   (entry :binding 0 :buffer uniforms))
 
 (render-pass :name paintBackdrop
   (color-attachment :view context-current-texture
     :clear-value [0 0 0 1] :load-op clear :store-op store)
-  :pipeline backdropPipe :bind-groups [backdropBG]
+  :pipeline backdropPipe :bind-groups [paneBG]
   (draw :vertex-count 3))
 
 (render-pass :name paintGlass
   (color-attachment :view context-current-texture :load-op load :store-op store)
-  :pipeline glassPipe :bind-groups [glassBG]
+  :pipeline glassPipe :bind-groups [paneBG]
   (draw :vertex-count 6 :instance-count 3))
 
 (frame :name main :before [writeInputs] :perform [paintBackdrop paintGlass])

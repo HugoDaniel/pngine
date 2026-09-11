@@ -1,0 +1,30 @@
+; `(pass … :scale …)` — an intermediate at a fraction of the canvas, which is
+; how every half-resolution effect is built: ambient occlusion, a bloom
+; downsample chain, a cheap blur.
+;
+; The first pass renders into a quarter-size texture, so its `@builtin(position)`
+; runs 0..canvas/4 and an 8-texel checker there covers 32 canvas pixels. Delete
+; `:scale 0.25` and the same checker covers 8. `pngine.width`/`height` keep
+; meaning the CANVAS in every pass, so the prelude declares `const PASS_SCALE`
+; for the pass to find its own extent with.
+
+(pass-graph
+  (pass :name coarse :scale 0.25 :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      // In THIS target's texels, of which there are a quarter of the canvas's.
+      let cell = floor(pos.xy / 8.0);
+      let dark = fract((cell.x + cell.y) * 0.5) < 0.25;
+      // The pass's own extent: the canvas times its scale.
+      let uv = pos.xy / (vec2f(pngine.width, pngine.height) * PASS_SCALE);
+      let lit = vec3f(uv.x, 0.35 + 0.45 * uv.y, 0.9 - 0.5 * uv.x);
+      return vec4f(select(lit, lit * 0.25, dark), 1.0);
+    }
+  """)
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      // Sampled back up to canvas resolution through the shared linear sampler,
+      // so the quarter-size checker arrives soft-edged.
+      return textureSample(coarse, samp, uv);
+    }
+  """))

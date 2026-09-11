@@ -1,0 +1,30 @@
+; `(pass … :format …)` — an HDR intermediate.
+;
+; The first pass writes radiance well above 1.0. In the sugar's default
+; rgba8unorm that is clamped the moment it is written, and the tone map in the
+; second pass has nothing left to compress; in rgba16float it survives the trip
+; through the texture and the tone map does its job. The two spellings differ
+; per pixel, which is what makes this a gate rather than a decoration: delete
+; `:format rgba16float` and the snapshot moves.
+;
+; `pngine.width`/`height` are the canvas, and the intermediate tracks it, so the
+; two passes share one uv.
+(pass-graph
+  (pass :name radiance :format rgba16float :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      let d = distance(uv, vec2f(0.5, 0.5));
+      // A bright core: 12 at the centre, falling off to nothing by the edges.
+      let e = 12.0 * exp(-d * d * 20.0);
+      return vec4f(e, e * 0.55, e * 0.15, 1.0);
+    }
+  """)
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      let hdr = textureSample(radiance, samp, uv).rgb;
+      // Reinhard. An unclamped 12 lands at 0.92; a value the texture had
+      // already clipped to 1 lands at 0.5, which is the visible difference.
+      return vec4f(hdr / (hdr + vec3f(1.0)), 1.0);
+    }
+  """))

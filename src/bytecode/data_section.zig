@@ -45,14 +45,14 @@ pub const DataSection = struct {
         .total_size = 0,
     };
 
-    pub fn deinit(self: *Self, allocator: Allocator) void {
+    pub fn deinit(self: *Self, gpa: Allocator) void {
         // Free all owned blob copies. `blobs` is the sole owner — `index` keys
         // alias the same buffers, so it must not free through them.
         for (self.blobs.items) |blob| {
-            allocator.free(blob);
+            gpa.free(blob);
         }
-        self.index.deinit(allocator);
-        self.blobs.deinit(allocator);
+        self.index.deinit(gpa);
+        self.blobs.deinit(gpa);
         self.* = undefined;
     }
 
@@ -74,7 +74,7 @@ pub const DataSection = struct {
     /// That is already how the string table behaves for entry-point names.
     ///
     /// Complexity: O(n) in data.len — one hash, plus one copy on a miss.
-    pub fn add(self: *Self, allocator: Allocator, data: []const u8) !DataId {
+    pub fn add(self: *Self, gpa: Allocator, data: []const u8) !DataId {
         // Content already present: return its id without touching the caps
         // below. A duplicate costs no id and no bytes, which is the point.
         if (self.index.get(data)) |existing| {
@@ -93,16 +93,16 @@ pub const DataSection = struct {
         const id: DataId = @enumFromInt(@as(u16, @intCast(self.blobs.items.len)));
 
         // Make owned copy of data
-        const owned = try allocator.dupe(u8, data);
-        errdefer allocator.free(owned);
+        const owned = try gpa.dupe(u8, data);
+        errdefer gpa.free(owned);
 
         // Order matters, and it is the LEAK-10 lesson from `StringTable.intern`:
         // `blobs` owns the buffer, so it takes it FIRST. Putting the key in the
         // map first lets a failing append free a buffer the map still holds as a
         // key — a use-after-free on the next `add` that hashes into that bucket.
-        try self.blobs.append(allocator, owned);
+        try self.blobs.append(gpa, owned);
         errdefer _ = self.blobs.pop();
-        try self.index.put(allocator, owned, id);
+        try self.index.put(gpa, owned, id);
         self.total_size += data.len;
 
         // Post-condition: ID is valid and the index agrees with the list
@@ -147,7 +147,9 @@ pub const DataSection = struct {
 
     /// Serialize to binary format.
     /// Returns: count (u16) + entries ([]{offset: u32, len: u32}) + data
-    pub fn serialize(self: *const Self, allocator: Allocator) ![]u8 {
+    ///
+    /// Caller owns the returned bytes.
+    pub fn serialize(self: *const Self, gpa: Allocator) ![]u8 {
         const data_count = self.count();
 
         // Calculate sizes
@@ -155,8 +157,8 @@ pub const DataSection = struct {
         const entries_size = @as(usize, data_count) * (2 * @sizeOf(u32)); // offset + len
         const total = header_size + entries_size + self.total_size;
 
-        const buffer = try allocator.alloc(u8, total);
-        errdefer allocator.free(buffer);
+        const buffer = try gpa.alloc(u8, total);
+        errdefer gpa.free(buffer);
 
         var offset: usize = 0;
 
@@ -197,7 +199,7 @@ pub const DataSection = struct {
 /// carry duplicates; they must keep their ids. Nothing adds to a deserialized
 /// section (the builder is the only `add` caller), so the empty index costs
 /// nothing but a missed dedupe that could not happen.
-pub fn deserialize(allocator: Allocator, data: []const u8) !DataSection {
+pub fn deserialize(gpa: Allocator, data: []const u8) !DataSection {
     // Pre-condition: at least header present
     if (data.len < 2) return error.InvalidDataSection;
 
@@ -211,9 +213,9 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !DataSection {
     if (data.len < metadata_size) return error.InvalidDataSection;
 
     var section: DataSection = .empty;
-    errdefer section.deinit(allocator);
+    errdefer section.deinit(gpa);
 
-    try section.blobs.ensureTotalCapacity(allocator, data_count);
+    try section.blobs.ensureTotalCapacity(gpa, data_count);
 
     const entries_start = header_size;
     const data_start = metadata_size;
@@ -240,7 +242,7 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !DataSection {
         if (blob_bytes_total > blob_bytes_available) return error.InvalidDataSection;
 
         // Make owned copy of blob data
-        const owned = try allocator.dupe(u8, data[@intCast(blob_start)..@intCast(blob_end)]);
+        const owned = try gpa.dupe(u8, data[@intCast(blob_start)..@intCast(blob_end)]);
         section.blobs.appendAssumeCapacity(owned);
         section.total_size += owned.len;
     }

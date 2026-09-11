@@ -1,0 +1,20 @@
+; Invalid: a pass samples a dependency whose `:format` is unfilterable-float.
+; WebGPU types the three 32-bit float formats `unfilterable-float` without the
+; `float32-filterable` feature, and the sampler the pass sugar shares is
+; `linear` — so the bind group the auto layout asks for is one WebGPU refuses,
+; which reaches the author as a blank canvas and a console line. Read it with
+; `textureLoad(field, …)` instead, or give `field` a filterable format.
+
+(pass-graph
+  (pass :name field :format rgba32float :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return vec4f(uv * 64.0, 0.0, 1.0);
+    }
+  """)
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return textureSample(field, samp, uv) / 64.0;
+    }
+  """))

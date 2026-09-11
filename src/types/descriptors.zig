@@ -144,6 +144,11 @@ pub const TextureField = enum(u8) {
     usage = 0x08, // TextureUsage flags
     view_formats = 0x09, // Array of formats
     size_from_image_bitmap = 0x0A, // ImageBitmap ID for runtime size resolution
+    // f32, canvas-tracking textures only: the fraction of the canvas this
+    // texture takes in each dimension. Absent means 1.0, so every descriptor
+    // written before this field existed decodes unchanged. The runtime rounds
+    // and clamps to at least one texel, at create time and on every resize.
+    size_canvas_scale = 0x0B,
 };
 
 // ============================================================================

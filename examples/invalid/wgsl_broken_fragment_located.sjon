@@ -1,0 +1,21 @@
+; R8: a WGSL error inside a fragment is reported against the FRAGMENT, at a line
+; local to the fragment's own text — not at a line of assembled text the author
+; never wrote.
+;
+; `padding` is imported FIRST and on purpose: it pushes `broken` down the
+; assembled module so the fragment-local line and the assembled line are
+; DIFFERENT numbers. A fixture where they coincide would pass with the whole
+; mapping deleted.
+(wgsl :name padding :code """
+fn pad1() -> f32 { return 1.0; }
+fn pad2() -> f32 { return 2.0; }
+fn pad3() -> f32 { return 3.0; }
+fn pad4() -> f32 { return 4.0; }
+""")
+(wgsl :name broken :code """
+fn fine() -> f32 { return 1.0; }
+fn oops() -> f32 { return notAThingAtAll(); }
+""")
+(shader-module :name m :imports [padding broken] :code """
+@fragment fn fs() -> @location(0) vec4f { return vec4f(oops() + pad1()); }
+""")

@@ -1,0 +1,15 @@
+; Invalid: a `:scale` that is positive as a double and zero as an f32. The wire
+; carries the field as an f32, so `1e-308` reaches the encoder as 0.0 — a
+; zero-texel texture, which the runtime would then clamp to 1×1 without anyone
+; asking. Refused against the NARROWED value, which is the one that ships.
+; (The mutation sweep wrote this document before any author did.)
+
+(texture :name tiny :size canvas :scale 1e-308 :format rgba8unorm
+  :usage [texture-binding render-attachment])
+(pass-graph
+  (pass :name main :reads [tiny] :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return textureSample(tiny, samp, uv);
+    }
+  """))

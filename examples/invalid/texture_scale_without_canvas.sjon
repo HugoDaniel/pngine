@@ -1,0 +1,14 @@
+; Invalid: `:scale` on a texture whose `:size` is an explicit extent. The key
+; is a FRACTION OF THE CANVAS, and this texture's size is already the size the
+; author asked for — there is nothing for a fraction to be a fraction of.
+; Scale the extent by hand, or write `:size canvas :scale 0.5`.
+
+(texture :name half :size [256 256] :scale 0.5 :format rgba8unorm
+  :usage [texture-binding copy-dst])
+(pass-graph
+  (pass :name main :reads [half] :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return textureSample(half, samp, uv);
+    }
+  """))

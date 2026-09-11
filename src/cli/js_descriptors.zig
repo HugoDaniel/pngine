@@ -20,6 +20,7 @@
 //!   (mastery rule 1) — see its comment for the payload that motivated it.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const pngine = @import("pngine");
 const descriptors = pngine.types.descriptors;
 const opcodes = pngine.opcodes;
@@ -29,14 +30,14 @@ const appendCompactFloat = js_emit.appendCompactFloat;
 const emitJsonValue = js_emit.emitJsonValue;
 
 /// Emit render pipeline descriptor from JSON data.
-pub fn emitRenderPipelineDesc(out: *std.ArrayList(u8), allocator: std.mem.Allocator, data: []const u8, override_format: ?[]const u8) !void {
+pub fn emitRenderPipelineDesc(out: *std.ArrayList(u8), gpa: Allocator, data: []const u8, override_format: ?[]const u8) !void {
     // Data is JSON like: {"vertex":{"shader":0,"entryPoint":"vs"},"fragment":{"shader":0,"entryPoint":"fs"},...}
     // We need to replace "shader":N with actual sN references and add layout:'auto' + format
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch {
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, data, .{}) catch {
         // Fallback: emit raw JSON wrapped
-        try out.appendSlice(allocator, "JSON.parse('");
-        try out.appendSlice(allocator, data);
-        try out.appendSlice(allocator, "')");
+        try out.appendSlice(gpa, "JSON.parse('");
+        try out.appendSlice(gpa, data);
+        try out.appendSlice(gpa, "')");
         return;
     };
     defer parsed.deinit();
@@ -51,37 +52,37 @@ pub fn emitRenderPipelineDesc(out: *std.ArrayList(u8), allocator: std.mem.Alloca
     // else the auto-derived layout.
     if (obj.get("layoutId")) |l| {
         if (l == .integer) {
-            try out.appendSlice(allocator, "{layout:PL");
-            try appendInt(out, allocator, @as(u16, @intCast(l.integer)));
-            try out.appendSlice(allocator, ",vertex:{module:s");
+            try out.appendSlice(gpa, "{layout:PL");
+            try appendInt(out, gpa, @as(u16, @intCast(l.integer)));
+            try out.appendSlice(gpa, ",vertex:{module:s");
         } else {
-            try out.appendSlice(allocator, "{layout:'auto',vertex:{module:s");
+            try out.appendSlice(gpa, "{layout:'auto',vertex:{module:s");
         }
     } else {
-        try out.appendSlice(allocator, "{layout:'auto',vertex:{module:s");
+        try out.appendSlice(gpa, "{layout:'auto',vertex:{module:s");
     }
 
-    const vs_id = try emitVertexStage(out, allocator, obj);
+    const vs_id = try emitVertexStage(out, gpa, obj);
 
-    try emitFragmentStage(out, allocator, obj, override_format, vs_id);
-    try emitPrimitiveState(out, allocator, obj);
+    try emitFragmentStage(out, gpa, obj, override_format, vs_id);
+    try emitPrimitiveState(out, gpa, obj);
 
     // Depth stencil
     if (obj.get("depthStencil")) |ds| {
         if (ds == .object) {
-            try out.appendSlice(allocator, ",depthStencil:");
-            try emitJsonValue(out, allocator, ds);
+            try out.appendSlice(gpa, ",depthStencil:");
+            try emitJsonValue(out, gpa, ds);
         }
     }
 
-    try out.appendSlice(allocator, "}");
+    try out.appendSlice(gpa, "}");
 }
 
 /// The `vertex:{…}` half of a render-pipeline descriptor, up to and including
 /// the `},fragment:{module:s` that opens the next one. Returns the vertex
 /// shader id, which the fragment stage falls back to when the descriptor names
 /// no fragment shader of its own.
-fn emitVertexStage(out: *std.ArrayList(u8), allocator: std.mem.Allocator, obj: std.json.ObjectMap) !u16 {
+fn emitVertexStage(out: *std.ArrayList(u8), gpa: Allocator, obj: std.json.ObjectMap) !u16 {
     const vertex = obj.get("vertex");
     var vs_id: u16 = 0;
     if (vertex) |v| {
@@ -91,16 +92,16 @@ fn emitVertexStage(out: *std.ArrayList(u8), allocator: std.mem.Allocator, obj: s
             }
         }
     }
-    try appendInt(out, allocator, vs_id);
+    try appendInt(out, gpa, vs_id);
 
     // Vertex entry point — always emit when specified (needed when multiple entry points exist)
     if (vertex) |v| {
         if (v == .object) {
             if (v.object.get("entryPoint")) |ep| {
                 if (ep == .string) {
-                    try out.appendSlice(allocator, ",entryPoint:'");
-                    try out.appendSlice(allocator, ep.string);
-                    try out.appendSlice(allocator, "'");
+                    try out.appendSlice(gpa, ",entryPoint:'");
+                    try out.appendSlice(gpa, ep.string);
+                    try out.appendSlice(gpa, "'");
                 }
             }
         }
@@ -111,14 +112,14 @@ fn emitVertexStage(out: *std.ArrayList(u8), allocator: std.mem.Allocator, obj: s
         if (v == .object) {
             if (v.object.get("buffers")) |b| {
                 if (b == .array and b.array.items.len > 0) {
-                    try out.appendSlice(allocator, ",buffers:");
-                    try emitJsonValue(out, allocator, b);
+                    try out.appendSlice(gpa, ",buffers:");
+                    try emitJsonValue(out, gpa, b);
                 }
             }
         }
     }
 
-    try out.appendSlice(allocator, "},fragment:{module:s");
+    try out.appendSlice(gpa, "},fragment:{module:s");
     return vs_id;
 }
 
@@ -127,7 +128,7 @@ fn emitVertexStage(out: *std.ArrayList(u8), allocator: std.mem.Allocator, obj: s
 /// descriptor > `f`, the canvas format resolved at runtime.
 fn emitFragmentStage(
     out: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     obj: std.json.ObjectMap,
     override_format: ?[]const u8,
     vs_id: u16,
@@ -152,13 +153,13 @@ fn emitFragmentStage(
     } else {
         fs_id = vs_id;
     }
-    try appendInt(out, allocator, fs_id);
+    try appendInt(out, gpa, fs_id);
 
     // Fragment entry point — always emit when specified (needed when multiple entry points exist)
     if (fs_entry) |ep| {
-        try out.appendSlice(allocator, ",entryPoint:'");
-        try out.appendSlice(allocator, ep);
-        try out.appendSlice(allocator, "'");
+        try out.appendSlice(gpa, ",entryPoint:'");
+        try out.appendSlice(gpa, ep);
+        try out.appendSlice(gpa, "'");
     }
     // Blend state from the descriptor's fragment.targets[0].blend (browser-shape,
     // the WebGPU-ready `{color,alpha}` object). js_codegen previously dropped it →
@@ -177,25 +178,25 @@ fn emitFragmentStage(
 
     // Format priority: override (from render pass target) > JSON descriptor > canvas
     const effective_format = override_format orelse target_format;
-    try out.appendSlice(allocator, ",targets:[{format:");
+    try out.appendSlice(gpa, ",targets:[{format:");
     if (effective_format) |fmt| {
-        try out.append(allocator, '\'');
-        try out.appendSlice(allocator, fmt);
-        try out.append(allocator, '\'');
+        try out.append(gpa, '\'');
+        try out.appendSlice(gpa, fmt);
+        try out.append(gpa, '\'');
     } else {
-        try out.append(allocator, 'f');
+        try out.append(gpa, 'f');
     }
     if (blend_val) |bl| {
-        try out.appendSlice(allocator, ",blend:");
-        try emitJsonValue(out, allocator, bl);
+        try out.appendSlice(gpa, ",blend:");
+        try emitJsonValue(out, gpa, bl);
     }
-    try out.appendSlice(allocator, "}]}");
+    try out.appendSlice(gpa, "}]}");
 }
 
 /// The `primitive:{…}` block, omitted entirely when every field is at its
 /// WebGPU default — a `{topology:'triangle-list'}` no browser needs is pure
 /// payload weight.
-fn emitPrimitiveState(out: *std.ArrayList(u8), allocator: std.mem.Allocator, obj: std.json.ObjectMap) !void {
+fn emitPrimitiveState(out: *std.ArrayList(u8), gpa: Allocator, obj: std.json.ObjectMap) !void {
     // Primitive — omit entirely when all defaults (topology=triangle-list, cullMode=none)
     const primitive = obj.get("primitive");
     if (primitive) |prim| {
@@ -214,48 +215,48 @@ fn emitPrimitiveState(out: *std.ArrayList(u8), allocator: std.mem.Allocator, obj
             const has_ud = ud != null and ud.? == .bool;
 
             if (!is_default_topo or has_ff or has_cm or has_sif or has_ud) {
-                try out.appendSlice(allocator, ",primitive:{");
+                try out.appendSlice(gpa, ",primitive:{");
                 var prim_first = true;
                 if (!is_default_topo) {
-                    try out.appendSlice(allocator, "topology:'");
-                    try out.appendSlice(allocator, topo_str);
-                    try out.appendSlice(allocator, "'");
+                    try out.appendSlice(gpa, "topology:'");
+                    try out.appendSlice(gpa, topo_str);
+                    try out.appendSlice(gpa, "'");
                     prim_first = false;
                 }
                 if (has_ff) {
-                    if (!prim_first) try out.appendSlice(allocator, ",");
-                    try out.appendSlice(allocator, "frontFace:'");
-                    try out.appendSlice(allocator, ff.?.string);
-                    try out.appendSlice(allocator, "'");
+                    if (!prim_first) try out.appendSlice(gpa, ",");
+                    try out.appendSlice(gpa, "frontFace:'");
+                    try out.appendSlice(gpa, ff.?.string);
+                    try out.appendSlice(gpa, "'");
                     prim_first = false;
                 }
                 if (has_cm) {
-                    if (!prim_first) try out.appendSlice(allocator, ",");
-                    try out.appendSlice(allocator, "cullMode:'");
-                    try out.appendSlice(allocator, cm.?.string);
-                    try out.appendSlice(allocator, "'");
+                    if (!prim_first) try out.appendSlice(gpa, ",");
+                    try out.appendSlice(gpa, "cullMode:'");
+                    try out.appendSlice(gpa, cm.?.string);
+                    try out.appendSlice(gpa, "'");
                     prim_first = false;
                 }
                 if (has_sif) {
-                    if (!prim_first) try out.appendSlice(allocator, ",");
-                    try out.appendSlice(allocator, "stripIndexFormat:'");
-                    try out.appendSlice(allocator, sif.?.string);
-                    try out.appendSlice(allocator, "'");
+                    if (!prim_first) try out.appendSlice(gpa, ",");
+                    try out.appendSlice(gpa, "stripIndexFormat:'");
+                    try out.appendSlice(gpa, sif.?.string);
+                    try out.appendSlice(gpa, "'");
                     prim_first = false;
                 }
                 if (has_ud) {
-                    if (!prim_first) try out.appendSlice(allocator, ",");
-                    try out.appendSlice(allocator, "unclippedDepth:");
-                    try out.appendSlice(allocator, if (ud.?.bool) "true" else "false");
+                    if (!prim_first) try out.appendSlice(gpa, ",");
+                    try out.appendSlice(gpa, "unclippedDepth:");
+                    try out.appendSlice(gpa, if (ud.?.bool) "true" else "false");
                 }
-                try out.appendSlice(allocator, "}");
+                try out.appendSlice(gpa, "}");
             }
         }
     }
 }
 
 /// Emit compute pipeline descriptor from JSON data.
-pub fn emitComputePipelineDesc(out: *std.ArrayList(u8), allocator: std.mem.Allocator, data: []const u8) !void {
+pub fn emitComputePipelineDesc(out: *std.ArrayList(u8), gpa: Allocator, data: []const u8) !void {
     // Binary format: [type_tag:0x06][shader_id:u16 LE][entry_len:u8][entry_bytes]
     //                 [layout_id:u16 LE (optional)]
     if (data.len >= 4 and data[0] == 0x06) {
@@ -264,27 +265,27 @@ pub fn emitComputePipelineDesc(out: *std.ArrayList(u8), allocator: std.mem.Alloc
         const has_entry = entry_len > 0 and data.len >= 4 + entry_len;
         const entry_point = if (has_entry) data[4 .. 4 + entry_len] else "main";
 
-        try out.appendSlice(allocator, "{layout:");
+        try out.appendSlice(gpa, "{layout:");
         if (extractComputePipelineLayoutId(data)) |lid| {
-            try out.appendSlice(allocator, "PL");
-            try appendInt(out, allocator, lid);
+            try out.appendSlice(gpa, "PL");
+            try appendInt(out, gpa, lid);
         } else {
-            try out.appendSlice(allocator, "'auto'");
+            try out.appendSlice(gpa, "'auto'");
         }
-        try out.appendSlice(allocator, ",compute:{module:s");
-        try appendInt(out, allocator, shader_id);
+        try out.appendSlice(gpa, ",compute:{module:s");
+        try appendInt(out, gpa, shader_id);
         if (!std.mem.eql(u8, entry_point, "main")) {
-            try out.appendSlice(allocator, ",entryPoint:'");
-            try out.appendSlice(allocator, entry_point);
-            try out.appendSlice(allocator, "'");
+            try out.appendSlice(gpa, ",entryPoint:'");
+            try out.appendSlice(gpa, entry_point);
+            try out.appendSlice(gpa, "'");
         }
-        try out.appendSlice(allocator, "}}");
+        try out.appendSlice(gpa, "}}");
         return;
     }
 
     // Fallback: try JSON (legacy/manual descriptors)
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch {
-        try out.appendSlice(allocator, "{layout:'auto',compute:{module:s0}}");
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, data, .{}) catch {
+        try out.appendSlice(gpa, "{layout:'auto',compute:{module:s0}}");
         return;
     };
     defer parsed.deinit();
@@ -305,9 +306,9 @@ pub fn emitComputePipelineDesc(out: *std.ArrayList(u8), allocator: std.mem.Alloc
         }
     }
 
-    try out.appendSlice(allocator, "{layout:'auto',compute:{module:s");
-    try appendInt(out, allocator, cs_id);
-    try out.appendSlice(allocator, "}}");
+    try out.appendSlice(gpa, "{layout:'auto',compute:{module:s");
+    try appendInt(out, gpa, cs_id);
+    try out.appendSlice(gpa, "}}");
 }
 
 /// The `@group(N)` index a bind-group descriptor targets, read in a pre-pass
@@ -348,7 +349,7 @@ fn scanBindGroupIndex(data: []const u8, field_count: u8) u8 {
 /// Over the 70-line rule by design: the body is one walk over a contiguous
 /// tagged-field table, and the arms are the table's rows. Its only separable
 /// job — the group-index pre-pass — is already `scanBindGroupIndex` above.
-pub fn emitBindGroupDesc(out: *std.ArrayList(u8), allocator: std.mem.Allocator, data: []const u8, layout_id: u16) !void {
+pub fn emitBindGroupDesc(out: *std.ArrayList(u8), gpa: Allocator, data: []const u8, layout_id: u16) !void {
     // Binary format: [type_tag:u8][field_count:u8] then fields
     // field_id=0x01 (layout): [0x01][0x07][group_index:u8]
     // field_id=0x02 (entries): [0x02][0x03][count:u8] then per entry:
@@ -366,18 +367,18 @@ pub fn emitBindGroupDesc(out: *std.ArrayList(u8), allocator: std.mem.Allocator, 
     // auto-derived layout of pipeline p<n>. Emitting the pipeline form for a
     // tagged id printed `p<bgl id>` — a *different* pipeline when the ids
     // collided, and an undeclared identifier when they did not (§339).
-    try out.appendSlice(allocator, "{layout:");
+    try out.appendSlice(gpa, "{layout:");
     if (opcodes.layoutIdIsBindGroupLayout(layout_id)) {
-        try out.appendSlice(allocator, "BGL");
-        try appendInt(out, allocator, opcodes.layoutIdValue(layout_id));
+        try out.appendSlice(gpa, "BGL");
+        try appendInt(out, gpa, opcodes.layoutIdValue(layout_id));
     } else {
-        try out.appendSlice(allocator, "p");
-        try appendInt(out, allocator, layout_id);
-        try out.appendSlice(allocator, ".getBindGroupLayout(");
-        try appendInt(out, allocator, group_index);
-        try out.append(allocator, ')');
+        try out.appendSlice(gpa, "p");
+        try appendInt(out, gpa, layout_id);
+        try out.appendSlice(gpa, ".getBindGroupLayout(");
+        try appendInt(out, gpa, group_index);
+        try out.append(gpa, ')');
     }
-    try out.appendSlice(allocator, ",entries:[");
+    try out.appendSlice(gpa, ",entries:[");
 
     // Second pass: emit entries
     q = 2;
@@ -400,47 +401,47 @@ pub fn emitBindGroupDesc(out: *std.ArrayList(u8), allocator: std.mem.Allocator, 
                 const ri = std.mem.readInt(u16, data[q + 2 ..][0..2], .little);
                 q += 4;
 
-                if (!first_entry) try out.appendSlice(allocator, ",");
+                if (!first_entry) try out.appendSlice(gpa, ",");
                 first_entry = false;
 
-                try out.appendSlice(allocator, "{binding:");
-                try appendInt(out, allocator, binding);
-                try out.appendSlice(allocator, ",resource:");
+                try out.appendSlice(gpa, "{binding:");
+                try appendInt(out, gpa, binding);
+                try out.appendSlice(gpa, ",resource:");
 
                 if (rt == 0x00) {
                     // buffer
-                    try out.appendSlice(allocator, "{buffer:b");
-                    try appendInt(out, allocator, ri);
-                    try out.appendSlice(allocator, "}");
+                    try out.appendSlice(gpa, "{buffer:b");
+                    try appendInt(out, gpa, ri);
+                    try out.appendSlice(gpa, "}");
                     q += 8; // skip offset + size
                 } else if (rt == 0x02) {
                     // sampler
-                    try out.appendSlice(allocator, "m");
-                    try appendInt(out, allocator, ri);
+                    try out.appendSlice(gpa, "m");
+                    try appendInt(out, gpa, ri);
                 } else if (rt == 0x03 or rt == 0x01) {
                     // texture bound directly → default view
-                    try out.appendSlice(allocator, "T");
-                    try appendInt(out, allocator, ri);
-                    try out.appendSlice(allocator, ".createView()");
+                    try out.appendSlice(gpa, "T");
+                    try appendInt(out, gpa, ri);
+                    try out.appendSlice(gpa, ".createView()");
                 } else if (rt == 0x04) {
                     // explicit (texture-view …) → the pre-created view var
-                    try out.appendSlice(allocator, "V");
-                    try appendInt(out, allocator, ri);
+                    try out.appendSlice(gpa, "V");
+                    try appendInt(out, gpa, ri);
                 }
 
-                try out.appendSlice(allocator, "}");
+                try out.appendSlice(gpa, "}");
             }
         }
     }
 
-    try out.appendSlice(allocator, "]}");
+    try out.appendSlice(gpa, "]}");
 }
 
 // --- DCE helpers: extract resource IDs from descriptors ---
 
 /// Extract shader IDs from a render pipeline descriptor (JSON format).
-pub fn extractRenderPipelineShaders(allocator: std.mem.Allocator, data: []const u8, used_shaders: *std.AutoHashMapUnmanaged(u16, void)) std.mem.Allocator.Error!void {
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch return;
+pub fn extractRenderPipelineShaders(gpa: Allocator, data: []const u8, used_shaders: *std.AutoHashMapUnmanaged(u16, void)) Allocator.Error!void {
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, data, .{}) catch return;
     defer parsed.deinit();
     const obj = switch (parsed.value) {
         .object => |o| o,
@@ -449,14 +450,14 @@ pub fn extractRenderPipelineShaders(allocator: std.mem.Allocator, data: []const 
     if (obj.get("vertex")) |v| {
         if (v == .object) {
             if (v.object.get("shader")) |s| {
-                if (s == .integer) try used_shaders.put(allocator, @intCast(s.integer), {});
+                if (s == .integer) try used_shaders.put(gpa, @intCast(s.integer), {});
             }
         }
     }
     if (obj.get("fragment")) |f| {
         if (f == .object) {
             if (f.object.get("shader")) |s| {
-                if (s == .integer) try used_shaders.put(allocator, @intCast(s.integer), {});
+                if (s == .integer) try used_shaders.put(gpa, @intCast(s.integer), {});
             }
         }
     } else {
@@ -464,7 +465,7 @@ pub fn extractRenderPipelineShaders(allocator: std.mem.Allocator, data: []const 
         if (obj.get("vertex")) |v| {
             if (v == .object) {
                 if (v.object.get("shader")) |s| {
-                    if (s == .integer) try used_shaders.put(allocator, @intCast(s.integer), {});
+                    if (s == .integer) try used_shaders.put(gpa, @intCast(s.integer), {});
                 }
             }
         }
@@ -472,15 +473,15 @@ pub fn extractRenderPipelineShaders(allocator: std.mem.Allocator, data: []const 
 }
 
 /// Extract shader ID from a compute pipeline descriptor (binary or JSON).
-pub fn extractComputePipelineShader(allocator: std.mem.Allocator, data: []const u8, used_shaders: *std.AutoHashMapUnmanaged(u16, void)) std.mem.Allocator.Error!void {
+pub fn extractComputePipelineShader(gpa: Allocator, data: []const u8, used_shaders: *std.AutoHashMapUnmanaged(u16, void)) Allocator.Error!void {
     // Binary format: [type_tag:0x06][shader_id:u16 LE][entry_len:u8][entry_bytes]
     if (data.len >= 4 and data[0] == 0x06) {
         const shader_id: u16 = @as(u16, data[1]) | (@as(u16, data[2]) << 8);
-        try used_shaders.put(allocator, shader_id, {});
+        try used_shaders.put(gpa, shader_id, {});
         return;
     }
     // JSON fallback
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch return;
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, data, .{}) catch return;
     defer parsed.deinit();
     const obj = switch (parsed.value) {
         .object => |o| o,
@@ -489,7 +490,7 @@ pub fn extractComputePipelineShader(allocator: std.mem.Allocator, data: []const 
     if (obj.get("compute")) |comp| {
         if (comp == .object) {
             if (comp.object.get("shader")) |s| {
-                if (s == .integer) try used_shaders.put(allocator, @intCast(s.integer), {});
+                if (s == .integer) try used_shaders.put(gpa, @intCast(s.integer), {});
             }
         }
     }
@@ -497,8 +498,8 @@ pub fn extractComputePipelineShader(allocator: std.mem.Allocator, data: []const 
 
 /// The explicit pipeline-layout id a render pipeline references (its JSON
 /// `layoutId`), or null for an auto-layout pipeline.
-pub fn extractRenderPipelineLayoutId(allocator: std.mem.Allocator, data: []const u8) ?u16 {
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch return null;
+pub fn extractRenderPipelineLayoutId(gpa: Allocator, data: []const u8) ?u16 {
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, data, .{}) catch return null;
     defer parsed.deinit();
     const obj = switch (parsed.value) {
         .object => |o| o,
@@ -522,8 +523,8 @@ pub fn extractComputePipelineLayoutId(data: []const u8) ?u16 {
 
 /// Mark each bind-group-layout composed by a pipeline-layout descriptor
 /// (`{"bindGroupLayouts":[id0,id1,…]}`) as used.
-pub fn extractPipelineLayoutBGLs(allocator: std.mem.Allocator, data: []const u8, used_bgls: *std.AutoHashMapUnmanaged(u16, void)) std.mem.Allocator.Error!void {
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch return;
+pub fn extractPipelineLayoutBGLs(gpa: Allocator, data: []const u8, used_bgls: *std.AutoHashMapUnmanaged(u16, void)) Allocator.Error!void {
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, data, .{}) catch return;
     defer parsed.deinit();
     const obj = switch (parsed.value) {
         .object => |o| o,
@@ -532,7 +533,7 @@ pub fn extractPipelineLayoutBGLs(allocator: std.mem.Allocator, data: []const u8,
     if (obj.get("bindGroupLayouts")) |bgls| {
         if (bgls == .array) {
             for (bgls.array.items) |item| {
-                if (item == .integer) try used_bgls.put(allocator, @intCast(item.integer), {});
+                if (item == .integer) try used_bgls.put(gpa, @intCast(item.integer), {});
             }
         }
     }
@@ -541,36 +542,36 @@ pub fn extractPipelineLayoutBGLs(allocator: std.mem.Allocator, data: []const u8,
 /// Emit a `createPipelineLayout` descriptor: `{bindGroupLayouts:[BGL0,BGL1,…]}`
 /// from the JSON `{"bindGroupLayouts":[id0,id1,…]}`, mapping each id to its BGL
 /// variable reference.
-pub fn emitPipelineLayoutDesc(out: *std.ArrayList(u8), allocator: std.mem.Allocator, data: []const u8) !void {
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch {
-        try out.appendSlice(allocator, "{bindGroupLayouts:[]}");
+pub fn emitPipelineLayoutDesc(out: *std.ArrayList(u8), gpa: Allocator, data: []const u8) !void {
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, data, .{}) catch {
+        try out.appendSlice(gpa, "{bindGroupLayouts:[]}");
         return;
     };
     defer parsed.deinit();
-    try out.appendSlice(allocator, "{bindGroupLayouts:[");
+    try out.appendSlice(gpa, "{bindGroupLayouts:[");
     if (parsed.value == .object) {
         if (parsed.value.object.get("bindGroupLayouts")) |bgls| {
             if (bgls == .array) {
                 for (bgls.array.items, 0..) |item, i| {
-                    if (i != 0) try out.append(allocator, ',');
-                    try out.appendSlice(allocator, "BGL");
-                    if (item == .integer) try appendInt(out, allocator, @as(u16, @intCast(item.integer)));
+                    if (i != 0) try out.append(gpa, ',');
+                    try out.appendSlice(gpa, "BGL");
+                    if (item == .integer) try appendInt(out, gpa, @as(u16, @intCast(item.integer)));
                 }
             }
         }
     }
-    try out.appendSlice(allocator, "]}");
+    try out.appendSlice(gpa, "]}");
 }
 
 /// Extract buffer/sampler/texture IDs from bind group entry data (binary format).
 pub fn extractBindGroupResources(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     data: []const u8,
     used_buffers: *std.AutoHashMapUnmanaged(u16, void),
     used_samplers: *std.AutoHashMapUnmanaged(u16, void),
     used_textures: *std.AutoHashMapUnmanaged(u16, void),
     used_views: *std.AutoHashMapUnmanaged(u16, void),
-) std.mem.Allocator.Error!void {
+) Allocator.Error!void {
     if (data.len < 2) return;
     const field_count = data[1];
     var q: usize = 2;
@@ -592,12 +593,12 @@ pub fn extractBindGroupResources(
                 q += 4;
                 switch (rt) {
                     0x00 => {
-                        try used_buffers.put(allocator, ri, {});
+                        try used_buffers.put(gpa, ri, {});
                         q += 8; // skip offset + size
                     },
-                    0x02 => try used_samplers.put(allocator, ri, {}),
-                    0x01, 0x03 => try used_textures.put(allocator, ri, {}),
-                    0x04 => try used_views.put(allocator, ri, {}), // explicit (texture-view …)
+                    0x02 => try used_samplers.put(gpa, ri, {}),
+                    0x01, 0x03 => try used_textures.put(gpa, ri, {}),
+                    0x04 => try used_views.put(gpa, ri, {}), // explicit (texture-view …)
                     else => {},
                 }
             }
@@ -617,6 +618,9 @@ const TextureFields = struct {
     dimension: u8 = 1, // 0=1d, 1=2d, 2=3d
     format: ?[]const u8 = null,
     usage: u8 = 0,
+    /// `size_canvas_scale` — a fraction of the canvas per dimension, present
+    /// only on a canvas-tracking texture (one with no width/height).
+    canvas_scale: ?f32 = null,
 };
 
 /// Decode half of the texture descriptor: walk the tagged fields, ignore any
@@ -666,78 +670,105 @@ fn parseTextureFields(data: []const u8) TextureFields {
                     q += 4;
                 }
             },
+            0x0B => { // size_canvas_scale (f32)
+                if (vt == 0x01 and q + 4 <= data.len) {
+                    f.canvas_scale = @bitCast(std.mem.readInt(u32, data[q..][0..4], .little));
+                    q += 4;
+                } else q = skipValue(data, q, vt);
+            },
             else => q = skipValue(data, q, vt),
         }
     }
     return f;
 }
 
+/// One dimension of a canvas-tracking texture in the generated JS: the canvas
+/// expression itself, or `Math.max(1,Math.round(<expr>*<scale>))` when the
+/// texture takes a fraction of it. Same arithmetic as gpu.js `scaleExtent` and
+/// the native backend's, written out because the generated page carries no
+/// runtime of ours to call.
+fn appendCanvasExtent(out: *std.ArrayList(u8), gpa: Allocator, expr: []const u8, scale: ?f32) !void {
+    const s = scale orelse {
+        try out.appendSlice(gpa, expr);
+        return;
+    };
+    if (s == 1.0) {
+        try out.appendSlice(gpa, expr);
+        return;
+    }
+    try out.appendSlice(gpa, "Math.max(1,Math.round(");
+    try out.appendSlice(gpa, expr);
+    try out.appendSlice(gpa, "*");
+    try js_emit.appendCompactFloat(out, gpa, s);
+    try out.appendSlice(gpa, "))");
+}
+
 /// Emit texture descriptor from binary data.
-pub fn emitTextureDesc(out: *std.ArrayList(u8), allocator: std.mem.Allocator, data: []const u8) !void {
+pub fn emitTextureDesc(out: *std.ArrayList(u8), gpa: Allocator, data: []const u8) !void {
     if (data.len < 2) {
-        try out.appendSlice(allocator, "{}");
+        try out.appendSlice(gpa, "{}");
         return;
     }
 
     const f = parseTextureFields(data);
 
     // Canvas-size textures omit width/height fields — use canvas dimensions
-    try out.appendSlice(allocator, "{size:[");
+    try out.appendSlice(gpa, "{size:[");
     if (f.width) |w| {
-        try appendInt(out, allocator, w);
+        try appendInt(out, gpa, w);
     } else {
-        try out.appendSlice(allocator, "c.width");
+        try appendCanvasExtent(out, gpa, "c.width", f.canvas_scale);
     }
-    try out.appendSlice(allocator, ",");
+    try out.appendSlice(gpa, ",");
     if (f.height) |h| {
-        try appendInt(out, allocator, h);
+        try appendInt(out, gpa, h);
     } else {
-        try out.appendSlice(allocator, "c.height");
+        try appendCanvasExtent(out, gpa, "c.height", f.canvas_scale);
     }
     if (f.depth_or_array_layers) |d| {
-        try out.appendSlice(allocator, ",");
-        try appendInt(out, allocator, d);
+        try out.appendSlice(gpa, ",");
+        try appendInt(out, gpa, d);
     }
-    try out.appendSlice(allocator, "],");
+    try out.appendSlice(gpa, "],");
     if (f.dimension != 1) {
-        try out.appendSlice(allocator, "dimension:'");
-        try out.appendSlice(allocator, switch (f.dimension) {
+        try out.appendSlice(gpa, "dimension:'");
+        try out.appendSlice(gpa, switch (f.dimension) {
             0 => "1d",
             2 => "3d",
             else => "2d",
         });
-        try out.appendSlice(allocator, "',");
+        try out.appendSlice(gpa, "',");
     }
     if (f.mip_level_count) |m| {
-        try out.appendSlice(allocator, "mipLevelCount:");
-        try appendInt(out, allocator, m);
-        try out.appendSlice(allocator, ",");
+        try out.appendSlice(gpa, "mipLevelCount:");
+        try appendInt(out, gpa, m);
+        try out.appendSlice(gpa, ",");
     }
     if (f.sample_count) |n| {
-        try out.appendSlice(allocator, "sampleCount:");
-        try appendInt(out, allocator, n);
-        try out.appendSlice(allocator, ",");
+        try out.appendSlice(gpa, "sampleCount:");
+        try appendInt(out, gpa, n);
+        try out.appendSlice(gpa, ",");
     }
-    try out.appendSlice(allocator, "format:'");
-    try out.appendSlice(allocator, f.format orelse "rgba8unorm");
-    try out.appendSlice(allocator, "',usage:");
-    try appendInt(out, allocator, f.usage);
-    try out.appendSlice(allocator, "}");
+    try out.appendSlice(gpa, "format:'");
+    try out.appendSlice(gpa, f.format orelse "rgba8unorm");
+    try out.appendSlice(gpa, "',usage:");
+    try appendInt(out, gpa, f.usage);
+    try out.appendSlice(gpa, "}");
 }
 
 /// Emit a texture-view descriptor (TLV type tag 0x09) from binary data as a
 /// GPUTextureViewDescriptor object literal. Every field is optional, so an
 /// all-default view yields `{}` (a plain createView()).
-pub fn emitTextureViewDesc(out: *std.ArrayList(u8), allocator: std.mem.Allocator, data: []const u8) !void {
+pub fn emitTextureViewDesc(out: *std.ArrayList(u8), gpa: Allocator, data: []const u8) !void {
     if (data.len < 2) {
-        try out.appendSlice(allocator, "{}");
+        try out.appendSlice(gpa, "{}");
         return;
     }
     var q: usize = 2; // skip type_tag + field_count
     const field_count = data[1];
     var has_fields = false;
 
-    try out.appendSlice(allocator, "{");
+    try out.appendSlice(gpa, "{");
     for (0..field_count) |_| {
         if (q + 2 > data.len) break;
         const fi = data[q];
@@ -753,12 +784,12 @@ pub fn emitTextureViewDesc(out: *std.ArrayList(u8), allocator: std.mem.Allocator
                 else => null,
             };
             if (kv) |p| {
-                if (has_fields) try out.appendSlice(allocator, ",");
+                if (has_fields) try out.appendSlice(gpa, ",");
                 has_fields = true;
-                try out.appendSlice(allocator, p.k);
-                try out.appendSlice(allocator, ":'");
-                try out.appendSlice(allocator, p.v);
-                try out.appendSlice(allocator, "'");
+                try out.appendSlice(gpa, p.k);
+                try out.appendSlice(gpa, ":'");
+                try out.appendSlice(gpa, p.v);
+                try out.appendSlice(gpa, "'");
             }
         } else if (vt == 0x00 and q + 4 <= data.len) { // u32 → number
             const val = std.mem.readInt(u32, data[q..][0..4], .little);
@@ -771,17 +802,17 @@ pub fn emitTextureViewDesc(out: *std.ArrayList(u8), allocator: std.mem.Allocator
                 else => null,
             };
             if (key) |k| {
-                if (has_fields) try out.appendSlice(allocator, ",");
+                if (has_fields) try out.appendSlice(gpa, ",");
                 has_fields = true;
-                try out.appendSlice(allocator, k);
-                try out.appendSlice(allocator, ":");
-                try appendInt(out, allocator, val);
+                try out.appendSlice(gpa, k);
+                try out.appendSlice(gpa, ":");
+                try appendInt(out, gpa, val);
             }
         } else {
             q = skipValue(data, q, vt);
         }
     }
-    try out.appendSlice(allocator, "}");
+    try out.appendSlice(gpa, "}");
 }
 
 /// view-dimension byte → GPUTextureViewDimension string.
@@ -828,9 +859,9 @@ pub fn parseTextureFormat(data: []const u8) ?[]const u8 {
 ///
 /// Over the 70-line rule by design: a contiguous field table (ten sampler
 /// fields, three wire types), same judgement as emitBindGroupDesc.
-pub fn emitSamplerDesc(out: *std.ArrayList(u8), allocator: std.mem.Allocator, data: []const u8) !void {
+pub fn emitSamplerDesc(out: *std.ArrayList(u8), gpa: Allocator, data: []const u8) !void {
     if (data.len < 2) {
-        try out.appendSlice(allocator, "{}");
+        try out.appendSlice(gpa, "{}");
         return;
     }
 
@@ -838,7 +869,7 @@ pub fn emitSamplerDesc(out: *std.ArrayList(u8), allocator: std.mem.Allocator, da
     const field_count = data[1];
     var has_fields = false;
 
-    try out.appendSlice(allocator, "{");
+    try out.appendSlice(gpa, "{");
 
     for (0..field_count) |_| {
         if (q + 2 > data.len) break;
@@ -866,42 +897,43 @@ pub fn emitSamplerDesc(out: *std.ArrayList(u8), allocator: std.mem.Allocator, da
         };
 
         if (vt == 0x07 and q < data.len) { // enum → quoted string
-            if (has_fields) try out.appendSlice(allocator, ",");
+            if (has_fields) try out.appendSlice(gpa, ",");
             has_fields = true;
-            try out.appendSlice(allocator, n);
-            try out.appendSlice(allocator, ":'");
+            try out.appendSlice(gpa, n);
+            try out.appendSlice(gpa, ":'");
             const val_str: []const u8 = switch (fi) {
                 0x01, 0x02, 0x03 => addressModeStr(data[q]),
                 0x04, 0x05, 0x06 => filterModeStr(data[q]),
                 0x09 => compareFnStr(data[q]),
                 else => "nearest",
             };
-            try out.appendSlice(allocator, val_str);
-            try out.appendSlice(allocator, "'");
+            try out.appendSlice(gpa, val_str);
+            try out.appendSlice(gpa, "'");
             q += 1;
         } else if (vt == 0x01 and q + 4 <= data.len) { // f32 (lod clamps) → number
-            if (has_fields) try out.appendSlice(allocator, ",");
+            if (has_fields) try out.appendSlice(gpa, ",");
             has_fields = true;
-            try out.appendSlice(allocator, n);
-            try out.appendSlice(allocator, ":");
+            try out.appendSlice(gpa, n);
+            try out.appendSlice(gpa, ":");
             const bits = std.mem.readInt(u32, data[q..][0..4], .little);
-            try appendCompactFloat(out, allocator, @bitCast(bits));
+            try appendCompactFloat(out, gpa, @bitCast(bits));
             q += 4;
         } else if (vt == 0x06 and q + 2 <= data.len) { // u16 (max anisotropy) → number
-            if (has_fields) try out.appendSlice(allocator, ",");
+            if (has_fields) try out.appendSlice(gpa, ",");
             has_fields = true;
-            try out.appendSlice(allocator, n);
-            try out.appendSlice(allocator, ":");
-            var buf: [8]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d}", .{std.mem.readInt(u16, data[q..][0..2], .little)}) catch "0";
-            try out.appendSlice(allocator, s);
+            try out.appendSlice(gpa, n);
+            try out.appendSlice(gpa, ":");
+            // Through `appendInt` rather than a local buffer: this is a value,
+            // and the local `catch "0"` was a second answer to the question
+            // `appendInt` already answers by sizing from the type.
+            try appendInt(out, gpa, std.mem.readInt(u16, data[q..][0..2], .little));
             q += 2;
         } else {
             q = skipValue(data, q, vt);
         }
     }
 
-    try out.appendSlice(allocator, "}");
+    try out.appendSlice(gpa, "}");
 }
 
 // ============================================================================

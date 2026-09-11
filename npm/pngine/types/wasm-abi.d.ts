@@ -26,6 +26,24 @@ interface PngineCompilerExports {
   /** Structured diagnostics, as a JSON array. */
   getDiagPtr(): number;
   getDiagLen(): number;
+  /**
+   * Supply the files a document names, since the browser has no filesystem.
+   * Allocate, write the packed table
+   * `[u32 count]([u32 nameLen][name][u32 dataLen][data])*` at the returned
+   * pointer, then declare its length. Returns 0 on OOM or an over-large length.
+   * The table is owned by the module and freed by the next allocFileTable.
+   */
+  allocFileTable(len: number): number;
+  setFileTableLen(len: number): void;
+  /**
+   * Which files the last compile could not resolve, as a JSON array of strings.
+   * Complete after ONE compile — the compiler resolves every path the document
+   * writes before it walks anything. `getNeedsDropped() > 0` means the array is
+   * a PREFIX and the list cannot be trusted as complete.
+   */
+  getNeedsPtr(): number;
+  getNeedsLen(): number;
+  getNeedsDropped(): number;
   /** Each returns 0 on success, non-zero with getErrorPtr/Len set. */
   compile(): number;
   compileToPng(): number;

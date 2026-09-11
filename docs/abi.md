@@ -44,6 +44,9 @@ getAbiVersion() → u32
 | `frame` | `(time: f32, width: u32, height: u32) → u32` | Emit per-frame commands. `0` ok, `1` not initialized. Host must pass nonzero width/height |
 | `getFrameCounter` | `() → u32` | Frames rendered since `init()` (drives ping-pong pool selection) |
 | `setFrameCounter` | `(n: u32) → void` | Restore a saved counter around host-side ephemeral renders (thumbnails must not shift pool phase). Absent on pre-2026-08 binaries — hosts feature-detect |
+| `getFrameCount` | `() → u32` | How many `define_frame`s `init()` indexed; `0` before a successful init. Absent on pre-2026-09 binaries — hosts feature-detect (the worker reports the historical `1` then) |
+| `getFrameNameId` | `(index: u32) → u32` | The string-table id of frame `index`'s name (its `(frame :name …)`), in define order; `0xFFFFFFFF` past the count or before init. The host resolves it through the string table it already parses — the executor never handles a name. A u32 result crosses into JS as an i32, so that sentinel reads as `-1` until masked (`>>> 0`); the worker never reads it, iterating `getFrameCount()` instead |
+| `setFrame` | `(index: u32) → u32` | Pin the frame `frame()` renders, by index; `0xFFFFFFFF` releases the pin. `0` ok, `1` not initialised, `2` out of range (the pin is left as it was). The pin outranks the animation table and holds until the next `setFrame` or `init()`, which clears it. This is what `setFrame(p, name)` in the JS API lands on — before it, the frozen `frame(time, w, h)` signature left the executor running its first frame no matter what the host pinned |
 | `getAbiVersion` | `() → u32` | See §1. Absent on pre-2026-06 binaries |
 
 Buffer caps (256 KB bytecode / 512 KB data / 64 KB commands) are **per-binary**
@@ -179,7 +182,7 @@ commands the buffer had no room for, and a handler's operand reads ran past
 | 0x1E | dispatch_indirect | `[buffer_id:u16][offset:u32]` | 6 |
 | 0x1F | set_viewport | `[x:u32][y:u32][w:u32][h:u32][min_depth:f32][max_depth:f32]` | 24 |
 | 0x20 | write_buffer | `[id:u16][offset:u32][data_ptr:u32][data_len:u32]` | 14 |
-| 0x21 | write_time_uniform | `[id:u16][offset:u32][size:u16]` — JS writes `Float32Array([time, w, h, w/h])`, clamped to min(size, 16) | 8 |
+| 0x21 | write_time_uniform | `[id:u16][offset:u32][size:u16]` — JS writes `Float32Array([time, w, h, w/h])` then `Uint32Array([frameCounter])` at byte 16, clamped to min(size, 20) | 8 |
 | 0x22 | copy_buffer_to_buffer | `[src:u16][src_off:u32][dst:u16][dst_off:u32][size:u32]` | 16 |
 | 0x23 | copy_texture_to_texture | `[src:u16][dst:u16][w:u16][h:u16]` (0 → canvas dims) | 8 |
 | 0x24 | write_buffer_from_wasm | `[buffer_id:u16][buffer_off:u32][call_id:u32][size:u32]` | 14 |
@@ -253,10 +256,13 @@ design, `throw`s instead. Both refuse; neither skips.
 
 ### Frontend-enforced runtime caps
 
-Three limits are enforced by the compiler so a shipped PNG never trips them
+These limits are enforced by the compiler so a shipped PNG never trips them
 silently. The first two are structural to the *default* executor rather than to
 the wire format (`bytecode.DEFAULT_MAX_PASSES` / `bytecode.MAX_EXECUTE_BUNDLES`);
-the third is part of the wire format itself:
+the third is part of the wire format itself; the fourth belongs to the NATIVE
+backend and therefore points the other way. All of them are declared in
+`src/bytecode/resource_limits.zig`, which also records which kind each is — a
+wire fact, a WebGPU spec fact, or one runtime's statically-sized table.
 
 - **≤ 32 passes per document.** The embedded executor stores pass ranges in a
   fixed `pass_ranges[32]` table (`wasm_config.max_passes`); a `define_pass`
@@ -271,6 +277,17 @@ the third is part of the wire format itself:
   decoders and `skipParams` can never disagree about where the command ends.
   A custom executor build may raise `max_passes`, but the bundle cap is fixed
   by the opcode layout.
+- **Resource id budgets, held by the NATIVE backend** (`resource_limits.IdSpace`
+  — 256 buffers / 256 textures / 256 texture views / 128 bind groups / 64
+  samplers / 64 shader modules / 64 pipelines / 64 bind-group layouts / 64
+  pipeline layouts). These are the sizes of `wgpu_native_gpu.zig`'s fixed
+  arrays, so the divergence runs OPPOSITE to the pass cap above: the browser
+  runtime has no such tables, and a document past one of them would load in a
+  browser while `--frame` refuses it with `error.InvalidResourceId`. The emitter
+  refuses it first, at the source line, naming the form and the number. The id
+  spaces the native backend stubs (render bundles, query sets, image bitmaps,
+  nested WASM) are capped only by the wire's u16.
+
 - **≤ 32 args per `call_wasm_func`** (`wire_schema.repMaxOf(.call_wasm_func)`).
   Unlike the two above, over-cap here is not a silent drop but a **stream
   desync**: the count is one byte, so 33 encodes fine, and every consumer then
@@ -410,7 +427,16 @@ same byte, and one of them means "guess".
    corpus survival case). The device-limits table
    (`has_device_limits` = flags bit 2, `reserved` @9–11 = u24 LE offset, table
    appended after the animation table) is the worked example — zero executor
-   bytes, zero museum churn, PNGB still v0.
+   bytes, zero museum churn, PNGB still v0. The buffer-name block
+   (`has_buffer_names` = flags bit 4) is the second, and it shows the cheaper
+   shape: it needs no `reserved` offset at all, because it sits at the tail of
+   the uniform-table section, which the header already bounds and which both
+   pre-block readers stop reading at `binding_count`. A free bit is enough
+   when the table can live inside a bounded section; empty ⟹ no block, so a
+   document with no buffers is byte-identical. Executor blindness is pinned
+   the corpus way — every example compiles with the block and runs through its
+   embedded executor in `tests/npm/write-buffer.test.js`'s sweep, and the
+   goldens hold.
 7. New executors may only emit opcodes/descriptors the *already-shipped* JS
    understands; ship the JS first (see the unknown-opcode rule in §5).
 8. **The command stream is create-only, and stays that way.** There are 13

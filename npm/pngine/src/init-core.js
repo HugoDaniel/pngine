@@ -272,21 +272,20 @@ export function createPngine(internal) {
     get frameCount() {
       return internal.frameCount ?? 0;
     },
-    get animation() {
-      return internal.animation;
-    },
-    get currentScene() {
-      return internal.pb?.scene ?? null;
-    },
+    // The pin setFrame holds: a (frame :name …) string, or null for the
+    // executor's own choice. (The animation-table getters that sat beside it —
+    // animation, duration, currentScene — read a table the worker stopped
+    // delivering in Dec 2025; they answered null/0/null for every payload
+    // and are gone. docs/plans/archive/api-audit-2026-09.md finding 2.)
     get currentFrame() {
       return internal.pb?.frame ?? null;
     },
-    get duration() {
-      // Animation duration in seconds, or 0 if no animation
-      return internal.animation ? internal.animation.duration / 1000 : 0;
-    },
+    // The readable face of the song a `pNGa` chunk carries: duration, playing,
+    // currentTime. Its transport is the instance's own — play/pause/stop/seek
+    // drive the song in step with the playback reducer — so the player's
+    // verbs stay on `internal.audio`, where only anim.js reaches them.
     get audio() {
-      return internal.audio;
+      return internal.audio?.info ?? null;
     },
 
     // Internal state (for other functions)
@@ -356,12 +355,10 @@ export function destroy(p) {
   i.canvas = null;
   i.audio = null;
   i.pointer = null;
-  i.animation = null;
   i.pb = null;
   i.detachListeners = null;
   i.disconnectResize = null;
   i.animationId = null;
-  i.ready = false;
   i.width = 0;
   i.height = 0;
   i.frameCount = 0;

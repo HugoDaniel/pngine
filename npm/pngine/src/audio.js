@@ -26,13 +26,21 @@ export function deinterleaveStereo(audioBuffer, samples, frames, isInt16) {
  * After instantiation, audio samples are available in WASM memory.
  * We copy them to an AudioBuffer for playback via Web Audio API.
  *
- * The clock master is whoever calls play()/pause(); this exposes currentTime so
- * a caller can sync a render loop to the audio, never the other way round.
+ * The player has two faces. `info` is what a host may READ of the song
+ * (duration, playing, currentTime) and is what `p.audio` resolves to. The
+ * transport verbs are the driver's: anim.js calls them in step with the
+ * playback reducer, so the song follows the instance's clock. A host that
+ * could reach play/pause/seek here would move the song without moving the
+ * clock, and the two would drift apart — which is why the verbs are not on
+ * the face the instance hands out.
+ *
+ * @typedef {object} AudioInfo
+ * @property {number} duration            Song length in seconds
+ * @property {boolean} playing
+ * @property {number} currentTime         Seconds into the song, off the audio clock
  *
  * @typedef {object} AudioPlayer
- * @property {number} duration            Song length in seconds
- * @property {boolean} playing            Read-only
- * @property {number} currentTime         Read-only, seconds since song start
+ * @property {AudioInfo} info             The readable face, `p.audio`
  * @property {(offset?: number) => void} play
  * @property {() => void} pause
  * @property {() => void} stop
@@ -89,8 +97,10 @@ export async function createAudioPlayer(wasmBytes) {
   let playing = false;
   const duration = frames / sampleRate;
 
-  const player = {
-    duration,
+  // Getters only, so a host assigning through `p.audio` throws (strict
+  // mode) instead of shadowing a reading.
+  const info = {
+    get duration() { return duration; },
 
     get playing() { return playing; },
 
@@ -98,6 +108,10 @@ export async function createAudioPlayer(wasmBytes) {
       if (!playing || !ctx) return pauseOffset;
       return ctx.currentTime - startedAt;
     },
+  };
+
+  const player = {
+    info,
 
     play(offset) {
       if (playing) return;

@@ -1,0 +1,112 @@
+; The hand-written twin of examples/pass_hdr_tonemap.sjon: the same program with
+; `(pass-graph …)` expanded by hand into the core forms it lowers to.
+;
+; `schema/sugar-ledger.mjs` names this file for `(pass … :format)`, and
+; `tests/zig/render/render_test.zig` holds the pair pixel-equal every run
+; (`twin_of = "pass_hdr_tonemap"`).
+;
+; `:format rgba16float` lands in TWO places, and both are below: the
+; intermediate `(texture … :format rgba16float)` and the producing pipeline's
+; `(target :format rgba16float)`. They have to agree — a pipeline writing a
+; format its attachment does not have is a validation error at pipeline
+; creation — and the sugar's one key is exactly the thing that keeps them in
+; step. Write them by hand and you own that agreement yourself, which is the
+; honest price of the key not existing.
+;
+; The key is load-bearing per pixel, not merely present. In the default
+; rgba8unorm the first pass's radiance of 12 is clamped at write time and the
+; Reinhard tone map in the second pass gets a 1 back, landing at 0.5; through
+; rgba16float the 12 survives and lands at 0.92.
+;
+; Equivalence: PIXEL. BYTE is out of reach for every sugar twin — see the
+; header of examples/pass_half_res_hand.sjon.
+
+(sampler :name __pass_sampler :mag-filter linear :min-filter linear)
+
+; ---- pass `radiance` -> the HDR intermediate --------------------------------
+
+(buffer :name radiance__ubuf :size 16 :usage [uniform copy-dst])
+
+(texture :name radiance__tex :size canvas :format rgba16float
+  :usage [texture-binding render-attachment])
+
+; No `samp` in this prelude: the pass samples nothing, so the hook does not
+; declare a binding for it and the auto layout has no slot for one.
+(shader-module :name radiance__shader :code """struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+@group(0) @binding(0) var<uniform> pngine: PngineInputs;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let x = f32(i & 1u) * 4.0 - 1.0;
+  let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+  return vec4f(x, y, 0, 1);
+}
+
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      let d = distance(uv, vec2f(0.5, 0.5));
+      // A bright core: 12 at the centre, falling off to nothing by the edges.
+      let e = 12.0 * exp(-d * d * 20.0);
+      return vec4f(e, e * 0.55, e * 0.15, 1.0);
+    }
+  """)
+
+(render-pipeline :name radiance__pipe :layout auto
+  (vertex :module radiance__shader :entry vs)
+  (fragment :module radiance__shader :entry fs
+    (target :format rgba16float)))
+
+(bind-group :name radiance__bg :layout radiance__pipe :group 0
+  (entry :binding 0 :buffer radiance__ubuf))
+
+(render-pass :name radiance :pipeline radiance__pipe :bind-groups [radiance__bg]
+  (color-attachment :view radiance__tex :clear-value [0 0 0 1]
+    :load-op clear :store-op store)
+  (draw :vertex-count 3))
+
+(queue :name radiance__uq
+  (write-buffer :buffer radiance__ubuf :offset 0 :data pngine-inputs))
+
+; ---- pass `main` -> the canvas ---------------------------------------------
+
+(buffer :name main__ubuf :size 16 :usage [uniform copy-dst])
+
+(shader-module :name main__shader :code """struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+@group(0) @binding(0) var<uniform> pngine: PngineInputs;
+@group(0) @binding(1) var samp: sampler;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let x = f32(i & 1u) * 4.0 - 1.0;
+  let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+  return vec4f(x, y, 0, 1);
+}
+@group(0) @binding(2) var radiance: texture_2d<f32>;
+
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      let hdr = textureSample(radiance, samp, uv).rgb;
+      // Reinhard. An unclamped 12 lands at 0.92; a value the texture had
+      // already clipped to 1 lands at 0.5, which is the visible difference.
+      return vec4f(hdr / (hdr + vec3f(1.0)), 1.0);
+    }
+  """)
+
+; The LAST pass has no `:format`: it draws to the canvas, whose format the
+; document does not choose. That is also why there is no `main__tex` here —
+; a last pass with no `post()` routes straight to `context-current-texture`.
+(render-pipeline :name main__pipe :layout auto
+  (vertex :module main__shader :entry vs)
+  (fragment :module main__shader :entry fs
+    (target :format preferred-canvas-format)))
+
+(bind-group :name main__bg :layout main__pipe :group 0
+  (entry :binding 0 :buffer main__ubuf)
+  (entry :binding 1 :sampler __pass_sampler)
+  (entry :binding 2 :texture radiance__tex))
+
+(render-pass :name main :pipeline main__pipe :bind-groups [main__bg]
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1]
+    :load-op clear :store-op store)
+  (draw :vertex-count 3))
+
+(queue :name main__uq
+  (write-buffer :buffer main__ubuf :offset 0 :data pngine-inputs))
+
+(frame :name draw :perform [radiance__uq radiance main__uq main])

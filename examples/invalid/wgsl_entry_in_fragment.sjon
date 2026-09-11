@@ -1,0 +1,9 @@
+; R4: a fragment declares no entry point. Two roots importing this one would
+; each declare `vs`, and a `(pass …)` decides what kind of pass it is by
+; scanning its own body, which never sees fragment text.
+(wgsl :name bad :code """
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f { return vec4f(f32(i)); }
+""")
+(shader-module :name m :imports [bad] :code """
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")

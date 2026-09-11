@@ -8,6 +8,7 @@
 //! For release mode: zig build bench -Doptimize=ReleaseFast
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const pngine = @import("pngine");
 
 const format = pngine.format;
@@ -60,11 +61,11 @@ const BenchResult = struct {
 };
 
 pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa_state.deinit();
+    const gpa = gpa_state.allocator();
 
-    var threaded: std.Io.Threaded = .init(allocator, .{});
+    var threaded: std.Io.Threaded = .init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
@@ -82,12 +83,12 @@ pub fn main() !void {
 
     // First, compile SJON to PNGB (one-time cost, not benchmarked)
     std.debug.print("\nCompiling SJON to PNGB...\n", .{});
-    const pngb = try pngine.dsl_sjon.compile(allocator, simple_triangle.simple_triangle_sjon);
-    defer allocator.free(pngb);
+    const pngb = try pngine.dsl_sjon.compile(gpa, simple_triangle.simple_triangle_sjon);
+    defer gpa.free(pngb);
     std.debug.print("  PNGB size: {d} bytes\n", .{pngb.len});
 
     // Benchmark 1: PNGB Parsing (Deserialization)
-    const parse_result = try benchParsing(allocator, io, pngb);
+    const parse_result = try benchParsing(gpa, io, pngb);
     parse_result.print();
 
     const parse_target_ms: f64 = 1.0;
@@ -98,7 +99,7 @@ pub fn main() !void {
     }
 
     // Benchmark 2: Frame Execution (MockGPU dispatch)
-    const exec_result = try benchExecution(allocator, io, pngb);
+    const exec_result = try benchExecution(gpa, io, pngb);
     exec_result.print();
 
     const exec_target_ms: f64 = 0.1;
@@ -109,7 +110,7 @@ pub fn main() !void {
     }
 
     // Benchmark 3: Full Pipeline (Parse + Execute)
-    const full_result = try benchFullPipeline(allocator, io, pngb);
+    const full_result = try benchFullPipeline(gpa, io, pngb);
     full_result.print();
 
     // Summary
@@ -137,23 +138,23 @@ pub fn main() !void {
     });
 }
 
-fn benchParsing(allocator: std.mem.Allocator, io: std.Io, pngb: []const u8) !BenchResult {
+fn benchParsing(gpa: Allocator, io: std.Io, pngb: []const u8) !BenchResult {
     var total_ns: u64 = 0;
     var min_ns: u64 = std.math.maxInt(u64);
     var max_ns: u64 = 0;
 
     // Warmup
     for (0..WARMUP_ITERATIONS) |_| {
-        var module = try format.deserialize(allocator, pngb);
-        module.deinit(allocator);
+        var module = try format.deserialize(gpa, pngb);
+        module.deinit(gpa);
     }
 
     // Benchmark
     for (0..BENCH_ITERATIONS) |_| {
         const t0 = std.Io.Clock.now(.awake, io);
 
-        var module = try format.deserialize(allocator, pngb);
-        module.deinit(allocator);
+        var module = try format.deserialize(gpa, pngb);
+        module.deinit(gpa);
 
         const elapsed = elapsedNs(t0, std.Io.Clock.now(.awake, io));
         total_ns += elapsed;
@@ -170,13 +171,13 @@ fn benchParsing(allocator: std.mem.Allocator, io: std.Io, pngb: []const u8) !Ben
     };
 }
 
-fn benchExecution(allocator: std.mem.Allocator, io: std.Io, pngb: []const u8) !BenchResult {
+fn benchExecution(gpa: Allocator, io: std.Io, pngb: []const u8) !BenchResult {
     // Parse once
-    var module = try format.deserialize(allocator, pngb);
-    defer module.deinit(allocator);
+    var module = try format.deserialize(gpa, pngb);
+    defer module.deinit(gpa);
 
     var gpu: MockGPU = .empty;
-    defer gpu.deinit(allocator);
+    defer gpu.deinit(gpa);
 
     var total_ns: u64 = 0;
     var min_ns: u64 = std.math.maxInt(u64);
@@ -185,8 +186,8 @@ fn benchExecution(allocator: std.mem.Allocator, io: std.Io, pngb: []const u8) !B
     // Warmup
     for (0..WARMUP_ITERATIONS) |_| {
         gpu.reset();
-        var dispatcher = Dispatcher(MockGPU).init(allocator, &gpu, &module);
-        try dispatcher.execute_all(allocator);
+        var dispatcher = Dispatcher(MockGPU).init(gpa, &gpu, &module);
+        try dispatcher.execute_all(gpa);
     }
 
     // Benchmark
@@ -194,8 +195,8 @@ fn benchExecution(allocator: std.mem.Allocator, io: std.Io, pngb: []const u8) !B
         gpu.reset();
         const t0 = std.Io.Clock.now(.awake, io);
 
-        var dispatcher = Dispatcher(MockGPU).init(allocator, &gpu, &module);
-        try dispatcher.execute_all(allocator);
+        var dispatcher = Dispatcher(MockGPU).init(gpa, &gpu, &module);
+        try dispatcher.execute_all(gpa);
 
         const elapsed = elapsedNs(t0, std.Io.Clock.now(.awake, io));
         total_ns += elapsed;
@@ -212,9 +213,9 @@ fn benchExecution(allocator: std.mem.Allocator, io: std.Io, pngb: []const u8) !B
     };
 }
 
-fn benchFullPipeline(allocator: std.mem.Allocator, io: std.Io, pngb: []const u8) !BenchResult {
+fn benchFullPipeline(gpa: Allocator, io: std.Io, pngb: []const u8) !BenchResult {
     var gpu: MockGPU = .empty;
-    defer gpu.deinit(allocator);
+    defer gpu.deinit(gpa);
 
     var total_ns: u64 = 0;
     var min_ns: u64 = std.math.maxInt(u64);
@@ -223,10 +224,10 @@ fn benchFullPipeline(allocator: std.mem.Allocator, io: std.Io, pngb: []const u8)
     // Warmup
     for (0..WARMUP_ITERATIONS) |_| {
         gpu.reset();
-        var module = try format.deserialize(allocator, pngb);
-        var dispatcher = Dispatcher(MockGPU).init(allocator, &gpu, &module);
-        try dispatcher.execute_all(allocator);
-        module.deinit(allocator);
+        var module = try format.deserialize(gpa, pngb);
+        var dispatcher = Dispatcher(MockGPU).init(gpa, &gpu, &module);
+        try dispatcher.execute_all(gpa);
+        module.deinit(gpa);
     }
 
     // Benchmark
@@ -234,10 +235,10 @@ fn benchFullPipeline(allocator: std.mem.Allocator, io: std.Io, pngb: []const u8)
         gpu.reset();
         const t0 = std.Io.Clock.now(.awake, io);
 
-        var module = try format.deserialize(allocator, pngb);
-        var dispatcher = Dispatcher(MockGPU).init(allocator, &gpu, &module);
-        try dispatcher.execute_all(allocator);
-        module.deinit(allocator);
+        var module = try format.deserialize(gpa, pngb);
+        var dispatcher = Dispatcher(MockGPU).init(gpa, &gpu, &module);
+        try dispatcher.execute_all(gpa);
+        module.deinit(gpa);
 
         const elapsed = elapsedNs(t0, std.Io.Clock.now(.awake, io));
         total_ns += elapsed;

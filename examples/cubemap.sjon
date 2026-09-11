@@ -37,7 +37,9 @@
 (sampler :name samp :mag-filter linear :min-filter linear)
 (buffer :name inputs :size 16 :usage [uniform copy-dst])
 
-(shader-module :name code :code """
+(wgsl :name invPerspective :file "./lib/inv_perspective.wgsl")
+
+(shader-module :name code :imports [invPerspective] :code """
 struct PngineInputs {
   time: f32,
   canvasW: f32,
@@ -47,20 +49,6 @@ struct PngineInputs {
 @group(0) @binding(0) var<uniform> inputs : PngineInputs;
 @group(0) @binding(1) var samp : sampler;
 @group(0) @binding(2) var tex : texture_cube<f32>;
-
-// Analytic inverse of the perspective helper used across the corpus
-// (verified P * invP = I): swap the diagonal reciprocals, move the -1.
-fn invPerspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  let a = far * nf;
-  let b = far * near * nf;
-  return mat4x4f(
-    vec4f(aspect / f, 0, 0, 0),
-    vec4f(0, 1.0 / f, 0, 0),
-    vec4f(0, 0, 0, 1.0 / b),
-    vec4f(0, 0, -1, a / b));
-}
 
 fn rotX(ang: f32) -> mat4x4f {
   let c = cos(ang);

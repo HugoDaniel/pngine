@@ -38,7 +38,9 @@ test suite runs through `pngine validate`; copy them as-is.
 - `schema/pngine.sjon` in the engine repo is the single source of truth.
 - SJON is the host language: https://hugodaniel.com/pages/sjon/
 - Shaders are WGSL, opaque to SJON. Uniforms are declared in WGSL and reflected.
-- Multi-file imports are deferred; keep documents single-file.
+- A document may extend another: `(import :file "./base.sjon" …)` compiles it
+  first, rebinding its `(define …)` constants and `(wgsl …)` fragments (see
+  "Fragments and imports").
 
 ## Syntax
 
@@ -55,7 +57,10 @@ start with `;`.
 **Constants & device**: `(define :name N :value 2048)`, `(limits …)`, `(canvas …)`
 
 **Shaders & data**
-- `(shader-module :name code :code """<wgsl>""")`
+- `(shader-module :name code :code """<wgsl>""")`; or `:file "./code.wgsl"`,
+  exactly one of the two
+- `(wgsl :name lib :code """<wgsl>""")`: a FRAGMENT, named WGSL that is not a
+  GPU object, assembled into whatever imports it (see "Fragments and imports")
 - `(data :name verts (cube :format [position4 color4 uv2]))`: shape generator
 - `(data :name v (wasm-data :file "cube.wasm" :func cube :returns "array<f32, 360>"))`:
   bytes produced once at buffer-create time by a WASM export
@@ -78,6 +83,8 @@ texture-binding storage-binding render-attachment`. At least one is required.
 
 **Binding & pipelines**
 - `(bind-group :name g :layout pipe :group 0 (entry :binding 0 :buffer uniforms))`
+- `(bind-group :name g :group 0 (entry …))` with no `:layout` derives one bind
+  group per pipeline that binds it, pruned to what that pipeline reaches
 - `(bind-group-layout :name l (entry :binding 0 …))`, `(pipeline-layout :name pl …)`
 - `(render-pipeline :name pipe :layout auto (vertex :module code :entry vsMain) (fragment …))`
 - `(compute-pipeline :name cp :layout auto (compute :module code :entry main))`
@@ -147,11 +154,20 @@ named, never clamped or truncated.
 
 Runtime-provided uniform data for `write-buffer`:
 
-| Identifier | Size | Layout (all f32) |
+| Identifier | Size | Layout (f32 unless noted) |
 |---|---|---|
 | `pngine-inputs` | 16B | time, width, height, aspect |
 | `scene-time-inputs` | 12B | time, width, height |
+| `pngine-frame-inputs` | 20B | time, width, height, aspect, frameIndex (u32) |
 | `pointer-inputs` | 48B | x, y, clickX, clickY, dx, dy, buttons, pressure, modifiers, scrollX, scrollY, pad |
+
+The first three are windows on one payload, widest last, so a document that
+wants the frame index asks for the wider window and finds everything the
+narrower ones carry in the same places. `frameIndex` is the executor's frame
+counter, which is also the ping-pong pool phase: use it for anything that
+rotates through a fixed sequence, such as a jitter offset for temporal
+anti-aliasing, where deriving the step from `time` would drift whenever a frame
+is dropped.
 
 ## `(pass …)` sugar
 
@@ -173,8 +189,157 @@ name), the `prev_<name>` feedback texture, and `D0`/`D1`/… storage buffers fro
 ```
 
 Optional keys: `:feedback true` (ping-pong texture; on an earlier pass, never
-the last one, which renders to the canvas), `:file ["a.wasm"]`,
-`:init "<wgsl compute>"`.
+the last one, which renders to the canvas), `:format rgba16float` (the texel
+format of the intermediate this pass renders into, default `rgba8unorm`; only on
+a pass that HAS an intermediate, so not on the one drawing to the canvas),
+`:reads [gDepth gColor]` (declared `(texture …)` forms the graph did not
+produce, bound by their own names and typed from each texture's `:format`, so a
+depth texture binds as `texture_depth_2d`; read a depth one with `textureLoad`,
+never `textureSample`), `:scale 0.5` (render the intermediate at a fraction of
+the canvas, for a half-resolution stage; the prelude then declares `const
+PASS_SCALE: f32`, and `pngine.width`/`height` still mean the canvas),
+`:file ["a.wasm"]`, `:init "<wgsl compute>"` (a one-shot seed run once per
+loaded payload, before the first frame, writing this pass's own target as
+`screen`, which is what gives a `:feedback true` chain a starting state. It may not name
+`pngine`, sit on a pass that draws to the canvas, or sit in a NAMED graph),
+`:imports [lib]` (fragments, see below).
+
+`:scale` is spelled the same way on the form it lowers to:
+`(texture :size canvas :scale 0.5 …)` is a canvas-tracking texture at half
+resolution, and follows the canvas on resize.
+
+The graph emits the document's `(frame …)`, so a document may not declare one
+of its own; steps that must run before the graph go in
+`(pass-graph :before [geo])`, which puts them at the head of that frame's
+`:perform`. That is how a `:reads` texture gets written.
+
+## `(draw-graph …)` sugar
+
+The other repetition: one geometry drawn in several stages, several geometries
+drawn in one stage. A `(stage …)` is the attachments a pass writes plus the
+pipeline state its geometries share; a `(geometry …)` is its buffers, its
+vertex layout, ONE draw command, and an `(in :stage …)` per stage it appears
+in. The hook emits the cross product: one `(render-pipeline …)`, one
+`(bind-group …)` per stage group and one `(render-pass …)` per (stage,
+geometry), named `<stage>__<geometry>` and run in stage-major order.
+
+```sjon
+(shader-module :name scene :code """
+@group(0) @binding(0) var<uniform> cam: vec4f;
+@vertex fn depthVs(@location(0) p: vec3f) -> @builtin(position) vec4f {
+  return vec4f(p, 1.0);
+}
+@vertex fn litVs(@location(0) p: vec3f) -> @builtin(position) vec4f {
+  return vec4f(p * cam.x, 1.0);
+}
+@fragment fn litFs() -> @location(0) vec4f { return cam; }
+""")
+(data :name mesh (cube :format [position3]))
+(buffer :name meshVB :usage [vertex] :data mesh)
+(buffer :name cam :size 16 :usage [uniform copy-dst])
+(texture :name shadowMap :size [512 512] :format depth32float
+  :usage [render-attachment texture-binding])
+(queue :name writeCam (write-buffer :buffer cam :offset 0 :data pngine-inputs))
+
+(draw-graph :before [writeCam]
+  (stage :name shadow
+    (depth-stencil-attachment :view shadowMap
+      :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+    (depth-stencil :format depth32float :depth-write-enabled true :depth-compare less))
+  (stage :name color
+    (color-attachment :view context-current-texture
+      :clear-value [0 0 0 1] :load-op clear :store-op store)
+    (bind-group :name sceneBG :group 0 (entry :binding 0 :buffer cam)))
+  (geometry :name mesh :vertex-buffers [meshVB]
+    (vertex-buffer :array-stride (* 4 3)
+      (attribute :shader-location 0 :offset 0 :format float32x3))
+    (draw :vertex-count 36)
+    (in :stage shadow (vertex :module scene :entry depthVs))
+    (in :stage color
+      (vertex :module scene :entry litVs)
+      (fragment :module scene :entry litFs))))
+```
+
+Every child is the ordinary form of that name, except three the graph fills a
+key of: an `(in …)`'s `(vertex …)` and `(fragment …)`, and a stage's
+`(target …)`, which carries blend state and a write mask but no `:format`. The
+graph fills in three things: each `(target :format …)`, taken from the stage's
+colour attachments, so an `(in …)` states none; the bind group's `:layout` per generated pipeline, with
+`:prune-unused` always on; and the load/store sequencing, meaning the stage's
+load ops and clear values on the FIRST pass of the stage and its store ops on
+the LAST. It emits the document's `(frame …)` too, with `:before` and `:after`
+as the way a hand-authored step composes when the graph has no `:name`.
+
+Give a graph a `:name` and it emits a `(step-group …)` instead of the frame, and
+the document writes the frame itself: that is how a `(draw-graph …)` and a
+`(pass-graph …)` run in one frame, in the order the frame states. A group is a
+compile-time name for a sequence of steps, inlined where it is named, so nothing
+about it reaches the wire. Without a `:name` a graph owns the document's only
+frame, and a second frame or a second graph beside it is refused. A `(color-attachment :view …)` takes a
+`(texture …)` name as readily as `context-current-texture`, and the derived
+target format follows whichever it is. A stage's `(target …)` children pair
+with its attachments by position, one each or none, so blending is a stage
+property: geometries that want different blending are different stages, which
+compose over one attachment through `:load-op load`.
+
+## Fragments and imports
+
+`(wgsl …)` is a named piece of WGSL that is not a GPU object. A
+`(shader-module …)` or `(pass …)` names fragments in `:imports`, and what
+reaches WebGPU is the ASSEMBLED module: the transitive imports in dependency
+order, each once, then the root's own text. Validation, `(constant …)`
+substitution, minification and reflection all run once over that whole text.
+
+A fragment may call something it does not define. WGSL does not care about
+module-scope declaration order, so the importing module supplies it, which is
+how one library serves several variants with no WGSL extension. `:requires`
+names those holes so a module that forgets one is told which fragment wanted it.
+
+```sjon
+(wgsl :name hash :code """
+fn hash2(p: vec2f) -> f32 { return fract(sin(dot(p, vec2f(127.1, 311.7))) * 43758.5453); }
+""")
+(wgsl :name fbm :imports [hash] :requires [noise] :code """
+fn fbm(p: vec2f) -> f32 {
+  var v = 0.0; var a = 0.5; var q = p;
+  for (var i = 0u; i < 5u; i++) { v += a * noise(q); q = q * 2.0; a *= 0.5; }
+  return v;
+}
+""")
+(wgsl :name valueNoise :imports [hash] :code """
+fn noise(p: vec2f) -> f32 {
+  let i = floor(p); let f = fract(p);
+  let u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash2(i), hash2(i + vec2f(1.0, 0.0)), u.x),
+             mix(hash2(i + vec2f(0.0, 1.0)), hash2(i + vec2f(1.0, 1.0)), u.x), u.y);
+}
+""")
+(pass-graph
+  (pass :name main :imports [valueNoise fbm] :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return vec4f(vec3f(fbm(uv * 8.0 + pngine.time * 0.1)), 1.0);
+    }
+  """))
+```
+
+Rules: a fragment declares no entry point; a fragment imported by a `(pass …)`
+declares no `@group`/`@binding` variable (the prelude owns group 0); the import
+graph is acyclic; every `:requires` name must be declared by the importing
+module, reached or not, because validation runs before dead-code elimination.
+`pngine validate` also checks `:requires` against the fragment's own text and
+warns both ways: a listed name the fragment never uses as a hole, and a hole
+the fragment uses and does not list.
+`:file` on a `(wgsl …)` or `(shader-module …)` reads a plain `.wgsl` file
+relative to the document, with no pngine-specific syntax in it and nothing to
+translate.
+
+A whole document can be imported too. `(import :file "./base.sjon" …)`
+compiles the named document ahead of this one, and the import's children,
+`(define …)` and `(wgsl …)` forms, replace the base's forms of the same name.
+Only those two heads may be rebound: both lower to nothing, so the payload is
+the base's with the value or the fragment changed and nothing else moved. A
+name the base does not declare under that head is refused.
 
 ## Complete example: triangle
 

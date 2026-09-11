@@ -2,17 +2,25 @@
 # Cut the public release repositories from this one.
 #
 # Usage:
-#   ./scripts/mirror.sh [-b <branch>] [--tag] <remote-url>...
+#   ./scripts/mirror.sh [-b <branch>] [--tag [--gh-release]] <remote-url>...
 #
-#   -b <branch>   branch to publish (default: main)
-#   --tag         also tag the cut `v<version>` (version = npm/pngine/package.json)
-#                 and push the tag. Refuses to move an existing tag.
+#   -b <branch>    branch to publish (default: main)
+#   --tag          also tag the cut `v<version>` (version = npm/pngine/package.json)
+#                  and push the tag. Refuses to move an existing tag.
+#   --gh-release   once the tag is pushed, create a GitHub Release for it on
+#                  every github.com remote given. Needs --tag and a `gh` logged
+#                  in to github.com; a release that already exists is left alone.
 #
 # Exports HEAD to a temp dir, applies `.mirrorignore`, removes tests/ and
 # strips the inline test blocks from every .zig file (zig-test-stripper), then
 # commits the result ON TOP OF the previous cut and pushes it to every remote
 # given. The public repositories therefore carry one commit per cut, in order,
 # and no development history.
+#
+# The cut carries its release notes. The version's section of CHANGELOG.md
+# (scripts/release-notes.sh) is the body of the cut commit, of the tag
+# annotation and of the GitHub Release. A version with no section, or an empty
+# one, stops the script before anything is built or pushed.
 #
 # The source is `git archive HEAD`, not the working tree. That is deliberate:
 # a working-tree copy publishes untracked-but-unignored files, and it cannot
@@ -30,23 +38,30 @@
 #   - zig (0.16.x+)
 #   - zig-test-stripper source at ../zig-test-stripper (sibling directory)
 #     or ZIG_TEST_STRIPPER_DIR env var pointing to its location
+#   - gh, for --gh-release only
 
 set -euo pipefail
 
 BRANCH=main
 TAG=0
+GH_RELEASE=0
 REMOTES=()
 while [ $# -gt 0 ]; do
     case "$1" in
         -b) BRANCH="${2:?-b needs a branch name}"; shift 2 ;;
         --tag) TAG=1; shift ;;
-        -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+        --gh-release) GH_RELEASE=1; shift ;;
+        -h|--help) sed -n '2,/^[^#]/p' "$0" | sed '$d'; exit 0 ;;
         -*) echo "error: unknown option $1" >&2; exit 2 ;;
         *) REMOTES+=("$1"); shift ;;
     esac
 done
 if [ ${#REMOTES[@]} -eq 0 ]; then
-    echo "Usage: $0 [-b <branch>] [--tag] <remote-url>..." >&2
+    echo "Usage: $0 [-b <branch>] [--tag [--gh-release]] <remote-url>..." >&2
+    exit 2
+fi
+if [ "$GH_RELEASE" = 1 ] && [ "$TAG" = 0 ]; then
+    echo "error: --gh-release needs --tag, since a release is made from a pushed tag" >&2
     exit 2
 fi
 
@@ -59,6 +74,37 @@ VERSION="$(sed -n 's/^  "version": "\(.*\)",$/\1/p' "$PROJECT_DIR/npm/pngine/pac
 if [ -z "$VERSION" ]; then
     echo "error: could not read the version from npm/pngine/package.json" >&2
     exit 1
+fi
+
+# --- Release notes: this version's CHANGELOG.md section ---
+# Read from the working tree's CHANGELOG.md, which must match HEAD's for the
+# notes to describe the cut; a dirty CHANGELOG.md is refused for that reason.
+if ! git -C "$PROJECT_DIR" diff --quiet HEAD -- CHANGELOG.md; then
+    echo "error: CHANGELOG.md has uncommitted changes; the notes must be the committed ones" >&2
+    exit 1
+fi
+NOTES="$("$SCRIPT_DIR/release-notes.sh" "$VERSION")"
+
+# --- GitHub Release preconditions, checked before anything is pushed ---
+GH_REPOS=()
+if [ "$GH_RELEASE" = 1 ]; then
+    for remote in "${REMOTES[@]}"; do
+        # git@github.com:OWNER/REPO(.git), ssh://git@github.com/..., https://github.com/...
+        slug="$(printf '%s\n' "$remote" \
+            | sed -n -E 's#^(git@github\.com:|ssh://git@github\.com/|https://github\.com/)([^/]+/[^/]+)$#\2#p' \
+            | sed 's/\.git$//')"
+        if [ -n "$slug" ]; then
+            GH_REPOS+=("$slug")
+        fi
+    done
+    if [ ${#GH_REPOS[@]} -eq 0 ]; then
+        echo "error: --gh-release given, but no remote is on github.com" >&2
+        exit 2
+    fi
+    if ! command -v gh >/dev/null 2>&1 || ! gh auth status --hostname github.com >/dev/null 2>&1; then
+        echo "error: --gh-release needs gh logged in to github.com (gh auth login)" >&2
+        exit 1
+    fi
 fi
 
 # --- Validate zig-test-stripper is available ---
@@ -143,6 +189,8 @@ if [ -n "$PARENT" ]; then
 fi
 
 # --- Stage and commit ---
+# `--cleanup=whitespace` keeps the notes' `### Added` headings, which the
+# default `strip` mode would delete as comment lines.
 git add -A
 if [ -n "$PARENT" ] && git diff --cached --quiet; then
     echo "The cut is identical to the previous one — no new commit."
@@ -152,11 +200,13 @@ else
     # `commit.gpgsign=true` kills the script here ("agent refused operation")
     # even though this repo disables signing locally. The cut is a synthetic
     # squash; signing it would attest to nothing.
-    git -c commit.gpgsign=false commit --quiet -F - <<EOF
+    git -c commit.gpgsign=false commit --quiet --cleanup=whitespace -F - <<EOF
 pngine $VERSION
 
 Release cut of development commit $HEAD_SHA: the engine source and
 reference docs, without the test suite.
+
+$NOTES
 EOF
     CUT="$(git rev-parse HEAD)"
 fi
@@ -169,7 +219,8 @@ done
 
 if [ "$TAG" = 1 ]; then
     TAGNAME="v$VERSION"
-    git -c tag.gpgsign=false tag -a "$TAGNAME" -m "pngine $VERSION" "$CUT"
+    printf 'pngine %s\n\n%s\n' "$VERSION" "$NOTES" > "$TMP/tag-message"
+    git -c tag.gpgsign=false tag -a --cleanup=whitespace -F "$TMP/tag-message" "$TAGNAME" "$CUT"
     for remote in "${REMOTES[@]}"; do
         # An annotated tag's peeled ref is the commit it names.
         existing="$(git ls-remote --tags "$remote" "refs/tags/$TAGNAME^{}" | cut -f1)"
@@ -181,6 +232,19 @@ if [ "$TAG" = 1 ]; then
         else
             echo "error: $TAGNAME exists on $remote at ${existing:0:7}, not ${CUT:0:7} — refusing to move it." >&2
             exit 1
+        fi
+    done
+fi
+
+if [ "$GH_RELEASE" = 1 ]; then
+    printf '%s\n' "$NOTES" > "$TMP/release-notes.md"
+    for repo in "${GH_REPOS[@]}"; do
+        if gh release view "$TAGNAME" --repo "$repo" >/dev/null 2>&1; then
+            echo "GitHub Release $TAGNAME already exists on $repo, left as it is."
+        else
+            echo "Creating GitHub Release $TAGNAME on $repo..."
+            gh release create "$TAGNAME" --repo "$repo" --verify-tag \
+                --title "pngine $VERSION" --notes-file "$TMP/release-notes.md"
         fi
     done
 fi

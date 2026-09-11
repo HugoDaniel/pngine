@@ -26,6 +26,7 @@
 //! - `inspect/symptom_diagnosis.zig` - Symptom-based diagnosis
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const pngine = @import("pngine");
 const format = pngine.format;
 const mock_gpu = pngine.mock_gpu;
@@ -55,7 +56,7 @@ pub const ValidationResult = types.ValidationResult;
 ///
 /// Pre-condition: args is the slice after "inspect" command.
 /// Post-condition: Returns exit code (0 = success, non-zero = error).
-pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+pub fn run(gpa: Allocator, io: std.Io, args: []const []const u8) !u8 {
     std.debug.assert(args.len <= 1024);
 
     // Parse arguments
@@ -80,10 +81,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         deep_opts.frame_indices.len > 1;
 
     if (deep) {
-        return runDeep(allocator, io, opts, &deep_opts, args);
+        return runDeep(gpa, io, opts, &deep_opts, args);
     }
 
-    return runMockGpu(allocator, io, opts);
+    return runMockGpu(gpa, io, opts);
 }
 
 /// Command options parsed from arguments.
@@ -100,18 +101,18 @@ const InspectOptions = struct {
 // Default mode: MockGPU inspection (fast)
 // ============================================================================
 
-fn runMockGpu(allocator: std.mem.Allocator, io: std.Io, opts: InspectOptions) !u8 {
+fn runMockGpu(gpa: Allocator, io: std.Io, opts: InspectOptions) !u8 {
     // Load or compile bytecode (shared format dispatcher)
-    const bytecode = loader.loadBytecode(allocator, io, opts.input) catch |err| {
+    const bytecode = loader.loadBytecode(gpa, io, opts.input) catch |err| {
         return handleLoadError(err, opts.input);
     };
-    defer allocator.free(bytecode);
+    defer gpa.free(bytecode);
 
     // Validate and deserialize
-    var module = validateAndDeserialize(allocator, bytecode) catch |err| {
+    var module = validateAndDeserialize(gpa, bytecode) catch |err| {
         return handleDeserializeError(err);
     };
-    defer module.deinit(allocator);
+    defer module.deinit(gpa);
 
     // Print module info (skip in verbose mode - we'll show call trace instead)
     if (!opts.verbose) {
@@ -120,11 +121,11 @@ fn runMockGpu(allocator: std.mem.Allocator, io: std.Io, opts: InspectOptions) !u
 
     // Execute with MockGPU to validate bytecode
     var gpu: MockGPU = .empty;
-    defer gpu.deinit(allocator);
+    defer gpu.deinit(gpa);
 
-    var dispatcher = Dispatcher(MockGPU).init(allocator, &gpu, &module);
+    var dispatcher = Dispatcher(MockGPU).init(gpa, &gpu, &module);
     defer dispatcher.deinit();
-    dispatcher.execute_all(allocator) catch |err| {
+    dispatcher.execute_all(gpa) catch |err| {
         std.debug.print("\nExecution error: {}\n", .{err});
         return 5;
     };
@@ -144,7 +145,7 @@ fn runMockGpu(allocator: std.mem.Allocator, io: std.Io, opts: InspectOptions) !u
 // Deep mode: WAMR runtime validation
 // ============================================================================
 
-fn runDeep(allocator: std.mem.Allocator, io: std.Io, opts: InspectOptions, deep_opts: *DeepOptions, args: []const []const u8) !u8 {
+fn runDeep(gpa: Allocator, io: std.Io, opts: InspectOptions, deep_opts: *DeepOptions, args: []const []const u8) !u8 {
     // Copy shared flags into deep opts
     deep_opts.input_path = opts.input;
     deep_opts.json_output = opts.json_output;
@@ -154,11 +155,11 @@ fn runDeep(allocator: std.mem.Allocator, io: std.Io, opts: InspectOptions, deep_
 
     // Parse --frames argument (needs allocator, so done after arg parsing)
     var owned_frame_indices: ?[]u32 = null;
-    defer if (owned_frame_indices) |fi| allocator.free(fi);
+    defer if (owned_frame_indices) |fi| gpa.free(fi);
 
     for (args, 0..) |arg, i| {
         if (std.mem.eql(u8, arg, "--frames") and i + 1 < args.len) {
-            owned_frame_indices = args_mod.parseFrameIndices(allocator, args[i + 1]) catch |err| {
+            owned_frame_indices = args_mod.parseFrameIndices(gpa, args[i + 1]) catch |err| {
                 std.debug.print("Error: invalid --frames format: {s}\n", .{@errorName(err)});
                 return 1;
             };
@@ -173,23 +174,23 @@ fn runDeep(allocator: std.mem.Allocator, io: std.Io, opts: InspectOptions, deep_
     std.debug.assert(deep_opts.frame_indices.len > 0);
 
     // Load and compile source to bytecode
-    const bytecode = loader.loadBytecode(allocator, io, deep_opts.input_path) catch |err| {
+    const bytecode = loader.loadBytecode(gpa, io, deep_opts.input_path) catch |err| {
         if (deep_opts.json_output) {
-            try output.outputJsonError(io, allocator, "compile_error", @errorName(err));
+            try output.outputJsonError(io, gpa, "compile_error", @errorName(err));
         } else {
             std.debug.print("Error: failed to load '{s}': {s}\n", .{ stdio.displayName(deep_opts.input_path), @errorName(err) });
         }
         return 3;
     };
-    defer allocator.free(bytecode);
+    defer gpa.free(bytecode);
 
     // Run validation
     var result = ValidationResult.init();
-    defer result.deinit(allocator);
+    defer result.deinit(gpa);
 
-    executor.validateBytecode(allocator, bytecode, &result, deep_opts) catch |err| {
+    executor.validateBytecode(gpa, bytecode, &result, deep_opts) catch |err| {
         if (deep_opts.json_output) {
-            try output.outputJsonError(io, allocator, "validation_error", @errorName(err));
+            try output.outputJsonError(io, gpa, "validation_error", @errorName(err));
         } else {
             std.debug.print("Error: validation failed: {s}\n", .{@errorName(err)});
         }
@@ -198,7 +199,7 @@ fn runDeep(allocator: std.mem.Allocator, io: std.Io, opts: InspectOptions, deep_
 
     // Output results
     if (deep_opts.json_output) {
-        try output.outputJson(io, allocator, &result, deep_opts);
+        try output.outputJson(io, gpa, &result, deep_opts);
     } else {
         try output.outputHuman(&result, deep_opts);
     }
@@ -364,7 +365,7 @@ fn handleLoadError(err: anyerror, input: []const u8) u8 {
     }
 }
 
-fn validateAndDeserialize(allocator: std.mem.Allocator, bytecode: []const u8) !format.Module {
+fn validateAndDeserialize(gpa: Allocator, bytecode: []const u8) !format.Module {
     std.debug.assert(bytecode.len > 0);
 
     if (bytecode.len < format.HEADER_SIZE) {
@@ -376,7 +377,7 @@ fn validateAndDeserialize(allocator: std.mem.Allocator, bytecode: []const u8) !f
         return error.InvalidFormat;
     }
 
-    const module = try format.deserialize(allocator, bytecode);
+    const module = try format.deserialize(gpa, bytecode);
     // A payload with no bytecode is a document that declared nothing the
     // emitter walks — `(define …)` alone, say. Reachable from valid input, so
     // a refusal with a sentence, not an assertion (audit 09 C3: this was a
@@ -385,7 +386,7 @@ fn validateAndDeserialize(allocator: std.mem.Allocator, bytecode: []const u8) !f
     if (module.bytecode.len == 0) {
         std.debug.print("Error: the payload carries no bytecode — the document declares no resource, pass or frame for the executor to run\n", .{});
         var m = module;
-        m.deinit(allocator);
+        m.deinit(gpa);
         return error.InvalidFormat;
     }
     return module;

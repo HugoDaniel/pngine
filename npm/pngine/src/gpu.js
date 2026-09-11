@@ -11,13 +11,15 @@
 
 import { dispatchResourcePassCommand } from "./gpu-resource-pass-commands.js";
 import { dispatchQueueCommand } from "./gpu-queue-commands.js";
+import { listBuffers, setBufferNames as setHostBufferNames, writeBuffers as hostWriteBuffers } from "./gpu-host-write.js";
 import { countCachedBindGroups, countLive } from "./gpu-stats.js";
-import { uniformToTypedArray } from "./uniform-convert.js";
+import { uniformToTypedArray, uniformTypeName } from "./uniform-convert.js";
 import { decodeTextureFormat } from "./enums.js";
 import {
   decodeTextureDescriptor,
   decodeSamplerDescriptor,
   decodeBindGroupData,
+  scaleExtent,
 } from "./descriptor-decode.js";
 
 // Optional WebGPU device features PNGine opportunistically requests at device
@@ -77,6 +79,9 @@ const PNGB_MAGIC = 0x42474e50; // "PNGB" little-endian
 // flags bit 2 — payload carries an authored device-limits table appended after
 // the animation table; its byte offset lives in the 3 reserved header bytes.
 const PNGB_FLAG_DEVICE_LIMITS = 0x04;
+// Header flag bit 4: the uniform-table section carries a buffer-name block
+// after its bindings (docs/plans/public-write-buffer.md D2).
+const PNGB_FLAG_BUFFER_NAMES = 0x10;
 // flags bit 3 — the author requested a PREMULTIPLIED canvas ((canvas
 // :alpha-mode premultiplied)); clear = "opaque", the GPUCanvasConfiguration
 // default. The bit used to mean the opposite, back when this runtime's own
@@ -99,22 +104,32 @@ export function canvasAlphaMode(bytecode) {
 
 /**
  * Parse uniform table from PNGB bytecode.
- * Returns: { uniforms: Map<string, {bufferId, offset, size, type, elemCount}>, strings: string[] }
+ * Returns: { uniforms: Map<string, {bufferId, offset, size, type, elemCount}>,
+ *            strings: string[],
+ *            buffers: Map<string, {id, pool, frameWritten}> }
  * For a fixed-size array field, `type` is the ELEMENT's UT_* tag and
  * `elemCount` its element count; elemCount 0 = not an array (the byte was
  * padding in older payloads, so they parse identically).
+ *
+ * `buffers` is the buffer-name block: every `(buffer :name …)` by its SJON
+ * name, with its pool's base id and member count, and whether the frame's
+ * own queue ops write it every draw. Read only behind header flag bit 4 and
+ * only within the section, so a payload minted before the block — or one
+ * whose bit is clear — parses to an empty map and nothing else changes.
  */
 export function parseUniformTable(bytecode) {
   const view = new DataView(bytecode.buffer, bytecode.byteOffset, bytecode.byteLength);
+  const buffers = new Map();
 
   // Validate PNGB magic
-  if (view.getUint32(0, true) !== PNGB_MAGIC) {
-    return { uniforms: new Map(), strings: [] };
+  if (bytecode.length < PNGB_HEADER_SIZE || view.getUint32(0, true) !== PNGB_MAGIC) {
+    return { uniforms: new Map(), strings: [], buffers };
   }
 
   // Read header offsets
   const stringTableOffset = view.getUint32(20, true);
   const uniformTableOffset = view.getUint32(32, true);
+  const sectionEnd = Math.min(view.getUint32(36, true) || bytecode.length, bytecode.length);
 
   // Parse string table first
   const strings = parseStringTable(bytecode, stringTableOffset);
@@ -122,7 +137,7 @@ export function parseUniformTable(bytecode) {
   // Parse uniform table
   const uniforms = new Map();
   if (uniformTableOffset === 0 || uniformTableOffset >= bytecode.length) {
-    return { uniforms, strings };
+    return { uniforms, strings, buffers };
   }
 
   let pos = uniformTableOffset;
@@ -157,7 +172,22 @@ export function parseUniformTable(bytecode) {
     }
   }
 
-  return { uniforms, strings };
+  // The buffer-name block: [count u16] then 6 bytes per entry, bounded by
+  // the section end so a bad count cannot read the animation table as names.
+  if ((view.getUint16(6, true) & PNGB_FLAG_BUFFER_NAMES) && pos + 2 <= sectionEnd) {
+    const nameCount = view.getUint16(pos, true);
+    pos += 2;
+    for (let i = 0; i < nameCount && pos + 6 <= sectionEnd; i++, pos += 6) {
+      const nameStringId = view.getUint16(pos + 2, true);
+      buffers.set(strings[nameStringId] || `buffer_${nameStringId}`, {
+        id: view.getUint16(pos, true),
+        pool: view.getUint8(pos + 4),
+        frameWritten: (view.getUint8(pos + 5) & 1) === 1,
+      });
+    }
+  }
+
+  return { uniforms, strings, buffers };
 }
 
 /**
@@ -286,6 +316,12 @@ export function createCommandDispatcher(device, ctx) {
   // context during prefetch so thumbnail renders don't touch the visible canvas.
   let targetCtx = ctx;
   let time = 0;
+  // The EXECUTOR's frame counter, pushed in by the host before each frame() —
+  // not a count kept here. The counter is also the ping-pong pool phase, so a
+  // shader that jitters by frame index and a `:pool 2` history buffer that
+  // flips by the same number stay in step. A host that never pushes it leaves
+  // this 0, which is what a single-frame render is.
+  let frame = 0;
   // Seconds between the last two setTime calls (one per rendered frame). Only
   // the `time-delta` wasm-call arg reads it; a seek reports the seek distance,
   // which is the honest answer to "how far did the clock move".
@@ -306,10 +342,15 @@ export function createCommandDispatcher(device, ctx) {
   // The byte views exist so the queue write can be BYTE-counted: writeBuffer's
   // 5-argument form measures dataOffset/size in ELEMENTS of the array it is
   // handed, and the sizes on the wire are byte counts.
-  const timeAB = new ArrayBuffer(16);   // pngine-inputs: time, w, h, aspect
+  // 20, not 16: `pngine-frame-inputs` appends the frame counter to the block
+  // the other two sources are prefixes of. `frame` is a Uint32Array over the
+  // SAME bytes, starting at float 4, because the counter is a count and an f32
+  // stops being exact at 2^24 frames. Three sources, three sizes, one payload.
+  const timeAB = new ArrayBuffer(20);   // pngine-inputs: time, w, h, aspect (+ frameCounter)
   const ptrAB = new ArrayBuffer(48);    // pointer-inputs: 11 floats + padding
   const scratch = {
-    time: new Float32Array(timeAB), timeBytes: new Uint8Array(timeAB),
+    time: new Float32Array(timeAB, 0, 4), frame: new Uint32Array(timeAB, 16, 1),
+    timeBytes: new Uint8Array(timeAB),
     ptr: new Float32Array(ptrAB), ptrBytes: new Uint8Array(ptrAB),
   };
   let enc = null;      // command encoder
@@ -345,7 +386,9 @@ export function createCommandDispatcher(device, ctx) {
   const txd = [];      // texture descriptors
   const bun = [];      // render bundles
   const qs = [];       // query sets
-  const bufUsage = []; // buffer usage flags (for MAP_READ detection)
+  const bufUsage = []; // buffer usage flags (for MAP_READ detection, host-write refusal)
+  const bufSize = [];  // buffer byte sizes (host-write range check)
+  const bufNames = new Map(); // SJON buffer name → {id, pool, frameWritten} (host writes)
   let pendingOcclusionQS = null;
   let pendingTimestampWrites = null;
   let pendingDepthStencilOps = null;
@@ -411,6 +454,7 @@ export function createCommandDispatcher(device, ctx) {
     // Bytecode usage flags match WebGPU GPUBufferUsage values directly
     buf[id] = scoped("createBuffer", id, () => device.createBuffer({ size, usage: usage || GPUBufferUsage.COPY_DST }));
     bufUsage[id] = usage;
+    bufSize[id] = size;
   }
 
 
@@ -516,11 +560,13 @@ export function createCommandDispatcher(device, ctx) {
   function createTexture(id, ptr, len) {
     if (tex[id]) return;
     if (len === 0) return emptyDescriptor("createTexture", id);
-    const { desc, canvasBound } = decodeTextureDescriptor(
+    const { desc, canvasBound, canvasScale } = decodeTextureDescriptor(
       new Uint8Array(mem.buffer, ptr, len), navigator.gpu.getPreferredCanvasFormat(), cw, ch, bmp);
     // Canvas-bound: bytecode omitted width/height, so size tracks canvas dims.
-    // Remember the static fields so the resize path can rebuild at new cw/ch.
-    txd[id] = { format: desc.format, usage: desc.usage, canvasBound,
+    // Remember the static fields so the resize path can rebuild at new cw/ch —
+    // `canvasScale` among them, or a half-resolution target would come back
+    // full-size after the first resize.
+    txd[id] = { format: desc.format, usage: desc.usage, canvasBound, canvasScale,
                 dimension: desc.dimension, sampleCount: desc.sampleCount, depth: desc.size[2] };
     DEBUG && dbg && console.log(`[GPU] createTexture(${id}) ${desc.size[0]}x${desc.size[1]} ${desc.format} usage=0x${desc.usage.toString(16)}${canvasBound ? ' [canvas]' : ''}`);
     installTexture(id, scoped("createTexture", id, () => device.createTexture(desc)));
@@ -753,13 +799,17 @@ export function createCommandDispatcher(device, ctx) {
       enc = null;
       return e;
     },
-    clock: () => ({ time, cw, ch }),
+    clock: () => ({ time, cw, ch, frame }),
     scratch,
     decodeWasmArgs: (ab) => decodeWasmArgs(ab, { cw, ch, time, tdelta }),
     getOnQueryResult: () => onQueryResult,
     debug: () => dbg,
     reportError: (e) => { onError && onError(e); },
     alive: () => alive,
+
+    // --- host writes (gpu-host-write.js) ---
+    bufSize,
+    bufNames,
   };
 
   // Main dispatch - inline command constants for minification
@@ -859,8 +909,9 @@ export function createCommandDispatcher(device, ctx) {
     bmp.forEach(b => b?.close?.());
     buf.length = tex.length = txv.length = dfv.length = smp.length = shd.length = pip.length = 0;
     bg.length = bgl.length = ppl.length = bmp.length = wm.length = 0;
-    wcr.length = bgd.length = txd.length = txs.length = bufUsage.length = 0;
+    wcr.length = bgd.length = txd.length = txs.length = bufUsage.length = bufSize.length = 0;
     qs.length = bun.length = 0;
+    bufNames.clear();
     curPip = -1;
     pendingReadbacks.length = 0;
     pendingOcclusionQS = pendingTimestampWrites = null;
@@ -892,20 +943,22 @@ export function createCommandDispatcher(device, ctx) {
   /**
    * Set a uniform value by name.
    * @param {string} name - Uniform field name
-   * @param {number|number[]} value - Value to set
-   * @returns {boolean} - true if uniform was found and written
+   * @param {number|number[]|number[][]} value - Value to set (a nested array for a matrix or an array field)
+   * @returns {boolean} - true if uniform was found and written; a refusal reached onError
    */
+  // A refusal reaches the host through onError (source "set-uniform"), the
+  // route writeBuffer's refusals take — it was a DEBUG-gated console.warn, so
+  // a typo in a name shipped a write that never landed and nothing said so.
   function setUniform(name, value) {
-    if (!uniformMap) return false;
-    const info = uniformMap.get(name);
+    const info = uniformMap?.get(name);
     if (!info) {
-      DEBUG && dbg && console.warn(`[GPU] setUniform: unknown uniform '${name}'`);
+      onError && onError({ message: `setUniform: no uniform named '${name}' (see getUniforms())`, source: "set-uniform" });
       return false;
     }
 
     const buffer = buf[info.bufferId];
     if (!buffer) {
-      DEBUG && dbg && console.warn(`[GPU] setUniform: buffer ${info.bufferId} not found`);
+      onError && onError({ message: `setUniform: '${name}' names a buffer this payload never created`, source: "set-uniform" });
       return false;
     }
 
@@ -913,7 +966,7 @@ export function createCommandDispatcher(device, ctx) {
     // expand per-element at the wire-implied stride — see uniformToTypedArray)
     const data = uniformToTypedArray(value, info.type, info.size, info.elemCount);
     if (!data) {
-      DEBUG && dbg && console.warn(`[GPU] setUniform: failed to convert value for '${name}'`);
+      onError && onError({ message: `setUniform: '${name}' could not be packed as ${uniformTypeName(info.type)}`, source: "set-uniform" });
       return false;
     }
 
@@ -956,7 +1009,7 @@ export function createCommandDispatcher(device, ctx) {
       const d = txd[id];
       if (!d || !d.canvasBound || !tex[id]) continue;
       tex[id].destroy?.();
-      const desc = { size: [w || 1, h || 1, d.depth || 1], format: d.format, usage: d.usage, sampleCount: d.sampleCount || 1 };
+      const desc = { size: [scaleExtent(w, d.canvasScale || 1), scaleExtent(h, d.canvasScale || 1), d.depth || 1], format: d.format, usage: d.usage, sampleCount: d.sampleCount || 1 };
       if (d.dimension) desc.dimension = d.dimension;
       installTexture(id, device.createTexture(desc));
     }
@@ -996,6 +1049,7 @@ export function createCommandDispatcher(device, ctx) {
     setDebug(v) { dbg = v; },
     setMemory(m) { mem = m; },
     setTime(t) { tdelta = t - time; time = t; },
+    setFrameCounter(n) { frame = n >>> 0; },
     setPointer(s) { scratch.ptr.set(s); },
     setCanvasSize(w, h) { cw = w; ch = h; },
     resizeCanvasBound,
@@ -1006,6 +1060,10 @@ export function createCommandDispatcher(device, ctx) {
     setUniformTable,
     setUniform,
     setUniforms,
+    // Host writes by SJON buffer name; bodies in gpu-host-write.js.
+    setBufferNames: (names) => setHostBufferNames(gpuOps, names),
+    writeBuffers: (buffers, counter) => hostWriteBuffers(gpuOps, buffers, counter),
+    getBuffers: () => listBuffers(gpuOps),
     getStats,
     execute,
     destroy,

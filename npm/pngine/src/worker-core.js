@@ -36,6 +36,7 @@
 //                  gated — both profiles react to a canvas resize.)
 
 import { createCommandDispatcher, parseUniformTable, parseDeviceLimits, requiredFeaturesFor, canvasAlphaMode } from "./gpu.js";
+import { describeUniforms } from "./uniform-convert.js";
 import { parsePayload, getExecutorImports } from "./loader.js";
 
 // Build flag — read below to gate the wasmUrl fallback branch. The value
@@ -53,8 +54,11 @@ export const MSG = {
   DRAW: "draw",
   LOAD: "load",
   DESTROY: "destroy",
-  SET_UNIFORM: "setUniform",
   GET_UNIFORMS: "getUniforms",
+  // Host buffer writes ride DRAW (`buffers` beside `uniforms`); this pair is
+  // only the listing. docs/plans/public-write-buffer.md.
+  GET_BUFFERS: "getBuffers",
+  BUFFERS: "buffers",
   GET_STATS: "getStats",
   STATS: "stats",
   RESIZE: "resize",
@@ -122,6 +126,17 @@ export function createWorkerHandlers(env, opts = {}) {
   // GPU resource on a fresh device without the host re-sending it.
   let lastBytecode = null;
   let uniformMap = null;
+  // The payload's buffer-name block, kept beside the uniform table so
+  // getUniforms can name each field's buffer the way writeBuffer speaks it.
+  let bufferNames = new Map();
+  // The payload's frames by name → index in define order, read out of the
+  // executor at load (getFrameCount / getFrameNameId through the string
+  // table). Empty on an executor that predates those exports.
+  let frameNames = new Map();
+  // The `frame` the executor currently holds, as the last draw applied it (a
+  // name, or null for unpinned — what init() leaves). The pin is a change,
+  // not a per-draw call: a draw whose frame equals this sends nothing.
+  let appliedFrame = null;
 
   // Normalize a posted payload (ArrayBuffer or view) to a Uint8Array for parsing.
   const toU8 = (b) => (b instanceof Uint8Array ? b : new Uint8Array(b));
@@ -163,13 +178,46 @@ export function createWorkerHandlers(env, opts = {}) {
     if (memory) gpu.setMemory(memory); // null at first init; handleInit binds it post-executor
     gpu.setCanvasSize(canvas.width, canvas.height);
     gpu.setOnShaderError((err) => { post({ type: "shader-error", ...err }); });
-    gpu.setOnError((err) => {
-      if (err.message === lastCommandError) return;
-      lastCommandError = err.message;
-      console.error("[Worker] GPU command error:", err.message);
-      post({ type: "gpu-error", ...err });
-    });
+    gpu.setOnError((err) => reportCommandError(err.message, err.source));
     gpu.setOnQueryResult((results) => { post({ type: "queryResult", data: results }); });
+  }
+
+  // One command-stream fault to the host, deduped per distinct message so a
+  // fault that repeats every RAF (a persistently-bad stream, a frame that
+  // keeps refusing, a pin that keeps naming nothing) posts once. Reset on
+  // device setup and load, beside lastUncapturedError.
+  function reportCommandError(message, source) {
+    if (message === lastCommandError) return;
+    lastCommandError = message;
+    console.error("[Worker] GPU command error:", message);
+    post({ type: "gpu-error", message, source });
+  }
+
+  // Pin the frame `frame()` renders, by the name the draw message carries
+  // (null releases). The executor keys frames by index; the name resolves
+  // through `frameNames`. A name the payload does not define, or an executor
+  // that predates the export, is refused through the same channel every other
+  // command fault takes — and the draw still renders, on whatever was pinned
+  // before, the way a refused host write does not skip the frame.
+  const NO_FRAME = 0xffffffff;
+  function applyFrame(name) {
+    appliedFrame = name;
+    if (typeof wasm.setFrame !== "function") {
+      if (name !== null) reportCommandError(`setFrame: '${name}' cannot be pinned — this embedded executor predates the setFrame export; re-embed with a current pngine`, "set-frame");
+      return;
+    }
+    if (name === null) {
+      wasm.setFrame(NO_FRAME);
+      return;
+    }
+    const index = frameNames.get(name);
+    if (index === undefined) {
+      const defined = [...frameNames.keys()].join(", ") || "none";
+      reportCommandError(`setFrame: no frame named '${name}' (the payload defines: ${defined})`, "set-frame");
+      return;
+    }
+    const status = wasm.setFrame(index);
+    if (status !== 0) reportCommandError(`setFrame: '${name}' refused by the executor (status ${status})`, "set-frame");
   }
 
   // Acquire a GPUDevice, wire its error/lost handlers, configure the visible
@@ -403,6 +451,7 @@ export function createWorkerHandlers(env, opts = {}) {
     }
     moduleLoaded = false;
     uniformMap = null;
+    bufferNames = new Map();
 
     // Split PNGB: bytecode (small) → bytecodePtr, data section (large) → dataPtr
     const bytecodeArray = bytecode instanceof Uint8Array ? bytecode : new Uint8Array(bytecode);
@@ -427,9 +476,13 @@ export function createWorkerHandlers(env, opts = {}) {
     }
     wasm.setDataLen(dataLen);
 
-    // Parse uniform table from bytecode before init (for runtime reflection)
-    const { uniforms } = parseUniformTable(bytecodeArray);
+    // Parse uniform table from bytecode before init (for runtime reflection).
+    // The same section carries the buffer-name block, when the payload has
+    // one; a payload without it names nothing, and every host write by name
+    // is refused as unknown rather than guessed.
+    const { uniforms, buffers, strings } = parseUniformTable(bytecodeArray);
     uniformMap = uniforms;
+    bufferNames = buffers ?? new Map();
     if (debugMode && uniforms.size > 0) {
       console.log(`[Worker] Parsed ${uniforms.size} uniform fields:`, [...uniforms.keys()]);
     }
@@ -451,9 +504,22 @@ export function createWorkerHandlers(env, opts = {}) {
 
     // Set uniform table after resources are created (buffers exist now)
     gpu.setUniformTable(uniformMap);
+    gpu.setBufferNames(bufferNames);
+
+    // The payload's frames, by name, out of the executor that just indexed
+    // them. init() cleared any pin on the executor side, so the tracker says
+    // so (null: unpinned) and the next draw re-applies whatever the host
+    // still holds. An executor that predates getFrameCount cannot say, so
+    // the count stays at the historical 1.
+    frameNames = new Map();
+    const frames = wasm.getFrameCount?.() ?? 1;
+    if (wasm.getFrameNameId) {
+      for (let i = 0; i < frames; i++) frameNames.set(strings[wasm.getFrameNameId(i)] ?? `frame_${i}`, i);
+    }
+    appliedFrame = null;
 
     moduleLoaded = true;
-    frameCount = 1;
+    frameCount = frames;
     prefetch?.reset();
 
     // First frame render
@@ -462,18 +528,19 @@ export function createWorkerHandlers(env, opts = {}) {
 
   async function render(time, width, height) {
     gpu.setTime(time);
+    // BEFORE frame(), not after: the executor runs the frame body at the
+    // counter's pre-increment value and advances it on the way out, so the
+    // number this frame's pooled bindings were selected with is the one
+    // readable here. Reading it after would jitter one frame ahead of the
+    // history buffer it is supposed to match.
+    if (wasm.getFrameCounter) gpu.setFrameCounter(wasm.getFrameCounter());
 
     const result = wasm.frame(time, width, height);
     if (result !== 0) {
       // The executor refused to build this frame's command buffer — the host was
       // never told before (console-only). Surface it as a gpu-error (deduped so a
       // persistently-failing frame posts once, not every RAF).
-      const message = `frame() returned status ${result}`;
-      if (message !== lastCommandError) {
-        lastCommandError = message;
-        console.warn("[Worker]", message);
-        post({ type: "gpu-error", message, source: "frame" });
-      }
+      reportCommandError(`frame() returned status ${result}`, "frame");
       return;
     }
 
@@ -499,7 +566,28 @@ export function createWorkerHandlers(env, opts = {}) {
     }
 
     const t = data.time ?? 0;
-    await withRenderLock(() => render(t, canvas.width, canvas.height));
+    await withRenderLock(async () => {
+      // Host buffer writes ride the draw message and land at the head of the
+      // frame that carries them — INSIDE the render lock, unlike the uniforms
+      // above, because a `poolIndex: "active"` write resolves against the
+      // executor's frame counter, and a prefetch thumbnail render moves and
+      // restores that counter under this same lock (renderEphemeral). Read
+      // outside it, the counter could be a thumbnail's. The read is the one
+      // render() makes: BEFORE frame(), the value this frame's pooled
+      // bindings are selected with; undefined on an executor that predates
+      // the export, which the dispatcher reports rather than guessing 0.
+      if (data.buffers && typeof data.buffers === "object") {
+        const n = gpu.writeBuffers(data.buffers, wasm.getFrameCounter?.());
+        if (debugMode && n > 0) console.log(`[Worker] Wrote ${n} host buffers`);
+      }
+      // The frame this draw renders: a name, or null for the executor's own
+      // choice (its first frame, or the animation table's scene). Applied
+      // only when it differs from what the executor already holds; a draw
+      // from a main thread that never sends `frame` reads as null.
+      const frame = data.frame ?? null;
+      if (frame !== appliedFrame) applyFrame(frame);
+      await render(t, canvas.width, canvas.height);
+    });
 
     // Opportunistic thumbnail emission + prefetch drain (dev capability).
     prefetch?.afterDraw(t);
@@ -529,6 +617,9 @@ export function createWorkerHandlers(env, opts = {}) {
     moduleLoaded = false;
     initialized = false;
     uniformMap = null;
+    bufferNames = new Map();
+    frameNames = new Map();
+    appliedFrame = null;
     prefetch?.destroy();
     gpu?.destroy();
     if (device) {
@@ -551,35 +642,20 @@ export function createWorkerHandlers(env, opts = {}) {
     post({ type: MSG.DESTROYED });
   }
 
-  // Set a uniform value without triggering a draw.
-  function handleSetUniform(data) {
-    if (!initialized || !moduleLoaded) return;
-
-    if (data.uniforms && typeof data.uniforms === "object") {
-      gpu.setUniforms(data.uniforms);
-    } else if (data.name !== undefined && data.value !== undefined) {
-      gpu.setUniform(data.name, data.value);
-    }
+  // Return every reflected uniform field by name: its type by its WGSL name
+  // and its buffer by its `(buffer :name …)`. The wire's tag and dispatcher
+  // id, which the reply carried through 3.0.1, are nothing a host can hand
+  // back to anything public (describeUniforms). (Uniform WRITES have no
+  // message of their own: they ride DRAW's `uniforms`, and the `setUniform`
+  // message that once sat here had no sender anywhere — audit finding 3.)
+  function handleGetUniforms() {
+    post({ type: MSG.UNIFORMS, uniforms: uniformMap ? describeUniforms(uniformMap, bufferNames) : {} });
   }
 
-  // Return the available uniform names and types.
-  function handleGetUniforms() {
-    if (!uniformMap) {
-      post({ type: MSG.UNIFORMS, uniforms: {} });
-      return;
-    }
-
-    const uniforms = {};
-    for (const [name, info] of uniformMap) {
-      uniforms[name] = {
-        type: info.type,
-        size: info.size,
-        bufferId: info.bufferId,
-        offset: info.offset,
-        elemCount: info.elemCount,
-      };
-    }
-    post({ type: MSG.UNIFORMS, uniforms });
+  // Report the payload's named buffers — what a host may write, by name, and
+  // why not (`writable`, `frameWritten`). Empty before init and after destroy.
+  function handleGetBuffers() {
+    post({ type: MSG.BUFFERS, buffers: gpu?.getBuffers?.() ?? {} });
   }
 
   // Report live GPU-resource counts + the executor's WASM memory size.
@@ -658,11 +734,11 @@ export function createWorkerHandlers(env, opts = {}) {
         case MSG.DESTROY:
           handleDestroy();
           break;
-        case MSG.SET_UNIFORM:
-          handleSetUniform(data);
-          break;
         case MSG.GET_UNIFORMS:
           handleGetUniforms();
+          break;
+        case MSG.GET_BUFFERS:
+          handleGetBuffers();
           break;
         case MSG.GET_STATS:
           handleGetStats();
@@ -706,12 +782,12 @@ export function createWorkerHandlers(env, opts = {}) {
   let chain = Promise.resolve();
   // Superseded rAF draws are dropped rather than rendered back-to-back once the
   // stall clears: a frame whose time has already been overtaken is work nobody
-  // will see. A draw carrying `uniforms` is NEVER dropped — that state is
-  // host-supplied (anim.js draw(p, {uniforms})) and the next frame does not
-  // re-send it, so collapsing it would silently lose a write.
+  // will see. A draw carrying `uniforms` or `buffers` is NEVER dropped — that
+  // state is host-supplied (anim.js draw(p, {uniforms, buffers})) and the next
+  // frame does not re-send it, so collapsing it would silently lose a write.
   let queuedDraws = 0;
   function dispatch(message) {
-    const supersedable = message.type === MSG.DRAW && !message.uniforms;
+    const supersedable = message.type === MSG.DRAW && !message.uniforms && !message.buffers;
     if (supersedable) queuedDraws++;
     const run = () => {
       if (supersedable && --queuedDraws > 0) return;

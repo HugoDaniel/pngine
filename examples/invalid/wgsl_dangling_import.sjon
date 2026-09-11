@@ -1,0 +1,6 @@
+; `:imports` is a `wgsl-ref-list`, a cross-reference to the `wgsl` form group
+; only — so a name nothing declares is `not_cross_ref` from the validator, with
+; no emitter code at all.
+(shader-module :name m :imports [nothingDeclaresThis] :code """
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")

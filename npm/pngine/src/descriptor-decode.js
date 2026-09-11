@@ -23,14 +23,16 @@ const RENDER_ATTACHMENT = 0x10;
  * @param {number} cw - canvas width fallback for size
  * @param {number} ch - canvas height fallback for size
  * @param {Array} [bmp] - ImageBitmap table for size-from-image (field 0x0A)
- * @returns {{desc: object, canvasBound: boolean}} - descriptor + whether size
- *   tracks the canvas (bytecode omitted explicit width AND height)
+ * @returns {{desc: object, canvasBound: boolean, canvasScale: number}} -
+ *   descriptor, whether size tracks the canvas (bytecode omitted explicit
+ *   width AND height), and the fraction of the canvas it tracks (1 unless
+ *   field 0x0B said otherwise; the resize path applies it again)
  */
 export function decodeTextureDescriptor(bytes, defaultFormat, cw, ch, bmp) {
   const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let off = 2; // skip type tag + field count
   const desc = { size: [cw || 512, ch || 512], format: defaultFormat, usage: RENDER_ATTACHMENT, sampleCount: 1 };
-  let hasW = false, hasH = false;
+  let hasW = false, hasH = false, scale = 1;
   const fc = bytes[1];
   for (let i = 0; i < fc; i++) {
     const fid = bytes[off++], vt = bytes[off++];
@@ -41,6 +43,11 @@ export function decodeTextureDescriptor(bytes, defaultFormat, cw, ch, bmp) {
       else if (fid === 0x03) desc.size[2] = val; // depthOrArrayLayers
       else if (fid === 0x04) desc.mipLevelCount = val;
       else if (fid === 0x05) desc.sampleCount = val;
+    } else if (vt === 0x01) { // f32
+      const val = v.getFloat32(off, true); off += 4;
+      // fid 0x0B = size_canvas_scale: this texture is a FRACTION of the canvas
+      // in each dimension. Applied below, and again by the resize path.
+      if (fid === 0x0B && val > 0) scale = val;
     } else if (vt === 0x06) { // u16 (resource ID reference)
       const val = v.getUint16(off, true); off += 2;
       // fid 0x0A = size_from_image_bitmap: use ImageBitmap dimensions
@@ -54,9 +61,42 @@ export function decodeTextureDescriptor(bytes, defaultFormat, cw, ch, bmp) {
       else if (fid === 0x07) desc.format = decodeTextureFormat(val);
       // Bytecode texture usage flags match WebGPU GPUTextureUsage values directly
       else if (fid === 0x08) desc.usage = val || RENDER_ATTACHMENT;
+    } else {
+      // A value type this decoder does not read still has to be STRIDDEN, or
+      // every field after it decodes from the middle of this one's bytes. The
+      // walk used to advance only for the three types above, which held only
+      // because no texture descriptor carried another — the f32 arm above was
+      // added the day one did.
+      off += SCALAR_BYTES[vt] ?? 0;
+      if (SCALAR_BYTES[vt] === undefined) break; // array/nested: not self-describing
     }
   }
-  return { desc, canvasBound: !hasW && !hasH };
+  const canvasBound = !hasW && !hasH;
+  // Rebuild in place rather than as a fresh 3-element array: `size` holds two
+  // entries unless a depth field arrived, and a third element of `undefined` is
+  // "Value is not of type 'unsigned long'" from createTexture.
+  if (canvasBound && scale !== 1) {
+    desc.size[0] = scaleExtent(desc.size[0], scale);
+    desc.size[1] = scaleExtent(desc.size[1], scale);
+  }
+  return { desc, canvasBound, canvasScale: scale };
+}
+
+/// Byte width of each scalar ValueType (src/types/descriptors.zig
+/// `ValueType.scalarByteSize`). Array (0x03) and nested (0x04) are absent:
+/// they are not self-describing, so a walk stops there rather than guessing.
+const SCALAR_BYTES = { 0x00: 4, 0x01: 4, 0x02: 2, 0x05: 1, 0x06: 2, 0x07: 1 };
+
+/**
+ * One dimension of a canvas-tracking texture at `scale`. Rounded, and never
+ * below one texel — a zero-texel dimension is invalid in every direction, and
+ * a small canvas at a small scale reaches zero long before the author notices.
+ * @param {number} n - the canvas dimension in texels
+ * @param {number} scale - the fraction, > 0
+ * @returns {number}
+ */
+export function scaleExtent(n, scale) {
+  return Math.max(1, Math.round((n || 1) * scale));
 }
 
 /**
@@ -85,6 +125,15 @@ export function decodeTextureViewDescriptor(bytes) {
       if (fid === 0x01) desc.format = decodeTextureFormat(val);
       else if (fid === 0x02) desc.dimension = ['1d', '2d', '2d-array', 'cube', 'cube-array', '3d'][val] || '2d';
       else if (fid === 0x03) desc.aspect = ['all', 'stencil-only', 'depth-only'][val] || 'all';
+    } else {
+      // Same rule as decodeTextureDescriptor: a value type this decoder does
+      // not read still has to be STRIDDEN. This walk had no such arm at all, so
+      // the first unrecognized type left `off` mid-value and every field after
+      // it decoded from the middle of that one's bytes -- silently, as a
+      // plausible mipLevelCount or aspect. Held only because the encoder has
+      // never written one here yet (§438).
+      off += SCALAR_BYTES[vt] ?? 0;
+      if (SCALAR_BYTES[vt] === undefined) break; // array/nested: not self-describing
     }
   }
   return desc;
@@ -124,9 +173,14 @@ export function decodeSamplerDescriptor(bytes) {
     } else if (vt === 0x06) { // u16
       const val = v.getUint16(off, true); off += 2;
       if (fid === 0x0A) desc.maxAnisotropy = val;
-    } else if (vt === 0x00) { off += 4; } // u32
-    else if (vt === 0x02) { off += 2; } // string_id
-    else if (vt === 0x05) { off += 1; } // bool
+    } else {
+      // The three read arms above cover every type the sampler encoder writes
+      // today; this covers the rest by table rather than by three more
+      // hand-written cases, so a new scalar type strides correctly the day it
+      // is added instead of desyncing the cursor (§438).
+      off += SCALAR_BYTES[vt] ?? 0;
+      if (SCALAR_BYTES[vt] === undefined) break; // array/nested: not self-describing
+    }
   }
   return desc;
 }

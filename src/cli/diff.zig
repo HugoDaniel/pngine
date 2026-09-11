@@ -17,6 +17,7 @@
 //! out to: native `--frame` vs a browser screenshot, pass/fail by exit status.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const pngine = @import("pngine");
 const png = pngine.png;
 const utils = @import("utils.zig");
@@ -35,7 +36,7 @@ const Options = struct {
 };
 
 /// Execute the diff command.
-pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+pub fn run(gpa: Allocator, io: std.Io, args: []const []const u8) !u8 {
     // --help short-circuits before the two-positional requirement.
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
@@ -53,11 +54,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     // the worst possible failure mode for a comparison tool.
     if (stdio.bothStdin(opts.a, opts.b)) return stdio.reportDoubleStdin();
 
-    const in_a = stdio.readInput(allocator, io, opts.a) catch |err| return stdio.reportReadError(err, opts.a);
-    defer in_a.deinit(allocator);
+    const in_a = stdio.readInput(gpa, io, opts.a) catch |err| return stdio.reportReadError(err, opts.a);
+    defer in_a.deinit(gpa);
 
-    const in_b = stdio.readInput(allocator, io, opts.b) catch |err| return stdio.reportReadError(err, opts.b);
-    defer in_b.deinit(allocator);
+    const in_b = stdio.readInput(gpa, io, opts.b) catch |err| return stdio.reportReadError(err, opts.b);
+    defer in_b.deinit(gpa);
 
     // Name the file in the common "wrong file type" case; deep-decode errors
     // (valid signature, exotic format) fall through to diffEncoded's typed error.
@@ -70,7 +71,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         return 4;
     }
 
-    const outcome = png.diff.diffEncoded(allocator, in_a.bytes, in_b.bytes, opts.config) catch |err| {
+    const outcome = png.diff.diffEncoded(gpa, in_a.bytes, in_b.bytes, opts.config) catch |err| {
         std.debug.print("Error: failed to decode PNG input: {}\n", .{err});
         return 4;
     };

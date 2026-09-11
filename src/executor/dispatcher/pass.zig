@@ -12,7 +12,6 @@
 //! - Pipeline must be set before draw/dispatch
 
 const std = @import("std");
-const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
 const bytecode_mod = @import("bytecode");
@@ -38,16 +37,13 @@ pub fn handle(
     comptime Self: type,
     self: *Self,
     op: OpCode,
-    allocator: Allocator,
+    gpa: Allocator,
 ) !bool {
-    // Pre-condition: valid opcode for this handler
-    assert(is_pass_opcode(op));
-
     switch (op) {
         .begin_render_pass => {
             const p = try wire.readOperands(wire.layoutOf(.begin_render_pass), self);
             try self.backend.begin_render_pass(
-                allocator,
+                gpa,
                 try wire.narrowU16(p.color_texture_id),
                 p.load_op,
                 p.store_op,
@@ -86,44 +82,44 @@ pub fn handle(
             const depth_texture_id = try wire.narrowU16(try self.read_varint());
             if (count == 0) return error.RepCountEmpty;
             try self.backend.begin_render_pass_mrt(
-                allocator,
+                gpa,
                 attachments[0..count],
                 depth_texture_id,
             );
         },
 
         .begin_compute_pass => {
-            try self.backend.begin_compute_pass(allocator);
+            try self.backend.begin_compute_pass(gpa);
         },
 
         .set_pipeline => {
             const p = try wire.readOperands(wire.layoutOf(.set_pipeline), self);
-            try self.backend.set_pipeline(allocator, try wire.narrowU16(p.v0));
+            try self.backend.set_pipeline(gpa, try wire.narrowU16(p.v0));
         },
 
         .set_bind_group => {
             const p = try wire.readOperands(wire.layoutOf(.set_bind_group), self);
-            try self.backend.set_bind_group(allocator, p.slot, try wire.narrowU16(p.id));
+            try self.backend.set_bind_group(gpa, p.slot, try wire.narrowU16(p.id));
         },
 
         .set_vertex_buffer => {
             const p = try wire.readOperands(wire.layoutOf(.set_vertex_buffer), self);
-            try self.backend.set_vertex_buffer(allocator, p.slot, try wire.narrowU16(p.id));
+            try self.backend.set_vertex_buffer(gpa, p.slot, try wire.narrowU16(p.id));
         },
 
         .set_index_buffer => {
             const p = try wire.readOperands(wire.layoutOf(.set_index_buffer), self);
-            try self.backend.set_index_buffer(allocator, try wire.narrowU16(p.buffer_id), p.index_format);
+            try self.backend.set_index_buffer(gpa, try wire.narrowU16(p.buffer_id), p.index_format);
         },
 
         .draw => {
             const p = try wire.readOperands(wire.layoutOf(.draw), self);
-            try self.backend.draw(allocator, p.v0, p.v1, p.v2, p.v3);
+            try self.backend.draw(gpa, p.v0, p.v1, p.v2, p.v3);
         },
 
         .draw_indexed => {
             const p = try wire.readOperands(wire.layoutOf(.draw_indexed), self);
-            try self.backend.draw_indexed(allocator, p.v0, p.v1, p.v2, p.v3, p.v4);
+            try self.backend.draw_indexed(gpa, p.v0, p.v1, p.v2, p.v3, p.v4);
         },
 
         .dispatch => {
@@ -135,71 +131,71 @@ pub fn handle(
                 debug_log.gpuDebugLog(21, p.v1); // dispatch y
                 debug_log.gpuDebugLog(22, p.v2); // dispatch z
             }
-            try self.backend.dispatch(allocator, p.v0, p.v1, p.v2);
+            try self.backend.dispatch(gpa, p.v0, p.v1, p.v2);
         },
 
         .set_viewport => {
             const p = try wire.readOperands(wire.layoutOf(.set_viewport), self);
-            try self.backend.set_viewport(allocator, p.x, p.y, p.w, p.h, p.min_depth, p.max_depth);
+            try self.backend.set_viewport(gpa, p.x, p.y, p.w, p.h, p.min_depth, p.max_depth);
         },
 
         .set_pass_occlusion_query_set => {
             const p = try wire.readOperands(wire.layoutOf(.set_pass_occlusion_query_set), self);
-            try self.backend.set_pass_occlusion_query_set(allocator, try wire.narrowU16(p.v0));
+            try self.backend.set_pass_occlusion_query_set(gpa, try wire.narrowU16(p.v0));
         },
 
         .set_pass_timestamp_writes => {
             const p = try wire.readOperands(wire.layoutOf(.set_pass_timestamp_writes), self);
-            try self.backend.set_pass_timestamp_writes(allocator, try wire.narrowU16(p.v0), p.v1, p.v2);
+            try self.backend.set_pass_timestamp_writes(gpa, try wire.narrowU16(p.v0), p.v1, p.v2);
         },
 
         .begin_occlusion_query => {
             const p = try wire.readOperands(wire.layoutOf(.begin_occlusion_query), self);
-            try self.backend.begin_occlusion_query(allocator, p.v0);
+            try self.backend.begin_occlusion_query(gpa, p.v0);
         },
 
         .end_occlusion_query => {
-            try self.backend.end_occlusion_query(allocator);
+            try self.backend.end_occlusion_query(gpa);
         },
 
         .set_stencil_reference => {
             const p = try wire.readOperands(wire.layoutOf(.set_stencil_reference), self);
-            try self.backend.set_stencil_reference(allocator, p.v0);
+            try self.backend.set_stencil_reference(gpa, p.v0);
         },
 
         .set_scissor_rect => {
             const p = try wire.readOperands(wire.layoutOf(.set_scissor_rect), self);
-            try self.backend.set_scissor_rect(allocator, p.v0, p.v1, p.v2, p.v3);
+            try self.backend.set_scissor_rect(gpa, p.v0, p.v1, p.v2, p.v3);
         },
 
         .set_pass_depth_stencil_ops => {
             const p = try wire.readOperands(wire.layoutOf(.set_pass_depth_stencil_ops), self);
-            try self.backend.set_pass_depth_stencil_ops(allocator, p.depth_load_op, p.depth_store_op, p.stencil_load_op, p.stencil_store_op);
+            try self.backend.set_pass_depth_stencil_ops(gpa, p.depth_load_op, p.depth_store_op, p.stencil_load_op, p.stencil_store_op);
         },
 
         .set_blend_constant => {
             const p = try wire.readOperands(wire.layoutOf(.set_blend_constant), self);
-            try self.backend.set_blend_constant(allocator, p.r, p.g, p.b, p.a);
+            try self.backend.set_blend_constant(gpa, p.r, p.g, p.b, p.a);
         },
 
         .set_pass_clear_values => {
             const p = try wire.readOperands(wire.layoutOf(.set_pass_clear_values), self);
-            try self.backend.set_pass_clear_values(allocator, p.depth_bits, p.stencil_value);
+            try self.backend.set_pass_clear_values(gpa, p.depth_bits, p.stencil_value);
         },
 
         .draw_indirect => {
             const p = try wire.readOperands(wire.layoutOf(.draw_indirect), self);
-            try self.backend.draw_indirect(allocator, try wire.narrowU16(p.v0), p.v1);
+            try self.backend.draw_indirect(gpa, try wire.narrowU16(p.v0), p.v1);
         },
 
         .draw_indexed_indirect => {
             const p = try wire.readOperands(wire.layoutOf(.draw_indexed_indirect), self);
-            try self.backend.draw_indexed_indirect(allocator, try wire.narrowU16(p.v0), p.v1);
+            try self.backend.draw_indexed_indirect(gpa, try wire.narrowU16(p.v0), p.v1);
         },
 
         .dispatch_indirect => {
             const p = try wire.readOperands(wire.layoutOf(.dispatch_indirect), self);
-            try self.backend.dispatch_indirect(allocator, try wire.narrowU16(p.v0), p.v1);
+            try self.backend.dispatch_indirect(gpa, try wire.narrowU16(p.v0), p.v1);
         },
 
         .execute_bundles => {
@@ -216,48 +212,15 @@ pub fn handle(
             for (0..bundle_count) |i| {
                 bundle_ids[i] = try wire.narrowU16(try self.read_varint());
             }
-            try self.backend.execute_bundles(allocator, bundle_ids[0..bundle_count]);
+            try self.backend.execute_bundles(gpa, bundle_ids[0..bundle_count]);
         },
 
         .end_pass => {
-            try self.backend.end_pass(allocator);
+            try self.backend.end_pass(gpa);
         },
 
         else => return false,
     }
 
     return true;
-}
-
-/// Check if opcode is a pass operation opcode.
-pub fn is_pass_opcode(op: OpCode) bool {
-    return switch (op) {
-        .begin_render_pass,
-        .begin_render_pass_mrt,
-        .begin_compute_pass,
-        .set_pipeline,
-        .set_bind_group,
-        .set_vertex_buffer,
-        .set_index_buffer,
-        .draw,
-        .draw_indexed,
-        .dispatch,
-        .draw_indirect,
-        .draw_indexed_indirect,
-        .dispatch_indirect,
-        .set_viewport,
-        .set_pass_occlusion_query_set,
-        .set_pass_timestamp_writes,
-        .begin_occlusion_query,
-        .end_occlusion_query,
-        .set_stencil_reference,
-        .set_scissor_rect,
-        .set_pass_depth_stencil_ops,
-        .set_blend_constant,
-        .set_pass_clear_values,
-        .execute_bundles,
-        .end_pass,
-        => true,
-        else => false,
-    };
 }

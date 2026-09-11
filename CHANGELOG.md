@@ -5,6 +5,282 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [4.0.0] - 2026-09-11
+
+A WGSL document stops being one file, the sugar tier gets an anchor, and the
+JavaScript API gets one contract.
+
+Shader text can now be named, imported, held open at a hole and specialised
+per module; a document can be another document plus a rebinding; a bind group
+can leave its pipeline open; and the graph sugars grow the keys the corpus was
+already asking them for. Separately, every key of every lowered form now has a
+hand-written twin in `examples/` that renders identically, and a drift gate
+that says so. On the host side, every `(buffer :name …)` is writable by name,
+and `setFrame` and `setUniform(…, { redraw: false })`, both documented and both
+inert through 3.0.1, now do what their documentation says.
+
+Major, because the JavaScript API changed where a host can see it:
+`getUniforms` answers in names, `p.audio` is read-only, three instance getters
+that always answered `null` or `0` are gone, and calls that used to do nothing
+now throw a `TypeError`. A document that compiled under 3.0.1 compiles
+unchanged unless it hits one of the refusals listed below, and every one of
+those except the symlink rule is a document that failed at runtime or rendered
+something it did not ask for.
+
+### Breaking
+
+- **`getUniforms` speaks names.** Each field's `type` is the WGSL spelling
+  (`"vec4f"`) where it was the payload's numeric wire tag, and `bufferId`, a
+  dispatcher index that no public call accepted, is replaced by `buffer`: the
+  `(buffer :name …)` holding the field, the same name `writeBuffer` and
+  `getBuffers` take. `buffer` is `null` for a payload compiled before 4.0.0,
+  because those payloads carry no buffer names. A tag this runtime does not
+  know reads `"unknown"`. The types are published as `UniformField` and
+  `UniformTypeName`.
+- **`p.audio` is read-only.** It resolves to `duration`, `playing` and
+  `currentTime` getters, and assigning through it throws. Through 3.0.1 it
+  handed out the whole audio player, whose `play`, `pause`, `stop` and `seek`
+  moved the song without moving the animation clock; the instance verbs
+  (`play(p)`, `seek(p, t)` and the rest) drive both. The published
+  `AudioPlayer` interface is now `AudioInfo`.
+- **The instance getters `animation`, `duration` and `currentScene` are
+  removed.** No payload has reached the runtime with an animation table since
+  the loader rewrite of December 2025, so they answered `null`, `0` and `null`
+  on every instance.
+- **The instance verbs share one contract.** Arguments are checked first, and
+  one of the wrong kind is a `TypeError` before anything is posted, including a
+  non-finite time (`seek(p, NaN)`, `draw(p, { time: "1" })`), and including on
+  a destroyed instance. A verb on a destroyed instance otherwise returns `p`
+  and posts nothing, so `draw(p, …)` no longer throws there, and `draw` returns
+  `p` like every other verb. The `pngine()` rejections for a source of the
+  wrong kind, a missing `options.canvas` and the viewer's dev-only options are
+  `TypeError`s for the same reason.
+- **`setUniform(p, name, value, false)` throws.** The trailing boolean never did
+  anything in a release (see Fixed). The spelling is
+  `setUniform(p, name, value, { redraw: false })`, the trailing options object
+  `writeBuffer` also takes, and the `TypeError` names it.
+- **Documents the compiler now refuses.** A `:file` path with a symbolic link
+  in any component below the document's directory, even a link that points
+  back inside it: a downloaded project is a directory, so whoever wrote the
+  document also placed its links, and "no links on the path" is a rule an
+  author can check by looking. The rest used to compile and then fail or
+  misrender: a document over one of the runtime's resource caps (it validated
+  clean and died at render with `InvalidResourceId`; it is now refused at its
+  source line, naming the cap and the backend that holds it), a
+  `write-buffer` whose builtin or `(data …)` source is larger than the buffer
+  it writes, a `(bind-group …)` with more than 255 entries, and a `gen` data
+  WASM that exports its memory under a name other than `memory`, which no
+  runtime reads.
+
+### Added
+
+- **`writeBuffer(p, name, bytes, opts)` and `getBuffers(p)`.** Every
+  `(buffer :name …)` is host-writable by the name the author wrote — a bare
+  `array<T>` no uniform reflects, a vertex buffer, an indirect-args buffer —
+  where before the only route onto the GPU was a reflected struct leaf through
+  `setUniform`. The compiler writes the names into the payload as a block at
+  the tail of the uniform-table section behind header flag bit 4 (median +36
+  bytes over the corpus; a document with no buffers is byte-identical), and
+  the runtime resolves them. A write needs `copy-dst` in the buffer's
+  `:usage`; a buffer the frame's own queue ops write every draw is refused
+  (`getBuffers` reports it as `frameWritten`); a pooled buffer takes
+  `poolIndex` (`k`, `"active"`, or absent for every member). Every refusal
+  reaches `onError` as a `PngineGPUError` with source `"write-buffer"`, never a
+  silent no-op. `draw(p, { buffers })` is the primitive both are sugar over,
+  and `--types` writes `Buffers` / `BufferName` into the `.d.ts`.
+- **`(wgsl …)` fragments.** A named block of WGSL, `:code` inline or `:file` on
+  disk, that shader modules and passes assemble ahead of their own text with
+  `:imports [name]`. A fragment is never a GPU object: what reaches wgslender
+  and the payload is one assembled text per root, so minification renames
+  across fragment boundaries and dead-code elimination drops what a root does
+  not reach. `(shader-module … :file …)` reads a whole module the same way.
+- **Holes (`:requires`).** A fragment may leave names open for the importing
+  module to supply, which is how one library serves several variants with no
+  WGSL extension. `validate` checks the list against the fragment's own
+  unresolved names, both ways.
+- **`(import :file "./base.sjon" …)`.** A document can be another document plus
+  a rebinding of its consumed forms: the base compiles ahead of this one with
+  the named `(define …)` constants and `(wgsl …)` fragments replaced,
+  byte-identical to the base with those edits made by hand.
+- **Derived bind groups.** Leave `:layout` out of a `(bind-group …)` and the
+  compiler emits one GPU bind group per pipeline that binds it, each holding
+  only the entries that pipeline's entry points reach. One resource set, any
+  number of pipelines. `(bind-group … :prune-unused true)` is the same pruning
+  for a group that does name a `:layout`.
+- **`(draw-graph …)`.** One conceptual draw expanded into many concrete ones:
+  a table of `(stage …)`s (what to draw into, and the pipeline state a stage
+  shares) and `(geometry …)`s (what to draw, and the stages it appears in),
+  lowered to one pipeline, one bind group per stage group and one render pass
+  per pair. A stage can render into a texture rather than the canvas, and can
+  state how its colour targets blend.
+- **`(step-group …)` and named graphs.** A graph with a `:name` emits a step
+  group instead of a frame, so two graphs — or a graph and hand-written passes
+  — compose inside one `(frame …)`.
+- **Five keys on `(pass …)`.** `(constant …)` children specialise the
+  `override`s of the modules a pass builds; `:format` chooses the format of the
+  texture it renders into; `:reads` binds textures the graph did not produce;
+  `:scale` renders the intermediate at a fraction of the canvas; `:init` seeds
+  that intermediate with a compute shader that runs once.
+- **`pngine-frame-inputs`.** A 20-byte `write-buffer` source: `pngine-inputs`
+  followed by the frame counter as a `u32`, for shaders that need the pool
+  phase rather than the clock.
+- **Diagnostics say which file they are in.** A finding inside an imported
+  fragment names the FILE and its line inside that file, once per compile
+  rather than once per importing module; `--json` entries carry a `"file"` key
+  saying which file `line`/`column` belong to. The two reachability advisories
+  (`W0001`, `W0002`) are not reported inside an imported fragment — a library
+  declaration this document does not reach is a finding about the library —
+  and `validate --verbose` prints how many were suppressed, with `--json`
+  carrying the count as `suppressed`.
+- **The browser compiler takes a file table** and reports what it needs, so a
+  host with no filesystem can resolve `:file` and follow an import chain.
+- **The sugar tier has a ledger.** `schema/sugar-ledger.mjs` records, for every
+  key of every hook-lowered form, what it desugars to and which hand-written
+  document proves it is sugar; `zig build drift` derives the key set from the
+  schema and fails on a key that is not written down. All 23 are twinned, each
+  gated on pixels by a row in the render suite. `zig build test-core` compiles
+  every example with an EMPTY lowering registry, so a document either compiles
+  byte-identically (it is core) or is refused with `lowering_hook_missing` (it
+  is sugar), with nothing in between.
+- **`(bytes …)`, verbatim bytes as a `(data …)` source.** `(bytes :file
+  "table.bin")` embeds a sidecar file read at compile time and `(bytes :base64
+  """…""")` carries the bytes inline (whitespace inside the literal is
+  ignored, so a wrapped block diffs by line). The bytes are stored with no
+  MIME prefix and sized like an inline array, so a `(buffer … :data …)` can
+  size and fill from them, which `(data … :file …)` cannot.
+- **`compiler.heapBytes()`** on `pngine/compiler`: the browser compiler's live
+  heap, the compile-side counterpart of `getStats(p).wasmBytes`, for a host
+  that recompiles on every keystroke and wants to see it stay flat.
+- **An `unlocated` array in the `--json` envelopes.** Thirteen of the
+  emitter's warnings have no position in the document (a finding about a WGSL
+  binding has no SJON node to point at). They were left out of `--json`, so
+  `validate --strict` could exit 1 against a report listing no diagnostics.
+  They now ride their own array, the same object shape minus `line` and
+  `column`, so an editor that turns each `diagnostics` entry into a squiggle
+  never meets a line 0.
+- Native `--frame` requests `depth32float-stencil8`,
+  `rg11b10ufloat-renderable` and `timestamp-query` when the adapter has them,
+  as the browser runtime does. `primitive-index`, `texture-formats-tier1` and
+  `core-features-and-limits` do not exist in the vendored wgpu-native, so a
+  document that needs one renders in the browser only.
+- Forty-four examples and seventy-six rejection fixtures. Among the examples:
+  `pass_acid_cubes` and `pass_acid_lattice` (a compute.toys cube-space march),
+  `pass_game_of_life`, `pass_hdr_tonemap`, `pass_half_res`, `pass_reads_depth`,
+  `pass_feedback_compute` (a hand-written compute pass beside a feedback pass
+  in one frame), `graph_compose`, three `draw_graph_*` fixtures,
+  `frame_index`, `test_data_gen`, ten `_hand.sjon` twins and six
+  `_fragments.sjon` pairs that render pixel-identically to the document they
+  were split out of. `examples/lib/` holds the 28 WGSL files those documents
+  share.
+
+### Fixed
+
+- **`setUniform(…, { redraw: false })` was a no-op.** Its doc promised
+  "batch updates without immediate redraw" from the API's first commit; the
+  store it wrote was deleted as write-only, and the branch returned `p`. Both
+  `setUniform` and `setUniforms` with `redraw: false` now store the values for
+  the next draw from anywhere — the play loop's, a seek's, a host `draw()` —
+  which carries and clears them. `writeBuffer` follows the same rule, and the
+  option is spelled the way `writeBuffer` spells it, as a trailing options
+  object (the old positional boolean is under Breaking).
+- **`setFrame(p, name)` did nothing.** The draw message has carried the pinned
+  frame since the API's first commit and the worker never read it, so a
+  document with several `(frame …)` forms always ran its first. The pin now
+  reaches the executor through three additive exports (`setFrame`,
+  `getFrameCount` and `getFrameNameId`, in `docs/abi.md`); `setFrame(p, null)`
+  releases it, `p.currentFrame` reads it back, and an unknown name reaches
+  `onError` with source `"set-frame"` while the draw still renders. The
+  `ready` message reports the payload's real frame count, where it always said
+  1.
+- **`(pass … :init …)` did nothing.** The key validated and was documented,
+  but the pass lowering never read it, so a pass with it and the same pass
+  without it compiled to identical bytes. It now seeds the pass's texture with
+  a compute shader that runs once, before the first frame's feedback read. A
+  document that carried the key renders the seed now.
+- **A `setUniform` that could not land said nothing.** An unknown uniform name,
+  or one whose buffer the init stream never created, was a debug-only console
+  warning. It reaches `onError` with source `"set-uniform"`, once per distinct
+  message, and the call still returns `false`.
+- **The core tier could not hear command faults or see the pointer.**
+  `pngine/core`'s `createCoreDispatcher` forwarded eight of the twelve
+  dispatcher methods the worker tier calls. Without `setOnError`, an unknown
+  opcode, an empty descriptor or a failed resource validation was console-only
+  there; without the pointer and frame-counter setters, `pointer-inputs` stayed
+  zeroed and the frame counter never advanced. All twelve are forwarded now,
+  with `setBufferNames`, `writeBuffers` and `getBuffers` beside them.
+- **`--html` exported wrong numbers.** Every float needing more than 24
+  characters in decimal (`1e30`, `1e-30`, the largest `f32`) reached the page
+  as `0`; `inf` and `nan` reached it as bare identifiers the browser rejects
+  with a `ReferenceError`; and a very small `:depth-bias-clamp` emitted the key
+  with no value. A 12-byte `scene-time-inputs` write overran its buffer, so
+  WebGPU refused it. Each builtin source now writes exactly its own size.
+- **A diagnostic that did not fit was blanked.** When the diagnostic store
+  overflowed, an entry kept an empty message and read as a diagnostic with
+  nothing to say. It is dropped and counted in `dropped`, the field that
+  already means "this report is a prefix". A line number too large for the
+  `--json` writer no longer leaves `"line":` with no value.
+- **`miniPngine(canvas, view)` read a `Uint8Array` from byte 0 of its
+  buffer**, so a view over part of a larger buffer (a slice of a bundle, a
+  fetch body with a prefix) found no pNGf chunk. It reads the view's own bytes.
+- **The published `.d.ts` disagreed with the runtime in eight places**, among
+  them `destroy` typed as `void` while it returns the instance,
+  `DrawOptions.frame` refusing the `null` that `setFrame(p, null)` takes, an
+  exported `canvasAlphaMode` with no declaration, `getUniforms` missing
+  `elemCount`, and `PngineInstance` hiding `currentFrame` and `audio`. The
+  type strings now live in one file that a test derives from the code.
+- **`(pass … :file …)` never worked on any shipping backend.**
+  `write_buffer_from_wasm`'s first operand is a CALL id and the lowering passed
+  a MODULE id, so the browser looked up a call that a `gen`-less data module
+  never makes and wrote no bytes: a black canvas where the fixture's own
+  comment said orange. A module with no `gen` export is now read at compile
+  time and shipped as bytes through an ordinary `write_buffer`, which also
+  drops two opcodes the native backend stubs (`test_data_pass` renders on
+  native, and its payload is 1,098 bytes smaller).
+- **A `gen` data buffer wrote to the wrong place.** The same operand family one
+  slot to the left: `write_buffer_from_wasm`'s `buffer_off` is the destination
+  in the GPU buffer, and the lowering passed `s`, which addresses the module's
+  memory. Correct for every fixture that had `s` = 0 and past the end of an
+  `l`-byte buffer for the first that did not. A `gen` module that exports its
+  memory under a name other than `memory` is now refused at compile time — the
+  runtime reads `exports.memory` or the `env.memory` import, so any other
+  spelling generated bytes nobody could read.
+- **A pass feature named only in a comment is not a feature.** The `(pass …)`
+  lowering detected `post()`, pointer input and sampler use with a substring
+  scan over the author's text, so a mention inside a comment enabled a feature
+  the shader did not use — three live `wgpu` aborts, and a fourth reader that
+  silently produced the wrong module.
+- **A root or pass that opens with a directive can import.** `enable` and
+  `requires` must precede every declaration in WGSL, so a document whose own
+  text began with one could not have a fragment assembled ahead of it. The
+  directives are hoisted to the top of the assembled text.
+- **The used-but-unbound check asks per PIPELINE, not per document.** A binding
+  that some entry point in the document reaches was treated as reached by every
+  pipeline, which refused documents that were correct and let the reverse pass.
+- A colour target with no authored blend gets no blend state on native, rather
+  than a default one the document never asked for.
+- The time uniform saturates at the payload's own size rather than at 16 bytes,
+  so a 20-byte `pngine-frame-inputs` buffer is filled rather than truncated.
+- An imported document's error names the file its line belongs to.
+
+### Changed
+
+- **`pngine/core`: `setFrameCounter`.** The core dispatcher's frame-counter
+  setter carries the one name the executor's counter (`getFrameCounter`,
+  frames rendered since `init()`) has on every tier. It was briefly
+  `setFrameIndex` during development, which beside the main API's `setFrame`
+  read as "which `(frame …)`"; no release carried that name.
+- A `(pass …)` that draws to the canvas no longer allocates an output texture
+  that nothing renders into or reads. Fifteen of the nineteen pass-graph
+  examples paid for one: 8.29 MB at 1920×1080, reallocated on every resize.
+- `docs/sjon-reference.md` gains sections for fragments and imports, extending
+  a document, derived bind groups, pipeline-overridable constants,
+  `(draw-graph …)` and `(step-group …)`.
+- The corpus stops copying its shared WGSL. Six one-function libraries under
+  `examples/lib/` (`perspective`, `look_at`, `inverse_camera`,
+  `inv_perspective`, `rotate_vec`, `hash`) are imported by 51 documents
+  between them — 37 for `perspective` alone — where each had carried its own
+  copy.
+
 ## [3.0.1] - 2026-08-24
 
 A patch on the published type declarations, the native backend's blend

@@ -1,0 +1,16 @@
+; R4 again, but with the fragment's text in a FILE. The twin next door
+; (wgsl_entry_in_fragment.sjon) writes the same rule with `:code`, and that is
+; exactly why it could not see the defect this fixture exists for: a `:code`
+; fragment's text is borrowed from the tree, a `:file` fragment's is owned, and
+; the owner changes at `Table.add`. The refusal below lands AFTER that call, so
+; the errdefer that still guarded the bytes freed what the table had already
+; taken, and `Emitter.deinit` freed it again — a double free on the plain
+; compile path, and in the browser a corrupted heap with no allocator to notice
+; (§437).
+;
+; The two `:file` negatives that existed (wgsl_missing_file, wgsl_escapes_dir)
+; both fail at the READ, before ownership moves, so neither reaches the window.
+(wgsl :name badlib :file "./entry_in_file_fragment.wgsl")
+(shader-module :name m :imports [badlib] :code """
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")

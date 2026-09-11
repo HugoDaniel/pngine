@@ -25,7 +25,10 @@
 ])
 (buffer :name gridParams :size 64 :usage [uniform] :data gridParamsData)
 
-(shader-module :name code :code """
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+(wgsl :name lookAt :file "./lib/look_at.wgsl")
+
+(shader-module :name code :imports [perspective lookAt] :code """
 struct PngineInputs {
   time: f32,
   canvasW: f32,
@@ -45,27 +48,6 @@ const PLANE_SCALE : f32 = 200.0;
 const UV_CELLS : f32 = 100.0;      // minor cells across the plane (2 units/cell)
 const FADE_DIST : f32 = 120.0;
 const CLEAR_COLOR : vec3f = vec3f(0.05, 0.06, 0.09);
-
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0, 0, 0),
-    vec4f(0, f, 0, 0),
-    vec4f(0, 0, far * nf, -1),
-    vec4f(0, 0, far * near * nf, 0));
-}
-
-fn lookAt(eye: vec3f, focus: vec3f, up: vec3f) -> mat4x4f {
-  let fwd = normalize(focus - eye);
-  let s = normalize(cross(fwd, up));
-  let u = cross(s, fwd);
-  return mat4x4f(
-    vec4f(s.x, u.x, -fwd.x, 0),
-    vec4f(s.y, u.y, -fwd.y, 0),
-    vec4f(s.z, u.z, -fwd.z, 0),
-    vec4f(-dot(s, eye), -dot(u, eye), dot(fwd, eye), 1));
-}
 
 fn cameraEye(t: f32) -> vec3f {
   return vec3f(sin(t * 0.05) * 8.0, 2.5, cos(t * 0.05) * 8.0);

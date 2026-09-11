@@ -6,7 +6,7 @@
 //!
 //! ## Usage
 //! ```zig
-//! var runtime = try WamrRuntime.init(allocator, 64 * 1024, 64 * 1024);
+//! var runtime = try WamrRuntime.init(gpa, 64 * 1024, 64 * 1024);
 //! defer runtime.deinit();
 //!
 //! try runtime.loadModule(wasm_bytes);
@@ -20,6 +20,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const Allocator = std.mem.Allocator;
 const build_options = @import("build_options");
 
 // Import WAMR C headers when available
@@ -60,9 +61,9 @@ pub const WamrError = error{
 pub const WASM_BUFFER_ALIGN: std.mem.Alignment = .fromByteUnits(4096);
 
 /// An owned, writable, page-aligned copy of `bytes`. Free with `freeWasmBuffer`.
-fn dupeWasmBuffer(allocator: std.mem.Allocator, bytes: []const u8) error{OutOfMemory}![]align(4096) u8 {
+fn dupeWasmBuffer(gpa: Allocator, bytes: []const u8) error{OutOfMemory}![]align(4096) u8 {
     std.debug.assert(bytes.len > 0);
-    const buffer = try allocator.alignedAlloc(u8, WASM_BUFFER_ALIGN, bytes.len);
+    const buffer = try gpa.alignedAlloc(u8, WASM_BUFFER_ALIGN, bytes.len);
     @memcpy(buffer, bytes);
     // Post-condition: the copy is whole; WAMR reads the whole module.
     std.debug.assert(buffer.len == bytes.len);
@@ -71,16 +72,18 @@ fn dupeWasmBuffer(allocator: std.mem.Allocator, bytes: []const u8) error{OutOfMe
 
 /// The other half of the pair. Both are `pub` only so the alignment agreement
 /// can be exercised without WAMR present.
-pub fn freeWasmBuffer(allocator: std.mem.Allocator, buffer: []align(4096) u8) void {
-    allocator.free(buffer);
+pub fn freeWasmBuffer(gpa: Allocator, buffer: []align(4096) u8) void {
+    gpa.free(buffer);
 }
 
 /// WAMR runtime instance.
+///
+/// Stores its own allocator; `deinit()` takes none.
 pub const WamrRuntime = struct {
     module: c.wasm_module_t,
     instance: c.wasm_module_inst_t,
     exec_env: c.wasm_exec_env_t,
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     /// Owned copy of the WASM bytes (WAMR requires a writable buffer). The
     /// alignment is in the TYPE — see `WASM_BUFFER_ALIGN`.
     wasm_buffer: ?[]align(4096) u8,
@@ -89,7 +92,7 @@ pub const WamrRuntime = struct {
     ///
     /// Pre-condition: stack_size > 0, heap_size > 0
     /// Post-condition: Runtime is ready for module loading
-    pub fn init(allocator: std.mem.Allocator, stack_size: u32, heap_size: u32) WamrError!WamrRuntime {
+    pub fn init(gpa: Allocator, stack_size: u32, heap_size: u32) WamrError!WamrRuntime {
         if (!build_options.has_wamr) {
             return WamrError.NotAvailable;
         }
@@ -115,7 +118,7 @@ pub const WamrRuntime = struct {
             .module = null,
             .instance = null,
             .exec_env = null,
-            .allocator = allocator,
+            .gpa = gpa,
             .wasm_buffer = null,
         };
     }
@@ -176,7 +179,7 @@ pub const WamrRuntime = struct {
             c.wasm_runtime_unload(self.module);
         }
         if (self.wasm_buffer) |buf| {
-            freeWasmBuffer(self.allocator, buf);
+            freeWasmBuffer(self.gpa, buf);
         }
         c.wasm_runtime_destroy();
         self.* = undefined;
@@ -201,7 +204,7 @@ pub const WamrRuntime = struct {
         // One allocation shape for both module kinds — the AOT one needs page
         // alignment, and paying it for interpreted modules too costs at most a
         // page and removes the branch that `deinit` was getting wrong.
-        const buffer = dupeWasmBuffer(self.allocator, wasm_bytes) catch return WamrError.OutOfMemory;
+        const buffer = dupeWasmBuffer(self.gpa, wasm_bytes) catch return WamrError.OutOfMemory;
         self.wasm_buffer = buffer;
 
         // Load the module
@@ -217,7 +220,7 @@ pub const WamrRuntime = struct {
             // Free the buffer on failure to prevent memory leak. One call now:
             // this branch used to be the ONLY place that knew about the AOT
             // alignment, and it knew by hand-casting.
-            freeWasmBuffer(self.allocator, buffer);
+            freeWasmBuffer(self.gpa, buffer);
             self.wasm_buffer = null;
             return WamrError.LoadFailed;
         }

@@ -16,6 +16,7 @@
 //! - Resource IDs are monotonically assigned
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 
 /// Command opcodes (matches src/executor/command_buffer.zig).
 /// Self-contained to avoid bytecode module dependency.
@@ -74,8 +75,10 @@ pub const Cmd = struct {
 
 /// GPU backend implementation.
 /// Currently a stub that traces commands; will be replaced with Dawn/Mach.
+///
+/// Stores its own allocator; `deinit()` takes none.
 pub const Runner = struct {
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     width: u32,
     height: u32,
     trace_mode: bool,
@@ -89,12 +92,12 @@ pub const Runner = struct {
     ///
     /// Pre-condition: width > 0, height > 0
     /// Post-condition: Runner ready for execute()
-    pub fn init(allocator: std.mem.Allocator, width: u32, height: u32) Runner {
+    pub fn init(gpa: Allocator, width: u32, height: u32) Runner {
         std.debug.assert(width > 0);
         std.debug.assert(height > 0);
 
         return .{
-            .allocator = allocator,
+            .gpa = gpa,
             .width = width,
             .height = height,
             .trace_mode = true, // Default to trace mode

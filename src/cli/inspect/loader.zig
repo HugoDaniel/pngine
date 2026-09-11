@@ -11,6 +11,7 @@
 //! of a pipeline has no filename to dispatch on.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const pngine = @import("pngine");
 const stdio = @import("../stdio.zig");
 const compile = @import("../compile.zig");
@@ -27,20 +28,20 @@ const test_utils = @import("../../test_utils.zig");
 ///
 /// Pre-condition: path is non-empty
 /// Post-condition: Returns owned bytecode slice (caller must free)
-pub fn loadBytecode(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
+pub fn loadBytecode(gpa: Allocator, io: std.Io, path: []const u8) ![]u8 {
     std.debug.assert(path.len > 0);
 
-    const in = try stdio.readInput(allocator, io, path);
-    defer in.deinit(allocator);
+    const in = try stdio.readInput(gpa, io, path);
+    defer in.deinit(gpa);
 
     return switch (in.kind) {
         // Already bytecode: hand back an owned copy, since `in` frees its own.
-        .pngb => allocator.dupe(u8, in.bytes),
-        .png => pngine.png.extractBytecode(allocator, in.bytes),
-        .zip => bundle.extractFromZip(allocator, in.bytes),
+        .pngb => gpa.dupe(u8, in.bytes),
+        .png => pngine.png.extractBytecode(gpa, in.bytes),
+        .zip => bundle.extractFromZip(gpa, in.bytes),
         // base_dir resolves any relative file references in the source; for
         // stdin that is the cwd (stdio.baseDir).
-        .sjon => compile.compileSource(allocator, io, path, in.bytes),
+        .sjon => compile.compileSource(gpa, io, path, in.bytes),
     };
 }
 

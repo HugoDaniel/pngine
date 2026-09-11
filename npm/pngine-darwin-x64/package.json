@@ -1,6 +1,6 @@
 {
   "name": "@pngine/darwin-x64",
-  "version": "3.0.1",
+  "version": "4.0.0",
   "description": "PNGine native binary for macOS x64 (Intel)",
   "author": "Hugo Daniel",
   "license": "CC0-1.0",

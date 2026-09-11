@@ -26,7 +26,9 @@
 (queue :name writeUniforms
   (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
 
-(shader-module :name code :code """
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+
+(shader-module :name code :imports [perspective] :code """
     struct PngineInputs {
       time: f32,
       width: f32,
@@ -38,18 +40,6 @@
     struct VertexOutput {
       @builtin(position) position: vec4f,
       @location(0) fragColor: vec4f,
-    }
-
-    // Perspective projection
-    fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-      let f = 1.0 / tan(fovy * 0.5);
-      let nf = 1.0 / (near - far);
-      return mat4x4f(
-        vec4f(f / aspect, 0, 0, 0),
-        vec4f(0, f, 0, 0),
-        vec4f(0, 0, (far + near) * nf, -1),
-        vec4f(0, 0, 2 * far * near * nf, 0),
-      );
     }
 
     fn rotateY(angle: f32) -> mat4x4f {

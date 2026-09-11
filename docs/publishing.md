@@ -104,16 +104,16 @@ The JS runtime uses esbuild for bundling with two build modes:
 
 One row per entry point `bundle.cjs` writes. The **budget** column is the gate
 in `bundle.cjs`'s `SIZE_BUDGETS`, which fails the build when a bundle grows past
-it — the durable number. Sizes are a measurement (2026-08-10, production) and
+it — the durable number. Sizes are a measurement (2026-09-03, production) and
 will drift; the budget is what holds them.
 
 <!-- BUNDLE-TABLE: checked against scripts/bundle.cjs by `zig build drift` -->
 
 | Bundle | Subpath | Profile | Size (gz) | Budget |
 | ------ | ------- | ------- | --------- | ------ |
-| `viewer.mjs` | `pngine` (browser), `pngine/viewer` | Lean production viewer; embedded-executor payloads only, worker inlined | 49.7 KB (17.0) | 51200 |
-| `dev.mjs` | `pngine/dev` | Full-feature browser API: shared `pngine.wasm` fallback, prefetch, diagnostics | 54.3 KB (18.6) | 55800 |
-| `core.mjs` | `pngine/core` | Low-level runtime API (dispatcher + loader), no main-thread wrapper | 26.6 KB (9.0) | 27300 |
+| `viewer.mjs` | `pngine` (browser), `pngine/viewer` | Lean production viewer; embedded-executor payloads only, worker inlined | 54.9 KB (18.9) | 56300 |
+| `dev.mjs` | `pngine/dev` | Full-feature browser API: shared `pngine.wasm` fallback, prefetch, diagnostics | 59.7 KB (20.5) | 61200 |
+| `core.mjs` | `pngine/core` | Low-level runtime API (dispatcher + loader), no main-thread wrapper | 30.8 KB (10.5) | 31600 |
 | `executor.mjs` | `pngine/executor` | Executor helpers — `parsePayload`, `createExecutor`, imports | 1.9 KB (0.9) | 2200 |
 | `mini.mjs` | `pngine/mini` | Flat pNGf main-thread player, with the Sointu audio worklet | 7.1 KB (3.3) | 7300 |
 | `mini-no-audio.mjs` | `pngine/mini-no-audio` | `mini.js` built with `AUDIO=false` — the audio path is DCE'd, not branched around | 6.4 KB (3.0) | 6600 |
@@ -217,7 +217,10 @@ gitignored `dist/` and runs its vitest suite).
 **Bump the version and update `CHANGELOG.md` in the same commit.**
 `sync-versions.mjs --check` (part of `zig build drift`) requires the
 changelog's newest released heading to match the package version, so a bump
-without an entry fails the gate.
+without an entry fails the gate. That section is also the release notes:
+`scripts/mirror.sh` puts it (through `scripts/release-notes.sh`) in the cut
+commit, the `v<version>` tag annotation and, with `--gh-release`, the GitHub
+Release.
 
 `npm/publish.sh` is the whole procedure:
 

@@ -1,0 +1,32 @@
+; INVALID: a (data ...) with a (bytes ...) source AND :float32.
+;
+; One source per (data ...). The schema's exclusive-group counts `:float32`
+; against `:file` only -- a positional source is a head-set the group cannot
+; see -- so this is the emitter's guard, the same one that has always refused a
+; shape generator beside a key. It is located on the (bytes ...) child.
+
+(data :name palette :float32 [1 0.5 0 1] (bytes :base64 "/4AA/wCAgP//AP///////w=="))
+(shader-module :name code :code """
+    @vertex fn fullscreen(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      let p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+      return vec4f(p[i], 0.0, 1.0);
+    }
+    @group(0) @binding(0) var<uniform> palette: vec4u;
+    @fragment fn show() -> @location(0) vec4f {
+      return vec4f(unpack4x8unorm(palette.x).rgb, 1.0);
+    }
+""")
+(buffer :name paletteBuf :size 16 :usage [uniform copy-dst] :data palette)
+(bind-group :name g :layout pipe :group 0
+  (entry :binding 0 :buffer paletteBuf))
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry fullscreen)
+  (fragment :module code :entry show
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list))
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipe :bind-groups [g]
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

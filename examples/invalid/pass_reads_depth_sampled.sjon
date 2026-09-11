@@ -1,0 +1,19 @@
+; Invalid: a `(pass … :reads …)` that SAMPLES a depth texture. A sampler a
+; shader uses with a depth texture is `non-filtering` in the pipeline's auto
+; layout — WebGPU's rule — and the only sampler this prelude binds is `samp`,
+; which is linear. Chrome refuses the bind group ("Filtering sampler is
+; incompatible with non-filtering sampler binding"); wgpu-native accepts it, so
+; the document renders on the native CLI and shows a blank canvas in the
+; browser. Read depth with `textureLoad(gDepth, vec2i(pos.xy), 0)`, which needs
+; no sampler at all — `examples/pass_reads_depth.sjon` is that document.
+
+(texture :name gDepth :size canvas :format depth32float
+  :usage [render-attachment texture-binding])
+(pass-graph
+  (pass :name main :reads [gDepth] :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      let d = textureSample(gDepth, samp, uv);
+      return vec4f(vec3f(d), 1.0);
+    }
+  """))

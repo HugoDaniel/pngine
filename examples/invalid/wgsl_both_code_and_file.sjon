@@ -1,0 +1,6 @@
+; R1, from the schema's exclusive-group: a fragment carries `:code` or `:file`,
+; never both. `mutually_exclusive_keys_present`.
+(wgsl :name a :code "fn a() -> f32 { return 1.0; }" :file "./lib.wgsl")
+(shader-module :name m :imports [a] :code """
+@fragment fn fs() -> @location(0) vec4f { return vec4f(a()); }
+""")

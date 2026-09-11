@@ -1,0 +1,16 @@
+; Invalid: a depth format on `(pass … :format …)`. A `(pass …)` writes a COLOR
+; attachment — the sugar emits `(color-attachment …)` and a `(target :format …)`
+; on the fragment stage, neither of which takes a depth format. A depth target
+; is a `(depth-stencil-attachment …)` on a hand-authored `(render-pass …)`.
+
+(pass-graph
+  (pass :name shadowish :format depth32float :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      return vec4f(pos.z, 0.0, 0.0, 1.0);
+    }
+  """)
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      return textureLoad(shadowish, vec2i(pos.xy), 0);
+    }
+  """))

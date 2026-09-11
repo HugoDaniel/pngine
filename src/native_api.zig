@@ -49,6 +49,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const Allocator = std.mem.Allocator;
 
 const wgpu_native = @import("executor/wgpu_native_gpu.zig");
 const Context = wgpu_native.Context;
@@ -219,7 +220,7 @@ pub const AnimDiagnostics = struct {
 // ============================================================================
 
 var global_context: ?Context = null;
-var global_allocator: std.mem.Allocator = std.heap.page_allocator;
+var global_allocator: Allocator = std.heap.page_allocator;
 
 // ============================================================================
 // Animation Handle
@@ -268,11 +269,20 @@ export fn pngine_shutdown() callconv(.c) void {
     }
 }
 
-/// Notify runtime of memory pressure.
-/// Clears caches and releases non-essential resources.
-export fn pngine_memory_warning() callconv(.c) void {
-    // TODO: Implement cache clearing
-}
+/// Notify the runtime of memory pressure. Currently a no-op, deliberately.
+///
+/// This is the iOS `didReceiveMemoryWarning` / Android `onTrimMemory` hook, and
+/// it exists so a host can wire it unconditionally rather than guard the call.
+/// There is nothing for it to free: this API holds exactly one `Context` (the
+/// device, released by `pngine_shutdown`) and one `Anim` per handle, whose GPU
+/// resources are all live bindings the next frame reads — none of it is a
+/// discardable cache. It becomes real work only if a resource pool that can be
+/// rebuilt on demand is ever added; until then, freeing anything here would
+/// break the next `pngine_draw` rather than save memory.
+///
+/// It does NOT say "clears caches and releases non-essential resources", which
+/// is what the comment here used to claim of an empty body.
+export fn pngine_memory_warning() callconv(.c) void {}
 
 // ============================================================================
 // Error Handling Exports
@@ -519,6 +529,10 @@ export fn pngine_render(anim: ?*PngineAnimation, time: f32) callconv(.c) PngineE
     };
 
     a.gpu.setTime(time);
+    // The counter the body is ABOUT to run at, so `pngine-frame-inputs` and the
+    // ping-pong pool phase agree. `end_frame` inside the body advances it, so
+    // reading it after would be one frame ahead of the bindings just selected.
+    a.gpu.setFrameCounter(a.dispatcher.frame_counter);
 
     // Run ONE frame body — the one this time selects. Resource creation ran at
     // `pngine_create`; replaying it here is what LEAK-03 was. `end_frame` is
@@ -653,6 +667,7 @@ export fn pngine_debug_frame(anim: ?*PngineAnimation, time: f32) callconv(.c) c_
     const a = anim orelse return -1;
 
     a.gpu.setTime(time);
+    a.gpu.setFrameCounter(a.dispatcher.frame_counter);
 
     // Same split as pngine_render: one selected frame body, no replay of the
     // init section. The explicit counter bump is gone with it — `end_frame`
@@ -776,8 +791,11 @@ fn createSurfaceFromHandle(instance: wgpu.Instance, handle: *anyopaque) ?wgpu.Su
 
         return wgpu.instanceCreateSurface(instance, &surface_desc);
     } else if (target.os.tag == .linux) {
-        // X11 or Wayland - for now assume X11
-        // TODO: Add Wayland support
+        // X11 only. A Wayland surface needs a `WGPUSurfaceSourceWaylandSurface`
+        // built from the compositor's `wl_display` + `wl_surface`, which the
+        // caller would have to pass instead of the single opaque `handle` this
+        // ABI takes — so it is an ABI change, not a missing branch. Nothing
+        // ships a Linux viewer yet, so X11 is the whole of the demand.
         const x11_desc = c.WGPUSurfaceSourceXlibWindow{
             .chain = .{
                 .next = null,

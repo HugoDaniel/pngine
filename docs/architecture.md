@@ -215,8 +215,14 @@ runs once at build time with unlimited complexity:
     ▼ Validate against schema/pngine.sjon
    resolved cross-refs + diagnostics
     │
-    ▼ Lowering hooks (hooks.zig: pngine/init-v1, pngine/pass-v1)
+    ▼ Lowering hooks (hooks.zig: pngine/init-v1, pngine/pass-v1, pngine/draw-v1)
    sugar expanded into ordinary forms
+    │
+    ▼ Document import (document_import.zig)
+   (import :file …) compiles the base with this document's rebindings
+    │
+    ▼ Assemble WGSL (fragments.zig)
+   each root's (wgsl …) imports, in dependency order, then its own text
     │
     ▼ Emitter walk (Emitter.zig)
    PNGB bytecode
@@ -228,6 +234,14 @@ runs once at build time with unlimited complexity:
 **Compiler Responsibilities:**
 - Validate forms against the WebGPU schema (required keys, enums, bounds)
 - Resolve bare-identifier cross-references document-wide
+- Assemble each shader module from its `(wgsl …)` fragments. A fragment is
+  never a GPU object and is never validated, minified or shipped alone: what
+  reaches wgslender and the payload is one assembled text per root, which is
+  why minification renames consistently across fragment boundaries and dead
+  code elimination drops what a root does not reach
+- Read the files a `:file` key names, through one resolver (`file_resolver.zig`)
+  that the CLI backs with the filesystem and the browser with a host-supplied
+  table
 - Evaluate bounded expressions (`(* NUM 4 4)`, `(ceil (/ NUM 64))`)
 - Generate vertex data from shape generators (`(cube …)`, `(plane …)`, `(teapot …)`)
 - Determine required plugins
@@ -238,7 +252,15 @@ runs once at build time with unlimited complexity:
 - `src/dsl_sjon/Compiler.zig` - High-level compile() interface (validate + lower → walk → PNGB)
 - `src/dsl_sjon/Emitter.zig` - Walks the validated/lowered forest, emits bytecode
 - `src/dsl_sjon/values.zig` - Typed readers over the SJON tree + expression eval
-- `src/dsl_sjon/hooks.zig` - `pngine/init-v1` + `pngine/pass-v1` sugar lowering
+- `src/dsl_sjon/hooks.zig` - the lowering registry: `pngine/init-v1` +
+  `pngine/pass-v1`, and the registration of `pngine/draw-v1`
+- `src/dsl_sjon/draw_graph.zig` - `pngine/draw-v1`: the `(draw-graph …)` stage
+  x geometry cross product, one pipeline and one render pass per pair
+- `src/dsl_sjon/document_import.zig` - `(import :file …)`: a document compiled
+  as another document plus a rebinding of its `(define …)`/`(wgsl …)` forms
+- `src/dsl_sjon/fragments.zig` - the `(wgsl …)` table, the assembler, the line
+  table that maps an assembled line back to the form that wrote it
+- `src/dsl_sjon/file_resolver.zig` - the one read seam behind every `:file`
 - `src/dsl_sjon/uniforms.zig` - Uniform-table construction
 - `src/dsl_sjon/shapes.zig` - Compile-time shape generators
 - `schema/pngine.sjon` - The WebGPU schema (single source of truth)
@@ -447,13 +469,37 @@ The SJON forms provide 1:1 mapping to WebGPU concepts with ergonomic syntax
 |-----------|----------------|----------------|
 | `(render-pass …)` | `GPURenderPassEncoder` | `(color-attachment …)`, `:pipeline`, `(draw …)` |
 | `(compute-pass …)` | `GPUComputePassEncoder` | `:pipeline`, `(dispatch …)` |
-| `(queue …)` | `GPUQueue.writeBuffer()` | `(write-buffer :buffer … :data …)` |
+| `(queue …)` | `GPUQueue.writeBuffer()` | `(write-buffer :buffer … :data …)`; a host writes the same way at runtime, by name, with `writeBuffer(p, name, bytes)`, which lands before the frame's own queue ops |
 
 ### Frame Form
 
 | SJON Form | Purpose | Example |
 |-----------|---------|---------|
 | `(frame …)` | Define execution order | `(frame :name main :perform [pass1 pass2])` |
+| `(step-group …)` | A named, reusable run of steps a frame performs | `(step-group :name scene :perform [depth lit])` |
+
+### Sugar Forms (no WebGPU counterpart)
+
+These are the other half of the vocabulary: forms PNGine invented, lowered by a
+`pngine/*` hook into the ordinary forms above before the emitter sees them.
+Nothing in the payload records that they were used. `schema/sugar-ledger.mjs`
+holds each key against the hand-written twin in `examples/` that proves it is
+sugar, and `zig build drift` derives the key set from the schema so a new one
+cannot land unrecorded.
+
+| SJON Form | Hook | Lowers to |
+|-----------|------|-----------|
+| `(init …)` | `pngine/init-v1` | compute-pipeline + bind-group + compute-pass, named into a frame's `:init` |
+| `(pass-graph (pass …))` | `pngine/pass-v1` | the whole fullscreen-shader graph: shader modules with an injected binding prelude, intermediate textures, pipelines, bind groups, render passes, and the frame or step-group that runs them |
+| `(draw-graph (stage …) (geometry …))` | `pngine/draw-v1` | the stage x geometry cross product: one pipeline and one render pass per pair, one bind group per stage group |
+
+### Source Composition (no WebGPU counterpart either)
+
+| SJON Form | Purpose |
+|-----------|---------|
+| `(wgsl …)` | A named WGSL fragment, `:code` or `:file`, assembled into the modules that `:imports` it. Never a GPU object and never shipped alone |
+| `(import …)` | This document is another document plus a rebinding of its `(define …)` constants and `(wgsl …)` fragments |
+| `(define …)` | A compile-time constant, usable in any numeric slot and in expressions |
 
 ### Execution Model
 
@@ -478,6 +524,7 @@ Per-frame loop:
 |------------|------|----------|
 | `pngine-inputs` | 16 bytes | time(f32), width(f32), height(f32), aspect(f32) |
 | `scene-time-inputs` | 12 bytes | time, width, height (the first 12 bytes of `pngine-inputs`) |
+| `pngine-frame-inputs` | 20 bytes | `pngine-inputs` then frameIndex (u32) |
 | `pointer-inputs` | 48 bytes | pointer x/y, click, deltas, buttons, pressure, scroll |
 | `context-current-texture` | - | Canvas texture for render pass |
 
@@ -645,7 +692,8 @@ src/dsl_sjon/        Depends on all above (+ the SJON package + wgslender)
     ├── Compiler.zig     compile(): validate + lower → walk → PNGB
     ├── Emitter.zig      Walks validated forms, emits bytecode
     ├── values.zig       Typed readers + expression eval
-    ├── hooks.zig        pngine/init-v1 + pngine/pass-v1 lowering
+    ├── hooks.zig        pngine/init-v1 + pngine/pass-v1 lowering (draw-v1 registered here)
+    ├── draw_graph.zig   pngine/draw-v1 lowering
     └── shapes.zig       Compile-time shape generators
     │
     ▼

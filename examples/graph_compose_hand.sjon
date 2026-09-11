@@ -1,0 +1,160 @@
+; The hand-written twin of examples/graph_compose.sjon: a `(draw-graph …)` and a
+; `(pass-graph …)` in one document, both expanded by hand into the core forms
+; they lower to.
+;
+; `schema/sugar-ledger.mjs` names this file for `(draw-graph … :name)`,
+; `(pass-graph … :name)` and `(pass … :reads)`, and
+; `tests/zig/render/render_test.zig` holds the pair pixel-equal every run
+; (`twin_of = "graph_compose"`).
+;
+; What the three keys turn into, all of it visible below:
+;
+;   (draw-graph :name scene …)  ->  (step-group :name scene :perform […])
+;   (pass-graph :name post …)   ->  (step-group :name post  :perform […])
+;   (pass … :reads [sceneColor]) -> `@group(0) @binding(2) var sceneColor:
+;                                   texture_2d<f32>` in the prelude, and the
+;                                   matching `(entry :binding 2 :texture …)`
+;
+; A NAMED graph emits a step group instead of the frame, which is what lets one
+; document hold two graphs: a frame step is one name and a graph is several
+; passes. Unnamed, either container would own `(frame …)` and refuse the other.
+; The emitter inlines a group where it is named, so the frame below emits
+; exactly the ops the same passes listed by hand would — which is the claim
+; this twin exists to make checkable.
+;
+; Equivalence: PIXEL. BYTE is out of reach for every sugar twin, for two
+; reasons that have nothing to do with these keys — see the header of
+; examples/pass_half_res_hand.sjon.
+
+(define :name COUNT :value 3)
+
+(shader-module :name sceneShader :code """
+// `pngine-inputs` is positional, so the MEMBER NAMES are the author's. They are
+// prefixed here because the pass graph below builds its own uniform buffer with
+// the conventional time/width/height/aspect, and `setUniform("time")` cannot
+// tell two buffers apart by field name: sharing them makes the JS API ambiguous
+// and `validate` says so.
+struct Inputs { sceneTime : f32, sceneW : f32, sceneH : f32, sceneAspect : f32 }
+@group(0) @binding(0) var<uniform> inputs : Inputs;
+
+struct VsOut { @builtin(position) pos : vec4f, @location(0) shade : f32 }
+
+@vertex fn vs(@location(0) p : vec3f, @location(1) n : vec3f,
+              @builtin(instance_index) inst : u32) -> VsOut {
+  let a = inputs.sceneTime * 0.6 + f32(inst) * 2.0943951;
+  let c = cos(a); let s = sin(a);
+  // Spin about Y, then push each instance out along its own angle.
+  let r = vec3f(p.x * c + p.z * s, p.y, -p.x * s + p.z * c) * 0.28;
+  let off = vec2f(cos(a) * 0.45, sin(a) * 0.45 * inputs.sceneAspect);
+  let rn = vec3f(n.x * c + n.z * s, n.y, -n.x * s + n.z * c);
+
+  var out : VsOut;
+  out.pos = vec4f(r.xy + off, r.z * 0.5 + 0.5, 1.0);
+  out.shade = clamp(dot(rn, normalize(vec3f(0.4, 0.7, 0.6))), 0.15, 1.0);
+  return out;
+}
+
+@fragment fn fs(in : VsOut) -> @location(0) vec4f {
+  return vec4f(vec3f(0.95, 0.6, 0.25) * in.shade, 1.0);
+}
+""")
+
+(data :name cubeMesh (cube :format [position3 normal3]))
+(buffer :name cubeVB :usage [vertex] :data cubeMesh)
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+(queue :name writeUniforms
+  (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+(texture :name sceneColor :size canvas :format rgba8unorm
+  :usage [render-attachment texture-binding])
+(texture :name sceneDepth :size canvas :format depth24plus
+  :usage [render-attachment])
+
+; ---- the draw graph: one stage over one geometry, so one of everything ------
+
+; The stage's `(depth-stencil …)` and `(primitive …)` and the geometry's
+; `(vertex-buffer …)` meet on the pipeline the cross product emits.
+(render-pipeline :name scene__main__cubes__pipe :layout auto
+  (vertex :module sceneShader :entry vs
+    (vertex-buffer :array-stride (* 4 6)
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)))
+  (fragment :module sceneShader :entry fs
+    (target :format rgba8unorm))
+  (primitive :topology triangle-list :cull-mode back)
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+; The stage's bind group, its `:layout` left open exactly as the stage writes it
+; (§416): one description, pruned per pipeline that binds it.
+(bind-group :name sceneBG :group 0
+  (entry :binding 0 :buffer uniforms))
+
+; The stage's attachments land on this pass because it is both the first and the
+; last of its stage — with more geometry the load ops would sit on the first and
+; the store ops on the last.
+(render-pass :name scene__main__cubes
+  (color-attachment :view sceneColor
+    :clear-value [0.02 0.02 0.05 1] :load-op clear :store-op store)
+  (depth-stencil-attachment :view sceneDepth
+    :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  :pipeline scene__main__cubes__pipe
+  :vertex-buffers [cubeVB]
+  :bind-groups [sceneBG]
+  (draw :vertex-count 36 :instance-count COUNT))
+
+; ---- the pass graph: one fullscreen pass reading what the draw graph drew ----
+
+(sampler :name __pass_sampler :mag-filter linear :min-filter linear)
+
+(buffer :name vignette__ubuf :size 16 :usage [uniform copy-dst])
+
+; The prelude the pass hook writes above the author's text: the uniform block,
+; the shared sampler, the fullscreen-triangle vertex entry, and — this is
+; `:reads` — one texture binding per name read, in the order they were listed.
+(shader-module :name vignette__shader :code """struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+@group(0) @binding(0) var<uniform> pngine: PngineInputs;
+@group(0) @binding(1) var samp: sampler;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let x = f32(i & 1u) * 4.0 - 1.0;
+  let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+  return vec4f(x, y, 0, 1);
+}
+@group(0) @binding(2) var sceneColor: texture_2d<f32>;
+
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      let c = textureSample(sceneColor, samp, uv).rgb;
+      // A vignette and a cool tint, so the frame cannot be mistaken for the
+      // draw graph's own output: corners darken and shadows go blue.
+      let d = distance(uv, vec2f(0.5, 0.5));
+      let vig = 1.0 - smoothstep(0.35, 0.85, d);
+      return vec4f(c * vig + vec3f(0.02, 0.05, 0.14) * (1.0 - vig), 1.0);
+    }
+  """)
+
+(render-pipeline :name vignette__pipe :layout auto
+  (vertex :module vignette__shader :entry vs)
+  (fragment :module vignette__shader :entry fs
+    (target :format preferred-canvas-format)))
+
+; Binding 2 is the other half of `:reads` — the prelude declared the name, this
+; supplies the texture it names.
+(bind-group :name vignette__bg :layout vignette__pipe :group 0
+  (entry :binding 0 :buffer vignette__ubuf)
+  (entry :binding 1 :sampler __pass_sampler)
+  (entry :binding 2 :texture sceneColor))
+
+(render-pass :name vignette :pipeline vignette__pipe :bind-groups [vignette__bg]
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1]
+    :load-op clear :store-op store)
+  (draw :vertex-count 3))
+
+(queue :name vignette__uq
+  (write-buffer :buffer vignette__ubuf :offset 0 :data pngine-inputs))
+
+; ---- the two names, and the frame that orders them -------------------------
+
+(step-group :name scene :perform [scene__main__cubes])
+(step-group :name post :perform [vignette__uq vignette])
+
+(frame :name main :perform [writeUniforms scene post])

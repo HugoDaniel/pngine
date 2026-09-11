@@ -1,0 +1,51 @@
+; Two `(pass …)` roots over ONE `(wgsl …)` fragment, each fixing that fragment's
+; `override` at a different value.
+;
+; This is the shape the pass sugar had no way to express until `(pass …)` took
+; `(constant …)` children. A pass builds its own shader modules — the author
+; never writes the `(vertex …)`/`(fragment …)` stage a hand-authored pipeline
+; hangs constants on — so a fragment's `override` could only ever ship at its
+; default here, however many roots imported it (journal §388, restated §391).
+;
+; Specialisation is per assembled MODULE and happens at compile time: each pass
+; ships its own copy of `fbm` with `OCTAVES` already substituted, as a `const`.
+; Neither `override` survives into the payload, which is the point — an
+; `override` with no value makes a pipeline uncreatable in every runtime.
+(wgsl :name noise :code """
+override OCTAVES: u32 = 1u;
+
+fn hash(p: vec2f) -> f32 {
+  return fract(sin(p.x * 12.9898 + p.y * 78.233) * 43758.5453);
+}
+
+fn fbm(p: vec2f) -> f32 {
+  var sum = 0.0;
+  var amp = 0.5;
+  var q = p;
+  for (var i = 0u; i < OCTAVES; i = i + 1u) {
+    sum = sum + amp * hash(floor(q));
+    q = q * 2.0;
+    amp = amp * 0.5;
+  }
+  return sum;
+}
+""")
+(pass-graph
+  ; Two octaves: a coarse, blocky field, rendered to this pass's own texture.
+  (pass :name coarse :imports [noise] :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return vec4f(fbm(uv * 8.0), 0, 0, 1);
+    }
+  """
+    (constant :name OCTAVES :value 2))
+  ; Six octaves of the SAME function, composited over the coarse pass. The two
+  ; modules differ only in the substituted constant.
+  (pass :name fine :imports [noise] :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      let c = textureLoad(coarse, vec2i(pos.xy), 0).r;
+      return vec4f(c, fbm(uv * 8.0), sin(pngine.time) * .5 + .5, 1);
+    }
+  """
+    (constant :name OCTAVES :value 6)))

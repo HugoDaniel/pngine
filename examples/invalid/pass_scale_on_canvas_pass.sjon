@@ -1,0 +1,16 @@
+; Invalid: `:scale` on a `(pass …)` that renders straight to the canvas. The
+; key is the fraction of the canvas the INTERMEDIATE texture takes, and this
+; pass has none — it is the last of its graph and carries no `post()`, so it
+; draws to the context's current texture at the size the page gives it. Since
+; §425 the intermediate is not even created, so there is nothing left for a
+; fraction to be a fraction of, and the `PASS_SCALE` the prelude declares would
+; describe nothing. Give the pass a `post()` (which makes it write an
+; intermediate) or move the key to an earlier pass.
+
+(pass-graph
+  (pass :name main :scale 0.5 :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / (vec2f(pngine.width, pngine.height) * PASS_SCALE);
+      return vec4f(uv, 0.0, 1.0);
+    }
+  """))

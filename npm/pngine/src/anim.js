@@ -12,45 +12,118 @@ import { reduce } from "./playback-state.js";
 /** @typedef {import("./init-core.js").Pngine} Pngine */
 
 /**
+ * One entry of a draw's `buffers` map: bytes for a buffer, by its SJON name.
+ * @typedef {ArrayBufferView|ArrayBuffer} Bytes
+ * @typedef {{ bytes: Bytes, offset?: number, poolIndex?: number|"active" }} BufferWrite
+ */
+
+/**
+ * Take the host state stored for "the next draw, whoever posts it"
+ * (setUniform/setUniforms/writeBuffer with `redraw: false`) and merge the
+ * draw's own map over it — the draw's entry wins on a shared name, being the
+ * later intent. The store is cleared: it rode this message.
+ * @param {any} i
+ * @param {"pendingUniforms"|"pendingBuffers"} key
+ * @param {object|undefined} own
+ */
+function takePending(i, key, own) {
+  const pending = i[key];
+  i[key] = null;
+  if (!pending) return own ?? null;
+  return own ? { ...pending, ...own } : pending;
+}
+
+/**
+ * A frame reference is a `(frame :name …)` string, or null for the
+ * executor's own choice (its first frame, or the animation table's scene).
+ * Anything else is the caller's bug: a TypeError here, before anything
+ * posts, the way writeBuffer treats bytes that are not bytes.
+ * @param {unknown} frame
+ * @returns {string|null}
+ */
+function checkFrame(frame) {
+  if (frame !== null && typeof frame !== "string") throw new TypeError(`frame must be a (frame :name …) string or null, got ${String(frame)}`);
+  return frame;
+}
+
+/**
+ * A time is a finite number of seconds — zero and negative included. NaN,
+ * an Infinity or a string would reach the executor as an f32 nobody meant,
+ * so it is the caller's bug, refused the way a bad frame is.
+ * @param {unknown} time
+ * @returns {number}
+ */
+function checkTime(time) {
+  if (typeof time !== "number" || !Number.isFinite(time)) throw new TypeError(`time must be a finite number of seconds, got ${String(time)}`);
+  return time;
+}
+
+/**
+ * The trailing options of setUniform/setUniforms/writeBuffer: an object or
+ * nothing. The positional boolean setUniform once took (a no-op in every
+ * release that had it) is refused by name, so a caller still passing it
+ * learns the spelling rather than getting a draw it asked not to have.
+ * @param {string} verb
+ * @param {unknown} opts
+ * @returns {{ redraw?: boolean, offset?: number, poolIndex?: number|"active" }}
+ */
+function checkOptions(verb, opts) {
+  if (opts === undefined) return {};
+  if (opts === null || typeof opts !== "object") throw new TypeError(`${verb}: the trailing argument is an options object, { redraw: false }, got ${String(opts)}`);
+  return opts;
+}
+
+/**
  * Draw a frame (sync, post-and-forget)
  *
- * When no frame is specified and animation is present, automatically
- * determines the correct frame based on time and the animation timeline.
+ * Host state rides the message: `uniforms` (reflected struct fields, by
+ * name) and `buffers` (raw bytes for a `(buffer :name …)`, by name). Both
+ * are applied at the head of the frame this draw renders, before its own
+ * queue ops run, and the worker never collapses a draw that carries either
+ * (a superseded rAF draw is dropped; one with host state is not).
+ *
+ * `frame` names which `(frame …)` this ONE draw renders; it does not move
+ * the pin setFrame holds. Absent, the draw carries the pin (null when none,
+ * which is the executor's own choice).
+ *
+ * Every verb here has the one shape: arguments that are the wrong kind are a
+ * TypeError before anything else happens (the call is the bug, whatever the
+ * handle's state); a destroyed handle returns `p` and posts nothing; the
+ * verb returns `p`. draw used to be the one exception on both counts.
  *
  * @param {Pngine} p
  * @param {Object} [opts]
  * @param {number} [opts.time]
- * @param {string|null} [opts.frame] - Explicit frame name, or null to let the
- *   animation timeline resolve it (what setFrame(p, null) restores)
+ * @param {string|null} [opts.frame] - The frame this draw renders, or null
+ *   for the executor's choice; absent → the pin from setFrame
  * @param {Object} [opts.uniforms]
+ * @param {Record<string, Bytes|BufferWrite>} [opts.buffers]
+ * @returns {Pngine}
  */
 export function draw(p, opts = {}) {
+  if (opts.time !== undefined) checkTime(opts.time);
+  if (opts.frame !== undefined) checkFrame(opts.frame);
   const i = p._;
-  if (!i) throw new Error("Pngine destroyed");
-  if (!i.ready) throw new Error("Not initialized");
+  if (!i) return p;
 
   const time = opts.time ?? i.pb.time;
-  let frame = opts.frame ?? null;
+  const frame = opts.frame !== undefined ? opts.frame : i.pb.frame;
 
-  // No explicit frame + an animation timeline: let the reducer resolve and
-  // persist the scene/frame from the time. Otherwise just record the draw time.
-  if (frame === null && i.animation && i.animation.scenes.length > 0) {
-    i.pb = reduce(i.pb, { type: "DRAW", time, scenes: i.animation.scenes, record: opts.time });
-    frame = i.pb.frame;
-  } else if (opts.time !== undefined) {
-    i.pb = reduce(i.pb, { type: "DRAW", time, record: opts.time });
-  }
+  // An explicit time is recorded as the instance's time (what p.time reads).
+  if (opts.time !== undefined) i.pb = reduce(i.pb, { type: "DRAW", record: opts.time });
 
   i.worker.postMessage({
     type: "draw",
     time,
     frame,
     pointer: i.pointer ?? null,
-    uniforms: opts.uniforms ?? null,
+    uniforms: takePending(i, "pendingUniforms", opts.uniforms),
+    buffers: takePending(i, "pendingBuffers", opts.buffers),
   });
 
   // Reset pointer deltas and scroll after each frame
   if (i.pointer) { i.pointer[4] = 0; i.pointer[5] = 0; i.pointer[9] = 0; i.pointer[10] = 0; }
+  return p;
 }
 
 /**
@@ -67,26 +140,11 @@ export function play(p) {
   // Start audio synced with visual time
   if (i.audio) i.audio.play(i.pb.time);
 
+  // The clock runs unbounded: nothing ends the loop but pause/stop/destroy.
   const loop = () => {
     if (!i.pb.playing) return;
-
-    const prev = i.pb;
-    const next = reduce(prev, { type: "TICK", now: performance.now(), animation: i.animation });
-    i.pb = next;
-
-    // Effects implied by the transition, diffed prev → next:
-    if (prev.playing && !next.playing) {
-      // endBehavior 'stop': halt at duration, draw once, don't reschedule.
-      if (i.audio) i.audio.stop();
-      draw(p, { time: next.time });
-      return;
-    }
-    if (next.startedAtMs !== prev.startedAtMs) {
-      // endBehavior loop/restart wrapped back to the start.
-      if (i.audio) i.audio.seek(0);
-    }
-
-    draw(p, { time: next.time, frame: next.frame });
+    i.pb = reduce(i.pb, { type: "TICK", now: performance.now() });
+    draw(p, { time: i.pb.time });
     i.animationId = requestAnimationFrame(loop);
   };
 
@@ -140,6 +198,7 @@ export function stop(p) {
  * @returns {Pngine}
  */
 export function seek(p, time) {
+  checkTime(time);
   const i = p._;
   if (!i) return p;
 
@@ -152,56 +211,119 @@ export function seek(p, time) {
 }
 
 /**
- * Set specific frame to render
+ * Pin which `(frame :name …)` renders, by name, and draw it.
+ *
+ * The pin rides every later draw from anywhere — the play loop's, a seek's,
+ * a host draw() — until `setFrame(p, null)` releases it, which hands the
+ * choice back to the executor (its first frame, or the animation table's
+ * scene). A name the payload does not define is refused on the worker
+ * through options.onError as a PngineGPUError with source "set-frame",
+ * naming the frames it does define; the draw still renders. A PNG whose
+ * embedded executor predates the pin reports that instead, once.
+ * `p.currentFrame` reads the pin back. A frame that is not a string or null
+ * is a TypeError here, before anything posts.
+ *
  * @param {Pngine} p
- * @param {string|null} frame - Frame name or null for all
+ * @param {string|null} frame - Frame name, or null to release the pin
  * @returns {Pngine}
  */
 export function setFrame(p, frame) {
+  checkFrame(frame);
   const i = p._;
   if (!i) return p;
 
   i.pb = reduce(i.pb, { type: "SET_FRAME", frame });
-  draw(p, { time: i.pb.time, frame });
+  draw(p, { time: i.pb.time });
   return p;
 }
 
 /**
- * Set uniform value and redraw.
+ * Set a uniform value and redraw.
+ *
+ * With `redraw: false` the value is stored and rides the NEXT draw from
+ * anywhere — the play loop's, a seek's, a host draw() — which clears the
+ * store. That is how a host batches several writes into one frame, or writes
+ * every frame during play() without a before-draw hook. The option is
+ * spelled as writeBuffer spells it; the positional boolean that stood here
+ * was a documented no-op in every release that had it, and is now refused.
  *
  * @param {Pngine} p - PNGine instance
  * @param {string} name - Uniform field name (as declared in WGSL struct)
- * @param {number|number[]} value - Value to set
- * @param {boolean} [redraw=true] - Whether to trigger immediate redraw
+ * @param {number|number[]|number[][]} value - Value to set
+ * @param {{ redraw?: boolean }} [opts]
  * @returns {Pngine}
  */
-export function setUniform(p, name, value, redraw = true) {
-  const i = p._;
-  if (!i) return p;
-
-  if (redraw) {
-    draw(p, { time: i.pb.time, uniforms: { [name]: value } });
-  }
-
-  return p;
+export function setUniform(p, name, value, opts) {
+  return setUniforms(p, { [name]: value }, checkOptions("setUniform", opts));
 }
 
 /**
- * Set multiple uniforms at once.
+ * Set multiple uniforms at once. `redraw: false`: see setUniform.
  *
  * @param {Pngine} p - PNGine instance
  * @param {Object} uniforms - Map of name -> value
- * @param {boolean} [redraw=true] - Whether to trigger immediate redraw
+ * @param {{ redraw?: boolean }} [opts]
  * @returns {Pngine}
  */
-export function setUniforms(p, uniforms, redraw = true) {
+export function setUniforms(p, uniforms, opts) {
+  const { redraw = true } = checkOptions("setUniforms", opts);
   const i = p._;
   if (!i) return p;
 
   if (redraw) {
     draw(p, { time: i.pb.time, uniforms });
+  } else {
+    Object.assign(i.pendingUniforms ??= {}, uniforms);
   }
 
+  return p;
+}
+
+/**
+ * Put bytes in a buffer, by the `(buffer :name …)` the document declares.
+ *
+ * The one seam is the draw message: with `redraw` true (the default) this is
+ * exactly `draw(p, { time, buffers: { [name]: { bytes, offset, poolIndex } } })`,
+ * so the write lands at the head of the frame it draws. With `redraw` false
+ * it is stored for the next draw from anywhere (see setUniform), and the
+ * bytes are read when THAT draw is posted, not now. Every write is a copy:
+ * structured clone, once, on the way to the worker — a slice out of an arena
+ * is fine and the arena stays yours.
+ *
+ * A pooled name (`:pool N`) takes `poolIndex`: `k` for member k, `"active"`
+ * for the member the coming frame reads at `:ping-pong 0`, absent for every
+ * member (seeding a ping-pong state). What the runtime cannot honour — an
+ * unknown name, a buffer the frame itself writes every draw, a bad pool
+ * member, no `copy-dst` in its `:usage`, a misaligned or out-of-range write —
+ * reaches options.onError as a PngineGPUError with source "write-buffer";
+ * getBuffers(p) says which names are writable and why not. Bytes that are
+ * not bytes are a TypeError here, before anything is posted.
+ *
+ * @param {Pngine} p
+ * @param {string} name
+ * @param {Bytes} bytes
+ * @param {{ offset?: number, poolIndex?: number|"active", redraw?: boolean }} [opts]
+ * @returns {Pngine}
+ */
+export function writeBuffer(p, name, bytes, opts) {
+  const { offset, poolIndex, redraw = true } = checkOptions("writeBuffer", opts);
+  if (!(ArrayBuffer.isView(bytes) || bytes instanceof ArrayBuffer)) throw new TypeError(`writeBuffer '${name}': bytes must be an ArrayBufferView or an ArrayBuffer`);
+  if (offset !== undefined && !(Number.isInteger(offset) && offset >= 0)) throw new TypeError(`writeBuffer '${name}': offset must be a non-negative integer, got ${offset}`);
+  if (poolIndex !== undefined && poolIndex !== "active" && !(Number.isInteger(poolIndex) && poolIndex >= 0)) {
+    throw new TypeError(`writeBuffer '${name}': poolIndex must be a non-negative integer or "active", got ${poolIndex}`);
+  }
+  const i = p._;
+  if (!i) return p;
+  /** @type {BufferWrite} */
+  const entry = { bytes };
+  if (offset !== undefined) entry.offset = offset;
+  if (poolIndex !== undefined) entry.poolIndex = poolIndex;
+
+  if (redraw) {
+    draw(p, { time: i.pb.time, buffers: { [name]: entry } });
+  } else {
+    (i.pendingBuffers ??= {})[name] = entry;
+  }
   return p;
 }
 
@@ -283,16 +405,34 @@ function workerRequest(i, request, replyType, read, fallback) {
 }
 
 /**
- * Get available uniform names from the loaded shader.
- * Returns a promise that resolves to an object with uniform metadata.
+ * Every reflected uniform field by name: its type as WGSL spells it, the
+ * `(buffer :name …)` it lives in (null for a payload minted before the
+ * buffer-name block), its byte offset and size, and its array length (0 for
+ * a scalar/vector/matrix field).
  *
  * @param {Pngine} p - PNGine instance
- * @returns {Promise<Object>} - Map of name -> {type, size, bufferId, offset}
+ * @returns {Promise<Object>} - Map of name -> {type, size, buffer, offset, elemCount}
  */
 export function getUniforms(p) {
   const i = p._;
-  if (!i || !i.ready) return Promise.resolve({});
+  if (!i) return Promise.resolve({});
   return workerRequest(i, { type: "getUniforms" }, "uniforms", (d) => d.uniforms || {}, {});
+}
+
+/**
+ * The document's buffers, by name: `{ size, usage, writable, pool,
+ * frameWritten }` each. `writable` is whether `:usage` has `copy-dst`, which
+ * is what a queue write requires; `frameWritten` means the frame's own
+ * queue ops write it every draw, so writeBuffer refuses it — give the host a
+ * dedicated buffer instead. Empty before the payload is loaded.
+ *
+ * @param {Pngine} p - PNGine instance
+ * @returns {Promise<Record<string, {size: number, usage: number, writable: boolean, pool: number, frameWritten: boolean}>>}
+ */
+export function getBuffers(p) {
+  const i = p._;
+  if (!i) return Promise.resolve({});
+  return workerRequest(i, { type: "getBuffers" }, "buffers", (d) => d.buffers || {}, {});
 }
 
 /**
@@ -315,6 +455,6 @@ export function getUniforms(p) {
 export function getStats(p) {
   const i = p._;
   const empty = { gpu: null, wasmBytes: 0, frameCount: 0, moduleLoaded: false, deviceLost: false };
-  if (!i || !i.ready) return Promise.resolve(empty);
+  if (!i) return Promise.resolve(empty);
   return workerRequest(i, { type: "getStats" }, "stats", (d) => d, empty);
 }

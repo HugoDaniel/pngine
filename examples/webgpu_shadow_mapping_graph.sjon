@@ -1,0 +1,98 @@
+; webgpu_shadow_mapping_graph — webgpu_shadow_mapping_fragments.sjon with its
+; pipeline / bind-group / pass triple replaced by one `(draw-graph …)`. Same
+; scene, same passes, same pixels (`pngine diff` against the fragments
+; snapshot reports 0/65536 differing); what changes is that the 2×2 cross
+; product is written as a table instead of four times by hand.
+;
+; The document it rewrites is 79 lines, 64 of them (81%) four pipelines, four
+; passes and one bind group saying the same thing twice each: two pieces of
+; geometry (a dragon and a ground quad) drawn in two stages (a shadow map and
+; a lit frame). That table is what a graph is:
+;
+;                  stage shadow            stage color
+;   geometry dragon  depth/shadow_vs        lit/color_vs + color_fs
+;   geometry ground  depth/ground_shadow_vs lit/ground_color_vs + ground_color_fs
+;
+; Every child form below is the ordinary form of the same name — the
+; `(depth-stencil …)` a pipeline takes, the `(color-attachment …)` a pass
+; takes, the `(bind-group …)` with its `:layout` left open the way §416
+; introduced. The hook emits one pipeline, one bind group and one render pass
+; per (stage, geometry) pair, and the frame that runs them in stage order:
+; `shadow__dragon`, `shadow__ground`, `color__dragon`, `color__ground`.
+;
+; The two things the graph does that reading the table does not show. The
+; stage's load ops land on the FIRST pass of the stage and its store ops on the
+; LAST, so the shadow map is cleared once and then loaded — the sequencing the
+; hand-written twin spells out attachment by attachment. And each generated
+; bind group is `:prune-unused`, so one entry list serves pipelines whose entry
+; points reach different subsets of it (CONTRIBUTING pitfall 37, unexpressible
+; here rather than merely avoided).
+
+(data :name dragonMesh (dragon :format [position3 normal3]))
+
+(buffer :name dragonVB :usage [vertex] :data dragonMesh)
+(buffer :name dragonIB :index-of dragonMesh :usage [index])
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+
+(queue :name writeUniforms (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+(texture :name depthTexture :size canvas :format depth24plus :usage [render-attachment])
+(define :name SHADOW_SIZE :value 256)
+(texture :name shadowMap :size [SHADOW_SIZE SHADOW_SIZE] :format depth32float :usage [render-attachment texture-binding])
+
+(sampler :name shadowSampler :compare less :mag-filter linear :min-filter linear)
+
+; --- The library ---
+
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+(wgsl :name lookAt :file "./lib/look_at.wgsl")
+(wgsl :name shadowScene :file "./lib/shadow_scene.wgsl" :imports [perspective lookAt])
+(wgsl :name shadowPcf :file "./lib/shadow_pcf.wgsl" :requires [t_shadow s_shadow])
+
+; --- The roots ---
+
+(shader-module :name depth :file "./lib/shadow_depth.wgsl" :imports [shadowScene])
+(shader-module :name lit :file "./lib/shadow_lit.wgsl" :imports [shadowScene shadowPcf])
+
+; --- The graph ---
+
+(draw-graph :before [writeUniforms]
+  (stage :name shadow
+    (depth-stencil-attachment :view shadowMap
+      :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+    (depth-stencil :depth-write-enabled true :depth-compare less :format depth32float
+      :depth-bias 1 :depth-bias-slope-scale 1.0 :depth-bias-clamp 0.0)
+    (primitive :topology triangle-list))
+
+  (stage :name color
+    (color-attachment :view context-current-texture
+      :clear-value [0.1 0.1 0.15 1] :load-op clear :store-op store)
+    (depth-stencil-attachment :view depthTexture
+      :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+    (depth-stencil :depth-write-enabled true :depth-compare less :format depth24plus)
+    (primitive :topology triangle-list)
+    (bind-group :name sceneBG :group 0
+      (entry :binding 0 :buffer uniforms)
+      (entry :binding 1 :texture shadowMap)
+      (entry :binding 2 :sampler shadowSampler)))
+
+  (geometry :name dragon :vertex-buffers [dragonVB] :index-buffer dragonIB
+    (vertex-buffer :array-stride (* 4 6)
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3))
+    (draw-indexed :index-count 33306)
+    (in :stage shadow
+      (vertex :module depth :entry shadow_vs)
+      (primitive :topology triangle-list :cull-mode back))
+    (in :stage color
+      (vertex :module lit :entry color_vs)
+      (fragment :module lit :entry color_fs)
+      (primitive :topology triangle-list :cull-mode back)))
+
+  (geometry :name ground
+    (draw :vertex-count 6)
+    (in :stage shadow
+      (vertex :module depth :entry ground_shadow_vs))
+    (in :stage color
+      (vertex :module lit :entry ground_color_vs)
+      (fragment :module lit :entry ground_color_fs))))

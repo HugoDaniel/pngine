@@ -129,9 +129,11 @@ fn fsMain(@location(0) local : vec2f,
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less)
   (multisample :count 4 :alpha-to-coverage-enabled true))
 
-(bind-group :name gBlend :layout blendPipe :group 0
-  (entry :binding 0 :buffer inputs))
-(bind-group :name gA2c :layout a2cPipe :group 0
+; One resource set, two pipelines. With no `:layout` the compiler derives one
+; GPU bind group per pipeline that binds it, pruned to what that pipeline's
+; entry points reach — so the two forms that differed only in the pipeline they
+; named became one. Compiles to the same bytes as the pair did.
+(bind-group :name gInputs :group 0
   (entry :binding 0 :buffer inputs))
 
 (queue :name writeInputs
@@ -142,14 +144,14 @@ fn fsMain(@location(0) local : vec2f,
     :clear-value [0.10 0.10 0.12 1] :load-op clear :store-op store)
   (depth-stencil-attachment :view msaaDepth :depth-clear-value 1.0
     :depth-load-op clear :depth-store-op store)
-  :pipeline blendPipe :bind-groups [gBlend]
+  :pipeline blendPipe :bind-groups [gInputs]
   (draw :vertex-count 6 :instance-count 8))
 
 (render-pass :name right
   (color-attachment :view msaaColor :resolve-target context-current-texture
     :load-op load :store-op discard)
   (depth-stencil-attachment :view msaaDepth :depth-load-op load :depth-store-op store)
-  :pipeline a2cPipe :bind-groups [gA2c]
+  :pipeline a2cPipe :bind-groups [gInputs]
   (draw :vertex-count 6 :instance-count 8))
 
 (frame :name main :perform [writeInputs left right])

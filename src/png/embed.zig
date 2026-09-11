@@ -24,6 +24,7 @@
 //! - Original image data is preserved unchanged
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const chunk = @import("chunk.zig");
 const createMinimalPng = @import("test_png.zig").createMinimalPng;
 const crc32 = @import("crc32.zig");
@@ -93,15 +94,15 @@ fn checkPngSignature(png_data: []const u8) Error!void {
 }
 
 /// Wrap a spec's payload into its on-disk chunk data. Caller owns the result.
-fn encodeChunkData(allocator: std.mem.Allocator, spec: ChunkSpec) Error![]u8 {
+fn encodeChunkData(gpa: Allocator, spec: ChunkSpec) Error![]u8 {
     switch (spec.encoding) {
         .versioned_deflate => {
-            const compressed = compressDeflateRaw(allocator, spec.payload) catch {
+            const compressed = compressDeflateRaw(gpa, spec.payload) catch {
                 return Error.CompressionFailed;
             };
-            defer allocator.free(compressed);
+            defer gpa.free(compressed);
 
-            const data = allocator.alloc(u8, 2 + compressed.len) catch {
+            const data = gpa.alloc(u8, 2 + compressed.len) catch {
                 return Error.OutOfMemory;
             };
             data[0] = spec.version;
@@ -110,7 +111,7 @@ fn encodeChunkData(allocator: std.mem.Allocator, spec: ChunkSpec) Error![]u8 {
             return data;
         },
         .versioned_raw => {
-            const data = allocator.alloc(u8, 1 + spec.payload.len) catch {
+            const data = gpa.alloc(u8, 1 + spec.payload.len) catch {
                 return Error.OutOfMemory;
             };
             data[0] = spec.version;
@@ -137,7 +138,7 @@ fn encodeChunkData(allocator: std.mem.Allocator, spec: ChunkSpec) Error![]u8 {
 ///
 /// Complexity: O(png_data.len + total payload len)
 fn embedChunks(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     png_data: []const u8,
     specs: []const ChunkSpec,
 ) Error![]u8 {
@@ -154,11 +155,11 @@ fn embedChunks(
     // Encode every chunk first: sizes are needed before the result is sized.
     var encoded: [MAX_EMBED_CHUNKS][]u8 = undefined;
     var encoded_len: usize = 0;
-    defer for (encoded[0..encoded_len]) |data| allocator.free(data);
+    defer for (encoded[0..encoded_len]) |data| gpa.free(data);
 
     var chunks_size: usize = 0;
     for (specs) |spec| {
-        const data = try encodeChunkData(allocator, spec);
+        const data = try encodeChunkData(gpa, spec);
         encoded[encoded_len] = data;
         encoded_len += 1;
         chunks_size += chunk.chunkSize(data.len);
@@ -166,10 +167,10 @@ fn embedChunks(
     std.debug.assert(encoded_len == specs.len);
 
     const result_size = iend_pos + chunks_size + (png_data.len - iend_pos);
-    const result = allocator.alloc(u8, result_size) catch {
+    const result = gpa.alloc(u8, result_size) catch {
         return Error.OutOfMemory;
     };
-    errdefer allocator.free(result);
+    errdefer gpa.free(result);
 
     // Assemble: [original up to IEND] + [chunks, in order] + [IEND chunk]
     @memcpy(result[0..iend_pos], png_data[0..iend_pos]);
@@ -207,13 +208,13 @@ fn embedChunks(
 ///
 /// Complexity: O(png_data.len + bytecode.len)
 pub fn embed(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     png_data: []const u8,
     bytecode: []const u8,
 ) Error![]u8 {
     // Byte-for-byte the metadata-less case: with an empty metadata string
     // embedWithMetadata emits a pNGb chunk and nothing else.
-    return embedWithMetadata(allocator, png_data, bytecode, "");
+    return embedWithMetadata(gpa, png_data, bytecode, "");
 }
 
 /// Embed PNGB bytecode and metadata into a PNG image.
@@ -232,7 +233,7 @@ pub fn embed(
 /// - Original image data is preserved
 /// - Caller owns returned slice
 pub fn embedWithMetadata(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     png_data: []const u8,
     bytecode: []const u8,
     metadata: []const u8,
@@ -252,10 +253,10 @@ pub fn embedWithMetadata(
     };
 
     if (metadata.len == 0) {
-        return embedChunks(allocator, png_data, &.{pngb});
+        return embedChunks(gpa, png_data, &.{pngb});
     }
 
-    return embedChunks(allocator, png_data, &.{
+    return embedChunks(gpa, png_data, &.{
         .{
             .chunk_type = PNGM_CHUNK_TYPE,
             .payload = metadata,
@@ -282,13 +283,13 @@ pub fn embedWithMetadata(
 /// - Original image data and other chunks preserved
 /// - Caller owns returned slice
 pub fn embedAudio(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     png_data: []const u8,
     audio_wasm: []const u8,
 ) Error![]u8 {
     std.debug.assert(audio_wasm.len > 0);
 
-    return embedChunks(allocator, png_data, &.{.{
+    return embedChunks(gpa, png_data, &.{.{
         .chunk_type = PNGA_CHUNK_TYPE,
         .payload = audio_wasm,
         .encoding = .versioned_deflate,
@@ -310,13 +311,13 @@ pub fn embedAudio(
 /// - Original image data and other chunks preserved
 /// - Caller owns returned slice
 pub fn embedFlat(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     png_data: []const u8,
     flat_data: []const u8,
 ) Error![]u8 {
     std.debug.assert(flat_data.len > 0);
 
-    return embedChunks(allocator, png_data, &.{.{
+    return embedChunks(gpa, png_data, &.{.{
         .chunk_type = PNGF_CHUNK_TYPE,
         .payload = flat_data,
         .encoding = .versioned_deflate,
@@ -381,7 +382,7 @@ pub fn compressedCapacity(len: usize) usize {
     return len + len / 64 + 1024;
 }
 
-fn compressDeflateRaw(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+fn compressDeflateRaw(gpa: Allocator, data: []const u8) ![]u8 {
     // Pre-condition: data is not empty
     std.debug.assert(data.len > 0);
 
@@ -392,8 +393,8 @@ fn compressDeflateRaw(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     // `render` fail with CompressionFailed. `len / 64` (1.5%) is ~9× that
     // measurement, plus the 1 KiB of headers. (Third leak pass)
     const initial_capacity = compressedCapacity(data.len);
-    var output_buf = try allocator.alloc(u8, initial_capacity);
-    errdefer allocator.free(output_buf);
+    var output_buf = try gpa.alloc(u8, initial_capacity);
+    errdefer gpa.free(output_buf);
 
     // 32KB window enables back-references up to 32KB ago, standard for DEFLATE.
     var window_buf: [flate.max_window_len]u8 = undefined;
@@ -425,9 +426,9 @@ fn compressDeflateRaw(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     const compressed_len = output_writer.end;
 
     // Copy to exact-size allocation (avoids wasting ~1KB slack space).
-    const result = try allocator.alloc(u8, compressed_len);
+    const result = try gpa.alloc(u8, compressed_len);
     @memcpy(result, output_buf[0..compressed_len]);
-    allocator.free(output_buf);
+    gpa.free(output_buf);
 
     // Post-condition: DEFLATE always produces at least block header bytes.
     std.debug.assert(result.len > 0);

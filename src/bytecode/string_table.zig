@@ -41,22 +41,22 @@ pub const StringTable = struct {
         .owns_strings = true,
     };
 
-    pub fn deinit(self: *Self, allocator: Allocator) void {
+    pub fn deinit(self: *Self, gpa: Allocator) void {
         // Free string copies only if we own them (intern() copies, deserialize() borrows)
         if (self.owns_strings) {
             for (self.strings.items) |str| {
-                allocator.free(str);
+                gpa.free(str);
             }
         }
-        self.map.deinit(allocator);
-        self.strings.deinit(allocator);
+        self.map.deinit(gpa);
+        self.strings.deinit(gpa);
         self.* = undefined;
     }
 
     /// Intern a string, returning its ID. Deduplicates identical strings.
     /// The string is copied, so caller can free their copy after this returns.
     /// Complexity: O(1) average, O(n) on hash collision.
-    pub fn intern(self: *Self, allocator: Allocator, str: []const u8) !StringId {
+    pub fn intern(self: *Self, gpa: Allocator, str: []const u8) !StringId {
         // Pre-condition: string data fits in u16 range
         if (self.total_size + str.len > std.math.maxInt(u16)) {
             return error.StringTableOverflow;
@@ -68,8 +68,8 @@ pub const StringTable = struct {
         }
 
         // Copy the string so we own it
-        const owned_str = try allocator.dupe(u8, str);
-        errdefer allocator.free(owned_str);
+        const owned_str = try gpa.dupe(u8, str);
+        errdefer gpa.free(owned_str);
 
         // New string - allocate ID
         const id: StringId = @enumFromInt(@as(u16, @intCast(self.strings.items.len)));
@@ -80,9 +80,9 @@ pub const StringTable = struct {
         // the map still held as a key — a use-after-free on the next intern that
         // hashed into that bucket, silent because callers `catch continue`
         // (LEAK-10).
-        try self.strings.append(allocator, owned_str);
+        try self.strings.append(gpa, owned_str);
         errdefer _ = self.strings.pop();
-        try self.map.put(allocator, owned_str, id);
+        try self.map.put(gpa, owned_str, id);
         self.total_size += str.len;
 
         // Post-condition: ID is valid
@@ -116,7 +116,9 @@ pub const StringTable = struct {
 
     /// Serialize to binary format.
     /// Returns: count (u16) + offsets (u16 each) + lengths (u16 each) + data
-    pub fn serialize(self: *const Self, allocator: Allocator) ![]u8 {
+    ///
+    /// Caller owns the returned bytes.
+    pub fn serialize(self: *const Self, gpa: Allocator) ![]u8 {
         const str_count = self.count();
 
         // Calculate sizes
@@ -125,8 +127,8 @@ pub const StringTable = struct {
         const lengths_size = @as(usize, str_count) * @sizeOf(u16);
         const total = header_size + offsets_size + lengths_size + self.total_size;
 
-        const buffer = try allocator.alloc(u8, total);
-        errdefer allocator.free(buffer);
+        const buffer = try gpa.alloc(u8, total);
+        errdefer gpa.free(buffer);
 
         var offset: usize = 0;
 
@@ -162,7 +164,7 @@ pub const StringTable = struct {
 };
 
 /// Deserialize string table from binary format.
-pub fn deserialize(allocator: Allocator, data: []const u8) !StringTable {
+pub fn deserialize(gpa: Allocator, data: []const u8) !StringTable {
     // Pre-condition: at least header present
     if (data.len < 2) return error.InvalidStringTable;
 
@@ -178,10 +180,10 @@ pub fn deserialize(allocator: Allocator, data: []const u8) !StringTable {
 
     var table: StringTable = .empty;
     table.owns_strings = false; // Deserialize borrows slices from input data
-    errdefer table.deinit(allocator);
+    errdefer table.deinit(gpa);
 
-    try table.strings.ensureTotalCapacity(allocator, str_count);
-    try table.map.ensureTotalCapacity(allocator, str_count);
+    try table.strings.ensureTotalCapacity(gpa, str_count);
+    try table.map.ensureTotalCapacity(gpa, str_count);
 
     // Read offsets and lengths
     const offsets_start = header_size;

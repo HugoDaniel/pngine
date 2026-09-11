@@ -1,0 +1,36 @@
+; The un-glitched twin of pass_acid_cubes.sjon. Same compute.toys port, same
+; palette, one function put back: where that file's `cellDist` returns the raw
+; distance to the current cell's star, this one returns the union with the
+; cell wall, which is what the original computed and then threw away.
+;
+; This is the whole document. It is pass_acid_cubes.sjon with one fragment
+; rebound, and `(import …)` is how a document says that instead of copying. It
+; used to be that document's 146 lines with one line changed, kept in step by
+; hand. A `(wgsl …)` has no emission position — an assembled module takes its
+; text from `:imports` order, never from where the form sits — so rebinding one
+; moves nothing: the payload is byte-identical to the one this file produced
+; when it was written out in full.
+;
+; It is not a tidier version of the same picture. Restoring the union makes the
+; march respect cell walls, so the ray steps wall to wall — and the volumetric
+; glow reads that same distance. `LOCAL_SAFE_DIST` pins every wall crossing to
+; 0.001, so each one spikes the glow and the cell lattice itself lights up as a
+; corridor of glowing planes. Nothing here is a cube, and nothing is a
+; starfield: it is the grid, seen edge-on down its own axis.
+;
+; The stars are still there and still hit. At low acidity (pointer near the
+; bottom of the canvas) they show as white specks; at high acidity the lattice
+; drowns them.
+;
+; Mouse: as its twin. `pointer.x` rotates the hue a full turn across the
+; canvas; `pointer.y` sets how acid it gets (up = more).
+
+(import :file "./pass_acid_cubes.sjon"
+  ; The one function that separates this file from pass_acid_cubes.sjon. The
+  ; union is the correct distance for a domain-repeated field: never step
+  ; further than the wall of the cell whose hash you just read.
+  (wgsl :name cellDist :code """
+  fn cellDist(d_star: f32, d_wall: f32) -> f32 {
+    return min(d_star, d_wall);
+  }
+"""))

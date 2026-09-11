@@ -1,0 +1,54 @@
+; Nine `(color-attachment …)` sub-forms. WebGPU's `maxColorAttachments` is 8 and
+; the MRT opcode's attachment array is exactly that wide, so the ninth cannot be
+; encoded at all. A SPEC fact rather than one runtime's budget: no backend can
+; raise it, which is why the number lives beside the wire and the emitter reads
+; the same declaration the native backend and `(draw-graph …)` do (r3-03).
+(shader-module :name code :code """
+struct Out {
+  @location(0) a : vec4f, @location(1) b : vec4f, @location(2) c : vec4f,
+  @location(3) d : vec4f, @location(4) e : vec4f, @location(5) f : vec4f,
+  @location(6) g : vec4f, @location(7) h : vec4f, @location(8) i : vec4f,
+}
+
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  let x = f32(i) - 1.0;
+  return vec4f(x, x, 0.0, 1.0);
+}
+
+@fragment fn fs() -> Out {
+  let one = vec4f(1.0);
+  return Out(one, one, one, one, one, one, one, one, one);
+}
+""")
+
+(texture :name t0 :size canvas :format rgba8unorm :usage [render-attachment])
+(texture :name t1 :size canvas :format rgba8unorm :usage [render-attachment])
+(texture :name t2 :size canvas :format rgba8unorm :usage [render-attachment])
+(texture :name t3 :size canvas :format rgba8unorm :usage [render-attachment])
+(texture :name t4 :size canvas :format rgba8unorm :usage [render-attachment])
+(texture :name t5 :size canvas :format rgba8unorm :usage [render-attachment])
+(texture :name t6 :size canvas :format rgba8unorm :usage [render-attachment])
+(texture :name t7 :size canvas :format rgba8unorm :usage [render-attachment])
+(texture :name t8 :size canvas :format rgba8unorm :usage [render-attachment])
+
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (target :format rgba8unorm) (target :format rgba8unorm) (target :format rgba8unorm)
+    (target :format rgba8unorm) (target :format rgba8unorm) (target :format rgba8unorm)
+    (target :format rgba8unorm) (target :format rgba8unorm) (target :format rgba8unorm)))
+
+(render-pass :name draw
+  (color-attachment :view t0 :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (color-attachment :view t1 :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (color-attachment :view t2 :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (color-attachment :view t3 :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (color-attachment :view t4 :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (color-attachment :view t5 :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (color-attachment :view t6 :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (color-attachment :view t7 :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (color-attachment :view t8 :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipe
+  (draw :vertex-count 3))
+
+(frame :name main :perform [draw])

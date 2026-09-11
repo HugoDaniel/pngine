@@ -82,8 +82,8 @@
 //! native_gpu.setModule(&bytecode_module);
 //!
 //! // Execute GPU commands
-//! try native_gpu.create_buffer(allocator, 0, 1024, 0x28); // VERTEX | COPY_DST
-//! try native_gpu.create_shader_module(allocator, 0, 0);
+//! try native_gpu.create_buffer(gpa, 0, 1024, 0x28); // VERTEX | COPY_DST
+//! try native_gpu.create_shader_module(gpa, 0, 0);
 //! ```
 
 const std = @import("std");
@@ -336,6 +336,8 @@ pub const stub = struct {
 
 // Use bytecode module import
 const bytecode_mod = @import("bytecode");
+/// Resource id-space budgets — shared with MockGPU and NullGPU.
+const limits = bytecode_mod.resource_limits;
 const format = bytecode_mod.format;
 const Module = format.Module;
 const DataSection = bytecode_mod.DataSection;
@@ -452,12 +454,26 @@ pub const Context = struct {
         // (mirrors gpu.js OPTIONAL_DEVICE_FEATURES). Each is gated on adapter
         // support, since requesting a feature the adapter lacks rejects the
         // device request outright; requesting an unused one is harmless.
-        //   depth-clip-control    powers `(primitive :unclipped-depth true)`
-        //   dual-source-blending  powers `enable dual_source_blending;` +
-        //                         @blend_src outputs + the src1* blend factors
+        //   depth-clip-control        powers `(primitive :unclipped-depth true)`
+        //   dual-source-blending      powers `enable dual_source_blending;` +
+        //                             @blend_src outputs + the src1* blend factors
+        //   depth32float-stencil8     powers the texture format of the same name
+        //   rg11b10ufloat-renderable  powers rg11b10ufloat as a render target
+        //   timestamp-query           powers (query-set :type timestamp …)
+        //
+        // Three of gpu.js's eight have no `WGPUFeatureName` in the vendored
+        // wgpu-native header at all — `primitive-index`,
+        // `texture-formats-tier1`, `core-features-and-limits` — so there is
+        // nothing to request for them here and a document using one renders in
+        // the browser and not natively. That is a wgpu-native version gap, not
+        // a list to keep short: everything the header DOES name is requested,
+        // so the two lists diverge only where they must (§438).
         const optional_features = [_]c.WGPUFeatureName{
             c.WGPUFeatureName_DepthClipControl,
             c.WGPUFeatureName_DualSourceBlending,
+            c.WGPUFeatureName_Depth32FloatStencil8,
+            c.WGPUFeatureName_RG11B10UfloatRenderable,
+            c.WGPUFeatureName_TimestampQuery,
         };
         var required_features: [optional_features.len]c.WGPUFeatureName = undefined;
         var feature_count: usize = 0;
@@ -594,20 +610,41 @@ pub const WgpuNativeGPU = struct {
     const Self = @This();
 
     /// Maximum resources per category (static allocation bounds).
-    pub const MAX_BUFFERS: u16 = 256;
-    pub const MAX_TEXTURES: u16 = 256;
-    pub const MAX_TEXTURE_VIEWS: u16 = 256;
-    pub const MAX_SAMPLERS: u16 = 64;
-    pub const MAX_SHADERS: u16 = 64;
-    pub const MAX_RENDER_PIPELINES: u16 = 64;
-    pub const MAX_COMPUTE_PIPELINES: u16 = 64;
+    ///
+    /// These arrays are the tables that actually stop a render, so
+    /// `bytecode.resource_limits` declares their sizes and the compiler reads
+    /// the same declaration — an over-cap document is refused at its source line
+    /// by `pngine validate` instead of dying here as a bare
+    /// `error.InvalidResourceId` with no form, no number and no line (r3-03).
+    ///
+    /// ## Policy for an over-cap id that still reaches here
+    ///
+    /// The stream is untrusted (`pngine inspect art.png` runs arbitrary PNGB),
+    /// so every id is still checked. The two answers are deliberate and differ:
+    /// a **create** past the cap REFUSES with `error.InvalidResourceId` — the
+    /// descriptor names a resource this backend cannot hold, and binding
+    /// something else in its place would render a lie. A **set** past the cap
+    /// RETURNS — `setPipeline`/`setBindGroup`/`setVertexBuffer` with an id no
+    /// create ever filled is indistinguishable from one naming an empty slot,
+    /// which is already a no-op here, and WebGPU itself refuses the draw that
+    /// follows. One id space, two verbs, one policy each.
+    pub const MAX_BUFFERS: u16 = limits.capOf(.buffers);
+    pub const MAX_TEXTURES: u16 = limits.capOf(.textures);
+    pub const MAX_TEXTURE_VIEWS: u16 = limits.capOf(.texture_views);
+    pub const MAX_SAMPLERS: u16 = limits.capOf(.samplers);
+    pub const MAX_SHADERS: u16 = limits.capOf(.shaders);
+    /// Render and compute pipelines are two arrays over ONE id space
+    /// (`set_pipeline` carries a single id and looks in both), so they take the
+    /// SAME budget rather than adding up to twice it.
+    pub const MAX_RENDER_PIPELINES: u16 = limits.capOf(.pipelines);
+    pub const MAX_COMPUTE_PIPELINES: u16 = limits.capOf(.pipelines);
     /// WebGPU caps a render pass at 8 simultaneous color attachments; the pipeline
     /// target list and the MRT render-pass path share this bound (pass.zig decodes
-    /// up to 8, command_buffer.zig documents the same).
-    pub const MAX_COLOR_ATTACHMENTS: u16 = 8;
-    pub const MAX_BIND_GROUPS: u16 = 128;
-    pub const MAX_BIND_GROUP_LAYOUTS: u16 = 64;
-    pub const MAX_PIPELINE_LAYOUTS: u16 = 64;
+    /// up to 8, command_buffer.zig documents the same). A spec fact, not a budget.
+    pub const MAX_COLOR_ATTACHMENTS: u16 = limits.MAX_COLOR_ATTACHMENTS;
+    pub const MAX_BIND_GROUPS: u16 = limits.capOf(.bind_groups);
+    pub const MAX_BIND_GROUP_LAYOUTS: u16 = limits.capOf(.bind_group_layouts);
+    pub const MAX_PIPELINE_LAYOUTS: u16 = limits.capOf(.pipeline_layouts);
 
     /// Narrow a resource id decoded from a JSON descriptor to something the
     /// `max`-sized table can hold.
@@ -783,6 +820,13 @@ pub const WgpuNativeGPU = struct {
 
     /// Animation time in seconds for time-based uniforms.
     time: f32,
+    /// The frame counter the current frame body was executed at, pushed in by
+    /// the caller beside `setTime` — the same value the browser host reads out
+    /// of the executor before `frame()`. It is also the ping-pong pool phase,
+    /// which is why it is the caller's to supply rather than counted here: a
+    /// host that saves and restores the counter around an ephemeral render
+    /// (a timeline thumbnail) must have the uniform follow it.
+    frame_counter: u32,
 
     /// Create a new WgpuNativeGPU instance.
     pub fn init(ctx: *Context, surface: ?wgpu.Surface, width: u32, height: u32) Self {
@@ -841,6 +885,7 @@ pub const WgpuNativeGPU = struct {
             .height = height,
             .texture_formats = [_]c_uint{c.WGPUTextureFormat_BGRA8Unorm} ** MAX_TEXTURES,
             .time = 0.0,
+            .frame_counter = 0,
         };
 
         // Configure surface if provided
@@ -977,12 +1022,19 @@ pub const WgpuNativeGPU = struct {
         self.time = time_value;
     }
 
+    /// The frame counter this frame body runs at (`pngine-frame-inputs`).
+    /// Set beside `setTime`; 0 for a one-shot render, which is what frame 0 is.
+    pub fn setFrameCounter(self: *Self, n: u32) void {
+        self.frame_counter = n;
+        assert(self.frame_counter == n); // post: the next write_time_uniform sees it
+    }
+
     // ========================================================================
     // Resource Creation
     // ========================================================================
 
-    pub fn create_buffer(self: *Self, allocator: Allocator, buffer_id: u16, size: u32, usage: u16) !void {
-        _ = allocator;
+    pub fn create_buffer(self: *Self, gpa: Allocator, buffer_id: u16, size: u32, usage: u16) !void {
+        _ = gpa;
 
         // Untrusted id: a real branch, not an assert (see the resource-array
         // contract). Everything below indexes `buffers` with it.
@@ -1021,8 +1073,8 @@ pub const WgpuNativeGPU = struct {
         assert(self.buffers[buffer_id] != null or buffer == null);
     }
 
-    pub fn create_texture(self: *Self, allocator: Allocator, texture_id: u16, descriptor_data_id: u16) !void {
-        _ = allocator;
+    pub fn create_texture(self: *Self, gpa: Allocator, texture_id: u16, descriptor_data_id: u16) !void {
+        _ = gpa;
         // Untrusted id: bounds `textures` and `texture_formats` (same MAX).
         if (texture_id >= MAX_TEXTURES) return error.InvalidResourceId;
         assert(self.module != null);
@@ -1047,12 +1099,20 @@ pub const WgpuNativeGPU = struct {
         var depth_or_array_layers: u32 = 1;
         var mip_level_count: u32 = 1;
         var dimension: c_uint = c.WGPUTextureDimension_2D;
+        // A canvas-tracking texture starts at the render size and `:scale`
+        // takes a fraction of it. `width`/`height` fields, when present, are an
+        // explicit extent and win — the encoder never writes both.
+        var canvas_scale: f32 = 1.0;
 
         if (descriptors.TlvReader.init(data)) |reader_const| {
             var reader = reader_const;
             while (reader.next()) |field| {
                 const tf = std.enums.fromInt(descriptors.TextureField, field.id) orelse continue;
                 switch (field.value_type) {
+                    .f32_val => switch (tf) {
+                        .size_canvas_scale => canvas_scale = @bitCast(field.scalar),
+                        else => {},
+                    },
                     .u32_val => switch (tf) {
                         .width => tex_width = field.scalar,
                         .height => tex_height = field.scalar,
@@ -1074,6 +1134,14 @@ pub const WgpuNativeGPU = struct {
                     else => {},
                 }
             }
+        }
+
+        // The scale applies to the canvas-tracking extent only, and rounds to at
+        // least one texel — the same arithmetic `scaleExtent` runs in gpu.js, so
+        // the two backends size a half-resolution target identically.
+        if (canvas_scale != 1.0 and canvas_scale > 0.0) {
+            tex_width = scaleExtent(tex_width, canvas_scale);
+            tex_height = scaleExtent(tex_height, canvas_scale);
         }
 
         // Zero-initialize to avoid undefined memory issues
@@ -1102,6 +1170,15 @@ pub const WgpuNativeGPU = struct {
     /// member) instead of trapping on the narrow.
     fn tlvByte(scalar: u32) u8 {
         return std.math.lossyCast(u8, scalar);
+    }
+
+    /// One dimension of a canvas-tracking texture at `scale`: rounded, never
+    /// below one texel. Mirrors `scaleExtent` in npm/pngine/src/descriptor-decode.js.
+    fn scaleExtent(n: u32, scale: f32) u32 {
+        const scaled = @round(@as(f32, @floatFromInt(n)) * scale);
+        if (!(scaled >= 1.0)) return 1; // NaN-safe: `!(x >= 1)` catches NaN too
+        if (scaled >= @as(f32, @floatFromInt(std.math.maxInt(u32)))) return std.math.maxInt(u32);
+        return @intFromFloat(scaled);
     }
 
     fn decodeTextureFormat(val: u8) c_uint {
@@ -1184,8 +1261,8 @@ pub const WgpuNativeGPU = struct {
         return usage;
     }
 
-    pub fn create_texture_view(self: *Self, allocator: Allocator, view_id: u16, texture_id: u16, descriptor_data_id: u16) !void {
-        _ = allocator;
+    pub fn create_texture_view(self: *Self, gpa: Allocator, view_id: u16, texture_id: u16, descriptor_data_id: u16) !void {
+        _ = gpa;
         // Untrusted ids, both indexed below (view_id → explicit_texture_views,
         // texture_id → textures + texture_formats).
         if (view_id >= MAX_TEXTURE_VIEWS) return error.InvalidResourceId;
@@ -1249,8 +1326,8 @@ pub const WgpuNativeGPU = struct {
         };
     }
 
-    pub fn create_sampler(self: *Self, allocator: Allocator, sampler_id: u16, descriptor_data_id: u16) !void {
-        _ = allocator;
+    pub fn create_sampler(self: *Self, gpa: Allocator, sampler_id: u16, descriptor_data_id: u16) !void {
+        _ = gpa;
         if (sampler_id >= MAX_SAMPLERS) return error.InvalidResourceId; // untrusted id
         assert(self.module != null);
 
@@ -1347,7 +1424,7 @@ pub const WgpuNativeGPU = struct {
         };
     }
 
-    pub fn create_shader_module(self: *Self, allocator: Allocator, shader_id: u16, code_data_id: u16) !void {
+    pub fn create_shader_module(self: *Self, gpa: Allocator, shader_id: u16, code_data_id: u16) !void {
         // Pre-condition assertions (Zig Mastery Compliance)
         if (shader_id >= MAX_SHADERS) return error.InvalidResourceId; // untrusted id
         assert(self.module != null);
@@ -1365,8 +1442,8 @@ pub const WgpuNativeGPU = struct {
         assert(code.len > 0); // Shader code must not be empty
 
         // Create null-terminated string for wgpu
-        const code_z = try allocator.allocSentinel(u8, code.len, 0);
-        defer allocator.free(code_z);
+        const code_z = try gpa.allocSentinel(u8, code.len, 0);
+        defer gpa.free(code_z);
         @memcpy(code_z, code);
 
         const wgsl_desc = c.WGPUShaderSourceWGSL{
@@ -1400,7 +1477,7 @@ pub const WgpuNativeGPU = struct {
         assert(self.shaders[shader_id] != null);
     }
 
-    pub fn create_render_pipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_render_pipeline(self: *Self, gpa: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
         if (pipeline_id >= MAX_RENDER_PIPELINES) return error.InvalidResourceId; // untrusted id
         assert(self.module != null);
 
@@ -1412,7 +1489,7 @@ pub const WgpuNativeGPU = struct {
         const module = self.module.?;
         const desc_data = module.data.get(DataId.fromInt(descriptor_data_id));
 
-        const parsed = std.json.parseFromSlice(std.json.Value, allocator, desc_data, .{}) catch {
+        const parsed = std.json.parseFromSlice(std.json.Value, gpa, desc_data, .{}) catch {
             return error.InvalidResourceId;
         };
         defer parsed.deinit();
@@ -1428,8 +1505,8 @@ pub const WgpuNativeGPU = struct {
         const vertex_entry = vertex_obj.get("entryPoint").?.string;
         const vertex_shader = self.shaders[vertex_shader_id] orelse return error.InvalidResourceId;
 
-        const vertex_entry_z = try allocator.allocSentinel(u8, vertex_entry.len, 0);
-        defer allocator.free(vertex_entry_z);
+        const vertex_entry_z = try gpa.allocSentinel(u8, vertex_entry.len, 0);
+        defer gpa.free(vertex_entry_z);
         @memcpy(vertex_entry_z, vertex_entry);
 
         // Parse vertex buffer layouts into caller-owned storage. `vertex_layouts`
@@ -1452,7 +1529,7 @@ pub const WgpuNativeGPU = struct {
             const frag_entry = frag_obj.get("entryPoint").?.string;
             const frag_shader = self.shaders[frag_shader_id] orelse return error.InvalidResourceId;
 
-            fragment_entry_z = try allocator.allocSentinel(u8, frag_entry.len, 0);
+            fragment_entry_z = try gpa.allocSentinel(u8, frag_entry.len, 0);
             @memcpy(fragment_entry_z.?, frag_entry);
 
             // Default: opaque replace (src One / dst Zero), applied to every target.
@@ -1479,8 +1556,17 @@ pub const WgpuNativeGPU = struct {
                         c.WGPUTextureFormat_BGRA8Unorm;
                     // Honor the authored blend state (the JSON `blend` object) so
                     // `constant`/`one-minus-constant` factors consume the value set
-                    // by set_blend_constant; fall back to replace when unblended.
-                    blend_states[i] = if (t_obj.get("blend")) |bv| parseBlendState(bv, default_blend) else default_blend;
+                    // by set_blend_constant. An UNBLENDED target gets a null
+                    // `blend` pointer, not a One/Zero state that means the same
+                    // thing: GPUColorTargetState.blend is optional, and supplying
+                    // one at all makes WebGPU require a BLENDABLE format. Passing
+                    // the opaque default unconditionally is why an rgba32float or
+                    // rgba8uint target — neither of which blends, and neither of
+                    // which asked to — died here as "Format … is not blendable"
+                    // while the same document rendered in the browser, where
+                    // gpu.js omits the member.
+                    const authored_blend = t_obj.get("blend");
+                    if (authored_blend) |bv| blend_states[i] = parseBlendState(bv, default_blend);
                     // Authored channel mask (R=1 G=2 B=4 A=8, same bit values
                     // as WGPUColorWriteMask); absent → All.
                     const write_mask: u64 = if (t_obj.get("writeMask")) |wm|
@@ -1490,7 +1576,7 @@ pub const WgpuNativeGPU = struct {
                     color_targets[i] = c.WGPUColorTargetState{
                         .nextInChain = null,
                         .format = fmt,
-                        .blend = &blend_states[i],
+                        .blend = if (authored_blend == null) null else &blend_states[i],
                         .writeMask = write_mask,
                     };
                     target_count = i + 1;
@@ -1499,11 +1585,10 @@ pub const WgpuNativeGPU = struct {
             // A fragment stage with no explicit `targets` (or an empty list) still
             // needs one target — the preferred canvas format.
             if (target_count == 0) {
-                blend_states[0] = default_blend;
                 color_targets[0] = c.WGPUColorTargetState{
                     .nextInChain = null,
                     .format = c.WGPUTextureFormat_BGRA8Unorm,
-                    .blend = &blend_states[0],
+                    .blend = null,
                     .writeMask = c.WGPUColorWriteMask_All,
                 };
                 target_count = 1;
@@ -1520,7 +1605,7 @@ pub const WgpuNativeGPU = struct {
                 .targets = @ptrCast(&color_targets),
             };
         }
-        defer if (fragment_entry_z) |z| allocator.free(z);
+        defer if (fragment_entry_z) |z| gpa.free(z);
 
         // Parse primitive and depth stencil states using helpers
         const primitive = parsePrimitiveState(root);
@@ -2268,7 +2353,7 @@ pub const WgpuNativeGPU = struct {
         assert(self.pending_depth_load_op == 1 and self.pending_stencil_load_op == 1);
     }
 
-    pub fn create_compute_pipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_compute_pipeline(self: *Self, gpa: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
         if (pipeline_id >= MAX_COMPUTE_PIPELINES) return error.InvalidResourceId; // untrusted id
         assert(self.module != null);
 
@@ -2309,8 +2394,8 @@ pub const WgpuNativeGPU = struct {
         }
 
         // Create null-terminated entry point string
-        const entry_z = try allocator.allocSentinel(u8, entry_point.len, 0);
-        defer allocator.free(entry_z);
+        const entry_z = try gpa.allocSentinel(u8, entry_point.len, 0);
+        defer gpa.free(entry_z);
         @memcpy(entry_z, entry_point);
 
         // Create compute pipeline descriptor
@@ -2341,7 +2426,7 @@ pub const WgpuNativeGPU = struct {
         self.compute_pipelines[pipeline_id] = pipeline;
     }
 
-    pub fn create_bind_group(self: *Self, allocator: Allocator, group_id: u16, layout_id: u16, entry_data_id: u16) !void {
+    pub fn create_bind_group(self: *Self, gpa: Allocator, group_id: u16, layout_id: u16, entry_data_id: u16) !void {
         if (group_id >= MAX_BIND_GROUPS) return error.InvalidResourceId; // untrusted id
         assert(self.module != null);
 
@@ -2563,10 +2648,10 @@ pub const WgpuNativeGPU = struct {
             entry_count,
             bind_group != null,
         });
-        _ = allocator; // Interface requirement - native backend doesn't need allocator
+        _ = gpa; // Interface requirement - native backend doesn't need allocator
     }
 
-    pub fn create_bind_group_layout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_bind_group_layout(self: *Self, gpa: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
         if (layout_id >= MAX_BIND_GROUP_LAYOUTS) return error.InvalidResourceId; // untrusted id
         assert(self.module != null);
 
@@ -2583,7 +2668,7 @@ pub const WgpuNativeGPU = struct {
         // command-buffer path parses (gpu-resource-pass-commands case 0x0A). Only
         // buffer bindings are modeled today (uniform_access's sole kind); the encoder
         // gains sampler/texture entries later, and this parser extends alongside it.
-        const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch return;
+        const parsed = std.json.parseFromSlice(std.json.Value, gpa, data, .{}) catch return;
         defer parsed.deinit();
         const json_entries = (parsed.value.object.get("entries") orelse return).array;
         if (json_entries.items.len == 0 or json_entries.items.len > 16) return;
@@ -2701,27 +2786,7 @@ pub const WgpuNativeGPU = struct {
         };
     }
 
-    /// Map encoded texture format to wgpu constant
-    fn mapTextureFormat(fmt: u8) c_uint {
-        return switch (fmt) {
-            0x00 => c.WGPUTextureFormat_RGBA8Unorm,
-            0x01 => c.WGPUTextureFormat_RGBA8Snorm,
-            0x02 => c.WGPUTextureFormat_RGBA8Uint,
-            0x03 => c.WGPUTextureFormat_RGBA8Sint,
-            0x04 => c.WGPUTextureFormat_RGBA16Uint,
-            0x05 => c.WGPUTextureFormat_RGBA16Sint,
-            0x06 => c.WGPUTextureFormat_RGBA16Float,
-            0x07 => c.WGPUTextureFormat_RGBA32Uint,
-            0x08 => c.WGPUTextureFormat_RGBA32Sint,
-            0x09 => c.WGPUTextureFormat_RGBA32Float,
-            0x0A => c.WGPUTextureFormat_BGRA8Unorm,
-            0x0B => c.WGPUTextureFormat_R32Float,
-            0x0C => c.WGPUTextureFormat_RG32Float,
-            else => c.WGPUTextureFormat_RGBA8Unorm,
-        };
-    }
-
-    pub fn create_pipeline_layout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_pipeline_layout(self: *Self, gpa: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
         if (layout_id >= MAX_PIPELINE_LAYOUTS) return error.InvalidResourceId; // untrusted id
         assert(self.module != null);
 
@@ -2737,7 +2802,7 @@ pub const WgpuNativeGPU = struct {
         // emitter feeds the browser command-buffer path (gpu-resource-pass-commands
         // case 0x0C). Each id resolves against the bind_group_layouts table (created
         // by the create_bind_group_layout phase that runs before this one).
-        const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch return;
+        const parsed = std.json.parseFromSlice(std.json.Value, gpa, data, .{}) catch return;
         defer parsed.deinit();
         const bgls = (parsed.value.object.get("bindGroupLayouts") orelse return).array;
         if (bgls.items.len == 0 or bgls.items.len > 8) return;
@@ -2773,10 +2838,10 @@ pub const WgpuNativeGPU = struct {
     /// `--frame` renders one frame and exits, so a resolved query would go to a
     /// buffer nothing reads. Implement together with something that consumes the
     /// result, or the fixtures flip to a green that measures nothing.
-    pub fn create_query_set(self: *Self, allocator: Allocator, query_set_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_query_set(self: *Self, gpa: Allocator, query_set_id: u16, descriptor_data_id: u16) !void {
         stub.note("create_query_set");
         _ = self;
-        _ = allocator;
+        _ = gpa;
         _ = query_set_id;
         _ = descriptor_data_id;
     }
@@ -2787,14 +2852,18 @@ pub const WgpuNativeGPU = struct {
     /// textured_rotating_cube, webgpu_textured_cube, webgpu_text_msdf) are all
     /// asset-loading demos whose GPU paths are covered elsewhere in the corpus.
     /// Their `stub` rows are the honest record; see also copy_external_image_to_texture.
-    pub fn create_image_bitmap(self: *Self, allocator: Allocator, bitmap_id: u16, blob_data_id: u16) !void {
+    pub fn create_image_bitmap(self: *Self, gpa: Allocator, bitmap_id: u16, blob_data_id: u16) !void {
         stub.note("create_image_bitmap");
         _ = self;
-        _ = allocator;
+        _ = gpa;
         _ = bitmap_id;
         _ = blob_data_id;
 
-        // TODO: Implement image loading
+        // DEFERRED, like create_render_bundle below: a bitmap is a compressed
+        // blob (PNG/JPEG) that the browser decodes with `createImageBitmap`,
+        // and there is no decoder on this side — it would mean pulling an image
+        // codec into the native backend. `stub.note` above is what keeps a
+        // render that reaches here from being reported as genuine.
     }
 
     /// DEFERRED (r2-06, §335) — the largest of the remaining stubs, and the only
@@ -2806,18 +2875,18 @@ pub const WgpuNativeGPU = struct {
     /// webgpu_text_msdf — the last also needs image decode). Bundles are a CPU
     /// -overhead optimisation: replaying one must produce pixels identical to
     /// drawing directly, so the payoff here is parity confidence, not new output.
-    pub fn create_render_bundle(self: *Self, allocator: Allocator, bundle_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_render_bundle(self: *Self, gpa: Allocator, bundle_id: u16, descriptor_data_id: u16) !void {
         stub.note("create_render_bundle");
         _ = self;
-        _ = allocator;
+        _ = gpa;
         _ = bundle_id;
         _ = descriptor_data_id;
     }
 
-    pub fn execute_bundles(self: *Self, allocator: Allocator, bundle_ids: []const u16) !void {
+    pub fn execute_bundles(self: *Self, gpa: Allocator, bundle_ids: []const u16) !void {
         stub.note("execute_bundles");
         _ = self;
-        _ = allocator;
+        _ = gpa;
         _ = bundle_ids;
     }
 
@@ -2853,8 +2922,8 @@ pub const WgpuNativeGPU = struct {
         return .{ .r = f64FromBits(r), .g = f64FromBits(g), .b = f64FromBits(b), .a = f64FromBits(a) };
     }
 
-    pub fn begin_render_pass(self: *Self, allocator: Allocator, color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16, clear_r_bits: u32, clear_g_bits: u32, clear_b_bits: u32, clear_a_bits: u32, resolve_texture_id: u16) !void {
-        _ = allocator;
+    pub fn begin_render_pass(self: *Self, gpa: Allocator, color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16, clear_r_bits: u32, clear_g_bits: u32, clear_b_bits: u32, clear_a_bits: u32, resolve_texture_id: u16) !void {
+        _ = gpa;
 
         // Pre-condition assertions (Zig Mastery Compliance)
         assert(self.ctx.device != null);
@@ -2942,8 +3011,8 @@ pub const WgpuNativeGPU = struct {
         }
     }
 
-    pub fn begin_compute_pass(self: *Self, allocator: Allocator) !void {
-        _ = allocator;
+    pub fn begin_compute_pass(self: *Self, gpa: Allocator) !void {
+        _ = gpa;
 
         // Pre-condition assertions (Zig Mastery Compliance)
         assert(self.ctx.device != null);
@@ -2966,8 +3035,8 @@ pub const WgpuNativeGPU = struct {
         assert(self.compute_pass != null);
     }
 
-    pub fn set_pipeline(self: *Self, allocator: Allocator, pipeline_id: u16) !void {
-        _ = allocator;
+    pub fn set_pipeline(self: *Self, gpa: Allocator, pipeline_id: u16) !void {
+        _ = gpa;
 
         if (self.render_pass) |pass| {
             if (pipeline_id >= MAX_RENDER_PIPELINES) return; // untrusted id, same as an empty slot
@@ -2975,7 +3044,7 @@ pub const WgpuNativeGPU = struct {
                 wgpu.renderPassEncoderSetPipeline(pass, pipeline);
             }
         } else if (self.compute_pass) |pass| {
-            if (pipeline_id >= MAX_COMPUTE_PIPELINES) return; // untrusted id
+            if (pipeline_id >= MAX_COMPUTE_PIPELINES) return; // untrusted id, same as an empty slot
             const has_pipeline = self.compute_pipelines[pipeline_id] != null;
             nativeLog("set_pipeline(compute): id={}, found={}, pass_valid={}\n", .{ pipeline_id, has_pipeline, pass != null });
             if (self.compute_pipelines[pipeline_id]) |pipeline| {
@@ -2984,8 +3053,8 @@ pub const WgpuNativeGPU = struct {
         }
     }
 
-    pub fn set_bind_group(self: *Self, allocator: Allocator, slot: u8, group_id: u16) !void {
-        _ = allocator;
+    pub fn set_bind_group(self: *Self, gpa: Allocator, slot: u8, group_id: u16) !void {
+        _ = gpa;
 
         if (group_id >= MAX_BIND_GROUPS) return; // untrusted id, same as an empty slot
         const has_group = self.bind_groups[group_id] != null;
@@ -3003,8 +3072,8 @@ pub const WgpuNativeGPU = struct {
         }
     }
 
-    pub fn set_vertex_buffer(self: *Self, allocator: Allocator, slot: u8, buffer_id: u16) !void {
-        _ = allocator;
+    pub fn set_vertex_buffer(self: *Self, gpa: Allocator, slot: u8, buffer_id: u16) !void {
+        _ = gpa;
 
         if (buffer_id >= MAX_BUFFERS) return; // untrusted id, same as an empty slot
 
@@ -3021,8 +3090,8 @@ pub const WgpuNativeGPU = struct {
         }
     }
 
-    pub fn set_index_buffer(self: *Self, allocator: Allocator, buffer_id: u16, index_format: u8) !void {
-        _ = allocator;
+    pub fn set_index_buffer(self: *Self, gpa: Allocator, buffer_id: u16, index_format: u8) !void {
+        _ = gpa;
 
         if (buffer_id >= MAX_BUFFERS) return; // untrusted id, same as an empty slot
         if (self.render_pass) |pass| {
@@ -3037,8 +3106,8 @@ pub const WgpuNativeGPU = struct {
         }
     }
 
-    pub fn draw(self: *Self, allocator: Allocator, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) !void {
-        _ = allocator;
+    pub fn draw(self: *Self, gpa: Allocator, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) !void {
+        _ = gpa;
 
         if (self.render_pass) |pass| {
             _ = debug_draws.fetchAdd(1, .monotonic);
@@ -3048,16 +3117,16 @@ pub const WgpuNativeGPU = struct {
         }
     }
 
-    pub fn draw_indexed(self: *Self, allocator: Allocator, index_count: u32, instance_count: u32, first_index: u32, base_vertex: u32, first_instance: u32) !void {
-        _ = allocator;
+    pub fn draw_indexed(self: *Self, gpa: Allocator, index_count: u32, instance_count: u32, first_index: u32, base_vertex: u32, first_instance: u32) !void {
+        _ = gpa;
 
         if (self.render_pass) |pass| {
             wgpu.renderPassEncoderDrawIndexed(pass, index_count, instance_count, first_index, @intCast(base_vertex), first_instance);
         }
     }
 
-    pub fn dispatch(self: *Self, allocator: Allocator, x: u32, y: u32, z: u32) !void {
-        _ = allocator;
+    pub fn dispatch(self: *Self, gpa: Allocator, x: u32, y: u32, z: u32) !void {
+        _ = gpa;
 
         const has_pass = self.compute_pass != null;
         nativeLog("dispatch: x={}, y={}, z={}, has_pass={}\n", .{ x, y, z, has_pass });
@@ -3069,8 +3138,8 @@ pub const WgpuNativeGPU = struct {
         }
     }
 
-    pub fn end_pass(self: *Self, allocator: Allocator) !void {
-        _ = allocator;
+    pub fn end_pass(self: *Self, gpa: Allocator) !void {
+        _ = gpa;
 
         if (self.render_pass) |pass| {
             wgpu.renderPassEncoderEnd(pass);
@@ -3089,8 +3158,8 @@ pub const WgpuNativeGPU = struct {
     // Extended Pass Operations (stubs for new features)
     // ========================================================================
 
-    pub fn draw_indirect(self: *Self, allocator: Allocator, buffer_id: u16, offset: u32) !void {
-        _ = allocator;
+    pub fn draw_indirect(self: *Self, gpa: Allocator, buffer_id: u16, offset: u32) !void {
+        _ = gpa;
         if (buffer_id >= MAX_BUFFERS) return; // untrusted id, same as an empty slot
         if (self.render_pass) |pass| {
             if (self.buffers[buffer_id]) |buffer| {
@@ -3099,8 +3168,8 @@ pub const WgpuNativeGPU = struct {
         }
     }
 
-    pub fn draw_indexed_indirect(self: *Self, allocator: Allocator, buffer_id: u16, offset: u32) !void {
-        _ = allocator;
+    pub fn draw_indexed_indirect(self: *Self, gpa: Allocator, buffer_id: u16, offset: u32) !void {
+        _ = gpa;
         if (buffer_id >= MAX_BUFFERS) return; // untrusted id, same as an empty slot
         if (self.render_pass) |pass| {
             if (self.buffers[buffer_id]) |buffer| {
@@ -3109,8 +3178,8 @@ pub const WgpuNativeGPU = struct {
         }
     }
 
-    pub fn dispatch_indirect(self: *Self, allocator: Allocator, buffer_id: u16, offset: u32) !void {
-        _ = allocator;
+    pub fn dispatch_indirect(self: *Self, gpa: Allocator, buffer_id: u16, offset: u32) !void {
+        _ = gpa;
         if (buffer_id >= MAX_BUFFERS) return; // untrusted id, same as an empty slot
         if (self.compute_pass) |pass| {
             if (self.buffers[buffer_id]) |buffer| {
@@ -3125,8 +3194,8 @@ pub const WgpuNativeGPU = struct {
     /// the same encoding the browser decodes with `getFloat32` (0x1F in
     /// gpu-resource-pass-commands.js). Reading them as integers would silently
     /// send 0/1065353216 instead of 0.0/1.0.
-    pub fn set_viewport(self: *Self, allocator: Allocator, x: u32, y: u32, w: u32, h: u32, min_depth_bits: u32, max_depth_bits: u32) !void {
-        _ = allocator;
+    pub fn set_viewport(self: *Self, gpa: Allocator, x: u32, y: u32, w: u32, h: u32, min_depth_bits: u32, max_depth_bits: u32) !void {
+        _ = gpa;
         assert(self.compute_pass == null); // viewport is a render-pass concept
         const pass = self.render_pass orelse return;
         wgpu.renderPassEncoderSetViewport(
@@ -3142,8 +3211,8 @@ pub const WgpuNativeGPU = struct {
 
     /// In-pass state: discard fragments outside the rectangle. No-op when no
     /// render pass is active (compute passes never emit it).
-    pub fn set_scissor_rect(self: *Self, allocator: Allocator, x: u32, y: u32, w: u32, h: u32) !void {
-        _ = allocator;
+    pub fn set_scissor_rect(self: *Self, gpa: Allocator, x: u32, y: u32, w: u32, h: u32) !void {
+        _ = gpa;
         assert(self.compute_pass == null); // scissor is a render-pass concept
         const pass = self.render_pass orelse return;
         wgpu.renderPassEncoderSetScissorRect(pass, x, y, w, h);
@@ -3151,8 +3220,8 @@ pub const WgpuNativeGPU = struct {
 
     /// In-pass state: set the stencil comparison reference value for subsequent
     /// draws. No-op when no render pass is active (compute passes never emit it).
-    pub fn set_stencil_reference(self: *Self, allocator: Allocator, reference: u32) !void {
-        _ = allocator;
+    pub fn set_stencil_reference(self: *Self, gpa: Allocator, reference: u32) !void {
+        _ = gpa;
         assert(self.compute_pass == null); // stencil ref is a render-pass concept
         if (self.render_pass) |pass| {
             wgpu.renderPassEncoderSetStencilReference(pass, reference);
@@ -3163,8 +3232,8 @@ pub const WgpuNativeGPU = struct {
     /// `one-minus-constant` blend factors multiply by). Args are f32 bit patterns
     /// (raw u32); WGPUColor takes f64, so widen through f32. No-op with no render
     /// pass active (compute passes never emit it).
-    pub fn set_blend_constant(self: *Self, allocator: Allocator, r_bits: u32, g_bits: u32, b_bits: u32, a_bits: u32) !void {
-        _ = allocator;
+    pub fn set_blend_constant(self: *Self, gpa: Allocator, r_bits: u32, g_bits: u32, b_bits: u32, a_bits: u32) !void {
+        _ = gpa;
         assert(self.compute_pass == null); // blend constant is a render-pass concept
         if (self.render_pass) |pass| {
             const color = c.WGPUColor{
@@ -3180,8 +3249,8 @@ pub const WgpuNativeGPU = struct {
     /// Pre-pass state (emitted before begin_render_pass): stash the depth/stencil
     /// load-store ops so the next begin_render_pass{,_mrt} bakes them into the
     /// depth-stencil attachment. Only emitted for a non-default pass (§214).
-    pub fn set_pass_depth_stencil_ops(self: *Self, allocator: Allocator, depth_load_op: u8, depth_store_op: u8, stencil_load_op: u8, stencil_store_op: u8) !void {
-        _ = allocator;
+    pub fn set_pass_depth_stencil_ops(self: *Self, gpa: Allocator, depth_load_op: u8, depth_store_op: u8, stencil_load_op: u8, stencil_store_op: u8) !void {
+        _ = gpa;
         assert(depth_load_op <= 1 and depth_store_op <= 1);
         assert(stencil_load_op <= 1 and stencil_store_op <= 1);
         self.pending_depth_load_op = depth_load_op;
@@ -3193,47 +3262,47 @@ pub const WgpuNativeGPU = struct {
     /// Pre-pass state: stash the depth/stencil clear values so the next
     /// begin_render_pass{,_mrt} bakes them into the depth-stencil attachment.
     /// Only emitted for a non-default pass (see set_pass_depth_stencil_ops).
-    pub fn set_pass_clear_values(self: *Self, allocator: Allocator, depth_bits: u32, stencil_value: u32) !void {
-        _ = allocator;
+    pub fn set_pass_clear_values(self: *Self, gpa: Allocator, depth_bits: u32, stencil_value: u32) !void {
+        _ = gpa;
         const depth: f32 = @bitCast(depth_bits);
         assert(depth >= 0.0 and depth <= 1.0); // schema type is unorm
         self.pending_depth_clear_value = depth;
         self.pending_stencil_clear_value = stencil_value;
     }
 
-    pub fn set_pass_occlusion_query_set(self: *Self, allocator: Allocator, query_set_id: u16) !void {
+    pub fn set_pass_occlusion_query_set(self: *Self, gpa: Allocator, query_set_id: u16) !void {
         stub.note("set_pass_occlusion_query_set");
         _ = self;
-        _ = allocator;
+        _ = gpa;
         _ = query_set_id;
     }
 
-    pub fn set_pass_timestamp_writes(self: *Self, allocator: Allocator, query_set_id: u16, begin_index: u32, end_index: u32) !void {
+    pub fn set_pass_timestamp_writes(self: *Self, gpa: Allocator, query_set_id: u16, begin_index: u32, end_index: u32) !void {
         stub.note("set_pass_timestamp_writes");
         _ = self;
-        _ = allocator;
+        _ = gpa;
         _ = query_set_id;
         _ = begin_index;
         _ = end_index;
     }
 
-    pub fn begin_occlusion_query(self: *Self, allocator: Allocator, query_index: u32) !void {
+    pub fn begin_occlusion_query(self: *Self, gpa: Allocator, query_index: u32) !void {
         stub.note("begin_occlusion_query");
         _ = self;
-        _ = allocator;
+        _ = gpa;
         _ = query_index;
     }
 
-    pub fn end_occlusion_query(self: *Self, allocator: Allocator) !void {
+    pub fn end_occlusion_query(self: *Self, gpa: Allocator) !void {
         stub.note("end_occlusion_query");
         _ = self;
-        _ = allocator;
+        _ = gpa;
     }
 
-    pub fn resolve_query_set(self: *Self, allocator: Allocator, query_set_id: u16, first_query: u32, query_count: u32, dest_buffer_id: u16, dest_offset: u32) !void {
+    pub fn resolve_query_set(self: *Self, gpa: Allocator, query_set_id: u16, first_query: u32, query_count: u32, dest_buffer_id: u16, dest_offset: u32) !void {
         stub.note("resolve_query_set");
         _ = self;
-        _ = allocator;
+        _ = gpa;
         _ = query_set_id;
         _ = first_query;
         _ = query_count;
@@ -3245,8 +3314,8 @@ pub const WgpuNativeGPU = struct {
     // Queue Operations
     // ========================================================================
 
-    pub fn write_buffer(self: *Self, allocator: Allocator, buffer_id: u16, offset: u32, data_id: u16) !void {
-        _ = allocator;
+    pub fn write_buffer(self: *Self, gpa: Allocator, buffer_id: u16, offset: u32, data_id: u16) !void {
+        _ = gpa;
 
         if (buffer_id >= MAX_BUFFERS) return; // untrusted id, same as an empty slot
         if (self.buffers[buffer_id]) |buffer| {
@@ -3284,8 +3353,8 @@ pub const WgpuNativeGPU = struct {
         return .{ .texture = t, .owned = false };
     }
 
-    pub fn copy_buffer_to_buffer(self: *Self, allocator: Allocator, src_buffer: u16, src_offset: u32, dst_buffer: u16, dst_offset: u32, size: u32) !void {
-        _ = allocator;
+    pub fn copy_buffer_to_buffer(self: *Self, gpa: Allocator, src_buffer: u16, src_offset: u32, dst_buffer: u16, dst_offset: u32, size: u32) !void {
+        _ = gpa;
         assert(self.render_pass == null and self.compute_pass == null); // encoder-level op
         if (src_buffer >= MAX_BUFFERS or dst_buffer >= MAX_BUFFERS) return; // untrusted ids
         const src = self.buffers[src_buffer] orelse return;
@@ -3305,8 +3374,8 @@ pub const WgpuNativeGPU = struct {
     /// browser instead falls back to the canvas size when its w/h operands are 0
     /// (0x23 in gpu-queue-commands.js) — same answer whenever the canvas-sized
     /// feedback texture is the destination, which is every corpus use today.
-    pub fn copy_texture_to_texture(self: *Self, allocator: Allocator, src_texture: u16, dst_texture: u16) !void {
-        _ = allocator;
+    pub fn copy_texture_to_texture(self: *Self, gpa: Allocator, src_texture: u16, dst_texture: u16) !void {
+        _ = gpa;
         assert(self.render_pass == null and self.compute_pass == null); // encoder-level op
         const src = self.getCopyTexture(src_texture) orelse return;
         defer if (src.owned) wgpu.textureRelease(src.texture);
@@ -3347,23 +3416,23 @@ pub const WgpuNativeGPU = struct {
     // would reclassify a faithful render as `stub`. Deliberately permanent — this
     // is the state these two ops are meant to stay in, not a deferred TODO.
 
-    pub fn write_uniform(self: *Self, allocator: Allocator, buffer_id: u16, uniform_id: u16) !void {
-        _ = allocator;
+    pub fn write_uniform(self: *Self, gpa: Allocator, buffer_id: u16, uniform_id: u16) !void {
+        _ = gpa;
         _ = self;
         _ = buffer_id;
         _ = uniform_id;
     }
 
-    pub fn write_audio_data(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
-        _ = allocator;
+    pub fn write_audio_data(self: *Self, gpa: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
+        _ = gpa;
         _ = self;
         _ = buffer_id;
         _ = buffer_offset;
         _ = size;
     }
 
-    pub fn submit(self: *Self, allocator: Allocator) !void {
-        _ = allocator;
+    pub fn submit(self: *Self, gpa: Allocator) !void {
+        _ = gpa;
 
         if (self.encoder) |encoder| {
             const cmd = wgpu.commandEncoderFinish(encoder, null);
@@ -3450,7 +3519,7 @@ pub const WgpuNativeGPU = struct {
     /// into a padded staging buffer and strip the padding per row on the way
     /// out. The single BGRA→RGBA swizzle here is why the encoder keeps its
     /// "returns RGBA" contract even though the target is BGRA8Unorm.
-    pub fn read_pixels(self: *Self, allocator: Allocator) ![]u8 {
+    pub fn read_pixels(self: *Self, gpa: Allocator) ![]u8 {
         assert(self.width > 0 and self.height > 0);
         const texture = self.offscreen_texture orelse return error.NoOffscreenTarget;
 
@@ -3500,8 +3569,8 @@ pub const WgpuNativeGPU = struct {
         const src_ptr: [*]const u8 = @ptrCast(mapped);
         const src: []const u8 = src_ptr[0..@intCast(buffer_size)];
 
-        const out = try allocator.alloc(u8, @as(usize, self.width) * self.height * 4);
-        errdefer allocator.free(out);
+        const out = try gpa.alloc(u8, @as(usize, self.width) * self.height * 4);
+        errdefer gpa.free(out);
 
         // Per-row unpad + BGRA→RGBA swizzle. Bounds are the real dimensions.
         const w: usize = self.width;
@@ -3526,10 +3595,10 @@ pub const WgpuNativeGPU = struct {
         return out;
     }
 
-    pub fn copy_external_image_to_texture(self: *Self, allocator: Allocator, bitmap_id: u16, texture_id: u16, mip_level: u8, origin_x: u16, origin_y: u16, origin_z: u16) !void {
+    pub fn copy_external_image_to_texture(self: *Self, gpa: Allocator, bitmap_id: u16, texture_id: u16, mip_level: u8, origin_x: u16, origin_y: u16, origin_z: u16) !void {
         stub.note("copy_external_image_to_texture");
         _ = self;
-        _ = allocator;
+        _ = gpa;
         _ = bitmap_id;
         _ = texture_id;
         _ = mip_level;
@@ -3556,19 +3625,19 @@ pub const WgpuNativeGPU = struct {
     // mode a `stub` row exists to record. Not "browser-only" as this header
     // previously claimed: browser-only is where it stands, not where it must.
 
-    pub fn init_wasm_module(self: *Self, allocator: Allocator, module_id: u16, wasm_data_id: u16) !void {
+    pub fn init_wasm_module(self: *Self, gpa: Allocator, module_id: u16, wasm_data_id: u16) !void {
         stub.note("init_wasm_module");
         _ = self;
-        _ = allocator;
+        _ = gpa;
         _ = module_id;
         _ = wasm_data_id;
         // See the section header above: deferred, not permanent.
     }
 
-    pub fn call_wasm_func(self: *Self, allocator: Allocator, call_id: u16, module_id: u16, func_name_id: u16, args: []const u8) !void {
+    pub fn call_wasm_func(self: *Self, gpa: Allocator, call_id: u16, module_id: u16, func_name_id: u16, args: []const u8) !void {
         stub.note("call_wasm_func");
         _ = self;
-        _ = allocator;
+        _ = gpa;
         _ = call_id;
         _ = module_id;
         _ = func_name_id;
@@ -3576,10 +3645,10 @@ pub const WgpuNativeGPU = struct {
         // See the section header above: deferred, not permanent.
     }
 
-    pub fn write_buffer_from_wasm(self: *Self, allocator: Allocator, call_id: u16, buffer_id: u16, offset: u32, byte_len: u32) !void {
+    pub fn write_buffer_from_wasm(self: *Self, gpa: Allocator, call_id: u16, buffer_id: u16, offset: u32, byte_len: u32) !void {
         stub.note("write_buffer_from_wasm");
         _ = self;
-        _ = allocator;
+        _ = gpa;
         _ = call_id;
         _ = buffer_id;
         _ = offset;
@@ -3587,13 +3656,16 @@ pub const WgpuNativeGPU = struct {
         // See the section header above: deferred, not permanent.
     }
 
-    pub fn write_time_uniform(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
-        _ = allocator;
+    pub fn write_time_uniform(self: *Self, gpa: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
+        _ = gpa;
 
         if (buffer_id >= MAX_BUFFERS) return; // untrusted id, same as an empty slot
         if (self.buffers[buffer_id]) |buffer| {
-            // Write time + canvas dimensions
-            var data: [16]u8 = undefined;
+            // Time + canvas dimensions, then the frame index. 20 bytes, of
+            // which `size` selects a prefix: 12 for `scene-time-inputs`, 16 for
+            // `pngine-inputs`, 20 for `pngine-frame-inputs`. The browser's
+            // gpu.js stages the identical block.
+            var data: [20]u8 = undefined;
             const time_bytes = std.mem.asBytes(&self.time);
             const width_f: f32 = @floatFromInt(self.width);
             const height_f: f32 = @floatFromInt(self.height);
@@ -3603,8 +3675,9 @@ pub const WgpuNativeGPU = struct {
             @memcpy(data[4..8], std.mem.asBytes(&width_f));
             @memcpy(data[8..12], std.mem.asBytes(&height_f));
             @memcpy(data[12..16], std.mem.asBytes(&aspect));
+            @memcpy(data[16..20], std.mem.asBytes(&self.frame_counter));
 
-            const write_size = @min(size, 16);
+            const write_size = @min(size, 20);
             wgpu.queueWriteBuffer(self.ctx.queue, buffer, buffer_offset, data[0..write_size]);
         }
     }
@@ -3620,8 +3693,8 @@ pub const WgpuNativeGPU = struct {
     /// hold". Previously it no-op'd, and the five pointer fixtures rendered
     /// correctly only because WebGPU zero-initialises buffers anyway — a right
     /// answer resting on an unstated guarantee.
-    pub fn write_pointer_uniform(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
-        _ = allocator;
+    pub fn write_pointer_uniform(self: *Self, gpa: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
+        _ = gpa;
         assert(size <= 64); // the block is 48 B; anything larger is a decode bug
 
         if (buffer_id >= MAX_BUFFERS) return; // untrusted id, same as an empty slot
@@ -3643,8 +3716,8 @@ pub const WgpuNativeGPU = struct {
     // attachment-count mismatch. MRT carries no resolve target (the emitter's
     // ColorAttachment has no resolve id); MSAA resolve stays on the single-
     // attachment begin_render_pass path.
-    pub fn begin_render_pass_mrt(self: *Self, allocator: Allocator, attachments: []const @import("bytecode").emitter.Emitter.ColorAttachment, depth_texture_id: u16) !void {
-        _ = allocator;
+    pub fn begin_render_pass_mrt(self: *Self, gpa: Allocator, attachments: []const @import("bytecode").emitter.Emitter.ColorAttachment, depth_texture_id: u16) !void {
+        _ = gpa;
 
         // Pre-conditions: device ready and a valid attachment count (the bytecode
         // always emits ≥1; WebGPU caps at MAX_COLOR_ATTACHMENTS, which the

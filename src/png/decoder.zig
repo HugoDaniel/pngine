@@ -47,8 +47,8 @@ pub const Image = struct {
     height: u32,
     pixels: []u8,
 
-    pub fn deinit(self: *Image, allocator: Allocator) void {
-        allocator.free(self.pixels);
+    pub fn deinit(self: *Image, gpa: Allocator) void {
+        gpa.free(self.pixels);
         self.* = undefined;
     }
 };
@@ -64,7 +64,7 @@ const Header = struct {
 ///
 /// Pre-condition: `png_data` is a candidate PNG (checked, not assumed).
 /// Post-condition: on success, `pixels.len == width*height*4`.
-pub fn decode(allocator: Allocator, png_data: []const u8) Error!Image {
+pub fn decode(gpa: Allocator, png_data: []const u8) Error!Image {
     // Pre-condition
     if (png_data.len < chunk.PNG_SIGNATURE.len) return Error.InvalidSignature;
     if (!std.mem.eql(u8, png_data[0..8], &chunk.PNG_SIGNATURE)) return Error.InvalidSignature;
@@ -74,7 +74,7 @@ pub fn decode(allocator: Allocator, png_data: []const u8) Error!Image {
 
     var header: ?Header = null;
     var idat: std.ArrayList(u8) = .empty;
-    defer idat.deinit(allocator);
+    defer idat.deinit(gpa);
 
     // A bounded walk over the chunk stream — parseChunks yields at most one
     // chunk per 12+ input bytes, so `png_data.len` is a hard upper bound.
@@ -82,7 +82,7 @@ pub fn decode(allocator: Allocator, png_data: []const u8) Error!Image {
         if (std.mem.eql(u8, &c.chunk_type, "IHDR")) {
             header = try parseHeader(c.data);
         } else if (std.mem.eql(u8, &c.chunk_type, "IDAT")) {
-            idat.appendSlice(allocator, c.data) catch return Error.OutOfMemory;
+            idat.appendSlice(gpa, c.data) catch return Error.OutOfMemory;
         } else if (std.mem.eql(u8, &c.chunk_type, "IEND")) {
             break;
         }
@@ -97,13 +97,13 @@ pub fn decode(allocator: Allocator, png_data: []const u8) Error!Image {
     // (Arc-3 §2.3)
     const expected_raw: usize =
         (@as(usize, hdr.width) * hdr.channels + 1) * @as(usize, hdr.height);
-    const raw = inflateZlib(allocator, idat.items, expected_raw) catch |err| switch (err) {
+    const raw = inflateZlib(gpa, idat.items, expected_raw) catch |err| switch (err) {
         error.OutOfMemory => return Error.OutOfMemory,
         else => return Error.DecompressionFailed,
     };
-    defer allocator.free(raw);
+    defer gpa.free(raw);
 
-    const pixels = try unfilter(allocator, raw, hdr);
+    const pixels = try unfilter(gpa, raw, hdr);
 
     // Post-condition
     assert(pixels.len == @as(usize, hdr.width) * @as(usize, hdr.height) * 4);
@@ -146,9 +146,9 @@ fn parseHeader(data: []const u8) Error!Header {
 /// Inflate a zlib stream (RFC 1950) — PNG IDAT uses zlib-wrapped DEFLATE, unlike
 /// the raw-DEFLATE pNGb chunk in `extract.zig`. Mirrors that file's decompressor
 /// setup but with the `.zlib` container.
-fn inflateZlib(allocator: Allocator, data: []const u8, max_out: usize) ![]u8 {
+fn inflateZlib(gpa: Allocator, data: []const u8, max_out: usize) ![]u8 {
     if (data.len < 2) return error.InvalidFormat;
-    return inflate.decompressCapped(allocator, data, .zlib, max_out);
+    return inflate.decompressCapped(gpa, data, .zlib, max_out);
 }
 
 /// Reconstruct the filtered scanline stream into RGBA8 pixels.
@@ -156,7 +156,7 @@ fn inflateZlib(allocator: Allocator, data: []const u8, max_out: usize) ![]u8 {
 /// The PNG spec defines each filter over the *reconstructed* neighbours a
 /// (left), b (up), c (up-left). We reconstruct in place, channel-by-channel,
 /// into an RGBA output buffer; for RGB inputs the 4th channel is forced to 255.
-fn unfilter(allocator: Allocator, raw: []const u8, hdr: Header) Error![]u8 {
+fn unfilter(gpa: Allocator, raw: []const u8, hdr: Header) Error![]u8 {
     const bpp: usize = hdr.channels; // bytes per pixel = channels at 8-bit
     const width: usize = hdr.width;
     const height: usize = hdr.height;
@@ -168,16 +168,16 @@ fn unfilter(allocator: Allocator, raw: []const u8, hdr: Header) Error![]u8 {
     if (raw.len < filtered_stride * height) return Error.InvalidFormat;
 
     const dst_stride = width * 4; // RGBA output is always 4 channels
-    const pixels = allocator.alloc(u8, dst_stride * height) catch return Error.OutOfMemory;
-    errdefer allocator.free(pixels);
+    const pixels = gpa.alloc(u8, dst_stride * height) catch return Error.OutOfMemory;
+    errdefer gpa.free(pixels);
 
     // Reconstructed source-channel bytes for the previous row (for Up/Paeth).
-    const prev = allocator.alloc(u8, src_stride) catch return Error.OutOfMemory;
-    defer allocator.free(prev);
+    const prev = gpa.alloc(u8, src_stride) catch return Error.OutOfMemory;
+    defer gpa.free(prev);
     @memset(prev, 0);
 
-    const cur = allocator.alloc(u8, src_stride) catch return Error.OutOfMemory;
-    defer allocator.free(cur);
+    const cur = gpa.alloc(u8, src_stride) catch return Error.OutOfMemory;
+    defer gpa.free(cur);
 
     for (0..height) |y| {
         const row = raw[y * filtered_stride ..];
@@ -250,38 +250,38 @@ fn adler32(data: []const u8) u32 {
 
 /// Wrap raw bytes in a zlib stream using stored (uncompressed) DEFLATE blocks —
 /// no compressor needed, so the test controls the exact filtered bytes.
-fn zlibStore(allocator: Allocator, data: []const u8) ![]u8 {
+fn zlibStore(gpa: Allocator, data: []const u8) ![]u8 {
     assert(data.len > 0);
     var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.append(allocator, 0x78); // CMF: 32K window, deflate
-    try out.append(allocator, 0x01); // FLG: FCHECK makes 0x7801 % 31 == 0
+    errdefer out.deinit(gpa);
+    try out.append(gpa, 0x78); // CMF: 32K window, deflate
+    try out.append(gpa, 0x01); // FLG: FCHECK makes 0x7801 % 31 == 0
 
     var i: usize = 0;
     while (i < data.len) {
         const block_len: u16 = @intCast(@min(data.len - i, 65535));
         const final = (i + block_len == data.len);
-        try out.append(allocator, if (final) 0x01 else 0x00); // BFINAL + BTYPE=stored
-        try out.append(allocator, @intCast(block_len & 0xFF));
-        try out.append(allocator, @intCast((block_len >> 8) & 0xFF));
+        try out.append(gpa, if (final) 0x01 else 0x00); // BFINAL + BTYPE=stored
+        try out.append(gpa, @intCast(block_len & 0xFF));
+        try out.append(gpa, @intCast((block_len >> 8) & 0xFF));
         const nlen = ~block_len;
-        try out.append(allocator, @intCast(nlen & 0xFF));
-        try out.append(allocator, @intCast((nlen >> 8) & 0xFF));
-        try out.appendSlice(allocator, data[i .. i + block_len]);
+        try out.append(gpa, @intCast(nlen & 0xFF));
+        try out.append(gpa, @intCast((nlen >> 8) & 0xFF));
+        try out.appendSlice(gpa, data[i .. i + block_len]);
         i += block_len;
     }
 
     const adler = adler32(data);
-    try out.append(allocator, @intCast((adler >> 24) & 0xFF));
-    try out.append(allocator, @intCast((adler >> 16) & 0xFF));
-    try out.append(allocator, @intCast((adler >> 8) & 0xFF));
-    try out.append(allocator, @intCast(adler & 0xFF));
-    return out.toOwnedSlice(allocator);
+    try out.append(gpa, @intCast((adler >> 24) & 0xFF));
+    try out.append(gpa, @intCast((adler >> 16) & 0xFF));
+    try out.append(gpa, @intCast((adler >> 8) & 0xFF));
+    try out.append(gpa, @intCast(adler & 0xFF));
+    return out.toOwnedSlice(gpa);
 }
 
 /// Assemble a full PNG from an already-filtered scanline stream.
 fn buildPng(
-    allocator: Allocator,
+    gpa: Allocator,
     width: u32,
     height: u32,
     bit_depth: u8,
@@ -290,8 +290,8 @@ fn buildPng(
     filtered_stream: []const u8,
 ) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, &chunk.PNG_SIGNATURE);
+    errdefer out.deinit(gpa);
+    try out.appendSlice(gpa, &chunk.PNG_SIGNATURE);
 
     var ihdr: [13]u8 = undefined;
     std.mem.writeInt(u32, ihdr[0..4], width, .big);
@@ -301,20 +301,20 @@ fn buildPng(
     ihdr[10] = 0; // compression method
     ihdr[11] = 0; // filter method
     ihdr[12] = interlace;
-    try chunk.writeChunk(&out, allocator, "IHDR".*, &ihdr);
+    try chunk.writeChunk(&out, gpa, "IHDR".*, &ihdr);
 
-    const idat = try zlibStore(allocator, filtered_stream);
-    defer allocator.free(idat);
-    try chunk.writeChunk(&out, allocator, "IDAT".*, idat);
-    try chunk.writeChunk(&out, allocator, "IEND".*, "");
-    return out.toOwnedSlice(allocator);
+    const idat = try zlibStore(gpa, filtered_stream);
+    defer gpa.free(idat);
+    try chunk.writeChunk(&out, gpa, "IDAT".*, idat);
+    try chunk.writeChunk(&out, gpa, "IEND".*, "");
+    return out.toOwnedSlice(gpa);
 }
 
 /// Forward-filter `raw` (unfiltered channel bytes) with `filter` per the PNG
 /// spec, producing the on-disk filtered stream (filter byte + row). This is the
 /// inverse of `unfilter`; testing them against each other proves both.
 fn applyFilter(
-    allocator: Allocator,
+    gpa: Allocator,
     raw: []const u8,
     width: u32,
     height: u32,
@@ -323,7 +323,7 @@ fn applyFilter(
 ) ![]u8 {
     const bpp: usize = channels;
     const stride = @as(usize, width) * bpp;
-    const out = try allocator.alloc(u8, (stride + 1) * height);
+    const out = try gpa.alloc(u8, (stride + 1) * height);
     for (0..height) |y| {
         const src = raw[y * stride ..][0..stride];
         const prev: []const u8 = if (y > 0) raw[(y - 1) * stride ..][0..stride] else &[_]u8{};

@@ -35,6 +35,7 @@
 //!   ask, instead of each spelling the comparison out.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const utils = @import("utils.zig");
 
 /// The argument that means "stdin" as an input and "stdout" as an output.
@@ -159,7 +160,7 @@ pub const Input = struct {
     bytes: [:0]const u8,
     kind: Kind,
 
-    pub fn deinit(self: Input, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: Input, gpa: Allocator) void {
         gpa.free(self.bytes);
     }
 };
@@ -185,7 +186,7 @@ const max_reads: u32 = utils.max_file_size + 2;
 ///
 /// Pre-condition: path is non-empty.
 /// Post-condition: the returned buffer is NUL-terminated at [len].
-pub fn readInput(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !Input {
+pub fn readInput(gpa: Allocator, io: std.Io, path: []const u8) !Input {
     std.debug.assert(path.len > 0);
 
     if (isStd(path)) {
@@ -206,7 +207,7 @@ pub fn readInput(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !Input {
 /// Slurp stdin with an explicit cap.
 ///
 /// Post-condition: the result is at most `max_file_size` bytes.
-fn readAllStdin(gpa: std.mem.Allocator, io: std.Io) ![:0]u8 {
+fn readAllStdin(gpa: Allocator, io: std.Io) ![:0]u8 {
     return accumulateStdin(gpa, io, std.Io.File.stdin());
 }
 
@@ -221,7 +222,7 @@ fn readAllStdin(gpa: std.mem.Allocator, io: std.Io) ![:0]u8 {
 /// Pre-condition: the cap is positive (asserted so a future edit to
 /// `max_file_size` cannot silently disable the guard).
 /// Post-condition: the result is at most `max_file_size` bytes.
-fn accumulateStdin(gpa: std.mem.Allocator, io: std.Io, reader: anytype) ![:0]u8 {
+fn accumulateStdin(gpa: Allocator, io: std.Io, reader: anytype) ![:0]u8 {
     comptime std.debug.assert(utils.max_file_size > 0);
     // `anytype` accepts every type until the call below fails somewhere deep
     // inside it. Name the one thing this seam requires, so passing the wrong
@@ -278,7 +279,7 @@ pub const Output = struct {
         return .{ .path = path, .owns = true };
     }
 
-    pub fn deinit(self: Output, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: Output, gpa: Allocator) void {
         if (self.owns) gpa.free(self.path);
     }
 };

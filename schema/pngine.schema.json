@@ -3,6 +3,20 @@
   "x-sjon-export-version": 1,
   "x-sjon-export-warnings": [
     {
+      "code": "string_bounds_emitted_via_keywords",
+      "severity": "info",
+      "message": "value-kind `file-path` string bounds emitted via `minLength`/`maxLength`/`pattern`/`format`; codepoint-vs-UTF16 length and SJON-deferred regex semantics carry their own caveats",
+      "plugin": "pngine",
+      "kind": "file-path"
+    },
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `import-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin": "pngine",
+      "kind": "import-section"
+    },
+    {
       "code": "union_emitted_via_anyof",
       "severity": "info",
       "message": "value-kind `real` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`",
@@ -45,11 +59,32 @@
       "kind": "canvas-alpha-mode"
     },
     {
-      "code": "string_bounds_emitted_via_keywords",
-      "severity": "info",
-      "message": "value-kind `file-path` string bounds emitted via `minLength`/`maxLength`/`pattern`/`format`; codepoint-vs-UTF16 length and SJON-deferred regex semantics carry their own caveats",
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `wgsl-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
       "plugin": "pngine",
-      "kind": "file-path"
+      "kind": "wgsl-ref"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `wgsl-ref` cross-ref annotation surfaces target-form=`wgsl` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "plugin": "pngine",
+      "kind": "wgsl-ref"
+    },
+    {
+      "code": "exclusive_group_unenforceable",
+      "severity": "info",
+      "message": "form `wgsl` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only",
+      "plugin": "pngine",
+      "form": "wgsl"
+    },
+    {
+      "code": "exclusive_group_unenforceable",
+      "severity": "info",
+      "message": "form `shader-module` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only",
+      "plugin": "pngine",
+      "form": "shader-module"
     },
     {
       "code": "head_set_emitted_via_oneof_refs",
@@ -85,6 +120,13 @@
       "message": "value-kind `shape-format` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations",
       "plugin": "pngine",
       "kind": "shape-format"
+    },
+    {
+      "code": "exclusive_group_unenforceable",
+      "severity": "info",
+      "message": "form `bytes` exclusive groups emitted structurally (`oneOf` for exactly_one, `not:{allOf}` for at_most_one); source-order constraints between variant keys and discriminants remain SJON-only",
+      "plugin": "pngine",
+      "form": "bytes"
     },
     {
       "code": "union_emitted_via_anyof",
@@ -176,6 +218,20 @@
       "message": "value-kind `subresource-count-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values",
       "plugin": "pngine",
       "kind": "subresource-count-value"
+    },
+    {
+      "code": "union_emitted_via_anyof",
+      "severity": "info",
+      "message": "value-kind `canvas-scale` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`",
+      "plugin": "pngine",
+      "kind": "canvas-scale"
+    },
+    {
+      "code": "numeric_bounds_emitted_via_min_max",
+      "severity": "info",
+      "message": "value-kind `canvas-scale-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=false); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values",
+      "plugin": "pngine",
+      "kind": "canvas-scale-value"
     },
     {
       "code": "union_emitted_via_anyof",
@@ -997,6 +1053,20 @@
     {
       "code": "cross_ref_unenforceable",
       "severity": "warn",
+      "message": "value-kind `frame-step` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin": "pngine",
+      "kind": "frame-step"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `frame-step` cross-ref annotation surfaces target-form=`render-pass | compute-pass | queue | step-group` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "plugin": "pngine",
+      "kind": "frame-step"
+    },
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
       "message": "value-kind `compute-pass-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
       "plugin": "pngine",
       "kind": "compute-pass-ref"
@@ -1023,18 +1093,11 @@
       "kind": "queue-ref"
     },
     {
-      "code": "cross_ref_unenforceable",
-      "severity": "warn",
-      "message": "value-kind `frame-step` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
-      "plugin": "pngine",
-      "kind": "frame-step"
-    },
-    {
-      "code": "cross_ref_annotation_only",
+      "code": "head_set_emitted_via_oneof_refs",
       "severity": "info",
-      "message": "value-kind `frame-step` cross-ref annotation surfaces target-form=`render-pass | compute-pass | queue` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "message": "value-kind `pass-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
       "plugin": "pngine",
-      "kind": "frame-step"
+      "kind": "pass-section"
     },
     {
       "code": "head_set_emitted_via_oneof_refs",
@@ -1042,9 +1105,114 @@
       "message": "value-kind `pass-item` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
       "plugin": "pngine",
       "kind": "pass-item"
+    },
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `stage-section` head-set emitted as a closed `oneOf` — 1 of 6 head(s) resolve to slot-local forms and are emitted inline, the rest as `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin": "pngine",
+      "form": "stage",
+      "kind": "stage-section"
+    },
+    {
+      "code": "local_forms_emitted_inline",
+      "severity": "info",
+      "message": "positional slot on form `stage` declares 1 local form(s) behind a 6-head head-set — emitted as a closed inline union with no global fallback branch; a head outside the set is `not_head_member`",
+      "plugin": "pngine",
+      "form": "stage"
+    },
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `geometry-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin": "pngine",
+      "kind": "geometry-section"
+    },
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `stage-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin": "pngine",
+      "kind": "stage-ref"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `stage-ref` cross-ref annotation surfaces target-form=`stage` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "plugin": "pngine",
+      "kind": "stage-ref"
+    },
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `in-stage-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin": "pngine",
+      "kind": "in-stage-section"
+    },
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `in-section` head-set emitted as a closed `oneOf` — 2 of 3 head(s) resolve to slot-local forms and are emitted inline, the rest as `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin": "pngine",
+      "form": "in",
+      "kind": "in-section"
+    },
+    {
+      "code": "local_forms_emitted_inline",
+      "severity": "info",
+      "message": "positional slot on form `in` declares 2 local form(s) behind a 3-head head-set — emitted as a closed inline union with no global fallback branch; a head outside the set is `not_head_member`",
+      "plugin": "pngine",
+      "form": "in"
+    },
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `draw-graph-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin": "pngine",
+      "kind": "draw-graph-section"
     }
   ],
   "$defs": {
+    "form.pngine.import": {
+      "type": "object",
+      "description": "Compile another document ahead of this one, rebinding its (define …) constants and (wgsl …) fragments. The imported forms come first; the import itself is consumed and emits nothing.",
+      "properties": {
+        "$form": {
+          "const": "import"
+        },
+        "$ns": {
+          "const": "pngine"
+        },
+        "file": {
+          "description": "Path to the .sjon document this one extends, resolved like every other :file — relative, no climbing out of the compile's root.",
+          "type": "string",
+          "x-sjon-format": "path",
+          "x-sjon-length-unit": "codepoint"
+        },
+        "$children": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/form.pngine.define"
+              },
+              {
+                "$ref": "#/$defs/form.pngine.wgsl"
+              }
+            ],
+            "x-sjon-head-set": [
+              "define",
+              "wgsl"
+            ]
+          }
+        }
+      },
+      "required": [
+        "$form",
+        "file"
+      ],
+      "additionalProperties": false
+    },
     "form.pngine.define": {
       "type": "object",
       "description": "Named numeric constant, usable in every numeric slot and vector element as a bare name or inside a bounded expression.",
@@ -2273,9 +2441,119 @@
       ],
       "additionalProperties": false
     },
+    "form.pngine.wgsl": {
+      "type": "object",
+      "description": "A named WGSL fragment, from inline :code or a :file, assembled into the modules that :imports it. Not a GPU object: never validated, minified or shipped alone.",
+      "properties": {
+        "$form": {
+          "const": "wgsl"
+        },
+        "$ns": {
+          "const": "pngine"
+        },
+        "code": {
+          "description": "WGSL source text, kept verbatim. Exactly one of :code or :file.",
+          "type": "string"
+        },
+        "file": {
+          "description": "Path to a .wgsl file, relative to the source document. Exactly one of :code or :file.",
+          "type": "string",
+          "x-sjon-format": "path",
+          "x-sjon-length-unit": "codepoint"
+        },
+        "imports": {
+          "description": "Fragments this one is assembled behind, in dependency order. The graph must be acyclic and each fragment appears once per assembled module.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "$sym": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "$sym"
+            ],
+            "additionalProperties": false,
+            "x-sjon-cross-ref": {
+              "target-form": "wgsl",
+              "name-key": "name",
+              "acyclic": false
+            }
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "name": {
+          "description": "Fragment name referenced by another fragment's, a (shader-module …)'s or a (pass …)'s :imports.",
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "requires": {
+          "description": "WGSL identifiers this fragment uses but does not declare. Every one must be declared by the module that imports it (or by a sibling fragment) — reached or not, since validation runs before dead-code elimination. `validate` checks the list against the fragment's own text and warns both ways: a listed name never used as a hole, a hole never listed.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "$sym": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "$sym"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 64
+        }
+      },
+      "required": [
+        "$form",
+        "name"
+      ],
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": [
+                "code"
+              ]
+            },
+            {
+              "required": [
+                "file"
+              ]
+            }
+          ]
+        }
+      ],
+      "unevaluatedProperties": false,
+      "x-sjon-exclusive-groups": [
+        {
+          "cardinality": "exactly_one",
+          "alternatives": [
+            [
+              "code"
+            ],
+            [
+              "file"
+            ]
+          ]
+        }
+      ]
+    },
     "form.pngine.shader-module": {
       "type": "object",
-      "description": "A named WGSL module. The source is opaque text to SJON.",
+      "description": "A named WGSL module. The source is opaque text to SJON. With :imports it is the ROOT of an assembled module: its fragments' text in dependency order, then its own.",
       "properties": {
         "$form": {
           "const": "shader-module"
@@ -2284,8 +2562,37 @@
           "const": "pngine"
         },
         "code": {
-          "description": "WGSL source text, kept verbatim (a triple-quoted string's indentation is part of the shader).",
+          "description": "WGSL source text, kept verbatim (a triple-quoted string's indentation is part of the shader). Exactly one of :code or :file.",
           "type": "string"
+        },
+        "file": {
+          "description": "Path to a .wgsl file, relative to the source document. Exactly one of :code or :file.",
+          "type": "string",
+          "x-sjon-format": "path",
+          "x-sjon-length-unit": "codepoint"
+        },
+        "imports": {
+          "description": "Fragments assembled ahead of this module's own text. Minification and dead-code elimination run once over the whole assembled module, so names stay consistent across fragment boundaries and unreached fragment code is dropped.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "$sym": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "$sym"
+            ],
+            "additionalProperties": false,
+            "x-sjon-cross-ref": {
+              "target-form": "wgsl",
+              "name-key": "name",
+              "acyclic": false
+            }
+          },
+          "minItems": 1,
+          "maxItems": 64
         },
         "name": {
           "description": "Module name referenced by a pipeline stage's :module key.",
@@ -2303,14 +2610,42 @@
       },
       "required": [
         "$form",
-        "name",
-        "code"
+        "name"
       ],
-      "additionalProperties": false
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": [
+                "code"
+              ]
+            },
+            {
+              "required": [
+                "file"
+              ]
+            }
+          ]
+        }
+      ],
+      "unevaluatedProperties": false,
+      "x-sjon-exclusive-groups": [
+        {
+          "cardinality": "exactly_one",
+          "alternatives": [
+            [
+              "code"
+            ],
+            [
+              "file"
+            ]
+          ]
+        }
+      ]
     },
     "form.pngine.data": {
       "type": "object",
-      "description": "Binary data: an inline float32 array, a positional shape sub-form\n                 (cube/teapot/…) the emitter expands to vertex bytes, or a `:file`\n                 image file the emitter reads from disk and embeds as\n                 [mime_len][mime][bytes] (consumed by an image-bitmap).",
+      "description": "Binary data, from exactly one source: an inline float32 array, a\n                 positional shape sub-form (cube/teapot/…) the emitter expands to\n                 vertex bytes, a positional `(bytes …)` carrying verbatim bytes\n                 from a sidecar file or inline base64, or a `:file` image file the\n                 emitter reads from disk and embeds as [mime_len][mime][bytes]\n                 (consumed by an image-bitmap). Only the image source is wrapped,\n                 and only it cannot size a buffer.",
       "properties": {
         "$form": {
           "const": "data"
@@ -2403,6 +2738,9 @@
               },
               {
                 "$ref": "#/$defs/form.pngine.wasm-data"
+              },
+              {
+                "$ref": "#/$defs/form.pngine.bytes"
               }
             ],
             "x-sjon-head-set": [
@@ -2414,7 +2752,8 @@
               "cylinder",
               "teapot",
               "dragon",
-              "wasm-data"
+              "wasm-data",
+              "bytes"
             ]
           },
           "allOf": [
@@ -2483,6 +2822,13 @@
             },
             {
               "contains": {
+                "$ref": "#/$defs/form.pngine.bytes"
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
                 "anyOf": [
                   {
                     "$ref": "#/$defs/form.pngine.cube"
@@ -2510,6 +2856,9 @@
                   },
                   {
                     "$ref": "#/$defs/form.pngine.wasm-data"
+                  },
+                  {
+                    "$ref": "#/$defs/form.pngine.bytes"
                   }
                 ]
               },
@@ -3076,6 +3425,61 @@
       ],
       "additionalProperties": true
     },
+    "form.pngine.bytes": {
+      "type": "object",
+      "description": "Verbatim bytes as a (data …) source: a sidecar file read at compile time, or inline base64. Stored with no MIME prefix and sized like an inline array, so a buffer's :data can size and fill from it — which (data … :file …) deliberately cannot.",
+      "properties": {
+        "$form": {
+          "const": "bytes"
+        },
+        "$ns": {
+          "const": "pngine"
+        },
+        "base64": {
+          "description": "The bytes inline, base64-encoded, for a document that carries its own data. Exactly one of :file or :base64.",
+          "type": "string"
+        },
+        "file": {
+          "description": "Binary file path relative to the source document, embedded byte-for-byte. Exactly one of :file or :base64.",
+          "type": "string",
+          "x-sjon-format": "path",
+          "x-sjon-length-unit": "codepoint"
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": [
+                "file"
+              ]
+            },
+            {
+              "required": [
+                "base64"
+              ]
+            }
+          ]
+        }
+      ],
+      "unevaluatedProperties": false,
+      "x-sjon-exclusive-groups": [
+        {
+          "cardinality": "exactly_one",
+          "alternatives": [
+            [
+              "file"
+            ],
+            [
+              "base64"
+            ]
+          ]
+        }
+      ]
+    },
     "form.pngine.wasm-data": {
       "type": "object",
       "description": "Static WASM data generator (positional child of (data …)): the module's :func is called once at buffer-create time and its returned bytes fill the buffer via mappedAtCreation.",
@@ -3568,6 +3972,38 @@
           ],
           "x-sjon-union-alternatives": [
             "u32-value",
+            "define-ref"
+          ]
+        },
+        "scale": {
+          "description": "Fraction of the canvas this texture takes in each dimension (requires :size canvas). The runtime rounds and clamps to at least 1 texel, at create time and on every resize.",
+          "anyOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 8,
+              "x-sjon-gpu-repr": "f32"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "define",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "canvas-scale-value",
             "define-ref"
           ]
         },
@@ -4633,7 +5069,7 @@
           }
         },
         "data": {
-          "description": "Source: a (data …) ref, a (wasm-call …) whose result is written each frame, or a runtime builtin — pngine-inputs (16B time/width/height/aspect), scene-time-inputs (12B), pointer-inputs (48B).",
+          "description": "Source: a (data …) ref, a (wasm-call …) whose result is written each frame, or a runtime builtin — pngine-inputs (16B time/width/height/aspect), scene-time-inputs (12B), pngine-frame-inputs (20B, + frameIndex), pointer-inputs (48B).",
           "anyOf": [
             {
               "oneOf": [
@@ -4648,6 +5084,12 @@
                     "$sym": "scene-time-inputs"
                   },
                   "description": "12 B: time, canvasWidth, canvasHeight (all f32) — the first 12 bytes of pngine-inputs. True scene timing is not modelled yet."
+                },
+                {
+                  "const": {
+                    "$sym": "pngine-frame-inputs"
+                  },
+                  "description": "20 B: the 16 B of pngine-inputs, then frameIndex (u32) — the executor's frame counter, which is also the ping-pong pool phase. For a jitter sequence (TAA) or any per-frame rotation."
                 },
                 {
                   "const": {
@@ -5498,7 +5940,7 @@
     },
     "form.pngine.bind-group": {
       "type": "object",
-      "description": "Bind group. `pool` + per-entry `ping-pong` drive ping-pong. The\n                  layout is a pipeline's auto-layout or an explicit\n                  (bind-group-layout …) — one required :layout key naming either.",
+      "description": "Bind group. `pool` + per-entry `ping-pong` drive ping-pong. The\n                  layout is a pipeline's auto-layout or an explicit\n                  (bind-group-layout …), named by :layout — or left open: with\n                  no :layout the emitter derives one GPU bind group per pipeline\n                  that binds the group, pruned to what that pipeline reaches.",
       "properties": {
         "$form": {
           "const": "bind-group"
@@ -5540,7 +5982,7 @@
           "default": 0
         },
         "layout": {
-          "description": "The layout this group is built against: a pipeline (its auto-derived layout) or an explicit (bind-group-layout …).",
+          "description": "The layout this group is built against: a pipeline (its auto-derived layout) or an explicit (bind-group-layout …). Omit it to derive one bind group per pipeline that binds the group (through a render-pass, compute-pass or render-bundle), each pruned to what that pipeline's entry points reach; a pipeline with an explicit (pipeline-layout …) cannot bind such a group.",
           "type": "object",
           "properties": {
             "$sym": {
@@ -5604,6 +6046,11 @@
             "pool-size-value",
             "define-ref"
           ]
+        },
+        "prune-unused": {
+          "description": "Drop each (entry …) whose (group, binding) no entry point of the :layout pipeline reaches. Prevents the bind-group/auto-layout desync that aborts at set_bind_group. Ignored when :layout names an explicit (bind-group-layout …); refused as redundant on a group with no :layout, which is pruned per pipeline already.",
+          "type": "boolean",
+          "default": false
         },
         "$children": {
           "type": "array",
@@ -5889,8 +6336,7 @@
       },
       "required": [
         "$form",
-        "name",
-        "layout"
+        "name"
       ],
       "additionalProperties": false
     },
@@ -7525,7 +7971,7 @@
     },
     "form.pngine.constant": {
       "type": "object",
-      "description": "Specialise a WGSL `override` with a compile-time value. The declaration becomes a `const` in the shipped shader, so the value participates in const-folding and dead-code elimination — an unused branch leaves the payload entirely.",
+      "description": "Specialise a WGSL `override` with a compile-time value. The declaration becomes a `const` in the shipped shader, so the value is fixed at build time and the name is free to be minified. It does NOT remove an untaken branch: wgslender's dead-code elimination works by reachability from entry points, not by folding conditions, so `if (QUALITY > 1u)` keeps both arms (measured, journal §343). Specialisation is per assembled MODULE, so two roots importing one fragment may fix its override at two different values.",
       "properties": {
         "$form": {
           "const": "constant"
@@ -12636,6 +13082,63 @@
       ],
       "additionalProperties": false
     },
+    "form.pngine.step-group": {
+      "type": "object",
+      "description": "A named sequence of frame steps, inlined wherever a (frame …) or another group names it. Emitted by a named (draw-graph …) / (pass-graph …); writable by hand to name a sequence once and run it in several frames.",
+      "properties": {
+        "$form": {
+          "const": "step-group"
+        },
+        "$ns": {
+          "const": "pngine"
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "perform": {
+          "description": "The steps this group stands for, in order.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "$sym": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "$sym"
+            ],
+            "additionalProperties": false,
+            "x-sjon-cross-ref": {
+              "target-forms": [
+                "render-pass",
+                "compute-pass",
+                "queue",
+                "step-group"
+              ],
+              "name-key": "name",
+              "acyclic": false
+            }
+          },
+          "maxItems": 2048
+        }
+      },
+      "required": [
+        "$form",
+        "name",
+        "perform"
+      ],
+      "additionalProperties": false
+    },
     "form.pngine.frame": {
       "type": "object",
       "description": "Frame program: what runs each frame, in order.",
@@ -12720,7 +13223,8 @@
               "target-forms": [
                 "render-pass",
                 "compute-pass",
-                "queue"
+                "queue",
+                "step-group"
               ],
               "name-key": "name",
               "acyclic": false
@@ -12853,7 +13357,7 @@
     },
     "form.pngine.pass": {
       "type": "object",
-      "description": "One `(pass …)`: a fullscreen fragment (or compute) shader-art stage.\n                  The hook detects features from the WGSL (pngine/pointer/feedback).",
+      "description": "One `(pass …)`: a fullscreen fragment (or compute) shader-art stage.\n                  The hook detects features from the WGSL (pngine/pointer/feedback).\n                  Positional (constant …) children specialise the `override`s of\n                  the modules built from this pass's text.",
       "properties": {
         "$form": {
           "const": "pass"
@@ -12878,8 +13382,336 @@
             "x-sjon-length-unit": "codepoint"
           }
         },
+        "format": {
+          "description": "Texel format of the texture this pass renders into, and of its pipeline's color target (default rgba8unorm). A later pass reading it gets a texture_2d<T> whose T follows this format's sample class.",
+          "oneOf": [
+            {
+              "const": {
+                "$sym": "rgba8unorm"
+              },
+              "description": "4×8-bit unorm; renderable, filterable, blendable."
+            },
+            {
+              "const": {
+                "$sym": "rgba8snorm"
+              },
+              "description": "4×8-bit signed norm in [-1,1]; filterable, not baseline-renderable."
+            },
+            {
+              "const": {
+                "$sym": "bgra8unorm"
+              },
+              "description": "4×8-bit unorm, BGRA order; common canvas format."
+            },
+            {
+              "const": {
+                "$sym": "rgba16float"
+              },
+              "description": "4×16-bit float; renderable, filterable, blendable."
+            },
+            {
+              "const": {
+                "$sym": "rgba32float"
+              },
+              "description": "4×32-bit float; renderable; filterable only with the float32-filterable feature."
+            },
+            {
+              "const": {
+                "$sym": "depth24plus"
+              },
+              "description": "At least 24-bit depth; depth-comparison only, not filterable."
+            },
+            {
+              "const": {
+                "$sym": "depth24plus-stencil8"
+              },
+              "description": "At least 24-bit depth plus 8-bit stencil."
+            },
+            {
+              "const": {
+                "$sym": "depth32float"
+              },
+              "description": "32-bit float depth."
+            },
+            {
+              "const": {
+                "$sym": "stencil8"
+              },
+              "description": "8-bit stencil only; no depth aspect."
+            },
+            {
+              "const": {
+                "$sym": "depth16unorm"
+              },
+              "description": "16-bit unorm depth; depth-comparison only, not filterable."
+            },
+            {
+              "const": {
+                "$sym": "r8unorm"
+              },
+              "description": "1×8-bit unorm; renderable, filterable."
+            },
+            {
+              "const": {
+                "$sym": "rg8unorm"
+              },
+              "description": "2×8-bit unorm; renderable, filterable."
+            },
+            {
+              "const": {
+                "$sym": "r16float"
+              },
+              "description": "1×16-bit float; renderable, filterable."
+            },
+            {
+              "const": {
+                "$sym": "rg16float"
+              },
+              "description": "2×16-bit float; renderable, filterable."
+            },
+            {
+              "const": {
+                "$sym": "r32float"
+              },
+              "description": "1×32-bit float; renderable; filterable only with the float32-filterable feature."
+            },
+            {
+              "const": {
+                "$sym": "r32uint"
+              },
+              "description": "1×32-bit unsigned int; not filterable."
+            },
+            {
+              "const": {
+                "$sym": "rgba8unorm-srgb"
+              },
+              "description": "4×8-bit unorm, sRGB-encoded; renderable, filterable, blendable."
+            },
+            {
+              "const": {
+                "$sym": "rgba8uint"
+              },
+              "description": "4×8-bit unsigned int; renderable, not filterable."
+            },
+            {
+              "const": {
+                "$sym": "rgba8sint"
+              },
+              "description": "4×8-bit signed int; renderable, not filterable."
+            },
+            {
+              "const": {
+                "$sym": "r8snorm"
+              },
+              "description": "1×8-bit signed norm in [-1,1]; filterable, not baseline-renderable."
+            },
+            {
+              "const": {
+                "$sym": "r8uint"
+              },
+              "description": "1×8-bit unsigned int; renderable, not filterable."
+            },
+            {
+              "const": {
+                "$sym": "r8sint"
+              },
+              "description": "1×8-bit signed int; renderable, not filterable."
+            },
+            {
+              "const": {
+                "$sym": "rg8snorm"
+              },
+              "description": "2×8-bit signed norm; filterable, not baseline-renderable."
+            },
+            {
+              "const": {
+                "$sym": "rg8uint"
+              },
+              "description": "2×8-bit unsigned int; renderable, not filterable."
+            },
+            {
+              "const": {
+                "$sym": "rg8sint"
+              },
+              "description": "2×8-bit signed int; renderable, not filterable."
+            },
+            {
+              "const": {
+                "$sym": "r16uint"
+              },
+              "description": "1×16-bit unsigned int; renderable, not filterable."
+            },
+            {
+              "const": {
+                "$sym": "r16sint"
+              },
+              "description": "1×16-bit signed int; renderable, not filterable."
+            },
+            {
+              "const": {
+                "$sym": "rg16uint"
+              },
+              "description": "2×16-bit unsigned int; renderable, not filterable."
+            },
+            {
+              "const": {
+                "$sym": "rg16sint"
+              },
+              "description": "2×16-bit signed int; renderable, not filterable."
+            },
+            {
+              "const": {
+                "$sym": "r32sint"
+              },
+              "description": "1×32-bit signed int; renderable, not filterable."
+            },
+            {
+              "const": {
+                "$sym": "rg32uint"
+              },
+              "description": "2×32-bit unsigned int; renderable, not filterable."
+            },
+            {
+              "const": {
+                "$sym": "rg32sint"
+              },
+              "description": "2×32-bit signed int; renderable, not filterable."
+            },
+            {
+              "const": {
+                "$sym": "rg32float"
+              },
+              "description": "2×32-bit float; renderable; filterable only with the float32-filterable feature."
+            },
+            {
+              "const": {
+                "$sym": "rgba16uint"
+              },
+              "description": "4×16-bit unsigned int; renderable, not filterable."
+            },
+            {
+              "const": {
+                "$sym": "rgba16sint"
+              },
+              "description": "4×16-bit signed int; renderable, not filterable."
+            },
+            {
+              "const": {
+                "$sym": "rgba32uint"
+              },
+              "description": "4×32-bit unsigned int; renderable, not filterable."
+            },
+            {
+              "const": {
+                "$sym": "rgba32sint"
+              },
+              "description": "4×32-bit signed int; renderable, not filterable."
+            },
+            {
+              "const": {
+                "$sym": "rgb10a2unorm"
+              },
+              "description": "Packed 10/10/10/2-bit unorm; renderable, filterable, blendable."
+            },
+            {
+              "const": {
+                "$sym": "rgb10a2uint"
+              },
+              "description": "Packed 10/10/10/2-bit unsigned int; renderable, not filterable."
+            },
+            {
+              "const": {
+                "$sym": "rg11b10ufloat"
+              },
+              "description": "Packed 11/11/10-bit unsigned float; filterable; renderable only with the rg11b10ufloat-renderable feature."
+            },
+            {
+              "const": {
+                "$sym": "rgb9e5ufloat"
+              },
+              "description": "Packed 9/9/9-bit float, shared 5-bit exponent; filterable, not renderable."
+            },
+            {
+              "const": {
+                "$sym": "bgra8unorm-srgb"
+              },
+              "description": "4×8-bit unorm, BGRA order, sRGB-encoded; needs core-features-and-limits (present on any core, non-compat device)."
+            },
+            {
+              "const": {
+                "$sym": "r16unorm"
+              },
+              "description": "1×16-bit unorm; needs texture-formats-tier1. Renderable + blendable when enabled."
+            },
+            {
+              "const": {
+                "$sym": "r16snorm"
+              },
+              "description": "1×16-bit signed norm; needs texture-formats-tier1. Renderable + blendable when enabled."
+            },
+            {
+              "const": {
+                "$sym": "rg16unorm"
+              },
+              "description": "2×16-bit unorm; needs texture-formats-tier1. Renderable + blendable when enabled."
+            },
+            {
+              "const": {
+                "$sym": "rg16snorm"
+              },
+              "description": "2×16-bit signed norm; needs texture-formats-tier1. Renderable + blendable when enabled."
+            },
+            {
+              "const": {
+                "$sym": "rgba16unorm"
+              },
+              "description": "4×16-bit unorm; needs texture-formats-tier1. Renderable + blendable when enabled."
+            },
+            {
+              "const": {
+                "$sym": "rgba16snorm"
+              },
+              "description": "4×16-bit signed norm; needs texture-formats-tier1. Renderable + blendable when enabled."
+            },
+            {
+              "const": {
+                "$sym": "depth32float-stencil8"
+              },
+              "description": "32-bit float depth plus 8-bit stencil; needs the depth32float-stencil8 device feature."
+            },
+            {
+              "const": {
+                "$sym": "preferred-canvas-format"
+              },
+              "description": "Resolved at runtime to the platform's canvas format."
+            }
+          ]
+        },
+        "imports": {
+          "description": "Fragments assembled ahead of this pass's code. They may declare functions, structs and constants, but no resource bindings — the prelude owns group 0.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "$sym": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "$sym"
+            ],
+            "additionalProperties": false,
+            "x-sjon-cross-ref": {
+              "target-form": "wgsl",
+              "name-key": "name",
+              "acyclic": false
+            }
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
         "init": {
-          "description": "One-shot WGSL compute source run on the first frame only.",
+          "description": "One-shot WGSL compute source, run once per loaded payload before the first frame, writing this pass's own target as `screen`.",
           "type": "string"
         },
         "name": {
@@ -12893,6 +13725,74 @@
             "$sym"
           ],
           "additionalProperties": false
+        },
+        "reads": {
+          "description": "Declared (texture …) forms this pass samples, bound after its prior-pass dependencies. Each must carry texture-binding usage, be a single-layer 2d texture, be unmultisampled, and be named by this pass's WGSL.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "$sym": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "$sym"
+            ],
+            "additionalProperties": false,
+            "x-sjon-cross-ref": {
+              "target-form": "texture",
+              "name-key": "name",
+              "acyclic": false
+            }
+          },
+          "minItems": 1,
+          "maxItems": 16
+        },
+        "scale": {
+          "description": "Render this pass's intermediate at a fraction of the canvas in each dimension. The prelude declares `const PASS_SCALE: f32` when this is set; pngine.width/height keep meaning the canvas.",
+          "anyOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 8,
+              "x-sjon-gpu-repr": "f32"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "define",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "canvas-scale-value",
+            "define-ref"
+          ]
+        },
+        "$children": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/form.pngine.constant"
+              }
+            ],
+            "x-sjon-head-set": [
+              "constant"
+            ]
+          }
         }
       },
       "required": [
@@ -12911,6 +13811,46 @@
         },
         "$ns": {
           "const": "pngine"
+        },
+        "before": {
+          "description": "Passes and queues run each frame BEFORE the graph's own steps, in this order — they become the head of the emitted (frame …)'s :perform.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "$sym": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "$sym"
+            ],
+            "additionalProperties": false,
+            "x-sjon-cross-ref": {
+              "target-forms": [
+                "render-pass",
+                "compute-pass",
+                "queue",
+                "step-group"
+              ],
+              "name-key": "name",
+              "acyclic": false
+            }
+          },
+          "maxItems": 2048
+        },
+        "name": {
+          "description": "Makes this graph a (step-group …) of that name instead of the document's (frame …). A document with two graphs names both.",
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
         },
         "$children": {
           "type": "array",
@@ -12943,10 +13883,12 @@
           "vertex",
           "fragment",
           "target",
+          "constant",
           "render-pass",
           "color-attachment",
           "draw",
           "frame",
+          "step-group",
           "compute-pipeline",
           "compute",
           "compute-pass",
@@ -12955,9 +13897,632 @@
           "write-buffer"
         ]
       }
+    },
+    "form.pngine.stage": {
+      "type": "object",
+      "description": "One stage of a (draw-graph …): the attachments a pass writes, plus the pipeline state every geometry drawn in it shares. Becomes one (render-pass …) per geometry.",
+      "properties": {
+        "$form": {
+          "const": "stage"
+        },
+        "$ns": {
+          "const": "pngine"
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "$children": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/form.pngine.color-attachment"
+              },
+              {
+                "type": "object",
+                "description": "Blend state and write mask for one of this stage's colour targets, paired with the (color-attachment …) at the same position. The format is derived from that attachment, so it is not stated here.",
+                "properties": {
+                  "$form": {
+                    "const": "target"
+                  },
+                  "$ns": {
+                    "const": "pngine"
+                  },
+                  "write-mask": {
+                    "description": "Channel write mask: bitmask R=1 G=2 B=4 A=8, or all (15; the WebGPU default).",
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 15,
+                        "x-sjon-gpu-repr": "u32"
+                      },
+                      {
+                        "enum": [
+                          {
+                            "$sym": "all"
+                          }
+                        ]
+                      }
+                    ],
+                    "x-sjon-union-alternatives": [
+                      "write-mask-value",
+                      "write-mask-symbol"
+                    ]
+                  },
+                  "$children": {
+                    "type": "array",
+                    "items": {
+                      "oneOf": [
+                        {
+                          "$ref": "#/$defs/form.pngine.blend"
+                        }
+                      ],
+                      "x-sjon-head-set": [
+                        "blend"
+                      ]
+                    },
+                    "allOf": [
+                      {
+                        "contains": {
+                          "$ref": "#/$defs/form.pngine.blend"
+                        },
+                        "minContains": 0,
+                        "maxContains": 1
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "$form"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "$ref": "#/$defs/form.pngine.depth-stencil-attachment"
+              },
+              {
+                "$ref": "#/$defs/form.pngine.depth-stencil"
+              },
+              {
+                "$ref": "#/$defs/form.pngine.primitive"
+              },
+              {
+                "$ref": "#/$defs/form.pngine.bind-group"
+              }
+            ],
+            "x-sjon-head-set": [
+              "color-attachment",
+              "target",
+              "depth-stencil-attachment",
+              "depth-stencil",
+              "primitive",
+              "bind-group"
+            ],
+            "x-sjon-local-forms": [
+              "target"
+            ]
+          },
+          "allOf": [
+            {
+              "contains": {
+                "$ref": "#/$defs/form.pngine.depth-stencil-attachment"
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "$ref": "#/$defs/form.pngine.depth-stencil"
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "$ref": "#/$defs/form.pngine.primitive"
+              },
+              "minContains": 0,
+              "maxContains": 1
+            }
+          ]
+        }
+      },
+      "required": [
+        "$form",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "form.pngine.geometry": {
+      "type": "object",
+      "description": "One thing a (draw-graph …) draws: its buffers, its vertex layout, one draw command, and an (in …) per stage it appears in.",
+      "properties": {
+        "$form": {
+          "const": "geometry"
+        },
+        "$ns": {
+          "const": "pngine"
+        },
+        "index-buffer": {
+          "description": "Index buffer for a (draw-indexed …); index format propagates from the buffer's :index-of source.",
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false,
+          "x-sjon-cross-ref": {
+            "target-form": "buffer",
+            "name-key": "name",
+            "acyclic": false
+          }
+        },
+        "name": {
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "vertex-buffers": {
+          "description": "Buffers bound to vertex slots 0..N in order, on every pass this geometry generates.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "$sym": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "$sym"
+            ],
+            "additionalProperties": false,
+            "x-sjon-cross-ref": {
+              "target-form": "buffer",
+              "name-key": "name",
+              "acyclic": false
+            }
+          }
+        },
+        "$children": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/form.pngine.vertex-buffer"
+              },
+              {
+                "$ref": "#/$defs/form.pngine.draw"
+              },
+              {
+                "$ref": "#/$defs/form.pngine.draw-indexed"
+              },
+              {
+                "$ref": "#/$defs/form.pngine.draw-indirect"
+              },
+              {
+                "$ref": "#/$defs/form.pngine.draw-indexed-indirect"
+              },
+              {
+                "$ref": "#/$defs/form.pngine.in"
+              }
+            ],
+            "x-sjon-head-set": [
+              "vertex-buffer",
+              "draw",
+              "draw-indexed",
+              "draw-indirect",
+              "draw-indexed-indirect",
+              "in"
+            ]
+          },
+          "allOf": [
+            {
+              "contains": {
+                "$ref": "#/$defs/form.pngine.draw"
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "$ref": "#/$defs/form.pngine.draw-indexed"
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "$ref": "#/$defs/form.pngine.draw-indirect"
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "$ref": "#/$defs/form.pngine.draw-indexed-indirect"
+              },
+              "minContains": 0,
+              "maxContains": 1
+            }
+          ]
+        }
+      },
+      "required": [
+        "$form",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "form.pngine.in": {
+      "type": "object",
+      "description": "This geometry, drawn in that stage: the entry points, and any state that overrides the stage's.",
+      "properties": {
+        "$form": {
+          "const": "in"
+        },
+        "$ns": {
+          "const": "pngine"
+        },
+        "stage": {
+          "description": "Name of the (stage …) of this graph this geometry is drawn in.",
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false,
+          "x-sjon-cross-ref": {
+            "target-form": "stage",
+            "name-key": "name",
+            "acyclic": false
+          }
+        },
+        "$children": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "description": "Vertex stage of this (stage, geometry) pipeline: the module + entry point, and (constant …) overrides. The geometry's (vertex-buffer …) children become this stage's buffers.",
+                "properties": {
+                  "$form": {
+                    "const": "vertex"
+                  },
+                  "$ns": {
+                    "const": "pngine"
+                  },
+                  "entry": {
+                    "description": "Entry-point function name (defaults to the module's sole @vertex fn).",
+                    "type": "object",
+                    "properties": {
+                      "$sym": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "$sym"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "module": {
+                    "description": "The (shader-module …) holding the @vertex entry.",
+                    "type": "object",
+                    "properties": {
+                      "$sym": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "$sym"
+                    ],
+                    "additionalProperties": false,
+                    "x-sjon-cross-ref": {
+                      "target-form": "shader-module",
+                      "name-key": "name",
+                      "acyclic": false
+                    }
+                  },
+                  "$children": {
+                    "type": "array",
+                    "items": {
+                      "oneOf": [
+                        {
+                          "$ref": "#/$defs/form.pngine.constant"
+                        }
+                      ],
+                      "x-sjon-head-set": [
+                        "constant"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "$form",
+                  "module"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "description": "Fragment stage of this (stage, geometry) pipeline: the module + entry point, and (constant …) overrides. Omit it for a depth-only draw. The stage's color attachments derive the (target …) list.",
+                "properties": {
+                  "$form": {
+                    "const": "fragment"
+                  },
+                  "$ns": {
+                    "const": "pngine"
+                  },
+                  "entry": {
+                    "description": "Entry-point function name (defaults to the module's sole @fragment fn).",
+                    "type": "object",
+                    "properties": {
+                      "$sym": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "$sym"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "module": {
+                    "description": "The (shader-module …) holding the @fragment entry.",
+                    "type": "object",
+                    "properties": {
+                      "$sym": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "$sym"
+                    ],
+                    "additionalProperties": false,
+                    "x-sjon-cross-ref": {
+                      "target-form": "shader-module",
+                      "name-key": "name",
+                      "acyclic": false
+                    }
+                  },
+                  "$children": {
+                    "type": "array",
+                    "items": {
+                      "oneOf": [
+                        {
+                          "$ref": "#/$defs/form.pngine.constant"
+                        }
+                      ],
+                      "x-sjon-head-set": [
+                        "constant"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "$form",
+                  "module"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "$ref": "#/$defs/form.pngine.primitive"
+              }
+            ],
+            "x-sjon-head-set": [
+              "vertex",
+              "fragment",
+              "primitive"
+            ],
+            "x-sjon-local-forms": [
+              "vertex",
+              "fragment"
+            ]
+          },
+          "allOf": [
+            {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "$form": {
+                    "const": "vertex"
+                  }
+                },
+                "required": [
+                  "$form"
+                ]
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "$form": {
+                    "const": "fragment"
+                  }
+                },
+                "required": [
+                  "$form"
+                ]
+              },
+              "minContains": 0,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "$ref": "#/$defs/form.pngine.primitive"
+              },
+              "minContains": 0,
+              "maxContains": 1
+            }
+          ]
+        }
+      },
+      "required": [
+        "$form",
+        "stage",
+        "$children"
+      ],
+      "additionalProperties": false
+    },
+    "form.pngine.draw-graph": {
+      "type": "object",
+      "description": "Container of (stage …) and (geometry …) children lowered as a unit into the\n                  cross product: one (render-pipeline …), one (bind-group …) per stage group and\n                  one (render-pass …) for each (stage, geometry) pair, in stage-major order.",
+      "properties": {
+        "$form": {
+          "const": "draw-graph"
+        },
+        "$ns": {
+          "const": "pngine"
+        },
+        "after": {
+          "description": "Passes and queues run each frame AFTER the graph's own steps — the tail of the emitted (frame …)'s :perform.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "$sym": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "$sym"
+            ],
+            "additionalProperties": false,
+            "x-sjon-cross-ref": {
+              "target-forms": [
+                "render-pass",
+                "compute-pass",
+                "queue",
+                "step-group"
+              ],
+              "name-key": "name",
+              "acyclic": false
+            }
+          },
+          "maxItems": 2048
+        },
+        "before": {
+          "description": "Passes and queues run each frame BEFORE the graph's own steps — the head of the emitted (frame …)'s :perform.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "$sym": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "$sym"
+            ],
+            "additionalProperties": false,
+            "x-sjon-cross-ref": {
+              "target-forms": [
+                "render-pass",
+                "compute-pass",
+                "queue",
+                "step-group"
+              ],
+              "name-key": "name",
+              "acyclic": false
+            }
+          },
+          "maxItems": 2048
+        },
+        "name": {
+          "description": "Makes this graph a (step-group …) of that name instead of the document's (frame …). A document with two graphs names both.",
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "$children": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/form.pngine.stage"
+              },
+              {
+                "$ref": "#/$defs/form.pngine.geometry"
+              }
+            ],
+            "x-sjon-head-set": [
+              "stage",
+              "geometry"
+            ]
+          }
+        }
+      },
+      "required": [
+        "$form"
+      ],
+      "additionalProperties": false,
+      "x-sjon-lowering": {
+        "hook": "pngine/draw-v1",
+        "produces": [
+          "render-pipeline",
+          "vertex",
+          "fragment",
+          "target",
+          "blend",
+          "color",
+          "alpha",
+          "constant",
+          "vertex-buffer",
+          "attribute",
+          "primitive",
+          "depth-stencil",
+          "bind-group",
+          "entry",
+          "render-pass",
+          "color-attachment",
+          "depth-stencil-attachment",
+          "draw",
+          "draw-indexed",
+          "draw-indirect",
+          "draw-indexed-indirect",
+          "frame",
+          "step-group"
+        ]
+      }
     }
   },
   "oneOf": [
+    {
+      "$ref": "#/$defs/form.pngine.import"
+    },
     {
       "$ref": "#/$defs/form.pngine.define"
     },
@@ -12966,6 +14531,9 @@
     },
     {
       "$ref": "#/$defs/form.pngine.canvas"
+    },
+    {
+      "$ref": "#/$defs/form.pngine.wgsl"
     },
     {
       "$ref": "#/$defs/form.pngine.shader-module"
@@ -12999,6 +14567,9 @@
     },
     {
       "$ref": "#/$defs/form.pngine.dragon"
+    },
+    {
+      "$ref": "#/$defs/form.pngine.bytes"
     },
     {
       "$ref": "#/$defs/form.pngine.wasm-data"
@@ -13139,6 +14710,9 @@
       "$ref": "#/$defs/form.pngine.render-bundle"
     },
     {
+      "$ref": "#/$defs/form.pngine.step-group"
+    },
+    {
       "$ref": "#/$defs/form.pngine.frame"
     },
     {
@@ -13149,6 +14723,18 @@
     },
     {
       "$ref": "#/$defs/form.pngine.pass-graph"
+    },
+    {
+      "$ref": "#/$defs/form.pngine.stage"
+    },
+    {
+      "$ref": "#/$defs/form.pngine.geometry"
+    },
+    {
+      "$ref": "#/$defs/form.pngine.in"
+    },
+    {
+      "$ref": "#/$defs/form.pngine.draw-graph"
     }
   ]
 }

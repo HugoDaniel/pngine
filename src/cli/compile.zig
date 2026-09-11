@@ -7,6 +7,7 @@
 //! executor feature.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const pngine = @import("pngine");
 const utils = @import("utils.zig");
 const stdio = @import("stdio.zig");
@@ -56,7 +57,7 @@ const Options = struct {
 ///
 /// Pre-condition: args is the slice after "compile" command.
 /// Post-condition: Returns exit code (0 = success, non-zero = error).
-pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+pub fn run(gpa: Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (arg_reader.wantsHelp(args)) return arg_reader.printHelp(usage);
 
     var opts = Options{};
@@ -74,16 +75,16 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !
     else if (stdio.isStd(input))
         .borrowed(stdio.std_path)
     else
-        .owned(utils.deriveOutputPath(allocator, input) catch |err| {
+        .owned(utils.deriveSiblingPath(gpa, input, ".pngb") catch |err| {
             std.debug.print("Error: failed to derive output path: {}\n", .{err});
             return 2;
         });
-    defer dest.deinit(allocator);
+    defer dest.deinit(gpa);
     const output = dest.path;
 
     // Read input (a real path by extension, stdin by content).
-    const in = stdio.readInput(allocator, io, input) catch |err| return stdio.reportReadError(err, input);
-    defer in.deinit(allocator);
+    const in = stdio.readInput(gpa, io, input) catch |err| return stdio.reportReadError(err, input);
+    defer in.deinit(gpa);
 
     if (in.kind != .sjon) {
         std.debug.print("Error: compile expects SJON source, got {t} ({s})\n", .{ in.kind, stdio.displayName(input) });
@@ -92,7 +93,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !
 
     // Compile using appropriate compiler based on file extension
     const fallback_wasm: ?[]const u8 = if (embedded_wasm.len > 0) embedded_wasm else null;
-    const result = compileSourceWithPlugins(allocator, io, input, in.bytes, .{
+    const result = compileSourceWithPlugins(gpa, io, input, in.bytes, .{
         .embed_executor = opts.embed_executor,
         .executors_dir = opts.executors_dir,
         .minify_shaders = opts.minify_shaders,
@@ -102,7 +103,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !
         std.debug.print("Error: compilation failed: {}\n", .{err});
         return 3;
     };
-    defer allocator.free(result.bytecode);
+    defer gpa.free(result.bytecode);
 
     // Post-condition: valid PNGB output
     std.debug.assert(result.bytecode.len >= pngine.format.HEADER_SIZE);
@@ -205,7 +206,7 @@ pub const CompileOptions = struct {
 /// legacy `.pbsf` S-expression assembler was retired after it; any other
 /// extension is rejected with `error.UnsupportedFormat`.
 pub fn compileSourceWithPlugins(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     io: std.Io,
     path: []const u8,
     source: [:0]const u8,
@@ -218,7 +219,7 @@ pub fn compileSourceWithPlugins(
         // embedding path as the DSL branch (identical CompileOutput shape).
         const base_dir = stdio.baseDir(path);
 
-        const result = try pngine.dsl_sjon.compileWithPlugins(allocator, source, .{
+        const result = try pngine.dsl_sjon.compileWithPlugins(gpa, source, .{
             .base_dir = base_dir,
             .file_path = path,
             .minify_shaders = options.minify_shaders,
@@ -243,7 +244,9 @@ pub fn compileSourceWithPlugins(
 }
 
 /// Legacy compile function for backwards compatibility.
-pub fn compileSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8, source: [:0]const u8) ![]u8 {
-    const result = try compileSourceWithPlugins(allocator, io, path, source, .{});
+///
+/// Caller owns the returned bytecode.
+pub fn compileSource(gpa: Allocator, io: std.Io, path: []const u8, source: [:0]const u8) ![]u8 {
+    const result = try compileSourceWithPlugins(gpa, io, path, source, .{});
     return result.bytecode;
 }

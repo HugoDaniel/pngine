@@ -353,6 +353,8 @@ module.exports = {
   setUniform: browserOnly,
   setUniforms: browserOnly,
   getUniforms: browserOnly,
+  writeBuffer: browserOnly,
+  getBuffers: browserOnly,
   getStats: browserOnly,
   restart: browserOnly,
   extractBytecode: browserOnly,
@@ -377,6 +379,8 @@ export const setFrame = browserOnly;
 export const setUniform = browserOnly;
 export const setUniforms = browserOnly;
 export const getUniforms = browserOnly;
+export const writeBuffer = browserOnly;
+export const getBuffers = browserOnly;
 export const getStats = browserOnly;
 export const restart = browserOnly;
 export const extractBytecode = browserOnly;
@@ -386,312 +390,15 @@ export const extractBytecode = browserOnly;
   fs.writeFileSync(path.join(DIST_DIR, 'index.mjs'), nodeStubEsm);
 }
 
-// Every block below is a TEMPLATE LITERAL, so a backtick inside a doc comment
-// ends the string and the script dies with a SyntaxError somewhere further
-// down. Escape it (\`map-read\`), the way the getStats doc already does.
-//
-// These interfaces are the published API surface for TypeScript callers, and
-// the only thing keeping them honest is reading the runtime: an option missing
-// here is an option an object literal cannot pass, because excess-property
-// checks reject it. The authoritative list is the JSDoc on
-// src/viewer-init.js and src/init.js, which share src/init-core.js.
+// The .d.ts strings live in scripts/type-defs.cjs — the published API surface
+// for TypeScript callers, gated against the runtime by
+// tests/npm/types-surface.test.js (module exports, dispatcher methods,
+// instance getters, the init files' documented options, the worker's reply
+// keys). An option missing there is an option an object literal cannot pass,
+// because excess-property checks reject it.
 function writeTypeDefs() {
   console.log('6. Creating TypeScript definitions...');
-
-  const sharedTypes = `
-/** Uniform value: number (f32), array (vecNf), or nested array (matNxMf) */
-export type UniformValue = number | number[] | number[][];
-
-export interface DrawOptions {
-  time?: number;
-  frame?: string;
-  uniforms?: Record<string, UniformValue>;
-}
-
-export interface PngineInstance {
-  readonly width: number;
-  readonly height: number;
-  readonly frameCount: number;
-  readonly isPlaying: boolean;
-  readonly time: number;
-}
-
-export function destroy(instance: PngineInstance): void;
-export function draw(instance: PngineInstance, options?: DrawOptions): void;
-export function play(instance: PngineInstance): PngineInstance;
-export function pause(instance: PngineInstance): PngineInstance;
-export function stop(instance: PngineInstance): PngineInstance;
-export function seek(instance: PngineInstance, time: number): PngineInstance;
-export function setFrame(instance: PngineInstance, frame: string | null): PngineInstance;
-export function setUniform(instance: PngineInstance, name: string, value: UniformValue, redraw?: boolean): PngineInstance;
-export function setUniforms(instance: PngineInstance, uniforms: Record<string, UniformValue>, redraw?: boolean): PngineInstance;
-export function getUniforms(instance: PngineInstance): Promise<Record<string, { type: number; size: number; bufferId: number; offset: number }>>;
-/**
- * Live GPU-resource counts for this instance — the instrument for a
- * long-running session. \`gpu.live\` counts the objects the runtime is holding
- * right now, by kind; \`gpu.executed\` is the command buffers run so far.
- *
- * Two properties worth asserting over a soak: \`gpu.live\` stays flat as
- * \`gpu.executed\` climbs, and \`wasmBytes\` never changes (the embedded executor
- * has no allocator, so growth there is itself a bug signal).
- */
-export function getStats(instance: PngineInstance): Promise<{
-  gpu: { live: Record<string, number>; total: number; cachedBindGroups: number; executed: number } | null;
-  wasmBytes: number;
-  frameCount: number;
-  moduleLoaded: boolean;
-  deviceLost: boolean;
-}>;
-/** Rebuild the GPU device and replay the current shader after a "device-lost" PngineGPUError. */
-export function restart(instance: PngineInstance): PngineInstance;
-
-export function extractBytecode(data: ArrayBuffer | Uint8Array): Promise<Uint8Array>;
-export function detectFormat(data: ArrayBuffer | Uint8Array): 'png' | 'zip' | 'pngb' | null;
-export function isPng(data: ArrayBuffer | Uint8Array): boolean;
-export function isZip(data: ArrayBuffer | Uint8Array): boolean;
-export function isPngb(data: ArrayBuffer | Uint8Array): boolean;
-`;
-
-  const viewerTypes = `
-export interface ViewerOptions {
-  canvas: HTMLCanvasElement;
-  debug?: boolean;
-  dpr?: number;
-  /**
-   * Leave the canvas CSS size to the page and keep the backing store synced to
-   * its rendered size (responsive). Off by default (fixed size); a DPR change
-   * re-sharpens the backing store either way.
-   */
-  autoResize?: boolean;
-  /**
-   * REJECTED at runtime, and declared here deliberately. The viewer throws
-   * Error("viewer pngine() does not support wasmUrl; use embedded executor
-   * payloads"). A caller moving over from pngine/dev needs that message, not an
-   * excess-property error from their bundler, so the rejection is part of this
-   * interface rather than hidden from it.
-   */
-  wasmUrl?: string | URL;
-  onError?: (error: Error) => void;
-  /**
-   * Receives the contents of every \`map-read\` buffer the frame copies into,
-   * once per submit, as one number per 64-bit lane. The path was written for
-   * timestamp and occlusion query results, which are 64-bit; a compute readback
-   * has to write 64-bit lanes, \`vec2u(value, 0u)\`, to survive it.
-   */
-  onQueryResult?: (values: number[]) => void;
-}
-
-export function pngine(
-  // HTMLImageElement is in the union for the reason wasmUrl is in the options:
-  // the viewer rejects it at runtime with a message naming pngine/dev, and that
-  // message is more use to a caller than a compile error. A CSS-selector string
-  // is rejected the same way and needs no arm of its own, being a string.
-  source: ArrayBuffer | Uint8Array | Blob | string | HTMLImageElement,
-  options: ViewerOptions
-): Promise<PngineInstance>;
-${sharedTypes}
-`;
-
-  const devTypes = `
-export interface DevOptions {
-  canvas?: HTMLCanvasElement;
-  debug?: boolean;
-  dpr?: number;
-  /**
-   * Leave the canvas CSS size to the page and keep the backing store synced to
-   * its rendered size (responsive). Off by default (fixed size); a DPR change
-   * re-sharpens the backing store either way.
-   */
-  autoResize?: boolean;
-  wasmUrl?: string | URL;
-  onError?: (error: Error) => void;
-  /**
-   * Receives the contents of every \`map-read\` buffer the frame copies into,
-   * once per submit, as one number per 64-bit lane. The path was written for
-   * timestamp and occlusion query results, which are 64-bit; a compute readback
-   * has to write 64-bit lanes, \`vec2u(value, 0u)\`, to survive it.
-   */
-  onQueryResult?: (values: number[]) => void;
-}
-
-export function pngine(
-  source: ArrayBuffer | Uint8Array | Blob | string | HTMLImageElement,
-  options?: DevOptions
-): Promise<PngineInstance>;
-${sharedTypes}
-
-export interface PayloadInfo {
-  version: number;
-  hasEmbeddedExecutor: boolean;
-  hasAnimationTable: boolean;
-  plugins: {
-    core: boolean;
-    render: boolean;
-    compute: boolean;
-    wasm: boolean;
-    animation: boolean;
-    texture: boolean;
-  };
-  executor: Uint8Array | null;
-  bytecode: Uint8Array;
-  payload: Uint8Array;
-  offsets: {
-    executor: number;
-    executorLength: number;
-    bytecode: number;
-    bytecodeLength: number;
-    stringTable: number;
-    data: number;
-    wgsl: number;
-    uniform: number;
-    animation: number;
-  };
-}
-
-export interface ExecutorInstance {
-  instance: WebAssembly.Instance;
-  memory: WebAssembly.Memory;
-  exports: WebAssembly.Exports;
-  getBytecodePtr(): number;
-  setBytecodeLen(len: number): void;
-  getDataPtr(): number;
-  setDataLen(len: number): void;
-  init(): void;
-  frame(time: number, width: number, height: number): void;
-  getCommandPtr(): number;
-  getCommandLen(): number;
-}
-
-export interface ExecutorCallbacks {
-  log?: (ptr: number, len: number) => void;
-  wasmInstantiate?: (id: number, ptr: number, len: number) => void;
-  wasmCall?: (callId: number, modId: number, namePtr: number, nameLen: number, argsPtr: number, argsLen: number) => void;
-  wasmGetResult?: (callId: number, outPtr: number, outLen: number) => number;
-}
-
-export function parsePayload(pngb: Uint8Array): PayloadInfo;
-export function createExecutor(wasmBytes: Uint8Array, imports?: WebAssembly.Imports): Promise<ExecutorInstance>;
-export function getExecutorImports(callbacks?: ExecutorCallbacks): WebAssembly.Imports;
-export function getExecutorVariantName(plugins: PayloadInfo['plugins']): string;
-`;
-
-  const coreTypes = `
-export interface UniformInfo {
-  bufferId: number;
-  offset: number;
-  size: number;
-  type: number;
-  /** Fixed array element count (type is then the ELEMENT's tag); 0 = not an array. */
-  elemCount: number;
-}
-
-export interface UniformTableResult {
-  uniforms: Map<string, UniformInfo>;
-  strings: string[];
-}
-
-export interface CoreDispatcher {
-  setMemory(memory: WebAssembly.Memory): void;
-  execute(ptr: number): Promise<void> | void;
-  setUniform(name: string, value: number | number[]): boolean;
-  setUniforms(uniforms: Record<string, number | number[]>): number;
-  setUniformTable(table: Map<string, UniformInfo>): void;
-  destroy(): void;
-  setDebug(v: boolean): void;
-  setTime(t: number): void;
-  setCanvasSize(w: number, h: number): void;
-  _dispatcher: unknown;
-}
-
-export function createCommandDispatcher(device: GPUDevice, ctx: GPUCanvasContext): unknown;
-export function parseUniformTable(bytecode: Uint8Array): UniformTableResult;
-export function createCoreDispatcher(device: GPUDevice, ctx: GPUCanvasContext): CoreDispatcher;
-export function getDevice(adapter?: GPUAdapter): Promise<GPUDevice>;
-export function configureCanvas(canvas: HTMLCanvasElement, device: GPUDevice): GPUCanvasContext;
-`;
-
-  const executorTypes = `
-export interface PayloadInfo {
-  version: number;
-  hasEmbeddedExecutor: boolean;
-  hasAnimationTable: boolean;
-  plugins: {
-    core: boolean;
-    render: boolean;
-    compute: boolean;
-    wasm: boolean;
-    animation: boolean;
-    texture: boolean;
-  };
-  executor: Uint8Array | null;
-  bytecode: Uint8Array;
-  payload: Uint8Array;
-  offsets: {
-    executor: number;
-    executorLength: number;
-    bytecode: number;
-    bytecodeLength: number;
-    stringTable: number;
-    data: number;
-    wgsl: number;
-    uniform: number;
-    animation: number;
-  };
-}
-
-export interface ExecutorInstance {
-  instance: WebAssembly.Instance;
-  memory: WebAssembly.Memory;
-  exports: WebAssembly.Exports;
-  getBytecodePtr(): number;
-  setBytecodeLen(len: number): void;
-  getDataPtr(): number;
-  setDataLen(len: number): void;
-  init(): void;
-  frame(time: number, width: number, height: number): void;
-  getCommandPtr(): number;
-  getCommandLen(): number;
-}
-
-export interface ExecutorCallbacks {
-  log?: (ptr: number, len: number) => void;
-  wasmInstantiate?: (id: number, ptr: number, len: number) => void;
-  wasmCall?: (callId: number, modId: number, namePtr: number, nameLen: number, argsPtr: number, argsLen: number) => void;
-  wasmGetResult?: (callId: number, outPtr: number, outLen: number) => number;
-}
-
-export function parsePayload(pngb: Uint8Array): PayloadInfo;
-export function createExecutor(wasmBytes: Uint8Array, imports?: WebAssembly.Imports): Promise<ExecutorInstance>;
-export function getExecutorImports(callbacks?: ExecutorCallbacks): WebAssembly.Imports;
-export function getExecutorVariantName(plugins: PayloadInfo['plugins']): string;
-`;
-
-  const miniTypes = `
-export interface MiniOptions {
-  autoplay?: boolean;
-  /**
-   * Runtime faults after the promise resolves (an undecodable opcode mid-frame,
-   * a WebGPU validation error, device loss). Setup failures reject instead.
-   * Without a handler they are console.error'd.
-   */
-  onError?: (error: Error) => void;
-}
-
-export interface MiniInstance {
-  play(): void;
-  pause(): void;
-  stop(): void;
-  destroy(): void;
-  readonly time: number;
-  readonly isPlaying: boolean;
-}
-
-export function miniPngine(
-  canvas: HTMLCanvasElement,
-  source: string | ArrayBuffer | Uint8Array,
-  opts?: MiniOptions
-): Promise<MiniInstance>;
-`;
+  const { viewerTypes, devTypes, coreTypes, executorTypes, miniTypes } = require('./type-defs.cjs');
 
   fs.writeFileSync(path.join(DIST_DIR, 'index.d.ts'), viewerTypes);
   fs.writeFileSync(path.join(DIST_DIR, 'viewer.d.ts'), viewerTypes);
@@ -712,7 +419,7 @@ const viewerOut = buildInlinedProfileBundle({
   includeLoader: false,
   exportBlock: `
 export { pngine, destroy };
-export { draw, play, pause, stop, seek, setFrame, setUniform, setUniforms, getUniforms, getStats, restart };
+export { draw, play, pause, stop, seek, setFrame, setUniform, setUniforms, getUniforms, writeBuffer, getBuffers, getStats, restart };
 export { extractBytecode, detectFormat, isPng, isZip, isPngb };`,
 });
 
@@ -726,7 +433,7 @@ const devOut = buildInlinedProfileBundle({
   includeLoader: true,
   exportBlock: `
 export { pngine, destroy };
-export { draw, play, pause, stop, seek, setFrame, setUniform, setUniforms, getUniforms, getStats, restart };
+export { draw, play, pause, stop, seek, setFrame, setUniform, setUniforms, getUniforms, writeBuffer, getBuffers, getStats, restart };
 export { extractBytecode, detectFormat, isPng, isZip, isPngb };
 export { parsePayload, createExecutor, getExecutorImports, getExecutorVariantName };`,
 });
@@ -851,9 +558,43 @@ if (!DEBUG) {
     // (`gpuDirty`), self-recovery rides the dispatch FIFO, `scoped()` pops its
     // error scope in a `finally`, and a failed worker bring-up detaches its
     // listeners. Lifecycle correctness, ~100–230 B minified.
-    'viewer.mjs': 51200,
-    'dev.mjs': 55800,
-    'core.mjs': 27300,
+    // viewer/dev/core bumped 2026-09-02 (+3400/+3500/+3700 over two commits)
+    // for two things found together. First, the gate was already RED on a
+    // clean tree at 6a29562 by +285/+406/+500 (esbuild 0.24.2) — the blind
+    // spot this comment block records twice already: nothing in `npm test`
+    // runs it. Second, host buffer writes (gpu-host-write.js,
+    // docs/plans/public-write-buffer.md): ~2.9 KB minified per bundle. The
+    // name map, pools (one member, the active member, every member), the
+    // getBuffers listing, and the eight refusal messages a host hears instead
+    // of a silent no-op — unknown name, frame-written, bad pool member, no
+    // copy-dst (with the fix spelled out), misaligned, out of range. About
+    // 1.1 KB of it is the messages, which are the feature. core also gains
+    // setOnError, without which its writeBuffers would have been exactly the
+    // silent no-op the plan's D6 forbids. viewer/dev +400 more, same day, for
+    // the worker seam: `buffers` on the draw message (applied inside the
+    // render lock, with the frame counter), the supersession exemption, and
+    // the GET_BUFFERS/BUFFERS pair. All three +300 on 2026-09-03 for the
+    // block reader: parseUniformTable's third key, `buffers`, read behind
+    // header flag bit 4 and bounded by the section end. viewer/dev +1000 the
+    // same day for the public surface: writeBuffer(p, name, bytes, opts) and
+    // getBuffers(p) in anim.js, `buffers` on the draw message, and the
+    // `redraw: false` store both APIs now share (setUniform's doc promised it
+    // from the first commit; the branch was a no-op). ~1 KB minified, a third
+    // of it the three TypeErrors a malformed call gets before anything posts.
+    // core +300 2026-09-03 (measured +80): setUniform's refusals reach onError
+    // (source "set-uniform") instead of a DEBUG-gated console.warn — the same
+    // route writeBuffer's take. Three message strings, no per-frame cost; a
+    // typo in a uniform name used to ship a write that never landed with no
+    // signal to the host (docs/plans/archive/api-audit-2026-09.md finding 5).
+    // dev +200 on 2026-09-05 (measured +235 on all three; viewer and core had
+    // the room): getUniforms speaks names — each field's type as WGSL spells
+    // it and its buffer by its `(buffer :name …)` — where the reply carried
+    // the wire tag and the dispatcher id, neither of which anything public
+    // accepts. The 14-name table, indexed by tag, is also what setUniform's
+    // "could not be packed" refusal names the type with.
+    'viewer.mjs': 56300,
+    'dev.mjs': 61200,
+    'core.mjs': 31600,
     'executor.mjs': 2200,
     'mini.mjs': 7300,
     'mini-no-audio.mjs': 6600,
@@ -892,7 +633,17 @@ if (!DEBUG) {
   // 2026-08-19: 45000 → 46500 — the `scoped()` try/finally and the bind-group
   // write-order comments of the third leak pass crossed it by 127 B of prose;
   // re-set at the same ~3% headroom over today's 45.1 KB.
-  const GPU_SOURCE_BUDGET = 46500;
+  // 2026-09-02: 46500 → 48000. The host write path went into its own module
+  // (gpu-host-write.js) precisely so this file would not pay for it; gpu.js's
+  // share is four lines (the import, `bufSize`, its clear, the forward) and
+  // one ops-bag entry, 356 B, and the gate was 344 B from its ceiling. Re-set
+  // at the same ~3% headroom over today's 46.5 KB.
+  // 2026-09-03: 48000 → 49500. The buffer-name block's reader lives in
+  // parseUniformTable — gpu.js's parse territory, beside the bindings it
+  // follows, not the write module's — and its doc comment says what the block
+  // is and when it is read. ~1.3 KB, most of it that comment. Re-set at ~3%
+  // headroom over today's 48.3 KB.
+  const GPU_SOURCE_BUDGET = 49500;
 
   const violations = [];
   for (const [label, file] of files) {

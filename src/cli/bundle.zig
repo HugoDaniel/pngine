@@ -5,6 +5,7 @@
 //!   pngine list <file.zip|file.png>
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const pngine = @import("pngine");
 const zip = pngine.zip;
 const utils = @import("utils.zig");
@@ -57,7 +58,7 @@ const ZipResult = struct {
 };
 
 /// Execute the bundle command.
-pub fn runBundle(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+pub fn runBundle(gpa: Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (arg_reader.wantsHelp(args)) return arg_reader.printHelp(bundle_usage);
 
     var opts = Options{};
@@ -71,29 +72,29 @@ pub fn runBundle(allocator: std.mem.Allocator, io: std.Io, args: []const []const
     else if (stdio.isStd(input))
         .borrowed(stdio.std_path)
     else
-        .owned(utils.deriveBundleOutputPath(allocator, input) catch |err| {
+        .owned(utils.deriveSiblingPath(gpa, input, ".zip") catch |err| {
             std.debug.print("Error: failed to derive output path: {}\n", .{err});
             return 2;
         });
-    defer dest.deinit(allocator);
+    defer dest.deinit(gpa);
     const output = dest.path;
 
-    const in = stdio.readInput(allocator, io, input) catch |err| return stdio.reportReadError(err, input);
-    defer in.deinit(allocator);
+    const in = stdio.readInput(gpa, io, input) catch |err| return stdio.reportReadError(err, input);
+    defer in.deinit(gpa);
     if (in.kind != .sjon) {
         std.debug.print("Error: bundle expects SJON source, got {t} ({s})\n", .{ in.kind, stdio.displayName(input) });
         return 4;
     }
 
-    const bytecode = compile.compileSource(allocator, io, input, in.bytes) catch |err| {
+    const bytecode = compile.compileSource(gpa, io, input, in.bytes) catch |err| {
         std.debug.print("Error: compilation failed: {}\n", .{err});
         return 3;
     };
-    defer allocator.free(bytecode);
+    defer gpa.free(bytecode);
 
-    const zip_result = buildBundle(allocator, io, bytecode, opts);
+    const zip_result = buildBundle(gpa, io, bytecode, opts);
     if (zip_result.exit_code != 0) return zip_result.exit_code;
-    defer allocator.free(zip_result.data);
+    defer gpa.free(zip_result.data);
 
     stdio.writeOutput(io, output, zip_result.data, true) catch |err| return stdio.reportWriteError(err, output);
 
@@ -140,14 +141,14 @@ fn parseArgs(args: []const []const u8, opts: *Options) u8 {
 
 /// Assemble the bundle ZIP: manifest, bytecode, optional assets, optional runtime.
 fn buildBundle(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     io: std.Io,
     bytecode: []const u8,
     opts: Options,
 ) ZipResult {
     std.debug.assert(bytecode.len > 0);
 
-    var writer = zip.ZipWriter.init(allocator);
+    var writer = zip.ZipWriter.init(gpa);
     defer writer.deinit();
 
     const manifest = if (opts.include_runtime)
@@ -167,7 +168,7 @@ fn buildBundle(
 
     var assets_count: u32 = 0;
     if (opts.assets_dir) |dir_path| {
-        assets_count = addAssetsFromDir(allocator, io, &writer, dir_path) catch |err| {
+        assets_count = addAssetsFromDir(gpa, io, &writer, dir_path) catch |err| {
             std.debug.print("Error: {}\n", .{err});
             return .{ .data = undefined, .assets_count = 0, .exit_code = 2 };
         };
@@ -193,13 +194,13 @@ fn buildBundle(
     return .{ .data = zip_data, .assets_count = assets_count, .exit_code = 0 };
 }
 
-fn addAssetsFromDir(allocator: std.mem.Allocator, io: std.Io, writer: *zip.ZipWriter, dir_path: []const u8) !u32 {
+fn addAssetsFromDir(gpa: Allocator, io: std.Io, writer: *zip.ZipWriter, dir_path: []const u8) !u32 {
     var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch {
         return error.FailedToOpenAssetsDir;
     };
     defer dir.close(io);
 
-    var walker = dir.walk(allocator) catch {
+    var walker = dir.walk(gpa) catch {
         return error.FailedToWalkAssetsDir;
     };
     defer walker.deinit();
@@ -212,15 +213,15 @@ fn addAssetsFromDir(allocator: std.mem.Allocator, io: std.Io, writer: *zip.ZipWr
 
         if (entry) |e| {
             if (e.kind == .file) {
-                const asset_path = std.fmt.allocPrint(allocator, "assets/{s}", .{e.path}) catch {
+                const asset_path = std.fmt.allocPrint(gpa, "assets/{s}", .{e.path}) catch {
                     return error.OutOfMemory;
                 };
-                defer allocator.free(asset_path);
+                defer gpa.free(asset_path);
 
-                const content = dir.readFileAlloc(io, e.path, allocator, .limited(10 * 1024 * 1024)) catch {
+                const content = dir.readFileAlloc(io, e.path, gpa, .limited(10 * 1024 * 1024)) catch {
                     return error.FailedToReadAsset;
                 };
-                defer allocator.free(content);
+                defer gpa.free(content);
 
                 const method: zip.CompressionMethod = if (isCompressedExtension(e.basename)) .store else .deflate;
                 writer.addFile(asset_path, content, method) catch {
@@ -234,7 +235,7 @@ fn addAssetsFromDir(allocator: std.mem.Allocator, io: std.Io, writer: *zip.ZipWr
 }
 
 /// Execute the list command.
-pub fn runList(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+pub fn runList(gpa: Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (arg_reader.wantsHelp(args)) return arg_reader.printHelp(list_usage);
 
     if (args.len == 0) {
@@ -244,11 +245,11 @@ pub fn runList(allocator: std.mem.Allocator, io: std.Io, args: []const []const u
     }
 
     const input = args[0];
-    const in = stdio.readInput(allocator, io, input) catch |err| return stdio.reportReadError(err, input);
-    defer in.deinit(allocator);
+    const in = stdio.readInput(gpa, io, input) catch |err| return stdio.reportReadError(err, input);
+    defer in.deinit(gpa);
 
     return switch (in.kind) {
-        .zip => listZipContents(allocator, stdio.displayName(input), in.bytes),
+        .zip => listZipContents(gpa, stdio.displayName(input), in.bytes),
         .png => listPngContents(stdio.displayName(input), in.bytes),
         .pngb, .sjon => {
             std.debug.print("Error: '{s}' is not a ZIP or PNG file\n", .{stdio.displayName(input)});
@@ -257,8 +258,8 @@ pub fn runList(allocator: std.mem.Allocator, io: std.Io, args: []const []const u
     };
 }
 
-fn listZipContents(allocator: std.mem.Allocator, input: []const u8, data: []const u8) u8 {
-    var reader = zip.ZipReader.init(allocator, data) catch |err| {
+fn listZipContents(gpa: Allocator, input: []const u8, data: []const u8) u8 {
+    var reader = zip.ZipReader.init(gpa, data) catch |err| {
         std.debug.print("Error: failed to read ZIP: {}\n", .{err});
         return 4;
     };
@@ -324,8 +325,10 @@ pub fn isCompressedExtension(filename: []const u8) bool {
 }
 
 /// Extract bytecode from a ZIP bundle.
-pub fn extractFromZip(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
-    var reader = zip.ZipReader.init(allocator, data) catch {
+///
+/// Caller owns the returned bytes.
+pub fn extractFromZip(gpa: Allocator, data: []const u8) ![]u8 {
+    var reader = zip.ZipReader.init(gpa, data) catch {
         return error.InvalidZip;
     };
     defer reader.deinit();
@@ -333,7 +336,7 @@ pub fn extractFromZip(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     var entry_name_buf: [256]u8 = undefined;
     const entry_name: []const u8 = blk: {
         if (reader.extract("manifest.json")) |manifest_data| {
-            defer allocator.free(manifest_data);
+            defer gpa.free(manifest_data);
             if (findJsonValue(manifest_data, "\"entry\"")) |entry_value| {
                 if (entry_value.len <= entry_name_buf.len) {
                     @memcpy(entry_name_buf[0..entry_value.len], entry_value);

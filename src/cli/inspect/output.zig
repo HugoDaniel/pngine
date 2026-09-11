@@ -3,6 +3,7 @@
 //! Handles JSON and human-readable output of validation results.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const types = @import("types.zig");
 const wgsl_reflect = @import("wgsl_reflect.zig");
 const params = @import("cmd_validator/params.zig");
@@ -27,8 +28,8 @@ fn jsonString(writer: *std.Io.Writer, s: []const u8) !void {
 ///
 /// Thin wrapper: buffers `writeReportJson` into an allocating writer, then emits
 /// the finished document in one go.
-pub fn outputJson(io: std.Io, allocator: std.mem.Allocator, result: *const ValidationResult, opts: *const Options) !void {
-    var aw: std.Io.Writer.Allocating = .init(allocator);
+pub fn outputJson(io: std.Io, gpa: Allocator, result: *const ValidationResult, opts: *const Options) !void {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
     try writeReportJson(&aw.writer, result, opts);
     utils.writeStdout(io, aw.writer.buffered()) catch {};
@@ -314,8 +315,8 @@ pub fn writeReportJsonError(writer: *std.Io.Writer, err_type: []const u8, messag
 }
 
 /// Output an error envelope as JSON to stdout. Thin wrapper over `writeReportJsonError`.
-pub fn outputJsonError(io: std.Io, allocator: std.mem.Allocator, err_type: []const u8, message: []const u8) !void {
-    var aw: std.Io.Writer.Allocating = .init(allocator);
+pub fn outputJsonError(io: std.Io, gpa: Allocator, err_type: []const u8, message: []const u8) !void {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
     try writeReportJsonError(&aw.writer, err_type, message);
     utils.writeStdout(io, aw.writer.buffered()) catch {};

@@ -50,7 +50,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }
 """)
 
-(shader-module :name code :code """
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+
+(shader-module :name code :imports [perspective] :code """
 struct PngineInputs {
   time: f32,
   width: f32,
@@ -68,17 +70,6 @@ struct VSOutput {
 }
 
 const PI: f32 = 3.14159265359;
-
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0, 0, 0),
-    vec4f(0, f, 0, 0),
-    vec4f(0, 0, (far + near) * nf, -1),
-    vec4f(0, 0, 2 * far * near * nf, 0),
-  );
-}
 
 fn rotateY(a: f32) -> mat4x4f {
   let c = cos(a); let s = sin(a);
@@ -193,12 +184,11 @@ fn quadCorner(vNdx: u32) -> vec2f {
 (bind-group :name spriteBindGroup :layout spritePipeline :group 0
   (entry :binding 0 :texture spriteTex))
 
-(bind-group :name fixedBindGroup :layout fixedPipeline :group 0
-  (entry :binding 0 :buffer uniforms)
-  (entry :binding 1 :sampler spriteSampler)
-  (entry :binding 2 :texture spriteTex))
-
-(bind-group :name perspBindGroup :layout perspPipeline :group 0
+; One resource set, two pipelines. With no `:layout` the compiler derives one
+; GPU bind group per pipeline that binds it, pruned to what that pipeline's
+; entry points reach — so the two forms that differed only in the pipeline they
+; named became one. Compiles to the same bytes as the pair did.
+(bind-group :name quadBindGroup :group 0
   (entry :binding 0 :buffer uniforms)
   (entry :binding 1 :sampler spriteSampler)
   (entry :binding 2 :texture spriteTex))
@@ -212,14 +202,14 @@ fn quadCorner(vNdx: u32) -> vec2f {
   (color-attachment :view context-current-texture :clear-value [0.05 0.05 0.08 1] :load-op clear :store-op store)
   (depth-stencil-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   :pipeline fixedPipeline
-  :bind-groups [fixedBindGroup]
+  :bind-groups [quadBindGroup]
   (draw :vertex-count 6 :instance-count NUM_POINTS))
 
 (render-pass :name perspPass
   (color-attachment :view context-current-texture :load-op load :store-op store)
   (depth-stencil-attachment :view depthTexture :depth-load-op load :depth-store-op store)
   :pipeline perspPipeline
-  :bind-groups [perspBindGroup]
+  :bind-groups [quadBindGroup]
   (draw :vertex-count 6 :instance-count NUM_POINTS))
 
 (frame :name main

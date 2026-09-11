@@ -9,7 +9,12 @@
 //!   The legacy `.pngine` macro DSL was removed in Phase 5 (Stage B2).
 //! - Dynamic allocation: Uses wasm_allocator for compiler internals
 //! - Static I/O buffers: Fixed-size buffers for source input and output
-//! - No file I/O: No imports, no base_dir resolution
+//! - No filesystem, but files ARE served: a host packs a name→bytes table into
+//!   linear memory before `compile()`, and the emitter reads every `:file` key
+//!   through it (`dsl_sjon/file_resolver.zig`'s `TableResolver`). A compile
+//!   that is missing files reports ALL of them at once in `getNeedsPtr`, so a
+//!   host fetches once and compiles again. There is still no `base_dir` and no
+//!   path resolution here: the table's names are matched, not opened.
 //! - Reflection: wgslender module included
 //! - PNG generation: Produces self-contained PNGs with embedded executor
 //!
@@ -18,13 +23,15 @@
 //! ```
 //! WASM Linear Memory:
 //! ┌─────────────────────────────────────────┐
-//! │ Source Buffer (64KB)                    │ ← JS writes SJON source here
+//! │ Source Buffer (256KB)                   │ ← JS writes SJON source here
 //! ├─────────────────────────────────────────┤
 //! │ Output Buffer (256KB)                  │ ← Compiler writes PNGB/PNG here
 //! ├─────────────────────────────────────────┤
 //! │ Error Buffer (4KB)                     │ ← Compiler writes errors here
 //! ├─────────────────────────────────────────┤
-//! │ Dynamic Heap (wasm_allocator)          │ ← SJON host / PNG
+//! │ Diag / Needs Buffers (32KB / 8KB)      │ ← Diagnostics + missing files
+//! ├─────────────────────────────────────────┤
+//! │ Dynamic Heap (wasm_allocator)          │ ← SJON host / PNG / file table
 //! └─────────────────────────────────────────┘
 //! ```
 //!
@@ -35,12 +42,38 @@
 //! - `compileToPng()`: Compile + embed executor + encode PNG
 //! - `getOutputPtr()` / `getOutputLen()`: Read result (PNGB or PNG)
 //! - `getErrorPtr()` / `getErrorLen()`: Read error messages
+//! - `allocFileTable()` / `setFileTableLen()`: Supply files a document names
+//! - `getNeedsPtr()` / `getNeedsLen()` / `getNeedsDropped()`: Read which files
+//!   the last compile was missing
 //!
 //! ## Invariants
 //!
 //! - Source must be written before compile()/compileToPng() is called
 //! - Output/error buffers are valid until next compile()/compileToPng() call
-//! - All intermediate allocations freed after each compilation
+//! - All intermediate allocations freed after each compilation. The ONE
+//!   deliberate exception is `schema_cache` below, which outlives every call.
+//!
+//! ## What holds the allocation invariant, and what does not
+//!
+//! Not the code's shape. Each export threads `std.heap.wasm_allocator` raw
+//! into the pipeline and every path frees by hand. Three things watch it:
+//!
+//!   • `zig build test-sjon-oom` — the exhaustive one. Compiles every fixture
+//!     once per allocation index under a `FailingAllocator`, so the FAILURE
+//!     path unwinds clean too. The leak it found on its first run was
+//!     reachable at exactly one index out of 1,610.
+//!   • `tests/npm/wasm-compiler-heap.test.js` — the shipped one. Soaks THIS
+//!     module's `.wasm` and asserts `memory.buffer.byteLength` goes flat
+//!     across repeated compiles, which is what a leak looks like in a browser
+//!     tab: linear memory never shrinks, so anything outliving a call is
+//!     permanent. Page-granular, so it sees ~2.7 KiB per compile and up.
+//!   • `zig build test-sjon-arena` — the measurement that says why it is done
+//!     by hand at all. R3-04 asked for one `ArenaAllocator` per export, which
+//!     would make the release structural; measured, that costs 2.0x–3.7x the
+//!     peak (5.6 MB → 16.1 MB on the largest fixture) in a linear memory that
+//!     never shrinks, so it was rejected with the numbers
+//!     (`docs/plans/r3/04-arena-at-the-entry-boundary.md`). Do not re-derive
+//!     that from first principles — the gate re-measures it on every run.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -58,17 +91,26 @@ const SOURCE_MAX = 256 * 1024;
 const OUTPUT_MAX = 256 * 1024;
 const ERROR_MAX = 4 * 1024;
 const DIAG_MAX = 32 * 1024;
+/// JSON array of the paths the last compile could not resolve. Sized from
+/// `Needs` itself (8 KiB of path bytes) plus per-entry quoting and commas.
+const NEEDS_MAX = 12 * 1024;
+/// Packed file table the host writes before a compile. Big enough for a handful
+/// of textures and meshes; a host with more should compile on the CLI.
+const FILE_TABLE_MAX = 16 * 1024 * 1024;
 
 // Static I/O buffers
 var source_buffer: [SOURCE_MAX]u8 = undefined;
 var output_buffer: [OUTPUT_MAX]u8 = undefined;
 var error_buffer: [ERROR_MAX]u8 = undefined;
 var diag_buffer: [DIAG_MAX]u8 = undefined;
+var needs_buffer: [NEEDS_MAX]u8 = undefined;
 
 var source_len: u32 = 0;
 var output_len: u32 = 0;
 var error_len: u32 = 0;
 var diag_len: u32 = 0;
+var needs_len: u32 = 0;
+var needs_dropped: u32 = 0;
 
 // The collect-all diagnostic sink (~19KB) lives in bss, not on the wasm stack —
 // mirroring the static I/O buffers above. Reset per compile via `sink = .{}`.
@@ -95,30 +137,23 @@ fn schemaCache() ?*const dsl_sjon.Compiler.PreloadedSchema {
 // --- Executor variant lookup ---
 
 /// Embedded executor WASM variants (built by build.zig).
+///
+/// The eight names are NOT repeated here. build.zig derives each anonymous
+/// import name as `executor_<variant>` from `executor/variant.zig:VARIANTS`,
+/// so this reads the same table: adding a variant there needs no edit here,
+/// and a name can never drift between the two.
 const executors = struct {
-    const core: []const u8 = @embedFile("executor_core");
-    const render: []const u8 = @embedFile("executor_render");
-    const compute: []const u8 = @embedFile("executor_compute");
-    const render_compute: []const u8 = @embedFile("executor_render-compute");
-    const render_anim: []const u8 = @embedFile("executor_render-anim");
-    const render_compute_anim: []const u8 = @embedFile("executor_render-compute-anim");
-    const render_wasm: []const u8 = @embedFile("executor_render-wasm");
-    const full: []const u8 = @embedFile("executor_full");
-
     /// Look up embedded executor bytes by variant name (see selectVariant).
     fn get(name: []const u8) ?[]const u8 {
-        const map = std.StaticStringMap([]const u8).initComptime(.{
-            .{ "core", core },
-            .{ "render", render },
-            .{ "compute", compute },
-            .{ "render-compute", render_compute },
-            .{ "render-anim", render_anim },
-            .{ "render-compute-anim", render_compute_anim },
-            .{ "render-wasm", render_wasm },
-            .{ "full", full },
-        });
-        return map.get(name);
+        inline for (dsl_sjon.VARIANTS) |v| {
+            if (std.mem.eql(u8, name, v.name)) return @embedFile("executor_" ++ v.name);
+        }
+        return null;
     }
+
+    /// The always-valid fallback (`selectVariant` returns it when nothing
+    /// smaller covers the plugin set), resolved through the same table.
+    const full: []const u8 = @embedFile("executor_full");
 };
 
 /// Select embedded executor bytes for the required plugins.
@@ -137,6 +172,155 @@ fn getExecutorWasm(plugins: PluginSet) []const u8 {
     std.debug.assert(plugins.core);
     const name = dsl_sjon.selectVariant(plugins).name;
     return executors.get(name) orelse executors.full;
+}
+
+// --- The file table (how a `:file` works with no filesystem) ---
+
+// The host packs every file the document names into ONE heap buffer and hands
+// its length over; `compile()` parses it into a `TableResolver` the emitter
+// reads through. Packed rather than one call per file because a call per file
+// is a round-trip per file, and the `needs` protocol answers a whole document's
+// worth of missing files at once.
+//
+// ⚠️ It is ONE round per import LEVEL, not one round full stop, since 05
+// (journal §411). An `(import :file "./other.sjon")` is discovered by parsing,
+// so a document's second-level imports cannot be known until the first level is
+// in hand: a host that imports must loop until `needs` comes back empty. A
+// document with no import — which is every document that existed before that
+// feature — still settles in one round.
+//
+// Wire format, little-endian, no padding:
+//
+//     [u32 count] ( [u32 name_len][name bytes][u32 data_len][data bytes] )*
+//
+// Owned here and freed at the top of the next compile, so a host may write a
+// new table without leaking the old one and may leave one in place across
+// compiles of the same document.
+
+var file_table_buf: ?[]u8 = null;
+var file_table_len: u32 = 0;
+/// Parsed view over `file_table_buf`. Entries borrow it, so it must not be
+/// freed or rewritten while a compile is running.
+var file_entries: [dsl_sjon.Compiler.TableResolver.MAX_ENTRIES]dsl_sjon.Compiler.TableResolver.Entry = undefined;
+var file_entry_count: u32 = 0;
+
+/// Allocate (or reallocate) the file-table buffer and return a pointer the host
+/// writes into. Returns null on OOM or a length past `FILE_TABLE_MAX`.
+export fn allocFileTable(len: u32) ?[*]u8 {
+    freeFileTable();
+    if (len == 0) return null;
+    if (len > FILE_TABLE_MAX) return null;
+    const buf = std.heap.wasm_allocator.alloc(u8, len) catch return null;
+    file_table_buf = buf;
+    return buf.ptr;
+}
+
+/// Declare how many of the allocated bytes the host actually wrote.
+export fn setFileTableLen(len: u32) void {
+    const cap: u32 = if (file_table_buf) |b| @intCast(b.len) else 0;
+    file_table_len = @min(len, cap);
+}
+
+fn freeFileTable() void {
+    if (file_table_buf) |b| std.heap.wasm_allocator.free(b);
+    file_table_buf = null;
+    file_table_len = 0;
+    file_entry_count = 0;
+}
+
+/// Parse the packed table into `file_entries`. Returns false on a malformed
+/// buffer — a truncated length prefix or a run that claims more bytes than
+/// remain. Refusing is the point: a silent short read would hand the emitter
+/// half a texture and blame the document.
+fn parseFileTable() bool {
+    file_entry_count = 0;
+    const buf = file_table_buf orelse return true; // no table is not an error
+    const bytes = buf[0..file_table_len];
+    if (bytes.len == 0) return true;
+    if (bytes.len < 4) return false;
+
+    const count = std.mem.readInt(u32, bytes[0..4], .little);
+    if (count > dsl_sjon.Compiler.TableResolver.MAX_ENTRIES) return false;
+    // Every bound below is written as a SUBTRACTION from the remaining length,
+    // never as `off + len > bytes.len`. This is the wasm32 build: `usize` is 32
+    // bits there, so a host handing in a `name_len` of 0xFFFFFFFF wrapped that
+    // addition to a small number, passed the check, and sliced out of bounds.
+    // `bytes.len - off` cannot underflow — each arm establishes `off <=
+    // bytes.len` before subtracting (§438).
+    var off: usize = 4;
+    for (0..count) |i| {
+        if (bytes.len - off < 4) return false;
+        const name_len = std.mem.readInt(u32, bytes[off..][0..4], .little);
+        off += 4;
+        if (name_len == 0 or name_len > bytes.len - off) return false;
+        const name = bytes[off..][0..name_len];
+        off += name_len;
+
+        if (bytes.len - off < 4) return false;
+        const data_len = std.mem.readInt(u32, bytes[off..][0..4], .little);
+        off += 4;
+        if (data_len > bytes.len - off) return false;
+        const data = bytes[off..][0..data_len];
+        off += data_len;
+
+        file_entries[i] = .{ .name = name, .bytes = data };
+    }
+    file_entry_count = count;
+    return true;
+}
+
+/// The resolver for this compile. ALWAYS a resolver, even with no table yet.
+///
+/// It used to be null until the host supplied entries, and for every other
+/// `:file` key that was harmless: the `needs` pre-pass walks the validated
+/// forest and reports what the document names whether or not anything can be
+/// read, so round one produced the complete list regardless.
+///
+/// `(import …)` is not like the others. The composer runs BEFORE validation —
+/// there is no forest to pre-walk, because what the forest contains is what the
+/// import decides — so the only way a path reaches `needs` is by being ATTEMPTED
+/// and failing. A null resolver made that attempt impossible, and the first
+/// round of every import chain refused with "this host has no file resolver"
+/// and an empty `needs`: unrecoverable, because the host is never told what to
+/// fetch. An empty table answers `NotFound` instead, which is what `needs`
+/// listens for.
+///
+/// An empty table is also the truer model. This host HAS a file mechanism; the
+/// table being empty means nothing has been handed over yet, not that files are
+/// impossible here — which is exactly what the NotFound wording says.
+var table_resolver: dsl_sjon.Compiler.TableResolver = .{ .entries = &.{} };
+
+fn fileResolver() dsl_sjon.Compiler.FileResolver {
+    table_resolver = .{ .entries = file_entries[0..file_entry_count] };
+    return table_resolver.resolver();
+}
+
+// --- The `needs` list (what the host must fetch before compiling again) ---
+
+/// Every file the last compile named and could not read, as a JSON array of
+/// strings. Written after EVERY compile, success or failure, so a host reads it
+/// unconditionally and `[]` means "nothing missing".
+var needs_sink: dsl_sjon.Compiler.Needs = .{};
+
+fn writeNeedsJson() void {
+    var w: std.Io.Writer = .fixed(needs_buffer[0..]);
+    w.writeByte('[') catch {};
+    for (0..needs_sink.count) |i| {
+        if (i > 0) w.writeByte(',') catch {};
+        // `std.json.fmt` emits a complete JSON value, quotes included — a path
+        // with a backslash or a quote in it must not break the array.
+        w.print("{f}", .{std.json.fmt(needs_sink.pathAt(@intCast(i)), .{})}) catch break;
+    }
+    w.writeByte(']') catch {};
+    needs_len = @intCast(w.buffered().len);
+    needs_dropped = needs_sink.dropped;
+}
+
+fn writeEmptyNeeds() void {
+    needs_buffer[0] = '[';
+    needs_buffer[1] = ']';
+    needs_len = 2;
+    needs_dropped = 0;
 }
 
 // --- SJON dispatch (PNGine as a SJON host; in-browser .sjon compile) ---
@@ -217,29 +401,39 @@ fn writeDiagJson() void {
 
 /// Copy `source_buffer` into a sentinel-terminated heap buffer for the SJON host
 /// (its parser requires `[:0]const u8`).
-fn dupeSourceZ(allocator: Allocator) ?[:0]u8 {
-    const source_z = allocator.allocSentinel(u8, source_len, 0) catch return null;
+fn dupeSourceZ(gpa: Allocator) ?[:0]u8 {
+    const source_z = gpa.allocSentinel(u8, source_len, 0) catch return null;
     @memcpy(source_z, source_buffer[0..source_len]);
     return source_z;
 }
 
 /// SJON path of `compile()`: validate + lower + emit PNGB (no executor).
-fn compileSjon(allocator: Allocator) i32 {
+fn compileSjon(gpa: Allocator) i32 {
     writeEmptyDiag(); // valid [] until the compile runs (covers the early -1 return)
+    writeEmptyNeeds();
     diag_sink = .{};
-    const source_z = dupeSourceZ(allocator) orelse return -1;
-    defer allocator.free(source_z);
+    needs_sink = .{};
+    if (!parseFileTable()) {
+        writeError("the file table is malformed — expected [u32 count]([u32 name_len][name][u32 data_len][data])*");
+        return 3;
+    }
+    const source_z = dupeSourceZ(gpa) orelse return -1;
+    defer gpa.free(source_z);
 
-    const pngb = dsl_sjon.Compiler.compileWithOptions(allocator, source_z, .{
+    const pngb = dsl_sjon.Compiler.compileWithOptions(gpa, source_z, .{
         .validate_shaders = true,
         .diag = &diag_sink,
+        .resolver = fileResolver(),
+        .needs = &needs_sink,
         .schema_cache = schemaCache(),
     }) catch |err| {
         writeDiagJson();
+        writeNeedsJson();
         return sjonErrorCodeWithDiag(err, &diag_sink);
     };
-    defer allocator.free(pngb);
+    defer gpa.free(pngb);
     writeDiagJson();
+    writeNeedsJson();
 
     if (pngb.len > OUTPUT_MAX) {
         writeError("Output exceeds 256KB limit");
@@ -254,44 +448,54 @@ fn compileSjon(allocator: Allocator) i32 {
 /// variant → emit PNGB → encode 1×1 PNG → embed bytecode as a pNGb chunk. Reuses
 /// `getExecutorWasm` and the `png` encoder/embedder, so the `.sjon` PNG is
 /// self-contained and structurally identical to the CLI output.
-fn compileToPngSjon(allocator: Allocator) i32 {
+fn compileToPngSjon(gpa: Allocator) i32 {
     writeEmptyDiag();
+    writeEmptyNeeds();
     diag_sink = .{};
-    const source_z = dupeSourceZ(allocator) orelse return -1;
-    defer allocator.free(source_z);
+    needs_sink = .{};
+    if (!parseFileTable()) {
+        writeError("the file table is malformed — expected [u32 count]([u32 name_len][name][u32 data_len][data])*");
+        return 3;
+    }
+    const source_z = dupeSourceZ(gpa) orelse return -1;
+    defer gpa.free(source_z);
 
     // ONE compile. Which executor variant to embed depends on the plugin set,
     // which is only known after the walk — so the resolver is handed down and
     // called at that point, rather than the export paying for a whole throwaway
     // validate + emit up front just to read it. (The discarded pass also ran with
     // validate_shaders off, so it never caught anything this one doesn't.)
-    var result = dsl_sjon.Compiler.compileWithPlugins(allocator, source_z, .{
+    var result = dsl_sjon.Compiler.compileWithPlugins(gpa, source_z, .{
         .embed_executor = true,
         .resolve_executor = getExecutorWasm,
         .validate_shaders = true,
         .diag = &diag_sink,
+        .resolver = fileResolver(),
+        .needs = &needs_sink,
         .schema_cache = schemaCache(),
     }) catch |err| {
         writeDiagJson();
+        writeNeedsJson();
         return sjonErrorCodeWithDiag(err, &diag_sink);
     };
-    defer result.deinit(allocator);
+    defer result.deinit(gpa);
     writeDiagJson();
+    writeNeedsJson();
 
     // Encode 1x1 transparent PNG
     const pixel = [_]u8{ 0, 0, 0, 0 };
-    const png_data = png.encoder.encode(allocator, &pixel, 1, 1) catch {
+    const png_data = png.encoder.encode(gpa, &pixel, 1, 1) catch {
         writeError("PNG encoding failed");
         return 4;
     };
-    defer allocator.free(png_data);
+    defer gpa.free(png_data);
 
     // Embed bytecode in PNG as pNGb chunk
-    const final_png = png.embed.embed(allocator, png_data, result.pngb) catch {
+    const final_png = png.embed.embed(gpa, png_data, result.pngb) catch {
         writeError("Bytecode embedding failed");
         return 4;
     };
-    defer allocator.free(final_png);
+    defer gpa.free(final_png);
 
     if (final_png.len > OUTPUT_MAX) {
         writeError("PNG output exceeds 256KB limit");
@@ -320,7 +524,7 @@ export fn compile() i32 {
     error_len = 0;
     diag_len = 0;
 
-    const allocator = std.heap.wasm_allocator;
+    const gpa = std.heap.wasm_allocator;
 
     // PNGine is a SJON host: only `.sjon` source compiles. A non-SJON first byte
     // (`#`/`//` macro DSL, or junk) is reported, not silently miscompiled — the
@@ -330,7 +534,7 @@ export fn compile() i32 {
         writeError("legacy .pngine DSL is no longer supported — use SJON (.sjon) source");
         return 1;
     }
-    return compileSjon(allocator);
+    return compileSjon(gpa);
 }
 
 /// Compile SJON to self-contained PNG with embedded executor.
@@ -345,14 +549,14 @@ export fn compileToPng() i32 {
     error_len = 0;
     diag_len = 0;
 
-    const allocator = std.heap.wasm_allocator;
+    const gpa = std.heap.wasm_allocator;
 
     if (!isSjon(source_buffer[0..source_len])) {
         writeEmptyDiag();
         writeError("legacy .pngine DSL is no longer supported — use SJON (.sjon) source");
         return 1;
     }
-    return compileToPngSjon(allocator);
+    return compileToPngSjon(gpa);
 }
 
 /// Minify WGSL source via wgslender. Input written to source_buffer; result
@@ -409,6 +613,23 @@ export fn getErrorLen() u32 {
     return error_len;
 }
 
+/// The paths the last compile could not resolve, as a JSON array of strings.
+/// Always valid JSON: `[]` when nothing is missing, and after an early return.
+export fn getNeedsPtr() [*]const u8 {
+    return &needs_buffer;
+}
+
+export fn getNeedsLen() u32 {
+    return needs_len;
+}
+
+/// Entries that did not fit in the list. NON-ZERO MEANS THE ARRAY IS A PREFIX —
+/// a host that ignores it cannot tell "nothing else is missing" from "the
+/// buffer filled up", which is the failure `Diag.dropped` exists to prevent too.
+export fn getNeedsDropped() u32 {
+    return needs_dropped;
+}
+
 export fn getDiagPtr() [*]const u8 {
     return &diag_buffer;
 }
@@ -442,6 +663,8 @@ fn wasmLog(
     _ = level;
     _ = scope;
     var buf: [512]u8 = undefined;
+    // A log line, not a value: dropping one that does not fit is the right
+    // degradation. (§440's classification of every `bufPrint … catch` here.)
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
     log(msg.ptr, @intCast(msg.len));
 }

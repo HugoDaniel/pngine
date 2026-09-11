@@ -65,7 +65,9 @@ pngine(
     canvas: HTMLCanvasElement;
     debug?: boolean;
     dpr?: number;
+    autoResize?: boolean;
     onError?: (err: Error) => void;
+    onQueryResult?: (values: number[]) => void;
   }
 )
 ```
@@ -75,7 +77,20 @@ Notes:
 - `source` can be URL or byte data.
 - `wasmUrl`, selector strings, and `HTMLImageElement` sources are dev-only features.
 - Viewer keeps wasm-in-wasm runtime support enabled by default.
-- Viewer supports runtime interactivity via `draw(...uniforms)`, `setUniform`, `setUniforms`, and `getUniforms`.
+- Viewer supports runtime interactivity via `draw(p, { time, frame, uniforms, buffers })`, `setUniform` /
+  `setUniforms` (`{ redraw: false }` stores for the next draw instead of drawing now) and `getUniforms`,
+  which describes every reflected field by name: its type as WGSL spells it (`vec4f`), the
+  `(buffer :name …)` it lives in, its offset, size and array length.
+  Every verb has one contract: it returns `p`; an argument of the wrong kind is a `TypeError` before
+  anything posts; on a destroyed instance it returns `p` and posts nothing.
+- A document with several `(frame :name …)` forms renders its first by default; `setFrame(p, name)` pins
+  another for every later draw and `setFrame(p, null)` releases it. A name the payload does not define
+  reaches `onError` with source `"set-frame"`, listing the names it does; `p.frameCount` is the count.
+- Buffers are host-writable by their `(buffer :name …)`: `writeBuffer(p, name, bytes, { offset, poolIndex, redraw })`
+  draws once carrying the write, or with `redraw: false` rides the next draw from anywhere (the play loop's
+  included). A write needs `copy-dst` in the buffer's `:usage`; a buffer the frame itself writes every draw is
+  refused. A pooled buffer takes `poolIndex` (`k`, `"active"`, or absent for every member). Refusals reach
+  `onError` with source `"write-buffer"`; `getBuffers(p)` lists every buffer with `writable` and `frameWritten`.
 
 ### Example
 

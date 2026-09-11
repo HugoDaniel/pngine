@@ -1,0 +1,6 @@
+; R5: a `:file` that is not there. The refusal names the path and says where it
+; is resolved from.
+(wgsl :name lib :file "./no_such_fragment.wgsl")
+(shader-module :name m :imports [lib] :code """
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")

@@ -1,0 +1,385 @@
+; webgpu_marching_cubes_fragments — webgpu_marching_cubes.sjon and
+; webgpu_metaballs.sjon are one program with two instances. The originals say
+; so in prose (the metaballs header lists its "departures from
+; webgpu_marching_cubes.sjon") and then copy 428 lines of byte-identical WGSL
+; between them, plus another ~250 that differ only where the instance does.
+;
+; This pair says it in structure. Eleven .wgsl files under lib/ hold the whole
+; machinery — the five compute stages, the ground, the mesh shading, the grid
+; and the normal — and each document supplies two small fragments of its own:
+; the scalar `field`, and the palette. Both are HOLES: names the library calls
+; without declaring, filled by whichever fragment the document imports.
+;
+;   lib/mc_field_sdf.wgsl        this document: an animated rounded box
+;                                smooth-unioned with a torus, and an AO march
+;   lib/mc_field_metaballs.wgsl  the twin: six orbiting inverse-square balls,
+;                                and `ambientOcclusion` returning 1.0
+;
+; Everything else here is forms plus one inline root, the arcball camera, which
+; is genuinely a different program from the twin's time-orbit camera.
+;
+; The technique is after the `marchingCubes` entry of webgpu-samples (ported,
+; not its source): a GPU-only 5-stage compute pipeline (clear, density,
+; vertex-gen, index-gen, indirect-args) regenerates the mesh every frame on a
+; 33³ grid, rendered with `(draw-indexed-indirect …)`; a 6th compute pass runs
+; the arcball camera from pointer-inputs.
+;
+; Controls (arcball camera):
+;   Left-drag         -> orbit
+;   Space + Left-drag -> pan
+;   Middle-click drag -> pan
+;   Scroll wheel      -> zoom
+;
+; Two forms this program depends on: `:index-format uint32` on the index
+; buffer — its bytes are GPU-generated, so there is no `:index-of` companion
+; to source the format from — and `(draw-indexed-indirect :buffer B :offset
+; N)`, reading the GPUDrawIndexedIndirectArgs written by the indirect-args
+; stage. The ground is the default 1×1 `plane` shape (no size config), drawn
+; at y = −12. Defines are used in buffer `:size` expressions; `:array-stride`
+; spells the literal 32 although `VERTEX_STRIDE` compiles byte-identical.
+
+(define :name GRID_TOTAL_VERTS :value 35937)
+(define :name MAX_VERTICES :value 65536)
+(define :name MAX_INDICES :value 262144)
+(define :name VERTEX_ID_MAP_SIZE :value 98304)
+(define :name VERTEX_STRIDE :value 32)
+
+; ── Ground Plane (mesh primitive) ──────────────────────────────────────
+
+(data :name groundPlane (plane :format [position3 normal3]))
+
+; ── Buffers ────────────────────────────────────────────────────────────
+(buffer :name vertexBuffer :size (* MAX_VERTICES VERTEX_STRIDE)
+  :usage [vertex storage])
+
+; GPU-generated u32 indices: no :index-of companion, so the index format is
+; declared explicitly (propagates to set_index_buffer).
+(buffer :name indexBuffer :size (* MAX_INDICES 4) :usage [index storage]
+  :index-format uint32)
+
+(buffer :name atomicCounters :size 16 :usage [storage])
+
+(buffer :name mvpBuffer :size 128 :usage [storage])
+
+(buffer :name indirectDrawBuffer :size 20 :usage [indirect storage])
+
+(buffer :name timeUniforms :size 16 :usage [uniform copy-dst])
+
+(buffer :name groundVB :usage [vertex]
+  :data groundPlane)
+
+(buffer :name cameraState :size 128 :usage [storage])
+
+(buffer :name vertexIdMap :size (* VERTEX_ID_MAP_SIZE 4) :usage [storage])
+
+(buffer :name pointerBuf :size 48 :usage [uniform copy-dst])
+
+(buffer :name densityBuffer :size (* GRID_TOTAL_VERTS 4) :usage [storage])
+
+; ── Textures ───────────────────────────────────────────────────────────
+
+(texture :name depthTexture :size canvas :format depth24plus
+  :usage [render-attachment])
+
+; ── Queue Operations ───────────────────────────────────────────────────
+
+(queue :name writeTime
+  (write-buffer :buffer timeUniforms :offset 0 :data pngine-inputs))
+
+(queue :name writePointer
+  (write-buffer :buffer pointerBuf :offset 0 :data pointer-inputs))
+
+
+
+; ── Shader: Indirect Args ─────────────────────────────────────────
+
+; ── The library ────────────────────────────────────────────────────────
+;
+; Eleven plain .wgsl files under lib/, shared with webgpu_metaballs_fragments.
+; This document then supplies its own instance of the two things the library
+; leaves open: the scalar field, and the palette.
+
+(wgsl :name mcInputs :file "./lib/mc_inputs.wgsl")
+(wgsl :name mcMvp :file "./lib/mc_mvp.wgsl")
+(wgsl :name mcGrid :file "./lib/mc_grid.wgsl" :requires [density])
+(wgsl :name mcNormal :file "./lib/mc_normal.wgsl" :requires [field pngine])
+(wgsl :name fieldInstance :file "./lib/mc_field_sdf.wgsl" :requires [pngine])
+
+; The palette lib/mc_mesh_render.wgsl leaves open: warm on top, steel blue on
+; the sides, deep indigo underneath.
+(wgsl :name palette :code """
+const kTop = vec3f(0.85, 0.55, 0.35);
+const kSide = vec3f(0.35, 0.55, 0.70);
+const kBottom = vec3f(0.20, 0.25, 0.40);
+""")
+
+(shader-module :name indirectArgsShader :file "./lib/mc_indirect_args.wgsl")
+
+; ── Shader: Clear ─────────────────────────────────────────────────
+
+(shader-module :name clearShader :file "./lib/mc_clear.wgsl")
+
+; ── Shader: Index Generation ──────────────────────────────────────
+
+(shader-module :name indexGenShader :file "./lib/mc_index_gen.wgsl" :imports [mcGrid])
+
+; ── Shader: Ground Render ─────────────────────────────────────────
+
+(shader-module :name groundRenderShader :file "./lib/mc_ground_render.wgsl" :imports [mcMvp])
+
+; ── Shader: Camera (arcball) ──────────────────────────────────────
+
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+
+(wgsl :name inverseCamera :file "./lib/inverse_camera.wgsl")
+
+(wgsl :name rotateVec :file "./lib/rotate_vec.wgsl")
+
+(shader-module :name cameraShader :imports [mcInputs mcMvp perspective inverseCamera rotateVec] :code """
+struct PointerInputs {
+  x: f32, y: f32, clickX: f32, clickY: f32,
+  dx: f32, dy: f32, buttons: f32, pressure: f32,
+  modifiers: f32, scrollX: f32, scrollY: f32, _pad: f32,
+}
+struct CameraState { data: array<f32, 32> }
+
+@group(0) @binding(0) var<uniform> pngine: PngineInputs;
+@group(0) @binding(1) var<uniform> pointer: PointerInputs;
+@group(0) @binding(2) var<storage, read_write> cam: CameraState;
+@group(0) @binding(3) var<storage, read_write> mvp: MVPData;
+
+const EPSILON: f32 = 0.0000001;
+const ROTATION_SPEED: f32 = 500.0;
+const ZOOM_SPEED: f32 = 0.1;
+const PAN_SPEED: f32 = 3.0;
+const FRICTION: f32 = 0.999;
+const PI: f32 = 3.14159265;
+fn getRight() -> vec3f { return vec3f(cam.data[0], cam.data[1], cam.data[2]); }
+fn getUp() -> vec3f { return vec3f(cam.data[4], cam.data[5], cam.data[6]); }
+fn getBack() -> vec3f { return vec3f(cam.data[8], cam.data[9], cam.data[10]); }
+fn getTgt() -> vec3f { return vec3f(cam.data[21], cam.data[22], cam.data[23]); }
+fn setRight(v: vec3f) { cam.data[0] = v.x; cam.data[1] = v.y; cam.data[2] = v.z; }
+fn setUp(v: vec3f) { cam.data[4] = v.x; cam.data[5] = v.y; cam.data[6] = v.z; }
+fn setBack(v: vec3f) { cam.data[8] = v.x; cam.data[9] = v.y; cam.data[10] = v.z; }
+fn setPos(v: vec3f) { cam.data[12] = v.x; cam.data[13] = v.y; cam.data[14] = v.z; }
+fn setAxis(v: vec3f) { cam.data[16] = v.x; cam.data[17] = v.y; cam.data[18] = v.z; }
+fn setTgt(v: vec3f) { cam.data[21] = v.x; cam.data[22] = v.y; cam.data[23] = v.z; }
+
+@compute @workgroup_size(1)
+fn updateCamera() {
+  if (cam.data[25] < 0.5) {
+    let initPos = vec3f(0.0, 10.0, 40.0);
+    let dist = length(initPos);
+    let back = normalize(initPos);
+    let worldUp = vec3f(0, 1, 0);
+    let right = normalize(cross(worldUp, back));
+    let up = normalize(cross(back, right));
+    setRight(right); setUp(up); setBack(back); setPos(initPos);
+    setAxis(vec3f(0, 1, 0));
+    cam.data[19] = 0.0; cam.data[20] = dist;
+    setTgt(vec3f(0, 0, 0));
+    cam.data[24] = pngine.time; cam.data[25] = 1.0;
+    let viewMatrix = inverseCamera(right, up, back, initPos);
+    let proj = perspective(PI / 3.0, pngine.aspect, 0.1, 200.0);
+    mvp.matrix = proj * viewMatrix;
+    mvp.camPos = vec4f(initPos, 1.0);
+    return;
+  }
+  let dt = clamp(pngine.time - cam.data[24], 0.0, 0.1);
+  cam.data[24] = pngine.time;
+  var right = getRight(); var up = getUp(); var back = getBack();
+  var axis = vec3f(cam.data[16], cam.data[17], cam.data[18]);
+  var angVel = cam.data[19]; var dist = cam.data[20]; var tgt = getTgt();
+  let buttonsI = u32(pointer.buttons); let modsI = u32(pointer.modifiers);
+  let leftDown = (buttonsI & 1u) != 0u;
+  let middleDown = (buttonsI & 4u) != 0u;
+  let spaceHeld = (modsI & 16u) != 0u;
+  let isPanning = (leftDown && spaceHeld) || middleDown;
+  let isOrbiting = leftDown && !isPanning;
+  if (isPanning && (abs(pointer.dx) > EPSILON || abs(pointer.dy) > EPSILON)) {
+    let panDelta = right * (-pointer.dx * PAN_SPEED * dist) + up * (pointer.dy * PAN_SPEED * dist);
+    tgt += panDelta;
+  }
+  let ctrlHeld = (modsI & 2u) != 0u;
+  if (!ctrlHeld) {
+    if (abs(pointer.scrollX) > EPSILON) { tgt += right * (pointer.scrollX * 0.02 * dist); }
+    if (abs(pointer.scrollY) > EPSILON) { tgt += up * (-pointer.scrollY * 0.02 * dist); }
+  }
+  if (isOrbiting) {
+    angVel = 0.0;
+    let movement = right * pointer.dx + up * (-pointer.dy);
+    let crossP = cross(movement, back);
+    let mag = length(crossP);
+    if (mag > EPSILON) { axis = crossP / mag; angVel = mag * ROTATION_SPEED; }
+  } else if (!leftDown && !middleDown) {
+    angVel *= pow(1.0 - FRICTION, dt);
+  }
+  let rotAngle = angVel * dt;
+  if (rotAngle > EPSILON) {
+    back = normalize(rotateVec(back, axis, rotAngle));
+    let worldUp = vec3f(0, 1, 0);
+    let newRight = cross(worldUp, back);
+    if (length(newRight) > EPSILON) { right = normalize(newRight); }
+    up = normalize(cross(back, right));
+  }
+  if (ctrlHeld && abs(pointer.scrollY) > EPSILON) {
+    dist *= 1.0 + pointer.scrollY * ZOOM_SPEED;
+    dist = clamp(dist, 0.1, 200.0);
+  }
+  let position = tgt + back * dist;
+  setRight(right); setUp(up); setBack(back); setPos(position);
+  setAxis(axis);
+  cam.data[19] = angVel; cam.data[20] = dist; setTgt(tgt);
+  let viewMatrix = inverseCamera(right, up, back, position);
+  let proj = perspective(PI / 3.0, pngine.aspect, 0.1, 200.0);
+  mvp.matrix = proj * viewMatrix;
+  mvp.camPos = vec4f(position, 1.0);
+}
+""")
+
+; ── Shader: Density ───────────────────────────────────────────────
+
+(shader-module :name densityShader :file "./lib/mc_density.wgsl" :imports [mcInputs fieldInstance])
+
+; ── Shader: Vertex Generation ─────────────────────────────────────
+
+(shader-module :name vertexGenShader :file "./lib/mc_vertex_gen.wgsl"
+  :imports [mcInputs mcGrid mcNormal fieldInstance])
+
+; ── Shader: Mesh Render ───────────────────────────────────────────
+
+(shader-module :name meshRenderShader :file "./lib/mc_mesh_render.wgsl" :imports [mcMvp palette])
+
+; ── Compute Pipelines ──────────────────────────────────────────────────
+
+(compute-pipeline :name densityPipeline :layout auto (compute :module densityShader :entry main))
+
+(compute-pipeline :name cameraPipeline :layout auto (compute :module cameraShader :entry updateCamera))
+
+(compute-pipeline :name clearPipeline :layout auto (compute :module clearShader :entry main))
+
+(compute-pipeline :name vertexGenPipeline :layout auto (compute :module vertexGenShader :entry main))
+
+(compute-pipeline :name indexGenPipeline :layout auto (compute :module indexGenShader :entry main))
+
+(compute-pipeline :name indirectArgsPipeline :layout auto (compute :module indirectArgsShader :entry main))
+
+
+; ── Render Pipelines ───────────────────────────────────────────────────
+
+(render-pipeline :name groundRenderPipeline
+  :layout auto
+  (vertex :module groundRenderShader :entry vs
+    (vertex-buffer :array-stride 24
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)))
+  (fragment :module groundRenderShader :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list)
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+(render-pipeline :name meshRenderPipeline
+  :layout auto
+  (vertex :module meshRenderShader :entry vs
+    (vertex-buffer :array-stride 32
+      (attribute :shader-location 0 :offset 0 :format float32x4)
+      (attribute :shader-location 1 :offset 16 :format float32x4)))
+  (fragment :module meshRenderShader :entry fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+; ── Bind Groups ────────────────────────────────────────────────────────
+
+(bind-group :name meshRenderBG :layout meshRenderPipeline :group 0
+  (entry :binding 0 :buffer mvpBuffer))
+
+(bind-group :name groundRenderBG :layout groundRenderPipeline :group 0
+  (entry :binding 0 :buffer mvpBuffer))
+
+(bind-group :name vertexGenBG :layout vertexGenPipeline :group 0
+  (entry :binding 0 :buffer densityBuffer)
+  (entry :binding 1 :buffer vertexBuffer)
+  (entry :binding 2 :buffer vertexIdMap)
+  (entry :binding 3 :buffer atomicCounters)
+  (entry :binding 4 :buffer timeUniforms))
+
+(bind-group :name densityBG :layout densityPipeline :group 0
+  (entry :binding 0 :buffer timeUniforms)
+  (entry :binding 1 :buffer densityBuffer))
+
+(bind-group :name indirectArgsBG :layout indirectArgsPipeline :group 0
+  (entry :binding 0 :buffer atomicCounters)
+  (entry :binding 1 :buffer indirectDrawBuffer))
+
+(bind-group :name indexGenBG :layout indexGenPipeline :group 0
+  (entry :binding 0 :buffer densityBuffer)
+  (entry :binding 1 :buffer vertexIdMap)
+  (entry :binding 2 :buffer indexBuffer)
+  (entry :binding 3 :buffer atomicCounters))
+
+(bind-group :name cameraBG :layout cameraPipeline :group 0
+  (entry :binding 0 :buffer timeUniforms)
+  (entry :binding 1 :buffer pointerBuf)
+  (entry :binding 2 :buffer cameraState)
+  (entry :binding 3 :buffer mvpBuffer))
+
+(bind-group :name clearBG :layout clearPipeline :group 0
+  (entry :binding 0 :buffer atomicCounters)
+  (entry :binding 1 :buffer indirectDrawBuffer)
+  (entry :binding 2 :buffer vertexIdMap))
+
+; ── Compute Passes ─────────────────────────────────────────────────────
+
+(compute-pass :name cameraPass :pipeline cameraPipeline :bind-groups [cameraBG]
+  (dispatch :workgroups [1 1 1]))
+
+(compute-pass :name clearPass :pipeline clearPipeline :bind-groups [clearBG]
+  (dispatch :workgroups [384 1 1]))
+
+(compute-pass :name densityPass :pipeline densityPipeline :bind-groups [densityBG]
+  (dispatch :workgroups [141 1 1]))
+
+(compute-pass :name vertexPass :pipeline vertexGenPipeline :bind-groups [vertexGenBG]
+  (dispatch :workgroups [128 1 1]))
+
+(compute-pass :name indexPass :pipeline indexGenPipeline :bind-groups [indexGenBG]
+  (dispatch :workgroups [128 1 1]))
+
+(compute-pass :name indirectArgsPass :pipeline indirectArgsPipeline :bind-groups [indirectArgsBG]
+  (dispatch :workgroups [1 1 1]))
+
+; ── Render Passes ──────────────────────────────────────────────────────
+
+(render-pass :name renderMeshPass
+  (color-attachment :view context-current-texture
+    :clear-value [0.18 0.18 0.22 1.0] :load-op clear :store-op store)
+  (depth-stencil-attachment :view depthTexture
+    :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  :pipeline meshRenderPipeline
+  :vertex-buffers [vertexBuffer]
+  :index-buffer indexBuffer
+  :bind-groups [meshRenderBG]
+  (draw-indexed-indirect :buffer indirectDrawBuffer :offset 0))
+
+(render-pass :name renderGroundPass
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-load-op load :depth-store-op store)
+  :pipeline groundRenderPipeline
+  :vertex-buffers [groundVB]
+  :bind-groups [groundRenderBG]
+  (draw :vertex-count 6))
+
+; ── Frame ──────────────────────────────────────────────────────────────
+
+(frame :name main
+  :perform [writeTime
+            writePointer
+            clearPass
+            densityPass
+            vertexPass
+            indexPass
+            indirectArgsPass
+            cameraPass
+            renderMeshPass
+            renderGroundPass])

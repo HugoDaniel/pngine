@@ -53,11 +53,19 @@ const ColorAttachment = bytecode.Emitter.ColorAttachment;
 /// only refuse a stream that breaks it, and only this end knows the source line.
 const MAX_WASM_ARGS: usize = bytecode.wire_schema.repMaxOf(.call_wasm_func);
 
+/// Resource id-space budgets, and the wire/spec/implementation classification
+/// behind them. The emitter reads the SAME declaration the three backends do, so
+/// a document past a runtime's table is refused here — at its source line, with
+/// the cap and the number — instead of dying at render as a bare
+/// `error.InvalidResourceId` (r3-03).
+const limits = bytecode.resource_limits;
+
 /// Color attachments per render pass. WebGPU's `maxColorAttachments` floor, the
-/// width of `begin_render_pass_mrt`'s attachment array, and the native backend's
-/// own `MAX_COLOR_ATTACHMENTS` — one number, three consumers, so the emitter
-/// rejects at the same boundary the runtime asserts at.
-const MAX_COLOR_ATTACHMENTS: usize = 8;
+/// width of `begin_render_pass_mrt`'s attachment array, the native backend's own
+/// `MAX_COLOR_ATTACHMENTS` and `(draw-graph …)`'s per-stage bound — one number,
+/// four consumers, so the emitter rejects at the same boundary the runtime
+/// asserts at. It used to be four hand-written `8`s honouring that by hand.
+const MAX_COLOR_ATTACHMENTS: usize = limits.MAX_COLOR_ATTACHMENTS;
 
 /// Instances in a `:pool` ping-pong run. The pool index is a byte everywhere the
 /// wire carries it — `IdTable.Entry.count`, the descriptor encoders, the
@@ -67,12 +75,126 @@ const MAX_COLOR_ATTACHMENTS: usize = 8;
 /// spelling the schema's repr check cannot see.
 const MAX_POOL_SIZE: u32 = 255;
 
+/// Distinct pipelines one module's binding may be reached by, for the dedup
+/// scan in `pipelinesNeeding`. Only the COUNT and the first id are used, so
+/// overrunning it costs a duplicate in the count, never a wrong verdict.
+const MAX_NEEDING_PIPELINES: u32 = 64;
+
+/// wgslender's stable code for "declared but never used" — one of the two
+/// advisories an imported fragment produces by construction rather than by
+/// defect.
+const UNUSED_DECLARATION: []const u8 = "W0001";
+
+/// wgslender's stable code for "referenced, but not reachable from any entry
+/// point" — the other one, and the same finding one link further down the
+/// chain. `UNUSED_DECLARATION` fires on the head of a dead chain (nothing
+/// refers to it at all); this fires on everything the head refers to. Which of
+/// the two a given declaration gets is a fact about the LIBRARY's internal
+/// structure — whether some other unreached declaration happens to name it —
+/// not about whose defect it is, so the two are suppressed together or not at
+/// all.
+const UNREACHED_DECLARATION: []const u8 = "W0002";
+
+/// The three wgslender codes an unresolved name arrives under when a fragment
+/// is validated on its own (R11): an identifier nothing declares, a call to
+/// one, and a type nothing declares. `E0200` is ALSO every genuine type
+/// mismatch, so it counts only with the `unknown type` message: a mismatch
+/// anchors on the DECLARED variable and quotes it (`cannot initialize 'b' with
+/// type 'f32'`), which would otherwise harvest a hole named `b`.
+const UNDECLARED_IDENTIFIER: []const u8 = "E0100";
+const NOT_CALLABLE: []const u8 = "E0204";
+const UNKNOWN_TYPE: []const u8 = "E0200";
+const UNKNOWN_TYPE_MESSAGE: []const u8 = "unknown type '";
+
+/// Distinct holes harvested from one fragment. The schema bounds `:requires`
+/// at 64 names (`wgsl-name-list`); a fragment using more distinct unresolved
+/// names than that is checked one way only (see `Harvest.overflow`).
+const MAX_HARVEST: usize = 64;
+
+/// The names one fragment uses and nothing in its own assembly declares, each
+/// with where it is first used in the fragment's own text.
+const Harvest = struct {
+    names: [MAX_HARVEST][]const u8 = undefined,
+    lines: [MAX_HARVEST]u32 = undefined,
+    cols: [MAX_HARVEST]u32 = undefined,
+    len: u32 = 0,
+    /// Set when a 65th distinct name arrived and was not kept. Every name kept
+    /// is still a real hole; the SET is no longer complete, so "listed and
+    /// never used" cannot be decided.
+    overflow: bool = false,
+
+    fn has(self: *const Harvest, name: []const u8) bool {
+        std.debug.assert(name.len > 0);
+        std.debug.assert(self.len <= MAX_HARVEST);
+        for (self.names[0..self.len]) |n| if (std.mem.eql(u8, n, name)) return true;
+        return false;
+    }
+
+    fn add(self: *Harvest, name: []const u8, line: u32, col: u32) void {
+        std.debug.assert(name.len > 0);
+        std.debug.assert(line >= 1 and col >= 1);
+        if (self.has(name)) return;
+        if (self.len == MAX_HARVEST) {
+            self.overflow = true;
+            return;
+        }
+        self.names[self.len] = name;
+        self.lines[self.len] = line;
+        self.cols[self.len] = col;
+        self.len += 1;
+    }
+};
+
+/// Advisories remembered for dedup (see `Emitter.advisories`). Comfortably past
+/// `Diag`'s 64-entry cap, so the sink fills before the dedup does — a compile
+/// cannot reach the point where dedup stops without the report being truncated
+/// anyway.
+const MAX_ADVISORY_KEYS: usize = 128;
+
+/// One advisory already attributed to a fragment, by WHERE it is rather than
+/// what it says: the same finding assembled into a second root arrives at the
+/// same position in the same origin.
+///
+/// The origin name is borrowed (it outlives the compile — it is the fragment
+/// table's or the tree's), but `code` is NOT: it points into wgslender's
+/// result, freed when the module's `LintResult` deinits. It is copied, because
+/// two rules CAN fire at one position (an unused declaration that is also
+/// misnamed) and keying on position alone would hide the second.
+const AdvisoryKey = struct {
+    origin: []const u8,
+    line: u32,
+    col: u32,
+    code_len: u8,
+    code: [8]u8,
+
+    fn init(origin: []const u8, line: u32, col: u32, code: []const u8) AdvisoryKey {
+        var k: AdvisoryKey = .{ .origin = origin, .line = line, .col = col, .code_len = 0, .code = undefined };
+        const n = @min(code.len, k.code.len);
+        @memcpy(k.code[0..n], code[0..n]);
+        k.code_len = @intCast(n);
+        return k;
+    }
+
+    fn eql(self: AdvisoryKey, other: AdvisoryKey) bool {
+        return self.line == other.line and self.col == other.col and
+            self.code_len == other.code_len and
+            std.mem.eql(u8, self.code[0..self.code_len], other.code[0..other.code_len]) and
+            std.mem.eql(u8, self.origin, other.origin);
+    }
+};
+
 /// Ceiling on the bytes a document's shape generators may produce in total
 /// (32 MiB). A payload is data embedded in a PNG — the largest honest mesh in
 /// the corpus (the dragon, 8 attributes) is ~0.7 MB, and every legitimate
 /// document is far below this; a document at the ceiling has asked the
 /// compiler for more mesh than any PNG should carry. See `generated_bytes`.
 const MAX_GENERATED_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Byte ceiling on anything a `:file` key names — a WASM module, an image, a
+/// mesh blob. Unchanged from the value the direct filesystem read used before
+/// the resolver existed, so no document that compiled yesterday is refused
+/// today. EXCLUSIVE: a file that reaches it is `TooLarge`.
+const MAX_DATA_FILE_BYTES: u32 = 8 * 1024 * 1024;
 
 /// Steps a single frame may carry, counting a `(queue …)`'s positional actions.
 ///
@@ -88,10 +210,23 @@ const MAX_GENERATED_BYTES: u64 = 32 * 1024 * 1024;
 /// sub-forms, which have no length for a `vector-shape` to bound — hence the
 /// counted check here (§348, LEAK-11-E).
 const MAX_FRAME_STEPS: usize = 2048;
+/// How deep a `(step-group …)` chain may nest before the emitter calls it a
+/// cycle. A hook emits flat groups (one per graph), so anything past 1 is
+/// hand-written; the bound is what turns "a group that names itself" from a
+/// hang into a sentence.
+const MAX_STEP_GROUP_DEPTH: usize = 8;
 
 const values = @import("values.zig");
 const Reader = values.Reader;
 const Env = values.Env;
+// The one seam between this walk and the bytes behind a `:file` key. Every read
+// goes through it, so the in-browser compiler (no filesystem) serves the same
+// five keys the CLI does by injecting a table instead.
+const file_resolver = @import("file_resolver.zig");
+const document_import = @import("document_import.zig");
+// The WGSL preprocessor's pure half: the fragment table and the assembler that
+// turns a root plus its `:imports` into the one text wgslender ever sees.
+const fragments = @import("fragments.zig");
 
 // Reused, unchanged backend modules (no Ast/Analyzer coupling — see CONTRIBUTING
 // §17): compile-time shape vertex/index generators + the binary descriptor
@@ -193,6 +328,22 @@ fn IdTable(comptime Id: type) type {
             const id = self.next;
             self.next += 1;
             return id;
+        }
+
+        /// Reserve `count` sequential ids with NO name — the instances a
+        /// layout-less `(bind-group …)` derives, one per pipeline that binds it.
+        /// They are looked up by (name, pipeline) through
+        /// `Tables.derived_bind_groups` and must NOT resolve through `get(name)`:
+        /// the name alone does not say which instance a pass means. Same
+        /// exhaustion contract as `reserve`; the caller pre-checks with a
+        /// located diagnostic (`checkIdsFit`).
+        fn reserveAnonymous(self: *Self, count: u8) error{EmitError}!Id {
+            std.debug.assert(count > 0); // pre: a pool of nothing is not a resource
+            if (@as(u32, self.next) + count > std.math.maxInt(Id)) return error.EmitError;
+            const base = self.next;
+            self.next += count;
+            std.debug.assert(self.next == base + count); // post: exactly count ids
+            return base;
         }
 
         fn get(self: *const Self, name: []const u8) ?Id {
@@ -298,17 +449,58 @@ const WasmMeshData = struct { module_id: u16, func_name_id: u16, byte_size: u32 
 /// `populateUniformTable`.
 const UniformBindingKey = struct { group: u8, binding: u8 };
 
-/// One (shader module → pipeline) instantiation row, recorded per stage by the
-/// pipeline phases. Joined against `scoped_bindings` by the uniform-table pass
-/// to resolve a reflected binding's buffer PER PIPELINE — under `:layout auto`
-/// a (group, binding) slot is pipeline-scoped, not document-global.
-const ModulePipeline = struct { module: []const u8, pipeline: u16 };
+/// One (shader module, entry point → pipeline) instantiation row, recorded per
+/// stage by the pipeline phases. Joined against `scoped_bindings` by the
+/// uniform-table pass to resolve a reflected binding's buffer PER PIPELINE —
+/// under `:layout auto` a (group, binding) slot is pipeline-scoped, not
+/// document-global.
+///
+/// `entry` is here because the LAYOUT is derived from the entry points a
+/// pipeline instantiates, not from the module: `:layout auto` keeps only the
+/// bindings those entries statically reach. A rule that reasons per module
+/// about a per-pipeline layout gets the material case backwards — a module
+/// whose lit entry samples a texture its depth entry does not (§392). Empty
+/// when the stage's entry could not be resolved, which reads as "every entry",
+/// the pre-per-entry behaviour.
+const ModulePipeline = struct { module: []const u8, entry: []const u8, pipeline: u16 };
 
 /// One (pipeline, group, binding) → BASE buffer id row, recorded in
 /// `emitBindGroup` for groups whose `:layout` names a pipeline
 /// (a group whose `:layout` names a bind-group-layout has no pipeline scope → no row; the global
 /// `uniform_bindings` join covers it). A flat multimap over bounded scans.
 const ScopedBinding = struct { pipeline: u16, group: u8, binding: u8, buffer: u16 };
+
+/// One (bind-group name → pipeline) row: a source pass or bundle names the
+/// group in its `:bind-groups` and that pipeline in its `:pipeline`. Collected
+/// before the bind-group phase (`collectGroupBinders`), because a layout-less
+/// group derives one instance per pipeline that binds it and the forms that
+/// say which pipelines those are emit AFTER it.
+const GroupBinder = struct { group: []const u8, pipeline: u16 };
+
+/// One wire instance a layout-less `(bind-group …)` derived for one pipeline:
+/// `size` ids from `base`, or `omitted` when its entries pruned to nothing
+/// above every group index that pipeline reaches (no wire group; the pass sets
+/// nothing at that slot). `group` is the form's `:group`, kept for messages.
+const DerivedBindGroup = struct { name: []const u8, pipeline: u16, group: u8, base: u16, size: u8, omitted: bool };
+
+/// One (pipeline, group, binding) → what SJON bound there row, for the HANDLE
+/// joins. The buffer join has had `ScopedBinding` since the per-pipeline
+/// uniform work; the kind and handle-id joins were still reading a
+/// document-wide `(group, binding)` map, which is the same per-module-about-a-
+/// per-pipeline-layout confusion §392 and §393 are about — and it MISCOMPARED
+/// rather than merely over-demanding: the pass sugar numbers each pipeline's
+/// prelude from 0 independently, so `(0,1)` is `samp` in a main shader that has
+/// a uniform and `postTex` in a post shader that does not. Neither is wrong;
+/// joining them by slot alone is.
+const ScopedHandle = struct {
+    pipeline: u16,
+    group: u8,
+    binding: u8,
+    kind: ?BindKind,
+    texture: ?u16,
+    sampler: ?u16,
+    loc: ?Diag.Located,
+};
 
 /// One shader module in EMIT order (+ whether it lowered from `(pass …)`/`(init …)`
 /// sugar). `populateUniformTable` iterates this list instead of `shader_analysis`'s
@@ -557,6 +749,16 @@ const BindJoin = struct {
     // pipeline-layout groups). Flat lists — every consumer is a bounded scan.
     module_pipelines: std.ArrayList(ModulePipeline) = .empty,
     scoped_bindings: std.ArrayList(ScopedBinding) = .empty,
+    // The handle/kind counterpart of `scoped_bindings`. Read through
+    // `scopedHandleFor`, which falls back to the document-wide maps when a
+    // module is bound only via explicit-bgl groups or reached by no pipeline.
+    scoped_handles: std.ArrayList(ScopedHandle) = .empty,
+    // Which pipelines bind each group, read off the source pass and bundle
+    // forms (`collectGroupBinders`); consumed by `emitDerivedBindGroup`. And
+    // the pipelines whose `:layout` names an explicit (pipeline-layout …),
+    // which have no auto layout for a layout-less group to derive against.
+    group_binders: std.ArrayList(GroupBinder) = .empty,
+    explicit_layout_pipelines: std.AutoHashMapUnmanaged(u16, void) = .empty,
 
     /// Comptime field loop, for the reason spelled out on `Tables.deinit`: a
     /// hand-written list of 14 teardown calls is a list you can forget to
@@ -619,6 +821,19 @@ const Tables = struct {
     image_bitmaps: IdTable(u16) = .{},
     pipelines: IdTable(u16) = .{},
     bind_groups: IdTable(u16) = .{},
+    // A layout-less `(bind-group …)` has NO entry in `bind_groups` — its name
+    // alone does not say which instance a pass means. Its instances live here,
+    // keyed by (name, pipeline); `derived_names` records that the form exists
+    // even when nothing binds it, so a reference can be told apart from a typo.
+    derived_bind_groups: std.ArrayList(DerivedBindGroup) = .empty,
+    derived_names: std.StringHashMapUnmanaged(void) = .empty,
+    // A `:prune-unused` group a HOOK emitted whose entries all pruned away, at
+    // a group index above everything its `:layout` pipeline reaches. Nothing
+    // was created for it, and the pass that names it sets nothing at that slot
+    // — the same rule the derived path applies through `DerivedBindGroup
+    // .omitted`, reached here because a `(draw-graph …)` writes one group per
+    // (stage, geometry) and a geometry may reach none of its stage's entries.
+    omitted_groups: std.StringHashMapUnmanaged(void) = .empty,
     bind_group_layouts: IdTable(u16) = .{},
     pipeline_layouts: IdTable(u16) = .{},
     render_bundles: IdTable(u16) = .{},
@@ -636,6 +851,10 @@ const Tables = struct {
     // the lowered tree, for the pass-v1 per-pass uniform-write queues), so the
     // action is read from the tree it was emitted into.
     queue_actions: std.StringHashMapUnmanaged(FormRef) = .empty,
+    /// `(step-group :name … :perform […])` by name, source and lowered. A group
+    /// is expanded WHERE IT IS NAMED, so nothing here reaches the wire: a frame
+    /// over groups emits the same ops as the frame written out by hand.
+    step_groups: std.StringHashMapUnmanaged(FormRef) = .empty,
     // Call name → module id. Distinct from `wasm_modules` (url-keyed): this is
     // the per-call resolution of that dedup.
     wasm_call_module_ids: StringMapU16 = .empty,
@@ -683,6 +902,8 @@ const Tables = struct {
     }
 };
 
+/// Stores its own allocator; `deinit()` takes none. Every emitter helper that
+/// allocates therefore reads `self.gpa` rather than taking a parameter.
 pub const Emitter = struct {
     /// `ValidationError` is raised by the `validate_shaders` emit-time diagnostics
     /// (bad WGSL, missing pipeline entry point); `EmitError` covers the semantic
@@ -700,6 +921,46 @@ pub const Emitter = struct {
     // the legacy emitter's `options.base_dir` / `options.io`.
     base_dir: ?[]const u8 = null,
     io: ?std.Io = null,
+    // The seam every `:file` key reads through (`file_resolver.zig`). A caller
+    // may inject one — the in-browser compiler injects a `TableResolver` over
+    // bytes JavaScript handed in, which is how a `:file` works with no
+    // filesystem at all. Null falls back to a `FilesystemResolver` built per
+    // read from `base_dir`/`io` above, which is the CLI and every harness.
+    resolver: ?file_resolver.FileResolver = null,
+    // Every path this document names, deduplicated, in document order. Held
+    // only to deduplicate the pre-pass: the slices borrow the tree and die with
+    // this Emitter.
+    wanted_files: std.ArrayList([]const u8) = .empty,
+    // Optional caller-owned sink for the paths the host could not supply
+    // (`file_resolver.Needs`). Filled by `collectWantedFiles` BEFORE the walk,
+    // because the walk aborts at the first unreadable file: without the pre-pass
+    // a compile could only ever report one missing asset, and `cubemap.sjon`
+    // (six images) would need six rounds to be told about all of them. It
+    // copies its paths, so it outlives this Emitter and the tree. Nothing here
+    // diagnoses — `unreadableFile` still owns the refusal, at the form that
+    // named the file.
+    needs: ?*file_resolver.Needs = null,
+    // Every `(wgsl …)` fragment in the document, collected before the walk.
+    // Fragments are not GPU objects and have no phase: they exist to be
+    // assembled into the modules that import them.
+    frags: fragments.Table = .{},
+    // Owned backing for the `:imports`/`:requires` name slices the fragment
+    // table and the roots point at. One list rather than per-fragment
+    // ownership: the slices outlive individual reads and are freed together.
+    frag_lists: std.ArrayList([][]const u8) = .empty,
+    // The module currently being validated, when it was assembled from
+    // fragments. `reportShaderError` reads it to map an assembled line back to
+    // the form that wrote it (R8). Null for a root with no imports, which is
+    // every document that predates the preprocessor.
+    assembling: ?*const fragments.Assembled = null,
+    // Advisories already attributed to a fragment this compile, so one
+    // fragment's finding is reported once and not once per importing root.
+    // `reportShaderError`'s `Fragment.reported` bit cannot serve: it is one bit
+    // per fragment, and a fragment can carry several distinct advisories, where
+    // it carries at most one reported error. Bounded and non-growing — past the
+    // cap dedup simply stops and `Diag`'s own 64-entry cap takes over.
+    advisories: [MAX_ADVISORY_KEYS]AdvisoryKey = undefined,
+    advisory_count: u32 = 0,
 
     // Strict-validation toggle (the CLI `validate` command + the in-browser
     // compiler set it; the parity/golden harnesses leave it false). Gates the
@@ -747,6 +1008,11 @@ pub const Emitter = struct {
     // squiggle. F9: the tree parses `source` at offset 0 (the schema is preloaded,
     // not prepended), so spans are already document-local — no prefix to subtract.
     user_source: []const u8 = "",
+    // 05: the composition `user_source` is, when this document imported
+    // anything. `locate` needs it because a span is an offset into the WHOLE
+    // composition and the author wants the line in the file they wrote. Null
+    // for every document that does not import, which is the fast path.
+    composed: ?*const document_import.Composed = null,
 
     src: Reader,
     low: Reader,
@@ -764,6 +1030,14 @@ pub const Emitter = struct {
     /// The one id space with no registry: nothing looks a frame up by name, so
     /// there is no map to pair this counter with and nothing for `Tables` to own.
     next_frame_id: u16 = 0,
+    /// Buffer BASE ids the frames' own queue ops write every draw — a
+    /// `(write-buffer …)` target, a copy or query-resolve destination reached
+    /// from a `:before`/`:perform` step. Never an `:init` seed, which runs once
+    /// per loaded payload. Read by `populateBufferNames` into the block's
+    /// `frame_written` flag (docs/plans/public-write-buffer.md D7): a host
+    /// write to such a buffer lands first and is clobbered every frame, so the
+    /// runtime refuses it and says to use a dedicated buffer.
+    frame_written: std.AutoHashMapUnmanaged(u16, void) = .empty,
     /// Bytes the shape generators have produced for this document so far —
     /// held to `MAX_GENERATED_BYTES` (below). `DataSection.add` dedupes
     /// IDENTICAL blobs, which LEAK-11 D counted on as the bound; distinct
@@ -774,7 +1048,21 @@ pub const Emitter = struct {
     /// kept, is the bound the dedupe cannot be.
     generated_bytes: u64 = 0,
 
-    pub fn init(gpa: Allocator, result: *const Host.HostResult, base_dir: ?[]const u8, io: ?std.Io, validate_shaders: bool) Emitter {
+    /// How the Emitter reaches the outside world. A struct rather than four
+    /// positional arguments because this list grows: `resolver` is the third
+    /// thing to be threaded through the same eleven call sites, and there will
+    /// be a fourth.
+    pub const Config = struct {
+        base_dir: ?[]const u8 = null,
+        io: ?std.Io = null,
+        resolver: ?file_resolver.FileResolver = null,
+        /// Where "the host could not supply these files" is reported. See the
+        /// `needs` field.
+        needs: ?*file_resolver.Needs = null,
+        validate_shaders: bool = false,
+    };
+
+    pub fn init(gpa: Allocator, result: *const Host.HostResult, cfg: Config) Emitter {
         const src_reader = Reader.init(&result.tree, &result.materialized_defaults);
         var low_reader = src_reader;
         var has_low = false;
@@ -785,9 +1073,11 @@ pub const Emitter = struct {
         return .{
             .gpa = gpa,
             .result = result,
-            .base_dir = base_dir,
-            .io = io,
-            .validate_shaders = validate_shaders,
+            .base_dir = cfg.base_dir,
+            .io = cfg.io,
+            .resolver = cfg.resolver,
+            .needs = cfg.needs,
+            .validate_shaders = cfg.validate_shaders,
             // PNGine author-position expressions (sizes, counts, dispatch) use
             // only the `core` plugin's arithmetic (`* / + ceil floor …`).
             // `HostResult.schema` deliberately omits core (it lives only in the
@@ -809,16 +1099,23 @@ pub const Emitter = struct {
     pub fn deinit(self: *Emitter) void {
         self.builder.deinit(self.gpa);
         self.forms.deinit(self.gpa);
+        self.wanted_files.deinit(self.gpa);
+        self.frags.deinit(self.gpa);
+        for (self.frag_lists.items) |l| self.gpa.free(l);
+        self.frag_lists.deinit(self.gpa);
         self.env_bindings.deinit(self.gpa);
         self.tables.deinit(self.gpa);
         self.binds.deinit(self.gpa);
+        self.frame_written.deinit(self.gpa);
         self.* = undefined;
     }
 
     /// Convenience: build an emitter, run the walk, and finalize to PNGB bytes.
     /// `base_dir`/`io` enable `(pass … :file …)` WASM file embedding (null → disabled).
-    pub fn emit(gpa: Allocator, result: *const Host.HostResult, base_dir: ?[]const u8, io: ?std.Io, validate_shaders: bool) Error![]u8 {
-        var em = init(gpa, result, base_dir, io, validate_shaders);
+    ///
+    /// Caller owns the returned bytecode.
+    pub fn emit(gpa: Allocator, result: *const Host.HostResult, cfg: Config) Error![]u8 {
+        var em = init(gpa, result, cfg);
         defer em.deinit();
         try em.run();
         return em.builder.finalize(gpa) catch error.OutOfMemory;
@@ -905,6 +1202,9 @@ pub const Emitter = struct {
         // else — SJON has no root restriction, and a stray one used to be
         // skipped by the head-keyed phase walk below.
         try self.checkDocumentForms();
+        // …and an `(import …)` that survived composition, which would otherwise
+        // emit nothing and take the whole imported document with it.
+        try self.checkImportsComposed();
         // R10's opinion half, before anything reads a name: one namespace across
         // every named form, and the builtin symbols are reserved. Neither is a
         // check SJON can make (see the function's doc comment), and both must
@@ -923,6 +1223,31 @@ pub const Emitter = struct {
         // wgslender sees. Needs `buildEnv` above (a value may be an expression
         // over `(define …)`).
         try self.collectConstants();
+        // Every path the document names, resolved once. Reports nothing — it
+        // exists so a caller learns about ALL the files it must supply from one
+        // compile, since everything below stops at the first one it cannot read.
+        //
+        // FIRST, ahead of `collectFragments`: a `(wgsl :file …)` is READ down
+        // there, so a browser host that had not guessed the path got the
+        // refusal with an empty `needs` and no way to learn what to supply.
+        // This pass reads nothing itself — it walks the schema's file keys over
+        // the tree — so it is free to run before anything opens a file.
+        try self.collectWantedFiles();
+        // …then the container whose hook did not run, which would otherwise
+        // emit nothing and say nothing. AFTER `collectWantedFiles` for the
+        // reason that pass exists: a host with no filesystem must still learn
+        // every file the document names, from a compile that then refuses.
+        try self.checkContainersLowered();
+        // …and every `(wgsl …)` fragment, which the shader-module phase needs
+        // BEFORE it reads a root's text: an assembled module is the fragments'
+        // text and then the root's, and that whole text is what gets math
+        // constants substituted, specialised, validated, minified and shipped.
+        try self.collectFragments();
+        // …and, under `validate`, each fragment's `:requires` checked against
+        // the names it actually leaves unresolved (R11). BEFORE any root
+        // assembles, because the check assembles each fragment as if it were
+        // one and must leave no `imported` bit behind.
+        try self.checkRequiresSignatures();
 
         // User (source) resources first. `self.forms` holds source forms only,
         // so each phase naturally emits user resources. The pre-split phases run
@@ -936,6 +1261,13 @@ pub const Emitter = struct {
             if (comptime std.mem.eql(u8, ph.head, "shader-module")) {
                 if (self.shader_error_count > 0) return error.ValidationError;
             }
+            // The bind-group phase is next, and a layout-less group derives one
+            // instance per pipeline that binds it — a fact written on the pass
+            // and bundle forms, which emit later. Read it off them now, once
+            // both pipeline phases have assigned the ids it resolves to.
+            if (comptime std.mem.eql(u8, ph.head, "compute-pipeline")) {
+                try self.collectGroupBinders();
+            }
         }
 
         // Then the lowering-hook outputs (`(init …)`, `(pass …)`) as a unit, walked in
@@ -948,6 +1280,7 @@ pub const Emitter = struct {
         // auto-frame is a lowered form emitted inside emitLowered, and it
         // resolves its per-pass uniform-write queue steps against this map.
         try self.collectQueues();
+        try self.collectStepGroups();
         try self.emitLowered();
         // F5: the `(init …)`/`(pass …)` sugar emits its own shader modules interleaved with
         // pipelines here; a broken lowered module records into the same counter, so
@@ -955,10 +1288,18 @@ pub const Emitter = struct {
         // already returned above, never reaching emitLowered — no double count.)
         if (self.shader_error_count > 0) return error.ValidationError;
 
+        // R6, advisory: every root has been walked by now, so a fragment with
+        // its `imported` bit still clear is one nothing uses.
+        self.warnUnimportedFragments();
+
         // Post-split phases: source passes + frames, behind the lowered outputs.
         inline for (phases[phases_split..]) |ph| {
             try self.emitPhase(ph.head, ph.emit);
         }
+        // …then the lowered frames, which `emitLowered` deferred to here so a
+        // `(pass-graph :before […])` step can name a SOURCE pass — the phases
+        // just above are what put those names in `tables.passes`.
+        try self.emitLoweredFrames();
 
         // Uniform-table reflection runs LAST: every buffer + bind group (source
         // AND lowered `(pass …)`/`(init …)`) has populated `uniform_bindings` by now, and
@@ -966,6 +1307,51 @@ pub const Emitter = struct {
         // to their buffers → runtime setUniform(name, …), `--types` .d.ts, and the
         // worker's "Parsed N uniform fields" log all light up from this one pass.
         try self.populateUniformTable();
+        // …and the buffer-name block behind it, which needs the frame walks
+        // done (the frame-written set) and shares the string table's budget.
+        try self.populateBufferNames();
+    }
+
+    /// The buffer-name block (docs/plans/public-write-buffer.md D2): every
+    /// `(buffer :name …)` by its SJON name, in BASE-ID order — declaration
+    /// order, never the name map's iteration order (see `IdTable`'s doc: map
+    /// order must not reach the emitted bytes). A pool is one entry, base id
+    /// plus member count. The frame-written flag comes from the set the frame
+    /// walks filled.
+    ///
+    /// Runs AFTER `populateUniformTable`, spending from the same 64 KiB string
+    /// table: a name that no longer fits warns the way a field name does and
+    /// the entry is left out — the host then hears "no buffer named" for it,
+    /// which is what the warning says.
+    fn populateBufferNames(self: *Emitter) Error!void {
+        const count = self.tables.buffers.map.count();
+        if (count == 0) return;
+        const Row = struct { base: u16, pool: u8, name: []const u8 };
+        const rows = try self.gpa.alloc(Row, count);
+        defer self.gpa.free(rows);
+        var n: usize = 0;
+        var it = self.tables.buffers.map.iterator();
+        while (it.next()) |e| : (n += 1) {
+            rows[n] = .{ .base = e.value_ptr.base, .pool = e.value_ptr.count, .name = e.key_ptr.* };
+        }
+        std.debug.assert(n == count);
+        std.mem.sort(Row, rows, {}, struct {
+            fn lt(_: void, a: Row, b: Row) bool {
+                return a.base < b.base;
+            }
+        }.lt);
+        for (rows) |row| {
+            const name_id = self.builder.internString(self.gpa, row.name) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {
+                    self.diagnoseWarn(.sjon, null, "", "buffer '{s}' is left out of the buffer-name block: the string table is full (64 KiB of names), so a host write by that name will be refused as unknown", .{row.name});
+                    continue;
+                },
+            };
+            std.debug.assert(row.pool > 0); // an IdTable entry is never a pool of nothing
+            self.builder.addBufferName(self.gpa, row.base, name_id.toInt(), row.pool, self.frame_written.contains(row.base)) catch return error.OutOfMemory;
+        }
+        std.debug.assert(self.builder.getUniformTable().buffer_names.items.len <= count);
     }
 
     // ----------------------------------------------------------------------
@@ -996,12 +1382,91 @@ pub const Emitter = struct {
     /// normally absent from `self.forms`; listed for a registry-less validate).
     /// Derived from `phases` so a new phase cannot be forgotten here.
     const document_heads = blk: {
-        const extra = [_][]const u8{ "define", "limits", "canvas", "queue", "init", "pass-graph" };
+        // `wgsl` has no phase: a fragment is not a GPU object and emits
+        // nothing. It is consumed by `collectFragments` before the walk, and it
+        // is listed here so `checkDocumentForms` does not refuse it as a child
+        // form written at the root.
+        //
+        // `import` is here for the opposite reason: it is a document form, but
+        // one that must NOT survive to the emitter. Listing it keeps
+        // `checkDocumentForms` from calling it a child form (which it is not),
+        // and `checkImportsComposed` below refuses it with the sentence that
+        // names the real cause.
+        const extra = [_][]const u8{ "define", "limits", "canvas", "queue", "init", "pass-graph", "draw-graph", "step-group", "wgsl", "import" };
         var heads: [phases.len + extra.len][]const u8 = undefined;
         for (phases, 0..) |ph, i| heads[i] = ph.head;
         for (extra, 0..) |h, i| heads[phases.len + i] = h;
         break :blk heads;
     };
+
+    /// Refuse an `(import …)` that reached the emitter (05 Part A).
+    ///
+    /// Composition happens above this module, before SJON validates: the
+    /// pre-pass reads every `(import …)`, splices the documents and blanks the
+    /// form out of the source. So a surviving one does not mean the author
+    /// wrote something wrong — it means the CALLER skipped composition, which
+    /// is a harness on the bare `Compiler.compile`, or a host with no resolver.
+    ///
+    /// Without this the form validates cleanly (it is in `document_heads`), the
+    /// head-keyed phase walk never visits it, and the document compiles as if
+    /// the import were not there — a payload silently missing every form the
+    /// imported document declares. That is the failure class §409 named: a
+    /// form the emitter reads nothing from is not a silent hole if it says so.
+    fn checkImportsComposed(self: *Emitter) Error!void {
+        for (self.forms.items) |f| {
+            const head = f.reader.head(f.idx);
+            std.debug.assert(head.len > 0);
+            if (!std.mem.eql(u8, head, "import")) continue;
+            self.diagnose(.sjon, self.locate(f.reader, f.idx), "", "`(import …)` reached the emitter, so this document was never composed — the caller compiled the source directly instead of resolving its imports first", .{});
+            return error.ValidationError;
+        }
+    }
+
+    /// Refuse a container whose hook did not run (§421).
+    ///
+    /// `(pass-graph …)` and `(draw-graph …)` lower to everything they emit, so
+    /// one that reaches the emitter emitted NOTHING — and the document that
+    /// held it compiles to a payload with no pipeline, no pass and no frame,
+    /// silently. The cause is upstream and not the author's to see: SJON
+    /// validates the container's sub-tree ALONE before invoking the hook and
+    /// skips the hook on any shape error, filtering only the three cross-ref
+    /// codes (`Lowering.hasNonCrossRefError`). A cross-ref reached through a
+    /// UNION is not one of them — a `(color-attachment :view <texture>)` inside
+    /// a `(stage …)` cannot resolve its `attachment-view` union in a sub-tree
+    /// that holds no `(texture …)`, so it fails as `union_no_branch_matched`
+    /// and takes the whole graph with it. The final forest resolves the name,
+    /// so nothing is reported there either.
+    ///
+    /// Until SJON filters that shape too, this turns the silence into a
+    /// refusal that names what to do. `checkDocumentForms` used to catch it by
+    /// accident, before both heads were listed as document heads; an accident
+    /// with the wrong sentence is not a check.
+    ///
+    /// A registry-less caller trips it too, the way `checkImportsComposed`
+    /// does: a harness on the bare `Compiler.compile` registers no hooks, so
+    /// nothing lowers. That is the same fact stated about the same document.
+    /// A container that survives to the emitter lowered to nothing, and nothing
+    /// said so. SJON validates a container's sub-tree alone before calling its
+    /// hook and skips the hook on a shape error there; if that error is also
+    /// reported in the final forest the author sees it, but a shape a sibling
+    /// makes legal is invisible in the fragment and the document just compiles
+    /// empty (CONTRIBUTING pitfall 112).
+    ///
+    /// The one known instance — a cross-ref reached through a union — was fixed
+    /// upstream (SJON ask 19), so this should now never fire. It stays because
+    /// the class is "a check that decides differently in a fragment", not "the
+    /// union case", and because a container lowers to everything it emits:
+    /// there is no reading under which one reaching here is benign.
+    fn checkContainersLowered(self: *Emitter) Error!void {
+        for (self.forms.items) |f| {
+            const head = f.reader.head(f.idx);
+            std.debug.assert(head.len > 0);
+            const is_container = std.mem.eql(u8, head, "pass-graph") or std.mem.eql(u8, head, "draw-graph");
+            if (!is_container) continue;
+            self.diagnose(.sjon, self.locate(f.reader, f.idx), "", "internal: `({s} …)` reached the emitter, so its lowering hook never ran and this document holds no pipeline, pass or frame at all — a child of it failed the sub-tree pass SJON runs before calling a container's hook, and that failure was reported nowhere", .{head});
+            return error.ValidationError;
+        }
+    }
 
     /// Refuse a slot-only form written at the document root (audit 09 C3).
     ///
@@ -1076,6 +1541,9 @@ pub const Emitter = struct {
         for (lt.root) |idx| {
             if (lt.tagOf(idx) != .form) continue;
             const head = r.head(idx);
+            // A lowered `(frame …)` waits for `emitLoweredFrames`, after the
+            // post-split phases — see there.
+            if (std.mem.eql(u8, head, "frame")) continue;
             // Dispatch through the SAME `phases` table run() walks (image-bitmap
             // and wasm-call included). Non-phase heads — e.g. `queue`, handled by
             // collectQueues() — match nothing and are skipped, as before.
@@ -1085,6 +1553,34 @@ pub const Emitter = struct {
                     break;
                 }
             }
+        }
+    }
+
+    /// The lowered `(frame …)` forms `emitLowered` skipped, emitted after the
+    /// post-split phases.
+    ///
+    /// A frame resolves its steps by NAME against `tables.passes`, and that
+    /// table is filled by the render-pass / compute-pass phases, which run
+    /// AFTER `emitLowered` (the split exists so a source pass's `define_pass`
+    /// block lands before any `define_frame`). So a lowered frame emitted in
+    /// place could only ever name a lowered pass: `(pass-graph :before
+    /// [geoPass])` resolved to nothing and the step was DROPPED, silently, by
+    /// `emitFrameSteps`' last branch. Queues never had the problem —
+    /// `collectQueues` runs ahead of `emitLowered` for exactly this reason.
+    ///
+    /// Deferring only the frame keeps every other lowered form where the golden
+    /// traces pin it, and for a document with no source passes it moves nothing
+    /// at all: there is nothing between the two positions to reorder against.
+    /// A second walk rather than a stashed list — the root scan is O(forms) and
+    /// this way the emitter carries no state between the two.
+    fn emitLoweredFrames(self: *Emitter) Error!void {
+        if (!self.has_low) return;
+        const lt = &self.result.lowered_tree.?;
+        const r = &self.low;
+        for (lt.root) |idx| {
+            if (lt.tagOf(idx) != .form) continue;
+            if (!std.mem.eql(u8, r.head(idx), "frame")) continue;
+            try self.emitFrame(r, idx);
         }
     }
 
@@ -1100,6 +1596,7 @@ pub const Emitter = struct {
         "preferred-canvas-format",
         "pngine-inputs",
         "scene-time-inputs",
+        "pngine-frame-inputs",
         "pointer-inputs",
         "all",
         "canvas-width",
@@ -1130,7 +1627,7 @@ pub const Emitter = struct {
     /// scan keeps the FIRST declaration's span, which is what the message needs.
     fn checkNameNamespace(self: *Emitter) Error!void {
         const Decl = struct { name: []const u8, head: []const u8, idx: NodeIndex };
-        var decls: std.ArrayListUnmanaged(Decl) = .empty;
+        var decls: std.ArrayList(Decl) = .empty;
         defer decls.deinit(self.gpa);
 
         for (self.result.data_forest) |idx| {
@@ -1173,7 +1670,7 @@ pub const Emitter = struct {
     /// reference was an unlocated "emit failed".
     fn buildEnv(self: *Emitter) Error!void {
         const Pending = struct { name: []const u8, form: NodeIndex, vnode: NodeIndex, reader: *const Reader, done: bool };
-        var pending: std.ArrayListUnmanaged(Pending) = .empty;
+        var pending: std.ArrayList(Pending) = .empty;
         defer pending.deinit(self.gpa);
         for (self.forms.items) |f| {
             if (!std.mem.eql(u8, f.reader.head(f.idx), "define")) continue;
@@ -1327,14 +1824,22 @@ pub const Emitter = struct {
         for (r.children(form)) |c| {
             if (r.tree.tagOf(c) != .form) continue;
             const head = r.head(c);
-            const is_generator = std.mem.eql(u8, head, "wasm-data") or values.shapeTypeFromHead(head) != null;
+            const is_generator = std.mem.eql(u8, head, "wasm-data") or
+                std.mem.eql(u8, head, "bytes") or
+                values.shapeTypeFromHead(head) != null;
             if (!is_generator) continue;
             if (has_inline or has_file) {
-                self.diagnose(.sjon, self.locate(r, c), "", "(data :name {s}) has a `({s} …)` generator AND `:{s}` — a data entry has one source", .{ name, head, if (has_inline) "float32" else "file" });
+                self.diagnose(.sjon, self.locate(r, c), "", "(data :name {s}) has a `({s} …)` source AND `:{s}` — a data entry has one source", .{ name, head, if (has_inline) "float32" else "file" });
                 return error.ValidationError;
             }
             if (std.mem.eql(u8, head, "wasm-data")) {
                 try self.emitWasmMeshData(r, name, c);
+                return;
+            }
+            // `(bytes …)` is not a generator — it computes nothing. It shares
+            // this loop because the one-source rule is the same rule.
+            if (std.mem.eql(u8, head, "bytes")) {
+                try self.emitRawBytesData(r, name, c);
                 return;
             }
             if (values.shapeTypeFromHead(head)) |shape| {
@@ -1343,7 +1848,7 @@ pub const Emitter = struct {
             }
         }
         if (!has_inline and !has_file) {
-            self.diagnose(.sjon, self.locate(r, form), "", "(data :name {s}) has no source — give it `:float32 […]`, `:file \"…\"`, or a shape generator such as `(cube …)`", .{name});
+            self.diagnose(.sjon, self.locate(r, form), "", "(data :name {s}) has no source — give it `:float32 […]`, `:file \"…\"`, `(bytes :file \"…\")`, or a shape generator such as `(cube …)`", .{name});
             return error.ValidationError;
         }
 
@@ -1452,7 +1957,7 @@ pub const Emitter = struct {
             return error.EmitError;
         };
 
-        const wasm_bytes = self.readDataFile(url) catch |e| return self.unreadableFile(r, form, url, e);
+        const wasm_bytes = self.readFile(url, MAX_DATA_FILE_BYTES) catch |e| return self.unreadableFile(r, form, url, MAX_DATA_FILE_BYTES, e);
         defer self.gpa.free(wasm_bytes);
         const data_id = self.builder.addData(self.gpa, wasm_bytes) catch return error.OutOfMemory;
 
@@ -1467,6 +1972,87 @@ pub const Emitter = struct {
         });
     }
 
+    /// Emit `(data :name … (bytes :file "…"))` or `(… (bytes :base64 "…"))`:
+    /// the author's bytes, verbatim.
+    ///
+    /// Two things separate it from `emitBlobData` below and they are the whole
+    /// form. It writes NO `[mime_len][mime]` prefix, and it records
+    /// `data_byte_len`, so a `(buffer :data …)` sizes and fills from it — which
+    /// a blob deliberately cannot. That pair is what a host baking a table at
+    /// compile time needs and what nothing else offered
+    /// (docs/plans/asks/01-host-baked-data-bytes.md).
+    ///
+    /// The schema's `exactly-one` group settles which key is present, so the
+    /// third branch here is unreachable through the validator and exists for
+    /// the emitter's own callers.
+    fn emitRawBytesData(self: *Emitter, r: *const Reader, name: []const u8, form: NodeIndex) Error!void {
+        std.debug.assert(name.len > 0);
+        std.debug.assert(r.tree.tagOf(form) == .form);
+
+        const bytes: []u8 = if (r.string(form, "file")) |url|
+            self.readFile(url, MAX_DATA_FILE_BYTES) catch |e|
+                return self.unreadableFile(r, form, url, MAX_DATA_FILE_BYTES, e)
+        else if (r.string(form, "base64")) |text|
+            try self.decodeBase64(r, form, name, text)
+        else {
+            self.diagnose(.sjon, self.locate(r, form), "", "(data :name {s}) has a `(bytes …)` with neither `:file` nor `:base64`", .{name});
+            return error.ValidationError;
+        };
+        defer self.gpa.free(bytes);
+
+        // Zero bytes would size a buffer at zero and fill it with nothing, which
+        // is a black canvas with no error. Refuse, the way a data WASM with an
+        // unresolvable `l` is refused rather than believed (`wasm_data.zig`).
+        if (bytes.len == 0) {
+            self.diagnose(.sjon, self.locate(r, form), "", "(data :name {s}) `(bytes …)` decoded to zero bytes — a data entry with no bytes cannot size or fill a buffer", .{name});
+            return error.ValidationError;
+        }
+        std.debug.assert(bytes.len <= MAX_DATA_FILE_BYTES);
+
+        const data_id = self.builder.addData(self.gpa, bytes) catch return error.OutOfMemory;
+        try self.tables.data.put(self.gpa, name, data_id.toInt());
+        try self.tables.data_byte_len.put(self.gpa, name, @intCast(bytes.len));
+    }
+
+    /// Decode `(bytes :base64 "…")` into caller-owned bytes.
+    ///
+    /// ASCII whitespace is stripped first, so a wrapped triple-quoted literal
+    /// works and a generated document diffs by line rather than as one very long
+    /// line. `std.base64.standard` itself rejects whitespace, which is why the
+    /// strip cannot be skipped.
+    ///
+    /// Complexity: O(n) in the literal's length, one pass and one allocation each.
+    fn decodeBase64(self: *Emitter, r: *const Reader, form: NodeIndex, name: []const u8, text: []const u8) Error![]u8 {
+        std.debug.assert(name.len > 0);
+        std.debug.assert(r.tree.tagOf(form) == .form);
+
+        var compact: std.ArrayList(u8) = .empty;
+        defer compact.deinit(self.gpa);
+        compact.ensureTotalCapacity(self.gpa, text.len) catch return error.OutOfMemory;
+        for (text) |ch| switch (ch) {
+            ' ', '\t', '\n', '\r' => {},
+            else => compact.appendAssumeCapacity(ch),
+        };
+
+        const decoder = std.base64.standard.Decoder;
+        const len = decoder.calcSizeForSlice(compact.items) catch |e| {
+            self.diagnose(.sjon, self.locate(r, form), "", "(data :name {s}) `:base64` is not valid base64 ({s}) — {d} non-whitespace characters, which must be a multiple of 4 with standard `+/` and `=` padding", .{ name, @errorName(e), compact.items.len });
+            return error.ValidationError;
+        };
+        if (len > MAX_DATA_FILE_BYTES) {
+            self.diagnose(.sjon, self.locate(r, form), "", "(data :name {s}) `:base64` decodes to {d} bytes, over the {d}-byte limit", .{ name, len, MAX_DATA_FILE_BYTES });
+            return error.ValidationError;
+        }
+
+        const out = self.gpa.alloc(u8, len) catch return error.OutOfMemory;
+        errdefer self.gpa.free(out);
+        decoder.decode(out, compact.items) catch |e| {
+            self.diagnose(.sjon, self.locate(r, form), "", "(data :name {s}) `:base64` is not valid base64 ({s}) — the length is right but a character is not in the standard alphabet", .{ name, @errorName(e) });
+            return error.ValidationError;
+        };
+        return out;
+    }
+
     /// Emit a blob `(data :name … :file "path" :mime "…")` (port of legacy
     /// `resources.emitBlobData`): read the image file relative to `base_dir` and
     /// embed it as `[mime_len:u8][mime][file bytes]` in the data section. Recorded
@@ -1476,7 +2062,7 @@ pub const Emitter = struct {
     /// it used to be an UNLOCATED headline, which `--json` drops from the array.
     fn emitBlobData(self: *Emitter, r: *const Reader, form: NodeIndex, name: []const u8, url: []const u8, mime: []const u8) Error!void {
         std.debug.assert(name.len > 0);
-        const file_data = self.readDataFile(url) catch |e| return self.unreadableFile(r, form, url, e);
+        const file_data = self.readFile(url, MAX_DATA_FILE_BYTES) catch |e| return self.unreadableFile(r, form, url, MAX_DATA_FILE_BYTES, e);
         defer self.gpa.free(file_data);
 
         var bytes: std.ArrayList(u8) = .empty;
@@ -1499,13 +2085,37 @@ pub const Emitter = struct {
         const data_name = try self.requiredSymbol(r, form, "data");
         const blob_data_id = self.tables.data.get(data_name) orelse return self.unresolvedRef(r, form, "the (data …) blob", data_name);
 
-        const bitmap_id = try self.tables.image_bitmaps.intern(self.gpa, name);
+        const bitmap_id = try self.reserveId(r, form, .image_bitmaps, name);
         self.builder.getEmitter().createImageBitmap(self.gpa, bitmap_id, blob_data_id) catch return error.OutOfMemory;
     }
 
     fn emitShaderModule(self: *Emitter, r: *const Reader, form: NodeIndex) Error!void {
         const name = try self.requiredSymbol(r, form, "name");
-        const code = try self.requiredString(r, form, "code");
+        // The ROOT's own text: `:code` inline, or a `:file` read through the
+        // resolver. The schema's exclusive-group guarantees exactly one.
+        var own_owned: ?[]u8 = null;
+        defer if (own_owned) |b| self.gpa.free(b);
+        var root_origin: fragments.Origin = .{ .inline_code = name };
+        const own_text: []const u8 = if (r.string(form, "code")) |c| c else blk: {
+            const path = try self.requiredString(r, form, "file");
+            const bytes = self.readFile(path, MAX_WGSL_FILE_BYTES) catch |e| {
+                const node = r.authorNode(form, "file") orelse form;
+                return self.unreadableFile(r, node, path, MAX_WGSL_FILE_BYTES, e);
+            };
+            own_owned = bytes;
+            root_origin = .{ .file = path };
+            break :blk bytes;
+        };
+
+        // ASSEMBLY. The imports' text in dependency order, then the root's —
+        // and that whole text is what everything below sees. A root with no
+        // imports takes the fast path and IS its own text, which is why every
+        // pre-existing golden is byte-identical.
+        const imports = try self.symbolList(r, form, "imports");
+        var assembled = try self.assembleRoot(r, form, name, root_origin, own_text, imports);
+        defer assembled.deinit(self.gpa);
+        const code = assembled.text;
+
         // Inline math constants (PI/TAU/E) so the WGSL matches the legacy path.
         const subst = values.substituteMathConstants(self.gpa, code) catch return error.OutOfMemory;
         defer if (subst) |s| self.gpa.free(s);
@@ -1527,6 +2137,23 @@ pub const Emitter = struct {
         // point every error at 1:n of bytes the author never wrote. This call
         // used to sit below `createShaderModule`, which was harmless only while
         // the shipped bytes and the validated bytes were the same slice.
+        // R8: while this module is being validated, a wgslender `line:col` is a
+        // position in the ASSEMBLED text, and only the assembly knows which
+        // fragment wrote that line. Park it where `reportShaderError` can read
+        // it, and clear it after — a module with no imports leaves it null and
+        // every diagnostic is reported exactly as it was before fragments
+        // existed.
+        // `rows.len > 0` is "this text came from more than one place". A
+        // `:file` ROOT with no imports has one place, but it is not the
+        // document either: its line 7 is line 7 of the .wgsl, and the unmapped
+        // path reports that as a position in the .sjon — an editor squiggles
+        // line 7 of a document the author never wrote the code in, and the
+        // `--json` entry carries no `file` key to say otherwise. Map it too, so
+        // "where did this line come from" has the same answer with and without
+        // an `:imports` list (§438). An INLINE root with no imports still leaves
+        // it null, which is every pre-fragments document.
+        self.assembling = if (assembled.rows.len > 0 or root_origin.isFile()) &assembled else null;
+        defer self.assembling = null;
         const validated = if (self.validate_shaders) try self.validateShader(name, source) else false;
 
         // Minify (when asked) and reflect, in ONE wgslender parse. What this
@@ -1547,7 +2174,7 @@ pub const Emitter = struct {
         }
         const data_id = self.builder.addData(self.gpa, analysis.wgsl) catch return error.OutOfMemory;
         _ = self.builder.addWgsl(self.gpa, data_id.toInt(), &.{}) catch return error.OutOfMemory;
-        const shader_id = try self.tables.shaders.intern(self.gpa, name);
+        const shader_id = try self.reserveId(r, form, .shaders, name);
         self.builder.getEmitter().createShaderModule(self.gpa, shader_id, data_id.toInt()) catch return error.OutOfMemory;
 
         // Entry points come from the SAME reflection, so a valid module costs no
@@ -1783,6 +2410,13 @@ pub const Emitter = struct {
     fn reportShaderError(self: *Emitter, name: []const u8, diagnostics: []const reflect.wgslender_native.ValidationDiagnostic) bool {
         for (diagnostics) |d| {
             if (d.severity != .@"error") continue;
+            // R8: an assembled module's line belongs to one of its fragments or
+            // to the root. Report it against THAT form, at a line local to it,
+            // because the author never wrote the assembled text and a line
+            // number in it means nothing to them.
+            if (self.assembling) |a| {
+                if (self.reportAssembledError(a, name, d)) return true;
+            }
             // Surface the first error-severity diagnostic (correctly labeled)
             // rather than the generic "SJON validation failed": to stderr for the
             // CLI human and, when a sink is attached, into the editor's WGSL view
@@ -1807,6 +2441,71 @@ pub const Emitter = struct {
             return true;
         }
         return false;
+    }
+
+    /// R8's body: attribute one WGSL error on an assembled module to the form
+    /// that actually wrote the line.
+    ///
+    /// The `shader` tag names the ORIGIN — the fragment, or the root — because
+    /// that tag is what routes a squiggle to a region in the editor, and the
+    /// region the author has open is the fragment's own `:code`. The line and
+    /// column are local to that form's text for the same reason.
+    ///
+    /// A FILE origin has no document position at all, so the message carries
+    /// `path:line:col` and the located squiggle is dropped rather than pointed
+    /// somewhere wrong. (README D5: a `file` field in the JSON envelope is the
+    /// upgrade, when pstudio asks for one.)
+    ///
+    /// **A fragment's defect is reported once per compile, not once per root
+    /// that imports it.** `Diag` is a bounded push with no deduplication and
+    /// `reportShaderError` reports one error per module, so N roots over one
+    /// broken fragment would spend N of the sink's 64 entries saying the same
+    /// thing — and crowd out every other module's own errors. The `reported`
+    /// bit on the fragment is what stops that. It does NOT suppress a root's
+    /// own errors: only the fragment's row is marked.
+    ///
+    /// Returns true when it reported (and counted) the error.
+    fn reportAssembledError(
+        self: *Emitter,
+        a: *const fragments.Assembled,
+        name: []const u8,
+        d: reflect.wgslender_native.ValidationDiagnostic,
+    ) bool {
+        const at = a.locate(d.line);
+        const is_root = at.is_root;
+
+        if (!is_root) {
+            if (self.frags.find(at.name)) |f| {
+                if (f.reported) {
+                    // Already said once, about this same fragment. Count the
+                    // module as broken — it is — but do not repeat the message.
+                    self.shader_error_count += 1;
+                    return true;
+                }
+                f.reported = true;
+            }
+        }
+
+        const span_lines: u32 = if (d.end_line >= d.line) d.end_line - d.line else 0;
+        if (at.origin.isFile()) {
+            self.diagnose(
+                .wgsl,
+                null, // no document position for text that lives in a file
+                at.name,
+                "WGSL error in '{s}' at {d}:{d} (assembled into shader module '{s}'): {s}",
+                .{ at.origin.name(), at.line, d.column, name, d.message },
+            );
+        } else {
+            self.diagnose(
+                .wgsl,
+                .{ .line = at.line, .col = d.column, .end_line = at.line + span_lines, .end_col = d.end_column },
+                at.name,
+                "WGSL error in {s} '{s}' at {d}:{d} (assembled into shader module '{s}'): {s}",
+                .{ if (is_root) "shader module" else "fragment", at.name, at.line, d.column, name, d.message },
+            );
+        }
+        self.shader_error_count += 1;
+        return true;
     }
 
     /// Report advisory findings for an otherwise-valid module: wgslender's
@@ -1844,12 +2543,148 @@ pub const Emitter = struct {
         d: reflect.wgslender_native.ValidationDiagnostic,
         comptime kind: []const u8,
     ) void {
+        // R8 for advisories, the same as `reportShaderError` does for errors.
+        // Without it a lint finding on an imported fragment is reported against
+        // the ROOT, at a line in text the author never wrote — and once per
+        // importing root, so a fragment imported into three modules said the
+        // same thing three times at the same meaningless line.
+        if (self.assembling) |a| {
+            if (self.warnAssembledDiagnostic(a, name, d, kind)) return;
+        }
         const loc: Diag.Located = .{ .line = d.line, .col = d.column, .end_line = d.end_line, .end_col = d.end_column };
         if (d.code.len > 0) {
             self.diagnoseWarn(.wgsl, loc, name, kind ++ " in shader module '{s}' at {d}:{d}: {s} ({s})", .{ name, d.line, d.column, d.message, d.code });
         } else {
             self.diagnoseWarn(.wgsl, loc, name, kind ++ " in shader module '{s}' at {d}:{d}: {s}", .{ name, d.line, d.column, d.message });
         }
+    }
+
+    /// `reportAssembledError`'s counterpart for an advisory: attribute it to the
+    /// form that wrote the line, and say it once.
+    ///
+    /// Three differences from the error path, all of them because an advisory is
+    /// not fatal and there are many per module rather than one:
+    ///
+    ///  - **The root's own findings are mapped too, and still reported.** The
+    ///    error path can return early on a root because it reports one error and
+    ///    stops; here a root's line still has to be corrected from the assembled
+    ///    text to the root's own, so `locate` runs for every finding and only the
+    ///    message shape differs.
+    ///  - **Dedup is per finding, not per fragment.** `Fragment.reported` is one
+    ///    bit and is the ERROR path's; reusing it would let a lint finding
+    ///    silence a later error on the same fragment, and would hide a
+    ///    fragment's second distinct advisory.
+    ///  - **Nothing is counted.** No `shader_error_count`, by construction.
+    ///
+    /// Returns true when it handled the diagnostic (reported it, or suppressed a
+    /// repeat), false to fall through to the unmapped path.
+    fn warnAssembledDiagnostic(
+        self: *Emitter,
+        a: *const fragments.Assembled,
+        name: []const u8,
+        d: reflect.wgslender_native.ValidationDiagnostic,
+        comptime kind: []const u8,
+    ) bool {
+        const at = a.locate(d.line);
+        const is_root = at.is_root;
+
+        // A root's own finding belongs to this module alone, so it is never
+        // deduplicated — two modules reporting the same rule at the same local
+        // line are two separate findings about two separate roots.
+        if (!is_root and self.advisorySeen(at.origin.name(), at.line, d.column, d.code)) return true;
+        if (!is_root and (std.mem.eql(u8, d.code, UNUSED_DECLARATION) or
+            std.mem.eql(u8, d.code, UNREACHED_DECLARATION)))
+        {
+            // A library declaration this module does not reach is not a finding
+            // ABOUT this module. The author did not write it, cannot fix it by
+            // editing their own text, and importing a library to use part of it
+            // is the normal case, not a mistake: a fragment that declares a
+            // struct, a helper and a constant is used partially by design.
+            //
+            // No file is named here on purpose. The example this comment used to
+            // give was split into two files the week it was written (§402), and
+            // a rule does not depend on which library happens to be coarse.
+            //
+            // Both reachability codes, because they are one rule cut in two by
+            // the library's own shape: a helper the document never reaches is
+            // `W0001` if no other unreached declaration names it and `W0002` if
+            // one does. Suppressing only the first left the tail of every dead
+            // chain reported — 22 of the corpus's 27 `W0002` findings had a
+            // fragment origin, all of them the same non-finding.
+            //
+            // Narrow on purpose. Only these two rules, and only for a NON-root
+            // origin: an unreached declaration in the root's own text is the
+            // author's, and every other rule (shadowing, magic numbers, a
+            // binding nothing reaches) is a real finding wherever the text came
+            // from. `W0002` in particular stays reported on a `(pass …)`, whose
+            // prelude is root text: pitfall 103 rests on it.
+            //
+            // This is what the origin mapping bought. Before it there was no way
+            // to tell whose declaration it was — the finding arrived tagged with
+            // the root, at a line in assembled text.
+            if (self.diag) |dg| dg.suppressed += 1;
+            return true;
+        }
+
+        const span_lines: u32 = if (d.end_line >= d.line) d.end_line - d.line else 0;
+        // The rule code as a ready-to-print suffix. A format string must be
+        // comptime, and whether there IS a code is not, so the branch lives here
+        // rather than in three pairs of near-identical literals. An unformattable
+        // code degrades to no suffix; it never costs the finding.
+        var code_buf: [32]u8 = undefined;
+        const code_str: []const u8 = if (d.code.len > 0)
+            std.fmt.bufPrint(&code_buf, " ({s})", .{d.code}) catch ""
+        else
+            "";
+
+        if (at.origin.isFile()) {
+            // The position is real, it is just real in ANOTHER file — so it
+            // travels with the path that makes it meaningful (`Located.file`,
+            // README D5) rather than being dropped.
+            //
+            // The error path drops it, and is right to: a refusal surfaces
+            // through the headline either way. An advisory has no headline, so
+            // dropping it means a `--strict` run can exit 1 while `--json`
+            // reports an empty `diagnostics` array — "no warnings visible" and
+            // "the run failed on warnings" at the same time.
+            self.diagnoseWarn(
+                .wgsl,
+                .{ .line = at.line, .col = d.column, .end_line = at.line + span_lines, .end_col = d.end_column, .file = at.origin.name() },
+                at.name,
+                kind ++ " in '{s}' at {d}:{d} (assembled into shader module '{s}'): {s}{s}",
+                .{ at.origin.name(), at.line, d.column, name, d.message, code_str },
+            );
+        } else if (is_root) {
+            self.diagnoseWarn(
+                .wgsl,
+                .{ .line = at.line, .col = d.column, .end_line = at.line + span_lines, .end_col = d.end_column },
+                at.name,
+                kind ++ " in shader module '{s}' at {d}:{d}: {s}{s}",
+                .{ at.name, at.line, d.column, d.message, code_str },
+            );
+        } else {
+            self.diagnoseWarn(
+                .wgsl,
+                .{ .line = at.line, .col = d.column, .end_line = at.line + span_lines, .end_col = d.end_column },
+                at.name,
+                kind ++ " in fragment '{s}' at {d}:{d} (assembled into shader module '{s}'): {s}{s}",
+                .{ at.name, at.line, d.column, name, d.message, code_str },
+            );
+        }
+        return true;
+    }
+
+    /// Remember one advisory position, and answer whether it was already there.
+    /// Linear over a bounded array: the set is capped at `MAX_ADVISORY_KEYS` and
+    /// a compile that fills it has already overrun `Diag`'s own cap.
+    fn advisorySeen(self: *Emitter, origin: []const u8, line: u32, col: u32, code: []const u8) bool {
+        const key = AdvisoryKey.init(origin, line, col, code);
+        std.debug.assert(self.advisory_count <= MAX_ADVISORY_KEYS);
+        for (self.advisories[0..self.advisory_count]) |k| if (k.eql(key)) return true;
+        if (self.advisory_count == MAX_ADVISORY_KEYS) return false; // stop deduping, never start lying
+        self.advisories[self.advisory_count] = key;
+        self.advisory_count += 1;
+        return false;
     }
 
     /// Record a valid module's reflected entry points so the pipeline phases can
@@ -1889,16 +2724,37 @@ pub const Emitter = struct {
         if (self.user_source.len == 0) return null; // golden/parity: source not threaded
         if (r.tree != self.src.tree) return null; // lowered/synthetic tree → no user span
         const span = r.tree.spanOf(node);
-        const lc = Diag.lineColOf(self.user_source, span.start);
+        // 05: when the document was composed from imports, `user_source` is the
+        // COMPOSITION, so a raw line count would report the line the form ended
+        // up on rather than the line its author wrote it on. `localise` maps the
+        // offset back into the file it came from; the file is named on the
+        // diagnostic exactly as §400 names a fragment's.
+        const text, const base, const file = self.localiseSpan(span.start);
+        const lc = Diag.lineColOf(text, span.start - base);
         var end_line: u32 = 0;
         var end_col: u32 = 0;
-        if (span.end > span.start) {
-            const lce = Diag.lineColOf(self.user_source, span.end);
+        if (span.end > span.start and span.end - base <= text.len) {
+            const lce = Diag.lineColOf(text, span.end - base);
             end_line = lce.line;
             end_col = lce.col;
         }
         std.debug.assert(lc.line >= 1 and lc.col >= 1);
-        return .{ .line = lc.line, .col = lc.col, .end_line = end_line, .end_col = end_col };
+        return .{ .line = lc.line, .col = lc.col, .end_line = end_line, .end_col = end_col, .file = file };
+    }
+
+    /// The text a composed-source offset should be counted against, the offset
+    /// that text starts at, and the file to name (empty for the author's own
+    /// document, which needs no file to explain it).
+    ///
+    /// Returns the whole source unshifted when nothing was composed, which is
+    /// every document that does not import.
+    fn localiseSpan(self: *const Emitter, offset: u32) struct { []const u8, u32, []const u8 } {
+        const c = self.composed orelse return .{ self.user_source, 0, "" };
+        for (c.regions) |reg| {
+            if (offset < reg.start or offset >= reg.end) continue;
+            return .{ c.source[reg.start..reg.end], reg.start, reg.path };
+        }
+        return .{ self.user_source, 0, "" };
     }
 
     /// Read an OPTIONAL numeric slot: the value, or null when the key is absent
@@ -1973,6 +2829,9 @@ pub const Emitter = struct {
     fn checkBound(self: *Emitter, r: *const Reader, node: NodeIndex, key: ?[]const u8, v: u32, bound: Bound) Error!void {
         std.debug.assert(bound.why.len > 0);
         if (v >= bound.min and v <= bound.max) return;
+        // A message fallback, deliberately: a key too long to name degrades the
+        // wording to "the value" and the span still points at it. Same class as
+        // `mock_gpu.describe`; the opposite of `cli/js_emit.zig` (§440).
         var what_buf: [64]u8 = undefined;
         const what: []const u8 = if (key) |k| (std.fmt.bufPrint(&what_buf, "`:{s}`", .{k}) catch "the value") else "the value";
         self.diagnose(.sjon, self.locate(r, node), "", "{s} evaluates to {d}, outside this slot's range {d}..{d} — {s}", .{ what, v, bound.min, bound.max, bound.why });
@@ -2126,11 +2985,29 @@ pub const Emitter = struct {
     }
 
     /// The refusal for a referenced FILE the compiler could not read (05 §6). The
-    /// path is the author's, so the message names it; the causes are ordinary
-    /// (a typo, a moved asset, a `base_dir` that is not the document's directory,
-    /// or a host with no IO at all — the browser compiler).
-    fn unreadableFile(self: *Emitter, r: *const Reader, node: NodeIndex, path: []const u8, err: anyerror) Error {
-        self.diagnose(.sjon, self.locate(r, node), "", "cannot read '{s}': {s} — the path is resolved against the document's directory (the cwd for piped source)", .{ path, @errorName(err) });
+    /// path is the author's, so the message names it.
+    ///
+    /// Each `ReadError` is a different thing to tell an author, and printing
+    /// `@errorName` told them all the same thing — `error.FileReadError`
+    /// covered "you typoed the name", "you tried to climb out of your own
+    /// directory" and "this host has no filesystem at all". The resolver's
+    /// error set was made sentence-shaped for exactly this switch.
+    fn unreadableFile(self: *Emitter, r: *const Reader, node: NodeIndex, path: []const u8, limit: u32, err: file_resolver.ReadError) Error {
+        const loc = self.locate(r, node);
+        switch (err) {
+            error.NotFound => if (self.resolver != null) {
+                // An injected resolver is the browser's table: the file is not
+                // missing from a disk, it was never handed in.
+                self.diagnose(.sjon, loc, "", "cannot read '{s}': it is not in the file table given to the compiler — a host with no filesystem must supply every file the document names", .{path});
+            } else {
+                self.diagnose(.sjon, loc, "", "cannot read '{s}': no such file — the path is resolved against the document's directory (the cwd for piped source)", .{path});
+            },
+            error.InvalidPath => self.diagnose(.sjon, loc, "", "cannot read '{s}': the path must be relative and stay inside the document's directory — no leading '/', no drive letter, no '..' that climbs out", .{path}),
+            error.Symlink => self.diagnose(.sjon, loc, "", "cannot read '{s}': a directory or file on that path is a symbolic link — the path rules are text-only, so a link is refused rather than followed out of the document's directory", .{path}),
+            error.TooLarge => self.diagnose(.sjon, loc, "", "cannot read '{s}': the file reaches the {d} byte limit for a referenced file", .{ path, limit }),
+            error.ReadFailed => self.diagnose(.sjon, loc, "", "cannot read '{s}': the host would not hand the bytes over — a permission bit, a directory named as a file, or a host with no IO at all (the browser compiler without a file table)", .{path}),
+            error.OutOfMemory => return error.OutOfMemory,
+        }
         return error.EmitError;
     }
 
@@ -2611,7 +3488,7 @@ pub const Emitter = struct {
             try self.checkWriteLength(r, form, name, written, "its :data source");
         }
 
-        const reserved = try self.reservePool(r, form, &self.tables.buffers, name);
+        const reserved = try self.reservePool(r, form, .buffers, name);
         const base = reserved.base;
         const pool_size = reserved.size;
         // Record {size, usage} at the BASE id so the R1 checks can join it from a
@@ -2741,15 +3618,43 @@ pub const Emitter = struct {
         }
     }
 
-    /// Emit a `(pass … :file …)` storage buffer filled from a WASM file (port of legacy
-    /// `pass_sugar.loadDataWasm`): parse `l`/`s`/`gen`, embed the WASM bytes in the
-    /// data section, create the buffer (size from the `l` export), then init the
-    /// module + optionally call `gen()` + copy its memory into the buffer at
-    /// runtime. The write reads from `module_id` (legacy reuses it as the call id;
-    /// preserved for call-log parity). IO unavailable → emit error.
+    /// Emit a `(pass … :file …)` / `(buffer … :file …)` storage buffer filled from a
+    /// WASM file: parse `l`/`s`/`gen`, create the buffer (size from the `l` export),
+    /// and fill it one of two ways.
+    ///
+    /// **No `gen` export — the common case, and it is a COMPILE-time constant.**
+    /// The module has no function to call, so its linear memory holds exactly what
+    /// its data segments put there, and the compiler has already read the file.
+    /// It reads the bytes out (`wasm_data.readDataBytes`) and emits an ordinary
+    /// `write_buffer` from the data section — the same opcode every static buffer
+    /// uses, which every backend already implements.
+    ///
+    /// It did not always. Until §435 this path emitted `init_wasm_module` +
+    /// `write_buffer_from_wasm` here too, and that pair is where the key died:
+    ///
+    ///   - `write_buffer_from_wasm`'s first operand is a CALL id, and this path
+    ///     passed a MODULE id. The browser runtime looks the call up
+    ///     (`ops.wcr[callId]`), finds nothing, and writes nothing — measured in
+    ///     Chrome: `test_data_pass` rendered black, its own comment claiming
+    ///     orange. With `gen` it worked only because both id tables start at 0.
+    ///   - Native and headless stub both opcodes, so the fixture was `stub` in
+    ///     `coverage.txt` and no render gate could hold it.
+    ///   - `js_codegen.zig` read the same operands a THIRD way (offset as the
+    ///     source, destination 0), which is the reading this path meant.
+    ///
+    /// One opcode carrying two operand meanings depending on which path emitted
+    /// it is the defect; the fix is for this path not to need it. CLAUDE.md's
+    /// Component Responsibilities table already says so — a generator runs in the
+    /// compiler when it can.
+    ///
+    /// **With `gen`** the bytes are whatever the function computes, so the old
+    /// emission stands: embed the binary, init the module, call `gen()`, copy its
+    /// memory. That genuinely needs a runtime, and it is still browser-only.
+    ///
+    /// IO unavailable → emit error.
     fn emitWasmDataBuffer(self: *Emitter, r: *const Reader, form: NodeIndex, name: []const u8, wasm_path: []const u8, usage: BufferUsage) Error!void {
         std.debug.assert(name.len > 0);
-        const wasm_bytes = self.readDataFile(wasm_path) catch |e| return self.unreadableFile(r, form, wasm_path, e);
+        const wasm_bytes = self.readFile(wasm_path, MAX_DATA_FILE_BYTES) catch |e| return self.unreadableFile(r, form, wasm_path, MAX_DATA_FILE_BYTES, e);
         defer self.gpa.free(wasm_bytes);
         const info = wasm_data.parseWasmDataInfo(wasm_bytes) orelse {
             self.diagnose(.sjon, self.locate(r, form), "", "'{s}' is not a data WASM the compiler can read — it needs an exported `l` (byte length) and a data segment, and may export `gen`", .{wasm_path});
@@ -2757,22 +3662,71 @@ pub const Emitter = struct {
         };
         try self.checkWriteLength(r, form, name, info.byte_length, "its :file WASM `l` export");
 
-        const wasm_data_id = self.builder.addData(self.gpa, wasm_bytes) catch return error.OutOfMemory;
-
-        const buffer_id = try self.tables.buffers.intern(self.gpa, name);
+        const buffer_id = try self.reserveId(r, form, .buffers, name);
         try self.binds.buffer_meta.put(self.gpa, buffer_id, .{ .size = info.byte_length, .usage = usage });
         const em = self.builder.getEmitter();
         em.createBuffer(self.gpa, buffer_id, info.byte_length, usage) catch return error.OutOfMemory;
 
+        if (!info.has_gen) {
+            // Static image: read the segments here, ship the bytes, not the binary.
+            //
+            // `l` is any non-negative i32 the FILE declares, and this branch is
+            // the one that materialises that many bytes IN THE COMPILER. A
+            // 65-byte `.wasm` declaring `l` = 2 GiB took 6.4 GB of RSS and then
+            // died writing the payload, all from an input smaller than this
+            // comment (§437). The budget is the shape generators' — it asks the
+            // same question, how many bytes a compile may produce for the
+            // payload. The `gen` shape below is NOT bounded by it: those bytes
+            // are computed at runtime into a GPU buffer, so a large one is an
+            // ordinary request rather than a compile-time allocation.
+            if (info.byte_length > MAX_GENERATED_BYTES) {
+                self.diagnose(.sjon, self.locate(r, form), "", "'{s}' declares `l` = {d} bytes, past the {d} MiB a compile may materialise — a data WASM with no `gen` export is read at COMPILE time and its bytes ship in the payload; export `gen` to compute them at runtime instead", .{ wasm_path, info.byte_length, MAX_GENERATED_BYTES / (1024 * 1024) });
+                return error.EmitError;
+            }
+            const bytes = self.gpa.alloc(u8, info.byte_length) catch return error.OutOfMemory;
+            defer self.gpa.free(bytes);
+            @memset(bytes, 0); // memory no segment covers reads as zero
+            if (!wasm_data.readDataBytes(wasm_bytes, info.start_offset, bytes)) {
+                self.diagnose(.sjon, self.locate(r, form), "", "'{s}' declares `l` = {d} bytes at `s` = {d} but its data section cannot be read — a data WASM with no `gen` export is read at compile time, so its segments must be active and well-formed", .{ wasm_path, info.byte_length, info.start_offset });
+                return error.EmitError;
+            }
+            const data_id = self.builder.addData(self.gpa, bytes) catch return error.OutOfMemory;
+            em.writeBuffer(self.gpa, buffer_id, 0, data_id.toInt()) catch return error.OutOfMemory;
+            return;
+        }
+
+        // `gen` computes the bytes, so the runtime needs the module itself — and
+        // it reads them back out of `exports.memory`, falling back to the
+        // `env.memory` it handed in. A memory exported under any OTHER name
+        // (`m`, the spelling `test_data.wat` uses) is found by neither, so the
+        // module runs and the buffer stays zero: a black canvas with no
+        // diagnostic anywhere. Exporting no memory at all is fine — that module
+        // is writing into the imported one.
+        if (info.exports_memory and !info.memory_named_memory) {
+            self.diagnose(.sjon, self.locate(r, form), "", "'{s}' exports `gen` but exports its memory under another name — the runtime reads a generated buffer from `exports.memory` (or the `env.memory` import), so name it `memory` or import one", .{wasm_path});
+            return error.EmitError;
+        }
+        const wasm_data_id = self.builder.addData(self.gpa, wasm_bytes) catch return error.OutOfMemory;
         const module_id = try self.tables.wasm_modules.allocAnonymous();
         em.initWasmModule(self.gpa, module_id, wasm_data_id.toInt()) catch return error.OutOfMemory;
-
-        if (info.has_gen) {
-            const gen_name_id = self.builder.internString(self.gpa, "gen") catch return error.OutOfMemory;
-            const gen_call_id = try self.tables.wasm_calls.allocAnonymous();
-            em.callWasmFunc(self.gpa, gen_call_id, module_id, gen_name_id.toInt(), &.{0}) catch return error.OutOfMemory;
-        }
-        em.writeBufferFromWasm(self.gpa, module_id, buffer_id, info.start_offset, info.byte_length) catch return error.OutOfMemory;
+        const gen_name_id = self.builder.internString(self.gpa, "gen") catch return error.OutOfMemory;
+        const gen_call_id = try self.tables.wasm_calls.allocAnonymous();
+        em.callWasmFunc(self.gpa, gen_call_id, module_id, gen_name_id.toInt(), &.{0}) catch return error.OutOfMemory;
+        // The call id, not the module id: `write_buffer_from_wasm` reads the
+        // CALL's result as its source pointer, which is what the browser runtime
+        // has always done and what the old module-id spelling only satisfied by
+        // both tables starting at 0.
+        // Offset 0, not `s`. The two offsets in play address different memories
+        // and `write_buffer_from_wasm` only carries one: `s` says where the bytes
+        // sit in the MODULE (which is why the no-`gen` path reads its segments
+        // from there), while this operand is the destination in the GPU buffer —
+        // `buffer_off` in the frozen wire (docs/abi.md §6.3), forwarded straight
+        // to `queue.writeBuffer`. The buffer is created with size `l` and gets
+        // `l` bytes, so the destination can only be 0; `s` there wrote past the
+        // end of a buffer with no room for it, invisible while every fixture had
+        // `s` = 0. The runtime's source is `gen`'s RETURN value, which is how a
+        // generated module says the same thing `s` says for a stored one.
+        em.writeBufferFromWasm(self.gpa, gen_call_id, buffer_id, 0, info.byte_length) catch return error.OutOfMemory;
     }
 
     /// Emit `init_wasm_module` for a `(wasm-call …)` declaration, deduped by `:file` path
@@ -2782,7 +3736,7 @@ pub const Emitter = struct {
     /// is the first create-call in the log.
     fn emitWasmCallModule(self: *Emitter, r: *const Reader, form: NodeIndex) Error!void {
         const name = try self.requiredSymbol(r, form, "name");
-        _ = try self.tables.wasm_calls.intern(self.gpa, name);
+        _ = try self.reserveId(r, form, .wasm_calls, name);
         try self.tables.wasm_call_forms.put(self.gpa, name, form);
 
         // Check `:args` HERE, at the declaration, not only where the call is
@@ -2801,8 +3755,8 @@ pub const Emitter = struct {
             return;
         }
         // Registered under the file path, which is what the dedup above looks up.
-        const module_id = try self.tables.wasm_modules.intern(self.gpa, url);
-        const wasm_bytes = self.readDataFile(url) catch |e| return self.unreadableFile(r, form, url, e);
+        const module_id = try self.reserveId(r, form, .wasm_modules, url);
+        const wasm_bytes = self.readFile(url, MAX_DATA_FILE_BYTES) catch |e| return self.unreadableFile(r, form, url, MAX_DATA_FILE_BYTES, e);
         defer self.gpa.free(wasm_bytes);
         const data_id = self.builder.addData(self.gpa, wasm_bytes) catch return error.OutOfMemory;
         self.builder.getEmitter().initWasmModule(self.gpa, module_id, data_id.toInt()) catch return error.OutOfMemory;
@@ -2910,17 +3864,29 @@ pub const Emitter = struct {
         return buf[0..off];
     }
 
-    /// Read a WASM data file relative to `base_dir`. Freestanding-guarded — the
-    /// in-browser compiler has no filesystem (data files are resolved before
-    /// compile), so the IO path compiles out for wasm32.
-    fn readDataFile(self: *Emitter, rel_path: []const u8) ![]u8 {
-        if (comptime @import("builtin").os.tag == .freestanding) return error.FileReadError;
+    /// Read a file a `:file` key named, through the resolver.
+    ///
+    /// THE read. There is no other: the path rules (relative only, never
+    /// climbing out of the document's directory) live in
+    /// `FileResolver.read`, so they apply whether the bytes come from disk or
+    /// from a table the browser handed in, and a future third source gets them
+    /// for free.
+    ///
+    /// The `FilesystemResolver` is built here, per call, rather than stored on
+    /// the Emitter: a `FileResolver` holds a pointer to its implementation, and
+    /// an Emitter is returned BY VALUE from `init` (`Compiler.initEmitter` does
+    /// exactly that), which would leave a stored one pointing at the moved-from
+    /// copy. A local outlives the call and cannot be stale.
+    ///
+    /// Complexity: O(path.len) + the resolver's.
+    fn readFile(self: *Emitter, rel_path: []const u8, limit: u32) file_resolver.ReadError![]u8 {
         std.debug.assert(rel_path.len > 0);
-        const base = self.base_dir orelse return error.FileReadError;
-        const io = self.io orelse return error.FileReadError;
-        var path_buf: [512]u8 = undefined;
-        const full = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ base, rel_path });
-        return std.Io.Dir.cwd().readFileAlloc(io, full, self.gpa, .limited(8 * 1024 * 1024));
+        std.debug.assert(limit > 0);
+        if (self.resolver) |r| return r.read(self.gpa, rel_path, limit);
+        const base = self.base_dir orelse return error.ReadFailed;
+        const io = self.io orelse return error.ReadFailed;
+        var fs = file_resolver.FilesystemResolver{ .base_dir = base, .io = io };
+        return fs.resolver().read(self.gpa, rel_path, limit);
     }
 
     /// Read shape vertex formats from a shape sub-form's `:format` list, defaulting
@@ -3050,13 +4016,20 @@ pub const Emitter = struct {
                 self.diagnose(.sjon, self.locate(r, form), "", "internal: texture '{s}' has no :size after validation — :size is required", .{name});
                 return error.ValidationError;
             };
-            if (std.mem.eql(u8, size_name, "canvas")) break :size_blk .canvas;
+            if (std.mem.eql(u8, size_name, "canvas")) break :size_blk .{ .canvas = .{ .scale = try self.canvasScale(r, form, name) } };
             // The bitmap id is embedded in the descriptor (created in the image-bitmap
             // phase, which runs before textures), so the raw descriptor compare ties
             // the two paths only when bitmap ids match (single bitmap → 0 == 0).
             const ib_id = self.tables.image_bitmaps.get(size_name) orelse return self.unresolvedRef(r, form, "image-bitmap", size_name);
             break :size_blk .{ .image_bitmap = ib_id };
         };
+        // `:scale` is a canvas-tracking concept: an explicit extent already IS
+        // the size the author wants, and an `(image-bitmap …)` is the image's.
+        // Refused on either rather than encoded and ignored (the §409 class).
+        if (size != .canvas and r.authorNode(form, "scale") != null) {
+            self.diagnose(.sjon, self.locate(r, r.authorNode(form, "scale").?), "", "texture '{s}' sets :scale without `:size canvas` — the key is a FRACTION of the canvas, and this texture's size is already fixed by its own :size", .{name});
+            return error.ValidationError;
+        }
         try self.checkTextureShape(r, form, name, .{
             .sample_count = sample_count,
             .mip_level_count = mip_level_count,
@@ -3077,7 +4050,7 @@ pub const Emitter = struct {
         defer self.gpa.free(desc);
         const desc_id = self.builder.addData(self.gpa, desc) catch return error.OutOfMemory;
 
-        const reserved = try self.reservePool(r, form, &self.tables.textures, name);
+        const reserved = try self.reservePool(r, form, .textures, name);
         const base = reserved.base;
         const pool_size = reserved.size;
         // Record {format, loc} at the BASE id so the R4 texture sample-class check
@@ -3107,6 +4080,27 @@ pub const Emitter = struct {
         dimension: u8,
         usage: values.TextureUsage,
     };
+
+    /// Read `(texture :size canvas :scale …)` — the fraction of the canvas the
+    /// texture takes in each dimension, 1.0 when absent.
+    ///
+    /// The schema bounds it to (0, 8]; this re-reads the low end because the
+    /// value may be an EXPRESSION, and an expression's result is not something
+    /// the validator's numeric bounds ever saw. A texture with no texels is
+    /// invalid GPU in every direction, and the runtime's clamp to one texel
+    /// would turn the mistake into a 1×1 render target nobody asked for.
+    fn canvasScale(self: *Emitter, r: *const Reader, form: NodeIndex, name: []const u8) Error!f32 {
+        const v = (try self.optF64(r, form, "scale")) orelse return 1.0;
+        // Range-check the NARROWED value, not the f64. The wire field is an
+        // f32, and `1e-308` is a positive double that becomes exactly 0.0 as an
+        // f32 — it passed a check written against `v` and reached the encoder's
+        // `assert(scale > 0)` as a zero-texel texture. Found by the mutation
+        // sweep, which is where a denormal comes from.
+        const f: f32 = @floatCast(v);
+        if (f > 0.0 and f <= 8.0) return f;
+        self.diagnose(.sjon, self.locate(r, r.authorNode(form, "scale") orelse form), "", "texture '{s}' sets :scale {e} — a canvas fraction is greater than 0 and at most 8, as an f32 (the wire carries it as one, so a value that narrows to zero is refused here)", .{ name, v });
+        return error.ValidationError;
+    }
 
     /// C16 (05 §5) — what a texture's own descriptor has to agree with. Every rule
     /// here is one line of WebGPU's "validating GPUTextureDescriptor", and every
@@ -3187,7 +4181,7 @@ pub const Emitter = struct {
         defer self.gpa.free(desc);
         const desc_id = self.builder.addData(self.gpa, desc) catch return error.OutOfMemory;
 
-        const view_id = try self.tables.texture_views.intern(self.gpa, name);
+        const view_id = try self.reserveId(r, form, .texture_views, name);
         self.builder.getEmitter().createTextureView(self.gpa, view_id, texture_id, desc_id.toInt()) catch return error.OutOfMemory;
     }
 
@@ -3221,7 +4215,7 @@ pub const Emitter = struct {
         defer self.gpa.free(desc);
         const desc_id = self.builder.addData(self.gpa, desc) catch return error.OutOfMemory;
 
-        const sampler_id = try self.tables.samplers.intern(self.gpa, name);
+        const sampler_id = try self.reserveId(r, form, .samplers, name);
         // Record {comparison, loc} so the R4 sampler check can join it from a
         // reflected binding's (group, binding) → sampler id. A `:compare` function
         // makes this a comparison sampler (the WGSL `sampler_comparison` shape).
@@ -3283,34 +4277,45 @@ pub const Emitter = struct {
         try json.append(self.gpa, '}');
 
         const data_id = self.builder.addData(self.gpa, json.items) catch return error.OutOfMemory;
-        const pid = try self.tables.pipelines.intern(self.gpa, name);
+        const pid = try self.reserveId(r, form, .pipelines, name);
         self.builder.getEmitter().createRenderPipeline(self.gpa, pid, data_id.toInt()) catch return error.OutOfMemory;
+        try self.recordLayoutMode(r, form, pid);
         // Per-pipeline uniform join: record (module → pid) for each stage.
-        try self.recordStageModule(r, vtx, pid);
-        if (r.child(form, "fragment")) |frag| try self.recordStageModule(r, frag, pid);
+        try self.recordStageModule(r, vtx, pid, .vertex);
+        if (r.child(form, "fragment")) |frag| try self.recordStageModule(r, frag, pid, .fragment);
         // R5a: record this pipeline's attachment state for the render-pass join
         // (no-op with validation off — the golden/parity path never reads it).
         try self.recordRenderPipelineMeta(r, form, pid);
     }
 
-    /// Record a render stage's (module → pipeline) instantiation row, the module
-    /// name read the `stageShader` way. A stage with no resolvable module
+    /// Record a render stage's (module, entry → pipeline) instantiation row, the
+    /// module name read the `stageShader` way. A stage with no resolvable module
     /// records nothing (the emitter's own resolution already errored or defaulted).
-    fn recordStageModule(self: *Emitter, r: *const Reader, section: NodeIndex, pid: u16) Error!void {
+    ///
+    /// The entry is resolved the same way every other per-stage check resolves
+    /// it, and a failure here is SWALLOWED: `checkStageEntry` ran a few lines
+    /// above in `emitRenderPipeline` and already reported anything wrong, so a
+    /// second diagnostic would be a duplicate. An unresolved entry records the
+    /// empty string, which the reach join reads as "every entry of the module" —
+    /// the behaviour that predates this row carrying an entry at all.
+    fn recordStageModule(self: *Emitter, r: *const Reader, section: NodeIndex, pid: u16, stage: reflect.EntryPoint.Stage) Error!void {
         const mname = r.symbol(section, "module") orelse return;
-        try self.recordModulePipeline(mname, pid);
+        const entry = self.resolveStageEntry(r, section, stage) catch "";
+        try self.recordModulePipeline(mname, entry, pid);
     }
 
-    /// Append one (module → pipeline) row, skipping an exact duplicate (a
-    /// pipeline whose vertex and fragment stages share one module). Bounded
-    /// linear scan — documents hold a handful of pipelines × stages.
-    fn recordModulePipeline(self: *Emitter, module: []const u8, pid: u16) Error!void {
+    /// Append one (module, entry → pipeline) row, skipping an exact duplicate.
+    /// A pipeline whose vertex and fragment stages share one module now records
+    /// TWO rows (one per entry), which it must: the two stages reach different
+    /// bindings, and collapsing them is the per-module reasoning §392 is about.
+    /// Bounded linear scan — documents hold a handful of pipelines × stages.
+    fn recordModulePipeline(self: *Emitter, module: []const u8, entry: []const u8, pid: u16) Error!void {
         std.debug.assert(module.len > 0);
         std.debug.assert(pid < self.tables.pipelines.next);
         for (self.binds.module_pipelines.items) |mp| {
-            if (mp.pipeline == pid and std.mem.eql(u8, mp.module, module)) return;
+            if (mp.pipeline == pid and std.mem.eql(u8, mp.module, module) and std.mem.eql(u8, mp.entry, entry)) return;
         }
-        try self.binds.module_pipelines.append(self.gpa, .{ .module = module, .pipeline = pid });
+        try self.binds.module_pipelines.append(self.gpa, .{ .module = module, .entry = entry, .pipeline = pid });
     }
 
     /// Record a render-pipeline's draw-time attachment state (color target formats,
@@ -3412,10 +4417,11 @@ pub const Emitter = struct {
         }
 
         const data_id = self.builder.addData(self.gpa, blob.items) catch return error.OutOfMemory;
-        const pid = try self.tables.pipelines.intern(self.gpa, name);
+        const pid = try self.reserveId(r, form, .pipelines, name);
         self.builder.getEmitter().createComputePipeline(self.gpa, pid, data_id.toInt()) catch return error.OutOfMemory;
-        // Per-pipeline uniform join: record (module → pid) for the compute stage.
-        try self.recordModulePipeline(module, pid);
+        try self.recordLayoutMode(r, form, pid);
+        // Per-pipeline uniform join: record (module, entry → pid) for the compute stage.
+        try self.recordModulePipeline(module, entry, pid);
     }
 
     /// Emit an explicit `(bind-group-layout :name … (entry …)…)` (uniform_access):
@@ -3444,7 +4450,7 @@ pub const Emitter = struct {
         try json.appendSlice(self.gpa, "]}");
 
         const data_id = self.builder.addData(self.gpa, json.items) catch return error.OutOfMemory;
-        const layout_id = try self.tables.bind_group_layouts.intern(self.gpa, name);
+        const layout_id = try self.reserveId(r, form, .bind_group_layouts, name);
         self.builder.getEmitter().createBindGroupLayout(self.gpa, layout_id, data_id.toInt()) catch return error.OutOfMemory;
     }
 
@@ -3499,7 +4505,7 @@ pub const Emitter = struct {
         try json.appendSlice(self.gpa, "]}");
 
         const data_id = self.builder.addData(self.gpa, json.items) catch return error.OutOfMemory;
-        const layout_id = try self.tables.pipeline_layouts.intern(self.gpa, name);
+        const layout_id = try self.reserveId(r, form, .pipeline_layouts, name);
         self.builder.getEmitter().createPipelineLayout(self.gpa, layout_id, data_id.toInt()) catch return error.OutOfMemory;
     }
 
@@ -3577,7 +4583,11 @@ pub const Emitter = struct {
         // TAGS its id (opcodes.BIND_GROUP_LAYOUT_TAG) — this is the only place
         // that still knows which space the author named. Untagged, the two
         // collide and every consumer downstream has to guess (journal §339).
-        const layout_name = try self.requiredSymbol(r, form, "layout");
+        //
+        // No `:layout` at all is the third arm: the annotation with the pipeline
+        // left open, which derives one instance per pipeline that binds it
+        // (docs/plans/polymorphism/README.md §4.2).
+        const layout_name = r.symbol(form, "layout") orelse return self.emitDerivedBindGroup(r, form, name);
         var scope_pid: ?u16 = null;
         const layout_id = if (self.tables.pipelines.get(layout_name)) |pid| blk: {
             std.debug.assert(!opcodes.layoutIdIsBindGroupLayout(pid)); // pipeline ids never carry the tag
@@ -3602,31 +4612,252 @@ pub const Emitter = struct {
         var be_it = r.childrenWithHead(form, "entry");
         while (be_it.next()) |c| try entry_nodes.append(self.gpa, c);
 
+        // `:prune-unused` — CONTRIBUTING pitfall 37, retired for whoever opts
+        // in. Drops the entries this pipeline's layout will not contain, BEFORE
+        // `harvestBindMetadata` sees them: a pruned entry must not become a
+        // scoped-binding row either, or the uniform-table join would describe a
+        // resource that is not in the descriptor.
+        if (r.boolean(form, "prune-unused") orelse false) {
+            if (!try self.pruneUnusedEntries(r, form, name, scope_pid, &entry_nodes)) return;
+        }
+
         // Harvest the (group, binding) → resource cross-validation side tables from
         // this group's entries — BEFORE emission, so populateUniformTable's R1/R4
         // joins (run at the end of run()) see them. Fires for source AND lowered
         // (`(pass …)`/`(init …)`) groups because it lives in this shared emit path.
         try self.harvestBindMetadata(r, entry_nodes.items, group_index, scope_pid);
 
-        const reserved = try self.reservePool(r, form, &self.tables.bind_groups, name);
-        const base = reserved.base;
-        const pool_size = reserved.size;
+        const reserved = try self.reservePool(r, form, .bind_groups, name);
+        try self.emitBindGroupInstances(r, form, name, entry_nodes.items, group_index, reserved.base, reserved.size, layout_id);
+    }
 
+    /// Emit `pool_size` `create_bind_group`s for one entry list against one
+    /// layout: instance `i` resolves each entry's `:ping-pong` for pool slot `i`
+    /// and the reused encoder produces the blob. Shared by the authored and the
+    /// derived paths, so the two cannot encode a descriptor differently.
+    fn emitBindGroupInstances(self: *Emitter, r: *const Reader, form: NodeIndex, name: []const u8, entry_nodes: []const NodeIndex, group_index: u8, base: u16, pool_size: u8, layout_id: u16) Error!void {
+        std.debug.assert(pool_size > 0); // pre: a pool of nothing is not a resource
+        std.debug.assert(@as(u32, base) + pool_size <= self.tables.bind_groups.next); // pre: ids reserved
+
+        // The descriptor encodes its entry count in ONE byte, which
+        // `encodeBindGroupDescriptor` states as an assert. That cap is the
+        // DOCUMENT's to reach: the schema bounds `:binding` to 255, which
+        // bounds the INDICES and not how many entries there are, so a group of
+        // 256 walked into the assert and panicked (and in ReleaseFast
+        // truncated the count byte instead). Refused here — the one path both
+        // the authored and the derived group emit through — where the group
+        // can still be named (pitfall 89, §437).
+        if (entry_nodes.len > 255) {
+            self.diagnose(.sjon, self.locate(r, form), "", "bind-group '{s}' has {d} (entry …) children, but the descriptor encodes its count in ONE byte — at most 255 fit", .{ name, entry_nodes.len });
+            return error.ValidationError;
+        }
         for (0..pool_size) |i| {
             const pool_idx: u8 = @intCast(i);
             const group_id = base + @as(u16, pool_idx);
 
-            // Build the entry list (resolving ping-pong per pool instance) and let
-            // the reused encoder produce the blob — byte-identical to the legacy path.
             var entries: std.ArrayList(DescriptorEncoder.BindGroupEntry) = .empty;
             defer entries.deinit(self.gpa);
-            for (entry_nodes.items) |e| try entries.append(self.gpa, try self.bindGroupEntry(r, e, pool_idx));
+            for (entry_nodes) |e| try entries.append(self.gpa, try self.bindGroupEntry(r, e, pool_idx));
 
             const blob = DescriptorEncoder.encodeBindGroupDescriptor(self.gpa, group_index, entries.items) catch return error.OutOfMemory;
             defer self.gpa.free(blob);
             const data_id = self.builder.addData(self.gpa, blob) catch return error.OutOfMemory;
             self.builder.getEmitter().createBindGroup(self.gpa, group_id, layout_id, data_id.toInt()) catch return error.OutOfMemory;
         }
+    }
+
+    /// A `(bind-group …)` with no `:layout`: one wire instance per pipeline that
+    /// binds it, each pruned to what that pipeline's entry points reach.
+    ///
+    /// `(bind-group :layout <pipeline>)` is an effect annotation keyed by a
+    /// pipeline, which is why N pipelines over one resource set cost N forms —
+    /// `colorBG` and `groundColorBG` in webgpu_shadow_mapping_fragments were
+    /// identical but for that key. `:prune-unused` already derives the ENTRIES
+    /// from the pipeline; leaving `:layout` out derives the instances too, from
+    /// the same reflection through the same join (`pipelineReachesSlot`), in
+    /// the emitter where L1 lives. Nothing runs later than compile time, and
+    /// the escape hatch is the key itself.
+    ///
+    /// Which pipelines bind the group comes from `group_binders`, read off the
+    /// pass and bundle forms before this phase. Instances are numbered in form
+    /// order then pipeline order (the walk over the id space IS the sort), so
+    /// the create sequence depends on the document and not on the passes'
+    /// order.
+    fn emitDerivedBindGroup(self: *Emitter, r: *const Reader, form: NodeIndex, name: []const u8) Error!void {
+        std.debug.assert(r.symbol(form, "layout") == null); // pre: the layout-less arm
+        std.debug.assert(name.len > 0);
+        // Refused, not accepted as a no-op (the §409 class): a layout-less
+        // group is pruned per pipeline by construction, so the key has nothing
+        // to add, and a key that reads as applied and did nothing is the
+        // failure it exists to prevent.
+        if (r.authorNode(form, "prune-unused")) |pn| {
+            self.diagnose(.sjon, self.locate(r, pn), "", "bind-group '{s}' sets :prune-unused but names no :layout — a group with no :layout is already pruned for each pipeline that binds it, so the key is redundant; drop it, or name a :layout", .{name});
+            return error.ValidationError;
+        }
+        try self.tables.derived_names.put(self.gpa, name, {});
+        const group_index: u8 = @intCast((try self.optBounded(r, form, "group", .byte)) orelse 0);
+        // The pool count is the form's, validated once; ids are reserved per
+        // instance, so `:pool N` is N ids for EACH pipeline.
+        const pool_size = try self.poolSizeOf(r, form, name);
+
+        var entry_nodes: std.ArrayList(NodeIndex) = .empty;
+        defer entry_nodes.deinit(self.gpa);
+        var be_it = r.childrenWithHead(form, "entry");
+        while (be_it.next()) |c| try entry_nodes.append(self.gpa, c);
+        // Per entry: did ANY binding pipeline reach it? An entry no pipeline
+        // reaches is dropped from every instance without a word, which is a
+        // typo's shape as much as a design's — the one advisory below.
+        const reached = try self.gpa.alloc(bool, entry_nodes.items.len);
+        defer self.gpa.free(reached);
+        @memset(reached, false);
+
+        var binders: u32 = 0;
+        for (0..self.tables.pipelines.next) |pid_usize| {
+            const pid: u16 = @intCast(pid_usize);
+            if (!self.groupBoundBy(name, pid)) continue;
+            binders += 1;
+            try self.emitDerivedInstance(r, form, name, group_index, entry_nodes.items, reached, pool_size, pid);
+        }
+        if (!self.validate_shaders) return;
+        if (binders == 0) {
+            self.diagnoseWarn(.sjon, self.locate(r, form), "", "bind-group '{s}' names no :layout and no pass or bundle binds it, so there is no pipeline to derive it for — it emits nothing", .{name});
+            return;
+        }
+        for (entry_nodes.items, reached) |e, hit| {
+            if (hit) continue;
+            const b: u8 = @intCast((try self.optBounded(r, e, "binding", .byte)) orelse 0);
+            self.diagnoseWarn(.sjon, self.locate(r, e), "", "bind-group '{s}': the entry at @group({d}) @binding({d}) is reached by no entry point of any pipeline that binds the group, so every derived instance drops it", .{ name, group_index, b });
+        }
+    }
+
+    /// One instance of a layout-less group for `pid`: prune to what the
+    /// pipeline reaches, then reserve ids and emit exactly what the authored
+    /// path emits for `:layout <pid>` over the kept entries.
+    fn emitDerivedInstance(
+        self: *Emitter,
+        r: *const Reader,
+        form: NodeIndex,
+        name: []const u8,
+        group_index: u8,
+        entries: []const NodeIndex,
+        reached: []bool,
+        pool_size: u8,
+        pid: u16,
+    ) Error!void {
+        std.debug.assert(pid < self.tables.pipelines.next);
+        std.debug.assert(entries.len == reached.len);
+        const pname = self.tables.pipelines.nameOf(pid) orelse "?";
+        // An explicit (pipeline-layout …) IS the layout: there is no reachable
+        // set to derive from, and pruning against reflection would drop entries
+        // its bind-group-layouts still demand. Refused, as `:prune-unused` is
+        // on the bgl arm; the escape hatch is `:layout <bind-group-layout>`.
+        if (self.binds.explicit_layout_pipelines.contains(pid)) {
+            self.diagnose(.sjon, self.locate(r, form), "", "bind-group '{s}' names no :layout, but pipeline '{s}' binds it through an explicit (pipeline-layout …) — there is no auto-derived layout to derive an instance from; name the (bind-group-layout …) as this group's :layout instead", .{ name, pname });
+            return error.ValidationError;
+        }
+        var kept: std.ArrayList(NodeIndex) = .empty;
+        defer kept.deinit(self.gpa);
+        for (entries, reached) |e, *hit| {
+            const b: u8 = @intCast((try self.optBounded(r, e, "binding", .byte)) orelse 0);
+            if (!self.pipelineReachesSlot(pid, group_index, b)) continue;
+            hit.* = true;
+            try kept.append(self.gpa, e);
+        }
+        if (kept.items.len == 0) {
+            // 04's third question, pinned here. A pipeline's default layout has an
+            // entry per group index up to the highest one its entry points reach.
+            // ABOVE that, `getBindGroupLayout(N)` is itself the error, so the
+            // instance is omitted: no wire group, and the pass sets nothing at
+            // the slot. AT or BELOW it, WebGPU requires an empty group to be set,
+            // which this emitter does not build (a zero-entry group aborts —
+            // probed, §392), so it is refused the way `:prune-unused` refuses it.
+            const top = self.highestGroupReached(pid);
+            if (top == null or group_index > top.?) {
+                try self.tables.derived_bind_groups.append(self.gpa, .{ .name = name, .pipeline = pid, .group = group_index, .base = 0, .size = pool_size, .omitted = true });
+                return;
+            }
+            self.diagnose(.sjon, self.locate(r, form), "", "bind-group '{s}' derives an empty instance for pipeline '{s}': no entry point of it reaches any entry at @group({d}), while the pipeline does reach @group({d}) — WebGPU requires an empty group to be set at the lower index and this emitter does not build one; renumber that pipeline's bindings so it reaches every group index up to its highest", .{ name, pname, group_index, top.? });
+            return error.ValidationError;
+        }
+        // BEFORE reservation and emission, as the authored path does: the
+        // uniform-table joins must see the PRUNED rows, scoped to this pipeline.
+        try self.harvestBindMetadata(r, kept.items, group_index, pid);
+        try self.checkIdsFit(r, form, .bind_groups, name, pool_size);
+        const base = self.tables.bind_groups.reserveAnonymous(pool_size) catch return error.EmitError;
+        try self.emitBindGroupInstances(r, form, name, kept.items, group_index, base, pool_size, pid);
+        try self.tables.derived_bind_groups.append(self.gpa, .{ .name = name, .pipeline = pid, .group = group_index, .base = base, .size = pool_size, .omitted = false });
+    }
+
+    /// Which pipelines bind each `(bind-group …)`, read off the source pass and
+    /// bundle forms BEFORE the bind-group phase. Resolved through
+    /// `tables.pipelines`, so it runs after both pipeline phases; a form whose
+    /// `:pipeline` does not resolve records nothing and is refused by its own
+    /// phase later. The lowered tree is not walked: every group a hook binds
+    /// carries a `:layout`.
+    fn collectGroupBinders(self: *Emitter) Error!void {
+        std.debug.assert(self.binds.group_binders.items.len == 0); // pre: runs once
+        std.debug.assert(self.tables.bind_groups.next == 0); // pre: before the phase that reads it
+        for (self.forms.items) |ref| {
+            const r = ref.reader;
+            const head = r.head(ref.idx);
+            const binds_groups = std.mem.eql(u8, head, "render-pass") or std.mem.eql(u8, head, "compute-pass") or std.mem.eql(u8, head, "render-bundle");
+            if (!binds_groups) continue;
+            const pname = r.symbol(ref.idx, "pipeline") orelse continue;
+            const pid = self.tables.pipelines.get(pname) orelse continue;
+            const names = r.vectorNodes(ref.idx, "bind-groups") orelse continue;
+            for (names) |n| {
+                const gname = r.elemSymbol(n) orelse continue;
+                try self.recordGroupBinder(gname, pid);
+            }
+        }
+    }
+
+    /// Append one (group → pipeline) row, skipping an exact duplicate (two
+    /// passes over one pipeline binding one group is the common case). Bounded
+    /// linear scan — a document binds a handful of groups.
+    fn recordGroupBinder(self: *Emitter, group: []const u8, pid: u16) Error!void {
+        std.debug.assert(group.len > 0);
+        std.debug.assert(pid < self.tables.pipelines.next);
+        if (self.groupBoundBy(group, pid)) return;
+        try self.binds.group_binders.append(self.gpa, .{ .group = group, .pipeline = pid });
+    }
+
+    /// Does some source pass or bundle bind `group` under `pid`?
+    fn groupBoundBy(self: *const Emitter, group: []const u8, pid: u16) bool {
+        std.debug.assert(group.len > 0);
+        for (self.binds.group_binders.items) |gb| {
+            if (gb.pipeline == pid and std.mem.eql(u8, gb.group, group)) return true;
+        }
+        return false;
+    }
+
+    /// Note that `pid` has an explicit `(pipeline-layout …)`, so a layout-less
+    /// group cannot derive against it. Both pipeline kinds record through this
+    /// one reader, so they cannot disagree about what `auto` means.
+    fn recordLayoutMode(self: *Emitter, r: *const Reader, form: NodeIndex, pid: u16) Error!void {
+        std.debug.assert(pid < self.tables.pipelines.next);
+        if (pipelineLayoutName(r, form) == null) return;
+        try self.binds.explicit_layout_pipelines.put(self.gpa, pid, {});
+    }
+
+    /// The highest group index any entry point of `pid` reaches, or null when
+    /// it reaches no binding at all. A module with no reflection answers the
+    /// wire's top group (3) — the conservative direction for the one caller,
+    /// which omits an instance only when its group index sits ABOVE this.
+    fn highestGroupReached(self: *const Emitter, pid: u16) ?u8 {
+        std.debug.assert(pid < self.tables.pipelines.next);
+        var top: ?u8 = null;
+        for (self.binds.module_pipelines.items) |mp| {
+            if (mp.pipeline != pid) continue;
+            const rd = self.reflectionOf(mp.module) orelse return 3;
+            for (rd.bindings) |b| {
+                if (b.group > 3) continue; // past the wire's group cap, never bindable
+                if (!self.pipelineReachesBinding(pid, mp.module, b.name)) continue;
+                const g: u8 = @intCast(b.group);
+                if (top == null or g > top.?) top = g;
+            }
+        }
+        return top;
     }
 
     /// Record the (group, binding) → BASE resource id side tables `emitBindGroup`
@@ -3677,6 +4908,22 @@ pub const Emitter = struct {
                     try self.binds.bind_sampler_ids.put(self.gpa, bk, sid);
                 }
             }
+            // The scoped side of the two joins above. Recorded for a
+            // PIPELINE-arm group only: an explicit-bgl group has no pipeline
+            // scope and stays on the document-wide fallback, exactly as the
+            // buffer join does.
+            if (scope_pid) |pid| {
+                try self.binds.scoped_handles.append(self.gpa, .{
+                    .pipeline = pid,
+                    .group = group_index,
+                    .binding = eb,
+                    .kind = bindEntryKind(r, e),
+                    .texture = if (r.symbol(e, "texture")) |t| self.tables.textures.get(t) else null,
+                    .sampler = if (r.symbol(e, "sampler")) |sm| self.tables.samplers.get(sm) else null,
+                    .loc = if (self.validate_shaders) self.locate(r, e) else null,
+                });
+            }
+
             const bname = r.symbol(e, "buffer") orelse continue;
             const base_id = self.tables.buffers.get(bname) orelse continue;
             // Slot reuse across pipelines (a different buffer already recorded at
@@ -3861,7 +5108,7 @@ pub const Emitter = struct {
         // R1 ⑤ (bind resource-kind) + R4 (handle typed-descriptor) agreement
         // — both gated, and run BEFORE the buffer filter below so texture/
         // sampler slots are validated too (they'd otherwise be dropped).
-        try self.checkHandleAgreement(binding, key);
+        try self.checkHandleAgreement(ref.name, binding, key);
 
         // Only buffer-backed uniform/storage bindings carry a setUniform story.
         if (binding.address_space != .uniform and binding.address_space != .storage) return;
@@ -3870,7 +5117,7 @@ pub const Emitter = struct {
         // to, across the pipelines that instantiate it? No candidate →
         // the preserved R1 ② used-but-unbound check, else a benign skip.
         const cands = self.candidateBuffersFor(ref.name, key);
-        if (cands.len == 0) return try self.checkUnboundBinding(rd, binding);
+        if (cands.len == 0) return try self.checkUnboundBinding(rd, ref, binding);
         // Collision (a): ONE module's slot fanning out to ≥2 buffers
         // across its pipelines. Every record still emits (below) —
         // setUniform reaches each buffer via its own record — but the
@@ -3931,6 +5178,111 @@ pub const Emitter = struct {
         }
     }
 
+    /// Drop each `(entry …)` whose `(group, binding)` no entry point of the
+    /// layout pipeline statically reaches.
+    ///
+    /// `:layout auto` builds a layout from exactly the bindings a pipeline's
+    /// entry points reach. A bind group that also binds something unreached does
+    /// not fail to compile and does not warn: it aborts at the first
+    /// `set_bind_group` with "Number of bindings in bind group descriptor (2)
+    /// does not match the number of bindings defined in the bind group layout
+    /// (1)". This key is the compile-time answer, and it is what lets ONE
+    /// bind-group description serve a material's depth and lit variants when
+    /// only the lit one samples the albedo.
+    ///
+    /// Which bindings the pipeline reaches comes from the same join L1 gave
+    /// `checkUnboundBinding` — the modules a pipeline instantiates, the entry
+    /// points it names, and their reflected `resources`. The two are the same
+    /// question asked from opposite ends, which is why they must agree: this
+    /// prunes what that check no longer demands.
+    ///
+    /// Refuses rather than prunes on the bgl arm: an explicit
+    /// `(bind-group-layout …)` IS the layout, so there is no reachable set to
+    /// derive and silently keeping every entry would make the key read as
+    /// "applied" when nothing happened.
+    fn pruneUnusedEntries(
+        self: *Emitter,
+        r: *const Reader,
+        form: NodeIndex,
+        name: []const u8,
+        scope_pid: ?u16,
+        entry_nodes: *std.ArrayList(NodeIndex),
+    ) Error!bool {
+        const pid = scope_pid orelse {
+            self.diagnose(.sjon, self.locate(r, r.authorNode(form, "prune-unused") orelse form), "", "bind-group '{s}' sets :prune-unused but its :layout names an explicit (bind-group-layout …) — there is no auto-derived layout to prune against, since that layout IS the one being bound", .{name});
+            return error.ValidationError;
+        };
+        const group_index: u8 = @intCast((try self.optBounded(r, form, "group", .byte)) orelse 0);
+
+        var kept: std.ArrayList(NodeIndex) = .empty;
+        defer kept.deinit(self.gpa);
+        var dropped: u32 = 0;
+        for (entry_nodes.items) |e| {
+            const b: u8 = @intCast((try self.optBounded(r, e, "binding", .byte)) orelse 0);
+            if (self.pipelineReachesSlot(pid, group_index, b)) {
+                kept.append(self.gpa, e) catch return error.OutOfMemory;
+                continue;
+            }
+            dropped += 1;
+            if (self.validate_shaders) {
+                self.diagnoseWarn(.sjon, self.locate(r, e), "", "bind-group '{s}': dropped the entry at @group({d}) @binding({d}) — no entry point of pipeline '{s}' reaches it, so its auto-derived layout has no slot for it (:prune-unused)", .{ name, group_index, b, self.tables.pipelines.nameOf(pid) orelse "?" });
+            }
+        }
+
+        // Pruning to nothing is refused, not emitted. A pipeline's default
+        // layout has an entry per group index up to the highest one any entry
+        // point reaches, so a group that prunes empty is either below that (and
+        // must still be SET, as a zero-entry group, which this emitter does not
+        // build) or above it (and should be dropped from the pass's
+        // `:bind-groups` list instead, which is the author's edit, not this
+        // key's). Both are outside what pruning entries can express, and
+        // emitting a zero-entry group aborts — probed, §392.
+        if (kept.items.len == 0 and entry_nodes.items.len > 0) {
+            // "Remove the group from the pass's :bind-groups" is an edit the
+            // author can only make on a group they wrote. A hook-emitted one —
+            // a `(draw-graph …)` stage's entry list, instantiated once per
+            // geometry — is not theirs to remove, and a geometry whose variant
+            // reaches none of the stage's entries is the design rather than a
+            // mistake. Omit it instead, under the same condition the derived
+            // path omits (§416): only ABOVE every group index the pipeline
+            // reaches, where `getBindGroupLayout(N)` is itself the error. At or
+            // below, WebGPU wants an empty group set and this emitter builds
+            // none, so both origins are refused.
+            const from_hook = self.has_low and r == @as(*const Reader, &self.low);
+            const top = self.highestGroupReached(pid);
+            if (from_hook and (top == null or group_index > top.?)) {
+                try self.tables.omitted_groups.put(self.gpa, name, {});
+                return false;
+            }
+            self.diagnose(.sjon, self.locate(r, form), "", "bind-group '{s}': :prune-unused would drop every entry, because no entry point of pipeline '{s}' reaches any of them — remove the group from the pass's :bind-groups instead", .{ name, self.tables.pipelines.nameOf(pid) orelse "?" });
+            return error.ValidationError;
+        }
+        if (dropped == 0) return true;
+
+        entry_nodes.clearRetainingCapacity();
+        entry_nodes.appendSlice(self.gpa, kept.items) catch return error.OutOfMemory;
+        return true;
+    }
+
+    /// Does any entry point of `pid` reach `(group, binding)`?
+    ///
+    /// The slot-shaped half of `pipelineReachesBinding`: that one answers for a
+    /// binding NAME in a known module, this one for a wire slot, by walking the
+    /// modules the pipeline instantiates and matching their reflected bindings'
+    /// declared group/binding. A module with no reflection answers true — the
+    /// conservative direction, since pruning on a guess would abort.
+    fn pipelineReachesSlot(self: *const Emitter, pid: u16, group: u8, binding: u8) bool {
+        for (self.binds.module_pipelines.items) |mp| {
+            if (mp.pipeline != pid) continue;
+            const rd = self.reflectionOf(mp.module) orelse return true;
+            for (rd.bindings) |b| {
+                if (b.group != group or b.binding != binding) continue;
+                if (self.pipelineReachesBinding(pid, mp.module, b.name)) return true;
+            }
+        }
+        return false;
+    }
+
     /// Record each leaf path's FIRST owning buffer and warn on a cross-buffer
     /// duplicate: gpu.js's setUniform keys by bare field name doc-wide, so the
     /// same name in two buffers is runtime-ambiguous (the last-parsed record
@@ -3988,15 +5340,157 @@ pub const Emitter = struct {
         return c;
     }
 
+    /// Does any entry point `pid` instantiates from `module` statically reach
+    /// `binding_name`?
+    ///
+    /// THE per-pipeline question, and the one `:layout auto` actually answers:
+    /// the default layout keeps exactly the bindings a pipeline's entry points
+    /// reach, so a module's OTHER entry points have no say in it. An empty
+    /// `entry` on a row means the stage's entry could not be resolved; it reads
+    /// as "every entry", which is the conservative direction — it can only make
+    /// this return true.
+    ///
+    /// Complexity: O(rows × entry points × resources), all bounded and small.
+    fn pipelineReachesBinding(self: *const Emitter, pid: u16, module: []const u8, binding_name: []const u8) bool {
+        std.debug.assert(module.len > 0);
+        std.debug.assert(binding_name.len > 0);
+        const rd = self.reflectionOf(module) orelse return true; // no reflection → assume reached
+        for (self.binds.module_pipelines.items) |mp| {
+            if (mp.pipeline != pid or !std.mem.eql(u8, mp.module, module)) continue;
+            if (mp.entry.len == 0) {
+                if (uniforms.bindingUsedByAnyEntry(rd, binding_name)) return true;
+                continue;
+            }
+            for (rd.entry_points) |ep| {
+                if (!std.mem.eql(u8, ep.name, mp.entry)) continue;
+                for (ep.resources) |res| {
+                    if (std.mem.eql(u8, res, binding_name)) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /// The pipelines that instantiate `module` AND whose own entry points reach
+    /// `binding_name` — the pipelines for which this slot must be bound.
+    /// Returns the count and, via `first`, one pipeline id to name in a message.
+    fn pipelinesNeeding(self: *const Emitter, module: []const u8, binding_name: []const u8, first: *u16) u32 {
+        var n: u32 = 0;
+        var seen: [MAX_NEEDING_PIPELINES]u16 = undefined;
+        for (self.binds.module_pipelines.items) |mp| {
+            if (!std.mem.eql(u8, mp.module, module)) continue;
+            var dup = false;
+            for (seen[0..@min(n, MAX_NEEDING_PIPELINES)]) |p| {
+                if (p == mp.pipeline) dup = true;
+            }
+            if (dup) continue;
+            if (!self.pipelineReachesBinding(mp.pipeline, module, binding_name)) continue;
+            if (n == 0) first.* = mp.pipeline;
+            if (n < MAX_NEEDING_PIPELINES) seen[n] = mp.pipeline;
+            n += 1;
+        }
+        return n;
+    }
+
+    /// What SJON bound at `key` for a pipeline that instantiates `module`.
+    ///
+    /// The handle counterpart of `candidateBuffersFor`, and it exists for the
+    /// same reason: `UniformBindingKey` is `(group, binding)` with no pipeline
+    /// and no module in it, while `:layout auto` makes a slot mean whatever the
+    /// pipeline that owns the layout says it means. The pass sugar shows the
+    /// failure at its sharpest — it numbers each pipeline's prelude from 0
+    /// independently, so a main shader with a uniform puts `samp` at (0,1) while
+    /// its own post shader, having no uniform, puts `postTex` there. Both
+    /// documents are right; joining them by slot alone reported a sampler bound
+    /// as a texture (`docs/plans/hook-binding-table.md`, step 0).
+    ///
+    /// Three answers, and the middle one is the fix:
+    ///
+    /// - `.scoped` — a pipeline over this module bound the slot. Authoritative.
+    /// - `.unbound` — pipelines DO instantiate this module and none of them
+    ///   bound the slot. There is nothing to compare against, so the check must
+    ///   say nothing. Reading the document-wide map here is what produced the
+    ///   false report: it answers with what some OTHER pipeline bound at the
+    ///   same numbers.
+    /// - `.no_scope` — no pipeline instantiates this module at all, so there is
+    ///   no pipeline scope to ask instead and the document-wide maps (with their
+    ///   ambiguity guards) are the best available answer. Same shape as the
+    ///   module-wide fallback `checkUnboundBinding` keeps for the same case.
+    ///
+    /// A slot two pipelines over one module bind DIFFERENTLY answers `.unbound`:
+    /// the module has no single meaning at that slot, which is exactly what the
+    /// global ambiguity sets exist to express.
+    const ScopedHandleResult = union(enum) {
+        scoped: struct { kind: ?BindKind, texture: ?u16, sampler: ?u16, loc: ?Diag.Located },
+        unbound,
+        no_scope,
+    };
+
+    fn scopedHandleFor(self: *const Emitter, module: []const u8, key: UniformBindingKey) ScopedHandleResult {
+        var instantiated = false;
+        var hit: ?ScopedHandle = null;
+        for (self.binds.module_pipelines.items) |mp| {
+            if (!std.mem.eql(u8, mp.module, module)) continue;
+            instantiated = true;
+            for (self.binds.scoped_handles.items) |sh| {
+                if (sh.pipeline != mp.pipeline or sh.group != key.group or sh.binding != key.binding) continue;
+                if (hit) |prev| {
+                    if (prev.kind != sh.kind or prev.texture != sh.texture or prev.sampler != sh.sampler) return .unbound;
+                    continue;
+                }
+                hit = sh;
+            }
+        }
+        if (!instantiated) return .no_scope;
+        const h = hit orelse return .unbound;
+        return .{ .scoped = .{ .kind = h.kind, .texture = h.texture, .sampler = h.sampler, .loc = h.loc } };
+    }
+
     /// R1 check ②: a uniform/storage binding the shader actually USES but the
-    /// SJON never bound (no scoped row AND no global entry) → a runtime black
-    /// screen on whoever later loads the PNG. Filtered by the reflected
-    /// per-entry resources[] usage list, so a declared-but-unused binding under
-    /// :layout auto is never a false positive. Gated: the default path keeps
-    /// the lenient silent skip.
-    fn checkUnboundBinding(self: *Emitter, rd: *const reflect.ReflectionData, binding: reflect.Binding) Error!void {
+    /// SJON never bound → a runtime black screen on whoever later loads the PNG.
+    ///
+    /// **Per PIPELINE, not per module** (§392). It used to ask
+    /// `bindingUsedByAnyEntry`: does ANY entry point of the module reach this
+    /// binding. But `:layout auto` derives the layout from the entry points ONE
+    /// PIPELINE instantiates, so a module whose `litFs` samples a texture its
+    /// `depthOnlyFs` does not made the two rules contradict each other — the
+    /// layout wants the entry absent from the depth pipeline's bind group, this
+    /// check wanted it present. That is exactly the material shape a shadow or
+    /// G-buffer renderer has, so it was not an edge case.
+    ///
+    /// The rule now: for each pipeline that instantiates this module and whose
+    /// OWN entry points reach the binding, a bind must exist. A module no
+    /// pipeline instantiates keeps the module-wide question, because there is no
+    /// pipeline scope to ask instead — dead code in a document still gets told
+    /// its binding is unbound.
+    ///
+    /// It stayed a hard error and did not become a warning: an unbound binding
+    /// the shader reads IS a black screen, and every negative that proved so
+    /// still proves it.
+    fn checkUnboundBinding(self: *Emitter, rd: *const reflect.ReflectionData, ref: ShaderRef, binding: reflect.Binding) Error!void {
         if (!self.validate_shaders) return;
         if (!uniforms.bindingUsedByAnyEntry(rd, binding.name)) return;
+
+        var instantiated = false;
+        for (self.binds.module_pipelines.items) |mp| {
+            if (std.mem.eql(u8, mp.module, ref.name)) {
+                instantiated = true;
+                break;
+            }
+        }
+
+        if (instantiated) {
+            var first_pid: u16 = 0;
+            const needing = self.pipelinesNeeding(ref.name, binding.name, &first_pid);
+            // Reached by no pipeline's entry points: the declaration is dead
+            // under every layout derived from this module, and binding it would
+            // be the desync (pitfall 37), not the fix.
+            if (needing == 0) return;
+            const pipe = self.tables.pipelines.nameOf(first_pid) orelse "?";
+            self.diagnose(.wgsl, null, "", "binding '{s}' (@group({d}) @binding({d})) is reached by pipeline '{s}' but never bound in SJON", .{ binding.name, binding.group, binding.binding, pipe });
+            return error.ValidationError;
+        }
+
         // Intentionally UNLOCATED: the binding is USED by the shader but never
         // written in SJON, so there is no `(entry …)` node to squiggle — it
         // surfaces as a headline (the fix is to add the missing bind).
@@ -4012,11 +5506,31 @@ pub const Emitter = struct {
     /// across pipelines — the global join isn't authoritative there). The R4
     /// comparators are conservative: an unknown/depth/storage class returns false →
     /// the check silently skips, never a false reject.
-    fn checkHandleAgreement(self: *Emitter, binding: reflect.Binding, key: UniformBindingKey) Error!void {
-        if (self.validate_shaders and !self.binds.bind_kind_ambiguous.contains(key)) {
-            if (self.binds.bind_kinds.get(key)) |sjon_kind| {
+    fn checkHandleAgreement(self: *Emitter, module: []const u8, binding: reflect.Binding, key: UniformBindingKey) Error!void {
+        // What SJON bound at this slot FOR A PIPELINE THAT INSTANTIATES THIS
+        // MODULE. Falls back to the document-wide maps when there is no such
+        // row, which is what an explicit-bgl group or an uninstantiated module
+        // gets — the same fallback shape `candidateBuffersFor` uses.
+        const scoped = self.scopedHandleFor(module, key);
+        if (scoped == .unbound) return; // nothing this module's pipelines bound here
+        const kind_ok = switch (scoped) {
+            .scoped => true, // authoritative; the ambiguity sets guard the global join
+            .no_scope => !self.binds.bind_kind_ambiguous.contains(key),
+            .unbound => unreachable,
+        };
+        if (self.validate_shaders and kind_ok) {
+            if (switch (scoped) {
+                .scoped => |sc| sc.kind,
+                .no_scope => self.binds.bind_kinds.get(key),
+                .unbound => unreachable,
+            }) |sjon_kind| {
                 if (uniforms.reflectedKindMismatch(binding.resource, sjon_kind)) {
-                    self.diagnose(.wgsl, self.binds.bind_kind_locs.get(key), "", "binding '{s}' (@group({d}) @binding({d})) is bound as a {s} in SJON but the shader declares a {s}", .{ binding.name, binding.group, binding.binding, @tagName(sjon_kind), uniforms.reflectedKindName(binding.resource) });
+                    const loc = switch (scoped) {
+                        .scoped => |sc| sc.loc,
+                        .no_scope => self.binds.bind_kind_locs.get(key),
+                        .unbound => unreachable,
+                    };
+                    self.diagnose(.wgsl, loc, "", "binding '{s}' (@group({d}) @binding({d})) is bound as a {s} in SJON but the shader declares a {s}", .{ binding.name, binding.group, binding.binding, @tagName(sjon_kind), uniforms.reflectedKindName(binding.resource) });
                     return error.ValidationError;
                 }
             }
@@ -4025,9 +5539,18 @@ pub const Emitter = struct {
         // R4 runs after the bind-kind check (so the shape already agrees — a .texture
         // reflected here is bound as a texture in SJON) and before the buffer-only
         // filter (handle bindings have the .handle address space, which that drops).
-        if (self.validate_shaders and !self.binds.bind_kind_ambiguous.contains(key) and !self.binds.bind_handle_ambiguous.contains(key)) {
+        const handles_ok = switch (scoped) {
+            .scoped => true, // a scoped row is authoritative; the ambiguity sets guard the global join
+            .no_scope => !self.binds.bind_kind_ambiguous.contains(key) and !self.binds.bind_handle_ambiguous.contains(key),
+            .unbound => unreachable,
+        };
+        if (self.validate_shaders and handles_ok) {
             switch (binding.resource) {
-                .texture => |tex| if (self.binds.bind_texture_ids.get(key)) |tid| {
+                .texture => |tex| if (switch (scoped) {
+                    .scoped => |sc| sc.texture,
+                    .no_scope => self.binds.bind_texture_ids.get(key),
+                    .unbound => unreachable,
+                }) |tid| {
                     if (self.binds.texture_meta.get(tid)) |meta| {
                         if (type_agree.textureSampleClassMismatch(tex, meta.format)) {
                             const shader_class = type_agree.textureSampleClass(tex).?;
@@ -4047,7 +5570,11 @@ pub const Emitter = struct {
                         }
                     }
                 },
-                .sampler => |samp| if (self.binds.bind_sampler_ids.get(key)) |sid| {
+                .sampler => |samp| if (switch (scoped) {
+                    .scoped => |sc| sc.sampler,
+                    .no_scope => self.binds.bind_sampler_ids.get(key),
+                    .unbound => unreachable,
+                }) |sid| {
                     if (self.binds.sampler_meta.get(sid)) |meta| {
                         if (type_agree.samplerComparisonMismatch(samp, meta.comparison)) {
                             self.diagnose(.wgsl, meta.loc, "", "sampler '{s}' (@group({d}) @binding({d})) is a {s} sampler in SJON but the shader declares {s}", .{ binding.name, binding.group, binding.binding, if (meta.comparison) "comparison" else "non-comparison", if (samp.comparison) "sampler_comparison" else "a plain sampler" });
@@ -4240,6 +5767,541 @@ pub const Emitter = struct {
         }
     }
 
+    // ── Fragments: `(wgsl …)` collection and the rules that guard them ──────
+
+    /// Byte ceiling on a `(wgsl :file …)`. Smaller than the 8 MiB every other
+    /// file gets, because a WGSL fragment is source text: a megabyte of it is
+    /// already 20,000 lines, and the payload has to carry the assembled result.
+    const MAX_WGSL_FILE_BYTES: u32 = 1024 * 1024;
+
+    /// Collect every `(wgsl …)` into the fragment table, and check the two
+    /// rules that are about a fragment ALONE rather than about an assembly.
+    ///
+    /// R4 (no entry points) and R12 (no bindings under a pass) are checked by
+    /// reflecting each fragment **on its own**, not by mapping a span from an
+    /// assembled module's reflection. wgslender's parser does not require
+    /// identifiers to resolve, so a fragment full of holes reflects fine; and
+    /// the assembled reflection is the wrong instrument anyway, because
+    /// `analyzeModule` minifies and reflects in one pass — under `--minify`
+    /// every span it returns points into text the author never wrote.
+    /// Reflecting alone also puts the diagnostic on the fragment's own form,
+    /// with no arithmetic, and costs one parse per fragment rather than one per
+    /// (root × fragment).
+    fn collectFragments(self: *Emitter) Error!void {
+        for (self.forms.items) |ref| {
+            const r = ref.reader;
+            if (!std.mem.eql(u8, r.head(ref.idx), "wgsl")) continue;
+            const name = try self.requiredSymbol(r, ref.idx, "name");
+
+            // Exactly one of `:code`/`:file` — the schema's exclusive-group
+            // already refused both and neither, so this is a total read.
+            var owns = false;
+            var origin: fragments.Origin = undefined;
+            const text: []const u8 = if (r.string(ref.idx, "code")) |code| blk: {
+                origin = .{ .inline_code = name };
+                break :blk code;
+            } else blk: {
+                const path = try self.requiredString(r, ref.idx, "file");
+                const bytes = self.readFile(path, MAX_WGSL_FILE_BYTES) catch |e| {
+                    const node = r.authorNode(ref.idx, "file") orelse ref.idx;
+                    return self.unreadableFile(r, node, path, MAX_WGSL_FILE_BYTES, e);
+                };
+                owns = true;
+                origin = .{ .file = path };
+                break :blk bytes;
+            };
+            // Armed only until `add` below: `Table.add` COPIES `owns_text`, so
+            // from that call on the table is the owner and frees these bytes in
+            // `Table.deinit`. Leaving it armed past that point made every
+            // post-`add` refusal a double free — `checkFragmentAlone`'s R4 is
+            // one, and in the browser there is no DebugAllocator to catch it,
+            // just a corrupted heap in a compiler that reruns per keystroke
+            // (§437).
+            var mine = owns;
+            errdefer if (mine) self.gpa.free(@constCast(text));
+
+            const imports = try self.symbolList(r, ref.idx, "imports");
+            const requires = try self.symbolList(r, ref.idx, "requires");
+
+            self.frags.add(self.gpa, .{
+                .name = name,
+                .text = text,
+                .owns_text = owns,
+                .origin = origin,
+                .imports = imports,
+                .requires = requires,
+            }) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.TooDeep => {
+                    self.diagnose(.sjon, self.locate(r, ref.idx), "", "fragment '{s}' is fragment #{d}, but a document holds at most {d}", .{ name, self.frags.len() + 1, fragments.MAX_FRAGMENTS });
+                    return error.ValidationError;
+                },
+                else => return error.EmitError,
+            };
+            mine = false; // the table owns the bytes from here
+
+            try self.checkFragmentAlone(r, ref.idx, name, text);
+        }
+    }
+
+    /// Read a vector-of-symbols key into a `gpa`-owned slice of borrowed names.
+    /// Absent reads as empty, which is what both `:imports` and `:requires`
+    /// mean when unwritten.
+    fn symbolList(self: *Emitter, r: *const Reader, form: NodeIndex, key: []const u8) Error![][]const u8 {
+        const elems = r.vectorNodes(form, key) orelse return &.{};
+        std.debug.assert(elems.len <= fragments.MAX_IMPORTS); // schema bound
+        const out = self.gpa.alloc([]const u8, elems.len) catch return error.OutOfMemory;
+        errdefer self.gpa.free(out);
+        for (elems, 0..) |e, i| {
+            out[i] = r.elemSymbol(e) orelse {
+                // The schema's element kind is a symbol, so this is a broken
+                // invariant rather than input — but inventing a name would put
+                // a fabricated import in the graph.
+                std.debug.assert(false);
+                self.diagnose(.sjon, self.locate(r, form), "", "internal: `:{s}` element {d} is not a symbol after validation", .{ key, i });
+                return error.EmitError;
+            };
+        }
+        self.frag_lists.append(self.gpa, out) catch return error.OutOfMemory;
+        return out;
+    }
+
+    /// R4, and the half of R12 that does not need to know who imports it.
+    ///
+    /// A fragment declares no entry point, ever: two roots importing one would
+    /// each declare that stage, and the pass hook decides what kind of pass it
+    /// is by scanning its own body, which never sees fragment text — so a
+    /// `@fragment fn` hidden in a fragment would silently make a `(pass …)` a
+    /// compute pass or nothing at all.
+    ///
+    /// Reflection, not `wgsl_scan`: a commented-out `@vertex` must not trip it
+    /// (journal §325), and only a parse knows the difference.
+    fn checkFragmentAlone(self: *Emitter, r: *const Reader, form: NodeIndex, name: []const u8, text: []const u8) Error!void {
+        if (text.len == 0) return;
+        var rd = reflect.wgslender_native.reflectNative(self.gpa, text) catch {
+            // A fragment that will not parse alone is not necessarily broken —
+            // it may be all holes — and it will be validated as part of every
+            // module that imports it. Skipping the rule is correct; going
+            // silent is not.
+            self.diagnoseWarn(.wgsl, self.locate(r, form), name, "fragment '{s}' could not be reflected on its own, so it was not checked for entry points or bindings (it is still validated inside every module that imports it)", .{name});
+            return;
+        };
+        defer rd.deinit();
+
+        if (rd.entry_points.len > 0) {
+            const ep = rd.entry_points[0];
+            self.diagnose(.sjon, self.locate(r, form), "", "fragment '{s}' declares entry point '{s}' — entry points belong to the (shader-module …) or (pass …) that imports the fragment, not to the fragment", .{ name, ep.name });
+            return error.ValidationError;
+        }
+        // The binding count is recorded for R12; whether it is an error depends
+        // on who imports it, which `checkPassFragmentBindings` decides once the
+        // roots are known.
+        if (self.frags.find(name)) |f| f.binding_count = @intCast(rd.bindings.len);
+    }
+
+    /// Assemble one root, turning the assembler's refusals into located
+    /// diagnostics. Also enforces R12, which needs to know that the importer is
+    /// a pass.
+    ///
+    /// The `assembled` value is kept alive by the caller for the whole of
+    /// `emitShaderModule`, because `locate` is what maps a wgslender `line:col`
+    /// back to the fragment that wrote the line (R8).
+    fn assembleRoot(
+        self: *Emitter,
+        r: *const Reader,
+        form: NodeIndex,
+        name: []const u8,
+        origin: fragments.Origin,
+        own_text: []const u8,
+        imports: []const []const u8,
+    ) Error!fragments.Assembled {
+        var cycle: fragments.CyclePath = .{};
+        var a = fragments.assemble(self.gpa, &self.frags, name, origin, own_text, imports, &cycle) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ImportCycle => {
+                var buf: [512]u8 = undefined;
+                var w: std.Io.Writer = .fixed(&buf);
+                for (cycle.slice(), 0..) |n, i| {
+                    if (i > 0) w.writeAll(" → ") catch break;
+                    w.writeAll(n) catch break;
+                }
+                self.diagnose(.sjon, self.locate(r, r.authorNode(form, "imports") orelse form), "", "the import graph has a cycle: {s}", .{w.buffered()});
+                return error.ValidationError;
+            },
+            error.UnknownFragment => {
+                // The validator reports a dangling `:imports` entry as
+                // `not_cross_ref` on the source path; a LOWERED form has had no
+                // cross-ref check, so this is the net that catches a hook
+                // forwarding a name nothing declares.
+                self.diagnose(.sjon, self.locate(r, r.authorNode(form, "imports") orelse form), "", "an `:imports` entry of '{s}' names no `(wgsl …)` fragment", .{name});
+                return error.ValidationError;
+            },
+            error.TooDeep => {
+                self.diagnose(.sjon, self.locate(r, r.authorNode(form, "imports") orelse form), "", "'{s}' imports more than {d} levels of fragments, or more than {d} in one module", .{ name, fragments.MAX_DEPTH, fragments.MAX_FRAGMENTS });
+                return error.ValidationError;
+            },
+        };
+        // Every refusal below happens AFTER the text has been built, so the
+        // assembly has to be freed on the way out — the caller only owns it
+        // once this function returns it.
+        errdefer a.deinit(self.gpa);
+
+        // A LOWERED shader module is one a hook emitted, and `pngine/pass-v1`
+        // is the only hook that emits shader modules — which is what makes R12
+        // a property of the reader rather than of a provenance table.
+        const from_hook = self.has_low and r == @as(*const Reader, &self.low);
+        if (from_hook) try self.checkPassFragmentBindings(r, form, name, a);
+
+        // R10: a hole the assembled module does not fill. Checked against the
+        // ASSEMBLED SOURCE, not against reflection: pngine's ReflectionData has
+        // no function or alias inventory, and under `--minify` the reflection
+        // `analyzeModule` returns describes renamed text.
+        for (a.rows) |row| {
+            if (std.mem.eql(u8, row.name, name)) continue; // the root's own row
+            const f = self.frags.find(row.name) orelse continue;
+            for (f.requires) |req| {
+                if (fragments.declaresName(a.text, req)) continue;
+                const node = r.authorNode(form, "imports") orelse form;
+                self.diagnose(.sjon, self.locate(r, node), "", "fragment '{s}' requires '{s}', which nothing in module '{s}' declares — the module that imports a fragment must supply every name the fragment leaves open, whether or not it reaches it (validation runs before dead-code elimination)", .{ row.name, req, name });
+                return error.ValidationError;
+            }
+        }
+        return a;
+    }
+
+    /// R12: a fragment imported by a `(pass …)` declares no resource binding.
+    ///
+    /// The pass prelude assigns `@group(0)` bindings in order — the uniform
+    /// struct, the sampler, one texture per prior pass, the feedback texture,
+    /// the data buffers, `postTex` — and the hook emits bind groups for group 0
+    /// only. So a fragment's own `@group`/`@binding` variable has nowhere to
+    /// go: at group 0 it collides with the prelude's numbering, at any other
+    /// group no bind group exists. The same fragment is perfectly legal under a
+    /// `(shader-module …)` root, whose bind groups the author writes.
+    ///
+    /// The count comes from reflecting the fragment ALONE at collect time (see
+    /// `checkFragmentAlone`), so this is a lookup, not a span mapping.
+    fn checkPassFragmentBindings(self: *Emitter, r: *const Reader, form: NodeIndex, name: []const u8, a: fragments.Assembled) Error!void {
+        for (a.rows) |row| {
+            if (std.mem.eql(u8, row.name, name)) continue; // the root's own row
+            const f = self.frags.find(row.name) orelse continue;
+            if (f.binding_count == 0) continue;
+            self.diagnose(.sjon, self.locate(r, form), "", "fragment '{s}' declares a @group/@binding variable and is imported by a (pass …) — a pass's prelude owns @group(0) and emits bind groups for it, so a fragment binding has nowhere to be bound. Import it from a (shader-module …) instead, or move the binding into the pass body", .{row.name});
+            return error.ValidationError;
+        }
+    }
+
+    /// R6, advisory: a fragment nothing imports.
+    ///
+    /// `validate` only, on the lint channel, because an unimported fragment is
+    /// dead text rather than a broken program — and a document being edited has
+    /// one all the time.
+    fn warnUnimportedFragments(self: *Emitter) void {
+        if (!self.lint_shaders) return;
+        for (self.frags.items.items) |f| {
+            if (f.imported) continue;
+            self.diagnoseWarn(.wgsl, null, f.name, "fragment '{s}' is never imported — it contributes nothing to any shader module", .{f.name});
+        }
+    }
+
+    // ── `:requires` as a signature (R11) ────────────────────────────────────
+
+    /// R11, advisory: `:requires` as a checked signature.
+    ///
+    /// R10 checks that the module importing a fragment declares every name the
+    /// fragment LISTS. Nothing checked the list against the fragment itself, so
+    /// a `:requires` naming something the fragment never uses, or omitting a
+    /// name it does use, was silent — the list was documentation the emitter
+    /// trusted. Here each fragment is assembled with its own transitive imports
+    /// and validated on its own, and the names wgslender cannot resolve on the
+    /// fragment's own lines are its holes: what an import declares resolves,
+    /// what only the ROOT would declare does not. A listed name that is not a
+    /// hole warns; a hole that is not listed warns.
+    ///
+    /// `validate` only, on the lint channel. Both findings are about a
+    /// signature the compile does not need: an unfilled hole fails the
+    /// assembled module's validation whether or not it is listed, and a stale
+    /// list costs nothing but the truth of the next refusal.
+    ///
+    /// Runs BEFORE any root assembles, and that ordering is load-bearing: the
+    /// assembler's walk marks every fragment it reaches `imported`, which is
+    /// how R6 learns what a root uses — and this pass is not a root. So every
+    /// bit is clear on entry (asserted) and cleared again on the way out.
+    fn checkRequiresSignatures(self: *Emitter) Error!void {
+        if (!self.lint_shaders) return;
+        for (self.frags.items.items) |f| std.debug.assert(!f.imported);
+        defer {
+            for (self.frags.items.items) |*f| f.imported = false;
+        }
+
+        for (self.forms.items) |ref| {
+            const r = ref.reader;
+            if (!std.mem.eql(u8, r.head(ref.idx), "wgsl")) continue;
+            const name = r.symbol(ref.idx, "name") orelse continue;
+            const f = self.frags.find(name) orelse continue;
+            if (f.text.len == 0) continue;
+            try self.checkRequiresSignature(r, ref.idx, f);
+        }
+    }
+
+    /// One fragment: assemble it with its imports, validate that alone, harvest
+    /// the holes on its own lines, and compare with `:requires` both ways.
+    fn checkRequiresSignature(self: *Emitter, r: *const Reader, form: NodeIndex, f: *const fragments.Fragment) Error!void {
+        std.debug.assert(self.lint_shaders);
+        std.debug.assert(f.text.len > 0);
+
+        var a = fragments.assemble(self.gpa, &self.frags, f.name, f.origin, f.text, f.imports, null) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // A cycle or a dangling import is refused where a ROOT assembles
+            // this fragment; one no root reaches is R6's finding, not this one.
+            error.ImportCycle, error.UnknownFragment, error.TooDeep => return,
+        };
+        defer a.deinit(self.gpa);
+
+        // The same text a root validates: PI/TAU/E inlined. Without it every
+        // `PI` in a fragment reads as a hole. Line-preserving, so `a.locate`
+        // still maps rows; NOT column-preserving, so identifiers are read from
+        // this text, not from `a.text`.
+        const subst = values.substituteMathConstants(self.gpa, a.text) catch return error.OutOfMemory;
+        defer if (subst) |s| self.gpa.free(s);
+        const text = subst orelse a.text;
+
+        var vr = reflect.wgslender_native.validateNative(self.gpa, text) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                // Infra, not WGSL: say the check did not run rather than let
+                // "no finding" read as "the list is exact".
+                self.diagnoseWarn(.wgsl, self.locate(r, form), f.name, "fragment '{s}' could not be validated on its own, so its `:requires` was not checked against the names it uses", .{f.name});
+                return;
+            },
+        };
+        defer vr.deinit();
+
+        var h: Harvest = .{};
+        for (vr.diagnostics) |d| {
+            if (d.severity != .@"error") continue;
+            const hole = holeOf(&a, text, f.name, d) orelse continue;
+            h.add(hole.name, hole.line, d.column);
+        }
+
+        // Listed and never used — decidable only when the harvest is whole.
+        if (h.overflow) {
+            self.diagnoseWarn(.wgsl, self.locate(r, form), f.name, "fragment '{s}' uses more than {d} distinct names it does not declare, so its `:requires` was checked one way only (names it uses and does not list)", .{ f.name, MAX_HARVEST });
+        } else if (r.vectorNodes(form, "requires")) |elems| {
+            for (elems) |e| {
+                const req = r.elemSymbol(e) orelse continue;
+                if (h.has(req)) continue;
+                self.diagnoseWarn(.sjon, self.locate(r, e), "", "fragment '{s}' lists '{s}' in `:requires` and never uses it as a hole — it is unused, or declared by the fragment itself or by one of its imports", .{ f.name, req });
+            }
+        }
+
+        // Used and not listed.
+        for (h.names[0..h.len], h.lines[0..h.len], h.cols[0..h.len]) |n, line, col| {
+            if (listsName(f.requires, n)) continue;
+            self.warnUnlistedHole(f, n, line, col);
+        }
+    }
+
+    /// One "used and not listed" advisory, at the first use in the fragment's
+    /// own text: a shader-relative position tagged with the fragment, like every
+    /// other finding on a fragment's lines (R8), carrying the file when the text
+    /// lives in one (README D5) — and naming both in the message, because the
+    /// CLI's human path prints a warning's message and nothing else.
+    fn warnUnlistedHole(self: *Emitter, f: *const fragments.Fragment, hole: []const u8, line: u32, col: u32) void {
+        std.debug.assert(line >= 1 and col >= 1);
+        std.debug.assert(hole.len > 0);
+        const end_col: u32 = col + @as(u32, @intCast(hole.len));
+        if (f.origin.isFile()) {
+            self.diagnoseWarn(.wgsl, .{ .line = line, .col = col, .end_line = line, .end_col = end_col, .file = f.origin.name() }, f.name, "fragment '{s}' uses '{s}' at {d}:{d} of '{s}' without declaring it or listing it in `:requires` — add it to `:requires`, or declare it in the fragment", .{ f.name, hole, line, col, f.origin.name() });
+        } else {
+            self.diagnoseWarn(.wgsl, .{ .line = line, .col = col, .end_line = line, .end_col = end_col }, f.name, "fragment '{s}' uses '{s}' at {d}:{d} without declaring it or listing it in `:requires` — add it to `:requires`, or declare it in the fragment", .{ f.name, hole, line, col });
+        }
+    }
+
+    /// The hole one solo-validation diagnostic names on the fragment's OWN
+    /// lines, or null: for any other code, for a genuine `E0200` mismatch, for
+    /// a diagnostic on an import's line (that import's hole, harvested when the
+    /// import is checked), and for a range that does not start on the name the
+    /// message quotes.
+    ///
+    /// `text` is what was validated (the assembly with math constants inlined);
+    /// `a` is the assembly's line table, which the rewrite did not move.
+    fn holeOf(a: *const fragments.Assembled, text: []const u8, name: []const u8, d: reflect.wgslender_native.ValidationDiagnostic) ?struct { name: []const u8, line: u32 } {
+        std.debug.assert(name.len > 0);
+        std.debug.assert(text.len >= a.text.len);
+        const unresolved = std.mem.eql(u8, d.code, UNDECLARED_IDENTIFIER) or
+            std.mem.eql(u8, d.code, NOT_CALLABLE) or
+            (std.mem.eql(u8, d.code, UNKNOWN_TYPE) and std.mem.startsWith(u8, d.message, UNKNOWN_TYPE_MESSAGE));
+        if (!unresolved or d.line == 0 or d.column == 0) return null;
+        const at = a.locate(d.line);
+        if (!std.mem.eql(u8, at.name, name)) return null;
+        const ident = fragments.identifierAt(text, d.line, d.column) orelse return null;
+        if (!fragments.quotesName(d.message, ident)) return null;
+        std.debug.assert(at.line >= 1);
+        return .{ .name = ident, .line = at.line };
+    }
+
+    fn listsName(list: []const []const u8, name: []const u8) bool {
+        std.debug.assert(name.len > 0);
+        std.debug.assert(list.len <= fragments.MAX_IMPORTS); // the schema's `wgsl-name-list` bound
+        for (list) |n| if (std.mem.eql(u8, n, name)) return true;
+        return false;
+    }
+
+    // ── The `needs` pre-pass ────────────────────────────────────────────────
+
+    /// The most distinct paths one document may name. Matches
+    /// `TableResolver.MAX_ENTRIES`, because the two numbers describe the same
+    /// thing from the two ends: what a document can ask for, and what a host
+    /// can supply. (`MAX_WGSL_DEPS` is deliberately NOT reused here — that
+    /// bound is about one module's import list.)
+    const MAX_WANTED_FILES: u32 = file_resolver.TableResolver.MAX_ENTRIES;
+
+    /// How many (form, key) pairs the schema may declare as file-bearing.
+    /// Seven today. Overrunning it is a schema fact, not an input fact, so it
+    /// ASSERTS rather than truncating: a silently dropped file key would leave
+    /// `needs` quietly incomplete, and `Needs.dropped` does not cover that.
+    const MAX_FILE_KEYS: u32 = 64;
+
+    /// Depth of the form-spec walk's explicit stack. Larger than
+    /// `MAX_FILE_KEYS` because it holds every form list still to be visited,
+    /// not just the matches: one pop can push a child list per form.
+    const MAX_FORM_STACK: u32 = 256;
+
+    /// One schema-declared file slot: "on a `(data …)`, the `:file` key is a
+    /// path" / "on a `(pass …)`, the `:file` key is a LIST of paths".
+    pub const FileKey = struct {
+        form: []const u8,
+        key: []const u8,
+        list: bool,
+    };
+
+    /// Every path this document names, resolved once, before the walk.
+    ///
+    /// The walk aborts at the FIRST unreadable file (`unreadableFile` returns
+    /// `error.EmitError`), so without this pass a compile can only ever name
+    /// one missing asset and `cubemap.sjon`, with six images, would take six
+    /// rounds to be told about all six. This pass makes the list complete after
+    /// one compile, which is what lets `compileWithLoader` in the browser be a
+    /// single round rather than a loop.
+    ///
+    /// It diagnoses NOTHING. The refusal still belongs to the walk, at the form
+    /// that named the file, where the author's location is.
+    ///
+    /// Schema-driven on purpose: the file slots come from the manifest, not
+    /// from a hand-list here, so a `:file` key added to a form later joins this
+    /// pass with no code and cannot be forgotten.
+    ///
+    /// Complexity: O(schema keys + tree nodes × wanted_files).
+    fn collectWantedFiles(self: *Emitter) Error!void {
+        // No sink, nothing to fill. The walk still refuses the first unreadable
+        // file with the same diagnostic, so a caller that never asked for the
+        // list pays nothing — which is every golden, parity and CLI compile.
+        if (self.needs == null) return;
+        var keys: [MAX_FILE_KEYS]FileKey = undefined;
+        const key_count = collectFileKeys(self.result.schema.plugins, &keys);
+        if (key_count == 0) return; // no schema slot names a file — nothing to do
+
+        try self.scanTreeForFiles(&self.result.tree, &self.src, keys[0..key_count]);
+        if (self.result.lowered_tree) |*lt| {
+            try self.scanTreeForFiles(lt, &self.low, keys[0..key_count]);
+        }
+        if (self.needs) |n| std.debug.assert(n.count <= self.wanted_files.items.len);
+    }
+
+    /// Collect the schema's file-bearing (form, key) pairs, descending into
+    /// positional slot-local forms — `(pass …)` is one, declared inside
+    /// `(pass-graph …)`, and it carries the `:file` list. Bounded explicit
+    /// stack, no recursion.
+    pub fn collectFileKeys(plugins: []const sjon.Plugin.Plugin, out: *[MAX_FILE_KEYS]FileKey) u32 {
+        std.debug.assert(plugins.len > 0);
+        var n: u32 = 0;
+        var stack: [MAX_FORM_STACK][]const sjon.Plugin.FormSpec = undefined;
+        var depth: u32 = 0;
+        for (plugins) |plugin| {
+            if (plugin.forms.len == 0) continue;
+            std.debug.assert(depth < MAX_FORM_STACK);
+            stack[depth] = plugin.forms;
+            depth += 1;
+        }
+        // Bound: every frame either pops or pushes one child list, and the
+        // schema's local-form nesting is capped at load time.
+        for (0..MAX_FORM_STACK * MAX_FORM_STACK) |_| {
+            if (depth == 0) break;
+            depth -= 1;
+            const forms = stack[depth];
+            for (forms) |form| {
+                for (form.keys) |key| {
+                    const named = switch (key.value_type) {
+                        .named => |q| q.name,
+                        else => continue,
+                    };
+                    const list = std.mem.eql(u8, named, "data-file-list");
+                    if (!list and !std.mem.eql(u8, named, "file-path")) continue;
+                    std.debug.assert(n < MAX_FILE_KEYS);
+                    out[n] = .{ .form = form.name, .key = key.name, .list = list };
+                    n += 1;
+                }
+                if (form.local_forms.len > 0) {
+                    std.debug.assert(depth < MAX_FORM_STACK);
+                    stack[depth] = form.local_forms;
+                    depth += 1;
+                }
+            }
+        } else unreachable;
+        return n;
+    }
+
+    /// Flat scan of one tree's nodes for the file slots. A flat scan rather
+    /// than a descent because it is the only walk that cannot miss a nesting
+    /// the schema allows: every form node in the tree has an index, whatever
+    /// its parent.
+    fn scanTreeForFiles(self: *Emitter, tree: *const Ast.Tree, r: *const Reader, keys: []const FileKey) Error!void {
+        std.debug.assert(keys.len > 0);
+        const node_count = tree.nodes.len;
+        for (0..node_count) |i| {
+            const idx: NodeIndex = @enumFromInt(@as(u32, @intCast(i)));
+            if (tree.tagOf(idx) != .form) continue;
+            const head = r.head(idx);
+            for (keys) |k| {
+                if (!std.mem.eql(u8, head, k.form)) continue;
+                if (k.list) {
+                    const elems = r.vectorNodes(idx, k.key) orelse continue;
+                    for (elems) |e| {
+                        if (tree.tagOf(e) != .string) continue;
+                        try self.wantFile(tree.stringText(e));
+                    }
+                } else if (r.string(idx, k.key)) |path| {
+                    try self.wantFile(path);
+                }
+            }
+        }
+    }
+
+    /// Record one path, resolve it once, and remember it if it could not be
+    /// read. Deduplicated by a bounded linear scan — the list is at most 256
+    /// entries and a document names a handful.
+    fn wantFile(self: *Emitter, path: []const u8) Error!void {
+        if (path.len == 0) return;
+        if (self.wanted_files.items.len >= MAX_WANTED_FILES) return; // bounded; the walk still refuses each one
+        for (self.wanted_files.items) |seen| {
+            if (std.mem.eql(u8, seen, path)) return;
+        }
+        self.wanted_files.append(self.gpa, path) catch return error.OutOfMemory;
+
+        const bytes = self.readFile(path, MAX_DATA_FILE_BYTES) catch |e| {
+            if (e == error.OutOfMemory) return error.OutOfMemory;
+            if (self.needs) |n| n.add(path, e);
+            return;
+        };
+        // The bytes are read twice: once here to learn whether they are
+        // readable, once at the form that names them. The second read is the
+        // one whose bytes are used, so this one is dropped. Two reads of a file
+        // that is about to be embedded is cheap next to a compile that can only
+        // report one missing asset at a time.
+        self.gpa.free(bytes);
+    }
+
     /// Dispatch one form to its constant-bearing stages. All three stage forms
     /// are the same shape now, so there is one reader for all of them; before
     /// D10 a compute pipeline carried its `(constant …)` children directly and
@@ -4342,6 +6404,32 @@ pub const Emitter = struct {
                 if (!std.mem.eql(u8, self.low.head(idx), "queue")) continue;
                 const name = self.low.symbol(idx, "name") orelse continue;
                 try self.tables.queue_actions.put(self.gpa, name, .{ .reader = &self.low, .idx = idx });
+            }
+        }
+    }
+
+    /// Collect `(step-group :name … :perform […])`, source and lowered.
+    ///
+    /// Same shape as `collectQueues` and for the same reason: the group's FORM
+    /// node is stored, and `emitFrameSteps` walks its `:perform` where the group
+    /// is named. Lowered groups are what a named `(draw-graph …)` /
+    /// `(pass-graph …)` emits in place of a frame, and they are collected with
+    /// the lowered reader BEFORE `emitLowered` runs, so a source frame naming a
+    /// lowered graph resolves.
+    fn collectStepGroups(self: *Emitter) Error!void {
+        for (self.forms.items) |ref| {
+            const r = ref.reader;
+            if (!std.mem.eql(u8, r.head(ref.idx), "step-group")) continue;
+            const name = r.symbol(ref.idx, "name") orelse continue;
+            try self.tables.step_groups.put(self.gpa, name, .{ .reader = r, .idx = ref.idx });
+        }
+        if (self.has_low) {
+            const lt = &self.result.lowered_tree.?;
+            for (lt.root) |idx| {
+                if (lt.tagOf(idx) != .form) continue;
+                if (!std.mem.eql(u8, self.low.head(idx), "step-group")) continue;
+                const name = self.low.symbol(idx, "name") orelse continue;
+                try self.tables.step_groups.put(self.gpa, name, .{ .reader = &self.low, .idx = idx });
             }
         }
     }
@@ -4907,18 +6995,112 @@ pub const Emitter = struct {
     /// which the `orelse 1` then turned into a one-instance pool. The read
     /// evaluates now, so the range check below is the only guard needed and
     /// `:pool (* COPIES 3)` is rejected for the reason its author cares about.
-    fn reservePool(self: *Emitter, r: *const Reader, form: NodeIndex, table: *IdTable(u16), name: []const u8) Error!struct { base: u16, size: u8 } {
+    fn reservePool(self: *Emitter, r: *const Reader, form: NodeIndex, comptime space: limits.IdSpace, name: []const u8) Error!struct { base: u16, size: u8 } {
+        const pool_size = try self.poolSizeOf(r, form, name);
+        try self.checkIdsFit(r, form, space, name, pool_size);
+        const table = self.tableOf(space);
+        return .{ .base = try table.reserve(self.gpa, name, pool_size), .size = pool_size };
+    }
+
+    /// The form's `:pool` count — 1 when absent — validated against the wire's
+    /// byte-sized pool index. Split from `reservePool` so a layout-less bind
+    /// group can validate the count once and reserve it per instance.
+    fn poolSizeOf(self: *Emitter, r: *const Reader, form: NodeIndex, name: []const u8) Error!u8 {
+        std.debug.assert(name.len > 0);
         const requested = (try self.optU32(r, form, "pool")) orelse 1;
         if (requested < 1 or requested > MAX_POOL_SIZE) {
             self.diagnose(.sjon, self.locate(r, form), "", "'{s}' declares :pool {d}, but a pool holds at most {d} instances (the pool index is a byte everywhere the wire encodes it)", .{ name, requested, MAX_POOL_SIZE });
             return error.ValidationError;
         }
-        const pool_size: u8 = @intCast(requested);
-        if (@as(u32, table.next) + pool_size > std.math.maxInt(u16)) {
-            self.diagnose(.sjon, self.locate(r, form), "", "'{s}' does not fit: this document has already reserved {d} of the {d} resource ids of its kind that the bytecode can address", .{ name, table.next, std.math.maxInt(u16) });
-            return error.ValidationError;
+        std.debug.assert(requested <= MAX_POOL_SIZE);
+        return @intCast(requested);
+    }
+
+    // Every `IdTable(u16)` in `Tables` is a declared `IdSpace`, and every
+    // `IdSpace` is one of those tables — the two directions of the same gate.
+    //
+    // `tableOf`'s switch closes one of them (a new `IdSpace` with no table is a
+    // compile error). This closes the one that actually happens: a new resource
+    // kind arrives as a new registry field, and without this it would simply
+    // have no budget, no cap check and no diagnostic — the exact state four id
+    // spaces were in before r3-03, silently, for two releases.
+    comptime {
+        for (@typeInfo(Tables).@"struct".fields) |f| {
+            if (f.type != IdTable(u16)) continue;
+            if (!@hasField(limits.IdSpace, f.name)) @compileError(
+                "Emitter.Tables." ++ f.name ++ " is an id registry with no `IdSpace` in " ++
+                    "bytecode/resource_limits.zig — declare its budget there, so the walk " ++
+                    "refuses an over-cap document at its source line instead of at render",
+            );
         }
-        return .{ .base = try table.reserve(self.gpa, name, pool_size), .size = pool_size };
+        for (@typeInfo(limits.IdSpace).@"enum".fields) |f| {
+            if (!@hasField(Tables, f.name)) @compileError(
+                "resource_limits.IdSpace." ++ f.name ++ " names no `Tables` registry — " ++
+                    "either the emitter lost a table or the id space is not the compiler's to cap",
+            );
+        }
+    }
+
+    /// The registry `space` names.
+    ///
+    /// TOTAL over `limits.IdSpace`, which is the gate: `resource_limits.zig`
+    /// declares one budget per id space, and this switch makes a space the
+    /// compiler does not check a `@compileError` rather than a cap that
+    /// silently applies to nobody. It is the half of r3-03 a drift script could
+    /// not cover — the backends' constants ARE the shared ones now, so there is
+    /// nothing there to compare, but the compiler's knowledge of them could
+    /// still fall behind.
+    fn tableOf(self: *Emitter, comptime space: limits.IdSpace) *IdTable(u16) {
+        return switch (space) {
+            .buffers => &self.tables.buffers,
+            .textures => &self.tables.textures,
+            .texture_views => &self.tables.texture_views,
+            .samplers => &self.tables.samplers,
+            .shaders => &self.tables.shaders,
+            .pipelines => &self.tables.pipelines,
+            .bind_groups => &self.tables.bind_groups,
+            .bind_group_layouts => &self.tables.bind_group_layouts,
+            .pipeline_layouts => &self.tables.pipeline_layouts,
+            .image_bitmaps => &self.tables.image_bitmaps,
+            .render_bundles => &self.tables.render_bundles,
+            .query_sets => &self.tables.query_sets,
+            .passes => &self.tables.passes,
+            .wasm_modules => &self.tables.wasm_modules,
+            .wasm_calls => &self.tables.wasm_calls,
+        };
+    }
+
+    /// Refuse, with the author's form to point at, a reservation that would run
+    /// `space` past the budget SOME runtime holds for it — the registry's own
+    /// check (`reserve`, `reserveAnonymous`) sees only the u16 ceiling and has
+    /// nothing to point at either way.
+    ///
+    /// Three refusals, because the three budgets promise different things about
+    /// the runtimes that are not the binding one. Guessing between them would be
+    /// worse than staying silent: for a native table the document still loads in
+    /// a browser, for a browser table it still previews natively, and saying
+    /// either one backwards sends the author to debug the wrong runtime.
+    fn checkIdsFit(self: *Emitter, r: *const Reader, form: NodeIndex, comptime space: limits.IdSpace, name: []const u8, count: u8) Error!void {
+        std.debug.assert(count > 0);
+        const budget = comptime limits.budgetOf(space);
+        const next = self.tableOf(space).next;
+        if (@as(u32, next) + count <= budget.max) return;
+        const reached = @as(u32, next) + count;
+        switch (comptime budget.held_by) {
+            .wire => self.diagnose(.sjon, self.locate(r, form), "", "{s} '{s}' runs this document to {s} #{d}, but PNGB addresses at most {d} {s} — the id space is a u16, and an id past it would alias a live resource instead of failing", .{ budget.noun, name, budget.noun, reached, budget.max, budget.plural }),
+            .native => self.diagnose(.sjon, self.locate(r, form), "", "{s} '{s}' runs this document to {s} #{d}, but the native backend keeps a fixed table of {d} {s} — one past it is refused at render with `error.InvalidResourceId` (the browser runtime has no such table, so this document would load there but cannot be rendered with `--frame`)", .{ budget.noun, name, budget.noun, reached, budget.max, budget.plural }),
+            .browser => self.diagnose(.sjon, self.locate(r, form), "", "{s} '{s}' runs this document to {s} #{d}, but the browser executor stores at most {d} {s} — {s} beyond that are silently dropped at load (native `--frame` has no such cap, so this renders in a preview but not in a browser)", .{ budget.noun, name, budget.noun, reached, budget.max, budget.plural, budget.plural }),
+        }
+        return error.ValidationError;
+    }
+
+    /// Reserve exactly one id in `space` under `name`, refusing at the author's
+    /// form if it would not fit. The single spelling every non-pool registration
+    /// uses, so no id space can acquire a reservation site that skips its cap.
+    fn reserveId(self: *Emitter, r: *const Reader, form: NodeIndex, comptime space: limits.IdSpace, name: []const u8) Error!u16 {
+        std.debug.assert(name.len > 0);
+        try self.checkIdsFit(r, form, space, name, 1);
+        return try self.tableOf(space).intern(self.gpa, name);
     }
 
     /// Allocate the next document-wide pass id for `name` (kind render/compute),
@@ -4931,13 +7113,13 @@ pub const Emitter = struct {
     /// than shipping a PNG that renders differently than it previews. The
     /// silent-drop behavior it guards against is pinned by
     /// tests/zig/executor/wasm_entry_pass_cap_test.zig.
+    ///
+    /// The cap and its message live with every other id space's now: this was
+    /// the ONE resource kind the compiler knew a runtime budget for, and its
+    /// message is the shape `checkIdsFit` generalised (r3-03).
     fn allocPassId(self: *Emitter, r: *const Reader, form: NodeIndex, name: []const u8, kind: PassType) Error!u16 {
         std.debug.assert(name.len > 0);
-        if (self.tables.passes.next >= bytecode.DEFAULT_MAX_PASSES) {
-            self.diagnose(.sjon, self.locate(r, form), "", "pass '{s}' is pass #{d}, but the browser executor stores at most {d} passes — passes beyond that are silently dropped at load (native `--frame` has no such cap, so this renders in a preview but not in a browser)", .{ name, self.tables.passes.next + 1, bytecode.DEFAULT_MAX_PASSES });
-            return error.ValidationError;
-        }
-        const pass_id = try self.tables.passes.intern(self.gpa, name);
+        const pass_id = try self.reserveId(r, form, .passes, name);
         try self.tables.pass_types.put(self.gpa, name, kind);
         std.debug.assert(self.tables.passes.next <= bytecode.DEFAULT_MAX_PASSES);
         return pass_id;
@@ -5551,7 +7733,7 @@ pub const Emitter = struct {
 
     fn emitRenderBundle(self: *Emitter, r: *const Reader, form: NodeIndex) Error!void {
         const name = try self.requiredSymbol(r, form, "name");
-        const bundle_id = try self.tables.render_bundles.intern(self.gpa, name);
+        const bundle_id = try self.reserveId(r, form, .render_bundles, name);
 
         // C19 — the bundle's declared GPURenderPassLayout: checked against itself
         // and against the pipeline it records, then RECORDED for the pass that
@@ -5594,8 +7776,10 @@ pub const Emitter = struct {
             0;
         try appendU16LE(self.gpa, &desc, pipeline_id);
 
-        // bindGroups: count (u8) + ids (u16 LE).
-        try appendRefList(self, r, &desc, form, name, "bind-groups", "bind group", &self.tables.bind_groups);
+        // bindGroups: count (u8) + ids (u16 LE). Not `appendRefList`: a name
+        // here may be a layout-less group, whose instance depends on the
+        // bundle's pipeline.
+        try self.appendBundleBindGroups(r, &desc, form, name, if (r.symbol(form, "pipeline") != null) pipeline_id else null);
         // vertexBuffers: count (u8) + ids (u16 LE).
         try appendRefList(self, r, &desc, form, name, "vertex-buffers", "vertex buffer", &self.tables.buffers);
 
@@ -5643,7 +7827,7 @@ pub const Emitter = struct {
     /// is 0=occlusion (default) / 1=timestamp.
     fn emitQuerySet(self: *Emitter, r: *const Reader, form: NodeIndex) Error!void {
         const name = try self.requiredSymbol(r, form, "name");
-        const qs_id = try self.tables.query_sets.intern(self.gpa, name);
+        const qs_id = try self.reserveId(r, form, .query_sets, name);
 
         const query_type: u8 = if (r.symbol(form, "type")) |t|
             (if (std.mem.eql(u8, t, "timestamp")) @as(u8, 1) else 0)
@@ -5699,6 +7883,26 @@ pub const Emitter = struct {
     /// (u16 LE) resolved through `id_map`, via `bundleRef` (a miss is an error,
     /// not slot 0). Shared by bind-groups / vertex-buffers; `kind` is the
     /// singular human name for the diagnostic.
+    /// The bundle's `:bind-groups`, `[count:u8][id:u16 LE…]`, through
+    /// `boundGroup` so a layout-less group resolves to the instance derived for
+    /// the bundle's pipeline. The list is DENSE — entry i is slot i — so an
+    /// omitted instance cannot be skipped the way a pass skips a
+    /// `set_bind_group`; it is refused, and the author drops it from the list.
+    fn appendBundleBindGroups(self: *Emitter, r: *const Reader, desc: *std.ArrayList(u8), form: NodeIndex, bundle: []const u8, pass_pid: ?u16) Error!void {
+        std.debug.assert(bundle.len > 0);
+        const elems = r.vectorNodes(form, "bind-groups") orelse return desc.append(self.gpa, 0);
+        try self.checkDescListFits(r, form, bundle, "bind-groups", elems.len);
+        try desc.append(self.gpa, @intCast(elems.len));
+        for (elems) |e| {
+            const sym = try self.descListSymbol(r, e);
+            const g = (try self.boundGroup(r, form, sym, pass_pid)) orelse {
+                self.diagnose(.sjon, self.locate(r, form), "", "render-bundle '{s}' lists bind-group '{s}', which derives nothing for the bundle's pipeline (no entry point of it reaches the group's index) — a bundle's list is dense, so remove the group from this bundle's :bind-groups", .{ bundle, sym });
+                return error.ValidationError;
+            };
+            try appendU16LE(self.gpa, desc, g.base);
+        }
+    }
+
     fn appendRefList(
         self: *Emitter,
         r: *const Reader,
@@ -5863,21 +8067,23 @@ pub const Emitter = struct {
     /// top-level pass draw and the inner draws of an (occlusion-query …) bracket.
     fn emitDrawForm(self: *Emitter, r: *const Reader, node: NodeIndex) Error!void {
         const em = self.builder.getEmitter();
+        // Both arms are hook-emitted now — pass-v1's fullscreen triangle is a
+        // `(draw …)`, and `(draw-graph …)` clones the geometry's draw command,
+        // whichever of the two it is. Lowered trees are re-validated, so the
+        // REQUIRED counts are guaranteed on both origins; their
+        // materialized-defaults overlay is not exposed in HostResult (lowered
+        // forms read through `empty_overlay`), so every DEFAULTED key reads
+        // through `optU32` with the schema's own default beside it. A cloned
+        // form carries what the author wrote and nothing else, which is what
+        // keeps its descriptor equal to the hand-written twin's.
         if (std.mem.eql(u8, r.head(node), "draw-indexed")) {
-            // draw-indexed is never hook-emitted: schema requires :index-count and
-            // materializes :default for the rest — absence is unreachable post-validation.
             const ic = try self.requiredU32(r, node, "index-count");
-            const inst = try self.requiredU32(r, node, "instance-count");
-            const fi = try self.requiredU32(r, node, "first-index");
-            const bv = try self.requiredU32(r, node, "base-vertex");
-            const finst = try self.requiredU32(r, node, "first-instance");
+            const inst = (try self.optU32(r, node, "instance-count")) orelse 1;
+            const fi = (try self.optU32(r, node, "first-index")) orelse 0;
+            const bv = (try self.optU32(r, node, "base-vertex")) orelse 0;
+            const finst = (try self.optU32(r, node, "first-instance")) orelse 0;
             em.drawIndexed(self.gpa, ic, inst, fi, bv, finst) catch return error.OutOfMemory;
         } else {
-            // draw IS hook-emitted (pass-v1's fullscreen triangle). Lowered trees are
-            // re-validated, so the required :vertex-count is guaranteed on both origins
-            // — but their materialized-defaults overlay is not exposed in HostResult
-            // (lowered forms read through empty_overlay), so the three defaulted keys
-            // keep a live backstop for hook draws that only carry :vertex-count.
             const vc = try self.requiredU32(r, node, "vertex-count");
             const ic = (try self.optU32(r, node, "instance-count")) orelse 1;
             const fv = (try self.optU32(r, node, "first-vertex")) orelse 0;
@@ -6080,18 +8286,63 @@ pub const Emitter = struct {
         }
     }
 
+    /// Emit one frame-step list. A step names a pass (an `exec_pass` op), a
+    /// queue (its actions, inlined) or a `(step-group …)` (its own steps,
+    /// inlined here — a group is a compile-time name for a sequence and reaches
+    /// no wire).
+    ///
+    /// An explicit worklist rather than a recursive descent (the repo's Zig
+    /// rules), and bounded twice over: `MAX_STEP_GROUP_DEPTH` stops a group
+    /// cycle, and `MAX_FRAME_STEPS` stops a fan-out that would tear the command
+    /// buffer. A cycle is reachable only from hand-written groups — the hooks
+    /// emit flat ones — but "only a hand-written document can do it" is the
+    /// definition of an input, not of a case to leave open.
     fn emitFrameSteps(self: *Emitter, r: *const Reader, form: NodeIndex, key: []const u8) Error!void {
         const steps = r.vectorNodes(form, key) orelse return;
         const em = self.builder.getEmitter();
-        for (steps) |s| {
-            const sname = r.elemSymbol(s) orelse continue;
+
+        const Frame = struct { reader: *const Reader, steps: []const NodeIndex, at: usize };
+        var stack: std.ArrayList(Frame) = .empty;
+        defer stack.deinit(self.gpa);
+        try stack.append(self.gpa, .{ .reader = r, .steps = steps, .at = 0 });
+
+        var emitted: usize = 0;
+        for (0..MAX_FRAME_STEPS * MAX_STEP_GROUP_DEPTH) |_| {
+            const top = &stack.items[stack.items.len - 1];
+            if (top.at == top.steps.len) {
+                _ = stack.pop();
+                if (stack.items.len == 0) return;
+                continue;
+            }
+            const node = top.steps[top.at];
+            const sr = top.reader;
+            top.at += 1;
+            const sname = sr.elemSymbol(node) orelse continue;
+
             if (self.tables.passes.get(sname)) |pid| {
                 em.execPass(self.gpa, pid) catch return error.OutOfMemory;
+                emitted += 1;
             } else if (self.tables.queue_actions.get(sname)) |queue| {
                 try self.emitQueueActions(queue);
+                emitted += 1;
+            } else if (self.tables.step_groups.get(sname)) |group| {
+                if (stack.items.len == MAX_STEP_GROUP_DEPTH) {
+                    self.diagnose(.sjon, self.locate(sr, node), "", "step group '{s}' is nested more than {d} deep — a group naming itself, directly or through a chain, has no expansion", .{ sname, MAX_STEP_GROUP_DEPTH });
+                    return error.ValidationError;
+                }
+                const inner = group.reader.vectorNodes(group.idx, "perform") orelse &.{};
+                try stack.append(self.gpa, .{ .reader = group.reader, .steps = inner, .at = 0 });
             }
-            // else: a step that resolved to neither a pass nor a queue is dropped
+            // else: a step that resolved to none of the three is dropped
             // (the source/lowered cross-ref validator already rejected dangling names).
+
+            if (emitted > MAX_FRAME_STEPS) {
+                self.diagnose(.sjon, self.locate(r, form), "", "this frame expands to more than {d} steps once its `(step-group …)` names are inlined — the 64 KB command buffer cannot describe them all", .{MAX_FRAME_STEPS});
+                return error.ValidationError;
+            }
+        } else {
+            self.diagnose(.sjon, self.locate(r, form), "", "this frame's steps did not finish expanding — a `(step-group …)` chain is longer than the emitter walks", .{});
+            return error.ValidationError;
         }
     }
 
@@ -6150,6 +8401,7 @@ pub const Emitter = struct {
         const count = try self.requiredU32(r, rqs, "query-count");
         const dst_name = try self.requiredSymbol(r, rqs, "destination");
         const dst_id = self.tables.buffers.get(dst_name) orelse return self.unresolvedRef(r, rqs, "buffer", dst_name);
+        try self.frame_written.put(self.gpa, dst_id, {});
         const dst_off = try self.requiredU32(r, rqs, "destination-offset");
         self.builder.getEmitter().resolveQuerySet(self.gpa, qs_id, first, count, dst_id, dst_off) catch return error.OutOfMemory;
     }
@@ -6183,6 +8435,28 @@ pub const Emitter = struct {
         return error.ValidationError;
     }
 
+    /// `checkCopyFits` for a `(write-buffer …)`, whose size comes from the
+    /// `:data` rather than from a `:size` key. Both spellings have a length the
+    /// compiler knows: a builtin runtime source is fixed by the ABI
+    /// (`pngine-inputs` 16 bytes, `pngine-frame-inputs` 20, `pointer-inputs`
+    /// 48), and a declared `(data …)` has its bytes right here.
+    ///
+    /// Nothing else answers this. `checkBufferSize`'s uniform floor is 16 and a
+    /// 16-byte buffer clears it, so `pngine-frame-inputs` — 16 bytes plus a u32
+    /// frame counter — overran by four with a clean compile, and WebGPU's own
+    /// refusal happens at `queue.writeBuffer`, where it reads as "the animation
+    /// does not animate" rather than as an error. Pitfall 2's fourth path
+    /// (§438); the first three are `checkBufferSize`'s.
+    fn checkWriteFits(self: *Emitter, r: *const Reader, wb: NodeIndex, name: []const u8, id: u16, offset: u32, size: u32, source: []const u8) Error!void {
+        std.debug.assert(name.len > 0); // pre: a named buffer to blame
+        std.debug.assert(size > 0); // pre: a zero-length write has nothing to check
+        const meta = self.binds.buffer_meta.get(id) orelse return;
+        const end = @as(u64, offset) + @as(u64, size);
+        if (end <= meta.size) return;
+        self.diagnose(.sjon, self.locate(r, wb), "", "'{s}' writes {d} bytes at offset {d} of buffer '{s}', which is {d} bytes long", .{ source, size, offset, name, meta.size });
+        return error.ValidationError;
+    }
+
     /// Inline a queue's copy-buffer-to-buffer op (e.g. resolved queries → a
     /// MAP_READ readback buffer) → copy_buffer_to_buffer.
     fn emitCopyBufferToBuffer(self: *Emitter, r: *const Reader, cbb: NodeIndex) Error!void {
@@ -6193,6 +8467,7 @@ pub const Emitter = struct {
         const src_off = try self.requiredU32(r, cbb, "source-offset");
         const dst_name = try self.requiredSymbol(r, cbb, "destination");
         const dst_id = self.tables.buffers.get(dst_name) orelse return self.unresolvedRef(r, cbb, "buffer", dst_name);
+        try self.frame_written.put(self.gpa, dst_id, {});
         const dst_off = try self.requiredU32(r, cbb, "destination-offset");
         const size = try self.requiredU32(r, cbb, "size");
         try self.checkBufferCopyUsage(r, cbb, src_name, src_id, "source", "source");
@@ -6273,6 +8548,9 @@ pub const Emitter = struct {
     fn emitQueueWrite(self: *Emitter, r: *const Reader, wb: NodeIndex) Error!void {
         const buffer_name = try self.requiredSymbol(r, wb, "buffer");
         const buffer_id = self.tables.buffers.get(buffer_name) orelse return self.unresolvedRef(r, wb, "buffer", buffer_name);
+        // Every path below is a per-frame write (this is only reached from a
+        // frame's step walk), so the flag is set before the source is known.
+        try self.frame_written.put(self.gpa, buffer_id, {});
         const offset = (try self.optU32(r, wb, "offset")) orelse 0;
         // queue.writeBuffer is a copy like any other, so its destination admits one.
         try self.checkBufferCopyUsage(r, wb, buffer_name, buffer_id, "destination", "buffer");
@@ -6284,6 +8562,10 @@ pub const Emitter = struct {
         const data = try self.requiredSymbol(r, wb, "data");
         const em = self.builder.getEmitter();
         if (values.mapDataSource(data)) |src_kind| {
+            const src_size: u32 = switch (src_kind) {
+                .time_uniform, .pointer_uniform => |n| n,
+            };
+            try self.checkWriteFits(r, wb, buffer_name, buffer_id, offset, src_size, data);
             switch (src_kind) {
                 .time_uniform => |size| em.writeTimeUniform(self.gpa, buffer_id, offset, size) catch return error.OutOfMemory,
                 .pointer_uniform => |size| em.writePointerUniform(self.gpa, buffer_id, offset, size) catch return error.OutOfMemory,
@@ -6291,6 +8573,9 @@ pub const Emitter = struct {
             return;
         }
         if (self.tables.data.get(data)) |did| {
+            if (self.tables.data_byte_len.get(data)) |dlen| {
+                if (dlen > 0) try self.checkWriteFits(r, wb, buffer_name, buffer_id, offset, dlen, data);
+            }
             em.writeBuffer(self.gpa, buffer_id, offset, did) catch return error.OutOfMemory;
             return;
         }
@@ -6323,19 +8608,58 @@ pub const Emitter = struct {
         const names = r.vectorNodes(form, "bind-groups") orelse return;
         try self.checkSlotListFits(r, form, "bind-groups", names.len);
         const offsets = r.vectorNodes(form, "bind-groups-pool-offsets");
+        // The pass's pipeline picks a layout-less group's instance. Already
+        // resolved (or refused) by the caller's `:pipeline` read above.
+        const pass_pid: ?u16 = if (r.symbol(form, "pipeline")) |p| self.tables.pipelines.get(p) else null;
         const em = self.builder.getEmitter();
         for (names, 0..) |nnode, slot_usize| {
             const slot: u8 = @intCast(slot_usize);
             const gname = r.elemSymbol(nnode) orelse continue;
-            const base = self.tables.bind_groups.get(gname) orelse return self.unresolvedRef(r, form, "bind-group", gname);
+            // An omitted instance sets nothing at its slot: the pipeline reaches
+            // no group index that high, so there is no layout to bind against.
+            const g = (try self.boundGroup(r, form, gname, pass_pid)) orelse continue;
             const off = try self.poolOffset(r, offsets, slot_usize);
-            if (self.tables.bind_groups.pool(gname)) |bp| {
-                try self.checkPoolOffsetFits(r, offsets, slot_usize, "bind-groups-pool-offsets", gname, off, bp.size);
-                em.setBindGroupPool(self.gpa, slot, bp.base, bp.size, off) catch return error.OutOfMemory;
+            if (g.size > 1) {
+                try self.checkPoolOffsetFits(r, offsets, slot_usize, "bind-groups-pool-offsets", gname, off, g.size);
+                em.setBindGroupPool(self.gpa, slot, g.base, g.size, off) catch return error.OutOfMemory;
             } else {
-                em.setBindGroup(self.gpa, slot, base) catch return error.OutOfMemory;
+                em.setBindGroup(self.gpa, slot, g.base) catch return error.OutOfMemory;
             }
         }
+    }
+
+    const BoundGroup = struct { base: u16, size: u8 };
+
+    /// Resolve a name in a `:bind-groups` list to the wire group it sets under
+    /// `pass_pid`: an authored group (one registry entry, whatever the
+    /// pipeline) or the instance a layout-less group derived for THIS pipeline.
+    /// Null is the omitted instance — a derived group that pruned to nothing
+    /// above every group index the pipeline reaches — for which the caller
+    /// sets nothing.
+    fn boundGroup(self: *Emitter, r: *const Reader, form: NodeIndex, gname: []const u8, pass_pid: ?u16) Error!?BoundGroup {
+        std.debug.assert(gname.len > 0);
+        if (self.tables.bind_groups.get(gname)) |base| {
+            const size: u8 = if (self.tables.bind_groups.pool(gname)) |bp| bp.size else 1;
+            return .{ .base = base, .size = size };
+        }
+        // Emitted nothing, deliberately: see `Tables.omitted_groups`.
+        if (self.tables.omitted_groups.contains(gname)) return null;
+        if (!self.tables.derived_names.contains(gname)) return self.unresolvedRef(r, form, "bind-group", gname);
+        const pid = pass_pid orelse {
+            self.diagnose(.sjon, self.locate(r, form), "", "bind-group '{s}' names no :layout and derives one instance per pipeline, but this form names no :pipeline to pick an instance by — name one, or give the group a :layout", .{gname});
+            return error.ValidationError;
+        };
+        for (self.tables.derived_bind_groups.items) |d| {
+            if (d.pipeline != pid or !std.mem.eql(u8, d.name, gname)) continue;
+            if (d.omitted) return null;
+            return .{ .base = d.base, .size = d.size };
+        }
+        // Every (group, pipeline) pair a source pass or bundle names was
+        // collected before the group emitted, so a miss is a binder the
+        // collector cannot see — a lowered pass, or a pipeline that did not
+        // resolve when it ran.
+        self.diagnose(.sjon, self.locate(r, form), "", "bind-group '{s}' derived no instance for pipeline '{s}' — a group with no :layout derives for the pipelines that source passes and bundles name, resolved before the bind-group phase; give the group a :layout", .{ gname, self.tables.pipelines.nameOf(pid) orelse "?" });
+        return error.ValidationError;
     }
 
     // ---- render pipeline JSON pieces ----
@@ -6437,9 +8761,9 @@ pub const Emitter = struct {
         // truncate, because the u32 readers return null for a negative literal —
         // which is how `:depth-bias -1` used to vanish between validation and the
         // descriptor with nothing reported.
-        if (try self.optF64(r, ds, "depth-bias")) |m| try self.appendJsonInt(json, &first, "depthBias", @intFromFloat(m));
-        if (try self.optF64(r, ds, "depth-bias-slope-scale")) |v| try self.appendJsonFloat(json, &first, "depthBiasSlopeScale", v);
-        if (try self.optF64(r, ds, "depth-bias-clamp")) |v| try self.appendJsonFloat(json, &first, "depthBiasClamp", v);
+        if (try self.optF64(r, ds, "depth-bias")) |m| try self.appendJsonNum(json, &first, "depthBias", @as(i32, @intFromFloat(m)));
+        if (try self.optF64(r, ds, "depth-bias-slope-scale")) |v| try self.appendJsonNum(json, &first, "depthBiasSlopeScale", v);
+        if (try self.optF64(r, ds, "depth-bias-clamp")) |v| try self.appendJsonNum(json, &first, "depthBiasClamp", v);
         if (try self.optU32(r, ds, "stencil-read-mask")) |m| try self.appendJsonNum(json, &first, "stencilReadMask", m);
         if (try self.optU32(r, ds, "stencil-write-mask")) |m| try self.appendJsonNum(json, &first, "stencilWriteMask", m);
         if (r.child(ds, "stencil-front")) |sf| try self.appendStencilFace(json, &first, r, sf, "stencilFront");
@@ -6464,7 +8788,15 @@ pub const Emitter = struct {
     }
 
     /// Append `"key":"val"`, prefixing a comma after the first property.
+    ///
+    /// `val` goes in unescaped, which is correct only because every value that
+    /// reaches here is a schema-validated symbol or enum spelling — a member of
+    /// a closed set, none of which contains a quote, a backslash or a newline.
+    /// The assertion is that precondition made checkable: route a free-text key
+    /// through this and the debug build says so, instead of the payload
+    /// carrying JSON that no parser accepts.
     fn appendJsonStr(self: *Emitter, json: *std.ArrayList(u8), first: *bool, key: []const u8, val: []const u8) Error!void {
+        std.debug.assert(std.mem.indexOfAny(u8, val, "\"\\\n") == null);
         if (!first.*) try json.append(self.gpa, ',');
         first.* = false;
         try json.append(self.gpa, '"');
@@ -6484,43 +8816,37 @@ pub const Emitter = struct {
         try json.append(self.gpa, '}');
     }
 
-    /// Append `"key":<num>`, prefixing a comma after the first property.
-    fn appendJsonNum(self: *Emitter, json: *std.ArrayList(u8), first: *bool, key: []const u8, val: u32) Error!void {
+    /// Append `"key":<number>`, prefixing a comma after the first property.
+    ///
+    /// One helper for all three numeric shapes the descriptors carry — u32 (most
+    /// fields), i32 (`depthBias`, the only signed one) and f64 — because all
+    /// three emit the SAME JSON. `{d}` renders an integral float as `1` rather
+    /// than `1.0`, mirroring pipelines.zig's appendFloatProperty, and the parity
+    /// oracle compares pipeline descriptors structurally, so `1` and `1.0` are
+    /// equivalent. They were three byte-identical bodies before, kept apart only
+    /// because the unsigned one was typed `u32`.
+    ///
+    /// Integers format into a stack buffer (11 chars covers every i32/u32); a
+    /// float goes through `allocPrint`, whose output has no such short bound.
+    fn appendJsonNum(self: *Emitter, json: *std.ArrayList(u8), first: *bool, key: []const u8, val: anytype) Error!void {
         if (!first.*) try json.append(self.gpa, ',');
         first.* = false;
         try json.append(self.gpa, '"');
         try json.appendSlice(self.gpa, key);
         try json.appendSlice(self.gpa, "\":");
-        try appendInt(self.gpa, json, val);
-    }
 
-    /// `appendJsonNum` for a SIGNED field (`depthBias`). Separate because the
-    /// unsigned helper takes a u32 and there is exactly one signed descriptor
-    /// field; both runtimes read it as a JSON integer.
-    fn appendJsonInt(self: *Emitter, json: *std.ArrayList(u8), first: *bool, key: []const u8, val: i32) Error!void {
-        if (!first.*) try json.append(self.gpa, ',');
-        first.* = false;
-        try json.append(self.gpa, '"');
-        try json.appendSlice(self.gpa, key);
-        try json.appendSlice(self.gpa, "\":");
-        const entry = std.fmt.allocPrint(self.gpa, "{d}", .{val}) catch return error.OutOfMemory;
-        defer self.gpa.free(entry);
-        try json.appendSlice(self.gpa, entry);
-    }
-
-    /// Append `"key":<float>` using the legacy `{d}` formatting (1.0 → "1",
-    /// 0.5 → "0.5"), mirroring pipelines.zig appendFloatProperty. The parity
-    /// oracle compares pipeline descriptors structurally, so an integral float
-    /// (1) and its decimal form (1.0) are equivalent.
-    fn appendJsonFloat(self: *Emitter, json: *std.ArrayList(u8), first: *bool, key: []const u8, val: f64) Error!void {
-        if (!first.*) try json.append(self.gpa, ',');
-        first.* = false;
-        try json.append(self.gpa, '"');
-        try json.appendSlice(self.gpa, key);
-        try json.appendSlice(self.gpa, "\":");
-        const entry = std.fmt.allocPrint(self.gpa, "{d}", .{val}) catch return error.OutOfMemory;
-        defer self.gpa.free(entry);
-        try json.appendSlice(self.gpa, entry);
+        switch (@typeInfo(@TypeOf(val))) {
+            .int, .comptime_int => {
+                var buf: [12]u8 = undefined;
+                const text = std.fmt.bufPrint(&buf, "{d}", .{val}) catch unreachable; // 11 chars max
+                try json.appendSlice(self.gpa, text);
+            },
+            else => {
+                const text = std.fmt.allocPrint(self.gpa, "{d}", .{val}) catch return error.OutOfMemory;
+                defer self.gpa.free(text);
+                try json.appendSlice(self.gpa, text);
+            },
+        }
     }
 
     /// Append `"key":true|false`, prefixing a comma after the first property.

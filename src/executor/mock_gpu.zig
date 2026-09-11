@@ -13,6 +13,8 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const bytecode_emitter = @import("bytecode").emitter.Emitter;
 const opcodes = @import("bytecode").opcodes;
+/// Resource id-space budgets — shared with NullGPU and the native backend.
+const limits = @import("bytecode").resource_limits;
 
 /// GPU API call types.
 pub const CallType = enum {
@@ -139,7 +141,7 @@ pub const Call = struct {
         },
         begin_render_pass_mrt: struct {
             attachment_count: u8,
-            attachments: [8]bytecode_emitter.ColorAttachment,
+            attachments: [limits.MAX_COLOR_ATTACHMENTS]bytecode_emitter.ColorAttachment,
             depth_texture_id: u16,
         },
         set_pipeline: struct {
@@ -299,6 +301,12 @@ pub const Call = struct {
     };
 
     /// Write call description to buffer for debugging.
+    ///
+    /// Every arm's `catch "…(...)"` is a MESSAGE fallback, and deliberate: this
+    /// text is read by a human in a trace, so a truncated line still tells them
+    /// which call it was. That is the opposite of the rule in `cli/js_emit.zig`,
+    /// where the formatted text is a value the page computes with and no
+    /// fallback is acceptable (§440).
     pub fn describe(self: Call, buf: []u8) []const u8 {
         return switch (self.call_type) {
             .create_buffer => blk: {
@@ -465,11 +473,18 @@ pub const MockGPU = struct {
     /// point of this backend, and a trace reading `create_bind_group(id=60000)`
     /// diagnoses the malformed payload that a dropped call would hide. Only the
     /// bitset write — a resource-tracking convenience — is skipped.
-    pub const MAX_BUFFERS: u16 = 256;
-    pub const MAX_TEXTURES: u16 = 256;
-    pub const MAX_SHADERS: u16 = 64;
-    pub const MAX_PIPELINES: u16 = 64;
-    pub const MAX_BIND_GROUPS: u16 = 64;
+    ///
+    /// The numbers themselves are NOT here: they come from
+    /// `bytecode.resource_limits`, the one declaration all three backends read,
+    /// so a bitset here cannot be narrower than the table that actually stops a
+    /// render. `MAX_BIND_GROUPS` used to be 64 in this file while the native
+    /// backend held 128 — a reader consulting MockGPU concluded 64 was the
+    /// engine's limit and was wrong by a factor of two (r3-03).
+    pub const MAX_BUFFERS: u16 = limits.capOf(.buffers);
+    pub const MAX_TEXTURES: u16 = limits.capOf(.textures);
+    pub const MAX_SHADERS: u16 = limits.capOf(.shaders);
+    pub const MAX_PIPELINES: u16 = limits.capOf(.pipelines);
+    pub const MAX_BIND_GROUPS: u16 = limits.capOf(.bind_groups);
 
     /// A recorded runtime-uniform write. `kind` distinguishes the two opcodes
     /// (`.time` = write_time_uniform, `.pointer` = write_pointer_uniform); `size`
@@ -567,9 +582,9 @@ pub const MockGPU = struct {
     /// So: a refusal, at every site, in every build. The dispatcher propagates
     /// it as `error.CallBudgetExhausted` and the trace recorded up to the
     /// refusal stays intact — that prefix is what diagnoses the payload.
-    fn record(self: *Self, allocator: Allocator, call: Call) !void {
+    fn record(self: *Self, gpa: Allocator, call: Call) !void {
         if (self.calls.items.len >= CALL_BUDGET) return error.CallBudgetExhausted;
-        try self.calls.append(allocator, call);
+        try self.calls.append(gpa, call);
         // Post-condition: the log never passes the budget.
         assert(self.calls.items.len <= CALL_BUDGET);
     }
@@ -587,9 +602,9 @@ pub const MockGPU = struct {
         return self.pass_state_violations > 0;
     }
 
-    pub fn deinit(self: *Self, allocator: Allocator) void {
-        self.calls.deinit(allocator);
-        self.uniform_writes.deinit(allocator);
+    pub fn deinit(self: *Self, gpa: Allocator) void {
+        self.calls.deinit(gpa);
+        self.uniform_writes.deinit(gpa);
         self.* = undefined;
     }
 
@@ -612,11 +627,11 @@ pub const MockGPU = struct {
     // Resource Creation
     // ========================================================================
 
-    pub fn create_buffer(self: *Self, allocator: Allocator, buffer_id: u16, size: u32, usage: u16) !void {
+    pub fn create_buffer(self: *Self, gpa: Allocator, buffer_id: u16, size: u32, usage: u16) !void {
         // Untrusted id: a real branch, not an assert (see the MAX_* contract).
         if (buffer_id < MAX_BUFFERS) self.buffers_created.set(buffer_id);
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .create_buffer,
             .params = .{ .create_buffer = .{
                 .buffer_id = buffer_id,
@@ -628,7 +643,7 @@ pub const MockGPU = struct {
 
     /// Record texture creation.
     /// Tracks texture ID in bitset for resource validation.
-    pub fn create_texture(self: *Self, allocator: Allocator, texture_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_texture(self: *Self, gpa: Allocator, texture_id: u16, descriptor_data_id: u16) !void {
         // Untrusted id: a real branch, not an assert (see the MAX_* contract).
         //
         // No duplicate-id assert either. It claimed an invariant the INPUT is
@@ -641,7 +656,7 @@ pub const MockGPU = struct {
         // duplicate is visible in the recorded call log where it belongs.
         if (texture_id < MAX_TEXTURES) self.textures_created.set(texture_id);
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .create_texture,
             .params = .{ .create_texture = .{
                 .texture_id = texture_id,
@@ -652,13 +667,13 @@ pub const MockGPU = struct {
 
     /// Record sampler creation.
     /// Samplers are not tracked in bitset (typically few per pipeline).
-    pub fn create_sampler(self: *Self, allocator: Allocator, sampler_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_sampler(self: *Self, gpa: Allocator, sampler_id: u16, descriptor_data_id: u16) !void {
         // No id assert: samplers have no table here (see the doc line above), so
         // the old `sampler_id < MAX_TEXTURES` bounded a sampler id by the TEXTURE
         // cap — a borrowed number, not an invariant. It guarded nothing and
         // Debug-panicked on the malformed payloads this backend exists to report.
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .create_sampler,
             .params = .{ .create_sampler = .{
                 .sampler_id = sampler_id,
@@ -668,8 +683,8 @@ pub const MockGPU = struct {
     }
 
     /// Record texture view creation.
-    pub fn create_texture_view(self: *Self, allocator: Allocator, view_id: u16, texture_id: u16, descriptor_data_id: u16) !void {
-        try self.record(allocator, .{
+    pub fn create_texture_view(self: *Self, gpa: Allocator, view_id: u16, texture_id: u16, descriptor_data_id: u16) !void {
+        try self.record(gpa, .{
             .call_type = .create_texture_view,
             .params = .{ .create_texture_view = .{
                 .view_id = view_id,
@@ -680,8 +695,8 @@ pub const MockGPU = struct {
     }
 
     /// Record query set creation.
-    pub fn create_query_set(self: *Self, allocator: Allocator, query_set_id: u16, descriptor_data_id: u16) !void {
-        try self.record(allocator, .{
+    pub fn create_query_set(self: *Self, gpa: Allocator, query_set_id: u16, descriptor_data_id: u16) !void {
+        try self.record(gpa, .{
             .call_type = .create_query_set,
             .params = .{ .create_query_set = .{
                 .query_set_id = query_set_id,
@@ -691,14 +706,14 @@ pub const MockGPU = struct {
     }
 
     /// Record bind group layout creation.
-    pub fn create_bind_group_layout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_bind_group_layout(self: *Self, gpa: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
         // No id assert: this backend keeps no bind-group-layout table, so there
         // is no bound to enforce — the old `layout_id < MAX_BIND_GROUPS` guarded
         // nothing and named the wrong id space besides. Asserting here only
         // turned a malformed payload into a Debug panic in the one backend whose
         // job is to describe malformed payloads.
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .create_bind_group_layout,
             .params = .{ .create_bind_group_layout = .{
                 .layout_id = layout_id,
@@ -708,8 +723,8 @@ pub const MockGPU = struct {
     }
 
     /// Record pipeline layout creation.
-    pub fn create_pipeline_layout(self: *Self, allocator: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
-        try self.record(allocator, .{
+    pub fn create_pipeline_layout(self: *Self, gpa: Allocator, layout_id: u16, descriptor_data_id: u16) !void {
+        try self.record(gpa, .{
             .call_type = .create_pipeline_layout,
             .params = .{ .create_pipeline_layout = .{
                 .layout_id = layout_id,
@@ -719,8 +734,8 @@ pub const MockGPU = struct {
     }
 
     /// Record render bundle creation.
-    pub fn create_render_bundle(self: *Self, allocator: Allocator, bundle_id: u16, descriptor_data_id: u16) !void {
-        try self.record(allocator, .{
+    pub fn create_render_bundle(self: *Self, gpa: Allocator, bundle_id: u16, descriptor_data_id: u16) !void {
+        try self.record(gpa, .{
             .call_type = .create_render_bundle,
             .params = .{ .create_render_bundle = .{
                 .bundle_id = bundle_id,
@@ -729,10 +744,10 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn create_shader_module(self: *Self, allocator: Allocator, shader_id: u16, code_data_id: u16) !void {
+    pub fn create_shader_module(self: *Self, gpa: Allocator, shader_id: u16, code_data_id: u16) !void {
         if (shader_id < MAX_SHADERS) self.shaders_created.set(shader_id); // untrusted id
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .create_shader_module,
             .params = .{ .create_shader_module = .{
                 .shader_id = shader_id,
@@ -741,10 +756,10 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn create_render_pipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_render_pipeline(self: *Self, gpa: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
         if (pipeline_id < MAX_PIPELINES) self.pipelines_created.set(pipeline_id); // untrusted id
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .create_render_pipeline,
             .params = .{ .create_render_pipeline = .{
                 .pipeline_id = pipeline_id,
@@ -753,10 +768,10 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn create_compute_pipeline(self: *Self, allocator: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
+    pub fn create_compute_pipeline(self: *Self, gpa: Allocator, pipeline_id: u16, descriptor_data_id: u16) !void {
         if (pipeline_id < MAX_PIPELINES) self.pipelines_created.set(pipeline_id); // untrusted id
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .create_compute_pipeline,
             .params = .{ .create_compute_pipeline = .{
                 .pipeline_id = pipeline_id,
@@ -765,10 +780,10 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn create_bind_group(self: *Self, allocator: Allocator, group_id: u16, layout_id: u16, entry_data_id: u16) !void {
+    pub fn create_bind_group(self: *Self, gpa: Allocator, group_id: u16, layout_id: u16, entry_data_id: u16) !void {
         if (group_id < MAX_BIND_GROUPS) self.bind_groups_created.set(group_id); // untrusted id
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .create_bind_group,
             .params = .{ .create_bind_group = .{
                 .group_id = group_id,
@@ -782,14 +797,14 @@ pub const MockGPU = struct {
     // Pass Operations
     // ========================================================================
 
-    pub fn begin_render_pass(self: *Self, allocator: Allocator, color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16, clear_r_bits: u32, clear_g_bits: u32, clear_b_bits: u32, clear_a_bits: u32, resolve_texture_id: u16) !void {
+    pub fn begin_render_pass(self: *Self, gpa: Allocator, color_texture_id: u16, load_op: u8, store_op: u8, depth_texture_id: u16, clear_r_bits: u32, clear_g_bits: u32, clear_b_bits: u32, clear_a_bits: u32, resolve_texture_id: u16) !void {
         // Latched, not asserted: this is input, not a caller bug.
         self.notePassState(!self.in_render_pass and !self.in_compute_pass);
 
         self.in_render_pass = true;
         self.current_pipeline = null;
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .begin_render_pass,
             .params = .{ .begin_render_pass = .{
                 .color_texture_id = color_texture_id,
@@ -805,7 +820,7 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn begin_render_pass_mrt(self: *Self, allocator: Allocator, attachments: []const bytecode_emitter.ColorAttachment, depth_texture_id: u16) !void {
+    pub fn begin_render_pass_mrt(self: *Self, gpa: Allocator, attachments: []const bytecode_emitter.ColorAttachment, depth_texture_id: u16) !void {
         self.notePassState(!self.in_render_pass and !self.in_compute_pass);
 
         self.in_render_pass = true;
@@ -815,7 +830,7 @@ pub const MockGPU = struct {
         const count: u8 = @intCast(@min(attachments.len, 8));
         @memcpy(atts[0..count], attachments[0..count]);
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .begin_render_pass_mrt,
             .params = .{ .begin_render_pass_mrt = .{
                 .attachment_count = count,
@@ -825,25 +840,25 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn begin_compute_pass(self: *Self, allocator: Allocator) !void {
+    pub fn begin_compute_pass(self: *Self, gpa: Allocator) !void {
         self.notePassState(!self.in_render_pass and !self.in_compute_pass);
 
         self.in_compute_pass = true;
         self.current_pipeline = null;
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .begin_compute_pass,
             .params = .{ .none = {} },
         });
     }
 
-    pub fn set_pipeline(self: *Self, allocator: Allocator, pipeline_id: u16) !void {
+    pub fn set_pipeline(self: *Self, gpa: Allocator, pipeline_id: u16) !void {
         // Latched, not asserted: this is input, not a caller bug.
         self.notePassState(self.in_render_pass or self.in_compute_pass);
 
         self.current_pipeline = pipeline_id;
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .set_pipeline,
             .params = .{ .set_pipeline = .{
                 .pipeline_id = pipeline_id,
@@ -851,10 +866,10 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn set_bind_group(self: *Self, allocator: Allocator, slot: u8, group_id: u16) !void {
+    pub fn set_bind_group(self: *Self, gpa: Allocator, slot: u8, group_id: u16) !void {
         self.notePassState(self.in_render_pass or self.in_compute_pass);
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .set_bind_group,
             .params = .{ .set_bind_group = .{
                 .slot = slot,
@@ -863,10 +878,10 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn set_vertex_buffer(self: *Self, allocator: Allocator, slot: u8, buffer_id: u16) !void {
+    pub fn set_vertex_buffer(self: *Self, gpa: Allocator, slot: u8, buffer_id: u16) !void {
         self.notePassState(self.in_render_pass);
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .set_vertex_buffer,
             .params = .{ .set_vertex_buffer = .{
                 .slot = slot,
@@ -875,10 +890,10 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn set_index_buffer(self: *Self, allocator: Allocator, buffer_id: u16, index_format: u8) !void {
+    pub fn set_index_buffer(self: *Self, gpa: Allocator, buffer_id: u16, index_format: u8) !void {
         self.notePassState(self.in_render_pass);
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .set_index_buffer,
             .params = .{ .set_index_buffer = .{
                 .buffer_id = buffer_id,
@@ -889,7 +904,7 @@ pub const MockGPU = struct {
 
     pub fn draw(
         self: *Self,
-        allocator: Allocator,
+        gpa: Allocator,
         vertex_count: u32,
         instance_count: u32,
         first_vertex: u32,
@@ -897,7 +912,7 @@ pub const MockGPU = struct {
     ) !void {
         self.notePassState(self.in_render_pass);
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .draw,
             .params = .{ .draw = .{
                 .vertex_count = vertex_count,
@@ -910,7 +925,7 @@ pub const MockGPU = struct {
 
     pub fn draw_indexed(
         self: *Self,
-        allocator: Allocator,
+        gpa: Allocator,
         index_count: u32,
         instance_count: u32,
         first_index: u32,
@@ -919,7 +934,7 @@ pub const MockGPU = struct {
     ) !void {
         self.notePassState(self.in_render_pass);
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .draw_indexed,
             .params = .{ .draw_indexed = .{
                 .index_count = index_count,
@@ -931,10 +946,10 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn dispatch(self: *Self, allocator: Allocator, x: u32, y: u32, z: u32) !void {
+    pub fn dispatch(self: *Self, gpa: Allocator, x: u32, y: u32, z: u32) !void {
         self.notePassState(self.in_compute_pass);
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .dispatch,
             .params = .{ .dispatch = .{
                 .x = x,
@@ -944,10 +959,10 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn draw_indirect(self: *Self, allocator: Allocator, buffer_id: u16, offset: u32) !void {
+    pub fn draw_indirect(self: *Self, gpa: Allocator, buffer_id: u16, offset: u32) !void {
         self.notePassState(self.in_render_pass);
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .draw_indirect,
             .params = .{ .draw_indirect = .{
                 .buffer_id = buffer_id,
@@ -956,10 +971,10 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn draw_indexed_indirect(self: *Self, allocator: Allocator, buffer_id: u16, offset: u32) !void {
+    pub fn draw_indexed_indirect(self: *Self, gpa: Allocator, buffer_id: u16, offset: u32) !void {
         self.notePassState(self.in_render_pass);
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .draw_indexed_indirect,
             .params = .{ .draw_indexed_indirect = .{
                 .buffer_id = buffer_id,
@@ -968,10 +983,10 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn set_viewport(self: *Self, allocator: Allocator, x: u32, y: u32, width: u32, height: u32, min_depth_bits: u32, max_depth_bits: u32) !void {
+    pub fn set_viewport(self: *Self, gpa: Allocator, x: u32, y: u32, width: u32, height: u32, min_depth_bits: u32, max_depth_bits: u32) !void {
         self.notePassState(self.in_render_pass);
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .set_viewport,
             .params = .{ .set_viewport = .{
                 .x = x,
@@ -984,50 +999,50 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn set_pass_occlusion_query_set(self: *Self, allocator: Allocator, query_set_id: u16) !void {
-        try self.record(allocator, .{ .call_type = .set_pass_occlusion_query_set, .params = .{ .set_pass_occlusion_query_set = .{ .query_set_id = query_set_id } } });
+    pub fn set_pass_occlusion_query_set(self: *Self, gpa: Allocator, query_set_id: u16) !void {
+        try self.record(gpa, .{ .call_type = .set_pass_occlusion_query_set, .params = .{ .set_pass_occlusion_query_set = .{ .query_set_id = query_set_id } } });
     }
 
-    pub fn set_pass_timestamp_writes(self: *Self, allocator: Allocator, query_set_id: u16, begin_index: u32, end_index: u32) !void {
-        try self.record(allocator, .{ .call_type = .set_pass_timestamp_writes, .params = .{ .set_pass_timestamp_writes = .{ .query_set_id = query_set_id, .begin_index = begin_index, .end_index = end_index } } });
+    pub fn set_pass_timestamp_writes(self: *Self, gpa: Allocator, query_set_id: u16, begin_index: u32, end_index: u32) !void {
+        try self.record(gpa, .{ .call_type = .set_pass_timestamp_writes, .params = .{ .set_pass_timestamp_writes = .{ .query_set_id = query_set_id, .begin_index = begin_index, .end_index = end_index } } });
     }
 
-    pub fn begin_occlusion_query(self: *Self, allocator: Allocator, query_index: u32) !void {
+    pub fn begin_occlusion_query(self: *Self, gpa: Allocator, query_index: u32) !void {
         self.notePassState(self.in_render_pass);
-        try self.record(allocator, .{ .call_type = .begin_occlusion_query, .params = .{ .begin_occlusion_query = .{ .query_index = query_index } } });
+        try self.record(gpa, .{ .call_type = .begin_occlusion_query, .params = .{ .begin_occlusion_query = .{ .query_index = query_index } } });
     }
 
-    pub fn end_occlusion_query(self: *Self, allocator: Allocator) !void {
+    pub fn end_occlusion_query(self: *Self, gpa: Allocator) !void {
         self.notePassState(self.in_render_pass);
-        try self.record(allocator, .{ .call_type = .end_occlusion_query, .params = .{ .end_occlusion_query = .{} } });
+        try self.record(gpa, .{ .call_type = .end_occlusion_query, .params = .{ .end_occlusion_query = .{} } });
     }
 
-    pub fn resolve_query_set(self: *Self, allocator: Allocator, query_set_id: u16, first_query: u32, query_count: u32, dest_buffer_id: u16, dest_offset: u32) !void {
-        try self.record(allocator, .{ .call_type = .resolve_query_set, .params = .{ .resolve_query_set = .{ .query_set_id = query_set_id, .first_query = first_query, .query_count = query_count, .dest_buffer_id = dest_buffer_id, .dest_offset = dest_offset } } });
+    pub fn resolve_query_set(self: *Self, gpa: Allocator, query_set_id: u16, first_query: u32, query_count: u32, dest_buffer_id: u16, dest_offset: u32) !void {
+        try self.record(gpa, .{ .call_type = .resolve_query_set, .params = .{ .resolve_query_set = .{ .query_set_id = query_set_id, .first_query = first_query, .query_count = query_count, .dest_buffer_id = dest_buffer_id, .dest_offset = dest_offset } } });
     }
 
-    pub fn set_stencil_reference(self: *Self, allocator: Allocator, reference: u32) !void {
+    pub fn set_stencil_reference(self: *Self, gpa: Allocator, reference: u32) !void {
         self.notePassState(self.in_render_pass);
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .set_stencil_reference,
             .params = .{ .set_stencil_reference = .{ .reference = reference } },
         });
     }
 
-    pub fn set_blend_constant(self: *Self, allocator: Allocator, r_bits: u32, g_bits: u32, b_bits: u32, a_bits: u32) !void {
+    pub fn set_blend_constant(self: *Self, gpa: Allocator, r_bits: u32, g_bits: u32, b_bits: u32, a_bits: u32) !void {
         self.notePassState(self.in_render_pass);
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .set_blend_constant,
             .params = .{ .set_blend_constant = .{ .r_bits = r_bits, .g_bits = g_bits, .b_bits = b_bits, .a_bits = a_bits } },
         });
     }
 
-    pub fn set_scissor_rect(self: *Self, allocator: Allocator, x: u32, y: u32, width: u32, height: u32) !void {
+    pub fn set_scissor_rect(self: *Self, gpa: Allocator, x: u32, y: u32, width: u32, height: u32) !void {
         self.notePassState(self.in_render_pass);
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .set_scissor_rect,
             .params = .{ .set_scissor_rect = .{
                 .x = x,
@@ -1038,8 +1053,8 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn set_pass_depth_stencil_ops(self: *Self, allocator: Allocator, depth_load_op: u8, depth_store_op: u8, stencil_load_op: u8, stencil_store_op: u8) !void {
-        try self.record(allocator, .{
+    pub fn set_pass_depth_stencil_ops(self: *Self, gpa: Allocator, depth_load_op: u8, depth_store_op: u8, stencil_load_op: u8, stencil_store_op: u8) !void {
+        try self.record(gpa, .{
             .call_type = .set_pass_depth_stencil_ops,
             .params = .{ .set_pass_depth_stencil_ops = .{
                 .depth_load_op = depth_load_op,
@@ -1050,8 +1065,8 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn set_pass_clear_values(self: *Self, allocator: Allocator, depth_bits: u32, stencil_value: u32) !void {
-        try self.record(allocator, .{
+    pub fn set_pass_clear_values(self: *Self, gpa: Allocator, depth_bits: u32, stencil_value: u32) !void {
+        try self.record(gpa, .{
             .call_type = .set_pass_clear_values,
             .params = .{ .set_pass_clear_values = .{
                 .depth_bits = depth_bits,
@@ -1060,10 +1075,10 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn dispatch_indirect(self: *Self, allocator: Allocator, buffer_id: u16, offset: u32) !void {
+    pub fn dispatch_indirect(self: *Self, gpa: Allocator, buffer_id: u16, offset: u32) !void {
         self.notePassState(self.in_compute_pass);
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .dispatch_indirect,
             .params = .{ .dispatch_indirect = .{
                 .buffer_id = buffer_id,
@@ -1073,10 +1088,10 @@ pub const MockGPU = struct {
     }
 
     /// Execute pre-recorded render bundles.
-    pub fn execute_bundles(self: *Self, allocator: Allocator, bundle_ids: []const u16) !void {
+    pub fn execute_bundles(self: *Self, gpa: Allocator, bundle_ids: []const u16) !void {
         self.notePassState(self.in_render_pass);
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .execute_bundles,
             .params = .{ .execute_bundles = .{
                 .bundle_count = @intCast(bundle_ids.len),
@@ -1084,7 +1099,7 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn end_pass(self: *Self, allocator: Allocator) !void {
+    pub fn end_pass(self: *Self, gpa: Allocator) !void {
         // Latched, not asserted: this is input, not a caller bug.
         self.notePassState(self.in_render_pass or self.in_compute_pass);
 
@@ -1092,7 +1107,7 @@ pub const MockGPU = struct {
         self.in_compute_pass = false;
         self.current_pipeline = null;
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .end_pass,
             .params = .{ .none = {} },
         });
@@ -1102,8 +1117,8 @@ pub const MockGPU = struct {
     // Queue Operations
     // ========================================================================
 
-    pub fn write_buffer(self: *Self, allocator: Allocator, buffer_id: u16, offset: u32, data_id: u16) !void {
-        try self.record(allocator, .{
+    pub fn write_buffer(self: *Self, gpa: Allocator, buffer_id: u16, offset: u32, data_id: u16) !void {
+        try self.record(gpa, .{
             .call_type = .write_buffer,
             .params = .{ .write_buffer = .{
                 .buffer_id = buffer_id,
@@ -1113,18 +1128,18 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn submit(self: *Self, allocator: Allocator) !void {
+    pub fn submit(self: *Self, gpa: Allocator) !void {
         // Latched, not asserted: a pass left open at submit is malformed input.
         self.notePassState(!self.in_render_pass and !self.in_compute_pass);
 
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .submit,
             .params = .{ .none = {} },
         });
     }
 
-    pub fn create_image_bitmap(self: *Self, allocator: Allocator, bitmap_id: u16, blob_data_id: u16) !void {
-        try self.record(allocator, .{
+    pub fn create_image_bitmap(self: *Self, gpa: Allocator, bitmap_id: u16, blob_data_id: u16) !void {
+        try self.record(gpa, .{
             .call_type = .create_image_bitmap,
             .params = .{ .create_image_bitmap = .{
                 .bitmap_id = bitmap_id,
@@ -1133,8 +1148,8 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn copy_external_image_to_texture(self: *Self, allocator: Allocator, bitmap_id: u16, texture_id: u16, mip_level: u8, origin_x: u16, origin_y: u16, origin_z: u16) !void {
-        try self.record(allocator, .{
+    pub fn copy_external_image_to_texture(self: *Self, gpa: Allocator, bitmap_id: u16, texture_id: u16, mip_level: u8, origin_x: u16, origin_y: u16, origin_z: u16) !void {
+        try self.record(gpa, .{
             .call_type = .copy_external_image_to_texture,
             .params = .{ .copy_external_image_to_texture = .{
                 .bitmap_id = bitmap_id,
@@ -1151,8 +1166,8 @@ pub const MockGPU = struct {
     // Copy Operations
     // ========================================================================
 
-    pub fn copy_buffer_to_buffer(self: *Self, allocator: Allocator, src_buffer: u16, src_offset: u32, dst_buffer: u16, dst_offset: u32, size: u32) !void {
-        try self.record(allocator, .{
+    pub fn copy_buffer_to_buffer(self: *Self, gpa: Allocator, src_buffer: u16, src_offset: u32, dst_buffer: u16, dst_offset: u32, size: u32) !void {
+        try self.record(gpa, .{
             .call_type = .copy_buffer_to_buffer,
             .params = .{ .copy_buffer_to_buffer = .{
                 .src_buffer = src_buffer,
@@ -1164,8 +1179,8 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn copy_texture_to_texture(self: *Self, allocator: Allocator, src_texture: u16, dst_texture: u16) !void {
-        try self.record(allocator, .{
+    pub fn copy_texture_to_texture(self: *Self, gpa: Allocator, src_texture: u16, dst_texture: u16) !void {
+        try self.record(gpa, .{
             .call_type = .copy_texture_to_texture,
             .params = .{ .copy_texture_to_texture = .{
                 .src_texture = src_texture,
@@ -1174,8 +1189,8 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn write_uniform(self: *Self, allocator: Allocator, buffer_id: u16, uniform_id: u16) !void {
-        try self.record(allocator, .{
+    pub fn write_uniform(self: *Self, gpa: Allocator, buffer_id: u16, uniform_id: u16) !void {
+        try self.record(gpa, .{
             .call_type = .write_uniform,
             .params = .{ .write_uniform = .{
                 .buffer_id = buffer_id,
@@ -1188,8 +1203,8 @@ pub const MockGPU = struct {
     // WASM Operations
     // ========================================================================
 
-    pub fn init_wasm_module(self: *Self, allocator: Allocator, module_id: u16, wasm_data_id: u16) !void {
-        try self.record(allocator, .{
+    pub fn init_wasm_module(self: *Self, gpa: Allocator, module_id: u16, wasm_data_id: u16) !void {
+        try self.record(gpa, .{
             .call_type = .init_wasm_module,
             .params = .{ .init_wasm_module = .{
                 .module_id = module_id,
@@ -1198,9 +1213,9 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn call_wasm_func(self: *Self, allocator: Allocator, call_id: u16, module_id: u16, func_name_id: u16, args: []const u8) !void {
+    pub fn call_wasm_func(self: *Self, gpa: Allocator, call_id: u16, module_id: u16, func_name_id: u16, args: []const u8) !void {
         _ = args; // Args passed to JS at runtime, not needed for mock
-        try self.record(allocator, .{
+        try self.record(gpa, .{
             .call_type = .call_wasm_func,
             .params = .{ .call_wasm_func = .{
                 .call_id = call_id,
@@ -1210,8 +1225,8 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn write_buffer_from_wasm(self: *Self, allocator: Allocator, call_id: u16, buffer_id: u16, offset: u32, byte_len: u32) !void {
-        try self.record(allocator, .{
+    pub fn write_buffer_from_wasm(self: *Self, gpa: Allocator, call_id: u16, buffer_id: u16, offset: u32, byte_len: u32) !void {
+        try self.record(gpa, .{
             .call_type = .write_buffer_from_wasm,
             .params = .{ .write_buffer_from_wasm = .{
                 .call_id = call_id,
@@ -1222,17 +1237,17 @@ pub const MockGPU = struct {
         });
     }
 
-    pub fn write_time_uniform(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
-        try self.uniform_writes.append(allocator, .{ .kind = .time, .buffer_id = buffer_id, .offset = buffer_offset, .size = size });
+    pub fn write_time_uniform(self: *Self, gpa: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
+        try self.uniform_writes.append(gpa, .{ .kind = .time, .buffer_id = buffer_id, .offset = buffer_offset, .size = size });
     }
 
-    pub fn write_pointer_uniform(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
-        try self.uniform_writes.append(allocator, .{ .kind = .pointer, .buffer_id = buffer_id, .offset = buffer_offset, .size = size });
+    pub fn write_pointer_uniform(self: *Self, gpa: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
+        try self.uniform_writes.append(gpa, .{ .kind = .pointer, .buffer_id = buffer_id, .offset = buffer_offset, .size = size });
     }
 
-    pub fn write_audio_data(self: *Self, allocator: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
+    pub fn write_audio_data(self: *Self, gpa: Allocator, buffer_id: u16, buffer_offset: u32, size: u16) !void {
         _ = self;
-        _ = allocator;
+        _ = gpa;
         _ = buffer_id;
         _ = buffer_offset;
         _ = size;

@@ -1,0 +1,203 @@
+; The hand-written twin of examples/pass_acid_cubes.sjon: the same raymarcher
+; with `(pass-graph …)` expanded by hand into the core forms it lowers to.
+; `schema/sugar-ledger.mjs` names this file for `(pass …)`'s `:imports`, and
+; `tests/zig/render/render_test.zig` holds the pair pixel-equal every run
+; (`twin_of = "pass_acid_cubes"`).
+;
+; `:imports` is the smallest key on the pass form: it is FORWARDED, unchanged,
+; onto every shader module the pass builds from the author's text. So the twin
+; carries the same `:imports [cellDist]` on its `(shader-module …)`, and the
+; fragment below is the sugar document's own, copied verbatim. Nothing about
+; the assembly is re-done by hand — that is the claim.
+;
+; Why the pair is worth gating rather than asserting. Inlining `cellDist`'s
+; text into `:code` instead of importing it would render the same picture and
+; prove nothing, so the probe that separates a faithful twin from that one is
+; to perturb the FRAGMENT: give it `min(d_star, d_wall)` here and this file
+; renders the OTHER document in the corpus (pass_acid_lattice.sjon is exactly
+; that rebinding, and it is a different picture, not a tidier one). Measured
+; when this landed: 65,534 of 65,536 pixels move, max difference 255. A twin
+; that had inlined the text would not have moved at all.
+;
+; Equivalence reached: PIXEL, for the two reasons every `(pass …)` twin is
+; pixel rather than byte — the sugar names the frame and the last render pass
+; alike (`duplicate name 'main'` when written by hand, hence `(frame :name
+; draw …)`), and the emitter walks authored forms grouped by kind against
+; lowered forms in emission order.
+
+(wgsl :name cellDist :code """
+  fn cellDist(d_star: f32, d_wall: f32) -> f32 {
+    return d_star;
+  }
+""")
+
+; Emitted by the graph whether or not any pass samples: this one does not.
+(sampler :name __pass_sampler :mag-filter linear :min-filter linear)
+
+; ---- pass `main` -> the canvas ---------------------------------------------
+
+(buffer :name main__ubuf :size 16 :usage [uniform copy-dst])
+(buffer :name main__pbuf :size 48 :usage [uniform copy-dst])
+
+; No `main__tex`: a last pass with no `post()` renders straight to
+; `context-current-texture` (§425, CONTRIBUTING pitfall 114).
+
+; The prelude the hook injects ahead of the author's text — the two uniform
+; structs the WGSL names and the fullscreen triangle every pass draws with.
+; `:imports` rides on THIS form; the pass key does nothing else with it.
+(shader-module :name main__shader :imports [cellDist] :code """struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
+@group(0) @binding(0) var<uniform> pngine: PngineInputs;
+struct PointerInputs { x: f32, y: f32, clickX: f32, clickY: f32, dx: f32, dy: f32, buttons: f32, pressure: f32, modifiers: f32, scrollX: f32, scrollY: f32, _pad: f32 }
+@group(0) @binding(1) var<uniform> pointer: PointerInputs;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let x = f32(i & 1u) * 4.0 - 1.0;
+  let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+  return vec4f(x, y, 0, 1);
+}
+
+    // Cosine palette (Inigo Quilez). `t` carries the hue offset already.
+    // TAU is a pngine built-in — the emitter inlines the literal, so declaring
+    // it here would leave a dangling const (W0001).
+    fn acid(t: f32, punch: f32) -> vec3f {
+      let a = vec3f(0.5);
+      let b = vec3f(0.5 + punch);
+      let d = vec3f(0.0, 0.33, 0.67);
+      // The clamp is load-bearing twice over. Driving `b` past 0.5 pushes the
+      // cosine outside [0,1], and clipping those peaks flat is what turns a
+      // soft gradient into hard neon primaries. It also keeps the result
+      // non-negative: pow() on a negative channel below is undefined, and the
+      // undershoot was reaching it.
+      return clamp(a + b * cos(TAU * (t + d)), vec3f(0.0), vec3f(1.0));
+    }
+
+    /// Three pseudo-random numbers in [0, 1] from a 3D cell id.
+    fn hash3(p: vec3f) -> vec3f {
+      var p3 = fract(p * vec3f(0.1031, 0.1030, 0.0973));
+      p3 = p3 + dot(p3, p3.yzx + 19.19);
+      return fract(vec3f(p3.x + p3.y, p3.y + p3.z, p3.z + p3.x) * p3.zxy);
+    }
+
+    fn sdBox(p: vec3f, b: vec3f) -> f32 {
+      let q = abs(p) - b;
+      return length(max(q, vec3f(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
+    }
+
+    fn sdSphere(p: vec3f, r: f32) -> f32 {
+      return length(p) - r;
+    }
+
+    fn map(p: vec3f) -> f32 {
+      let grid_size = 10.0;
+      let p_scaled = p / grid_size;
+
+      let cell_id = floor(p_scaled);
+      let q = fract(p_scaled) - 0.5;
+
+      // The hit threshold below is 0.001. Never let the distance to a cell wall
+      // fall under that, or a cell boundary registers as a hit.
+      let LOCAL_SAFE_DIST = 0.001;
+      let d_cell_boundary_local = max(-sdBox(q, vec3f(0.5)), LOCAL_SAFE_DIST);
+
+      let h = hash3(cell_id);
+
+      // Empty cell: the safe distance to the wall is all there is.
+      if (h.z > 0.95) {
+        return d_cell_boundary_local * grid_size;
+      }
+
+      let size = 0.005;
+      let d_star_local = sdSphere(q, size);
+
+      // What the marcher may step is the `cellDist` fragment's answer. The
+      // glitch lives there, and pass_acid_lattice.sjon rebinds it.
+      return cellDist(d_star_local, d_cell_boundary_local) * grid_size;
+    }
+
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let res = vec2f(pngine.width, pngine.height);
+      // compute.toys hands the kernel a bottom-left origin; @builtin(position)
+      // is top-left with pixel centres already at +0.5, so one flip ports it.
+      let fragCoord = vec2f(pos.x, res.y - pos.y);
+      let uv = (fragCoord * 2.0 - res) / res.y;
+
+      // pointer.x / pointer.y are normalised 0..1 over the canvas, y down, and
+      // both read 0 until the first pointer event, so the opening frame sits at
+      // hue 0 and full acidity. That is a deliberate default, not a fallback.
+      //   x: rotates the whole palette one full turn across the canvas.
+      //   y: top is full acid, bottom is calm. It drives saturation and band
+      //      count together because either one on its own is too subtle to
+      //      read as a change at all — the clamp below flattens most of the
+      //      saturation range into the same clipped primaries.
+      let acidity = 1.0 - pointer.y;
+      let hue = pointer.x + pngine.time * 0.02;
+      let punch = mix(0.05, 0.95, acidity);
+      let bands = mix(2.0, 14.0, acidity);
+
+      let cam_speed = 15.0;
+      let fov = 1.0;
+      let ro = vec3f(0.0, 0.0, -3.0 + pngine.time * cam_speed);
+      let rd = normalize(vec3f(uv * fov, 1.0));
+
+      var t = 0.0;
+      var glow = 0.0;
+      var hit_t = -1.0;
+
+      for (var i = 0; i < 80; i++) {
+        let p = ro + rd * t;
+        let d = map(p);
+
+        // Accumulate glow as a scalar, not as colour. Summing a hue that moves
+        // per step averages the whole rainbow back to mud; accumulating
+        // intensity and colouring once at the end keeps every band saturated.
+        glow += 0.01 * exp(-d * 50.0);
+
+        if (d < 0.001) { hit_t = t; break; }
+
+        t += d;
+
+        if (d > 100.0) { break; }
+      }
+
+      // Palette the accumulated intensity, so equal-glow contours come out as
+      // hard neon bands instead of one smooth ramp. That banding is the acid.
+      // pow() lifts the dim tail so the faint structure keeps its colour too.
+      var col = acid(glow * bands + hue, punch) * pow(glow, 0.7) * 2.5;
+
+      // Star cores, half a turn of hue away from their own halo.
+      if (hit_t >= 0.0) {
+        col += acid(hit_t * 0.02 + hue + 0.5, punch) * 1.5;
+      }
+
+      // Reinhard on luminance, not per channel. Per-channel compresses the
+      // brightest channel hardest, which drags every saturated colour toward
+      // white and is where the browns came from; scaling by a single luminance
+      // factor keeps the channel ratios, and so keeps the colour.
+      let lum = dot(col, vec3f(0.2126, 0.7152, 0.0722));
+      col = col / (1.0 + lum);
+      col = pow(col, vec3f(1.0 / 2.2));
+      return vec4f(col, 1.0);
+    }
+  """)
+
+(render-pipeline :name main__pipe :layout auto
+  (vertex :module main__shader :entry vs)
+  (fragment :module main__shader :entry fs
+    (target :format preferred-canvas-format)))
+
+(bind-group :name main__bg :layout main__pipe :group 0
+  (entry :binding 0 :buffer main__ubuf)
+  (entry :binding 1 :buffer main__pbuf))
+
+(render-pass :name main :pipeline main__pipe :bind-groups [main__bg]
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1]
+    :load-op clear :store-op store)
+  (draw :vertex-count 3))
+
+; A pass that names `pngine` or `pointer` restreams its uniform buffer every
+; frame; without these the buffers hold only their (zero) creation state.
+(queue :name main__uq
+  (write-buffer :buffer main__ubuf :offset 0 :data pngine-inputs))
+(queue :name main__pq
+  (write-buffer :buffer main__pbuf :offset 0 :data pointer-inputs))
+
+(frame :name draw :perform [main__uq main__pq main])

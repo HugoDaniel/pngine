@@ -1,0 +1,14 @@
+; Invalid: a `:reads` texture with `:sample-count 4`. The prelude declares a
+; plain `texture_2d`, and a multisampled texture needs `texture_multisampled_2d`
+; — which `textureSample` cannot read at all (only `textureLoad` per sample).
+; Resolve it into a single-sample texture first and read that.
+
+(texture :name msaaColor :size canvas :format rgba8unorm :sample-count 4
+  :usage [render-attachment texture-binding])
+(pass-graph
+  (pass :name main :reads [msaaColor] :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return textureSample(msaaColor, samp, uv);
+    }
+  """))

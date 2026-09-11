@@ -37,6 +37,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const Allocator = std.mem.Allocator;
 
 // Import pngine library for format parsing
 const pngine = @import("pngine");
@@ -62,11 +63,11 @@ const Options = struct {
 };
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa_state.deinit();
+    const gpa = gpa_state.allocator();
 
-    var threaded: std.Io.Threaded = .init(allocator, .{
+    var threaded: std.Io.Threaded = .init(gpa, .{
         .environ = init.environ,
         .argv0 = .init(init.args),
     });
@@ -74,8 +75,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const io = threaded.io();
 
     // Parse command line
-    const opts = try parseArgs(allocator, init.args);
-    defer allocator.free(opts.input_path);
+    const opts = try parseArgs(gpa, init.args);
+    defer gpa.free(opts.input_path);
 
     if (opts.help) {
         printUsage();
@@ -90,13 +91,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     std.debug.print("WAMR version: {s}\n", .{WamrRuntime.version()});
 
     // Run the viewer
-    run(allocator, io, opts) catch |err| {
+    run(gpa, io, opts) catch |err| {
         std.debug.print("Error: {}\n", .{err});
         std.process.exit(1);
     };
 }
 
-fn run(allocator: std.mem.Allocator, io: std.Io, opts: Options) !void {
+fn run(gpa: Allocator, io: std.Io, opts: Options) !void {
     // Load input file
     const file = try std.Io.Dir.cwd().openFile(io, opts.input_path, .{});
     defer file.close(io);
@@ -107,8 +108,8 @@ fn run(allocator: std.mem.Allocator, io: std.Io, opts: Options) !void {
     else
         @intCast(stat.size);
 
-    const file_data = try allocator.alloc(u8, size);
-    defer allocator.free(file_data);
+    const file_data = try gpa.alloc(u8, size);
+    defer gpa.free(file_data);
 
     var bytes_read: u32 = 0;
     for (0..size + 1) |_| {
@@ -121,8 +122,8 @@ fn run(allocator: std.mem.Allocator, io: std.Io, opts: Options) !void {
     std.debug.print("Loaded {s}: {} bytes\n", .{ opts.input_path, file_data.len });
 
     // Extract bytecode (handles PNG or raw PNGB)
-    const bytecode = try extractBytecode(allocator, file_data);
-    defer allocator.free(bytecode);
+    const bytecode = try extractBytecode(gpa, file_data);
+    defer gpa.free(bytecode);
 
     std.debug.print("Bytecode: {} bytes\n", .{bytecode.len});
 
@@ -148,7 +149,7 @@ fn run(allocator: std.mem.Allocator, io: std.Io, opts: Options) !void {
     const executor_wasm = bytecode[header.executor_offset..][0..header.executor_length];
 
     // Initialize WAMR runtime (256KB stack, 256KB heap)
-    var runtime = try WamrRuntime.init(allocator, 256 * 1024, 256 * 1024);
+    var runtime = try WamrRuntime.init(gpa, 256 * 1024, 256 * 1024);
     defer runtime.deinit();
 
     // Load executor WASM
@@ -222,7 +223,7 @@ fn run(allocator: std.mem.Allocator, io: std.Io, opts: Options) !void {
         if (opts.trace_only) {
             traceCommandBuffer(init_cmd_buf, "init");
         } else {
-            var runner = Runner.init(allocator, opts.width, opts.height);
+            var runner = Runner.init(gpa, opts.width, opts.height);
             defer runner.deinit();
             try runner.execute(init_cmd_buf);
         }
@@ -245,7 +246,7 @@ fn run(allocator: std.mem.Allocator, io: std.Io, opts: Options) !void {
         if (opts.trace_only) {
             traceCommandBuffer(frame_cmd_buf, "frame");
         } else {
-            var runner = Runner.init(allocator, opts.width, opts.height);
+            var runner = Runner.init(gpa, opts.width, opts.height);
             defer runner.deinit();
             try runner.execute(frame_cmd_buf);
         }
@@ -255,11 +256,11 @@ fn run(allocator: std.mem.Allocator, io: std.Io, opts: Options) !void {
 }
 
 /// Extract bytecode from PNG or return raw PNGB.
-fn extractBytecode(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+fn extractBytecode(gpa: Allocator, data: []const u8) ![]u8 {
     // Check if it's a PNG (magic: 0x89 P N G)
     if (data.len >= 8 and std.mem.eql(u8, data[0..4], &.{ 0x89, 0x50, 0x4E, 0x47 })) {
         // Extract from PNG
-        const result = pngine.png.extract.extract(allocator, data) catch {
+        const result = pngine.png.extract.extract(gpa, data) catch {
             return error.ExtractionFailed;
         };
         return result;
@@ -267,7 +268,7 @@ fn extractBytecode(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
 
     // Check if it's raw PNGB
     if (data.len >= 4 and std.mem.eql(u8, data[0..4], format.MAGIC)) {
-        const copy = try allocator.alloc(u8, data.len);
+        const copy = try gpa.alloc(u8, data.len);
         @memcpy(copy, data);
         return copy;
     }
@@ -364,9 +365,9 @@ fn cmdSize(cmd: u8) usize {
     };
 }
 
-fn parseArgs(allocator: std.mem.Allocator, raw_args: std.process.Args) !Options {
-    const args = try raw_args.toSlice(allocator);
-    defer allocator.free(args);
+fn parseArgs(gpa: Allocator, raw_args: std.process.Args) !Options {
+    const args = try raw_args.toSlice(gpa);
+    defer gpa.free(args);
 
     var opts = Options{
         .input_path = "",
@@ -387,7 +388,7 @@ fn parseArgs(allocator: std.mem.Allocator, raw_args: std.process.Args) !Options 
         } else if (std.mem.startsWith(u8, arg, "--time=")) {
             opts.time = try std.fmt.parseFloat(f32, arg["--time=".len..]);
         } else if (!std.mem.startsWith(u8, arg, "-")) {
-            opts.input_path = try allocator.dupe(u8, arg);
+            opts.input_path = try gpa.dupe(u8, arg);
         }
     }
 

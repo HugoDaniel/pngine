@@ -1,0 +1,11 @@
+; The import graph must be acyclic. `mesh` imports `material`, which imports
+; `mesh` back — the assembler reports the path rather than looping.
+(wgsl :name mesh :imports [material] :code """
+fn projectMesh(p: vec3f) -> vec4f { return materialTint(vec4f(p, 1.0)); }
+""")
+(wgsl :name material :imports [mesh] :code """
+fn materialTint(c: vec4f) -> vec4f { return c * 0.5; }
+""")
+(shader-module :name m :imports [mesh] :code """
+@fragment fn fs(@builtin(position) c: vec4f) -> @location(0) vec4f { return projectMesh(c.xyz); }
+""")

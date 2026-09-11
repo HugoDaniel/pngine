@@ -3,6 +3,7 @@
 //! ../cmd_validator.zig.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const pngine = @import("pngine");
 const Cmd = pngine.command_buffer.Cmd;
 const desc = pngine.types.descriptors;
@@ -64,7 +65,7 @@ const WriteBufferFromWasmParams = cv_shared.WriteBufferFromWasmParams;
 ///
 /// Pre-condition: data.len >= 8 (header size)
 /// Post-condition: Returns owned slice of parsed commands (caller must free)
-pub fn parseCommands(allocator: std.mem.Allocator, data: []const u8) ![]ParsedCommand {
+pub fn parseCommands(gpa: Allocator, data: []const u8) ![]ParsedCommand {
     // Pre-condition: minimum header size
     if (data.len < 8) return &[_]ParsedCommand{};
 
@@ -75,7 +76,7 @@ pub fn parseCommands(allocator: std.mem.Allocator, data: []const u8) ![]ParsedCo
     std.debug.assert(total_len >= 8);
 
     var commands = std.ArrayList(ParsedCommand).empty;
-    errdefer commands.deinit(allocator);
+    errdefer commands.deinit(gpa);
 
     var pos: u32 = 8; // Skip 8-byte header
     var cmd_index: u32 = 0;
@@ -93,7 +94,7 @@ pub fn parseCommands(allocator: std.mem.Allocator, data: []const u8) ![]ParsedCo
         const cmd = std.enums.fromInt(Cmd, tag) orelse return error.InvalidFormat;
         const params = try parseParams(cmd, data, &pos);
 
-        try commands.append(allocator, .{
+        try commands.append(gpa, .{
             .index = cmd_index,
             .cmd = cmd,
             .params = params,
@@ -107,7 +108,7 @@ pub fn parseCommands(allocator: std.mem.Allocator, data: []const u8) ![]ParsedCo
         return error.InvalidFormat;
     }
 
-    const result = try commands.toOwnedSlice(allocator);
+    const result = try commands.toOwnedSlice(gpa);
 
     // Post-condition: result length bounded
     std.debug.assert(result.len <= MAX_COMMANDS);

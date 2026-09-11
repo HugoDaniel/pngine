@@ -1,0 +1,14 @@
+; Invalid: a `:reads` texture that is 3d. A texture bound directly gets its
+; DEFAULT view, which for a 3d texture is `3d`, and the prelude declares
+; `texture_2d`. Sampling a volume needs an explicit `(texture-view …)` and a
+; matching WGSL type, neither of which this sugar builds.
+
+(texture :name volume :size [32 32 32] :dimension 3d :format rgba8unorm
+  :usage [texture-binding copy-dst])
+(pass-graph
+  (pass :name main :reads [volume] :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return textureSample(volume, samp, uv);
+    }
+  """))

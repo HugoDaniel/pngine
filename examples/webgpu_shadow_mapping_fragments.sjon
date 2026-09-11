@@ -1,0 +1,138 @@
+; webgpu_shadow_mapping_fragments — webgpu_shadow_mapping.sjon over fragments
+; and roots. Same scene, same passes, same pixels (`pngine diff` against the
+; original's snapshot reports 0/65536 differing); what changes is where the WGSL
+; lives and how many modules it becomes.
+;
+; The original is one 194-line module with six entry points, so the two depth
+; pipelines carry the whole lit half of it: a module is the unit that ships.
+; Here the WGSL sits in five plain .wgsl files and each STAGE gets its own root:
+;
+;   depth = lib/shadow_depth.wgsl  ← shadow_scene.wgsl ← perspective.wgsl
+;   lit   = lib/shadow_lit.wgsl    ← shadow_scene.wgsl ← look_at.wgsl
+;                                  ← shadow_pcf.wgsl
+;
+; The split is the answer to the one thing shared shader text cannot express:
+; `shadowVisibility` samples a texture and a comparison sampler that the depth
+; stage has no bind group for. It lives in a fragment the depth root does not
+; import, and it names the two bindings as HOLES its own root fills. Nothing is
+; conditional and nothing is preprocessed; the depth root simply assembles a
+; smaller module. The 3x3 PCF loop, written twice in the original (once per lit
+; fragment shader), is written once here.
+;
+; This document holds no WGSL at all — that is the point of the pair. Its twin
+; webgpu_shadow_mapping_hq_fragments.sjon no longer copies this file either: it
+; is one `(import …)` of it with `SHADOW_SIZE` rebound, two lines against this
+; document's 79. The two ORIGINALS differ in that value too, and copy 194 lines
+; of identical WGSL plus 78 lines of identical forms to say so.
+
+(data :name dragonMesh (dragon :format [position3 normal3]))
+
+(buffer :name dragonVB :usage [vertex] :data dragonMesh)
+(buffer :name dragonIB :index-of dragonMesh :usage [index])
+(buffer :name uniforms :size 16 :usage [uniform copy-dst])
+
+(queue :name writeUniforms (write-buffer :buffer uniforms :offset 0 :data pngine-inputs))
+
+(texture :name depthTexture :size canvas :format depth24plus :usage [render-attachment])
+; The shadow map's resolution is the ONE thing the hq twin changes, so it is a
+; named constant rather than a literal: webgpu_shadow_mapping_hq_fragments.sjon
+; is `(import …)` plus a rebinding of this line, and copies nothing.
+(define :name SHADOW_SIZE :value 256)
+(texture :name shadowMap :size [SHADOW_SIZE SHADOW_SIZE] :format depth32float :usage [render-attachment texture-binding])
+
+; Comparison sampler → WGSL sampler_comparison (textureSampleCompare).
+(sampler :name shadowSampler :compare less :mag-filter linear :min-filter linear)
+
+; --- The library ---
+
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+(wgsl :name lookAt :file "./lib/look_at.wgsl")
+(wgsl :name shadowScene :file "./lib/shadow_scene.wgsl" :imports [perspective lookAt])
+(wgsl :name shadowPcf :file "./lib/shadow_pcf.wgsl" :requires [t_shadow s_shadow])
+
+; --- The roots ---
+
+(shader-module :name depth :file "./lib/shadow_depth.wgsl" :imports [shadowScene])
+(shader-module :name lit :file "./lib/shadow_lit.wgsl" :imports [shadowScene shadowPcf])
+
+; --- Pipelines ---
+
+(render-pipeline :name colorPipe
+  :layout auto
+  (vertex :module lit :entry color_vs
+    (vertex-buffer :array-stride (* 4 6)
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)))
+  (fragment :module lit :entry color_fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list :cull-mode back)
+  (depth-stencil :depth-write-enabled true :depth-compare less :format depth24plus))
+
+(render-pipeline :name groundShadowPipe
+  :layout auto
+  (vertex :module depth :entry ground_shadow_vs)
+  (primitive :topology triangle-list)
+  (depth-stencil :depth-write-enabled true :depth-compare less :format depth32float
+    :depth-bias 1 :depth-bias-slope-scale 1.0 :depth-bias-clamp 0.0))
+
+(render-pipeline :name groundColorPipe
+  :layout auto
+  (vertex :module lit :entry ground_color_vs)
+  (fragment :module lit :entry ground_color_fs
+    (target :format preferred-canvas-format))
+  (primitive :topology triangle-list)
+  (depth-stencil :depth-write-enabled true :depth-compare less :format depth24plus))
+
+(render-pipeline :name shadowPipe
+  :layout auto
+  (vertex :module depth :entry shadow_vs
+    (vertex-buffer :array-stride (* 4 6)
+      (attribute :shader-location 0 :offset 0 :format float32x3)
+      (attribute :shader-location 1 :offset 12 :format float32x3)))
+  (primitive :topology triangle-list :cull-mode back)
+  (depth-stencil :depth-write-enabled true :depth-compare less :format depth32float
+    :depth-bias 1 :depth-bias-slope-scale 1.0 :depth-bias-clamp 0.0))
+
+; --- Bind groups ---
+;
+; One resource set, no :layout: the emitter derives one bind group per pipeline
+; that binds it (colorPipe through colorPass, groundColorPipe through
+; groundColorPass), each pruned to what that pipeline reaches. It used to be two
+; forms, `colorBG` and `groundColorBG`, identical but for the :layout key.
+
+(bind-group :name sceneBG :group 0
+  (entry :binding 0 :buffer uniforms)
+  (entry :binding 1 :texture shadowMap)
+  (entry :binding 2 :sampler shadowSampler))
+
+; --- Render passes (frame-perform order) ---
+
+(render-pass :name shadowPass
+  (depth-stencil-attachment :view shadowMap :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  :pipeline shadowPipe
+  :vertex-buffers [dragonVB]
+  :index-buffer dragonIB
+  (draw-indexed :index-count 33306))
+
+(render-pass :name groundShadowPass
+  (depth-stencil-attachment :view shadowMap :depth-load-op load :depth-store-op store)
+  :pipeline groundShadowPipe
+  (draw :vertex-count 6))
+
+(render-pass :name colorPass
+  (color-attachment :view context-current-texture :clear-value [0.1 0.1 0.15 1] :load-op clear :store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  :pipeline colorPipe
+  :vertex-buffers [dragonVB]
+  :index-buffer dragonIB
+  :bind-groups [sceneBG]
+  (draw-indexed :index-count 33306))
+
+(render-pass :name groundColorPass
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  (depth-stencil-attachment :view depthTexture :depth-load-op load :depth-store-op store)
+  :pipeline groundColorPipe
+  :bind-groups [sceneBG]
+  (draw :vertex-count 6))
+
+(frame :name main :perform [writeUniforms shadowPass groundShadowPass colorPass groundColorPass])

@@ -23,14 +23,16 @@
  *     they name a pipeline or a buffer another fence declares, or they show
  *     two keys out of a form. So four diagnostics are allowed and everything
  *     else fails — including warnings, because the one warning a reference
- *     example can carry (`no-unused-binding`, W0003) is the `:layout auto`
+ *     example could carry (`no-unused-binding`, W0003) is the `:layout auto`
  *     desync that renders black (CONTRIBUTING pitfall 37):
  *
  *       not_cross_ref              a name the fence does not declare
  *       keyword pair at top level  a deliberate `:key value` excerpt
- *       cannot read '…': FileNotFound   a `:file` path the repo does not hold
+ *       cannot read '…': no such file   a `:file` path the repo does not hold
  *       `(x …)` is a child of …, not a document form
  *                                  a child form shown on its own
+ *       :prune-unused dropped an entry  the CURE for that same desync,
+ *                                  reporting itself
  *
  *   - a fence that SHOWS an error opens with `; invalid: <needle>` and must
  *     then be refused with a diagnostic whose code or message contains the
@@ -81,8 +83,21 @@ const DEFAULT_FILES = ["README.md", "docs/sjon-reference.md", "docs/architecture
 const ALLOWED = [
   (d) => d.code === "not_cross_ref",
   (d) => /keyword pair at top level/.test(d.message),
-  (d) => /FileNotFound/.test(d.message),
+  // The wording, not the Zig error name: the emitter's file refusals became
+  // sentence-shaped (one per resolver ReadError) when the FileResolver landed,
+  // and this gate is the only reader that matched `FileNotFound`. Only the
+  // NOT-FOUND class is fragment-explainable — a path a doc fence only
+  // illustrates. An invalid or over-limit path in a fence is the page being
+  // wrong, and stays a problem.
+  (d) => /cannot read '[^']*': no such file/.test(d.message),
   (d) => /is a child of .* not a document form/.test(d.message),
+  // The fifth, and the only WARNING on the list. `:prune-unused` announces
+  // every entry it drops, so the reference example that demonstrates the key
+  // necessarily carries one. It is admitted narrowly — the message must name
+  // the key — because the rule above ("warnings fail") was written about
+  // W0003, the `:layout auto` desync, and this is that desync's cure saying it
+  // worked. A W0003 in a fence still fails, which is the point.
+  (d) => d.severity === "warning" && /\(:prune-unused\)$/.test(d.message),
 ];
 
 // --- args --------------------------------------------------------------------

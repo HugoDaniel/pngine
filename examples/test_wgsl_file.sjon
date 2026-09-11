@@ -1,0 +1,31 @@
+; A file-backed fragment. `examples/lib/test_wgsl_lib.wgsl` is plain WGSL with a
+; hole (`phase`), and the root fills it — so the same file could serve a second
+; document with a different notion of time.
+(wgsl :name waves :file "./lib/test_wgsl_lib.wgsl" :requires [phase])
+
+(shader-module :name vs :code """
+@vertex fn v(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let p = array(vec2f(-1.0, -3.0), vec2f(-1.0, 1.0), vec2f(3.0, 1.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+""")
+
+(shader-module :name art :imports [waves] :code """
+fn phase() -> f32 { return 1.7; }
+@fragment fn fs(@builtin(position) c: vec4f) -> @location(0) vec4f {
+  let uv = c.xy * 0.002;
+  return vec4f(wave(uv), ripple(uv, 40.0), 0.3, 1.0);
+}
+""")
+
+(render-pipeline :name pipe :layout auto
+  (vertex :module vs :entry v)
+  (fragment :module art :entry fs (target :format preferred-canvas-format)))
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipe
+  (draw :vertex-count 3))
+
+(frame :name main :perform [draw])

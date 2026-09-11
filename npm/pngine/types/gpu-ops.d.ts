@@ -122,8 +122,19 @@ interface GpuOps {
     entries: unknown;
     alt: Map<number, GPUBindGroup> | null;
   }>;
-  /** Buffer usage flags, kept so 0x22 can spot MAP_READ destinations. */
+  /**
+   * Buffer usage flags, kept so 0x22 can spot MAP_READ destinations and a
+   * host write can be refused for a buffer without COPY_DST.
+   */
   bufUsage: ResourceTable<number>;
+  /** Buffer byte sizes, so a host write can be refused for running past the end. */
+  bufSize: ResourceTable<number>;
+  /**
+   * SJON buffer name → { id, pool, frameWritten }, from the payload's
+   * buffer-name block. What host writes resolve through (gpu-host-write.js).
+   * A `const` Map cleared and refilled in place, like the tables.
+   */
+  bufNames: Map<string, { id: number; pool: number; frameWritten: boolean }>;
   wm: ResourceTable<WasmModuleEntry>;
   wcr: ResourceTable<WasmCallResult>;
 
@@ -169,7 +180,7 @@ interface GpuOps {
   encoder(): GPUCommandEncoder;
   /** Take the encoder and clear it, so submit cannot leave a finished one installed. */
   takeEnc(): GPUCommandEncoder | null;
-  clock(): { time: number; cw: number; ch: number };
+  clock(): { time: number; cw: number; ch: number; frame: number };
   /**
    * Staging for the two built-in uniform writes, allocated once per dispatcher
    * and refilled in place — the frame path must not build a typed array per
@@ -184,6 +195,7 @@ interface GpuOps {
    */
   scratch: {
     time: Float32Array<ArrayBuffer>;
+    frame: Uint32Array<ArrayBuffer>;
     timeBytes: Uint8Array<ArrayBuffer>;
     ptr: Float32Array<ArrayBuffer>;
     ptrBytes: Uint8Array<ArrayBuffer>;

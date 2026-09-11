@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const flate = std.compress.flate;
+const Allocator = std.mem.Allocator;
 
 /// Absolute output cap for a stream with no externally-known size (the pNGb
 /// chunk). Generous next to any real embedded payload (<1 MB typical, a few MB
@@ -28,7 +29,7 @@ pub const MAX_DECOMPRESSED: usize = 64 * 1024 * 1024;
 /// then ends via EndOfStream with one byte of headroom left instead of tripping
 /// the limit on its final byte.
 pub fn decompressCapped(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     data: []const u8,
     container: flate.Container,
     max_out: usize,
@@ -36,5 +37,5 @@ pub fn decompressCapped(
     var window_buf: [flate.max_window_len]u8 = undefined;
     var input_reader: std.Io.Reader = .fixed(data);
     var decompressor: flate.Decompress = .init(&input_reader, container, &window_buf);
-    return decompressor.reader.allocRemaining(allocator, .limited(max_out +| 1));
+    return decompressor.reader.allocRemaining(gpa, .limited(max_out +| 1));
 }

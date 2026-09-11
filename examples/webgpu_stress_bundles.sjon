@@ -19,17 +19,11 @@
 ; but far from the frame budget. Native `--frame`: bundles and queries are
 ; no-ops, so it shows only the clear.
 
-(shader-module :name code :code """
+(wgsl :name hash :file "./lib/hash.wgsl")
+
+(shader-module :name code :imports [hash] :code """
 struct Info { v : vec4f }
 @group(0) @binding(0) var<uniform> info : Info;
-
-fn hash(n: u32) -> f32 {
-  var x = n;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = (x >> 16u) ^ x;
-  return f32(x) / f32(0xffffffffu);
-}
 
 struct VSOut {
   @builtin(position) pos : vec4f,

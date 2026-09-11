@@ -6,6 +6,7 @@
 //!   pngine extract <input.png> --list   (dump the pNG* chunk inventory)
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const pngine = @import("pngine");
 const format = pngine.format;
 const utils = @import("utils.zig");
@@ -46,7 +47,7 @@ pub const extract_usage =
 ;
 
 /// Execute the embed command.
-pub fn runEmbed(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+pub fn runEmbed(gpa: Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (arg_reader.wantsHelp(args)) return arg_reader.printHelp(embed_usage);
 
     const parsed = parseEmbedArgs(args) orelse return 1;
@@ -61,13 +62,13 @@ pub fn runEmbed(allocator: std.mem.Allocator, io: std.Io, args: []const []const 
     else if (stdio.isStd(parsed.png_path))
         .borrowed(stdio.std_path)
     else
-        .owned(utils.deriveEmbedOutputPath(allocator, parsed.png_path) catch |err| {
+        .owned(utils.deriveSiblingPath(gpa, parsed.png_path, "_embedded.png") catch |err| {
             std.debug.print("Error: failed to derive output path: {}\n", .{err});
             return 2;
         });
-    defer dest.deinit(allocator);
+    defer dest.deinit(gpa);
 
-    return executeEmbed(allocator, io, parsed.png_path, parsed.pngb_path, dest.path);
+    return executeEmbed(gpa, io, parsed.png_path, parsed.pngb_path, dest.path);
 }
 
 fn parseEmbedArgs(args: []const []const u8) ?EmbedArgs {
@@ -105,16 +106,16 @@ fn parseEmbedArgs(args: []const []const u8) ?EmbedArgs {
     return .{ .png_path = png_path.?, .pngb_path = pngb_path.?, .output_path = output_path };
 }
 
-fn executeEmbed(allocator: std.mem.Allocator, io: std.Io, png_input: []const u8, pngb_input: []const u8, output: []const u8) u8 {
+fn executeEmbed(gpa: Allocator, io: std.Io, png_input: []const u8, pngb_input: []const u8, output: []const u8) u8 {
     std.debug.assert(png_input.len > 0);
     std.debug.assert(pngb_input.len > 0);
 
-    const png_in = stdio.readInput(allocator, io, png_input) catch |err| return stdio.reportReadError(err, png_input);
-    defer png_in.deinit(allocator);
+    const png_in = stdio.readInput(gpa, io, png_input) catch |err| return stdio.reportReadError(err, png_input);
+    defer png_in.deinit(gpa);
     const png_data = png_in.bytes;
 
-    const pngb_in = stdio.readInput(allocator, io, pngb_input) catch |err| return stdio.reportReadError(err, pngb_input);
-    defer pngb_in.deinit(allocator);
+    const pngb_in = stdio.readInput(gpa, io, pngb_input) catch |err| return stdio.reportReadError(err, pngb_input);
+    defer pngb_in.deinit(gpa);
     const bytecode = pngb_in.bytes;
 
     if (png_in.kind != .png) {
@@ -127,11 +128,11 @@ fn executeEmbed(allocator: std.mem.Allocator, io: std.Io, png_input: []const u8,
         return 4;
     }
 
-    const embedded = pngine.png.embedBytecode(allocator, png_data, bytecode) catch |err| {
+    const embedded = pngine.png.embedBytecode(gpa, png_data, bytecode) catch |err| {
         std.debug.print("Error: failed to embed bytecode: {}\n", .{err});
         return 4;
     };
-    defer allocator.free(embedded);
+    defer gpa.free(embedded);
 
     stdio.writeOutput(io, output, embedded, true) catch |err| return stdio.reportWriteError(err, output);
 
@@ -143,7 +144,7 @@ fn executeEmbed(allocator: std.mem.Allocator, io: std.Io, png_input: []const u8,
 }
 
 /// Execute the extract command.
-pub fn runExtract(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !u8 {
+pub fn runExtract(gpa: Allocator, io: std.Io, args: []const []const u8) !u8 {
     if (arg_reader.wantsHelp(args)) return arg_reader.printHelp(extract_usage);
 
     var input_path: ?[]const u8 = null;
@@ -175,7 +176,7 @@ pub fn runExtract(allocator: std.mem.Allocator, io: std.Io, args: []const []cons
     // `--list`: enumerate every PNGine ancillary chunk (pNGb/pNGm/pNGa/pNGf/…)
     // the file carries — the read-side inventory of whatever `embed` wrote (A7).
     // A diagnostic dump; writes no output file.
-    if (list_chunks) return runExtractList(allocator, io, input);
+    if (list_chunks) return runExtractList(gpa, io, input);
 
     // Piped input has no name to derive an output from, so it defaults to
     // stdout — which is what makes `pngine extract - | pngine inspect -` work
@@ -185,19 +186,19 @@ pub fn runExtract(allocator: std.mem.Allocator, io: std.Io, args: []const []cons
     else if (stdio.isStd(input))
         .borrowed(stdio.std_path)
     else
-        .owned(utils.deriveExtractOutputPath(allocator, input) catch |err| {
+        .owned(utils.deriveSiblingPath(gpa, input, ".pngb") catch |err| {
             std.debug.print("Error: failed to derive output path: {}\n", .{err});
             return 2;
         });
-    defer dest.deinit(allocator);
+    defer dest.deinit(gpa);
     const output = dest.path;
 
-    const in = stdio.readInput(allocator, io, input) catch |err| return stdio.reportReadError(err, input);
-    defer in.deinit(allocator);
+    const in = stdio.readInput(gpa, io, input) catch |err| return stdio.reportReadError(err, input);
+    defer in.deinit(gpa);
     const file_data = in.bytes;
 
-    const bytecode = carvedBytecode(allocator, in.kind, file_data, input) orelse return 4;
-    defer allocator.free(bytecode);
+    const bytecode = carvedBytecode(gpa, in.kind, file_data, input) orelse return 4;
+    defer gpa.free(bytecode);
 
     stdio.writeOutput(io, output, bytecode, true) catch |err| return stdio.reportWriteError(err, output);
 
@@ -211,7 +212,7 @@ pub fn runExtract(allocator: std.mem.Allocator, io: std.Io, args: []const []cons
 /// every way this can fail (wrong container, no pNGb chunk, corrupt payload)
 /// carries a different message but the same code.
 fn carvedBytecode(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     kind: stdio.Kind,
     file_data: []const u8,
     input: []const u8,
@@ -219,7 +220,7 @@ fn carvedBytecode(
     std.debug.assert(input.len > 0);
 
     const bytecode = switch (kind) {
-        .zip => bundle.extractFromZip(allocator, file_data) catch |err| {
+        .zip => bundle.extractFromZip(gpa, file_data) catch |err| {
             std.debug.print("Error: failed to extract from ZIP: {}\n", .{err});
             return null;
         },
@@ -228,7 +229,7 @@ fn carvedBytecode(
                 std.debug.print("Error: '{s}' has no embedded bytecode (missing pNGb chunk)\n", .{stdio.displayName(input)});
                 return null;
             }
-            break :blk pngine.png.extractBytecode(allocator, file_data) catch |err| {
+            break :blk pngine.png.extractBytecode(gpa, file_data) catch |err| {
                 std.debug.print("Error: failed to extract bytecode: {}\n", .{err});
                 return null;
             };
@@ -241,7 +242,7 @@ fn carvedBytecode(
 
     if (bytecode.len < format.HEADER_SIZE or !std.mem.eql(u8, bytecode[0..4], format.MAGIC)) {
         std.debug.print("Error: extracted data is not valid PNGB\n", .{});
-        allocator.free(bytecode);
+        gpa.free(bytecode);
         return null;
     }
     return bytecode;
@@ -264,9 +265,9 @@ fn chunkRole(chunk_type: [4]u8) []const u8 {
 /// `pngine extract --list`: dump the PNGine ancillary-chunk inventory of a PNG —
 /// the read-side counterpart to the `embed*` writers (A7). PNG-only (a ZIP bundle
 /// has no chunk namespace); writes no output file.
-fn runExtractList(allocator: std.mem.Allocator, io: std.Io, input: []const u8) !u8 {
-    const in = stdio.readInput(allocator, io, input) catch |err| return stdio.reportReadError(err, input);
-    defer in.deinit(allocator);
+fn runExtractList(gpa: Allocator, io: std.Io, input: []const u8) !u8 {
+    const in = stdio.readInput(gpa, io, input) catch |err| return stdio.reportReadError(err, input);
+    defer in.deinit(gpa);
     const file_data = in.bytes;
 
     if (in.kind != .png) {
@@ -274,11 +275,11 @@ fn runExtractList(allocator: std.mem.Allocator, io: std.Io, input: []const u8) !
         return 4;
     }
 
-    const chunks = pngine.png.enumerateChunks(allocator, file_data) catch |err| {
+    const chunks = pngine.png.enumerateChunks(gpa, file_data) catch |err| {
         std.debug.print("Error: failed to enumerate chunks in '{s}': {}\n", .{ stdio.displayName(input), err });
         return 4;
     };
-    defer allocator.free(chunks);
+    defer gpa.free(chunks);
 
     if (chunks.len == 0) {
         std.debug.print("{s}: no PNGine (pNG*) chunks\n", .{stdio.displayName(input)});

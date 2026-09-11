@@ -517,7 +517,11 @@ fn fs(in: VSOut) -> @location(0) vec4f {
 
 ; ── Shader: Camera (time orbit) ───────────────────────────────────
 
-(shader-module :name cameraShader :code """
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+
+(wgsl :name inverseCamera :file "./lib/inverse_camera.wgsl")
+
+(shader-module :name cameraShader :imports [perspective inverseCamera] :code """
 struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
 struct MVPData { matrix: mat4x4f, camPos: vec4f }
 
@@ -525,20 +529,6 @@ struct MVPData { matrix: mat4x4f, camPos: vec4f }
 @group(0) @binding(1) var<storage, read_write> mvp: MVPData;
 
 const PI: f32 = 3.14159265;
-
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0, 0, 0), vec4f(0, f, 0, 0),
-    vec4f(0, 0, far * nf, -1), vec4f(0, 0, far * near * nf, 0));
-}
-fn inverseCamera(r: vec3f, u: vec3f, b: vec3f, p: vec3f) -> mat4x4f {
-  return mat4x4f(
-    vec4f(r.x, u.x, b.x, 0), vec4f(r.y, u.y, b.y, 0),
-    vec4f(r.z, u.z, b.z, 0),
-    vec4f(-dot(r, p), -dot(u, p), -dot(b, p), 1));
-}
 
 // Stateless slow orbit — replaces the donor's arcball (write_pointer_uniform
 // was its only native stub; time is fully deterministic for parity).

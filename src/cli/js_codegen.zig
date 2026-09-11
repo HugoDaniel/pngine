@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const flate = std.compress.flate;
+const Allocator = std.mem.Allocator;
 const pngine = @import("pngine");
 const format = pngine.format;
 const descriptors = pngine.types.descriptors;
@@ -49,8 +50,8 @@ const NO_TEXTURE_ID: u16 = 0xFFFF;
 pub const CodegenResult = struct {
     html: []u8,
 
-    pub fn deinit(self: *CodegenResult, allocator: std.mem.Allocator) void {
-        allocator.free(self.html);
+    pub fn deinit(self: *CodegenResult, gpa: Allocator) void {
+        gpa.free(self.html);
     }
 };
 
@@ -105,30 +106,30 @@ const Usage = struct {
     pipeline_layouts: std.AutoHashMapUnmanaged(u16, void) = .{},
     bgls: std.AutoHashMapUnmanaged(u16, void) = .{},
 
-    fn deinit(self: *Usage, allocator: std.mem.Allocator) void {
+    fn deinit(self: *Usage, gpa: Allocator) void {
         inline for (@typeInfo(Usage).@"struct".fields) |field| {
-            @field(self, field.name).deinit(allocator);
+            @field(self, field.name).deinit(gpa);
         }
     }
 
     /// Build the live sets. `calls[0..split_idx]` are resource creations,
     /// `calls[split_idx..]` are the per-frame calls that consume them.
     fn compute(
-        allocator: std.mem.Allocator,
+        gpa: Allocator,
         calls: []const Call,
         split_idx: usize,
         module: *const format.Module,
-    ) std.mem.Allocator.Error!Usage {
+    ) Allocator.Error!Usage {
         std.debug.assert(split_idx <= calls.len);
         var u: Usage = .{};
-        errdefer u.deinit(allocator);
+        errdefer u.deinit(gpa);
 
-        try u.markFrameConsumers(allocator, calls[split_idx..], module);
-        try u.markPipelineAndGroupDeps(allocator, calls[0..split_idx], module);
-        try u.markViewSources(allocator, calls[0..split_idx]);
-        try u.markLayoutBGLs(allocator, calls[0..split_idx], module);
-        try u.markBindGroupBGLs(allocator, calls[0..split_idx]);
-        try u.markWasmProducers(allocator, calls[0..split_idx]);
+        try u.markFrameConsumers(gpa, calls[split_idx..], module);
+        try u.markPipelineAndGroupDeps(gpa, calls[0..split_idx], module);
+        try u.markViewSources(gpa, calls[0..split_idx]);
+        try u.markLayoutBGLs(gpa, calls[0..split_idx], module);
+        try u.markBindGroupBGLs(gpa, calls[0..split_idx]);
+        try u.markWasmProducers(gpa, calls[0..split_idx]);
         return u;
     }
 
@@ -136,40 +137,40 @@ const Usage = struct {
     /// buffers the frame writes through opcodes MockGPU discards.
     fn markFrameConsumers(
         u: *Usage,
-        allocator: std.mem.Allocator,
+        gpa: Allocator,
         frame_calls: []const Call,
         module: *const format.Module,
-    ) std.mem.Allocator.Error!void {
+    ) Allocator.Error!void {
         for (frame_calls) |call| {
             switch (call.call_type) {
-                .set_pipeline => try u.pipelines.put(allocator, call.params.set_pipeline.pipeline_id, {}),
-                .set_bind_group => try u.bind_groups.put(allocator, call.params.set_bind_group.group_id, {}),
-                .set_vertex_buffer => try u.buffers.put(allocator, call.params.set_vertex_buffer.buffer_id, {}),
-                .set_index_buffer => try u.buffers.put(allocator, call.params.set_index_buffer.buffer_id, {}),
+                .set_pipeline => try u.pipelines.put(gpa, call.params.set_pipeline.pipeline_id, {}),
+                .set_bind_group => try u.bind_groups.put(gpa, call.params.set_bind_group.group_id, {}),
+                .set_vertex_buffer => try u.buffers.put(gpa, call.params.set_vertex_buffer.buffer_id, {}),
+                .set_index_buffer => try u.buffers.put(gpa, call.params.set_index_buffer.buffer_id, {}),
                 .begin_render_pass => {
                     const p = call.params.begin_render_pass;
-                    if (p.color_texture_id != CANVAS_TEXTURE_ID) try u.textures.put(allocator, p.color_texture_id, {});
-                    if (p.depth_texture_id != NO_TEXTURE_ID) try u.textures.put(allocator, p.depth_texture_id, {});
+                    if (p.color_texture_id != CANVAS_TEXTURE_ID) try u.textures.put(gpa, p.color_texture_id, {});
+                    if (p.depth_texture_id != NO_TEXTURE_ID) try u.textures.put(gpa, p.depth_texture_id, {});
                 },
-                .write_buffer => try u.buffers.put(allocator, call.params.write_buffer.buffer_id, {}),
+                .write_buffer => try u.buffers.put(gpa, call.params.write_buffer.buffer_id, {}),
                 else => {},
             }
         }
         // Also mark uniform buffers from bytecode scan (write_time_uniform)
         const all_tu = scanAllTimeUniforms(module.bytecode);
         for (all_tu.items[0..all_tu.count]) |tu| {
-            try u.buffers.put(allocator, tu.buffer_id, {});
+            try u.buffers.put(gpa, tu.buffer_id, {});
         }
         // Also mark pointer buffers from bytecode scan (write_pointer_uniform)
         const all_pu_scan = scanAllPointerUniforms(module.bytecode);
         for (all_pu_scan.items[0..all_pu_scan.count]) |pu| {
-            try u.buffers.put(allocator, pu.buffer_id, {});
+            try u.buffers.put(gpa, pu.buffer_id, {});
         }
         // Also mark dark-uniform buffers from the uniform table, so the
         // per-frame `dk` write never references an eliminated buffer var.
         const all_du = scanDarkUniforms(module);
         for (all_du.items[0..all_du.count]) |du| {
-            try u.buffers.put(allocator, du.buffer_id, {});
+            try u.buffers.put(gpa, du.buffer_id, {});
         }
     }
 
@@ -177,35 +178,35 @@ const Usage = struct {
     /// live bind group keeps every resource it binds.
     fn markPipelineAndGroupDeps(
         u: *Usage,
-        allocator: std.mem.Allocator,
+        gpa: Allocator,
         init_calls: []const Call,
         module: *const format.Module,
-    ) std.mem.Allocator.Error!void {
+    ) Allocator.Error!void {
         for (init_calls) |call| {
             switch (call.call_type) {
                 .create_render_pipeline => {
                     const p = call.params.create_render_pipeline;
                     if (u.pipelines.contains(p.pipeline_id)) {
                         const data = module.data.get(@enumFromInt(p.descriptor_data_id));
-                        try desc.extractRenderPipelineShaders(allocator, data, &u.shaders);
-                        if (desc.extractRenderPipelineLayoutId(allocator, data)) |lid|
-                            try u.pipeline_layouts.put(allocator, lid, {});
+                        try desc.extractRenderPipelineShaders(gpa, data, &u.shaders);
+                        if (desc.extractRenderPipelineLayoutId(gpa, data)) |lid|
+                            try u.pipeline_layouts.put(gpa, lid, {});
                     }
                 },
                 .create_compute_pipeline => {
                     const p = call.params.create_compute_pipeline;
                     if (u.pipelines.contains(p.pipeline_id)) {
                         const data = module.data.get(@enumFromInt(p.descriptor_data_id));
-                        try desc.extractComputePipelineShader(allocator, data, &u.shaders);
+                        try desc.extractComputePipelineShader(gpa, data, &u.shaders);
                         if (desc.extractComputePipelineLayoutId(data)) |lid|
-                            try u.pipeline_layouts.put(allocator, lid, {});
+                            try u.pipeline_layouts.put(gpa, lid, {});
                     }
                 },
                 .create_bind_group => {
                     const p = call.params.create_bind_group;
                     if (u.bind_groups.contains(p.group_id)) {
                         const data = module.data.get(@enumFromInt(p.entry_data_id));
-                        try desc.extractBindGroupResources(allocator, data, &u.buffers, &u.samplers, &u.textures, &u.views);
+                        try desc.extractBindGroupResources(gpa, data, &u.buffers, &u.samplers, &u.textures, &u.views);
                     }
                 },
                 else => {},
@@ -220,14 +221,14 @@ const Usage = struct {
     /// empty and drop the view and its texture.
     fn markViewSources(
         u: *Usage,
-        allocator: std.mem.Allocator,
+        gpa: Allocator,
         init_calls: []const Call,
-    ) std.mem.Allocator.Error!void {
+    ) Allocator.Error!void {
         for (init_calls) |call| {
             if (call.call_type == .create_texture_view) {
                 const p = call.params.create_texture_view;
                 if (u.views.contains(p.view_id)) {
-                    try u.textures.put(allocator, p.texture_id, {});
+                    try u.textures.put(gpa, p.texture_id, {});
                 }
             }
         }
@@ -240,16 +241,16 @@ const Usage = struct {
     /// pipeline_layouts empty and drop the layout + its BGLs.
     fn markLayoutBGLs(
         u: *Usage,
-        allocator: std.mem.Allocator,
+        gpa: Allocator,
         init_calls: []const Call,
         module: *const format.Module,
-    ) std.mem.Allocator.Error!void {
+    ) Allocator.Error!void {
         for (init_calls) |call| {
             if (call.call_type == .create_pipeline_layout) {
                 const p = call.params.create_pipeline_layout;
                 if (u.pipeline_layouts.contains(p.layout_id)) {
                     const data = module.data.get(@enumFromInt(p.descriptor_data_id));
-                    try desc.extractPipelineLayoutBGLs(allocator, data, &u.bgls);
+                    try desc.extractPipelineLayoutBGLs(gpa, data, &u.bgls);
                 }
             }
         }
@@ -263,15 +264,15 @@ const Usage = struct {
     /// and the dead BGL went unnoticed.
     fn markBindGroupBGLs(
         u: *Usage,
-        allocator: std.mem.Allocator,
+        gpa: Allocator,
         init_calls: []const Call,
-    ) std.mem.Allocator.Error!void {
+    ) Allocator.Error!void {
         for (init_calls) |call| {
             if (call.call_type == .create_bind_group) {
                 const p = call.params.create_bind_group;
                 if (!opcodes.layoutIdIsBindGroupLayout(p.layout_id)) continue;
                 if (u.bind_groups.contains(p.group_id)) {
-                    try u.bgls.put(allocator, opcodes.layoutIdValue(p.layout_id), {});
+                    try u.bgls.put(gpa, opcodes.layoutIdValue(p.layout_id), {});
                 }
             }
         }
@@ -280,14 +281,14 @@ const Usage = struct {
     /// Pass 3 — a WASM module is live iff the buffer it writes into is.
     fn markWasmProducers(
         u: *Usage,
-        allocator: std.mem.Allocator,
+        gpa: Allocator,
         init_calls: []const Call,
-    ) std.mem.Allocator.Error!void {
+    ) Allocator.Error!void {
         for (init_calls) |call| {
             if (call.call_type == .write_buffer_from_wasm) {
                 const p = call.params.write_buffer_from_wasm;
                 if (u.buffers.contains(p.buffer_id)) {
-                    try u.wasm_modules.put(allocator, p.call_id, {});
+                    try u.wasm_modules.put(gpa, p.call_id, {});
                 }
             }
         }
@@ -325,7 +326,7 @@ const Usage = struct {
 /// dark flag has no opcode at all and comes from the uniform table — so they
 /// are emitted here rather than falling out of `emitCall`.
 fn emitFrameUniformWrites(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     out: *std.ArrayList(u8),
     scans: struct {
         time: TimeUniformScanResult,
@@ -342,45 +343,64 @@ fn emitFrameUniformWrites(
     // In fullscreen the canvas is the source of truth for resolution, so the
     // emitted JS reads c.width/c.height live instead of baking the numbers in.
     for (scans.time.items[0..scans.time.count]) |tu| {
-        try out.appendSlice(allocator, "d.queue.writeBuffer(b");
-        try appendInt(out, allocator, tu.buffer_id);
+        // Write exactly the source's own byte count. `scene-time-inputs` is 12
+        // bytes and has no aspect member; emitting the fourth float regardless
+        // overran a buffer sized to it, and WebGPU rejects the whole
+        // writeBuffer rather than truncating — so the SHORT source was as
+        // silently dead as the long one (§438).
+        const with_aspect = tu.size >= 16;
+        try out.appendSlice(gpa, "d.queue.writeBuffer(b");
+        try appendInt(out, gpa, tu.buffer_id);
         if (fullscreen) {
-            try out.appendSlice(allocator, ",0,new Float32Array([t,c.width,c.height,c.width/c.height]));");
+            try out.appendSlice(gpa, if (with_aspect)
+                ",0,new Float32Array([t,c.width,c.height,c.width/c.height]));"
+            else
+                ",0,new Float32Array([t,c.width,c.height]));");
         } else {
-            try out.appendSlice(allocator, ",0,new Float32Array([t,");
-            try appendInt(out, allocator, width);
-            try out.appendSlice(allocator, ",");
-            try appendInt(out, allocator, height);
-            try out.appendSlice(allocator, ",");
-            try appendInt(out, allocator, width);
-            try out.appendSlice(allocator, "/");
-            try appendInt(out, allocator, height);
-            try out.appendSlice(allocator, "]));");
+            try out.appendSlice(gpa, ",0,new Float32Array([t,");
+            try appendInt(out, gpa, width);
+            try out.appendSlice(gpa, ",");
+            try appendInt(out, gpa, height);
+            if (with_aspect) {
+                try out.appendSlice(gpa, ",");
+                try appendInt(out, gpa, width);
+                try out.appendSlice(gpa, "/");
+                try appendInt(out, gpa, height);
+            }
+            try out.appendSlice(gpa, "]));");
+        }
+        // `pngine-frame-inputs` is those 16 bytes plus the frame counter as a
+        // u32 — a second write rather than a wider Float32Array, because the
+        // trailing member is an integer and a float bit pattern is not it.
+        if (tu.size >= 20) {
+            try out.appendSlice(gpa, "d.queue.writeBuffer(b");
+            try appendInt(out, gpa, tu.buffer_id);
+            try out.appendSlice(gpa, ",16,new Uint32Array([_n]));");
         }
     }
 
     // Deltas reset after each read, so the write and the reset must stay one unit.
     for (scans.pointer.items[0..scans.pointer.count]) |pu| {
-        try out.appendSlice(allocator, "d.queue.writeBuffer(b");
-        try appendInt(out, allocator, pu.buffer_id);
-        try out.appendSlice(allocator, ",0,new Float32Array([px,py,pcx,pcy,pdx,pdy,pbt,ppr,pm,psx,psy,0]));pdx=0;pdy=0;psx=0;psy=0;");
+        try out.appendSlice(gpa, "d.queue.writeBuffer(b");
+        try appendInt(out, gpa, pu.buffer_id);
+        try out.appendSlice(gpa, ",0,new Float32Array([px,py,pcx,pcy,pdx,pdy,pbt,ppr,pm,psx,psy,0]));pdx=0;pdy=0;psx=0;psy=0;");
     }
 
     // `_af` is the shared analyser array from s(); absent until audio starts.
     for (scans.audio.items[0..scans.audio.count]) |au| {
-        try out.appendSlice(allocator, "if(_af)d.queue.writeBuffer(b");
-        try appendInt(out, allocator, au.buffer_id);
-        try out.appendSlice(allocator, ",0,_af);");
+        try out.appendSlice(gpa, "if(_af)d.queue.writeBuffer(b");
+        try appendInt(out, gpa, au.buffer_id);
+        try out.appendSlice(gpa, ",0,_af);");
     }
 
     // `dk` is module-scope state from frag.dark_setup; written at the member's
     // own offset, so it composes with the 16-byte time write into one buffer.
     for (scans.dark.items[0..scans.dark.count]) |du| {
-        try out.appendSlice(allocator, "d.queue.writeBuffer(b");
-        try appendInt(out, allocator, du.buffer_id);
-        try out.appendSlice(allocator, ",");
-        try appendInt(out, allocator, du.offset);
-        try out.appendSlice(allocator, ",new Float32Array([dk]));");
+        try out.appendSlice(gpa, "d.queue.writeBuffer(b");
+        try appendInt(out, gpa, du.buffer_id);
+        try out.appendSlice(gpa, ",");
+        try appendInt(out, gpa, du.offset);
+        try out.appendSlice(gpa, ",new Float32Array([dk]));");
     }
 }
 
@@ -401,6 +421,8 @@ const Page = struct {
     has_audio_data: bool,
     has_pointer: bool,
     has_dark: bool,
+    /// A `pngine-frame-inputs` write needs a frame counter (`_n`) in scope.
+    has_frame_counter: bool,
 
     /// A play prompt is shown iff there is audio to unlock: browsers refuse to
     /// start an AudioContext without a gesture.
@@ -444,19 +466,19 @@ pub fn findSplitIndex(calls: []const Call, diag: *Diag) CodegenError!usize {
 /// Caller owns the map. A texture whose descriptor carries no format is absent
 /// rather than defaulted — the consumer below distinguishes the two.
 fn buildTextureFormats(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     calls: []const Call,
     module: *const format.Module,
-) std.mem.Allocator.Error!std.AutoHashMapUnmanaged(u16, []const u8) {
+) Allocator.Error!std.AutoHashMapUnmanaged(u16, []const u8) {
     var tex_formats = std.AutoHashMapUnmanaged(u16, []const u8){};
-    errdefer tex_formats.deinit(allocator);
+    errdefer tex_formats.deinit(gpa);
 
     for (calls) |call| {
         if (call.call_type == .create_texture) {
             const p = call.params.create_texture;
             const data = module.data.get(@enumFromInt(p.descriptor_data_id));
             const fmt = desc.parseTextureFormat(data);
-            if (fmt) |f| try tex_formats.put(allocator, p.texture_id, f);
+            if (fmt) |f| try tex_formats.put(gpa, p.texture_id, f);
         }
     }
     return tex_formats;
@@ -470,14 +492,14 @@ fn buildTextureFormats(
 /// format, resolved at runtime) is the right answer there, and baking a concrete
 /// format would break on a device that prefers the other one.
 fn buildPipelineFormats(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     calls: []const Call,
     split_idx: usize,
     tex_formats: *const std.AutoHashMapUnmanaged(u16, []const u8),
-) std.mem.Allocator.Error!std.AutoHashMapUnmanaged(u16, []const u8) {
+) Allocator.Error!std.AutoHashMapUnmanaged(u16, []const u8) {
     std.debug.assert(split_idx <= calls.len);
     var pipeline_formats = std.AutoHashMapUnmanaged(u16, []const u8){};
-    errdefer pipeline_formats.deinit(allocator);
+    errdefer pipeline_formats.deinit(gpa);
 
     var current_color_tex: u16 = CANVAS_TEXTURE_ID;
     for (calls[split_idx..]) |call| {
@@ -486,7 +508,7 @@ fn buildPipelineFormats(
             .set_pipeline => {
                 if (current_color_tex == CANVAS_TEXTURE_ID) continue;
                 if (tex_formats.get(current_color_tex)) |fmt| {
-                    try pipeline_formats.put(allocator, call.params.set_pipeline.pipeline_id, fmt);
+                    try pipeline_formats.put(gpa, call.params.set_pipeline.pipeline_id, fmt);
                 }
             },
             else => {},
@@ -502,28 +524,28 @@ fn buildPipelineFormats(
 /// `document.body.innerHTML`, unpacked mode writes it as literal HTML. They
 /// differ only in what surrounds this, which is why it is one function — the two
 /// spellings drifted apart before (see the fullscreen sizing note in generate).
-fn emitCanvasMarkup(out: *std.ArrayList(u8), allocator: std.mem.Allocator, page: Page) !void {
+fn emitCanvasMarkup(out: *std.ArrayList(u8), gpa: Allocator, page: Page) !void {
     const body_rules = if (page.fullscreen)
         "*{margin:0}body{background:#000;overflow:hidden}canvas{display:block}"
     else
         "*{margin:0}body{background:#000;overflow:hidden;display:grid;place-items:center;height:100vh}";
-    try out.appendSlice(allocator, body_rules);
+    try out.appendSlice(gpa, body_rules);
 
     if (page.hasAudio()) {
-        try out.appendSlice(allocator, "#p{position:fixed;inset:0;display:grid;place-items:center;cursor:pointer;color:#fff;font:15vmin sans-serif}");
+        try out.appendSlice(gpa, "#p{position:fixed;inset:0;display:grid;place-items:center;cursor:pointer;color:#fff;font:15vmin sans-serif}");
     }
 
     if (page.fullscreen) {
-        try out.appendSlice(allocator, "</style><canvas id=c style=width:100vw;height:100vh></canvas>");
+        try out.appendSlice(gpa, "</style><canvas id=c style=width:100vw;height:100vh></canvas>");
     } else {
-        try out.appendSlice(allocator, "</style><canvas id=c width=");
-        try appendInt(out, allocator, page.width);
-        try out.appendSlice(allocator, " height=");
-        try appendInt(out, allocator, page.height);
-        try out.appendSlice(allocator, "></canvas>");
+        try out.appendSlice(gpa, "</style><canvas id=c width=");
+        try appendInt(out, gpa, page.width);
+        try out.appendSlice(gpa, " height=");
+        try appendInt(out, gpa, page.height);
+        try out.appendSlice(gpa, "></canvas>");
     }
 
-    if (page.hasAudio()) try out.appendSlice(allocator, "<div id=p>&#9654;</div>");
+    if (page.hasAudio()) try out.appendSlice(gpa, "<div id=p>&#9654;</div>");
 }
 
 /// Deflate the assembled JS and prepend the bootstrap that fetches the page
@@ -536,7 +558,7 @@ fn emitCanvasMarkup(out: *std.ArrayList(u8), allocator: std.mem.Allocator, page:
 /// fixed-point loop below.
 fn emitPackedBootstrap(
     html: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     js_bytes: []const u8,
     audio_wasm: ?[]const u8,
 ) CodegenError!void {
@@ -544,18 +566,18 @@ fn emitPackedBootstrap(
 
     const aw = audio_wasm orelse {
         // No-audio pack: simple fixed-size bootstrap
-        const compressed = deflateCompress(allocator, js_bytes) catch return CodegenError.OutOfMemory;
-        defer allocator.free(compressed);
+        const compressed = deflateCompress(gpa, js_bytes) catch return CodegenError.OutOfMemory;
+        defer gpa.free(compressed);
 
         const bootstrap = "<body onload=\"fetch('#').then(t=>t.blob()).then(b=>new Response(b.slice(159).stream().pipeThrough(new DecompressionStream('deflate-raw'))).text()).then(eval)\">";
         comptime std.debug.assert(bootstrap.len == 159);
 
-        try html.appendSlice(allocator, bootstrap);
-        try html.appendSlice(allocator, compressed);
+        try html.appendSlice(gpa, bootstrap);
+        try html.appendSlice(gpa, compressed);
         return;
     };
 
-    return emitAudioPackBootstrap(html, allocator, js_bytes, aw);
+    return emitAudioPackBootstrap(html, gpa, js_bytes, aw);
 }
 
 /// Emit whatever runs the frame: for an animated payload the audio setup, the
@@ -563,53 +585,59 @@ fn emitPackedBootstrap(
 /// once.
 fn emitFrameDriver(
     payload: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     page: Page,
     frame_js: []const u8,
 ) !void {
+    // Declared outside the loop so it survives between frames, and before the
+    // static path too: a one-shot render IS frame 0, and the write reads `_n`
+    // either way.
+    if (page.has_frame_counter) try payload.appendSlice(gpa, "let _n=0;");
+
     if (!page.has_animation) {
         // Static: just run the frame once.
-        try payload.appendSlice(allocator, frame_js);
+        try payload.appendSlice(gpa, frame_js);
         return;
     }
 
     // Audio JS: append user-provided JS code (defines s() function)
     if (page.audio_js) |ajs| {
         if (page.has_audio_data) {
-            try payload.appendSlice(allocator, "let _af;");
+            try payload.appendSlice(gpa, "let _af;");
         }
-        try payload.appendSlice(allocator, ajs);
+        try payload.appendSlice(gpa, ajs);
     }
 
     // Audio WASM setup (before frame function)
     if (page.audio_wasm) |aw| {
         if (page.pack) {
             // Pack mode: raw audio binary in deflate blob, bootstrap sets _a global
-            try emitAudioSetupFromGlobal(payload, allocator);
+            try emitAudioSetupFromGlobal(payload, gpa);
         } else {
-            try emitAudioSetup(payload, allocator, aw);
+            try emitAudioSetup(payload, gpa, aw);
         }
     }
 
     // Animated: click-to-play with rAF loop, Esc reloads page
-    try payload.appendSlice(allocator, frag.anim_start);
-    try payload.appendSlice(allocator, frame_js);
-    try payload.appendSlice(allocator, frag.anim_end);
-    try payload.appendSlice(allocator, frag.esc_handler);
+    try payload.appendSlice(gpa, frag.anim_start);
+    try payload.appendSlice(gpa, frame_js);
+    if (page.has_frame_counter) try payload.appendSlice(gpa, "_n++;");
+    try payload.appendSlice(gpa, frag.anim_end);
+    try payload.appendSlice(gpa, frag.esc_handler);
     if (page.audio_js != null) {
         // Use FFT variant if bytecode has write_audio_data opcodes (captures return value)
         if (page.has_audio_data) {
-            try payload.appendSlice(allocator, frag.click_handler_audiojs_fft_pre);
+            try payload.appendSlice(gpa, frag.click_handler_audiojs_fft_pre);
         } else {
-            try payload.appendSlice(allocator, frag.click_handler_audiojs_pre);
+            try payload.appendSlice(gpa, frag.click_handler_audiojs_pre);
         }
-        try payload.appendSlice(allocator, frag.click_handler_audiojs_post);
+        try payload.appendSlice(gpa, frag.click_handler_audiojs_post);
     } else if (page.audio_wasm != null) {
-        try payload.appendSlice(allocator, frag.click_handler_audio_pre);
-        try payload.appendSlice(allocator, frag.click_audio_start);
-        try payload.appendSlice(allocator, frag.click_handler_audio_post);
+        try payload.appendSlice(gpa, frag.click_handler_audio_pre);
+        try payload.appendSlice(gpa, frag.click_audio_start);
+        try payload.appendSlice(gpa, frag.click_handler_audio_post);
     } else {
-        try payload.appendSlice(allocator, frag.click_handler);
+        try payload.appendSlice(gpa, frag.click_handler);
     }
 }
 
@@ -620,7 +648,7 @@ fn emitFrameDriver(
 /// covers the case where the digit count changed between them.
 fn emitAudioPackBootstrap(
     html: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     js_bytes: []const u8,
     aw: []const u8,
 ) CodegenError!void {
@@ -629,15 +657,15 @@ fn emitAudioPackBootstrap(
     // sets _a global for audio bytes, eval's JS text.
     const js_len: u32 = @intCast(js_bytes.len);
     const blob_size = 4 + js_bytes.len + aw.len;
-    const blob = allocator.alloc(u8, blob_size) catch return CodegenError.OutOfMemory;
-    defer allocator.free(blob);
+    const blob = gpa.alloc(u8, blob_size) catch return CodegenError.OutOfMemory;
+    defer gpa.free(blob);
 
     std.mem.writeInt(u32, blob[0..4], js_len, .little);
     @memcpy(blob[4..][0..js_bytes.len], js_bytes);
     @memcpy(blob[4 + js_bytes.len ..][0..aw.len], aw);
 
-    const compressed = deflateCompress(allocator, blob) catch return CodegenError.OutOfMemory;
-    defer allocator.free(compressed);
+    const compressed = deflateCompress(gpa, blob) catch return CodegenError.OutOfMemory;
+    defer gpa.free(compressed);
 
     const audio_bootstrap_fmt =
         "<body onload=\"fetch('#').then(t=>t.arrayBuffer()).then(b=>{{let h={d},j={d};" ++
@@ -673,8 +701,8 @@ fn emitAudioPackBootstrap(
     // page slices the compressed blob at the wrong byte and decompresses noise.
     std.debug.assert(stable.len == h1 or stable.len == pass2.len);
 
-    try html.appendSlice(allocator, stable);
-    try html.appendSlice(allocator, compressed);
+    try html.appendSlice(gpa, stable);
+    try html.appendSlice(gpa, compressed);
 }
 
 /// Assemble the module-scope JS: DOM setup (packed only), WebGPU init, the
@@ -683,7 +711,7 @@ fn emitAudioPackBootstrap(
 ///
 /// Returns the buffer; the caller owns it and decides how to wrap it.
 fn buildPayload(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     page: Page,
     module: *const format.Module,
     init_js: []const u8,
@@ -692,11 +720,11 @@ fn buildPayload(
     std.debug.assert(page.width > 0 and page.height > 0);
 
     var payload = std.ArrayList(u8).empty;
-    errdefer payload.deinit(allocator);
+    errdefer payload.deinit(gpa);
 
     if (page.pack) {
         // Pack mode: wrap in async IIFE for top-level await support (eval can't do modules)
-        try payload.appendSlice(allocator, "(async()=>{");
+        try payload.appendSlice(gpa, "(async()=>{");
     }
 
     // Before anything else, including this run's own DOM: stop the previous run.
@@ -704,13 +732,13 @@ fn buildPayload(
     // loop is still rendering into, so the order is load-bearing rather than
     // tidy — and it must precede requestAdapter either way, or two devices are
     // live at once with the first unreachable.
-    try payload.appendSlice(allocator, frag.stop_prev);
+    try payload.appendSlice(gpa, frag.stop_prev);
 
     if (page.pack) {
         // DOM setup is part of the JS (no HTML boilerplate around it)
-        try payload.appendSlice(allocator, "document.body.innerHTML='<style>");
-        try emitCanvasMarkup(&payload, allocator, page);
-        try payload.appendSlice(allocator, "';");
+        try payload.appendSlice(gpa, "document.body.innerHTML='<style>");
+        try emitCanvasMarkup(&payload, gpa, page);
+        try payload.appendSlice(gpa, "';");
     }
 
     // A fullscreen canvas is stretched to the viewport by CSS, so its drawing
@@ -719,7 +747,7 @@ fn buildPayload(
     // above, which meant --unpack — the mode whose whole purpose is to be a
     // readable equivalent of the packed page — rendered at a different
     // resolution than the page it mirrors (§336).
-    if (page.fullscreen) try payload.appendSlice(allocator, frag.fs_setup);
+    if (page.fullscreen) try payload.appendSlice(gpa, frag.fs_setup);
 
     // WebGPU init. Authored device limits (Arc-3 §5.3b) → emit
     // `let L={requiredLimits:{…}}` and request them via the _limits init variant
@@ -727,17 +755,17 @@ fn buildPayload(
     // valid JS identifier keys. Legacy modules (no limits form) take the original
     // fragment → byte-identical output.
     if (module.limits.count() > 0) {
-        try payload.appendSlice(allocator, "let L={requiredLimits:{");
+        try payload.appendSlice(gpa, "let L={requiredLimits:{");
         for (module.limits.entries.items, 0..) |entry, i| {
-            if (i > 0) try payload.append(allocator, ',');
-            try payload.appendSlice(allocator, module.strings.get(@enumFromInt(entry.name_string_id)));
-            try payload.append(allocator, ':');
-            try appendInt(&payload, allocator, entry.value);
+            if (i > 0) try payload.append(gpa, ',');
+            try payload.appendSlice(gpa, module.strings.get(@enumFromInt(entry.name_string_id)));
+            try payload.append(gpa, ':');
+            try appendInt(&payload, gpa, entry.value);
         }
-        try payload.appendSlice(allocator, "}};");
-        try payload.appendSlice(allocator, frag.webgpu_init_limits);
+        try payload.appendSlice(gpa, "}};");
+        try payload.appendSlice(gpa, frag.webgpu_init_limits);
     } else {
-        try payload.appendSlice(allocator, frag.webgpu_init);
+        try payload.appendSlice(gpa, frag.webgpu_init);
     }
 
     // An authored `(canvas :alpha-mode premultiplied)` re-configures the context.
@@ -751,11 +779,11 @@ fn buildPayload(
     // composited premultiplied. The same document rendered two ways depending on
     // which runtime opened it, and the flag the author set was ignored here.
     if (module.header.flags.canvas_alpha_premultiplied) {
-        try payload.appendSlice(allocator, frag.canvas_premultiplied);
+        try payload.appendSlice(gpa, frag.canvas_premultiplied);
     }
 
     // Init section
-    try payload.appendSlice(allocator, init_js);
+    try payload.appendSlice(gpa, init_js);
 
     // Pointer setup: state vars + pointer/keyboard/wheel listeners, at MODULE
     // scope so they run exactly once (canvas `c` exists after webgpu_init). This
@@ -763,26 +791,26 @@ fn buildPayload(
     // frame and the wheel addEventListener leaks a handler per frame. The
     // per-frame writeBuffer that consumes this state stays in frame_js.
     if (page.has_pointer) {
-        try payload.appendSlice(allocator, frag.pointer);
+        try payload.appendSlice(gpa, frag.pointer);
     }
 
     // Dark-mode flag state, same once-only reasoning as the pointer block.
     // Needs only `window`, so its position relative to webgpu_init is free.
     if (page.has_dark) {
-        try payload.appendSlice(allocator, frag.dark_setup);
+        try payload.appendSlice(gpa, frag.dark_setup);
     }
 
-    try emitFrameDriver(&payload, allocator, page, frame_js);
+    try emitFrameDriver(&payload, gpa, page, frame_js);
 
     // Teardown, published last because it closes over the device and the loop
     // handle. Static pages get it too: they have no loop to cancel, but a re-run
     // still strands a GPUDevice and everything reachable from it.
-    try payload.appendSlice(allocator, frag.stop_reg);
-    if (page.has_animation) try payload.appendSlice(allocator, frag.device_lost);
+    try payload.appendSlice(gpa, frag.stop_reg);
+    if (page.has_animation) try payload.appendSlice(gpa, frag.device_lost);
 
     // Close async IIFE if packing
     if (page.pack) {
-        try payload.appendSlice(allocator, "})()");
+        try payload.appendSlice(gpa, "})()");
     }
 
     return payload;
@@ -805,25 +833,25 @@ const Analysis = struct {
     audio: AudioUniformScanResult,
     dark: DarkUniformScanResult,
 
-    fn of(allocator: std.mem.Allocator, calls: []const Call, module: *const format.Module, diag: *Diag) CodegenError!Analysis {
+    fn of(gpa: Allocator, calls: []const Call, module: *const format.Module, diag: *Diag) CodegenError!Analysis {
         const split_idx = try findSplitIndex(calls, diag);
 
         // The texture→format map exists only to resolve pipeline targets, and
         // the strings it holds are static (descriptors.toWebGPU), so it can be
         // freed the moment pipeline_formats is built.
-        var tex_formats = try buildTextureFormats(allocator, calls, module);
-        defer tex_formats.deinit(allocator);
+        var tex_formats = try buildTextureFormats(gpa, calls, module);
+        defer tex_formats.deinit(gpa);
 
         // Bound separately rather than inline in the literal: `usage` owns six
         // maps by the time `pipeline_formats` is built, and a struct literal
         // has nowhere to hang the errdefer that frees them.
-        var usage = try Usage.compute(allocator, calls, split_idx, module);
-        errdefer usage.deinit(allocator);
+        var usage = try Usage.compute(gpa, calls, split_idx, module);
+        errdefer usage.deinit(gpa);
 
         return .{
             .split_idx = split_idx,
             .usage = usage,
-            .pipeline_formats = try buildPipelineFormats(allocator, calls, split_idx, &tex_formats),
+            .pipeline_formats = try buildPipelineFormats(gpa, calls, split_idx, &tex_formats),
             // The three side channels are written by opcodes MockGPU discards,
             // so they are read from the raw PNGB rather than from the call log.
             .time = scanAllTimeUniforms(module.bytecode),
@@ -835,15 +863,15 @@ const Analysis = struct {
         };
     }
 
-    fn deinit(self: *Analysis, allocator: std.mem.Allocator) void {
-        self.usage.deinit(allocator);
-        self.pipeline_formats.deinit(allocator);
+    fn deinit(self: *Analysis, gpa: Allocator) void {
+        self.usage.deinit(gpa);
+        self.pipeline_formats.deinit(gpa);
     }
 };
 
 /// Emit the resource creations, skipping the ones nothing in the frame reaches.
 fn emitInitSection(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     out: *std.ArrayList(u8),
     calls: []const Call,
     analysis: *const Analysis,
@@ -855,7 +883,7 @@ fn emitInitSection(
     var submit_start: u16 = 0;
     for (calls[0..analysis.split_idx]) |call| {
         if (!analysis.usage.isLive(call)) continue;
-        try emitCall(allocator, out, call, module, &pass_idx, &submit_start, &analysis.pipeline_formats, diag);
+        try emitCall(gpa, out, call, module, &pass_idx, &submit_start, &analysis.pipeline_formats, diag);
     }
 }
 
@@ -868,7 +896,7 @@ fn emitInitSection(
 /// would stack a fresh handler per frame (§223). Only the per-frame pointer
 /// writeBuffer, which reads px,py,… and resets pdx/pdy/…, belongs here.
 fn emitFrameSection(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     out: *std.ArrayList(u8),
     calls: []const Call,
     analysis: *const Analysis,
@@ -881,7 +909,7 @@ fn emitFrameSection(
     std.debug.assert(analysis.split_idx <= calls.len);
     std.debug.assert(width > 0 and height > 0);
 
-    try emitFrameUniformWrites(allocator, out, .{
+    try emitFrameUniformWrites(gpa, out, .{
         .time = analysis.time,
         .pointer = analysis.pointer,
         .audio = analysis.audio,
@@ -891,36 +919,36 @@ fn emitFrameSection(
     var pass_idx: u16 = 0;
     var submit_start: u16 = 0;
     for (calls[analysis.split_idx..]) |call| {
-        try emitCall(allocator, out, call, module, &pass_idx, &submit_start, &analysis.pipeline_formats, diag);
+        try emitCall(gpa, out, call, module, &pass_idx, &submit_start, &analysis.pipeline_formats, diag);
     }
 }
 
 /// Wrap the assembled JS in its delivery vehicle: a deflate blob behind a
 /// self-fetching bootstrap (packed), or literal HTML with an inline module
 /// script (unpacked). Returns the page; the caller owns it.
-fn wrapHtml(allocator: std.mem.Allocator, page: Page, payload: []const u8) CodegenError![]u8 {
+fn wrapHtml(gpa: Allocator, page: Page, payload: []const u8) CodegenError![]u8 {
     var html = std.ArrayList(u8).empty;
-    errdefer html.deinit(allocator);
+    errdefer html.deinit(gpa);
 
     if (page.pack) {
-        try emitPackedBootstrap(&html, allocator, payload, page.audio_wasm);
+        try emitPackedBootstrap(&html, gpa, payload, page.audio_wasm);
     } else {
-        try html.appendSlice(allocator, "<!DOCTYPE html><meta charset=utf-8><style>");
-        try emitCanvasMarkup(&html, allocator, page);
-        try html.appendSlice(allocator, "<script type=module>\n");
-        try html.appendSlice(allocator, payload);
-        try html.appendSlice(allocator, "</script>\n");
+        try html.appendSlice(gpa, "<!DOCTYPE html><meta charset=utf-8><style>");
+        try emitCanvasMarkup(&html, gpa, page);
+        try html.appendSlice(gpa, "<script type=module>\n");
+        try html.appendSlice(gpa, payload);
+        try html.appendSlice(gpa, "</script>\n");
     }
 
     std.debug.assert(html.items.len > 0);
-    return html.toOwnedSlice(allocator) catch CodegenError.OutOfMemory;
+    return html.toOwnedSlice(gpa) catch CodegenError.OutOfMemory;
 }
 
 /// Generate self-contained HTML with inline WebGPU JavaScript.
 /// Shaders are emitted as raw WGSL template literals; see the note below for
 /// why inner per-shader compression is deliberately absent.
 pub fn generate(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     bytecode: []const u8,
     width: u32,
     height: u32,
@@ -937,33 +965,33 @@ pub fn generate(
         return CodegenError.InvalidBytecode;
     }
 
-    var module = format.deserialize(allocator, bytecode) catch {
+    var module = format.deserialize(gpa, bytecode) catch {
         return CodegenError.InvalidBytecode;
     };
-    defer module.deinit(allocator);
+    defer module.deinit(gpa);
 
     // Execute bytecode with MockGPU to capture call sequence
     var gpu: MockGPU = .empty;
-    defer gpu.deinit(allocator);
+    defer gpu.deinit(gpa);
 
-    var dispatcher = Dispatcher(MockGPU).init(allocator, &gpu, &module);
+    var dispatcher = Dispatcher(MockGPU).init(gpa, &gpu, &module);
     defer dispatcher.deinit();
-    dispatcher.execute_all(allocator) catch {
+    dispatcher.execute_all(gpa) catch {
         return CodegenError.ExecutionFailed;
     };
 
     const calls = gpu.get_calls();
 
-    var analysis = try Analysis.of(allocator, calls, &module, diag);
-    defer analysis.deinit(allocator);
+    var analysis = try Analysis.of(gpa, calls, &module, diag);
+    defer analysis.deinit(gpa);
 
     var js = std.ArrayList(u8).empty;
-    defer js.deinit(allocator);
-    try emitInitSection(allocator, &js, calls, &analysis, &module, diag);
+    defer js.deinit(gpa);
+    try emitInitSection(gpa, &js, calls, &analysis, &module, diag);
 
     var frame_js = std.ArrayList(u8).empty;
-    defer frame_js.deinit(allocator);
-    try emitFrameSection(allocator, &frame_js, calls, &analysis, &module, width, height, fullscreen, diag);
+    defer frame_js.deinit(gpa);
+    try emitFrameSection(gpa, &frame_js, calls, &analysis, &module, width, height, fullscreen, diag);
 
     const page = Page{
         .width = width,
@@ -976,12 +1004,18 @@ pub fn generate(
         .has_audio_data = analysis.audio.count > 0,
         .has_pointer = analysis.pointer.count > 0,
         .has_dark = analysis.dark.count > 0,
+        .has_frame_counter = blk: {
+            for (analysis.time.items[0..analysis.time.count]) |tu| {
+                if (tu.size >= 20) break :blk true;
+            }
+            break :blk false;
+        },
     };
 
-    var payload = try buildPayload(allocator, page, &module, js.items, frame_js.items);
-    defer payload.deinit(allocator);
+    var payload = try buildPayload(gpa, page, &module, js.items, frame_js.items);
+    defer payload.deinit(gpa);
 
-    const html = try wrapHtml(allocator, page, payload.items);
+    const html = try wrapHtml(gpa, page, payload.items);
     return CodegenResult{ .html = html };
 }
 
@@ -992,7 +1026,7 @@ pub fn generate(
 /// The only arm of `emitCall` long enough to obscure the dispatch table around
 /// it — the rest are a handful of lines each and read better inline.
 fn emitBeginRenderPass(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     out: *std.ArrayList(u8),
     call: Call,
     pass_idx: *u16,
@@ -1004,34 +1038,34 @@ fn emitBeginRenderPass(
     const store_str: []const u8 = if (p.store_op == 0) "store" else "discard";
 
     // Encoder + pass with indexed names: e0/r0, e1/r1, ...
-    try out.appendSlice(allocator, "let e");
-    try appendInt(out, allocator, pi);
-    try out.appendSlice(allocator, "=d.createCommandEncoder(),r");
-    try appendInt(out, allocator, pi);
-    try out.appendSlice(allocator, "=e");
-    try appendInt(out, allocator, pi);
-    try out.appendSlice(allocator, ".beginRenderPass({colorAttachments:[{view:");
+    try out.appendSlice(gpa, "let e");
+    try appendInt(out, gpa, pi);
+    try out.appendSlice(gpa, "=d.createCommandEncoder(),r");
+    try appendInt(out, gpa, pi);
+    try out.appendSlice(gpa, "=e");
+    try appendInt(out, gpa, pi);
+    try out.appendSlice(gpa, ".beginRenderPass({colorAttachments:[{view:");
 
     // Color target: the canvas sentinel resolves to the swapchain view
     if (p.color_texture_id == CANVAS_TEXTURE_ID) {
-        try out.appendSlice(allocator, "x.getCurrentTexture().createView()");
+        try out.appendSlice(gpa, "x.getCurrentTexture().createView()");
     } else {
         // The texture's default view, made once beside the texture itself. Only
         // the canvas attachment above is per-frame, and only because the swap
         // chain hands out a different GPUTexture every frame.
-        try out.appendSlice(allocator, "T");
-        try appendInt(out, allocator, p.color_texture_id);
-        try out.appendSlice(allocator, "v");
+        try out.appendSlice(gpa, "T");
+        try appendInt(out, gpa, p.color_texture_id);
+        try out.appendSlice(gpa, "v");
     }
 
-    try out.appendSlice(allocator, ",loadOp:'");
-    try out.appendSlice(allocator, load_str);
-    try out.appendSlice(allocator, "',storeOp:'");
-    try out.appendSlice(allocator, store_str);
+    try out.appendSlice(gpa, ",loadOp:'");
+    try out.appendSlice(gpa, load_str);
+    try out.appendSlice(gpa, "',storeOp:'");
+    try out.appendSlice(gpa, store_str);
     // The clear color arrives as four f32 bit patterns and goes out as the same
     // four floats. It used to be four u8s printed as `n/255`, which is why a
     // --html page could not reproduce a clear the browser runtime rendered.
-    try out.appendSlice(allocator, "',clearValue:[");
+    try out.appendSlice(gpa, "',clearValue:[");
     var cv_buf: [96]u8 = undefined;
     const cv_str = std.fmt.bufPrint(&cv_buf, "{d},{d},{d},{d}", .{
         @as(f32, @bitCast(p.clear_r_bits)),
@@ -1039,17 +1073,17 @@ fn emitBeginRenderPass(
         @as(f32, @bitCast(p.clear_b_bits)),
         @as(f32, @bitCast(p.clear_a_bits)),
     }) catch "0,0,0,0";
-    try out.appendSlice(allocator, cv_str);
-    try out.appendSlice(allocator, "]}]");
+    try out.appendSlice(gpa, cv_str);
+    try out.appendSlice(gpa, "]}]");
 
     // Depth stencil attachment (the sentinel means none)
     if (p.depth_texture_id != NO_TEXTURE_ID) {
-        try out.appendSlice(allocator, ",depthStencilAttachment:{view:T");
-        try appendInt(out, allocator, p.depth_texture_id);
-        try out.appendSlice(allocator, "v,depthClearValue:1,depthLoadOp:'clear',depthStoreOp:'store'}");
+        try out.appendSlice(gpa, ",depthStencilAttachment:{view:T");
+        try appendInt(out, gpa, p.depth_texture_id);
+        try out.appendSlice(gpa, "v,depthClearValue:1,depthLoadOp:'clear',depthStoreOp:'store'}");
     }
 
-    try out.appendSlice(allocator, "});");
+    try out.appendSlice(gpa, "});");
 }
 
 /// Which family a MockGPU call belongs to. Exhaustive on purpose: a new
@@ -1120,7 +1154,7 @@ fn familyOf(t: CallType) Family {
 /// Emit a single MockGPU call as JavaScript, routing to its family — the same
 /// resource/pass/queue/wasm split the executor's dispatcher handlers use.
 fn emitCall(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     out: *std.ArrayList(u8),
     call: Call,
     module: *const format.Module,
@@ -1131,10 +1165,10 @@ fn emitCall(
 ) !void {
     const before = out.items.len;
     switch (familyOf(call.call_type)) {
-        .resource => try emitResourceCall(allocator, out, call, module, pipeline_formats),
-        .pass => try emitPassCall(allocator, out, call, pass_idx),
-        .queue => try emitQueueCall(allocator, out, call, module, pass_idx, submit_start),
-        .wasm => try emitWasmCall(allocator, out, call, module),
+        .resource => try emitResourceCall(gpa, out, call, module, pipeline_formats),
+        .pass => try emitPassCall(gpa, out, call, pass_idx),
+        .queue => try emitQueueCall(gpa, out, call, module, pass_idx, submit_start),
+        .wasm => try emitWasmCall(gpa, out, call, module),
         .unsupported => {
             diag.unsupported = call.call_type;
             return CodegenError.UnsupportedByHtml;
@@ -1153,7 +1187,7 @@ fn emitCall(
 /// splitting it further would put a `switch` in front of a `switch`. Same
 /// judgement as dispatcher/pass.zig's handle.
 fn emitResourceCall(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     out: *std.ArrayList(u8),
     call: Call,
     module: *const format.Module,
@@ -1167,60 +1201,60 @@ fn emitResourceCall(
         // the WGSL is readable.
         .create_shader_module => {
             const p = call.params.create_shader_module;
-            const wgsl = resolveWgslCode(allocator, p.code_data_id, module) catch return;
-            defer allocator.free(wgsl);
+            const wgsl = resolveWgslCode(gpa, p.code_data_id, module) catch return;
+            defer gpa.free(wgsl);
 
-            try out.appendSlice(allocator, "let s");
-            try appendInt(out, allocator, p.shader_id);
-            try out.appendSlice(allocator, "=d.createShaderModule({code:`");
-            try appendEscapedWgsl(out, allocator, wgsl);
-            try out.appendSlice(allocator, "`});");
+            try out.appendSlice(gpa, "let s");
+            try appendInt(out, gpa, p.shader_id);
+            try out.appendSlice(gpa, "=d.createShaderModule({code:`");
+            try appendEscapedWgsl(out, gpa, wgsl);
+            try out.appendSlice(gpa, "`});");
         },
         .create_buffer => {
             const p = call.params.create_buffer;
-            try out.appendSlice(allocator, "let b");
-            try appendInt(out, allocator, p.buffer_id);
-            try out.appendSlice(allocator, "=d.createBuffer({size:");
-            try appendInt(out, allocator, p.size);
-            try out.appendSlice(allocator, ",usage:");
-            try appendInt(out, allocator, p.usage);
-            try out.appendSlice(allocator, "});");
+            try out.appendSlice(gpa, "let b");
+            try appendInt(out, gpa, p.buffer_id);
+            try out.appendSlice(gpa, "=d.createBuffer({size:");
+            try appendInt(out, gpa, p.size);
+            try out.appendSlice(gpa, ",usage:");
+            try appendInt(out, gpa, p.usage);
+            try out.appendSlice(gpa, "});");
         },
         .create_render_pipeline => {
             const p = call.params.create_render_pipeline;
             const data = module.data.get(@enumFromInt(p.descriptor_data_id));
             const target_fmt = pipeline_formats.get(p.pipeline_id);
-            try out.appendSlice(allocator, "let p");
-            try appendInt(out, allocator, p.pipeline_id);
-            try out.appendSlice(allocator, "=d.createRenderPipeline(");
-            try desc.emitRenderPipelineDesc(out, allocator, data, target_fmt);
-            try out.appendSlice(allocator, ");");
+            try out.appendSlice(gpa, "let p");
+            try appendInt(out, gpa, p.pipeline_id);
+            try out.appendSlice(gpa, "=d.createRenderPipeline(");
+            try desc.emitRenderPipelineDesc(out, gpa, data, target_fmt);
+            try out.appendSlice(gpa, ");");
         },
         .create_compute_pipeline => {
             const p = call.params.create_compute_pipeline;
             const data = module.data.get(@enumFromInt(p.descriptor_data_id));
-            try out.appendSlice(allocator, "let p");
-            try appendInt(out, allocator, p.pipeline_id);
-            try out.appendSlice(allocator, "=d.createComputePipeline(");
-            try desc.emitComputePipelineDesc(out, allocator, data);
-            try out.appendSlice(allocator, ");");
+            try out.appendSlice(gpa, "let p");
+            try appendInt(out, gpa, p.pipeline_id);
+            try out.appendSlice(gpa, "=d.createComputePipeline(");
+            try desc.emitComputePipelineDesc(out, gpa, data);
+            try out.appendSlice(gpa, ");");
         },
         .create_bind_group => {
             const p = call.params.create_bind_group;
             const data = module.data.get(@enumFromInt(p.entry_data_id));
-            try out.appendSlice(allocator, "let g");
-            try appendInt(out, allocator, p.group_id);
-            try out.appendSlice(allocator, "=d.createBindGroup(");
-            try desc.emitBindGroupDesc(out, allocator, data, p.layout_id);
-            try out.appendSlice(allocator, ");");
+            try out.appendSlice(gpa, "let g");
+            try appendInt(out, gpa, p.group_id);
+            try out.appendSlice(gpa, "=d.createBindGroup(");
+            try desc.emitBindGroupDesc(out, gpa, data, p.layout_id);
+            try out.appendSlice(gpa, ");");
         },
         .create_texture => {
             const p = call.params.create_texture;
             const data = module.data.get(@enumFromInt(p.descriptor_data_id));
-            try out.appendSlice(allocator, "let T");
-            try appendInt(out, allocator, p.texture_id);
-            try out.appendSlice(allocator, "=d.createTexture(");
-            try desc.emitTextureDesc(out, allocator, data);
+            try out.appendSlice(gpa, "let T");
+            try appendInt(out, gpa, p.texture_id);
+            try out.appendSlice(gpa, "=d.createTexture(");
+            try desc.emitTextureDesc(out, gpa, data);
             // …and its default view, installed WITH the texture. Attachments
             // used to spell `T0.createView()` inline, which for an animated page
             // meant one driver-side view per attachment per pass per FRAME, and
@@ -1230,51 +1264,51 @@ fn emitResourceCall(
             // is exactly what the purity gate forbids. The page has no resize
             // handler, so the texture — and therefore this view — lives as long
             // as the run does.
-            try out.appendSlice(allocator, "),T");
-            try appendInt(out, allocator, p.texture_id);
-            try out.appendSlice(allocator, "v=T");
-            try appendInt(out, allocator, p.texture_id);
-            try out.appendSlice(allocator, ".createView();");
+            try out.appendSlice(gpa, "),T");
+            try appendInt(out, gpa, p.texture_id);
+            try out.appendSlice(gpa, "v=T");
+            try appendInt(out, gpa, p.texture_id);
+            try out.appendSlice(gpa, ".createView();");
         },
         .create_sampler => {
             const p = call.params.create_sampler;
             const data = module.data.get(@enumFromInt(p.descriptor_data_id));
-            try out.appendSlice(allocator, "let m");
-            try appendInt(out, allocator, p.sampler_id);
-            try out.appendSlice(allocator, "=d.createSampler(");
-            try desc.emitSamplerDesc(out, allocator, data);
-            try out.appendSlice(allocator, ");");
+            try out.appendSlice(gpa, "let m");
+            try appendInt(out, gpa, p.sampler_id);
+            try out.appendSlice(gpa, "=d.createSampler(");
+            try desc.emitSamplerDesc(out, gpa, data);
+            try out.appendSlice(gpa, ");");
         },
         .create_texture_view => {
             const p = call.params.create_texture_view;
             const data = module.data.get(@enumFromInt(p.descriptor_data_id));
-            try out.appendSlice(allocator, "let V");
-            try appendInt(out, allocator, p.view_id);
-            try out.appendSlice(allocator, "=T");
-            try appendInt(out, allocator, p.texture_id);
-            try out.appendSlice(allocator, ".createView(");
-            try desc.emitTextureViewDesc(out, allocator, data);
-            try out.appendSlice(allocator, ");");
+            try out.appendSlice(gpa, "let V");
+            try appendInt(out, gpa, p.view_id);
+            try out.appendSlice(gpa, "=T");
+            try appendInt(out, gpa, p.texture_id);
+            try out.appendSlice(gpa, ".createView(");
+            try desc.emitTextureViewDesc(out, gpa, data);
+            try out.appendSlice(gpa, ");");
         },
         .create_bind_group_layout => {
             const p = call.params.create_bind_group_layout;
             const data = module.data.get(@enumFromInt(p.descriptor_data_id));
-            try out.appendSlice(allocator, "let BGL");
-            try appendInt(out, allocator, p.layout_id);
-            try out.appendSlice(allocator, "=d.createBindGroupLayout(");
+            try out.appendSlice(gpa, "let BGL");
+            try appendInt(out, gpa, p.layout_id);
+            try out.appendSlice(gpa, "=d.createBindGroupLayout(");
             // The descriptor is already the browser-shape JSON `{"entries":[…]}`;
             // hand it to the device verbatim (visibility/type are wgpu-native names).
-            try out.appendSlice(allocator, data);
-            try out.appendSlice(allocator, ");");
+            try out.appendSlice(gpa, data);
+            try out.appendSlice(gpa, ");");
         },
         .create_pipeline_layout => {
             const p = call.params.create_pipeline_layout;
             const data = module.data.get(@enumFromInt(p.descriptor_data_id));
-            try out.appendSlice(allocator, "let PL");
-            try appendInt(out, allocator, p.layout_id);
-            try out.appendSlice(allocator, "=d.createPipelineLayout(");
-            try desc.emitPipelineLayoutDesc(out, allocator, data);
-            try out.appendSlice(allocator, ");");
+            try out.appendSlice(gpa, "let PL");
+            try appendInt(out, gpa, p.layout_id);
+            try out.appendSlice(gpa, "=d.createPipelineLayout(");
+            try desc.emitPipelineLayoutDesc(out, gpa, data);
+            try out.appendSlice(gpa, ");");
         },
         else => unreachable, // familyOf routes every other tag elsewhere
     }
@@ -1287,152 +1321,152 @@ fn emitResourceCall(
 /// Over the 70-line rule by design — a dispatch table, same as emitResourceCall
 /// above; see its note.
 fn emitPassCall(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     out: *std.ArrayList(u8),
     call: Call,
     pass_idx: *u16,
 ) !void {
     switch (call.call_type) {
-        .begin_render_pass => try emitBeginRenderPass(allocator, out, call, pass_idx),
+        .begin_render_pass => try emitBeginRenderPass(gpa, out, call, pass_idx),
         .begin_compute_pass => {
             const pi = pass_idx.*;
             pass_idx.* += 1;
-            try out.appendSlice(allocator, "let e");
-            try appendInt(out, allocator, pi);
-            try out.appendSlice(allocator, "=d.createCommandEncoder(),r");
-            try appendInt(out, allocator, pi);
-            try out.appendSlice(allocator, "=e");
-            try appendInt(out, allocator, pi);
-            try out.appendSlice(allocator, ".beginComputePass();");
+            try out.appendSlice(gpa, "let e");
+            try appendInt(out, gpa, pi);
+            try out.appendSlice(gpa, "=d.createCommandEncoder(),r");
+            try appendInt(out, gpa, pi);
+            try out.appendSlice(gpa, "=e");
+            try appendInt(out, gpa, pi);
+            try out.appendSlice(gpa, ".beginComputePass();");
         },
         .set_pipeline => {
             const p = call.params.set_pipeline;
-            try out.appendSlice(allocator, "r");
-            try appendInt(out, allocator, pass_idx.* -| 1);
-            try out.appendSlice(allocator, ".setPipeline(p");
-            try appendInt(out, allocator, p.pipeline_id);
-            try out.appendSlice(allocator, ");");
+            try out.appendSlice(gpa, "r");
+            try appendInt(out, gpa, pass_idx.* -| 1);
+            try out.appendSlice(gpa, ".setPipeline(p");
+            try appendInt(out, gpa, p.pipeline_id);
+            try out.appendSlice(gpa, ");");
         },
         .set_bind_group => {
             const p = call.params.set_bind_group;
-            try out.appendSlice(allocator, "r");
-            try appendInt(out, allocator, pass_idx.* -| 1);
-            try out.appendSlice(allocator, ".setBindGroup(");
-            try appendInt(out, allocator, p.slot);
-            try out.appendSlice(allocator, ",g");
-            try appendInt(out, allocator, p.group_id);
-            try out.appendSlice(allocator, ");");
+            try out.appendSlice(gpa, "r");
+            try appendInt(out, gpa, pass_idx.* -| 1);
+            try out.appendSlice(gpa, ".setBindGroup(");
+            try appendInt(out, gpa, p.slot);
+            try out.appendSlice(gpa, ",g");
+            try appendInt(out, gpa, p.group_id);
+            try out.appendSlice(gpa, ");");
         },
         .set_vertex_buffer => {
             const p = call.params.set_vertex_buffer;
-            try out.appendSlice(allocator, "r");
-            try appendInt(out, allocator, pass_idx.* -| 1);
-            try out.appendSlice(allocator, ".setVertexBuffer(");
-            try appendInt(out, allocator, p.slot);
-            try out.appendSlice(allocator, ",b");
-            try appendInt(out, allocator, p.buffer_id);
-            try out.appendSlice(allocator, ");");
+            try out.appendSlice(gpa, "r");
+            try appendInt(out, gpa, pass_idx.* -| 1);
+            try out.appendSlice(gpa, ".setVertexBuffer(");
+            try appendInt(out, gpa, p.slot);
+            try out.appendSlice(gpa, ",b");
+            try appendInt(out, gpa, p.buffer_id);
+            try out.appendSlice(gpa, ");");
         },
         .set_index_buffer => {
             const p = call.params.set_index_buffer;
-            try out.appendSlice(allocator, "r");
-            try appendInt(out, allocator, pass_idx.* -| 1);
-            try out.appendSlice(allocator, ".setIndexBuffer(b");
-            try appendInt(out, allocator, p.buffer_id);
-            try out.appendSlice(allocator, ",'");
-            try out.appendSlice(allocator, if (p.index_format == 0) "uint16" else "uint32");
-            try out.appendSlice(allocator, "');");
+            try out.appendSlice(gpa, "r");
+            try appendInt(out, gpa, pass_idx.* -| 1);
+            try out.appendSlice(gpa, ".setIndexBuffer(b");
+            try appendInt(out, gpa, p.buffer_id);
+            try out.appendSlice(gpa, ",'");
+            try out.appendSlice(gpa, if (p.index_format == 0) "uint16" else "uint32");
+            try out.appendSlice(gpa, "');");
         },
         .set_blend_constant => {
             const p = call.params.set_blend_constant;
-            try out.appendSlice(allocator, "r");
-            try appendInt(out, allocator, pass_idx.* -| 1);
-            try out.appendSlice(allocator, ".setBlendConstant([");
+            try out.appendSlice(gpa, "r");
+            try appendInt(out, gpa, pass_idx.* -| 1);
+            try out.appendSlice(gpa, ".setBlendConstant([");
             var bc_buf: [64]u8 = undefined;
             const bc_str = std.fmt.bufPrint(&bc_buf, "{d},{d},{d},{d}", .{
                 @as(f32, @bitCast(p.r_bits)), @as(f32, @bitCast(p.g_bits)), @as(f32, @bitCast(p.b_bits)), @as(f32, @bitCast(p.a_bits)),
             }) catch "0,0,0,0";
-            try out.appendSlice(allocator, bc_str);
-            try out.appendSlice(allocator, "]);");
+            try out.appendSlice(gpa, bc_str);
+            try out.appendSlice(gpa, "]);");
         },
         .draw => {
             const p = call.params.draw;
-            try out.appendSlice(allocator, "r");
-            try appendInt(out, allocator, pass_idx.* -| 1);
-            try out.appendSlice(allocator, ".draw(");
-            try appendInt(out, allocator, p.vertex_count);
+            try out.appendSlice(gpa, "r");
+            try appendInt(out, gpa, pass_idx.* -| 1);
+            try out.appendSlice(gpa, ".draw(");
+            try appendInt(out, gpa, p.vertex_count);
             if (p.instance_count != 1 or p.first_vertex != 0 or p.first_instance != 0) {
-                try out.appendSlice(allocator, ",");
-                try appendInt(out, allocator, p.instance_count);
+                try out.appendSlice(gpa, ",");
+                try appendInt(out, gpa, p.instance_count);
                 if (p.first_vertex != 0 or p.first_instance != 0) {
-                    try out.appendSlice(allocator, ",");
-                    try appendInt(out, allocator, p.first_vertex);
+                    try out.appendSlice(gpa, ",");
+                    try appendInt(out, gpa, p.first_vertex);
                     if (p.first_instance != 0) {
-                        try out.appendSlice(allocator, ",");
-                        try appendInt(out, allocator, p.first_instance);
+                        try out.appendSlice(gpa, ",");
+                        try appendInt(out, gpa, p.first_instance);
                     }
                 }
             }
-            try out.appendSlice(allocator, ");");
+            try out.appendSlice(gpa, ");");
         },
         .draw_indexed => {
             const p = call.params.draw_indexed;
-            try out.appendSlice(allocator, "r");
-            try appendInt(out, allocator, pass_idx.* -| 1);
-            try out.appendSlice(allocator, ".drawIndexed(");
-            try appendInt(out, allocator, p.index_count);
+            try out.appendSlice(gpa, "r");
+            try appendInt(out, gpa, pass_idx.* -| 1);
+            try out.appendSlice(gpa, ".drawIndexed(");
+            try appendInt(out, gpa, p.index_count);
             if (p.instance_count != 1 or p.first_index != 0 or p.base_vertex != 0 or p.first_instance != 0) {
-                try out.appendSlice(allocator, ",");
-                try appendInt(out, allocator, p.instance_count);
+                try out.appendSlice(gpa, ",");
+                try appendInt(out, gpa, p.instance_count);
             }
-            try out.appendSlice(allocator, ");");
+            try out.appendSlice(gpa, ");");
         },
         .dispatch => {
             const p = call.params.dispatch;
-            try out.appendSlice(allocator, "r");
-            try appendInt(out, allocator, pass_idx.* -| 1);
-            try out.appendSlice(allocator, ".dispatchWorkgroups(");
-            try appendInt(out, allocator, p.x);
-            try out.appendSlice(allocator, ",");
-            try appendInt(out, allocator, p.y);
-            try out.appendSlice(allocator, ",");
-            try appendInt(out, allocator, p.z);
-            try out.appendSlice(allocator, ");");
+            try out.appendSlice(gpa, "r");
+            try appendInt(out, gpa, pass_idx.* -| 1);
+            try out.appendSlice(gpa, ".dispatchWorkgroups(");
+            try appendInt(out, gpa, p.x);
+            try out.appendSlice(gpa, ",");
+            try appendInt(out, gpa, p.y);
+            try out.appendSlice(gpa, ",");
+            try appendInt(out, gpa, p.z);
+            try out.appendSlice(gpa, ");");
         },
         .end_pass => {
-            try out.appendSlice(allocator, "r");
-            try appendInt(out, allocator, pass_idx.* -| 1);
-            try out.appendSlice(allocator, ".end();");
+            try out.appendSlice(gpa, "r");
+            try appendInt(out, gpa, pass_idx.* -| 1);
+            try out.appendSlice(gpa, ".end();");
         },
         .draw_indirect => {
             const p = call.params.draw_indirect;
-            try out.appendSlice(allocator, "r");
-            try appendInt(out, allocator, pass_idx.* -| 1);
-            try out.appendSlice(allocator, ".drawIndirect(b");
-            try appendInt(out, allocator, p.buffer_id);
-            try out.appendSlice(allocator, ",");
-            try appendInt(out, allocator, p.offset);
-            try out.appendSlice(allocator, ");");
+            try out.appendSlice(gpa, "r");
+            try appendInt(out, gpa, pass_idx.* -| 1);
+            try out.appendSlice(gpa, ".drawIndirect(b");
+            try appendInt(out, gpa, p.buffer_id);
+            try out.appendSlice(gpa, ",");
+            try appendInt(out, gpa, p.offset);
+            try out.appendSlice(gpa, ");");
         },
         .draw_indexed_indirect => {
             const p = call.params.draw_indexed_indirect;
-            try out.appendSlice(allocator, "r");
-            try appendInt(out, allocator, pass_idx.* -| 1);
-            try out.appendSlice(allocator, ".drawIndexedIndirect(b");
-            try appendInt(out, allocator, p.buffer_id);
-            try out.appendSlice(allocator, ",");
-            try appendInt(out, allocator, p.offset);
-            try out.appendSlice(allocator, ");");
+            try out.appendSlice(gpa, "r");
+            try appendInt(out, gpa, pass_idx.* -| 1);
+            try out.appendSlice(gpa, ".drawIndexedIndirect(b");
+            try appendInt(out, gpa, p.buffer_id);
+            try out.appendSlice(gpa, ",");
+            try appendInt(out, gpa, p.offset);
+            try out.appendSlice(gpa, ");");
         },
         .dispatch_indirect => {
             const p = call.params.dispatch_indirect;
-            try out.appendSlice(allocator, "r");
-            try appendInt(out, allocator, pass_idx.* -| 1);
-            try out.appendSlice(allocator, ".dispatchWorkgroupsIndirect(b");
-            try appendInt(out, allocator, p.buffer_id);
-            try out.appendSlice(allocator, ",");
-            try appendInt(out, allocator, p.offset);
-            try out.appendSlice(allocator, ");");
+            try out.appendSlice(gpa, "r");
+            try appendInt(out, gpa, pass_idx.* -| 1);
+            try out.appendSlice(gpa, ".dispatchWorkgroupsIndirect(b");
+            try appendInt(out, gpa, p.buffer_id);
+            try out.appendSlice(gpa, ",");
+            try appendInt(out, gpa, p.offset);
+            try out.appendSlice(gpa, ");");
         },
         else => unreachable, // familyOf routes every other tag elsewhere
     }
@@ -1441,7 +1475,7 @@ fn emitPassCall(
 /// The queue-level commands: static buffer writes and the submit that flushes
 /// every encoder opened since the last one.
 fn emitQueueCall(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     out: *std.ArrayList(u8),
     call: Call,
     module: *const format.Module,
@@ -1451,15 +1485,15 @@ fn emitQueueCall(
     switch (call.call_type) {
         .submit => {
             // Submit all encoders since the last submit
-            try out.appendSlice(allocator, "d.queue.submit([");
+            try out.appendSlice(gpa, "d.queue.submit([");
             var i = submit_start.*;
             while (i < pass_idx.*) : (i += 1) {
-                if (i > submit_start.*) try out.appendSlice(allocator, ",");
-                try out.appendSlice(allocator, "e");
-                try appendInt(out, allocator, i);
-                try out.appendSlice(allocator, ".finish()");
+                if (i > submit_start.*) try out.appendSlice(gpa, ",");
+                try out.appendSlice(gpa, "e");
+                try appendInt(out, gpa, i);
+                try out.appendSlice(gpa, ".finish()");
             }
-            try out.appendSlice(allocator, "]);");
+            try out.appendSlice(gpa, "]);");
             submit_start.* = pass_idx.*;
         },
         .write_buffer => {
@@ -1467,20 +1501,20 @@ fn emitQueueCall(
             const p = call.params.write_buffer;
             const data = module.data.get(@enumFromInt(p.data_id));
             if (data.len > 0) {
-                try out.appendSlice(allocator, "d.queue.writeBuffer(b");
-                try appendInt(out, allocator, p.buffer_id);
-                try out.appendSlice(allocator, ",");
-                try appendInt(out, allocator, p.offset);
-                try out.appendSlice(allocator, ",new Float32Array([");
+                try out.appendSlice(gpa, "d.queue.writeBuffer(b");
+                try appendInt(out, gpa, p.buffer_id);
+                try out.appendSlice(gpa, ",");
+                try appendInt(out, gpa, p.offset);
+                try out.appendSlice(gpa, ",new Float32Array([");
                 // Emit data as float32 values (compact: .5 instead of 0.5)
                 const float_count = data.len / 4;
                 for (0..float_count) |fi| {
-                    if (fi > 0) try out.appendSlice(allocator, ",");
+                    if (fi > 0) try out.appendSlice(gpa, ",");
                     const bytes = data[fi * 4 ..][0..4];
                     const val: f32 = @bitCast(bytes.*);
-                    try appendCompactFloat(out, allocator, val);
+                    try appendCompactFloat(out, gpa, val);
                 }
-                try out.appendSlice(allocator, "]));");
+                try out.appendSlice(gpa, "]));");
             }
         },
         else => unreachable, // familyOf routes every other tag elsewhere
@@ -1490,7 +1524,7 @@ fn emitQueueCall(
 /// The [wasm] plugin's three commands: instantiate a module, call an export,
 /// and copy a slice of its linear memory into a GPU buffer.
 fn emitWasmCall(
-    allocator: std.mem.Allocator,
+    gpa: Allocator,
     out: *std.ArrayList(u8),
     call: Call,
     module: *const format.Module,
@@ -1500,34 +1534,34 @@ fn emitWasmCall(
             const p = call.params.init_wasm_module;
             const wasm_bytes = module.data.get(@enumFromInt(p.wasm_data_id));
             // Emit: let wN=await WebAssembly.instantiate(Uint8Array.from(atob('...'),c=>c.charCodeAt(0)))
-            try out.appendSlice(allocator, "let w");
-            try appendInt(out, allocator, p.module_id);
-            try out.appendSlice(allocator, "=await WebAssembly.instantiate(Uint8Array.from(atob('");
-            try base64Append(out, allocator, wasm_bytes);
-            try out.appendSlice(allocator, "'),c=>c.charCodeAt(0)));");
+            try out.appendSlice(gpa, "let w");
+            try appendInt(out, gpa, p.module_id);
+            try out.appendSlice(gpa, "=await WebAssembly.instantiate(Uint8Array.from(atob('");
+            try base64Append(out, gpa, wasm_bytes);
+            try out.appendSlice(gpa, "'),c=>c.charCodeAt(0)));");
         },
         .call_wasm_func => {
             const p = call.params.call_wasm_func;
             const func_name = module.strings.get(@enumFromInt(p.func_name_id));
             // Emit: wN.instance.exports.funcName()
-            try out.appendSlice(allocator, "w");
-            try appendInt(out, allocator, p.module_id);
-            try out.appendSlice(allocator, ".instance.exports.");
-            try out.appendSlice(allocator, func_name);
-            try out.appendSlice(allocator, "();");
+            try out.appendSlice(gpa, "w");
+            try appendInt(out, gpa, p.module_id);
+            try out.appendSlice(gpa, ".instance.exports.");
+            try out.appendSlice(gpa, func_name);
+            try out.appendSlice(gpa, "();");
         },
         .write_buffer_from_wasm => {
             const p = call.params.write_buffer_from_wasm;
             // Emit: d.queue.writeBuffer(bN,0,new Uint8Array(wM.instance.exports.m.buffer,S,L))
-            try out.appendSlice(allocator, "d.queue.writeBuffer(b");
-            try appendInt(out, allocator, p.buffer_id);
-            try out.appendSlice(allocator, ",0,new Uint8Array(w");
-            try appendInt(out, allocator, p.call_id); // module_id used as call_id
-            try out.appendSlice(allocator, ".instance.exports.m.buffer,");
-            try appendInt(out, allocator, p.offset);
-            try out.appendSlice(allocator, ",");
-            try appendInt(out, allocator, p.byte_len);
-            try out.appendSlice(allocator, "));");
+            try out.appendSlice(gpa, "d.queue.writeBuffer(b");
+            try appendInt(out, gpa, p.buffer_id);
+            try out.appendSlice(gpa, ",0,new Uint8Array(w");
+            try appendInt(out, gpa, p.call_id); // module_id used as call_id
+            try out.appendSlice(gpa, ".instance.exports.m.buffer,");
+            try appendInt(out, gpa, p.offset);
+            try out.appendSlice(gpa, ",");
+            try appendInt(out, gpa, p.byte_len);
+            try out.appendSlice(gpa, "));");
         },
         else => unreachable, // familyOf routes every other tag elsewhere
     }
@@ -1605,7 +1639,12 @@ fn scanRuntimeUniforms(bytecode: []const u8, comptime kind: RuntimeUniformKind, 
         if (r3.len == 0) continue;
         if (r1.value > std.math.maxInt(u16) or r3.value > std.math.maxInt(u16)) continue;
         const size_ok = switch (kind) {
-            .time => r3.value == 12 or r3.value == 16,
+            // The three builtin time sources, by their ABI byte counts:
+            // `scene-time-inputs` 12, `pngine-inputs` 16, `pngine-frame-inputs`
+            // 20. A size this scan does not list is not emitted AT ALL, so
+            // leaving 20 out did not degrade the page — it dropped the uniform
+            // write, and the shader read a buffer nothing ever filled (§438).
+            .time => r3.value == 12 or r3.value == 16 or r3.value == 20,
             .pointer => r3.value == 16 or r3.value == 32 or r3.value == 48,
             .audio => true,
         };
@@ -1648,13 +1687,6 @@ fn scanAllAudioUniforms(bytecode: []const u8) AudioUniformScanResult {
     var result: AudioUniformScanResult = .{ .items = undefined, .count = 0 };
     result.count = scanRuntimeUniforms(bytecode, .audio, &result.items);
     return result;
-}
-
-/// Backward-compatible wrapper: returns first time uniform or null.
-fn scanForTimeUniform(bytecode: []const u8) ?TimeUniformInfo {
-    const result = scanAllTimeUniforms(bytecode);
-    if (result.count > 0) return result.items[0];
-    return null;
 }
 
 /// Scan the uniform TABLE (not the bytecode) for top-level f32 members named
@@ -1702,7 +1734,7 @@ const decodeVarint = pngine.opcodes.decode_varint_safe;
 /// The code_data_id from MockGPU is a data section index (not wgsl_id).
 /// First try direct data section lookup. If the WGSL table has entries whose
 /// data_id matches, resolve imports via DFS. Otherwise return raw data.
-fn resolveWgslCode(allocator: std.mem.Allocator, code_data_id: u16, module: *const format.Module) ![]u8 {
+fn resolveWgslCode(gpa: Allocator, code_data_id: u16, module: *const format.Module) ![]u8 {
     const wgsl_table = &module.wgsl;
 
     // Find wgsl_id by matching data_id
@@ -1720,29 +1752,29 @@ fn resolveWgslCode(allocator: std.mem.Allocator, code_data_id: u16, module: *con
     if (wgsl_id) |wid| {
         const entry = wgsl_table.get(wid).?;
         if (entry.deps.len > 0) {
-            return resolveWgslWithDeps(allocator, wid, module);
+            return resolveWgslWithDeps(gpa, wid, module);
         }
     }
 
     // Fallback: read directly from data section
     const data = module.data.get(@enumFromInt(code_data_id));
-    const result = try allocator.alloc(u8, data.len);
+    const result = try gpa.alloc(u8, data.len);
     @memcpy(result, data);
     return result;
 }
 
 /// Resolve WGSL with import dependencies (iterative DFS).
-fn resolveWgslWithDeps(allocator: std.mem.Allocator, wgsl_id: u16, module: *const format.Module) ![]u8 {
+fn resolveWgslWithDeps(gpa: Allocator, wgsl_id: u16, module: *const format.Module) ![]u8 {
     const wgsl_table = &module.wgsl;
 
     var included = std.AutoHashMapUnmanaged(u16, void){};
-    defer included.deinit(allocator);
+    defer included.deinit(gpa);
     var order = std.ArrayList(u16).empty;
-    defer order.deinit(allocator);
+    defer order.deinit(gpa);
     var stack = std.ArrayList(u16).empty;
-    defer stack.deinit(allocator);
+    defer stack.deinit(gpa);
 
-    try stack.append(allocator, wgsl_id);
+    try stack.append(gpa, wgsl_id);
 
     for (0..1024) |_| {
         if (stack.items.len == 0) break;
@@ -1760,13 +1792,13 @@ fn resolveWgslWithDeps(allocator: std.mem.Allocator, wgsl_id: u16, module: *cons
         }
 
         if (all_deps_ready) {
-            try included.put(allocator, current, {});
-            try order.append(allocator, current);
+            try included.put(gpa, current, {});
+            try order.append(gpa, current);
         } else {
-            try stack.append(allocator, current);
+            try stack.append(gpa, current);
             for (entry.deps) |dep| {
                 if (!included.contains(dep)) {
-                    try stack.append(allocator, dep);
+                    try stack.append(gpa, dep);
                 }
             }
         }
@@ -1780,7 +1812,7 @@ fn resolveWgslWithDeps(allocator: std.mem.Allocator, wgsl_id: u16, module: *cons
         }
     }
 
-    const result = try allocator.alloc(u8, total_size);
+    const result = try gpa.alloc(u8, total_size);
     var pos: usize = 0;
     for (order.items) |id| {
         if (wgsl_table.get(id)) |entry| {
@@ -1794,12 +1826,12 @@ fn resolveWgslWithDeps(allocator: std.mem.Allocator, wgsl_id: u16, module: *cons
 }
 
 /// Raw deflate compression. Returns owned compressed bytes.
-fn deflateCompress(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+fn deflateCompress(gpa: Allocator, data: []const u8) ![]u8 {
     std.debug.assert(data.len > 0);
 
     const capacity = data.len + data.len / 10 + 1024;
-    var output_buf = try allocator.alloc(u8, capacity);
-    defer allocator.free(output_buf);
+    var output_buf = try gpa.alloc(u8, capacity);
+    defer gpa.free(output_buf);
 
     var window_buf: [flate.max_window_len]u8 = undefined;
     var output_writer: std.Io.Writer = .fixed(output_buf);
@@ -1814,26 +1846,26 @@ fn deflateCompress(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     compressor.writer.writeAll(data) catch return error.OutOfMemory;
     compressor.finish() catch return error.OutOfMemory;
 
-    const result = try allocator.alloc(u8, output_writer.end);
+    const result = try gpa.alloc(u8, output_writer.end);
     @memcpy(result, output_buf[0..output_writer.end]);
     return result;
 }
 
 /// Emit audio WASM setup code (base64-encoded inline).
-fn emitAudioSetup(html: *std.ArrayList(u8), allocator: std.mem.Allocator, audio_wasm: []const u8) !void {
-    try html.appendSlice(allocator, frag.audio_pre);
+fn emitAudioSetup(html: *std.ArrayList(u8), gpa: Allocator, audio_wasm: []const u8) !void {
+    try html.appendSlice(gpa, frag.audio_pre);
     // Base64 encode audio WASM
-    try base64Append(html, allocator, audio_wasm);
-    try html.appendSlice(allocator, frag.audio_post);
+    try base64Append(html, gpa, audio_wasm);
+    try html.appendSlice(gpa, frag.audio_post);
 }
 
 /// Emit audio WASM setup from _a global (raw binary, no base64).
-fn emitAudioSetupFromGlobal(html: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+fn emitAudioSetupFromGlobal(html: *std.ArrayList(u8), gpa: Allocator) !void {
     // _a is a Uint8Array set by the bootstrap, pointing to raw audio WASM bytes.
     // audio_post starts with "'),c=>c.charCodeAt(0)),{m:Math})..." — skip the
     // atob/charCodeAt prefix (23 chars) and prepend our own instantiate call.
-    try html.appendSlice(allocator, "let{instance:ai}=await WebAssembly.instantiate(_a,");
-    try html.appendSlice(allocator, frag.audio_post[23..]); // from "{m:Math}),am=..."
+    try html.appendSlice(gpa, "let{instance:ai}=await WebAssembly.instantiate(_a,");
+    try html.appendSlice(gpa, frag.audio_post[23..]); // from "{m:Math}),am=..."
 }
 
 // ============================================================================
@@ -1845,7 +1877,7 @@ const testing = std.testing;
 /// A bytecode body with an honest time write and a draw whose operands spell
 /// the three opcodes: `draw 42 1 0 70000` — 42 = 0x2A, and the trailing
 /// 4-byte varint is what the old audio scan `@intCast` into a u16.
-fn runtimeUniformProbe(gpa: std.mem.Allocator) ![]u8 {
+fn runtimeUniformProbe(gpa: Allocator) ![]u8 {
     var b = pngine.format.Builder.init();
     defer b.deinit(gpa);
     const name_id = try b.internString(gpa, "f");

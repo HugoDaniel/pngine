@@ -11,17 +11,11 @@
 
 (buffer :name cellBuffer :size (* GRID_SIZE GRID_SIZE 4) :usage [storage] :pool 2)
 
-(shader-module :name initShader :code """
+(wgsl :name hash :file "./lib/hash.wgsl")
+
+(shader-module :name initShader :imports [hash] :code """
 struct Cells { data: array<u32> }
 @binding(0) @group(0) var<storage, read_write> cells: Cells;
-
-fn hash(n: u32) -> f32 {
-  var x = n;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = (x >> 16u) ^ x;
-  return f32(x) / f32(0xffffffffu);
-}
 
 const SIZE: u32 = 128u;
 

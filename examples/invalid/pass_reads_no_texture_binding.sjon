@@ -1,0 +1,13 @@
+; Invalid: a `:reads` texture created without `texture-binding` usage. A texture
+; a shader samples must be created with the usage that says so; WebGPU refuses
+; the bind group otherwise. The `(texture …)` is what has to change, so that is
+; what the diagnostic points at.
+
+(texture :name gColor :size canvas :format rgba8unorm :usage [render-attachment])
+(pass-graph
+  (pass :name main :reads [gColor] :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return textureSample(gColor, samp, uv);
+    }
+  """))

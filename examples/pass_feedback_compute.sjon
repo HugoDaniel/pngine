@@ -1,0 +1,116 @@
+; pass_feedback_compute — a hand-written compute pass over a storage buffer and
+; a `:feedback true` pass, in one `(frame …)`.
+;
+; Eight points ride a ring, each turning at its own rate, and each leaves a
+; decaying trail. The positions live in a `(buffer …)` that only the compute
+; pass ever touches; the trail lives in the feedback pool that only the sugar
+; pass ever touches. Neither is readable from the other's side, and the frame
+; runs both anyway.
+;
+; **Why the graph is named.** A `(pass-graph …)` with no `:name` owns the
+; document's frame, and `:before [orbitStep]` is enough to put a hand-written
+; step at the head of it — `pass_reads_depth.sjon` is that shorter spelling.
+; But the frame a graph emits has only the `:init` steps the graph itself
+; generated, so a top-level `(init …)` beside an unnamed graph is never
+; performed: its pipeline and bind group are built, nothing dispatches them,
+; and nothing says so. The agent buffer needs seeding once, so this document
+; names the graph, takes the `(step-group …)` that produces, and writes the
+; frame — where `:init` and `:perform` are one list, read in order.
+;
+; **How the two halves meet.** They do not, directly. A `(pass …)` prelude binds
+; `pngine`, `pointer`, `samp`, the earlier passes its WGSL names, `:reads`
+; textures, the feedback texture and `:file` data buffers, and nothing else:
+; naming `agents` inside the pass is `use of undeclared identifier`. So the
+; compute pass publishes through a texture instead — an 8x1 `rgba16float` it
+; stores into and the pass `:reads` back by texel. A storage buffer crosses into
+; the sugar tier as a texture or not at all.
+;
+; Two fail-probes, and both start in the same corner. Drop `orbitStep` from
+; `:perform` and the publish texture is never written: it reads back the zeroes
+; it was created with, and all eight sit on the top-left corner forever. Drop
+; `seedAgents` from `:init` and the buffer holds that same zero, but the step
+; still runs, so the eight leave the corner as one clump and orbit the centre
+; together.
+;
+; `(define …)` feeds numeric slots and never rewrites WGSL, so the eight is
+; written twice: `N` here, a literal in each shader.
+
+(define :name N :value 8)
+
+; Ring state, one vec2f per point. Nothing but `stepCode` reads or writes it.
+(buffer :name agents :size (* N 8) :usage [storage])
+
+; The wire into the sugar tier: one texel per point, written by the compute
+; pass, read by the fullscreen one. `storage-binding` for the store side,
+; `texture-binding` for the `:reads` side.
+(texture :name orbits :size [N 1] :format rgba16float
+  :usage [storage-binding texture-binding])
+
+(shader-module :name seedCode :code """
+@group(0) @binding(0) var<storage, read_write> agents : array<vec2f>;
+@compute @workgroup_size(8) fn seed(@builtin(global_invocation_id) id : vec3u) {
+  let a = f32(id.x) * 0.7853981634;
+  let r = 0.14 + f32(id.x) * 0.022;
+  agents[id.x] = vec2f(0.5, 0.5) + vec2f(cos(a), sin(a)) * r;
+}
+""")
+
+(shader-module :name stepCode :code """
+@group(0) @binding(0) var<storage, read_write> agents : array<vec2f>;
+@group(0) @binding(1) var orbits : texture_storage_2d<rgba16float, write>;
+@compute @workgroup_size(8) fn main(@builtin(global_invocation_id) id : vec3u) {
+  // A rigid rotation per frame, at a rate that differs per point so the ring
+  // smears instead of turning as one body. No `pngine` here: a hand-written
+  // compute pass binds what its bind group says and nothing else, and a fixed
+  // step keeps the animation identical on every device.
+  let w = 0.006 + f32(id.x) * 0.0022;
+  let p = agents[id.x] - vec2f(0.5, 0.5);
+  let q = vec2f(p.x * cos(w) - p.y * sin(w), p.x * sin(w) + p.y * cos(w));
+  let next = q + vec2f(0.5, 0.5);
+  agents[id.x] = next;
+  textureStore(orbits, vec2i(i32(id.x), 0), vec4f(next, 0.0, 1.0));
+}
+""")
+
+(compute-pipeline :name stepPipe :layout auto
+  (compute :module stepCode :entry main))
+
+(bind-group :name stepBinds :layout stepPipe :group 0
+  (entry :binding 0 :buffer agents)
+  (entry :binding 1 :texture orbits))
+
+(compute-pass :name orbitStep :pipeline stepPipe :bind-groups [stepBinds]
+  (dispatch :workgroups [1]))
+
+(init :name seedAgents :buffer agents :module seedCode :workgroups [1])
+
+(pass-graph :name trails
+  (pass :name trail :feedback true :reads [orbits] :format rgba16float :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      let asp = vec2f(pngine.width / pngine.height, 1.0);
+      // `prev_trail` is last frame's output, dimmed. Everything the points ever
+      // drew is in here and nowhere else.
+      var col = textureLoad(prev_trail, vec2i(pos.xy), 0).rgb * 0.945;
+      for (var i = 0; i < 8; i++) {
+        let p = textureLoad(orbits, vec2i(i, 0), 0).xy;
+        let tint = vec3f(0.5 + 0.5 * cos(f32(i) * 0.8),
+                         0.5 + 0.5 * cos(f32(i) * 0.8 + 2.1),
+                         0.5 + 0.5 * cos(f32(i) * 0.8 + 4.2));
+        let d = length((uv - p) * asp);
+        col += tint * (0.000064 / (d * d + 0.000064) + 0.03 * exp(-d * 30.0));
+      }
+      return vec4f(col, 1.0);
+    }
+  """)
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      // The pool is rgba16float, so a trail crossing itself keeps accumulating
+      // past 1.0 and this is where it comes back down.
+      let hdr = textureSample(trail, samp, uv).rgb;
+      return vec4f(hdr / (hdr + vec3f(1.0)), 1.0);
+    }
+  """))
+
+(frame :name main :init [seedAgents] :perform [orbitStep trails])

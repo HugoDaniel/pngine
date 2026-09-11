@@ -144,6 +144,14 @@ var cmd_buffer: [COMMAND_BUFFER_SIZE]u8 = undefined;
 
 /// Executor state.
 var initialized: bool = false;
+/// Bytes in the runtime's time block, and therefore the largest `size` a
+/// `write_time_uniform` may carry to the host. Three sources are prefixes of
+/// it: 12 `scene-time-inputs`, 16 `pngine-inputs`, 20 `pngine-frame-inputs`
+/// (the last four bytes being the frame counter as a u32). Peers that must
+/// agree: `gpu.js`'s `timeAB` + `gpu-queue-commands.js`'s clamp,
+/// `wgpu_native_gpu.write_time_uniform`, `values.mapDataSource`, docs/abi.md.
+const TIME_PAYLOAD_BYTES: u64 = 20;
+
 var frame_counter: u32 = 0;
 var resources_created: bool = false;
 
@@ -228,6 +236,16 @@ var frame_count: u32 = 0;
 
 /// Whether animation table was successfully parsed.
 var has_animation: bool = false;
+
+/// "No frame pinned" — the value `setFrame` takes to release the pin and
+/// `getFrameNameId` returns past the table's end (docs/abi.md §2).
+const NO_FRAME: u32 = 0xFFFF_FFFF;
+
+/// The frame `frame()` renders when the host pinned one (`setFrame`), by its
+/// index in `frame_entries`; `NO_FRAME` when none is. Outranks the animation
+/// table — a pin is the host's decision — and is cleared by `init()`, since a
+/// new payload has new frames.
+var pinned_frame: u32 = NO_FRAME;
 
 // ============================================================================
 // Host Imports (Minimal)
@@ -331,6 +349,7 @@ pub export fn init() u32 {
     pass_ranges = [_]PassRange{.{ .start = 0, .end = 0 }} ** MAX_PASSES;
     pass_executed_once = @splat(false);
     frame_count = 0;
+    pinned_frame = NO_FRAME;
     has_animation = false;
     anim_scene_count = 0;
     malformed_body = false;
@@ -513,6 +532,37 @@ pub export fn setFrameCounter(n: u32) void {
     frame_counter = n;
 }
 
+/// How many `define_frame`s `init()` indexed; 0 before a successful init.
+/// Additive export (docs/abi.md §2) — hosts feature-detect.
+pub export fn getFrameCount() u32 {
+    if (!initialized) return 0;
+    return frame_count;
+}
+
+/// The string id of frame `index`'s name (its `(frame :name …)`, interned in
+/// the payload's string table), or `NO_FRAME` past the end or before init.
+/// The host resolves the id through the string table it already parses, so
+/// the executor never handles a name. Additive export (docs/abi.md §2).
+pub export fn getFrameNameId(index: u32) u32 {
+    if (!initialized or index >= frame_count) return NO_FRAME;
+    return frame_entries[index].name_string_id;
+}
+
+/// Pin the frame `frame()` renders, by its index in define order; `NO_FRAME`
+/// releases the pin. The pin outranks the animation table and holds until
+/// the next `setFrame` or `init()`.
+///
+/// Returns 0 ok, 1 not initialised, 2 out of range (the pin is left as it
+/// was). Additive export (docs/abi.md §2).
+pub export fn setFrame(index: u32) u32 {
+    if (!initialized) return 1;
+    if (index != NO_FRAME and index >= frame_count) return 2;
+    pinned_frame = index;
+    // Post-condition: the pin names a frame or nothing.
+    std.debug.assert(pinned_frame == NO_FRAME or pinned_frame < frame_count);
+    return 0;
+}
+
 /// ABI version of the executor↔host interface (docs/abi.md).
 /// Binaries without this export are version 1; the host reads it via
 /// `exports.getAbiVersion?.() ?? 1`. The interface is frozen append-only,
@@ -624,8 +674,18 @@ fn executeFrame(cmds: *CommandBuffer, time: f32, width: u32, height: u32) void {
     var pc: usize = 0;
     var found_frame = false;
 
+    // A host pin (setFrame) outranks the animation table: "pin" means the
+    // host decided. `setFrame` only stores an index below frame_count, and
+    // init() clears it, so the bound holds here.
+    if (pinned_frame != NO_FRAME) {
+        std.debug.assert(pinned_frame < frame_count);
+        pc = frame_entries[pinned_frame].pc_offset;
+        found_frame = true;
+        dbg("t={d}ms pinned frame={d} pc={d}", .{ time_ms, pinned_frame, pc });
+    }
+
     // If animation is defined, select scene by time
-    if (has_animation) {
+    if (!found_frame and has_animation) {
         if (findSceneAtTime(time_ms)) |scene_idx| {
             const scene = anim_scenes[scene_idx];
             if (findFramePcByStringId(scene.frame_string_id)) |frame_pc| {
@@ -690,18 +750,25 @@ fn executeFrame(cmds: *CommandBuffer, time: f32, width: u32, height: u32) void {
         }
 
         // Handle time uniform specially. The size operand rides through (the
-        // emitter writes 12 for `scene-time-inputs`, 16 for `pngine-inputs`);
-        // it used to be read and dropped, so every time write was 16 bytes and
-        // a 12-byte buffer got an over-long `writeBuffer` in the browser. The
-        // host clamps to its 16-byte staging either way, so a size past 16 is
-        // saturated rather than wrapped into the u16 field.
+        // emitter writes 12 for `scene-time-inputs`, 16 for `pngine-inputs`,
+        // 20 for `pngine-frame-inputs`); it used to be read and dropped, so
+        // every time write was 16 bytes and a 12-byte buffer got an over-long
+        // `writeBuffer` in the browser.
+        //
+        // The saturation is against the HOST's staging block, so it must equal
+        // it: gpu.js stages `TIME_PAYLOAD_BYTES` and clamps to the same number,
+        // and the native backend assembles the same block (docs/abi.md 0x21).
+        // It was 16 while the block was, which capped `pngine-frame-inputs` to
+        // its first 16 bytes and dropped the frame index SILENTLY — native
+        // reads the size straight out of the bytecode and so never saw it
+        // (CONTRIBUTING pitfall 110: the browser is the strict one here).
         if (op == .write_time_uniform) {
             const buffer_id = read_varint(bytecode, &pc);
             const offset = read_varint(bytecode, &pc);
             const size = read_varint(bytecode, &pc);
             _ = width;
             _ = height;
-            cmds.writeTimeUniform(narrowId(buffer_id), @intCast(offset), @intCast(@min(size, 16)));
+            cmds.writeTimeUniform(narrowId(buffer_id), @intCast(offset), @intCast(@min(size, TIME_PAYLOAD_BYTES)));
             continue;
         }
 

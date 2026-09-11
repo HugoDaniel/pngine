@@ -26,7 +26,7 @@ exercises. Read that header first — it is more specific than this index.
 |-------|-------|
 | **Basics** | `simple_triangle`, `simple_triangle_msaa`, `moving_triangle`, `rotating_cube`, `two_cubes`, `uniform_access`, `pipeline_layout`, `pipeline_constants`, `primitive_strip`, `test_viewport`, `test_define_wgsl`, `transparent_canvas`, `test_multi_draw` (several draws in one pass), `test_instanced_simple` / `test_instanced_builtin` (instanced draws with and without vertex buffers), `test_bind_offset` (a bind-group buffer slice) |
 | **Fullscreen fragment** | `circle_avalanche`, `domino_cascade`, `tower_explosion`, `pngine_logo`, `pristine_grid` |
-| **`(pass …)` sugar** | `pass_shader_art`, `pass_bloom`, `pass_postprocess`, `pass_compute_rainbow`, `pass_pointer` |
+| **`(pass …)` sugar** | `pass_shader_art`, `pass_bloom`, `pass_postprocess`, `pass_compute_rainbow`, `pass_pointer`, `pass_feedback_compute` (a hand-written compute pass over a storage buffer and a `:feedback true` pass in one `(frame …)`, wired through a texture) |
 | **Compute / simulation** | `boids`, `boids_init_only`, `pngine_background`, `test_compute_dispatch`, `test_init_compute`, `test_storage_buffer`, `test_boids_render` (and the `boids_*` triangles below) |
 | **Meshes** | `teapot` (Utah teapot), `dragon` (Stanford dragon, ~222 KB payload), `textured_rotating_cube`, `wasm_rotated_cube`, `normal_map`, `cubemap`, `compute_subdivision` (a hand-written octahedron subdivided on the GPU, then displaced in the vertex stage) |
 | **Textures & samplers** | `texture_options`, `texture_view`, `sampler_options`, `image_blur`, `test_cube_view` (a `2d-array` storage view, then a cube view), `test_copy_buffer`, `test_copy_texture` |

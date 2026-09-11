@@ -1,0 +1,62 @@
+; A `(bind-group …)` with no `:layout` — the polymorphism queue's item 2 (§416).
+;
+; This is examples/test_prune_unused.sjon with its two bind groups written ONCE.
+; `:layout` names the pipeline whose auto-derived layout a group is built
+; against, so N pipelines over one resource set used to cost N forms that
+; differed in that key alone. Leave the key out and the emitter derives one GPU
+; bind group per pipeline that binds the group (here: `depthPipe` through
+; `depthDraw`, `litPipe` through `litDraw`), each pruned to the entries that
+; pipeline's entry points reach — `depthOnlyFs` never reads `tint`, so the
+; depth instance carries one entry and the lit instance two.
+;
+; Instances are numbered in form order then pipeline order, so this document's
+; bytecode is byte-identical to test_prune_unused.sjon's: tests/zig/golden pins
+; the two traces equal, and the render snapshot pins the pixels.
+
+(shader-module :name code :code """
+struct Cam { m: mat4x4f }
+@group(0) @binding(0) var<uniform> cam: Cam;
+@group(0) @binding(1) var<uniform> tint: vec4f;
+
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let p = array(vec2f(-1.0, -3.0), vec2f(-1.0, 1.0), vec2f(3.0, 1.0));
+  return cam.m * vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn depthOnlyFs() -> @location(0) vec4f { return vec4f(0.15, 0.15, 0.2, 1.0); }
+@fragment fn litFs() -> @location(0) vec4f { return tint; }
+""")
+
+(data :name identity :float32 [1 0 0 0  0 1 0 0  0 0 1 0  0 0 0 1])
+(data :name orange :float32 [1 0.55 0.1 1])
+(buffer :name camBuf :size 64 :usage [uniform copy-dst])
+(buffer :name tintBuf :size 16 :usage [uniform copy-dst])
+
+(render-pipeline :name depthPipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry depthOnlyFs (target :format preferred-canvas-format)))
+
+(render-pipeline :name litPipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry litFs (target :format preferred-canvas-format)))
+
+; One resource set. Each pass's pipeline decides what it becomes.
+(bind-group :name scene :group 0
+  (entry :binding 0 :buffer camBuf)
+  (entry :binding 1 :buffer tintBuf))
+
+(queue :name writeUniforms
+  (write-buffer :buffer camBuf :offset 0 :data identity)
+  (write-buffer :buffer tintBuf :offset 0 :data orange))
+
+(render-pass :name depthDraw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline depthPipe :bind-groups [scene]
+  (draw :vertex-count 3))
+
+(render-pass :name litDraw
+  (color-attachment :view context-current-texture :load-op load :store-op store)
+  :pipeline litPipe :bind-groups [scene]
+  (draw :vertex-count 3))
+
+(frame :name main :before [writeUniforms] :perform [depthDraw litDraw])

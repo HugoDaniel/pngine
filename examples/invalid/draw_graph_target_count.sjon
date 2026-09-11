@@ -1,0 +1,23 @@
+; A stage's `(target …)` children pair with its `(color-attachment …)` children
+; by POSITION, so two targets over one attachment has no reading: the second
+; target describes an attachment that is not there. One per attachment, or none
+; at all (in which case every target is the derived format alone).
+(shader-module :name m :code """
+@group(0) @binding(0) var<uniform> c: vec4f;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return c; }
+""")
+(buffer :name cb :size 16 :usage [uniform copy-dst])
+(draw-graph
+  (stage :name s
+    (color-attachment :view context-current-texture
+      :clear-value [0 0 0 1] :load-op clear :store-op store)
+    (target :write-mask 7)
+    (target :write-mask 15)
+    (bind-group :name g :group 0 (entry :binding 0 :buffer cb)))
+  (geometry :name a (draw :vertex-count 3)
+    (in :stage s (vertex :module m :entry vs) (fragment :module m :entry fs)))
+  )

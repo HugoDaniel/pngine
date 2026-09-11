@@ -1,0 +1,66 @@
+; The hand-written twin of examples/test_data_pass.sjon: the same program with
+; `(pass-graph …)` expanded by hand into the core forms it lowers to.
+; `schema/sugar-ledger.mjs` names this file for `(pass …)`'s `:file`, and
+; `tests/zig/render/render_test.zig` holds the pair pixel-equal every run
+; (`twin_of = "test_data_pass"`).
+;
+; `:file` lowers to one `(buffer … :file …)` per path — `<pass>__d0`, `__d1`, …
+; with `storage|copy-dst` usage — plus the `var<storage, read> D{i}: array<f32>`
+; the prelude declares and the bind-group entry that binds it. `:file` on a
+; `(buffer …)` is a CORE key (the schema says so: "Synthesized by pngine/pass-v1
+; for `(pass … :file …)` buffers"), so the twin says it directly.
+;
+; The buffer has no `:size`: the WASM's `l` export is the size, and `s` is where
+; its bytes start. test_data.wasm holds 3 f32s — orange RGB.
+;
+; This was the LAST key on the sugar ledger, and it was last because it did not
+; work. Until §435 the lowering emitted `init_wasm_module` +
+; `write_buffer_from_wasm`, and that pair filled nothing: the write's first
+; operand is a CALL id and this path passed a MODULE id, so the browser looked
+; up a call that was never made and wrote no bytes (measured in Chrome: this
+; document rendered BLACK while its own comment claimed orange). Native stubbed
+; both opcodes, so `coverage.txt` said `stub` and no render gate could hold it.
+; A module with no `gen` export has no function to call and its memory is
+; whatever its data segments put there, so the compiler now reads the bytes and
+; emits an ordinary `write_buffer` — which is why this twin can exist at all.
+;
+; Equivalence reached: PIXEL, for the two reasons every `(pass …)` twin is pixel
+; rather than byte — the sugar names the frame and the last render pass alike,
+; and the emitter walks authored forms grouped by kind against lowered forms in
+; emission order.
+
+(sampler :name __pass_sampler :mag-filter linear :min-filter linear)
+
+; No `:size` — the WASM's `l` export is the length, `s` the start offset. Point
+; this at a module holding different floats and the canvas changes colour:
+; 65,536 of 65,536 pixels, max difference 255. That is the probe, and it is the
+; one a twin needs here — a twin that hard-coded the three floats in its WGSL
+; would render identically and prove nothing about `:file` at all.
+(buffer :name main__d0 :file "test_data.wasm" :usage [storage copy-dst])
+
+(shader-module :name main__shader :code """@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let x = f32(i & 1u) * 4.0 - 1.0;
+  let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+  return vec4f(x, y, 0, 1);
+}
+@group(0) @binding(0) var<storage, read> D0: array<f32>;
+
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      return vec4f(D0[0], D0[1], D0[2], 1.0);
+    }
+  """)
+
+(render-pipeline :name main__pipe :layout auto
+  (vertex :module main__shader :entry vs)
+  (fragment :module main__shader :entry fs
+    (target :format preferred-canvas-format)))
+
+(bind-group :name main__bg :layout main__pipe :group 0
+  (entry :binding 0 :buffer main__d0))
+
+(render-pass :name main :pipeline main__pipe :bind-groups [main__bg]
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1]
+    :load-op clear :store-op store)
+  (draw :vertex-count 3))
+
+(frame :name draw :perform [main])

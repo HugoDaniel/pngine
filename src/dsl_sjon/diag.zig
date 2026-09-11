@@ -55,6 +55,12 @@ pub const Diag = struct {
     arena_len: u32 = 0,
     /// Diagnostics dropped on capacity/arena overflow (surfaced, not silent).
     dropped: u32 = 0,
+    /// Advisories deliberately NOT reported, because they are findings about an
+    /// imported library rather than about this document (see the emitter's
+    /// `warnAssembledDiagnostic`). Counted rather than discarded: "silent by
+    /// default" is the point, "invisible" is not, so `validate --verbose` and
+    /// the `--json` envelope can both say how many there were.
+    suppressed: u32 = 0,
 
     pub const Domain = enum { sjon, wgsl };
     pub const Severity = enum { err, warning };
@@ -71,6 +77,18 @@ pub const Diag = struct {
         col: u32,
         end_line: u32 = 0,
         end_col: u32 = 0,
+        /// The FILE `line`/`col` are relative to, when they are not relative to
+        /// the document. Empty for the ordinary case, which is every position
+        /// the author can see in their own source.
+        ///
+        /// A `(wgsl :file …)` fragment's text lives outside the document, so an
+        /// advisory in it has a real position that is real *somewhere else*.
+        /// Dropping the location instead (what the ERROR path does) costs
+        /// nothing there — a refusal surfaces through the headline — but an
+        /// advisory on a successful compile has no headline to fall back to, so
+        /// dropping it means `--strict` can exit 1 with an empty `diagnostics`
+        /// array. Carrying the path keeps the entry and keeps it honest.
+        file: []const u8 = "",
     };
 
     /// One collected diagnostic. `line == 0` means UNLOCATED — surfaced via the
@@ -90,6 +108,8 @@ pub const Diag = struct {
         code_len: u32 = 0, // 0 == absent
         shader_off: u32 = 0,
         shader_len: u32 = 0, // 0 == absent (WGSL module name, routes to WGSL view)
+        file_off: u32 = 0,
+        file_len: u32 = 0, // 0 == absent; when set, line/col are inside THAT file
         msg_off: u32 = 0,
         msg_len: u32 = 0,
     };
@@ -192,6 +212,18 @@ pub const Diag = struct {
     /// message + shader tag, entry located iff `loc` is present.
     fn collect(self: *Diag, domain: Domain, severity: Severity, loc: ?Located, shader: []const u8, s: []const u8) void {
         const m = self.intern(s);
+        // The arena filled up. An entry whose message did not fit reads to every
+        // consumer as a diagnostic with no text — `writeJson` emits
+        // `"message":""` and the human loop prints a blank line, both
+        // indistinguishable from a well-formed empty one. Count it against
+        // `dropped` instead, which is the field that already means "this report
+        // is a prefix" and which `--strict` already fails on. The `.buf`
+        // headline is a separate fixed buffer, so the first ERROR still has its
+        // text however full this arena is (§438).
+        if (s.len > 0 and m.len == 0) {
+            self.dropped += 1;
+            return;
+        }
         const sh = self.intern(shader);
         var e: Entry = .{
             .domain = domain,
@@ -206,6 +238,9 @@ pub const Diag = struct {
             e.col = l.col;
             e.end_line = l.end_line;
             e.end_col = l.end_col;
+            const fl = self.intern(l.file);
+            e.file_off = fl.off;
+            e.file_len = fl.len;
         }
         self.append(e);
     }
@@ -220,6 +255,12 @@ pub const Diag = struct {
     /// squiggles the SJON source rather than the WGSL view).
     pub fn entryShader(self: *const Diag, e: Entry) []const u8 {
         return self.sliceOf(e.shader_off, e.shader_len);
+    }
+
+    /// The file `Entry.line`/`col` are relative to, or empty when they are
+    /// relative to the document (the ordinary case).
+    pub fn entryFile(self: *const Diag, e: Entry) []const u8 {
+        return self.sliceOf(e.file_off, e.file_len);
     }
 
     /// The interned diagnostic code of a collect-all `Entry` — the SJON
@@ -267,6 +308,49 @@ pub const Diag = struct {
         });
     }
 
+    /// `addLocated` for a position inside a file that is NOT the document — an
+    /// imported `.sjon` (05), where `line`/`col` are relative to `file`.
+    ///
+    /// Separate from `addLocated` rather than a tenth parameter on it, because
+    /// almost every caller has no file to name and a defaulted `file` argument
+    /// is the kind of slot that gets filled in by accident.
+    pub fn addLocatedIn(
+        self: *Diag,
+        domain: Domain,
+        severity: Severity,
+        line: u32,
+        col: u32,
+        end_line: u32,
+        end_col: u32,
+        code: []const u8,
+        shader: []const u8,
+        file: []const u8,
+        msg: []const u8,
+    ) void {
+        std.debug.assert(line >= 1);
+        std.debug.assert(col >= 1);
+        const c = self.intern(code);
+        const sh = self.intern(shader);
+        const fl = self.intern(file);
+        const m = self.intern(msg);
+        self.append(.{
+            .domain = domain,
+            .severity = severity,
+            .line = line,
+            .col = col,
+            .end_line = end_line,
+            .end_col = end_col,
+            .code_off = c.off,
+            .code_len = c.len,
+            .shader_off = sh.off,
+            .shader_len = sh.len,
+            .file_off = fl.off,
+            .file_len = fl.len,
+            .msg_off = m.off,
+            .msg_len = m.len,
+        });
+    }
+
     /// 1-based (line, column) of byte `offset` within `source`. Column counts
     /// UTF-8 bytes from the line start (the editor consumes 1-based line/col and
     /// clamps). Bounded scan; an offset past the end clamps to the final position.
@@ -293,6 +377,55 @@ pub const Diag = struct {
     /// Writes into `out`; returns bytes written, never exceeding `out.len`. On tight
     /// space it degrades to a clean empty array (`[]`) rather than truncated
     /// (invalid) JSON — the editor's `JSON.parse` catch also tolerates it.
+    /// The entries `writeJson` drops: the ones with NO source location.
+    ///
+    /// They are not squiggles and never were — a finding about a WGSL binding
+    /// (`@group(0) @binding(3) is beyond the wire cap`) has no SJON node to
+    /// point at, and neither does "this module's reflection failed". But they
+    /// ARE counted by `validate --strict`, which meant a CI run could exit 1
+    /// against `{"status":"ok","diagnostics":[],"dropped":0}` — a failing
+    /// command and a clean report with nothing joining them (§438).
+    ///
+    /// A separate array rather than `line: 0` entries in `diagnostics`, because
+    /// an editor walking that array turns each entry into a squiggle and line 0
+    /// is not a position. Same object shape minus `line`/`column`.
+    pub fn writeJsonUnlocated(self: *const Diag, out: []u8) u32 {
+        std.debug.assert(out.len >= 2);
+        var w = JsonWriter{ .out = out };
+        w.byte('[');
+        var first = true;
+        var idx: u32 = 0;
+        while (idx < self.count) : (idx += 1) {
+            const e = self.entries[idx];
+            if (e.line != 0) continue; // located → already in `diagnostics`
+            if (!first) w.byte(',');
+            first = false;
+            w.raw("{\"severity\":\"");
+            w.raw(if (e.severity == .warning) "warning" else "error");
+            w.byte('"');
+            if (e.code_len != 0) {
+                w.raw(",\"code\":\"");
+                w.jsonStr(self.sliceOf(e.code_off, e.code_len));
+                w.byte('"');
+            }
+            if (e.shader_len != 0) {
+                w.raw(",\"shader\":\"");
+                w.jsonStr(self.sliceOf(e.shader_off, e.shader_len));
+                w.byte('"');
+            }
+            w.raw(",\"message\":\"");
+            w.jsonStr(self.sliceOf(e.msg_off, e.msg_len));
+            w.raw("\"}");
+        }
+        w.byte(']');
+        if (w.overflowed) {
+            out[0] = '[';
+            out[1] = ']';
+            return 2;
+        }
+        return w.pos;
+    }
+
     pub fn writeJson(self: *const Diag, out: []u8) u32 {
         std.debug.assert(out.len >= 2);
         var w = JsonWriter{ .out = out };
@@ -326,6 +459,11 @@ pub const Diag = struct {
                 w.jsonStr(self.sliceOf(e.shader_off, e.shader_len));
                 w.byte('"');
             }
+            if (e.file_len != 0) {
+                w.raw(",\"file\":\"");
+                w.jsonStr(self.sliceOf(e.file_off, e.file_len));
+                w.byte('"');
+            }
             w.raw(",\"message\":\"");
             w.jsonStr(self.sliceOf(e.msg_off, e.msg_len));
             w.raw("\"}");
@@ -357,7 +495,10 @@ pub const Diag = struct {
         }
         fn num(self: *JsonWriter, n: u32) void {
             var b: [10]u8 = undefined;
-            const s = std.fmt.bufPrint(&b, "{d}", .{n}) catch return;
+            // A value, not a message: emitting nothing here would produce
+            // `"line":` — invalid JSON, indistinguishable from a parser bug on
+            // the reading side. The buffer is exactly wide enough.
+            const s = std.fmt.bufPrint(&b, "{d}", .{n}) catch unreachable; // u32 max is 10 digits
             self.raw(s);
         }
         fn jsonStr(self: *JsonWriter, s: []const u8) void {
@@ -369,7 +510,7 @@ pub const Diag = struct {
                 '\t' => self.raw("\\t"),
                 else => if (c < 0x20) {
                     var b: [8]u8 = undefined;
-                    const esc = std.fmt.bufPrint(&b, "\\u{x:0>4}", .{c}) catch return;
+                    const esc = std.fmt.bufPrint(&b, "\\u{x:0>4}", .{c}) catch unreachable; // "\\u00XX" is 6 chars
                     self.raw(esc);
                 } else self.byte(c),
             };

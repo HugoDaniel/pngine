@@ -63,7 +63,9 @@
 (init :name initParticles :buffer particleBuffers :module initShader
   :workgroups [(ceil (/ NUM_PARTICLES WORKGROUP_SIZE))])
 
-(shader-module :name initShader :code """
+(wgsl :name hash :file "./lib/hash.wgsl")
+
+(shader-module :name initShader :imports [hash] :code """
 struct Particle {
   pos: vec2f,
   vel: vec2f,
@@ -78,14 +80,6 @@ struct Particles {
 @group(0) @binding(0) var<storage, read_write> data: Particles;
 
 // Hash function for pseudo-random numbers
-fn hash(n: u32) -> f32 {
-  var x = n;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = (x >> 16u) ^ x;
-  return f32(x) / f32(0xffffffffu);
-}
-
 fn hash2(n: u32) -> vec2f {
   return vec2f(hash(n), hash(n + 1000u));
 }

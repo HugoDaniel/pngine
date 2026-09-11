@@ -1,0 +1,20 @@
+; webgpu_shadow_mapping_hq_fragments — the fragments port of
+; webgpu_shadow_mapping_hq.sjon: the same scene with a true 1024² shadow map,
+; the resolution the PCF kernel in lib/shadow_pcf.wgsl assumes.
+;
+; This is the whole document. It is webgpu_shadow_mapping_fragments.sjon with
+; one constant rebound, and `(import …)` is how a document says that instead of
+; copying. It used to be that document's 79 form lines with `256` changed to
+; `1024` in one of them, kept in step by hand.
+;
+; The two ORIGINALS still show what the copying costs: webgpu_shadow_mapping.sjon
+; and webgpu_shadow_mapping_hq.sjon differ in the same one value and additionally
+; carry 194 identical lines of shader code between them, with a comment at the
+; top of each asking whoever edits one to remember the other.
+;
+; The payload is byte-identical to the one this file produced when it was
+; written out in full — a `(define …)` has no emission position, so rebinding
+; one changes the value and moves nothing.
+
+(import :file "./webgpu_shadow_mapping_fragments.sjon"
+  (define :name SHADOW_SIZE :value 1024))

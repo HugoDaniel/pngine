@@ -48,17 +48,19 @@ export async function pngine(source, options = {}) {
       const el = document.querySelector(source);
       if (!el) throw new Error(`Element not found: ${source}`);
 
+      // A wrong kind of source or option is a TypeError, as a wrong kind of
+      // argument is on every verb; a selector that matches nothing is a plain
+      // Error, the lookup having failed rather than the call being malformed.
       if (el instanceof HTMLImageElement) {
         ({ canvas, bytecode, rawData, createdCanvas } = await initFromImage(el, options));
       } else if (el instanceof HTMLCanvasElement) {
-        canvas = el;
-        throw new Error("Canvas source requires URL or data");
+        throw new TypeError("A canvas selector is not a source: pass the URL or bytes, with the canvas in options.canvas");
       } else {
-        throw new Error(`Invalid element type`);
+        throw new TypeError(`Element ${source} is not an <img>`);
       }
     } else {
       canvas = options.canvas;
-      if (!canvas) throw new Error("Canvas required for URL source");
+      if (!canvas) throw new TypeError("Canvas required for URL source");
       const resp = await fetch(source);
       if (!resp.ok) throw new Error(`Fetch failed: ${resp.status}`);
       rawData = await resp.arrayBuffer();
@@ -72,11 +74,11 @@ export async function pngine(source, options = {}) {
     source instanceof Blob
   ) {
     canvas = options.canvas;
-    if (!canvas) throw new Error("Canvas required for data source");
+    if (!canvas) throw new TypeError("Canvas required for data source");
     rawData = source instanceof Blob ? await source.arrayBuffer() : source;
     bytecode = await extractBytecode(rawData);
   } else {
-    throw new Error("Invalid source type");
+    throw new TypeError("source must be a URL, a selector, an <img>, or bytes (ArrayBuffer, Uint8Array, Blob)");
   }
 
   // Size the HiDPI backing store (fixed by default; responsive with autoResize).
@@ -145,8 +147,6 @@ export async function pngine(source, options = {}) {
     width: logicalW,
     height: logicalH,
     frameCount: result.frameCount,
-    animation: result.animation || null,
-    ready: true,
     pb: initialPlayback(),
     animationId: null,
     audio: null,

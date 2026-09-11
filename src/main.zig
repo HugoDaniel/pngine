@@ -11,6 +11,7 @@
 //! - Resource IDs are dense indices into fixed-size tables
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 
 // Core types (zero-dependency, enables parallel compilation)
 // Uses module import provided by build.zig
@@ -81,6 +82,57 @@ pub const gpu_backends = struct {
         // broke both, while `zig build`, `drift` and the full suite stayed
         // green (§377). Comptime-only: it emits no code and links nothing.
         _ = executor_mod.Dispatcher(headless_gpu.NullGPU);
+
+        // The OTHER half of the interface, on both candidates. `Dispatcher`
+        // above validates only what the dispatcher itself calls; `render.zig`
+        // additionally drives `NativeGPU` by hand, and those methods have
+        // per-method shapes rather than the dispatcher's uniform
+        // `(self, gpa, …) !void`, so `CONTRACT` cannot express them.
+        // Unchecked, they drifted: NullGPU spelled three of them `set_module` /
+        // `set_time` / `is_available` and lacked the other three entirely, and
+        // no build could notice because `renderWithGpuNative` — the only caller
+        // — sits behind a comptime `if (has_wgpu_native)` that a GPU-less build
+        // never analyzes.
+        assertDriverApi(NativeGPU);
+        assertDriverApi(headless_gpu.NullGPU);
+    }
+
+    /// The host-driver method set `cli/render.zig` calls on `NativeGPU` outside
+    /// the dispatcher, with the signature each must have.
+    ///
+    /// `init` is deliberately absent: NullGPU takes `(Allocator, w, h)` because
+    /// it owns its pixel buffer while WgpuNativeGPU takes
+    /// `(*Context, ?Surface, w, h)` because the device owns the target, and
+    /// nothing calls either through a shared name. Every method that CAN agree
+    /// is listed, so a new one is a compile error in the backend that lacks it
+    /// rather than a latent break in the build nobody makes by hand.
+    fn assertDriverApi(comptime T: type) void {
+        const specs = .{
+            .{ "setModule", fn (*T, *const format.Module) void },
+            .{ "setTime", fn (*T, f32) void },
+            .{ "setFrameCounter", fn (*T, u32) void },
+            .{ "abortFrame", fn (*T) void },
+        };
+        inline for (specs) |spec| {
+            if (!@hasDecl(T, spec[0])) @compileError(
+                "backend " ++ @typeName(T) ++ " is missing host-driver method '" ++
+                    spec[0] ++ "' (see gpu/headless_gpu.zig's Invariants)",
+            );
+            if (@TypeOf(@field(T, spec[0])) != spec[1]) @compileError(
+                "backend " ++ @typeName(T) ++ "." ++ spec[0] ++ " is " ++
+                    @typeName(@TypeOf(@field(T, spec[0]))) ++ ", the host-driver " ++
+                    "contract requires " ++ @typeName(spec[1]),
+            );
+        }
+
+        // `resize` and `read_pixels` agree on shape but not on error set (each
+        // backend infers its own), so they are checked by name and arity only.
+        inline for (.{ "resize", "read_pixels" }) |name| {
+            if (!@hasDecl(T, name)) @compileError(
+                "backend " ++ @typeName(T) ++ " is missing host-driver method '" ++
+                    name ++ "' (see gpu/headless_gpu.zig's Invariants)",
+            );
+        }
     }
 
     /// Shared GPU context (instance/adapter/device/queue) for the native
@@ -267,8 +319,8 @@ pub const Module = format.Module;
 /// Load PNGB bytes into a Module for execution.
 /// Note: The returned module references the input data - caller must ensure
 /// data outlives the module.
-pub fn load(allocator: std.mem.Allocator, pngb: []const u8) !Module {
-    return format.deserialize(allocator, pngb);
+pub fn load(gpa: Allocator, pngb: []const u8) !Module {
+    return format.deserialize(gpa, pngb);
 }
 
 // Test fixtures

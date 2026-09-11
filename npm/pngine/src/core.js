@@ -47,9 +47,13 @@ export function createCoreDispatcher(device, ctx) {
         },
 
         /**
-         * Set a uniform value by name.
+         * Set a uniform value by name. A name the table does not carry, or
+         * one whose buffer the init stream never created, is REFUSED through
+         * the callback installed with setOnError (source "set-uniform") and
+         * returns false — never silently dropped.
          * @param {string} name
-         * @param {number|number[]} value
+         * @param {number|number[]|number[][]} value
+         * @returns {boolean}
          */
         setUniform(name, value) {
             return dispatcher.setUniform(name, value);
@@ -69,6 +73,58 @@ export function createCoreDispatcher(device, ctx) {
          */
         setUniformTable(table) {
             dispatcher.setUniformTable(table);
+        },
+
+        /**
+         * Install the payload's buffer names, so writeBuffers/getBuffers can
+         * address a buffer by the `(buffer :name …)` the author wrote. The
+         * map comes from parseUniformTable(bytecode).buffers; call this after
+         * the init stream has executed, beside setUniformTable.
+         * @param {Map<string, import("./gpu-host-write.js").BufferName>|Record<string, import("./gpu-host-write.js").BufferName>} names
+         */
+        setBufferNames(names) {
+            dispatcher.setBufferNames(names);
+        },
+
+        /**
+         * Put host bytes in buffers, by name: `{ particles: bytes }` or
+         * `{ particles: { bytes, offset, poolIndex } }`.
+         *
+         * A name the runtime cannot honour (unknown, written by the frame
+         * itself, a bad pool member, no copy-dst usage, misaligned, out of
+         * range) is REFUSED through the callback installed with setOnError,
+         * with source "write-buffer" — never silently dropped. Returns how
+         * many queue writes were made. A pooled name with no poolIndex writes
+         * every member; `"active"` needs the coming frame's counter
+         * (`wasm.getFrameCounter()`, read before `frame()`).
+         * @param {import("./gpu-host-write.js").HostWrites} buffers
+         * @param {number} [frameCounter]
+         * @returns {number}
+         */
+        writeBuffers(buffers, frameCounter) {
+            return dispatcher.writeBuffers(buffers, frameCounter);
+        },
+
+        /**
+         * Every named buffer: `{ size, usage, writable, pool, frameWritten }`.
+         * `writable` is the copy-dst bit, which is what queue.writeBuffer
+         * requires; `frameWritten` means writeBuffers will refuse it.
+         * @returns {Record<string, {size: number, usage: number, writable: boolean, pool: number, frameWritten: boolean}>}
+         */
+        getBuffers() {
+            return dispatcher.getBuffers();
+        },
+
+        /**
+         * Hear command-stream faults: an unknown opcode, an empty descriptor,
+         * a resource that failed validation, a refused host write. Called
+         * with `{ message, source }`. Without this a core-tier host had no
+         * way to install the listener the dispatcher already reports to, so
+         * every one of those was console-only in this tier.
+         * @param {((err: {message: string, source: string}) => void)|null} fn
+         */
+        setOnError(fn) {
+            dispatcher.setOnError(fn);
         },
 
         /**
@@ -101,6 +157,39 @@ export function createCoreDispatcher(device, ctx) {
          */
         setCanvasSize(w, h) {
             dispatcher.setCanvasSize(w, h);
+        },
+
+        /**
+         * Set the frame counter the `pngine-frame-inputs` write reads — the
+         * executor's `getFrameCounter()`, the number of frames rendered since
+         * `init()`, which also selects the member a `:ping-pong` pool binds.
+         * One name for it on every tier: the executor ABI says frameCounter,
+         * `writeBuffers` takes a frameCounter, and this is setFrameCounter.
+         * (It was `setFrameIndex` for a while, which read as "which
+         * `(frame …)`" beside the main API's `setFrame`.)
+         *
+         * One of the four runtime values the builtin uniform writes read out of
+         * the dispatcher (gpu.js: setTime, setFrameCounter, setPointer,
+         * setCanvasSize). This tier forwarded two of them, so a core-tier host
+         * could drive time and canvas size but not the counter -- a payload
+         * writing `pngine-frame-inputs` saw it frozen at 0, and nothing
+         * said so (§438).
+         * @param {number} n
+         */
+        setFrameCounter(n) {
+            dispatcher.setFrameCounter(n);
+        },
+
+        /**
+         * Set the pointer state a `pointer-inputs` write reads (48 bytes).
+         *
+         * The same gap as setFrameCounter above: the worker tier tracks the
+         * pointer and pushes it every frame, and without this a core-tier host
+         * had no way to, so `pointer-inputs` stayed all zeroes.
+         * @param {ArrayLike<number>} s
+         */
+        setPointer(s) {
+            dispatcher.setPointer(s);
         },
 
         // Direct access to dispatcher for advanced use

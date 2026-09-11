@@ -1,0 +1,21 @@
+; A `(step-group …)` chain that names its way back to its start. The emitter
+; inlines a group where it is named, so a cycle has no expansion; the bound
+; turns a hang into a sentence. Only a hand-written group can do this (both
+; container hooks emit flat ones), which is a description of an input, not of a
+; case to leave open.
+(shader-module :name m :code """
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.1, 1.0); }
+""")
+(render-pipeline :name p :layout auto
+  (vertex :module m :entry vs)
+  (fragment :module m :entry fs (target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline p
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(step-group :name a :perform [draw b])
+(step-group :name b :perform [a])
+(frame :name main :perform [a])

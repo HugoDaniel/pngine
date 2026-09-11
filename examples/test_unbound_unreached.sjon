@@ -1,0 +1,39 @@
+; A binding declared in the module, reached by an entry point NO pipeline
+; instantiates, and deliberately not bound.
+;
+; This did not compile before §393. The used-but-unbound check asked whether
+; ANY entry point of the MODULE reached the binding, while `:layout auto`
+; derives the layout from the entry points ONE PIPELINE instantiates — so a
+; module with a lit entry beside a depth-only entry was caught between two
+; rules: the layout wanted `extra` absent from the depth pipeline's bind group,
+; the check wanted it present. Binding it anyway is CONTRIBUTING pitfall 37, an
+; abort at the first `set_bind_group`.
+;
+; `litFs` is real code a second pipeline could use; here only `depthOnlyFs` is
+; instantiated, so `extra` is unreached and the group binds `cam` alone.
+; Its counterpart is `examples/invalid/unbound_binding_reached_by_pipeline.sjon`,
+; where the pipeline DOES reach `extra` and the refusal stands.
+(shader-module :name code :code """
+struct U { m: mat4x4f }
+@group(0) @binding(0) var<uniform> cam: U;
+@group(0) @binding(1) var<uniform> extra: vec4f;
+@vertex fn depthVs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let p = array(vec2f(-1.0, -3.0), vec2f(-1.0, 1.0), vec2f(3.0, 1.0));
+  return cam.m * vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn depthOnlyFs() -> @location(0) vec4f { return vec4f(0.2, 0.6, 0.9, 1.0); }
+@fragment fn litFs() -> @location(0) vec4f { return extra; }
+""")
+(buffer :name camBuf :size 64 :usage [uniform copy-dst])
+(render-pipeline :name depthPipe :layout auto
+  (vertex :module code :entry depthVs)
+  (fragment :module code :entry depthOnlyFs (target :format preferred-canvas-format)))
+(bind-group :name g :layout depthPipe :group 0
+  (entry :binding 0 :buffer camBuf))
+(queue :name writeCam
+  (write-buffer :buffer camBuf :offset 0 :data identity))
+(data :name identity :float32 [1 0 0 0  0 1 0 0  0 0 1 0  0 0 0 1])
+(render-pass :name p
+  (color-attachment :view context-current-texture :load-op clear :clear-value [0 0 0 1] :store-op store)
+  :pipeline depthPipe :bind-groups [g] (draw :vertex-count 3))
+(frame :name main :before [writeCam] :perform [p])

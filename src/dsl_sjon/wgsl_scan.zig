@@ -195,7 +195,12 @@ pub fn scanEntryPoints(source: []const u8) ScanResult {
 }
 
 /// Check if `pattern` matches at position `pos` in `source`.
-fn matchAt(source: []const u8, pos: u32, pattern: []const u8) bool {
+///
+/// Public together with `skipTrivia` and `findFnName` so the `(pass …)` hook's
+/// `post()` extractor reads an entry point the way this scanner does. The three
+/// of them ARE the comment blindness fix; a second hand-rolled walk over the
+/// same text is how a commented-out `post()` became a live pass (§408).
+pub fn matchAt(source: []const u8, pos: u32, pattern: []const u8) bool {
     const end = pos + @as(u32, @intCast(pattern.len));
     if (end > source.len) return false;
     return std.mem.eql(u8, source[pos..end], pattern);
@@ -211,8 +216,8 @@ fn findNextAnnotation(source: []const u8, start: u32, pattern: []const u8) ?u32 
 }
 
 /// Find 'fn NAME(' pattern starting from `start`, skipping whitespace/annotations.
-/// Returns the function name slice, or null.
-fn findFnName(source: []const u8, start: u32) ?[]const u8 {
+/// Returns the function name slice, or null. Public — see `matchAt`.
+pub fn findFnName(source: []const u8, start: u32) ?[]const u8 {
     var i = start;
     const len: u32 = @intCast(source.len);
 
@@ -378,7 +383,10 @@ fn findCloseParen(source: []const u8, start: u32) ?u32 {
 /// position no trivia covers, so this function is the whole of the scanner's
 /// comment blindness fix: commenting out an entry point while iterating is the
 /// most common thing a shader author does, and it used to be scanned as real.
-fn skipTrivia(source: []const u8, start: u32) u32 {
+///
+/// Public — see `matchAt`. Every reader of user WGSL in the SJON host goes
+/// through this function or `hooks.zig`'s `namesIdent`; there is no third way.
+pub fn skipTrivia(source: []const u8, start: u32) u32 {
     const len: u32 = @intCast(source.len);
     var i = start;
 
@@ -428,10 +436,6 @@ fn isWhitespace(c: u8) bool {
 fn isIdentChar(c: u8) bool {
     return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
         (c >= '0' and c <= '9') or c == '_';
-}
-
-fn isDigit(c: u8) bool {
-    return c >= '0' and c <= '9';
 }
 
 // ============================================================================

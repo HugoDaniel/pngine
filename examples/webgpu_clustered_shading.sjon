@@ -36,7 +36,9 @@
 (queue :name writeInputs
   (write-buffer :buffer inputs :offset 0 :data pngine-inputs))
 
-(shader-module :name seedCode :code """
+(wgsl :name hash :file "./lib/hash.wgsl")
+
+(shader-module :name seedCode :imports [hash] :code """
 struct Light {
   pos : vec3f,
   range : f32,
@@ -46,14 +48,6 @@ struct Light {
 struct Lights { lights : array<Light> }
 
 @binding(0) @group(0) var<storage, read_write> data : Lights;
-
-fn hash(n: u32) -> f32 {
-  var x = n;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = (x >> 16u) ^ x;
-  return f32(x) / f32(0xffffffffu);
-}
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid : vec3u) {
@@ -68,7 +62,7 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
 }
 """)
 
-(shader-module :name updateCode :code """
+(shader-module :name updateCode :imports [hash] :code """
 struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
 struct Light {
   pos : vec3f,
@@ -80,14 +74,6 @@ struct Lights { lights : array<Light> }
 
 @group(0) @binding(0) var<uniform> inputs : PngineInputs;
 @group(0) @binding(1) var<storage, read_write> data : Lights;
-
-fn hash(n: u32) -> f32 {
-  var x = n;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = (x >> 16u) ^ x;
-  return f32(x) / f32(0xffffffffu);
-}
 
 // Positions are pure functions of (index, time): hashed orbit radius,
 // speed, phase and height, with a slow vertical bob.
@@ -162,7 +148,10 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
 }
 """)
 
-(shader-module :name cullCode :code """
+(wgsl :name perspective :file "./lib/perspective.wgsl")
+(wgsl :name lookAt :file "./lib/look_at.wgsl")
+
+(shader-module :name cullCode :imports [lookAt] :code """
 struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
 struct Light {
   pos : vec3f,
@@ -184,17 +173,6 @@ struct ClusterLists { clusters : array<ClusterList> }
 @group(0) @binding(2) var<storage, read> lightData : Lights;
 @group(0) @binding(3) var<storage, read_write> lists : ClusterLists;
 
-// Camera formula — MUST match sceneCode's viewMatrix verbatim.
-fn lookAt(eye: vec3f, focus: vec3f, up: vec3f) -> mat4x4f {
-  let fwd = normalize(focus - eye);
-  let s = normalize(cross(fwd, up));
-  let u = cross(s, fwd);
-  return mat4x4f(
-    vec4f(s.x, u.x, -fwd.x, 0),
-    vec4f(s.y, u.y, -fwd.y, 0),
-    vec4f(s.z, u.z, -fwd.z, 0),
-    vec4f(-dot(s, eye), -dot(u, eye), dot(fwd, eye), 1));
-}
 fn eyePos(t: f32) -> vec3f {
   return vec3f(sin(t * 0.1) * 16.0, 7.0, cos(t * 0.1) * 16.0);
 }
@@ -223,7 +201,7 @@ fn main(@builtin(global_invocation_id) gid : vec3u) {
 }
 """)
 
-(shader-module :name sceneCode :code """
+(shader-module :name sceneCode :imports [perspective lookAt hash] :code """
 struct PngineInputs { time: f32, width: f32, height: f32, aspect: f32 }
 struct Light {
   pos : vec3f,
@@ -249,38 +227,11 @@ const NEAR = 0.1;
 const FAR = 100.0;
 const DEBUG_HEAT = false;                // true: tint by lights-per-cluster
 
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4f {
-  let f = 1.0 / tan(fovy * 0.5);
-  let nf = 1.0 / (near - far);
-  return mat4x4f(
-    vec4f(f / aspect, 0, 0, 0),
-    vec4f(0, f, 0, 0),
-    vec4f(0, 0, far * nf, -1),
-    vec4f(0, 0, far * near * nf, 0));
-}
-fn lookAt(eye: vec3f, focus: vec3f, up: vec3f) -> mat4x4f {
-  let fwd = normalize(focus - eye);
-  let s = normalize(cross(fwd, up));
-  let u = cross(s, fwd);
-  return mat4x4f(
-    vec4f(s.x, u.x, -fwd.x, 0),
-    vec4f(s.y, u.y, -fwd.y, 0),
-    vec4f(s.z, u.z, -fwd.z, 0),
-    vec4f(-dot(s, eye), -dot(u, eye), dot(fwd, eye), 1));
-}
 fn eyePos(t: f32) -> vec3f {
   return vec3f(sin(t * 0.1) * 16.0, 7.0, cos(t * 0.1) * 16.0);
 }
 fn viewMatrix(t: f32) -> mat4x4f {
   return lookAt(eyePos(t), vec3f(0.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0));
-}
-
-fn hash(n: u32) -> f32 {
-  var x = n;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-  x = (x >> 16u) ^ x;
-  return f32(x) / f32(0xffffffffu);
 }
 
 struct VSOut {
@@ -397,12 +348,11 @@ fn fs(in: VSOut) -> @location(0) vec4f {
   (entry :binding 2 :buffer lights)
   (entry :binding 3 :buffer clusterLights))
 
-(bind-group :name planeBG :layout planePipe :group 0
-  (entry :binding 0 :buffer inputs)
-  (entry :binding 1 :buffer lights)
-  (entry :binding 2 :buffer clusterLights))
-
-(bind-group :name sphereBG :layout spherePipe :group 0
+; One resource set, two pipelines. With no `:layout` the compiler derives one
+; GPU bind group per pipeline that binds it, pruned to what that pipeline's
+; entry points reach — so the two forms that differed only in the pipeline they
+; named became one. Compiles to the same bytes as the pair did.
+(bind-group :name litBG :group 0
   (entry :binding 0 :buffer inputs)
   (entry :binding 1 :buffer lights)
   (entry :binding 2 :buffer clusterLights))
@@ -424,13 +374,13 @@ fn fs(in: VSOut) -> @location(0) vec4f {
     :clear-value [0.015 0.015 0.02 1] :load-op clear :store-op store)
   (depth-stencil-attachment :view depthTex :depth-clear-value 1.0
     :depth-load-op clear :depth-store-op store)
-  :pipeline planePipe :bind-groups [planeBG] :vertex-buffers [planeVB]
+  :pipeline planePipe :bind-groups [litBG] :vertex-buffers [planeVB]
   (draw :vertex-count 6))
 
 (render-pass :name drawSpheres
   (color-attachment :view context-current-texture :load-op load :store-op store)
   (depth-stencil-attachment :view depthTex :depth-load-op load :depth-store-op store)
-  :pipeline spherePipe :bind-groups [sphereBG] :vertex-buffers [sphereVB]
+  :pipeline spherePipe :bind-groups [litBG] :vertex-buffers [sphereVB]
   (draw :vertex-count 768 :instance-count 24))
 
 (frame :name main :init [seedLights] :before [writeInputs]
