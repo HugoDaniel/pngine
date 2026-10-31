@@ -251,6 +251,12 @@ pub fn runList(gpa: Allocator, io: std.Io, args: []const []const u8) !u8 {
     return switch (in.kind) {
         .zip => listZipContents(gpa, stdio.displayName(input), in.bytes),
         .png => listPngContents(stdio.displayName(input), in.bytes),
+        // A FLAC's inventory is `ls` (the payload walker, 02.C3); `list` is
+        // the ZIP/PNG chunk dumper.
+        .flac => {
+            std.debug.print("Error: '{s}' is a FLAC file; use `pngine ls` for its payload inventory\n", .{stdio.displayName(input)});
+            return 4;
+        },
         .pngb, .sjon => {
             std.debug.print("Error: '{s}' is not a ZIP or PNG file\n", .{stdio.displayName(input)});
             return 4;

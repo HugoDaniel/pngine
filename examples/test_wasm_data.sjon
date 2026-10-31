@@ -45,7 +45,7 @@ fn fragMain(@location(0) fragUV: vec2f) -> @location(0) vec4f {
       (attribute :shader-location 0 :offset 0 :format float32x4)
       (attribute :shader-location 1 :offset 32 :format float32x2)))
   (fragment :module cubeShader :entry fragMain
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list :cull-mode back))
 
 (render-pass :name drawCube

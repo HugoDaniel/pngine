@@ -108,7 +108,7 @@ struct VSOut {
   :layout auto
   (vertex :module gridShader :entry vs)
   (fragment :module gridShader :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (bind-group :name bakeBindGroup :layout bakePipeline :group 0
   (entry :binding 0 :texture checkerTex))

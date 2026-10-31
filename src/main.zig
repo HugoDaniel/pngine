@@ -230,6 +230,10 @@ pub const gpu_backends = struct {
 // ZIP bundle support
 pub const zip = @import("zip.zig");
 
+// The payload envelope + kind registry, FROZEN v1 (02.C1); the PNG carrier's
+// reader and writer go through it (02.C2).
+pub const payload = @import("payload");
+
 // WGSL Reflection (via wgslender) - use module import
 pub const reflect = @import("reflect");
 
@@ -259,6 +263,19 @@ pub const png = struct {
     pub const enumerateChunks = extract.enumerateChunks;
     pub const ChunkEntry = extract.ChunkEntry;
 
+    // The payload walker over both carrier generations (02.C2)
+    pub const walkPng = extract.walkPng;
+    pub const Walk = extract.Walk;
+    pub const WalkPayload = extract.Payload;
+    pub const WalkSkip = extract.WalkSkip;
+    pub const WalkSkipReason = extract.WalkSkipReason;
+    pub const WalkCarrier = extract.Carrier;
+    pub const inflatePayload = extract.inflatePayload;
+
+    // The one payload writer behind pack and render's --audio sugar (02.C2)
+    pub const packPng = embed.packPng;
+    pub const PackSpec = embed.PackSpec;
+
     // Re-export encoder functions
     pub const encode = encoder.encode;
     pub const encodeBGRA = encoder.encodeBGRA;
@@ -274,6 +291,28 @@ pub const png = struct {
     pub const DiffOutcome = diff.Outcome;
 };
 
+// FLAC carrier (02.C3): the pNGx APPLICATION-block reader and writer. Sits
+// in this module (not a standalone root) because the reader nests PICTURE
+// PNGs through `walkPng` by file import, and a module rooted at src/flac/
+// could not reach ../png; here both live under the one src/ root.
+pub const flac = struct {
+    pub const blocks = @import("flac/blocks.zig");
+    pub const embed = @import("flac/embed.zig");
+
+    // Re-exports, the same shape as the png struct's.
+    pub const walkFlac = blocks.walkFlac;
+    pub const Walk = blocks.Walk;
+    pub const WalkPayload = blocks.Payload;
+    pub const WalkSkip = blocks.WalkSkip;
+    pub const WalkSkipReason = blocks.WalkSkipReason;
+    pub const WalkCarrier = blocks.Carrier;
+    pub const APP_ID = blocks.APP_ID;
+
+    pub const packFlac = embed.packFlac;
+    pub const PackSpec = embed.PackSpec;
+    pub const MAX_APPLICATION_BODY = embed.MAX_APPLICATION_BODY;
+};
+
 // SJON-backed compiler (the `.sjon` frontend; PNGine is a SJON host). The legacy
 // `.pngine` macro DSL (Phase 5 B2) and the `.pbsf` assembler were retired;
 // `.sjon` is the sole source frontend.
@@ -287,6 +326,11 @@ pub const dsl_sjon = struct {
     pub const compile = Compiler.compile;
     pub const compileWithOptions = Compiler.compileWithOptions;
     pub const compileWithPlugins = Compiler.compileWithPlugins;
+    /// PNGine's own sugar hooks, public for a host that seeds its own
+    /// registry (ask P6): `hooks.buildRegistry(gpa)` plus the `pass_v1` /
+    /// `init_v1` / `draw_v1` values. The env half of that seam is
+    /// `Compiler.buildLoweringEnv`.
+    pub const hooks = mod.hooks;
 };
 
 // DescriptorEncoder — the single canonical export. Sources the vendored
@@ -327,3 +371,19 @@ pub fn load(gpa: Allocator, pngb: []const u8) !Module {
 pub const fixtures = struct {
     pub const simple_triangle = @import("fixtures/simple_triangle.zig");
 };
+
+// ============================================================================
+// P6 export seam (ask 06). These tests sit HERE, in the module that imports
+// `dsl_sjon` the way a host does — a test inside `dsl_sjon/Compiler.zig` cannot
+// see this namespace, and `test-sjon` never compiles this file. `test-fast` and
+// `zig build test` run these.
+// ============================================================================
+
+/// A complete document that uses pngine's `(init …)` sugar plus every form it
+/// references, so a compile through the exported seam can only fail at the seam.
+const p6_init_doc: [:0]const u8 =
+    \\(shader-module :name initShader :code "@compute @workgroup_size(64) fn main() {}")
+    \\(buffer :name parts :size 1024 :usage [vertex storage] :pool 2)
+    \\(init :name spawn :buffer parts :module initShader :workgroups [16])
+    \\(frame :name main :init [spawn] :perform [spawn])
+;

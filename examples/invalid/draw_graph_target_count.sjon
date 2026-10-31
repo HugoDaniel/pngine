@@ -1,4 +1,4 @@
-; A stage's `(target …)` children pair with its `(color-attachment …)` children
+; A stage's `(color-target …)` children pair with its `(color-attachment …)` children
 ; by POSITION, so two targets over one attachment has no reading: the second
 ; target describes an attachment that is not there. One per attachment, or none
 ; at all (in which case every target is the derived format alone).
@@ -15,8 +15,8 @@
   (stage :name s
     (color-attachment :view context-current-texture
       :clear-value [0 0 0 1] :load-op clear :store-op store)
-    (target :write-mask 7)
-    (target :write-mask 15)
+    (color-target :write-mask 7)
+    (color-target :write-mask 15)
     (bind-group :name g :group 0 (entry :binding 0 :buffer cb)))
   (geometry :name a (draw :vertex-count 3)
     (in :stage s (vertex :module m :entry vs) (fragment :module m :entry fs)))

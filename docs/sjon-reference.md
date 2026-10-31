@@ -61,7 +61,7 @@ page.
   :layout auto
   (vertex :module code :entry vsMain)
   (fragment :module code :entry fsMain
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list))
 
 (compute-pipeline :name cp :layout auto (compute :module code :entry main))
@@ -691,7 +691,7 @@ and name it as the pipeline's `:layout`:
 
 (render-pipeline :name pipe :layout pl
   (vertex :module mod :entry vs)
-  (fragment :module mod :entry fs (target :format bgra8unorm)))
+  (fragment :module mod :entry fs (color-target :format bgra8unorm)))
 
 (bind-group :name gColor :layout pipe :group 0
   (entry :binding 0 :buffer colorBuf))
@@ -764,10 +764,10 @@ struct Cam { m: mat4x4f }
 
 (render-pipeline :name depthPipe :layout auto
   (vertex :module code :entry vs)
-  (fragment :module code :entry depthOnlyFs (target :format preferred-canvas-format)))
+  (fragment :module code :entry depthOnlyFs (color-target :format preferred-canvas-format)))
 (render-pipeline :name litPipe :layout auto
   (vertex :module code :entry vs)
-  (fragment :module code :entry litFs (target :format preferred-canvas-format)))
+  (fragment :module code :entry litFs (color-target :format preferred-canvas-format)))
 
 ; The same two entries against both layouts. Only the depth one prunes.
 (bind-group :name depthGroup :layout depthPipe :group 0 :prune-unused true
@@ -824,10 +824,10 @@ struct Cam { m: mat4x4f }
 
 (render-pipeline :name depthPipe :layout auto
   (vertex :module code :entry vs)
-  (fragment :module code :entry depthOnlyFs (target :format preferred-canvas-format)))
+  (fragment :module code :entry depthOnlyFs (color-target :format preferred-canvas-format)))
 (render-pipeline :name litPipe :layout auto
   (vertex :module code :entry vs)
-  (fragment :module code :entry litFs (target :format preferred-canvas-format)))
+  (fragment :module code :entry litFs (color-target :format preferred-canvas-format)))
 
 ; One resource set. Each pass's pipeline decides what it becomes: one entry
 ; for depthPipe, two for litPipe.
@@ -892,7 +892,7 @@ A `(vertex …)` stage that reads vertex buffers declares their layout with one
       (attribute :shader-location 1 :offset 16 :format float32x4)
       (attribute :shader-location 2 :offset 32 :format float32x2)))
   (fragment :module code :entry fragMain
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 ```
 
 | Key                | Form            | Notes                                          |
@@ -1136,7 +1136,7 @@ override WG: u32 = 64u;
   (vertex :module code :entry vs
     (constant :name QUALITY :value 3))
   (fragment :module code :entry fs
-    (target :format bgra8unorm)
+    (color-target :format bgra8unorm)
     (constant :name SCALE :value 0.5)))
 
 (compute-pipeline :name cp :layout auto
@@ -1193,7 +1193,7 @@ and `:front-face`, two fields cover the rest of the descriptor:
 ```sjon
 (render-pipeline :name strip :layout auto
   (vertex :module code :entry vs)
-  (fragment :module code :entry fs (target :format bgra8unorm))
+  (fragment :module code :entry fs (color-target :format bgra8unorm))
   (primitive :topology triangle-strip :strip-index-format uint32 :unclipped-depth true))
 ```
 
@@ -1217,7 +1217,7 @@ Both are emitted into the pipeline descriptor only when authored — a plain
 
 ### Blending & the blend constant
 
-A fragment `(target …)` carries an optional `(blend …)` mirroring
+A fragment `(color-target …)` carries an optional `(blend …)` mirroring
 `GPUBlendState` — a `(color …)` and an `(alpha …)` component, **both required**
 (a `(blend …)` with only one is a validation error), each with
 `:src-factor`, `:dst-factor`, and `:operation` (the WebGPU spellings, e.g.
@@ -1231,7 +1231,7 @@ is render-pass state, set with `:blend-constant [r g b a]` (four floats, default
 (render-pipeline :name pipe :layout auto
   (vertex :module code :entry vs)
   (fragment :module code :entry fs
-    (target :format preferred-canvas-format
+    (color-target :format preferred-canvas-format
       (blend
         (color :src-factor constant :dst-factor one-minus-constant :operation add)
         (alpha :src-factor one :dst-factor zero :operation add)))))
@@ -1248,7 +1248,7 @@ Both the authored blend state and `:blend-constant` execute on every non-`mini`
 tier (the `mini` pNGf tier refuses a payload that sets a blend constant at
 write). See `examples/webgpu_blend_constant.sjon`.
 
-A `(target …)` also takes `:write-mask`, the per-channel colour write mask:
+A `(color-target …)` also takes `:write-mask`, the per-channel colour write mask:
 either an integer bitmask (`R=1 G=2 B=4 A=8`, so `5` writes red and blue) or the
 symbol `all` (15, the WebGPU default). `:write-mask 0` writes no colour at all —
 the idiom for a depth-only or occlusion pre-pass that still needs a fragment
@@ -1279,7 +1279,7 @@ what happens to it at the pass boundary.
 
 (render-pipeline :name pipe :layout auto
   (vertex :module code :entry vs)
-  (fragment :module code :entry fs (target :format bgra8unorm))
+  (fragment :module code :entry fs (color-target :format bgra8unorm))
   (depth-stencil :format depth24plus-stencil8
     :depth-write-enabled true :depth-compare less
     (stencil-front :compare always :pass-op replace)
@@ -1351,7 +1351,7 @@ through `:resolve-target`:
 
 (render-pipeline :name pipe :layout auto
   (vertex :module code :entry vs)
-  (fragment :module code :entry fs (target :format bgra8unorm))
+  (fragment :module code :entry fs (color-target :format bgra8unorm))
   (multisample :count 4))
 
 (render-pass :name draw
@@ -1623,7 +1623,10 @@ usage, and WebGPU requires `:destination-offset` to be a multiple of 256. See
 ### Copies
 
 Three `(queue …)` actions copy between GPU resources; none of them transfers
-through the CPU.
+through the CPU. That absence is a contract, not an accident of these three
+forms: nothing a copy produces decides what a frame executes (the full
+statement lives in `docs/architecture.md`'s Core Concepts), and a copy into a
+`map-read` buffer is a buffer the host may map, never one the schedule reads.
 
 ```sjon
 (texture :name history :size canvas :format preferred-canvas-format
@@ -2320,7 +2323,7 @@ spelling to learn.
 
 What the graph fills in for you:
 
-- **The `(target …)` list**, one per color attachment of the stage, in order:
+- **The `(color-target …)` list**, one per color attachment of the stage, in order:
   `preferred-canvas-format` for `context-current-texture`, otherwise the named
   texture's own `:format`. This is why an `(in …)`'s `(fragment …)` states no
   targets and why blending is not expressible in a graph yet — write those
@@ -2367,10 +2370,10 @@ The rules, each one a compile-time answer:
   paired with a single-sampled pipeline.
 - **A stage renders wherever a pass can.** `(color-attachment :view …)` takes
   `context-current-texture` or a `(texture …)` name, and the stage's
-  `(target :format …)` is derived from whichever it is — the canvas format, or
+  `(color-target :format …)` is derived from whichever it is — the canvas format, or
   that texture's own `:format`. `examples/draw_graph_offscreen.sjon` is two
   stages over one intermediate.
-- **Blending is a stage's, through a `(target …)` child.** It carries the blend
+- **Blending is a stage's, through a `(color-target …)` child.** It carries the blend
   state and the write mask and *not* the format, which is the attachment's; a
   stage's targets pair with its `(color-attachment …)` children by position, so
   it declares one per attachment or none at all. Two geometries that wanted
@@ -2437,6 +2440,67 @@ The order is the frame's, stated once, where a reader looks for it — not the
 order the two hooks happened to emit in. `examples/graph_compose.sjon` is the
 worked version, with three lit cubes into the intermediate.
 
+**A frame over a named graph performs a selection, and per-pass selection by
+name is a designed surface, not an accident of the emitter.** The names are
+the author's own, carried through lowering deliberately (a frame step is one
+namespace across render-pass, compute-pass, queue and step-group names, so a
+pass name collides with nothing), and the emitter resolves each step by name
+against lowered and hand-written passes alike, which is why frames are emitted
+after passes on purpose. The group's `:perform` is the menu, stated in the
+document's own text: in front of each pass sit the two uniform-write queues
+the hook spliced there (`<pass>__uq`, `<pass>__pq`), so the unit of removal is
+visible without knowing the lowering. The frame may perform any sublist.
+Leaving a pass's steps out mutes it: the pass stays in the graph, and its
+textures are created at load like every other resource, so a later pass that
+samples it by name keeps a valid binding and reads zero-initialised contents
+until something writes them (or, in a live session that toggles the mute,
+whatever was last rendered); nothing requires a group's every step to be
+performed, and nothing withholds an unperformed pass's resources, so the
+frame stays whole. The mute is the frame's `:perform`, which is the point:
+view state in the document's own text, undoable, recorded, and answerable
+later. One boundary: the canvas destination is fixed at lowering time (the
+graph's last pass, or one named `main`, is the one lowered to
+`context-current-texture`), so selection chooses what runs, not what the
+canvas receives; mute the canvas-bound pass and the canvas keeps whatever it
+last held.
+
+**Soloing needs one step past selection: a canvas destination.** Performing a
+middle pass shows nothing, because it renders into its own intermediate and
+nothing targets the canvas. `:expose` publishes that intermediate as a render
+pass of its own: `:expose [warp]` emits `warp__blit` (pngine's own blit shader
+over `warp`'s intermediate, onto the canvas) and puts it in NO step list, so it
+runs only when a frame names it. A named graph hands the frame to the document,
+which makes the solo the frame's own `:perform`:
+`[warp__uq warp warp__blit]` runs the pass's uniform write, the pass, and its
+blit (the `<pass>__uq` entry is present when the pass names `pngine`, the same
+queue mute's unit of removal includes). Restoring `[g]` runs the whole graph
+again. Both edits are the document's own text, so solo carries mute's
+properties: undoable, recorded, and answerable later. An absent or empty
+`:expose` compiles to the same bytes as before the key existed; a name no pass
+in the graph carries, a pass that already draws to the canvas, and a pass whose
+`:format` pngine's blit cannot sample are each refused at lowering.
+
+```sjon
+(pass-graph :name g :expose [warp]
+  (pass :name warp :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return vec4f(uv, 0.5 + 0.5 * sin(pngine.time), 1.0);
+    }
+  """)
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      return vec4f(0.05, 0.05, 0.08, 1.0);
+    }
+  """))
+
+(frame :name main :perform [warp__uq warp warp__blit])
+```
+
+`examples/pass_expose.sjon` is that document, and its committed trace shows the
+solo: `warp` renders into its intermediate, `warp__blit` samples it onto the
+canvas, and `main`'s steps are never executed.
+
 **A graph with no `:name` still owns the frame**, exactly as both containers
 always have, with `:before` / `:after` around its own steps. Every graph
 document written before groups existed compiles to the same bytes.
@@ -2444,8 +2508,9 @@ document written before groups existed compiles to the same bytes.
 The rules that follow, each a refusal:
 
 - **An unnamed graph is the document's only frame owner.** A `(frame …)` beside
-  it is a second frame, and so is another graph; the runtime runs the first, and
-  which one that is, is not visible in the source.
+  it is refused at load, and so is another graph; the refusal names both ways
+  out (give the graphs `:name` and perform them from one `(frame …)`, or drop
+  the frame and put the step in `:before`).
 - **A named graph needs a frame.** It emits a group and nothing else, so a
   document that names its graph and declares no `(frame …)` builds resources
   that never run.

@@ -328,6 +328,49 @@ export function writeBuffer(p, name, bytes, opts) {
 }
 
 /**
+ * The pointer source every draw posts: an ArrayLike of exactly twelve
+ * numbers (the pointer-inputs layout), or null to hand the lanes back to the
+ * instance's live tracking array. A wrong kind or a wrong length is a
+ * TypeError before anything changes, the way every verb refuses a bad call.
+ * @param {unknown} lanes
+ */
+function checkPointerLanes(lanes) {
+  if (lanes === null) return;
+  const length = typeof lanes === "object" ? /** @type {{ length?: unknown }} */ (lanes).length : undefined;
+  if (typeof length !== "number") {
+    throw new TypeError(`lanes must be an ArrayLike<number> of 12 numbers (pointer-inputs), or null, got ${String(lanes)}`);
+  }
+  if (length !== 12) throw new TypeError(`lanes must carry exactly 12 numbers (pointer-inputs), got length ${length}`);
+}
+
+/**
+ * Set the pointer array every draw posts, by reference.
+ *
+ * `lanes` is an ArrayLike of exactly twelve numbers (the pointer-inputs
+ * layout), or null to hand the lanes back to the instance's live tracking
+ * array, which the listeners kept writing while a host array was installed.
+ * The instance posts the array's current values on every draw and drains
+ * lanes 4, 5, 9 and 10 in place after each one, the lifecycle the tracking
+ * array already had: a host that writes its lanes between draws never calls
+ * this again, and a later call replaces the source (there is no stack). The
+ * verb does not draw, so the next draw from anywhere carries the new lanes.
+ * A wrong kind or a wrong length is a TypeError before anything changes; a
+ * destroyed handle returns `p` and changes nothing.
+ *
+ * @param {Pngine} p
+ * @param {ArrayLike<number>|null} lanes
+ * @returns {Pngine}
+ */
+export function setPointer(p, lanes) {
+  checkPointerLanes(lanes);
+  const i = p._;
+  if (!i) return p;
+
+  i.pointer = lanes === null ? (i.trackingPointer ?? null) : lanes;
+  return p;
+}
+
+/**
  * Rebuild the GPU device and replay the current shader after a device loss.
  *
  * The device can be lost out from under a running instance (driver reset, TDR,
@@ -351,7 +394,61 @@ export function restart(p) {
   return p;
 }
 
-// How long a request waits for its reply before resolving with the fallback.
+/**
+ * Restart, awaited: resolves with the instance once the worker's `restart-done`
+ * echoing this call's rid says the rebuild ran — the same destroy-and-rebuild
+ * `restart(p)` fires and forgets, with the answer attached.
+ *
+ * The use is the restart that must not overlap anything: a host re-arming a
+ * piece can await this and know the renderer's reset is done before it starts
+ * something of its own. `ok: true` means the worker released the old GPU
+ * stack, acquired a fresh device and reloaded the bytecode — the reset is
+ * complete, and draws submitted after it render on the new stack. It is NOT a
+ * presentation claim: nothing here says a frame has become visible.
+ *
+ * The reply is correlated: each call carries a per-instance request id, and
+ * only the `restart-done` echoing THAT id settles it — ridless acks (the
+ * legacy restart, the viewer's self-recovery) and other requests' acks pass
+ * it by. A reply that never comes rejects `restart-timeout` after the shared
+ * request budget (2000 ms, post to ack, the worker's FIFO predecessors
+ * included — restarts queued behind a long load pay for the queue too); a
+ * late ack after that lands nowhere, on this call or a later one.
+ *
+ * Failure rejects with a PngineRestartError whose `code` names the case:
+ * "restart-failed" — the worker skipped the rebuild (nothing initialized,
+ * nothing retained) or the rebuild threw; `message` is the worker's reason.
+ * "destroyed" — the instance was destroyed before the call, or by teardown
+ * mid-request: a destroyed handle does not resolve vacuously the way the
+ * sync verbs return `p`, because a resolved restart on a dead renderer would
+ * re-create the false-READY this API exists to close. "worker-error" — the
+ * worker fired an error event mid-request. A postMessage that throws rejects
+ * with that error itself. Every outcome detaches the listeners, clears the
+ * timer and drops the pending entry exactly once.
+ *
+ * The Node stubs (dist/index.cjs, dist/index.mjs) throw the browser-only
+ * refusal like every other verb: there is no worker to await in Node.
+ *
+ * @param {Pngine} p - PNGine instance
+ * @returns {Promise<Pngine>}
+ */
+export function restartSettled(p) {
+  const i = p._;
+  // Fail closed, the one deliberate break with the sync verbs' "a destroyed
+  // handle returns p": restartSettled's whole product is the settle, and a
+  // resolved restart on a dead renderer would re-create the false-READY this
+  // API exists to close.
+  if (!i) return Promise.reject(restartRefusal("destroyed", "restartSettled: the instance is destroyed"));
+  // Monotonic per instance: a rid is never reused, so a late ack of an
+  // earlier request can never land on a later one.
+  const rid = (i.restartRid = (i.restartRid ?? 0) + 1);
+  return correlatedRequest(i, { type: "restart", rid }, "restart-done", rid, p);
+}
+
+// How long a request waits for its reply before the get* queries resolve
+// with their fallback — and restartSettled rejects with restart-timeout. For
+// the awaited restart it is a post→ack round-trip budget: the worker handles
+// one message at a time, so whatever is queued ahead of the restart is part
+// of its cost.
 const REQUEST_TIMEOUT_MS = 2000;
 
 /**
@@ -402,6 +499,91 @@ function workerRequest(i, request, replyType, read, fallback) {
     worker.addEventListener("message", handler);
     worker.postMessage(request);
   });
+}
+
+/**
+ * The rejecting counterpart of workerRequest: a request whose ANSWER is the
+ * product, correlated by a request id instead of matched on reply type alone.
+ *
+ * workerRequest resolves a fallback when its reply never comes — right for the
+ * get* queries, wrong for a restart a caller awaits, whose only honest
+ * non-answer is a rejection. This variant matches the reply's `type` AND its
+ * `rid`, so ridless acks (the legacy restart, the viewer's self-recovery)
+ * and acks of other requests pass it by, and it rejects an `ok: false` reply
+ * with the worker's own message.
+ *
+ * @param {any} i - instance internals
+ * @param {object} request - message to post (carries the rid)
+ * @param {string} replyType - `type` of the reply to wait for
+ * @param {number} rid - the request id the reply must echo
+ * @param {Pngine} resolvesWith - what the promise resolves with on ok:true
+ * @returns {Promise<Pngine>}
+ */
+function correlatedRequest(i, request, replyType, rid, resolvesWith) {
+  const worker = i.worker;
+  const pending = (i.pendingRequests ??= new Set());
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (settle, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      pending.delete(abandon);
+      worker.removeEventListener("message", handler);
+      worker.removeEventListener("error", crash);
+      worker.removeEventListener("messageerror", crash);
+      settle(value);
+    };
+    // destroy() drives this for every request still in flight, the same
+    // registry workerRequest's abandons live in. Where those answer the
+    // fallback, an awaited restart's only honest destroy answer is a
+    // rejection: no reply can arrive once the worker is terminated.
+    const abandon = () => finish(reject, restartRefusal("destroyed", `${request.type} request abandoned: the instance was destroyed`));
+    const handler = (e) => {
+      const d = e.data;
+      if (d?.type !== replyType || d.rid !== rid) return;
+      if (d.ok === true) finish(resolve, resolvesWith);
+      else finish(reject, restartRefusal("restart-failed", d.message || `${replyType} reported failure without a message`));
+    };
+    // A worker that died mid-request can never ack it. These port-level
+    // listeners fire beside routeWorkerMessages' onerror property — hearing
+    // the crash here rejects the awaiting caller now instead of at the
+    // budget.
+    const crash = (e) => finish(reject, restartRefusal("worker-error", (e && e.message) || "worker error"));
+    // The budget the get* requests share, rejecting here instead of resolving
+    // a fallback: an awaited restart has no honest default answer.
+    const timer = setTimeout(
+      () => finish(reject, restartRefusal("restart-timeout", `${request.type} round trip exceeded ${REQUEST_TIMEOUT_MS} ms (post to ack, FIFO predecessors included)`)),
+      REQUEST_TIMEOUT_MS,
+    );
+    worker.addEventListener("message", handler);
+    worker.addEventListener("error", crash);
+    worker.addEventListener("messageerror", crash);
+    pending.add(abandon);
+    try {
+      worker.postMessage(request);
+    } catch (err) {
+      // The post itself refused (an uncloneable payload, a closed port):
+      // the caller hears that error, and nothing of the request survives.
+      finish(reject, err);
+    }
+  });
+}
+
+/**
+ * A restartSettled rejection: an Error carrying the machine-readable `code`
+ * its contract names, so a host can switch on the failure rather than parse
+ * the message.
+ *
+ * @typedef {Error & {code?: string}} RestartRefusal
+ * @param {string} code
+ * @param {string} message
+ */
+function restartRefusal(code, message) {
+  const err = /** @type {RestartRefusal} */ (new Error(message));
+  err.name = "PngineRestartError";
+  err.code = code;
+  return err;
 }
 
 /**

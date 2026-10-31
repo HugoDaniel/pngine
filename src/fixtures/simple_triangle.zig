@@ -31,7 +31,7 @@ pub const simple_triangle_sjon: [:0]const u8 =
     \\  :layout auto
     \\  (vertex :module code :entry vertexMain)
     \\  (fragment :module code :entry fragMain
-    \\    (target :format preferred-canvas-format))
+    \\    (color-target :format preferred-canvas-format))
     \\  (primitive :topology triangle-list))
     \\
     \\(render-pass :name renderPipeline

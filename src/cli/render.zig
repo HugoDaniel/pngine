@@ -331,16 +331,42 @@ fn executePipeline(
         return executeFlatPipeline(gpa, io, opts.input_path, output, opts.width, opts.height, bytecode, opts.audio_path);
     }
 
-    // Render (or stub) the PNG and attach the pNGb chunk.
-    const png_result = producePng(gpa, final_bytecode, opts);
-    if (png_result.exit_code != 0) return png_result.exit_code;
-    var png_data = png_result.png_data;
+    // Render (or stub) the PNG, then pack every payload in ONE pass: the
+    // bytecode (unless --no-embed) and the --audio sugar as a SNTU payload.
+    // One writer for both spellings — `--audio song.wasm` resolves to exactly
+    // what `pngine pack --add SNTU=song.wasm` writes (02.C2, spec 02:110).
+    const rendered = generatePng(gpa, final_bytecode, opts.width, opts.height, opts.time, opts.render_frame, opts.scene_name, opts.strict_native_stubs);
+    if (rendered.exit_code != 0) return rendered.exit_code;
+    var png_data = rendered.png_data;
     defer gpa.free(png_data);
 
-    // Optionally embed audio WASM in PNG (pNGa chunk)
-    if (opts.audio_path) |apath| {
-        const audio_code = attachAudio(gpa, io, &png_data, apath);
-        if (audio_code != 0) return audio_code;
+    // The song must outlive packPng: a `defer` inside the `if` block below
+    // would free it at the block's end, before the payload list is consumed.
+    var audio_wasm: ?[]u8 = null;
+    defer if (audio_wasm) |aw| gpa.free(aw);
+
+    if (opts.embed_bytecode or opts.audio_path != null) {
+        var specs: [2]pngine.png.PackSpec = undefined;
+        var n: usize = 0;
+        if (opts.embed_bytecode) {
+            specs[n] = .{ .kind = .{ 'P', 'N', 'G', 'B' }, .body = final_bytecode };
+            n += 1;
+        }
+        if (opts.audio_path) |apath| {
+            audio_wasm = utils.readBinaryFile(gpa, io, apath) catch |err| {
+                std.debug.print("Error: failed to read audio '{s}': {}\n", .{ apath, err });
+                return 2;
+            };
+            specs[n] = .{ .kind = .{ 'S', 'N', 'T', 'U' }, .body = audio_wasm.? };
+            n += 1;
+            std.debug.print("  Audio: {s} ({d} bytes)\n", .{ apath, audio_wasm.?.len });
+        }
+        const packed_png = pngine.png.packPng(gpa, png_data, specs[0..n]) catch |err| {
+            std.debug.print("Error: failed to pack payloads: {}\n", .{err});
+            return 4;
+        };
+        gpa.free(png_data);
+        png_data = packed_png;
     }
 
     // Write final output. PNG bytes are binary, so a bare terminal is refused.
@@ -390,24 +416,6 @@ fn embedExecutorIfRequested(
     return .{ .bytes = with_executor, .owned = true };
 }
 
-/// Produce the PNG bytes: a rendered frame or the 1x1 transparent stub, with
-/// the pNGb chunk attached unless `--no-embed`.
-fn producePng(gpa: Allocator, final_bytecode: []const u8, opts: Options) PngResult {
-    std.debug.assert(final_bytecode.len >= format.HEADER_SIZE);
-    std.debug.assert(opts.width > 0 and opts.height > 0);
-
-    const rendered = generatePng(gpa, final_bytecode, opts.width, opts.height, opts.time, opts.render_frame, opts.scene_name, opts.strict_native_stubs);
-    if (rendered.exit_code != 0) return rendered;
-    if (!opts.embed_bytecode) return rendered;
-
-    const with_bytecode = embedBytecodeInPng(gpa, rendered.png_data, final_bytecode) catch |err| {
-        std.debug.print("Error: failed to embed bytecode: {}\n", .{err});
-        gpa.free(rendered.png_data);
-        return .{ .png_data = undefined, .exit_code = 4 };
-    };
-    return .{ .png_data = with_bytecode, .exit_code = 0 };
-}
-
 /// Compile the render input, capturing the plugin set when one is detected.
 ///
 /// Plugin detection is only run when the executor is going to be embedded —
@@ -427,29 +435,6 @@ fn compileForRender(
     const result = try compileFromFileWithPlugins(gpa, io, opts.input_path, opts.minify_shaders, opts.validate_shaders);
     plugins.* = result.plugins;
     return result.pngb;
-}
-
-/// Re-wrap `png_data` with a pNGa audio chunk. Returns 0, or an exit code
-/// after printing its own message.
-fn attachAudio(gpa: Allocator, io: std.Io, png_data: *[]u8, audio_path: []const u8) u8 {
-    std.debug.assert(png_data.*.len > 0);
-    std.debug.assert(audio_path.len > 0);
-
-    const audio_wasm = utils.readBinaryFile(gpa, io, audio_path) catch |err| {
-        std.debug.print("Error: failed to read audio '{s}': {}\n", .{ audio_path, err });
-        return 2;
-    };
-    defer gpa.free(audio_wasm);
-
-    const with_audio = pngine.png.embedAudio(gpa, png_data.*, audio_wasm) catch |err| {
-        std.debug.print("Error: failed to embed audio: {}\n", .{err});
-        return 4;
-    };
-    gpa.free(png_data.*);
-    png_data.* = with_audio;
-
-    std.debug.print("  Audio: {s} ({d} bytes)\n", .{ audio_path, audio_wasm.len });
-    return 0;
 }
 
 /// Write the `--types` TypeScript sidecar beside `output`. Returns 0, or an
@@ -583,36 +568,34 @@ fn executeFlatPipeline(
     // Generate 1x1 transparent pixel PNG (no GPU render → strict-stub flag moot)
     const png_result = generatePng(gpa, bytecode, width, height, 0.0, false, null, false);
     if (png_result.exit_code != 0) return png_result.exit_code;
+    defer gpa.free(png_result.png_data);
 
-    // Embed pNGf chunk instead of pNGb. `png_data` is owned from here to the
-    // end — one `defer`, tracking the audio swap below, the same shape as
-    // `executePipeline`. It used to be freed only on the success path, so a
-    // missing audio file, a refused audio chunk or a failed write leaked it.
-    var png_data = pngine.png.embedFlat(gpa, png_result.png_data, flat_payload.data) catch |err| {
-        std.debug.print("Error: failed to embed flat data: {}\n", .{err});
-        gpa.free(png_result.png_data);
-        return 4;
-    };
-    gpa.free(png_result.png_data);
-    defer gpa.free(png_data);
+    // Pack the flat payload (and the --audio sugar, as a SNTU payload) in
+    // ONE pass — the same writer `pngine pack --add` uses, so flat mode has
+    // no second embedding path of its own (02.C2).
+    // As in executePipeline: the song outlives packPng, so its `defer` sits
+    // at this scope, not inside the `if` that reads it.
+    var audio_wasm: ?[]u8 = null;
+    defer if (audio_wasm) |aw| gpa.free(aw);
 
-    // Optionally embed audio
+    var specs: [2]pngine.png.PackSpec = undefined;
+    var n: usize = 0;
+    specs[n] = .{ .kind = .{ 'P', 'N', 'G', 'F' }, .body = flat_payload.data };
+    n += 1;
     if (audio_path) |apath| {
-        const audio_wasm = utils.readBinaryFile(gpa, io, apath) catch |err| {
+        audio_wasm = utils.readBinaryFile(gpa, io, apath) catch |err| {
             std.debug.print("Error: failed to read audio '{s}': {}\n", .{ apath, err });
             return 2;
         };
-        defer gpa.free(audio_wasm);
-
-        const with_audio = pngine.png.embedAudio(gpa, png_data, audio_wasm) catch |err| {
-            std.debug.print("Error: failed to embed audio: {}\n", .{err});
-            return 4;
-        };
-        gpa.free(png_data);
-        png_data = with_audio;
-
-        std.debug.print("  Audio: {s} ({d} bytes)\n", .{ apath, audio_wasm.len });
+        specs[n] = .{ .kind = .{ 'S', 'N', 'T', 'U' }, .body = audio_wasm.? };
+        n += 1;
+        std.debug.print("  Audio: {s} ({d} bytes)\n", .{ apath, audio_wasm.?.len });
     }
+    const png_data = pngine.png.packPng(gpa, png_result.png_data, specs[0..n]) catch |err| {
+        std.debug.print("Error: failed to pack payloads: {}\n", .{err});
+        return 4;
+    };
+    defer gpa.free(png_data);
 
     // Write PNG output
     stdio.writeOutput(io, output, png_data, true) catch |err| return stdio.reportWriteError(err, output);
@@ -837,13 +820,6 @@ fn generatePng(
         return .{ .png_data = undefined, .exit_code = 4 };
     };
     return .{ .png_data = png_data, .exit_code = 0 };
-}
-
-/// Embed bytecode in PNG, freeing original PNG data.
-fn embedBytecodeInPng(gpa: Allocator, png_data: []u8, bytecode: []const u8) ![]u8 {
-    const embedded = try pngine.png.embedBytecode(gpa, png_data, bytecode);
-    gpa.free(png_data);
-    return embedded;
 }
 
 /// Print success message after render completes.
@@ -1176,7 +1152,10 @@ pub fn printUsage() void {
         \\  --no-fullscreen, --fixed  Fixed-size canvas using --size dimensions (HTML mode)
         \\  --unpack                  Output unpacked HTML (no deflate, larger but debuggable)
         \\  --flat                    Produce flat pNGf command buffer (no WASM executor)
-        \\  -a, --audio <path>        Embed audio WASM (e.g., sointu compiled song)
+        \\  -a, --audio <path>        Embed audio WASM (e.g., sointu compiled song);
+        \\                            sugar for the SNTU payload `pack --add` writes
+        \\      --audio-js <path>     JS glue hosting the audio WASM inside --html
+        \\                            output (ignored without --html)
         \\  --types                   Generate TypeScript type definitions (.d.ts) for uniforms
         \\  -h, --help                Show this help
         \\

@@ -34,13 +34,13 @@ fn shade(uv: vec2f) -> vec4f { return vec4f(tint(fract(uv.x * SCALE)), 1.0); }
   (vertex :module vs :entry v)
   (fragment :module coarse :entry fs
     (constant :name SCALE :value 2)
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (render-pipeline :name pfine :layout auto
   (vertex :module vs :entry v)
   (fragment :module fine :entry fs
     (constant :name SCALE :value 8)
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (render-pass :name draw
   (color-attachment :view context-current-texture

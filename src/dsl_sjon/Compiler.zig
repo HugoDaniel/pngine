@@ -23,11 +23,25 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const sjon = @import("sjon");
+
+comptime {
+    const minimum_sjon = std.SemanticVersion{ .major = 1, .minor = 5, .patch = 0 };
+    const sjon_version = std.SemanticVersion.parse(sjon.version) catch
+        @compileError("PNGine requires SJON 1.5.0 or newer; update ../SJON");
+    if (sjon_version.order(minimum_sjon) == .lt)
+        @compileError("PNGine requires SJON 1.5.0 or newer; update ../SJON");
+}
+
 const bytecode = @import("bytecode");
 const executor = @import("executor");
 
 const Emitter = @import("Emitter.zig").Emitter;
-const hooks = @import("hooks.zig");
+/// PNGine's own lowering hooks, reachable by a caller that supplies its own
+/// registry (ask P6). Supported surface: the `pass_v1` / `init_v1` / `draw_v1`
+/// values and `buildRegistry`; every other `pub` decl in the module is
+/// internal and may change without notice. This binding itself becomes
+/// `pngine.dsl_sjon.hooks` in `src/main.zig`.
+pub const hooks = @import("hooks.zig");
 const values = @import("values.zig");
 const document_import = @import("document_import.zig");
 const Expr = sjon.Expr;
@@ -554,7 +568,13 @@ pub const Compiler = struct {
     /// constant into a count slot narrows it there), and the same fixed-point
     /// resolution, so a define may name one declared after it. Bindings + name
     /// slices are owned by `arena`.
-    fn buildLoweringEnv(arena: Allocator, source: [:0]const u8) Expr.Env {
+    ///
+    /// Public since P6: a host that owns the lowering registry also owns the
+    /// env. `arena` must outlive the `sjon.validateDocument` call whose
+    /// lowering consumes the returned env (the compiler's own per-call
+    /// `env_arena` is the shape); the env borrows every name and value from
+    /// that arena and frees nothing itself.
+    pub fn buildLoweringEnv(arena: Allocator, source: [:0]const u8) Expr.Env {
         var tree = sjon.parse(arena, source) catch return .{};
         const eval_schema = sjon.Schema.Schema.init(&.{sjon.plugins.core.plugin});
         const Pending = struct { name: []const u8, vnode: sjon.Ast.NodeIndex, done: bool };
@@ -761,12 +781,14 @@ fn expectDiagnostic(gpa: Allocator, source: [:0]const u8, code: []const u8) !voi
 // SJON does not parse: a WGSL entry point, a WGSL `override`, a WASM export,
 // and the `:name` keys that DECLARE cross-ref targets rather than reference
 // them. The route for the first two is filed upstream (06 S11,
-// `(cross-ref-provider …)`).
+// `(cross-ref-provider …)`). `pass-name` joins them because its targets are
+// `(pass …)` children a container hook consumed: the validator's index never
+// sees them, so only the hook can resolve the name (03 P3's `:expose`).
 //
 // The test is the gate the plan asked for: a new loose slot has to be listed
 // here, which is the moment to ask whether it should be closed instead.
 
-const loose_symbol_kinds = [_][]const u8{ "entry-point", "override-name", "wgsl-name" };
+const loose_symbol_kinds = [_][]const u8{ "entry-point", "override-name", "wgsl-name", "pass-name" };
 const primitive_symbol_keys = [_][]const u8{ "name", "func" };
 
 // ── S13 / S14 adoption (05 §2 R7, 05 §5 C8) ─────────────────────────────────
@@ -808,7 +830,7 @@ fn primitiveDoc(comptime primitive: []const u8) [:0]const u8 {
     return "(shader-module :name code :code \"@vertex fn v() -> @builtin(position) vec4f { return vec4f(0); } @fragment fn f() -> @location(0) vec4f { return vec4f(1); }\")\n" ++
         "(render-pipeline :name pipe :layout auto\n" ++
         "  (vertex :module code :entry v)\n" ++
-        "  (fragment :module code :entry f (target :format preferred-canvas-format))\n" ++
+        "  (fragment :module code :entry f (color-target :format preferred-canvas-format))\n" ++
         "  " ++ primitive ++ ")\n" ++
         "(render-pass :name draw :pipeline pipe\n" ++
         "  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)\n" ++
@@ -944,7 +966,7 @@ const skeleton_source: [:0]const u8 =
     \\(render-pipeline :name pipe :layout auto
     \\  (vertex :module code :entry vsMain)
     \\  (fragment :module code :entry fsMain
-    \\    (target :format preferred-canvas-format))
+    \\    (color-target :format preferred-canvas-format))
     \\  (primitive :topology point-list)
     \\  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
     \\(compute-pipeline :name cp :layout auto (compute :module sim :entry main))
@@ -978,3 +1000,45 @@ fn namedBuffers(gpa: Allocator, module: *const bytecode.format.Module) ![]NamedB
     }
     return out.toOwnedSlice(gpa);
 }
+
+// ============================================================================
+// P6 export seam (ask 06). The public names are compiled and validated from
+// this module, but the host-shaped reachability tests live in `src/main.zig`
+// (a child module cannot see the parent's namespace). Here the pins are the
+// behavioral ones: the exported builder's registry must compile what the
+// default null path compiles, a foreign hook must ride the same lowering pass,
+// and the public env helper must resolve a forward define chain.
+// ============================================================================
+
+/// A trivially-real foreign lowering hook: `(foreign-sugar :x N)` becomes the
+/// bare `(foreign-normal)` form of the test-local manifest below. It exists to
+/// prove ONE pass runs pngine's hooks and another vocabulary's side by side.
+fn testForeignLower(
+    arena: Allocator,
+    input: *const sjon.Lowering.LoweringInput,
+    out: *sjon.Lowering.LoweringOutput,
+) sjon.Lowering.LoweringError!void {
+    try out.append(arena, .{
+        .head = "foreign-normal",
+        .kvpairs = &.{},
+        .children = &.{},
+        .source_form_idx = input.form_idx,
+    });
+}
+
+/// A one-form vocabulary a host owns: nothing here is pngine's, and nothing
+/// imports a sibling repo.
+const p6_foreign_manifest: [:0]const u8 =
+    \\(plugin :name testvocab :version "1.0.0"
+    \\  (form :name foreign-sugar :open true
+    \\    :lowering (lowering :hook test/foreign-v1 :produces [foreign-normal]))
+    \\  (form :name foreign-normal))
+;
+
+/// The same complete sugar document every P6 pin uses.
+const p6_sugar_doc: [:0]const u8 =
+    \\(shader-module :name initShader :code "@compute @workgroup_size(64) fn main() {}")
+    \\(buffer :name parts :size 1024 :usage [vertex storage] :pool 2)
+    \\(init :name spawn :buffer parts :module initShader :workgroups [16])
+    \\(frame :name main :init [spawn] :perform [spawn])
+;

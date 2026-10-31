@@ -68,7 +68,7 @@ struct VsOut { @builtin(position) pos : vec4f, @location(0) uv : vec2f }
 (render-pipeline :name pipe :layout auto
   (vertex :module m :entry vs)
   (fragment :module m :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (render-pass :name draw :pipeline pipe :bind-groups [g]
   (color-attachment :view context-current-texture

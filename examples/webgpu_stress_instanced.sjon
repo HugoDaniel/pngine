@@ -37,7 +37,7 @@ fn fs(@location(0) color : vec3f) -> @location(0) vec4f {
   :layout auto
   (vertex :module instCode :entry vs)
   (fragment :module instCode :entry fs
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list))
 
 (query-set :name tsQS :type timestamp :count 2)

@@ -201,7 +201,7 @@ fn indexAt(i: u32) -> u32 {
       (attribute :shader-location 0 :offset 0 :format float32x3)
       (attribute :shader-location 1 :offset 12 :format float32x3)))
   (fragment :module solidShader :entry fs
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
@@ -209,7 +209,7 @@ fn indexAt(i: u32) -> u32 {
   :layout auto
   (vertex :module baryShader :entry vs)
   (fragment :module baryShader :entry fs
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list :cull-mode back)
   ; Negative bias pulls the overlay toward the camera so it wins the
   ; less-compare against the solid pass it retraces.
@@ -220,7 +220,7 @@ fn indexAt(i: u32) -> u32 {
   :layout auto
   (vertex :module linesShader :entry vs)
   (fragment :module linesShader :entry fs
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology line-list)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 

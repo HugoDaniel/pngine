@@ -108,7 +108,7 @@ fn fsMain(@location(0) local : vec2f,
   :layout auto
   (vertex :module code :entry vsLeft)
   (fragment :module code :entry fsMain
-    (target :format preferred-canvas-format
+    (color-target :format preferred-canvas-format
       (blend (color :src-factor src-alpha :dst-factor one-minus-src-alpha :operation add)
              (alpha :src-factor one :dst-factor one-minus-src-alpha :operation add))))
   (primitive :topology triangle-list)
@@ -124,7 +124,7 @@ fn fsMain(@location(0) local : vec2f,
   :layout auto
   (vertex :module code :entry vsRight)
   (fragment :module code :entry fsMain
-    (target :format preferred-canvas-format :write-mask 7))
+    (color-target :format preferred-canvas-format :write-mask 7))
   (primitive :topology triangle-list)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less)
   (multisample :count 4 :alpha-to-coverage-enabled true))

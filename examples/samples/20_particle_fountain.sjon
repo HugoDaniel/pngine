@@ -206,7 +206,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
       (attribute :shader-location 2 :offset 16 :format float32x3)
       (attribute :shader-location 3 :offset 28 :format float32)))
   (fragment :module renderShader :entry fs
-    (target :format preferred-canvas-format
+    (color-target :format preferred-canvas-format
       (blend
         (color :src-factor src-alpha :dst-factor one)
         (alpha :src-factor one :dst-factor one))))

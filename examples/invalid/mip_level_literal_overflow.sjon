@@ -18,7 +18,7 @@
 """)
 (render-pipeline :name pipe :layout auto
   (vertex :module code :entry v)
-  (fragment :module code :entry f (target :format preferred-canvas-format)))
+  (fragment :module code :entry f (color-target :format preferred-canvas-format)))
 (render-pass :name draw :pipeline pipe
   (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
   (draw :vertex-count 3))

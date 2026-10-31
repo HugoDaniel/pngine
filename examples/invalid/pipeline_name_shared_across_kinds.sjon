@@ -9,7 +9,7 @@
 ; `bind-group-layout-spec` is now one cross-ref over the three forms it may
 ; name (render-pipeline, compute-pipeline, bind-group-layout) -- one
 ; namespace -- so the second declaration is a located `duplicate_cross_ref_target`
-; and the reference can never be ambiguous (target groups).
+; and the reference can never be ambiguous (color-target groups).
 (shader-module :name code :code """
 @vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
   var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
@@ -21,7 +21,7 @@
 (render-pipeline :name same :layout auto
   (vertex :module code :entry vs)
   (fragment :module code :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 (compute-pipeline :name same :layout auto (compute :module code :entry cs))
 (buffer :name u :size 16 :usage [uniform copy-dst])
 (bind-group :name g :layout same :group 0

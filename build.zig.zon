@@ -7,7 +7,7 @@
         .wgslender = .{
             .path = "../wgslender",
         },
-        // SJON: schema-driven S-expression format + validator + lowering.
+        // SJON >= 1.5.0 (Zig 0.16.0): schema-driven format + validator + lowering.
         // Path dependency (sibling repo), like wgslender. PNGine consumes it
         // with `plugin-exec=false` (see build.zig) so no libwasmtime link.
         .sjon = .{
@@ -22,8 +22,7 @@
         //     .lazy = true,
         // },
         .wamr = .{
-            .url = "https://github.com/bytecodealliance/wasm-micro-runtime/archive/refs/tags/WAMR-2.2.0.tar.gz",
-            .hash = "N-V-__8AAN1-KAFc0Vf-GoFEuhZWQxeT9pledJd5zBNtyrIE",
+            .path = "../wasm-micro-runtime",
             .lazy = true,
         },
     },

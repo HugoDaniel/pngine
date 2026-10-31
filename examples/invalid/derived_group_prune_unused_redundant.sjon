@@ -13,7 +13,7 @@
 (buffer :name buf :size 16 :usage [uniform copy-dst])
 (render-pipeline :name pipe :layout auto
   (vertex :module code :entry vs)
-  (fragment :module code :entry fs (target :format preferred-canvas-format)))
+  (fragment :module code :entry fs (color-target :format preferred-canvas-format)))
 (bind-group :name g :group 0 :prune-unused true
   (entry :binding 0 :buffer buf))
 (render-pass :name p

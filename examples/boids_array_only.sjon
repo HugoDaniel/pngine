@@ -22,7 +22,7 @@ fn fragMain() -> @location(0) vec4f {
   :layout auto
   (vertex :module code :entry vertexMain)
   (fragment :module code :entry fragMain
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list))
 
 (render-pass :name drawBoidsPass

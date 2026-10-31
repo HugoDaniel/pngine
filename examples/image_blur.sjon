@@ -161,7 +161,7 @@ fn fsMain(@location(0) fragUV : vec2f) -> @location(0) vec4f {
   :layout auto
   (vertex :module blitCode :entry vsMain)
   (fragment :module blitCode :entry fsMain
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (bind-group :name constants :layout blurPipe :group 0
   (entry :binding 0 :sampler samp)

@@ -262,8 +262,8 @@ geometry), named `<stage>__<geometry>` and run in stage-major order.
 
 Every child is the ordinary form of that name, except three the graph fills a
 key of: an `(in …)`'s `(vertex …)` and `(fragment …)`, and a stage's
-`(target …)`, which carries blend state and a write mask but no `:format`. The
-graph fills in three things: each `(target :format …)`, taken from the stage's
+`(color-target …)`, which carries blend state and a write mask but no `:format`. The
+graph fills in three things: each `(color-target :format …)`, taken from the stage's
 colour attachments, so an `(in …)` states none; the bind group's `:layout` per generated pipeline, with
 `:prune-unused` always on; and the load/store sequencing, meaning the stage's
 load ops and clear values on the FIRST pass of the stage and its store ops on
@@ -277,7 +277,7 @@ compile-time name for a sequence of steps, inlined where it is named, so nothing
 about it reaches the wire. Without a `:name` a graph owns the document's only
 frame, and a second frame or a second graph beside it is refused. A `(color-attachment :view …)` takes a
 `(texture …)` name as readily as `context-current-texture`, and the derived
-target format follows whichever it is. A stage's `(target …)` children pair
+target format follows whichever it is. A stage's `(color-target …)` children pair
 with its attachments by position, one each or none, so blending is a stage
 property: geometries that want different blending are different stages, which
 compose over one attachment through `:load-op load`.
@@ -356,7 +356,7 @@ name the base does not declare under that head is refused.
   :layout auto
   (vertex :module code :entry vsMain)
   (fragment :module code :entry fsMain
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (render-pass :name draw
   (color-attachment :view context-current-texture

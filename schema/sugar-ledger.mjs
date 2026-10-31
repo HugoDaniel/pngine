@@ -109,6 +109,11 @@ export const SUGAR_FORMS = {
         twin: "examples/pass_reads_depth_hand.sjon",
         equivalence: "pixel",
       },
+      expose: {
+        desugars_to: "the compute auto-blit machinery per named pass (`<pass>__blit_shader`, `<pass>__blit_pipe`, `<pass>__blit_bg` and `<pass>__blit` reading `<pass>__tex`), emitted into NO step list so only a frame that names `<pass>__blit` runs it",
+        ledger:
+          "no twin: the only hand-written equivalent reads `<pass>__tex`, the hook's internal intermediate naming, which this key exists to keep off the authoring surface (the alternative the verdict set aside)",
+      },
     },
   },
 
@@ -135,7 +140,7 @@ export const SUGAR_FORMS = {
         equivalence: "pixel",
       },
       format: {
-        desugars_to: "texture :format and the pipeline's (target :format …), which must agree",
+        desugars_to: "texture :format and the pipeline's (color-target :format …), which must agree",
         twin: "examples/pass_hdr_tonemap_hand.sjon",
         equivalence: "pixel",
       },

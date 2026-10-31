@@ -76,7 +76,7 @@ struct VsOut { @builtin(position) pos : vec4f, @location(0) uv : vec2f }
 (render-pipeline :name borderPipe :layout auto
   (vertex :module border :entry vs)
   (fragment :module border :entry fs
-    (target :format preferred-canvas-format
+    (color-target :format preferred-canvas-format
       (blend
         (color :src-factor src-alpha :dst-factor one-minus-src-alpha :operation add)
         (alpha :src-factor one :dst-factor one-minus-src-alpha :operation add))))

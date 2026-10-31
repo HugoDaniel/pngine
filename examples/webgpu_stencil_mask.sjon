@@ -266,7 +266,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
       (attribute :shader-location 0 :offset 0 :format float32x3)
       (attribute :shader-location 1 :offset 12 :format float32x3)))
   (fragment :module renderShader :entry fs
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus-stencil8 :depth-write-enabled true :depth-compare less
     (stencil-front :compare always :pass-op replace)))
@@ -278,7 +278,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
       (attribute :shader-location 0 :offset 0 :format float32x3)
       (attribute :shader-location 1 :offset 12 :format float32x3)))
   (fragment :module renderShader :entry fs
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus-stencil8 :depth-write-enabled true :depth-compare less
     (stencil-front :compare equal :pass-op keep)))

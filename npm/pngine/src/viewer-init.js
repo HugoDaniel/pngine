@@ -128,6 +128,9 @@ export async function pngine(source, options = {}) {
     canvas,
     worker,
     pointer: ptr,
+    // The live tracking array, kept for the instance's whole life so
+    // setPointer(p, null) can hand the lanes back to it.
+    trackingPointer: ptr,
     detachListeners,
     width: logicalW,
     height: logicalH,

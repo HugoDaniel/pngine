@@ -101,6 +101,20 @@ pub fn writeOutputFile(io: std.Io, path: []const u8, data: []const u8) !void {
     try file.writeStreamingAll(io, data);
 }
 
+/// Create or truncate `path` as an empty file: the empty-artifact twin of
+/// `writeOutputFile`, whose `data.len > 0` assert is right for every artifact
+/// an empty one is not. The error path is the same one, so the caller's
+/// `reportWriteError` maps both identically.
+///
+/// Pre-condition: path.len > 0
+/// Post-condition: file exists and is empty
+pub fn writeEmptyFile(io: std.Io, path: []const u8) !void {
+    std.debug.assert(path.len > 0);
+
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+}
+
 /// Write bytes to stdout. Machine-readable output (`--json`) routes here so it
 /// is cleanly pipeable (`| jq`, `| python3 -m json.tool`); human-facing status
 /// lines and diagnostics stay on stderr via `std.debug.print`. Callers swallow

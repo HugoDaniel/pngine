@@ -117,7 +117,7 @@
       (attribute :shader-location 1 :offset 12 :format float32x3)
       (attribute :shader-location 2 :offset 24 :format float32x3)))
   (fragment :module shader :entry fs
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 

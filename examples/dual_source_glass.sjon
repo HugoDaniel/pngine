@@ -150,12 +150,12 @@ fn fs(in : VSOut) -> Glass {
 (render-pipeline :name backdropPipe :layout auto
   (vertex :module backdrop :entry vs)
   (fragment :module backdrop :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (render-pipeline :name glassPipe :layout auto
   (vertex :module glass :entry vs)
   (fragment :module glass :entry fs
-    (target :format preferred-canvas-format
+    (color-target :format preferred-canvas-format
       ; dst is multiplied by the fragment's SECOND output, channel by channel.
       (blend
         (color :src-factor one :dst-factor src1 :operation add)

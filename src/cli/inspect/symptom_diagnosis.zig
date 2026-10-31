@@ -546,13 +546,13 @@ fn diagnoseBlendIssues(
             .passed = true,
             .severity = .info,
             .message = "Pipeline created - blend state is in pipeline descriptor",
-            .suggestion = "Verify the (blend …) under the (target …) of the (render-pipeline …)",
+            .suggestion = "Verify the (blend …) under the (color-target …) of the (render-pipeline …)",
         });
         f.suspect(.{
             .probability = "medium",
             .cause = "Blend state misconfigured",
             .evidence = "Pipeline exists but blend may not be enabled",
-            .fix = "Under the (target …), add (blend (color :src-factor … :dst-factor …) (alpha …))",
+            .fix = "Under the (color-target …), add (blend (color :src-factor … :dst-factor …) (alpha …))",
         });
     } else {
         f.blame(.{
@@ -560,12 +560,12 @@ fn diagnoseBlendIssues(
             .passed = false,
             .severity = .err,
             .message = "No render pipeline created",
-            .suggestion = "Add a (render-pipeline …) whose (target …) carries a (blend …)",
+            .suggestion = "Add a (render-pipeline …) whose (color-target …) carries a (blend …)",
         }, .{
             .probability = "high",
             .cause = "No pipeline for blend configuration",
             .evidence = "No CREATE_RENDER_PIPELINE command found",
-            .fix = "Define a (render-pipeline …) with a (blend …) under its (target …)",
+            .fix = "Define a (render-pipeline …) with a (blend …) under its (color-target …)",
         });
     }
 

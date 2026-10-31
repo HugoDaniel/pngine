@@ -18,7 +18,7 @@
 (render-pipeline :name pipe :layout auto
   (vertex :module code :entry vs)
   (fragment :module code :entry fs
-    (target :format rg8unorm))
+    (color-target :format rg8unorm))
   (multisample :count 4 :alpha-to-coverage-enabled true))
 (render-pass :name draw :pipeline pipe
   (color-attachment :view msaa

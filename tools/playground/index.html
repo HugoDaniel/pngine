@@ -55,6 +55,36 @@
             border-radius: 4px;
         }
 
+        /* The runtime pins the canvas's rendered box to its authored 512x512
+           with inline width/height styles (npm/pngine/src/init-core.js,
+           sizeCanvasForInit, the default fixed-size path). Below the width that
+           pin needs on this page (512 + 2rem body padding + 1rem panel padding,
+           608px, rounded up to 640 for a scrollbar) the box no longer fits and
+           the page scrolls sideways. Cap the canvas to its panel and hand the
+           height back to the canvas's own 1:1 ratio, so the frame scales
+           instead of squashing. At 1280/1400 the pin still fits and this query
+           does not apply: the canvas stays 512. */
+        @media (max-width: 640px) {
+            canvas {
+                max-width: 100%;
+                height: auto !important;
+            }
+        }
+
+        /* Independent of the canvas: a long unbroken token in #file-info (a
+           133-character filename) or in #status sets the min-content width of
+           its flex panel. At a 390px viewport that pushed the page's
+           scrollWidth to 621, or 629 when both carried one. The canvas cap
+           above cannot cover it because the widening elements are these text
+           blocks, not the canvas. overflow-wrap: anywhere only breaks a token
+           that cannot otherwise fit, and unlike break-word it also reduces
+           min-content sizing; a harness measured scrollWidth back at 390 even
+           for a 120-character name, with normal states unchanged. */
+        .info,
+        .status {
+            overflow-wrap: anywhere;
+        }
+
         .controls {
             display: flex;
             gap: 0.5rem;
@@ -109,12 +139,27 @@
         }
 
         .drop-zone:hover,
-        .drop-zone.dragover {
+        .drop-zone.dragover,
+        .drop-zone:focus-visible,
+        #file-input:focus-visible + .drop-zone {
             border-color: #0f3460;
         }
 
-        .drop-zone input {
-            display: none;
+        /* Keep the file input in the accessibility tree and reachable, but out
+           of the Tab order: the zone is the picker's one keyboard stop.
+           display: none took it out of the tree. It sits before the zone so
+           the sibling rule above can light the zone up if the input has
+           focus. */
+        .visually-hidden {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
         }
 
         .time {
@@ -149,11 +194,11 @@
 
     <div class="container">
         <div class="panel">
-            <label>Drop PNG with embedded bytecode</label>
-            <div class="drop-zone" id="drop-zone">
+            <label for="file-input" id="file-input-label">Drop PNG with embedded bytecode</label>
+            <input type="file" id="file-input" accept=".png,.pngb" class="visually-hidden" tabindex="-1">
+            <div class="drop-zone" id="drop-zone" role="button" tabindex="0" aria-labelledby="file-input-label">
                 <p>Drop .png file here</p>
                 <p style="font-size: 0.75rem; color: #666; margin-top: 0.5rem;">or click to browse</p>
-                <input type="file" id="file-input" accept=".png,.pngb">
             </div>
             <div id="file-info" class="info"></div>
             <div class="examples">
@@ -173,7 +218,7 @@
 
         <div class="panel">
             <label>Output (512x512)</label>
-            <canvas id="canvas" width="512" height="512"></canvas>
+            <canvas id="canvas" width="512" height="512" role="img" aria-label="Rendered output (512x512)"></canvas>
             <div class="controls">
                 <button id="play-btn" disabled>Play</button>
                 <button id="stop-btn" disabled>Stop</button>
@@ -184,9 +229,14 @@
     </div>
 
     <script type="module">
-        import { pngine, play, pause, stop, draw, destroy, extractBytecode, isPng, isPngb } from './pngine.js';
+        import { pngine, play, pause, stop, draw, extractBytecode, isPng, isPngb } from './pngine.js';
+        // Audio is main-thread state beside the worker (not part of the worker's
+        // load protocol), so a reused engine has to be handed the reloaded
+        // payload's player explicitly. Both are the same modules pngine() uses.
+        import { extractAudio } from './extract.js';
+        import { createAudioPlayer } from './audio.js';
 
-        let canvas = document.getElementById('canvas');
+        const canvas = document.getElementById('canvas');
         const status = document.getElementById('status');
         const playBtn = document.getElementById('play-btn');
         const stopBtn = document.getElementById('stop-btn');
@@ -208,6 +258,39 @@
             return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
         }
 
+        // Replace the bytecode of a live engine's worker through the worker's own
+        // `load` protocol (MSG.LOAD, worker-core.js handleLoad): the same worker
+        // keeps the same canvas, its WebGPU device and its configured canvas
+        // context across loads. This is the point of the reuse. destroy() would
+        // instead terminate a worker owning those objects on every load, which is
+        // the teardown a WebKit tab does not survive.
+        function reload(worker, bytecode) {
+            return new Promise((resolve, reject) => {
+                // Mirrors awaitWorkerReady's init timeout: a wedged worker
+                // rejects instead of leaving the page at "Loading...".
+                const timer = setTimeout(() => settle(new Error('Worker load timeout')), 15000);
+                function onMessage(e) {
+                    if (e.data?.type === 'ready') settle(null, e.data);
+                    else if (e.data?.type === 'error') settle(new Error(e.data.message));
+                }
+                function onError(e) {
+                    settle(new Error(e.message || 'Worker error'));
+                }
+                function settle(err, result) {
+                    clearTimeout(timer);
+                    worker.removeEventListener('message', onMessage);
+                    worker.removeEventListener('error', onError);
+                    if (err) reject(err); else resolve(result);
+                }
+                // The library's router stays on `worker.onmessage` and still
+                // reports errors through options.onError; these listeners only
+                // observe the same events to settle this promise.
+                worker.addEventListener('message', onMessage);
+                worker.addEventListener('error', onError);
+                worker.postMessage({ type: 'load', bytecode });
+            });
+        }
+
         // Initialize
         async function init() {
             try {
@@ -225,29 +308,45 @@
             try {
                 setStatus('Loading...');
 
-                // Clean up previous engine
-                if (engine) {
-                    destroy(engine);
-                    engine = null;
-                    // Need to recreate canvas since control was transferred
-                    const parent = canvas.parentElement;
-                    const newCanvas = document.createElement('canvas');
-                    newCanvas.id = 'canvas';
-                    newCanvas.width = 512;
-                    newCanvas.height = 512;
-                    parent.replaceChild(newCanvas, canvas);
-                    canvas = newCanvas;
-                }
-
                 const data = new Uint8Array(await file.arrayBuffer());
                 fileInfo.textContent = `${file.name} (${formatBytes(data.length)})`;
 
-                // Create new engine
-                engine = await pngine(data, {
-                    canvas: canvas,
-                    debug: true,
-                    onError: (err) => setStatus('Error: ' + err.message, 'error'),
-                });
+                if (engine) {
+                    // Decode both chunks on the main thread first, so a payload
+                    // that cannot be loaded leaves the running engine alone.
+                    const bytecode = await extractBytecode(data);
+                    const audioWasm = await extractAudio(data);
+
+                    // One worker and one canvas for the page's whole life. The
+                    // engine's clock is stopped (it may be mid-play) and its
+                    // old audio player is released before the worker swaps the
+                    // old payload's resources for the new bytecode in place,
+                    // without a terminate.
+                    stop(engine);
+                    engine._.audio?.destroy();
+                    engine._.audio = null;
+                    playBtn.textContent = 'Play';
+                    playBtn.classList.remove('playing');
+                    timeEl.textContent = 't = 0.00s';
+
+                    const ready = await reload(engine._.worker, bytecode);
+                    engine._.frameCount = ready.frameCount;
+
+                    // The audio player lives on the main thread beside the
+                    // worker, so the reload attaches the new payload's player
+                    // by hand. A Play landing while the reload was in flight
+                    // starts the song at the clock it started.
+                    if (audioWasm) {
+                        engine._.audio = await createAudioPlayer(audioWasm);
+                        if (engine.isPlaying) engine._.audio.play(engine.time);
+                    }
+                } else {
+                    engine = await pngine(data, {
+                        canvas: canvas,
+                        debug: true,
+                        onError: (err) => setStatus('Error: ' + err.message, 'error'),
+                    });
+                }
 
                 setStatus(`Loaded: ${engine.width}x${engine.height}, ${engine.frameCount} frames`, 'success');
                 playBtn.disabled = false;
@@ -320,8 +419,15 @@
         playBtn.onclick = togglePlay;
         stopBtn.onclick = handleStop;
 
-        // File drop handling
+        // File drop handling. The zone is a button: Enter and Space do what a
+        // click does, and the input stays in the tree for assistive technology.
         dropZone.onclick = () => fileInput.click();
+        dropZone.onkeydown = (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                fileInput.click();
+            }
+        };
         fileInput.onchange = (e) => {
             if (e.target.files[0]) loadFile(e.target.files[0]);
         };

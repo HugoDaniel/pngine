@@ -40,13 +40,13 @@
   :layout auto
   (vertex :module code :entry fullscreen)
   (fragment :module code :entry paint
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (render-pipeline :name showPipe
   :layout auto
   (vertex :module code :entry fullscreen)
   (fragment :module code :entry show
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (bind-group :name showBG :layout showPipe :group 0
   (entry :binding 0 :sampler samp)

@@ -98,7 +98,7 @@ fn main(@builtin(global_invocation_id) id : vec3u) {
     (vertex-buffer :array-stride (* 2 4) :step-mode vertex
       (attribute :shader-location 2 :offset 0 :format float32x2)))
   (fragment :module code :entry fragMain
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list))
 
 (init :name initParticles :buffer particleBuffer :module initShader :workgroups [32])

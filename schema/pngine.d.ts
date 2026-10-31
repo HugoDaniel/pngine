@@ -129,7 +129,7 @@
 //   [info rich_members_emitted_with_annotations] value-kind `color-target-format` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
 //   [info union_emitted_via_anyof] value-kind `write-mask` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
 //   [info numeric_bounds_emitted_via_min_max] value-kind `write-mask-value` numeric bounds emitted via `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (integer=true); SJON-aware tooling additionally reads `x-sjon-exact-bound` for >2^53 values
-//   [info head_set_emitted_via_oneof_refs] value-kind `target-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
+//   [info head_set_emitted_via_oneof_refs] value-kind `color-target-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [info head_set_emitted_via_oneof_refs] value-kind `blend-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [info rich_members_emitted_with_annotations] value-kind `blend-factor` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
 //   [info rich_members_emitted_with_annotations] value-kind `blend-operation` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
@@ -160,7 +160,7 @@
 //   [info cross_ref_annotation_only] value-kind `queue-ref` cross-ref annotation surfaces target-form=`queue` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
 //   [info head_set_emitted_via_oneof_refs] value-kind `pass-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [info head_set_emitted_via_oneof_refs] value-kind `pass-item` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
-//   [info head_set_emitted_via_oneof_refs] value-kind `stage-section` head-set emitted as a closed `oneOf` — 1 of 6 head(s) resolve to slot-local forms and are emitted inline, the rest as `$ref`s into `#/$defs/form.<plugin>.<head>`
+//   [info head_set_emitted_via_oneof_refs] value-kind `draw-stage-section` head-set emitted as a closed `oneOf` — 1 of 6 head(s) resolve to slot-local forms and are emitted inline, the rest as `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [info local_forms_emitted_inline] positional slot on form `stage` declares 1 local form(s) behind a 6-head head-set — emitted as a closed inline union with no global fallback branch; a head outside the set is `not_head_member`
 //   [info head_set_emitted_via_oneof_refs] value-kind `geometry-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [warn cross_ref_unenforceable] value-kind `stage-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
@@ -963,7 +963,7 @@ export interface Pngine_Vertex {
   $children?: Array<{ readonly $form: "vertex-buffer" } | { readonly $form: "constant" }>;
 }
 
-/** Fragment stage (GPUFragmentState): the module + entry point, one (target …) per color attachment, and (constant …) overrides. */
+/** Fragment stage (GPUFragmentState): the module + entry point, one (color-target …) per color attachment, and (constant …) overrides. */
 export interface Pngine_Fragment {
   $form: "fragment";
   $ns: "pngine";
@@ -974,8 +974,8 @@ export interface Pngine_Fragment {
    * @sjon-cross-ref target=`shader-module` name-key=`name` acyclic=false
    */
   module: CrossRef<"shader-module">;
-  /** Positional counts (not expressible in TS): target: 1.. */
-  $children?: Array<{ readonly $form: "target" } | { readonly $form: "constant" }>;
+  /** Positional counts (not expressible in TS): color-target: 1.. */
+  $children?: Array<{ readonly $form: "color-target" } | { readonly $form: "constant" }>;
 }
 
 /** Compute stage (GPUProgrammableStage): the module + @compute entry point of a (compute-pipeline …), and (constant …) overrides. */
@@ -1251,7 +1251,7 @@ export interface Pngine_StencilBack {
 export interface Pngine_Multisample {
   $form: "multisample";
   $ns: "pngine";
-  /** Fragment alpha generates the coverage mask. Requires :count above 1, a (fragment …) stage, and a first (target …) whose format has an alpha channel to derive the mask from. */
+  /** Fragment alpha generates the coverage mask. Requires :count above 1, a (fragment …) stage, and a first (color-target …) whose format has an alpha channel to derive the mask from. */
   "alpha-to-coverage-enabled"?: boolean;
   /** Samples per pixel: 1 or 4; must match the attachment textures' sample-count. Absent defers to WebGPU's 1 — a (multisample …) carrying only :mask or :alpha-to-coverage-enabled is legal. */
   count?: U32 | CrossRef<"define">;
@@ -1330,11 +1330,11 @@ export interface Pngine_Attribute {
 }
 
 /** One color target: format plus optional (blend …) state and write mask. */
-export interface Pngine_Target {
-  $form: "target";
+export interface Pngine_ColorTarget {
+  $form: "color-target";
   $ns: "pngine";
   /**
-   * Format of the attachment this target renders to.
+   * Format of the attachment this color-target renders to.
    * @member preferred-canvas-format: Resolved at runtime to the platform's canvas format (bgra8unorm on macOS, rgba8unorm elsewhere).
    * @member bgra8unorm: 4×8-bit unorm, BGRA order; common canvas format.
    * @member rgba8unorm: 4×8-bit unorm; renderable, filterable, blendable.
@@ -1941,6 +1941,8 @@ export interface Pngine_PassGraph {
   $ns: "pngine";
   /** Passes and queues run each frame BEFORE the graph's own steps, in this order — they become the head of the emitted (frame …)'s :perform. */
   before?: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group">>;
+  /** The graph's passes whose intermediate a frame may put on the canvas through a generated `<pass>__blit` render pass. Absent, nothing is emitted. */
+  expose?: Array<Symbol_>;
   /** Makes this graph a (step-group …) of that name instead of the document's (frame …). A document with two graphs names both. */
   name?: Symbol_;
   $children?: Array<{ readonly $form: "pass" }>;
@@ -1953,7 +1955,7 @@ export interface Pngine_Stage {
   $ns: "pngine";
   name: Symbol_;
   /** Positional counts (not expressible in TS): depth-stencil-attachment: 0..1; depth-stencil: 0..1; primitive: 0..1 */
-  $children?: Array<{ readonly $form: "color-attachment" } | { $form: "target"; $ns?: string; "write-mask"?: U32 | Symbol_<"all">; $children?: Array<{ readonly $form: "blend" }>; } | { readonly $form: "depth-stencil-attachment" } | { readonly $form: "depth-stencil" } | { readonly $form: "primitive" } | { readonly $form: "bind-group" }>;
+  $children?: Array<{ readonly $form: "color-attachment" } | { $form: "color-target"; $ns?: string; "write-mask"?: U32 | Symbol_<"all">; $children?: Array<{ readonly $form: "blend" }>; } | { readonly $form: "depth-stencil-attachment" } | { readonly $form: "depth-stencil" } | { readonly $form: "primitive" } | { readonly $form: "bind-group" }>;
 }
 
 /** One thing a (draw-graph …) draws: its buffers, its vertex layout, one draw command, and an (in …) per stage it appears in. */
@@ -2047,7 +2049,7 @@ export type SjonPngine =
   | Pngine_Multisample
   | Pngine_VertexBuffer
   | Pngine_Attribute
-  | Pngine_Target
+  | Pngine_ColorTarget
   | Pngine_Blend
   | Pngine_Color
   | Pngine_Alpha

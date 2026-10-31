@@ -253,12 +253,21 @@ fn compress(gpa: Allocator, data: []const u8) ![]u8 {
 
     // Create compressor with zlib container
     // Use level 6 (default) - good balance of speed and compression
-    var compressor = flate.Compress.init(
+    //
+    // Heap-allocated for the same reason as `png.embed.compressDeflateRaw`:
+    // `flate.Compress` is ~230 KiB, and in the wasm compiler this frame and
+    // that embedder's are live at once, which overflowed the 1 MiB stack and
+    // trapped `compileToPng`. `init` is forced inline so the assignment below
+    // constructs into the heap pointer directly; an out-of-line call would
+    // still leave a compressor-sized temporary in this frame on wasm32.
+    const compressor = try gpa.create(flate.Compress);
+    defer gpa.destroy(compressor);
+    compressor.* = @call(.always_inline, flate.Compress.init, .{
         &output_writer,
         &window_buf,
         .zlib,
-        .level_6,
-    ) catch {
+        flate.Compress.Options.level_6,
+    }) catch {
         return error.CompressionFailed;
     };
 

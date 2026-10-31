@@ -22,7 +22,7 @@
 (sampler :name samp :mag-filter linear :min-filter linear)
 (render-pipeline :name pipe :layout auto
   (vertex :module code :entry vs)
-  (fragment :module code :entry fs (target :format preferred-canvas-format)))
+  (fragment :module code :entry fs (color-target :format preferred-canvas-format)))
 (bind-group :name g :layout pipe :group 0
   (entry :binding 0 :buffer buf)
   (entry :binding 1 :sampler samp))

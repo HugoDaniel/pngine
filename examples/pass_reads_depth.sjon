@@ -40,7 +40,7 @@ struct VSOut { @builtin(position) pos : vec4f, @location(0) tint : vec3f }
 
 (render-pipeline :name geoPipe :layout auto
   (vertex :module scene :entry vs)
-  (fragment :module scene :entry fs (target :format rgba8unorm))
+  (fragment :module scene :entry fs (color-target :format rgba8unorm))
   (depth-stencil :format depth32float :depth-write-enabled true :depth-compare less))
 
 (render-pass :name geo

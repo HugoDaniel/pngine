@@ -102,7 +102,7 @@ fn calculateLighting(normal: vec3f, viewDir: vec3f) -> vec3f {
 (render-pipeline :name pipeline :layout layout0Pl
   (vertex :module shaderMod :entry vertexMain)
   (fragment :module shaderMod :entry fragmentMain
-    (target :format bgra8unorm)))
+    (color-target :format bgra8unorm)))
 
 (render-pass :name mainPass
   (color-attachment :view context-current-texture :clear-value [0.1 0.1 0.15 1] :load-op clear :store-op store)

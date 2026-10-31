@@ -9,7 +9,9 @@
 //! | inspect | Bytecode inspection via MockGPU, optional WAMR deep analysis |
 //! | render | Create PNG with embedded bytecode (default command) |
 //! | embed | Embed PNGB bytecode into an existing PNG |
-//! | extract | Extract PNGB bytecode from a PNG or ZIP file |
+//! | extract | Extract PNGB bytecode from a PNG or ZIP file, or one payload by kind (PNG/FLAC) |
+//! | pack | Append payloads to a PNG or FLAC, one carrier per --add (02.C2/C3) |
+//! | ls | List the payloads a PNG or FLAC carries, one row each (02.C2/C3) |
 //! | bundle | Create a ZIP bundle with bytecode and optional assets |
 //! | list | List contents of a ZIP or PNG file |
 //!
@@ -136,6 +138,10 @@ pub fn run(gpa: Allocator, args: []const [:0]const u8, io: std.Io) !u8 {
         return embed_cmd.runEmbed(gpa, io, args[2..]);
     } else if (std.mem.eql(u8, command, "extract")) {
         return embed_cmd.runExtract(gpa, io, args[2..]);
+    } else if (std.mem.eql(u8, command, "pack")) {
+        return embed_cmd.runPack(gpa, io, args[2..]);
+    } else if (std.mem.eql(u8, command, "ls")) {
+        return embed_cmd.runLs(gpa, io, args[2..]);
     } else if (std.mem.eql(u8, command, "bundle")) {
         return bundle_cmd.runBundle(gpa, io, args[2..]);
     } else if (std.mem.eql(u8, command, "list")) {
@@ -172,6 +178,8 @@ fn printUsage() void {
         \\  render    Create PNG with bytecode (default)
         \\  embed     Embed bytecode into PNG
         \\  extract   Extract bytecode from PNG/ZIP
+        \\  pack      Append payloads to a PNG (--add KIND=path[,raw])
+        \\  ls        List the payloads a PNG carries
         \\  bundle    Create ZIP bundle
         \\  list      List contents of ZIP/PNG
         \\  diff      Pixel-compare two PNGs (tolerance model)

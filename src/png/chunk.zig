@@ -45,6 +45,12 @@ pub const ChunkType = struct {
     /// PNGine WGSL source chunk (ancillary, public, safe-to-copy)
     /// Contains deflate-compressed WGSL shader code for --html compression
     pub const pNGw = [4]u8{ 'p', 'N', 'G', 'w' };
+    /// PNGine envelope carrier chunk (ancillary, public, safe-to-copy; 02.C2).
+    /// One chunk per payload, body = envelope + bytes: the carrier-agnostic
+    /// payload header (src/payload/envelope.zig) so kinds without a legacy
+    /// letter ride the same PNG. The `N` uppercase follows the family's
+    /// public-bit convention rather than standing alone (02:204-206).
+    pub const pNGx = [4]u8{ 'p', 'N', 'G', 'x' };
 };
 
 /// A parsed PNG chunk (references original data, no allocation).

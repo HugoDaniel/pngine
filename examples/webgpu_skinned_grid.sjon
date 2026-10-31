@@ -147,7 +147,7 @@ fn fragmentMain(@location(0) weights : vec4f) -> @location(0) vec4f {
       (attribute :shader-location 1 :offset 8 :format float32x4)
       (attribute :shader-location 2 :offset 24 :format float32x4)))
   (fragment :module gridCode :entry fragmentMain
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology line-list))
 
 (bind-group :name paletteBG :layout palettePipe :group 0

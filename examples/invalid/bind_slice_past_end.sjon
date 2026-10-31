@@ -17,7 +17,7 @@
   :layout auto
   (vertex :module code :entry vs)
   (fragment :module code :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (bind-group :name g :layout pipe :group 0
   (entry :binding 0 :buffer colors :offset 384 :size 256))

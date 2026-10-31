@@ -29,7 +29,7 @@ fn fragMain() -> @location(0) vec4f {
   :layout auto
   (vertex :module code :entry vertexMain)
   (fragment :module code :entry fragMain
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-strip :strip-index-format uint32 :unclipped-depth true))
 
 (render-pass :name drawStrip

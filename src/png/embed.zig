@@ -29,6 +29,9 @@ const chunk = @import("chunk.zig");
 const createMinimalPng = @import("test_png.zig").createMinimalPng;
 const crc32 = @import("crc32.zig");
 const flate = std.compress.flate;
+/// The FROZEN v1 envelope (02.C1): what a `pNGx` chunk's data is made of
+/// (02.C2). Imported by module name — see src/png/extract.zig's note.
+const payload = @import("payload");
 
 /// pNGb chunk type identifier.
 pub const PNGB_CHUNK_TYPE = chunk.ChunkType.pNGb;
@@ -57,6 +60,10 @@ pub const Error = error{
     OutOfMemory,
     BytecodeTooSmall,
     CompressionFailed,
+    /// `packPng` only: more payloads than `MAX_EMBED_CHUNKS` (02:92-93).
+    TooManyPayloads,
+    /// `packPng` only: a kind tag byte outside printable ASCII (02:15).
+    InvalidKind,
 };
 
 /// How a chunk's payload is wrapped before it is written.
@@ -65,6 +72,11 @@ pub const ChunkEncoding = enum {
     versioned_deflate,
     /// `[version, payload]` — pNGm metadata JSON, stored uncompressed.
     versioned_raw,
+    /// `envelope + body` in a `pNGx` chunk (02.C2): the carrier-agnostic
+    /// payload header, compression named by the envelope's own flag bit
+    /// rather than a header byte. Pairs with `ChunkSpec.kind` and
+    /// `ChunkSpec.raw`.
+    envelope,
 };
 
 /// One chunk to insert before IEND.
@@ -75,12 +87,101 @@ pub const ChunkSpec = struct {
     payload: []const u8,
     encoding: ChunkEncoding,
     version: u8 = PNGB_VERSION,
+    /// `.envelope` only: the payload kind tag the envelope carries (02:15).
+    kind: [4]u8 = .{ 0, 0, 0, 0 },
+    /// Skip DEFLATE and store the body verbatim — the `,raw` of
+    /// `pngine pack --add KIND=path[,raw]` (02:107). Consulted by
+    /// `.versioned_deflate` (which then writes the compression bit clear)
+    /// and `.envelope` (flag bit 0 clear); `.versioned_raw` never compresses
+    /// (pNGm has no flags byte to clear).
+    raw: bool = false,
 };
 
-/// Upper bound on chunks per embed call. The public entry points use at most
-/// two (pNGm + pNGb); the array below is sized so a bounded loop can build
-/// them without a heap list.
-pub const MAX_EMBED_CHUNKS: usize = 4;
+/// One payload for `packPng` (02:90-95): the kind tag, its body, and how to
+/// store it. Kinds with legacy carriers keep them (PNGB→pNGb, PNGF→pNGf,
+/// SNTU→pNGa, META→pNGm — the museum promise, 02:77-83); every other kind
+/// rides a `pNGx` envelope chunk (02:85-87).
+pub const PackSpec = struct {
+    kind: [4]u8,
+    body: []const u8,
+    version: u8 = PNGB_VERSION,
+    /// `,raw`: store verbatim instead of DEFLATE (02:107).
+    raw: bool = false,
+};
+
+/// Pack `specs` into `png_data` as payloads before IEND, in order — the one
+/// writer behind the CLI's `pack` (02:107) and `render --audio` sugar: each
+/// spec becomes exactly one chunk, legacy-lettered where the kind has a
+/// legacy carrier, `pNGx`-enveloped otherwise.
+///
+/// Pre-conditions:
+/// - png_data starts with a valid PNG signature and contains IEND
+/// - 1 <= specs.len <= MAX_EMBED_CHUNKS
+/// - every kind is four printable ASCII bytes (02:15)
+///
+/// Post-conditions:
+/// - Returns a valid PNG with every spec present, original image data intact
+/// - Caller owns the returned slice
+pub fn packPng(
+    gpa: Allocator,
+    png_data: []const u8,
+    specs: []const PackSpec,
+) Error![]u8 {
+    std.debug.assert(specs.len >= 1);
+    if (specs.len > MAX_EMBED_CHUNKS) return Error.TooManyPayloads;
+
+    var packed_specs: [MAX_EMBED_CHUNKS]ChunkSpec = undefined;
+    for (specs, 0..) |s, i| {
+        if (legacyCarrier(s.kind)) |carrier| {
+            // "Writers therefore keep writing pNGb/pNGf/pNGa for
+            // PNGB/PNGF/SNTU" and pNGm for META — the museum promise, so a
+            // PNG that uses only legacy kinds still reads on old players
+            // (02:77-83).
+            packed_specs[i] = .{
+                .chunk_type = carrier.chunk_type,
+                .payload = s.body,
+                .encoding = carrier.encoding,
+                .version = s.version,
+                .raw = s.raw,
+            };
+        } else {
+            // "New kinds go in pNGx" (02:85-87): one chunk per payload,
+            // body = envelope + bytes.
+            packed_specs[i] = .{
+                .chunk_type = chunk.ChunkType.pNGx,
+                .payload = s.body,
+                .encoding = .envelope,
+                .version = s.version,
+                .kind = s.kind,
+                .raw = s.raw,
+            };
+        }
+    }
+
+    return embedChunks(gpa, png_data, packed_specs[0..specs.len]);
+}
+
+const LegacyCarrier = struct {
+    chunk_type: [4]u8,
+    encoding: ChunkEncoding,
+};
+
+/// The legacy carrier a kind must keep using, if it has one (02:79-83):
+/// PNGB→pNGb, PNGF→pNGf, SNTU→pNGa, all `[version][flags][payload]`, and
+/// META→pNGm, `[version][payload]` — the one irregular legacy header (02:48).
+fn legacyCarrier(kind: [4]u8) ?LegacyCarrier {
+    if (std.mem.eql(u8, &kind, "PNGB")) return .{ .chunk_type = PNGB_CHUNK_TYPE, .encoding = .versioned_deflate };
+    if (std.mem.eql(u8, &kind, "PNGF")) return .{ .chunk_type = PNGF_CHUNK_TYPE, .encoding = .versioned_deflate };
+    if (std.mem.eql(u8, &kind, "SNTU")) return .{ .chunk_type = PNGA_CHUNK_TYPE, .encoding = .versioned_deflate };
+    if (std.mem.eql(u8, &kind, "META")) return .{ .chunk_type = PNGM_CHUNK_TYPE, .encoding = .versioned_raw };
+    return null;
+}
+
+/// Upper bound on chunks per embed call. The public entry points used at
+/// most two (pNGm + pNGb); `packPng` takes a whole payload list, so the
+/// bounded array behind it grows with the list it must accept (02.C2 raised
+/// it from 4 to 16 — it only sizes a stack array, and no test pins it).
+pub const MAX_EMBED_CHUNKS: usize = 16;
 
 /// Reject anything that is not a PNG.
 ///
@@ -97,6 +198,18 @@ fn checkPngSignature(png_data: []const u8) Error!void {
 fn encodeChunkData(gpa: Allocator, spec: ChunkSpec) Error![]u8 {
     switch (spec.encoding) {
         .versioned_deflate => {
+            if (spec.raw) {
+                // `,raw` on a legacy letter (02:107): the same 2-byte header
+                // with the compression bit clear — a shape the letter has
+                // always allowed (`extract` reads flags-clear chunks).
+                const data = gpa.alloc(u8, 2 + spec.payload.len) catch {
+                    return Error.OutOfMemory;
+                };
+                data[0] = spec.version;
+                data[1] = 0;
+                @memcpy(data[2..], spec.payload);
+                return data;
+            }
             const compressed = compressDeflateRaw(gpa, spec.payload) catch {
                 return Error.CompressionFailed;
             };
@@ -117,6 +230,25 @@ fn encodeChunkData(gpa: Allocator, spec: ChunkSpec) Error![]u8 {
             data[0] = spec.version;
             @memcpy(data[1..], spec.payload);
             return data;
+        },
+        .envelope => {
+            // A pNGx chunk's data IS the envelope record (02:85-86): kind,
+            // version, flags — bit 0 saying raw DEFLATE — zero reserved, then
+            // the stored body (02:12-26). DEFLATE by default, `,raw` to skip
+            // (02:107).
+            const stored: []const u8 = if (spec.raw)
+                spec.payload
+            else
+                compressDeflateRaw(gpa, spec.payload) catch return Error.CompressionFailed;
+            defer if (!spec.raw) gpa.free(stored);
+            const flags: u8 = if (spec.raw) 0 else FLAG_COMPRESSED;
+
+            return payload.envelope.encode(gpa, spec.kind, spec.version, flags, stored) catch |err| switch (err) {
+                error.OutOfMemory => Error.OutOfMemory,
+                // flags are constructed here from the two v1 bits alone
+                error.ReservedFlagBit => unreachable,
+                error.UnprintableTag => Error.InvalidKind,
+            };
         },
     }
 }
@@ -367,9 +499,14 @@ fn findIEND(png_data: []const u8) ?usize {
 ///
 /// Uses real LZ77+Huffman compression for significant size reduction.
 /// Output is raw DEFLATE compatible with browser's DecompressionStream('deflate-raw').
+/// Public since 02.C3: the FLAC writer compresses with the same function so
+/// both containers store the same bytes for the same body (02:107).
 ///
 /// Pre-conditions:
-/// - data.len > 0
+/// - data may be empty: the empty payload compresses to the fixed two-byte
+///   stream `03 00` (valid raw DEFLATE of zero bytes, the same stream
+///   decompressDeflateRaw's comment names), so an empty payload is legal on
+///   the default spelling (02:12, 02:107)
 ///
 /// Post-conditions:
 /// - Returns valid raw DEFLATE stream with len > 0
@@ -382,9 +519,16 @@ pub fn compressedCapacity(len: usize) usize {
     return len + len / 64 + 1024;
 }
 
-fn compressDeflateRaw(gpa: Allocator, data: []const u8) ![]u8 {
-    // Pre-condition: data is not empty
-    std.debug.assert(data.len > 0);
+pub fn compressDeflateRaw(gpa: Allocator, data: []const u8) ![]u8 {
+    // The empty input: the compressor itself never sees zero bytes, and the
+    // fixed stream below is what every reader (std's inflater included)
+    // inflates back to nothing. Returned as an owned slice like any other.
+    if (data.len == 0) {
+        const empty = try gpa.alloc(u8, 2);
+        empty[0] = 0x03;
+        empty[1] = 0x00;
+        return empty;
+    }
 
     // Allocate output buffer larger than input because incompressible data
     // expands. Measured against std's flate at level 6: +1,738 B for 1 MiB of
@@ -404,12 +548,22 @@ fn compressDeflateRaw(gpa: Allocator, data: []const u8) ![]u8 {
 
     // Raw format omits zlib header/footer for browser DecompressionStream compatibility.
     // Level 6 balances compression ratio (~2-3x) with speed (<100ms for 100KB).
-    var compressor = flate.Compress.init(
+    //
+    // The compressor state lives on the HEAP, not the stack: `flate.Compress`
+    // is ~230 KiB, and in the wasm compiler two live compressor frames (this
+    // one and the IDAT encoder's) overflowed the 1 MiB stack once LLVM stopped
+    // overlapping them, trapping `compileToPng` with
+    // `memory access out of bounds`. `init` is forced inline so the assignment
+    // below constructs into the heap pointer directly; an out-of-line call
+    // would still leave a compressor-sized temporary in this frame on wasm32.
+    const compressor = try gpa.create(flate.Compress);
+    defer gpa.destroy(compressor);
+    compressor.* = @call(.always_inline, flate.Compress.init, .{
         &output_writer,
         &window_buf,
         .raw,
-        .level_6,
-    ) catch {
+        flate.Compress.Options.level_6,
+    }) catch {
         return error.CompressionFailed;
     };
 
@@ -439,3 +593,27 @@ fn compressDeflateRaw(gpa: Allocator, data: []const u8) ![]u8 {
 // ============================================================================
 // Tests
 // ============================================================================
+
+// ============================================================================
+// 02.C2 packPng tests — goldens authored from the spec, never from this
+// encoder (expansible-player docs/02-envelope-and-containers.md @ a7220d5;
+// citations like 02:85-87 name its lines).
+// ============================================================================
+
+/// Parse `png` and return the data of every chunk whose type equals `want`,
+/// in file order, each duplicated (chunk data is a view into `png`). A
+/// test-side reader so the goldens below assert against the CHUNK LAYER,
+/// not against packPng's own inventory.
+fn chunkDataOf(gpa: Allocator, png: []const u8, want: [4]u8) ![][]const u8 {
+    var found: std.ArrayList([]const u8) = .empty;
+    errdefer found.deinit(gpa);
+    var iter = try chunk.parseChunks(png);
+    while (try iter.next()) |c| {
+        if (std.mem.eql(u8, &c.chunk_type, &want)) {
+            const dup = try gpa.dupe(u8, c.data);
+            errdefer gpa.free(dup);
+            try found.append(gpa, dup);
+        }
+    }
+    return found.toOwnedSlice(gpa);
+}

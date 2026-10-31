@@ -103,7 +103,7 @@
   :layout auto
   (vertex :module shader :entry vs)
   (fragment :module shader :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (bind-group :name uniformsBindGroup :layout pipeline :group 0
   (entry :binding 0 :buffer uniforms))

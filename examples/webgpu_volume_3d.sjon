@@ -163,7 +163,7 @@ fn fragment_main(
   :layout auto
   (vertex :module volCode :entry vertex_main)
   (fragment :module volCode :entry fragment_main
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list :cull-mode back)
   (multisample :count 4))
 

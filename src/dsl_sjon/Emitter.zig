@@ -591,7 +591,7 @@ const TargetMeta = struct { fmt: values.TextureFormat, spelling: []const u8 };
 /// Recorded by `recordRenderPipelineMeta` at the END of `emitRenderPipeline` (keyed
 /// by pipeline id), gated on `validate_shaders`; a compute pipeline records nothing
 /// (no entry → the join skips). `targets_known == false` marks a fragment stage
-/// with zero `(target …)` children → the count/format checks skip; validation
+/// with zero `(color-target …)` children → the count/format checks skip; validation
 /// (`fragment-section` `:min 1`, 02 R3) keeps a document from getting there, and
 /// `pngine/pass-v1` spells its canvas target out. A pipeline with NO fragment
 /// stage is depth-only (known M = 0). Author spellings are borrowed from the
@@ -1471,7 +1471,7 @@ pub const Emitter = struct {
     /// Refuse a slot-only form written at the document root (audit 09 C3).
     ///
     /// SJON has no root restriction — a document is "a flat list of roots" —
-    /// so `(draw …)`, `(target …)`, `(entry …)`, `(cube …)`, `(pass …)` all
+    /// so `(draw …)`, `(color-target …)`, `(entry …)`, `(cube …)`, `(pass …)` all
     /// validate at the root, and the phase walk (keyed by head) simply never
     /// visited them: a stray draw vanished, and a `(pass …)` outside its
     /// `(pass-graph …)` compiled to a payload with no bytecode at all. The
@@ -3354,7 +3354,7 @@ pub const Emitter = struct {
         const DeclaredTarget = struct { format: []const u8, node: NodeIndex };
         var targets = std.ArrayList(DeclaredTarget).empty;
         defer targets.deinit(self.gpa);
-        var t_it = r.childrenWithHead(frag, "target");
+        var t_it = r.childrenWithHead(frag, "color-target");
         while (t_it.next()) |t| {
             targets.append(self.gpa, .{
                 .format = r.symbol(t, "format") orelse "preferred-canvas-format",
@@ -3365,7 +3365,7 @@ pub const Emitter = struct {
         // No declared color targets → the target set is IMPLICIT: the target list
         // isn't knowable at compile time, so SKIP the whole check (never a false
         // reject). Unreachable from a validated document since `fragment-section`
-        // carries `(head :name target :min 1)`; kept because this is a check, and
+        // carries `(head :name color-target :min 1)`; kept because this is a check, and
         // a check that assumes its input has been checked is not one.
         if (targets.items.len == 0) return;
 
@@ -4330,7 +4330,7 @@ pub const Emitter = struct {
 
         if (r.child(form, "fragment")) |frag| {
             var total: u16 = 0;
-            var t_it = r.childrenWithHead(frag, "target");
+            var t_it = r.childrenWithHead(frag, "color-target");
             while (t_it.next()) |t| {
                 // `:format` is required (spec/09 B); the `orelse` is a guard, not a default.
                 const spelling = r.symbol(t, "format") orelse "preferred-canvas-format";
@@ -6498,8 +6498,8 @@ pub const Emitter = struct {
             self.diagnose(.sjon, self.locate(r, ms), "", "render-pipeline '{s}' enables :alpha-to-coverage-enabled with no (fragment …) — the coverage mask is the fragment's alpha, and there is no fragment stage to produce one", .{name});
             return error.ValidationError;
         };
-        var t_it = r.childrenWithHead(frag, "target");
-        const first = t_it.next() orelse return; // no target: `(head :name target :min 1)` says it first
+        var t_it = r.childrenWithHead(frag, "color-target");
+        const first = t_it.next() orelse return; // no target: `(head :name color-target :min 1)` says it first
         const fmt_sym = r.symbol(first, "format") orelse "preferred-canvas-format";
         const fmt = values.mapTextureFormat(fmt_sym);
         if (fmt == .invalid) return; // unknown spelling → its own diagnostic; never a false reject
@@ -6519,7 +6519,7 @@ pub const Emitter = struct {
     /// which the runtime requests opportunistically, so rejecting them here would
     /// refuse documents that render on the adapters that have it.
     fn checkBlendableTargets(self: *Emitter, r: *const Reader, frag: NodeIndex, name: []const u8) Error!void {
-        var t_it = r.childrenWithHead(frag, "target");
+        var t_it = r.childrenWithHead(frag, "color-target");
         var idx: u8 = 0;
         while (t_it.next()) |t| : (idx += 1) {
             if (r.child(t, "blend") == null) continue;
@@ -8697,15 +8697,15 @@ pub const Emitter = struct {
         // over with its own guess: gpu.js substituted
         // `[{format: preferredCanvasFormat}]`, native substituted BGRA8Unorm. The
         // pipeline "worked" while nobody looked at the attachment it wrote to.
-        // `fragment-section`'s `(head :name target :min 1)` now says it, so this
+        // `fragment-section`'s `(head :name color-target :min 1)` now says it, so this
         // is the unreachable half of a belt-and-braces pair — kept because a
         // lowering hook builds these forms too.
-        var t_it = r.childrenWithHead(frag, "target");
+        var t_it = r.childrenWithHead(frag, "color-target");
         if (t_it.next() == null) {
-            self.diagnose(.sjon, self.locate(r, frag), "", "(fragment …) declares no (target …) — a fragment stage must name the color targets it writes", .{});
+            self.diagnose(.sjon, self.locate(r, frag), "", "(fragment …) declares no (color-target …) — a fragment stage must name the color targets it writes", .{});
             return error.ValidationError;
         }
-        t_it = r.childrenWithHead(frag, "target");
+        t_it = r.childrenWithHead(frag, "color-target");
         try json.appendSlice(self.gpa, ",\"targets\":[");
         var first = true;
         while (t_it.next()) |c| {

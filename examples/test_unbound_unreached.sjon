@@ -27,7 +27,7 @@ struct U { m: mat4x4f }
 (buffer :name camBuf :size 64 :usage [uniform copy-dst])
 (render-pipeline :name depthPipe :layout auto
   (vertex :module code :entry depthVs)
-  (fragment :module code :entry depthOnlyFs (target :format preferred-canvas-format)))
+  (fragment :module code :entry depthOnlyFs (color-target :format preferred-canvas-format)))
 (bind-group :name g :layout depthPipe :group 0
   (entry :binding 0 :buffer camBuf))
 (queue :name writeCam

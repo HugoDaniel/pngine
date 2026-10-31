@@ -67,7 +67,7 @@ fn fsMain(@location(0) uv : vec2f) -> @location(0) vec4f {
   :layout auto
   (vertex :module showCode :entry vsMain)
   (fragment :module showCode :entry fsMain
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (bind-group :name paintBind :layout paintPipe :group 0
   (entry :binding 0 :texture-view facesView))

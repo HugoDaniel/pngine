@@ -16,6 +16,12 @@ pub fn build(b: *std.Build) void {
     // Shared types module (zero dependencies, used by multiple modules)
     const types_module = stdModule(b, target, optimize, "src/types/main.zig", &.{});
 
+    // Payload module: the carrier-agnostic envelope + kind registry (02.C1).
+    // Zero deps, but now imported BY the png module (02.C2's walkPng/packPng
+    // go through the frozen envelope), so one instance is shared by lib,
+    // png tests and anything else that reaches src/png/.
+    const payload_module = stdModule(b, target, optimize, "src/payload/main.zig", &.{});
+
     // Bytecode module (depends on types, used by executor)
     const bytecode_module = stdModule(b, target, optimize, "src/bytecode/standalone.zig", &.{
         .{ .name = "types", .module = types_module },
@@ -65,6 +71,9 @@ pub fn build(b: *std.Build) void {
     lib_module.addImport("bytecode", bytecode_module);
     lib_module.addImport("reflect", reflect_module);
     lib_module.addImport("executor", lib_executor_module);
+    // The envelope behind pNGx (02.C2): src/png/{embed,extract}.zig import it
+    // by module name — a relative hop would leave src/png's module root.
+    lib_module.addImport("payload", payload_module);
 
     // Build options for GPU module (zgpu availability)
     const gpu_build_options = b.addOptions();
@@ -75,9 +84,10 @@ pub fn build(b: *std.Build) void {
     // loop). Defaults to true on a macOS host build when the vendored static lib
     // is present. `vendor/` is gitignored, so we DETECT the lib rather than
     // assume it. `zig build npm` forces this off (cross targets have no libs).
+    const vendored_wgpu_static_lib = "vendor/wgpu-native/lib/libwgpu_native.a";
     const vendored_wgpu_present = if (b.build_root.handle.access(
         b.graph.io,
-        "vendor/wgpu-native/lib/libwgpu_native.a",
+        vendored_wgpu_static_lib,
         .{},
     )) |_| true else |_| false;
     const gpu_native_default = target.result.os.tag == .macos and vendored_wgpu_present;
@@ -89,22 +99,44 @@ pub fn build(b: *std.Build) void {
     gpu_build_options.addOption(bool, "has_wgpu_native", has_wgpu_native);
     lib_module.addImport("gpu_build_options", gpu_build_options.createModule());
 
+    // Whether THIS build links the vendored backend — the one boolean the link
+    // settings below and the static-link guard (at the CLI, ~500 lines down)
+    // both key off, so the guard can never be wired for a configuration the
+    // link is not, nor left unwired for one it is.
+    const wgpu_link_active = has_wgpu_native and vendored_wgpu_present;
+
     // When the native GPU backend is on, attach its link settings to lib_module.
     // In Zig 0.16 module-level link settings propagate to every artifact whose
     // graph includes the module, so this single attachment covers the CLI exe
     // (`zig build`) AND the lib tests (`zig build test`/`test-fast`), both of
     // which import `pngine`. test-standalone uses per-module roots (not
     // lib_module) so it stays GPU-free. Template mirrors the `native` step below.
+    //
+    // The link is STATIC BY CONSTRUCTION: `addObjectFile` hands the linker the
+    // exact `vendored_wgpu_static_lib` archive probed above — one expression,
+    // one decision. It must NOT be `linkSystemLibrary("wgpu_native", …)`: that
+    // asks for a by-name `-l` search, and wgpu-native's macOS zip vendors a
+    // libwgpu_native.dylib NEXT TO the archive which a dylib-first search
+    // (ld64's default; Zig's linker matches) prefers — shipping an
+    // `@rpath/libwgpu_native.dylib` dependency that only resolves against the
+    // build host's vendor/ path and kills the binary on every other machine
+    // (Library not loaded: @rpath/libwgpu_native.dylib). The same decision is
+    // made observable by tools/assert_wgpu_static.zig, which fails the default
+    // install if the produced CLI ever carries a dynamic wgpu_native entry.
     if (has_wgpu_native) {
         if (vendored_wgpu_present) {
             lib_module.addIncludePath(b.path("vendor/wgpu-native/include"));
-            lib_module.addLibraryPath(b.path("vendor/wgpu-native/lib"));
-            lib_module.linkSystemLibrary("wgpu_native", .{});
+            lib_module.addObjectFile(b.path(vendored_wgpu_static_lib));
             lib_module.link_libc = true;
             if (target.result.os.tag == .macos) {
                 lib_module.linkFramework("Metal", .{});
                 lib_module.linkFramework("MetalKit", .{});
                 lib_module.linkFramework("QuartzCore", .{});
+                // The archive's members reference Foundation symbols
+                // (NSKeyValueChangeNewKey among them) that the dylib satisfied
+                // internally; a static link must name the framework itself or
+                // the darwin link dies on undefined symbols.
+                lib_module.linkFramework("Foundation", .{});
             }
         } else {
             // Only reachable via an explicit `-Dgpu-native=true` with no lib.
@@ -360,6 +392,7 @@ pub fn build(b: *std.Build) void {
         const is_aarch64 = target.result.cpu.arch == .aarch64;
         const is_x86_64 = target.result.cpu.arch == .x86_64;
         const is_darwin = target.result.os.tag == .macos;
+        const is_openbsd = target.result.os.tag == .openbsd;
 
         // Core interpreter sources
         const interp_sources: []const []const u8 = &.{
@@ -447,6 +480,8 @@ pub fn build(b: *std.Build) void {
         else
             "-DBUILD_TARGET=\"X86_64\""; // Fallback
 
+        // WAMR platform layer: darwin/ or openbsd/ (the fork at ../wasm-micro-runtime adds OpenBSD)
+        const platform_define: []const u8 = if (is_openbsd) "-DBH_PLATFORM_OPENBSD" else "-DBH_PLATFORM_DARWIN";
         // Common compile flags for all WAMR sources
         // Note: -fno-sanitize=alignment disables alignment sanitizer which catches
         // misaligned accesses in WAMR's internal table instantiation code
@@ -457,10 +492,11 @@ pub fn build(b: *std.Build) void {
             "-DWASM_ENABLE_FAST_INTERP=0", // Classic interpreter
             "-DWASM_ENABLE_AOT=1",
             "-DWASM_ENABLE_BULK_MEMORY=1", // Required for AOT modules
+            "-DWASM_ENABLE_BULK_MEMORY_OPT=1", // WAMR 2.4: its CMake pairs this with BULK_MEMORY; the interpreter assumes it
             "-DWASM_ENABLE_REF_TYPES=1", // Required for Zig-produced WASM
             "-DBH_MALLOC=wasm_runtime_malloc",
             "-DBH_FREE=wasm_runtime_free",
-            "-DBH_PLATFORM_DARWIN", // For macOS
+            platform_define,
             build_target_flag,
             build_target_str, // String literal for get_current_target()
         };
@@ -517,6 +553,12 @@ pub fn build(b: *std.Build) void {
                 .files = &.{"core/shared/platform/darwin/platform_init.c"},
                 .flags = wamr_common_flags,
             });
+        } else if (is_openbsd) {
+            wamr_module.addCSourceFiles(.{
+                .root = dep.path("."),
+                .files = &.{"core/shared/platform/openbsd/platform_init.c"},
+                .flags = wamr_common_flags,
+            });
         }
 
         // Architecture-specific AOT relocation
@@ -548,6 +590,8 @@ pub fn build(b: *std.Build) void {
         wamr_module.addIncludePath(dep.path("core/shared/platform/common/libc-util"));
         if (is_darwin) {
             wamr_module.addIncludePath(dep.path("core/shared/platform/darwin"));
+        } else if (is_openbsd) {
+            wamr_module.addIncludePath(dep.path("core/shared/platform/openbsd"));
         }
 
         const lib = b.addLibrary(.{
@@ -582,6 +626,21 @@ pub fn build(b: *std.Build) void {
     });
 
     b.installArtifact(cli);
+
+    // Static-link guard for the wgpu-native decision above (`wgpu_link_active`):
+    // whenever the vendored backend is linked, the built CLI must carry NO
+    // dynamic wgpu_native dependency — the shipped defect was an
+    // `@rpath/libwgpu_native.dylib` entry that only resolved on the build host.
+    // On the default install step, like the variant/budget guards, so the
+    // `zig build` that links the backend cannot skip it. The guard takes the
+    // CLI as its file arg, so it runs after the link it judges.
+    if (wgpu_link_active) {
+        const guard_mod = stdModule(b, target, optimize, "tools/assert_wgpu_static.zig", &.{});
+        const guard_exe = b.addExecutable(.{ .name = "assert-wgpu-static", .root_module = guard_mod });
+        const run_wgpu_guard = b.addRunArtifact(guard_exe);
+        run_wgpu_guard.addArtifactArg(cli);
+        b.getInstallStep().dependOn(&run_wgpu_guard.step);
+    }
 
     // Run step for CLI
     const run_cmd = b.addRunArtifact(cli);
@@ -648,10 +707,18 @@ pub fn build(b: *std.Build) void {
     const types_test_mod = stdModule(b, target, optimize, "src/types/main.zig", &.{});
     addStandaloneTest(b, standalone_step, types_test_step, "types", types_test_mod);
 
-    // PNG module (encoding/embedding)
+    // PNG module (encoding/embedding). Imports the payload module: walkPng
+    // feeds the frozen envelope, packPng writes it (02.C2).
     const png_test_step = b.step("test-png", "Run PNG module tests");
-    const png_test_mod = stdModule(b, target, optimize, "src/png/main.zig", &.{});
+    const png_test_mod = stdModule(b, target, optimize, "src/png/main.zig", &.{
+        .{ .name = "payload", .module = payload_module },
+    });
     addStandaloneTest(b, standalone_step, png_test_step, "png", png_test_mod);
+
+    // Payload module (the envelope + kind registry, 02.C1). Zero deps, so it
+    // roots directly like png/types.
+    const payload_step = b.step("test-payload", "Run payload envelope tests (02.C1)");
+    addStandaloneTest(b, standalone_step, payload_step, "payload", payload_module);
 
     // (The legacy test-dsl-frontend and test-dsl-backend step blocks were
     // deleted in Phase 5 B3 along with src/dsl/.)
@@ -961,7 +1028,7 @@ pub fn build(b: *std.Build) void {
     const sjon_invalid_mod = stdModule(b, target, optimize, "tests/zig/sjon_invalid.zig", &.{
         .{ .name = "dsl_sjon", .module = sjon_test_mod },
     });
-    inline for (.{ "bad_wgsl_syntax", "missing_entry_point", "buffer_too_small", "missing_bind_group", "unaligned_uniform", "bad_scissor_rect", "uniform_too_small_for_struct", "missing_uniform_bind", "address_space_mismatch", "workgroup_too_large", "bind_kind_mismatch", "vertex_location_unbound", "texture_sample_type_mismatch", "sampler_comparison_mismatch", "vertex_format_mismatch", "fragment_output_type_mismatch", "fragment_output_unbound", "pass_attachment_count_mismatch", "pass_attachment_format_mismatch", "pass_depth_missing_in_pipeline", "pass_depth_missing_in_pass", "pass_depth_format_mismatch", "pass_resolve_format_mismatch", "pass_sample_count_mismatch", "storage_texture_format_mismatch", "too_many_passes", "too_many_bundles", "sampler_anisotropy_out_of_range", "texture_dimension_numeric", "texture_view_dimension_not_a_member", "pipeline_layout_dangling_bgl", "primitive_strip_index_format", "workgroup_512_no_limits", "bind_offset_without_buffer", "bind_slice_past_end", "bind_offset_at_end", "bundle_ref_lowered", "too_many_wasm_args", "unknown_wasm_arg", "pass_mixed_stages", "pass_no_entry_point", "pass_graph_empty", "pass_too_many_entries", "init_workgroups_unresolved", "override_no_default", "override_no_default_compute", "constant_unknown_override", "constant_type_mismatch", "constant_conflict", "pool_overflow", "pool_expression_overflow", "shape_sphere_zero", "shape_cone_bomb", "define_overflow", "pass_shader_name_collision", "fragment_no_targets", "stage_no_module", "depth_stencil_no_format", "texture_no_size", "buffer_no_size", "pipeline_no_layout", "compute_stage_no_module", "bundle_no_color_formats", "attachment_no_load_op", "pipeline_two_vertex_stages", "blend_missing_alpha", "pipeline_name_shared_across_kinds", "define_ref_typo", "write_buffer_offset_unaligned", "bgl_entry_two_resources", "bgl_entry_no_resource", "data_two_generators", "dup_name_cross_kind", "reserved_name_builtin", "copy_no_destination", "compute_pass_no_dispatch", "dispatch_no_workgroups", "bundle_no_draw", "write_mask_not_a_member", "pipeline_two_primitive", "depth_stencil_two_stencil_front", "strip_index_format_on_list_topology", "strip_topology_indexed_draw", "clear_value_with_load_op", "depth_clear_without_value", "depth_attachment_no_store_op", "alpha_to_coverage_single_sample", "render_pass_no_attachments", "occlusion_query_no_set", "anisotropy_without_linear_filters", "map_read_extra_usage", "wasm_data_size_unaligned", "wasm_gen_memory_name", "wasm_data_missing_file", "data_file_missing", "data_bytes_and_float32", "data_bytes_both_sources", "data_bytes_bad_base64", "data_bytes_file_missing", "data_bytes_empty", "depth_stencil_colour_format", "depth_write_on_stencil_only_format", "stencil_state_on_depth_only_format", "depth_format_no_write_enabled", "depth_compare_missing_with_write", "depth_bias_on_line_topology", "blend_on_integer_target", "alpha_to_coverage_no_alpha_target", "alpha_to_coverage_no_fragment", "depth_ops_on_stencil_only_attachment", "stencil_ops_missing_on_combined_attachment", "stencil_ops_on_depth_only_attachment", "msaa_texture_mipped", "msaa_texture_not_attachment", "msaa_texture_sample_count_two", "volume_texture_multisampled", "attachment_texture_1d", "copy_source_without_copy_src", "copy_destination_without_copy_dst", "copy_past_end_of_buffer", "write_buffer_target_without_copy_dst", "copy_texture_source_without_copy_src", "bundle_color_format_is_depth", "bundle_depth_format_is_colour", "bundle_pipeline_format_mismatch", "bundle_pipeline_sample_count_mismatch", "bundle_pipeline_depth_mismatch", "bundle_pass_format_mismatch", "bundle_pass_attachment_count", "bundle_pass_depth_missing", "bundle_pass_sample_count_mismatch", "define_ref_fractional_in_count", "define_cycle", "expression_negative", "count_expression_overflow", "stray_command_at_root", "pass_outside_pass_graph", "bundle_no_pipeline", "pass_no_code", "pass_feedback_on_last", "pass_format_on_canvas_pass", "pass_format_depth", "pass_format_on_compute", "pass_format_unfilterable", "pass_reads_unused", "pass_reads_no_texture_binding", "pass_reads_multisampled", "pass_reads_volume", "pass_reads_array_layers", "pass_reads_stencil", "pass_reads_depth_sampled", "pass_reads_name_collision", "pass_scale_on_compute", "pass_scale_on_canvas_pass", "texture_scale_without_canvas", "texture_scale_narrows_to_zero", "pass_graph_second_frame", "render_pass_draw_no_pipeline", "draw_indirect_offset_unaligned", "query_set_count_over_max", "expression_unknown_constant", "define_unknown_constant", "pipeline_no_vertex", "bind_group_index_define_overflow", "binding_expression_overflow", "anisotropy_define_overflow", "limits_negative_expression", "texture_depth_define_zero", "mip_level_literal_overflow", "origin_define_overflow", "pool_offset_define_overflow", "query_count_define_overflow", "pool_offset_past_pool", "wgsl_cycle", "wgsl_entry_in_fragment", "wgsl_both_code_and_file", "wgsl_neither_code_nor_file", "wgsl_dangling_import", "wgsl_missing_hole", "wgsl_binding_in_pass_fragment", "wgsl_broken_fragment_located", "wgsl_missing_file", "wgsl_escapes_dir", "unbound_binding_reached_by_pipeline", "prune_unused_on_explicit_layout", "prune_unused_empties_group", "bind_kind_mismatch_scoped", "derived_group_prune_unused_redundant", "derived_group_explicit_pipeline_layout", "derived_group_empties_below_reach", "derived_group_omitted_in_bundle", "draw_graph_attachment_unknown_texture", "draw_graph_duplicate_stage", "draw_graph_fragment_without_color", "draw_graph_geometry_no_in", "draw_graph_group_index_gap", "draw_graph_group_layout", "draw_graph_group_prune_unused", "draw_graph_multisampled_attachment", "draw_graph_name_collision", "draw_graph_no_draw", "draw_graph_no_geometry", "draw_graph_no_stage", "draw_graph_second_frame", "draw_graph_stage_no_attachment", "draw_graph_target_count", "draw_graph_stage_unused", "draw_graph_two_draws", "graph_named_no_frame", "graph_named_before", "graph_two_unnamed", "step_group_cycle", "draw_graph_unknown_stage", "draw_graph_with_pass_graph", "draw_graph_sample_count_overflow", "draw_graph_group_define_ref", "bind_group_entries_over_255", "wgsl_entry_in_file_fragment", "wasm_data_length_over_budget", "write_buffer_frame_inputs_too_small", "bind_group_pool_over_native_cap", "render_pass_too_many_attachments" }) |name| {
+    inline for (.{ "bad_wgsl_syntax", "missing_entry_point", "buffer_too_small", "missing_bind_group", "unaligned_uniform", "bad_scissor_rect", "uniform_too_small_for_struct", "missing_uniform_bind", "address_space_mismatch", "workgroup_too_large", "bind_kind_mismatch", "vertex_location_unbound", "texture_sample_type_mismatch", "sampler_comparison_mismatch", "vertex_format_mismatch", "fragment_output_type_mismatch", "fragment_output_unbound", "pass_attachment_count_mismatch", "pass_attachment_format_mismatch", "pass_depth_missing_in_pipeline", "pass_depth_missing_in_pass", "pass_depth_format_mismatch", "pass_resolve_format_mismatch", "pass_sample_count_mismatch", "storage_texture_format_mismatch", "too_many_passes", "too_many_bundles", "sampler_anisotropy_out_of_range", "texture_dimension_numeric", "texture_view_dimension_not_a_member", "pipeline_layout_dangling_bgl", "primitive_strip_index_format", "workgroup_512_no_limits", "bind_offset_without_buffer", "bind_slice_past_end", "bind_offset_at_end", "bundle_ref_lowered", "too_many_wasm_args", "unknown_wasm_arg", "pass_mixed_stages", "pass_no_entry_point", "pass_graph_empty", "pass_too_many_entries", "init_workgroups_unresolved", "override_no_default", "override_no_default_compute", "constant_unknown_override", "constant_type_mismatch", "constant_conflict", "pool_overflow", "pool_expression_overflow", "shape_sphere_zero", "shape_cone_bomb", "define_overflow", "pass_shader_name_collision", "fragment_no_targets", "stage_no_module", "depth_stencil_no_format", "texture_no_size", "buffer_no_size", "pipeline_no_layout", "compute_stage_no_module", "bundle_no_color_formats", "attachment_no_load_op", "pipeline_two_vertex_stages", "blend_missing_alpha", "pipeline_name_shared_across_kinds", "define_ref_typo", "write_buffer_offset_unaligned", "bgl_entry_two_resources", "bgl_entry_no_resource", "data_two_generators", "dup_name_cross_kind", "reserved_name_builtin", "copy_no_destination", "compute_pass_no_dispatch", "dispatch_no_workgroups", "bundle_no_draw", "write_mask_not_a_member", "pipeline_two_primitive", "depth_stencil_two_stencil_front", "strip_index_format_on_list_topology", "strip_topology_indexed_draw", "clear_value_with_load_op", "depth_clear_without_value", "depth_attachment_no_store_op", "alpha_to_coverage_single_sample", "render_pass_no_attachments", "occlusion_query_no_set", "anisotropy_without_linear_filters", "map_read_extra_usage", "wasm_data_size_unaligned", "wasm_gen_memory_name", "wasm_data_missing_file", "data_file_missing", "data_bytes_and_float32", "data_bytes_both_sources", "data_bytes_bad_base64", "data_bytes_file_missing", "data_bytes_empty", "depth_stencil_colour_format", "depth_write_on_stencil_only_format", "stencil_state_on_depth_only_format", "depth_format_no_write_enabled", "depth_compare_missing_with_write", "depth_bias_on_line_topology", "blend_on_integer_target", "alpha_to_coverage_no_alpha_target", "alpha_to_coverage_no_fragment", "depth_ops_on_stencil_only_attachment", "stencil_ops_missing_on_combined_attachment", "stencil_ops_on_depth_only_attachment", "msaa_texture_mipped", "msaa_texture_not_attachment", "msaa_texture_sample_count_two", "volume_texture_multisampled", "attachment_texture_1d", "copy_source_without_copy_src", "copy_destination_without_copy_dst", "copy_past_end_of_buffer", "write_buffer_target_without_copy_dst", "copy_texture_source_without_copy_src", "bundle_color_format_is_depth", "bundle_depth_format_is_colour", "bundle_pipeline_format_mismatch", "bundle_pipeline_sample_count_mismatch", "bundle_pipeline_depth_mismatch", "bundle_pass_format_mismatch", "bundle_pass_attachment_count", "bundle_pass_depth_missing", "bundle_pass_sample_count_mismatch", "define_ref_fractional_in_count", "define_cycle", "expression_negative", "count_expression_overflow", "stray_command_at_root", "pass_outside_pass_graph", "bundle_no_pipeline", "pass_no_code", "pass_feedback_on_last", "pass_format_on_canvas_pass", "pass_format_depth", "pass_format_on_compute", "pass_format_unfilterable", "pass_reads_unused", "pass_reads_no_texture_binding", "pass_reads_multisampled", "pass_reads_volume", "pass_reads_array_layers", "pass_reads_stencil", "pass_reads_depth_sampled", "pass_reads_name_collision", "pass_scale_on_compute", "pass_scale_on_canvas_pass", "texture_scale_without_canvas", "texture_scale_narrows_to_zero", "pass_graph_second_frame", "render_pass_draw_no_pipeline", "draw_indirect_offset_unaligned", "query_set_count_over_max", "expression_unknown_constant", "define_unknown_constant", "pipeline_no_vertex", "bind_group_index_define_overflow", "binding_expression_overflow", "anisotropy_define_overflow", "limits_negative_expression", "texture_depth_define_zero", "mip_level_literal_overflow", "origin_define_overflow", "pool_offset_define_overflow", "query_count_define_overflow", "pool_offset_past_pool", "wgsl_cycle", "wgsl_entry_in_fragment", "wgsl_both_code_and_file", "wgsl_neither_code_nor_file", "wgsl_dangling_import", "wgsl_missing_hole", "wgsl_binding_in_pass_fragment", "wgsl_broken_fragment_located", "wgsl_missing_file", "wgsl_escapes_dir", "unbound_binding_reached_by_pipeline", "prune_unused_on_explicit_layout", "prune_unused_empties_group", "bind_kind_mismatch_scoped", "derived_group_prune_unused_redundant", "derived_group_explicit_pipeline_layout", "derived_group_empties_below_reach", "derived_group_omitted_in_bundle", "draw_graph_attachment_unknown_texture", "draw_graph_duplicate_stage", "draw_graph_fragment_without_color", "draw_graph_geometry_no_in", "draw_graph_group_index_gap", "draw_graph_group_layout", "draw_graph_group_prune_unused", "draw_graph_multisampled_attachment", "draw_graph_name_collision", "draw_graph_no_draw", "draw_graph_no_geometry", "draw_graph_no_stage", "draw_graph_second_frame", "draw_graph_stage_no_attachment", "draw_graph_target_count", "draw_graph_stage_unused", "draw_graph_two_draws", "graph_named_no_frame", "graph_named_before", "graph_two_unnamed", "step_group_cycle", "draw_graph_unknown_stage", "draw_graph_with_pass_graph", "draw_graph_sample_count_overflow", "draw_graph_group_define_ref", "bind_group_entries_over_255", "wgsl_entry_in_file_fragment", "wasm_data_length_over_budget", "write_buffer_frame_inputs_too_small", "bind_group_pool_over_native_cap", "render_pass_too_many_attachments", "pass_graph_expose_missing", "pass_expose_blit_collision" }) |name| {
         sjon_invalid_mod.addAnonymousImport(name ++ "_invalid", .{ .root_source_file = b.path("examples/invalid/" ++ name ++ ".sjon") });
     }
     const sjon_invalid_step = b.step("test-sjon-invalid", "Run SJON invalid-negatives rejection tests");
@@ -1404,6 +1471,9 @@ pub fn build(b: *std.Build) void {
     // Dedicated CLI tests (moved to tests/zig/cli/)
     const cli_dedicated_mod = stdModule(b, target, optimize, "tests/zig/test_cli.zig", &.{
         .{ .name = "cli", .module = cli_test_module },
+        // 02.C2: walk_test.zig reads the museum PNGs through the lib's
+        // walker beside the CLI it drives.
+        .{ .name = "pngine", .module = lib_module },
     });
     const cli_dedicated_test = b.addTest(.{ .name = "cli-dedicated", .root_module = cli_dedicated_mod });
     cli_dedicated_test.step.dependOn(&wasm.step);
@@ -1525,8 +1595,13 @@ pub fn build(b: *std.Build) void {
         .{ .name = "reflect", .module = wasm_reflect_module },
     });
 
-    // PNG module for PNG encoding and bytecode embedding (zero external deps)
-    const wasm_png_module = stdModule(b, wasm_target, .ReleaseSmall, "src/png/main.zig", &.{});
+    // PNG module for PNG encoding and bytecode embedding. Imports the payload
+    // module (02.C2): envelope.zig is pure std, so it crosses to wasm32
+    // without new deps.
+    const wasm_payload_module = stdModule(b, wasm_target, .ReleaseSmall, "src/payload/main.zig", &.{});
+    const wasm_png_module = stdModule(b, wasm_target, .ReleaseSmall, "src/png/main.zig", &.{
+        .{ .name = "payload", .module = wasm_payload_module },
+    });
     wasm_compiler_module.addImport("png", wasm_png_module);
 
     // ── SJON host for wasm32-freestanding (in-browser .sjon compile) ─────────
@@ -1841,6 +1916,20 @@ pub fn build(b: *std.Build) void {
     const drift_alloc_names = b.addSystemCommand(&.{ "node", "scripts/check-allocator-names.mjs", "--check" });
     drift_step.dependOn(&drift_alloc_names.step);
 
+    // docs/payload-kinds.md <- src/payload/envelope.zig's v1_kinds table.
+    //
+    // The kind registry (02.C1, FROZEN v1 at X0): the doc is the registry's
+    // face, the Zig table its anchor, this gate the weld. Tag set, status
+    // and owner must agree; lowercase-initial (private) tags must never be
+    // listed. Bodies, handlers and legacy carriers are prose the doc carries
+    // alone. The step is named `drift_payload_kinds` (the spec's own name)
+    // so its verdict is runnable alone, like the sibling `drift` gate runs
+    // them all.
+    const drift_payload_kinds_step = b.step("drift_payload_kinds", "Check docs/payload-kinds.md against src/payload/envelope.zig's v1_kinds (02.C1)");
+    const drift_payload_kinds = b.addSystemCommand(&.{ "node", "scripts/check-payload-kinds.mjs", "--check" });
+    drift_payload_kinds_step.dependOn(&drift_payload_kinds.step);
+    drift_step.dependOn(&drift_payload_kinds.step);
+
     // docs/llms.txt <- the built CLI, run over the file's own programs.
     //
     // The fourth prose gate, and the first that runs the engine over its
@@ -1924,6 +2013,7 @@ pub fn build(b: *std.Build) void {
 
         // Create sub-modules for this cross-compile target
         const cross_types = stdModule(b, cross_target, .ReleaseFast, "src/types/main.zig", &.{});
+        const cross_payload = stdModule(b, cross_target, .ReleaseFast, "src/payload/main.zig", &.{});
 
         const cross_bytecode = stdModule(b, cross_target, .ReleaseFast, "src/bytecode/standalone.zig", &.{
             .{ .name = "types", .module = cross_types },
@@ -1976,6 +2066,7 @@ pub fn build(b: *std.Build) void {
         cross_lib.addImport("bytecode", cross_bytecode);
         cross_lib.addImport("reflect", cross_reflect);
         cross_lib.addImport("executor", cross_executor);
+        cross_lib.addImport("payload", cross_payload);
         cross_lib.addImport("dsl_sjon", cross_dsl_sjon);
 
         const cross_gpu_options = b.addOptions();

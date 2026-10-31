@@ -12,7 +12,7 @@
 (render-pipeline :name decoy :layout auto
   (vertex :module code :entry vs)
   (fragment :module code :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (pass-graph
   (pass :name main :code """

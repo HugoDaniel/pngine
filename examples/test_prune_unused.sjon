@@ -33,11 +33,11 @@ struct Cam { m: mat4x4f }
 
 (render-pipeline :name depthPipe :layout auto
   (vertex :module code :entry vs)
-  (fragment :module code :entry depthOnlyFs (target :format preferred-canvas-format)))
+  (fragment :module code :entry depthOnlyFs (color-target :format preferred-canvas-format)))
 
 (render-pipeline :name litPipe :layout auto
   (vertex :module code :entry vs)
-  (fragment :module code :entry litFs (target :format preferred-canvas-format)))
+  (fragment :module code :entry litFs (color-target :format preferred-canvas-format)))
 
 ; The same two entries, written once, against both layouts. Only the depth one
 ; prunes; the lit pipeline reaches both, so nothing is dropped there.

@@ -14,7 +14,7 @@
 ;   geometry bg      art/bgVs + bgFs       —
 ;   geometry discs   —                     art/discVs + discFs (additive)
 ;
-; The `(target …)` on stage `glow` is the whole new form. It is slot-local and
+; The `(color-target …)` on stage `glow` is the whole new form. It is slot-local and
 ; carries no `:format`: a stage's targets pair with its `(color-attachment …)`
 ; children by position, and the format is read off the attachment, so stating
 ; it here would be the one thing said twice. Everything else a colour target
@@ -91,7 +91,7 @@ struct DiscOut {
     ; Additive, and alpha left alone. `:write-mask 7` is R|G|B — the canvas
     ; alpha stays 1 from the base stage's clear, so the frame is opaque no
     ; matter how many discs overlap.
-    (target :write-mask 7
+    (color-target :write-mask 7
       (blend
         (color :src-factor one :dst-factor one :operation add)
         (alpha :src-factor zero :dst-factor one :operation add)))

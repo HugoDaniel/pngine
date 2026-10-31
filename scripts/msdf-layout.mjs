@@ -433,7 +433,7 @@ fn fragMain(@location(0) fragPosition : vec4f) -> @location(0) vec4f {
       (attribute :shader-location 1 :offset 16 :format float32x4)
       (attribute :shader-location 2 :offset 32 :format float32x2)))
   (fragment :module cubeCode :entry fragMain
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
@@ -441,7 +441,7 @@ fn fragMain(@location(0) fragPosition : vec4f) -> @location(0) vec4f {
   :layout auto
   (vertex :module textCode :entry vertexMain)
   (fragment :module textCode :entry fragmentMain
-    (target :format preferred-canvas-format
+    (color-target :format preferred-canvas-format
       (blend (color :src-factor src-alpha :dst-factor one-minus-src-alpha :operation add)
              (alpha :src-factor one :dst-factor one :operation add))))
   (primitive :topology triangle-strip)

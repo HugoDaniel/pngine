@@ -66,7 +66,7 @@ fn fragMain() -> @location(0) vec4f {
   :layout auto
   (vertex :module drawCode :entry vertexMain)
   (fragment :module drawCode :entry fragMain
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list))
 
 (bind-group :name drawGroup :layout pipeline :group 0

@@ -1177,7 +1177,7 @@
   (value-kind :name vertex-section :underlying form :heads (head-set
     (head :name vertex-buffer)
     (head :name constant)))
-  ; `:min 1` on `target` is a deliberate PNGine narrowing of
+  ; `:min 1` on `color-target` is a deliberate PNGine narrowing of
   ; GPUFragmentState.targets, which WebGPU lets be empty (a depth-only fragment
   ; stage). Removing the wrapper costed as "zero targets becomes legal" — but
   ; pngine has no runtime that honours it: wgpu_native_gpu's
@@ -1188,7 +1188,7 @@
   ; express a depth-only stage. It also closes a hole the wrapper left open:
   ; `(targets)` with no children validated and reached the same fabrication.
   (value-kind :name fragment-section :underlying form :heads (head-set
-    (head :name target :min 1)
+    (head :name color-target :min 1)
     (head :name constant)))
   ; One stage per compute pipeline, spelled as a form like the other two. The
   ; schema used to argue the flat `:module`/`:entry` shape was natural
@@ -1207,7 +1207,7 @@
   ; re-declaring one at top level is `duplicate_cross_ref_target` anyway.
   (value-kind :name import-section :underlying form :heads (head-set :names [define wgsl]))
   (value-kind :name attribute-item :underlying form :heads (head-set :names [attribute]))
-  (value-kind :name target-section :underlying form :heads (head-set
+  (value-kind :name color-target-section :underlying form :heads (head-set
     (head :name blend :max 1)))
   ; GPUBlendState requires BOTH components — `(blend (color …))` alone used to
   ; validate and die on the GPU.
@@ -1241,9 +1241,9 @@
   ; it shares. Its `(bind-group …)` children carry no `:layout` — the graph
   ; fills one in per generated pipeline — which is the spelling §416 gave a
   ; group whose pipeline is left open.
-  (value-kind :name stage-section :underlying form :heads (head-set
+  (value-kind :name draw-stage-section :underlying form :heads (head-set
     (head :name color-attachment)
-    (head :name target)
+    (head :name color-target)
     (head :name depth-stencil-attachment :max 1)
     (head :name depth-stencil :max 1)
     (head :name primitive :max 1)
@@ -1264,8 +1264,8 @@
     (head :name primitive :max 1)))
   ; What an `(in …)`'s stage forms may hold: overrides, and nothing else. The
   ; global `(vertex …)` also admits `(vertex-buffer …)` and the global
-  ; `(fragment …)` REQUIRES at least one `(target …)`; here the geometry owns
-  ; the vertex layout and the stage's color attachments derive the targets, so
+  ; `(fragment …)` REQUIRES at least one `(color-target …)`; here the geometry owns
+  ; the vertex layout and the stage's color attachments derive the color-targets, so
   ; both absences are the narrowing, enforced by this head-set rather than by
   ; the hook.
   (value-kind :name in-stage-section :underlying form :heads (head-set
@@ -1942,7 +1942,7 @@
     (key :name entry :type entry-point :optional true
       :description "Entry-point function name (defaults to the module's sole @vertex fn)."))
   (form :name fragment
-    :description "Fragment stage (GPUFragmentState): the module + entry point, one (target …) per color attachment, and (constant …) overrides."
+    :description "Fragment stage (GPUFragmentState): the module + entry point, one (color-target …) per color attachment, and (constant …) overrides."
     :positional fragment-section
     (key :name module :type module-ref
       :description "The (shader-module …) holding the @fragment entry.")
@@ -2055,7 +2055,7 @@
     (key :name mask :type mask32 :optional true
       :description "Sample coverage bitmask (spec default 0xFFFFFFFF).")
     (key :name alpha-to-coverage-enabled :type boolean :optional true
-      :description "Fragment alpha generates the coverage mask. Requires :count above 1, a (fragment …) stage, and a first (target …) whose format has an alpha channel to derive the mask from."))
+      :description "Fragment alpha generates the coverage mask. Requires :count above 1, a (fragment …) stage, and a first (color-target …) whose format has an alpha channel to derive the mask from."))
   (form :name vertex-buffer
     :description "Layout of one vertex buffer slot: stride + step mode + (attribute …) children."
     :positional attribute-item
@@ -2071,11 +2071,11 @@
       :description "Byte offset of the attribute within one element.")
     (key :name format :type vertex-format
       :description "Wire format of the attribute data."))
-  (form :name target
+  (form :name color-target
     :description "One color target: format plus optional (blend …) state and write mask."
-    :positional target-section
+    :positional color-target-section
     (key :name format :type color-target-format
-      :description "Format of the attachment this target renders to.")
+      :description "Format of the attachment this color-target renders to.")
     (key :name write-mask :type write-mask :optional true
       :description "Channel write mask: bitmask R=1 G=2 B=4 A=8, or all (15; the WebGPU default)."))
   (form :name blend
@@ -2372,6 +2372,22 @@
   ; because of it.
   (value-kind :name pass-section :underlying form :heads (head-set :names [constant]))
 
+  ; The names `(pass-graph … :expose […])` takes. NOT a cross-ref: the
+  ; `(pass …)` children are consumed by the hook, so their names never reach
+  ; the validator's index, and the hook checks each entry against the passes it
+  ; lowered (CONTRIBUTING pitfall 112). `pass-name` is therefore one of the
+  ; F8 loose-symbol exceptions (Compiler.zig), the same way `wgsl-name` is: it
+  ; names something the schema cannot resolve, and its consumer checks it.
+  ; `:max-len 32` is `bytecode.DEFAULT_MAX_PASSES`, the executor's pass table:
+  ; a graph cannot emit more passes than the runtime can hold, so the list
+  ; cannot honestly be longer either.
+  (value-kind :name pass-name
+    :description "The :name of one (pass …) child of the same (pass-graph …), checked by the hook against the passes it lowered."
+    :underlying symbol)
+  (value-kind :name pass-name-list
+    :description "Names of (pass …) children of the same (pass-graph …), in any order."
+    :underlying vector :vector (vector-shape :element pass-name :max-len 32))
+
   (form :name pass
     :description "One `(pass …)`: a fullscreen fragment (or compute) shader-art stage.
                   The hook detects features from the WGSL (pngine/pointer/feedback).
@@ -2401,7 +2417,7 @@
     (key :name feedback :type boolean :optional true
       :description "Ping-pong texture pair for feedback; the previous frame is readable as prev_<name>.")
     ; The intermediate's texel format, which is ONE value in WebGPU terms: the
-    ; texture this pass renders into and the (target :format …) of the pipeline
+    ; texture this pass renders into and the (color-target :format …) of the pipeline
     ; that renders it. Refused on a pass that draws straight to the canvas
     ; (there is no intermediate, and the canvas format is the context's), on a
     ; depth/stencil format (a pass writes a COLOR attachment), and on a compute
@@ -2468,17 +2484,39 @@
     ; then the document's only one.
     (key :name name :type symbol :optional true
       :description "Makes this graph a (step-group …) of that name instead of the document's (frame …). A document with two graphs names both.")
-    ; The graph emits the document's frame, so a hand-authored step has no way
-    ; into it — and a document that declares its own (frame …) beside a
-    ; (pass-graph …) compiles TWO, of which the runtime runs the first. This key
-    ; is the way in: the steps land at the head of the emitted frame's :perform,
-    ; ahead of every pass the graph builds, which is what lets a (pass … :reads …)
-    ; read a texture a hand-authored pass wrote this frame.
+    ; The unnamed graph emits the document's frame, so a hand-authored step has
+    ; no way into it; a document that declares its own (frame …) beside an
+    ; unnamed graph, or a (draw-graph …) beside this one, is refused rather
+    ; than silently compiled to two frames of which the runtime runs the first.
+    ; This key is the way in: the steps land at the head of the emitted frame's
+    ; :perform, ahead of every pass the graph builds, which is what lets a
+    ; (pass … :reads …) read a texture a hand-authored pass wrote this frame.
     (key :name before :type frame-step-list :optional true
       :description "Passes and queues run each frame BEFORE the graph's own steps, in this order — they become the head of the emitted (frame …)'s :perform.")
+    ; The canvas destination for a pass that is not the graph's last. The
+    ; hook emits the same machinery a compute main's auto-blit uses (the blit
+    ; shader, a canvas pipeline, a bind group over the pass's intermediate and
+    ; the shared sampler, and a render pass to the canvas), named
+    ; `<pass>__blit`, and appends it to NO step list: it exists as a frame
+    ; step and runs only when a frame names it. Soloing `warp` is then the
+    ; frame performing `[warp__uq warp warp__blit]` (the queue is the pass's
+    ; uniform write, present when the pass names `pngine`), and restoring the
+    ; frame to the group runs the whole graph again.
+    ;
+    ; Three refusals, each naming what it could not do. A name no `(pass …)` in
+    ; this graph carries has no intermediate to blit. A pass that renders
+    ; straight to the canvas has no intermediate either, and a frame performing
+    ; it already puts it on the canvas. A pass whose `:format` is not a
+    ; filterable float cannot be sampled by pngine's own blit shader, which
+    ; declares `texture_2d<f32>` and binds the shared linear sampler.
+    ;
+    ; Additive by construction: no key, no forms, and every existing document
+    ; compiles to the same bytes (the `:init` empty-vector precedent below).
+    (key :name expose :type pass-name-list :optional true
+      :description "The graph's passes whose intermediate a frame may put on the canvas through a generated `<pass>__blit` render pass. Absent, nothing is emitted.")
     :lowering (lowering :hook pngine/pass-v1
       :produces [shader-module buffer texture sampler bind-group entry
-                 render-pipeline vertex fragment target constant
+                 render-pipeline vertex fragment color-target constant
                  render-pass color-attachment draw frame step-group
                  compute-pipeline compute compute-pass dispatch queue write-buffer]))
 
@@ -2500,21 +2538,27 @@
   ; without a `test-render` gate. The load/store rewrite that carrier needs —
   ; the stage's ops on the first pass, `load` on the rest, the stage's store-op
   ; on the last — is written once here instead of by every author.
+  ; As of 2026-10-06 the kind NAME moved off `stage-section`, the one
+  ; value-kind name pacer's carried copy also declares and references bare,
+  ; so that pacer's reference has a single claimant in every aggregate that
+  ; loads both vocabularies. A bare name two loaded plugins declare is still
+  ; ambiguous, and the declarant still gets no priority. The rule is the
+  ; charter's fourth ruling and SJON's plugin-model ownership paragraph.
   (form :name stage
     :description "One stage of a (draw-graph …): the attachments a pass writes, plus the pipeline state every geometry drawn in it shares. Becomes one (render-pass …) per geometry."
-    :positional stage-section
+    :positional pngine/draw-stage-section
     (key :name name :type symbol)
-    ; Slot-local `(target …)`, and the narrowing is the missing `:format`: a
-    ; stage's targets pair positionally with its `(color-attachment …)`
+    ; Slot-local `(color-target …)`, and the narrowing is the missing `:format`: a
+    ; stage's color-targets pair positionally with its `(color-attachment …)`
     ; children, and the format is read off the attachment, so stating it here
     ; would be the one thing said twice that D3 exists to prevent. Everything
     ; else a colour target carries — the blend state and the write mask — has
-    ; nowhere else to live, since a stage owns the attachments a target
-    ; describes. Optional as a group: declare none and every target is the
+    ; nowhere else to live, since a stage owns the attachments a color-target
+    ; describes. Optional as a group: declare none and every color-target is the
     ; derived format alone, exactly as before this key existed.
-    (form :name target
+    (form :name color-target
       :description "Blend state and write mask for one of this stage's colour targets, paired with the (color-attachment …) at the same position. The format is derived from that attachment, so it is not stated here."
-      :positional target-section
+      :positional color-target-section
       (key :name write-mask :type write-mask :optional true
         :description "Channel write mask: bitmask R=1 G=2 B=4 A=8, or all (15; the WebGPU default).")))
   (form :name geometry
@@ -2546,7 +2590,7 @@
       (key :name entry :type entry-point :optional true
         :description "Entry-point function name (defaults to the module's sole @vertex fn)."))
     (form :name fragment
-      :description "Fragment stage of this (stage, geometry) pipeline: the module + entry point, and (constant …) overrides. Omit it for a depth-only draw. The stage's color attachments derive the (target …) list."
+      :description "Fragment stage of this (stage, geometry) pipeline: the module + entry point, and (constant …) overrides. Omit it for a depth-only draw. The stage's color attachments derive the (color-target …) list."
       :positional in-stage-section
       (key :name module :type module-ref
         :description "The (shader-module …) holding the @fragment entry.")
@@ -2574,7 +2618,7 @@
     (key :name after :type frame-step-list :optional true
       :description "Passes and queues run each frame AFTER the graph's own steps — the tail of the emitted (frame …)'s :perform.")
     :lowering (lowering :hook pngine/draw-v1
-      :produces [render-pipeline vertex fragment target blend color alpha
+      :produces [render-pipeline vertex fragment color-target blend color alpha
                  constant vertex-buffer attribute primitive depth-stencil
                  bind-group entry
                  render-pass color-attachment depth-stencil-attachment

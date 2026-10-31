@@ -12,8 +12,9 @@
 //!   to one of those forms reaches the graph with no edit here. The exceptions
 //!   are the three forms the graph itself fills a key of, declared slot-local
 //!   so the head-set states the narrowing rather than this file: `(vertex …)`
-//!   and `(fragment …)` under `(in …)` (no vertex layout, no target list), and
-//!   `(target …)` under `(stage …)` (no `:format` — it is the attachment's).
+//!   and `(fragment …)` under `(in …)` (no vertex layout, no color-target list),
+//!   and `(color-target …)` under `(stage …)` (no `:format` — it is the
+//!   attachment's).
 //! - The carrier is one `(render-pass …)` per (stage, geometry), not a render
 //!   bundle: this wire cannot express a depth-only bundle (docs/abi.md §6.5 —
 //!   `cf_count` 0 is the frozen "guess the canvas" sentinel) and the native
@@ -79,11 +80,11 @@ const Stage = struct {
     /// `(bind-group …)` children sorted by `:group`, which the checks below
     /// force to be `0..len-1`.
     groups: []const Ast.NodeIndex,
-    /// `(target :format …)` derived from `color`, one per attachment.
+    /// `(color-target :format …)` derived from `color`, one per attachment.
     targets: []const []const u8,
-    /// The stage's own `(target …)` children, in order, or empty. When it has
-    /// them there is exactly one per colour attachment (`readStage` refuses
-    /// any other count), and each is cloned into the emitted target with the
+    /// The stage's own `(color-target …)` children, in order, or empty. When it
+    /// has them there is exactly one per colour attachment (`readStage` refuses
+    /// any other count), and each is cloned into the emitted color-target with the
     /// derived format written in front of what the author put there.
     blends: []const Ast.NodeIndex,
     /// How many geometries draw in this stage — the load/store rewrite needs
@@ -225,8 +226,8 @@ fn readStage(
         if (std.mem.eql(u8, head, "color-attachment")) {
             if (color.items.len == MAX_COLOR_ATTACHMENTS) return out.failAt(arena, view.tree.spanOf(c), "stage '{s}' has more than {d} `(color-attachment …)` children", .{ name, MAX_COLOR_ATTACHMENTS });
             try color.append(arena, c);
-        } else if (std.mem.eql(u8, head, "target")) {
-            if (blends.items.len == MAX_COLOR_ATTACHMENTS) return out.failAt(arena, view.tree.spanOf(c), "stage '{s}' has more than {d} `(target …)` children", .{ name, MAX_COLOR_ATTACHMENTS });
+        } else if (std.mem.eql(u8, head, "color-target")) {
+            if (blends.items.len == MAX_COLOR_ATTACHMENTS) return out.failAt(arena, view.tree.spanOf(c), "stage '{s}' has more than {d} `(color-target …)` children", .{ name, MAX_COLOR_ATTACHMENTS });
             try blends.append(arena, c);
         } else if (std.mem.eql(u8, head, "depth-stencil-attachment")) {
             depth = c;
@@ -246,13 +247,13 @@ fn readStage(
         .{name},
     );
     // Positional pairing, so the two lists are the same length or the pairing
-    // is a guess. Zero targets is the whole feature staying out of the way:
-    // every target is then the derived format alone, as it was before the key
-    // existed.
+    // is a guess. Zero color-targets is the whole feature staying out of the
+    // way: every color-target is then the derived format alone, as it was
+    // before the key existed.
     if (blends.items.len > 0 and blends.items.len != color.items.len) return out.failAt(
         arena,
         view.tree.spanOf(blends.items[0]),
-        "stage '{s}' declares {d} `(target …)` child(ren) and {d} `(color-attachment …)` child(ren) — a stage's targets pair with its attachments by POSITION, so it needs one target per attachment or none at all",
+        "stage '{s}' declares {d} `(color-target …)` child(ren) and {d} `(color-attachment …)` child(ren) — a stage's color-targets pair with its attachments by POSITION, so it needs one color-target per attachment or none at all",
         .{ name, blends.items.len, color.items.len },
     );
     const sorted = try sortStageGroups(arena, out, view, name, groups.items);
@@ -307,7 +308,7 @@ fn sortStageGroups(
     return sorted;
 }
 
-/// One `(target :format …)` per color attachment: the canvas format for
+/// One `(color-target :format …)` per color attachment: the canvas format for
 /// `context-current-texture`, otherwise the named `(texture …)`'s own `:format`.
 ///
 /// This is the pairing 04 pinned as its first question, and it is not a pairing
@@ -640,7 +641,7 @@ fn emitPipeline(
         var fs_form = try cloneForm(arena, out, input, fs);
         var fs_children: std.ArrayList(EmittedValue) = .empty;
         for (stage.targets, 0..) |fmt, i| {
-            // With no `(target …)` on the stage this is the derived format and
+            // With no `(color-target …)` on the stage this is the derived format and
             // nothing else — the shape every graph emitted before the key
             // existed, which is what keeps it additive. With one, the author's
             // blend state and write mask ride along and the format is still
@@ -648,7 +649,7 @@ fn emitPipeline(
             var t: EmittedForm = if (stage.blends.len > 0)
                 try cloneForm(arena, out, input, stage.blends[i])
             else
-                .{ .head = "target", .kvpairs = &.{}, .source_form_idx = container };
+                .{ .head = "color-target", .kvpairs = &.{}, .source_form_idx = container };
             var kvs: std.ArrayList(EmittedKvpair) = .empty;
             try kvs.append(arena, .{ .key = "format", .value = .{ .symbol = fmt } });
             try kvs.appendSlice(arena, t.kvpairs);

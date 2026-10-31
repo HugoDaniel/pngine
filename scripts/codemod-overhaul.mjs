@@ -338,8 +338,10 @@ const KEY_RENAMES = {
   },
 };
 
-/// Heads renamed outright (D3: the IDL word is `depthStencilAttachment`).
-const HEAD_RENAMES = { 'depth-attachment': 'depth-stencil-attachment' };
+/// Heads renamed outright (D3: the IDL word is `depthStencilAttachment`; the
+/// colour-target rename takes `target` to `color-target` beside the schema's
+/// already-native `color-target-format`).
+const HEAD_RENAMES = { 'depth-attachment': 'depth-stencil-attachment', target: 'color-target' };
 
 /// The rule groups, in the order the cuts land. Each is a set of rewrites that
 /// one schema+emitter commit makes legal, so running a group leaves the tree
@@ -381,6 +383,9 @@ export function rewrite(src, groups = GROUPS) {
   }
 
   const e = new Edits(src);
+  // Spans the R3 unwrap replaces whole. A HEAD_RENAMES edit inside one would
+  // overlap that splice, so those heads are renamed in the emitted text below.
+  const unwrappedSpans = [];
 
   for (const form of walk(roots)) {
     const head = headOf(form);
@@ -422,7 +427,25 @@ export function rewrite(src, groups = GROUPS) {
         // children: a comment sitting above the first `(vertex-buffer …)` is the
         // author's and belongs to the child, not to the wrapper that is going
         // away. Slicing child-start-to-child-end silently ate those.
-        const inner = src.slice(nodeEnd(w.items[0]), w.close).replace(/^\s+/, '').replace(/\s+$/, '');
+        const raw = src.slice(nodeEnd(w.items[0]), w.close);
+        const lead = raw.length - raw.replace(/^\s+/, '').length;
+        let inner = raw.replace(/^\s+/, '').replace(/\s+$/, '');
+        if (on('passes')) {
+          // A head rename on a direct child (today: `(targets (target …))` →
+          // `(targets (color-target …))` → unwrap) has to ride along in the
+          // replacement text, since the form-level rule below would overlap
+          // this splice.
+          const headEdits = [];
+          for (const kid of kids) {
+            const to = HEAD_RENAMES[headOf(kid)];
+            if (!to) continue;
+            const h = kid.items[0];
+            headEdits.push([h.start - nodeEnd(w.items[0]) - lead, h.end - nodeEnd(w.items[0]) - lead, to]);
+          }
+          for (const [from, to, text] of headEdits.sort((a, b) => b[0] - a[0])) {
+            inner = inner.slice(0, from) + text + inner.slice(to);
+          }
+        }
         // How far left the children move. When the first child sits on the
         // wrapper's OWN line (`(targets (target …`), the lines under it were
         // indented relative to the WRAPPER — and the child lands exactly where
@@ -431,6 +454,7 @@ export function rewrite(src, groups = GROUPS) {
         // and invisible to every gate.
         const sameLine = !src.slice(w.open, nodeStart(kids[0])).includes('\n');
         const shift = sameLine ? 0 : columnOf(src, nodeStart(kids[0])) - columnOf(src, w.open);
+        unwrappedSpans.push([w.open, w.close + 1]);
         e.splice(w.open, w.close + 1, dedent(inner, shift), `unwrap (${wrapperHead} …)`);
       }
     }
@@ -450,7 +474,8 @@ export function rewrite(src, groups = GROUPS) {
     const newHead = on('passes') ? HEAD_RENAMES[head] : undefined;
     if (newHead) {
       const h = form.items[0];
-      e.splice(h.start, h.end, newHead, `(${head} …)→(${newHead} …)`);
+      const unwrapped = unwrappedSpans.some(([from, to]) => h.start >= from && h.start < to);
+      if (!unwrapped) e.splice(h.start, h.end, newHead, `(${head} …)→(${newHead} …)`);
     }
 
     // --- D10/R2: the compute stage becomes a (compute …) sub-form -----------
@@ -749,8 +774,8 @@ function collect(paths) {
 }
 
 /// Heads plan 03 RETIRED as forms — every one is a key now (`:layout`,
-/// `:module`, `:topology`, `:vertex-buffers`, and the `(target …)` list that
-/// `(targets …)` used to wrap). The corpus check above proves no DOCUMENT still
+/// `:module`, `:topology`, `:vertex-buffers`, and the `(color-target …)` list
+/// that `(targets …)` used to wrap). The corpus check above proves no DOCUMENT still
 /// writes them; this proves the SCHEMA cannot accept them again, which is the
 /// half a document scan can never reach. Skipped when the schema is absent (a
 /// consumer running this script over its own corpus).

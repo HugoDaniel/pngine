@@ -17,7 +17,7 @@
 (pipeline-layout :name pl :bind-group-layouts [bgl])
 (render-pipeline :name pipe :layout pl
   (vertex :module code :entry vs)
-  (fragment :module code :entry fs (target :format preferred-canvas-format)))
+  (fragment :module code :entry fs (color-target :format preferred-canvas-format)))
 (bind-group :name g :group 0
   (entry :binding 0 :buffer buf))
 (render-pass :name p

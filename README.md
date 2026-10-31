@@ -30,11 +30,11 @@ npm install pngine
 ```
 
 Or build from source. `build.zig.zon` declares two path dependencies,
-`../wgslender` and `../SJON`, so clone all three side by side:
+`../wgslender` and `../SJON` (SJON 1.5.0 or newer), so clone all three side by side:
 
 ```bash
 git clone https://github.com/HugoDaniel/wgslender.git
-git clone https://github.com/HugoDaniel/SJON.git
+git clone --branch v1.5.0 https://github.com/HugoDaniel/SJON.git
 git clone https://github.com/HugoDaniel/pngine.git
 cd pngine
 zig build          # → zig-out/bin/pngine
@@ -133,7 +133,7 @@ PNG, instantiates the WASM, and connects it to WebGPU.
   :layout auto
   (vertex :module shader :entry vs)
   (fragment :module shader :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (render-pass :name draw
   (color-attachment :view context-current-texture :load-op clear :store-op store)

@@ -17,7 +17,7 @@ struct Inputs { time : f32, width : f32, height : f32, aspect : f32 }
 (render-pipeline :name pipe :layout auto
   (vertex :module code :entry vsMain)
   (fragment :module code :entry fsMain
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list))
 (render-pass :name draw
   (color-attachment :view context-current-texture

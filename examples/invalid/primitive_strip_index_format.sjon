@@ -11,7 +11,7 @@
 """)
 (render-pipeline :name pipeline :layout auto
   (vertex :module code :entry vertexMain)
-  (fragment :module code :entry fragMain (target :format preferred-canvas-format))
+  (fragment :module code :entry fragMain (color-target :format preferred-canvas-format))
   (primitive :topology triangle-strip :strip-index-format uint8))
 (render-pass :name render :pipeline pipeline
   (color-attachment :view context-current-texture :clear-value [0 0 0 0] :load-op clear :store-op store)

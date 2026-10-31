@@ -19,7 +19,7 @@
 """)
 (render-pipeline :name pipe :layout auto
   (vertex :module code :entry vs)
-  (fragment :module code :entry fs (target :format preferred-canvas-format)))
+  (fragment :module code :entry fs (color-target :format preferred-canvas-format)))
 (bind-group :name bg :group 0 (entry :binding 0 :buffer ramp))
 (render-pass :name draw :pipeline pipe :bind-groups [bg]
   (color-attachment :view context-current-texture :clear-value [0 0 0 1]

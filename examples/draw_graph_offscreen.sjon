@@ -15,7 +15,7 @@
 ;   geometry tri     scene/vs + scene/fs      —
 ;   geometry quad    —                        blit/vs + blit/fs
 ;
-; The two things worth watching. Each stage's `(target :format …)` is DERIVED
+; The two things worth watching. Each stage's `(color-target :format …)` is DERIVED
 ; from the attachment it writes — `rgba8unorm` from the texture for `scene`,
 ; `preferred-canvas-format` for `present` — so the format is stated once, on
 ; the texture, and the two pipelines differ in it without either saying so. And

@@ -24,7 +24,11 @@ const test_utils = @import("../../test_utils.zig");
 /// - `.png`  → extract embedded pNGb chunk
 /// - `.zip`  → extract bytecode from the bundle
 /// - `.sjon` → compile (base_dir = the source file's directory)
-/// - `-`     → whichever of the four the leading bytes say it is
+/// - `-`     → whichever of the five the leading bytes say it is
+///
+/// A `.flac` input is refused: inspect reads PNGB bytecode, and a FLAC has no
+/// legacy bytecode route (every payload rides a pNGx APPLICATION block,
+/// 02:129); `extract --kind PNGB` is that route.
 ///
 /// Pre-condition: path is non-empty
 /// Post-condition: Returns owned bytecode slice (caller must free)
@@ -42,6 +46,7 @@ pub fn loadBytecode(gpa: Allocator, io: std.Io, path: []const u8) ![]u8 {
         // base_dir resolves any relative file references in the source; for
         // stdin that is the cwd (stdio.baseDir).
         .sjon => compile.compileSource(gpa, io, path, in.bytes),
+        .flac => error.UnsupportedFormat,
     };
 }
 

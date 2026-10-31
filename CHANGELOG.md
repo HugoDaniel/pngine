@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [4.1.0] - 2026-10-31
+
+### Breaking
+
+- **The colour target head is `color-target`.** pngine's `(target …)` form and
+  its `target-section` positional value-kind are renamed `(color-target …)` and
+  `color-target-section`. The old spelling collided with pacer's animation
+  `target` in a scope that loads both plugins, so every document, codemod and
+  hook that spells the pngine head moves to the new name. `target` remains
+  pacer's word; `color-target-format`, `color-attachment` and
+  `depth-stencil-attachment` already spell the colour target natively.
+
+### Fixed
+
+- extract --list: pNGm lists without a flags byte (02:82-83) and unknown pNG
+  letters list as v-1 with the chunk's full payload size.
+- npm bundle: the inlined viewer/dev profiles build again. payloads.js was
+  concatenated in at 02.C2 with a private concatParts that collides with
+  envelope.js's own, and without the size-budget bump its bytes cost, so the
+  first bundler run since then failed twice; the helper is renamed, the
+  budgets are bumped for the walker plus its framing preflight, and
+  bundle-closure now refuses any top-level name declared by two concatenated
+  modules.
+- npm types: payloadsOf is exported by the viewer and dev profiles and
+  declared in the published d.ts (PayloadEntry, PayloadSkip), with a
+  consumer compile against the emitted declarations.
+- npm payloadsOf: refuses non-PNG bytes with a TypeError instead of walking
+  them from offset 8.
+- readers: payloadsOf verifies CRC and chunk bounds before the first yield,
+  matching walkPng; walkPng reports an over-16-MiB chunk as its own error,
+  not as corruption.
+- pack and extract --kind: empty payloads are legal; the default spelling
+  stores the empty DEFLATE stream, `,raw` stores zero bytes, and generic
+  extraction writes an empty artifact (empty file to -o, zero bytes to
+  stdout); legacy PNGB extraction still refuses them.
+- pass-v1: a scaled pass's `post()` can name `PASS_SCALE`. The main prelude
+  declares the const whenever `:scale` is authored, but the post module's own
+  prelude never did, so the one stage that reads the scaled intermediate back
+  up to the canvas had to restate the fraction by hand — a restatement that
+  silently broke the day `:scale` changed. The post prelude now declares its
+  own copy, gated on the post fn actually naming the const (`namesIdent`, so
+  a comment does not count), because its prelude is root text and an unread
+  const there would warn W0001 on every scaled pass with a post().
+
+## [4.0.1] - 2026-10-29
+
+### Fixed
+
+- **macOS binaries link the vendored wgpu-native archive instead of resolving
+  a dylib beside it.** wgpu-native's macOS zip vendors a
+  `libwgpu_native.dylib` next to the `libwgpu_native.a` the build probes, and
+  the old by-name `-lwgpu_native` search preferred the dylib — shipping a CLI
+  that recorded `@rpath/libwgpu_native.dylib` and died on every machine but
+  the one that built it (`Library not loaded`). build.zig now hands the
+  linker the exact archive it probed (one expression decides both presence
+  and link input) and links Foundation on darwin (the archive's members
+  reference `NSKeyValueChangeNewKey`, which the dylib satisfied internally),
+  and the install now refuses a binary that still names `libwgpu_native` in
+  any `LC_LOAD_*_DYLIB`/`DT_NEEDED` entry:
+  `tools/assert_wgpu_static.zig` fails the default install whenever the
+  produced CLI carries any dynamic `wgpu_native` dependency (Mach-O load
+  commands / ELF `DT_NEEDED`). This is what the release acceptance on
+  darwin-arm64 proved on 2026-10-28: the binary the gate built, installed and
+  smoked carries no dynamic `libwgpu_native` reference.
+
 ## [4.0.0] - 2026-09-11
 
 A WGSL document stops being one file, the sugar tier gets an anchor, and the

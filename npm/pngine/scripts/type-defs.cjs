@@ -151,6 +151,18 @@ export function writeBuffer(
   bytes: BufferBytes,
   options?: { offset?: number; poolIndex?: number | "active"; redraw?: boolean },
 ): PngineInstance;
+/**
+ * Set the pointer array every draw posts: an ArrayLike of exactly twelve
+ * numbers (the pointer-inputs layout), or null to hand the lanes back to the
+ * instance's live tracking array. Held by reference, and lanes 4, 5, 9 and 10
+ * are drained in place after each draw, the lifecycle the tracking array
+ * already had. The verb does not draw; a later call replaces the source, and a
+ * wrong kind or a wrong length is a TypeError before anything changes.
+ */
+export function setPointer(
+  instance: PngineInstance,
+  lanes: ArrayLike<number> | null,
+): PngineInstance;
 /** The document's buffers by name — which are writable, and why not. */
 export function getBuffers(instance: PngineInstance): Promise<Record<string, BufferInfo>>;
 /**
@@ -171,12 +183,59 @@ export function getStats(instance: PngineInstance): Promise<{
 }>;
 /** Rebuild the GPU device and replay the current shader after a "device-lost" PngineGPUError. */
 export function restart(instance: PngineInstance): PngineInstance;
+/**
+ * Restart, awaited: resolves with the instance once the worker's \`restart-done\`
+ * echoing this call's request id says the rebuild ran — the same
+ * destroy-and-rebuild \`restart\` fires and forgets, with the answer attached.
+ *
+ * \`ok: true\` means the worker released the old GPU stack, acquired a fresh
+ * device and reloaded the bytecode; it is not a presentation claim. The reply
+ * is correlated per call, so ridless acks (the legacy restart, the viewer's
+ * self-recovery) never settle it. Failure rejects with a PngineRestartError
+ * whose \`code\` names the case: "restart-failed" (skipped or threw —
+ * \`message\` is the worker's reason), "restart-timeout" (the shared 2000 ms
+ * post-to-ack round-trip budget, the worker's FIFO predecessors included),
+ * "destroyed" (before or mid-request — a destroyed handle does not resolve
+ * vacuously), or "worker-error". A post that throws rejects with that error.
+ * In the Node stubs (\`index.cjs\`/\`index.mjs\`) this is the browser-only
+ * refusal like every other verb: there is no worker to await in Node.
+ */
+export function restartSettled(instance: PngineInstance): Promise<PngineInstance>;
 
 export function extractBytecode(data: ArrayBuffer | Uint8Array): Promise<Uint8Array>;
 export function detectFormat(data: ArrayBuffer | Uint8Array): 'png' | 'zip' | 'pngb' | null;
 export function isPng(data: ArrayBuffer | Uint8Array): boolean;
 export function isZip(data: ArrayBuffer | Uint8Array): boolean;
 export function isPngb(data: ArrayBuffer | Uint8Array): boolean;
+
+/** One payload as \`payloadsOf\` yields it: the stored body plus its carrier. */
+export interface PayloadEntry {
+  kind: string;
+  version: number;
+  flags: number;
+  /**
+   * The STORED bytes: flag bit 0 marks raw DEFLATE, so inflating is the
+   * consumer's job (\`DecompressionStream('deflate-raw')\` on the web side),
+   * after any chain concatenation the walker already did.
+   */
+  body: Uint8Array;
+  /** The carrying chunk: \`"pNGb"\`, \`"pNGx#2"\`, ... */
+  carrier: string;
+}
+
+/** One listed skip: a chunk that carries no payload, listed so nothing a PNG carries is silently dropped. */
+export interface PayloadSkip {
+  skip: {
+    kind: string;
+    reason: string;
+    /** The offending flags byte, present for reason "unreadable_flags". */
+    flags?: number;
+  };
+  carrier: string;
+}
+
+/** Walk a PNG's payloads, legacy letters and pNGx envelopes alike, in file order. */
+export function payloadsOf(bytes: Uint8Array): Generator<PayloadEntry | PayloadSkip>;
 `;
 
 const viewerTypes = `

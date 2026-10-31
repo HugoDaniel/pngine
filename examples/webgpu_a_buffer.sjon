@@ -294,7 +294,7 @@ fn main_fs(@builtin(position) position : vec4f) -> @location(0) vec4f {
     (vertex-buffer :array-stride 12
       (attribute :shader-location 0 :offset 0 :format float32x3)))
   (fragment :module opaqueCode :entry main_fs
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
@@ -314,14 +314,14 @@ fn main_fs(@builtin(position) position : vec4f) -> @location(0) vec4f {
     (vertex-buffer :array-stride 12
       (attribute :shader-location 0 :offset 0 :format float32x3)))
   (fragment :module translucentCode :entry main_fs
-    (target :format preferred-canvas-format :write-mask 0))
+    (color-target :format preferred-canvas-format :write-mask 0))
   (primitive :topology triangle-list))
 
 (render-pipeline :name compositePipe
   :layout auto
   (vertex :module compositeCode :entry main_vs)
   (fragment :module compositeCode :entry main_fs
-    (target :format preferred-canvas-format
+    (color-target :format preferred-canvas-format
       (blend (color :src-factor one :dst-factor one-minus-src-alpha :operation add)
              (alpha :src-factor one :dst-factor zero :operation add))))
   (primitive :topology triangle-list))

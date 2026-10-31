@@ -7,7 +7,7 @@
 ;
 ; `:format rgba16float` lands in TWO places, and both are below: the
 ; intermediate `(texture … :format rgba16float)` and the producing pipeline's
-; `(target :format rgba16float)`. They have to agree — a pipeline writing a
+; `(color-target :format rgba16float)`. They have to agree — a pipeline writing a
 ; format its attachment does not have is a validation error at pipeline
 ; creation — and the sugar's one key is exactly the thing that keeps them in
 ; step. Write them by hand and you own that agreement yourself, which is the
@@ -52,7 +52,7 @@
 (render-pipeline :name radiance__pipe :layout auto
   (vertex :module radiance__shader :entry vs)
   (fragment :module radiance__shader :entry fs
-    (target :format rgba16float)))
+    (color-target :format rgba16float)))
 
 (bind-group :name radiance__bg :layout radiance__pipe :group 0
   (entry :binding 0 :buffer radiance__ubuf))
@@ -94,7 +94,7 @@
 (render-pipeline :name main__pipe :layout auto
   (vertex :module main__shader :entry vs)
   (fragment :module main__shader :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (bind-group :name main__bg :layout main__pipe :group 0
   (entry :binding 0 :buffer main__ubuf)

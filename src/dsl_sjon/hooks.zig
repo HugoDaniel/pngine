@@ -6,6 +6,12 @@
 //! the key set from the schema, so a new key on a lowered form fails the build
 //! until it is recorded.
 //!
+//! Supported external surface (ask P6): the `pass_v1` / `init_v1` / `draw_v1`
+//! values and `buildRegistry`. Every other `pub` decl in this module is
+//! internal and may change without notice; a one-pass host also needs
+//! `Compiler.buildLoweringEnv` so a define-ref `:workgroups` expression
+//! resolves at lowering time.
+//!
 //! `(init …)` and `(pass …)` sugar become host-owned form-lowering hooks: SJON calls
 //! them between default-materialization and final validation, and the canonical
 //! forms they emit flow through the same emitter path as hand-written resources.
@@ -14,7 +20,7 @@
 //! `EmittedForm.children` is a positional `[]const EmittedValue` (SJON 2026-06-07),
 //! so a hook can synthesize child forms like `(entry :binding 0 :buffer b)`. The render
 //! pipeline hooks below emit the canonical `(vertex :module … :entry …)(fragment
-//! :module … :entry … (target :format …))` form — the same shape a hand-authored
+//! :module … :entry … (color-target :format …))` form — the same shape a hand-authored
 //! pipeline uses, so the emitter's single descriptor path serves both (§86 retired
 //! the legacy flat `flat-module`/… kvpair shape and its parallel emitter branch).
 //! `compute-pipeline` carries a `(compute …)` stage, the same GPUProgrammableStage
@@ -88,12 +94,16 @@ const BLIT_WGSL =
 /// `scalar` and `filterable` are its `:format`'s two consequences for whoever
 /// reads it: the `texture_2d<T>` a dependent's prelude declares, and whether the
 /// shared linear sampler may touch it at all.
+/// `intermediate` says whether `tex` names an emitted form: a pass that draws
+/// straight to the canvas (§425) carries the name but no texture, so `:expose`
+/// has to refuse it rather than blit a form that does not exist.
 const PassRef = struct {
     name: []const u8,
     tex: []const u8,
     pool_size: u8,
     scalar: []const u8 = "f32",
     filterable: bool = true,
+    intermediate: bool = true,
 };
 
 /// The default `(pass …)` intermediate format, unchanged since the sugar
@@ -226,6 +236,10 @@ pub fn passV1(
         const ref = try lowerOnePass(arena, out, container, view, pass, is_last, prior.items, constants, scale, &frame_steps, &init_steps);
         try prior.append(arena, ref);
     }
+
+    // `:expose`: the passes a frame may put on the canvas. Emitted here, but
+    // appended to NO step list, so nothing runs a blit until a frame names it.
+    try lowerExposedBlits(arena, out, view, container, prior.items);
 
     // Named: a `(step-group …)` the document's own `(frame …)` runs, which is
     // how a pass graph and a draw graph share one frame. Unnamed: the auto-frame,
@@ -1021,7 +1035,7 @@ fn lowerFragmentPass(
     try frame_steps.append(arena, .{ .symbol = name });
 
     if (feat.post_fn) |pf|
-        try lowerPostPass(arena, out, container, name, pf, code, tex, facts.scalar, feat.needs_uniform, ubuf, imports, try postConstants(arena, constants, code), frame_steps);
+        try lowerPostPass(arena, out, container, name, pf, code, scale, tex, facts.scalar, feat.needs_uniform, ubuf, imports, try postConstants(arena, constants, code), frame_steps);
 
     // The seed LAST, as legacy `pass_sugar` emitted it (step 7 of the pass
     // expansion), so its resource ids sit after everything the pass itself
@@ -1034,15 +1048,15 @@ fn lowerFragmentPass(
     // drew to the canvas — and a canvas-drawing pass is the last one, so the
     // `PassRef` a later pass would read it through is never built.
     std.debug.assert(!renders_to_canvas or is_main);
-    return .{ .name = name, .tex = tex, .pool_size = tex_pool, .scalar = facts.scalar, .filterable = facts.filterable };
+    return .{ .name = name, .tex = tex, .pool_size = tex_pool, .scalar = facts.scalar, .filterable = facts.filterable, .intermediate = !renders_to_canvas };
 }
 
 /// Emit the post-processing pass: a separate shader (prelude of pngine? / samp? /
-/// `postTex`, then the extracted `post()` fn), a render pipeline (fragment entry
-/// `post`, canvas target), a bind group ([uniform?, sampler?, intermediate texture]),
-/// and a render pass → canvas. Appended after the main pass so the lowered create
-/// order matches legacy `emitPostPass`. `intermediate_tex` is the main pass's
-/// output texture (post()'s `postTex`).
+/// `postTex` / `PASS_SCALE`?, then the extracted `post()` fn), a render pipeline
+/// (fragment entry `post`, canvas target), a bind group ([uniform?, sampler?,
+/// intermediate texture]), and a render pass → canvas. Appended after the main
+/// pass so the lowered create order matches legacy `emitPostPass`.
+/// `intermediate_tex` is the main pass's output texture (post()'s `postTex`).
 fn lowerPostPass(
     arena: Allocator,
     out: *Lowering.LoweringOutput,
@@ -1050,6 +1064,7 @@ fn lowerPostPass(
     pass_name: []const u8,
     post_fn: []const u8,
     code: []const u8,
+    scale: ?f64,
     intermediate_tex: []const u8,
     intermediate_scalar: []const u8,
     main_needs_uniform: bool,
@@ -1063,13 +1078,23 @@ fn lowerPostPass(
     // the bind-group cross-ref never dangles (true for the corpus — post() and the
     // main fs() both reference `pngine`).
     const post_uniform = main_needs_uniform and namesIdent(post_fn, "pngine");
+    // `PASS_SCALE` on the post stage's own terms: the value, but only when the
+    // post fn names it. The MAIN prelude declares it whenever `:scale` is
+    // authored; this one cannot — the prelude is the ROOT's own text, so a
+    // const this module never reads is a W0001 (pitfall 102), and a scaled
+    // pass whose post() ignores its own extent is the ordinary case, not a
+    // mistake. `namesIdent`, so a mention inside a comment does not declare
+    // the const either. Until this, a post() that wanted its texel grid had
+    // to restate the fraction by hand, and the restatement silently broke the
+    // day `:scale` changed.
+    const post_scale: ?f64 = if (namesIdent(post_fn, "PASS_SCALE")) scale else null;
 
     const shader = try std.fmt.allocPrint(arena, "{s}__post_shader", .{pass_name});
     const pipe = try std.fmt.allocPrint(arena, "{s}__post_pipe", .{pass_name});
     const bg = try std.fmt.allocPrint(arena, "{s}__post_bg", .{pass_name});
     const pass = try std.fmt.allocPrint(arena, "{s}__post", .{pass_name});
 
-    const post_code = try buildPostShader(arena, post_uniform, post_needs_samp, intermediate_scalar, post_fn, code);
+    const post_code = try buildPostShader(arena, post_uniform, post_needs_samp, post_scale, intermediate_scalar, post_fn, code);
     try appendShader(arena, out, container, shader, post_code, imports);
 
     // Renders to canvas → fragment entry `post`, no explicit target format.
@@ -1190,14 +1215,21 @@ fn lowerComputePass(
 /// blit shader (`BLIT_WGSL`), a canvas render pipeline (vertex `vs`, fragment `fs`),
 /// a bind group [`screen` texture, shared sampler], and a render pass → canvas.
 /// Appended after the compute pass(es) so the lowered create order matches legacy.
+///
+/// `frame_steps` is where the blit's own step name lands when the blit is part
+/// of an auto-performed list (a compute main's frame). `:expose` calls this with
+/// null: the blit is emitted, but appended to NO list, so only a frame that
+/// names `<pass>__blit` runs it.
 fn lowerBlitPass(
     arena: Allocator,
     out: *Lowering.LoweringOutput,
     container: Ast.NodeIndex,
     pass_name: []const u8,
     screen_tex: []const u8,
-    frame_steps: *std.ArrayList(EmittedValue),
+    frame_steps: ?*std.ArrayList(EmittedValue),
 ) Lowering.LoweringError!void {
+    std.debug.assert(pass_name.len > 0); // pre: a pass has a name
+    std.debug.assert(screen_tex.len > 0); // pre: the texture to sample
     const shader = try std.fmt.allocPrint(arena, "{s}__blit_shader", .{pass_name});
     const pipe = try std.fmt.allocPrint(arena, "{s}__blit_pipe", .{pass_name});
     const bg = try std.fmt.allocPrint(arena, "{s}__blit_bg", .{pass_name});
@@ -1222,7 +1254,66 @@ fn lowerBlitPass(
     }, entries);
 
     try appendRenderPass(arena, out, container, blit, pipe, bg, "context-current-texture");
-    try frame_steps.append(arena, .{ .symbol = blit });
+    if (frame_steps) |steps| try steps.append(arena, .{ .symbol = blit });
+}
+
+/// `(pass-graph :expose [name …])`: for each name, emit `<pass>__blit`, the
+/// compute-main blit machinery over that pass's intermediate, and add it to NO
+/// step list. The document's frame performs `[<pass>__uq <pass> <pass>__blit]`
+/// to solo the pass (the queue is the pass's uniform write, present when the
+/// pass names `pngine`); restoring the frame to the group runs the whole graph
+/// again, and the pass itself is never muted by this key.
+///
+/// Every entry is the hook's own to check: the `(pass …)` children are consumed
+/// by this container, so their names never enter the validator's index, and
+/// `:expose` cannot be a cross-ref for the same reason (CONTRIBUTING pitfall
+/// 112). The refusals are the passes the blit cannot serve: a name no pass
+/// carries; a pass with no intermediate (it draws straight to the canvas, which
+/// is what solo wants already); and a pass whose format pngine's own blit
+/// shader cannot sample (it declares `texture_2d<f32>` and binds the shared
+/// linear sampler).
+fn lowerExposedBlits(
+    arena: Allocator,
+    out: *Lowering.LoweringOutput,
+    view: EffectiveView,
+    container: Ast.NodeIndex,
+    refs: []const PassRef,
+) Lowering.LoweringError!void {
+    const elems = Reader.initFromView(view).vectorNodes(container, "expose") orelse return;
+    std.debug.assert(elems.len <= 32); // schema: pass-name-list :max-len 32
+    for (elems) |e| {
+        // The slot's element kind is `pass-name`, a named symbol; a non-symbol
+        // cannot reach here from a validated document, and skipping it lets
+        // validation report the type error rather than asserting here.
+        if (view.tree.tagOf(e) != .symbol) continue;
+        const name = view.tree.symbolText(e);
+        var found: ?*const PassRef = null;
+        for (refs) |*r| {
+            if (std.mem.eql(u8, r.name, name)) {
+                found = r;
+                break;
+            }
+        }
+        const ref = found orelse return out.failAt(
+            arena,
+            view.tree.spanOf(e),
+            "`:expose` names `{s}`, and no `(pass …)` in this graph carries that name: the list names the graph's own passes, and only one of those has an intermediate to blit",
+            .{name},
+        );
+        if (!ref.intermediate) return out.failAt(
+            arena,
+            view.tree.spanOf(e),
+            "pass `{s}`: `:expose` blits a pass's intermediate to the canvas, and this pass draws straight to the CANVAS already. A frame performing `{s}` puts it on the canvas, and there is no intermediate to blit",
+            .{ name, name },
+        );
+        if (!ref.filterable or !std.mem.eql(u8, ref.scalar, "f32")) return out.failAt(
+            arena,
+            view.tree.spanOf(e),
+            "pass `{s}`: `:expose` blits this pass's intermediate through pngine's own blit shader, which declares `texture_2d<f32>` and samples it with the shared linear sampler. This pass's `:format` is neither filterable nor float, so the bind group it would build is one WebGPU refuses. Give the pass a filterable float `:format` (rgba8unorm, rgba16float, …) or drop it from `:expose`",
+            .{name},
+        );
+        try lowerBlitPass(arena, out, container, ref.name, ref.tex, null);
+    }
 }
 
 /// The WGSL texel formats a `texture_storage_2d<…, write>` may name without a
@@ -1707,7 +1798,7 @@ fn appendScreenTexture(
 }
 
 /// A pipeline stage: `(vertex :module M :entry E)` or
-/// `(fragment :module M :entry E (target :format F))`. `target_format` is read
+/// `(fragment :module M :entry E (color-target :format F))`. `target_format` is read
 /// on the fragment stage only, and null there means the canvas format.
 /// `constants` are the pass's `(constant …)` children, already built by
 /// `constantChildren` and shared by every stage over the same module.
@@ -1730,7 +1821,7 @@ fn stageForm(
     // (spec/09 step B). The `(targets …)` wrapper that held it went with 02 R3.
     if (std.mem.eql(u8, head, "fragment")) {
         const target = EmittedForm{
-            .head = "target",
+            .head = "color-target",
             .kvpairs = try arena.dupe(EmittedKvpair, &.{.{
                 .key = "format",
                 .value = .{ .symbol = target_format orelse "preferred-canvas-format" },
@@ -1739,7 +1830,7 @@ fn stageForm(
         };
         try children.append(arena, .{ .form = target });
     }
-    // After the target: a fragment stage's business is what it draws to, and
+    // After the color-target: a fragment stage's business is what it draws to, and
     // the emitter reads both by head, so the order is free.
     for (constants) |c| try children.append(arena, c);
     return .{
@@ -1754,7 +1845,7 @@ fn stageForm(
 }
 
 /// A canonical render pipeline for a `(pass …)`: positional `(vertex :module M :entry vs)`
-/// + `(fragment :module M :entry FE (target :format FMT))`. This is the
+/// + `(fragment :module M :entry FE (color-target :format FMT))`. This is the
 /// same shape a hand-authored pipeline uses, so the emitter's single authored
 /// descriptor path builds it (§86 replaced the legacy flat `:flat-module` keys; the
 /// runtime is unchanged — gpu.js normalizes the old `targetFormat` string and the
@@ -2387,7 +2478,9 @@ fn buildPrelude(
     // the ROOT's own text, so an unreferenced declaration here is a W0001 on
     // every pass in the corpus (pitfall 102), and a const nobody asked for is
     // exactly that. `pngine.width`/`height` keep meaning the canvas, so this is
-    // how a scaled pass finds its own extent.
+    // how a scaled pass finds its own extent. A scaled pass's `post()` gets its
+    // own copy from `buildPostShader`, gated there on the post fn naming it —
+    // same const, one more condition, for the same pitfall-102 reason.
     if (scale) |sc| try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "const PASS_SCALE: f32 = {d};\n", .{sc}));
     try appendHoisted(arena, &buf, code);
     return buf.toOwnedSlice(arena);
@@ -2419,14 +2512,21 @@ fn appendHoisted(
 }
 
 /// Build the post-processing shader: a prelude of pngine? / samp? / `postTex`
-/// (bindings 0,1,2… contiguous in that order) + the fullscreen-triangle vertex
-/// shader + the extracted `post()` function (port of `pass_sugar.emitPostPass`).
+/// (bindings 0,1,2… contiguous in that order) / `PASS_SCALE`? + the
+/// fullscreen-triangle vertex shader + the extracted `post()` function (port of
+/// `pass_sugar.emitPostPass`).
 ///
 /// `code` is the pass's WHOLE `:code`, and it is here for its directives alone:
 /// `post_fn` is a slice cut from below them, so without lifting them in, a pass
 /// that enables an extension and uses it in `post()` compiles its main module
 /// and fails its post one.
-fn buildPostShader(arena: Allocator, has_uniform: bool, has_samp: bool, tex_scalar: []const u8, post_fn: []const u8, code: []const u8) Lowering.LoweringError![]u8 {
+///
+/// `scale` is `null` unless the pass authored `:scale` AND its `post()` names
+/// `PASS_SCALE` (probed by the caller, like `has_uniform`/`has_samp`): this
+/// prelude is root text, so a const the module never reads would be a W0001 on
+/// every scaled pass with a post() — the same reason `buildPrelude` gates the
+/// main module's copy on `:scale` being authored at all.
+fn buildPostShader(arena: Allocator, has_uniform: bool, has_samp: bool, scale: ?f64, tex_scalar: []const u8, post_fn: []const u8, code: []const u8) Lowering.LoweringError![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     if (has_uniform) {
         try buf.appendSlice(arena,
@@ -2441,6 +2541,12 @@ fn buildPostShader(arena: Allocator, has_uniform: bool, has_samp: bool, tex_scal
     }
     const tex_binding: u32 = (if (has_uniform) @as(u32, 1) else 0) + (if (has_samp) @as(u32, 1) else 0);
     try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "@group(0) @binding({d}) var postTex: texture_2d<{s}>;\n", .{ tex_binding, tex_scalar }));
+    // `PASS_SCALE`, on the same terms as the main prelude's (`buildPrelude`):
+    // how a scaled pass's post() finds its own texel grid, `pngine.width` /
+    // `height` still meaning the canvas. A const, not a binding — the value is
+    // a compile-time fraction, and smuggling it through one would make post()
+    // implicitly depend on a texture or buffer it never reads.
+    if (scale) |sc| try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "const PASS_SCALE: f32 = {d};\n", .{sc}));
     try buf.appendSlice(arena, FULLSCREEN_VS);
     try buf.appendSlice(arena, post_fn);
     fragments.prependDirectivesOf(arena, &buf, code) catch |e| switch (e) {
@@ -2753,20 +2859,71 @@ pub fn initV1(
     }
 }
 
-/// Build a registry with every PNGine hook registered. The compiler passes
-/// `&registry` as `HostOptions.lowering_registry`. Caller owns the registry and
-/// must `deinit(gpa)` it.
+/// The three PNGine hooks as registerable values — the supported external
+/// surface (ask P6). A caller-owned `Lowering.LoweringRegistry` takes these
+/// values by name and never spells an id; the ids live here, once, beside the
+/// lowering fns they carry, and `buildRegistry` registers these same values.
+///
+/// `pub` in this module beyond these three constants and `buildRegistry` is
+/// **internal and unsupported** (the lowering fns, the frame helpers, the
+/// emitted-form builders): they are visible because Zig exposes a module's
+/// `pub` decls, not because a host may depend on their names or shapes.
+pub const pass_v1: Lowering.LoweringHook = .{ .id = "pngine/pass-v1", .lower = passV1 };
+pub const init_v1: Lowering.LoweringHook = .{ .id = "pngine/init-v1", .lower = initV1 };
+pub const draw_v1: Lowering.LoweringHook = .{ .id = "pngine/draw-v1", .lower = draw_graph.drawV1 };
+
+// The ids are contract keys: each must appear in the embedded schema (the
+// manifest is what binds a form to the id) and no two may collide. Both facts
+// are static, so they are checked at compile time — a rename that outruns the
+// manifest, or a copy-pasted id, fails the build rather than a test run.
+comptime {
+    // Three substring searches over the 83 KB manifest, plus the pairwise
+    // id scan, blow past the default 1000-branch comptime quota.
+    @setEvalBranchQuota(1_000_000);
+    const manifest = @embedFile("pngine_schema");
+    const all = [_]Lowering.LoweringHook{ pass_v1, init_v1, draw_v1 };
+    for (all, 0..) |hook, i| {
+        if (std.mem.indexOf(u8, manifest, hook.id) == null) {
+            @compileError("pngine hook id is not in the embedded schema: " ++ hook.id);
+        }
+        for (all[0..i]) |prev| {
+            if (std.mem.eql(u8, prev.id, hook.id)) {
+                @compileError("duplicate pngine hook id: " ++ hook.id);
+            }
+        }
+    }
+}
+
+/// Build a registry with every PNGine hook registered — the three constants
+/// above, exactly. The compiler passes `&registry` as
+/// `HostOptions.lowering_registry`. Caller owns the registry and must
+/// `deinit(gpa)` it; the compiler never frees a caller-supplied one.
 pub fn buildRegistry(gpa: Allocator) Lowering.RegisterError!Lowering.LoweringRegistry {
     var registry: Lowering.LoweringRegistry = .{};
     errdefer registry.deinit(gpa);
-    try registry.register(gpa, .{ .id = "pngine/pass-v1", .lower = passV1 });
-    try registry.register(gpa, .{ .id = "pngine/init-v1", .lower = initV1 });
+    try registry.register(gpa, pass_v1);
+    try registry.register(gpa, init_v1);
     // `(draw-graph …)` lives in its own file: it shares no state with the two
-    // above and is the size of both together.
-    try registry.register(gpa, .{ .id = "pngine/draw-v1", .lower = draw_graph.drawV1 });
+    // above and is the size of both together. Its value still comes from here,
+    // so the registry has one source of truth per id.
+    try registry.register(gpa, draw_v1);
     return registry;
 }
 
 // ============================================================================
 // Tests
 // ============================================================================
+
+/// A complete document that may use `(init …)`: every name the form and the
+/// frame reference is declared, so a refusal test over it can only fail at the
+/// hook, never at an undeclared cross-reference. Kept in one place so the
+/// lowering and the refusal tests cannot drift into testing different sources.
+fn completeInitDoc(gpa: Allocator) ![:0]u8 {
+    const manifest = @embedFile("pngine_schema");
+    return std.fmt.allocPrintSentinel(gpa, "{s}\n" ++
+        \\(shader-module :name initShader :code "@compute @workgroup_size(64) fn main() {{}}")
+        \\(buffer :name parts :size 1024 :usage [vertex storage] :pool 2)
+        \\(init :name spawn :buffer parts :module initShader :workgroups [16])
+        \\(frame :name main :init [spawn] :perform [spawn])
+    , .{manifest}, 0);
+}

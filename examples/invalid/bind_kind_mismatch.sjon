@@ -15,7 +15,7 @@
 (render-pipeline :name pipe :layout auto
   (vertex :module code :entry vs)
   (fragment :module code :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 (bind-group :name g0 :layout pipe :group 0
   (entry :binding 0 :buffer buf))
 (render-pass :name draw :pipeline pipe :bind-groups [g0]

@@ -111,8 +111,8 @@ will drift; the budget is what holds them.
 
 | Bundle | Subpath | Profile | Size (gz) | Budget |
 | ------ | ------- | ------- | --------- | ------ |
-| `viewer.mjs` | `pngine` (browser), `pngine/viewer` | Lean production viewer; embedded-executor payloads only, worker inlined | 54.9 KB (18.9) | 56300 |
-| `dev.mjs` | `pngine/dev` | Full-feature browser API: shared `pngine.wasm` fallback, prefetch, diagnostics | 59.7 KB (20.5) | 61200 |
+| `viewer.mjs` | `pngine` (browser), `pngine/viewer` | Lean production viewer; embedded-executor payloads only, worker inlined | 60.1 KB (20.7) | 61700 |
+| `dev.mjs` | `pngine/dev` | Full-feature browser API: shared `pngine.wasm` fallback, prefetch, diagnostics | 64.8 KB (22.4) | 66500 |
 | `core.mjs` | `pngine/core` | Low-level runtime API (dispatcher + loader), no main-thread wrapper | 30.8 KB (10.5) | 31600 |
 | `executor.mjs` | `pngine/executor` | Executor helpers — `parsePayload`, `createExecutor`, imports | 1.9 KB (0.9) | 2200 |
 | `mini.mjs` | `pngine/mini` | Flat pNGf main-thread player, with the Sointu audio worklet | 7.1 KB (3.3) | 7300 |

@@ -52,7 +52,7 @@
   :layout auto
   (vertex :module shader :entry vs)
   (fragment :module shader :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (buffer :name uniforms :size 16 :usage [uniform copy-dst])
 

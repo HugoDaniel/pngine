@@ -20,7 +20,7 @@ struct U { m: mat4x4f }
 (buffer :name camBuf :size 64 :usage [uniform copy-dst])
 (render-pipeline :name litPipe :layout auto
   (vertex :module code :entry vs)
-  (fragment :module code :entry litFs (target :format preferred-canvas-format)))
+  (fragment :module code :entry litFs (color-target :format preferred-canvas-format)))
 (bind-group :name g :layout litPipe :group 0
   (entry :binding 0 :buffer camBuf))
 (render-pass :name p

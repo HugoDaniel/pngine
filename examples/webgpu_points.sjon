@@ -164,7 +164,7 @@ fn quadCorner(vNdx: u32) -> vec2f {
   :layout auto
   (vertex :module code :entry vsFixed)
   (fragment :module code :entry fs
-    (target :format preferred-canvas-format
+    (color-target :format preferred-canvas-format
       ; Premultiplied-alpha blend.
       (blend
         (color :src-factor one :dst-factor one-minus-src-alpha)
@@ -175,7 +175,7 @@ fn quadCorner(vNdx: u32) -> vec2f {
   :layout auto
   (vertex :module code :entry vsPersp)
   (fragment :module code :entry fs
-    (target :format preferred-canvas-format
+    (color-target :format preferred-canvas-format
       (blend
         (color :src-factor one :dst-factor one-minus-src-alpha)
         (alpha :src-factor one :dst-factor one-minus-src-alpha))))

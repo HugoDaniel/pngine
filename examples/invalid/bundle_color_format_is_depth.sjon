@@ -16,7 +16,7 @@
 (render-pipeline :name pipe :layout auto
   (vertex :module code :entry vs)
   (fragment :module code :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 (render-bundle :name tri :pipeline pipe
   :color-formats [depth24plus]
   (draw :vertex-count 3))

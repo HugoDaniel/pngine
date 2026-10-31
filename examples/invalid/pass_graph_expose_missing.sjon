@@ -1,0 +1,13 @@
+; Invalid: `:expose` names the graph's own passes, and `ghost` is not one of
+; them. There is no pass whose intermediate could be blitted to the canvas, so
+; the hook refuses at the name rather than emitting a blit over a texture that
+; does not exist.
+
+(pass-graph :name g :expose [ghost]
+  (pass :name warp :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      return vec4f(0.2, 0.4, 0.6, 1.0);
+    }
+  """))
+
+(frame :name main :perform [g])

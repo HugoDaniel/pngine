@@ -225,7 +225,7 @@ fn fs(in : VSOut) -> @location(0) vec4f {
 (render-pipeline :name drawPipe :layout auto
   (vertex :module draw :entry vs)
   (fragment :module draw :entry fs
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 

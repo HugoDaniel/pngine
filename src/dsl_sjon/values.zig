@@ -7,7 +7,7 @@
 //! `HostResult.materialized_defaults`; hook-emitted lowered forms pair with an
 //! empty overlay (the `pngine/*` hooks emit every key they need explicitly).
 //!
-//! Child forms (`(vertex …)`, `(entry …)`, `(target …)`) are read off
+//! Child forms (`(vertex …)`, `(entry …)`, `(color-target …)`) are read off
 //! `formHeader().children`, filtering `.form` children by head. Expression /
 //! define-reference values (`(* NUM 4 4)`, `(ceil (/ NUM 64))`, bare `NUM`) are
 //! evaluated with `Expr.eval` against the `#define` environment.
@@ -68,7 +68,7 @@ pub const Reader = struct {
 
     /// Non-allocating iterator over a form's child *forms* whose head equals
     /// `child_head`, in document order — the `.form`-tag + head filter the emitter
-    /// walks for repeated positional sub-forms (`(attribute …)`, `(target …)`,
+    /// walks for repeated positional sub-forms (`(attribute …)`, `(color-target …)`,
     /// `(color-attachment …)`, `(entry …)`, …). Replaces the hand-inlined
     /// `for (children) |c| { if (tagOf != .form) continue; if (!eql head) continue; }`
     /// that recurred a dozen times, so the skip logic lives in one place. Only the

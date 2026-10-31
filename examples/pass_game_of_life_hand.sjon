@@ -73,7 +73,7 @@
 (render-pipeline :name life__pipe :layout auto
   (vertex :module life__shader :entry vs)
   (fragment :module life__shader :entry fs
-    (target :format rgba8unorm)))
+    (color-target :format rgba8unorm)))
 
 (bind-group :name life__bg :layout life__pipe :group 0 :pool 2
   (entry :binding 0 :texture life__tex :ping-pong 1))
@@ -143,7 +143,7 @@
 (render-pipeline :name main__pipe :layout auto
   (vertex :module main__shader :entry vs)
   (fragment :module main__shader :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 ; Pooled because its producer is: a fixed group would sample whichever slot it
 ; was built against, half the frames stale.

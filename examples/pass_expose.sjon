@@ -1,0 +1,24 @@
+; `(pass-graph :expose …)`: solo a pass.
+;
+; The graph publishes `warp`'s intermediate as a render pass of its own,
+; `warp__blit` (pngine's own blit shader over `warp__tex`, onto the canvas),
+; and appends it to NO step list. The document's frame is therefore the solo:
+; it performs `warp`'s uniform write, `warp` itself, and the blit. `main` is
+; simply not performed, so the canvas shows what `warp` produced. Restoring
+; the frame to `[g]` runs the whole graph again.
+
+(pass-graph :name g :expose [warp]
+  (pass :name warp :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return vec4f(uv, 0.5 + 0.5 * sin(pngine.time), 1.0);
+    }
+  """)
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      return vec4f(0.05 + 0.1 * uv.x, 0.05, 0.08 + 0.1 * uv.y, 1.0);
+    }
+  """))
+
+(frame :name main :perform [warp__uq warp warp__blit])

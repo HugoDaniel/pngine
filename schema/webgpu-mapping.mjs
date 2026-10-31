@@ -194,7 +194,7 @@ export const FORM_DICT_MAP = [
   { form: 'stencil-front', dict: 'GPUStencilFaceState', ledger: [] },
   { form: 'stencil-back', dict: 'GPUStencilFaceState', ledger: [] },
   { form: 'multisample', dict: 'GPUMultisampleState', ledger: [] },
-  { form: 'target', dict: 'GPUColorTargetState', provided: ['blend'], ledger: [] },
+  { form: 'color-target', dict: 'GPUColorTargetState', provided: ['blend'], ledger: [] },
   { form: 'color', dict: 'GPUBlendComponent', ledger: [] },
   { form: 'alpha', dict: 'GPUBlendComponent', ledger: [] },
   {
@@ -315,7 +315,7 @@ export const FORM_DICT_MAP = [
     alias: { entry: 'entryPoint' },
     provided: ['targets', 'constants'],
     enforced: {
-      targets: "fragment-section's (head :name target :min 1) → positional_missing (examples/invalid/fragment_no_targets.sjon)",
+      targets: "fragment-section's (head :name color-target :min 1) → positional_missing (examples/invalid/fragment_no_targets.sjon)",
     },
     ledger: [],
   },

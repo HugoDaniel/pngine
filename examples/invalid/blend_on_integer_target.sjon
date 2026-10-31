@@ -17,7 +17,7 @@
 (render-pipeline :name pipe :layout auto
   (vertex :module code :entry vs)
   (fragment :module code :entry fs
-    (target :format r32uint
+    (color-target :format r32uint
       (blend
         (color :src-factor src-alpha :dst-factor one-minus-src-alpha :operation add)
         (alpha :src-factor one :dst-factor zero :operation add)))))

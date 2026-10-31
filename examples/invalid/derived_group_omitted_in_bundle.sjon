@@ -18,7 +18,7 @@
 (buffer :name tintBuf :size 16 :usage [uniform copy-dst])
 (render-pipeline :name depthPipe :layout auto
   (vertex :module code :entry vs)
-  (fragment :module code :entry depthOnlyFs (target :format preferred-canvas-format)))
+  (fragment :module code :entry depthOnlyFs (color-target :format preferred-canvas-format)))
 (bind-group :name scene :group 0 (entry :binding 0 :buffer camBuf))
 (bind-group :name mat :group 1 (entry :binding 0 :buffer tintBuf))
 (render-bundle :name b :pipeline depthPipe :color-formats [preferred-canvas-format]

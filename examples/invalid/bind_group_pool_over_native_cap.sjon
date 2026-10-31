@@ -20,7 +20,7 @@
 (render-pipeline :name pipe :layout auto
   (vertex :module code :entry vs)
   (fragment :module code :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (bind-group :name tintGroups :layout pipe :group 0 :pool 200
   (entry :binding 0 :buffer tints :ping-pong 0))

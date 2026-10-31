@@ -16,7 +16,7 @@
 """)
 (render-pipeline :name p :layout auto
   (vertex :module m :entry vs)
-  (fragment :module m :entry fs (target :format preferred-canvas-format)))
+  (fragment :module m :entry fs (color-target :format preferred-canvas-format)))
 (bind-group :name big :layout p :group 0
   (entry :binding 0 :buffer ub)
   (entry :binding 1 :buffer ub)

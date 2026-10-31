@@ -17,7 +17,7 @@
 (render-pipeline :name pipe :layout auto
   (vertex :module code :entry vs)
   (fragment :module code :entry fs
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (depth-stencil :format depth24plus-stencil8 :depth-write-enabled true :depth-compare less))
 (render-pass :name draw :pipeline pipe
   (color-attachment :view context-current-texture

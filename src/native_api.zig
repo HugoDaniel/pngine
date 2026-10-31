@@ -970,7 +970,7 @@ const triangle_sjon =
     \\  :layout auto
     \\  (vertex :module code :entry vs)
     \\  (fragment :module code :entry fs
-    \\    (target :format preferred-canvas-format)))
+    \\    (color-target :format preferred-canvas-format)))
     \\(render-pass :name pass
     \\  (color-attachment :view context-current-texture
     \\    :clear-value [0 0 0 1] :load-op clear :store-op store)

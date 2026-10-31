@@ -42,7 +42,7 @@
   :layout auto
   (vertex :module shader :entry writeVs)
   (fragment :module shader :entry writeFs
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list :cull-mode none :front-face ccw)
   (depth-stencil :format depth24plus-stencil8 :depth-write-enabled false :depth-compare always
     (stencil-front :compare always :pass-op keep)
@@ -55,7 +55,7 @@
   :layout auto
   (vertex :module shader :entry testVs)
   (fragment :module shader :entry testFs
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (depth-stencil :format depth24plus-stencil8 :depth-write-enabled false :depth-compare always
     (stencil-front :compare equal :pass-op keep)
     (stencil-back :compare equal :pass-op keep)))

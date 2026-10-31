@@ -214,7 +214,7 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   :layout auto
   (vertex :module renderShader :entry vs)
   (fragment :module renderShader :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (bind-group :name renderBindGroup :layout renderPipeline :group 0 :pool 2
   (entry :binding 0 :buffer uniforms)

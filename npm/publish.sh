@@ -105,12 +105,14 @@ if [ "$MODE" != publish ]; then
   zig build test --summary all
   zig build test-standalone -Doptimize=ReleaseFast --summary all
   if [ "$(uname -s)" = "Darwin" ] && [ -f "$ROOT/vendor/wgpu-native/lib/libwgpu_native.a" ]; then
+    render_before="$(git status --porcelain --untracked-files=all -- tests/zig/render; git diff --no-ext-diff --binary -- tests/zig/render)"
     zig build gen-render-snapshots
     zig build test-render
-    # gen-render-snapshots rewrites tests/zig/render/ when a render moved. A
-    # tree that changed here means the committed snapshots were stale.
-    if [ -n "$(git status --porcelain -- tests/zig/render)" ]; then
-      echo "gen-render-snapshots changed tests/zig/render/ — the committed snapshots were stale:" >&2
+    # Report changes made during these gates, without mistaking existing edits
+    # to the coverage or snapshots for changes made by the generator.
+    render_after="$(git status --porcelain --untracked-files=all -- tests/zig/render; git diff --no-ext-diff --binary -- tests/zig/render)"
+    if [ "$render_before" != "$render_after" ]; then
+      echo "render gates changed tests/zig/render/:" >&2
       git status --porcelain -- tests/zig/render >&2
       exit 1
     fi

@@ -167,7 +167,7 @@
     (vertex-buffer :array-stride 8 :step-mode vertex
       (attribute :shader-location 2 :offset 0 :format float32x2)))
   (fragment :module renderShader :entry fs
-    (target :format preferred-canvas-format
+    (color-target :format preferred-canvas-format
       ; additive blend: color = src-alpha*src + one*dst; alpha = zero + one*dst
       (blend
         (color :src-factor src-alpha :dst-factor one :operation add)

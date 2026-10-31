@@ -892,9 +892,9 @@
     {
       "code": "head_set_emitted_via_oneof_refs",
       "severity": "info",
-      "message": "value-kind `target-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "message": "value-kind `color-target-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
       "plugin": "pngine",
-      "kind": "target-section"
+      "kind": "color-target-section"
     },
     {
       "code": "head_set_emitted_via_oneof_refs",
@@ -1109,10 +1109,10 @@
     {
       "code": "head_set_emitted_via_oneof_refs",
       "severity": "info",
-      "message": "value-kind `stage-section` head-set emitted as a closed `oneOf` — 1 of 6 head(s) resolve to slot-local forms and are emitted inline, the rest as `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "message": "value-kind `draw-stage-section` head-set emitted as a closed `oneOf` — 1 of 6 head(s) resolve to slot-local forms and are emitted inline, the rest as `$ref`s into `#/$defs/form.<plugin>.<head>`",
       "plugin": "pngine",
       "form": "stage",
-      "kind": "stage-section"
+      "kind": "draw-stage-section"
     },
     {
       "code": "local_forms_emitted_inline",
@@ -7836,7 +7836,7 @@
     },
     "form.pngine.fragment": {
       "type": "object",
-      "description": "Fragment stage (GPUFragmentState): the module + entry point, one (target …) per color attachment, and (constant …) overrides.",
+      "description": "Fragment stage (GPUFragmentState): the module + entry point, one (color-target …) per color attachment, and (constant …) overrides.",
       "properties": {
         "$form": {
           "const": "fragment"
@@ -7880,21 +7880,21 @@
           "items": {
             "oneOf": [
               {
-                "$ref": "#/$defs/form.pngine.target"
+                "$ref": "#/$defs/form.pngine.color-target"
               },
               {
                 "$ref": "#/$defs/form.pngine.constant"
               }
             ],
             "x-sjon-head-set": [
-              "target",
+              "color-target",
               "constant"
             ]
           },
           "allOf": [
             {
               "contains": {
-                "$ref": "#/$defs/form.pngine.target"
+                "$ref": "#/$defs/form.pngine.color-target"
               },
               "minContains": 1
             }
@@ -9214,7 +9214,7 @@
           "const": "pngine"
         },
         "alpha-to-coverage-enabled": {
-          "description": "Fragment alpha generates the coverage mask. Requires :count above 1, a (fragment …) stage, and a first (target …) whose format has an alpha channel to derive the mask from.",
+          "description": "Fragment alpha generates the coverage mask. Requires :count above 1, a (fragment …) stage, and a first (color-target …) whose format has an alpha channel to derive the mask from.",
           "type": "boolean"
         },
         "count": {
@@ -9697,18 +9697,18 @@
       ],
       "additionalProperties": false
     },
-    "form.pngine.target": {
+    "form.pngine.color-target": {
       "type": "object",
       "description": "One color target: format plus optional (blend …) state and write mask.",
       "properties": {
         "$form": {
-          "const": "target"
+          "const": "color-target"
         },
         "$ns": {
           "const": "pngine"
         },
         "format": {
-          "description": "Format of the attachment this target renders to.",
+          "description": "Format of the attachment this color-target renders to.",
           "oneOf": [
             {
               "const": {
@@ -13839,6 +13839,23 @@
           },
           "maxItems": 2048
         },
+        "expose": {
+          "description": "The graph's passes whose intermediate a frame may put on the canvas through a generated `<pass>__blit` render pass. Absent, nothing is emitted.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "$sym": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "$sym"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 32
+        },
         "name": {
           "description": "Makes this graph a (step-group …) of that name instead of the document's (frame …). A document with two graphs names both.",
           "type": "object",
@@ -13882,7 +13899,7 @@
           "render-pipeline",
           "vertex",
           "fragment",
-          "target",
+          "color-target",
           "constant",
           "render-pass",
           "color-attachment",
@@ -13932,7 +13949,7 @@
                 "description": "Blend state and write mask for one of this stage's colour targets, paired with the (color-attachment …) at the same position. The format is derived from that attachment, so it is not stated here.",
                 "properties": {
                   "$form": {
-                    "const": "target"
+                    "const": "color-target"
                   },
                   "$ns": {
                     "const": "pngine"
@@ -14002,14 +14019,14 @@
             ],
             "x-sjon-head-set": [
               "color-attachment",
-              "target",
+              "color-target",
               "depth-stencil-attachment",
               "depth-stencil",
               "primitive",
               "bind-group"
             ],
             "x-sjon-local-forms": [
-              "target"
+              "color-target"
             ]
           },
           "allOf": [
@@ -14269,7 +14286,7 @@
               },
               {
                 "type": "object",
-                "description": "Fragment stage of this (stage, geometry) pipeline: the module + entry point, and (constant …) overrides. Omit it for a depth-only draw. The stage's color attachments derive the (target …) list.",
+                "description": "Fragment stage of this (stage, geometry) pipeline: the module + entry point, and (constant …) overrides. Omit it for a depth-only draw. The stage's color attachments derive the (color-target …) list.",
                 "properties": {
                   "$form": {
                     "const": "fragment"
@@ -14495,7 +14512,7 @@
           "render-pipeline",
           "vertex",
           "fragment",
-          "target",
+          "color-target",
           "blend",
           "color",
           "alpha",
@@ -14659,7 +14676,7 @@
       "$ref": "#/$defs/form.pngine.attribute"
     },
     {
-      "$ref": "#/$defs/form.pngine.target"
+      "$ref": "#/$defs/form.pngine.color-target"
     },
     {
       "$ref": "#/$defs/form.pngine.blend"

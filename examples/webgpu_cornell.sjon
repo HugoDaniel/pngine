@@ -645,7 +645,7 @@ fn fs(@location(0) uv : vec2f) -> @location(0) vec4f {
   :layout auto
   (vertex :module blitCode :entry vs)
   (fragment :module blitCode :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (bind-group :name stateGroup :layout statePipe :group 0
   (entry :binding 0 :buffer frameState))

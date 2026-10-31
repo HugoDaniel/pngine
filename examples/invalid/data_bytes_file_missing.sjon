@@ -20,7 +20,7 @@
 (render-pipeline :name pipe :layout auto
   (vertex :module code :entry fullscreen)
   (fragment :module code :entry show
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list))
 (render-pass :name draw
   (color-attachment :view context-current-texture

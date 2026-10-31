@@ -182,7 +182,7 @@ struct PointerInputs { x: f32, y: f32, clickX: f32, clickY: f32, dx: f32, dy: f3
 (render-pipeline :name main__pipe :layout auto
   (vertex :module main__shader :entry vs)
   (fragment :module main__shader :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (bind-group :name main__bg :layout main__pipe :group 0
   (entry :binding 0 :buffer main__ubuf)

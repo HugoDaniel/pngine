@@ -39,7 +39,7 @@ struct Offset { xy: vec2f, _pad: vec2f }
 (render-pipeline :name pipe :layout pl
   (vertex :module mod :entry vs)
   (fragment :module mod :entry fs
-    (target :format bgra8unorm)))
+    (color-target :format bgra8unorm)))
 
 (bind-group :name gColor :layout pipe :group 0
   (entry :binding 0 :buffer colorBuf))

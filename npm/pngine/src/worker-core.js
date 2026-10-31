@@ -69,6 +69,12 @@ export const MSG = {
   SET_PLAYING: "setPlaying",
   THUMB_SPACING: "thumb-spacing",
   RESTART: "restart",
+  // The correlated restart's ack: restartSettled(p) on the host posts
+  // {type:"restart", rid} and settles only on the restart-done that echoes
+  // the same rid. A ridless restart (the legacy verb, the viewer's
+  // self-recovery) is never acked — no ack it could trigger may settle an
+  // awaiting host.
+  RESTART_DONE: "restart-done",
   DEVICE_LOST: "device-lost",
   DEVICE_RESTORED: "device-restored",
   // Posted once handleDestroy has released the device. The host terminates on
@@ -109,6 +115,11 @@ export function createWorkerHandlers(env, opts = {}) {
   let gpuDirty = false;
   let frameCount = 0;
   let debugMode = false;
+  // The bytes of the embedded executor this worker currently runs. Each
+  // payload embeds the smallest variant covering its own bytecode
+  // (executor/variant.zig selectVariant), so a reload can bring a DIFFERENT
+  // one; handleLoad compares against these to decide whether to adopt it.
+  let executorBytes = null;
   // Executor↔host ABI version (docs/abi.md); binaries without the export are v1.
   let abiVersion = 1;
   // Last WebGPU uncaptured-error message; dedupes per-frame repeats so the
@@ -137,6 +148,11 @@ export function createWorkerHandlers(env, opts = {}) {
   // name, or null for unpinned — what init() leaves). The pin is a change,
   // not a per-draw call: a draw whose frame equals this sends nothing.
   let appliedFrame = null;
+  // The time of the last frame the worker rendered to the MAIN canvas (the
+  // load's first frame, then every draw's), or null before one exists. A
+  // resize repaints THIS time (handleResize), so the clock stands still
+  // while the presented image catches up with the new backing size.
+  let lastFrameTime = null;
 
   // Normalize a posted payload (ArrayBuffer or view) to a Uint8Array for parsing.
   const toU8 = (b) => (b instanceof Uint8Array ? b : new Uint8Array(b));
@@ -180,6 +196,59 @@ export function createWorkerHandlers(env, opts = {}) {
     gpu.setOnShaderError((err) => { post({ type: "shader-error", ...err }); });
     gpu.setOnError((err) => reportCommandError(err.message, err.source));
     gpu.setOnQueryResult((results) => { post({ type: "queryResult", data: results }); });
+  }
+
+  // Instantiate `bytes` as this worker's executor and rebind everything that
+  // reads it. The one instantiate path for a first init AND a reload's
+  // executor adoption (handleLoad): wasm/memory/abiVersion are closure state
+  // every handler reads at call time, so the swap is picked up everywhere.
+  // A rejected instantiate swaps nothing — the running engine keeps the
+  // previous payload and the error reaches the host through the dispatch
+  // catch, like any other refused load.
+  async function adoptExecutor(bytes, debug) {
+    const imports = getExecutorImports({
+      log: (ptr, len) => {
+        if (debug) {
+          const str = new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len));
+          console.log("[Executor]", str);
+        }
+      },
+    });
+
+    const { instance } = await env.instantiate(bytes, imports);
+    wasm = instance.exports;
+    memory = wasm.memory;
+    abiVersion = wasm.getAbiVersion?.() ?? 1;
+    executorBytes = bytes;
+    if (debug) console.log("[Worker] Executor ABI version:", abiVersion);
+    // The dispatcher decodes every command stream out of the EXECUTOR's
+    // memory; a swap without this rebind reads the new payload's stream from
+    // the old executor's bytes. loadBytecode's dirty-reset re-wires the whole
+    // dispatcher (rebinding memory again); this covers a load whose previous
+    // init stream was empty (gpuDirty false, dispatcher kept).
+    gpu?.setMemory(memory);
+  }
+
+  // The embedded executor a payload carries, or null when it has none. A
+  // payload too malformed to parse reports nothing here: loadBytecode's own
+  // parsePayload surfaces that as the load's error, on the same path as
+  // before this helper existed.
+  function embeddedExecutorOf(bytecode) {
+    try {
+      return parsePayload(toU8(bytecode)).executor;
+    } catch {
+      return null;
+    }
+  }
+
+  // Byte identity, not variant-name equality: two payloads compiled for the
+  // same variant embed byte-identical executors, and byte identity is the
+  // only comparison that cannot mistake "covers the same plugins" for "is
+  // the same build".
+  function sameExecutorBytes(a, b) {
+    if (a === b) return true;
+    if (!a || !b || a.length !== b.length) return false;
+    return a.every((byte, i) => byte === b[i]);
   }
 
   // One command-stream fault to the host, deduped per distinct message so a
@@ -305,13 +374,17 @@ export function createWorkerHandlers(env, opts = {}) {
   // texture of the previous payload stayed allocated with it until GC.
   // `watchDeviceLost` ignores the resulting `destroyed` reason. (Third leak
   // pass, LEAK-06's edge)
+  //
+  // Returns `true` once a real rebuild ran, or a string naming the state that
+  // made it a no-op — the caller with a rid reports that as an ok:false ack
+  // rather than certifying a rebuild that never happened.
   async function recoverDevice(bytecode) {
-    if (!initialized) return;
+    if (!initialized) return "not initialized";
     const bc = bytecode ?? lastBytecode;
     // selfRecover fires auto-recovery, which can race a loss before the first
     // load lands a bytecode — the viewer bails then; the passive (dev) path
     // rebuilds an empty stack unconditionally, matching the original workers.
-    if (!bc && selfRecover) return;
+    if (!bc && selfRecover) return "no bytecode retained to rebuild from";
     moduleLoaded = false;
     gpu?.destroy();
     gpuDirty = false;
@@ -320,6 +393,7 @@ export function createWorkerHandlers(env, opts = {}) {
     if (bc) await loadBytecode(bc);
     post({ type: MSG.DEVICE_RESTORED });
     post({ type: MSG.READY, frameCount, abiVersion });
+    return true;
   }
 
   async function handleInit(data) {
@@ -353,21 +427,7 @@ export function createWorkerHandlers(env, opts = {}) {
       // Use embedded executor from PNG payload
       if (data.debug) console.log("[Worker] Using embedded executor from payload");
 
-      const imports = getExecutorImports({
-        log: (ptr, len) => {
-          if (data.debug) {
-            const str = new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len));
-            console.log("[Executor]", str);
-          }
-        },
-      });
-
-      const { instance } = await env.instantiate(payloadInfo.executor, imports);
-      wasm = instance.exports;
-      memory = wasm.memory;
-      abiVersion = wasm.getAbiVersion?.() ?? 1;
-      if (data.debug) console.log("[Worker] Executor ABI version:", abiVersion);
-      gpu.setMemory(memory);
+      await adoptExecutor(payloadInfo.executor, data.debug);
       initialized = true;
 
       await loadBytecode(payloadInfo.payload);
@@ -400,6 +460,28 @@ export function createWorkerHandlers(env, opts = {}) {
 
   async function handleLoad(data) {
     if (!initialized) throw new Error("Not initialized");
+
+    // A reload can embed a DIFFERENT executor than the one this worker runs.
+    // Every payload embeds the smallest variant covering its own bytecode
+    // (executor/variant.zig selectVariant), and a variant compiled without a
+    // plugin emits NO command for that plugin's opcodes (wasm_entry.zig's
+    // comptime-gated handlers take the skipOpcodeParams branch). Running the
+    // new bytecode on the first payload's variant silently drops resource
+    // creation: rotating_cube after simple_triangle never created its depth
+    // texture, gpu.js applyPendingPassState dropped the depth attachment it
+    // could not resolve, and the pass then mismatched the very pipeline the
+    // same stream built ("setPipeline: color and depth targets from pass do
+    // not match pipeline" — the reuse path's cross-payload failure, both
+    // engines). Adopt the payload's own executor FIRST — before the
+    // device-lost and limits rebuilds, whose loadBytecode must also run on
+    // it. Byte-identical executors (same variant, the common reload chain)
+    // keep the running instance; a payload without one keeps it too.
+    const incoming = embeddedExecutorOf(data.bytecode);
+    if (incoming && !sameExecutorBytes(incoming, executorBytes)) {
+      if (debugMode) console.log("[Worker] Reload embeds a different executor; adopting it");
+      await adoptExecutor(incoming, debugMode);
+    }
+
     // A load arriving while the device is lost (the user edited past the crash)
     // rebuilds the device first, then loads the NEW shader — the natural restart.
     if (deviceLost) {
@@ -524,6 +606,7 @@ export function createWorkerHandlers(env, opts = {}) {
 
     // First frame render
     await render(0, canvas.width, canvas.height);
+    lastFrameTime = 0;
   }
 
   async function render(time, width, height) {
@@ -549,6 +632,23 @@ export function createWorkerHandlers(env, opts = {}) {
     if (!ptr || len === 0) return;
 
     await gpu.execute(ptr);
+  }
+
+  // A render that leaves the executor exactly where it found it. The frame
+  // counter IS the ping-pong pool phase, and wasm.frame() advances it, so an
+  // extra render between live frames would invert every pooled binding. Callers
+  // that must not disturb the animation (the timeline thumbnails, and the
+  // resize repaint below) save and restore the counter around the render;
+  // executors older than the additive setFrameCounter export keep the
+  // historical drift (`wasm` is read at call time; it is null while the
+  // prefetch capability is being built).
+  async function renderEphemeral(t, w, h) {
+    const save = typeof wasm?.setFrameCounter === "function" ? wasm.getFrameCounter() : undefined;
+    try {
+      await render(t, w, h);
+    } finally {
+      if (save !== undefined) wasm.setFrameCounter(save);
+    }
   }
 
   async function handleDraw(data) {
@@ -587,13 +687,27 @@ export function createWorkerHandlers(env, opts = {}) {
       const frame = data.frame ?? null;
       if (frame !== appliedFrame) applyFrame(frame);
       await render(t, canvas.width, canvas.height);
+      // Inside the lock, so a resize queued behind this draw repaints the
+      // frame this draw presented, not the one before it.
+      lastFrameTime = t;
     });
 
     // Opportunistic thumbnail emission + prefetch drain (dev capability).
     prefetch?.afterDraw(t);
   }
 
-  function handleResize(data) {
+  // A resize is applied the moment it arrives, then the frame the player is
+  // paused on is repainted at the new size. The backing store the PAGE reads
+  // (the placeholder canvas's attributes) and the visible image both heal only
+  // when a frame is PRESENTED; without the repaint a paused clock kept the old
+  // frame stretched into the new CSS box and the reported backing stale until
+  // the next draw. The repaint is not a draw the host asked for and not a
+  // tick: renderEphemeral restores the executor's frame counter (the
+  // ping-pong pool phase) and the time is the last presented frame's own, so
+  // the animation state stands still while the image catches up. With nothing
+  // presented yet (init not complete, or a load that never rendered) there is
+  // no current frame to repaint, and a lost device has nothing to present on.
+  async function handleResize(data) {
     if (canvas) {
       canvas.width = data.width;
       canvas.height = data.height;
@@ -602,6 +716,9 @@ export function createWorkerHandlers(env, opts = {}) {
     // Rebuild canvas-bound textures (e.g. depth attachments sized to the canvas)
     // so they stay in sync with the swap chain.
     gpu?.resizeCanvasBound?.(data.width, data.height);
+    if (lastFrameTime === null || !moduleLoaded || deviceLost || !canvas || !gpu) return;
+    const t = lastFrameTime;
+    await withRenderLock(() => renderEphemeral(t, canvas.width, canvas.height));
   }
 
   // Release everything this worker owns and tell the host it may terminate us.
@@ -724,13 +841,30 @@ export function createWorkerHandlers(env, opts = {}) {
         case MSG.LOAD:
           await handleLoad(data);
           break;
-        case MSG.RESTART:
+        case MSG.RESTART: {
+          // A correlated restart (host restartSettled) carries a rid and is
+          // acked with its own restart-done; the legacy fire-and-forget verb
+          // and the viewer's self-recovery dispatch carry none and are acked
+          // by nothing.
+          const rid = data.rid;
           try {
-            await recoverDevice(data.bytecode);
+            const rebuilt = await recoverDevice(data.bytecode);
+            if (rid !== undefined) {
+              post(rebuilt === true
+                ? { type: MSG.RESTART_DONE, rid, ok: true }
+                : { type: MSG.RESTART_DONE, rid, ok: false, message: `restart skipped: ${rebuilt}` });
+            }
           } catch (err) {
+            // The correlated caller hears the fault as its own rejection
+            // BEFORE the throw becomes the shared error post below, so
+            // onError still fires exactly once for the same failure.
+            if (rid !== undefined) {
+              post({ type: MSG.RESTART_DONE, rid, ok: false, message: `GPU recovery failed: ${err instanceof Error ? err.message : String(err)}` });
+            }
             throw new Error(`GPU recovery failed: ${err instanceof Error ? err.message : String(err)}`);
           }
           break;
+        }
         case MSG.DESTROY:
           handleDestroy();
           break;
@@ -744,7 +878,9 @@ export function createWorkerHandlers(env, opts = {}) {
           handleGetStats();
           break;
         case MSG.RESIZE:
-          handleResize(data);
+          // Awaited: a draw posted after the resize must render at the new
+          // size, not race the repaint that presents it.
+          await handleResize(data);
           break;
         default:
           if (prefetch && dispatchEditorMessage(type, data)) break;
@@ -810,18 +946,9 @@ export function createWorkerHandlers(env, opts = {}) {
       // Thumbnails must be side-effect-free: wasm.frame() advances the
       // executor's frame_counter, which IS the ping-pong pool phase, so an
       // odd number of thumbnail renders between live frames would invert
-      // every pooled binding. Save/restore the counter around the render;
-      // executors older than the additive setFrameCounter export keep the
-      // historical drift (`wasm` is read at call time — it is null while
-      // this capability is being built).
-      renderEphemeral: async (t, w, h) => {
-        const save = typeof wasm?.setFrameCounter === "function" ? wasm.getFrameCounter() : undefined;
-        try {
-          await render(t, w, h);
-        } finally {
-          if (save !== undefined) wasm.setFrameCounter(save);
-        }
-      },
+      // every pooled binding. renderEphemeral (shared with the resize
+      // repaint) saves and restores the counter around the render.
+      renderEphemeral,
       getCanvas: () => canvas,
       getGpu: () => gpu,
       loaded: () => moduleLoaded,

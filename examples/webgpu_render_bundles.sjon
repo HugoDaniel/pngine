@@ -126,7 +126,7 @@ fn fs(in: VertexOutput) -> @location(0) vec4f {
       (attribute :shader-location 1 :offset 16 :format float32x4)
       (attribute :shader-location 2 :offset 32 :format float32x2)))
   (fragment :module renderShader :entry fs
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 

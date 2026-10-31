@@ -52,6 +52,26 @@ everything needed to render except the executor and GPU driver.
 - **Size-constrained**: Target <50KB for practical distribution
 - **Platform-agnostic**: Same payload runs on any WebGPU-capable platform
 
+**No value the GPU produces decides what a frame does.** This is the
+engine-side twin of the payload's declarative property, and it is a contract,
+not a state of affairs: the payload commits to carrying no executable CPU
+code, and the engine commits to a schedule no GPU result steers. The schedule
+of a loaded payload (the passes, copies and dispatches a frame executes) is a
+function of the document and the frame counter, never of rendered or computed
+results. Data flows CPU to GPU through uniforms and host buffer writes; the
+look changes through those, and the schedule does not. Two carve-outs are part
+of the statement, not exceptions to it. GPU-to-GPU copies and query resolve
+are steps inside the schedule and stay legal: they move values between GPU
+resources, and nothing reads them back mid-frame to choose the next step.
+GPU-to-CPU readback lives at the edges and answers to the host, never to the
+schedule: the browser executor maps a copy's `map-read` target after submit
+and hands the values through the host's query callback
+(`npm/pngine/src/gpu-queue-commands.js`), and the native renderer maps one
+buffer to write each `--frame` PNG (`src/executor/wgpu_native_gpu.zig`). A
+`map-read` buffer is a buffer the host may map; nothing in the engine maps it
+into a scheduling decision, and nothing will without an explicit amendment of
+this paragraph, shipped as a versioned change and announced here.
+
 **Structure (v0 format, 40-byte header):**
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -296,6 +316,7 @@ below is the source of truth for that asymmetry.
 | `pNGa` | Audio WASM module (e.g. a compiled song) | `embedAudio` | JS runtime only (`extract.js`, `viewer-init.js`) |
 | `pNGf` | Flat command buffer (pre-flattened init+frame, inline data) | `embedFlat` | JS runtime only (mini viewer, `mini.js`) |
 | `pNGw` | DEFLATE'd WGSL source (for `--html` compression) | **Reserved** — declared, never written | — |
+| `pNGx` | Payload envelope + body (02.C2): any kind, one chunk per payload | `packPng` (CLI `pack`; `render`'s one-pass payload list) | `walkPng` (CLI `ls`, `extract --kind`) + JS `payloadsOf` |
 
 **Read-side symmetry (A7):** the native `extract` command's job is bytecode, so
 by design it only *decodes* `pNGb`; `pNGa`/`pNGf` are decoded by the JS runtime
@@ -303,8 +324,12 @@ at load, and `pNGm`/`pNGw` are reserved. So no single runtime
 reads everything `embed` can write — but `extract` must still be able to *see*
 the whole inventory. `extract.enumerateChunks` (CLI: `pngine extract <png>
 --list`) enumerates every `pNG*` chunk present (type, size, version, compressed
-flag), matching the `pNG` prefix so a new family is listed without a code
-change. Add a new chunk → add its row here and a `chunkRole` label in
+flag, mapped kind), matching the `pNG` prefix so a new family is listed without
+a code change. `extract.walkPng` (CLI: `pngine ls`) goes one step further and
+lists payloads: kinds mapped from the letters (`b→PNGB f→PNGF a→SNTU m→META
+w→WGSL`, `pNGm`'s missing flags byte supplied as zero), `pNGx` envelopes
+parsed, `continued` chains concatenated — the walker every container in the
+family shares. Add a new chunk → add its row here and a `chunkRole` label in
 `cli/embed.zig`.
 
 **Key JS files:**
@@ -547,7 +572,7 @@ Per-frame loop:
   :layout auto
   (vertex :module code :entry vertexMain)
   (fragment :module code :entry fragMain
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list))
 
 (render-pass :name renderPipeline

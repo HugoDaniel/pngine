@@ -181,8 +181,8 @@ fn updateLights(@builtin(global_invocation_id) id: vec3u) {
       (attribute :shader-location 0 :offset 0 :format float32x3)
       (attribute :shader-location 1 :offset 12 :format float32x3)))
   (fragment :module gBufferShader :entry gbuffer_fs
-    (target :format rgba16float)
-    (target :format rgba8unorm))
+    (color-target :format rgba16float)
+    (color-target :format rgba8unorm))
   (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :depth-write-enabled true :depth-compare less :format depth32float))
 
@@ -191,8 +191,8 @@ fn updateLights(@builtin(global_invocation_id) id: vec3u) {
   :layout auto
   (vertex :module groundGBufShader :entry ground_gbuffer_vs)
   (fragment :module groundGBufShader :entry ground_gbuffer_fs
-    (target :format rgba16float)
-    (target :format rgba8unorm))
+    (color-target :format rgba16float)
+    (color-target :format rgba8unorm))
   (primitive :topology triangle-list)
   (depth-stencil :depth-write-enabled true :depth-compare less :format depth32float))
 
@@ -317,7 +317,7 @@ struct PointerInputs {
   :layout auto
   (vertex :module deferredShader :entry deferred_vs)
   (fragment :module deferredShader :entry deferred_fs
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list))
 
 (bind-group :name deferredBG :layout deferredPipeline :group 0

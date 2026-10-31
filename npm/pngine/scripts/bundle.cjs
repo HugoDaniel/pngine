@@ -233,6 +233,8 @@ function buildInlinedProfileBundle(config) {
 
   const workerCode = buildWorkerBundle(name, embeddedOnly, workerFile);
   const pngChunksCode = fs.readFileSync(path.join(SRC_DIR, 'png-chunks.js'), 'utf-8');
+  const envelopeCode = fs.readFileSync(path.join(SRC_DIR, 'envelope.js'), 'utf-8');
+  const payloadsCode = fs.readFileSync(path.join(SRC_DIR, 'payloads.js'), 'utf-8');
   const inflateCode = fs.readFileSync(path.join(SRC_DIR, 'inflate.js'), 'utf-8');
   const detectCode = fs.readFileSync(path.join(SRC_DIR, 'detect.js'), 'utf-8');
   const extractCode = fs.readFileSync(path.join(SRC_DIR, 'extract.js'), 'utf-8');
@@ -248,6 +250,8 @@ function buildInlinedProfileBundle(config) {
 
   assertInlineClosure(name, {
     'png-chunks.js': pngChunksCode,
+    'envelope.js': envelopeCode,
+    'payloads.js': payloadsCode,
     'inflate.js': inflateCode,
     'detect.js': detectCode,
     'extract.js': extractCode,
@@ -282,6 +286,12 @@ function createWorkerBlobUrl() {
 
 // === png-chunks.js ===
 ${stripImports(stripExports(pngChunksCode))}
+
+// === envelope.js ===
+${stripImports(stripExports(envelopeCode))}
+
+// === payloads.js ===
+${stripImports(stripExports(payloadsCode))}
 
 // === inflate.js ===
 ${stripImports(stripExports(inflateCode))}
@@ -354,9 +364,11 @@ module.exports = {
   setUniforms: browserOnly,
   getUniforms: browserOnly,
   writeBuffer: browserOnly,
+  setPointer: browserOnly,
   getBuffers: browserOnly,
   getStats: browserOnly,
   restart: browserOnly,
+  restartSettled: browserOnly,
   extractBytecode: browserOnly,
   isPng,
   isZip,
@@ -380,9 +392,11 @@ export const setUniform = browserOnly;
 export const setUniforms = browserOnly;
 export const getUniforms = browserOnly;
 export const writeBuffer = browserOnly;
+export const setPointer = browserOnly;
 export const getBuffers = browserOnly;
 export const getStats = browserOnly;
 export const restart = browserOnly;
+export const restartSettled = browserOnly;
 export const extractBytecode = browserOnly;
 `;
 
@@ -419,8 +433,9 @@ const viewerOut = buildInlinedProfileBundle({
   includeLoader: false,
   exportBlock: `
 export { pngine, destroy };
-export { draw, play, pause, stop, seek, setFrame, setUniform, setUniforms, getUniforms, writeBuffer, getBuffers, getStats, restart };
-export { extractBytecode, detectFormat, isPng, isZip, isPngb };`,
+export { draw, play, pause, stop, seek, setFrame, setUniform, setUniforms, getUniforms, writeBuffer, setPointer, getBuffers, getStats, restart, restartSettled };
+export { extractBytecode, detectFormat, isPng, isZip, isPngb };
+export { payloadsOf };`,
 });
 
 console.log('2. Building dev profile...');
@@ -433,9 +448,10 @@ const devOut = buildInlinedProfileBundle({
   includeLoader: true,
   exportBlock: `
 export { pngine, destroy };
-export { draw, play, pause, stop, seek, setFrame, setUniform, setUniforms, getUniforms, writeBuffer, getBuffers, getStats, restart };
+export { draw, play, pause, stop, seek, setFrame, setUniform, setUniforms, getUniforms, writeBuffer, setPointer, getBuffers, getStats, restart, restartSettled };
 export { extractBytecode, detectFormat, isPng, isZip, isPngb };
-export { parsePayload, createExecutor, getExecutorImports, getExecutorVariantName };`,
+export { parsePayload, createExecutor, getExecutorImports, getExecutorVariantName };
+export { payloadsOf };`,
 });
 
 console.log('3. Building core/executor profiles...');
@@ -592,8 +608,33 @@ if (!DEBUG) {
     // the wire tag and the dispatcher id, neither of which anything public
     // accepts. The 14-name table, indexed by tag, is also what setUniform's
     // "could not be packed" refusal names the type with.
-    'viewer.mjs': 56300,
-    'dev.mjs': 61200,
+    // viewer/dev bumped 2026-10-05 (+2900/+2800) for payloads.js, the 02.C2
+    // payload walker: legacy-letter mapping, pNGx envelope records, continued
+    // chains, the CRC/bounds framing preflight (finding 2) and the PNG
+    // signature gate (finding 7). It was concatenated into both profiles at
+    // f3d7f4cd but never built. The same blind spot is recorded twice above:
+    // nothing in `npm test` runs the bundler, so the bundles were UNDER
+    // budget only because they were missing the code they export. Paying for
+    // it is the fix, not a regression.
+    // +500 each 2026-10-05: setPointer(p, lanes), the posted-pointer seam (ask
+    // 05). The verb, its two refusals before anything changes, and the export
+    // line are +443 B minified on both profiles (59112 -> 59555 viewer,
+    // 63954 -> 64397 dev), a real feature cost, not a regression.
+    // viewer/dev +2000/+2000 on 2026-10-17 for restartSettled(p), the awaited
+    // restart (the animader demo's restart-while-audio-starts bug): the
+    // rid-correlated request/reply in anim.js (listener-before-post, the
+    // shared-budget timer, the destroy abandon, the crash listeners, the
+    // four refusal codes) and the worker's restart-done echo with its skip
+    // and failure arms. Measured 59987 -> 61496 viewer and 64831 -> 66340 dev
+    // (+1509 each; the baseline was rebuilt at 57f5f379 for the comparison).
+    // Two things this bump records beyond the feature: first, the gate was
+    // already RED on that clean tree (+287/+331 — the blind spot this
+    // comment has recorded twice before: nothing in `npm test` runs the
+    // bundler), so +287/+331 of the raise is pre-existing creep being paid
+    // for here rather than silently carried; second, the headroom is the
+    // same small margin the setPointer entry set, not a new cushion.
+    'viewer.mjs': 61700,
+    'dev.mjs': 66500,
     'core.mjs': 31600,
     'executor.mjs': 2200,
     'mini.mjs': 7300,

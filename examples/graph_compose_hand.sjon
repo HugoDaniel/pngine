@@ -80,7 +80,7 @@ struct VsOut { @builtin(position) pos : vec4f, @location(0) shade : f32 }
       (attribute :shader-location 0 :offset 0 :format float32x3)
       (attribute :shader-location 1 :offset 12 :format float32x3)))
   (fragment :module sceneShader :entry fs
-    (target :format rgba8unorm))
+    (color-target :format rgba8unorm))
   (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
@@ -135,7 +135,7 @@ struct VsOut { @builtin(position) pos : vec4f, @location(0) shade : f32 }
 (render-pipeline :name vignette__pipe :layout auto
   (vertex :module vignette__shader :entry vs)
   (fragment :module vignette__shader :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 ; Binding 2 is the other half of `:reads` — the prelude declared the name, this
 ; supplies the texture it names.

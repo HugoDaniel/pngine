@@ -43,11 +43,12 @@ pub const std_path = "-";
 
 /// What a piece of input turned out to be. `sjon` is the fallback rather than
 /// a magic match: it is the only text format, so anything that is not one of
-/// the three binary containers and contains no NUL is source.
+/// the binary containers and contains no NUL is source.
 pub const Kind = enum {
     sjon,
     pngb,
     png,
+    flac,
     zip,
 
     /// True when a file of this kind must not be written to a terminal.
@@ -58,11 +59,15 @@ pub const Kind = enum {
 
 pub const png_signature = [_]u8{ 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n' };
 pub const pngb_magic = "PNGB";
+/// The FLAC stream marker (RFC 9639 §3); the carrier behind `pack`/`ls`/
+/// `extract --kind` for `.flac` (02.C3). An array (not a string literal) so
+/// tests can concatenate sample bytes onto it, like the PNG signature.
+pub const flac_magic = [4]u8{ 'f', 'L', 'a', 'C' };
 pub const zip_magic = [_]u8{ 'P', 'K', 3, 4 };
 
-/// The four kinds, spelled for error messages. Single source so every command
+/// The five kinds, spelled for error messages. Single source so every command
 /// rejects unrecognized input with the same list.
-pub const accepted_formats = "SJON source, PNGB bytecode, PNG, or ZIP bundle";
+pub const accepted_formats = "SJON source, PNGB bytecode, PNG, FLAC, or ZIP bundle";
 
 pub const Error = error{
     /// stdin exceeded `utils.max_file_size`.
@@ -112,6 +117,7 @@ pub fn baseDir(path: []const u8) []const u8 {
 pub fn sniff(data: []const u8) ?Kind {
     if (data.len >= png_signature.len and std.mem.eql(u8, data[0..png_signature.len], &png_signature)) return .png;
     if (data.len >= pngb_magic.len and std.mem.eql(u8, data[0..pngb_magic.len], pngb_magic)) return .pngb;
+    if (data.len >= flac_magic.len and std.mem.eql(u8, data[0..flac_magic.len], &flac_magic)) return .flac;
     if (data.len >= zip_magic.len and std.mem.eql(u8, data[0..zip_magic.len], &zip_magic)) return .zip;
 
     // Text or nothing. A NUL means these are bytes from some binary format we
@@ -135,6 +141,7 @@ pub fn kindFromExtension(path: []const u8) ?Kind {
     if (std.ascii.eqlIgnoreCase(ext, ".sjon")) return .sjon;
     if (std.ascii.eqlIgnoreCase(ext, ".pngb")) return .pngb;
     if (std.ascii.eqlIgnoreCase(ext, ".png")) return .png;
+    if (std.ascii.eqlIgnoreCase(ext, ".flac")) return .flac;
     if (std.ascii.eqlIgnoreCase(ext, ".zip")) return .zip;
     return null;
 }
@@ -202,6 +209,18 @@ pub fn readInput(gpa: Allocator, io: std.Io, path: []const u8) !Input {
     const bytes = try utils.readSourceFile(gpa, io, path);
     std.debug.assert(bytes[bytes.len] == 0);
     return .{ .bytes = bytes, .kind = kind };
+}
+
+/// Read `path` (or stdin when `-`) as raw bytes, with no format opinion.
+///
+/// Payload inputs for `pngine pack --add KIND=path` (02.C2): a payload is any
+/// bytes — a .json metadata body, a sniff-opaque blob — so neither the
+/// extension gate nor the stdin sniff of `readInput` applies. The cap and the
+/// NUL sentinel match `readInput`'s discipline.
+pub fn readPayloadBytes(gpa: Allocator, io: std.Io, path: []const u8) ![:0]const u8 {
+    std.debug.assert(path.len > 0);
+    if (isStd(path)) return readAllStdin(gpa, io);
+    return utils.readSourceFile(gpa, io, path);
 }
 
 /// Slurp stdin with an explicit cap.
@@ -314,6 +333,24 @@ pub fn writeOutput(io: std.Io, path: []const u8, data: []const u8, binary: bool)
     try out.writeStreamingAll(io, data);
 }
 
+/// Write an EMPTY artifact to `path`, or to stdout when it is `-`: the
+/// zero-length twin of `writeOutput`, for the one empty artifact that is a
+/// legal outcome: an extracted empty payload (02.C2). The output POLICY is
+/// the same, not bypassed: the file target is created or truncated, and the
+/// stdout target still runs the binary-to-TTY refusal (a caller asking for
+/// binary on a terminal made the same mistake either way), then writes
+/// nothing.
+///
+/// Pre-condition: path is non-empty.
+pub fn writeEmptyOutput(io: std.Io, path: []const u8, binary: bool) !void {
+    std.debug.assert(path.len > 0);
+
+    if (!isStd(path)) return utils.writeEmptyFile(io, path);
+
+    const out = std.Io.File.stdout();
+    if (refuseBinaryToTty(binary, try out.isTty(io))) return Error.BinaryToTerminal;
+}
+
 /// Render an input-side failure. One message per cause, shared by every
 /// command so `compile`, `inspect` and `list` explain the same thing the same
 /// way. Returns the exit code the caller should use.
@@ -328,7 +365,7 @@ pub fn reportReadError(err: anyerror, path: []const u8) u8 {
             return 4;
         },
         error.UnsupportedFormat => {
-            std.debug.print("Error: '{s}' has no recognized extension (expected .sjon, .pngb, .png or .zip)\n", .{path});
+            std.debug.print("Error: '{s}' has no recognized extension (expected .sjon, .pngb, .png, .flac or .zip)\n", .{path});
             return 4;
         },
         else => {

@@ -318,9 +318,9 @@ export function destroy(p) {
   if (i.disconnectResize) i.disconnectResize();
   if (i.audio) i.audio.destroy();
   if (i.detachListeners) i.detachListeners();
-  // Settle every in-flight worker request (anim.js workerRequest) with its
-  // fallback: no reply can arrive once we terminate, and an unsettled promise
-  // retains the awaiting caller's whole continuation.
+  // Settle every in-flight worker request (anim.js workerRequest; the
+  // correlated variant rejects): no reply can arrive once we terminate, and
+  // an unsettled promise retains the awaiting caller's whole continuation.
   if (i.pendingRequests) {
     for (const abandon of [...i.pendingRequests]) abandon();
     i.pendingRequests = null;

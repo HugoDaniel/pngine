@@ -63,7 +63,7 @@
 (render-pipeline :name pass0__pipe :layout auto
   (vertex :module pass0__shader :entry vs)
   (fragment :module pass0__shader :entry fs
-    (target :format rgba8unorm)))
+    (color-target :format rgba8unorm)))
 
 ; The A/B pair. Entry 2 reads the slot the NEXT frame will write over, which is
 ; the one this frame did not: that is the whole of the feedback.
@@ -109,7 +109,7 @@
 (render-pipeline :name main__pipe :layout auto
   (vertex :module main__shader :entry vs)
   (fragment :module main__shader :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 ; A consumer of a pooled producer is pooled too — otherwise one fixed group
 ; would sample whichever slot it was built against, half the frames stale.

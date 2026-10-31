@@ -15,7 +15,7 @@
 (texture :name depth :size [64 64] :format depth24plus-stencil8 :usage [render-attachment])
 (render-pipeline :name pipeline :layout auto
   (vertex :module code :entry vertexMain)
-  (fragment :module code :entry fragMain (target :format preferred-canvas-format))
+  (fragment :module code :entry fragMain (color-target :format preferred-canvas-format))
   (depth-stencil :format depth24plus-stencil8 :depth-write-enabled true :depth-compare less
     (stencil-front :compare always :pass-op replace)
     (stencil-front :compare never :pass-op keep)))

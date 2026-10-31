@@ -242,7 +242,7 @@ fn fsHalo(in : VSOut) -> @location(0) vec4f {
 (render-pipeline :name solidPipe :layout auto
   (vertex :module draw :entry vsSolid)
   (fragment :module draw :entry fsSolid
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
 
@@ -252,7 +252,7 @@ fn fsHalo(in : VSOut) -> @location(0) vec4f {
 (render-pipeline :name haloPipe :layout auto
   (vertex :module draw :entry vsHalo)
   (fragment :module draw :entry fsHalo
-    (target :format preferred-canvas-format
+    (color-target :format preferred-canvas-format
       (blend
         (color :src-factor one :dst-factor one :operation add)
         (alpha :src-factor one :dst-factor one :operation add))))

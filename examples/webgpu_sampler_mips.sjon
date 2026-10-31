@@ -103,13 +103,13 @@ fn quadAt(ii: u32, vi: u32, yCenter: f32) -> VSOut {
   :layout auto
   (vertex :module viewShader :entry vsTop)
   (fragment :module viewShader :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (render-pipeline :name trilinearRowPipeline
   :layout auto
   (vertex :module viewShader :entry vsBottom)
   (fragment :module viewShader :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (bind-group :name bakeBg0 :layout bakePipeline :group 0
   (entry :binding 0 :texture-view mip0))

@@ -21,7 +21,7 @@
 (render-pipeline :name pipe :layout auto
   (vertex :module code :entry vs)
   (fragment :module code :entry fs
-    (target :format rgba8unorm)))
+    (color-target :format rgba8unorm)))
 (render-pass :name draw :pipeline pipe
   (color-attachment :view srcTex
     :clear-value [0 0 0 1] :load-op clear :store-op store)

@@ -78,7 +78,7 @@ fn fs(in : VSOut) -> @location(0) vec4f {
   :layout auto
   (vertex :module drawCode :entry vs)
   (fragment :module drawCode :entry fs
-    (target :format preferred-canvas-format)))
+    (color-target :format preferred-canvas-format)))
 
 (bind-group :name drawBg :layout drawPipe :group 0
   (entry :binding 0 :sampler samp)

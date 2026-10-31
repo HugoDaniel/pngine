@@ -1,9 +1,9 @@
-; INVALID: a fragment stage that declares no (target ...).
+; INVALID: a fragment stage that declares no (color-target ...).
 ;
 ; GPUFragmentState.targets is REQUIRED in the WebGPU IDL. The `(targets ...)`
 ; wrapper that used to carry it is gone (a
 ; sequence of dictionaries is repeated children, not a wrapper), so the
-; requirement is now a floor on the head itself: `(head :name target :min 1)`
+; requirement is now a floor on the head itself: `(head :name color-target :min 1)`
 ; on `fragment-section`, a located positional_missing at validation rather than
 ; an emitter reject.
 ;

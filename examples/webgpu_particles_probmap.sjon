@@ -266,7 +266,7 @@ struct VSOut {
   :layout auto
   (vertex :module drawShader :entry vs)
   (fragment :module drawShader :entry fs
-    (target :format preferred-canvas-format
+    (color-target :format preferred-canvas-format
       (blend
         (color :src-factor one :dst-factor one :operation add)
         (alpha :src-factor one :dst-factor one :operation add)))))

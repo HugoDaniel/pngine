@@ -20,7 +20,7 @@ fn phase() -> f32 { return 1.7; }
 
 (render-pipeline :name pipe :layout auto
   (vertex :module vs :entry v)
-  (fragment :module art :entry fs (target :format preferred-canvas-format)))
+  (fragment :module art :entry fs (color-target :format preferred-canvas-format)))
 
 (render-pass :name draw
   (color-attachment :view context-current-texture

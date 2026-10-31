@@ -224,7 +224,7 @@ fn groundPos(i: u32) -> vec3f {
       (attribute :shader-location 0 :offset 0 :format float32x3)
       (attribute :shader-location 1 :offset 12 :format float32x3)))
   (fragment :module shader :entry color_fs
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list :cull-mode back)
   (depth-stencil :depth-write-enabled true :depth-compare less :format depth24plus))
 
@@ -241,7 +241,7 @@ fn groundPos(i: u32) -> vec3f {
   :layout auto
   (vertex :module shader :entry ground_color_vs)
   (fragment :module shader :entry ground_color_fs
-    (target :format preferred-canvas-format))
+    (color-target :format preferred-canvas-format))
   (primitive :topology triangle-list)
   (depth-stencil :depth-write-enabled true :depth-compare less :format depth24plus))
 

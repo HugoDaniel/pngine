@@ -390,7 +390,7 @@ fn fragMain(
     (vertex-buffer :array-stride (* 2 4) :step-mode vertex
       (attribute :shader-location 4 :offset 0 :format float32x2)))
   (fragment :module renderCode :entry fragMain
-    (target :format preferred-canvas-format
+    (color-target :format preferred-canvas-format
       ; Premultiplied-alpha blending.
       (blend
         (color :src-factor one :dst-factor one-minus-src-alpha :operation add)

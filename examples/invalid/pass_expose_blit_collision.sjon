@@ -1,0 +1,20 @@
+; Invalid: `:expose [warp]` makes the hook emit a render-pass named
+; `warp__blit`, and this document also declares a step-group of that name.
+; Both are frame-step names (one namespace across render-pass, compute-pass,
+; queue and step-group), so the second declaration is a
+; `duplicate_cross_ref_target` instead of two forms interning to one id.
+
+(pass-graph :name g :expose [warp]
+  (pass :name warp :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      return vec4f(0.2, 0.4, 0.6, 1.0);
+    }
+  """)
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      return vec4f(0.05, 0.05, 0.08, 1.0);
+    }
+  """))
+
+(step-group :name warp__blit :perform [g])
+(frame :name main :perform [g])
