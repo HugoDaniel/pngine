@@ -393,6 +393,7 @@ pub fn build(b: *std.Build) void {
         const is_x86_64 = target.result.cpu.arch == .x86_64;
         const is_darwin = target.result.os.tag == .macos;
         const is_openbsd = target.result.os.tag == .openbsd;
+        const is_linux = target.result.os.tag == .linux;
 
         // Core interpreter sources
         const interp_sources: []const []const u8 = &.{
@@ -480,8 +481,11 @@ pub fn build(b: *std.Build) void {
         else
             "-DBUILD_TARGET=\"X86_64\""; // Fallback
 
-        // WAMR platform layer: darwin/ or openbsd/ (the fork at ../wasm-micro-runtime adds OpenBSD)
-        const platform_define: []const u8 = if (is_openbsd) "-DBH_PLATFORM_OPENBSD" else "-DBH_PLATFORM_DARWIN";
+        // WAMR platform layer: darwin/, linux/ or openbsd/ — all three ship in the
+        // fork at ../wasm-micro-runtime (linux/ is upstream's own; the fork adds
+        // OpenBSD). Mirrors each dir's shared_platform.cmake: the platform define
+        // plus the platform dir on the include path (added below).
+        const platform_define: []const u8 = if (is_openbsd) "-DBH_PLATFORM_OPENBSD" else if (is_linux) "-DBH_PLATFORM_LINUX" else "-DBH_PLATFORM_DARWIN";
         // Common compile flags for all WAMR sources
         // Note: -fno-sanitize=alignment disables alignment sanitizer which catches
         // misaligned accesses in WAMR's internal table instantiation code
@@ -559,6 +563,12 @@ pub fn build(b: *std.Build) void {
                 .files = &.{"core/shared/platform/openbsd/platform_init.c"},
                 .flags = wamr_common_flags,
             });
+        } else if (is_linux) {
+            wamr_module.addCSourceFiles(.{
+                .root = dep.path("."),
+                .files = &.{"core/shared/platform/linux/platform_init.c"},
+                .flags = wamr_common_flags,
+            });
         }
 
         // Architecture-specific AOT relocation
@@ -592,6 +602,8 @@ pub fn build(b: *std.Build) void {
             wamr_module.addIncludePath(dep.path("core/shared/platform/darwin"));
         } else if (is_openbsd) {
             wamr_module.addIncludePath(dep.path("core/shared/platform/openbsd"));
+        } else if (is_linux) {
+            wamr_module.addIncludePath(dep.path("core/shared/platform/linux"));
         }
 
         const lib = b.addLibrary(.{

@@ -1,6 +1,6 @@
 {
   "name": "@pngine/darwin-arm64",
-  "version": "4.1.0",
+  "version": "4.1.1",
   "description": "PNGine native binary for macOS ARM64 (Apple Silicon)",
   "author": "Hugo Daniel",
   "license": "CC0-1.0",

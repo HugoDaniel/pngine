@@ -7,6 +7,15 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [4.1.1] - 2026-11-02
+
+### Fixed
+
+- build: the native npm CLI builds on Linux again. `893f829` passes the
+  target's platform define through to the WAMR layer instead of always
+  compiling with `-DBH_PLATFORM_DARWIN`, so `@pngine/linux-x64@4.1.1` is the
+  first Linux binary produced from a revision that can build it.
+
 ## [4.1.0] - 2026-10-31
 
 ### Breaking

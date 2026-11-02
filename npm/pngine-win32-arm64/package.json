@@ -1,6 +1,6 @@
 {
   "name": "@pngine/win32-arm64",
-  "version": "4.1.0",
+  "version": "4.1.1",
   "description": "PNGine native binary for Windows ARM64",
   "author": "Hugo Daniel",
   "license": "CC0-1.0",
