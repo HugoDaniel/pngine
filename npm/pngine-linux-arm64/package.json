@@ -1,6 +1,6 @@
 {
   "name": "@pngine/linux-arm64",
-  "version": "4.1.1",
+  "version": "4.2.0",
   "description": "PNGine native binary for Linux ARM64",
   "author": "Hugo Daniel",
   "license": "CC0-1.0",

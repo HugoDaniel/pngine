@@ -30,11 +30,11 @@ npm install pngine
 ```
 
 Or build from source. `build.zig.zon` declares two path dependencies,
-`../wgslender` and `../SJON` (SJON 1.5.0 or newer), so clone all three side by side:
+`../wgslender` and `../SJON` (SJON 1.7.0 or newer), so clone all three side by side:
 
 ```bash
 git clone https://github.com/HugoDaniel/wgslender.git
-git clone --branch v1.5.0 https://github.com/HugoDaniel/SJON.git
+git clone --branch v1.7.0 https://github.com/HugoDaniel/SJON.git
 git clone https://github.com/HugoDaniel/pngine.git
 cd pngine
 zig build          # → zig-out/bin/pngine

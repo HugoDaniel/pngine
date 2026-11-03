@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "x-sjon-export-version": 1,
+  "x-sjon-export-version": 2,
   "x-sjon-export-warnings": [
     {
       "code": "string_bounds_emitted_via_keywords",

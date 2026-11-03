@@ -25,11 +25,11 @@ const Allocator = std.mem.Allocator;
 const sjon = @import("sjon");
 
 comptime {
-    const minimum_sjon = std.SemanticVersion{ .major = 1, .minor = 5, .patch = 0 };
+    const minimum_sjon = std.SemanticVersion{ .major = 1, .minor = 7, .patch = 0 };
     const sjon_version = std.SemanticVersion.parse(sjon.version) catch
-        @compileError("PNGine requires SJON 1.5.0 or newer; update ../SJON");
+        @compileError("PNGine requires SJON 1.7.0 or newer; update ../SJON");
     if (sjon_version.order(minimum_sjon) == .lt)
-        @compileError("PNGine requires SJON 1.5.0 or newer; update ../SJON");
+        @compileError("PNGine requires SJON 1.7.0 or newer; update ../SJON");
 }
 
 const bytecode = @import("bytecode");

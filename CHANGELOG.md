@@ -7,6 +7,40 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [4.2.0] - 2026-11-03
+
+### Breaking
+
+- **The generated TypeScript enforces exclusive groups structurally.**
+  `schema/pngine.d.ts` moves to export format 2, so `Pngine_Wgsl`,
+  `Pngine_ShaderModule`, `Pngine_Data` and `Pngine_Bytes` are type aliases
+  now: a base object intersected with one arm-union per exclusive group,
+  instead of an interface whose grouped keys were all optional. Three
+  consequences for a consumer of that file. `interface X extends
+  Pngine_Wgsl {}` fails with TS2312 (an interface cannot extend an
+  intersection containing a union), declaration merging over those four
+  names is gone, and a document carrying both alternatives of a group,
+  `(wgsl :code … :file …)`, is a compile error instead of a silent
+  mismatch with the validator that already refused it. The inline
+  `bind-group` entry shape gains the same treatment. The npm tarball ships
+  only `schema/pngine.sjon`, so nothing in the published package changes;
+  the diff is for editors and anyone pointing `tsc` at
+  `schema/pngine.d.ts`. The JSON Schema artifact differs only in its
+  `x-sjon-export-version` stamp.
+
+### Changed
+
+- **The SJON path dependency is 1.7.0.** `src/dsl_sjon/Compiler.zig` now
+  refuses 1.5.x and 1.6.x at comptime, `README.md` and `CONTRIBUTING.md`
+  clone `--branch v1.7.0`, and `schema/pngine.{d.ts,schema.json}` are
+  regenerated from it. The floor moves with the artifacts rather than
+  ahead of them: once the committed files carry the version-2 stamp, a
+  1.5.0 checkout fails `schema-export` no matter what the compiler accepts,
+  so leaving the floor at 1.5.0 would only make the error message lie.
+  1.6.0 is the language-server release and 1.7.0 the schema-export
+  release; the binary wire stays v5 and the diagnostic-code enum is
+  unchanged, so no document, bytecode or runtime behaviour moves.
+
 ## [4.1.1] - 2026-11-02
 
 ### Fixed
