@@ -1060,7 +1060,7 @@
     {
       "code": "cross_ref_annotation_only",
       "severity": "info",
-      "message": "value-kind `frame-step` cross-ref annotation surfaces target-form=`render-pass | compute-pass | queue | step-group` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "message": "value-kind `frame-step` cross-ref annotation surfaces target-form=`render-pass | compute-pass | queue | step-group | pass-graph | draw-graph` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
       "plugin": "pngine",
       "kind": "frame-step"
     },
@@ -3865,7 +3865,7 @@
               "const": {
                 "$sym": "preferred-canvas-format"
               },
-              "description": "Resolved at runtime to the platform's canvas format."
+              "description": "Resolved at runtime to the platform's canvas format. Runtime-provided; there is no authored document declaration to navigate to."
             }
           ]
         },
@@ -4608,7 +4608,7 @@
               "const": {
                 "$sym": "preferred-canvas-format"
               },
-              "description": "Resolved at runtime to the platform's canvas format."
+              "description": "Resolved at runtime to the platform's canvas format. Runtime-provided; there is no authored document declaration to navigate to."
             }
           ]
         },
@@ -5077,25 +5077,25 @@
                   "const": {
                     "$sym": "pngine-inputs"
                   },
-                  "description": "16 B: time, canvasWidth, canvasHeight, aspect (all f32)."
+                  "description": "16 B: time, canvasWidth, canvasHeight, aspect (all f32). Runtime-provided; there is no authored document declaration to navigate to."
                 },
                 {
                   "const": {
                     "$sym": "scene-time-inputs"
                   },
-                  "description": "12 B: time, canvasWidth, canvasHeight (all f32) — the first 12 bytes of pngine-inputs. True scene timing is not modelled yet."
+                  "description": "12 B: time, canvasWidth, canvasHeight (all f32) — the first 12 bytes of pngine-inputs. True scene timing is not modelled yet. Runtime-provided; there is no authored document declaration to navigate to."
                 },
                 {
                   "const": {
                     "$sym": "pngine-frame-inputs"
                   },
-                  "description": "20 B: the 16 B of pngine-inputs, then frameIndex (u32) — the executor's frame counter, which is also the ping-pong pool phase. For a jitter sequence (TAA) or any per-frame rotation."
+                  "description": "20 B: the 16 B of pngine-inputs, then frameIndex (u32) — the executor's frame counter, which is also the ping-pong pool phase. For a jitter sequence (TAA) or any per-frame rotation. Runtime-provided; there is no authored document declaration to navigate to."
                 },
                 {
                   "const": {
                     "$sym": "pointer-inputs"
                   },
-                  "description": "48 B: x, y, clickX, clickY, dx, dy, buttons, pressure, modifiers, scrollX, scrollY, _pad (all f32)."
+                  "description": "48 B: x, y, clickX, clickY, dx, dy, buttons, pressure, modifiers, scrollX, scrollY, _pad (all f32). Runtime-provided; there is no authored document declaration to navigate to."
                 }
               ]
             },
@@ -5199,7 +5199,7 @@
                             "const": {
                               "$sym": "context-current-texture"
                             },
-                            "description": "The canvas's current swapchain texture."
+                            "description": "The canvas's current swapchain texture. Runtime-provided; there is no authored document declaration to navigate to."
                           }
                         ]
                       },
@@ -5252,7 +5252,7 @@
                             "const": {
                               "$sym": "context-current-texture"
                             },
-                            "description": "The canvas's current swapchain texture."
+                            "description": "The canvas's current swapchain texture. Runtime-provided; there is no authored document declaration to navigate to."
                           }
                         ]
                       },
@@ -6958,7 +6958,7 @@
                                   "const": {
                                     "$sym": "preferred-canvas-format"
                                   },
-                                  "description": "Resolved at runtime to the platform's canvas format."
+                                  "description": "Resolved at runtime to the platform's canvas format. Runtime-provided; there is no authored document declaration to navigate to."
                                 }
                               ]
                             },
@@ -8641,7 +8641,7 @@
               "const": {
                 "$sym": "preferred-canvas-format"
               },
-              "description": "Resolved at runtime to the platform's canvas format."
+              "description": "Resolved at runtime to the platform's canvas format. Runtime-provided; there is no authored document declaration to navigate to."
             }
           ]
         },
@@ -9714,7 +9714,7 @@
               "const": {
                 "$sym": "preferred-canvas-format"
               },
-              "description": "Resolved at runtime to the platform's canvas format (bgra8unorm on macOS, rgba8unorm elsewhere)."
+              "description": "Resolved at runtime to the platform's canvas format (bgra8unorm on macOS, rgba8unorm elsewhere). Runtime-provided; there is no authored document declaration to navigate to."
             },
             {
               "const": {
@@ -11118,7 +11118,7 @@
                   "const": {
                     "$sym": "context-current-texture"
                   },
-                  "description": "The canvas's current swapchain texture."
+                  "description": "The canvas's current swapchain texture. Runtime-provided; there is no authored document declaration to navigate to."
                 }
               ]
             },
@@ -11171,7 +11171,7 @@
                   "const": {
                     "$sym": "context-current-texture"
                   },
-                  "description": "The canvas's current swapchain texture."
+                  "description": "The canvas's current swapchain texture. Runtime-provided; there is no authored document declaration to navigate to."
                 }
               ]
             },
@@ -12614,7 +12614,7 @@
                 "const": {
                   "$sym": "preferred-canvas-format"
                 },
-                "description": "Resolved at runtime to the platform's canvas format."
+                "description": "Resolved at runtime to the platform's canvas format. Runtime-provided; there is no authored document declaration to navigate to."
               }
             ]
           },
@@ -12921,7 +12921,7 @@
               "const": {
                 "$sym": "preferred-canvas-format"
               },
-              "description": "Resolved at runtime to the platform's canvas format."
+              "description": "Resolved at runtime to the platform's canvas format. Runtime-provided; there is no authored document declaration to navigate to."
             }
           ]
         },
@@ -13123,7 +13123,9 @@
                 "render-pass",
                 "compute-pass",
                 "queue",
-                "step-group"
+                "step-group",
+                "pass-graph",
+                "draw-graph"
               ],
               "name-key": "name",
               "acyclic": false
@@ -13224,7 +13226,9 @@
                 "render-pass",
                 "compute-pass",
                 "queue",
-                "step-group"
+                "step-group",
+                "pass-graph",
+                "draw-graph"
               ],
               "name-key": "name",
               "acyclic": false
@@ -13683,7 +13687,7 @@
               "const": {
                 "$sym": "preferred-canvas-format"
               },
-              "description": "Resolved at runtime to the platform's canvas format."
+              "description": "Resolved at runtime to the platform's canvas format. Runtime-provided; there is no authored document declaration to navigate to."
             }
           ]
         },
@@ -13831,7 +13835,9 @@
                 "render-pass",
                 "compute-pass",
                 "queue",
-                "step-group"
+                "step-group",
+                "pass-graph",
+                "draw-graph"
               ],
               "name-key": "name",
               "acyclic": false
@@ -14436,7 +14442,9 @@
                 "render-pass",
                 "compute-pass",
                 "queue",
-                "step-group"
+                "step-group",
+                "pass-graph",
+                "draw-graph"
               ],
               "name-key": "name",
               "acyclic": false
@@ -14463,7 +14471,9 @@
                 "render-pass",
                 "compute-pass",
                 "queue",
-                "step-group"
+                "step-group",
+                "pass-graph",
+                "draw-graph"
               ],
               "name-key": "name",
               "acyclic": false

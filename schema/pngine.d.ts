@@ -153,7 +153,7 @@
 //   [info head_set_emitted_via_oneof_refs] value-kind `compute-pass-command` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [info head_set_emitted_via_oneof_refs] value-kind `render-bundle-command` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [warn cross_ref_unenforceable] value-kind `frame-step` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
-//   [info cross_ref_annotation_only] value-kind `frame-step` cross-ref annotation surfaces target-form=`render-pass | compute-pass | queue | step-group` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
+//   [info cross_ref_annotation_only] value-kind `frame-step` cross-ref annotation surfaces target-form=`render-pass | compute-pass | queue | step-group | pass-graph | draw-graph` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
 //   [warn cross_ref_unenforceable] value-kind `compute-pass-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
 //   [info cross_ref_annotation_only] value-kind `compute-pass-ref` cross-ref annotation surfaces target-form=`compute-pass` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
 //   [warn cross_ref_unenforceable] value-kind `queue-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
@@ -572,7 +572,7 @@ export interface Pngine_Texture {
    * @member rgba16unorm: 4×16-bit unorm; needs texture-formats-tier1. Renderable + blendable when enabled.
    * @member rgba16snorm: 4×16-bit signed norm; needs texture-formats-tier1. Renderable + blendable when enabled.
    * @member depth32float-stencil8: 32-bit float depth plus 8-bit stencil; needs the depth32float-stencil8 device feature.
-   * @member preferred-canvas-format: Resolved at runtime to the platform's canvas format.
+   * @member preferred-canvas-format: Resolved at runtime to the platform's canvas format. Runtime-provided; there is no authored document declaration to navigate to.
    */
   format: Symbol_<"rgba8unorm"> | Symbol_<"rgba8snorm"> | Symbol_<"bgra8unorm"> | Symbol_<"rgba16float"> | Symbol_<"rgba32float"> | Symbol_<"depth24plus"> | Symbol_<"depth24plus-stencil8"> | Symbol_<"depth32float"> | Symbol_<"stencil8"> | Symbol_<"depth16unorm"> | Symbol_<"r8unorm"> | Symbol_<"rg8unorm"> | Symbol_<"r16float"> | Symbol_<"rg16float"> | Symbol_<"r32float"> | Symbol_<"r32uint"> | Symbol_<"rgba8unorm-srgb"> | Symbol_<"rgba8uint"> | Symbol_<"rgba8sint"> | Symbol_<"r8snorm"> | Symbol_<"r8uint"> | Symbol_<"r8sint"> | Symbol_<"rg8snorm"> | Symbol_<"rg8uint"> | Symbol_<"rg8sint"> | Symbol_<"r16uint"> | Symbol_<"r16sint"> | Symbol_<"rg16uint"> | Symbol_<"rg16sint"> | Symbol_<"r32sint"> | Symbol_<"rg32uint"> | Symbol_<"rg32sint"> | Symbol_<"rg32float"> | Symbol_<"rgba16uint"> | Symbol_<"rgba16sint"> | Symbol_<"rgba32uint"> | Symbol_<"rgba32sint"> | Symbol_<"rgb10a2unorm"> | Symbol_<"rgb10a2uint"> | Symbol_<"rg11b10ufloat"> | Symbol_<"rgb9e5ufloat"> | Symbol_<"bgra8unorm-srgb"> | Symbol_<"r16unorm"> | Symbol_<"r16snorm"> | Symbol_<"rg16unorm"> | Symbol_<"rg16snorm"> | Symbol_<"rgba16unorm"> | Symbol_<"rgba16snorm"> | Symbol_<"depth32float-stencil8"> | Symbol_<"preferred-canvas-format">;
   /** GPUTextureDescriptor.mipLevelCount — number of mip levels to allocate (default 1). Levels beyond what's written stay uninitialized until generated. */
@@ -670,7 +670,7 @@ export interface Pngine_TextureView {
    * @member rgba16unorm: 4×16-bit unorm; needs texture-formats-tier1. Renderable + blendable when enabled.
    * @member rgba16snorm: 4×16-bit signed norm; needs texture-formats-tier1. Renderable + blendable when enabled.
    * @member depth32float-stencil8: 32-bit float depth plus 8-bit stencil; needs the depth32float-stencil8 device feature.
-   * @member preferred-canvas-format: Resolved at runtime to the platform's canvas format.
+   * @member preferred-canvas-format: Resolved at runtime to the platform's canvas format. Runtime-provided; there is no authored document declaration to navigate to.
    */
   format?: Symbol_<"rgba8unorm"> | Symbol_<"rgba8snorm"> | Symbol_<"bgra8unorm"> | Symbol_<"rgba16float"> | Symbol_<"rgba32float"> | Symbol_<"depth24plus"> | Symbol_<"depth24plus-stencil8"> | Symbol_<"depth32float"> | Symbol_<"stencil8"> | Symbol_<"depth16unorm"> | Symbol_<"r8unorm"> | Symbol_<"rg8unorm"> | Symbol_<"r16float"> | Symbol_<"rg16float"> | Symbol_<"r32float"> | Symbol_<"r32uint"> | Symbol_<"rgba8unorm-srgb"> | Symbol_<"rgba8uint"> | Symbol_<"rgba8sint"> | Symbol_<"r8snorm"> | Symbol_<"r8uint"> | Symbol_<"r8sint"> | Symbol_<"rg8snorm"> | Symbol_<"rg8uint"> | Symbol_<"rg8sint"> | Symbol_<"r16uint"> | Symbol_<"r16sint"> | Symbol_<"rg16uint"> | Symbol_<"rg16sint"> | Symbol_<"r32sint"> | Symbol_<"rg32uint"> | Symbol_<"rg32sint"> | Symbol_<"rg32float"> | Symbol_<"rgba16uint"> | Symbol_<"rgba16sint"> | Symbol_<"rgba32uint"> | Symbol_<"rgba32sint"> | Symbol_<"rgb10a2unorm"> | Symbol_<"rgb10a2uint"> | Symbol_<"rg11b10ufloat"> | Symbol_<"rgb9e5ufloat"> | Symbol_<"bgra8unorm-srgb"> | Symbol_<"r16unorm"> | Symbol_<"r16snorm"> | Symbol_<"rg16unorm"> | Symbol_<"rg16snorm"> | Symbol_<"rgba16unorm"> | Symbol_<"rgba16snorm"> | Symbol_<"depth32float-stencil8"> | Symbol_<"preferred-canvas-format">;
   /** Number of mip levels the view exposes (default: all levels from base-mip-level). */
@@ -1150,7 +1150,7 @@ export interface Pngine_DepthStencil {
    * @member rgba16unorm: 4×16-bit unorm; needs texture-formats-tier1. Renderable + blendable when enabled.
    * @member rgba16snorm: 4×16-bit signed norm; needs texture-formats-tier1. Renderable + blendable when enabled.
    * @member depth32float-stencil8: 32-bit float depth plus 8-bit stencil; needs the depth32float-stencil8 device feature.
-   * @member preferred-canvas-format: Resolved at runtime to the platform's canvas format.
+   * @member preferred-canvas-format: Resolved at runtime to the platform's canvas format. Runtime-provided; there is no authored document declaration to navigate to.
    */
   format: Symbol_<"rgba8unorm"> | Symbol_<"rgba8snorm"> | Symbol_<"bgra8unorm"> | Symbol_<"rgba16float"> | Symbol_<"rgba32float"> | Symbol_<"depth24plus"> | Symbol_<"depth24plus-stencil8"> | Symbol_<"depth32float"> | Symbol_<"stencil8"> | Symbol_<"depth16unorm"> | Symbol_<"r8unorm"> | Symbol_<"rg8unorm"> | Symbol_<"r16float"> | Symbol_<"rg16float"> | Symbol_<"r32float"> | Symbol_<"r32uint"> | Symbol_<"rgba8unorm-srgb"> | Symbol_<"rgba8uint"> | Symbol_<"rgba8sint"> | Symbol_<"r8snorm"> | Symbol_<"r8uint"> | Symbol_<"r8sint"> | Symbol_<"rg8snorm"> | Symbol_<"rg8uint"> | Symbol_<"rg8sint"> | Symbol_<"r16uint"> | Symbol_<"r16sint"> | Symbol_<"rg16uint"> | Symbol_<"rg16sint"> | Symbol_<"r32sint"> | Symbol_<"rg32uint"> | Symbol_<"rg32sint"> | Symbol_<"rg32float"> | Symbol_<"rgba16uint"> | Symbol_<"rgba16sint"> | Symbol_<"rgba32uint"> | Symbol_<"rgba32sint"> | Symbol_<"rgb10a2unorm"> | Symbol_<"rgb10a2uint"> | Symbol_<"rg11b10ufloat"> | Symbol_<"rgb9e5ufloat"> | Symbol_<"bgra8unorm-srgb"> | Symbol_<"r16unorm"> | Symbol_<"r16snorm"> | Symbol_<"rg16unorm"> | Symbol_<"rg16snorm"> | Symbol_<"rgba16unorm"> | Symbol_<"rgba16snorm"> | Symbol_<"depth32float-stencil8"> | Symbol_<"preferred-canvas-format">;
   /** Bitmask ANDed with stencil values for tests (spec default 0xFFFFFFFF). */
@@ -1357,7 +1357,7 @@ export interface Pngine_ColorTarget {
   $ns: "pngine";
   /**
    * Format of the attachment this color-target renders to.
-   * @member preferred-canvas-format: Resolved at runtime to the platform's canvas format (bgra8unorm on macOS, rgba8unorm elsewhere).
+   * @member preferred-canvas-format: Resolved at runtime to the platform's canvas format (bgra8unorm on macOS, rgba8unorm elsewhere). Runtime-provided; there is no authored document declaration to navigate to.
    * @member bgra8unorm: 4×8-bit unorm, BGRA order; common canvas format.
    * @member rgba8unorm: 4×8-bit unorm; renderable, filterable, blendable.
    * @member rgba16float: 4×16-bit float; renderable, filterable, blendable; HDR-capable.
@@ -1814,7 +1814,7 @@ export interface Pngine_RenderBundle {
    * @member rgba16unorm: 4×16-bit unorm; needs texture-formats-tier1. Renderable + blendable when enabled.
    * @member rgba16snorm: 4×16-bit signed norm; needs texture-formats-tier1. Renderable + blendable when enabled.
    * @member depth32float-stencil8: 32-bit float depth plus 8-bit stencil; needs the depth32float-stencil8 device feature.
-   * @member preferred-canvas-format: Resolved at runtime to the platform's canvas format.
+   * @member preferred-canvas-format: Resolved at runtime to the platform's canvas format. Runtime-provided; there is no authored document declaration to navigate to.
    */
   "depth-stencil-format"?: Symbol_<"rgba8unorm"> | Symbol_<"rgba8snorm"> | Symbol_<"bgra8unorm"> | Symbol_<"rgba16float"> | Symbol_<"rgba32float"> | Symbol_<"depth24plus"> | Symbol_<"depth24plus-stencil8"> | Symbol_<"depth32float"> | Symbol_<"stencil8"> | Symbol_<"depth16unorm"> | Symbol_<"r8unorm"> | Symbol_<"rg8unorm"> | Symbol_<"r16float"> | Symbol_<"rg16float"> | Symbol_<"r32float"> | Symbol_<"r32uint"> | Symbol_<"rgba8unorm-srgb"> | Symbol_<"rgba8uint"> | Symbol_<"rgba8sint"> | Symbol_<"r8snorm"> | Symbol_<"r8uint"> | Symbol_<"r8sint"> | Symbol_<"rg8snorm"> | Symbol_<"rg8uint"> | Symbol_<"rg8sint"> | Symbol_<"r16uint"> | Symbol_<"r16sint"> | Symbol_<"rg16uint"> | Symbol_<"rg16sint"> | Symbol_<"r32sint"> | Symbol_<"rg32uint"> | Symbol_<"rg32sint"> | Symbol_<"rg32float"> | Symbol_<"rgba16uint"> | Symbol_<"rgba16sint"> | Symbol_<"rgba32uint"> | Symbol_<"rgba32sint"> | Symbol_<"rgb10a2unorm"> | Symbol_<"rgb10a2uint"> | Symbol_<"rg11b10ufloat"> | Symbol_<"rgb9e5ufloat"> | Symbol_<"bgra8unorm-srgb"> | Symbol_<"r16unorm"> | Symbol_<"r16snorm"> | Symbol_<"rg16unorm"> | Symbol_<"rg16snorm"> | Symbol_<"rgba16unorm"> | Symbol_<"rgba16snorm"> | Symbol_<"depth32float-stencil8"> | Symbol_<"preferred-canvas-format">;
   /**
@@ -1842,7 +1842,7 @@ export interface Pngine_StepGroup {
   $ns: "pngine";
   name: Symbol_;
   /** The steps this group stands for, in order. */
-  perform: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group">>;
+  perform: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group"> | CrossRef<"pass-graph"> | CrossRef<"draw-graph">>;
 }
 
 /** Frame program: what runs each frame, in order. */
@@ -1855,7 +1855,7 @@ export interface Pngine_Frame {
   init?: Array<CrossRef<"compute-pass">>;
   name: Symbol_;
   /** Passes and queues run every frame, in order. */
-  perform: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group">>;
+  perform: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group"> | CrossRef<"pass-graph"> | CrossRef<"draw-graph">>;
 }
 
 /** One-shot compute init of a storage buffer (first frame only). */
@@ -1941,7 +1941,7 @@ export interface Pngine_Pass {
    * @member rgba16unorm: 4×16-bit unorm; needs texture-formats-tier1. Renderable + blendable when enabled.
    * @member rgba16snorm: 4×16-bit signed norm; needs texture-formats-tier1. Renderable + blendable when enabled.
    * @member depth32float-stencil8: 32-bit float depth plus 8-bit stencil; needs the depth32float-stencil8 device feature.
-   * @member preferred-canvas-format: Resolved at runtime to the platform's canvas format.
+   * @member preferred-canvas-format: Resolved at runtime to the platform's canvas format. Runtime-provided; there is no authored document declaration to navigate to.
    */
   format?: Symbol_<"rgba8unorm"> | Symbol_<"rgba8snorm"> | Symbol_<"bgra8unorm"> | Symbol_<"rgba16float"> | Symbol_<"rgba32float"> | Symbol_<"depth24plus"> | Symbol_<"depth24plus-stencil8"> | Symbol_<"depth32float"> | Symbol_<"stencil8"> | Symbol_<"depth16unorm"> | Symbol_<"r8unorm"> | Symbol_<"rg8unorm"> | Symbol_<"r16float"> | Symbol_<"rg16float"> | Symbol_<"r32float"> | Symbol_<"r32uint"> | Symbol_<"rgba8unorm-srgb"> | Symbol_<"rgba8uint"> | Symbol_<"rgba8sint"> | Symbol_<"r8snorm"> | Symbol_<"r8uint"> | Symbol_<"r8sint"> | Symbol_<"rg8snorm"> | Symbol_<"rg8uint"> | Symbol_<"rg8sint"> | Symbol_<"r16uint"> | Symbol_<"r16sint"> | Symbol_<"rg16uint"> | Symbol_<"rg16sint"> | Symbol_<"r32sint"> | Symbol_<"rg32uint"> | Symbol_<"rg32sint"> | Symbol_<"rg32float"> | Symbol_<"rgba16uint"> | Symbol_<"rgba16sint"> | Symbol_<"rgba32uint"> | Symbol_<"rgba32sint"> | Symbol_<"rgb10a2unorm"> | Symbol_<"rgb10a2uint"> | Symbol_<"rg11b10ufloat"> | Symbol_<"rgb9e5ufloat"> | Symbol_<"bgra8unorm-srgb"> | Symbol_<"r16unorm"> | Symbol_<"r16snorm"> | Symbol_<"rg16unorm"> | Symbol_<"rg16snorm"> | Symbol_<"rgba16unorm"> | Symbol_<"rgba16snorm"> | Symbol_<"depth32float-stencil8"> | Symbol_<"preferred-canvas-format">;
   /** Fragments assembled ahead of this pass's code. They may declare functions, structs and constants, but no resource bindings — the prelude owns group 0. */
@@ -1962,7 +1962,7 @@ export interface Pngine_PassGraph {
   $form: "pass-graph";
   $ns: "pngine";
   /** Passes and queues run each frame BEFORE the graph's own steps, in this order — they become the head of the emitted (frame …)'s :perform. */
-  before?: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group">>;
+  before?: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group"> | CrossRef<"pass-graph"> | CrossRef<"draw-graph">>;
   /** The graph's passes whose intermediate a frame may put on the canvas through a generated `<pass>__blit` render pass. Absent, nothing is emitted. */
   expose?: Array<Symbol_>;
   /** Makes this graph a (step-group …) of that name instead of the document's (frame …). A document with two graphs names both. */
@@ -2016,9 +2016,9 @@ export interface Pngine_DrawGraph {
   $form: "draw-graph";
   $ns: "pngine";
   /** Passes and queues run each frame AFTER the graph's own steps — the tail of the emitted (frame …)'s :perform. */
-  after?: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group">>;
+  after?: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group"> | CrossRef<"pass-graph"> | CrossRef<"draw-graph">>;
   /** Passes and queues run each frame BEFORE the graph's own steps — the head of the emitted (frame …)'s :perform. */
-  before?: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group">>;
+  before?: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group"> | CrossRef<"pass-graph"> | CrossRef<"draw-graph">>;
   /** Makes this graph a (step-group …) of that name instead of the document's (frame …). A document with two graphs names both. */
   name?: Symbol_;
   $children?: Array<{ readonly $form: "stage" } | { readonly $form: "geometry" }>;

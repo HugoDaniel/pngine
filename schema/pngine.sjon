@@ -399,10 +399,10 @@
     :description "Runtime-provided uniform data the player writes each frame."
     :underlying symbol
     :members (member-set
-      (member :name pngine-inputs :description "16 B: time, canvasWidth, canvasHeight, aspect (all f32).")
-      (member :name scene-time-inputs :description "12 B: time, canvasWidth, canvasHeight (all f32) — the first 12 bytes of pngine-inputs. True scene timing is not modelled yet.")
-      (member :name pngine-frame-inputs :description "20 B: the 16 B of pngine-inputs, then frameIndex (u32) — the executor's frame counter, which is also the ping-pong pool phase. For a jitter sequence (TAA) or any per-frame rotation.")
-      (member :name pointer-inputs :description "48 B: x, y, clickX, clickY, dx, dy, buttons, pressure, modifiers, scrollX, scrollY, _pad (all f32).")))
+      (member :name pngine-inputs :description "16 B: time, canvasWidth, canvasHeight, aspect (all f32). Runtime-provided; there is no authored document declaration to navigate to.")
+      (member :name scene-time-inputs :description "12 B: time, canvasWidth, canvasHeight (all f32) — the first 12 bytes of pngine-inputs. True scene timing is not modelled yet. Runtime-provided; there is no authored document declaration to navigate to.")
+      (member :name pngine-frame-inputs :description "20 B: the 16 B of pngine-inputs, then frameIndex (u32) — the executor's frame counter, which is also the ping-pong pool phase. For a jitter sequence (TAA) or any per-frame rotation. Runtime-provided; there is no authored document declaration to navigate to.")
+      (member :name pointer-inputs :description "48 B: x, y, clickX, clickY, dx, dy, buttons, pressure, modifiers, scrollX, scrollY, _pad (all f32). Runtime-provided; there is no authored document declaration to navigate to.")))
   ; The two ref arms are ONE cross-ref target group, never a union of two ref
   ; kinds: a union resolves first-match while the emitter looks the name up in
   ; separate id tables. A group gives one namespace — a
@@ -546,12 +546,12 @@
     :description "Builtin attachment view: context-current-texture is the canvas's current texture."
     :underlying symbol
     :members (member-set
-      (member :name context-current-texture :description "The canvas's current swapchain texture.")))
+      (member :name context-current-texture :description "The canvas's current swapchain texture. Runtime-provided; there is no authored document declaration to navigate to.")))
   (value-kind :name color-target-format
     :description "Color target format. preferred-canvas-format resolves to the platform's canvas format at runtime."
     :underlying symbol
     :members (member-set
-      (member :name preferred-canvas-format :description "Resolved at runtime to the platform's canvas format (bgra8unorm on macOS, rgba8unorm elsewhere).")
+      (member :name preferred-canvas-format :description "Resolved at runtime to the platform's canvas format (bgra8unorm on macOS, rgba8unorm elsewhere). Runtime-provided; there is no authored document declaration to navigate to.")
       (member :name bgra8unorm :description "4×8-bit unorm, BGRA order; common canvas format.")
       (member :name rgba8unorm :description "4×8-bit unorm; renderable, filterable, blendable.")
       (member :name rgba16float :description "4×16-bit float; renderable, filterable, blendable; HDR-capable.")
@@ -683,7 +683,7 @@
       (member :name rgba16unorm :description "4×16-bit unorm; needs texture-formats-tier1. Renderable + blendable when enabled.")
       (member :name rgba16snorm :description "4×16-bit signed norm; needs texture-formats-tier1. Renderable + blendable when enabled.")
       (member :name depth32float-stencil8 :description "32-bit float depth plus 8-bit stencil; needs the depth32float-stencil8 device feature.")
-      (member :name preferred-canvas-format :description "Resolved at runtime to the platform's canvas format.")))
+      (member :name preferred-canvas-format :description "Resolved at runtime to the platform's canvas format. Runtime-provided; there is no authored document declaration to navigate to.")))
   (value-kind :name texture-usage
     :description "GPUTextureUsage flag — what the texture may be used for."
     :underlying symbol
@@ -1066,15 +1066,18 @@
   (value-kind :name compute-pass-ref-list
     :description "Declared (compute-pass …) / (init …) names, run in order."
     :underlying vector :vector (vector-shape :element compute-pass-ref :max-len 2048))
-  ; One frame step. The three forms share ONE namespace (SJON 1.2.0 multi-target
+  ; One frame step. The forms share ONE namespace (SJON 1.2.0 multi-target
   ; cross-ref): a pass and a queue with the same :name is a
   ; `duplicate_cross_ref_target` at the declaration, so a step can never be
-  ; ambiguous. (It used to be a union tried in order, while the emitter kept
+  ; ambiguous. A named graph is in the list because the frame names it in the
+  ; AUTHORED aggregate, where it is a `(pass-graph …)` / `(draw-graph …)` and
+  ; not yet the `(step-group …)` its hook emits.
+  ; (It used to be a union tried in order, while the emitter kept
   ; one table for both pass kinds — a collision silently dropped the render pass.)
   (value-kind :name frame-step
-    :description "One frame step: a render-pass, compute-pass, queue or step-group name (one namespace across the four)."
+    :description "One frame step: a render-pass, compute-pass or queue name, a named pass-graph/draw-graph (a step group), or a step-group name (one namespace across the forms)."
     :underlying symbol
-    :cross-ref (cross-ref :target [render-pass compute-pass queue step-group]))
+    :cross-ref (cross-ref :target [render-pass compute-pass queue step-group pass-graph draw-graph]))
   (value-kind :name frame-step-list
     :description "Passes and queues run every frame, in order."
     :underlying vector :vector (vector-shape :element frame-step :max-len 2048))

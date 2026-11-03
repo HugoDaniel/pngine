@@ -7,6 +7,38 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [4.2.1] - 2026-11-03
+
+### Changed
+
+- **The SJON clone pin is v1.7.1.** README.md and CONTRIBUTING.md clone
+  `--branch v1.7.1`, the language-server polish release: goto-declaration,
+  key completion that offers a completed key's values, and a textEdit
+  whose range spans the whole typed key. The comptime floor in
+  `src/dsl_sjon/Compiler.zig` stays 1.7.0, and that is the honest
+  statement rather than a stale one: 1.7.1 changes nothing on the
+  language side (binary wire v5, the diagnostic-code enum, export
+  format 2 and the conformance corpus are untouched), pngine consumes
+  SJON's schema, validator and lowering but never its language server,
+  and the schema artifacts regenerate byte-identical, so a floor that
+  refused 1.7.0 would describe a failure that cannot happen. `zig build
+  drift` is green against both tags. An editor pairing pngine's schema
+  with SJON's `sjon-lsp.wasm` picks the completion and declaration
+  fixes up from the pinned checkout.
+
+### Fixed
+
+- **A frame can name a declared `(pass-graph …)` or `(draw-graph …)`.**
+  `frame-step`'s cross-ref targeted `[render-pass compute-pass queue
+  step-group]`, so a frame step naming an authored graph failed
+  validation: in the authored aggregate the graph is a `(pass-graph …)`
+  / `(draw-graph …)` declaration, and the `(step-group …)` its hook
+  emits does not exist yet at validation time, which rejected every
+  graph a frame actually names. The cross-ref gains `pass-graph` and
+  `draw-graph` as targets (`2089e59`), the generated TypeScript and
+  JSON Schema are regenerated from the corrected manifest, and the npm
+  payload's schema copy ships the fix (`eafebe6`).
+
 ## [4.2.0] - 2026-11-03
 
 ### Breaking

@@ -34,7 +34,7 @@ Or build from source. `build.zig.zon` declares two path dependencies,
 
 ```bash
 git clone https://github.com/HugoDaniel/wgslender.git
-git clone --branch v1.7.0 https://github.com/HugoDaniel/SJON.git
+git clone --branch v1.7.1 https://github.com/HugoDaniel/SJON.git
 git clone https://github.com/HugoDaniel/pngine.git
 cd pngine
 zig build          # → zig-out/bin/pngine
