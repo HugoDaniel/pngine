@@ -22,6 +22,9 @@
 //! - Output file is valid TypeScript
 //! - One property per distinct field name; when the same name appears in
 //!   several binding records the LAST one wins, matching gpu.js setUniform
+//! - Controls (the uniform table's control-name block) join the same
+//!   `Uniforms` interface as `number` — they are set through the same
+//!   setUniform; a reserved (empty-string) slot emits nothing
 //! - Type mappings follow WGSL to TypeScript conventions
 
 const std = @import("std");
@@ -81,7 +84,16 @@ pub fn generate(
     defer last_index.deinit(gpa);
     const total_fields = try indexLastOccurrences(gpa, uniforms, strings, &last_index);
 
-    if (total_fields == 0) {
+    // Controls join the same `Uniforms` interface (§6.1): a control is set
+    // through the same setUniform, so one generated type lists every name a
+    // host can write. `controlCount` counts only NAMED controls — an
+    // empty-string entry is a reserved slot (unnamed, unlistable).
+    var control_count: usize = 0;
+    for (uniforms.control_names.items) |id| {
+        if (strings.get(@enumFromInt(@as(u32, id))).len > 0) control_count += 1;
+    }
+
+    if (total_fields == 0 and control_count == 0) {
         // No uniforms - generate empty interface
         try output.appendSlice(gpa,
             \\export interface Uniforms {}
@@ -90,7 +102,8 @@ pub fn generate(
         );
     } else {
         try output.appendSlice(gpa, "export interface Uniforms {\n");
-        try emitFields(gpa, &output, uniforms, strings, &last_index, total_fields);
+        if (total_fields > 0) try emitFields(gpa, &output, uniforms, strings, &last_index, total_fields);
+        if (control_count > 0) try emitControls(gpa, &output, uniforms, strings);
         try output.appendSlice(gpa, "}\n\n");
 
         // Write UniformName type alias
@@ -203,6 +216,29 @@ fn emitFields(
     }
 
     assert(index == total_fields);
+}
+
+/// `name: number;` per named control, in slot order — a control is a
+/// host-settable f32 (§4.1), so `number` is the whole type. An empty-string
+/// entry is a reserved slot and emits nothing. Control names are WGSL
+/// identifiers by compiler rule; a name carrying a dot (a hostile table) is
+/// quoted, the same fallback emitFields uses.
+fn emitControls(
+    gpa: Allocator,
+    output: *std.ArrayList(u8),
+    uniforms: *const UniformTable,
+    strings: *const StringTable,
+) !void {
+    for (uniforms.control_names.items) |id| {
+        const name = strings.get(@enumFromInt(@as(u32, id)));
+        if (name.len == 0) continue; // a reserved slot: unnamed, not settable
+        const line = if (std.mem.indexOf(u8, name, ".") != null)
+            try std.fmt.allocPrint(gpa, "  \"{s}\": number;\n", .{name})
+        else
+            try std.fmt.allocPrint(gpa, "  {s}: number;\n", .{name});
+        defer gpa.free(line);
+        try output.appendSlice(gpa, line);
+    }
 }
 
 /// Map UniformType to TypeScript type string.

@@ -29,6 +29,7 @@ const js_codegen = @import("js_codegen.zig");
 const utils = @import("utils.zig");
 const stdio = @import("stdio.zig");
 const arg_reader = @import("arg_reader.zig");
+const control_args = @import("control_args.zig");
 const test_utils = @import("../test_utils.zig");
 
 const build_options = @import("build_options");
@@ -93,7 +94,57 @@ pub const Options = struct {
     /// a failure (exit 9) instead of a silent no-op. Off for normal renders (which
     /// still warn-once); the render-coverage gate sets it to reclassify OK→stub.
     strict_native_stubs: bool = false,
+    /// Repeatable `--control name=value` assignments (plan §6.3). Parsed here,
+    /// resolved against the compiled document's public control-name block
+    /// before any rendering starts.
+    controls: control_args.List = .{},
 };
+
+/// Options for the narrow packaging helper the play command uses. The defaults
+/// are render's: shader validation on, minification off, executor embedding on.
+pub const SelfContainedOptions = struct {
+    minify_shaders: bool = false,
+    validate_shaders: bool = true,
+};
+
+/// Compile SJON source and package it exactly as `pngine render`'s default
+/// self-contained path does: the executor variant is selected from the detected
+/// plugin set, embedded in the bytecode, and written as one legacy `pNGb`
+/// payload into a 1x1 transparent PNG.
+///
+/// The helper shares render's compilation, executor-selection, transparent-PNG
+/// and `packPng` primitives; it does not write files and does not alter the
+/// legacy carrier policy. The caller owns the returned PNG.
+pub fn packageSelfContainedPng(
+    gpa: Allocator,
+    io: std.Io,
+    input_path: []const u8,
+    source: [:0]const u8,
+    options: SelfContainedOptions,
+) ![]u8 {
+    std.debug.assert(input_path.len > 0);
+
+    const compiled = try compileSourceWithPlugins(
+        gpa,
+        io,
+        input_path,
+        source,
+        .sjon,
+        options.minify_shaders,
+        options.validate_shaders,
+    );
+    defer gpa.free(compiled.pngb);
+
+    const bytecode = try embedExecutorInBytecode(gpa, io, compiled.pngb, compiled.plugins);
+    defer gpa.free(bytecode);
+
+    const carrier = try createTransparentPixel(gpa);
+    defer gpa.free(carrier);
+
+    return pngine.png.packPng(gpa, carrier, &.{
+        .{ .kind = .{ 'P', 'N', 'G', 'B' }, .body = bytecode },
+    });
+}
 
 /// Execute the render command.
 ///
@@ -230,6 +281,9 @@ fn parseArgs(args: []const []const u8, opts: *Options) u8 {
             const time_str = reader.value() catch return arg_reader.missingValue(arg);
             const result = parseTimeValue(time_str, opts);
             if (result != 0) return result;
+        } else if (std.mem.eql(u8, arg, "--control")) {
+            const control_str = reader.value() catch return arg_reader.missingValue(arg);
+            if (!control_args.addFlag(control_str, &opts.controls)) return 1;
         } else if (std.mem.eql(u8, arg, "--audio") or std.mem.eql(u8, arg, "-a")) {
             opts.audio_path = reader.value() catch return arg_reader.missingValue(arg);
         } else if (std.mem.eql(u8, arg, "--audio-js")) {
@@ -314,6 +368,23 @@ fn executePipeline(
         return 3;
     }
 
+    // Resolve `--control` against the document's PUBLIC name block before
+    // anything is embedded, rendered or written. An unknown name is refused
+    // here — before any output — and the same slot list then steers both the
+    // reference dispatcher (--frame) and, when it lands, every other consumer
+    // of the compiled document.
+    var compiled_module = format.deserialize(gpa, bytecode) catch |err| {
+        std.debug.print("Error: failed to deserialize bytecode: {}\n", .{err});
+        return 3;
+    };
+    defer compiled_module.deinit(gpa);
+
+    var resolved_controls: control_args.ResolvedList = .{};
+    if (control_args.resolve(&compiled_module, &opts.controls, &resolved_controls)) |unknown| {
+        control_args.printUnknown(&compiled_module, unknown);
+        return 1;
+    }
+
     // Optionally embed executor WASM in bytecode (creates v5 format)
     const embedded = embedExecutorIfRequested(gpa, io, bytecode, opts, plugins);
     if (embedded.exit_code != 0) return embedded.exit_code;
@@ -335,7 +406,7 @@ fn executePipeline(
     // bytecode (unless --no-embed) and the --audio sugar as a SNTU payload.
     // One writer for both spellings — `--audio song.wasm` resolves to exactly
     // what `pngine pack --add SNTU=song.wasm` writes (02.C2, spec 02:110).
-    const rendered = generatePng(gpa, final_bytecode, opts.width, opts.height, opts.time, opts.render_frame, opts.scene_name, opts.strict_native_stubs);
+    const rendered = generatePng(gpa, final_bytecode, opts.width, opts.height, opts.time, opts.render_frame, opts.scene_name, opts.strict_native_stubs, resolved_controls.slice());
     if (rendered.exit_code != 0) return rendered.exit_code;
     var png_data = rendered.png_data;
     defer gpa.free(png_data);
@@ -466,6 +537,17 @@ fn writeTypesSidecar(gpa: Allocator, io: std.Io, output: []const u8, bytecode: [
     return 0;
 }
 
+/// Whether a compiled payload's header sets `has_guards` (flag bit 6): it
+/// carries frame-program instructions, whose branch a one-run MockGPU
+/// recording would freeze (plan frame-program §9). Read straight off the
+/// bytes — the header is 40 bytes and validated before either exporter gets
+/// here, so this only needs the flag.
+fn payloadHasGuards(bytecode: []const u8) bool {
+    std.debug.assert(bytecode.len >= format.HEADER_SIZE);
+    const flags: format.Flags = @bitCast(std.mem.readInt(u16, bytecode[6..8], .little));
+    return flags.has_guards;
+}
+
 /// Execute HTML codegen pipeline: compile → MockGPU → emit JS directly.
 fn executeHtmlCodegen(
     gpa: Allocator,
@@ -479,6 +561,21 @@ fn executeHtmlCodegen(
     fullscreen: bool,
     unpack: bool,
 ) !u8 {
+    // §9: this codegen records ONE MockGPU execution, so a guarded document
+    // would freeze whichever arm the recording took and drop every other
+    // arm's resources into a player that can never show them. Refuse before
+    // anything is captured or written — same exit-4 channel as a command the
+    // codegen cannot emit — and name the embedded-executor route, which runs
+    // every branch.
+    if (payloadHasGuards(bytecode)) {
+        std.debug.print(
+            "Error: cannot export a single-file (--html) player — the document uses frame-program guards, which a recorded one-run playback cannot represent.\n" ++
+                "  Re-export with an embedded executor (the default render, or `pngine play` for a player page): the executor runs every guard branch.\n",
+            .{},
+        );
+        return 4;
+    }
+
     // Read audio WASM if present
     var audio_wasm_data: ?[]const u8 = null;
     if (audio_path) |apath| {
@@ -546,6 +643,20 @@ fn executeFlatPipeline(
     bytecode: []const u8,
     audio_path: ?[]const u8,
 ) !u8 {
+    // §9, the mini player's half of the same refusal: pNGf records ONE
+    // MockGPU execution, so a guarded document would freeze one arm and drop
+    // every other's resources. Refuse before the flattener captures or writes
+    // anything — same exit-4 channel as a command the minimal runtime cannot
+    // play — naming the embedded-executor route.
+    if (payloadHasGuards(bytecode)) {
+        std.debug.print(
+            "Error: cannot export a flat (--flat) pNGf — the document uses frame-program guards, which a recorded one-run playback cannot represent.\n" ++
+                "  Re-export with an embedded executor (the default render, or `pngine play` for a player page): the executor runs every guard branch.\n",
+            .{},
+        );
+        return 4;
+    }
+
     // Flatten bytecode into pNGf format
     var diag: flat.Diag = .{};
     var flat_payload = flat.flattenPayload(gpa, bytecode, &diag) catch |err| {
@@ -566,7 +677,7 @@ fn executeFlatPipeline(
     defer flat_payload.deinit(gpa);
 
     // Generate 1x1 transparent pixel PNG (no GPU render → strict-stub flag moot)
-    const png_result = generatePng(gpa, bytecode, width, height, 0.0, false, null, false);
+    const png_result = generatePng(gpa, bytecode, width, height, 0.0, false, null, false, &.{});
     if (png_result.exit_code != 0) return png_result.exit_code;
     defer gpa.free(png_result.png_data);
 
@@ -628,11 +739,26 @@ const CompiledWithPlugins = struct {
 fn compileFromFileWithPlugins(gpa: Allocator, io: std.Io, input: []const u8, minify_shaders: bool, validate_shaders: bool) !CompiledWithPlugins {
     const in = try stdio.readInput(gpa, io, input);
     defer in.deinit(gpa);
-    const source = in.bytes;
+    return compileSourceWithPlugins(gpa, io, input, in.bytes, in.kind, minify_shaders, validate_shaders);
+}
 
+/// The shared source-compilation seam. `input` supplies the base directory for
+/// relative references (and the diagnostic name); `kind` is the format decision
+/// already made from the bytes or the extension; `source` is the in-memory text.
+/// Both `compileFromFileWithPlugins` and the public `packageSelfContainedPng`
+/// go through here, so the play command and render cannot drift.
+fn compileSourceWithPlugins(
+    gpa: Allocator,
+    io: std.Io,
+    input: []const u8,
+    source: [:0]const u8,
+    kind: stdio.Kind,
+    minify_shaders: bool,
+    validate_shaders: bool,
+) !CompiledWithPlugins {
     const base_dir = stdio.baseDir(input);
 
-    if (in.kind == .sjon) {
+    if (kind == .sjon) {
         // SJON-backed compiler (PNGine as a SJON host). Plain bytecode + plugins;
         // the executor is embedded afterwards by embedExecutorInBytecode.
         const result = try pngine.dsl_sjon.compileWithPlugins(gpa, source, .{
@@ -810,9 +936,10 @@ fn generatePng(
     render_frame: bool,
     scene_name: ?[]const u8,
     strict_native_stubs: bool,
+    controls: []const control_args.Resolved,
 ) PngResult {
     if (render_frame) {
-        return renderWithGpu(gpa, bytecode, width, height, time, scene_name, strict_native_stubs);
+        return renderWithGpu(gpa, bytecode, width, height, time, scene_name, strict_native_stubs, controls);
     }
     // 1x1 transparent pixel - minimal PNG container for bytecode
     const png_data = createTransparentPixel(gpa) catch |err| {
@@ -871,7 +998,7 @@ fn printSuccessMessage(
 /// cross binary, or any host build with `-Dgpu-native=false`) hard-error here
 /// with a rebuild hint instead of emitting a placeholder, so `--frame` output is
 /// always either a genuine render or an explicit failure — never a fake.
-fn renderWithGpu(gpa: Allocator, bytecode: []const u8, width: u32, height: u32, time: f32, scene_name: ?[]const u8, strict_native_stubs: bool) PngResult {
+fn renderWithGpu(gpa: Allocator, bytecode: []const u8, width: u32, height: u32, time: f32, scene_name: ?[]const u8, strict_native_stubs: bool, controls: []const control_args.Resolved) PngResult {
     // Pre-conditions
     std.debug.assert(bytecode.len >= format.HEADER_SIZE);
     std.debug.assert(width > 0 and height > 0);
@@ -887,12 +1014,12 @@ fn renderWithGpu(gpa: Allocator, bytecode: []const u8, width: u32, height: u32, 
         return .{ .png_data = undefined, .exit_code = 7 };
     }
 
-    return renderWithGpuNative(gpa, bytecode, width, height, time, scene_name, strict_native_stubs);
+    return renderWithGpuNative(gpa, bytecode, width, height, time, scene_name, strict_native_stubs, controls);
 }
 
 /// The real render path — only reachable (and only analyzed) when
 /// `has_wgpu_native` is true, so it may freely use `WgpuNativeGPU`/`Context`.
-fn renderWithGpuNative(gpa: Allocator, bytecode: []const u8, width: u32, height: u32, time: f32, scene_name: ?[]const u8, strict_native_stubs: bool) PngResult {
+fn renderWithGpuNative(gpa: Allocator, bytecode: []const u8, width: u32, height: u32, time: f32, scene_name: ?[]const u8, strict_native_stubs: bool, controls: []const control_args.Resolved) PngResult {
     const NativeGPU = pngine.gpu_backends.NativeGPU;
     const Context = pngine.gpu_backends.Context;
     const RequiredLimits = pngine.gpu_backends.RequiredLimits;
@@ -936,7 +1063,12 @@ fn renderWithGpuNative(gpa: Allocator, bytecode: []const u8, width: u32, height:
     var dispatcher = pngine.Dispatcher(NativeGPU).init(gpa, &gpu, &module);
     defer dispatcher.deinit();
 
-    const exec_code = runFrames(&dispatcher, &module, scene_name, gpa);
+    // The reference dispatcher's control table needs the same time the GPU
+    // backend got (plan §7.2): slot 0 is what a time guard reads. The
+    // declaration phase inside execute_init loads the defaults; runFrames
+    // seeds time and the host's `--control` values between init and the
+    // first frame body, by contract (§6.6).
+    const exec_code = runFrames(&dispatcher, &module, scene_name, controls, time, gpa);
     if (exec_code != 0) return .{ .png_data = undefined, .exit_code = exec_code };
 
     const pixels = gpu.read_pixels(gpa) catch |err| {
@@ -960,19 +1092,37 @@ fn renderWithGpuNative(gpa: Allocator, bytecode: []const u8, width: u32, height:
 
 /// Run the module's frames: one named scene, or every frame in order.
 /// Returns 0, or an exit code after printing its own message.
+///
+/// This is the split entry path the browser executor has always had:
+/// `execute_init` runs the creation region and the declaration phase, then the
+/// frame's time (slot 0) and the host's `--control` values are stored, and only
+/// then does the frame body run (plan §5, §6.6). Writing a control before init
+/// is meaningless — `scan_control_declarations` restores the authored defaults
+/// over it — so the order here is part of the contract, not an optimisation.
 fn runFrames(
     dispatcher: anytype,
     module: *const format.Module,
     scene_name: ?[]const u8,
+    controls: []const control_args.Resolved,
+    time: f32,
     gpa: Allocator,
 ) u8 {
     std.debug.assert(module.bytecode.len > 0);
 
     if (scene_name) |name| {
         std.debug.assert(name.len > 0);
-        return executeFrameByName(dispatcher, module, name, gpa);
+        return executeFrameByName(dispatcher, module, name, controls, time, gpa);
     }
-    dispatcher.execute_all(gpa) catch |err| {
+
+    dispatcher.execute_init(gpa) catch |err| {
+        std.debug.print("Error: execution failed: {}\n", .{err});
+        return 5;
+    };
+
+    dispatcher.set_time(time);
+    if (!control_args.applyToDispatcher(dispatcher, controls)) return 1;
+
+    dispatcher.execute_from_pc(gpa) catch |err| {
         std.debug.print("Error: execution failed: {}\n", .{err});
         return 5;
     };
@@ -1006,7 +1156,14 @@ fn nativeHonestyCode(strict_native_stubs: bool) u8 {
 
 /// Execute a specific frame by name.
 /// Returns 0 on success, error code on failure.
-fn executeFrameByName(dispatcher: anytype, module: *const format.Module, name: []const u8, gpa: Allocator) u8 {
+fn executeFrameByName(
+    dispatcher: anytype,
+    module: *const format.Module,
+    name: []const u8,
+    controls: []const control_args.Resolved,
+    time: f32,
+    gpa: Allocator,
+) u8 {
     const opcodes = pngine.opcodes;
 
     // Find string ID for the name
@@ -1035,6 +1192,12 @@ fn executeFrameByName(dispatcher: anytype, module: *const format.Module, name: [
         std.debug.print("Error: pass scan failed: {}\n", .{err});
         return 5;
     };
+
+    // `scan_pass_definitions` ran the declaration phase, so the table holds
+    // the authored defaults. Apply the frame's time and the host's controls
+    // now — after init, before the frame body (§6.6).
+    dispatcher.set_time(time);
+    if (!control_args.applyToDispatcher(dispatcher, controls)) return 1;
 
     // Execute only the specified frame
     dispatcher.pc = @intCast(frame_range.start);
@@ -1138,6 +1301,8 @@ pub fn printUsage() void {
         \\  -f, --frame               Render actual frame via GPU (default: 1x1 transparent)
         \\  -s, --size <WxH>          Output dimensions when using --frame (default: 512x512)
         \\  -t, --time <seconds>      Time value for animation (default: 0.0)
+        \\  --control <name=value>    Set a declared control (repeatable; reject
+        \\                            unknown names, non-finite values)
         \\  -n, --scene <name>        Render specific scene/frame by name (default: all frames)
         \\  -e, --embed               Embed bytecode in output PNG (default: on)
         \\  --no-embed                Do not embed bytecode
@@ -1246,4 +1411,43 @@ fn defaultOptions() Options {
         .embed_executor = true,
         .scene_name = null,
     };
+}
+
+/// The render path's own ordering proof, on MockGPU: `runFrames` must run
+/// init/declaration first, then seed time and the host's controls, then walk
+/// the frames (§5, §6.6). The payload is the guarded agreement's shape:
+/// slot 0 time `:at-least 2` gates LATE (offset 48), slot 1 scene `:is 0.25`
+/// picks THEN (16) over ELSE (32).
+fn buildGuardedRenderPayload(gpa: Allocator) ![]u8 {
+    var builder = pngine.format.Builder.init();
+    defer builder.deinit(gpa);
+
+    _ = try builder.internString(gpa, "main");
+    _ = try builder.addData(gpa, "THEN");
+    _ = try builder.addData(gpa, "ELSE");
+    _ = try builder.addData(gpa, "LATE");
+
+    const em = builder.getEmitter();
+    try em.createBuffer(gpa, 0, 64, .{ .uniform = true, .copy_dst = true });
+    try em.emitDefineControl(gpa, 0.25);
+    try em.emitDefineControl(gpa, 2.0);
+
+    try em.defineFrame(gpa, 0, 0);
+    try em.emitWriteControls(gpa, 0, 0, 8);
+
+    const late_if = try em.emitExecIf(gpa, 0, .at_least, 2.0);
+    try em.writeBuffer(gpa, 0, 48, 2);
+    const after_late = em.len();
+    em.patchSkip(late_if, @intCast(after_late - (late_if + 2)));
+
+    const scene_if = try em.emitExecIf(gpa, 1, .is, 0.25);
+    try em.writeBuffer(gpa, 0, 16, 0);
+    const skip = try em.emitExecSkip(gpa);
+    const else_start = em.len();
+    try em.writeBuffer(gpa, 0, 32, 1);
+    em.patchSkip(scene_if, @intCast(else_start - (scene_if + 2)));
+    em.patchSkip(skip, @intCast(em.len() - (skip + 2)));
+
+    try em.endFrame(gpa);
+    return builder.finalize(gpa);
 }

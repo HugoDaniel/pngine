@@ -1,0 +1,23 @@
+; INVALID: two `(control …)` forms sharing a `:name`.
+;
+; A control is a cross-ref target (the reference arm of `control-source`), so
+; SJON's one-namespace-per-bucket check sees both declarations and reports the
+; second `:name` as a `duplicate_cross_ref_target`. Without it a guard would
+; resolve to whichever declaration the index saw first while the host set the
+; other of two values under one name.
+(shader-module :name m :code """
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.1, 1.0); }
+""")
+(control :name scene)
+(control :name scene)
+(render-pipeline :name p :layout auto
+  (vertex :module m :entry vs)
+  (fragment :module m :entry fs (color-target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline p
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

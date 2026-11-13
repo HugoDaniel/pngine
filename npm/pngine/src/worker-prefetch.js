@@ -9,6 +9,8 @@
 //   env               — makeOffscreen, grabBitmap, defer, gpuTextureUsage
 //   post(msg, xfer?)  — self.postMessage
 //   render(t, w, h)   — the shared frame renderer (awaited)
+//   snapshotControls()/restoreControls(saved) — the live control table's
+//                       save/restore around a thumbnail's own uniforms (§6.2)
 //   getCanvas()       — the visible OffscreenCanvas (thumbnail source)
 //   getGpu()          — the current command dispatcher
 //   loaded()          — moduleLoaded (drain / prefetch guards)
@@ -163,6 +165,15 @@ export function createPrefetch(host) {
         // context (or capturing this block's frame onto the visible canvas).
         await host.withRenderLock(async () => {
           gpu.setRenderTargetContext(prefetchCtx);
+          // Snapshot the LIVE control values before the thumbnail's uniforms
+          // touch the table — inside this locked section, because that is
+          // where the values stop being live: a thumbnail's `scene` lane
+          // writes the same table the next live frame reads. Restored in the
+          // finally below, the way renderEphemeral restores the frame
+          // counter. (A snapshot taken inside renderEphemeral itself would
+          // capture the thumbnail's values — §6.2.) Uniform writes that went
+          // to GPU buffers are NOT restored: a preview cannot undo GPU work.
+          const savedControls = host.snapshotControls();
           try {
             // Apply this block's score uniforms (when present) so the thumbnail
             // renders the animation's value at its center time, exactly as the
@@ -174,6 +185,7 @@ export function createPrefetch(host) {
             // hosts built before it existed.
             await (host.renderEphemeral ?? host.render)(centerTime, prefetchCanvas.width, prefetchCanvas.height);
           } finally {
+            host.restoreControls(savedControls);
             gpu.setRenderTargetContext(null);
           }
         });

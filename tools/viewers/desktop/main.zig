@@ -52,6 +52,16 @@ const WamrError = wamr.WamrError;
 const Runner = @import("runner.zig").Runner;
 const Cmd = @import("runner.zig").Cmd;
 
+/// One `--control name=value` after parsing. The name is owned (argv is freed
+/// before `run`), the value is the host's f32.
+const Control = struct {
+    name: []const u8,
+    value: f32,
+};
+
+/// A document declares at most 64 controls (frame program §4.1).
+const MAX_CONTROLS: usize = 64;
+
 /// Command line options
 const Options = struct {
     input_path: []const u8,
@@ -60,6 +70,10 @@ const Options = struct {
     time: f32 = 0.0,
     trace_only: bool = true, // Default to trace mode (no GPU backend yet)
     help: bool = false,
+    /// `--control` assignments, in command-line order. Resolved to slots
+    /// against the payload's control-name block after the file is loaded.
+    controls: [MAX_CONTROLS]Control = undefined,
+    control_count: usize = 0,
 };
 
 pub fn main(init: std.process.Init.Minimal) !void {
@@ -75,8 +89,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const io = threaded.io();
 
     // Parse command line
-    const opts = try parseArgs(gpa, init.args);
-    defer gpa.free(opts.input_path);
+    var opts = parseArgs(gpa, init.args) catch |err| {
+        if (err != error.Reported) std.debug.print("Error: {}\n", .{err});
+        std.process.exit(1);
+    };
+    defer deinitOptions(gpa, &opts);
 
     if (opts.help) {
         printUsage();
@@ -88,13 +105,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.debug.print("Error: WAMR not available. Rebuild with WAMR support.\n", .{});
         std.process.exit(1);
     }
-    std.debug.print("WAMR version: {s}\n", .{WamrRuntime.version()});
 
     // Run the viewer
     run(gpa, io, opts) catch |err| {
-        std.debug.print("Error: {}\n", .{err});
+        if (err != error.Reported) std.debug.print("Error: {}\n", .{err});
         std.process.exit(1);
     };
+}
+
+fn deinitOptions(gpa: Allocator, opts: *Options) void {
+    gpa.free(opts.input_path);
+    for (opts.controls[0..opts.control_count]) |control| gpa.free(control.name);
 }
 
 fn run(gpa: Allocator, io: std.Io, opts: Options) !void {
@@ -119,13 +140,9 @@ fn run(gpa: Allocator, io: std.Io, opts: Options) !void {
         bytes_read += n;
     }
 
-    std.debug.print("Loaded {s}: {} bytes\n", .{ opts.input_path, file_data.len });
-
     // Extract bytecode (handles PNG or raw PNGB)
     const bytecode = try extractBytecode(gpa, file_data);
     defer gpa.free(bytecode);
-
-    std.debug.print("Bytecode: {} bytes\n", .{bytecode.len});
 
     // Parse header to check for embedded executor
     if (bytecode.len < format.HEADER_SIZE) {
@@ -135,6 +152,22 @@ fn run(gpa: Allocator, io: std.Io, opts: Options) !void {
     const header: *const format.Header = @ptrCast(@alignCast(bytecode.ptr));
     try header.validate();
 
+    // Resolve `--control` against the payload's PUBLIC control-name block
+    // before printing anything (plan §6.3/§6.6): an unknown name is refused
+    // with no partial viewer output. The slot is the position in the block
+    // counting from 1; slot 0 is `time` and is set by `frame()`.
+    var module = format.deserialize(gpa, bytecode) catch {
+        std.debug.print("Error: failed to deserialize bytecode\n", .{});
+        return error.Reported;
+    };
+    defer module.deinit(gpa);
+
+    var resolved: [MAX_CONTROLS]ResolvedControl = undefined;
+    const resolved_count = try resolveControls(&module, &opts, &resolved);
+
+    std.debug.print("WAMR version: {s}\n", .{WamrRuntime.version()});
+    std.debug.print("Loaded {s}: {} bytes\n", .{ opts.input_path, file_data.len });
+    std.debug.print("Bytecode: {} bytes\n", .{bytecode.len});
     std.debug.print("PNGB v{}, flags: embedded={}\n", .{ header.version, header.flags.has_embedded_executor });
 
     // Check for embedded executor
@@ -212,6 +245,10 @@ fn run(gpa: Allocator, io: std.Io, opts: Options) !void {
 
     std.debug.print("init() succeeded\n", .{});
 
+    // The §6.6 order: after init() (which restored the authored defaults),
+    // before frame(). One f32 per slot at `getControlPtr() + 4 * slot`.
+    try applyControls(&runtime, resolved[0..resolved_count]);
+
     // Get init command buffer
     const init_cmd_ptr = try runtime.callGetPtr("getCommandPtr");
     const init_cmd_len = try runtime.callGetPtr("getCommandLen");
@@ -253,6 +290,79 @@ fn run(gpa: Allocator, io: std.Io, opts: Options) !void {
     }
 
     std.debug.print("Done!\n", .{});
+}
+
+/// A `--control` assignment after the payload's name block supplied its slot.
+const ResolvedControl = struct {
+    name: []const u8,
+    slot: u16,
+    value: f32,
+};
+
+/// Resolve the parsed assignments against the module's public control-name
+/// block (the same `controlSlotByName` the CLI uses). An unknown name refuses
+/// the whole run before the viewer prints anything: it names the missing
+/// control and the ones the payload declares, max 64.
+fn resolveControls(
+    module: *const format.Module,
+    opts: *const Options,
+    out: *[MAX_CONTROLS]ResolvedControl,
+) !usize {
+    for (opts.controls[0..opts.control_count], 0..) |control, i| {
+        const slot = module.uniforms.controlSlotByName(&module.strings, control.name) orelse {
+            std.debug.print("Error: unknown control '{s}'", .{control.name});
+            const count = module.uniforms.control_names.items.len;
+            if (count == 0) {
+                std.debug.print(" (this document declares no controls)\n", .{});
+            } else {
+                std.debug.print(" (declared controls: ", .{});
+                var printed: usize = 0;
+                for (1..count + 1) |s| {
+                    const name = module.uniforms.controlNameBySlot(&module.strings, @intCast(s)) orelse continue;
+                    if (printed > 0) std.debug.print(", ", .{});
+                    std.debug.print("{s}", .{name});
+                    printed += 1;
+                    if (printed == MAX_CONTROLS) break;
+                }
+                if (printed == 0) std.debug.print("none — every slot is unnamed", .{});
+                std.debug.print(")\n", .{});
+            }
+            return error.Reported;
+        };
+        out[i] = .{ .name = control.name, .slot = slot, .value = control.value };
+    }
+    return opts.control_count;
+}
+
+/// One f32 per control at `getControlPtr() + 4 * slot`, slot 1..64. Slot 0 is
+/// `time`, which frame() writes; resolve() can never produce it.
+fn applyControls(runtime: *WamrRuntime, controls: []const ResolvedControl) !void {
+    if (controls.len == 0) return;
+
+    const table = runtime.callGetPtr("getControlPtr") catch {
+        std.debug.print("Error: the payload's executor has no getControlPtr export\n", .{});
+        return error.Reported;
+    };
+    const memory = try runtime.getMemory();
+    for (controls) |control| {
+        // A hostile/older payload could carry a name block past the 64-control
+        // document cap. Refuse before computing an address into the executor.
+        if (control.slot == 0 or control.slot > MAX_CONTROLS) {
+            std.debug.print("Error: control '{s}' names slot {d}, past the {d}-control limit\n", .{
+                control.name, control.slot, MAX_CONTROLS,
+            });
+            return error.Reported;
+        }
+        const offset = table + 4 * @as(u32, control.slot);
+        if (offset + 4 > memory.len) return error.MemoryAccessFailed;
+        var bytes: [4]u8 = undefined;
+        std.mem.writeInt(u32, &bytes, @bitCast(control.value), .little);
+        try runtime.writeMemory(offset, &bytes);
+        std.debug.print(
+            "[control] {s}: slot {d} = {d} at 0x{x:0>8}\n",
+            .{ control.name, control.slot, control.value, offset },
+        );
+    }
 }
 
 /// Extract bytecode from PNG or return raw PNGB.
@@ -305,7 +415,19 @@ fn traceCommandBuffer(buf: []const u8, phase: []const u8) void {
         const cmd = buf[pos];
         const cmd_name = cmdName(cmd);
         const cmd_size = cmdSize(cmd);
-        std.debug.print("  [{d:>3}] 0x{x:0>2} {s}\n", .{ cmd_idx, cmd, cmd_name });
+        std.debug.print("  [{d:>3}] 0x{x:0>2} {s}", .{ cmd_idx, cmd, cmd_name });
+
+        // WRITE_BUFFER is how a guard's arm becomes visible in this trace:
+        // the same command tag either way, so print the destination offset
+        // that says WHICH write ran. (The control table's write_controls is
+        // the same command with offset 0.)
+        if (cmd == Cmd.WRITE_BUFFER and pos + cmd_size <= buf.len) {
+            const id = std.mem.readInt(u16, buf[pos + 1 ..][0..2], .little);
+            const offset = std.mem.readInt(u32, buf[pos + 3 ..][0..4], .little);
+            const data_len = std.mem.readInt(u32, buf[pos + 11 ..][0..4], .little);
+            std.debug.print(" id={d} offset={d} size={d}", .{ id, offset, data_len });
+        }
+        std.debug.print("\n", .{});
 
         pos += cmd_size;
         cmd_idx += 1;
@@ -381,6 +503,15 @@ fn parseArgs(gpa: Allocator, raw_args: std.process.Args) !Options {
             opts.help = true;
         } else if (std.mem.eql(u8, arg, "--trace")) {
             opts.trace_only = true;
+        } else if (std.mem.eql(u8, arg, "--control")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: --control needs name=value\n", .{});
+                return error.Reported;
+            }
+            try addControl(gpa, &opts, args[i]);
+        } else if (std.mem.startsWith(u8, arg, "--control=")) {
+            try addControl(gpa, &opts, arg["--control=".len..]);
         } else if (std.mem.startsWith(u8, arg, "--width=")) {
             opts.width = try std.fmt.parseInt(u32, arg["--width=".len..], 10);
         } else if (std.mem.startsWith(u8, arg, "--height=")) {
@@ -388,6 +519,7 @@ fn parseArgs(gpa: Allocator, raw_args: std.process.Args) !Options {
         } else if (std.mem.startsWith(u8, arg, "--time=")) {
             opts.time = try std.fmt.parseFloat(f32, arg["--time=".len..]);
         } else if (!std.mem.startsWith(u8, arg, "-")) {
+            gpa.free(opts.input_path);
             opts.input_path = try gpa.dupe(u8, arg);
         }
     }
@@ -400,6 +532,38 @@ fn parseArgs(gpa: Allocator, raw_args: std.process.Args) !Options {
     return opts;
 }
 
+/// Parse and append one `--control name=value`; the same five refusals as the
+/// CLI (malformed, not one number, non-finite) plus the empty-name spelling.
+fn addControl(gpa: Allocator, opts: *Options, raw: []const u8) !void {
+    const eq = std.mem.indexOfScalar(u8, raw, '=') orelse {
+        std.debug.print("Error: invalid --control '{s}': expected name=value\n", .{raw});
+        return error.Reported;
+    };
+    const name = raw[0..eq];
+    const value_text = raw[eq + 1 ..];
+    if (name.len == 0 or value_text.len == 0) {
+        std.debug.print("Error: invalid --control '{s}': expected name=value\n", .{raw});
+        return error.Reported;
+    }
+    const value = std.fmt.parseFloat(f32, value_text) catch {
+        std.debug.print("Error: invalid --control '{s}': value must be one number\n", .{raw});
+        return error.Reported;
+    };
+    if (!std.math.isFinite(value)) {
+        std.debug.print("Error: invalid --control '{s}': value must be finite\n", .{raw});
+        return error.Reported;
+    }
+    if (opts.control_count == opts.controls.len) {
+        std.debug.print("Error: too many --control values (max {d})\n", .{MAX_CONTROLS});
+        return error.Reported;
+    }
+    opts.controls[opts.control_count] = .{
+        .name = try gpa.dupe(u8, name),
+        .value = value,
+    };
+    opts.control_count += 1;
+}
+
 fn printUsage() void {
     std.debug.print(
         \\PNGine Desktop Viewer
@@ -408,6 +572,7 @@ fn printUsage() void {
         \\
         \\Options:
         \\  --trace          Print command buffer trace (default, no GPU)
+        \\  --control <name=value>  Set a declared control before frame() (repeatable)
         \\  --width=N        Canvas width (default: 512)
         \\  --height=N       Canvas height (default: 512)
         \\  --time=T         Time value in seconds (default: 0.0)

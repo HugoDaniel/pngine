@@ -21,6 +21,14 @@
 //!     [type: u8]             // UniformType enum (an array's ELEMENT type)
 //!     [elem_count: u8]       // Fixed array element count; 0 = not an array
 //!                            // (was alignment padding — old payloads carry 0)
+//! [buffer_name_count: u16]   // only when the header's has_buffer_names is set
+//! For each buffer name:
+//!   [buffer_id: u16][name_string_id: u16][pool: u8][flags: u8]
+//! [control_count: u16]       // only when the header's has_control_names is
+//!                            // set (plan frame-program §7.2) — after the
+//!                            // buffer-name block, in slot order (slot 1 first)
+//! For each control:
+//!   [name_string_id: u16]    // the declared name; slot is position + 1
 //! ```
 //!
 //! ## Invariants
@@ -207,16 +215,29 @@ pub const BufferName = struct {
     flags: BufferNameFlags,
 };
 
+/// The string-table module, for the two public control-name operations. Same
+/// directory, no cycle: the block stores string IDS, and only a lookup turns
+/// an id into the name a host typed.
+const string_table = @import("string_table.zig");
+const StringTable = string_table.StringTable;
+
 /// Uniform table for runtime reflection.
 pub const UniformTable = struct {
     bindings: std.ArrayList(UniformBinding),
     /// The buffer-name block, in buffer-id order. Empty → no block is written
     /// and the header flag stays clear (byte-identical to pre-block output).
     buffer_names: std.ArrayList(BufferName),
+    /// The control-name block (plan frame-program §7.2): one string id per
+    /// declared control, in SLOT order — element 0 is slot 1, because slot 0
+    /// is `time` and is never in the block. Empty → no block, flag clear.
+    /// Kept as ids, not names: the string table is the one name source, and
+    /// the two operations below are the only readers a host needs (`--control`
+    /// and every non-JS host call them; no private copy anywhere).
+    control_names: std.ArrayList(u16),
     /// Arena for field allocations.
     arena: ?std.heap.ArenaAllocator,
 
-    pub const empty: UniformTable = .{ .bindings = .empty, .buffer_names = .empty, .arena = null };
+    pub const empty: UniformTable = .{ .bindings = .empty, .buffer_names = .empty, .control_names = .empty, .arena = null };
 
     /// The field slices have TWO owners, and `arena` says which. `deserialize`
     /// allocates them from the table's own arena; `addBinding` dupes them from
@@ -236,6 +257,7 @@ pub const UniformTable = struct {
         }
         self.bindings.deinit(gpa);
         self.buffer_names.deinit(gpa);
+        self.control_names.deinit(gpa);
         self.* = undefined;
     }
 
@@ -255,6 +277,50 @@ pub const UniformTable = struct {
     /// `has_buffer_names` must be set for a reader to find it.
     pub fn hasBufferNames(self: *const UniformTable) bool {
         return self.buffer_names.items.len > 0;
+    }
+
+    /// Name one declared control for the block. Callers add them in slot
+    /// order (the compiler's declaration order); the table does not sort,
+    /// because the order IS the data — slot is position + 1.
+    pub fn addControlName(self: *UniformTable, gpa: Allocator, name_string_id: u16) !void {
+        try self.control_names.append(gpa, name_string_id);
+    }
+
+    /// Whether serialize() writes the control block — and so whether the
+    /// header's `has_control_names` must be set for a reader to find it.
+    pub fn hasControlNames(self: *const UniformTable) bool {
+        return self.control_names.items.len > 0;
+    }
+
+    /// The slot of a named control: 1 for the first declared, or null when no
+    /// control carries that name. `time` answers null BY CONSTRUCTION — slot 0
+    /// is the engine's control and never enters the block. THE lookup a host's
+    /// `--control name=value` and `setUniform` routing start from; keep no
+    /// private copy of the names anywhere else.
+    ///
+    /// A slot whose name did not fit the string table holds the EMPTY string
+    /// (the writer reserves it rather than compact): it matches no query — no
+    /// control can be named "" — so the control is not addressable by name,
+    /// which is what the compile-time warning said.
+    pub fn controlSlotByName(self: *const UniformTable, strings: *const StringTable, name: []const u8) ?u16 {
+        for (self.control_names.items, 0..) |id, i| {
+            const s = strings.get(@enumFromInt(@as(u32, id)));
+            if (s.len == 0) continue; // a reserved slot is unnamed, not settable
+            if (std.mem.eql(u8, s, name))
+                return @intCast(i + 1);
+        }
+        return null;
+    }
+
+    /// The name of control `slot` (1..count), in slot order — the listing half
+    /// of the block's public surface (getUniforms and every non-JS host walk
+    /// slots this way). Null for slot 0 (`time`, unlisted), past the end, and
+    /// for a slot whose name did not fit the string table (the writer reserved
+    /// it with the empty string rather than compacting later slots onto it).
+    pub fn controlNameBySlot(self: *const UniformTable, strings: *const StringTable, slot: u16) ?[]const u8 {
+        if (slot == 0 or slot > self.control_names.items.len) return null;
+        const name = strings.get(@enumFromInt(@as(u32, self.control_names.items[slot - 1])));
+        return if (name.len == 0) null else name;
     }
 
     /// Add a binding with fields.
@@ -395,23 +461,41 @@ pub const UniformTable = struct {
             }
         }
 
+        // The control-name block, after the buffer-name block (plan §7.2):
+        // a count, then one string id per control in slot order. Same
+        // compatibility story as the block above — a pre-block reader is
+        // count-bounded and ignores these bytes; the flag gates the read.
+        // Absent when empty, so a document without controls serializes
+        // exactly as it always did.
+        if (self.control_names.items.len > 0) {
+            const control_count: u16 = @intCast(self.control_names.items.len);
+            try result.appendSlice(gpa, &std.mem.toBytes(control_count));
+            for (self.control_names.items) |id| {
+                try result.appendSlice(gpa, &std.mem.toBytes(id));
+            }
+        }
+
         return result.toOwnedSlice(gpa);
     }
 };
 
-/// Deserialize uniform table from bytes. `has_buffer_names` is the header's
-/// flag bit: only then is the block after the bindings read — the bytes are
-/// otherwise the section's tail, which every pre-block reader ignored.
-pub fn deserialize(gpa: Allocator, data: []const u8, has_buffer_names: bool) !UniformTable {
+/// Deserialize uniform table from bytes. `has_buffer_names` / `has_control_names`
+/// are the header's flag bits: only then is the block after the bindings read —
+/// the bytes are otherwise the section's tail, which every pre-block reader
+/// ignored. The control block (when its flag is set) follows the buffer-name
+/// block, in slot order (element 0 = slot 1; slot 0 is `time` and never listed).
+pub fn deserialize(gpa: Allocator, data: []const u8, has_buffer_names: bool, has_control_names: bool) !UniformTable {
     var table = UniformTable{
         .bindings = .empty,
         .buffer_names = .empty,
+        .control_names = .empty,
         .arena = std.heap.ArenaAllocator.init(gpa),
     };
     errdefer {
         if (table.arena) |*arena| arena.deinit();
         table.bindings.deinit(gpa);
         table.buffer_names.deinit(gpa);
+        table.control_names.deinit(gpa);
     }
 
     const arena = table.arena.?.allocator();
@@ -497,6 +581,23 @@ pub fn deserialize(gpa: Allocator, data: []const u8, has_buffer_names: bool) !Un
         }
     }
 
+    // The control-name block, behind its own flag, after the buffer-name
+    // block. Same bounds discipline as the blocks above: the count is the
+    // file's word, the tail is the bound, and a torn id is dropped, not
+    // refused — a hostile count over an empty tail reserves nothing. An id
+    // may be the EMPTY string — a slot the writer reserved because its name
+    // did not fit (never compacted: slot is position + 1).
+    if (has_control_names and pos + 2 <= data.len) {
+        const control_count = std.mem.readInt(u16, data[pos..][0..2], .little);
+        pos += 2;
+        const fit: usize = @min(control_count, (data.len - pos) / 2);
+        try table.control_names.ensureTotalCapacity(gpa, fit);
+        for (0..fit) |_| {
+            table.control_names.appendAssumeCapacity(std.mem.readInt(u16, data[pos..][0..2], .little));
+            pos += 2;
+        }
+    }
+
     return table;
 }
 
@@ -507,3 +608,8 @@ pub fn deserialize(gpa: Allocator, data: []const u8, has_buffer_names: bool) !Un
 const testing = std.testing;
 
 // ── Buffer-name block (docs/plans/public-write-buffer.md D2) ─────────────────
+
+// ── Control-name block (plan frame-program §7.2) ─────────────────────────────
+// A count-prefixed tail of string ids AFTER the buffer-name block, read behind
+// its own header flag the way the buffer-name block is. Slot 1 is element 0:
+// the block is in slot order, which is declaration order.

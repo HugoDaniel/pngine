@@ -1,0 +1,41 @@
+; The hand-written twin of examples/select_backdrop.sjon — the plan's §4.3
+; lowering, spelled out: the FIRST group keeps the select's name (so the frame
+; names `backdrop` either way) and each failing case's :else runs the next
+; case's group, following the hooks' double-underscore convention. Core-only
+; on purpose, so test-core compiles it byte-identically under an empty
+; lowering registry while the select document is refused for its hook.
+;
+; Emitter_test holds this pair byte-identical: a select emits no resource and
+; no wire byte of its own, so the sugar document and this one compile to the
+; same payload.
+
+(control :name scene)
+
+(shader-module :name m :code """
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.25, 0.1, 1.0); }
+""")
+
+(render-pipeline :name p :layout auto
+  (vertex :module m :entry vs)
+  (fragment :module m :entry fs (color-target :format preferred-canvas-format)))
+
+(render-pass :name linePass :pipeline p
+  (color-attachment :view context-current-texture :clear-value [1 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(render-pass :name gatesPass :pipeline p
+  (color-attachment :view context-current-texture :clear-value [0 1 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(render-pass :name ringPass :pipeline p
+  (color-attachment :view context-current-texture :clear-value [0 0.3 1 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+
+(step-group :name backdrop
+  :when scene :is 0 :perform [linePass] :else [backdrop__case1])
+(step-group :name backdrop__case1
+  :when scene :is 1 :perform [gatesPass] :else [ringPass])
+
+(frame :name main :perform [backdrop])

@@ -66,6 +66,13 @@ export interface UniformField {
   offset: number;
   /** Array length; 0 for a scalar/vector/matrix field. For an array, \`type\` is the element's. */
   elemCount: number;
+  /**
+   * True when the name is a control — a host-settable f32 the executor owns
+   * (frame-program §6.1): setUniform writes it, the frame's own
+   * control-inputs write carries it to the GPU, and no buffer backs it.
+   * False for every reflected field, so all fields keep one key set.
+   */
+  control: boolean;
 }
 
 export interface DrawOptions {
@@ -113,7 +120,12 @@ export function destroy(instance: PngineInstance): PngineInstance;
  * returns it untouched, and the instance comes back for chaining.
  */
 export function draw(instance: PngineInstance, options?: DrawOptions): PngineInstance;
-export function play(instance: PngineInstance): PngineInstance;
+/**
+ * Start (or resume) the clock. \`loop\` is the clock length in seconds, or null
+ * for the unbounded clock; absent, a length already set stays. A length that
+ * is neither null nor a finite number greater than zero is a TypeError.
+ */
+export function play(instance: PngineInstance, options?: { loop?: number | null }): PngineInstance;
 export function pause(instance: PngineInstance): PngineInstance;
 export function stop(instance: PngineInstance): PngineInstance;
 export function seek(instance: PngineInstance, time: number): PngineInstance;
@@ -369,6 +381,14 @@ export interface UniformInfo {
   type: number;
   /** Fixed array element count (type is then the ELEMENT's tag); 0 = not an array. */
   elemCount: number;
+  /**
+   * True on a control entry — parseUniformTable puts the declared controls in
+   * the same map (frame-program §6.1): setUniform routes it to the executor's
+   * control table (install the view with setControlTable), not a GPU buffer.
+   */
+  control?: boolean;
+  /** A control's 1-based slot in the executor's table; slot 0 is \`time\`. */
+  slot?: number;
 }
 
 /** One \`(buffer :name …)\` from the payload's buffer-name block. */
@@ -404,6 +424,12 @@ export interface CoreDispatcher {
   setUniform(name: string, value: number | number[] | number[][]): boolean;
   setUniforms(uniforms: Record<string, number | number[] | number[][]>): number;
   setUniformTable(table: Map<string, UniformInfo>): void;
+  /**
+   * Install the executor's control table: the Float32Array a host builds over
+   * \`getControlPtr()\` (65 slots — \`time\` at 0, controls at 1..64), or null when
+   * the executor predates the export. setUniform writes controls through it.
+   */
+  setControlTable(view: Float32Array | null): void;
   /** Install parseUniformTable(bytecode).buffers, after the init stream ran. */
   setBufferNames(names: Map<string, BufferName> | Record<string, BufferName>): void;
   /**

@@ -1147,6 +1147,12 @@ fn familyOf(t: CallType) Family {
         .begin_occlusion_query,
         .end_occlusion_query,
         .resolve_query_set,
+        // The declared controls (frame program §7.1). The single-file player
+        // has no control table to read, so a write of them is functionality
+        // it cannot express — the same refusal mini gives the call, and the
+        // per-call shape of the §9 rule that a guarded payload refuses --html
+        // outright once the exporter check lands.
+        .write_controls,
         => .unsupported,
     };
 }

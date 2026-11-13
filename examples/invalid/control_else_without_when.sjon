@@ -1,0 +1,21 @@
+; INVALID: `:else` with no `:when`.
+;
+; `:else` names the steps that run when the guard does not hold, so without a
+; guard it describes no condition and reads like a second, unconditional
+; `:perform`. `:requires [when]` refuses it at validation instead of letting
+; the emitter choose what the author meant.
+(shader-module :name m :code """
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.1, 1.0); }
+""")
+(render-pipeline :name p :layout auto
+  (vertex :module m :entry vs)
+  (fragment :module m :entry fs (color-target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline p
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(step-group :name a :else [draw] :perform [draw])
+(frame :name main :perform [a])

@@ -1,0 +1,22 @@
+; INVALID: a guard threshold carrying a unit.
+;
+; The comparison values are the schema's `real` kind -- a literal, a bounded
+; expression, or a `(define …)` name -- and `real` rejects the lexer's unit
+; suffix (`2s` is the number 2 with unit `s`), exactly as it does in every
+; other numeric slot. Dropping the unit and keeping the magnitude would make
+; the guard read a threshold the author did not write.
+(shader-module :name m :code """
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.1, 1.0); }
+""")
+(render-pipeline :name p :layout auto
+  (vertex :module m :entry vs)
+  (fragment :module m :entry fs (color-target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline p
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(step-group :name a :when time :below 2s :perform [draw])
+(frame :name main :perform [a])

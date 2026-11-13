@@ -153,11 +153,16 @@
 //   [info head_set_emitted_via_oneof_refs] value-kind `compute-pass-command` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [info head_set_emitted_via_oneof_refs] value-kind `render-bundle-command` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [warn cross_ref_unenforceable] value-kind `frame-step` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
-//   [info cross_ref_annotation_only] value-kind `frame-step` cross-ref annotation surfaces target-form=`render-pass | compute-pass | queue | step-group | pass-graph | draw-graph` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
+//   [info cross_ref_annotation_only] value-kind `frame-step` cross-ref annotation surfaces target-form=`render-pass | compute-pass | queue | step-group | pass-graph | draw-graph | select` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
+//   [info union_emitted_via_anyof] value-kind `control-source` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`
+//   [info rich_members_emitted_with_annotations] value-kind `builtin-control` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations
+//   [warn cross_ref_unenforceable] value-kind `control-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
+//   [info cross_ref_annotation_only] value-kind `control-ref` cross-ref annotation surfaces target-form=`control` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
 //   [warn cross_ref_unenforceable] value-kind `compute-pass-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
 //   [info cross_ref_annotation_only] value-kind `compute-pass-ref` cross-ref annotation surfaces target-form=`compute-pass` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
 //   [warn cross_ref_unenforceable] value-kind `queue-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator
 //   [info cross_ref_annotation_only] value-kind `queue-ref` cross-ref annotation surfaces target-form=`queue` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema
+//   [info head_set_emitted_via_oneof_refs] value-kind `select-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [info head_set_emitted_via_oneof_refs] value-kind `pass-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [info head_set_emitted_via_oneof_refs] value-kind `pass-item` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`
 //   [info head_set_emitted_via_oneof_refs] value-kind `draw-stage-section` head-set emitted as a closed `oneOf` — 1 of 6 head(s) resolve to slot-local forms and are emitted inline, the rest as `$ref`s into `#/$defs/form.<plugin>.<head>`
@@ -754,8 +759,8 @@ export interface Pngine_WriteBuffer {
    * @sjon-cross-ref target=`buffer` name-key=`name` acyclic=false
    */
   buffer: CrossRef<"buffer">;
-  /** Source: a (data …) ref, a (wasm-call …) whose result is written each frame, or a runtime builtin — pngine-inputs (16B time/width/height/aspect), scene-time-inputs (12B), pngine-frame-inputs (20B, + frameIndex), pointer-inputs (48B). */
-  data: Symbol_<"pngine-inputs"> | Symbol_<"scene-time-inputs"> | Symbol_<"pngine-frame-inputs"> | Symbol_<"pointer-inputs"> | CrossRef<"data"> | CrossRef<"wasm-call">;
+  /** Source: a (data …) ref, a (wasm-call …) whose result is written each frame, or a runtime builtin — pngine-inputs (16B time/width/height/aspect), scene-time-inputs (12B), pngine-frame-inputs (20B, + frameIndex), pointer-inputs (48B), control-inputs (4B per declared (control …) in declaration order). */
+  data: Symbol_<"pngine-inputs"> | Symbol_<"scene-time-inputs"> | Symbol_<"pngine-frame-inputs"> | Symbol_<"control-inputs"> | Symbol_<"pointer-inputs"> | CrossRef<"data"> | CrossRef<"wasm-call">;
   /** Byte offset into the destination (WebGPU requires a multiple of 4). */
   offset?: U32 | CrossRef<"define">;
 }
@@ -1836,13 +1841,60 @@ export interface Pngine_RenderBundle {
   $children?: Array<{ readonly $form: "draw" } | { readonly $form: "draw-indexed" }>;
 }
 
-/** A named sequence of frame steps, inlined wherever a (frame …) or another group names it. Emitted by a named (draw-graph …) / (pass-graph …); writable by hand to name a sequence once and run it in several frames. */
+/** A named f32 the host sets, readable by guards and by shaders through control-inputs. `time` is reserved by the compiler. The name must be a WGSL identifier and must not collide with a reflected uniform field — both are compiler checks, not schema rules. */
+export interface Pngine_Control {
+  $form: "control";
+  $ns: "pngine";
+  /** Initial value: a literal, a bounded expression, or a bare (define …) name. Omitted, it is 0. The compiler rejects a value that is not finite after f32 rounding. */
+  default?: number | CrossRef<"define">;
+  /** Control name, unique among controls. It names a WGSL struct member in control-inputs, so it must be a WGSL identifier, and the host addresses it and reflected uniforms by bare name, so it must not collide with one (both compiler checks). */
+  name: Symbol_;
+}
+
+/** A named sequence of frame steps, inlined wherever a (frame …) or another group names it. Emitted by a named (draw-graph …) / (pass-graph …); writable by hand to name a sequence once and run it in several frames. With :when the group runs only when every comparison key holds (no comparison key = nonzero), and :else names the steps that run otherwise; without :when the group behaves exactly as today. */
 export interface Pngine_StepGroup {
   $form: "step-group";
   $ns: "pngine";
+  /**
+   * Holds when the control is greater than this value. Written beside another comparison key, both must hold — two keys make a window.
+   * @sjon-requires when
+   */
+  above?: number | CrossRef<"define">;
+  /**
+   * Holds when the control is greater than or equal to this value. Written beside another comparison key, both must hold — two keys make a window.
+   * @sjon-requires when
+   */
+  "at-least"?: number | CrossRef<"define">;
+  /**
+   * Holds when the control is less than or equal to this value. Written beside another comparison key, both must hold — two keys make a window.
+   * @sjon-requires when
+   */
+  "at-most"?: number | CrossRef<"define">;
+  /**
+   * Holds when the control is less than this value. Written beside another comparison key, both must hold — two keys make a window, as in :at-least 10 :below 10.5.
+   * @sjon-requires when
+   */
+  below?: number | CrossRef<"define">;
+  /**
+   * The steps that run when the guard does not hold. Needs :when; a group without a guard has nothing to be the alternative to.
+   * @sjon-requires when
+   */
+  else?: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group"> | CrossRef<"pass-graph"> | CrossRef<"draw-graph"> | CrossRef<"select">>;
+  /**
+   * Holds when the control equals this value (an exact f32 comparison). Written beside another comparison key, both must hold — two keys make a window.
+   * @sjon-requires when
+   */
+  is?: number | CrossRef<"define">;
+  /**
+   * Holds when the control does not equal this value. Written beside another comparison key, both must hold — two keys make a window.
+   * @sjon-requires when
+   */
+  "is-not"?: number | CrossRef<"define">;
   name: Symbol_;
   /** The steps this group stands for, in order. */
-  perform: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group"> | CrossRef<"pass-graph"> | CrossRef<"draw-graph">>;
+  perform: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group"> | CrossRef<"pass-graph"> | CrossRef<"draw-graph"> | CrossRef<"select">>;
+  /** The guard's subject: the builtin control time, or a (control …) name. The group runs only when every comparison key holds; with no comparison key it runs when the control is nonzero. */
+  when?: Symbol_<"time"> | CrossRef<"control">;
 }
 
 /** Frame program: what runs each frame, in order. */
@@ -1855,7 +1907,41 @@ export interface Pngine_Frame {
   init?: Array<CrossRef<"compute-pass">>;
   name: Symbol_;
   /** Passes and queues run every frame, in order. */
-  perform: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group"> | CrossRef<"pass-graph"> | CrossRef<"draw-graph">>;
+  perform: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group"> | CrossRef<"pass-graph"> | CrossRef<"draw-graph"> | CrossRef<"select">>;
+}
+
+/** One case of a (select …): at least one comparison key (the default belongs in the select's :else), and the steps to perform when it is the first case that holds. */
+export interface Pngine_Case {
+  $form: "case";
+  $ns: "pngine";
+  /** Holds when the control is greater than this value. Written beside another comparison key, both must hold — two keys make a window. */
+  above?: number | CrossRef<"define">;
+  /** Holds when the control is greater than or equal to this value. Written beside another comparison key, both must hold — two keys make a window. */
+  "at-least"?: number | CrossRef<"define">;
+  /** Holds when the control is less than or equal to this value. Written beside another comparison key, both must hold — two keys make a window. */
+  "at-most"?: number | CrossRef<"define">;
+  /** Holds when the control is less than this value. Written beside another comparison key, both must hold — two keys make a window. */
+  below?: number | CrossRef<"define">;
+  /** Holds when the control equals this value (an exact f32 comparison). Written beside another comparison key, both must hold — two keys make a window. */
+  is?: number | CrossRef<"define">;
+  /** Holds when the control does not equal this value. Written beside another comparison key, both must hold — two keys make a window. */
+  "is-not"?: number | CrossRef<"define">;
+  /** The steps this case performs when it is the first case that holds. */
+  perform: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group"> | CrossRef<"pass-graph"> | CrossRef<"draw-graph"> | CrossRef<"select">>;
+}
+
+/** Pick the first case whose comparison holds. Sugar: pngine/select-v1 lowers it to a chain of guarded (step-group …) forms, so a frame names the select exactly as it names a group. Cases are tried in source order and the first match wins (overlap is legal — that is what makes a :below cascade work); no match and no :else, the select does nothing. */
+export interface Pngine_Select {
+  $form: "select";
+  $ns: "pngine";
+  /** The steps that run when no case holds. Becomes the last group's :else, so it is the chain's fallback arm. */
+  else?: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group"> | CrossRef<"pass-graph"> | CrossRef<"draw-graph"> | CrossRef<"select">>;
+  /** Select name — the first group of the lowered chain keeps it, so a (frame …) names the select itself, and the continuation groups are <name>__caseN. */
+  name: Symbol_;
+  /** The control every case compares — the builtin time, or a name declared by (control …). Becomes :when on every group the lowering emits. */
+  on: Symbol_<"time"> | CrossRef<"control">;
+  /** Positional counts (not expressible in TS): case: 1..64 */
+  $children?: Array<{ readonly $form: "case" }>;
 }
 
 /** One-shot compute init of a storage buffer (first frame only). */
@@ -1884,7 +1970,7 @@ export interface Pngine_Init {
 export interface Pngine_Pass {
   $form: "pass";
   $ns: "pngine";
-  /** WGSL fragment (or compute) source; the hook injects the binding prelude (pngine uniforms, pointer, sampler, dep/feedback textures, D0… data buffers). Required — the hook always refused its absence. */
+  /** WGSL fragment (or compute) source; the hook injects the binding prelude (pngine uniforms, pointer, sampler, dep/feedback textures, D0… data buffers, and — when the document declares (control …) forms and the code names `controls` — the ControlInputs struct, one f32 member per control in declaration order, on the next binding, with a graph-shared buffer and one control-inputs write per frame). Required — the hook always refused its absence. */
   code: string;
   /** Ping-pong texture pair for feedback; the previous frame is readable as prev_<name>. */
   feedback?: boolean;
@@ -1962,7 +2048,7 @@ export interface Pngine_PassGraph {
   $form: "pass-graph";
   $ns: "pngine";
   /** Passes and queues run each frame BEFORE the graph's own steps, in this order — they become the head of the emitted (frame …)'s :perform. */
-  before?: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group"> | CrossRef<"pass-graph"> | CrossRef<"draw-graph">>;
+  before?: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group"> | CrossRef<"pass-graph"> | CrossRef<"draw-graph"> | CrossRef<"select">>;
   /** The graph's passes whose intermediate a frame may put on the canvas through a generated `<pass>__blit` render pass. Absent, nothing is emitted. */
   expose?: Array<Symbol_>;
   /** Makes this graph a (step-group …) of that name instead of the document's (frame …). A document with two graphs names both. */
@@ -2016,9 +2102,9 @@ export interface Pngine_DrawGraph {
   $form: "draw-graph";
   $ns: "pngine";
   /** Passes and queues run each frame AFTER the graph's own steps — the tail of the emitted (frame …)'s :perform. */
-  after?: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group"> | CrossRef<"pass-graph"> | CrossRef<"draw-graph">>;
+  after?: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group"> | CrossRef<"pass-graph"> | CrossRef<"draw-graph"> | CrossRef<"select">>;
   /** Passes and queues run each frame BEFORE the graph's own steps — the head of the emitted (frame …)'s :perform. */
-  before?: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group"> | CrossRef<"pass-graph"> | CrossRef<"draw-graph">>;
+  before?: Array<CrossRef<"render-pass"> | CrossRef<"compute-pass"> | CrossRef<"queue"> | CrossRef<"step-group"> | CrossRef<"pass-graph"> | CrossRef<"draw-graph"> | CrossRef<"select">>;
   /** Makes this graph a (step-group …) of that name instead of the document's (frame …). A document with two graphs names both. */
   name?: Symbol_;
   $children?: Array<{ readonly $form: "stage" } | { readonly $form: "geometry" }>;
@@ -2088,8 +2174,11 @@ export type SjonPngine =
   | Pngine_Dispatch
   | Pngine_DispatchIndirect
   | Pngine_RenderBundle
+  | Pngine_Control
   | Pngine_StepGroup
   | Pngine_Frame
+  | Pngine_Case
+  | Pngine_Select
   | Pngine_Init
   | Pngine_Pass
   | Pngine_PassGraph

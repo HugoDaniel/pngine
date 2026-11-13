@@ -13,9 +13,9 @@ files. The key architectural insight is the separation of concerns:
 
 - **Heavy Compiler (Zig)**: Runs once at build time, unlimited complexity
 - **Minimal Payload (PNGB)**: Declarative bytecode + data, size-constrained
-- **Tiny Executor (WASM)**: Interprets bytecode, emits GPU commands. 13,331 B
-  for the full plugin set, under a build-enforced 13,600 cap; eight variants,
-  smallest 9,009 B
+- **Tiny Executor (WASM)**: Interprets bytecode, emits GPU commands. 14,046 B
+  for the full plugin set, under a build-enforced 14,150 cap; eight variants,
+  smallest 9,446 B
 - **Platform Viewer**: Executes GPU commands on a real WebGPU implementation —
   the browser, or wgpu-native/Metal for the CLI's `--frame`
 
@@ -26,7 +26,7 @@ files. The key architectural insight is the separation of concerns:
        (SJON)          (Zig)     (PNGB)    (WASM)    (WebGPU)
                         │           │          │          │
                     Heavy work   Stored    Tiny work   Platform
-                    (once)       (~13KB)   (per-frame)  native
+                    (once)       (~14KB)   (per-frame)  native
 ```
 
 **Scope note**: this document describes the *engine* — the four boxes above.
@@ -57,9 +57,14 @@ engine-side twin of the payload's declarative property, and it is a contract,
 not a state of affairs: the payload commits to carrying no executable CPU
 code, and the engine commits to a schedule no GPU result steers. The schedule
 of a loaded payload (the passes, copies and dispatches a frame executes) is a
-function of the document and the frame counter, never of rendered or computed
+function of the document, the frame counter, the frame's time, and the
+host-set controls the document declares, never of rendered or computed
 results. Data flows CPU to GPU through uniforms and host buffer writes; the
-look changes through those, and the schedule does not. Two carve-outs are part
+look changes through those, and the schedule does not. The frame's time and
+host-set controls are the **versioned change** this paragraph promised
+(frame-program milestone 1, 2026-11-12): a guarded `(step-group …)` branches
+on `time` or on a `(control …)` value the host wrote before the frame, and
+nothing in that value comes from the GPU. Two carve-outs are part
 of the statement, not exceptions to it. GPU-to-GPU copies and query resolve
 are steps inside the schedule and stay legal: they move values between GPU
 resources, and nothing reads them back mid-frame to choose the next step.
@@ -235,7 +240,7 @@ runs once at build time with unlimited complexity:
     ▼ Validate against schema/pngine.sjon
    resolved cross-refs + diagnostics
     │
-    ▼ Lowering hooks (hooks.zig: pngine/init-v1, pngine/pass-v1, pngine/draw-v1)
+    ▼ Lowering hooks (hooks.zig: pngine/init-v1, pngine/pass-v1, pngine/select-v1; draw_graph.zig: pngine/draw-v1)
    sugar expanded into ordinary forms
     │
     ▼ Document import (document_import.zig)
@@ -273,7 +278,7 @@ runs once at build time with unlimited complexity:
 - `src/dsl_sjon/Emitter.zig` - Walks the validated/lowered forest, emits bytecode
 - `src/dsl_sjon/values.zig` - Typed readers over the SJON tree + expression eval
 - `src/dsl_sjon/hooks.zig` - the lowering registry: `pngine/init-v1` +
-  `pngine/pass-v1`, and the registration of `pngine/draw-v1`
+  `pngine/pass-v1` + `pngine/select-v1`, and the registration of `pngine/draw-v1`
 - `src/dsl_sjon/draw_graph.zig` - `pngine/draw-v1`: the `(draw-graph …)` stage
   x geometry cross product, one pipeline and one render pass per pair
 - `src/dsl_sjon/document_import.zig` - `(import :file …)`: a document compiled
@@ -517,6 +522,7 @@ cannot land unrecorded.
 | `(init …)` | `pngine/init-v1` | compute-pipeline + bind-group + compute-pass, named into a frame's `:init` |
 | `(pass-graph (pass …))` | `pngine/pass-v1` | the whole fullscreen-shader graph: shader modules with an injected binding prelude, intermediate textures, pipelines, bind groups, render passes, and the frame or step-group that runs them |
 | `(draw-graph (stage …) (geometry …))` | `pngine/draw-v1` | the stage x geometry cross product: one pipeline and one render pass per pair, one bind group per stage group |
+| `(select …)` | `pngine/select-v1` | a chain of guarded `(step-group …)` forms, one per case: the first keeps the select's name, each failing case's `:else` runs the next case's group (`<name>__caseN`), and the last carries the select's `:else` |
 
 ### Source Composition (no WebGPU counterpart either)
 
@@ -717,7 +723,7 @@ src/dsl_sjon/        Depends on all above (+ the SJON package + wgslender)
     ├── Compiler.zig     compile(): validate + lower → walk → PNGB
     ├── Emitter.zig      Walks validated forms, emits bytecode
     ├── values.zig       Typed readers + expression eval
-    ├── hooks.zig        pngine/init-v1 + pngine/pass-v1 lowering (draw-v1 registered here)
+    ├── hooks.zig        pngine/init-v1 + pngine/pass-v1 + pngine/select-v1 lowering (draw-v1 registered here)
     ├── draw_graph.zig   pngine/draw-v1 lowering
     └── shapes.zig       Compile-time shape generators
     │
@@ -749,10 +755,10 @@ Key modules: `test-types`, `test-bytecode`, `test-executor`, `test-sjon`
 
 | Component | Size | Notes |
 |-----------|------|-------|
-| WASM executor (full) | 13,331 B | All plugins; build-enforced 13,600 cap |
-| WASM executor (core) | 9,009 B | Smallest of the eight variants |
-| `viewer.mjs` (default JS bundle) | 49.0 KB | 16.9 KB gzipped |
-| `mini.mjs` | 7.0 KB | 3.2 KB gzipped; pNGf, main thread, no WASM |
+| WASM executor (full) | 14,046 B | All plugins; build-enforced 14,150 cap |
+| WASM executor (core) | 9,446 B | Smallest of the eight variants |
+| `viewer.mjs` (default JS bundle) | 62.5 KB | 21.4 KB gzipped |
+| `mini.mjs` | 7.1 KB | 3.3 KB gzipped; pNGf, main thread, no WASM |
 | Simple triangle PNGB | ~500 B | Minimal example |
 | Boids simulation PNGB | ~5 KB | Compute + render |
 

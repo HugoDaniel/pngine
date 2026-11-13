@@ -59,6 +59,22 @@ function checkTime(time) {
 }
 
 /**
+ * A loop length is null (the unbounded clock) or a finite number of seconds
+ * greater than zero. Zero, a negative length, NaN, an Infinity or a string
+ * would divide the clock into a range nobody meant, so it is the caller's bug,
+ * refused before anything changes the way a bad `time` is.
+ * @param {unknown} loop
+ * @returns {number|null}
+ */
+function checkLoop(loop) {
+  if (loop === null) return loop;
+  if (typeof loop !== "number" || !Number.isFinite(loop) || loop <= 0) {
+    throw new TypeError(`loop must be null or a finite number of seconds greater than zero, got ${String(loop)}`);
+  }
+  return loop;
+}
+
+/**
  * The trailing options of setUniform/setUniforms/writeBuffer: an object or
  * nothing. The positional boolean setUniform once took (a no-op in every
  * release that had it) is refused by name, so a caller still passing it
@@ -127,23 +143,48 @@ export function draw(p, opts = {}) {
 }
 
 /**
- * Start animation loop
+ * Start animation loop.
+ *
+ * `loop` is the clock length in seconds, or null for the unbounded clock.
+ * Absent, the length already set (if any) stays, so a pause and resume keeps
+ * it. The option applies to an instance that is already playing too — the
+ * PLAY transition returns early there, but the length still lands.
+ *
  * @param {Pngine} p
+ * @param {{ loop?: number|null }} [opts]
  * @returns {Pngine}
  */
-export function play(p) {
+export function play(p, opts = {}) {
+  if (opts === null || typeof opts !== "object") throw new TypeError(`play: the second argument is an options object, { loop: 60 }, got ${String(opts)}`);
+  if (opts.loop !== undefined) checkLoop(opts.loop);
   const i = p._;
-  if (!i || i.pb.playing) return p;
+  if (!i) return p;
 
-  i.pb = reduce(i.pb, { type: "PLAY", now: performance.now() });
+  const now = performance.now();
+  if (opts.loop !== undefined) {
+    const before = i.pb.time;
+    i.pb = reduce(i.pb, { type: "SET_LOOP", loop: opts.loop, now });
+    // Setting the loop can wrap a running clock backward (t=61 → 1 under a
+    // 60s length). The TICK seam below cannot catch that one: the next tick
+    // moves FORWARD from the wrapped time, so audio would keep playing from
+    // 61 while the video restarts at 1. Seek here, before the early return.
+    if (i.audio && i.pb.playing && i.pb.time < before) i.audio.seek(i.pb.time);
+  }
+  if (i.pb.playing) return p;
+
+  i.pb = reduce(i.pb, { type: "PLAY", now });
 
   // Start audio synced with visual time
   if (i.audio) i.audio.play(i.pb.time);
 
-  // The clock runs unbounded: nothing ends the loop but pause/stop/destroy.
+  // Nothing ends the loop but pause/stop/destroy. A loop length wraps the
+  // clock; a tick that comes back lower than the one before it is the seam,
+  // so the song restarts at the wrapped offset in the same frame.
   const loop = () => {
     if (!i.pb.playing) return;
+    const before = i.pb.time;
     i.pb = reduce(i.pb, { type: "TICK", now: performance.now() });
+    if (i.audio && i.pb.time < before) i.audio.seek(i.pb.time);
     draw(p, { time: i.pb.time });
     i.animationId = requestAnimationFrame(loop);
   };
@@ -193,6 +234,12 @@ export function stop(p) {
 
 /**
  * Seek to specific time
+ *
+ * With a loop length set, a time past it wraps into the range (the floor form
+ * from frame-program §6.5) and the wrapped time is what the draw carries, what
+ * `p.time` reads and what the song seeks to. An explicit `draw(p, { time })`
+ * still sends the time it was given, unwrapped.
+ *
  * @param {Pngine} p
  * @param {number} time - Time in seconds
  * @returns {Pngine}
@@ -203,10 +250,11 @@ export function seek(p, time) {
   if (!i) return p;
 
   i.pb = reduce(i.pb, { type: "SEEK", now: performance.now(), time });
+  const wrapped = i.pb.time;
 
-  if (i.audio) i.audio.seek(time);
+  if (i.audio) i.audio.seek(wrapped);
 
-  draw(p, { time });
+  draw(p, { time: wrapped });
   return p;
 }
 

@@ -1,0 +1,22 @@
+; INVALID: a comparison key with no `:when`.
+;
+; `:below` is a statement about a control, so the schema makes it `:requires
+; [when]`: without `:when` there is nothing to compare against. The key would
+; otherwise be inert input the emitter could only ignore, which is the silent
+; drop the requirements exist to refuse. `:is` and the other five comparison
+; keys carry the same rule.
+(shader-module :name m :code """
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.1, 1.0); }
+""")
+(render-pipeline :name p :layout auto
+  (vertex :module m :entry vs)
+  (fragment :module m :entry fs (color-target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline p
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(step-group :name a :below 1 :perform [draw])
+(frame :name main :perform [a])

@@ -364,6 +364,7 @@ operations:
 | `pngine-inputs`     | 16 bytes | time(f32), width(f32), height(f32), aspect(f32)         |
 | `scene-time-inputs` | 12 bytes | time(f32), width(f32), height(f32) — the first 12 bytes of `pngine-inputs` |
 | `pngine-frame-inputs` | 20 bytes | the 16 bytes of `pngine-inputs`, then frameIndex(u32) — the executor's frame counter, which is also the ping-pong pool phase |
+| `control-inputs`    | 4 bytes per control | one f32 per declared `(control …)`, in declaration order; the frame's own `write-buffer` carries them, so a guard and a shader read one value |
 | `pointer-inputs`    | 48 bytes | x(f32), y(f32), clickX(f32), clickY(f32), dx(f32), dy(f32), buttons(f32), pressure(f32), modifiers(f32), scrollX(f32), scrollY(f32), _pad(f32) |
 
 **Example: Writing runtime inputs to a uniform buffer**
@@ -1096,6 +1097,13 @@ Rules, all of them:
   head.** A misspelt one is refused rather than silently ignored, and a
   `(wgsl :name N …)` does not rebind a `(define :name N …)`, which is what
   makes the rebinding safe to write.
+- **A control's default is a limit, not a hole.** `(control …)` is not a
+  consumed form, so `(import …)` cannot rebind its `:default`. A variant that
+  starts in another scene either sets the control from the host, or the base
+  document puts the value in a `(define …)` and uses that name in the
+  control's `:default` — a `(define …)` IS rebindable, so the second spelling
+  works today. Rebinding the control form itself is deferred (frame-program
+  §14).
 - **Imports are transitive**, a document is composed at most once however many
   paths reach it, and a cycle is refused.
 - **Paths are relative** to the compile's root and may not climb out of it, the
@@ -1791,6 +1799,7 @@ passes at once, so cross-pass texture ids sequence coherently.
 | Read textures| `:reads` entries (see below)                 | next    |
 | Feedback tex | `:feedback true` (not on the last pass)     | next    |
 | Data buffers | `:file` present                             | next    |
+| Controls buf | Code names `controls` and the document declares a `(control …)` | next |
 
 **Names** means the same thing in every row: a whole identifier, outside
 comments. `pngine` in a `// …` line is prose and builds nothing, `pointer` in
@@ -1801,6 +1810,17 @@ does not ask for a sampler — the sampler is the one your code binds by naming
 
 The prelude auto-injects `@binding(N)` declarations. For data buffers, it injects
 `var<storage, read> D0: array<f32>`, `D1: array<f32>`, etc.
+
+`controls` is the last prelude binding, and it follows the same rule: it is
+declared when the pass's WGSL names it AND the document declares at least one
+`(control …)`. The prelude writes `struct ControlInputs { … }` with member `i`
+named after control `i`, in declaration order; the hook creates one shared
+uniform buffer for the graph (at least 16 bytes and at least 4 bytes per
+control), and the first pass that names `controls` writes it once per frame.
+Every pass that names it binds the same buffer. A pass that names `controls` in
+a document that declares no control is a located reject; a document with no
+controls keeps the name free for its own variable, so existing documents do not
+change (decision D5).
 
 A pass binds an earlier output only when its WGSL names that pass
 (`textureSample(name, samp, uv)`, `textureLoad(name, …)`), so a graph may fan
@@ -2522,4 +2542,190 @@ The rules that follow, each a refusal:
 
 Groups are worth writing by hand too: a sequence named once and performed by
 several `(frame …)` forms is the same shape, and they nest up to eight deep.
+
+### Frame controls and guards
+
+A control is a named f32 the host sets without rebuilding the document. One
+value reaches two readers: a `(step-group …)` guard compares it, and a shader
+reads the same slot through the `control-inputs` runtime data source, so the
+branch and the draw cannot disagree.
+
+```sjon
+(define :name BLOOM_ON :value 0.001)
+(control :name scene)
+(control :name bloom :default 0.2)
+
+(shader-module :name m :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.1, 1.0); }
+""")
+(render-pipeline :name p :layout auto
+  (vertex :module m :entry vs)
+  (fragment :module m :entry fs (color-target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline p
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(render-pass :name blit :pipeline p
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(step-group :name glow :when bloom :above BLOOM_ON :perform [draw] :else [blit])
+(frame :name main :perform [glow])
+```
+
+`(control :name … :default …)` declares one slot:
+
+- `:name` — a symbol, unique among controls. The schema refuses a second
+  declaration of the same name. It becomes a WGSL struct member in
+  `control-inputs`, so the compiler requires a WGSL identifier, and the host
+  addresses it and reflected uniform fields by bare name, so the compiler also
+  requires that it not collide with one. `time` is reserved by the compiler; a
+  declared control cannot shadow the built-in.
+- `:default` — the initial value: a literal, a bounded expression, or a bare
+  `(define …)` name. Omitted, it is `0`. The compiler rejects a value that is
+  not finite after f32 rounding.
+- **Slots and the cap.** A document declares at most 64 controls; each gets a
+  slot in declaration order, slot 1 for the first, and slot 0 is the engine's
+  `time`. A 65th declaration is a located compile error.
+- **Persistence.** A control holds its value until the host sets it again.
+  `init()` restores the authored defaults, and both payload reload and device
+  recovery call `init()`.
+
+A `(step-group …)` gains `:when`, the comparison keys below, and `:else`:
+
+| Key | Holds when the control is |
+|---|---|
+| `:is N` | equal to N (an exact f32 comparison) |
+| `:is-not N` | not equal to N |
+| `:below N` | less than N |
+| `:above N` | greater than N |
+| `:at-least N` | greater than or equal to N |
+| `:at-most N` | less than or equal to N |
+
+- `:when` takes one control name, or `time`. It runs the group only when
+  every comparison key written holds, so two keys make a window
+  (`:when time :at-least 10 :below 10.5`).
+- With no comparison key, a bare `:when debug` runs the group when the control
+  is nonzero — the natural spelling for a toggle.
+- N is a compile-time number: a literal, a `(define …)` name, or a bounded
+  expression such as `:below (* 8 BAR)`.
+- `:else` names the steps that run when the guard does not hold. A comparison
+  key or `:else` written without `:when` is a validation error, not inert
+  input.
+- Without `:when`, a step group behaves exactly as it always has.
+- `:is` compares exact f32 values. A control that glides between values should
+  use a `:below` cascade instead: `:below 0.5`, `:below 1.5`, `:else` splits
+  the value's range with no gap (the select section below is the worked
+  version). For a value that reaches the executor without passing the host
+  API, every comparison with NaN is false except `:is-not`, and positive and
+  negative zero compare equal.
+
+`control-inputs` is a built-in `write-buffer :data` source: 4 bytes per
+declared control, in declaration order, and nothing else. The frame's own
+`write-buffer` carries them to the GPU. The compiler checks what an author can
+get wrong here:
+
+```sjon
+(control :name bloom :default 0.2)
+(buffer :name controlBuf :size 16 :usage [uniform copy-dst])
+(queue :name writeControls
+  (write-buffer :buffer controlBuf :offset 0 :data control-inputs))
+```
+
+- The buffer holds at least 4 bytes per control, and the write is at
+  `:offset 0`. A uniform buffer is also at least 16 bytes, so one or two
+  controls still size it 16 (the write covers 4·n of those bytes). Both
+  checks keep the struct check below a plain member-by-member comparison.
+- The buffer has no `:pool`. A pooled write would reach only one member of the
+  pool.
+- Every WGSL struct bound to that buffer agrees with the declarations: member
+  `i` is an `f32` named after control `i`, in slot order. The struct may stop
+  early, so a control added later for scheduling only forces no shader edit.
+  When two modules bind the buffer, each struct is checked on its own.
+
+The struct check is a WGSL join, so `--no-validate` skips it; the size, offset
+and pool checks always run. A control that no shader reads needs no buffer and
+no write.
+
+A JS host sets a control with the `setUniform` it already has:
+`setUniform(p, 'bloom', 0.6)`, `setUniforms(p, { bloom: 0.6 })`, or a draw's
+`uniforms`. `getUniforms` lists each control marked `control: true`. The CLI
+sets one with `--control bloom=0.6` on `render` and `inspect` (repeatable; an
+unknown name or a non-finite value is refused before any output). A host
+outside JavaScript writes the 65-entry table at `getControlPtr()`, or calls
+the reference dispatcher's `set_control`; `docs/abi.md` gives the slot layout
+and the three rules.
+
+These forms and keys validate AND compile: `(control …)` emits its
+`define_control` and the frame's `write_controls`, a `:when` group emits its
+guards, and both executors run them.
+
+### `(select …)`: the first case that holds
+
+A select picks between whole step lists on one control. It is sugar —
+`pngine/select-v1` lowers it to the chain of guarded step-groups a hand-written
+document spells out, so a frame names the select exactly as it names a group:
+
+```sjon
+(control :name scene)
+
+(shader-module :name m :code """
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.25, 0.1, 1.0); }
+""")
+(render-pipeline :name p :layout auto
+  (vertex :module m :entry vs)
+  (fragment :module m :entry fs (color-target :format preferred-canvas-format)))
+(render-pass :name linePass :pipeline p
+  (color-attachment :view context-current-texture :clear-value [1 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(render-pass :name gatesPass :pipeline p
+  (color-attachment :view context-current-texture :clear-value [0 1 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(render-pass :name ringPass :pipeline p
+  (color-attachment :view context-current-texture :clear-value [0 0.3 1 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+
+(select :name backdrop :on scene
+  (case :is 0 :perform [linePass])
+  (case :is 1 :perform [gatesPass])
+  :else [ringPass])
+
+(frame :name main :perform [backdrop])
+```
+
+which is `(step-group :name backdrop :when scene :is 0 :perform [linePass]
+:else [backdrop__case1])` followed by `(step-group :name backdrop__case1
+:when scene :is 1 :perform [gatesPass] :else [ringPass])` — the first group
+keeps the select's name, continuations follow the hooks' double-underscore
+convention, and the hand-written twin of the example above ships as
+`examples/select_backdrop_hand.sjon` (the pair compiles to the same payload).
+
+- A select carries 1 to 64 cases. The bounds are the schema's: an empty select
+  is refused on its head, a 65th case on the 65th child.
+- `:name` — the select's name; the first group of the chain keeps it, so a
+  frame names the select itself.
+- `:on` — the control every case compares: `time`, or a name declared by
+  `(control …)`. It becomes `:when` on every group the lowering emits.
+- `:else` — the steps that run when no case holds; it becomes the last
+  group's `:else`. With no match and no `:else`, the select does nothing.
+- Each `(case …)` carries one to six comparison keys from the table above and
+  `:perform`. At least one comparison key — the default belongs in `:else`,
+  and a bare case is refused on its own span (the schema carries the 1..64
+  case count, not the at-least-one-key rule).
+- Cases are tried in source order and the first match wins. Overlap is legal —
+  that is what makes a `:below` cascade work: `:below 0.5`, `:below 1.5`,
+  `:else` splits the control's range with no gap.
+- A case whose comparison an earlier case's comparison already covers —
+  `:below 10` written after `:below 12`, or the same `:is` twice — can never
+  run, and `pngine validate` warns about it. The warning fires only where the
+  reasoning is exact (compile-time constants, interval containment); the
+  legal cascade above does not warn.
 

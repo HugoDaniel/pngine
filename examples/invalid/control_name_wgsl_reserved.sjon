@@ -1,0 +1,25 @@
+; INVALID: a `(control …)` named `struct` — a WGSL keyword.
+;
+; A control name becomes a struct member in the prelude the pass hook writes
+; (`struct ControlInputs { struct: f32 }`), and the WGSL identifier grammar
+; accepts `struct` — `[A-Za-z_][A-Za-z0-9_]*` — while the language refuses it
+; as a member name. Without this rule the document compiles and the failure
+; surfaces later as an unlocated WGSL shader-creation error (or never, under
+; `--no-validate`). The reserved-word list is the WGSL spec's own (§16.1
+; keywords and §16.2 reserved words), and it is case-sensitive: `Struct`
+; remains a legal control name.
+(shader-module :name m :code """
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.1, 1.0); }
+""")
+(control :name struct)
+(render-pipeline :name p :layout auto
+  (vertex :module m :entry vs)
+  (fragment :module m :entry fs (color-target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline p
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

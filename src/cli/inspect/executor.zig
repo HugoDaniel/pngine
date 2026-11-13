@@ -22,6 +22,7 @@ const cmd_validator = @import("cmd_validator.zig");
 const Validator = cmd_validator.Validator;
 const symptom_diagnosis = @import("symptom_diagnosis.zig");
 const wgsl_reflect = @import("wgsl_reflect.zig");
+const control_args = @import("../control_args.zig");
 
 // Embedded WASM executor for WAMR interpreter
 // Note: AOT is not used for embedded scenarios because @embedFile puts data
@@ -169,7 +170,9 @@ fn checkHeader(
     }
 
     const version = std.mem.readInt(u16, bytecode[4..6], .little);
-    if (version != format.VERSION) {
+    // 0, and 1 for an executor-less guarded payload (D6) — inspect is a
+    // reader of the field like every other one.
+    if (!format.versionSupported(version)) {
         try fatal(gpa, result, "E003", "Unsupported PNGB version");
         return null;
     }
@@ -240,6 +243,14 @@ fn executeWasm(
     // valid document. A non-zero return from either phase is fatal, so both
     // report it and stop.
     if (!try runInitPhase(gpa, &runtime, &validator, result)) return;
+
+    // `--control` lands AFTER init (which restored the authored defaults) and
+    // BEFORE frame(): the §6.6 order. One f32 per slot at
+    // `getControlPtr() + 4 * slot`; slot 0 is `frame()`'s time and is never
+    // written here (resolve() cannot produce it — `time` is not in the name
+    // block).
+    try applyControls(&runtime, opts.controls.slice());
+
     if (opts.phase == .frame or opts.phase == .both) {
         if (!try runFramePhases(gpa, &runtime, &validator, result, opts)) return;
     }
@@ -344,6 +355,30 @@ fn runInitPhase(
         try crossValidateWgslPipelines(gpa, result);
     }
     return true;
+}
+
+/// Write the host's `--control` values into the browser executor's table
+/// through `getControlPtr()` (plan §6.6). After `init()` so the authored
+/// defaults are already loaded (a write before init is lost by contract), and
+/// before any `frame()`. Slot 0 is the frame's time; `resolve()` cannot name
+/// it, and this refuses a slot outside the table rather than write past it.
+fn applyControls(runtime: *WamrRuntime, controls: []const control_args.Resolved) !void {
+    if (controls.len == 0) return;
+
+    const table = try runtime.callGetPtr("getControlPtr");
+    const memory = try runtime.getMemory();
+    for (controls) |control| {
+        // The compiler caps a document at 64 controls; a name block that
+        // points past that is malformed, and writing at 4*slot could land in
+        // the executor's own tables. Refuse, never write.
+        if (control.slot == 0 or control.slot > pngine.opcodes.MAX_CONTROLS) return error.InvalidControlSlot;
+        const offset = table + 4 * @as(u32, control.slot);
+        if (offset + 4 > memory.len) return error.MemoryAccessFailed;
+        const bits: u32 = @bitCast(control.value);
+        var bytes: [4]u8 = undefined;
+        std.mem.writeInt(u32, &bytes, bits, .little);
+        try runtime.writeMemory(offset, &bytes);
+    }
 }
 
 /// Run `frame()` once per requested frame index, and diff them if there is more

@@ -159,6 +159,38 @@ pub fn className(c: ScalarClass) []const u8 {
     };
 }
 
+// --- F4a: the control-inputs struct agreement (plan frame-program §4.4) ---
+
+/// Does the WGSL struct bound to a `control-inputs` buffer agree with the
+/// `(control …)` declarations? Member `i` must be an `f32` NAMED after control
+/// `i`; the struct may STOP EARLY, because a control added later for
+/// scheduling only must not force a shader edit — but it may never run PAST
+/// the declarations: members beyond the controls read bytes `write_controls`
+/// never writes (4 bytes per DECLARED control) and are hidden by the
+/// reflection skip, so they are unwritten and not host-settable. Returns the
+/// first disagreeing member index, or null when the struct agrees or stops
+/// early (including the empty list — a bare `var<uniform>` binding has no
+/// members to disagree). An extra member reports `control_names.len` — the
+/// first index past the controls, which the caller must never use to index
+/// `control_names`.
+///
+/// Unlike every comparator above, this compares MEMBERS, not binding classes.
+/// It runs under SHADER VALIDATION: the Emitter join gates it on
+/// `validate_shaders`, so `--no-validate` skips it — the reflection SKIP of
+/// the same members (they are not plain uniforms) is unconditional and lives
+/// in the emitter, not here. Pure: no allocation, no I/O.
+pub fn controlStructMismatch(fields: []const reflect.Field, control_names: []const []const u8) ?usize {
+    const n = @min(fields.len, control_names.len);
+    for (0..n) |i| {
+        if (!std.mem.eql(u8, fields[i].name, control_names[i])) return i;
+        // The reflector spells the leaf "f32"; a vector member ("vec2f",
+        // "vec4<f32>") is a different type reading different bytes.
+        if (!std.mem.eql(u8, fields[i].type, "f32")) return i;
+    }
+    if (fields.len > control_names.len) return control_names.len;
+    return null;
+}
+
 // --- #5/#6: WGSL `@location` type + vertex-format parsers (shared) ---
 
 /// A parsed scalar class + component count. Phase B (#5, vertex attributes) and
@@ -262,3 +294,5 @@ const testing = std.testing;
 // --- #5: the shared WGSL type + vertex-format parsers ---
 
 // --- #6: the color-target format parser (delegates to the texture-format table) ---
+
+// --- F4a: the control-inputs struct agreement (plan frame-program §4.4) ---

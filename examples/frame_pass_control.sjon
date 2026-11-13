@@ -1,0 +1,32 @@
+; frame_pass_control — `controls` in a `(pass …)` prelude (plan §4.5).
+;
+; A `(pass …)`'s prelude owns @group(0), so an author-declared binding has
+; nowhere to land and the pass has no host-settable parameter of its own.
+; Declaring one control and naming `controls` in the WGSL closes that gap:
+; the prelude declares `struct ControlInputs`, the hook creates one shared
+; 16-byte buffer, and the first pass that names `controls` writes it once per
+; frame. The struct's member order is the declaration order, so the shader
+; reads the same value a guard would.
+;
+; `warp` bends the rings and drifts with pngine.time. The default 0.5 shows a
+; gentle bend; a JS host moves it with setUniform(p, 'warp', 1.0), or the CLI
+; with `--control warp=1`. Only a document that declares a control reserves
+; the name, so a pass in a document with none may still use `controls` as its
+; own variable (D5).
+;
+; What you see: warm concentric rings centred left of the canvas, bending
+; more sharply as `warp` rises.
+
+(control :name warp :default 0.5)
+
+(pass-graph
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      let uv = pos.xy / vec2f(pngine.width, pngine.height);
+      let p = uv - vec2f(0.4, 0.5);
+      let r = length(p);
+      let rings = 0.5 + 0.5 * sin(r * (20.0 + controls.warp * 60.0) - pngine.time * 2.0);
+      let tint = mix(vec3f(0.9, 0.35, 0.1), vec3f(0.95, 0.85, 0.35), rings);
+      return vec4f(tint * (0.35 + 0.65 * rings), 1.0);
+    }
+  """))

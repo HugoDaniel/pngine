@@ -135,6 +135,7 @@ pub fn classOf(op: OpCode) ?Class {
         .write_time_uniform,
         .write_pointer_uniform,
         .write_audio_data,
+        .write_controls,
         .copy_buffer_to_buffer,
         .copy_texture_to_texture,
         .copy_external_image_to_texture,
@@ -142,15 +143,31 @@ pub fn classOf(op: OpCode) ?Class {
         .submit,
         => .queue,
 
-        // ── frame.zig — frame/pass definition and invocation ──
+        // ── frame.zig — frame/pass definition and invocation, the control
+        // DECLARATION opcode, and the two frame-control GUARD opcodes.
+        //
+        // define_control sits here rather than with the create_* opcodes it
+        // shares "declared at load" semantics with, for three reasons that all
+        // point the same way: its define_* name family (define_frame,
+        // define_pass) lives here, its 0x3x frame-control block lives here,
+        // and the split_agreement name-join holds that every `.resource`
+        // opcode is a MockGPU create call — a declaration makes no backend
+        // call, so joining it there would need a dead CallType.
+        //
+        // exec_if/exec_skip belong here, not with the queue ops they share a
+        // block with: they move the pc somewhere `skipParams` does not land
+        // (the skip), which only the `.frame` class is exempt from proving
+        // equal at the end of `step`.
         .define_frame,
         .end_frame,
         .define_pass,
         .end_pass_def,
         .exec_pass,
         .exec_pass_once,
+        .define_control,
+        .exec_if,
+        .exec_skip,
         => .frame,
-
         // ── pool.zig — ping-pong pool selection (0x41-0x43) ──
         .set_vertex_buffer_pool,
         .set_bind_group_pool,

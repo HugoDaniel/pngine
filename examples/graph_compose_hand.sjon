@@ -104,7 +104,9 @@ struct VsOut { @builtin(position) pos : vec4f, @location(0) shade : f32 }
 
 ; ---- the pass graph: one fullscreen pass reading what the draw graph drew ----
 
-(sampler :name __pass_sampler :mag-filter linear :min-filter linear)
+; the sugar's own sampler, qualified by the graph the way the hook does
+; it for a NAMED graph (`post__pass_sampler`) so a second graph cannot collide
+(sampler :name post__pass_sampler :mag-filter linear :min-filter linear)
 
 (buffer :name vignette__ubuf :size 16 :usage [uniform copy-dst])
 
@@ -141,7 +143,7 @@ struct VsOut { @builtin(position) pos : vec4f, @location(0) shade : f32 }
 ; supplies the texture it names.
 (bind-group :name vignette__bg :layout vignette__pipe :group 0
   (entry :binding 0 :buffer vignette__ubuf)
-  (entry :binding 1 :sampler __pass_sampler)
+  (entry :binding 1 :sampler post__pass_sampler)
   (entry :binding 2 :texture sceneColor))
 
 (render-pass :name vignette :pipeline vignette__pipe :bind-groups [vignette__bg]

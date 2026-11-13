@@ -278,6 +278,17 @@ pub fn build(b: *std.Build) void {
         // moved. Measured, not estimated: deleting the retired 0x10/0x1B writers
         // changed nothing, so the linker was already dropping them and the growth
         // is the wider wire itself.
+        //
+        // Re-measured 2026-11-11 (frame-program milestone 0) after retiring the
+        // unreachable animation-table scheduler from wasm_entry.zig (plan §8.1,
+        // decision D1): it freed exactly 797 B in every variant —
+        //   core 9521→8724, render 12311→11514, compute 9805→9008,
+        //   render-compute 12603→11806, render-wasm 13177→12380, full 14120→13323
+        //   (the two -anim twins stayed byte-identical to their non-anim twins).
+        // The caps above are deliberately UNCHANGED: the reclaimed bytes are the
+        // headroom the frame-program controls and guards (§7) will spend, so a
+        // variant exceeding its old size before those land is a regression, not
+        // a windfall. Do not raise a cap without measuring.
         max_bytes: u32,
     };
 
@@ -820,6 +831,15 @@ pub fn build(b: *std.Build) void {
         .sjon = sjon_mod,
         .vendored = vendored_mods,
     });
+    // F5: the select example and its hand-written twin, so Emitter_test can
+    // hold the pair byte-identical without embedding a third copy of the
+    // document. Same convention as the golden/render harnesses (`*_sjon`).
+    sjon_test_mod.addAnonymousImport("select_backdrop_sjon", .{
+        .root_source_file = b.path("examples/select_backdrop.sjon"),
+    });
+    sjon_test_mod.addAnonymousImport("select_backdrop_hand_sjon", .{
+        .root_source_file = b.path("examples/select_backdrop_hand.sjon"),
+    });
     addStandaloneTest(b, standalone_step, sjon_step, "sjon", sjon_test_mod);
 
     // descriptor_encoder is a leaf module — imported by the SJON host but never the
@@ -1021,6 +1041,29 @@ pub fn build(b: *std.Build) void {
             .{ .root_source_file = b.path(b.fmt("tests/zig/golden/{s}.min.trace", .{name})) },
         );
     }
+    // Guarded-input goldens (sjon_golden.zig `guarded_fixtures`, F4b): the
+    // same fixture traced at more than one time and control value, because a
+    // single trace at time 0 shows only the default arm (plan §7.2). Gate-only
+    // like the two blocks above; the regen exe bootstraps them.
+    for ([_][2][]const u8{
+        .{ "frame_guards", "t2" },
+        .{ "frame_guards", "t9" },
+        .{ "frame_guards", "scene1" },
+        .{ "frame_guards", "t9s1" },
+        .{ "select_backdrop", "scene1" },
+        .{ "select_backdrop", "scene2" },
+        .{ "frame_select_scenes", "scene1" },
+        .{ "frame_select_scenes", "scene2" },
+        .{ "frame_select_scenes", "bloom0" },
+        .{ "frame_timeline", "t12" },
+        .{ "frame_timeline", "t40" },
+        .{ "frame_pass_control", "warp1" },
+    }) |lane| {
+        golden_test_mod.addAnonymousImport(
+            b.fmt("{s}_{s}_golden", .{ lane[0], lane[1] }),
+            .{ .root_source_file = b.path(b.fmt("tests/zig/golden/{s}.{s}.trace", .{ lane[0], lane[1] })) },
+        );
+    }
     golden_gen_mod.addAnonymousImport("fixture_list", .{ .root_source_file = fixture_list });
     golden_test_mod.addAnonymousImport("fixture_list", .{ .root_source_file = fixture_list });
     const golden_step = b.step("test-sjon-golden", "Run SJON golden-trace regression tests");
@@ -1040,7 +1083,7 @@ pub fn build(b: *std.Build) void {
     const sjon_invalid_mod = stdModule(b, target, optimize, "tests/zig/sjon_invalid.zig", &.{
         .{ .name = "dsl_sjon", .module = sjon_test_mod },
     });
-    inline for (.{ "bad_wgsl_syntax", "missing_entry_point", "buffer_too_small", "missing_bind_group", "unaligned_uniform", "bad_scissor_rect", "uniform_too_small_for_struct", "missing_uniform_bind", "address_space_mismatch", "workgroup_too_large", "bind_kind_mismatch", "vertex_location_unbound", "texture_sample_type_mismatch", "sampler_comparison_mismatch", "vertex_format_mismatch", "fragment_output_type_mismatch", "fragment_output_unbound", "pass_attachment_count_mismatch", "pass_attachment_format_mismatch", "pass_depth_missing_in_pipeline", "pass_depth_missing_in_pass", "pass_depth_format_mismatch", "pass_resolve_format_mismatch", "pass_sample_count_mismatch", "storage_texture_format_mismatch", "too_many_passes", "too_many_bundles", "sampler_anisotropy_out_of_range", "texture_dimension_numeric", "texture_view_dimension_not_a_member", "pipeline_layout_dangling_bgl", "primitive_strip_index_format", "workgroup_512_no_limits", "bind_offset_without_buffer", "bind_slice_past_end", "bind_offset_at_end", "bundle_ref_lowered", "too_many_wasm_args", "unknown_wasm_arg", "pass_mixed_stages", "pass_no_entry_point", "pass_graph_empty", "pass_too_many_entries", "init_workgroups_unresolved", "override_no_default", "override_no_default_compute", "constant_unknown_override", "constant_type_mismatch", "constant_conflict", "pool_overflow", "pool_expression_overflow", "shape_sphere_zero", "shape_cone_bomb", "define_overflow", "pass_shader_name_collision", "fragment_no_targets", "stage_no_module", "depth_stencil_no_format", "texture_no_size", "buffer_no_size", "pipeline_no_layout", "compute_stage_no_module", "bundle_no_color_formats", "attachment_no_load_op", "pipeline_two_vertex_stages", "blend_missing_alpha", "pipeline_name_shared_across_kinds", "define_ref_typo", "write_buffer_offset_unaligned", "bgl_entry_two_resources", "bgl_entry_no_resource", "data_two_generators", "dup_name_cross_kind", "reserved_name_builtin", "copy_no_destination", "compute_pass_no_dispatch", "dispatch_no_workgroups", "bundle_no_draw", "write_mask_not_a_member", "pipeline_two_primitive", "depth_stencil_two_stencil_front", "strip_index_format_on_list_topology", "strip_topology_indexed_draw", "clear_value_with_load_op", "depth_clear_without_value", "depth_attachment_no_store_op", "alpha_to_coverage_single_sample", "render_pass_no_attachments", "occlusion_query_no_set", "anisotropy_without_linear_filters", "map_read_extra_usage", "wasm_data_size_unaligned", "wasm_gen_memory_name", "wasm_data_missing_file", "data_file_missing", "data_bytes_and_float32", "data_bytes_both_sources", "data_bytes_bad_base64", "data_bytes_file_missing", "data_bytes_empty", "depth_stencil_colour_format", "depth_write_on_stencil_only_format", "stencil_state_on_depth_only_format", "depth_format_no_write_enabled", "depth_compare_missing_with_write", "depth_bias_on_line_topology", "blend_on_integer_target", "alpha_to_coverage_no_alpha_target", "alpha_to_coverage_no_fragment", "depth_ops_on_stencil_only_attachment", "stencil_ops_missing_on_combined_attachment", "stencil_ops_on_depth_only_attachment", "msaa_texture_mipped", "msaa_texture_not_attachment", "msaa_texture_sample_count_two", "volume_texture_multisampled", "attachment_texture_1d", "copy_source_without_copy_src", "copy_destination_without_copy_dst", "copy_past_end_of_buffer", "write_buffer_target_without_copy_dst", "copy_texture_source_without_copy_src", "bundle_color_format_is_depth", "bundle_depth_format_is_colour", "bundle_pipeline_format_mismatch", "bundle_pipeline_sample_count_mismatch", "bundle_pipeline_depth_mismatch", "bundle_pass_format_mismatch", "bundle_pass_attachment_count", "bundle_pass_depth_missing", "bundle_pass_sample_count_mismatch", "define_ref_fractional_in_count", "define_cycle", "expression_negative", "count_expression_overflow", "stray_command_at_root", "pass_outside_pass_graph", "bundle_no_pipeline", "pass_no_code", "pass_feedback_on_last", "pass_format_on_canvas_pass", "pass_format_depth", "pass_format_on_compute", "pass_format_unfilterable", "pass_reads_unused", "pass_reads_no_texture_binding", "pass_reads_multisampled", "pass_reads_volume", "pass_reads_array_layers", "pass_reads_stencil", "pass_reads_depth_sampled", "pass_reads_name_collision", "pass_scale_on_compute", "pass_scale_on_canvas_pass", "texture_scale_without_canvas", "texture_scale_narrows_to_zero", "pass_graph_second_frame", "render_pass_draw_no_pipeline", "draw_indirect_offset_unaligned", "query_set_count_over_max", "expression_unknown_constant", "define_unknown_constant", "pipeline_no_vertex", "bind_group_index_define_overflow", "binding_expression_overflow", "anisotropy_define_overflow", "limits_negative_expression", "texture_depth_define_zero", "mip_level_literal_overflow", "origin_define_overflow", "pool_offset_define_overflow", "query_count_define_overflow", "pool_offset_past_pool", "wgsl_cycle", "wgsl_entry_in_fragment", "wgsl_both_code_and_file", "wgsl_neither_code_nor_file", "wgsl_dangling_import", "wgsl_missing_hole", "wgsl_binding_in_pass_fragment", "wgsl_broken_fragment_located", "wgsl_missing_file", "wgsl_escapes_dir", "unbound_binding_reached_by_pipeline", "prune_unused_on_explicit_layout", "prune_unused_empties_group", "bind_kind_mismatch_scoped", "derived_group_prune_unused_redundant", "derived_group_explicit_pipeline_layout", "derived_group_empties_below_reach", "derived_group_omitted_in_bundle", "draw_graph_attachment_unknown_texture", "draw_graph_duplicate_stage", "draw_graph_fragment_without_color", "draw_graph_geometry_no_in", "draw_graph_group_index_gap", "draw_graph_group_layout", "draw_graph_group_prune_unused", "draw_graph_multisampled_attachment", "draw_graph_name_collision", "draw_graph_no_draw", "draw_graph_no_geometry", "draw_graph_no_stage", "draw_graph_second_frame", "draw_graph_stage_no_attachment", "draw_graph_target_count", "draw_graph_stage_unused", "draw_graph_two_draws", "graph_named_no_frame", "graph_named_before", "graph_two_unnamed", "step_group_cycle", "draw_graph_unknown_stage", "draw_graph_with_pass_graph", "draw_graph_sample_count_overflow", "draw_graph_group_define_ref", "bind_group_entries_over_255", "wgsl_entry_in_file_fragment", "wasm_data_length_over_budget", "write_buffer_frame_inputs_too_small", "bind_group_pool_over_native_cap", "render_pass_too_many_attachments", "pass_graph_expose_missing", "pass_expose_blit_collision" }) |name| {
+    inline for (.{ "bad_wgsl_syntax", "missing_entry_point", "buffer_too_small", "missing_bind_group", "unaligned_uniform", "bad_scissor_rect", "uniform_too_small_for_struct", "missing_uniform_bind", "address_space_mismatch", "workgroup_too_large", "bind_kind_mismatch", "vertex_location_unbound", "texture_sample_type_mismatch", "sampler_comparison_mismatch", "vertex_format_mismatch", "fragment_output_type_mismatch", "fragment_output_unbound", "pass_attachment_count_mismatch", "pass_attachment_format_mismatch", "pass_depth_missing_in_pipeline", "pass_depth_missing_in_pass", "pass_depth_format_mismatch", "pass_resolve_format_mismatch", "pass_sample_count_mismatch", "storage_texture_format_mismatch", "too_many_passes", "too_many_bundles", "sampler_anisotropy_out_of_range", "texture_dimension_numeric", "texture_view_dimension_not_a_member", "pipeline_layout_dangling_bgl", "primitive_strip_index_format", "workgroup_512_no_limits", "bind_offset_without_buffer", "bind_slice_past_end", "bind_offset_at_end", "bundle_ref_lowered", "too_many_wasm_args", "unknown_wasm_arg", "pass_mixed_stages", "pass_no_entry_point", "pass_graph_empty", "pass_too_many_entries", "init_workgroups_unresolved", "override_no_default", "override_no_default_compute", "constant_unknown_override", "constant_type_mismatch", "constant_conflict", "pool_overflow", "pool_expression_overflow", "shape_sphere_zero", "shape_cone_bomb", "define_overflow", "pass_shader_name_collision", "fragment_no_targets", "stage_no_module", "depth_stencil_no_format", "texture_no_size", "buffer_no_size", "pipeline_no_layout", "compute_stage_no_module", "bundle_no_color_formats", "attachment_no_load_op", "pipeline_two_vertex_stages", "blend_missing_alpha", "pipeline_name_shared_across_kinds", "define_ref_typo", "write_buffer_offset_unaligned", "bgl_entry_two_resources", "bgl_entry_no_resource", "data_two_generators", "dup_name_cross_kind", "reserved_name_builtin", "copy_no_destination", "compute_pass_no_dispatch", "dispatch_no_workgroups", "bundle_no_draw", "write_mask_not_a_member", "pipeline_two_primitive", "depth_stencil_two_stencil_front", "strip_index_format_on_list_topology", "strip_topology_indexed_draw", "clear_value_with_load_op", "depth_clear_without_value", "depth_attachment_no_store_op", "alpha_to_coverage_single_sample", "render_pass_no_attachments", "occlusion_query_no_set", "anisotropy_without_linear_filters", "map_read_extra_usage", "wasm_data_size_unaligned", "wasm_gen_memory_name", "wasm_data_missing_file", "data_file_missing", "data_bytes_and_float32", "data_bytes_both_sources", "data_bytes_bad_base64", "data_bytes_file_missing", "data_bytes_empty", "depth_stencil_colour_format", "depth_write_on_stencil_only_format", "stencil_state_on_depth_only_format", "depth_format_no_write_enabled", "depth_compare_missing_with_write", "depth_bias_on_line_topology", "blend_on_integer_target", "alpha_to_coverage_no_alpha_target", "alpha_to_coverage_no_fragment", "depth_ops_on_stencil_only_attachment", "stencil_ops_missing_on_combined_attachment", "stencil_ops_on_depth_only_attachment", "msaa_texture_mipped", "msaa_texture_not_attachment", "msaa_texture_sample_count_two", "volume_texture_multisampled", "attachment_texture_1d", "copy_source_without_copy_src", "copy_destination_without_copy_dst", "copy_past_end_of_buffer", "write_buffer_target_without_copy_dst", "copy_texture_source_without_copy_src", "bundle_color_format_is_depth", "bundle_depth_format_is_colour", "bundle_pipeline_format_mismatch", "bundle_pipeline_sample_count_mismatch", "bundle_pipeline_depth_mismatch", "bundle_pass_format_mismatch", "bundle_pass_attachment_count", "bundle_pass_depth_missing", "bundle_pass_sample_count_mismatch", "define_ref_fractional_in_count", "define_cycle", "expression_negative", "count_expression_overflow", "stray_command_at_root", "pass_outside_pass_graph", "bundle_no_pipeline", "pass_no_code", "pass_feedback_on_last", "pass_controls_undeclared", "pass_format_on_canvas_pass", "pass_format_depth", "pass_format_on_compute", "pass_format_unfilterable", "pass_reads_unused", "pass_reads_no_texture_binding", "pass_reads_multisampled", "pass_reads_volume", "pass_reads_array_layers", "pass_reads_stencil", "pass_reads_depth_sampled", "pass_reads_name_collision", "pass_scale_on_compute", "pass_scale_on_canvas_pass", "texture_scale_without_canvas", "texture_scale_narrows_to_zero", "pass_graph_second_frame", "render_pass_draw_no_pipeline", "draw_indirect_offset_unaligned", "query_set_count_over_max", "expression_unknown_constant", "define_unknown_constant", "pipeline_no_vertex", "bind_group_index_define_overflow", "binding_expression_overflow", "anisotropy_define_overflow", "limits_negative_expression", "texture_depth_define_zero", "mip_level_literal_overflow", "origin_define_overflow", "pool_offset_define_overflow", "query_count_define_overflow", "pool_offset_past_pool", "wgsl_cycle", "wgsl_entry_in_fragment", "wgsl_both_code_and_file", "wgsl_neither_code_nor_file", "wgsl_dangling_import", "wgsl_missing_hole", "wgsl_binding_in_pass_fragment", "wgsl_broken_fragment_located", "wgsl_missing_file", "wgsl_escapes_dir", "unbound_binding_reached_by_pipeline", "prune_unused_on_explicit_layout", "prune_unused_empties_group", "bind_kind_mismatch_scoped", "derived_group_prune_unused_redundant", "derived_group_explicit_pipeline_layout", "derived_group_empties_below_reach", "derived_group_omitted_in_bundle", "draw_graph_attachment_unknown_texture", "draw_graph_duplicate_stage", "draw_graph_fragment_without_color", "draw_graph_geometry_no_in", "draw_graph_group_index_gap", "draw_graph_group_layout", "draw_graph_group_prune_unused", "draw_graph_multisampled_attachment", "draw_graph_name_collision", "draw_graph_no_draw", "draw_graph_no_geometry", "draw_graph_no_stage", "draw_graph_second_frame", "draw_graph_stage_no_attachment", "draw_graph_target_count", "draw_graph_stage_unused", "draw_graph_two_draws", "graph_named_no_frame", "graph_named_before", "graph_two_unnamed", "step_group_cycle", "guard_cycle", "draw_graph_unknown_stage", "draw_graph_with_pass_graph", "draw_graph_sample_count_overflow", "draw_graph_group_define_ref", "bind_group_entries_over_255", "wgsl_entry_in_file_fragment", "wasm_data_length_over_budget", "write_buffer_frame_inputs_too_small", "bind_group_pool_over_native_cap", "render_pass_too_many_attachments", "pass_graph_expose_missing", "pass_expose_blit_collision", "control_when_unknown", "control_compare_unit", "control_compare_unknown_define", "control_key_without_when", "control_else_without_when", "control_dup_name", "control_name_wgsl_reserved", "select_no_cases", "select_sixty_five_cases", "select_on_unknown" }) |name| {
         sjon_invalid_mod.addAnonymousImport(name ++ "_invalid", .{ .root_source_file = b.path("examples/invalid/" ++ name ++ ".sjon") });
     }
     const sjon_invalid_step = b.step("test-sjon-invalid", "Run SJON invalid-negatives rejection tests");
@@ -1169,6 +1212,44 @@ pub fn build(b: *std.Build) void {
     }
     const sjon_core_step = b.step("test-core", "Compile every example with an EMPTY lowering registry (the core stands without the sugar)");
     addStandaloneTest(b, standalone_step, sjon_core_step, "core", sjon_core_mod);
+
+    // ========================================================================
+    // §11's bytecode-identity gate (frame-program plan, task F12). Two
+    // artifacts share tests/zig/bytecode_identity.zig:
+    //   • test-bytecode-identity (addTest, joined to test-standalone): the
+    //     gate. Compiles every document the committed manifest names — the
+    //     BASE commit's corpus — with HEAD's compiler and fails on any
+    //     compiler-output section (bytecode/strings/data/wgsl/uniform/
+    //     animation) whose offset, length or fnv moves. test-core cannot be
+    //     this evidence: it compares two compilations by the SAME compiler.
+    //   • gen-bytecode-identity (addExecutable): `-- --regen <pngb-dir>
+    //     --base <sha>` hashes PNGBs another (base) compiler emitted and
+    //     prints the manifest for review + commit. The exe skips test
+    //     blocks, so it never needs the manifest to exist — bootstrapping.
+    // ========================================================================
+    const bytecode_identity_mod = stdModule(b, target, optimize, "tests/zig/bytecode_identity.zig", &.{
+        .{ .name = "dsl_sjon", .module = sjon_test_mod },
+    });
+    bytecode_identity_mod.addAnonymousImport("fixture_list", .{ .root_source_file = fixture_list });
+    bytecode_identity_mod.addAnonymousImport("bytecode_identity_manifest", .{ .root_source_file = b.path("tests/fixtures/bytecode-identity.manifest") });
+    for ([_]struct { dir: []const u8, names: []const []const u8 }{
+        .{ .dir = "examples", .names = sjon_root_fixtures },
+        .{ .dir = "examples/samples", .names = sjon_sample_fixtures },
+    }) |group| {
+        for (group.names) |name| {
+            const src = b.path(b.fmt("{s}/{s}.sjon", .{ group.dir, name }));
+            bytecode_identity_mod.addAnonymousImport(b.fmt("{s}_sjon", .{name}), .{ .root_source_file = src });
+        }
+    }
+    const bytecode_identity_step = b.step("test-bytecode-identity", "Every pre-existing document's compiler-emitted sections still hash to the base compiler's manifest");
+    addStandaloneTest(b, standalone_step, bytecode_identity_step, "bytecode-identity", bytecode_identity_mod);
+
+    const bytecode_identity_gen = b.addExecutable(.{
+        .name = "gen-bytecode-identity",
+        .root_module = bytecode_identity_mod,
+    });
+    const bytecode_identity_gen_step = b.step("gen-bytecode-identity", "Print the bytecode-identity manifest from PNGBs a base compiler emitted (-- --regen <dir> --base <sha>)");
+    bytecode_identity_gen_step.dependOn(&b.addRunArtifact(bytecode_identity_gen).step);
 
     // ========================================================================
     // Native GPU render tests + snapshot/coverage gates (Phase 2 + 3 of the
@@ -1478,7 +1559,27 @@ pub fn build(b: *std.Build) void {
         .root_module = cli_test_module,
     });
     cli_tests.step.dependOn(&wasm.step);
-    test_step.dependOn(&b.addRunArtifact(cli_tests).step);
+    const run_cli_tests = b.addRunArtifact(cli_tests);
+    test_step.dependOn(&run_cli_tests.step);
+
+    // Play tests are rooted at src/cli.zig: a module rooted at
+    // src/cli/play.zig cannot compile because render.zig imports
+    // ../test_utils.zig, outside a src/cli/ module root (same constraint as
+    // src/png/extract.zig:30-33 and this file's CLI test module). Filtering on
+    // the module-path prefix keeps this lane focused on play tests while still
+    // covering play.zig and play_html.zig (whose full names both begin
+    // `cli.play`); `zig build test` retains the unfiltered CLI suite as the
+    // completeness net.
+    const cli_play_tests = b.addTest(.{
+        .name = "cli-play",
+        .root_module = cli_test_module,
+        .filters = &.{"cli.play"},
+    });
+    cli_play_tests.step.dependOn(&wasm.step);
+    const run_cli_play_tests = b.addRunArtifact(cli_play_tests);
+    const cli_play_step = b.step("test-cli-play", "Run play-command tests (rooted at src/cli.zig)");
+    cli_play_step.dependOn(&run_cli_play_tests.step);
+    test_step.dependOn(&run_cli_play_tests.step);
 
     // Dedicated CLI tests (moved to tests/zig/cli/)
     const cli_dedicated_mod = stdModule(b, target, optimize, "tests/zig/test_cli.zig", &.{
@@ -1738,6 +1839,18 @@ pub fn build(b: *std.Build) void {
     const bundle_cmd = b.addSystemCommand(&.{ "node", "npm/pngine/scripts/bundle.cjs" });
     web_bundle_step.dependOn(&bundle_cmd.step);
 
+    // Committed play runtime: src/cli/play_runtime.min.mjs
+    // <- `node scripts/gen-play-runtime.mjs`
+    //
+    // The play page embeds this asset with @embedFile and hands it to the
+    // browser as a Blob module, so the CLI ships a runtime without requiring
+    // Node or esbuild at build time. The generator runs the npm bundler and
+    // copies dist/dev.mjs byte-for-byte; it must run LOCALLY (esbuild lives in
+    // node_modules), never through obs.
+    const gen_play_runtime_step = b.step("gen-play-runtime", "Regenerate the committed play runtime from npm/pngine/dist/dev.mjs");
+    const gen_play_runtime = b.addSystemCommand(&.{ "node", "scripts/gen-play-runtime.mjs" });
+    gen_play_runtime_step.dependOn(&gen_play_runtime.step);
+
     // One command for "is any generated artifact stale?".
     //
     // Every gate below is the verify half of a regenerate/verify pair, and each
@@ -1765,7 +1878,7 @@ pub fn build(b: *std.Build) void {
     // needs terser out of node_modules. A skip is never total —
     // check-bundle-doc errors if EVERY table it knows about is gone, and
     // check-sjon-reference errors if it parses no forms out of the schema.
-    const drift_step = b.step("drift", "Verify every generated artifact is current (schema, journal index, npm versions+metadata, executor wasm + its no-allocator property, wgpu wrapper coverage, npm schema, bundle doc, js fragments, webgpu enums, sjon reference, sugar ledger, cli flags, llms.txt, doc fences, overhaul shape)");
+    const drift_step = b.step("drift", "Verify every generated artifact is current (schema, journal index, npm versions+metadata, executor wasm + its no-allocator property, wgpu wrapper coverage, npm schema, bundle doc, js fragments, play runtime, webgpu enums, sjon reference, sugar ledger, payload kinds, cli flags, llms.txt, doc fences, overhaul shape)");
 
     // schema/pngine.{d.ts,schema.json} <- `zig build schema-export -- --regen`
     const drift_schema = b.addRunArtifact(schema_export_exe);
@@ -1857,6 +1970,35 @@ pub fn build(b: *std.Build) void {
     // and the shipped output silently disagreeing.
     const drift_fragments = b.addSystemCommand(&.{ "node", "scripts/gen-js-fragments.js", "--check" });
     drift_step.dependOn(&drift_fragments.step);
+
+    // src/cli/play_runtime.min.mjs <- `node scripts/gen-play-runtime.mjs`
+    //
+    // The play page's whole browser program is committed as this one asset; it
+    // must stay the byte-exact production dev.mjs bundle. This gate has no
+    // esbuild dependency by design — ordinary `zig build`/`drift` must not
+    // need Node packages — so it compares the locally refreshed dist artifact.
+    // A missing dist is a hard FAIL in the development tree (running the
+    // checker locally is the documented pre-flight), never a silent pass.
+    // dist/ is a gitignored build product absent from a release clone, whose
+    // CLAUDE.md is also stripped by .mirrorignore: skip there with a notice,
+    // the same rule as check-cli-flags.
+    const drift_play_runtime = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\if [ ! -f CLAUDE.md ]; then
+        \\  echo "play-runtime drift: CLAUDE.md absent — skipping (stripped by .mirrorignore in a release clone)."
+        \\  exit 0
+        \\fi
+        \\if [ ! -f npm/pngine/dist/dev.mjs ]; then
+        \\  echo "play-runtime drift: npm/pngine/dist/dev.mjs is missing." >&2
+        \\  echo "Run locally: node scripts/gen-play-runtime.mjs" >&2
+        \\  exit 1
+        \\fi
+        \\cmp -s npm/pngine/dist/dev.mjs src/cli/play_runtime.min.mjs || {
+        \\  echo "play-runtime: stale; run node scripts/gen-play-runtime.mjs" >&2
+        \\  exit 1
+        \\}
+    });
+    drift_step.dependOn(&drift_play_runtime.step);
 
     // schema/webgpu-enums.json <- `node scripts/extract-webgpu-enums.mjs --regen`
     //

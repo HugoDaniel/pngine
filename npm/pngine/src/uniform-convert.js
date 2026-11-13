@@ -62,19 +62,32 @@ export function uniformTypeName(tag) {
  * block's base. `buffer` is null when the payload names nothing: one minted
  * before the buffer-name block (3.0.1 and earlier), or a buffer the block
  * does not list.
- * @param {Map<string, {bufferId: number, offset: number, size: number, type: number, elemCount: number}>} uniforms
+ *
+ * A control entry (parseUniformTable marks them) describes with the same key
+ * set as every field and `control: true`: type "f32", no buffer — its value
+ * reaches the GPU through the frame's own control-inputs write, so no host
+ * writeBuffer can name it — offset 0, elemCount 0 (§6.1).
+ * @param {Map<string, {bufferId: number, offset: number, size: number, type: number, elemCount: number, control?: boolean, slot?: number}>} uniforms
  * @param {Map<string, {id: number, pool?: number}>} buffers - the buffer-name block
- * @returns {Record<string, {type: string, size: number, buffer: string | null, offset: number, elemCount: number}>}
+ * @returns {Record<string, {type: string, size: number, buffer: string | null, offset: number, elemCount: number, control: boolean}>}
  */
 export function describeUniforms(uniforms, buffers) {
   const nameOf = (id) => {
     for (const [name, b] of buffers) if (id >= b.id && id < b.id + (b.pool || 1)) return name;
     return null;
   };
-  /** @type {Record<string, {type: string, size: number, buffer: string | null, offset: number, elemCount: number}>} */
+  /** @type {Record<string, {type: string, size: number, buffer: string | null, offset: number, elemCount: number, control: boolean}>} */
   const out = {};
   for (const [name, info] of uniforms) {
-    out[name] = { type: uniformTypeName(info.type), size: info.size, buffer: nameOf(info.bufferId), offset: info.offset, elemCount: info.elemCount };
+    const control = info.control === true;
+    out[name] = {
+      type: uniformTypeName(info.type),
+      size: info.size,
+      buffer: control ? null : nameOf(info.bufferId),
+      offset: info.offset,
+      elemCount: info.elemCount,
+      control,
+    };
   }
   return out;
 }

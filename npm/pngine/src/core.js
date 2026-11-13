@@ -76,6 +76,17 @@ export function createCoreDispatcher(device, ctx) {
         },
 
         /**
+         * Install the executor's control table: the Float32Array a host
+         * builds over `getControlPtr()` (65 slots — `time` at 0, controls at
+         * 1..64), or null when the executor predates the export. No copy:
+         * setUniform writes a control where the executor reads it, in place.
+         * @param {Float32Array|null} view
+         */
+        setControlTable(view) {
+            dispatcher.setControlTable(view);
+        },
+
+        /**
          * Install the payload's buffer names, so writeBuffers/getBuffers can
          * address a buffer by the `(buffer :name …)` the author wrote. The
          * map comes from parseUniformTable(bytecode).buffers; call this after

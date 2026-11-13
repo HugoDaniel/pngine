@@ -82,6 +82,11 @@ const PNGB_FLAG_DEVICE_LIMITS = 0x04;
 // Header flag bit 4: the uniform-table section carries a buffer-name block
 // after its bindings (docs/plans/public-write-buffer.md D2).
 const PNGB_FLAG_BUFFER_NAMES = 0x10;
+// Header flag bits 5 and 6 (frame-program §7.2): bit 5, the section carries a
+// control-name block after the buffer-name block; bit 6, `has_guards` — the
+// payload uses frame-program instructions (§9's load-time handshake).
+const PNGB_FLAG_CONTROL_NAMES = 0x20;
+const PNGB_FLAG_HAS_GUARDS = 0x40;
 // flags bit 3 — the author requested a PREMULTIPLIED canvas ((canvas
 // :alpha-mode premultiplied)); clear = "opaque", the GPUCanvasConfiguration
 // default. The bit used to mean the opposite, back when this runtime's own
@@ -103,6 +108,22 @@ export function canvasAlphaMode(bytecode) {
 }
 
 /**
+ * Whether a payload's header sets `has_guards` (flag bit 6): it carries
+ * frame-program instructions. The §9 load-time handshake reads this — such a
+ * payload must run on an executor that exports getControlPtr, or the executor
+ * reads the guard instructions' operands as instructions and renders garbage.
+ * False for a non-PNGB or a short buffer (nothing to refuse).
+ * @param {Uint8Array|null|undefined} bytecode
+ * @returns {boolean}
+ */
+export function payloadHasGuards(bytecode) {
+  if (!bytecode || bytecode.length < PNGB_HEADER_SIZE) return false;
+  const view = new DataView(bytecode.buffer, bytecode.byteOffset, bytecode.byteLength);
+  if (view.getUint32(0, true) !== PNGB_MAGIC) return false;
+  return (view.getUint16(6, true) & PNGB_FLAG_HAS_GUARDS) === PNGB_FLAG_HAS_GUARDS;
+}
+
+/**
  * Parse uniform table from PNGB bytecode.
  * Returns: { uniforms: Map<string, {bufferId, offset, size, type, elemCount}>,
  *            strings: string[],
@@ -116,6 +137,11 @@ export function canvasAlphaMode(bytecode) {
  * own queue ops write it every draw. Read only behind header flag bit 4 and
  * only within the section, so a payload minted before the block — or one
  * whose bit is clear — parses to an empty map and nothing else changes.
+ *
+ * The uniform-table section's second tail block (header flag bit 5) lists the
+ * document's declared controls; each joins `uniforms` marked
+ * `{ control: true, slot }` — slot is 1-based, slot 0 being `time`. See the
+ * block's reader below for the reserved-empty-slot rule.
  */
 export function parseUniformTable(bytecode) {
   const view = new DataView(bytecode.buffer, bytecode.byteOffset, bytecode.byteLength);
@@ -183,6 +209,34 @@ export function parseUniformTable(bytecode) {
         id: view.getUint16(pos, true),
         pool: view.getUint8(pos + 4),
         frameWritten: (view.getUint8(pos + 5) & 1) === 1,
+      });
+    }
+  }
+
+  // The control-name block, after the buffer-name block (§7.2): [count u16]
+  // then one string id per control, in slot order — element i is slot i + 1,
+  // because slot 0 is `time` and never listed. Each control joins the SAME
+  // `uniforms` map the reflected fields live in, marked `control` (§6.1), so
+  // every consumer of the map sees it; it has no GPU buffer of its own
+  // (control-inputs writes it each frame), so bufferId is -1 — no created
+  // buffer id. An entry whose string is EMPTY is a reserved slot (the name
+  // did not fit the string table; a slot is never reassigned): it counts for
+  // control-inputs but joins no map, so setUniform('') keeps the plain "no
+  // uniform named" refusal and later slots keep their numbers.
+  if ((view.getUint16(6, true) & PNGB_FLAG_CONTROL_NAMES) && pos + 2 <= sectionEnd) {
+    const controlCount = view.getUint16(pos, true);
+    pos += 2;
+    for (let i = 0; i < controlCount && pos + 2 <= sectionEnd; i++, pos += 2) {
+      const name = strings[view.getUint16(pos, true)];
+      if (!name) continue; // a reserved slot: unnamed, unlistable, still counted
+      uniforms.set(name, {
+        control: true,
+        slot: i + 1,
+        bufferId: -1,
+        offset: 0,
+        size: 4,
+        type: 0, // UT_F32 — controls are f32 only in this version (§4.1)
+        elemCount: 0,
       });
     }
   }
@@ -923,17 +977,25 @@ export function createCommandDispatcher(device, ctx) {
     // whole WASM memory.
     onQueryResult = onError = onShaderError = null;
     uniformMap = null;
+    controlTable = null;
     mem = null;
     targetCtx = null;
     enc = pass = null;
   }
 
-  // Uniform table: Map<string, {bufferId, offset, size, type, elemCount}>
+  // Uniform table: Map<string, {bufferId, offset, size, type, elemCount}> —
+  // plus control entries {control: true, slot, …} (parseUniformTable).
   let uniformMap = null;
+  // The EXECUTOR's control table as a host view: 65 f32 over getControlPtr
+  // (slot 0 is `time`). Installed by the worker or a core-tier host once the
+  // executor is instantiated; valid for the instance's life (the executor
+  // never grows its memory). Null until then, and on an executor that
+  // predates the export — setUniform refuses a control then.
+  let controlTable = null;
 
   /**
    * Set uniform table from parsed bytecode.
-   * @param {Map<string, {bufferId, offset, size, type, elemCount}>} map
+   * @param {Map<string, {bufferId: number, offset: number, size: number, type: number, elemCount: number, control?: boolean, slot?: number}>} map
    */
   function setUniformTable(map) {
     uniformMap = map;
@@ -941,10 +1003,24 @@ export function createCommandDispatcher(device, ctx) {
   }
 
   /**
-   * Set a uniform value by name.
+   * Install the executor's control table — the Float32Array a host builds
+   * over `getControlPtr()` (65 slots: `time` at 0, controls at 1..64), or
+   * null when the executor predates the export. No copy: writes land where
+   * the executor reads them, the same frame.
+   * @param {Float32Array|null} view
+   */
+  function setControlTable(view) {
+    controlTable = view;
+  }
+
+  /**
+   * Set a uniform value by name. A name that is a CONTROL
+   * (getUniforms marks them) is written into the executor's control table —
+   * install the getControlPtr view first with setControlTable — and takes
+   * exactly one finite number; every other name is packed for its GPU buffer.
    * @param {string} name - Uniform field name
    * @param {number|number[]|number[][]} value - Value to set (a nested array for a matrix or an array field)
-   * @returns {boolean} - true if uniform was found and written; a refusal reached onError
+   * @returns {boolean} - true if the value was written; a refusal reached onError
    */
   // A refusal reaches the host through onError (source "set-uniform"), the
   // route writeBuffer's refusals take — it was a DEBUG-gated console.warn, so
@@ -954,6 +1030,24 @@ export function createCommandDispatcher(device, ctx) {
     if (!info) {
       onError && onError({ message: `setUniform: no uniform named '${name}' (see getUniforms())`, source: "set-uniform" });
       return false;
+    }
+
+    // A control is one f32 the EXECUTOR owns (§6.1): write the table the
+    // guard compares and control-inputs copies, in place — no queue
+    // writeBuffer, so the branch and the shader read the same value in the
+    // same frame. Slot 0 (`time`) is never in the map.
+    if (info.control) {
+      if (!controlTable) {
+        onError && onError({ message: `setUniform: '${name}' is a control, but this executor predates getControlPtr — re-embed the executor with a current pngine, or run the payload on a newer runtime`, source: "set-uniform" });
+        return false;
+      }
+      if (typeof value !== "number" || !Number.isFinite(value)) {
+        onError && onError({ message: `setUniform: control '${name}' takes one finite number, got ${Array.isArray(value) ? "an array" : String(value)}`, source: "set-uniform" });
+        return false;
+      }
+      controlTable[info.slot] = value;
+      DEBUG && dbg && console.log(`[GPU] setUniform: control ${name} = ${value} @ slot ${info.slot}`);
+      return true;
     }
 
     const buffer = buf[info.bufferId];
@@ -1058,6 +1152,7 @@ export function createCommandDispatcher(device, ctx) {
     setOnError(fn) { onError = fn; },
     setOnQueryResult(fn) { onQueryResult = fn; },
     setUniformTable,
+    setControlTable,
     setUniform,
     setUniforms,
     // Host writes by SJON buffer name; bodies in gpu-host-write.js.

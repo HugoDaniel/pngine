@@ -1,0 +1,89 @@
+; INVALID: a select with 65 cases, one over the ceiling.
+;
+; The count bound is the schema's (head-set `:max 64` on the slot-local
+; `case` form, the same cardinality mechanism the pipeline sections use), so
+; the 65th child is `positional_too_many` at validation. 64 is the cap the
+; plan sets (8.3 "Controls and cases: 64 each") and the one the emitter's
+; physical expansion bound is sized for.
+
+(control :name scene)
+(shader-module :name m :code """
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.1, 1.0); }
+""")
+(render-pipeline :name p :layout auto
+  (vertex :module m :entry vs)
+  (fragment :module m :entry fs (color-target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline p
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(select :name backdrop :on scene
+  (case :is 0 :perform [draw])
+  (case :is 1 :perform [draw])
+  (case :is 2 :perform [draw])
+  (case :is 3 :perform [draw])
+  (case :is 4 :perform [draw])
+  (case :is 5 :perform [draw])
+  (case :is 6 :perform [draw])
+  (case :is 7 :perform [draw])
+  (case :is 8 :perform [draw])
+  (case :is 9 :perform [draw])
+  (case :is 10 :perform [draw])
+  (case :is 11 :perform [draw])
+  (case :is 12 :perform [draw])
+  (case :is 13 :perform [draw])
+  (case :is 14 :perform [draw])
+  (case :is 15 :perform [draw])
+  (case :is 16 :perform [draw])
+  (case :is 17 :perform [draw])
+  (case :is 18 :perform [draw])
+  (case :is 19 :perform [draw])
+  (case :is 20 :perform [draw])
+  (case :is 21 :perform [draw])
+  (case :is 22 :perform [draw])
+  (case :is 23 :perform [draw])
+  (case :is 24 :perform [draw])
+  (case :is 25 :perform [draw])
+  (case :is 26 :perform [draw])
+  (case :is 27 :perform [draw])
+  (case :is 28 :perform [draw])
+  (case :is 29 :perform [draw])
+  (case :is 30 :perform [draw])
+  (case :is 31 :perform [draw])
+  (case :is 32 :perform [draw])
+  (case :is 33 :perform [draw])
+  (case :is 34 :perform [draw])
+  (case :is 35 :perform [draw])
+  (case :is 36 :perform [draw])
+  (case :is 37 :perform [draw])
+  (case :is 38 :perform [draw])
+  (case :is 39 :perform [draw])
+  (case :is 40 :perform [draw])
+  (case :is 41 :perform [draw])
+  (case :is 42 :perform [draw])
+  (case :is 43 :perform [draw])
+  (case :is 44 :perform [draw])
+  (case :is 45 :perform [draw])
+  (case :is 46 :perform [draw])
+  (case :is 47 :perform [draw])
+  (case :is 48 :perform [draw])
+  (case :is 49 :perform [draw])
+  (case :is 50 :perform [draw])
+  (case :is 51 :perform [draw])
+  (case :is 52 :perform [draw])
+  (case :is 53 :perform [draw])
+  (case :is 54 :perform [draw])
+  (case :is 55 :perform [draw])
+  (case :is 56 :perform [draw])
+  (case :is 57 :perform [draw])
+  (case :is 58 :perform [draw])
+  (case :is 59 :perform [draw])
+  (case :is 60 :perform [draw])
+  (case :is 61 :perform [draw])
+  (case :is 62 :perform [draw])
+  (case :is 63 :perform [draw])
+  (case :is 64 :perform [draw]))
+(frame :name main :perform [backdrop])

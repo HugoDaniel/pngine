@@ -8,6 +8,7 @@
 //! | validate | Source-level validation (parse, analyze, WGSL check) |
 //! | inspect | Bytecode inspection via MockGPU, optional WAMR deep analysis |
 //! | render | Create PNG with embedded bytecode (default command) |
+//! | play | Generate a self-contained offline HTML player |
 //! | embed | Embed PNGB bytecode into an existing PNG |
 //! | extract | Extract PNGB bytecode from a PNG or ZIP file, or one payload by kind (PNG/FLAC) |
 //! | pack | Append payloads to a PNG or FLAC, one carrier per --add (02.C2/C3) |
@@ -34,6 +35,7 @@
 //! - `cli/validate.zig` - Validate command (source-level)
 //! - `cli/inspect.zig` - Inspect command (bytecode-level, merges old check + validate)
 //! - `cli/render.zig` - Render command
+//! - `cli/play.zig` - Play command (self-contained offline HTML player)
 //! - `cli/embed.zig` - Embed/extract commands
 //! - `cli/bundle.zig` - Bundle/list commands
 //! - `cli/utils.zig` - Shared utilities (file I/O, path handling)
@@ -47,6 +49,7 @@ const compile_cmd = @import("cli/compile.zig");
 const validate_cmd = @import("cli/validate.zig");
 pub const inspect_cmd = @import("cli/inspect.zig");
 const render_cmd = @import("cli/render.zig");
+const play_cmd = @import("cli/play.zig");
 const embed_cmd = @import("cli/embed.zig");
 const bundle_cmd = @import("cli/bundle.zig");
 const diff_cmd = @import("cli/diff.zig");
@@ -134,6 +137,8 @@ pub fn run(gpa: Allocator, args: []const [:0]const u8, io: std.Io) !u8 {
         return inspect_cmd.run(gpa, io, args[2..]);
     } else if (std.mem.eql(u8, command, "render")) {
         return render_cmd.run(gpa, io, args[2..]);
+    } else if (std.mem.eql(u8, command, "play")) {
+        return play_cmd.run(gpa, io, args[2..]);
     } else if (std.mem.eql(u8, command, "embed")) {
         return embed_cmd.runEmbed(gpa, io, args[2..]);
     } else if (std.mem.eql(u8, command, "extract")) {
@@ -176,6 +181,7 @@ fn printUsage() void {
         \\  validate  Validate source (syntax, semantics, WGSL)
         \\  inspect   Inspect bytecode (MockGPU summary, --deep for WAMR)
         \\  render    Create PNG with bytecode (default)
+        \\  play      Generate a self-contained offline HTML player
         \\  embed     Embed bytecode into PNG
         \\  extract   Extract bytecode from PNG/ZIP
         \\  pack      Append payloads to a PNG (--add KIND=path[,raw])
@@ -193,6 +199,7 @@ fn printUsage() void {
         \\  pngine inspect shader.sjon --verbose     GPU call trace
         \\  pngine inspect shader.sjon --deep --json WAMR runtime analysis
         \\  pngine embed img.png shader.pngb         Embed into existing PNG
+        \\  pngine play shader.sjon -o player.html   Self-contained offline player
         \\  pngine diff a.png b.png                  Pixel-compare two PNGs
         \\
         \\Piping:

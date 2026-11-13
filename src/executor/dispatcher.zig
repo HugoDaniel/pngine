@@ -61,6 +61,10 @@ const OpcodeScanner = handlers.OpcodeScanner;
 const PassRange = handlers.PassRange;
 const opcode_class = handlers.opcode_class;
 
+/// The debug-only guard trace (plan §6.3). Public so `pngine inspect` can
+/// install its observer; compiled out entirely outside Debug builds.
+pub const guard_trace = @import("dispatcher/guard_trace.zig");
+
 /// Execution error types.
 pub const ExecuteError = error{
     InvalidOpcode,
@@ -111,6 +115,24 @@ pub const ExecuteError = error{
     /// payload, not a document — and refusing it is what keeps the native
     /// backend from substituting a value the browser would have rejected.
     MissingRequiredMember,
+    /// A payload declared a 65th control (plan §4.1: at most 64). Refused by
+    /// the declaration phase, before any frame runs.
+    TooManyControls,
+    /// A guard (`exec_if`) named a slot past the declared controls. A payload
+    /// error, not a silent zero: reading an undeclared control would make an
+    /// unrunnable arm look like a working one.
+    InvalidControlSlot,
+    /// `write_controls`'s size is not a multiple of 4, or names more f32
+    /// values than the payload declared controls. Slot 0 (`time`) is not
+    /// writable through that instruction by design.
+    InvalidControlWrite,
+    /// `exec_if`'s comparison byte is not one of the six wire tags.
+    InvalidControlComparison,
+    /// A guard's skip target is not an instruction boundary inside its frame
+    /// (or is past the frame end). Refused at load, before any frame runs,
+    /// because the handlers call the backend as they decode — a mid-frame
+    /// refusal would arrive after earlier passes had already run (§7.3).
+    BadSkipTarget,
 };
 
 /// Instruction budget for one top-level execution pass. Bounds the linear walk
@@ -213,6 +235,10 @@ pub const CONTRACT = [_]MethodSpec{
     .{ .name = "write_time_uniform", .params = &.{ u16, u32, u16 } },
     .{ .name = "write_pointer_uniform", .params = &.{ u16, u32, u16 } },
     .{ .name = "write_audio_data", .params = &.{ u16, u32, u16 } },
+    // The declared controls, as f32 values in declaration order (frame
+    // program §7.1). One declaration here, enforced on every backend by
+    // `Backend(T).validate()` — not three hand-kept tables.
+    .{ .name = "write_controls", .params = &.{ u16, u32, []const f32 } },
     .{ .name = "copy_external_image_to_texture", .params = &.{ u16, u16, u8, u16, u16, u16 } },
     .{ .name = "copy_buffer_to_buffer", .params = &.{ u16, u32, u16, u32, u32 } },
     .{ .name = "copy_texture_to_texture", .params = &.{ u16, u16 } },
@@ -398,6 +424,21 @@ pub fn Dispatcher(comptime BackendType: type) type {
         /// (LEAK-09 B)
         steps_remaining: u32,
 
+        /// The control table (frame program §7.2): slot 0 is `time`, 1..64 the
+        /// declared controls in declaration order. 65 entries, fixed — the
+        /// reference dispatcher has no size budget, but the table is bounded by
+        /// the plan's 64-control cap so a payload cannot grow it.
+        controls: [opcodes.MAX_CONTROLS + 1]f32,
+
+        /// Authored defaults as `scan_control_declarations` read them. Kept
+        /// beside the live table so a reset can restore them (plan §6.2:
+        /// `init()`-style reset restores the authored defaults) without
+        /// re-walking the bytecode.
+        control_defaults: [opcodes.MAX_CONTROLS + 1]f32,
+
+        /// How many controls the payload declares (0..=MAX_CONTROLS).
+        declared_controls: u32,
+
         /// Allocator for internal data structures (pass_ranges map).
         gpa: Allocator,
 
@@ -433,6 +474,9 @@ pub fn Dispatcher(comptime BackendType: type) type {
                 .frame_counter = initial_frame,
                 .pass_exec_depth = 0,
                 .steps_remaining = MAX_TOTAL_STEPS,
+                .controls = @splat(0),
+                .control_defaults = @splat(0),
+                .declared_controls = 0,
                 .gpa = gpa,
             };
         }
@@ -452,10 +496,18 @@ pub fn Dispatcher(comptime BackendType: type) type {
         /// later `exec_pass` executing nothing, i.e. a wrong render reported as
         /// a success. See OpcodeScanner.scan_pass_definitions.
         ///
+        /// Also the seam the control declaration phase hangs off: this is the
+        /// one dispatcher method a caller that SKIPS the resource-creation
+        /// region still runs before executing a frame (render.zig's
+        /// executeFrameByName), so folding `scan_control_declarations` in here
+        /// is what puts the authored defaults on that path too.
+        ///
         /// Complexity: O(bytecode.len)
-        pub fn scan_pass_definitions(self: *Self) Allocator.Error!void {
+        pub fn scan_pass_definitions(self: *Self) ExecuteError!void {
             // Pre-condition: module bytecode is valid
             assert(self.module.bytecode.len <= 1024 * 1024);
+
+            try self.scan_control_declarations();
 
             // Delegate to OpcodeScanner
             var scanned = try OpcodeScanner.scan_pass_definitions(self.module.bytecode, self.gpa);
@@ -476,6 +528,242 @@ pub fn Dispatcher(comptime BackendType: type) type {
             var scanner = OpcodeScanner.init(bytecode, pc.*);
             scanner.skip_params(op);
             pc.* = scanner.pc;
+        }
+
+        // ====================================================================
+        // Controls: the table, the host setters, and the declaration phase
+        // (frame program §7.2)
+        // ====================================================================
+
+        /// Store the frame's time into control slot 0. Every guard in a frame
+        /// body then sees the same value, because nothing sets a control while
+        /// the body runs (plan §5).
+        pub fn set_time(self: *Self, seconds: f32) void {
+            self.controls[0] = seconds;
+        }
+
+        /// Set one declared control by slot (1..declared_controls).
+        ///
+        /// Out of range REFUSES to write — the shape the backends give an
+        /// untrusted resource id (a real branch, no clamp, no write): slot 0
+        /// is `time`, which only `set_time` writes, and a slot past the
+        /// declarations names a control that does not exist. Silently clamping
+        /// either one would move a host's value into a different control than
+        /// it asked for.
+        pub fn set_control(self: *Self, slot: u32, value: f32) void {
+            if (slot == 0 or slot > self.declared_controls) return;
+            self.controls[slot] = value;
+        }
+
+        /// How many controls the payload declared (0..=MAX_CONTROLS). The
+        /// declaration phase (`scan_control_declarations`) fills this; the CLI
+        /// checks a name block's slot against it before `set_control`, so a
+        /// malformed name block cannot point a host write at an undeclared
+        /// slot and be silently dropped.
+        pub fn declaredControlCount(self: *const Self) u32 {
+            return self.declared_controls;
+        }
+
+        /// The AUTHORED default of `slot` (1..declared_controls), as the
+        /// declaration phase read it. Null for slot 0 (`time`), an undeclared
+        /// slot, or before the declaration phase has run. This is what
+        /// `pngine inspect` lists beside each control name.
+        pub fn controlDefault(self: *const Self, slot: u16) ?f32 {
+            if (slot == 0 or slot > self.declared_controls) return null;
+            return self.control_defaults[slot];
+        }
+
+        /// The declaration phase: read every `define_control` once, store its
+        /// authored default, and load the defaults into the live table.
+        ///
+        /// This is the seam that makes the authored defaults appear on EVERY
+        /// entry path — including callers that skip the resource-creation
+        /// region where `define_control` lives (render.zig's
+        /// `executeFrameByName` reaches it through `scan_pass_definitions`).
+        /// The stepped opcode itself only consumes operands: the scan is the
+        /// single reader, so a control is declared exactly once no matter how
+        /// many times the stream is walked.
+        ///
+        /// A host `set_control` applied AFTER this phase wins over the
+        /// authored default; one applied before it is (by contract, plan
+        /// §6.6) overwritten — write after init, before frame. Idempotent: a
+        /// second run re-reads the same declarations, so an `init()`-style
+        /// reset is "run it again".
+        ///
+        /// The §7.3 load-time skip validation rides the same seam, for the
+        /// same reason: this is the one method every entry path runs before
+        /// it steps anything, so a refusal here lands before any frame body
+        /// executes and before any backend call.
+        ///
+        /// Complexity: O(bytecode.len)
+        pub fn scan_control_declarations(self: *Self) ExecuteError!void {
+            const bytecode = self.module.bytecode;
+            self.declared_controls = 0;
+
+            var scanner = OpcodeScanner.init(bytecode, 0);
+            for (0..MAX_TOP_LEVEL_STEPS) |_| {
+                const op = scanner.read_opcode() orelse break;
+
+                if (op == .define_control) {
+                    if (self.declared_controls >= opcodes.MAX_CONTROLS) return error.TooManyControls;
+                    // Operand width from the wire schema, not a hand count:
+                    // the landing pc says how many operand bytes the layout
+                    // spans (L_DEFINE_CONTROL is one u32_le — 4). A truncated
+                    // stream clamps short and is refused rather than mis-read.
+                    const end = wire.skipParams(bytecode, scanner.pc, .define_control);
+                    if (end - scanner.pc != 4) return error.UnexpectedEndOfBytecode;
+                    const bits = std.mem.readInt(u32, bytecode[scanner.pc..][0..4], .little);
+                    scanner.pc = end;
+
+                    self.declared_controls += 1;
+                    self.control_defaults[self.declared_controls] = @bitCast(bits);
+                } else {
+                    scanner.skip_params(op);
+                }
+            } else {
+                // Same bound, same reason as every entry walk: one step per
+                // opcode byte, so a long enough payload reaches it by
+                // construction.
+                return error.InstructionBudgetExhausted;
+            }
+
+            // Load the authored defaults. Slot 0 (`time`) is left alone — a
+            // re-scan must not zero a time a caller already set, and a fresh
+            // dispatcher starts at 0 anyway. Slots past the declarations are
+            // cleared: a reused dispatcher must not carry a previous
+            // payload's values into this one's guards.
+            for (1..1 + self.declared_controls) |i| {
+                self.controls[i] = self.control_defaults[i];
+            }
+            for (1 + self.declared_controls..opcodes.MAX_CONTROLS + 1) |i| {
+                self.controls[i] = 0;
+            }
+
+            // The §7.3 skip validation, on the seam documented above. AFTER
+            // the defaults load only because the order between the two
+            // halves does not matter — neither reads the other's state — and
+            // a payload refused here never runs a frame that could observe
+            // the table anyway.
+            // The §7.3 skip validation, on the seam documented above. AFTER
+            // the defaults load only because the order between the two
+            // halves does not matter — neither reads the other's state — and
+            // a payload refused here never runs a frame that could observe
+            // the table anyway.
+            try self.scan_skip_targets();
+        }
+
+        /// The load-time skip validation (plan §7.3): for every frame body in
+        /// the stream, walk it once with the `OpcodeScanner` — never a second
+        /// decoder; `wire_schema.skipParams` is the one operand table —
+        /// recording each instruction boundary and the frame's end, then
+        /// require every `exec_if`/`exec_skip` target
+        /// (`pc_after_instruction + skip`) to be a boundary or exactly the
+        /// frame end, and inside the frame.
+        ///
+        /// THIS function refuses, and what a caller sees is
+        /// `error.BadSkipTarget` from the entry point it called
+        /// (`execute_all`, `execute_init`, or the `scan_pass_definitions`
+        /// path render.zig's executeFrameByName takes) — before any frame
+        /// body executes and before any backend call, because the handlers
+        /// call the backend as they decode and a mid-frame refusal would
+        /// arrive after earlier passes had already run.
+        ///
+        /// The skip VALUE is not decoded: both guard layouts end in
+        /// skip_lo/skip_hi (a shape wire_schema asserts at comptime), so the
+        /// two bytes immediately before the scanner's landing pc ARE the
+        /// skip. Read only when the instruction was fully present — a
+        /// truncated one has no skip bytes, and execution refuses the
+        /// truncation on its own.
+        ///
+        /// A `skip` of 0 is LEGAL and a no-op: its target is the next
+        /// instruction, which is a boundary by construction. (That is also
+        /// the placeholder the emitter writes before `patchSkip`, so an
+        /// unpatched guard degrades to "always run the arm", never to a
+        /// refusal.)
+        ///
+        /// Complexity: O(bytecode.len) with a binary search per guard target.
+        fn scan_skip_targets(self: *Self) ExecuteError!void {
+            const bytecode = self.module.bytecode;
+
+            // Reused across frames: cleared per body, freed once.
+            var boundaries: std.ArrayList(u32) = .empty;
+            defer boundaries.deinit(self.gpa);
+            var targets: std.ArrayList(u32) = .empty;
+            defer targets.deinit(self.gpa);
+
+            var scanner = OpcodeScanner.init(bytecode, 0);
+            for (0..MAX_TOP_LEVEL_STEPS) |_| {
+                const op = scanner.read_opcode() orelse break;
+
+                if (op != .define_frame) {
+                    scanner.skip_params(op);
+                    continue;
+                }
+
+                // define_frame's header: frame_id, then name_string_id, read
+                // the same length-tolerant way `scan_frame_definitions` does
+                // — a truncated varint ends the scan, never a trap.
+                const frame_id = opcodes.decode_varint_safe(bytecode[scanner.pc..]);
+                if (frame_id.len == 0) break;
+                scanner.pc += @intCast(frame_id.len);
+                if (scanner.pc >= bytecode.len) break;
+                const name = opcodes.decode_varint_safe(bytecode[scanner.pc..]);
+                if (name.len == 0) break;
+                scanner.pc += @intCast(name.len);
+
+                // Walk one frame body. Frames do not nest, so the first
+                // `end_frame` closes it; a body that never finds one is a
+                // truncated payload whose end is the stream end (execution
+                // refuses the truncation itself — this walk only needs to
+                // know where the body stops).
+                boundaries.clearRetainingCapacity();
+                targets.clearRetainingCapacity();
+                var frame_end: ?u32 = null;
+                for (0..MAX_TOP_LEVEL_STEPS) |_| {
+                    const boundary = scanner.pc;
+                    const body_op = scanner.read_opcode() orelse break;
+                    if (body_op == .end_frame) {
+                        frame_end = boundary;
+                        break;
+                    }
+                    scanner.skip_params(body_op);
+                    boundaries.append(self.gpa, boundary) catch return error.OutOfMemory;
+
+                    if (body_op == .exec_if or body_op == .exec_skip) {
+                        const after = scanner.pc;
+                        // exec_skip is the shorter of the two at 3 bytes; a
+                        // smaller span means the stream truncated inside the
+                        // instruction and the landing pc is not trustworthy.
+                        if (after - boundary >= 3) {
+                            const skip = @as(u16, bytecode[after - 2]) |
+                                (@as(u16, bytecode[after - 1]) << 8);
+                            targets.append(self.gpa, after + skip) catch return error.OutOfMemory;
+                        }
+                    }
+                } else {
+                    // Same bound, same reason as every entry walk.
+                    return error.InstructionBudgetExhausted;
+                }
+
+                const end = frame_end orelse bytecode.len;
+                for (targets.items) |t| {
+                    if (t > end) return error.BadSkipTarget;
+                    if (t == end) continue; // exactly the frame end: legal
+                    // Interior target: must be a recorded boundary. The walk
+                    // recorded them in increasing order, so binary search;
+                    // the comparison is KEY vs ITEM, the direction std's own
+                    // binarySearch test uses.
+                    const found = std.sort.binarySearch(u32, boundaries.items, t, struct {
+                        fn order(target: u32, item: u32) std.math.Order {
+                            return std.math.order(target, item);
+                        }
+                    }.order);
+                    if (found == null) return error.BadSkipTarget;
+                }
+            } else {
+                // Same bound, same reason as every entry walk.
+                return error.InstructionBudgetExhausted;
+            }
         }
 
         // ====================================================================
@@ -509,6 +797,12 @@ pub fn Dispatcher(comptime BackendType: type) type {
             const bytecode = self.module.bytecode;
             self.pc = 0;
             self.steps_remaining = MAX_TOTAL_STEPS;
+
+            // The control declaration phase runs before the init region steps:
+            // a `write_controls` inside that region must already see the
+            // authored defaults, and a host `set_control` between here and the
+            // first frame must win over them (plan §6.6: write after init).
+            try self.scan_control_declarations();
 
             for (0..MAX_TOP_LEVEL_STEPS) |_| {
                 if (self.pc >= bytecode.len) break;
@@ -640,6 +934,11 @@ pub fn Dispatcher(comptime BackendType: type) type {
         pub fn execute_all(self: *Self, gpa: Allocator) ExecuteError!void {
             // Pre-condition: start at beginning
             assert(self.pc == 0);
+
+            // The declaration phase before any frame runs: the linear walk
+            // would reach the define_controls eventually, but guards and
+            // write_controls execute against the table from the first body on.
+            try self.scan_control_declarations();
 
             try self.execute_from_pc(gpa);
 

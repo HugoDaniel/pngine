@@ -63,6 +63,7 @@ pub const CallType = enum {
 
     // Queue operations
     write_buffer,
+    write_controls,
     submit,
     copy_external_image_to_texture,
     copy_buffer_to_buffer,
@@ -255,6 +256,16 @@ pub const Call = struct {
             offset: u32,
             data_id: u16,
         },
+        /// The declared controls written by `write_controls`, copied into a
+        /// fixed array so the record owns its values (the same reason
+        /// begin_render_pass_mrt copies its attachments). `count` says how
+        /// many of `values` are real.
+        write_controls: struct {
+            buffer_id: u16,
+            offset: u32,
+            values: [opcodes.MAX_CONTROLS]f32,
+            count: u8,
+        },
         create_image_bitmap: struct {
             bitmap_id: u16,
             blob_data_id: u16,
@@ -437,6 +448,10 @@ pub const Call = struct {
             .write_buffer => blk: {
                 const p = self.params.write_buffer;
                 break :blk std.fmt.bufPrint(buf, "write_buffer(id={d}, offset={d}, data={d})", .{ p.buffer_id, p.offset, p.data_id }) catch "write_buffer(...)";
+            },
+            .write_controls => blk: {
+                const p = self.params.write_controls;
+                break :blk std.fmt.bufPrint(buf, "write_controls(id={d}, offset={d}, count={d})", .{ p.buffer_id, p.offset, p.count }) catch "write_controls(...)";
             },
             .submit => "submit()",
             .copy_buffer_to_buffer => blk: {
@@ -1124,6 +1139,25 @@ pub const MockGPU = struct {
                 .buffer_id = buffer_id,
                 .offset = offset,
                 .data_id = data_id,
+            } },
+        });
+    }
+
+    /// Record a controls write (frame program §7.1). The VALUES are copied in
+    /// so a test can read them back from the log — including what slot 0
+    /// (`time`) would have contributed, which is nothing: the handler slices
+    /// the declared controls only.
+    pub fn write_controls(self: *Self, gpa: Allocator, buffer_id: u16, offset: u32, values: []const f32) !void {
+        var vals: [opcodes.MAX_CONTROLS]f32 = @splat(0);
+        const count: u8 = @intCast(@min(values.len, opcodes.MAX_CONTROLS));
+        @memcpy(vals[0..count], values[0..count]);
+        try self.record(gpa, .{
+            .call_type = .write_controls,
+            .params = .{ .write_controls = .{
+                .buffer_id = buffer_id,
+                .offset = offset,
+                .values = vals,
+                .count = count,
             } },
         });
     }

@@ -201,51 +201,57 @@ var bytecode_end: u32 = 0;
 var data_in_bytecode: bool = false;
 
 // ============================================================================
-// Animation State (Static Allocation)
+// Frame State (Static Allocation)
 // ============================================================================
-
-/// Maximum scenes per animation.
-const MAX_SCENES: u32 = 256;
 
 /// Maximum frames that can be defined in bytecode.
 const MAX_FRAMES: u32 = bytecode_mod.DEFAULT_MAX_FRAMES;
-
-/// Scene data (without string table lookup - just IDs and time ranges).
-const SceneEntry = struct {
-    frame_string_id: u16,
-    start_ms: u32,
-    end_ms: u32,
-};
 
 /// Frame definition entry: maps frame name string ID to bytecode PC offset.
 const FrameEntry = struct {
     name_string_id: u16,
     pc_offset: u32, // PC offset relative to bytecode_start (after define_frame params)
+    /// PC offset of this frame's `end_frame` opcode — the frame's END, which
+    /// init()'s scan records so `frame()` can bound guard skips (§7.3): a
+    /// skip may land exactly on it, never past it. A body that never closes
+    /// is a truncated payload; the buffer end is its bound, the same place
+    /// execution itself would stop.
+    end_pc: u32,
 };
-
-/// Animation metadata.
-var anim_duration_ms: u32 = 0;
-var anim_loop: bool = false;
-var anim_end_behavior: u8 = 0; // 0=hold, 1=stop, 2=restart
-var anim_scene_count: u32 = 0;
-var anim_scenes: [MAX_SCENES]SceneEntry = undefined;
 
 /// Frame definition table: maps frame_string_id to PC offset.
 var frame_entries: [MAX_FRAMES]FrameEntry = undefined;
 var frame_count: u32 = 0;
-
-/// Whether animation table was successfully parsed.
-var has_animation: bool = false;
 
 /// "No frame pinned" — the value `setFrame` takes to release the pin and
 /// `getFrameNameId` returns past the table's end (docs/abi.md §2).
 const NO_FRAME: u32 = 0xFFFF_FFFF;
 
 /// The frame `frame()` renders when the host pinned one (`setFrame`), by its
-/// index in `frame_entries`; `NO_FRAME` when none is. Outranks the animation
-/// table — a pin is the host's decision — and is cleared by `init()`, since a
-/// new payload has new frames.
+/// index in `frame_entries`; `NO_FRAME` when none is. The pin is the host's
+/// decision and the ONLY frame selector beside "the first one" — the
+/// time-to-scene scheduler that once read the payload's animation table is
+/// retired (frame-program plan §8.1/D1): no runtime path delivered the table,
+/// and `setFrame` covers the whole-frame choice it existed for. Cleared by
+/// `init()`, since a new payload has new frames.
 var pinned_frame: u32 = NO_FRAME;
+
+// ============================================================================
+// Frame-Program Controls (plan §7.2, task F3)
+// ============================================================================
+
+/// The control table: slot 0 is `time`, 1..64 the declared controls in
+/// declaration order. Static, like every buffer here — 65 f32, no allocator,
+/// and the memory never grows, so a host's `Float32Array` over
+/// `getControlPtr()` stays valid for the life of the instance (the drift
+/// gate's no-allocator property is what makes that view safe).
+var controls: [opcodes.MAX_CONTROLS + 1]f32 = @splat(0);
+
+/// How many controls the payload declares (0..MAX_CONTROLS), read by
+/// init()'s walk of the resource-creation region. Guards and write_controls
+/// check against it — the same bound the reference dispatcher keeps, so a
+/// slot past the declarations is a refusal in both, never a silent zero.
+var declared_controls: u32 = 0;
 
 // ============================================================================
 // Host Imports (Minimal)
@@ -350,9 +356,13 @@ pub export fn init() u32 {
     pass_executed_once = @splat(false);
     frame_count = 0;
     pinned_frame = NO_FRAME;
-    has_animation = false;
-    anim_scene_count = 0;
     malformed_body = false;
+    // The control table resets with everything else: a reloaded instance
+    // must not carry a previous payload's host values into this one's
+    // guards. Slot 0 (`time`) has nothing to restore — `init()` has no time
+    // input; `frame()` stores its argument there before each body (§7.2).
+    controls = @splat(0);
+    declared_controls = 0;
 
     // Validate bytecode - need at least v0 header size
     if (bytecode_len < format.HEADER_SIZE) {
@@ -366,8 +376,12 @@ pub export fn init() u32 {
     }
 
     const version = std.mem.readInt(u16, header[4..6], .little);
-    if (version != format.VERSION) {
-        return 3; // Unsupported version (only v0 supported)
+    // v0, and v1 (an executor-less guarded payload, D6): this executor IS the
+    // shared one such payloads run on, so refusing 1 would break the pairing
+    // the version exists to keep. 2 and up still refuse — status 3 is what a
+    // pre-handshake runtime obeys.
+    if (!format.versionSupported(version)) {
+        return 3; // Unsupported version (0 and 1 supported)
     }
 
     // Check if payload has embedded executor (v0 format, flag bit 0)
@@ -395,8 +409,10 @@ pub export fn init() u32 {
     string_table_offset = std.mem.readInt(u32, header[20..24], .little);
     data_section_offset = std.mem.readInt(u32, header[24..28], .little);
     const wgsl_table_offset = std.mem.readInt(u32, header[28..32], .little);
-    // Parse animation table offset (v0 header, byte 36) — validated below.
-    const animation_table_offset = std.mem.readInt(u32, header[36..40], .little);
+    // (The v0 header's byte 36, animation_table_offset, is deliberately NOT
+    // read: the PNGB format still carries the section, but this executor no
+    // longer schedules frames from it — see `pinned_frame`. It never reads the
+    // bytes, so a hostile or truncated table cannot affect it.)
 
     // Validate section offsets BEFORE the subtractions/slices that follow. In
     // ReleaseSmall the post-condition asserts (:end of init) are stripped and
@@ -427,8 +443,6 @@ pub export fn init() u32 {
     string_table_len = data_section_offset - string_table_offset;
     // Data section ends where WGSL table begins (not at end of file)
     data_section_len = wgsl_table_offset - data_section_offset;
-
-    parseAnimationTable(animation_table_offset);
 
     // Debug: log bytecode info
     const bc_len = bytecode_end -| bytecode_start;
@@ -470,7 +484,11 @@ pub export fn init() u32 {
 /// frame rendering commands to the command buffer.
 ///
 /// Parameters:
-/// - time: Elapsed time in seconds
+/// - time: Elapsed time in seconds. Stored into control slot 0 BEFORE the
+///   frame body runs, so every guard in that body sees one value and `time`
+///   needs no special case in `exec_if` (frame program §5, §7.1). The host
+///   still stages the 20-byte time block itself (`gpu.setTime` /
+///   `write_time_uniform`) — the slot is the guards' copy.
 /// - width: Canvas width in pixels
 /// - height: Canvas height in pixels
 ///
@@ -488,9 +506,12 @@ pub export fn frame(time: f32, width: u32, height: u32) u32 {
     assert(width > 0);
     assert(height > 0);
 
+    // §5: the frame's time lands in slot 0 before the body runs; nothing
+    // can set a control while the body runs, so every guard sees one value.
+    controls[0] = time;
     malformed_body = false;
     var cmds = CommandBuffer.init(&cmd_buffer);
-    executeFrame(&cmds, time, width, height);
+    executeFrame(&cmds, width, height);
     _ = cmds.finish();
 
     // Post-condition: frame counter advances.
@@ -498,9 +519,12 @@ pub export fn frame(time: f32, width: u32, height: u32) u32 {
     frame_counter +%= 1; // host-settable (setFrameCounter), so it wraps rather than traps
     assert(frame_counter == prev_frame + 1);
 
-    // A frame opcode carried an out-of-range id (hostile/corrupt stream only).
-    // Report it so the host skips this frame's command buffer and surfaces an
-    // onError, instead of executing commands that address wrapped ids.
+    // A frame opcode carried an out-of-range id, or a guard refused its
+    // input (a slot past the declared controls, an unknown comparison tag,
+    // or a skip past the frame's end) — hostile/corrupt streams only, since
+    // the compiler emits none of those. Report it so the host skips this
+    // frame's command buffer and surfaces an onError, instead of executing
+    // commands that address wrapped ids. (§7.3: one latch, one status.)
     if (malformed_body) return 2; // out-of-range id in frame body
 
     // The frame wanted more commands than the buffer holds. The commands that
@@ -571,6 +595,17 @@ export fn getAbiVersion() u32 {
     return 1;
 }
 
+/// Address of control slot 0 in linear memory (frame program §7.2), so a
+/// host reads and writes the table through one `Float32Array` over it:
+/// slot `i` lives at `getControlPtr() + 4 * i`. The view stays valid for
+/// the life of the instance because the executor never grows its memory.
+/// Additive export, like `getFrameCount` before it — `getAbiVersion` stays
+/// 1 (docs/abi.md §2). The runtime's load handshake (plan §9) treats the
+/// export's presence as "this executor knows guards".
+pub export fn getControlPtr() u32 {
+    return dataAddr(&controls);
+}
+
 // ============================================================================
 // Internal - Bytecode Execution
 // ============================================================================
@@ -630,6 +665,23 @@ fn executeResourceCreation(cmds: *CommandBuffer) void {
             continue;
         }
 
+        // define_control: the declaration phase (plan §7.2). This walk IS
+        // the resource-creation region, where the compiler puts the
+        // declarations; the authored default lands in the next slot (slot 0
+        // is `time`, set per frame by frame()). A 65th control is a
+        // malformed payload like any other creation-time refusal — latch,
+        // and init() returns 5 below.
+        if (op == .define_control) {
+            const bits = readRawU32(bytecode, &pc);
+            if (declared_controls < opcodes.MAX_CONTROLS) {
+                declared_controls += 1;
+                controls[declared_controls] = @bitCast(bits);
+            } else {
+                malformed_body = true;
+            }
+            continue;
+        }
+
         executeOpcode(cmds, bytecode, &pc, op);
     }
 
@@ -653,69 +705,51 @@ pub fn passRangeCountForTest(raw_bytecode: []const u8, cmds: *CommandBuffer) u32
     return pass_count;
 }
 
+/// Test-only: a host-shaped write into the control table — what a
+/// `Float32Array` over `getControlPtr()` does, including to slots a
+/// well-formed payload never declared (the guards still refuse those) and
+/// to slot 0 (frame() overwrites it). Out-of-range is a typed-array no-op.
+/// `pub`, not `export`: unreachable from any export, dead-stripped from
+/// the shipping wasm. The native agreement test drives the table this way
+/// because a 64-bit host cannot dereference the truncated `dataAddr`
+/// pointers the command buffer carries.
+pub fn setControlForTest(slot: u32, value: f32) void {
+    if (slot <= opcodes.MAX_CONTROLS) controls[slot] = value;
+}
+
+/// Test-only: the table itself, for reading defaults and values back.
+/// Same visibility rule as `setControlForTest`.
+pub fn controlTableForTest() []const f32 {
+    return &controls;
+}
+
 /// Execute frame opcodes.
-/// If animation is defined, selects the appropriate scene based on time.
-fn executeFrame(cmds: *CommandBuffer, time: f32, width: u32, height: u32) void {
+/// The frame that runs is the pinned one (`setFrame`), or the first
+/// `define_frame` when nothing is pinned. There is no time-based selection:
+/// the animation-table scheduler this function once carried is retired
+/// (frame-program plan §8.1/D1) — the stock runtime never delivered the
+/// table, and `setFrame` names the whole-frame choice it existed for.
+fn executeFrame(cmds: *CommandBuffer, width: u32, height: u32) void {
     const bytecode = bytecode_buffer[bytecode_start..bytecode_end];
 
-    // Convert time to milliseconds for scene lookup
-    // A host may hand us any f32 — negative, NaN, past u32 milliseconds. The
-    // wasm target lowers @intFromFloat saturating, the native test harness does
-    // not; saturate explicitly, as the reference dispatcher does.
-    const scaled = time * 1000.0;
-    const time_ms: u32 = if (!(scaled > 0.0))
-        0
-    else if (scaled >= 4_294_967_000.0)
-        std.math.maxInt(u32)
-    else
-        @intFromFloat(scaled);
+    // The frame that runs: the pinned one (`setFrame`), else the first in
+    // define order. init()'s scan indexed that same first frame as entry 0
+    // — the same walk from the same start — so its recorded body start and
+    // end ARE this frame's bounds; there is nothing to rescan here.
+    var pc: usize = bytecode.len; // no frame: an empty body
+    var frame_end: usize = bytecode.len;
 
-    // Try to find the appropriate frame for this time
-    var pc: usize = 0;
-    var found_frame = false;
-
-    // A host pin (setFrame) outranks the animation table: "pin" means the
-    // host decided. `setFrame` only stores an index below frame_count, and
-    // init() clears it, so the bound holds here.
+    // A host pin (setFrame) is the frame choice: "pin" means the host decided.
+    // `setFrame` only stores an index below frame_count, and init() clears it,
+    // so the bound holds here.
     if (pinned_frame != NO_FRAME) {
         std.debug.assert(pinned_frame < frame_count);
         pc = frame_entries[pinned_frame].pc_offset;
-        found_frame = true;
-        dbg("t={d}ms pinned frame={d} pc={d}", .{ time_ms, pinned_frame, pc });
-    }
-
-    // If animation is defined, select scene by time
-    if (!found_frame and has_animation) {
-        if (findSceneAtTime(time_ms)) |scene_idx| {
-            const scene = anim_scenes[scene_idx];
-            if (findFramePcByStringId(scene.frame_string_id)) |frame_pc| {
-                // Found the frame for this scene
-                pc = frame_pc;
-                found_frame = true;
-
-                // Debug: log scene selection
-                dbg("t={d}ms scene={d} frame_id={d} pc={d}", .{ time_ms, scene_idx, scene.frame_string_id, pc });
-            }
-        }
-    }
-
-    // Fallback: find first frame if no animation or scene not found
-    if (!found_frame) {
-        for (0..MAX_EXEC_ITERATIONS) |_| {
-            if (pc >= bytecode.len) break;
-
-            const op: OpCode = @enumFromInt(bytecode[pc]);
-            pc += 1;
-
-            if (op == .define_frame) {
-                // Skip frame_id and name_id
-                _ = read_varint(bytecode, &pc);
-                _ = read_varint(bytecode, &pc);
-                break;
-            }
-
-            skipOpcodeParams(bytecode, &pc, op);
-        }
+        frame_end = frame_entries[pinned_frame].end_pc;
+        dbg("pinned frame={d} pc={d}", .{ pinned_frame, pc });
+    } else if (frame_count > 0) {
+        pc = frame_entries[0].pc_offset;
+        frame_end = frame_entries[0].end_pc;
     }
 
     // Execute frame body
@@ -781,6 +815,93 @@ fn executeFrame(cmds: *CommandBuffer, time: f32, width: u32, height: u32) void {
             continue;
         }
 
+        // Guards (§7.1): exec_if compares a control slot against a constant
+        // and skips its arm when the comparison is FALSE; exec_skip is the
+        // unconditional jump over an else arm. Handled HERE, in the frame
+        // body, only: a guard inside a pass definition or the creation
+        // region keeps the decode-and-skip it has always had (§7.3 — the
+        // compiler never emits one there, and nothing below makes it behave
+        // differently). The comparison semantics are the reference
+        // dispatcher's (dispatcher/frame.zig), mirrored: same NaN rule,
+        // same +0 == -0, an out-of-range slot or unknown tag a refusal.
+        //
+        // The operand WALK is the shared `skipOpcodeParams` (the wire_schema
+        // table, one call for both layouts), and the evaluated fields are
+        // then read straight out of the walked bytes — the same trick the
+        // dispatcher's load-time scan uses: both guard layouts END in the
+        // skip bytes, so the two bytes before the landing pc ARE the skip.
+        // The slot is read as ONE byte: a legal slot is 0..64 (always a
+        // single-byte varint), and a slot byte with the varint continuation
+        // bit decodes to 128+, past every cap — either way the byte's value
+        // against `declared_controls` is the whole check, which is exactly
+        // what the dispatcher's full varint decode + range check decides.
+        // The comptime block below pins the layouts these reads mirror, so
+        // a wire change is a build failure here, not a silent mis-decode.
+        if (op == .exec_if or op == .exec_skip) {
+            const instr = pc - 1; // the opcode byte
+            skipOpcodeParams(bytecode, &pc, op);
+            const min_len: usize = if (op == .exec_if) 9 else 3;
+            if (pc - instr < min_len) {
+                // Truncated inside the instruction: no skip bytes exist.
+                malformed_body = true;
+                continue;
+            }
+            const skip = @as(u16, bytecode[pc - 2]) | (@as(u16, bytecode[pc - 1]) << 8);
+
+            // exec_if computes `holds`; exec_skip is the unconditional
+            // skip, so it enters with holds already false.
+            var holds = false;
+            if (op == .exec_if) {
+                const slot = bytecode[instr + 1];
+                const comparison: opcodes.ControlComparison = @enumFromInt(bytecode[instr + 2]);
+                // In bounds by the min_len check. An align(1) load: the
+                // wire carries the f32's bits little-endian at an
+                // unaligned offset, and one i32.load is the whole read.
+                const constant: f32 = @bitCast(
+                    @as(*align(1) const u32, @ptrCast(bytecode[instr + 3 ..].ptr)).*,
+                );
+                if (slot > declared_controls) {
+                    // A slot past the declarations names a control that
+                    // does not exist: refuse, never read a zero. (A
+                    // multi-byte slot varint lands here too — its first
+                    // byte carries the continuation bit, 128+.)
+                    malformed_body = true;
+                } else {
+                    const value = controls[slot];
+                    holds = switch (comparison) {
+                        .is => value == constant,
+                        .is_not => value != constant,
+                        .below => value < constant,
+                        .above => value > constant,
+                        .at_least => value >= constant,
+                        .at_most => value <= constant,
+                        // The enum is non-exhaustive so @enumFromInt is
+                        // not UB; an unknown tag is malformed input.
+                        // Refuse, never guess a comparison.
+                        _ => b: {
+                            malformed_body = true;
+                            break :b true;
+                        },
+                    };
+                }
+            }
+            if (!holds) {
+                pc += skip;
+                // §7.3: the skip target must not pass this frame's end,
+                // which init()'s scan recorded. On a refusal frame()
+                // returns the existing nonzero status and the host discards
+                // the whole command buffer — nothing in it has run yet, so
+                // the discard is a full rollback. A skip landing INSIDE an
+                // instruction is deliberately NOT detected here (§7.3):
+                // such a skip decodes attacker-chosen bytes as
+                // instructions, which a hostile payload can already do by
+                // writing those instructions directly, and the compiler
+                // never emits one.
+                if (pc > frame_end) malformed_body = true;
+            }
+            continue;
+        }
+
         executeOpcode(cmds, bytecode, &pc, op);
     }
 }
@@ -816,6 +937,7 @@ pub fn executeOpcode(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op:
         .create_pipeline_layout,
         .create_query_set,
         .write_buffer,
+        .write_controls,
         .copy_buffer_to_buffer,
         .resolve_query_set,
         .submit,
@@ -889,6 +1011,17 @@ pub fn executeOpcode(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op:
         .write_pointer_uniform,
         .write_audio_data,
         .select_from_pool,
+        // Frame-program controls and guards (F2/F3): the declaration and
+        // the guards are handled by init()'s walk and the frame-body loop,
+        // never here -- guards only ever move a frame body's pc, and a
+        // define_control is read exactly once by the creation walk. What IS
+        // forced here is the operand walk for all three, because the shared
+        // wire fixtures step these opcodes through this executor's
+        // conformance suite. Skipping (not no-op'ing) keeps the two
+        // executors' pcs in step on old payloads and on guarded ones alike.
+        .define_control,
+        .exec_if,
+        .exec_skip,
         => skipOpcodeParams(bytecode, pc, op),
 
         _ => {}, // Unknown opcode
@@ -914,6 +1047,7 @@ fn execCore(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) 
         .create_query_set,
         => execCoreCreate(cmds, bytecode, pc, op),
         .write_buffer,
+        .write_controls,
         .copy_buffer_to_buffer,
         .resolve_query_set,
         .submit,
@@ -969,8 +1103,8 @@ fn execCoreCreate(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: Op
     std.debug.assert(pc.* >= pc_start); // post: decode advances monotonically
 }
 
-/// Core data/queue opcodes: write_buffer, copy_buffer_to_buffer,
-/// resolve_query_set, submit.
+/// Core data/queue opcodes: write_buffer, write_controls,
+/// copy_buffer_to_buffer, resolve_query_set, submit.
 fn execCoreData(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) void {
     std.debug.assert(pc.* <= bytecode.len); // pre: pc at operand region or buffer end
     const pc_start = pc.*;
@@ -979,6 +1113,31 @@ fn execCoreData(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCo
             const o = readOps(.write_buffer, bytecode, pc);
             const data = getDataSlice(narrowId(o.v2));
             cmds.writeBuffer(narrowId(o.v0), @intCast(o.v1), dataAddr(data.ptr), @intCast(data.len));
+        },
+        .write_controls => {
+            // No new command-buffer opcode (§7.1): the existing write_buffer
+            // command, pointed at this executor's own control table FROM
+            // SLOT 1 — slot 0 is `time` and is deliberately not writable
+            // through this instruction, so the values are the DECLARED
+            // controls in declaration order. The command carries a memory
+            // address, not a data-section id, so it holds in both payload
+            // modes (embedded and shared). A size that is not a multiple of
+            // 4, or that runs past the declared controls, is the same
+            // malformed latch the dispatcher's InvalidControlWrite is —
+            // init()/frame() refuse and the host discards the buffer. The
+            // JS dispatcher's own `dataLen > 0` gate is mirrored: an empty
+            // write commands nothing (and keeps the decode-characterization
+            // dumps free of a runtime address). Hand-read for the same size
+            // reason as the guards; pinned by the comptime block below.
+            const buffer = read_varint(bytecode, pc);
+            const offset = read_varint(bytecode, pc);
+            const size = read_varint(bytecode, pc);
+            const count = size / 4;
+            if (size % 4 != 0 or count > declared_controls) {
+                malformed_body = true;
+            } else if (size > 0) {
+                cmds.writeBuffer(narrowId(buffer), @intCast(offset), dataAddr(&controls[1]), size);
+            }
         },
         .copy_buffer_to_buffer => {
             const o = readOps(.copy_buffer_to_buffer, bytecode, pc);
@@ -1530,162 +1689,8 @@ fn execPool(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) 
 }
 
 // ============================================================================
-// Internal - Animation Table Parsing
+// Internal - Frame Table Scan
 // ============================================================================
-
-/// Parse animation table from bytecode buffer at given offset.
-/// Format: flags(u8), [name_string_id(varint), duration_ms(u32), end_behavior(u8),
-///         scene_count(varint), scenes[scene_count]{id_varint, frame_varint, start_u32, end_u32}]
-fn parseAnimationTable(offset: u32) void {
-    // `offset > bytecode_len` is NOT a precondition violation: it happens for a
-    // hostile animation_table_offset (init() defers this section's bound to here,
-    // not to its ascending-offset check) AND legitimately in split-payload mode,
-    // where the animation table sits past the truncated bytecode_buffer. The
-    // guard below is the real handling — turn the section off, never slice out of
-    // range. A `assert(offset <= bytecode_len)` here would contradict that guard
-    // (Debug-panic on input the function is built to absorb; stripped anyway in
-    // the shipping ReleaseSmall build). (Arc-3 §3.2)
-    if (offset >= bytecode_len) {
-        has_animation = false;
-        return;
-    }
-
-    const data = bytecode_buffer[offset..bytecode_len];
-    if (data.len == 0) {
-        has_animation = false;
-        return;
-    }
-
-    var pos: usize = 0;
-
-    // Read flags
-    const flags = data[pos];
-    pos += 1;
-
-    const has_anim_flag = (flags & 1) != 0;
-    if (!has_anim_flag) {
-        has_animation = false;
-        return;
-    }
-
-    anim_loop = (flags & 2) != 0;
-
-    // Every varint below goes through `read_varint` — the length-tolerant
-    // decoder. The asserting `decode_varint`, guarded only by `pos < len`, read
-    // 1–3 bytes past a multi-byte lead at the end of the table: a stripped
-    // assert in the shipping ReleaseSmall build, an over-read of linear memory.
-    // A truncated table is an empty one (the same rule the native twin keeps);
-    // a declared scene count that outlives the bytes leaves `anim_scene_count`
-    // at the FILLED count, never at the declared one. (Third leak pass)
-
-    // Read name_string_id (skip - we don't need the name)
-    if (pos >= data.len) return;
-    const name_before = pos;
-    _ = read_varint(data, &pos);
-    if (pos == name_before) return; // lead byte at EOF
-
-    // Read duration_ms
-    if (pos + 4 > data.len) return;
-    anim_duration_ms = std.mem.readInt(u32, data[pos..][0..4], .little);
-    pos += 4;
-
-    // Read end_behavior
-    if (pos >= data.len) return;
-    anim_end_behavior = data[pos];
-    pos += 1;
-
-    // Read scene_count
-    if (pos >= data.len) return;
-    const count_before = pos;
-    const declared = read_varint(data, &pos);
-    if (pos == count_before) return;
-    const scene_cap: usize = @min(declared, MAX_SCENES);
-
-    // Read scenes (bounded loop)
-    var filled: u32 = 0;
-    for (0..scene_cap) |i| {
-        // id_string_id (skip - we don't need scene ID)
-        if (pos >= data.len) break;
-        const id_before = pos;
-        _ = read_varint(data, &pos);
-        if (pos == id_before) break;
-
-        // frame_string_id (this maps to a #frame name)
-        if (pos >= data.len) break;
-        const frame_before = pos;
-        const frame_id = read_varint(data, &pos);
-        if (pos == frame_before) break;
-
-        // start_ms
-        if (pos + 4 > data.len) break;
-        const start_ms = std.mem.readInt(u32, data[pos..][0..4], .little);
-        pos += 4;
-
-        // end_ms
-        if (pos + 4 > data.len) break;
-        const end_ms = std.mem.readInt(u32, data[pos..][0..4], .little);
-        pos += 4;
-
-        anim_scenes[i] = .{
-            // A frame id past u16 names nothing; `narrowId` latches the
-            // malformed flag and yields the never-matching 0xFFFF.
-            .frame_string_id = narrowId(frame_id),
-            .start_ms = start_ms,
-            .end_ms = end_ms,
-        };
-        filled = @intCast(i + 1);
-
-        // Debug: log each scene
-        dbg("scene[{d}] frame_id={d} {d}-{d}ms", .{ i, frame_id, start_ms, end_ms });
-    }
-    anim_scene_count = filled;
-
-    has_animation = anim_scene_count > 0;
-
-    // Debug: log animation info
-    dbg("anim: scenes={d} dur={d}ms loop={}", .{ anim_scene_count, anim_duration_ms, anim_loop });
-
-    // Post-condition
-    std.debug.assert(anim_scene_count <= MAX_SCENES);
-}
-
-/// Find scene index for a given time (in milliseconds).
-/// Returns scene index or null if no matching scene.
-fn findSceneAtTime(time_ms: u32) ?u32 {
-    if (!has_animation or anim_scene_count == 0) return null;
-
-    // Handle looping: wrap time to duration
-    var effective_time = time_ms;
-    if (anim_loop and anim_duration_ms > 0) {
-        effective_time = time_ms % anim_duration_ms;
-    }
-
-    // Find scene containing this time
-    for (0..anim_scene_count) |i| {
-        const scene = anim_scenes[i];
-        if (effective_time >= scene.start_ms and effective_time < scene.end_ms) {
-            return @intCast(i);
-        }
-    }
-
-    // Past all scenes: return last scene if hold behavior (0)
-    if (anim_end_behavior == 0 and anim_scene_count > 0) {
-        return anim_scene_count - 1;
-    }
-
-    return null;
-}
-
-/// Find PC offset for a frame by its string ID.
-/// Returns PC offset relative to bytecode_start, or null if not found.
-fn findFramePcByStringId(frame_string_id: u16) ?u32 {
-    for (0..frame_count) |i| {
-        if (frame_entries[i].name_string_id == frame_string_id) {
-            return frame_entries[i].pc_offset;
-        }
-    }
-    return null;
-}
 
 /// Scan bytecode for all define_frame opcodes and build frame_entries table.
 /// Must be called after executeResourceCreation() to build frame name → PC mapping.
@@ -1713,18 +1718,24 @@ fn scanFrameDefinitions() void {
             frame_entries[frame_count] = .{
                 .name_string_id = narrowId(name_id),
                 .pc_offset = @intCast(pc), // Points to first opcode inside frame body
+                .end_pc = @intCast(bytecode.len), // until the walk finds end_frame
             };
             frame_count += 1;
 
             // Debug: log frame definition
             dbg("frame[{d}] name_id={d} pc={d}", .{ frame_count - 1, name_id, pc });
 
-            // Continue scanning - skip frame body to find next frame
+            // Continue scanning - skip frame body to find next frame. The
+            // first `end_frame` closes this frame (they do not nest); its
+            // own pc IS the frame end the guard-skip check needs (§7.3).
             for (0..MAX_EXEC_ITERATIONS) |_| {
                 if (pc >= bytecode.len) break;
                 const inner_op: OpCode = @enumFromInt(bytecode[pc]);
                 pc += 1;
-                if (inner_op == .end_frame) break;
+                if (inner_op == .end_frame) {
+                    frame_entries[frame_count - 1].end_pc = @intCast(pc - 1);
+                    break;
+                }
                 skipOpcodeParams(bytecode, &pc, inner_op);
             }
         } else {
@@ -1931,4 +1942,37 @@ pub fn skipOpcodeParams(bytecode: []const u8, pc: *usize, op: OpCode) void { // 
     pc.* = wire_schema.skipParams(bytecode, @intCast(pc.*), op);
     // Post-condition: skipParams never advances past the buffer end.
     std.debug.assert(pc.* <= bytecode.len);
+}
+
+// The frame-body guard and write_controls decodes are HAND-READ (see their
+// sites for the size reason: a `readOps` instantiation per layout costs the
+// embedded executor ~150 B, and §8.1's caps do not have it). This comptime
+// block pins the layouts those reads mirror — field count, order, and kind —
+// so a wire_schema change is a BUILD FAILURE here, not a silent mis-decode;
+// the behavioural suites (wasm_entry_controls_test, the shared agreement
+// golden, and the wire fixtures that step these opcodes through
+// skipOpcodeParams) cover the rest.
+comptime {
+    const exec_if_layout = wire_schema.layoutOf(.exec_if);
+    std.debug.assert(exec_if_layout.head.len == 5);
+    std.debug.assert(exec_if_layout.head[0].kind == .varint); // slot
+    std.debug.assert(exec_if_layout.head[1].kind == .byte); // comparison
+    std.debug.assert(exec_if_layout.head[2].kind == .u32_le); // constant, f32 bits
+    std.debug.assert(exec_if_layout.head[3].kind == .byte); // skip_lo
+    std.debug.assert(exec_if_layout.head[4].kind == .byte); // skip_hi
+
+    const exec_skip_layout = wire_schema.layoutOf(.exec_skip);
+    std.debug.assert(exec_skip_layout.head.len == 2);
+    std.debug.assert(exec_skip_layout.head[0].kind == .byte); // skip_lo
+    std.debug.assert(exec_skip_layout.head[1].kind == .byte); // skip_hi
+
+    const write_controls_layout = wire_schema.layoutOf(.write_controls);
+    std.debug.assert(write_controls_layout.head.len == 3);
+    std.debug.assert(write_controls_layout.head[0].kind == .varint); // buffer
+    std.debug.assert(write_controls_layout.head[1].kind == .varint); // offset
+    std.debug.assert(write_controls_layout.head[2].kind == .varint); // size
+
+    const define_control_layout = wire_schema.layoutOf(.define_control);
+    std.debug.assert(define_control_layout.head.len == 1);
+    std.debug.assert(define_control_layout.head[0].kind == .u32_le); // default, f32 bits
 }

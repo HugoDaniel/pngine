@@ -1,0 +1,21 @@
+; A guarded group in a cycle: `a` runs only while `scene` is nonzero, and
+; `a` performs `b`, which performs `a` again. The guard cannot stop the
+; cycle — it is evaluated per frame, not per expansion — so the emitter
+; refuses the chain with the names in order.
+(shader-module :name m :code """
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.1, 1.0); }
+""")
+(render-pipeline :name p :layout auto
+  (vertex :module m :entry vs)
+  (fragment :module m :entry fs (color-target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline p
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(control :name scene)
+(step-group :name a :when scene :perform [draw b])
+(step-group :name b :perform [a])
+(frame :name main :perform [a])

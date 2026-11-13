@@ -35,7 +35,7 @@
 //                  whole block is dropped from its bundle. (RESIZE is NOT
 //                  gated — both profiles react to a canvas resize.)
 
-import { createCommandDispatcher, parseUniformTable, parseDeviceLimits, requiredFeaturesFor, canvasAlphaMode } from "./gpu.js";
+import { createCommandDispatcher, parseUniformTable, parseDeviceLimits, requiredFeaturesFor, canvasAlphaMode, payloadHasGuards } from "./gpu.js";
 import { describeUniforms } from "./uniform-convert.js";
 import { parsePayload, getExecutorImports } from "./loader.js";
 
@@ -84,6 +84,16 @@ export const MSG = {
 
 const NO_EMBEDDED_EXECUTOR_ERROR =
   "No embedded executor in payload. Use an embedded-executor PNG payload, or use pngine/dev with wasmUrl fallback.";
+
+// §9's load-time handshake: a payload whose header says has_guards carries
+// frame-program instructions, and an executor that predates them treats each
+// as a no-op and reads its OPERANDS as instructions — garbage, silently. The
+// executor that runs it must export getControlPtr; refuse the load naming the
+// two fixes. A guarded payload that EMBEDS its executor carries a current one
+// (the same compiler set the bit), so it passes; an old RUNTIME rendering it
+// never reaches this check and the guards run inside the embedded executor.
+const GUARDED_PAYLOAD_ERROR =
+  "payload uses frame-program guards, but this executor predates them (no getControlPtr export) — re-embed the executor with a current pngine, or run the payload on a newer runtime";
 
 // The default browser environment, wired from worker globals. Only called from
 // the worker entries (never node), so the global references are safe here.
@@ -137,6 +147,13 @@ export function createWorkerHandlers(env, opts = {}) {
   // GPU resource on a fresh device without the host re-sending it.
   let lastBytecode = null;
   let uniformMap = null;
+  // The EXECUTOR's control table as a host view (65 f32 over getControlPtr;
+  // slot 0 is `time`), rebuilt whenever an executor is adopted, and handed to
+  // whichever dispatcher then owns rendering — controls are written through
+  // gpu.setUniform (§6.1), so the dispatcher needs the view the executor
+  // reads. Null on an executor that predates the export; a payload that
+  // actually uses controls is refused at load (§9) rather than limping.
+  let controlTable = null;
   // The payload's buffer-name block, kept beside the uniform table so
   // getUniforms can name each field's buffer the way writeBuffer speaks it.
   let bufferNames = new Map();
@@ -192,6 +209,7 @@ export function createWorkerHandlers(env, opts = {}) {
     gpu = env.makeDispatcher(device, context);
     gpu.setDebug(debugMode);
     if (memory) gpu.setMemory(memory); // null at first init; handleInit binds it post-executor
+    if (controlTable) gpu.setControlTable(controlTable); // re-adopted on a reload's fresh dispatcher
     gpu.setCanvasSize(canvas.width, canvas.height);
     gpu.setOnShaderError((err) => { post({ type: "shader-error", ...err }); });
     gpu.setOnError((err) => reportCommandError(err.message, err.source));
@@ -220,6 +238,13 @@ export function createWorkerHandlers(env, opts = {}) {
     memory = wasm.memory;
     abiVersion = wasm.getAbiVersion?.() ?? 1;
     executorBytes = bytes;
+    // The control-table view follows the executor it reads: rebuilt on every
+    // adoption (a reload can swap executors), valid for the instance's life
+    // (the executor never grows its memory). Pushed to the dispatcher below —
+    // a kept dispatcher (gpuDirty false) must not keep the OLD memory's view.
+    controlTable = typeof wasm.getControlPtr === "function"
+      ? new Float32Array(memory.buffer, wasm.getControlPtr(), 65)
+      : null;
     if (debug) console.log("[Worker] Executor ABI version:", abiVersion);
     // The dispatcher decodes every command stream out of the EXECUTOR's
     // memory; a swap without this rebind reads the new payload's stream from
@@ -227,6 +252,7 @@ export function createWorkerHandlers(env, opts = {}) {
     // dispatcher (rebinding memory again); this covers a load whose previous
     // init stream was empty (gpuDirty false, dispatcher kept).
     gpu?.setMemory(memory);
+    gpu?.setControlTable?.(controlTable);
   }
 
   // The embedded executor a payload carries, or null when it has none. A
@@ -446,8 +472,14 @@ export function createWorkerHandlers(env, opts = {}) {
       wasm = instance.exports;
       memory = wasm.memory;
       abiVersion = wasm.getAbiVersion?.() ?? 1;
+      // Same view the embedded path builds (adoptExecutor): the shared
+      // executor's own table, handed to the dispatcher for setUniform routing.
+      controlTable = typeof wasm.getControlPtr === "function"
+        ? new Float32Array(memory.buffer, wasm.getControlPtr(), 65)
+        : null;
       if (data.debug) console.log("[Worker] Executor ABI version:", abiVersion);
       gpu.setMemory(memory);
+      gpu.setControlTable?.(controlTable);
       initialized = true;
 
       if (data.bytecode) await loadBytecode(data.bytecode);
@@ -520,6 +552,17 @@ export function createWorkerHandlers(env, opts = {}) {
   // for input, init() to emit resource-creation commands, frame() to render,
   // getCommandPtr/getCommandLen for the command-buffer output.
   async function loadBytecode(bytecode) {
+    // Normalize once, before every consumer below.
+    const bytecodeArray = bytecode instanceof Uint8Array ? bytecode : new Uint8Array(bytecode);
+
+    // The §9 handshake, FIRST: a refused load leaves the running engine
+    // exactly as it was (no dispatcher reset, no byte writes), the way a
+    // rejected executor adoption does. init() has not run, so there is no
+    // half-loaded state to unwind.
+    if (payloadHasGuards(bytecodeArray) && typeof wasm?.getControlPtr !== "function") {
+      throw new Error(GUARDED_PAYLOAD_ERROR);
+    }
+
     // Reset GPU state if the dispatcher has executed anything. Keyed on
     // `gpuDirty`, not `moduleLoaded`: the latter is set only on SUCCESS, so a
     // load whose init stream rejected midway (an undecodable image blob, a
@@ -536,7 +579,6 @@ export function createWorkerHandlers(env, opts = {}) {
     bufferNames = new Map();
 
     // Split PNGB: bytecode (small) → bytecodePtr, data section (large) → dataPtr
-    const bytecodeArray = bytecode instanceof Uint8Array ? bytecode : new Uint8Array(bytecode);
     lastBytecode = bytecodeArray; // retain so device-loss recovery can rebuild resources
     const payloadOffsets = parsePayload(bytecodeArray).offsets;
     const dataOffset = payloadOffsets.data;
@@ -651,24 +693,45 @@ export function createWorkerHandlers(env, opts = {}) {
     }
   }
 
+  // The control table gets the same save/restore around a preview — at most
+  // 64 floats (§6.2). The SNAPSHOT is the prefetch's to take, inside its own
+  // locked section BEFORE it applies the thumbnail's uniforms: one taken
+  // here, inside renderEphemeral, would capture the thumbnail's values, and
+  // the resize repaint never changes controls at all. Restoring writes every
+  // slot back; slot 0 is the frame's own time and frame() overwrites it
+  // before the next body runs. A preview still cannot undo GPU work — the
+  // uniform writes that went to buffers stay.
+  function snapshotControls() {
+    return controlTable ? controlTable.slice() : null;
+  }
+  function restoreControls(saved) {
+    if (controlTable && saved) controlTable.set(saved);
+  }
+
   async function handleDraw(data) {
     if (!initialized || !moduleLoaded || deviceLost) return;
 
     // Apply pointer state before rendering (if provided)
     if (data.pointer) gpu.setPointer(data.pointer);
 
-    // Apply uniforms before rendering (if provided)
-    if (data.uniforms && typeof data.uniforms === "object") {
-      const count = gpu.setUniforms(data.uniforms);
-      if (debugMode && count > 0) {
-        console.log(`[Worker] Set ${count} uniforms`);
-      }
-    }
-
     const t = data.time ?? 0;
     await withRenderLock(async () => {
+      // Host inputs land INSIDE the render lock (§6.2), at the head of the
+      // frame that carries them: uniforms and controls first, host buffer
+      // writes beside them, then the frame. Applied before the lock was
+      // taken, a thumbnail render could run between a draw's writes and its
+      // frame — overwriting the draw's control values with the thumbnail's
+      // `scene` lane, or leaking the draw's into the thumbnail, depending on
+      // the interleave. A control rides this same `uniforms` map (§6.1), so
+      // it inherits the ordering for free.
+      if (data.uniforms && typeof data.uniforms === "object") {
+        const count = gpu.setUniforms(data.uniforms);
+        if (debugMode && count > 0) {
+          console.log(`[Worker] Set ${count} uniforms`);
+        }
+      }
       // Host buffer writes ride the draw message and land at the head of the
-      // frame that carries them — INSIDE the render lock, unlike the uniforms
+      // frame that carries them — INSIDE the render lock, like the uniforms
       // above, because a `poolIndex: "active"` write resolves against the
       // executor's frame counter, and a prefetch thumbnail render moves and
       // restores that counter under this same lock (renderEphemeral). Read
@@ -734,6 +797,7 @@ export function createWorkerHandlers(env, opts = {}) {
     moduleLoaded = false;
     initialized = false;
     uniformMap = null;
+    controlTable = null;
     bufferNames = new Map();
     frameNames = new Map();
     appliedFrame = null;
@@ -949,6 +1013,11 @@ export function createWorkerHandlers(env, opts = {}) {
       // every pooled binding. renderEphemeral (shared with the resize
       // repaint) saves and restores the counter around the render.
       renderEphemeral,
+      // The control-table half of the same side-effect-freeness: drain()
+      // snapshots the live values before applying a thumbnail's uniforms and
+      // restores them after (§6.2).
+      snapshotControls,
+      restoreControls,
       getCanvas: () => canvas,
       getGpu: () => gpu,
       loaded: () => moduleLoaded,

@@ -44,6 +44,7 @@ const TABLES = {
   "Validate Options": "src/cli/validate.zig",
   "Inspect Options": "src/cli/inspect.zig",
   "Compile Options": "src/cli/compile.zig",
+  "Play Options": "src/cli/play.zig",
 };
 
 const claude = readFileSync(CLAUDE_MD, "utf8");

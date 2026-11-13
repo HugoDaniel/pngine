@@ -631,6 +631,17 @@ pub const NullGPU = struct {
         assert(self.initialized);
     }
 
+    /// Write the declared controls to a buffer (frame program §7.1). The
+    /// headless stub has no buffer contents to mutate.
+    pub fn write_controls(self: *Self, gpa: Allocator, buffer_id: u16, offset: u32, values: []const f32) !void {
+        _ = gpa;
+        _ = buffer_id;
+        _ = offset;
+        _ = values;
+
+        assert(self.initialized);
+    }
+
     pub fn submit(self: *Self, gpa: Allocator) !void {
         _ = gpa;
 

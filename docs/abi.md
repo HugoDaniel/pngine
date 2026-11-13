@@ -10,7 +10,9 @@ This document is the canonical specification of the interface between an
 A PNGine PNG is an immutable artifact: bytecode + its own interpreter, minted
 once, expected to render forever. The PNGB payload format is locked at v0 *by
 design* — payload evolution rides on the embedded executor, so the header never
-needs to change. What CANNOT ride along is the other half of the contract: the
+needs to change. (The one exception, v1 for an executor-less guarded payload,
+is decision D6 in the frame-program plan; change policy rule 6 below carries
+it.) What CANNOT ride along is the other half of the contract: the
 JS runtime is the moving part, and it must run **every executor ever shipped
 inside a PNG**, forever.
 
@@ -46,7 +48,8 @@ getAbiVersion() → u32
 | `setFrameCounter` | `(n: u32) → void` | Restore a saved counter around host-side ephemeral renders (thumbnails must not shift pool phase). Absent on pre-2026-08 binaries — hosts feature-detect |
 | `getFrameCount` | `() → u32` | How many `define_frame`s `init()` indexed; `0` before a successful init. Absent on pre-2026-09 binaries — hosts feature-detect (the worker reports the historical `1` then) |
 | `getFrameNameId` | `(index: u32) → u32` | The string-table id of frame `index`'s name (its `(frame :name …)`), in define order; `0xFFFFFFFF` past the count or before init. The host resolves it through the string table it already parses — the executor never handles a name. A u32 result crosses into JS as an i32, so that sentinel reads as `-1` until masked (`>>> 0`); the worker never reads it, iterating `getFrameCount()` instead |
-| `setFrame` | `(index: u32) → u32` | Pin the frame `frame()` renders, by index; `0xFFFFFFFF` releases the pin. `0` ok, `1` not initialised, `2` out of range (the pin is left as it was). The pin outranks the animation table and holds until the next `setFrame` or `init()`, which clears it. This is what `setFrame(p, name)` in the JS API lands on — before it, the frozen `frame(time, w, h)` signature left the executor running its first frame no matter what the host pinned |
+| `setFrame` | `(index: u32) → u32` | Pin the frame `frame()` renders, by index; `0xFFFFFFFF` releases the pin. `0` ok, `1` not initialised, `2` out of range (the pin is left as it was). The pin is the executor's only frame selector besides "the first one" — the time-to-scene scheduler it once outranked was retired in 2026-11 (frame-program plan §8.1/D1) — and holds until the next `setFrame` or `init()`, which clears it. This is what `setFrame(p, name)` in the JS API lands on — before it, the frozen `frame(time, w, h)` signature left the executor running its first frame no matter what the host pinned |
+| `getControlPtr` | `() → u32` | Address of the 65-entry f32 control table: slot 0 is `time`, slot `n` is the nth declared control (see §4.1). Additive, so `getAbiVersion` stays 1. Absent on pre-2026-11 binaries — hosts feature-detect it, as they do `getFrameCount` |
 | `getAbiVersion` | `() → u32` | See §1. Absent on pre-2026-06 binaries |
 
 Buffer caps (256 KB bytecode / 512 KB data / 64 KB commands) are **per-binary**
@@ -119,6 +122,69 @@ append-only; a host must treat an unknown nonzero the same way.
 | `frame` | 2 | out-of-range id in the frame body |
 | `frame` | 3 | command buffer overflowed |
 
+### 4.1 Frame-program controls (added 2026-11; ABI stays 1)
+
+The control table is 65 `f32` values in the executor's linear memory. Slot 0 is
+`time`; slot `n` (1..64) is the nth `(control …)` declared by the document, in
+declaration order. `getControlPtr()` returns the address of slot 0, and slot
+`n` is the little-endian `f32` at `getControlPtr() + 4 * n`. The table is
+static: the executor never grows its memory, so a host's `Float32Array` over
+that address stays valid for the life of the instance.
+
+`getControlPtr` is an **additive export**; `getAbiVersion` stays **1**, and a
+host feature-detects the export the way it does `getFrameCount`.
+
+A host that is not the JS runtime follows three rules:
+
+1. **Write after `init()` and before `frame()`.** `init()` restores the
+   authored defaults (payload load and device recovery both call it), so a
+   write made before it is lost.
+2. **Leave slot 0 alone.** `frame()` stores its `time` argument there before
+   the frame body runs; a host sets time the way it always has, through
+   `frame(time, w, h)`. A write to slot 0 is overwritten by the next frame.
+3. **Apply the §9 handshake if the executor is not the payload's.** A payload
+   whose header `has_guards` bit is set (below) must run on an executor that
+   exports `getControlPtr`; otherwise refuse the load. A payload with its own
+   embedded executor already satisfies this, and a payload whose `has_guards`
+   bit is clear is safe on an older shared executor. The JS runtime's check is
+   in `worker-core.js`'s `loadBytecode`.
+
+After `init()` the table holds the authored defaults, so a host that wants to
+show them reads the same address. A host that links the reference dispatcher
+instead of running an executor calls `set_control(slot, value)` before the
+frames; the slot rule is identical.
+
+**The payload can name the controls.** Two header flag bits describe a
+frame-program payload, and both are empty-means-absent:
+
+| Bit | Flag | Meaning |
+| --- | --- | --- |
+| 5 | `has_control_names` (the plan's shorthand: `has_controls`) | The uniform-table section carries a control-name block after its bindings and the buffer-name block. |
+| 6 | `has_guards` | The bytecode contains at least one of `define_control`, `write_controls`, `exec_if` or `exec_skip`. |
+
+The control-name block is the uniform-table section's tail, after the
+buffer-name block:
+
+```
+[control_count: u16]
+[ name_string_id: u16 ] × control_count
+```
+
+Little-endian, in slot order: element 0 is slot 1, because slot 0 is `time` and
+is never listed. A name id resolves through the payload's string table. A
+reader that predates the block is count-bounded and stops at `binding_count`,
+so it ignores these bytes; a payload with no controls writes no block and
+leaves bit 5 clear, so it is byte-identical to pre-controls output. A slot
+whose name did not fit the string table is RESERVED with the empty-string id:
+it still counts for `control-inputs` and keeps its slot number, but it is not
+addressable by name. An empty-string entry cannot be a control name (a control
+name is a WGSL identifier), so it is unambiguous.
+
+The block is read by hosts; the shipping executor never reads it. That is the
+frontend-only-table rule in §7's change policy, with the uniform table as the
+precedent, and it is why the payload grew without an ABI version bump. The
+`has_guards` bit also selects PNGB version 1 for an executor-less payload
+(rule 6); a payload with an embedded executor stays version 0.
 
 ## 5. Command-buffer wire format
 
@@ -414,7 +480,23 @@ same byte, and one of them means "guess".
    change breaks a pinned golden, the change is presumed wrong. Overriding
    requires `--force` on the regen script plus a commit message arguing
    semantic equivalence.
-6. **PNGB stays v0.** Payload evolution = embedded executor evolution. A
+6. **PNGB stays v0, with one exception: an executor-less payload whose
+   `has_guards` bit is set is written as v1** (frame-program plan, decision
+   D6). A payload WITHOUT an embedded executor runs on a shared executor the
+   PNG never shipped with, and one that predates frame programs treats each
+   guard instruction as a no-op and reads its operands as instructions —
+   garbage, silently. The runtime's load-time handshake refuses that pairing,
+   but a runtime from before the handshake cannot be taught it; the version
+   field is the one thing such a runtime checks, so v1 makes it throw
+   "Unsupported PNGB version" instead of rendering garbage. The cost D6
+   names: every reader of the field accepts 0 and 1 (`format.versionSupported`
+   in Zig; the version gates in `loader.js`, `viewer-init.js`, and
+   `wasm_entry.zig`'s `init`, which is the shared executor such payloads run
+   on), and the value depends on whether an executor is embedded — the embed
+   path re-serializes through the one header builder, which resets a guarded
+   compile to v0, so an old viewer keeps rendering a guarded PNG with its
+   time guards working and its controls at their defaults. Payload evolution
+   otherwise = embedded executor evolution. A
    *frontend-only* table — one parsed by `gpu.js` / native / `js_codegen` but
    NEVER by the shipping wasm executor (the uniform table is the original
    precedent) — may still grow the payload without touching the ABI, provided:

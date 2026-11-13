@@ -50,6 +50,24 @@ pub fn handle(
             try self.backend.write_audio_data(gpa, try wire.narrowU16(p.v0), p.v1, try wire.narrowU16(p.v2));
         },
 
+        .write_controls => {
+            const p = try wire.readOperands(wire.layoutOf(.write_controls), self);
+            // The written values are controls[1 .. 1 + size/4] — the DECLARED
+            // controls in declaration order. Slot 0 (`time`) is deliberately
+            // not writable through this instruction: control-inputs carries
+            // the declared controls only. A size that is not a multiple of 4,
+            // or that runs past the declared controls, is a payload error.
+            if (p.size % 4 != 0) return error.InvalidControlWrite;
+            const count = p.size / 4;
+            if (count > self.declared_controls) return error.InvalidControlWrite;
+            try self.backend.write_controls(
+                gpa,
+                try wire.narrowU16(p.buffer),
+                p.offset,
+                self.controls[1 .. 1 + count],
+            );
+        },
+
         .copy_external_image_to_texture => {
             const p = try wire.readOperands(wire.layoutOf(.copy_external_image_to_texture), self);
             try self.backend.copy_external_image_to_texture(

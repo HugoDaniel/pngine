@@ -7,6 +7,7 @@ const Allocator = std.mem.Allocator;
 const cmd_validator = @import("cmd_validator.zig");
 const symptom_diagnosis = @import("symptom_diagnosis.zig");
 const wgsl_reflect = @import("wgsl_reflect.zig");
+const control_args = @import("../control_args.zig");
 
 /// Maximum input file size (16 MiB).
 pub const max_file_size: u32 = 16 * 1024 * 1024;
@@ -43,6 +44,10 @@ pub const Options = struct {
     strict: bool,
     extract_wgsl: bool,
     quiet: bool,
+    /// `--control` values already resolved to the payload's slots. Written
+    /// into the executor's table after init() and before the first frame()
+    /// (plan §6.6); empty when the flag was not used.
+    controls: control_args.ResolvedList,
 
     /// Default frame indices (just frame 0).
     pub const default_frames = [_]u32{0};
@@ -63,6 +68,7 @@ pub const Options = struct {
             .strict = false,
             .extract_wgsl = false,
             .quiet = false,
+            .controls = .{},
         };
     }
 };

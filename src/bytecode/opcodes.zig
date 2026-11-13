@@ -17,6 +17,10 @@ pub const StoreOp = types.StoreOp;
 pub const PassType = types.PassType;
 pub const WasmArgType = types.WasmArgType;
 pub const WasmReturnType = types.WasmReturnType;
+/// `exec_if`'s comparison byte (frame program §4.2); wire order, see types.
+pub const ControlComparison = types.ControlComparison;
+/// Max declared controls per document (plan §4.1/§8.3); see types.
+pub const MAX_CONTROLS = types.MAX_CONTROLS;
 /// Opcode → required executor plugin (drives variant selection); see types.
 pub const pluginForOpcode = types.pluginForOpcode;
 /// `create_bind_group`'s `layout_id` id-space discriminator; see types.

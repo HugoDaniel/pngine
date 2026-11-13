@@ -12,6 +12,11 @@ import { initialPlayback } from "./playback-state.js";
 
 const PNGB_HEADER_SIZE = 40;
 const PNGB_VERSION_V0 = 0;
+// D6 (frame-program §12): version 1 marks an executor-less guarded payload.
+// The viewer's contract still requires an embedded executor, but a v1 payload
+// must be refused for THAT reason — never by the version gate, which an old
+// runtime reads but a new one must not hide behind.
+const PNGB_VERSION_V1 = 1;
 const PNGB_FLAG_HAS_EMBEDDED_EXECUTOR = 0x01;
 const NO_EMBEDDED_EXECUTOR_ERROR =
   "No embedded executor in payload. Use an embedded-executor PNG payload, or use pngine/dev with wasmUrl fallback.";
@@ -198,7 +203,7 @@ function assertEmbeddedExecutorPayload(bytecode) {
 
   const view = new DataView(bytecode.buffer, bytecode.byteOffset, bytecode.byteLength);
   const version = view.getUint16(4, true);
-  if (version !== PNGB_VERSION_V0) {
+  if (version !== PNGB_VERSION_V0 && version !== PNGB_VERSION_V1) {
     throw new Error(`Unsupported PNGB version: ${version}`);
   }
 

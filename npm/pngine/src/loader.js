@@ -4,9 +4,9 @@
  * Parses PNGB v0 format to detect and extract embedded executor WASM.
  * Falls back to shared executor if not embedded.
  *
- * PNGB v0 Header (40 bytes):
+ * PNGB Header (40 bytes):
  * - magic: "PNGB" (4 bytes)
- * - version: u16 (0)
+ * - version: u16 (0; 1 marks an executor-less guarded payload — D6)
  * - flags: u16 (bit 0 = has_embedded_executor, bit 1 = has_animation_table)
  * - plugins: u8 (PluginSet bitfield)
  * - reserved: [3]u8
@@ -25,6 +25,10 @@ if (typeof EMBEDDED_ONLY === "undefined") globalThis.EMBEDDED_ONLY = false;
 
 const PNGB_MAGIC = [0x50, 0x4e, 0x47, 0x42]; // "PNGB"
 const VERSION_V0 = 0;
+// D6 (frame-program §12): version 1 marks an executor-less guarded payload —
+// the only signal a runtime that predates the §9 handshake obeys. Every
+// reader of the field accepts both; the 40-byte layout is unchanged.
+const VERSION_V1 = 1;
 const HEADER_SIZE_V0 = 40;
 
 // Header flags
@@ -58,17 +62,20 @@ export function parsePayload(pngb) {
   const view = new DataView(pngb.buffer, pngb.byteOffset, pngb.byteLength);
   const version = view.getUint16(4, true);
 
-  if (version !== VERSION_V0) {
+  // v0, and v1 for an executor-less guarded payload (D6): the §9 handshake,
+  // not this gate, refuses the pairing that is unsafe to run.
+  if (version !== VERSION_V0 && version !== VERSION_V1) {
     throw new Error(`Unsupported PNGB version: ${version}`);
   }
 
-  return parseV0Header(pngb, view);
+  return parseV0Header(pngb, view, version);
 }
 
 /**
- * Parse v0 header (40 bytes)
+ * Parse the 40-byte header (v0 layout, shared by v1 — D6 changed the field's
+ * value, never its size or position).
  */
-function parseV0Header(pngb, view) {
+function parseV0Header(pngb, view, version) {
   const flags = view.getUint16(6, true);
   const plugins = pngb[8];
   const executorOffset = view.getUint32(12, true);
@@ -89,7 +96,7 @@ function parseV0Header(pngb, view) {
   const bytecodeLength = stringTableOffset - bytecodeOffset;
 
   return {
-    version: VERSION_V0,
+    version,
     hasEmbeddedExecutor,
     hasAnimationTable,
     plugins: parsePlugins(plugins),

@@ -529,6 +529,9 @@ export fn pngine_render(anim: ?*PngineAnimation, time: f32) callconv(.c) PngineE
     };
 
     a.gpu.setTime(time);
+    // Slot 0 of the control table: a time guard reads the same value the GPU
+    // backend's pngine-inputs write does (plan §7.2).
+    a.dispatcher.set_time(time);
     // The counter the body is ABOUT to run at, so `pngine-frame-inputs` and the
     // ping-pong pool phase agree. `end_frame` inside the body advances it, so
     // reading it after would be one frame ahead of the bindings just selected.
@@ -667,6 +670,7 @@ export fn pngine_debug_frame(anim: ?*PngineAnimation, time: f32) callconv(.c) c_
     const a = anim orelse return -1;
 
     a.gpu.setTime(time);
+    a.dispatcher.set_time(time); // slot 0: time guards read this (plan §7.2)
     a.gpu.setFrameCounter(a.dispatcher.frame_counter);
 
     // Same split as pngine_render: one selected frame body, no replay of the

@@ -74,6 +74,28 @@ node npm/pngine/scripts/bundle.cjs --debug # Debug (source maps, no minify)
 ./npm/publish.sh
 ```
 
+### Committed play runtime
+
+`src/cli/play_runtime.min.mjs` is a committed asset, not an npm output: the
+`pngine play` page embeds it with `@embedFile` and hands it to the browser as a
+Blob module. It is the byte-exact production `npm/pngine/dist/dev.mjs` bundle,
+so ordinary CLI builds need neither Node nor esbuild.
+
+Regenerate and verify it locally (esbuild lives in `node_modules`; never run it
+through `obs`):
+
+```bash
+node scripts/gen-play-runtime.mjs           # rebuild dist/dev.mjs and rewrite the asset
+node scripts/gen-play-runtime.mjs --check   # rebuild dist and verify the asset
+```
+
+`--check` refreshes `npm/pngine/dist/dev.mjs` but never rewrites the committed
+asset. The Zig `drift` gate byte-compares those two files; because `dist/` is a
+gitignored build product, run `node scripts/gen-play-runtime.mjs --check`
+locally before `zig build drift`. The asset adds no npm `exports` subpath and no
+row to the bundle table above — it is embedded in the CLI binary, not published
+as a separate bundle.
+
 ## Published Surface Beyond the Bundles
 
 Besides the `dist/` bundles, the package ships the unbundled `src/` tree and
@@ -104,16 +126,16 @@ The JS runtime uses esbuild for bundling with two build modes:
 
 One row per entry point `bundle.cjs` writes. The **budget** column is the gate
 in `bundle.cjs`'s `SIZE_BUDGETS`, which fails the build when a bundle grows past
-it — the durable number. Sizes are a measurement (2026-09-03, production) and
+it — the durable number. Sizes are a measurement (2026-11-12, production) and
 will drift; the budget is what holds them.
 
 <!-- BUNDLE-TABLE: checked against scripts/bundle.cjs by `zig build drift` -->
 
 | Bundle | Subpath | Profile | Size (gz) | Budget |
 | ------ | ------- | ------- | --------- | ------ |
-| `viewer.mjs` | `pngine` (browser), `pngine/viewer` | Lean production viewer; embedded-executor payloads only, worker inlined | 60.1 KB (20.7) | 61700 |
-| `dev.mjs` | `pngine/dev` | Full-feature browser API: shared `pngine.wasm` fallback, prefetch, diagnostics | 64.8 KB (22.4) | 66500 |
-| `core.mjs` | `pngine/core` | Low-level runtime API (dispatcher + loader), no main-thread wrapper | 30.8 KB (10.5) | 31600 |
+| `viewer.mjs` | `pngine` (browser), `pngine/viewer` | Lean production viewer; embedded-executor payloads only, worker inlined | 62.4 KB (21.4) | 64054 |
+| `dev.mjs` | `pngine/dev` | Full-feature browser API: shared `pngine.wasm` fallback, prefetch, diagnostics | 67.2 KB (23.0) | 69016 |
+| `core.mjs` | `pngine/core` | Low-level runtime API (dispatcher + loader), no main-thread wrapper | 31.5 KB (10.7) | 32339 |
 | `executor.mjs` | `pngine/executor` | Executor helpers — `parsePayload`, `createExecutor`, imports | 1.9 KB (0.9) | 2200 |
 | `mini.mjs` | `pngine/mini` | Flat pNGf main-thread player, with the Sointu audio worklet | 7.1 KB (3.3) | 7300 |
 | `mini-no-audio.mjs` | `pngine/mini-no-audio` | `mini.js` built with `AUDIO=false` — the audio path is DCE'd, not branched around | 6.4 KB (3.0) | 6600 |

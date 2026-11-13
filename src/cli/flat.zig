@@ -560,6 +560,10 @@ fn serializeCall(
         .begin_occlusion_query,
         .end_occlusion_query,
         .resolve_query_set,
+        // The declared controls (frame program §7.1): mini has no control
+        // table to read, so a write of them is functionality it cannot
+        // express — same refusal class as the rest of this arm.
+        .write_controls,
         => return error.UnsupportedByMini,
     }
     // A serialized call is at least its opcode byte: mini reads the stream

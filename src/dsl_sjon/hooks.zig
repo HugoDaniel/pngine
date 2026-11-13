@@ -1,15 +1,15 @@
 //! PNGine lowering hooks — the whole sugar tier, and the only door it has into
-//! a compile. Three are registered: `pngine/init-v1` and `pngine/pass-v1` live
-//! here, `pngine/draw-v1` in `draw_graph.zig`. Every key each one reads is
-//! written down in `schema/sugar-ledger.mjs` against the hand-written twin in
-//! `examples/` that proves it lowers to core forms; `zig build drift` derives
-//! the key set from the schema, so a new key on a lowered form fails the build
-//! until it is recorded.
+//! a compile. Four are registered: `pngine/init-v1` and `pngine/pass-v1` live
+//! here, `pngine/draw-v1` in `draw_graph.zig`, and `pngine/select-v1` here.
+//! Every key each one reads is written down in `schema/sugar-ledger.mjs`
+//! against the hand-written twin in `examples/` that proves it lowers to core
+//! forms; `zig build drift` derives the key set from the schema, so a new key
+//! on a lowered form fails the build until it is recorded.
 //!
 //! Supported external surface (ask P6): the `pass_v1` / `init_v1` / `draw_v1`
-//! values and `buildRegistry`. Every other `pub` decl in this module is
-//! internal and may change without notice; a one-pass host also needs
-//! `Compiler.buildLoweringEnv` so a define-ref `:workgroups` expression
+//! / `select_v1` values and `buildRegistry`. Every other `pub` decl in this
+//! module is internal and may change without notice; a one-pass host also
+//! needs `Compiler.buildLoweringEnv` so a define-ref `:workgroups` expression
 //! resolves at lowering time.
 //!
 //! `(init …)` and `(pass …)` sugar become host-owned form-lowering hooks: SJON calls
@@ -46,7 +46,72 @@ const EmittedValue = Lowering.EmittedValue;
 /// Shared linear sampler name (legacy `ensureSharedSampler`: created once,
 /// unconditionally, before any pass — even passes that never sample). Its
 /// filters are authored explicitly at the emission site, not defaulted.
+/// The plain spelling is what an UNNAMED graph emits; a named one emits it
+/// `graphScoped`, so two graphs cannot declare it twice.
 const PASS_SAMPLER = "__pass_sampler";
+
+/// The graph's shared controls buffer (frame-program §4.5): created once per
+/// `(pass-graph …)`, by the first pass whose WGSL names `controls`, and read
+/// by every pass that does — two passes share one buffer and one per-frame
+/// write, not two. Named on `PASS_SAMPLER`'s pattern: a resource the hook
+/// owns, spelled so it cannot collide with a pass an author named — and
+/// `graphScoped` by the graph, like the sampler, for the same reason.
+const PASS_CONTROLS = "__pass_controls";
+
+/// An internal, per-graph resource name: `base` qualified by the graph the
+/// way the hook already distinguishes graphs (`:name`, the same key
+/// `checkGraphFrameOwnership` reads), so two named graphs in one document
+/// each get their own buffer/sampler instead of declaring one name twice —
+/// names are one namespace across every form, and a fixed internal name in
+/// a per-graph hook collides the moment a second graph exists.
+///
+/// An UNNAMED graph keeps the plain spelling: it owns the document's only
+/// `(frame …)`, so `checkGraphFrameOwnership` refuses any second graph and
+/// the name cannot collide — and the plain spelling is what the golden
+/// corpus pins byte-for-byte for every pre-existing document.
+fn graphScoped(arena: Allocator, base: []const u8, graph_name: ?[]const u8) Lowering.LoweringError![]const u8 {
+    const g = graph_name orelse return base;
+    return std.fmt.allocPrint(arena, "{s}__{s}", .{ g, base });
+}
+
+/// What one `passV1` invocation knows about the document's controls (§4.5),
+/// threaded through every pass it lowers.
+const ControlsUse = struct {
+    /// The document's `(control …)` names in declaration order — which IS slot
+    /// order, the order `control-inputs` writes and the prelude's struct
+    /// declares its members in. Empty when the document declares none.
+    names: []const []const u8,
+    /// The graph-scoped name the shared buffer takes (`graphScoped`): one
+    /// ControlsUse per `(pass-graph …)`, so one buffer name per graph.
+    scoped_buf: []const u8,
+    /// The shared buffer, once the first pass that names `controls` created it.
+    /// Null until then: a control no pass reads needs no buffer (§4.4).
+    buf: ?[]const u8 = null,
+    /// Whether the graph's one per-frame write has joined a pass's uniform
+    /// queue yet. The FIRST pass that names `controls` owns the write, so N
+    /// passes still write the shared buffer once per frame, not N times.
+    written: bool = false,
+};
+
+/// Read the document's `(control …)` names, in declaration order, from the
+/// same whole-document view `checkGraphFrameOwnership` reads. The emitter's
+/// `collectControls` walks the same forms in the same order for the slots on
+/// the wire, so the struct this hook declares and the block `control-inputs`
+/// writes stay in lockstep by construction — the F4a struct check under shader
+/// validation then holds against the declarations automatically.
+fn documentControls(arena: Allocator, view: EffectiveView) Lowering.LoweringError![]const []const u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    for (view.tree.root) |idx| {
+        if (view.tree.tagOf(idx) != .form) continue;
+        if (!std.mem.eql(u8, view.tree.formHeader(idx).head, "control")) continue;
+        // A control without `:name` is the schema's to refuse, not this
+        // reader's; skipping it here cannot invent a slot the emitter would
+        // disagree with (`collectControls` skips the same form).
+        const n = Reader.initFromView(view).symbol(idx, "name") orelse continue;
+        try names.append(arena, try arena.dupe(u8, n));
+    }
+    return names.toOwnedSlice(arena);
+}
 
 /// The auto-injected fullscreen-triangle vertex shader (entry `vs`), shared by
 /// the main and post-processing pass preludes (port of `pass_sugar.buildPrelude`).
@@ -158,7 +223,9 @@ fn formatFacts(fmt: values.TextureFormat) FormatFacts {
 /// `sampler, buffer, texture, shader, pipeline, bind-group` — the `(pass …)`
 /// order the golden traces pin position-by-position.
 ///
-/// Scope: fullscreen fragment passes with optional `pngine`/`pointer` uniforms,
+/// Scope: fullscreen fragment passes with optional `pngine`/`pointer` uniforms
+/// (and, when the document declares controls and the WGSL names `controls`, the
+/// prelude's controls binding — frame-program §4.5),
 /// `@fragment fn post()` post-processing (main → intermediate texture → canvas),
 /// `:feedback true` ping-pong (a `:pool 2` output texture + `prev_<name>` binding,
 /// rendered via begin_render_pass_pool), cross-pass dependencies (a later pass
@@ -173,18 +240,6 @@ pub fn passV1(
     const view = input.view;
     const container = input.form_idx;
     const hdr = view.tree.formHeader(container);
-
-    // Shared sampler first. The filters are SPELLED OUT rather than left to the
-    // schema default: this sampler exists to read the previous pass's texture,
-    // where smoothing is the whole point, and the default is nearest since
-    // spec/09 step D. Riding the default here is how a feedback chain would have
-    // gone blocky the day the default moved — the sugar authors on the user's
-    // behalf, so it states what it means.
-    try appendForm(arena, out, container, "sampler", &.{
-        .{ .key = "name", .value = .{ .symbol = PASS_SAMPLER } },
-        .{ .key = "mag-filter", .value = .{ .symbol = "linear" } },
-        .{ .key = "min-filter", .value = .{ .symbol = "linear" } },
-    }, &.{});
 
     // Collect the (pass …) children up front so each knows whether it is the
     // last — the "main" pass renders to the canvas and owns any post() stage.
@@ -203,6 +258,23 @@ pub fn passV1(
     // Named or not decides who owns the frame (`graphOwnsFrame`).
     const graph_name = try childSymbol(arena, view, container, "name");
     try checkGraphFrameOwnership(arena, out, view, container, "pass-graph", graph_name);
+
+    // The graph's own internal names, qualified by the graph when it has one:
+    // a second named graph in the same document must find these taken by
+    // nobody but this graph (`graphScoped`).
+    const sampler_name = try graphScoped(arena, PASS_SAMPLER, graph_name);
+
+    // Shared sampler first. The filters are SPELLED OUT rather than left to the
+    // schema default: this sampler exists to read the previous pass's texture,
+    // where smoothing is the whole point, and the default is nearest since
+    // spec/09 step D. Riding the default here is how a feedback chain would have
+    // gone blocky the day the default moved — the sugar authors on the user's
+    // behalf, so it states what it means.
+    try appendForm(arena, out, container, "sampler", &.{
+        .{ .key = "name", .value = .{ .symbol = sampler_name } },
+        .{ .key = "mag-filter", .value = .{ .symbol = "linear" } },
+        .{ .key = "min-filter", .value = .{ .symbol = "linear" } },
+    }, &.{});
 
     // A named graph is a `(step-group …)`, and a group has no `:init` — only a
     // `(frame …)` does. Refused HERE, ahead of the loop, so the message names
@@ -225,6 +297,10 @@ pub fn passV1(
     var frame_steps: std.ArrayList(EmittedValue) = .empty;
     var init_steps: std.ArrayList(EmittedValue) = .empty;
     var prior: std.ArrayList(PassRef) = .empty;
+    var controls: ControlsUse = .{
+        .names = try documentControls(arena, view),
+        .scoped_buf = try graphScoped(arena, PASS_CONTROLS, graph_name),
+    };
     for (passes.items, 0..) |pass, i| {
         const is_last = (i == passes.items.len - 1);
         // Read here rather than inside `lowerOnePass`: evaluating `:value`
@@ -233,13 +309,13 @@ pub fn passV1(
         // Read here for the same reason the constants are: `:scale` may be an
         // expression over `(define …)`, and the lowering env lives on `input`.
         const scale = try readPassScale(arena, out, input, pass);
-        const ref = try lowerOnePass(arena, out, container, view, pass, is_last, prior.items, constants, scale, &frame_steps, &init_steps);
+        const ref = try lowerOnePass(arena, out, container, view, pass, is_last, sampler_name, prior.items, constants, scale, &controls, &frame_steps, &init_steps);
         try prior.append(arena, ref);
     }
 
     // `:expose`: the passes a frame may put on the canvas. Emitted here, but
     // appended to NO step list, so nothing runs a blit until a frame names it.
-    try lowerExposedBlits(arena, out, view, container, prior.items);
+    try lowerExposedBlits(arena, out, view, container, sampler_name, prior.items);
 
     // Named: a `(step-group …)` the document's own `(frame …)` runs, which is
     // how a pass graph and a draw graph share one frame. Unnamed: the auto-frame,
@@ -356,9 +432,11 @@ fn lowerOnePass(
     view: EffectiveView,
     pass: Ast.NodeIndex,
     is_last: bool,
+    sampler: []const u8,
     prior_passes: []const PassRef,
     constants: []const PassConstant,
     scale: ?f64,
+    controls: *ControlsUse,
     frame_steps: *std.ArrayList(EmittedValue),
     init_steps: *std.ArrayList(EmittedValue),
 ) Lowering.LoweringError!PassRef {
@@ -418,6 +496,19 @@ fn lowerOnePass(
     }
     // Read ONCE, for both paths and for the refusal below.
     const imports = try readImports(arena, view, pass);
+    // D5 (§4.5): `controls` names the prelude's binding only in documents that
+    // declare a control, so an existing document's `controls` is an ordinary
+    // identifier and nothing about it changes. A pass that NAMES it with
+    // nothing declared would lower to a binding over an empty struct and a
+    // buffer nothing fills — refuse at the pass, naming both fixes. Read on
+    // the whole `:code` (a post() naming it could not compile either: the
+    // module that shares has nowhere to declare it).
+    if (controls.names.len == 0 and namesIdent(code, "controls")) return out.failAt(
+        arena,
+        pass_span,
+        "pass `{s}`: its WGSL names `controls`, the prelude's controls binding, but this document declares no `(control …)` — declare one, or rename the variable",
+        .{name},
+    );
     // With no fragments in play this hook knows every declaration the pass's
     // modules can hold, so a constant naming an override the code does not
     // declare is refused HERE, where the message can name the pass and the
@@ -457,8 +548,8 @@ fn lowerOnePass(
     const init_code = try childString(arena, view, pass, "init");
     const is_main = is_last or std.mem.eql(u8, name, "main");
     if (scan.has_compute)
-        return lowerComputePass(arena, out, container, view, pass, name, code, scan, is_main, imports, constants, init_code, frame_steps, init_steps);
-    return lowerFragmentPass(arena, out, container, view, pass, name, code, format, scale, is_main, prior_passes, imports, constants, init_code, frame_steps, init_steps);
+        return lowerComputePass(arena, out, container, view, pass, name, code, scan, is_main, sampler, imports, constants, init_code, controls, frame_steps, init_steps);
+    return lowerFragmentPass(arena, out, container, view, pass, name, code, format, scale, is_main, sampler, prior_passes, imports, constants, init_code, controls, frame_steps, init_steps);
 }
 
 /// Read `(pass … :format …)`, refusing the two shapes that cannot honor it, and
@@ -747,6 +838,11 @@ const PassFeatures = struct {
     needs_uniform: bool,
     needs_pointer: bool,
     needs_sampler: bool,
+    /// The main WGSL names `controls` — the prelude's controls binding (§4.5).
+    /// Like `pngine`/`pointer`, a post() that names it alone does not declare
+    /// the binding (the main module would need it; see `lowerPostPass`'s
+    /// `post_uniform` for the same rule on `pngine`).
+    needs_controls: bool,
     /// The prior passes this one's WGSL names (`namesIdent`), in graph order:
     /// the prelude declares a `texture_2d` per entry and the bind group binds
     /// the same set. A fan-in graph (three producers, one consumer) has
@@ -805,6 +901,7 @@ fn detectPassFeatures(
         .needs_uniform = namesIdent(main_code, "pngine"),
         .needs_pointer = namesIdent(main_code, "pointer"),
         .needs_sampler = needs_sampler,
+        .needs_controls = namesIdent(main_code, "controls"),
         .deps = try deps.toOwnedSlice(arena),
         .main_code = main_code,
     };
@@ -912,10 +1009,12 @@ fn lowerFragmentPass(
     format: ?[]const u8,
     scale: ?f64,
     is_main: bool,
+    sampler: []const u8,
     prior_passes: []const PassRef,
     imports: []const EmittedValue,
     constants: []const PassConstant,
     init_code: ?[]const u8,
+    controls: *ControlsUse,
     frame_steps: *std.ArrayList(EmittedValue),
     init_steps: *std.ArrayList(EmittedValue),
 ) Lowering.LoweringError!PassRef {
@@ -982,6 +1081,13 @@ fn lowerFragmentPass(
     // Resources in legacy `(pass …)` order: ubuf, [pbuf], texture(s), shader,
     // pipeline, bind-group, render-pass. A feedback pass's output is a `:pool 2`
     // ping-pong pair (this frame renders one, samples the other).
+    // The graph's shared controls buffer (§4.5) precedes them: it is the
+    // sampler's story over again — one resource the whole graph shares, created
+    // by the first pass that names `controls` and bound by every pass that does.
+    if (feat.needs_controls and controls.buf == null) {
+        controls.buf = controls.scoped_buf;
+        try appendControlsBuffer(arena, out, container, controls.scoped_buf, controls.names.len);
+    }
     if (feat.needs_uniform) try appendBuffer(arena, out, container, ubuf, 16);
     if (feat.needs_pointer) try appendBuffer(arena, out, container, pbuf, 48);
 
@@ -1018,12 +1124,12 @@ fn lowerFragmentPass(
     // binding per prior pass the WGSL names (`feat.deps`, never every prior
     // pass: an unread one is a bind-group entry its auto layout lacks) and a
     // `prev_<name>` binding when feedback is on.
-    const full_code = try buildPrelude(arena, feat.needs_uniform, feat.needs_pointer, feat.needs_sampler, feat.has_post, feat.deps, reads, feat.feedback, name, facts.scalar, scale, data_bufs.items, code);
+    const full_code = try buildPrelude(arena, feat.needs_uniform, feat.needs_pointer, feat.needs_sampler, feat.has_post, feat.deps, reads, feat.feedback, name, facts.scalar, scale, data_bufs.items, feat.needs_controls, controls.names, code);
     try appendShader(arena, out, container, shader, full_code, imports);
 
     const target_fmt: ?[]const u8 = if (is_canvas_format) null else tex_format;
     try appendPipeline(arena, out, container, pipe, shader, "fs", target_fmt, try constantChildren(arena, container, constants));
-    try appendBindGroup(arena, out, container, bg, pipe, ubuf, feat.needs_uniform, pbuf, feat.needs_pointer, feat.needs_sampler, feat.has_post, feat.deps, reads, feat.feedback, tex, data_bufs.items);
+    try appendBindGroup(arena, out, container, bg, pipe, ubuf, feat.needs_uniform, pbuf, feat.needs_pointer, feat.needs_sampler, feat.has_post, sampler, feat.deps, reads, feat.feedback, tex, data_bufs.items, feat.needs_controls, controls.buf orelse "");
 
     // Feedback → render to the pooled output texture (emitter detects the pool →
     // begin_render_pass_pool); a plain main pass → canvas; otherwise → the pass's
@@ -1031,11 +1137,18 @@ fn lowerFragmentPass(
     const target_view = if (renders_to_canvas) "context-current-texture" else tex;
     try appendRenderPass(arena, out, container, name, pipe, bg, target_view);
     // Write the runtime uniform(s) before the pass runs (legacy emitAutoFrame order).
-    try appendUniformWriteSteps(arena, out, container, name, feat.needs_uniform, ubuf, feat.needs_pointer, pbuf, frame_steps);
+    // The controls write is this pass's only when it is the first to name
+    // `controls`: one write per graph, joined to this queue (§4.5).
+    var controls_write: ?[]const u8 = null;
+    if (feat.needs_controls and !controls.written) {
+        controls_write = controls.buf.?;
+        controls.written = true;
+    }
+    try appendUniformWriteSteps(arena, out, container, name, feat.needs_uniform, ubuf, feat.needs_pointer, pbuf, controls_write, frame_steps);
     try frame_steps.append(arena, .{ .symbol = name });
 
     if (feat.post_fn) |pf|
-        try lowerPostPass(arena, out, container, name, pf, code, scale, tex, facts.scalar, feat.needs_uniform, ubuf, imports, try postConstants(arena, constants, code), frame_steps);
+        try lowerPostPass(arena, out, container, name, pf, code, scale, tex, facts.scalar, feat.needs_uniform, ubuf, sampler, imports, try postConstants(arena, constants, code), frame_steps);
 
     // The seed LAST, as legacy `pass_sugar` emitted it (step 7 of the pass
     // expansion), so its resource ids sit after everything the pass itself
@@ -1069,6 +1182,7 @@ fn lowerPostPass(
     intermediate_scalar: []const u8,
     main_needs_uniform: bool,
     ubuf: []const u8,
+    sampler: []const u8,
     imports: []const EmittedValue,
     constants: []const PassConstant,
     frame_steps: *std.ArrayList(EmittedValue),
@@ -1109,7 +1223,7 @@ fn lowerPostPass(
         binding += 1;
     }
     if (post_needs_samp) {
-        try entries.append(arena, try beSampler(arena, container, binding, PASS_SAMPLER));
+        try entries.append(arena, try beSampler(arena, container, binding, sampler));
         binding += 1;
     }
     try entries.append(arena, try beTexture(arena, container, binding, intermediate_tex));
@@ -1148,9 +1262,11 @@ fn lowerComputePass(
     code: []const u8,
     scan: wgsl_scan.ScanResult,
     is_main: bool,
+    sampler: []const u8,
     imports: []const EmittedValue,
     constants: []const PassConstant,
     init_code: ?[]const u8,
+    controls: *ControlsUse,
     frame_steps: *std.ArrayList(EmittedValue),
     init_steps: *std.ArrayList(EmittedValue),
 ) Lowering.LoweringError!PassRef {
@@ -1158,6 +1274,7 @@ fn lowerComputePass(
 
     const needs_uniform = namesIdent(code, "pngine");
     const needs_pointer = namesIdent(code, "pointer");
+    const needs_controls = namesIdent(code, "controls");
 
     const ubuf = try std.fmt.allocPrint(arena, "{s}__ubuf", .{name});
     const pbuf = try std.fmt.allocPrint(arena, "{s}__pbuf", .{name});
@@ -1165,16 +1282,30 @@ fn lowerComputePass(
     const shader = try std.fmt.allocPrint(arena, "{s}__shader", .{name});
 
     // Resources in legacy compute order: ubuf?, pbuf?, screen texture, shader.
+    // The graph's shared controls buffer (§4.5) precedes them, exactly as the
+    // fragment path places it: one resource per graph, created by the first
+    // pass that names `controls`, shared by every pass that does.
+    if (needs_controls and controls.buf == null) {
+        controls.buf = controls.scoped_buf;
+        try appendControlsBuffer(arena, out, container, controls.scoped_buf, controls.names.len);
+    }
     if (needs_uniform) try appendBuffer(arena, out, container, ubuf, 16);
     if (needs_pointer) try appendBuffer(arena, out, container, pbuf, 48);
     try appendScreenTexture(arena, out, container, tex, 1);
 
-    const full_code = try buildComputePrelude(arena, needs_uniform, needs_pointer, DEFAULT_PASS_FORMAT, code);
+    const full_code = try buildComputePrelude(arena, needs_uniform, needs_pointer, DEFAULT_PASS_FORMAT, code, needs_controls, controls.names);
     try appendShader(arena, out, container, shader, full_code, imports);
 
     // Write the runtime uniform(s) once before the compute pass(es) run (legacy
-    // emitAutoFrame writes per pass_info, before its sub-passes execute).
-    try appendUniformWriteSteps(arena, out, container, name, needs_uniform, ubuf, needs_pointer, pbuf, frame_steps);
+    // emitAutoFrame writes per pass_info, before its sub-passes execute). The
+    // controls write is this pass's only when it is the first to name
+    // `controls`: one write per graph (§4.5).
+    var controls_write: ?[]const u8 = null;
+    if (needs_controls and !controls.written) {
+        controls_write = controls.buf.?;
+        controls.written = true;
+    }
+    try appendUniformWriteSteps(arena, out, container, name, needs_uniform, ubuf, needs_pointer, pbuf, controls_write, frame_steps);
 
     // One pipeline + compute pass per @compute entry point. The first entry's bind
     // group (same layout for all entries of a module) is reused by the rest.
@@ -1190,7 +1321,7 @@ fn lowerComputePass(
         try appendComputePipelineEntry(arena, out, container, pipe, shader, entry.name, const_children);
         if (ep == 0) {
             bg = try std.fmt.allocPrint(arena, "{s}__bg", .{name});
-            try appendComputeBindGroup(arena, out, container, bg, pipe, ubuf, needs_uniform, pbuf, needs_pointer, tex);
+            try appendComputeBindGroup(arena, out, container, bg, pipe, ubuf, needs_uniform, pbuf, needs_pointer, tex, needs_controls, controls.buf orelse "");
         }
         std.debug.assert(bg.len > 0);
         const c_pass = try std.fmt.allocPrint(arena, "{s}__c{d}", .{ name, ep });
@@ -1200,7 +1331,7 @@ fn lowerComputePass(
     }
 
     // The main compute pass blits its `screen` output to the canvas.
-    if (is_main) try lowerBlitPass(arena, out, container, name, tex, frame_steps);
+    if (is_main) try lowerBlitPass(arena, out, container, name, tex, sampler, frame_steps);
 
     // The seed writes the same `screen` this pass does, so it needs no usage
     // change here — `appendScreenTexture` already asks for `storage-binding`.
@@ -1226,6 +1357,7 @@ fn lowerBlitPass(
     container: Ast.NodeIndex,
     pass_name: []const u8,
     screen_tex: []const u8,
+    sampler: []const u8,
     frame_steps: ?*std.ArrayList(EmittedValue),
 ) Lowering.LoweringError!void {
     std.debug.assert(pass_name.len > 0); // pre: a pass has a name
@@ -1246,7 +1378,7 @@ fn lowerBlitPass(
 
     const entries = try arena.alloc(EmittedForm, 2);
     entries[0] = try beTexture(arena, container, 0, screen_tex);
-    entries[1] = try beSampler(arena, container, 1, PASS_SAMPLER);
+    entries[1] = try beSampler(arena, container, 1, sampler);
     try appendForm(arena, out, container, "bind-group", &.{
         .{ .key = "name", .value = .{ .symbol = bg } },
         .{ .key = "layout", .value = .{ .symbol = pipe } },
@@ -1277,6 +1409,7 @@ fn lowerExposedBlits(
     out: *Lowering.LoweringOutput,
     view: EffectiveView,
     container: Ast.NodeIndex,
+    sampler: []const u8,
     refs: []const PassRef,
 ) Lowering.LoweringError!void {
     const elems = Reader.initFromView(view).vectorNodes(container, "expose") orelse return;
@@ -1312,7 +1445,7 @@ fn lowerExposedBlits(
             "pass `{s}`: `:expose` blits this pass's intermediate through pngine's own blit shader, which declares `texture_2d<f32>` and samples it with the shared linear sampler. This pass's `:format` is neither filterable nor float, so the bind group it would build is one WebGPU refuses. Give the pass a filterable float `:format` (rgba8unorm, rgba16float, …) or drop it from `:expose`",
             .{name},
         );
-        try lowerBlitPass(arena, out, container, ref.name, ref.tex, null);
+        try lowerBlitPass(arena, out, container, ref.name, ref.tex, sampler, null);
     }
 }
 
@@ -1445,8 +1578,11 @@ fn lowerInitPasses(
     const shader = try std.fmt.allocPrint(arena, "{s}__init_shader", .{name});
     // NO imports and NO constants, for `lowerBlitPass`'s reason one step over:
     // the seed is its own module, and a fragment or an override forwarded here
-    // would be validated against text the author did not write it for.
-    const full_code = try buildComputePrelude(arena, false, false, format, init_code);
+    // would be validated against text the author did not write it for. No
+    // `controls` either: the seed is a one-shot that writes `screen`, its bind
+    // group binds the screen texture alone, and the controls belong to the
+    // frame's own passes.
+    const full_code = try buildComputePrelude(arena, false, false, format, init_code, false, &.{});
     try appendShader(arena, out, container, shader, full_code, &.{});
 
     var bg: []const u8 = "";
@@ -1485,17 +1621,28 @@ fn lowerInitPasses(
 /// (`examples/invalid/storage_texture_format_mismatch.sjon`). A compute main's
 /// `screen` is always `DEFAULT_PASS_FORMAT`; a `:init` seed's is whatever the
 /// pass it seeds renders into, which is the only reason this is a parameter.
+///
+/// `controls` (§4.5) is the same rule the fragment prelude follows, detected the
+/// way `pngine`/`pointer` are here (the whole `:code` — a compute pass has no
+/// post() to strip): the binding takes the next number after `screen`.
 fn buildComputePrelude(
     arena: Allocator,
     needs_uniform: bool,
     needs_pointer: bool,
     format: []const u8,
     code: []const u8,
+    needs_controls: bool,
+    control_names: []const []const u8,
 ) Lowering.LoweringError![]u8 {
     std.debug.assert(format.len > 0); // pre: a texel format to declare
     var buf: std.ArrayList(u8) = .empty;
-    const binding: u32 = try appendUniformStructs(arena, &buf, needs_uniform, needs_pointer);
+    var binding: u32 = try appendUniformStructs(arena, &buf, needs_uniform, needs_pointer);
     try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "@group(0) @binding({d}) var screen: texture_storage_2d<{s}, write>;\n", .{ binding, format }));
+    binding += 1;
+    if (needs_controls) {
+        try buf.appendSlice(arena, try controlsDecl(arena, binding, control_names));
+        binding += 1;
+    }
     try appendHoisted(arena, &buf, code);
     return buf.toOwnedSlice(arena);
 }
@@ -1522,7 +1669,9 @@ fn appendComputePipelineEntry(
 }
 
 /// The compute bind group (port of `buildComputeBindGroupDescriptor`): uniform?,
-/// pointer?, then the `screen` storage texture (bound as a texture-view).
+/// pointer?, then the `screen` storage texture (bound as a texture-view), and —
+/// when the pass names `controls` (§4.5) — the graph's shared controls buffer
+/// last, on the number the prelude gave it (after `screen`).
 fn appendComputeBindGroup(
     arena: Allocator,
     out: *Lowering.LoweringOutput,
@@ -1534,6 +1683,8 @@ fn appendComputeBindGroup(
     pbuf: []const u8,
     needs_pointer: bool,
     screen_tex: []const u8,
+    needs_controls: bool,
+    controls_buf: []const u8,
 ) Lowering.LoweringError!void {
     var entries: std.ArrayList(EmittedForm) = .empty;
     var binding: f64 = 0;
@@ -1546,6 +1697,12 @@ fn appendComputeBindGroup(
         binding += 1;
     }
     try entries.append(arena, try beTexture(arena, container, binding, screen_tex));
+    binding += 1;
+    if (needs_controls) {
+        std.debug.assert(controls_buf.len > 0); // pre: created before this pass's resources
+        try entries.append(arena, try beEntry(arena, container, binding, controls_buf));
+        binding += 1;
+    }
     try appendForm(arena, out, container, "bind-group", &.{
         .{ .key = "name", .value = .{ .symbol = name } },
         .{ .key = "layout", .value = .{ .symbol = pipe } },
@@ -1648,40 +1805,53 @@ fn appendBuffer(
     }, &.{});
 }
 
-/// A `(queue (write-buffer :buffer B :offset 0 :data S))` lowered form: a per-frame
-/// write of a built-in runtime data source (`pngine-inputs` / `pointer-inputs`) into
-/// a uniform buffer. The emitter's `emitQueueWrite` maps the data source to
-/// `writeTimeUniform` / `writePointerUniform` (same path as a hand-authored
-/// `(queue …)`, e.g. moving_triangle). The queue form creates no GPU resource; it is
-/// collected by name and inlined when the auto-frame's `:perform` references it.
+/// A `(queue …)` of `write-buffer` children — the per-frame writes of the
+/// built-in runtime data sources (`pngine-inputs` / `pointer-inputs` /
+/// `control-inputs`) into a pass's uniform buffers. The emitter's
+/// `emitQueueWrite` maps each data source to its opcode (`writeTimeUniform` /
+/// `writePointerUniform` / `write_controls`), the same path a hand-authored
+/// `(queue …)` takes. The queue form creates no GPU resource; it is collected
+/// by name and inlined when the auto-frame's `:perform` references it.
 fn appendUniformQueue(
     arena: Allocator,
     out: *Lowering.LoweringOutput,
     container: Ast.NodeIndex,
     queue_name: []const u8,
-    buffer_name: []const u8,
-    data_source: []const u8,
+    writes: []const UniformWrite,
 ) Lowering.LoweringError!void {
-    const wb = EmittedForm{
-        .head = "write-buffer",
-        .kvpairs = try arena.dupe(EmittedKvpair, &.{
-            .{ .key = "buffer", .value = .{ .symbol = buffer_name } },
-            .{ .key = "offset", .value = .{ .number = 0 } },
-            .{ .key = "data", .value = .{ .symbol = data_source } },
-        }),
-        .children = &.{},
-        .source_form_idx = container,
-    };
+    const wbs = try arena.alloc(EmittedForm, writes.len);
+    for (writes, 0..) |w, i| {
+        wbs[i] = .{
+            .head = "write-buffer",
+            .kvpairs = try arena.dupe(EmittedKvpair, &.{
+                .{ .key = "buffer", .value = .{ .symbol = w.buffer } },
+                .{ .key = "offset", .value = .{ .number = 0 } },
+                .{ .key = "data", .value = .{ .symbol = w.source } },
+            }),
+            .children = &.{},
+            .source_form_idx = container,
+        };
+    }
     try appendForm(arena, out, container, "queue", &.{
         .{ .key = "name", .value = .{ .symbol = queue_name } },
-    }, &.{wb});
+    }, wbs);
 }
+
+/// One `write-buffer` child of a uniform-write queue: the target buffer and
+/// the builtin data source that fills it.
+const UniformWrite = struct { buffer: []const u8, source: []const u8 };
 
 /// Emit the per-frame uniform-write queues for a pass and splice their step names
 /// into `frame_steps` so they run BEFORE the pass executes — mirroring legacy
 /// `pass_sugar.emitAutoFrame` (writeTimeUniform then writePointerUniform, then the
 /// pass). A `(pass …)` that references `pngine`/`pointer` must restream its uniform
 /// buffer every frame; without this the buffer holds only its (zero) creation state.
+///
+/// `controls_write` (§4.5) is the graph's shared controls buffer, passed by the
+/// FIRST pass that names `controls` (every later one passes null): the write
+/// JOINS that pass's uniform queue — the same `__uq` queue as `pngine-inputs`
+/// when there is one, a `__cq` queue of its own when there is not — so N passes
+/// naming `controls` still write the shared buffer once per frame, not N times.
 fn appendUniformWriteSteps(
     arena: Allocator,
     out: *Lowering.LoweringOutput,
@@ -1691,16 +1861,26 @@ fn appendUniformWriteSteps(
     ubuf: []const u8,
     needs_pointer: bool,
     pbuf: []const u8,
+    controls_write: ?[]const u8,
     frame_steps: *std.ArrayList(EmittedValue),
 ) Lowering.LoweringError!void {
     if (needs_uniform) {
         const q = try std.fmt.allocPrint(arena, "{s}__uq", .{pass_name});
-        try appendUniformQueue(arena, out, container, q, ubuf, "pngine-inputs");
+        var writes = [2]UniformWrite{ .{ .buffer = ubuf, .source = "pngine-inputs" }, undefined };
+        const n: usize = if (controls_write) |cbuf| blk: {
+            writes[1] = .{ .buffer = cbuf, .source = "control-inputs" };
+            break :blk 2;
+        } else 1;
+        try appendUniformQueue(arena, out, container, q, writes[0..n]);
+        try frame_steps.append(arena, .{ .symbol = q });
+    } else if (controls_write) |cbuf| {
+        const q = try std.fmt.allocPrint(arena, "{s}__cq", .{pass_name});
+        try appendUniformQueue(arena, out, container, q, &.{.{ .buffer = cbuf, .source = "control-inputs" }});
         try frame_steps.append(arena, .{ .symbol = q });
     }
     if (needs_pointer) {
         const q = try std.fmt.allocPrint(arena, "{s}__pq", .{pass_name});
-        try appendUniformQueue(arena, out, container, q, pbuf, "pointer-inputs");
+        try appendUniformQueue(arena, out, container, q, &.{.{ .buffer = pbuf, .source = "pointer-inputs" }});
         try frame_steps.append(arena, .{ .symbol = q });
     }
 }
@@ -1891,11 +2071,14 @@ fn appendBindGroup(
     needs_pointer: bool,
     needs_sampler: bool,
     has_post: bool,
+    sampler: []const u8,
     prior_passes: []const PassRef,
     reads: []const ReadRef,
     feedback: bool,
     own_tex: []const u8,
     data_bufs: []const []const u8,
+    needs_controls: bool,
+    controls_buf: []const u8,
 ) Lowering.LoweringError!void {
     std.debug.assert(name.len > 0); // pre: named bind group
     std.debug.assert(pipe.len > 0); // pre: layout pipeline named
@@ -1919,7 +2102,7 @@ fn appendBindGroup(
         binding += 1;
     }
     if (needs_sampler) {
-        try entries.append(arena, try beSampler(arena, container, binding, PASS_SAMPLER));
+        try entries.append(arena, try beSampler(arena, container, binding, sampler));
         binding += 1;
     } else if (has_post) {
         binding += 1; // prelude `samp` for post(); fs() doesn't bind it (gap).
@@ -1944,6 +2127,16 @@ fn appendBindGroup(
     // Data storage buffers (D0, D1, …) — bound after deps/feedback (legacy order).
     for (data_bufs) |dbuf| {
         try entries.append(arena, try beEntry(arena, container, binding, dbuf));
+        binding += 1;
+    }
+    // `controls` (§4.5) — the LAST prelude binding, so with `has_post` the
+    // postTex slot sits between the data buffers and here. fs() never binds
+    // postTex, so its number is a gap this group skips — the same shape as the
+    // sampler gap above.
+    if (needs_controls) {
+        std.debug.assert(controls_buf.len > 0); // pre: the buffer was created before this pass's resources
+        if (has_post) binding += 1; // prelude `postTex` for post(); fs() doesn't bind it (gap).
+        try entries.append(arena, try beEntry(arena, container, binding, controls_buf));
         binding += 1;
     }
 
@@ -2405,6 +2598,47 @@ fn appendUniformStructs(
     return binding;
 }
 
+/// The `controls` prelude declaration (frame-program §4.5): the struct — one
+/// `f32` member per declared control, in declaration order, which is slot
+/// order and the order `control-inputs` writes — and the uniform binding the
+/// pass's WGSL reads as `controls.<name>`. `ControlInputs` names it the way
+/// `PngineInputs` and `PointerInputs` name theirs, after the data source that
+/// fills it (`control-inputs`).
+///
+/// The bound buffer is the graph's `__pass_controls` (`graphScoped`): one per
+/// graph, written once per frame through the same `control-inputs` path a
+/// hand-authored `(queue …)` takes, so the F4a struct-agreement check and the
+/// reflection skip cover this struct with no second writer to keep honest.
+fn controlsDecl(arena: Allocator, binding: u32, names: []const []const u8) Lowering.LoweringError![]u8 {
+    std.debug.assert(names.len > 0); // pre: the pass named `controls`, so a control is declared
+    var members: std.ArrayList(u8) = .empty;
+    for (names, 0..) |n, i| {
+        if (i > 0) try members.appendSlice(arena, ", ");
+        try members.appendSlice(arena, try std.fmt.allocPrint(arena, "{s}: f32", .{n}));
+    }
+    return std.fmt.allocPrint(arena, "struct ControlInputs {{ {s} }}\n@group(0) @binding({d}) var<uniform> controls: ControlInputs;\n", .{ members.items, binding });
+}
+
+/// The graph's shared controls buffer (§4.5), under the graph-scoped name the
+/// hook computed for this graph (`graphScoped`): `4·n` bytes — one f32 per
+/// declared control — raised to the 16-byte uniform floor a hand-authored
+/// `(buffer …)` has to respect anyway (the F4a note; the emitter's
+/// `checkBufferSize` refuses below it under validation). `uniform|copy-dst`
+/// like the pass's own uniform buffers, and no `:pool`: `control-inputs`
+/// refuses a pooled buffer because the controls must reach every shader that
+/// binds this buffer, not one member of a pool.
+fn appendControlsBuffer(
+    arena: Allocator,
+    out: *Lowering.LoweringOutput,
+    container: Ast.NodeIndex,
+    name: []const u8,
+    n: usize,
+) Lowering.LoweringError!void {
+    std.debug.assert(n > 0); // pre: the caller refused a controls-naming pass with none declared
+    const size: f64 = @floatFromInt(@max(16, 4 * n));
+    try appendBuffer(arena, out, container, name, size);
+}
+
 /// Build the auto-injected WGSL prelude + user code (port of
 /// `pass_sugar.buildPrelude`): the pngine / pointer uniform structs, an optional
 /// `samp` binding, the fullscreen-triangle vertex shader, then a `texture_2d`
@@ -2430,6 +2664,8 @@ fn buildPrelude(
     own_scalar: []const u8,
     scale: ?f64,
     data_bufs: []const []const u8,
+    needs_controls: bool,
+    control_names: []const []const u8,
     code: []const u8,
 ) Lowering.LoweringError![]u8 {
     var buf: std.ArrayList(u8) = .empty;
@@ -2472,6 +2708,15 @@ fn buildPrelude(
     // compiles; fs() never binds it → auto-layout drops it (the gap).
     if (has_post) {
         try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "@group(0) @binding({d}) var postTex: texture_2d<{s}>;\n", .{ binding, own_scalar }));
+        binding += 1;
+    }
+    // `controls` (§4.5) — the LAST prelude binding, so the numbering of every
+    // declaration above is exactly what it was before this binding existed,
+    // for every pass, naming or not. The struct is the document's own: one f32
+    // member per declared control, in declaration order, the same order the
+    // `control-inputs` write carries to the buffer.
+    if (needs_controls) {
+        try buf.appendSlice(arena, try controlsDecl(arena, binding, control_names));
         binding += 1;
     }
     // `PASS_SCALE` — declared ONLY when `:scale` is authored. The prelude is
@@ -2859,29 +3104,181 @@ pub fn initV1(
     }
 }
 
-/// The three PNGine hooks as registerable values — the supported external
+/// `pngine/select-v1` — `(select …)` lowers to the chain of guarded
+/// `(step-group …)` forms the plan names (§4.3). For
+///
+/// ```sjon
+/// (select :name backdrop :on scene
+///   (case :is 0 :perform [linePass])
+///   (case :is 1 :perform [gatesPass])
+///   :else [ringPass])
+/// ```
+///
+/// it emits, in case order:
+///
+/// ```sjon
+/// (step-group :name backdrop        :when scene :is 0 :perform [linePass]   :else [backdrop__case1])
+/// (step-group :name backdrop__case1 :when scene :is 1 :perform [gatesPass] :else [ringPass])
+/// ```
+///
+/// The FIRST group keeps the select's name, so a frame names `backdrop`
+/// either way; case k ≥ 2's group is `<name>__case{k-1}` — the continuation
+/// that runs when cases 1..k-1 all failed — following the hooks'
+/// double-underscore convention and collision-checked against every declared
+/// name (SJON's duplicate check fires only after the hook, and its message
+/// could not name both sides).
+///
+/// Every author value moves with `EmittedValue.carry`, which clones the
+/// subtree verbatim — source spans included — so a bad constant in a case is
+/// reported on the bytes the author typed, and each group is stamped with its
+/// case's `source_span` so a diagnostic on the group lands on the case. The
+/// only values this hook WRITES are the group names and the
+/// `:else [<name>__caseN]` continuations; it builds no expression nodes.
+pub fn selectV1(
+    arena: Allocator,
+    input: *const Lowering.LoweringInput,
+    out: *Lowering.LoweringOutput,
+) Lowering.LoweringError!void {
+    const view = input.view;
+    const src = input.form_idx;
+    const name = (try input.symbol("name")) orelse
+        return out.fail(arena, "`(select …)` has no `:name`", .{});
+    // Required by the schema (`:on` is not optional), so this is the
+    // "internal:" shape — reachable only by a registry-less caller.
+    const on = (try input.subtree("on")) orelse
+        return out.fail(arena, "internal: select `{s}` has no `:on`", .{name});
+    const select_span = view.tree.formHeader(src).head_span;
+
+    // The positional `(case …)` children, in source order: cases are tried in
+    // that order and the first match wins, so the emission order is the
+    // trial order. The 1..64 bound is the head-set's; the zero case here is
+    // the hand-built-tree defense.
+    var cases: std.ArrayList(Ast.NodeIndex) = .empty;
+    for (view.tree.formHeader(src).children) |child| {
+        if (view.tree.tagOf(child) != .form) continue;
+        if (!std.mem.eql(u8, view.tree.formHeader(child).head, "case")) continue;
+        try cases.append(arena, child);
+    }
+    if (cases.items.len == 0)
+        return out.failAt(arena, select_span, "`(select :name {s} …)` declares no `(case …)` — a select needs 1 to 64", .{name});
+
+    // Continuation names, collision-checked against every declared name
+    // BEFORE anything is emitted: a document that declares `backdrop__case1`
+    // would leave the chain's `:else` resolving against the author's form
+    // instead of the continuation, and the honest refusal names both sides.
+    // The map only exists so a very long select stays O(names), not O(cases²).
+    for (1..cases.items.len) |k| {
+        const cont = try std.fmt.allocPrint(arena, "{s}__case{d}", .{ name, k });
+        if (try findDeclaredName(view, cont)) |decl| {
+            return out.failAt(arena, select_span, "select `{s}`: case {d} continues into a `(step-group :name {s} …)` the lowering emits, and this document already declares that name — on the ({s} …) `{s}`. Rename one of the two", .{ name, k + 1, cont, view.tree.formHeader(decl).head, cont });
+        }
+    }
+
+    // The select's `:else`, carried verbatim onto the LAST group (absent ⇒
+    // the last group has no `:else` at all — no match and no `:else` runs
+    // nothing, §4.3).
+    const select_else = try input.subtree("else");
+
+    for (cases.items, 0..) |case_idx, i| {
+        const case_span = view.tree.formHeader(case_idx).head_span;
+        const is_last = (i == cases.items.len - 1);
+
+        var kvs: std.ArrayList(EmittedKvpair) = .empty;
+        // Case k (1-based) sits in the select's own group (k == 1) or the
+        // continuation `__case{k-1}` — the twin's `backdrop__case1` holds the
+        // second case.
+        try kvs.append(arena, .{ .key = "name", .value = .{
+            .symbol = if (i == 0) name else try std.fmt.allocPrint(arena, "{s}__case{d}", .{ name, i }),
+        } });
+        try kvs.append(arena, .{ .key = "when", .value = .{ .carry = on } });
+
+        // The comparison keys, carried in the order the author wrote them —
+        // the emitter emits one exec_if per key in this order. A case with no
+        // comparison key is the one rule the schema cannot carry (a key-set
+        // has no min-children): refused here, on the case's own span.
+        var comparisons: usize = 0;
+        for (view.tree.formHeader(case_idx).children) |child| {
+            if (view.tree.tagOf(child) != .kvpair) continue;
+            const kv = view.tree.kvpairHeader(child);
+            if (!isComparisonKey(kv.key)) continue;
+            try kvs.append(arena, .{ .key = kv.key, .value = .{ .carry = kv.value } });
+            comparisons += 1;
+        }
+        if (comparisons == 0)
+            return out.failAt(arena, case_span, "select `{s}`: this case carries no comparison key, so it can never be the first match — the default belongs in the select's `:else`", .{name});
+
+        const perform = Reader.initFromView(view).authorNode(case_idx, "perform") orelse
+            return out.failAt(arena, case_span, "internal: select `{s}`: a case has no `:perform`", .{name});
+        try kvs.append(arena, .{ .key = "perform", .value = .{ .carry = perform } });
+        if (select_else) |els| {
+            if (is_last) try kvs.append(arena, .{ .key = "else", .value = .{ .carry = els } });
+        }
+        if (!is_last) {
+            // The hook's one authored-by-nothing value: the next continuation.
+            const next = try std.fmt.allocPrint(arena, "{s}__case{d}", .{ name, i + 1 });
+            const elems = try arena.dupe(EmittedValue, &.{.{ .symbol = next }});
+            try kvs.append(arena, .{ .key = "else", .value = .{ .vector = elems } });
+        }
+
+        try out.append(arena, .{
+            .head = "step-group",
+            .kvpairs = kvs.items,
+            .children = &.{},
+            .source_form_idx = src,
+            // Diagnostics on this group land on the case that authored it,
+            // not the select that wrapped it (the `source_span` contract).
+            .source_span = case_span,
+        });
+    }
+}
+
+/// The six keys a guard — and so a case — compares with. Kept beside the
+/// select hook because the lowered group's comparison order is this hook's
+/// to preserve, and `emitGuard` reads it back in exactly this order.
+fn isComparisonKey(key: []const u8) bool {
+    const keys = [_][]const u8{ "is", "is-not", "below", "above", "at-least", "at-most" };
+    for (keys) |k| if (std.mem.eql(u8, k, key)) return true;
+    return false;
+}
+
+/// The first top-level form whose `:name` is `sought`, or null. The sibling
+/// lookup `findTexture` established (ask 2): a lowering hook receives the
+/// whole-document view, so a top-level declaration is readable. Complexity
+/// O(top-level forms).
+fn findDeclaredName(view: EffectiveView, sought: []const u8) Lowering.LoweringError!?Ast.NodeIndex {
+    const r = Reader.initFromView(view);
+    for (view.tree.root) |idx| {
+        if (view.tree.tagOf(idx) != .form) continue;
+        const n = r.symbol(idx, "name") orelse continue;
+        if (std.mem.eql(u8, n, sought)) return idx;
+    }
+    return null;
+}
+
+/// The four PNGine hooks as registerable values — the supported external
 /// surface (ask P6). A caller-owned `Lowering.LoweringRegistry` takes these
 /// values by name and never spells an id; the ids live here, once, beside the
 /// lowering fns they carry, and `buildRegistry` registers these same values.
 ///
-/// `pub` in this module beyond these three constants and `buildRegistry` is
+/// `pub` in this module beyond these four constants and `buildRegistry` is
 /// **internal and unsupported** (the lowering fns, the frame helpers, the
 /// emitted-form builders): they are visible because Zig exposes a module's
 /// `pub` decls, not because a host may depend on their names or shapes.
 pub const pass_v1: Lowering.LoweringHook = .{ .id = "pngine/pass-v1", .lower = passV1 };
 pub const init_v1: Lowering.LoweringHook = .{ .id = "pngine/init-v1", .lower = initV1 };
 pub const draw_v1: Lowering.LoweringHook = .{ .id = "pngine/draw-v1", .lower = draw_graph.drawV1 };
+pub const select_v1: Lowering.LoweringHook = .{ .id = "pngine/select-v1", .lower = selectV1 };
 
 // The ids are contract keys: each must appear in the embedded schema (the
 // manifest is what binds a form to the id) and no two may collide. Both facts
 // are static, so they are checked at compile time — a rename that outruns the
 // manifest, or a copy-pasted id, fails the build rather than a test run.
 comptime {
-    // Three substring searches over the 83 KB manifest, plus the pairwise
+    // Four substring searches over the 83 KB manifest, plus the pairwise
     // id scan, blow past the default 1000-branch comptime quota.
     @setEvalBranchQuota(1_000_000);
     const manifest = @embedFile("pngine_schema");
-    const all = [_]Lowering.LoweringHook{ pass_v1, init_v1, draw_v1 };
+    const all = [_]Lowering.LoweringHook{ pass_v1, init_v1, draw_v1, select_v1 };
     for (all, 0..) |hook, i| {
         if (std.mem.indexOf(u8, manifest, hook.id) == null) {
             @compileError("pngine hook id is not in the embedded schema: " ++ hook.id);
@@ -2894,7 +3291,7 @@ comptime {
     }
 }
 
-/// Build a registry with every PNGine hook registered — the three constants
+/// Build a registry with every PNGine hook registered — the four constants
 /// above, exactly. The compiler passes `&registry` as
 /// `HostOptions.lowering_registry`. Caller owns the registry and must
 /// `deinit(gpa)` it; the compiler never frees a caller-supplied one.
@@ -2907,6 +3304,7 @@ pub fn buildRegistry(gpa: Allocator) Lowering.RegisterError!Lowering.LoweringReg
     // above and is the size of both together. Its value still comes from here,
     // so the registry has one source of truth per id.
     try registry.register(gpa, draw_v1);
+    try registry.register(gpa, select_v1);
     return registry;
 }
 
@@ -2926,4 +3324,106 @@ fn completeInitDoc(gpa: Allocator) ![:0]u8 {
         \\(init :name spawn :buffer parts :module initShader :workgroups [16])
         \\(frame :name main :init [spawn] :perform [spawn])
     , .{manifest}, 0);
+}
+
+// ---------------------------------------------------------------------------
+// (select …) — schema surface. The lowering itself is `selectV1` above; these
+// pin the rules the plan assigns to the SCHEMA (frame-program §4.6): the 1..64
+// case count by head-set bounds on the slot-local `case` form, and `:on` by
+// the `control-source` union `:when` already uses.
+// ---------------------------------------------------------------------------
+
+/// A complete document a `(select …)` can sit in: one control, one module, one
+/// pipeline, three passes. Every name the select's cases and the frame
+/// reference is declared, so a refusal over the result can only be about the
+/// select's own shape (or its hook), never an undeclared cross-reference.
+/// `select_form` splices in whole (multi-line fine); the frame names
+/// `backdrop`, the name every test select below carries.
+fn completeSelectDoc(gpa: Allocator, select_form: []const u8) ![:0]u8 {
+    const manifest = @embedFile("pngine_schema");
+    return std.fmt.allocPrintSentinel(gpa, "{s}\n" ++
+        \\(control :name scene)
+        \\(shader-module :name m :code "@vertex fn v(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {{ return vec4f(0); }} @fragment fn f() -> @location(0) vec4f {{ return vec4f(1); }}")
+        \\(render-pipeline :name p :layout auto
+        \\  (vertex :module m :entry v)
+        \\  (fragment :module m :entry f (color-target :format preferred-canvas-format)))
+        \\(render-pass :name linePass :pipeline p
+        \\  (color-attachment :view context-current-texture :clear-value [1 0 0 1] :load-op clear :store-op store)
+        \\  (draw :vertex-count 3))
+        \\(render-pass :name gatesPass :pipeline p
+        \\  (color-attachment :view context-current-texture :clear-value [0 1 0 1] :load-op clear :store-op store)
+        \\  (draw :vertex-count 3))
+        \\(render-pass :name ringPass :pipeline p
+        \\  (color-attachment :view context-current-texture :clear-value [0 0 1 1] :load-op clear :store-op store)
+        \\  (draw :vertex-count 3))
+        \\{s}
+        \\(frame :name main :perform [backdrop])
+    , .{ manifest, select_form }, 0);
+}
+
+/// Assert `source` produces an error diagnostic carrying exactly `code`
+/// (`expected_other` names what else arrived, so a failure is legible).
+fn expectSelectCode(gpa: Allocator, label: []const u8, source: [:0]const u8, code: Ast.Diagnostic.Code) !void {
+    var registry = try buildRegistry(gpa);
+    defer registry.deinit(gpa);
+    var result = try sjon.validateDocument(gpa, source, .{ .lowering_registry = &registry });
+    defer result.deinit();
+    var found = false;
+    for (result.diagnostics) |d| {
+        if (d.severity != .err) continue;
+        if (d.code == code) found = true;
+    }
+    if (!found) {
+        std.debug.print("\nselect {s}: no {s} diagnostic; what arrived:\n", .{ label, @tagName(code) });
+        for (result.diagnostics) |d|
+            std.debug.print("  [{s}] {s}\n", .{ @tagName(d.code), d.message });
+        return error.ExpectedCodeMissing;
+    }
+}
+
+const LoweredGroup = struct { name: []const u8, idx: Ast.NodeIndex };
+
+/// Validate `select_form` inside `completeSelectDoc` and return the lowered
+/// tree's `(step-group …)` forms, in emission order. Caller frees the slice;
+/// the tree dies with `result`, which the caller also owns — both are read
+/// immediately, never after.
+fn loweredSelectGroups(
+    gpa: Allocator,
+    select_form: []const u8,
+) !struct { result: sjon.Host.HostResult, groups: []const LoweredGroup } {
+    const src = try completeSelectDoc(gpa, select_form);
+    defer gpa.free(src);
+    var registry = try buildRegistry(gpa);
+    defer registry.deinit(gpa);
+    var result = try sjon.validateDocument(gpa, src, .{ .lowering_registry = &registry });
+    errdefer result.deinit();
+    if (result.hasErrors()) {
+        for (result.diagnostics) |d|
+            std.debug.print("  [{s}] {s}\n", .{ @tagName(d.code), d.message });
+        return error.SelectShouldValidate;
+    }
+    const lowered = result.lowered_tree orelse return error.TestNoLoweredTree;
+    var groups: std.ArrayList(LoweredGroup) = .empty;
+    errdefer groups.deinit(gpa);
+    const r = Reader.init(&lowered, &values.empty_overlay);
+    for (lowered.root) |idx| {
+        if (lowered.tagOf(idx) != .form) continue;
+        if (!std.mem.eql(u8, lowered.formHeader(idx).head, "step-group")) continue;
+        try groups.append(gpa, .{ .name = r.symbol(idx, "name") orelse "?", .idx = idx });
+    }
+    return .{ .result = result, .groups = try groups.toOwnedSlice(gpa) };
+}
+
+/// The key of the `n`-th comparison kvpair on a lowered group, in child order
+/// — "" when there are fewer. Shared by the ordering assertions above.
+fn comparisonKeyAt(r: Reader, group: Ast.NodeIndex, n: usize) []const u8 {
+    var seen: usize = 0;
+    for (r.children(group)) |c| {
+        if (r.tree.tagOf(c) != .kvpair) continue;
+        const key = r.tree.kvpairHeader(c).key;
+        if (!isComparisonKey(key)) continue;
+        if (seen == n) return key;
+        seen += 1;
+    }
+    return "";
 }

@@ -1,0 +1,23 @@
+; Invalid: a `(pass …)` whose WGSL names `controls`, in a document that declares
+; no `(control …)`. `controls` is the prelude's controls binding (frame-program
+; §4.5) — the same rule that binds `pngine`/`pointer`/`samp` when the pass's own
+; text names them — and with nothing declared there is no struct to declare, no
+; buffer to bind, and no value the host could ever set. Declare a control:
+;
+;   (control :name warp :default 0.5)
+;   (pass-graph
+;     (pass :name main :code """
+;       @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+;         return vec4f(vec3f(controls.warp), 1.0);
+;       }
+;     """))
+;
+; …or rename the variable. In a document that DOES declare a control, `controls`
+; is reserved exactly here and nowhere else, so no existing document changes (D5).
+
+(pass-graph
+  (pass :name main :code """
+    @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+      return vec4f(vec3f(controls.warp), 1.0);
+    }
+  """))

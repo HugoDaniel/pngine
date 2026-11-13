@@ -34,6 +34,10 @@ const wire = bytecode_mod.wire_schema;
 const scanner_mod = @import("scanner.zig");
 const OpcodeScanner = scanner_mod.OpcodeScanner;
 
+/// The reference dispatcher's debug-only guard trace (`inspect --verbose`).
+/// Not imported by the browser executor: its report never ships there.
+const guard_trace = @import("guard_trace.zig");
+
 /// Maximum iterations for pass execution loop.
 const PASS_MAX_ITERATIONS = @import("../dispatcher.zig").PASS_MAX_ITERATIONS;
 
@@ -101,6 +105,82 @@ pub fn handle(
 
         .end_pass_def => {
             // Should not be reached - handled by define_pass scanning
+        },
+
+        .define_control => {
+            // Declaration, not execution: the declaration phase
+            // (`scan_control_declarations`) already read this default into
+            // the table before any frame ran, on every entry path. Stepping
+            // over the instruction just consumes its one u32 operand — the
+            // scan is the single reader, so re-walking the stream cannot
+            // declare a control twice.
+            _ = try self.read_raw_u32();
+        },
+
+        .exec_if => {
+            // Comparison semantics (plan §4.2): `is` is exact f32 equality,
+            // so +0 and -0 are equal and NaN `is` anything is false. `is_not`
+            // is its negation — the ONLY comparison that holds against NaN;
+            // below/above/at_least/at_most are <, >, >=, <=, all false for
+            // NaN. A slot out of range is a payload error, never a zero.
+            const p = try wire.readOperands(wire.layoutOf(.exec_if), self);
+            if (p.slot > self.declared_controls) return error.InvalidControlSlot;
+            const comparison: opcodes.ControlComparison = @enumFromInt(p.comparison);
+            const value = self.controls[p.slot];
+            const constant: f32 = @bitCast(p.constant_bits);
+
+            const holds = switch (comparison) {
+                .is => value == constant,
+                .is_not => value != constant,
+                .below => value < constant,
+                .above => value > constant,
+                .at_least => value >= constant,
+                .at_most => value <= constant,
+                // An unknown tag is malformed input (the enum is deliberately
+                // non-exhaustive so @enumFromInt above is not UB): refuse,
+                // never guess a comparison.
+                _ => return error.InvalidControlComparison,
+            };
+
+            // `inspect --verbose`'s guard trace (plan §6.3). The whole block
+            // is pruned outside Debug builds; a normal run installs no
+            // observer, so this is one null check in Debug and nothing in
+            // release. Reported BEFORE the skip: a guard whose comparison
+            // fails (and so skips its arm) is exactly the line a debugger
+            // needs, not a silence.
+            if (comptime guard_trace.enabled) {
+                guard_trace.report(.{
+                    .frame = self.frame_counter,
+                    .slot = @intCast(p.slot),
+                    .name = if (p.slot == 0)
+                        "time"
+                    else
+                        (self.module.uniforms.controlNameBySlot(
+                            &self.module.strings,
+                            @intCast(p.slot),
+                        ) orelse "<unnamed>"),
+                    .comparison = comparison,
+                    .constant = constant,
+                    .value = value,
+                    .holds = holds,
+                });
+            }
+
+            // The comparison FALSE moves the pc forward by `skip` bytes
+            // counted from the end of this instruction; TRUE falls through.
+            if (!holds) {
+                const skip = @as(u16, p.skip_lo) | (@as(u16, p.skip_hi) << 8);
+                self.pc += skip;
+            }
+        },
+
+        .exec_skip => {
+            // Unconditional forward skip over an else arm. Same skip encoding
+            // as exec_if; the load-time validation already proved the target
+            // is an instruction boundary inside the frame.
+            const p = try wire.readOperands(wire.layoutOf(.exec_skip), self);
+            const skip = @as(u16, p.skip_lo) | (@as(u16, p.skip_hi) << 8);
+            self.pc += skip;
         },
 
         else => return false,

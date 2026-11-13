@@ -1,0 +1,40 @@
+; (select …) (plan frame-program §4.3): pick the first case whose comparison
+; holds. Sugar — pngine/select-v1 lowers this document to the two guarded
+; step-groups examples/select_backdrop_hand.sjon spells out, so a frame names
+; `backdrop` either way. Cases are tried in source order and the first match
+; wins; `:else` is the fallback when no case holds.
+;
+; Golden lanes freeze each arm (select_backdrop.scene1/scene2.trace): the
+; default `scene` is 0, so the base trace runs linePass; scene 1 runs
+; gatesPass; anything else runs ringPass (the :else).
+
+(control :name scene)
+
+(shader-module :name m :code """
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.25, 0.1, 1.0); }
+""")
+
+(render-pipeline :name p :layout auto
+  (vertex :module m :entry vs)
+  (fragment :module m :entry fs (color-target :format preferred-canvas-format)))
+
+(render-pass :name linePass :pipeline p
+  (color-attachment :view context-current-texture :clear-value [1 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(render-pass :name gatesPass :pipeline p
+  (color-attachment :view context-current-texture :clear-value [0 1 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(render-pass :name ringPass :pipeline p
+  (color-attachment :view context-current-texture :clear-value [0 0.3 1 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+
+(select :name backdrop :on scene
+  (case :is 0 :perform [linePass])
+  (case :is 1 :perform [gatesPass])
+  :else [ringPass])
+
+(frame :name main :perform [backdrop])

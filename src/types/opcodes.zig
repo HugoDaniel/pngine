@@ -262,6 +262,35 @@ pub const OpCode = enum(u8) {
     /// The executor tracks which passes have been executed and skips duplicates.
     exec_pass_once = 0x35,
 
+    /// Declare a control (frame program, plan §7.1).
+    /// Params: default (f32 bit pattern, raw u32 LE)
+    /// Appends a control; its slot is its order of appearance starting at 1
+    /// (slot 0 is `time`, which needs no declaration). Read by the load-time
+    /// declaration phase, not by frame execution.
+    define_control = 0x36,
+
+    /// Write the declared controls to a GPU buffer (frame program §7.1).
+    /// Params: buffer (varint), offset (varint), size (varint)
+    /// Values written: controls[1 .. 1 + size/4] — slot 0 (`time`) is
+    /// deliberately not writable through this instruction.
+    write_controls = 0x37,
+
+    /// Guarded execution (frame program §7.1).
+    /// Params: slot (varint), comparison (byte), constant (f32 bit pattern,
+    ///   raw u32 LE), skip_lo (byte), skip_hi (byte)
+    /// `skip` is a little-endian u16 counting bytes from the END of this
+    /// instruction (the next opcode's first byte) forward. When the comparison
+    /// is FALSE the pc moves forward by `skip`; when TRUE the next instruction
+    /// runs. Legal only in frame bodies (compiler-side rule; the reference
+    /// dispatcher additionally validates skip targets at load).
+    exec_if = 0x38,
+
+    /// Unconditional forward skip (frame program §7.1).
+    /// Params: skip_lo (byte), skip_hi (byte)
+    /// Emitted at the end of a taken arm that has an `:else`, to jump over the
+    /// else arm. Same skip encoding as `exec_if`.
+    exec_skip = 0x39,
+
     // ========================================================================
     // Pool Operations (0x40-0x4F)
     // ========================================================================
@@ -397,6 +426,10 @@ pub const OpCode = enum(u8) {
             .exec_pass_once,
             .define_pass,
             .end_pass_def,
+            .define_control,
+            .write_controls,
+            .exec_if,
+            .exec_skip,
             .select_from_pool,
             .set_vertex_buffer_pool,
             .set_bind_group_pool,
@@ -540,6 +573,12 @@ pub fn pluginForOpcode(op: OpCode) ?plugins.Plugin {
         .exec_pass_once,
         .define_pass,
         .end_pass_def,
+        // Frame-program controls and guards: table slots and skips are core
+        // frame-control work — no plugin gate (they run in every variant).
+        .define_control,
+        .write_controls,
+        .exec_if,
+        .exec_skip,
         .select_from_pool,
         .set_vertex_buffer_pool,
         .set_bind_group_pool,
@@ -661,6 +700,36 @@ pub const WasmArgType = enum(u8) {
         };
     }
 };
+
+/// The comparison encoding `exec_if`'s comparison byte carries (frame program
+/// §4.2/§7.1).
+///
+/// WIRE ORDER: the tag values ARE the wire encoding, in the order the plan
+/// lists the guard keys. Never renumber, never insert — a renumbered tag
+/// silently changes the meaning of every compiled guard, and there is no
+/// version bit to migrate it (PNGB stays version 0; see docs/abi.md).
+///
+/// NON-EXHAUSTIVE for the same reason `LoadOp` and `WasmArgType` are: both
+/// executors build one of these with `@enumFromInt` straight off the wire, and
+/// a payload carrying a byte ≥ 6 must be a REFUSAL, not undefined behaviour in
+/// the stripped executor. Consumers map the six known tags and treat `_` as
+/// malformed input.
+pub const ControlComparison = enum(u8) {
+    is = 0,
+    is_not = 1,
+    below = 2,
+    above = 3,
+    at_least = 4,
+    at_most = 5,
+    _,
+};
+
+/// Maximum declared controls per document (plan §4.1/§8.3: "a document
+/// declares at most 64 controls"). The executor table is this plus one slot
+/// for `time` (slot 0). Shared by the reference dispatcher's table, MockGPU's
+/// recorded values, and the skip-writer's bound — one declaration, not three
+/// copies (the resource_limits lesson, applied at birth).
+pub const MAX_CONTROLS: u8 = 64;
 
 /// Return type size mapping for WASM call results.
 pub const WasmReturnType = struct {

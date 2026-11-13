@@ -85,6 +85,22 @@
 export const TWIN_HOME = "examples";
 
 /**
+ * Why the `select` keys carry no render-row twin: the equivalence IS measured
+ * — at `byte`, the strongest level — but by the Emitter_test gate named
+ * below, not by a `twin_of` pair in tests/zig/render/render_test.zig. A
+ * render row needs a committed snapshot PNG, and the render corpus gates run
+ * only on the macOS Metal host (`zig build test-render`); this branch's hosts
+ * cannot regenerate one, and a row whose snapshot was fabricated would fail
+ * the first real gate run. The byte gate runs on every host instead.
+ */
+const SELECT_TWIN_LEDGER =
+  "no render row: the twin exists (examples/select_backdrop_hand.sjon) and Emitter_test's " +
+  "'select: the example compiles to its hand-written twin, byte for byte' holds the pair at " +
+  "byte level on every host — a select emits no resource and no wire byte of its own, so the " +
+  "claim is stronger than a pixel twin; a render row additionally needs a committed snapshot " +
+  "PNG, and the render gates run only on the macOS Metal host (see tests/zig/render/render_test.zig)";
+
+/**
  * Every form of the sugar tier, and every key on it.
  *
  * `hook` is set on the three lowering containers and must match the schema's
@@ -250,6 +266,57 @@ export const SUGAR_FORMS = {
         desugars_to: "dispatch :workgroups, expressions over (define …) included",
         twin: "examples/boids_init_only_hand.sjon",
         equivalence: "pixel",
+      },
+    },
+  },
+
+  select: {
+    hook: "pngine/select-v1",
+    keys: {
+      name: {
+        desugars_to: "the FIRST (step-group …)'s :name — the chain's later groups are the <name>__caseN continuations, so a frame names the select itself",
+        ledger: SELECT_TWIN_LEDGER,
+      },
+      on: {
+        desugars_to: ":when on every group the chain emits, carried verbatim (one subject, written once)",
+        ledger: SELECT_TWIN_LEDGER,
+      },
+      else: {
+        desugars_to: "the LAST group's :else; a middle group's :else is the hook's own [<name>__caseN] continuation vector",
+        ledger: SELECT_TWIN_LEDGER,
+      },
+    },
+  },
+
+  case: {
+    keys: {
+      is: {
+        desugars_to: "that case's group's :is, carried verbatim (comparison keys keep the author's order — one exec_if per key, in order)",
+        ledger: SELECT_TWIN_LEDGER,
+      },
+      "is-not": {
+        desugars_to: "that case's group's :is-not, carried verbatim",
+        ledger: SELECT_TWIN_LEDGER,
+      },
+      below: {
+        desugars_to: "that case's group's :below, carried verbatim",
+        ledger: SELECT_TWIN_LEDGER,
+      },
+      above: {
+        desugars_to: "that case's group's :above, carried verbatim",
+        ledger: SELECT_TWIN_LEDGER,
+      },
+      "at-least": {
+        desugars_to: "that case's group's :at-least, carried verbatim (beside another key, both must hold — two keys make a window)",
+        ledger: SELECT_TWIN_LEDGER,
+      },
+      "at-most": {
+        desugars_to: "that case's group's :at-most, carried verbatim",
+        ledger: SELECT_TWIN_LEDGER,
+      },
+      perform: {
+        desugars_to: "that case's group's :perform, carried verbatim with its spans",
+        ledger: SELECT_TWIN_LEDGER,
       },
     },
   },

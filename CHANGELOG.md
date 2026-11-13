@@ -7,6 +7,125 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [4.3.0] - 2026-11-13
+
+### Added
+
+- **Frame programs: controls, guards, and `(select …)`.** A document can
+  declare host-settable f32 values and branch on them inside a frame, and
+  one value reaches both readers: a guard compares the control, a shader
+  reads the same slot through the new `control-inputs` runtime data
+  source, so the branch and the draw cannot disagree.
+  `(control :name … :default …)` declares one slot — at most 64, `time`
+  reserved for the engine's own, the name a WGSL identifier that is
+  neither a WGSL keyword nor a reserved word and does not collide with a
+  reflected uniform field, the default finite after f32 rounding
+  (`efdd178`, `c16735c`). A `(step-group …)` gains `:when`, six
+  comparison keys (`:is`, `:is-not`, `:below`, `:above`, `:at-least`,
+  `:at-most`; several in one guard make a window) and `:else`; a frame
+  whose guards all skip submits no pass work and still advances the
+  frame counter exactly once (`be4088c`). `(select :name backdrop :on
+  scene (case :is 0 :perform […]) … :else […])` picks the first case
+  that holds; it is sugar — `pngine/select-v1` lowers it to the guarded
+  step-group chain a hand-written document spells out, so a frame names
+  the select exactly as it names a group, and diagnostics land on the
+  case's own span (`b0b9fc1`, `05f446e`). The bytecode carries a
+  control-name block and a `has_guards` header bit, four frame-control
+  instructions run in both executors, and the browser executor gains a
+  static 65-slot f32 control table with a `getControlPtr()` export (the
+  ABI version stays 1), pinned to agree with the reference dispatcher
+  (`a4b97c1`, `056a5f2`, `f440aef`). Existing documents keep their
+  bytes: a manifest pins the base compiler's output over the corpus,
+  byte for byte (`ddd731a`).
+- **The host drives controls in the npm runtime.** `setUniform` routes a
+  control name into the executor's table in place — no queue write, so
+  the guard and `control-inputs` read the same single value in the same
+  frame — and a value that is not one finite number is refused through
+  `onError` naming the fix while the control keeps its previous value
+  (`c222a29`). Thumbnail previews snapshot and restore the control table
+  around their drain, so a preview leaves the controls as it found them
+  (`ab094a2`). `play(p, { loop: 60 })` sets a loop length: the clock
+  runs 0 → 60 and starts again, seek carries the wrapped time to both
+  the draw and the song, and `draw(p, { time })` still sends the time it
+  was given, unwrapped (`570b4b4`, `3c21adf`, `ae240a5`).
+- **`pngine play <input.sjon|input.png>` generates a self-contained,
+  fully offline HTML player.** The page embeds the engine, the payload
+  and the play runtime — no server, no network — with transport controls
+  and a runtime error overlay; payloads are validated the same way
+  `compile` validates them. `-o` defaults to `<input>.html`, and
+  `--duration` (positive finite, default 10) bounds the run
+  (`9996595`, `c5e8e2c`, `6268294`, `a085be2`).
+- **`--control name=value` on render and inspect.** Repeatable, parsed
+  and validated before anything is printed or written, with names
+  resolved through the payload's own control-name block. `inspect`
+  lists each control with its authored default, `inspect --deep` writes
+  the value into the WAMR executor's table after init and before the
+  first frame, the desktop viewer takes the same flag, `--types` lists
+  each control in the generated `Uniforms` interface as `number`, and a
+  debug-only guard trace in `inspect --verbose` shows the arm a guard
+  chose (`52768dc`, `6efeb22`, `ab71860`, `05a627f`, `8d4f62d`).
+
+### Changed
+
+- **PNGB v1 marks an executor-less guarded payload.** A payload without
+  an embedded executor whose `has_guards` bit is set is written with
+  version 1 — the one signal a runtime that predates controls obeys, so
+  it throws instead of running guard operands as opcodes. A payload with
+  an embedded executor stays v0 however guarded (an old viewer keeps
+  rendering it, its controls at their authored defaults), every reader
+  of the field accepts 0 and 1 through one predicate, and 2 and up still
+  refuse (`6134dba`). Two single-recording exporters refuse a guarded
+  document rather than freeze whichever arm the recording took and drop
+  the other arms' resources: `--html` and the pNGf exports, each naming
+  the embedded-executor route (`06883fc`) — and the npm runtime's
+  load-time handshake refuses a guarded payload on a pre-controls shared
+  executor, naming both fixes (`02c8d13`).
+- **The browser executor's unreachable animation-table scheduler is
+  retired.** No SJON form writes an animation table and the stock
+  runtime never hands the executor those bytes, so the scene-table
+  parser and its `frame()` branch were dead weight twice over. Every
+  executor variant frees 797 B, kept as headroom rather than a smaller
+  cap; the PNGB format, the section writer/reader and the reference
+  dispatcher's animation plugin are untouched (`54ce8c4`).
+
+### Fixed
+
+- **Setting the loop on a playing instance seeks audio at the wrap.**
+  `play(p, { loop: 60 })` at t=61 wrapped the visual clock to 1s but
+  returned early, and audio was only ever seeked when a later tick came
+  back lower than the one before — the song kept playing from 61s. The
+  SET_LOOP transition now seeks to the wrapped time, only when the wrap
+  moved a playing instance's time backward (`48f2377`).
+- **A draw applies its uniforms inside the render lock.** A thumbnail
+  render could interleave between a draw's uniform writes and the draw's
+  own frame, leaking values either way; the writes join the lock, in the
+  same order (`814092b`).
+- **A control struct may stop early, never run past the controls.** A
+  `control-inputs` struct with more members than declared controls
+  compiled, and the trailing members read unwritten bytes and were not
+  host-settable; the first extra member is now a located reject
+  (`fd33564`).
+- **The control-name block never compacts.** A control name that no
+  longer fit the 64 KiB string table was skipped and later names
+  renumbered onto its slot, so a host set the wrong control; the slot is
+  now reserved and the overflowing name reports as unnamed (`8bed718`).
+- **Plain `inspect -t` seeds the time control before the frames.** The
+  flag was parsed but the non-deep path never called `set_time`, so
+  every time guard evaluated slot 0 at zero; both paths now seed slot 0
+  in the same place (`cbcab98`).
+- **Two named graphs cannot collide.** Every `(pass-graph …)` emitted
+  its internal sampler and controls buffer under one fixed name, so two
+  named graphs in one document tripped duplicate-name validation on the
+  sampler alone; the internal names are scoped by the graph's `:name`,
+  and an unnamed graph keeps the plain spellings (`0db18b4`).
+- **A control named for a WGSL keyword or reserved word is a located
+  reject** at the declaration — the spec's own §16.1 and §16.2 lists,
+  case-sensitive — instead of an unlocated shader-creation error later
+  (`70988dd`).
+- **A pass naming `controls` with no declared control is a located
+  reject** naming both ways out — declare a `(control …)`, or rename the
+  variable — before either lowering path emits anything (`a451637`).
+
 ## [4.2.1] - 2026-11-03
 
 ### Changed

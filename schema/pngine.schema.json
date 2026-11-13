@@ -1060,9 +1060,37 @@
     {
       "code": "cross_ref_annotation_only",
       "severity": "info",
-      "message": "value-kind `frame-step` cross-ref annotation surfaces target-form=`render-pass | compute-pass | queue | step-group | pass-graph | draw-graph` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "message": "value-kind `frame-step` cross-ref annotation surfaces target-form=`render-pass | compute-pass | queue | step-group | pass-graph | draw-graph | select` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
       "plugin": "pngine",
       "kind": "frame-step"
+    },
+    {
+      "code": "union_emitted_via_anyof",
+      "severity": "info",
+      "message": "value-kind `control-source` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`",
+      "plugin": "pngine",
+      "kind": "control-source"
+    },
+    {
+      "code": "rich_members_emitted_with_annotations",
+      "severity": "info",
+      "message": "value-kind `builtin-control` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations",
+      "plugin": "pngine",
+      "kind": "builtin-control"
+    },
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `control-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin": "pngine",
+      "kind": "control-ref"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `control-ref` cross-ref annotation surfaces target-form=`control` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "plugin": "pngine",
+      "kind": "control-ref"
     },
     {
       "code": "cross_ref_unenforceable",
@@ -1091,6 +1119,13 @@
       "message": "value-kind `queue-ref` cross-ref annotation surfaces target-form=`queue` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
       "plugin": "pngine",
       "kind": "queue-ref"
+    },
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `select-section` head-set emitted as `oneOf` of `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin": "pngine",
+      "kind": "select-section"
     },
     {
       "code": "head_set_emitted_via_oneof_refs",
@@ -5069,7 +5104,7 @@
           }
         },
         "data": {
-          "description": "Source: a (data …) ref, a (wasm-call …) whose result is written each frame, or a runtime builtin — pngine-inputs (16B time/width/height/aspect), scene-time-inputs (12B), pngine-frame-inputs (20B, + frameIndex), pointer-inputs (48B).",
+          "description": "Source: a (data …) ref, a (wasm-call …) whose result is written each frame, or a runtime builtin — pngine-inputs (16B time/width/height/aspect), scene-time-inputs (12B), pngine-frame-inputs (20B, + frameIndex), pointer-inputs (48B), control-inputs (4B per declared (control …) in declaration order).",
           "anyOf": [
             {
               "oneOf": [
@@ -5090,6 +5125,12 @@
                     "$sym": "pngine-frame-inputs"
                   },
                   "description": "20 B: the 16 B of pngine-inputs, then frameIndex (u32) — the executor's frame counter, which is also the ping-pong pool phase. For a jitter sequence (TAA) or any per-frame rotation. Runtime-provided; there is no authored document declaration to navigate to."
+                },
+                {
+                  "const": {
+                    "$sym": "control-inputs"
+                  },
+                  "description": "4 B per declared `(control …)`, in declaration order; the frame's own `write-buffer` carries them, so a guard and a shader read one value."
                 },
                 {
                   "const": {
@@ -13082,15 +13123,279 @@
       ],
       "additionalProperties": false
     },
+    "form.pngine.control": {
+      "type": "object",
+      "description": "A named f32 the host sets, readable by guards and by shaders through control-inputs. `time` is reserved by the compiler. The name must be a WGSL identifier and must not collide with a reflected uniform field — both are compiler checks, not schema rules.",
+      "properties": {
+        "$form": {
+          "const": "control"
+        },
+        "$ns": {
+          "const": "pngine"
+        },
+        "default": {
+          "description": "Initial value: a literal, a bounded expression, or a bare (define …) name. Omitted, it is 0. The compiler rejects a value that is not finite after f32 rounding.",
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "define",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "real-value",
+            "define-ref"
+          ],
+          "default": 0
+        },
+        "name": {
+          "description": "Control name, unique among controls. It names a WGSL struct member in control-inputs, so it must be a WGSL identifier, and the host addresses it and reflected uniforms by bare name, so it must not collide with one (both compiler checks).",
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "$form",
+        "name"
+      ],
+      "additionalProperties": false
+    },
     "form.pngine.step-group": {
       "type": "object",
-      "description": "A named sequence of frame steps, inlined wherever a (frame …) or another group names it. Emitted by a named (draw-graph …) / (pass-graph …); writable by hand to name a sequence once and run it in several frames.",
+      "description": "A named sequence of frame steps, inlined wherever a (frame …) or another group names it. Emitted by a named (draw-graph …) / (pass-graph …); writable by hand to name a sequence once and run it in several frames. With :when the group runs only when every comparison key holds (no comparison key = nonzero), and :else names the steps that run otherwise; without :when the group behaves exactly as today.",
       "properties": {
         "$form": {
           "const": "step-group"
         },
         "$ns": {
           "const": "pngine"
+        },
+        "above": {
+          "description": "Holds when the control is greater than this value. Written beside another comparison key, both must hold — two keys make a window.",
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "define",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "real-value",
+            "define-ref"
+          ]
+        },
+        "at-least": {
+          "description": "Holds when the control is greater than or equal to this value. Written beside another comparison key, both must hold — two keys make a window.",
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "define",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "real-value",
+            "define-ref"
+          ]
+        },
+        "at-most": {
+          "description": "Holds when the control is less than or equal to this value. Written beside another comparison key, both must hold — two keys make a window.",
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "define",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "real-value",
+            "define-ref"
+          ]
+        },
+        "below": {
+          "description": "Holds when the control is less than this value. Written beside another comparison key, both must hold — two keys make a window, as in :at-least 10 :below 10.5.",
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "define",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "real-value",
+            "define-ref"
+          ]
+        },
+        "else": {
+          "description": "The steps that run when the guard does not hold. Needs :when; a group without a guard has nothing to be the alternative to.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "$sym": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "$sym"
+            ],
+            "additionalProperties": false,
+            "x-sjon-cross-ref": {
+              "target-forms": [
+                "render-pass",
+                "compute-pass",
+                "queue",
+                "step-group",
+                "pass-graph",
+                "draw-graph",
+                "select"
+              ],
+              "name-key": "name",
+              "acyclic": false
+            }
+          },
+          "maxItems": 2048
+        },
+        "is": {
+          "description": "Holds when the control equals this value (an exact f32 comparison). Written beside another comparison key, both must hold — two keys make a window.",
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "define",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "real-value",
+            "define-ref"
+          ]
+        },
+        "is-not": {
+          "description": "Holds when the control does not equal this value. Written beside another comparison key, both must hold — two keys make a window.",
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "define",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "real-value",
+            "define-ref"
+          ]
         },
         "name": {
           "type": "object",
@@ -13125,13 +13430,50 @@
                 "queue",
                 "step-group",
                 "pass-graph",
-                "draw-graph"
+                "draw-graph",
+                "select"
               ],
               "name-key": "name",
               "acyclic": false
             }
           },
           "maxItems": 2048
+        },
+        "when": {
+          "description": "The guard's subject: the builtin control time, or a (control …) name. The group runs only when every comparison key holds; with no comparison key it runs when the control is nonzero.",
+          "anyOf": [
+            {
+              "oneOf": [
+                {
+                  "const": {
+                    "$sym": "time"
+                  },
+                  "description": "The built-in control the engine sets every frame: seconds since the frame program started. Needs no (control …) declaration; the compiler reserves the name, so a declared control cannot shadow it."
+                }
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "control",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "builtin-control",
+            "control-ref"
+          ]
         }
       },
       "required": [
@@ -13139,6 +13481,29 @@
         "name",
         "perform"
       ],
+      "dependentRequired": {
+        "is": [
+          "when"
+        ],
+        "is-not": [
+          "when"
+        ],
+        "below": [
+          "when"
+        ],
+        "above": [
+          "when"
+        ],
+        "at-least": [
+          "when"
+        ],
+        "at-most": [
+          "when"
+        ],
+        "else": [
+          "when"
+        ]
+      },
       "additionalProperties": false
     },
     "form.pngine.frame": {
@@ -13228,7 +13593,8 @@
                 "queue",
                 "step-group",
                 "pass-graph",
-                "draw-graph"
+                "draw-graph",
+                "select"
               ],
               "name-key": "name",
               "acyclic": false
@@ -13243,6 +13609,353 @@
         "perform"
       ],
       "additionalProperties": false
+    },
+    "form.pngine.case": {
+      "type": "object",
+      "description": "One case of a (select …): at least one comparison key (the default belongs in the select's :else), and the steps to perform when it is the first case that holds.",
+      "properties": {
+        "$form": {
+          "const": "case"
+        },
+        "$ns": {
+          "const": "pngine"
+        },
+        "above": {
+          "description": "Holds when the control is greater than this value. Written beside another comparison key, both must hold — two keys make a window.",
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "define",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "real-value",
+            "define-ref"
+          ]
+        },
+        "at-least": {
+          "description": "Holds when the control is greater than or equal to this value. Written beside another comparison key, both must hold — two keys make a window.",
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "define",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "real-value",
+            "define-ref"
+          ]
+        },
+        "at-most": {
+          "description": "Holds when the control is less than or equal to this value. Written beside another comparison key, both must hold — two keys make a window.",
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "define",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "real-value",
+            "define-ref"
+          ]
+        },
+        "below": {
+          "description": "Holds when the control is less than this value. Written beside another comparison key, both must hold — two keys make a window.",
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "define",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "real-value",
+            "define-ref"
+          ]
+        },
+        "is": {
+          "description": "Holds when the control equals this value (an exact f32 comparison). Written beside another comparison key, both must hold — two keys make a window.",
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "define",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "real-value",
+            "define-ref"
+          ]
+        },
+        "is-not": {
+          "description": "Holds when the control does not equal this value. Written beside another comparison key, both must hold — two keys make a window.",
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "define",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "real-value",
+            "define-ref"
+          ]
+        },
+        "perform": {
+          "description": "The steps this case performs when it is the first case that holds.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "$sym": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "$sym"
+            ],
+            "additionalProperties": false,
+            "x-sjon-cross-ref": {
+              "target-forms": [
+                "render-pass",
+                "compute-pass",
+                "queue",
+                "step-group",
+                "pass-graph",
+                "draw-graph",
+                "select"
+              ],
+              "name-key": "name",
+              "acyclic": false
+            }
+          },
+          "maxItems": 2048
+        }
+      },
+      "required": [
+        "$form",
+        "perform"
+      ],
+      "additionalProperties": false
+    },
+    "form.pngine.select": {
+      "type": "object",
+      "description": "Pick the first case whose comparison holds. Sugar: pngine/select-v1 lowers it to a chain of guarded (step-group …) forms, so a frame names the select exactly as it names a group. Cases are tried in source order and the first match wins (overlap is legal — that is what makes a :below cascade work); no match and no :else, the select does nothing.",
+      "properties": {
+        "$form": {
+          "const": "select"
+        },
+        "$ns": {
+          "const": "pngine"
+        },
+        "else": {
+          "description": "The steps that run when no case holds. Becomes the last group's :else, so it is the chain's fallback arm.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "$sym": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "$sym"
+            ],
+            "additionalProperties": false,
+            "x-sjon-cross-ref": {
+              "target-forms": [
+                "render-pass",
+                "compute-pass",
+                "queue",
+                "step-group",
+                "pass-graph",
+                "draw-graph",
+                "select"
+              ],
+              "name-key": "name",
+              "acyclic": false
+            }
+          },
+          "maxItems": 2048
+        },
+        "name": {
+          "description": "Select name — the first group of the lowered chain keeps it, so a (frame …) names the select itself, and the continuation groups are <name>__caseN.",
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "on": {
+          "description": "The control every case compares — the builtin time, or a name declared by (control …). Becomes :when on every group the lowering emits.",
+          "anyOf": [
+            {
+              "oneOf": [
+                {
+                  "const": {
+                    "$sym": "time"
+                  },
+                  "description": "The built-in control the engine sets every frame: seconds since the frame program started. Needs no (control …) declaration; the compiler reserves the name, so a declared control cannot shadow it."
+                }
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "control",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "builtin-control",
+            "control-ref"
+          ]
+        },
+        "$children": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/form.pngine.case"
+              }
+            ],
+            "x-sjon-head-set": [
+              "case"
+            ]
+          },
+          "allOf": [
+            {
+              "contains": {
+                "$ref": "#/$defs/form.pngine.case"
+              },
+              "minContains": 1,
+              "maxContains": 64
+            }
+          ]
+        }
+      },
+      "required": [
+        "$form",
+        "name",
+        "on",
+        "$children"
+      ],
+      "additionalProperties": false,
+      "x-sjon-lowering": {
+        "hook": "pngine/select-v1",
+        "produces": [
+          "step-group"
+        ]
+      }
     },
     "form.pngine.init": {
       "type": "object",
@@ -13370,7 +14083,7 @@
           "const": "pngine"
         },
         "code": {
-          "description": "WGSL fragment (or compute) source; the hook injects the binding prelude (pngine uniforms, pointer, sampler, dep/feedback textures, D0… data buffers). Required — the hook always refused its absence.",
+          "description": "WGSL fragment (or compute) source; the hook injects the binding prelude (pngine uniforms, pointer, sampler, dep/feedback textures, D0… data buffers, and — when the document declares (control …) forms and the code names `controls` — the ControlInputs struct, one f32 member per control in declaration order, on the next binding, with a graph-shared buffer and one control-inputs write per frame). Required — the hook always refused its absence.",
           "type": "string"
         },
         "feedback": {
@@ -13837,7 +14550,8 @@
                 "queue",
                 "step-group",
                 "pass-graph",
-                "draw-graph"
+                "draw-graph",
+                "select"
               ],
               "name-key": "name",
               "acyclic": false
@@ -14444,7 +15158,8 @@
                 "queue",
                 "step-group",
                 "pass-graph",
-                "draw-graph"
+                "draw-graph",
+                "select"
               ],
               "name-key": "name",
               "acyclic": false
@@ -14473,7 +15188,8 @@
                 "queue",
                 "step-group",
                 "pass-graph",
-                "draw-graph"
+                "draw-graph",
+                "select"
               ],
               "name-key": "name",
               "acyclic": false
@@ -14737,10 +15453,19 @@
       "$ref": "#/$defs/form.pngine.render-bundle"
     },
     {
+      "$ref": "#/$defs/form.pngine.control"
+    },
+    {
       "$ref": "#/$defs/form.pngine.step-group"
     },
     {
       "$ref": "#/$defs/form.pngine.frame"
+    },
+    {
+      "$ref": "#/$defs/form.pngine.case"
+    },
+    {
+      "$ref": "#/$defs/form.pngine.select"
     },
     {
       "$ref": "#/$defs/form.pngine.init"

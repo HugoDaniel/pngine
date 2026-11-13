@@ -39,6 +39,7 @@ const NodeIndex = Ast.NodeIndex;
 
 const format = bytecode.format;
 const opcodes = bytecode.opcodes;
+const StringId = bytecode.StringId;
 // Uniform-reflection table (UniformField / UniformType / MAX_*); populated by
 // `populateUniformTable` so the runtime can `setUniform(name, …)` by field name.
 const uniform_table = bytecode.uniform_table;
@@ -215,6 +216,15 @@ const MAX_FRAME_STEPS: usize = 2048;
 /// hand-written; the bound is what turns "a group that names itself" from a
 /// hang into a sentence.
 const MAX_STEP_GROUP_DEPTH: usize = 8;
+
+/// The physical expansion stack's own hard bound (§8.3), independent of the
+/// AUTHORED limit above. `MAX_STEP_GROUP_DEPTH` counts authored levels only;
+/// a select hook's continuation chain (`x__caseN` linked through `:else`, one
+/// group per case) is the hook's doing and must not trip it — but the walk
+/// still has to end. Sized for the worst legal document: 64 cases at each of
+/// 8 authored levels (8·64 continuation frames) plus the 8 authored groups'
+/// own frames plus the frame's root list = 521.
+const MAX_EXPANSION_DEPTH: usize = MAX_STEP_GROUP_DEPTH * 64 + MAX_STEP_GROUP_DEPTH + 1;
 
 const values = @import("values.zig");
 const Reader = values.Reader;
@@ -854,7 +864,21 @@ const Tables = struct {
     /// `(step-group :name … :perform […])` by name, source and lowered. A group
     /// is expanded WHERE IT IS NAMED, so nothing here reaches the wire: a frame
     /// over groups emits the same ops as the frame written out by hand.
-    step_groups: std.StringHashMapUnmanaged(FormRef) = .empty,
+    /// `authored` is the depth-accounting provenance (§8.3): true when the
+    /// author's document declares the NAME (a hand-written group, or a named
+    /// `(pass-graph …)` / `(draw-graph …)` whose hook emits the group under
+    /// the source's own name), false for a hook-invented continuation name
+    /// (`x__caseN`) that exists only in the lowered tree.
+    step_groups: std.StringHashMapUnmanaged(StepGroup) = .empty,
+    /// The `__caseN` continuations of each `(select …)`, keyed by group name:
+    /// which select lowered them and which case the group holds (1-based, by
+    /// emission order — the hook emits one group per case, in case order).
+    /// Read by `authorGroupName`, so a cycle/depth/arm-size refusal names what
+    /// the author wrote ("select 'backdrop' case 2") instead of a continuation
+    /// name that exists only in the lowered tree (§8.3), and by
+    /// `warnUnreachableCases` for the same chain's advisory. Empty unless a
+    /// select lowered.
+    select_continuations: std.StringHashMapUnmanaged(SelectContinuation) = .empty,
     // Call name → module id. Distinct from `wasm_modules` (url-keyed): this is
     // the per-call resolution of that dedup.
     wasm_call_module_ids: StringMapU16 = .empty,
@@ -901,6 +925,38 @@ const Tables = struct {
         }
     }
 };
+
+/// One declared `(control :name … :default …)` (plan frame-program §4.1).
+/// `name`/`ref` borrow the tree (like every name the emitter holds); the
+/// default is the f32 the wire carries, already checked finite.
+const ControlDecl = struct {
+    name: []const u8,
+    default: f32,
+    /// The author's form, for a located diagnostic at the reflection join
+    /// (the name-collision check runs long after collection).
+    ref: FormRef,
+};
+
+/// A (name, pooled-resource-name) pair — the §5 advisory's join rows. `owner`
+/// is a bind-group name in `group_pool_refs` and a pass name in
+/// `pass_pool_refs`, so one shape serves both lists.
+const NamePair = struct { owner: []const u8, res: []const u8 };
+
+/// A pooled resource referenced inside one guarded arm: the resource name,
+/// the group whose guard makes it conditional, and that group's form for the
+/// warning's squiggle.
+const GuardPoolRef = struct { res: []const u8, group: []const u8, ref: FormRef };
+
+/// A collected `(step-group …)`: where it lives, and whether expanding it is
+/// an AUTHORED nesting level (see `Tables.step_groups`).
+const StepGroup = struct { ref: FormRef, authored: bool };
+
+/// One `x__caseN` continuation of a `(select …)`, for §8.3 diagnostics: the
+/// select's own name and the 1-based case the group holds. Both come from the
+/// lowering provenance — the source form the table's build walks IS the
+/// `(select …)`, so `select` is its `:name` and `case_no` counts the groups
+/// the hook emitted for it, in order.
+const SelectContinuation = struct { select: []const u8, case_no: usize };
 
 /// Stores its own allocator; `deinit()` takes none. Every emitter helper that
 /// allocates therefore reads `self.gpa` rather than taking a parameter.
@@ -1038,6 +1094,45 @@ pub const Emitter = struct {
     /// write to such a buffer lands first and is clobbered every frame, so the
     /// runtime refuses it and says to use a dedicated buffer.
     frame_written: std.AutoHashMapUnmanaged(u16, void) = .empty,
+    /// The document's `(control …)` declarations in document order — which IS
+    /// slot order (slot 1 = first, plan §4.1). Collected by `collectControls`
+    /// before any phase runs; the `define_control` ops are emitted there, at
+    /// the head of the resource-creation region, so every entry path that
+    /// walks that region (both executors, `executeFrameByName`) sees them.
+    controls: std.ArrayList(ControlDecl) = .empty,
+    /// Buffer BASE id → the `(write-buffer :data control-inputs)` form that
+    /// paired it with the controls, filled by the frame walks. Read at the
+    /// uniform-table join: a struct bound to one of these buffers is the
+    /// controls' own struct — its members are NOT plain uniforms (the
+    /// unconditional skip, plan §4.4), and under shader validation it is
+    /// checked member-by-member against the declarations, with the squiggle
+    /// on the write that created the pairing.
+    control_buffers: std.AutoHashMapUnmanaged(u16, FormRef) = .empty,
+    /// §5's history advisory — the "pooled resource inside a guarded arm and
+    /// outside it" shape. Filled by the frame walks (`emitFrameSteps` and the
+    /// queue emitters it calls through `frame_arm`), joined once at the end of
+    /// `run()` by `warnGuardedPoolHistory`. Flat name pairs, scanned linearly:
+    /// a document holds a handful of each, and the join runs once.
+    ///
+    /// "Used" is binding-based: a pooled buffer/texture an arm's PASS binds
+    /// (a storage write, a feedback read — whichever side of the pool the
+    /// shader touches is a run-time fact the compiler cannot see), plus a
+    /// pooled queue-write destination inside the arm. The outside side is a
+    /// pass an unconditional step runs, or an unconditional copy source.
+    guard_arm_refs: std.ArrayList(GuardPoolRef) = .empty,
+    /// Pooled resources referenced OUTSIDE every guarded arm (names).
+    guard_outside_refs: std.ArrayList([]const u8) = .empty,
+    /// (bind-group name, pooled resource name), recorded at bind-group
+    /// emission — shared by the authored and derived paths — and joined at
+    /// pass emission into `pass_pool_refs`.
+    group_pool_refs: std.ArrayList(NamePair) = .empty,
+    /// (pass name, pooled resource name), recorded when a pass binds its
+    /// groups; read by the frame walk.
+    pass_pool_refs: std.ArrayList(NamePair) = .empty,
+    /// The innermost guarded arm the frame walk is currently expanding a step
+    /// in (`null` outside every arm). The queue emitters read it to classify
+    /// their pooled destinations without each taking the stack as a parameter.
+    frame_arm: ?[]const u8 = null,
     /// Bytes the shape generators have produced for this document so far —
     /// held to `MAX_GENERATED_BYTES` (below). `DataSection.add` dedupes
     /// IDENTICAL blobs, which LEAK-11 D counted on as the bound; distinct
@@ -1107,6 +1202,12 @@ pub const Emitter = struct {
         self.tables.deinit(self.gpa);
         self.binds.deinit(self.gpa);
         self.frame_written.deinit(self.gpa);
+        self.controls.deinit(self.gpa);
+        self.control_buffers.deinit(self.gpa);
+        self.guard_arm_refs.deinit(self.gpa);
+        self.guard_outside_refs.deinit(self.gpa);
+        self.group_pool_refs.deinit(self.gpa);
+        self.pass_pool_refs.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -1212,6 +1313,10 @@ pub const Emitter = struct {
         // collision rather than silently winning the env.
         try self.checkNameNamespace();
         try self.buildEnv();
+        // The `(control …)` declarations, beside the `define` collector (their
+        // defaults are `real`s that may name a define) and before any phase:
+        // the define_control ops are the head of the resource-creation region.
+        try self.collectControls();
         // Before any phase: fold the optional (limits …) form into the builder's
         // device-limits table and capture the compute-workgroup limits so the
         // compute-phase workgroup-size check sees the AUTHORED caps. (§5.3b)
@@ -1301,15 +1406,30 @@ pub const Emitter = struct {
         // just above are what put those names in `tables.passes`.
         try self.emitLoweredFrames();
 
+        // §5's history advisory, after every frame walk: pooled resources the
+        // guards made conditional that an unconditional step also touches.
+        self.warnGuardedPoolHistory();
+
+        // §4.3's unreachable-case advisory, over the lowered select chains the
+        // frame walks just expanded (and would have run).
+        self.warnUnreachableCases();
+
         // Uniform-table reflection runs LAST: every buffer + bind group (source
         // AND lowered `(pass …)`/`(init …)`) has populated `uniform_bindings` by now, and
         // every shader's WGSL is stashed. Joins reflected uniform/storage bindings
         // to their buffers → runtime setUniform(name, …), `--types` .d.ts, and the
         // worker's "Parsed N uniform fields" log all light up from this one pass.
         try self.populateUniformTable();
+        // The §4.1 join the schema cannot make: a control name against every
+        // reflected field the table just listed (the control buffer's own
+        // members were skipped, so they cannot collide with themselves).
+        try self.checkControlNameCollisions();
         // …and the buffer-name block behind it, which needs the frame walks
         // done (the frame-written set) and shares the string table's budget.
         try self.populateBufferNames();
+        // …and the control-name block behind THAT: the declared controls'
+        // names in slot order, in declaration order by construction.
+        try self.populateControlNames();
     }
 
     /// The buffer-name block (docs/plans/public-write-buffer.md D2): every
@@ -1354,6 +1474,42 @@ pub const Emitter = struct {
         std.debug.assert(self.builder.getUniformTable().buffer_names.items.len <= count);
     }
 
+    /// The control-name block (plan frame-program §7.2): one string id per
+    /// declared control, in slot order — which is `controls`' order, because
+    /// `collectControls` appends in document order and slots follow emission
+    /// order. Control names never enter the executor; this block is where a
+    /// host (`--control`, `setUniform` routing, every non-JS host) learns
+    /// them, through `UniformTable.controlSlotByName`/`controlNameBySlot`.
+    ///
+    /// Runs LAST, after `populateBufferNames`, spending from the same 64 KiB
+    /// string table. A name that no longer fits is NOT skipped: the lookup
+    /// APIs derive a slot from the entry's POSITION, so dropping one would
+    /// renumber every later control and a host would set the wrong slot.
+    /// Instead the slot is RESERVED with the empty string's id — no control
+    /// can be named "" (a control name is a WGSL identifier), so the entry
+    /// matches no lookup and `controlNameBySlot` reports it as unnamed; the
+    /// control itself still works (its slot and default are on the wire).
+    /// One entry per declaration, always.
+    fn populateControlNames(self: *Emitter) Error!void {
+        if (self.controls.items.len == 0) return;
+        for (self.controls.items) |c| {
+            const name_id = self.builder.internString(self.gpa, c.name) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {
+                    self.diagnoseWarn(.sjon, null, "", "control '{s}' is left unnamed in the control-name block: the string table is full (64 KiB of names), so a host cannot address it by name — its slot is reserved (later controls keep theirs) and its slot and default still work", .{c.name});
+                    // The empty string is internable even on a full table (it
+                    // costs no data bytes), and dedups to one id for every
+                    // overflow.
+                    const sentinel = self.builder.internString(self.gpa, "") catch return error.OutOfMemory;
+                    self.builder.addControlName(self.gpa, sentinel.toInt()) catch return error.OutOfMemory;
+                    continue;
+                },
+            };
+            self.builder.addControlName(self.gpa, name_id.toInt()) catch return error.OutOfMemory;
+        }
+        std.debug.assert(self.builder.getUniformTable().control_names.items.len == self.controls.items.len);
+    }
+
     // ----------------------------------------------------------------------
     // Form collection + define environment
     // ----------------------------------------------------------------------
@@ -1392,7 +1548,7 @@ pub const Emitter = struct {
         // `checkDocumentForms` from calling it a child form (which it is not),
         // and `checkImportsComposed` below refuses it with the sentence that
         // names the real cause.
-        const extra = [_][]const u8{ "define", "limits", "canvas", "queue", "init", "pass-graph", "draw-graph", "step-group", "wgsl", "import" };
+        const extra = [_][]const u8{ "define", "limits", "canvas", "queue", "init", "pass-graph", "draw-graph", "step-group", "control", "select", "wgsl", "import" };
         var heads: [phases.len + extra.len][]const u8 = undefined;
         for (phases, 0..) |ph, i| heads[i] = ph.head;
         for (extra, 0..) |h, i| heads[phases.len + i] = h;
@@ -1730,6 +1886,143 @@ pub const Emitter = struct {
         }
         self.env = .{ .bindings = self.env_bindings.items };
         std.debug.assert(self.env_bindings.items.len == pending.items.len);
+    }
+
+    /// Collect every `(control …)` declaration, in document order, and emit
+    /// its `define_control` op — the declaration phase of plan §7.2.
+    ///
+    /// A buildEnv-style pass, not a phase head: `control` is a declaration the
+    /// frame bodies read, exactly like `define`/`queue`. It runs AFTER
+    /// `buildEnv` because `:default` is the schema's `real` kind — a literal,
+    /// a bounded expression, or a `(define …)` name — and only the evaluating
+    /// reader sees all three (§307's lesson, the reason `optU32` exists). And
+    /// BEFORE any phase, so the ops land at the head of the resource-creation
+    /// region: `executeFrameByName` skips that region wholesale but re-reads
+    /// the declarations through `scan_control_declarations`, and slot order is
+    /// emission order.
+    ///
+    /// What SJON already holds stays there: the name is unique across controls
+    /// (a cross-ref target) and across every form (R10's one-namespace check,
+    /// which also refuses a control named `canvas`/`pngine-inputs`/… through
+    /// `reserved_names`). What only the compiler can see is here:
+    ///
+    /// - the 64 cap (§8.3), because the executor's table is 65 slots fixed;
+    /// - `time`, because slot 0 is the engine's own control (a member-set arm
+    ///   is not a cross-ref claimant, so the validator cannot see the clash —
+    ///   §4.6's measured gap);
+    /// - the WGSL-identifier rule, because the name becomes a struct member
+    ///   (`my-scene` is a legal SJON symbol and not a legal member);
+    /// - the WGSL reserved-word rule, because `struct` and `NULL` match that
+    ///   grammar and still are not member names (`isWgslReservedWord`);
+    /// - finiteness AFTER f32 rounding: `1e40` is a clean unbounded real to
+    ///   the schema and +inf to the wire.
+    fn collectControls(self: *Emitter) Error!void {
+        for (self.forms.items) |f| {
+            const r = f.reader;
+            if (!std.mem.eql(u8, r.head(f.idx), "control")) continue;
+            const name = r.symbol(f.idx, "name") orelse continue;
+            std.debug.assert(name.len > 0);
+
+            if (self.controls.items.len >= opcodes.MAX_CONTROLS) {
+                self.diagnose(.sjon, self.locate(r, f.idx), "", "'{s}' is control {d}, but a document declares at most {d} controls — the executor's table is {d} slots plus `time`, fixed", .{ name, self.controls.items.len + 1, opcodes.MAX_CONTROLS, opcodes.MAX_CONTROLS });
+                return error.ValidationError;
+            }
+            if (std.mem.eql(u8, name, "time")) {
+                self.diagnose(.sjon, self.locate(r, f.idx), "", "`time` is the engine's control and cannot be declared — slot 0 is where the frame's own clock lands, and a guard or shader reading `time` must read that one", .{});
+                return error.ValidationError;
+            }
+            if (!isWgslIdentifier(name)) {
+                self.diagnose(.sjon, self.locate(r, f.idx), "", "control name must be a WGSL identifier because it becomes a struct member — '{s}' is a legal SJON symbol and not a legal member name", .{name});
+                return error.ValidationError;
+            }
+            if (isWgslReservedWord(name)) {
+                self.diagnose(.sjon, self.locate(r, f.idx), "", "control name '{s}' is a reserved word in WGSL — it matches the identifier grammar but the language will not accept it as the struct member the prelude declares, so every shader reading `controls.{s}` would fail to create. The keyword and reserved-word lists are case-sensitive: `Struct` is free", .{ name, name });
+                return error.ValidationError;
+            }
+            // The real reader (a literal, an expression, or a define name);
+            // the schema materializes an omitted :default as 0.
+            const d = (try self.optF64(r, f.idx, "default")) orelse 0;
+            const df32: f32 = @floatCast(d);
+            if (!std.math.isFinite(df32)) {
+                self.diagnose(.sjon, self.locate(r, r.authorNode(f.idx, "default") orelse f.idx), "", "`:default` for control '{s}' is not finite after f32 rounding — a control holds an f32, and a value this large rounds to infinity", .{name});
+                return error.ValidationError;
+            }
+            try self.controls.append(self.gpa, .{ .name = name, .default = df32, .ref = f });
+            self.builder.getEmitter().emitDefineControl(self.gpa, df32) catch return error.OutOfMemory;
+        }
+    }
+
+    /// `[A-Za-z_][A-Za-z0-9_]*` — the WGSL identifier grammar, for the control
+    /// names that become struct members (§4.1).
+    fn isWgslIdentifier(name: []const u8) bool {
+        if (name.len == 0) return false;
+        const c0 = name[0];
+        const ok0 = (c0 >= 'A' and c0 <= 'Z') or (c0 >= 'a' and c0 <= 'z') or c0 == '_';
+        if (!ok0) return false;
+        for (name[1..]) |c| {
+            const ok = (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z') or (c >= '0' and c <= '9') or c == '_';
+            if (!ok) return false;
+        }
+        return true;
+    }
+
+    /// Every WGSL keyword and reserved word, verbatim from the spec's own two
+    /// lists — §16.1 Keyword Summary and §16.2 Reserved Words
+    /// (W3C Candidate Recommendation Draft; `NULL` and `Self` are spelled the
+    /// spec spells them). A reserved word MATCHES the identifier grammar above
+    /// but is not a usable name: "A WGSL module must not contain a reserved
+    /// word", and a keyword parses as itself. This is the ONE list for the
+    /// whole compiler — the control-name check reads it, and nothing else
+    /// needs a private copy. Comparison is case-sensitive exactly as the
+    /// spec's are: `struct` is refused, `Struct` is free.
+    const wgsl_reserved_words = [_][]const u8{
+        // §16.1 keywords
+        "alias",            "break",            "case",          "const",        "const_assert",
+        "continue",         "continuing",       "default",       "diagnostic",   "discard",
+        "else",             "enable",           "false",         "fn",           "for",
+        "if",               "let",              "loop",          "override",     "requires",
+        "return",           "struct",           "switch",        "true",         "var",
+        "while",
+        // §16.2 reserved words
+                   "NULL",             "Self",          "abstract",     "active",
+        "alignas",          "alignof",          "as",            "asm",          "asm_fragment",
+        "async",            "attribute",        "auto",          "await",        "become",
+        "cast",             "catch",            "class",         "co_await",     "co_return",
+        "co_yield",         "coherent",         "column_major",  "common",       "compile",
+        "compile_fragment", "concept",          "const_cast",    "consteval",    "constexpr",
+        "constinit",        "crate",            "debugger",      "decltype",     "delete",
+        "demote",           "demote_to_helper", "do",            "dynamic_cast", "enum",
+        "explicit",         "export",           "extends",       "extern",       "external",
+        "fallthrough",      "filter",           "final",         "finally",      "friend",
+        "from",             "fxgroup",          "get",           "goto",         "groupshared",
+        "highp",            "impl",             "implements",    "import",       "inline",
+        "instanceof",       "interface",        "layout",        "lowp",         "macro",
+        "macro_rules",      "match",            "mediump",       "meta",         "mod",
+        "module",           "move",             "mut",           "mutable",      "namespace",
+        "new",              "nil",              "noexcept",      "noinline",     "nointerpolation",
+        "non_coherent",     "noncoherent",      "noperspective", "null",         "nullptr",
+        "of",               "operator",         "package",       "packoffset",   "partition",
+        "pass",             "patch",            "pixelfragment", "precise",      "precision",
+        "premerge",         "priv",             "protected",     "pub",          "public",
+        "readonly",         "ref",              "regardless",    "register",     "reinterpret_cast",
+        "require",          "resource",         "restrict",      "self",         "set",
+        "shared",           "sizeof",           "smooth",        "snorm",        "static",
+        "static_assert",    "static_cast",      "std",           "subroutine",   "super",
+        "target",           "template",         "this",          "thread_local", "throw",
+        "trait",            "try",              "type",          "typedef",      "typeid",
+        "typename",         "typeof",           "union",         "unless",       "unorm",
+        "unsafe",           "unsized",          "use",           "using",        "varying",
+        "virtual",          "volatile",         "wgsl",          "where",        "with",
+        "writeonly",        "yield",
+    };
+
+    /// Is `name` one of the WGSL spec's keywords or reserved words? Exact,
+    /// case-sensitive comparison — see `wgsl_reserved_words`.
+    fn isWgslReservedWord(name: []const u8) bool {
+        for (wgsl_reserved_words) |w| {
+            if (std.mem.eql(u8, w, name)) return true;
+        }
+        return false;
     }
 
     /// Fold the optional top-level `(limits …)` form into the builder's
@@ -2722,7 +3015,21 @@ pub const Emitter = struct {
     /// prefix to subtract. Complexity: O(offset).
     fn locate(self: *const Emitter, r: *const Reader, node: NodeIndex) ?Diag.Located {
         if (self.user_source.len == 0) return null; // golden/parity: source not threaded
-        if (r.tree != self.src.tree) return null; // lowered/synthetic tree → no user span
+        if (r.tree != self.src.tree) {
+            // A lowered tree the HOST pipeline built carries SOURCE spans:
+            // `EmittedValue.carry` clones author bytes verbatim, and each
+            // emitted form is stamped with its invocation's span (or the
+            // `source_span` a hook set, as the select hook does per case), so
+            // its offsets index `user_source` and a squiggle is real — that
+            // is what "a bad constant in a case is reported on the bytes the
+            // author typed" needs. The builder finalizes such trees with an
+            // EMPTY source (`buildLoweredTree` → `finalize(&arena, "", …)`),
+            // which is the marker; a hand-built lowered tree (tests parse
+            // their own text into `lowered_tree`) borrows real source bytes
+            // that are not this document's, and stays unlocated.
+            const lt = if (self.has_low) &self.result.lowered_tree.? else return null;
+            if (r.tree != lt or lt.source.len != 0) return null;
+        }
         const span = r.tree.spanOf(node);
         // 05: when the document was composed from imports, `user_source` is the
         // COMPOSITION, so a raw line count would report the line the form ended
@@ -4628,6 +4935,19 @@ pub const Emitter = struct {
         try self.harvestBindMetadata(r, entry_nodes.items, group_index, scope_pid);
 
         const reserved = try self.reservePool(r, form, .bind_groups, name);
+        // §5 advisory state: which POOLED resources this group's entries bind,
+        // joined at pass emission into pass_pool_refs. Here, once, so the
+        // authored and derived paths cannot disagree.
+        for (entry_nodes.items) |en| {
+            if (r.symbol(en, "buffer")) |bname| {
+                if (self.tables.buffers.pool(bname) != null)
+                    try self.group_pool_refs.append(self.gpa, .{ .owner = name, .res = bname });
+            }
+            if (r.symbol(en, "texture")) |tname| {
+                if (self.tables.textures.pool(tname) != null)
+                    try self.group_pool_refs.append(self.gpa, .{ .owner = name, .res = tname });
+            }
+        }
         try self.emitBindGroupInstances(r, form, name, entry_nodes.items, group_index, reserved.base, reserved.size, layout_id);
     }
 
@@ -5134,6 +5454,63 @@ pub const Emitter = struct {
         try self.emitCandidates(emitted, owners, ref, binding, key, cands, flattened.items);
     }
 
+    /// The §4.4 struct agreement, joined: the WGSL struct bound to a buffer
+    /// `control-inputs` writes must be f32 members named after the controls,
+    /// in order (the struct may stop early, never run past the declarations —
+    /// an extra member reads bytes write_controls never writes and is hidden
+    /// by the reflection skip). Gated on `validate_shaders` like the other
+    /// WGSL joins — `--no-validate` skips THIS and still applies the
+    /// reflection skip that calls it. The squiggle is the `(write-buffer …)`
+    /// that paired the buffer with the controls; the message names the member
+    /// the author wrote and the control it should name — or, for a member
+    /// past the last control, how many controls there are (there is no
+    /// control `i` to name).
+    fn checkControlStruct(self: *Emitter, ref: ShaderRef, binding: reflect.Binding, buffer_id: u16, write: FormRef) Error!void {
+        std.debug.assert(self.controls.items.len > 0); // pre: the write already refused an empty document
+        var names: [opcodes.MAX_CONTROLS][]const u8 = undefined;
+        const n = self.controls.items.len;
+        for (self.controls.items, 0..) |c, i| names[i] = c.name;
+        const fields = binding.layout.fields;
+        if (type_agree.controlStructMismatch(fields, names[0..n])) |i| {
+            const buf_name = self.bufferNameOf(buffer_id);
+            const write_loc = self.locate(write.reader, write.idx);
+            if (i < n) {
+                self.diagnose(.wgsl, write_loc, ref.name, "the struct bound to control buffer '{s}' (@group({d}) @binding({d})) member {d} is `{s} {s}`, but control {d} is '{s}' — member i must be an f32 named after control i, and the struct may stop early", .{ buf_name, binding.group, binding.binding, i, fields[i].type, fields[i].name, i + 1, names[i] });
+            } else {
+                self.diagnose(.wgsl, write_loc, ref.name, "the struct bound to control buffer '{s}' (@group({d}) @binding({d})) member {d} is `{s} {s}`, but only {d} controls are declared — member i must be an f32 named after control i; the struct may stop early, never run past the declarations (an extra member reads bytes write_controls never writes)", .{ buf_name, binding.group, binding.binding, i, fields[i].type, fields[i].name, n });
+            }
+            return error.ValidationError;
+        }
+    }
+
+    /// The §4.1 name rule the schema cannot see: a control name must differ
+    /// from every REFLECTED uniform field name in the document, because the
+    /// host addresses both by bare name (`setUniform(p, 'bloom', …)`) and one
+    /// name must mean one thing. The control buffer's own members never reach
+    /// the table (the skip above), so "reflected field" here means every OTHER
+    /// buffer's fields — exactly the set the runtime would offer beside the
+    /// controls.
+    ///
+    /// Runs after `populateUniformTable` and before the tail blocks are
+    /// written, on the same seam as the other WGSL joins. UNCONDITIONAL: the
+    /// reflection it reads is built on every path (a `--no-validate` compile
+    /// still populates the table its runtime consumes), so the ambiguity is a
+    /// fact about the payload, not a validation opinion.
+    fn checkControlNameCollisions(self: *Emitter) Error!void {
+        if (self.controls.items.len == 0) return;
+        const ut = self.builder.getUniformTable();
+        for (self.controls.items) |c| {
+            for (ut.bindings.items) |b| {
+                for (b.fields) |fld| {
+                    const fname = self.builder.strings.get(StringId.fromInt(fld.name_string_id));
+                    if (!std.mem.eql(u8, fname, c.name)) continue;
+                    self.diagnose(.sjon, self.locate(c.ref.reader, c.ref.idx), "", "control name '{s}' is also a reflected uniform field (buffer '{s}') — the host addresses a control and a uniform by the same bare name, so one name must mean one thing; rename one of them", .{ c.name, self.bufferNameOf(b.buffer_id) });
+                    return error.ValidationError;
+                }
+            }
+        }
+    }
+
     /// Emit one table record per candidate buffer for a flattened binding,
     /// deduping by (buffer, shape hash) and reporting the two gated collision
     /// warnings: (b) one buffer bound with DISAGREEING shapes by two modules
@@ -5158,6 +5535,16 @@ pub const Emitter = struct {
             // resolution is authoritative, so they run where the old global
             // join had to skip as ambiguous.
             try self.checkBufferBinding(binding, key, buffer_id, cands.scoped);
+            // §4.4: a struct bound to a buffer `control-inputs` writes is the
+            // controls' own. The members are NOT listed as plain uniforms —
+            // unconditionally (with or without --no-validate), and BEFORE the
+            // dedupe consult below, so no record and no emitted-shape entry is
+            // created for this buffer. Under shader validation the struct is
+            // also CHECKED, member by member, against the declarations.
+            if (self.control_buffers.get(buffer_id)) |write| {
+                if (self.validate_shaders) try self.checkControlStruct(ref, binding, buffer_id, write);
+                continue;
+            }
             if (emitted.get(buffer_id)) |prev| {
                 if (prev.shape_hash == shape_hash) continue; // same buffer, same shape → one record
                 if (self.validate_shaders) {
@@ -6416,20 +6803,75 @@ pub const Emitter = struct {
     /// `(pass-graph …)` emits in place of a frame, and they are collected with
     /// the lowered reader BEFORE `emitLowered` runs, so a source frame naming a
     /// lowered graph resolves.
+    ///
+    /// The `authored` bit is the §8.3 provenance discrimination, decided HERE
+    /// and nowhere else:
+    ///
+    /// ```zig
+    /// // source groups are authored by construction…
+    /// try self.tables.step_groups.put(self.gpa, name, .{ .ref = .{ .reader = r, .idx = ref.idx }, .authored = true });
+    /// // …and a lowered group is authored IFF the author's document declares
+    /// // its NAME — no source form of that name means the hook invented it,
+    /// // which is the definition of a continuation, not an authored level.
+    /// const authored = source_names.contains(name);
+    /// ```
+    ///
+    /// A named graph's group keeps the source's own name (`post`), so it
+    /// counts; a select's `backdrop__case1` exists only in the lowered tree,
+    /// so it does not. Provenance-by-source-form cannot make the call (a
+    /// continuation's provenance points at the `(select …)`, which IS a
+    /// source form) — the name is the discriminator, because the name is what
+    /// the author did or did not write.
     fn collectStepGroups(self: *Emitter) Error!void {
         for (self.forms.items) |ref| {
             const r = ref.reader;
             if (!std.mem.eql(u8, r.head(ref.idx), "step-group")) continue;
             const name = r.symbol(ref.idx, "name") orelse continue;
-            try self.tables.step_groups.put(self.gpa, name, .{ .reader = r, .idx = ref.idx });
+            try self.tables.step_groups.put(self.gpa, name, .{ .ref = .{ .reader = r, .idx = ref.idx }, .authored = true });
         }
         if (self.has_low) {
+            // Every name the author's document declares, sugar containers
+            // included (self.forms drops lowering sources; data_forest keeps
+            // them, and `(pass-graph :name post …)` is one).
+            var source_names: std.StringHashMapUnmanaged(void) = .empty;
+            defer source_names.deinit(self.gpa);
+            for (self.result.data_forest) |idx| {
+                if (self.result.tree.tagOf(idx) != .form) continue;
+                const name = self.src.symbol(idx, "name") orelse continue;
+                try source_names.put(self.gpa, name, {});
+            }
+            // One counter per lowering source form: the select hook emits one
+            // group per case in case order, so the k-th group a source form
+            // produced holds case k — the case number §8.3 diagnostics name.
+            var case_counter: std.AutoHashMapUnmanaged(u32, usize) = .empty;
+            defer case_counter.deinit(self.gpa);
             const lt = &self.result.lowered_tree.?;
             for (lt.root) |idx| {
                 if (lt.tagOf(idx) != .form) continue;
                 if (!std.mem.eql(u8, self.low.head(idx), "step-group")) continue;
                 const name = self.low.symbol(idx, "name") orelse continue;
-                try self.tables.step_groups.put(self.gpa, name, .{ .reader = &self.low, .idx = idx });
+                const authored = source_names.contains(name);
+                try self.tables.step_groups.put(self.gpa, name, .{ .ref = .{ .reader = &self.low, .idx = idx }, .authored = authored });
+                // The continuation map is keyed by the SAME source-form
+                // provenance F4b's depth rule uses, and only for the groups
+                // that are NOT authored: the select's first group keeps the
+                // select's declared name (it counts as a level), while
+                // `x__caseN` exists only here.
+                if (self.result.lowering_provenance.lookup(idx)) |prov| {
+                    const src_idx = prov.source_form_idx;
+                    if (std.mem.eql(u8, self.src.head(src_idx), "select")) {
+                        const gop = try case_counter.getOrPut(self.gpa, @intFromEnum(src_idx));
+                        if (!gop.found_existing) gop.value_ptr.* = 0;
+                        gop.value_ptr.* += 1;
+                        if (!authored) {
+                            const sname = self.src.symbol(src_idx, "name") orelse name;
+                            try self.tables.select_continuations.put(self.gpa, name, .{
+                                .select = sname,
+                                .case_no = gop.value_ptr.*,
+                            });
+                        }
+                    }
+                }
             }
         }
     }
@@ -8289,27 +8731,120 @@ pub const Emitter = struct {
     /// Emit one frame-step list. A step names a pass (an `exec_pass` op), a
     /// queue (its actions, inlined) or a `(step-group …)` (its own steps,
     /// inlined here — a group is a compile-time name for a sequence and reaches
-    /// no wire).
+    /// no wire). A group carrying `:when` inlines as its guard instead (plan
+    /// frame-program §4.2/§7.1):
+    ///
+    /// ```text
+    /// :for each comparison key, in source order      (bare :when = one is-not 0)
+    ///   exec_if slot, cmp, const, skip→ARM_END       (placeholder, patched below)
+    /// :perform steps
+    /// [if :else]
+    ///   exec_skip skip→AFTER_ELSE                    (placeholder, patched below)
+    /// ARM_END:
+    ///   :else steps
+    /// AFTER_ELSE:
+    /// ```
+    ///
+    /// Every `exec_if` of one guard patches to the same `ARM_END`, and the
+    /// `exec_skip` a taken arm emits jumps the `:else` arm to `AFTER_ELSE` —
+    /// so a failing comparison lands at the `:else` steps and a taken arm
+    /// skips over them. A skip counts bytes from its instruction's END
+    /// (`patchSkip`, F2's primitive), and a distance that does not fit u16 is
+    /// a located compile error naming the group and the arm's size (§7.1).
     ///
     /// An explicit worklist rather than a recursive descent (the repo's Zig
-    /// rules), and bounded twice over: `MAX_STEP_GROUP_DEPTH` stops a group
-    /// cycle, and `MAX_FRAME_STEPS` stops a fan-out that would tear the command
-    /// buffer. A cycle is reachable only from hand-written groups — the hooks
-    /// emit flat ones — but "only a hand-written document can do it" is the
-    /// definition of an input, not of a case to leave open.
+    /// rules), and bounded three ways (§8.3):
+    ///
+    /// - `MAX_STEP_GROUP_DEPTH` bounds AUTHORED nesting: a group whose name
+    ///   the author's document declares (a hand-written `(step-group …)`, a
+    ///   named `(pass-graph …)`). It doubles as no one's cycle check.
+    /// - A group already on the expansion stack by NAME is a cycle, refused
+    ///   with the chain of names.
+    /// - The physical stack carries its own hard bound, `MAX_EXPANSION_DEPTH`:
+    ///   a select's `x__caseN` continuations are the HOOK's doing, not the
+    ///   author's, and must not trip the authored limit — but an unbounded
+    ///   chain of them is still a walk with no end, so exceeding it is the
+    ///   existing "did not finish expanding" refusal.
+    /// - `MAX_FRAME_STEPS` stops a fan-out that would tear the command buffer.
+    ///
+    /// `emitted` counts every step BOTH arms name, including arms that exclude
+    /// each other (a 16-scene select with 10 steps per scene counts 160). The
+    /// overcount is deliberate and simple (§8.3): the cap guards the command
+    /// buffer's shape, and no real document has met it — worst-path accounting
+    /// is the plan's named "only when a real document hits it" change.
     fn emitFrameSteps(self: *Emitter, r: *const Reader, form: NodeIndex, key: []const u8) Error!void {
         const steps = r.vectorNodes(form, key) orelse return;
         const em = self.builder.getEmitter();
 
-        const Frame = struct { reader: *const Reader, steps: []const NodeIndex, at: usize };
+        const Frame = struct {
+            reader: *const Reader,
+            steps: []const NodeIndex,
+            at: usize = 0,
+            /// The group this frame expands, for the cycle chain and the
+            /// arm-size squiggle; null on the frame's own root list.
+            group_name: ?[]const u8 = null,
+            /// Whether that group is an AUTHORED nesting level (see
+            /// `StepGroup.authored`). Meaningful only when `group_name` is set.
+            authored: bool = false,
+            /// The guard this frame's list sits inside, null on the root, on
+            /// unguarded groups, and once the tail below has run.
+            guard: ?Guard = null,
+        };
         var stack: std.ArrayList(Frame) = .empty;
         defer stack.deinit(self.gpa);
-        try stack.append(self.gpa, .{ .reader = r, .steps = steps, .at = 0 });
+        try stack.append(self.gpa, .{ .reader = r, .steps = steps });
 
         var emitted: usize = 0;
-        for (0..MAX_FRAME_STEPS * MAX_STEP_GROUP_DEPTH) |_| {
+        for (0..MAX_FRAME_STEPS + 2 * MAX_EXPANSION_DEPTH + 2) |_| {
             const top = &stack.items[stack.items.len - 1];
             if (top.at == top.steps.len) {
+                // The list is exhausted. A plain frame pops; a guarded one
+                // runs its tail first — patch what was promised when the
+                // guard was emitted, then either pop (no `:else`) or swap
+                // this frame to the `:else` list (whose own exhaustion
+                // patches the `exec_skip`).
+                const guard = top.guard orelse {
+                    _ = stack.pop();
+                    if (stack.items.len == 0) return;
+                    continue;
+                };
+                const arm_end = em.len();
+                if (guard.else_steps) |else_steps| {
+                    const skip_pos = em.emitExecSkip(self.gpa) catch return error.OutOfMemory;
+                    // The exec_ifs patch PAST the exec_skip (whose `skip_pos`
+                    // is its skip_lo byte, so the instruction ends at +2): a
+                    // failed guard runs the :else steps, and landing on the
+                    // exec_skip itself would skip over them too.
+                    try self.patchGuardSkips(top.reader, guard, skip_pos + 2);
+                    // The arm that just ended owns `exec_skip`; the else list
+                    // inherits the frame with a tail of its own.
+                    stack.items[stack.items.len - 1] = .{
+                        .reader = top.reader,
+                        .steps = else_steps,
+                        .group_name = top.group_name,
+                        .authored = top.authored,
+                        .guard = .{
+                            .group = guard.group,
+                            .name = guard.name,
+                            .if_pos = guard.if_pos,
+                            .if_count = 0, // the exec_ifs are patched already
+                            .skip_pos = skip_pos,
+                            .else_steps = null,
+                        },
+                    };
+                    continue;
+                }
+                try self.patchGuardSkips(top.reader, guard, arm_end);
+                if (guard.skip_pos) |skip_pos| {
+                    const after_else = em.len();
+                    const dist = after_else - (skip_pos + 2); // skip counts from the instruction's end
+                    if (dist > std.math.maxInt(u16)) {
+                        var nbuf: [96]u8 = undefined;
+                        self.diagnose(.sjon, self.locate(top.reader, guard.group), "", "step group '{s}': its :else arm is {d} bytes long, but a guard's skip distance is 16 bits — an arm longer than 65,535 bytes cannot be skipped over", .{ self.authorGroupName(guard.name, &nbuf), dist });
+                        return error.ValidationError;
+                    }
+                    em.patchSkip(skip_pos, @intCast(dist));
+                }
                 _ = stack.pop();
                 if (stack.items.len == 0) return;
                 continue;
@@ -8319,19 +8854,85 @@ pub const Emitter = struct {
             top.at += 1;
             const sname = sr.elemSymbol(node) orelse continue;
 
+            // The innermost guarded arm this step sits in (null = outside
+            // every arm). The §5 advisory classifies the step's pooled
+            // resources by this; the queue emitters read `frame_arm`.
+            const in_arm: ?[]const u8 = blk: {
+                var i = stack.items.len;
+                while (i > 0) {
+                    i -= 1;
+                    const g = stack.items[i].guard orelse continue;
+                    break :blk g.name;
+                }
+                break :blk null;
+            };
+            self.frame_arm = in_arm;
+
             if (self.tables.passes.get(sname)) |pid| {
                 em.execPass(self.gpa, pid) catch return error.OutOfMemory;
                 emitted += 1;
+                try self.notePassPoolUse(sname, in_arm, sr, node);
             } else if (self.tables.queue_actions.get(sname)) |queue| {
                 try self.emitQueueActions(queue);
                 emitted += 1;
             } else if (self.tables.step_groups.get(sname)) |group| {
-                if (stack.items.len == MAX_STEP_GROUP_DEPTH) {
-                    self.diagnose(.sjon, self.locate(sr, node), "", "step group '{s}' is nested more than {d} deep — a group naming itself, directly or through a chain, has no expansion", .{ sname, MAX_STEP_GROUP_DEPTH });
+                // A cycle is a group already on the expansion stack BY NAME:
+                // names are one namespace, so a repeat is the loop closing.
+                // Refused with the chain, so the author sees the whole cycle
+                // and not just its last link. Continuation groups render as
+                // their select + case (§8.3): the author never wrote
+                // `x__caseN`.
+                for (stack.items) |f| {
+                    const n = f.group_name orelse continue;
+                    if (!std.mem.eql(u8, n, sname)) continue;
+                    var chain: std.ArrayList(u8) = .empty;
+                    defer chain.deinit(self.gpa);
+                    var wrote = false;
+                    for (stack.items) |g| {
+                        const gn = g.group_name orelse continue;
+                        if (wrote) chain.appendSlice(self.gpa, " → ") catch return error.OutOfMemory;
+                        var nbuf: [96]u8 = undefined;
+                        chain.appendSlice(self.gpa, self.authorGroupName(gn, &nbuf)) catch return error.OutOfMemory;
+                        wrote = true;
+                    }
+                    chain.appendSlice(self.gpa, " → ") catch return error.OutOfMemory;
+                    var sbuf: [96]u8 = undefined;
+                    chain.appendSlice(self.gpa, self.authorGroupName(sname, &sbuf)) catch return error.OutOfMemory;
+                    var subj: [96]u8 = undefined;
+                    self.diagnose(.sjon, self.locate(sr, node), "", "step group '{s}' names its way back to itself — a group is inlined where it is named, so this chain has no expansion ({s})", .{ self.authorGroupName(sname, &subj), chain.items });
                     return error.ValidationError;
                 }
-                const inner = group.reader.vectorNodes(group.idx, "perform") orelse &.{};
-                try stack.append(self.gpa, .{ .reader = group.reader, .steps = inner, .at = 0 });
+                if (group.authored) {
+                    // §8.3: 8 bounds AUTHORED nesting. The root list is not a
+                    // group; a lowered continuation (below) is the hook's
+                    // doing, not the author's, and does not count.
+                    var authored_levels: usize = 0;
+                    for (stack.items) |f| {
+                        if (f.group_name != null and f.authored) authored_levels += 1;
+                    }
+                    if (authored_levels == MAX_STEP_GROUP_DEPTH) {
+                        var nbuf: [96]u8 = undefined;
+                        self.diagnose(.sjon, self.locate(sr, node), "", "step group '{s}' would nest more than {d} authored groups deep — split the chain, or lift the shared steps into the frame", .{ self.authorGroupName(sname, &nbuf), MAX_STEP_GROUP_DEPTH });
+                        return error.ValidationError;
+                    }
+                }
+                // The physical bound: whatever authored levels and hook
+                // continuations compose, the walk itself must end.
+                if (stack.items.len == MAX_EXPANSION_DEPTH) {
+                    self.diagnose(.sjon, self.locate(r, form), "", "this frame's steps did not finish expanding — a `(step-group …)` chain is longer than the emitter walks", .{});
+                    return error.ValidationError;
+                }
+                const inner = group.ref.reader.vectorNodes(group.ref.idx, "perform") orelse &.{};
+                var frame: Frame = .{
+                    .reader = group.ref.reader,
+                    .steps = inner,
+                    .group_name = sname,
+                    .authored = group.authored,
+                };
+                if (group.ref.reader.symbol(group.ref.idx, "when") != null) {
+                    frame.guard = try self.emitGuard(group.ref, sname);
+                }
+                try stack.append(self.gpa, frame);
             }
             // else: a step that resolved to none of the three is dropped
             // (the source/lowered cross-ref validator already rejected dangling names).
@@ -8344,6 +8945,338 @@ pub const Emitter = struct {
             self.diagnose(.sjon, self.locate(r, form), "", "this frame's steps did not finish expanding — a `(step-group …)` chain is longer than the emitter walks", .{});
             return error.ValidationError;
         }
+    }
+
+    /// One guarded group's in-flight state: what `emitFrameSteps` owes the
+    /// guard between pushing the group's frame and the frame exhausting.
+    const Guard = struct {
+        /// The step-group form (in the owning frame's reader) — the squiggle
+        /// for the arm-size refusals.
+        group: NodeIndex,
+        name: []const u8,
+        /// The `skip_lo` positions of this guard's `exec_if`s (at most one
+        /// per comparison key, and the schema allows each key once), all
+        /// patched to the same `ARM_END`.
+        if_pos: [6]usize = undefined,
+        if_count: u3 = 0,
+        /// Set once the `:else` list begins: the `exec_skip`'s `skip_lo`
+        /// position, patched to `AFTER_ELSE` when that list exhausts.
+        skip_pos: ?usize = null,
+        /// The `:else` steps, null when the group has none.
+        else_steps: ?[]const NodeIndex = null,
+    };
+
+    /// Classify one pass step's pooled resources for the §5 advisory:
+    /// inside a guarded arm → the (resource, group) pair; outside every arm →
+    /// the outside-reference set.
+    fn notePassPoolUse(self: *Emitter, pass: []const u8, in_arm: ?[]const u8, r: *const Reader, node: NodeIndex) Error!void {
+        for (self.pass_pool_refs.items) |p| {
+            if (!std.mem.eql(u8, p.owner, pass)) continue;
+            if (in_arm) |gname| {
+                try self.guard_arm_refs.append(self.gpa, .{ .res = p.res, .group = gname, .ref = .{ .reader = r, .idx = node } });
+            } else {
+                try self.guard_outside_refs.append(self.gpa, p.res);
+            }
+        }
+    }
+
+    /// A pooled queue-write destination, classified by `frame_arm` (the frame
+    /// walk sets it per step). Called from the queue emitters, which know the
+    /// destination's name; a pooled write inside an arm is the advisory's
+    /// inside-reference shape.
+    fn notePooledQueueWrite(self: *Emitter, kind: enum { buffer, texture }, name: []const u8, r: *const Reader, node: NodeIndex) Error!void {
+        const pooled = switch (kind) {
+            .buffer => self.tables.buffers.pool(name) != null,
+            .texture => self.tables.textures.pool(name) != null,
+        };
+        if (!pooled) return;
+        const gname = self.frame_arm orelse return;
+        try self.guard_arm_refs.append(self.gpa, .{ .res = name, .group = gname, .ref = .{ .reader = r, .idx = node } });
+    }
+
+    /// §4.3's unreachable-case advisory (plan frame-program §4.3, §8.3): every
+    /// case of a select shares one control, so a case whose comparison an
+    /// EARLIER case's comparison already covers can never run — `:below 10`
+    /// written after `:below 12`, or the same `:is` twice. Reported as a
+    /// WARNING with a located span (on the case, via the `source_span` the
+    /// hook stamps), never an error: overlap is legal and the cascade is the
+    /// feature.
+    ///
+    /// Kept honest, and the honesty is the pairing rule: a warning fires only
+    /// when BOTH cases' comparisons are intervals — keys from `{is, below,
+    /// above, at-least, at-most}` only, each value a compile-time constant
+    /// (a literal, `(define …)`, or a bounded expression that evaluates) —
+    /// and the later interval is EXACTLY contained in one single earlier
+    /// interval, endpoints included (`[2,8)` ⊆ `[2,9)` holds; `(−∞,10]` ⊆
+    /// `(−∞,10)` does not, and is not warned).
+    ///
+    /// NOT reasoned about, on purpose: `:is-not` (a complement is two
+    /// half-lines, not an interval); the UNION of several earlier cases (only
+    /// one earlier case may cover, alone); comparisons that fail to evaluate;
+    /// and windows whose containment depends on an endpoint's closedness in
+    /// any way the two rules above do not already decide.
+    fn warnUnreachableCases(self: *Emitter) void {
+        if (!self.validate_shaders) return;
+        if (!self.has_low) return;
+        const lt = &self.result.lowered_tree.?;
+
+        // The chains, in emission order (= case order): one row per lowered
+        // step-group whose provenance source form is a select.
+        const Row = struct { src: NodeIndex, group: NodeIndex };
+        var rows: std.ArrayList(Row) = .empty;
+        defer rows.deinit(self.gpa);
+        for (lt.root) |idx| {
+            if (lt.tagOf(idx) != .form) continue;
+            if (!std.mem.eql(u8, self.low.head(idx), "step-group")) continue;
+            const prov = self.result.lowering_provenance.lookup(idx) orelse continue;
+            const src_idx = prov.source_form_idx;
+            if (std.mem.eql(u8, self.src.head(src_idx), "select"))
+                rows.append(self.gpa, .{ .src = src_idx, .group = idx }) catch return;
+        }
+        if (rows.items.len == 0) return;
+
+        // One interval per case of one select; `covered_by` is the first
+        // earlier case that covers it, 0 meaning none.
+        const Case = struct { interval: Interval, covered_by: usize = 0 };
+        var cases: std.ArrayList(Case) = .empty;
+        defer cases.deinit(self.gpa);
+
+        var i: usize = 0;
+        while (i < rows.items.len) {
+            const src = rows.items[i].src;
+            var n: usize = 0;
+            while (i + n < rows.items.len and rows.items[i + n].src == src) n += 1;
+
+            // The select's own name, from the source form every group of this
+            // chain lowered from (the first group keeps it; the rest are the
+            // `x__caseN` continuations).
+            const select_name = self.src.symbol(src, "name") orelse {
+                i += n;
+                continue;
+            };
+
+            cases.clearRetainingCapacity();
+            for (rows.items[i .. i + n]) |row| {
+                const interval = self.readCaseInterval(row.group) orelse break;
+                var covered: usize = 0;
+                for (cases.items, 0..) |prior, k| {
+                    if (covered == 0 and prior.interval.contains(interval)) covered = k + 1;
+                }
+                cases.append(self.gpa, .{ .interval = interval, .covered_by = covered }) catch return;
+            }
+            // A break above leaves the chain partially built: a case whose
+            // interval could not be read ends the reasoning for THIS select
+            // (later cases may depend on the unread one), which is the
+            // conservative side.
+            if (cases.items.len == n) {
+                for (cases.items, 0..) |c, k| {
+                    if (c.covered_by == 0) continue;
+                    self.diagnoseWarn(.sjon, self.locate(&self.low, rows.items[i + k].group), "", "select '{s}': case {d} can never run — every control value that satisfies it also satisfies case {d}, which is tried first", .{ select_name, k + 1, c.covered_by });
+                }
+            }
+            i += n;
+        }
+    }
+
+    /// One case's comparison as an interval, or null when this case is not in
+    /// the reasoned set (a key outside the five interval-forming ones —
+    /// `:is-not` — or a value that does not evaluate at compile time).
+    /// `:is N` is the point `[N, N]`.
+    fn readCaseInterval(self: *Emitter, group: NodeIndex) ?Interval {
+        var out: Interval = .{ .lo = null, .lo_closed = false, .hi = null, .hi_closed = false };
+        var keys: usize = 0;
+        for (self.low.children(group)) |c| {
+            if (self.low.tree.tagOf(c) != .kvpair) continue;
+            const kv = self.low.tree.kvpairHeader(c);
+            const key = kv.key;
+            if (std.mem.eql(u8, key, "is-not")) return null; // a complement, not an interval
+            const is_low: bool = std.mem.eql(u8, key, "at-least") or std.mem.eql(u8, key, "above");
+            const is_high: bool = std.mem.eql(u8, key, "at-most") or std.mem.eql(u8, key, "below");
+            const is_point: bool = std.mem.eql(u8, key, "is");
+            if (!is_low and !is_high and !is_point) continue; // not a comparison key
+            keys += 1;
+            const v = values.evalNodeF64(self.gpa, self.low.tree, self.schema, &self.env, kv.value) catch return null;
+            if (!std.math.isFinite(v)) return null;
+            if (is_point) {
+                out.lo = .{ .v = v };
+                out.lo_closed = true;
+                out.hi = .{ .v = v };
+                out.hi_closed = true;
+            } else if (is_low) {
+                out.lo = .{ .v = v };
+                out.lo_closed = std.mem.eql(u8, key, "at-least");
+            } else {
+                out.hi = .{ .v = v };
+                out.hi_closed = std.mem.eql(u8, key, "at-most");
+            }
+        }
+        if (keys == 0) return null;
+        return out;
+    }
+
+    /// A closed/half-open interval over the f32 control values: a bound is
+    /// null at infinity. Endpoint-aware containment, the whole of the
+    /// reasoning `warnUnreachableCases` trusts.
+    const Interval = struct {
+        lo: ?struct { v: f64 },
+        hi: ?struct { v: f64 },
+        lo_closed: bool,
+        hi_closed: bool,
+
+        /// `inner ⊆ self`, exactly: a shared low endpoint needs self's closed
+        /// or inner's open; a shared high endpoint needs self's closed or
+        /// inner's open; infinities are unbounded and always contain.
+        fn contains(self: Interval, inner: Interval) bool {
+            if (self.lo) |s| {
+                const il = inner.lo orelse return false; // inner unbounded below, self is not
+                if (s.v > il.v) return false;
+                if (s.v == il.v and !self.lo_closed and inner.lo_closed) return false;
+            }
+            if (self.hi) |s| {
+                const ih = inner.hi orelse return false;
+                if (s.v < ih.v) return false;
+                if (s.v == ih.v and !self.hi_closed and inner.hi_closed) return false;
+            }
+            return true;
+        }
+    };
+
+    /// The §5 history advisory's join (plan §5 last line): one warning per
+    /// (pooled resource, guarded group) pair that the frame walks referenced
+    /// inside the arm AND outside every arm. Advisory only — the three §5
+    /// patterns are all legal documents; `pngine validate` surfaces this as a
+    /// warning, `--strict` is the CI door.
+    ///
+    /// Gated on `validate_shaders` like the other advisory joins: the golden
+    /// harness compiles with validation off and its traces must not see the
+    /// stderr fallback this warning would print there.
+    fn warnGuardedPoolHistory(self: *Emitter) void {
+        if (!self.validate_shaders) return;
+        for (self.guard_arm_refs.items, 0..) |a, i| {
+            var outside = false;
+            for (self.guard_outside_refs.items) |o| {
+                if (std.mem.eql(u8, o, a.res)) outside = true;
+            }
+            if (!outside) continue;
+            // A group named twice warns once: skip a (res, group) pair an
+            // earlier row already carried.
+            var seen = false;
+            for (self.guard_arm_refs.items[0..i]) |prev| {
+                if (std.mem.eql(u8, prev.res, a.res) and std.mem.eql(u8, prev.group, a.group)) seen = true;
+            }
+            if (seen) continue;
+            self.diagnoseWarn(.sjon, self.locate(a.ref.reader, a.ref.idx), "", "pooled resource '{s}' is used inside guarded group '{s}' and outside every guarded arm — a skipped frame leaves the pool member the counter next selects untouched, so the two sides can disagree about its history. Keep the state advancing unconditionally and guard only the presenting pass, guard the producer together with its consumers, or copy/reset the state explicitly", .{ a.res, a.group });
+        }
+    }
+
+    /// The author-facing name for a step-group name: itself, or
+    /// "select 'x' case N" when the name is a lowered `x__caseN` continuation
+    /// — §8.3's "diagnostics name what the author wrote", applied wherever a
+    /// group name reaches a refusal message. Writes the mapped spelling into
+    /// `buf` (the mapped form is longer than any group name, so the buffer is
+    /// sized for it) and returns whichever slice the caller should print.
+    fn authorGroupName(self: *const Emitter, name: []const u8, buf: []u8) []const u8 {
+        const cont = self.tables.select_continuations.get(name) orelse return name;
+        return std.fmt.bufPrint(buf, "select '{s}' case {d}", .{ cont.select, cont.case_no }) catch name;
+    }
+
+    /// Emit a guarded group's `exec_if`s (placeholders) and read its `:else`
+    /// list, returning the tail state the worklist carries until the arm
+    /// exhausts. Called where the group is named, BEFORE its `:perform` steps
+    /// — that ordering is what makes the skip distances forward-only.
+    fn emitGuard(self: *Emitter, group: FormRef, name: []const u8) Error!Guard {
+        const r = group.reader;
+        std.debug.assert(r.symbol(group.idx, "when") != null); // pre: the caller checked
+        // Continuations render as their select + case in every refusal below
+        // (§8.3): the author wrote a `(case …)`, not an `x__caseN` group.
+        var nbuf: [96]u8 = undefined;
+        const shown = self.authorGroupName(name, &nbuf);
+
+        // `:init` is one-shot and stays unconditional (§5); a group that
+        // carries it under a guard would silently drop the init steps, so the
+        // combination is refused. The schema already rejects the authored
+        // spelling (`step-group` declares no `:init`); this covers a lowered
+        // group a hook might emit.
+        if (r.authorNode(group.idx, "init") != null) {
+            self.diagnose(.sjon, self.locate(r, group.idx), "", "step group '{s}': ':init' is one-shot and unconditional, so it cannot sit inside a guarded arm — move it to the (frame …) that performs this group", .{shown});
+            return error.ValidationError;
+        }
+
+        const when_name = r.symbol(group.idx, "when").?;
+        const slot: u32 = if (std.mem.eql(u8, when_name, "time"))
+            0
+        else blk: {
+            for (self.controls.items, 0..) |c, i| {
+                if (std.mem.eql(u8, c.name, when_name)) break :blk @as(u32, @intCast(i + 1));
+            }
+            // The schema's union refuses the authored spelling; this is the
+            // lowered-tree defense (a hook naming a control that does not
+            // exist must never quietly read slot 0, which is `time`).
+            self.diagnose(.sjon, self.locate(r, group.idx), "", "step group '{s}': ':when' names '{s}', but no (control …) declares it and it is not `time`", .{ shown, when_name });
+            return error.ValidationError;
+        };
+
+        var guard = Guard{ .group = group.idx, .name = name };
+        // One exec_if per comparison key, in the order the author wrote them:
+        // the children of a form are kvpairs and positional sub-forms in
+        // document order, and a comparison key is a kvpair.
+        for (r.children(group.idx)) |c| {
+            if (r.tree.tagOf(c) != .kvpair) continue;
+            const kv = r.tree.kvpairHeader(c);
+            const cmp: ?opcodes.ControlComparison = comparisonOfKey(kv.key);
+            if (cmp == null) continue;
+            if (guard.if_count == guard.if_pos.len) {
+                // Each key may appear once (a form's kvpairs are a map), so
+                // this is reachable only from a hand-built lowered tree —
+                // refuse rather than write past the six slots.
+                self.diagnose(.sjon, self.locate(r, group.idx), "", "step group '{s}': a guard carries at most the six comparison keys", .{shown});
+                return error.ValidationError;
+            }
+            const value: f64 = values.evalNodeF64(self.gpa, r.tree, self.schema, &self.env, kv.value) catch |e| {
+                return self.refuseNumeric(r, kv.value, kv.key, e);
+            };
+            const pos = self.builder.getEmitter().emitExecIf(self.gpa, slot, cmp.?, @floatCast(value)) catch return error.OutOfMemory;
+            guard.if_pos[guard.if_count] = pos;
+            guard.if_count += 1;
+        }
+        // No comparison key: the group runs when the control is nonzero —
+        // the natural spelling for a toggle (plan D4).
+        if (guard.if_count == 0) {
+            const pos = self.builder.getEmitter().emitExecIf(self.gpa, slot, .is_not, 0) catch return error.OutOfMemory;
+            guard.if_pos[0] = pos;
+            guard.if_count = 1;
+        }
+        guard.else_steps = r.vectorNodes(group.idx, "else");
+        return guard;
+    }
+
+    /// Patch a guard's `exec_if`s to `arm_end`, refusing an arm whose distance
+    /// does not fit the wire's 16 bits (§7.1's located compile error).
+    fn patchGuardSkips(self: *Emitter, r: *const Reader, guard: Guard, arm_end: usize) Error!void {
+        const em = self.builder.getEmitter();
+        var i: usize = 0;
+        while (i < guard.if_count) : (i += 1) {
+            const dist = arm_end - (guard.if_pos[i] + 2); // skip counts from the instruction's end
+            if (dist > std.math.maxInt(u16)) {
+                var nbuf: [96]u8 = undefined;
+                self.diagnose(.sjon, self.locate(r, guard.group), "", "step group '{s}': its guarded arm is {d} bytes long, but a guard's skip distance is 16 bits — an arm longer than 65,535 bytes cannot be skipped over", .{ self.authorGroupName(guard.name, &nbuf), dist });
+                return error.ValidationError;
+            }
+            em.patchSkip(guard.if_pos[i], @intCast(dist));
+        }
+    }
+
+    /// The comparison a guard key name spells, or null for every other key.
+    fn comparisonOfKey(key: []const u8) ?opcodes.ControlComparison {
+        const map = std.StaticStringMap(opcodes.ControlComparison).initComptime(.{
+            .{ "is", .is },
+            .{ "is-not", .is_not },
+            .{ "below", .below },
+            .{ "above", .above },
+            .{ "at-least", .at_least },
+            .{ "at-most", .at_most },
+        });
+        return map.get(key);
     }
 
     /// Inline every positional action of a queue, in document order, dispatching
@@ -8402,6 +9335,8 @@ pub const Emitter = struct {
         const dst_name = try self.requiredSymbol(r, rqs, "destination");
         const dst_id = self.tables.buffers.get(dst_name) orelse return self.unresolvedRef(r, rqs, "buffer", dst_name);
         try self.frame_written.put(self.gpa, dst_id, {});
+        // §5 advisory: a pooled resolve destination inside a guarded arm.
+        try self.notePooledQueueWrite(.buffer, dst_name, r, rqs);
         const dst_off = try self.requiredU32(r, rqs, "destination-offset");
         self.builder.getEmitter().resolveQuerySet(self.gpa, qs_id, first, count, dst_id, dst_off) catch return error.OutOfMemory;
     }
@@ -8468,6 +9403,11 @@ pub const Emitter = struct {
         const dst_name = try self.requiredSymbol(r, cbb, "destination");
         const dst_id = self.tables.buffers.get(dst_name) orelse return self.unresolvedRef(r, cbb, "buffer", dst_name);
         try self.frame_written.put(self.gpa, dst_id, {});
+        // §5 advisory: a pooled copy destination inside a guarded arm, and a
+        // pooled copy SOURCE outside every arm (an unconditional read).
+        try self.notePooledQueueWrite(.buffer, dst_name, r, cbb);
+        if (self.frame_arm == null and self.tables.buffers.pool(src_name) != null)
+            try self.guard_outside_refs.append(self.gpa, src_name);
         const dst_off = try self.requiredU32(r, cbb, "destination-offset");
         const size = try self.requiredU32(r, cbb, "size");
         try self.checkBufferCopyUsage(r, cbb, src_name, src_id, "source", "source");
@@ -8551,6 +9491,8 @@ pub const Emitter = struct {
         // Every path below is a per-frame write (this is only reached from a
         // frame's step walk), so the flag is set before the source is known.
         try self.frame_written.put(self.gpa, buffer_id, {});
+        // §5 advisory: a pooled write destination inside a guarded arm.
+        try self.notePooledQueueWrite(.buffer, buffer_name, r, wb);
         const offset = (try self.optU32(r, wb, "offset")) orelse 0;
         // queue.writeBuffer is a copy like any other, so its destination admits one.
         try self.checkBufferCopyUsage(r, wb, buffer_name, buffer_id, "destination", "buffer");
@@ -8572,6 +9514,10 @@ pub const Emitter = struct {
             }
             return;
         }
+        // `control-inputs`: a builtin whose size the DOCUMENT decides (4 bytes
+        // per declared control, plan §4.4), so it cannot sit in
+        // `mapDataSource`'s fixed table — the count is right here.
+        if (std.mem.eql(u8, data, "control-inputs")) return self.emitControlInputsWrite(r, wb, buffer_name, buffer_id, offset);
         if (self.tables.data.get(data)) |did| {
             if (self.tables.data_byte_len.get(data)) |dlen| {
                 if (dlen > 0) try self.checkWriteFits(r, wb, buffer_name, buffer_id, offset, dlen, data);
@@ -8583,6 +9529,44 @@ pub const Emitter = struct {
         // result bytes. Two opcodes for one key.
         if (self.tables.wasm_calls.get(data) != null) return self.emitWasmCallWrite(data, buffer_id, offset);
         return self.unresolvedRef(r, wb, "as its :data the builtin source, (data …) or (wasm-call …)", data);
+    }
+
+    /// One `(write-buffer :data control-inputs)`: the frame's own copy of the
+    /// declared controls, 4 bytes each in declaration order (plan §4.4).
+    ///
+    /// Three rules the fixed builtin table cannot carry, each a located
+    /// refusal:
+    ///
+    /// - at least one control — the spelling is a schema-legal builtin, so a
+    ///   document that never declared one is the compiler's to catch;
+    /// - `:offset 0` — the controls are ONE packed block and every reader
+    ///   (the struct check below, the shader, a debugging host) addresses
+    ///   member i at 4·i from the buffer's start;
+    /// - no `:pool` — a pooled write reaches one member of the pool, so the
+    ///   controls would reach one shader's binding and not another's.
+    ///
+    /// The buffer-fit check is `checkWriteFits`, the same `pngine-frame-inputs`
+    /// path (4·n bytes at the offset). Emits `write_controls`, and records the
+    /// buffer for the uniform-table join: a struct bound to it belongs to the
+    /// controls, not to plain uniform reflection.
+    fn emitControlInputsWrite(self: *Emitter, r: *const Reader, wb: NodeIndex, buffer_name: []const u8, buffer_id: u16, offset: u32) Error!void {
+        const n = self.controls.items.len;
+        if (n == 0) {
+            self.diagnose(.sjon, self.locate(r, wb), "", "control-inputs needs at least one (control …) — no control is declared, so there is no value to write", .{});
+            return error.ValidationError;
+        }
+        if (offset != 0) {
+            self.diagnose(.sjon, self.locate(r, wb), "", "'control-inputs' writes at :offset 0 only — the controls are one packed block in declaration order, and the shader struct is checked against exactly that layout", .{});
+            return error.ValidationError;
+        }
+        if (self.tables.buffers.pool(buffer_name) != null) {
+            self.diagnose(.sjon, self.locate(r, wb), "", "'control-inputs' cannot write pooled buffer '{s}' — it carries no :pool, because a pooled write reaches only one member and the controls must reach every shader that binds the buffer", .{buffer_name});
+            return error.ValidationError;
+        }
+        const size: u32 = @intCast(4 * n);
+        try self.checkWriteFits(r, wb, buffer_name, buffer_id, 0, size, "control-inputs");
+        try self.control_buffers.put(self.gpa, buffer_id, .{ .reader = r, .idx = wb });
+        self.builder.getEmitter().emitWriteControls(self.gpa, buffer_id, 0, size) catch return error.OutOfMemory;
     }
 
     fn emitVertexBuffers(self: *Emitter, r: *const Reader, form: NodeIndex) Error!void {
@@ -8607,6 +9591,18 @@ pub const Emitter = struct {
     fn emitBindGroups(self: *Emitter, r: *const Reader, form: NodeIndex) Error!void {
         const names = r.vectorNodes(form, "bind-groups") orelse return;
         try self.checkSlotListFits(r, form, "bind-groups", names.len);
+        // §5 advisory: this pass's pooled resources, resolved through the
+        // groups it binds. Recorded here — at pass emission, when the form in
+        // hand IS the pass — so the frame walk only joins by pass name.
+        if (r.symbol(form, "name")) |pname| {
+            for (names) |nnode| {
+                const gname = r.elemSymbol(nnode) orelse continue;
+                for (self.group_pool_refs.items) |p| {
+                    if (!std.mem.eql(u8, p.owner, gname)) continue;
+                    try self.pass_pool_refs.append(self.gpa, .{ .owner = pname, .res = p.res });
+                }
+            }
+        }
         const offsets = r.vectorNodes(form, "bind-groups-pool-offsets");
         // The pass's pipeline picks a layout-less group's instance. Already
         // resolved (or refused) by the caller's `:pipeline` read above.

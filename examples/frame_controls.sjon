@@ -1,0 +1,74 @@
+; frame_controls — `(control …)` and `control-inputs`, the frame program's
+; host-settable values (docs/plans/frame-program §1, §4).
+;
+; A control is ONE value with two readers: a guard compares it before a group
+; runs (F4b), and a shader reads the same slot through the `control-inputs`
+; write, so the branch and the draw cannot disagree. The host sets either one
+; with the setUniform it already has — `setUniform(p, 'bloom', 0.6)` — and the
+; frame's own `:before` queue carries the values to the GPU in the same frame.
+;
+; `scene` (default 0) turns the triangle, `bloom` (default 0.2) sizes and
+; brightens it. The struct in the shader is checked against the declarations —
+; member i an f32 named after control i, and it may stop early, so a control
+; added later for scheduling only forces no shader edit — and its members are
+; deliberately NOT plain uniforms: the name belongs to the control.
+;
+; The buffer is 16 bytes for a 8-byte block: the write covers 8 (4 per
+; control, in declaration order) and WebGPU's uniform floor is 16. The write
+; is `:offset 0` and the buffer carries no `:pool`, both because the controls
+; are one packed block every reader addresses from the start.
+;
+; What you see at the defaults: a small warm triangle, two-thirds turn,
+; quarter bloom. A JS host turns it upright today by writing slot 1
+; through `getControlPtr`'s view (the setUniform routing lands with F7,
+; the CLI `--control` flag with F6).
+
+(control :name scene)
+(control :name bloom :default 0.2)
+
+(shader-module :name m :code """
+struct Controls {
+  scene : f32,
+  bloom : f32,
+}
+@group(0) @binding(0) var<uniform> controls : Controls;
+
+struct VsOut { @builtin(position) pos : vec4f, @location(0) uv : vec2f }
+
+@vertex fn vs(@builtin(vertex_index) i : u32) -> VsOut {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  let a = controls.scene;
+  let c = cos(a);
+  let s = sin(a);
+  let q = vec2f(p[i].x * c - p[i].y * s, p[i].x * s + p[i].y * c);
+  var out : VsOut;
+  out.pos = vec4f(q * (0.25 + controls.bloom * 0.45), 0.0, 1.0);
+  out.uv = (p[i] + 1.0) * 0.5;
+  return out;
+}
+
+@fragment fn fs(in : VsOut) -> @location(0) vec4f {
+  let d = length(in.uv - vec2f(0.5, 0.5));
+  let glow = controls.bloom * (1.0 - smoothstep(0.1, 0.7, d));
+  return vec4f(0.55 + glow, 0.2 + glow * 0.8, 0.06 + glow * 0.5, 1.0);
+}
+""")
+
+(buffer :name controlBuf :size 16 :usage [uniform copy-dst])
+(queue :name writeControls
+  (write-buffer :buffer controlBuf :offset 0 :data control-inputs))
+
+(bind-group :name g :layout pipe :group 0
+  (entry :binding 0 :buffer controlBuf))
+
+(render-pipeline :name pipe :layout auto
+  (vertex :module m :entry vs)
+  (fragment :module m :entry fs
+    (color-target :format preferred-canvas-format)))
+
+(render-pass :name draw :pipeline pipe :bind-groups [g]
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+
+(frame :name main :before [writeControls] :perform [draw])

@@ -18,7 +18,8 @@
 //!
 //! ## Invariants
 //!
-//! - Bytecode is appended sequentially, no backpatching
+//! - Bytecode is appended sequentially; the one backpatch is `patchSkip`,
+//!   a guarded arm's skip distance over already-emitted bytes
 //! - Each instruction is self-contained (no cross-references)
 //! - All IDs are validated before emission
 
@@ -32,6 +33,7 @@ const BufferUsage = opcodes.BufferUsage;
 const LoadOp = opcodes.LoadOp;
 const StoreOp = opcodes.StoreOp;
 const PassType = opcodes.PassType;
+const ControlComparison = opcodes.ControlComparison;
 
 // Rep-group caps, from the wire schema. These are the FIRST place the contract
 // can be checked — every consumer downstream can only refuse a stream that
@@ -1164,6 +1166,107 @@ pub const Emitter = struct {
     /// Emit end_pass_def instruction.
     pub fn endPassDef(self: *Self, gpa: Allocator) !void {
         try self.emitOpcode(gpa, .end_pass_def);
+    }
+
+    // ========================================================================
+    // Frame Controls and Guards (0x36-0x39, frame program §7.1)
+    // ========================================================================
+
+    /// Emit define_control instruction.
+    /// Appends a control; the slot is the order of appearance starting at 1.
+    /// `default_value`'s bit pattern goes on the wire as a raw u32 LE.
+    pub fn emitDefineControl(
+        self: *Self,
+        gpa: Allocator,
+        default_value: f32,
+    ) !void {
+        const start_len = self.bytes.items.len;
+        try self.emitOpcode(gpa, .define_control);
+        try self.emitRawU32(gpa, @bitCast(default_value));
+        // Post-condition: exactly 5 bytes (opcode + 4 raw).
+        assert(self.bytes.items.len == start_len + 5);
+    }
+
+    /// Emit write_controls instruction.
+    /// Writes the declared controls (slot 1 up, in declaration order — slot 0
+    /// is `time` and is not writable through this instruction) to a buffer.
+    pub fn emitWriteControls(
+        self: *Self,
+        gpa: Allocator,
+        buffer_id: u32,
+        offset: u32,
+        size: u32,
+    ) !void {
+        const start_len = self.bytes.items.len;
+        try self.emitOpcode(gpa, .write_controls);
+        try self.emitVarint(gpa, buffer_id);
+        try self.emitVarint(gpa, offset);
+        try self.emitVarint(gpa, size);
+        // Post-condition: at least 4 bytes emitted (opcode + 3 varints).
+        assert(self.bytes.items.len >= start_len + 4);
+    }
+
+    /// Emit exec_if instruction with a PLACEHOLDER skip of 0.
+    /// Returns the byte offset of the `skip_lo` field so the caller can patch
+    /// the real distance once the arm's length is known (patchSkip).
+    ///
+    /// The skip is counted from the END of this instruction; this method must
+    /// not guess it, because the arm has not been emitted yet.
+    pub fn emitExecIf(
+        self: *Self,
+        gpa: Allocator,
+        slot: u32,
+        comparison: ControlComparison,
+        constant: f32,
+    ) !usize {
+        const start_len = self.bytes.items.len;
+        try self.emitOpcode(gpa, .exec_if);
+        try self.emitVarint(gpa, slot);
+        try self.emitByte(gpa, @intFromEnum(comparison));
+        try self.emitRawU32(gpa, @bitCast(constant));
+        const skip_lo_pos = self.bytes.items.len;
+        try self.emitByte(gpa, 0); // skip_lo — placeholder until patchSkip
+        try self.emitByte(gpa, 0); // skip_hi
+        // Post-condition: opcode + slot varint + comparison byte + 4 constant
+        // bytes + 2 skip bytes = at least 9.
+        assert(self.bytes.items.len >= start_len + 9);
+        assert(self.bytes.items[skip_lo_pos] == 0);
+        return skip_lo_pos;
+    }
+
+    /// Emit exec_skip instruction with a PLACEHOLDER skip of 0.
+    /// Returns the byte offset of the `skip_lo` field (see emitExecIf).
+    pub fn emitExecSkip(self: *Self, gpa: Allocator) !usize {
+        const start_len = self.bytes.items.len;
+        try self.emitOpcode(gpa, .exec_skip);
+        const skip_lo_pos = self.bytes.items.len;
+        try self.emitByte(gpa, 0); // skip_lo — placeholder until patchSkip
+        try self.emitByte(gpa, 0); // skip_hi
+        // Post-condition: exactly 3 bytes (opcode + 2 skip bytes).
+        assert(self.bytes.items.len == start_len + 3);
+        return skip_lo_pos;
+    }
+
+    /// Patch a placeholder skip with the real distance.
+    ///
+    /// `lo_pos` is the offset emitExecIf/emitExecSkip returned. `skip` counts
+    /// bytes from the END of that instruction (the next opcode's first byte)
+    /// forward, and the CALLER computes it from positions it recorded — this
+    /// method writes what it is given and never guesses.
+    ///
+    /// A skip that does not fit u16 is the caller's located error (the SJON
+    /// emitter reports it with a source span); the parameter is u16 so the
+    /// overflow is a caller-side narrowing, and this method's own guards are
+    /// `assert`s — the shape every neighbour in this file uses — which fire in
+    /// Debug and ReleaseSafe and compile out of ReleaseFast/ReleaseSmall.
+    /// Note `lo_pos` may be at most `len - 2` here: both patch sites are
+    /// already-emitted instruction bytes, and the patched target
+    /// (`lo_pos + 2 + skip`) must land inside the emitted stream.
+    pub fn patchSkip(self: *Self, lo_pos: usize, skip: u16) void {
+        assert(lo_pos + 2 <= self.bytes.items.len); // pre: both skip bytes exist
+        assert(lo_pos + 2 + skip <= self.bytes.items.len); // pre: target inside the stream
+        self.bytes.items[lo_pos] = @truncate(skip);
+        self.bytes.items[lo_pos + 1] = @truncate(skip >> 8);
     }
 
     /// Emit write_time_uniform instruction.

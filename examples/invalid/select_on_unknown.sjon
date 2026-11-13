@@ -1,0 +1,25 @@
+; INVALID: a select whose `:on` names a control no form declares.
+;
+; `:on` is the same `control-source` union `:when` is -- the builtin `time`
+; member or a checked `(control …)` reference -- so a typo is
+; `union_no_branch_matched` on the name (the reject F1 pinned for guards with
+; control_when_unknown). Every case of the select would guard a control no
+; host can ever set.
+
+(control :name scene)
+(shader-module :name m :code """
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.1, 1.0); }
+""")
+(render-pipeline :name p :layout auto
+  (vertex :module m :entry vs)
+  (fragment :module m :entry fs (color-target :format preferred-canvas-format)))
+(render-pass :name draw :pipeline p
+  (color-attachment :view context-current-texture :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(select :name backdrop :on nosuch
+  (case :is 0 :perform [draw]))
+(frame :name main :perform [backdrop])

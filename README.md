@@ -162,6 +162,7 @@ https://raw.githubusercontent.com/HugoDaniel/pngine/main/docs/llms.txt
 | Command | Description |
 |---------|-------------|
 | `pngine <input>` | Compile to PNG with embedded bytecode + executor |
+| `pngine play <input.sjon\|input.png>` | Generate a self-contained offline HTML player (`-o` default `<input>.html`, `--duration` default `10`) |
 | `pngine compile <input>` | Compile to `.pngb` bytecode only |
 | `pngine validate <input>` | Check source: syntax, semantics, WGSL |
 | `pngine inspect <input>` | Inspect bytecode (`--deep` for runtime analysis) |
@@ -231,8 +232,8 @@ The npm package includes native CLI binaries for:
 | Linux | x64, arm64 |
 | Windows | x64, arm64 |
 
-Plus the WASM executor for browser execution: 13,331 bytes for the full build
-(the build enforces a 13,600-byte cap); smaller variants ship when a payload
+Plus the WASM executor for browser execution: 13,323 bytes for the full build
+(the build enforces a 14,150-byte cap); smaller variants ship when a payload
 needs fewer plugins.
 
 ## Development

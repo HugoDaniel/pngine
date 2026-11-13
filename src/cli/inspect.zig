@@ -37,6 +37,7 @@ const DescriptorEncoder = pngine.DescriptorEncoder;
 const utils = @import("utils.zig");
 const stdio = @import("stdio.zig");
 const arg_reader = @import("arg_reader.zig");
+const control_args = @import("control_args.zig");
 
 // Deep mode submodules (pub for test access via module import)
 pub const types = @import("inspect/types.zig");
@@ -84,7 +85,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: []const []const u8) !u8 {
         return runDeep(gpa, io, opts, &deep_opts, args);
     }
 
-    return runMockGpu(gpa, io, opts);
+    return runMockGpu(gpa, io, opts, deep_opts.time);
 }
 
 /// Command options parsed from arguments.
@@ -95,13 +96,16 @@ const InspectOptions = struct {
     json_output: bool = false,
     strict: bool = false,
     quiet: bool = false,
+    /// Repeatable `--control name=value` (plan §6.3). Resolved against the
+    /// payload's public name block before any output, on every path.
+    controls: control_args.List = .{},
 };
 
 // ============================================================================
 // Default mode: MockGPU inspection (fast)
 // ============================================================================
 
-fn runMockGpu(gpa: Allocator, io: std.Io, opts: InspectOptions) !u8 {
+fn runMockGpu(gpa: Allocator, io: std.Io, opts: InspectOptions, time: f32) !u8 {
     // Load or compile bytecode (shared format dispatcher)
     const bytecode = loader.loadBytecode(gpa, io, opts.input) catch |err| {
         return handleLoadError(err, opts.input);
@@ -114,18 +118,56 @@ fn runMockGpu(gpa: Allocator, io: std.Io, opts: InspectOptions) !u8 {
     };
     defer module.deinit(gpa);
 
-    // Print module info (skip in verbose mode - we'll show call trace instead)
-    if (!opts.verbose) {
-        printModuleInfo(stdio.displayName(opts.input), &module);
-    }
-
     // Execute with MockGPU to validate bytecode
     var gpu: MockGPU = .empty;
     defer gpu.deinit(gpa);
 
     var dispatcher = Dispatcher(MockGPU).init(gpa, &gpu, &module);
     defer dispatcher.deinit();
-    dispatcher.execute_all(gpa) catch |err| {
+
+    // Resolve `--control` BEFORE anything is printed (plan §6.3): an unknown
+    // name, or a slot the payload never declares, must not leave a partial
+    // report on the terminal. The name comes from the library's public
+    // control-name block — the CLI keeps no private copy of the list.
+    var resolved_controls: control_args.ResolvedList = .{};
+    if (control_args.resolve(&module, &opts.controls, &resolved_controls)) |unknown| {
+        control_args.printUnknown(&module, unknown);
+        return 1;
+    }
+
+    // The declaration phase loads the authored defaults, which the listing
+    // below prints; `execute_init` runs it again on the split execution path.
+    dispatcher.scan_control_declarations() catch |err| {
+        std.debug.print("Error: execution failed: {}\n", .{err});
+        return 5;
+    };
+
+    // Print module info (skip in verbose mode - we'll show call trace instead)
+    if (!opts.verbose) {
+        printModuleInfo(stdio.displayName(opts.input), &module);
+    }
+    printControls(&dispatcher, &module);
+
+    // `--verbose` records every guard the reference dispatcher evaluates.
+    // The hook is debug-only and never exists in the browser executor; a
+    // release build prunes the reporter at the call site (see guard_trace).
+    const previous_observer = pngine.dispatcher.guard_trace.observer;
+    defer pngine.dispatcher.guard_trace.observer = previous_observer;
+    if (opts.verbose) {
+        if (comptime pngine.dispatcher.guard_trace.enabled) {
+            pngine.dispatcher.guard_trace.observer = printGuardTrace;
+        }
+    }
+
+    // The split path is the contract order (§5, §6.6): init first, then the
+    // frame's time and the host's controls, then the frame bodies.
+    dispatcher.execute_init(gpa) catch |err| {
+        std.debug.print("\nExecution error: {}\n", .{err});
+        return 5;
+    };
+    dispatcher.set_time(time);
+    if (!control_args.applyToDispatcher(&dispatcher, resolved_controls.slice())) return 1;
+    dispatcher.execute_from_pc(gpa) catch |err| {
         std.debug.print("\nExecution error: {}\n", .{err});
         return 5;
     };
@@ -139,6 +181,58 @@ fn runMockGpu(gpa: Allocator, io: std.Io, opts: InspectOptions) !u8 {
     }
 
     return printExecutionSummary(calls, &module, gpu.pass_state_violations, opts.verbose, opts.strict);
+}
+
+/// Print the controls the document declares, in slot (declaration) order, with
+/// the authored defaults the declaration phase read. A document with no
+/// controls prints nothing at all — no empty heading.
+fn printControls(dispatcher: *const Dispatcher(MockGPU), module: *const format.Module) void {
+    const count = dispatcher.declaredControlCount();
+    if (count == 0) return;
+
+    std.debug.print("Controls:\n", .{});
+    var slot: u32 = 1;
+    while (slot <= count) : (slot += 1) {
+        const name = module.uniforms.controlNameBySlot(&module.strings, @intCast(slot)) orelse "<unnamed>";
+        // The declaration phase loaded every declared slot, so the default is
+        // present; 0 keeps the print total if a hostile payload skipped one.
+        const default = dispatcher.controlDefault(@intCast(slot)) orelse 0;
+        std.debug.print("  {s} = {d}\n", .{ name, default });
+    }
+    std.debug.print("\n", .{});
+}
+
+/// The author-facing spelling of a comparison tag (`at_least` → `at-least`),
+/// so the trace reads like the document's own keys.
+fn comparisonName(comparison: pngine.opcodes.ControlComparison) []const u8 {
+    return switch (comparison) {
+        .is => "is",
+        .is_not => "is-not",
+        .below => "below",
+        .above => "above",
+        .at_least => "at-least",
+        .at_most => "at-most",
+        _ => "unknown",
+    };
+}
+
+/// One line per guard the reference dispatcher evaluated (`inspect --verbose`).
+/// The fields are the plan's four: control, comparison, constant, outcome; the
+/// current value and frame are included because they are what makes a trace
+/// readable, and "skip" is printed for a FALSE comparison (the arm that did not
+/// run is the one being debugged).
+fn printGuardTrace(event: pngine.dispatcher.guard_trace.Event) void {
+    std.debug.print(
+        "[guard] frame {d}: {s} {s} {d} (value {d}) -> {s}\n",
+        .{
+            event.frame,
+            event.name,
+            comparisonName(event.comparison),
+            event.constant,
+            event.value,
+            if (event.holds) "run" else "skip",
+        },
+    );
 }
 
 // ============================================================================
@@ -183,6 +277,26 @@ fn runDeep(gpa: Allocator, io: std.Io, opts: InspectOptions, deep_opts: *DeepOpt
         return 3;
     };
     defer gpa.free(bytecode);
+
+    // Resolve `--control` against the payload's public name block BEFORE the
+    // deep run prints anything (plan §6.3). The WAMR executor only ever sees
+    // slots, so this is the one place the CLI turns a name into one; the
+    // same lookup feeds the reference-dispatcher paths. With no flag there is
+    // nothing to resolve, and deep's existing report path is untouched.
+    if (opts.controls.len > 0) {
+        var deep_module = format.deserialize(gpa, bytecode) catch |err| {
+            std.debug.print("Error: failed to deserialize bytecode: {}\n", .{err});
+            return 3;
+        };
+        defer deep_module.deinit(gpa);
+
+        var resolved_controls: control_args.ResolvedList = .{};
+        if (control_args.resolve(&deep_module, &opts.controls, &resolved_controls)) |unknown| {
+            control_args.printUnknown(&deep_module, unknown);
+            return 1;
+        }
+        deep_opts.controls = resolved_controls;
+    }
 
     // Run validation
     var result = ValidationResult.init();
@@ -249,6 +363,9 @@ fn parseInspectArgs(args: []const []const u8, opts: *InspectOptions, deep_opts: 
                 std.debug.print("Error: invalid time value\n", .{});
                 return 1;
             };
+        } else if (std.mem.eql(u8, arg, "--control")) {
+            const control_str = reader.value() catch return arg_reader.missingValue(arg);
+            if (!control_args.addFlag(control_str, &opts.controls)) return 1;
         } else if (std.mem.eql(u8, arg, "--time-step")) {
             const step_str = reader.value() catch return arg_reader.missingValue(arg);
             deep_opts.time_step = std.fmt.parseFloat(f32, step_str) catch {
@@ -289,6 +406,8 @@ fn printHelp() void {
         \\Default mode (MockGPU):
         \\  -v, --verbose          Full GPU call trace (like browser debug mode)
         \\  --json                 Output JSON
+        \\  -t, --time <seconds>   Seed the time control (slot 0) before the frames
+        \\  --control <name=value> Set a declared control (repeatable)
         \\  --strict               Exit code 1 on warnings (for CI)
         \\  -q, --quiet            Only output errors
         \\
@@ -298,6 +417,7 @@ fn printHelp() void {
         \\  --frames <list>        Test multiple frames (e.g., 0,1,10,60)
         \\  --symptom <desc>       Focus diagnosis: black, colors, blend, flicker, geometry
         \\  --time, -t <seconds>   Base time for frame 0 (default: 0.0)
+        \\  --control <name=value> Write a declared control after init, before frames (repeatable)
         \\  --time-step <seconds>  Time between frames (default: 1/60)
         \\  --size, -s <WxH>       Canvas size (default: 512x512)
         \\  --extract-wgsl         Include WGSL source in output

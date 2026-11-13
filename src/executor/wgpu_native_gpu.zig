@@ -3326,6 +3326,18 @@ pub const WgpuNativeGPU = struct {
         }
     }
 
+    /// Write the declared controls (frame program §7.1) — the same path
+    /// write_buffer takes, minus the data-section lookup: the values come
+    /// from the dispatcher's control table, not the payload.
+    pub fn write_controls(self: *Self, gpa: Allocator, buffer_id: u16, offset: u32, values: []const f32) !void {
+        _ = gpa;
+
+        if (buffer_id >= MAX_BUFFERS) return; // untrusted id, same as an empty slot
+        const buffer = self.buffers[buffer_id] orelse return;
+        if (values.len == 0) return; // nothing to stage; wgpu rejects empty writes
+        wgpu.queueWriteBuffer(self.ctx.queue, buffer, offset, std.mem.sliceAsBytes(values));
+    }
+
     /// Resolve a copy operand's texture id to a live texture.
     ///
     /// `0xFFFE` is the canvas sentinel, the same one `getColorTargetView` reads —

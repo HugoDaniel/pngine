@@ -123,6 +123,32 @@ const L_POOL_SET = Layout{ .head = &.{ nk("slot", .byte), nk("base_id", .varint)
 const L_SELECT_POOL = Layout{ .head = &.{ nk("slot", .byte), nk("base_id", .varint), nk("offset", .byte) } };
 const L_DEFINE_PASS = Layout{ .head = &.{ nk("pass_id", .varint), nk("pass_type", .byte), nk("descriptor_data_id", .varint) } };
 
+// ── Frame controls (0x36-0x39, frame program §7.1) ──
+// `Kind` has no u16, so a skip is two `byte` fields — the same reason
+// `usage_lo`/`usage_hi` exist. The skip counts bytes from the END of the
+// instruction forward, little-endian.
+const L_DEFINE_CONTROL = Layout{ .head = &.{nk("default_bits", .u32_le)} }; // authored default, f32 bit pattern
+// Not L_3V: that shape's generic names (v0..v2) do not read semantically, and
+// the dispatcher's handler reads `buffer`/`offset`/`size` by name.
+const L_WRITE_CONTROLS = Layout{ .head = &.{ nk("buffer", .varint), nk("offset", .varint), nk("size", .varint) } };
+const L_EXEC_IF = Layout{ .head = &.{ nk("slot", .varint), nk("comparison", .byte), nk("constant_bits", .u32_le), nk("skip_lo", .byte), nk("skip_hi", .byte) } };
+const L_EXEC_SKIP = Layout{ .head = &.{ nk("skip_lo", .byte), nk("skip_hi", .byte) } };
+
+// Both guard layouts END in the two skip bytes, in wire order (skip_lo then
+// skip_hi). The reference dispatcher's load-time skip validation relies on
+// this: it walks with `skipParams` only — never a second decoder — and reads
+// the skip value from the two bytes immediately before the landing pc. If
+// either layout ever stops ending in skip_lo/skip_hi, this fires.
+comptime {
+    for (.{ .{ "exec_if", L_EXEC_IF }, .{ "exec_skip", L_EXEC_SKIP } }) |pair| {
+        const head = pair[1].head;
+        const n = head.len;
+        if (n < 2 or head[n - 2].kind != .byte or head[n - 1].kind != .byte) @compileError(
+            "wire_schema: ." ++ pair[0] ++ " must end in skip_lo/skip_hi bytes",
+        );
+    }
+}
+
 // ── Shared count-prefixed layouts (rep-group; decoded manually in handlers) ──
 const L_SHADER_CONCAT = Layout{ .head = &.{nk("shader_id", .varint)}, .rep = .{ .count = .byte, .elem = &.{nk("part_id", .varint)}, .max = COUNT_BYTE_MAX } };
 // 16 is a HARD wire limit, not a storage convenience: both decoders read into a
@@ -272,13 +298,17 @@ fn layoutQueue(comptime op: OpCode) ?Layout {
     };
 }
 
-/// Frame control (0x30-0x35).
+/// Frame control (0x30-0x39), incl. the frame-program controls and guards.
 fn layoutControl(comptime op: OpCode) ?Layout {
     return switch (op) {
         .define_frame => L_2V,
         .end_frame, .end_pass_def => L_NONE,
         .exec_pass, .exec_pass_once => L_1V,
         .define_pass => L_DEFINE_PASS,
+        .define_control => L_DEFINE_CONTROL,
+        .write_controls => L_WRITE_CONTROLS,
+        .exec_if => L_EXEC_IF,
+        .exec_skip => L_EXEC_SKIP,
         else => null,
     };
 }

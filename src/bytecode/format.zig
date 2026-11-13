@@ -7,13 +7,15 @@
 //! ┌─────────────────────────────────────┐
 //! │ Header (40 bytes)                   │
 //! │   magic: "PNGB" (4 bytes)           │
-//! │   version: u16 (0)                  │
+//! │   version: u16 (0, or 1 — D6)       │
 //! │   flags: u16                        │
 //! │     bit 0: has_embedded_executor    │
 //! │     bit 1: has_animation_table      │
 //! │     bit 2: has_device_limits        │
 //! │     bit 3: canvas_alpha_premultiplied│
 //! │     bit 4: has_buffer_names         │
+//! │     bit 5: has_control_names        │
+//! │     bit 6: has_guards               │
 //! │   plugins: u8 (PluginSet bitfield)  │
 //! │   reserved: [3]u8 = limits offset   │
 //! │     (u24 LE when bit 2 set, else 0) │
@@ -50,7 +52,7 @@
 //!
 //! Invariants:
 //! - Magic must be "PNGB"
-//! - Version must be 0
+//! - Version must be 0, or 1 for an executor-less guarded payload (D6)
 //! - Offsets point to valid positions within the file
 //! - If has_embedded_executor, executor_offset and executor_length are valid
 
@@ -76,6 +78,24 @@ pub const MAGIC: *const [4]u8 = "PNGB";
 
 /// Current format version (v0 - initial release with embedded executor).
 pub const VERSION: u16 = 0;
+
+/// The version an executor-less payload whose `has_guards` bit is set is
+/// written with (frame-program plan, decision D6): the only signal a runtime
+/// that predates the §9 load-time handshake obeys — it throws "Unsupported
+/// PNGB version" instead of mis-executing the guard instructions as opcodes.
+/// A payload with an embedded executor stays `VERSION` however guarded, so an
+/// old viewer keeps rendering a guarded PNG (its time guards work inside the
+/// embedded executor; its controls sit at their defaults). The 40-byte layout
+/// is identical; only the field's value differs.
+pub const VERSION_GUARDED: u16 = 1;
+
+/// The set of versions a reader of the version field must accept: 0, and 1
+/// since D6. Everything after 1 is refused. D6's stated cost was "every
+/// reader of that field learning to accept 1" — this predicate is that rule,
+/// so no reader answers it independently.
+pub fn versionSupported(version: u16) bool {
+    return version == VERSION or version == VERSION_GUARDED;
+}
 
 /// Header size in bytes.
 pub const HEADER_SIZE: usize = 40;
@@ -141,8 +161,27 @@ pub const Flags = packed struct(u16) {
     /// it is a bit and not a table offset (the 3 reserved bytes are spent).
     /// (docs/plans/public-write-buffer.md D2)
     has_buffer_names: bool = false,
+    /// The uniform-table section ALSO carries a control-name block after the
+    /// buffer-name block (plan frame-program §7.2): one string id per declared
+    /// `(control …)`, in slot order, so a host can route `setUniform(name)` to
+    /// a control slot and list controls by name. Same compatibility story as
+    /// bit 4: every pre-block reader is count-bounded and ignores the bytes;
+    /// clear → no block, byte-identical output. (frame-program §7.2)
+    has_control_names: bool = false,
+    /// The compiler emitted at least one of the four frame-program
+    /// instructions — `define_control`, `write_controls`, `exec_if`,
+    /// `exec_skip` (the first two landed with F3/F4a; F4b added the guards).
+    /// Derived from
+    /// the bytecode itself at serialize time, so ANY emission path sets it.
+    /// Needed beside the block because they answer different questions: a
+    /// document that declares no control but guards on `time` emits
+    /// `exec_if` with no names to list, and a shared executor uses this bit
+    /// for the getControlPtr pairing handshake (§9). Clear → the payload is
+    /// guaranteed guard-free and an older runtime is safe. (frame-program
+    /// §7.2)
+    has_guards: bool = false,
     /// Reserved for future use.
-    reserved: u11 = 0,
+    reserved: u9 = 0,
 };
 
 /// PNGB file header (v0, 40 bytes).
@@ -158,7 +197,7 @@ pub const Flags = packed struct(u16) {
 pub const Header = extern struct {
     /// Magic bytes "PNGB".
     magic: [4]u8,
-    /// Format version (0).
+    /// Format version (0; 1 for an executor-less guarded payload — D6).
     version: u16,
     /// Feature flags.
     flags: Flags,
@@ -192,8 +231,8 @@ pub const Header = extern struct {
         if (!std.mem.eql(u8, &self.magic, MAGIC)) {
             return error.InvalidMagic;
         }
-        // Only accept v0 format
-        if (self.version != VERSION) {
+        // v0, and v1 for an executor-less guarded payload (D6)
+        if (!versionSupported(self.version)) {
             return error.UnsupportedVersion;
         }
     }
@@ -619,8 +658,29 @@ fn encodeReserved(has_limits: bool, limits_offset: u32) [3]u8 {
     return buf;
 }
 
+/// Whether the bytecode carries any of the four frame-program instructions
+/// (plan §7.2's `has_guards`). Walked with the SHARED wire schema — the same
+/// `skipParams` the scanner and both executors use — so the flag is derived
+/// from the bytes themselves and every emission path sets it, whatever wrote
+/// them. Unknown/reserved opcodes advance one byte (the opcode byte) and skip
+/// nothing, the scanner's own parity, so the walk always terminates.
+fn bytecodeHasFrameProgramOps(bc: []const u8) bool {
+    const wire_schema = @import("wire_schema.zig");
+    var pc: u32 = 0;
+    while (pc < bc.len) {
+        const op: @import("opcodes.zig").OpCode = @enumFromInt(bc[pc]);
+        pc += 1;
+        switch (op) {
+            .define_control, .write_controls, .exec_if, .exec_skip => return true,
+            else => {},
+        }
+        pc = wire_schema.skipParams(bc, pc, op);
+    }
+    return false;
+}
+
 /// Build PNGB header from offsets and options.
-fn buildHeader(offsets: *const SectionOffsets, options: SerializeOptions, animation_bytes_len: usize, limits_bytes_len: usize, has_buffer_names: bool) Header {
+fn buildHeader(offsets: *const SectionOffsets, options: SerializeOptions, animation_bytes_len: usize, limits_bytes_len: usize, has_buffer_names: bool, has_control_names: bool, has_guards: bool) Header {
     // Pre-condition: offsets are valid
     assert(offsets.string_table_offset >= HEADER_SIZE);
     assert(offsets.total_size > HEADER_SIZE);
@@ -630,13 +690,23 @@ fn buildHeader(offsets: *const SectionOffsets, options: SerializeOptions, animat
 
     return Header{
         .magic = MAGIC.*,
-        .version = VERSION,
+        // D6: an executor-less guarded payload is version 1 — the version a
+        // runtime that predates the §9 handshake checks before anything else,
+        // so it refuses the load instead of running guard instructions as
+        // opcodes. With an executor embedded the guards run inside it, so the
+        // payload stays v0 and every older viewer keeps working. `buildHeader`
+        // is the single place a version is stamped: the embed path
+        // re-serializes through here, which is what resets a guarded compile
+        // back to 0 when the executor lands.
+        .version = if (has_guards and !has_executor) VERSION_GUARDED else VERSION,
         .flags = .{
             .has_embedded_executor = has_executor,
             .has_animation_table = animation_bytes_len > 1, // Empty table is just count=0 (1 byte)
             .has_device_limits = has_limits,
             .canvas_alpha_premultiplied = options.canvas_alpha_premultiplied,
             .has_buffer_names = has_buffer_names,
+            .has_control_names = has_control_names,
+            .has_guards = has_guards,
         },
         .plugins = options.plugins,
         .reserved = encodeReserved(has_limits, offsets.limits_table_offset),
@@ -744,7 +814,15 @@ pub fn serializeWithOptions(
     }
 
     // Build header
-    const header = buildHeader(&offsets, options, sections.animation_bytes.len, sections.limits_bytes.len, uniforms.hasBufferNames());
+    const header = buildHeader(
+        &offsets,
+        options,
+        sections.animation_bytes.len,
+        sections.limits_bytes.len,
+        uniforms.hasBufferNames(),
+        uniforms.hasControlNames(),
+        bytecodeHasFrameProgramOps(bytecode),
+    );
 
     // Allocate output buffer
     const output = try gpa.alloc(u8, offsets.total_size);
@@ -770,9 +848,9 @@ fn validateHeaderAndOffsets(data: []const u8) !Header {
         return error.InvalidMagic;
     }
 
-    // Check version
+    // Check version — 0, and 1 for an executor-less guarded payload (D6)
     const version = std.mem.readInt(u16, data[4..6], .little);
-    if (version != VERSION) {
+    if (!versionSupported(version)) {
         return error.UnsupportedVersion;
     }
 
@@ -916,7 +994,7 @@ fn deserializeAllTables(gpa: Allocator, data: []const u8, header: *const Header)
 
     // Deserialize uniform table
     const uniform_data = data[header.uniform_table_offset..header.animation_table_offset];
-    const uniforms = try uniform_table_mod.deserialize(gpa, uniform_data, header.flags.has_buffer_names);
+    const uniforms = try uniform_table_mod.deserialize(gpa, uniform_data, header.flags.has_buffer_names, header.flags.has_control_names);
     errdefer {
         var u = uniforms;
         u.deinit(gpa);
@@ -1097,6 +1175,13 @@ pub const Builder = struct {
         return self.uniform_table.addBufferName(gpa, buffer_id, name_string_id, pool, frame_written);
     }
 
+    /// Name one declared control for the control-name block (already
+    /// interned, in slot order — the compiler's declaration order). The
+    /// header's `has_control_names` follows from the table being non-empty.
+    pub fn addControlName(self: *Self, gpa: Allocator, name_string_id: u16) !void {
+        return self.uniform_table.addControlName(gpa, name_string_id);
+    }
+
     /// Get animation table for direct manipulation.
     pub fn getAnimationTable(self: *Self) *AnimationTable {
         return &self.animation_table;
@@ -1220,3 +1305,37 @@ fn buildBufferNamesFixture(gpa: Allocator, add_names: bool) ![]u8 {
     }
     return builder.finalize(gpa);
 }
+
+// ── Control-name block + has_guards (plan frame-program §7.2) ────────────────
+
+/// A payload whose bytecode declares one control (the emitter primitive, so
+/// this test pins the FLAG, not the compiler): has_guards must follow the
+/// emitted ops, whatever wrote them.
+fn buildControlsFixture(gpa: Allocator, with_control: bool) ![]u8 {
+    var builder = Builder.init();
+    defer builder.deinit(gpa);
+    const em = builder.getEmitter();
+    if (with_control) try em.emitDefineControl(gpa, 0.25);
+    const frame_name = try builder.internString(gpa, "f");
+    try em.defineFrame(gpa, 0, frame_name.toInt());
+    try em.endFrame(gpa);
+    if (with_control) {
+        const scene = try builder.internString(gpa, "scene");
+        try builder.addControlName(gpa, scene.toInt());
+    }
+    return builder.finalize(gpa);
+}
+
+// ── PNGB version 1: an executor-less guarded payload (plan frame-program D6) ─
+
+// The D6 marking rule, asserted on the bytes a writer produces: a payload
+// WITHOUT an executor whose `has_guards` bit is set carries version 1 — the
+// only signal a runtime that predates the §9 handshake obeys (it throws
+// "Unsupported PNGB version" instead of rendering garbage). The same
+// document WITH an embedded executor stays version 0, so an old viewer keeps
+// rendering a guarded PNG (its time guards work; its controls sit at their
+// defaults). An unguarded payload stays version 0 in both modes, byte-for-byte.
+
+// Every reader of the version field accepts 0 and 1 (D6's cost: "every
+// reader of that field learning to accept 1"). A reader that still refuses 1
+// is the bug this marking exists to prevent. 2 and up stay refused.
