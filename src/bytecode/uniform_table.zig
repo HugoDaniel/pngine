@@ -29,6 +29,12 @@
 //!                            // buffer-name block, in slot order (slot 1 first)
 //! For each control:
 //!   [name_string_id: u16]    // the declared name; slot is position + 1
+//! [texture_name_count: u16]  // only when the header's has_texture_names is
+//!                            // set (plan 04 D14) — after the control block
+//! For each texture:
+//!   [base_id: u16][name_string_id: u16][pool: u8][flags: u8]
+//!                            // base-id order; flags bit 0 = frameWritten,
+//!                            // other bits preserved for newer writers
 //! ```
 //!
 //! ## Invariants
@@ -75,6 +81,13 @@ const FIELD_OFF_ELEM_COUNT: usize = 9;
 /// buffer by the name the author wrote — including the ones no binding
 /// reflects (a bare `array<T>`, a vertex buffer, an indirect buffer).
 pub const BUFFER_NAME_BYTES: usize = 6;
+
+/// One entry of the texture-name block that follows the control-name block
+/// when the header's `has_texture_names` is set (plan 04 D14):
+/// `[base_id: u16][name_string_id: u16][pool: u8][flags: u8]`. Every declared
+/// `(texture :name …)`, by the SJON name, including textures a host cannot
+/// write, so an author can tell "unknown" from "not permitted".
+pub const TEXTURE_NAME_BYTES: usize = 6;
 
 comptime {
     assert(FIELD_OFF_NAME == FIELD_OFF_SLOT + 2);
@@ -215,6 +228,26 @@ pub const BufferName = struct {
     flags: BufferNameFlags,
 };
 
+/// The `flags` byte of a texture-name entry. Bit 0 is the frame-written bit;
+/// unknown bits round-trip untouched, exactly as the buffer block's do.
+pub const TextureNameFlags = packed struct(u8) {
+    /// The frame's own queue ops write this texture every draw, AFTER any host
+    /// write lands, so a host write to it is refused (plan 04 D14). Set for
+    /// every `(write-texture …)` target reached from a frame's
+    /// `:before`/`:perform` steps; never for an `:init` seed.
+    frame_written: bool = false,
+    reserved: u7 = 0,
+};
+
+/// One `(texture :name …)`: its pool's BASE id and member count (1 unless
+/// `:pool N`), the interned SJON name, and the flags above.
+pub const TextureName = struct {
+    texture_id: u16,
+    name_string_id: u16,
+    pool: u8,
+    flags: TextureNameFlags,
+};
+
 /// The string-table module, for the two public control-name operations. Same
 /// directory, no cycle: the block stores string IDS, and only a lookup turns
 /// an id into the name a host typed.
@@ -234,10 +267,14 @@ pub const UniformTable = struct {
     /// the two operations below are the only readers a host needs (`--control`
     /// and every non-JS host call them; no private copy anywhere).
     control_names: std.ArrayList(u16),
+    /// The texture-name block (plan 04 D14), in base-id order. Empty → no
+    /// block is written and the header flag stays clear (byte-identical to
+    /// pre-block output). Every declared texture is here, writable or not.
+    texture_names: std.ArrayList(TextureName),
     /// Arena for field allocations.
     arena: ?std.heap.ArenaAllocator,
 
-    pub const empty: UniformTable = .{ .bindings = .empty, .buffer_names = .empty, .control_names = .empty, .arena = null };
+    pub const empty: UniformTable = .{ .bindings = .empty, .buffer_names = .empty, .control_names = .empty, .texture_names = .empty, .arena = null };
 
     /// The field slices have TWO owners, and `arena` says which. `deserialize`
     /// allocates them from the table's own arena; `addBinding` dupes them from
@@ -258,6 +295,7 @@ pub const UniformTable = struct {
         self.bindings.deinit(gpa);
         self.buffer_names.deinit(gpa);
         self.control_names.deinit(gpa);
+        self.texture_names.deinit(gpa);
         self.* = undefined;
     }
 
@@ -290,6 +328,24 @@ pub const UniformTable = struct {
     /// header's `has_control_names` must be set for a reader to find it.
     pub fn hasControlNames(self: *const UniformTable) bool {
         return self.control_names.items.len > 0;
+    }
+
+    /// Name a texture for host writes/reflection. `pool` is the member count
+    /// (1 for an ordinary texture); `texture_id` the pool's base.
+    pub fn addTextureName(self: *UniformTable, gpa: Allocator, texture_id: u16, name_string_id: u16, pool: u8, frame_written: bool) !void {
+        assert(pool > 0); // pre: a pool of nothing is not a resource
+        try self.texture_names.append(gpa, .{
+            .texture_id = texture_id,
+            .name_string_id = name_string_id,
+            .pool = pool,
+            .flags = .{ .frame_written = frame_written },
+        });
+    }
+
+    /// Whether serialize() writes the texture block — and so whether the
+    /// header's `has_texture_names` must be set for a reader to find it.
+    pub fn hasTextureNames(self: *const UniformTable) bool {
+        return self.texture_names.items.len > 0;
     }
 
     /// The slot of a named control: 1 for the first declared, or null when no
@@ -475,6 +531,23 @@ pub const UniformTable = struct {
             }
         }
 
+        // The texture-name block, after the control-name block (plan 04 D14):
+        // one count, then six bytes per declared texture in base-id order.
+        // Same compatibility story as the blocks above — absent when empty,
+        // and every pre-block reader stops at the counts it knows.
+        if (self.texture_names.items.len > 0) {
+            const texture_count: u16 = @intCast(self.texture_names.items.len);
+            try result.appendSlice(gpa, &std.mem.toBytes(texture_count));
+            for (self.texture_names.items) |tn| {
+                var rec = [_]u8{0} ** TEXTURE_NAME_BYTES;
+                std.mem.writeInt(u16, rec[0..2], tn.texture_id, .little);
+                std.mem.writeInt(u16, rec[2..4], tn.name_string_id, .little);
+                rec[4] = tn.pool;
+                rec[5] = @bitCast(tn.flags);
+                try result.appendSlice(gpa, &rec);
+            }
+        }
+
         return result.toOwnedSlice(gpa);
     }
 };
@@ -484,11 +557,14 @@ pub const UniformTable = struct {
 /// the bytes are otherwise the section's tail, which every pre-block reader
 /// ignored. The control block (when its flag is set) follows the buffer-name
 /// block, in slot order (element 0 = slot 1; slot 0 is `time` and never listed).
-pub fn deserialize(gpa: Allocator, data: []const u8, has_buffer_names: bool, has_control_names: bool) !UniformTable {
+/// The texture-name block (when `has_texture_names` is set) follows the control
+/// block, in base-id order.
+pub fn deserialize(gpa: Allocator, data: []const u8, has_buffer_names: bool, has_control_names: bool, has_texture_names: bool) !UniformTable {
     var table = UniformTable{
         .bindings = .empty,
         .buffer_names = .empty,
         .control_names = .empty,
+        .texture_names = .empty,
         .arena = std.heap.ArenaAllocator.init(gpa),
     };
     errdefer {
@@ -496,6 +572,7 @@ pub fn deserialize(gpa: Allocator, data: []const u8, has_buffer_names: bool, has
         table.bindings.deinit(gpa);
         table.buffer_names.deinit(gpa);
         table.control_names.deinit(gpa);
+        table.texture_names.deinit(gpa);
     }
 
     const arena = table.arena.?.allocator();
@@ -598,6 +675,28 @@ pub fn deserialize(gpa: Allocator, data: []const u8, has_buffer_names: bool, has
         }
     }
 
+    // The texture-name block, behind its own flag, after the control block.
+    // Same bounds discipline: the count is the file's word, the tail is the
+    // bound, and a torn six-byte record is dropped rather than refused. A
+    // reserved empty-string row stays in the table (later rows must not
+    // compact onto it); only a name lookup decides it is unnamed.
+    if (has_texture_names and pos + 2 <= data.len) {
+        const texture_count = std.mem.readInt(u16, data[pos..][0..2], .little);
+        pos += 2;
+        const fit: usize = @min(texture_count, (data.len - pos) / TEXTURE_NAME_BYTES);
+        try table.texture_names.ensureTotalCapacity(gpa, fit);
+        for (0..fit) |_| {
+            std.debug.assert(pos + TEXTURE_NAME_BYTES <= data.len);
+            table.texture_names.appendAssumeCapacity(.{
+                .texture_id = std.mem.readInt(u16, data[pos..][0..2], .little),
+                .name_string_id = std.mem.readInt(u16, data[pos + 2 ..][0..2], .little),
+                .pool = data[pos + 4],
+                .flags = @bitCast(data[pos + 5]),
+            });
+            pos += TEXTURE_NAME_BYTES;
+        }
+    }
+
     return table;
 }
 
@@ -608,6 +707,11 @@ pub fn deserialize(gpa: Allocator, data: []const u8, has_buffer_names: bool, has
 const testing = std.testing;
 
 // ── Buffer-name block (docs/plans/public-write-buffer.md D2) ─────────────────
+
+// ── Texture-name block (plan 04 D14) ────────────────────────────────────────
+// The same proven block shape, after the control names: every declared texture
+// by its SJON name, with its pool's base id, member count and frame-written
+// bit — including textures a host cannot write.
 
 // ── Control-name block (plan frame-program §7.2) ─────────────────────────────
 // A count-prefixed tail of string ids AFTER the buffer-name block, read behind

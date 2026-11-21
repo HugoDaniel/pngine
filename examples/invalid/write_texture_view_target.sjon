@@ -1,0 +1,8 @@
+; INVALID: :texture is a texture-ref, so a (texture-view …) name is the
+; schema's wrong-kind reject, not a write into the view's source texture.
+(data :name texels (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAA=="))
+(texture :name tex :size [2 2] :format rgba8unorm :usage [copy-dst])
+(texture-view :name view :texture tex)
+(queue :name upload
+  (write-texture :texture view :data texels :size [2 2] :bytes-per-row 8))
+(frame :name main :perform [upload])

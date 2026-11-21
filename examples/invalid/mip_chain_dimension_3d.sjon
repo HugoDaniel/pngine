@@ -1,0 +1,8 @@
+; INVALID: a 3d texture has no 2d render target per level.
+;
+; The chain generates 2d mip levels; volume levels need a slice-aware sampling
+; and view design that is deliberately not folded into this hook.
+
+(texture :name mipTex :size [64 64 4] :dimension 3d :format rgba8unorm
+  :mip-level-count 4 :usage [texture-binding render-attachment])
+(mip-chain :name fillMips :texture mipTex)

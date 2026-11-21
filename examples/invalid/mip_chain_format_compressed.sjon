@@ -1,0 +1,9 @@
+; INVALID: a compressed format is copy-only, never a render target.
+;
+; Every compressed family is sampleable but not color-renderable, so the chain
+; can neither render level N nor (without a feature) filter it. Refused at the
+; texture's :format, before any shader exists.
+
+(texture :name mipTex :size [64 64] :format bc1-rgba-unorm
+  :mip-level-count 4 :usage [texture-binding render-attachment])
+(mip-chain :name fillMips :texture mipTex)

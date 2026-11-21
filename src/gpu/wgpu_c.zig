@@ -637,7 +637,7 @@ pub fn queueWriteBuffer(queue: Queue, buffer: Buffer, offset: u64, data: []const
     c.wgpuQueueWriteBuffer(queue, buffer, offset, data.ptr, data.len);
 }
 
-pub fn queueWriteTexture(queue: Queue, destination: *const c.WGPUImageCopyTexture, data: []const u8, data_layout: *const c.WGPUTextureDataLayout, write_size: *const c.WGPUExtent3D) void {
+pub fn queueWriteTexture(queue: Queue, destination: *const c.WGPUTexelCopyTextureInfo, data: []const u8, data_layout: *const c.WGPUTexelCopyBufferLayout, write_size: *const c.WGPUExtent3D) void {
     c.wgpuQueueWriteTexture(queue, destination, data.ptr, data.len, data_layout, write_size);
 }
 
@@ -672,6 +672,17 @@ pub fn bufferGetSize(buffer: Buffer) u64 {
 /// callbacks) complete. Returns true while the queue is non-empty.
 pub fn devicePoll(device: Device, wait: bool) bool {
     return c.wgpuDevicePoll(device, @intFromBool(wait), null) != 0;
+}
+
+/// Record a buffer→texture copy into an existing command encoder.
+/// v27 names these `TexelCopy{Texture,Buffer}Info` (was `ImageCopy*`).
+pub fn commandEncoderCopyBufferToTexture(
+    encoder: CommandEncoder,
+    source: *const c.WGPUTexelCopyBufferInfo,
+    destination: *const c.WGPUTexelCopyTextureInfo,
+    copy_size: *const c.WGPUExtent3D,
+) void {
+    c.wgpuCommandEncoderCopyBufferToTexture(encoder, source, destination, copy_size);
 }
 
 /// Record a texture→buffer copy into an existing command encoder.

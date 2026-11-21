@@ -1,0 +1,11 @@
+; INVALID: a depth-stencil texture endpoint makes the buffer offset alignment
+; 4, regardless of the aspect's own texel footprint. stencil8's footprint is 1
+; byte, but offset 1 is still refused as `buffer-offset-alignment`; this is the
+; plan's "stencil8 source readback with buffer offset 1" row.
+(buffer :name readback :size 264 :usage [copy-dst])
+(texture :name depth :size [2 2] :format stencil8 :usage [copy-src])
+(queue :name copies
+  (copy-texture-to-buffer :size [2 2 1]
+    (source :texture depth :aspect stencil-only)
+    (destination :buffer readback :offset 1 :bytes-per-row 256 :rows-per-image 2)))
+(frame :name main :perform [copies])

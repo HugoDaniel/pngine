@@ -1,0 +1,7 @@
+; INVALID: origin x 2 + width 4 overruns the 4-texel physical extent. Both
+; terms are document data; plan 01 adds them in u64 and refuses.
+(data :name texels (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAA=="))
+(texture :name tex :size [4 4] :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture tex :data texels :origin [2 0 0] :size [4 1] :bytes-per-row 16))
+(frame :name main :perform [upload])

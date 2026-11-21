@@ -1,0 +1,8 @@
+; INVALID: a (data … :file …) is a MIME-wrapped image blob, not raw texels.
+; It carries no data_byte_len, so it cannot masquerade as a byte source for
+; writeTexture; only (bytes …) / :float32 data entries have raw lengths.
+(data :name pixels :file "pixel.png" :mime "image/png")
+(texture :name tex :size [2 2] :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture tex :data pixels :size [2 2] :bytes-per-row 8))
+(frame :name main :perform [upload])

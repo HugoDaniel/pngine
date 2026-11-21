@@ -1,0 +1,9 @@
+; INVALID: a pooled texture rotates members per frame.
+;
+; The chain's views and passes name one texture (the base id), so a pool would
+; generate into an arbitrary member while the frame reads another. Give the
+; texture one member; the refusal points at :pool.
+
+(texture :name mipTex :size [64 64] :format rgba8unorm :pool 2
+  :mip-level-count 4 :usage [texture-binding render-attachment])
+(mip-chain :name fillMips :texture mipTex)

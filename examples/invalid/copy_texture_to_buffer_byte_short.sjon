@@ -1,0 +1,10 @@
+; INVALID: the same one-byte-short span in the readback direction. The texture
+; is legal and copy-src; the destination buffer is 263 bytes for a 264-byte,
+; two-row span.
+(buffer :name readback :size 263 :usage [copy-dst])
+(texture :name source :size [2 2] :format rgba8unorm :usage [copy-src])
+(queue :name copies
+  (copy-texture-to-buffer :size [2 2 1]
+    (source :texture source)
+    (destination :buffer readback :offset 0 :bytes-per-row 256 :rows-per-image 2)))
+(frame :name main :perform [copies])

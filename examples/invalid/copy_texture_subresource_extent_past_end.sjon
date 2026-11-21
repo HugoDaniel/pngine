@@ -1,0 +1,9 @@
+; INVALID: an explicit copy extent past the source's physical mip extent.
+; The destination has room; the source does not.
+(texture :name src :size [4 4] :format rgba8unorm :usage [copy-src])
+(texture :name dst :size [8 8] :format rgba8unorm :usage [copy-dst])
+(queue :name blit
+  (copy-texture-to-texture :size [5 1 1]
+    (source :texture src)
+    (destination :texture dst)))
+(frame :name main :perform [blit])

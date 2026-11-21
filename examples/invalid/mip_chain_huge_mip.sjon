@@ -1,0 +1,10 @@
+; INVALID: a mip-chain whose level count cannot fit the lowering budget.
+;
+; The chain expands eight forms per generated level. A u32-max count would ask
+; for four billion name slots, so the hook refuses at the texture's
+; `:mip-level-count` before any allocation — a located lowerer-budget refusal,
+; not a host OutOfMemory. (The mutation sweep found this case.)
+
+(texture :name mipTex :size [64 64] :format rgba8unorm
+  :mip-level-count 4294967295 :usage [texture-binding render-attachment])
+(mip-chain :name fillMips :texture mipTex)

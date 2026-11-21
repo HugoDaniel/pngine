@@ -1,0 +1,17 @@
+; A real GPUCommandEncoder.copyBufferToTexture: two rgba8 rows leave a
+; copy-src buffer and land in a 2x2 copy-dst texture.
+;
+; The buffer is EXACTLY the required span, which is the tight end of the
+; buffer-copy bounds rule: 256 bytes for the first block row plus the 8-byte
+; final row (its 248 padding bytes are excluded) = 264. The 256-byte row stride
+; is the buffer-copy rule, not writeTexture's: queue writes may stay tightly
+; packed. This document is the positive half of the copy slice's wire evidence;
+; its golden trace pins the 0x2E instruction and every field MockGPU records.
+(buffer :name staging :size 264 :usage [copy-src])
+(texture :name target :size [2 2] :format rgba8unorm :usage [copy-dst])
+(queue :name copies
+  (copy-buffer-to-texture
+    :size [2 2 1]
+    (source :buffer staging :offset 0 :bytes-per-row 256 :rows-per-image 2)
+    (destination :texture target :mip-level 0 :origin [0 0 0] :aspect all)))
+(frame :name main :perform [copies])

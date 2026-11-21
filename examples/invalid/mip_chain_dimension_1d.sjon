@@ -1,0 +1,8 @@
+; INVALID: a 1d texture has no 2d render target per level.
+;
+; The chain generates 2d mip levels (a fullscreen pass into the level's 2d
+; view), so 1d/3d/array shapes are deferred to a separately specified lowering.
+
+(texture :name mipTex :size [64] :dimension 1d :format rgba8unorm
+  :mip-level-count 4 :usage [texture-binding render-attachment])
+(mip-chain :name fillMips :texture mipTex)

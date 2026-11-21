@@ -1,0 +1,10 @@
+; INVALID: exactly one byte short of the required source span. Two 2-texel
+; rgba8 rows with a padded 16-byte stride need 16 (first row) + 8 (final row)
+; = 24 bytes — the final row's padding is excluded — and the source has 23.
+; This is the tight proof of the span rule: if the final row's padding were
+; counted, 23 would be 9 bytes short, but the diagnostic's limit is 24.
+(data :name texels (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="))
+(texture :name tex :size [2 2] :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture tex :data texels :bytes-per-row 16 :rows-per-image 2 :size [2 2]))
+(frame :name main :perform [upload])

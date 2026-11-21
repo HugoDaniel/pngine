@@ -1,0 +1,10 @@
+; INVALID: an authored name in the chain's generated `<name>__…` space.
+;
+; The lowering names its views/passes `<name>__…` deterministically. A document
+; that already declares one of those names would intern the synthetic resource
+; to the same id and silently replace the author's form, so the hook refuses
+; at the authored form.
+
+(texture :name fillMips__view1 :size [64 64] :format rgba8unorm
+  :mip-level-count 4 :usage [texture-binding render-attachment])
+(mip-chain :name fillMips :texture fillMips__view1)

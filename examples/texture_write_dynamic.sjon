@@ -1,0 +1,12 @@
+; Runtime-sized destinations: a canvas-tracking texture and one sized from a
+; decoded image. The compiler keeps write presence but cannot know either
+; extent, so origin/stride/span checks wait for plan 03's resolution.
+(data :name texels (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAA=="))
+(data :name imageBytes :file "assets/Di-3d.png" :mime "image/png")
+(image-bitmap :name image :data imageBytes)
+(texture :name canvasTex :size canvas :format rgba8unorm :usage [copy-dst])
+(texture :name imageTex :size image :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture canvasTex :data texels :bytes-per-row 8 :rows-per-image 2 :size [2 2])
+  (write-texture :texture imageTex :data texels))
+(frame :name main :perform [upload])

@@ -57,6 +57,7 @@ const bytecode_mod = @import("bytecode");
 /// Resource id-space budgets — shared with MockGPU and the native backend.
 const limits = bytecode_mod.resource_limits;
 const format = bytecode_mod.format;
+const texture_layout = bytecode_mod.texture_layout;
 
 // Conditional zgpu import (only available on native targets)
 const has_zgpu = @hasDecl(@import("root"), "zgpu");
@@ -421,6 +422,21 @@ pub const NullGPU = struct {
         self.current_pipeline = null;
     }
 
+    /// 0x81: accept only a structurally valid pass and claim no pixels. The
+    /// record is already resolved by the dispatcher; this backend has no tables
+    /// to address, so there is nothing else to check.
+    pub fn begin_render_pass_views(self: *Self, gpa: Allocator, attachments: []const bytecode_mod.emitter.Emitter.ViewColorAttachment, depth_target: u16) !void {
+        _ = gpa;
+
+        assert(attachments.len <= bytecode_mod.resource_limits.MAX_COLOR_ATTACHMENTS);
+        assert(attachments.len > 0 or depth_target != bytecode_mod.opcodes.ATTACHMENT_NONE);
+        assert(!self.in_render_pass and !self.in_compute_pass);
+        assert(self.initialized);
+
+        self.in_render_pass = true;
+        self.current_pipeline = null;
+    }
+
     pub fn begin_compute_pass(self: *Self, gpa: Allocator) !void {
         _ = gpa;
 
@@ -631,6 +647,22 @@ pub const NullGPU = struct {
         assert(self.initialized);
     }
 
+    /// No-op on CONTENT: this backend deliberately holds no texture texels, so
+    /// this is never pixel evidence. It still validates the two facts it can:
+    /// the GPU is initialized, and the texture id names a texture whose
+    /// `create_texture` ran. The id is range-checked with a real branch BEFORE
+    /// the bitset read — a hostile id is a refusal, not an out-of-bounds access
+    /// (asserts compile out of the builds that matter).
+    pub fn write_texture(self: *Self, gpa: Allocator, texture_id: u16, data_id: u16, write: texture_layout.WriteLayout) !void {
+        _ = gpa;
+        _ = data_id;
+        _ = write;
+
+        assert(self.initialized);
+        if (texture_id >= MAX_TEXTURES) return error.InvalidResourceId;
+        if (!self.textures_created.isSet(texture_id)) return error.InvalidTextureWrite;
+    }
+
     /// Write the declared controls to a buffer (frame program §7.1). The
     /// headless stub has no buffer contents to mutate.
     pub fn write_controls(self: *Self, gpa: Allocator, buffer_id: u16, offset: u32, values: []const f32) !void {
@@ -638,6 +670,28 @@ pub const NullGPU = struct {
         _ = buffer_id;
         _ = offset;
         _ = values;
+
+        assert(self.initialized);
+    }
+
+    /// No-op on CONTENT, like every copy on this backend: NullGPU stores no
+    /// texels. The method exists so the shared dispatcher CONTRACT compiles for
+    /// the GPU-less build; plan 05 slice 3 gives it native encoder behaviour.
+    pub fn copy_buffer_to_texture(self: *Self, gpa: Allocator, texture_id: u16, buffer_id: u16, write: texture_layout.WriteLayout) !void {
+        _ = gpa;
+        _ = texture_id;
+        _ = buffer_id;
+        _ = write;
+
+        assert(self.initialized);
+    }
+
+    /// No-op texture→buffer copy (see `copy_buffer_to_texture`).
+    pub fn copy_texture_to_buffer(self: *Self, gpa: Allocator, texture_id: u16, buffer_id: u16, write: texture_layout.WriteLayout) !void {
+        _ = gpa;
+        _ = texture_id;
+        _ = buffer_id;
+        _ = write;
 
         assert(self.initialized);
     }
@@ -676,6 +730,18 @@ pub const NullGPU = struct {
         _ = gpa;
         _ = src_texture;
         _ = dst_texture;
+
+        assert(self.initialized);
+    }
+
+    /// No-op on CONTENT, like every copy on this backend: NullGPU stores no
+    /// texels. The method exists so the shared dispatcher CONTRACT compiles for
+    /// the GPU-less build; plan 06 slice 3 gives it native encoder behaviour.
+    pub fn copy_texture_subresource(self: *Self, gpa: Allocator, source_id: u16, destination_id: u16, copy: texture_layout.SubresourceCopy) !void {
+        _ = gpa;
+        _ = source_id;
+        _ = destination_id;
+        _ = copy;
 
         assert(self.initialized);
     }

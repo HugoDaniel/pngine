@@ -1,0 +1,8 @@
+; INVALID: 1D writes are explicitly refused in the first slice. Plan 01's
+; calculator still computes a 1D mip extent, so the protocol refusal is the
+; compiler's: the static matrix covers 2D, 2D-array and 3D only.
+(data :name texels (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAA=="))
+(texture :name tex :size [4] :dimension 1d :format rgba8unorm :usage [texture-binding copy-dst])
+(queue :name upload
+  (write-texture :texture tex :data texels :size [4]))
+(frame :name main :perform [upload])

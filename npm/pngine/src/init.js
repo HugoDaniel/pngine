@@ -32,6 +32,10 @@ let workerUrl = null;
  *   contents of every `map-read` buffer the frame copies into, once per submit,
  *   as one number per 64-bit lane. Written for timestamp and occlusion query
  *   results; a compute readback has to write 64-bit lanes to survive it.
+ * @param {(readback: import("./init-core.js").TextureReadback) => void} [options.onTextureReadback] -
+ *   Receives the bytes of every `copy-texture-to-buffer` into a MAP_READ|COPY_DST
+ *   buffer, once per submit, as an owned Uint8Array plus the padded layout and
+ *   subresource metadata that describe exactly what those bytes contain.
  * @returns {Promise<Pngine>}
  */
 export async function pngine(source, options = {}) {

@@ -13,6 +13,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const bytecode_emitter = @import("bytecode").emitter.Emitter;
 const opcodes = @import("bytecode").opcodes;
+const texture_layout = @import("bytecode").texture_layout;
 /// Resource id-space budgets — shared with NullGPU and the native backend.
 const limits = @import("bytecode").resource_limits;
 
@@ -35,6 +36,7 @@ pub const CallType = enum {
     // Pass operations
     begin_render_pass,
     begin_render_pass_mrt,
+    begin_render_pass_views,
     begin_compute_pass,
     set_pipeline,
     set_bind_group,
@@ -63,11 +65,16 @@ pub const CallType = enum {
 
     // Queue operations
     write_buffer,
+    write_texture,
+    copy_buffer_to_texture,
+    copy_texture_to_buffer,
     write_controls,
     submit,
     copy_external_image_to_texture,
     copy_buffer_to_buffer,
     copy_texture_to_texture,
+    /// Plan 06: the subresource texture→texture copy (PNGB 0x80).
+    copy_texture_subresource,
     write_uniform,
 
     // WASM operations
@@ -75,6 +82,109 @@ pub const CallType = enum {
     call_wasm_func,
     write_buffer_from_wasm,
 };
+
+/// A buffer↔texture copy's recorded payload. Both directions carry the same
+/// texture id, buffer id and presence-bearing `WriteLayout`; the CallType is
+/// the direction (the opcode), never a field.
+pub const TextureBufferCopy = struct {
+    texture_id: u16,
+    buffer_id: u16,
+    write: texture_layout.WriteLayout,
+};
+
+/// The human-readable form of one buffer↔texture copy for a MockGPU trace.
+/// `name` is the direction's call-type name. Every carried field appears,
+/// including presence as `null` and the flag byte's numeric inputs.
+fn describeTextureBufferCopy(buf: []u8, comptime name: []const u8, p: TextureBufferCopy) []const u8 {
+    const wl = p.write;
+    if (wl.size) |s| {
+        return std.fmt.bufPrint(buf, name ++ "(texture={d}, buffer={d}, offset={d}, bpr={?d}, rpi={?d}, mip={d}, origin=[{d},{d},{d}], aspect={d}, size=[{d},{d},{d}])", .{
+            p.texture_id,            p.buffer_id, wl.offset,   wl.bytes_per_row,        wl.rows_per_image, wl.mip_level,
+            wl.origin.x,             wl.origin.y, wl.origin.z, @intFromEnum(wl.aspect), s.width,           s.height,
+            s.depth_or_array_layers,
+        }) catch "texture_buffer_copy(...)";
+    }
+    return std.fmt.bufPrint(buf, name ++ "(texture={d}, buffer={d}, offset={d}, bpr={?d}, rpi={?d}, mip={d}, origin=[{d},{d},{d}], aspect={d}, size=null)", .{
+        p.texture_id, p.buffer_id, wl.offset,   wl.bytes_per_row,        wl.rows_per_image, wl.mip_level,
+        wl.origin.x,  wl.origin.y, wl.origin.z, @intFromEnum(wl.aspect),
+    }) catch "texture_buffer_copy(...)";
+}
+
+/// The human-readable form of one subresource texture→texture copy for a
+/// MockGPU trace. Every carried field appears: both endpoints, both mips, both
+/// aspects, both origins, the extent, and whether the size was explicit.
+fn describeSubresourceCopy(buf: []u8, p: texture_layout.SubresourceCopy) []const u8 {
+    if (p.size) |s| {
+        return std.fmt.bufPrint(
+            buf,
+            "copy_texture_subresource(src={d}, src_mip={d}, src_origin=[{d},{d},{d}], src_aspect={d}, dst={d}, dst_mip={d}, dst_origin=[{d},{d},{d}], dst_aspect={d}, size=[{d},{d},{d}])",
+            .{
+                p.source.texture_id,           p.source.mip_level,                 p.source.origin.x,       p.source.origin.y,      p.source.origin.z,
+                @intFromEnum(p.source.aspect), p.destination.texture_id,           p.destination.mip_level, p.destination.origin.x, p.destination.origin.y,
+                p.destination.origin.z,        @intFromEnum(p.destination.aspect), s.width,                 s.height,               s.depth_or_array_layers,
+            },
+        ) catch "copy_texture_subresource(...)";
+    }
+    return std.fmt.bufPrint(
+        buf,
+        "copy_texture_subresource(src={d}, src_mip={d}, src_origin=[{d},{d},{d}], src_aspect={d}, dst={d}, dst_mip={d}, dst_origin=[{d},{d},{d}], dst_aspect={d}, size=null)",
+        .{
+            p.source.texture_id,           p.source.mip_level,                 p.source.origin.x,       p.source.origin.y,      p.source.origin.z,
+            @intFromEnum(p.source.aspect), p.destination.texture_id,           p.destination.mip_level, p.destination.origin.x, p.destination.origin.y,
+            p.destination.origin.z,        @intFromEnum(p.destination.aspect),
+        },
+    ) catch "copy_texture_subresource(...)";
+}
+
+/// Append `bytes` at `pos`, refusing rather than overflowing.
+fn appendBytes(buf: []u8, pos: *usize, bytes: []const u8) !void {
+    if (pos.* > buf.len or bytes.len > buf.len - pos.*) return error.NoSpaceLeft;
+    @memcpy(buf[pos.*..][0..bytes.len], bytes);
+    pos.* += bytes.len;
+}
+
+/// Format into `buf` at `pos`, refusing rather than overflowing.
+fn appendFmt(buf: []u8, pos: *usize, comptime fmt: []const u8, args: anytype) !void {
+    const written = std.fmt.bufPrint(buf[pos.*..], fmt, args) catch return error.NoSpaceLeft;
+    pos.* += written.len;
+}
+
+/// The human-readable form of one attachment target: `texture:N`, `view:N`,
+/// `canvas` or `none`. The ONE target-resolution helper both the trace and the
+/// reference tests read — the sentinel order and the high-bit mask live in
+/// `types/opcodes.zig`, not here.
+fn appendAttachmentTarget(buf: []u8, pos: *usize, target: u16) !void {
+    switch (opcodes.decodeAttachmentTarget(target)) {
+        .none => try appendBytes(buf, pos, "none"),
+        .canvas => try appendBytes(buf, pos, "canvas"),
+        .texture => |id| try appendFmt(buf, pos, "texture:{d}", .{id}),
+        .view => |id| try appendFmt(buf, pos, "view:{d}", .{id}),
+    }
+}
+
+/// The 0x81 trace line. Every colour target AND every resolve target names its
+/// own id space, and the depth target is named the same way; a bare count would
+/// hide exactly the substitution this opcode exists to prevent.
+fn describeBeginRenderPassViews(buf: []u8, p: anytype) []const u8 {
+    var pos: usize = 0;
+    const ok = blk: {
+        appendFmt(buf, &pos, "begin_render_pass_views(count={d}, targets=[", .{p.attachment_count}) catch break :blk false;
+        for (0..p.attachment_count) |i| {
+            if (i > 0) appendBytes(buf, &pos, ",") catch break :blk false;
+            appendAttachmentTarget(buf, &pos, p.attachments[i].target) catch break :blk false;
+        }
+        appendBytes(buf, &pos, "], resolves=[") catch break :blk false;
+        for (0..p.attachment_count) |i| {
+            if (i > 0) appendBytes(buf, &pos, ",") catch break :blk false;
+            appendAttachmentTarget(buf, &pos, p.attachments[i].resolve_target) catch break :blk false;
+        }
+        appendBytes(buf, &pos, "], depth=") catch break :blk false;
+        appendAttachmentTarget(buf, &pos, p.depth_target) catch break :blk false;
+        appendBytes(buf, &pos, ")") catch break :blk false;
+        break :blk true;
+    };
+    return if (ok) buf[0..pos] else "begin_render_pass_views(...)";
+}
 
 /// Recorded GPU API call with parameters.
 pub const Call = struct {
@@ -144,6 +254,14 @@ pub const Call = struct {
             attachment_count: u8,
             attachments: [limits.MAX_COLOR_ATTACHMENTS]bytecode_emitter.ColorAttachment,
             depth_texture_id: u16,
+        },
+        /// 0x81's owned record: the repeated colour attachments (target +
+        /// load/store + four clear channels + resolve target) and the depth
+        /// target. Copied by value so the log never aliases the decoder's stack.
+        begin_render_pass_views: struct {
+            attachment_count: u8,
+            attachments: [limits.MAX_COLOR_ATTACHMENTS]bytecode_emitter.ViewColorAttachment,
+            depth_target: u16,
         },
         set_pipeline: struct {
             pipeline_id: u16,
@@ -256,6 +374,19 @@ pub const Call = struct {
             offset: u32,
             data_id: u16,
         },
+        /// A raw texture upload. The write carries the same presence-bearing
+        /// `WriteLayout` the compiler normalized, so a golden can pin an
+        /// omitted stride/size against an authored zero.
+        write_texture: struct {
+            texture_id: u16,
+            data_id: u16,
+            write: texture_layout.WriteLayout,
+        },
+        /// A buffer→texture copy. Every field the 0x2E instruction carries,
+        /// recorded by value so a golden can pin presence, origin and extent.
+        copy_buffer_to_texture: TextureBufferCopy,
+        /// A texture→buffer copy: the same recorded shape, opposite direction.
+        copy_texture_to_buffer: TextureBufferCopy,
         /// The declared controls written by `write_controls`, copied into a
         /// fixed array so the record owns its values (the same reason
         /// begin_render_pass_mrt copies its attachments). `count` says how
@@ -289,6 +420,10 @@ pub const Call = struct {
             src_texture: u16,
             dst_texture: u16,
         },
+        /// Plan 06's subresource copy, recorded by value: both endpoints (id,
+        /// mip, origin, aspect) and the optional authored size. A golden can
+        /// therefore pin presence as well as every field.
+        copy_texture_subresource: texture_layout.SubresourceCopy,
         write_uniform: struct {
             buffer_id: u16,
             uniform_id: u16,
@@ -362,6 +497,7 @@ pub const Call = struct {
                 const p = self.params.begin_render_pass_mrt;
                 break :blk std.fmt.bufPrint(buf, "begin_render_pass_mrt(count={d}, depth={d})", .{ p.attachment_count, p.depth_texture_id }) catch "begin_render_pass_mrt(...)";
             },
+            .begin_render_pass_views => describeBeginRenderPassViews(buf, self.params.begin_render_pass_views),
             .begin_compute_pass => "begin_compute_pass()",
             .set_pipeline => blk: {
                 const p = self.params.set_pipeline;
@@ -449,6 +585,23 @@ pub const Call = struct {
                 const p = self.params.write_buffer;
                 break :blk std.fmt.bufPrint(buf, "write_buffer(id={d}, offset={d}, data={d})", .{ p.buffer_id, p.offset, p.data_id }) catch "write_buffer(...)";
             },
+            .write_texture => blk: {
+                const p = self.params.write_texture;
+                const wl = p.write;
+                if (wl.size) |s| {
+                    break :blk std.fmt.bufPrint(buf, "write_texture(id={d}, data={d}, offset={d}, bpr={?d}, rpi={?d}, mip={d}, origin=[{d},{d},{d}], aspect={d}, size=[{d},{d},{d}])", .{
+                        p.texture_id,            p.data_id,   wl.offset,   wl.bytes_per_row,        wl.rows_per_image, wl.mip_level,
+                        wl.origin.x,             wl.origin.y, wl.origin.z, @intFromEnum(wl.aspect), s.width,           s.height,
+                        s.depth_or_array_layers,
+                    }) catch "write_texture(...)";
+                }
+                break :blk std.fmt.bufPrint(buf, "write_texture(id={d}, data={d}, offset={d}, bpr={?d}, rpi={?d}, mip={d}, origin=[{d},{d},{d}], aspect={d}, size=null)", .{
+                    p.texture_id, p.data_id,   wl.offset,   wl.bytes_per_row,        wl.rows_per_image, wl.mip_level,
+                    wl.origin.x,  wl.origin.y, wl.origin.z, @intFromEnum(wl.aspect),
+                }) catch "write_texture(...)";
+            },
+            .copy_buffer_to_texture => describeTextureBufferCopy(buf, "copy_buffer_to_texture", self.params.copy_buffer_to_texture),
+            .copy_texture_to_buffer => describeTextureBufferCopy(buf, "copy_texture_to_buffer", self.params.copy_texture_to_buffer),
             .write_controls => blk: {
                 const p = self.params.write_controls;
                 break :blk std.fmt.bufPrint(buf, "write_controls(id={d}, offset={d}, count={d})", .{ p.buffer_id, p.offset, p.count }) catch "write_controls(...)";
@@ -462,6 +615,7 @@ pub const Call = struct {
                 const p = self.params.copy_texture_to_texture;
                 break :blk std.fmt.bufPrint(buf, "copy_texture_to_texture(src={d}, dst={d})", .{ p.src_texture, p.dst_texture }) catch "copy_texture_to_texture(...)";
             },
+            .copy_texture_subresource => describeSubresourceCopy(buf, self.params.copy_texture_subresource),
             .write_uniform => blk: {
                 const p = self.params.write_uniform;
                 break :blk std.fmt.bufPrint(buf, "write_uniform(buffer={d}, uniform={d})", .{ p.buffer_id, p.uniform_id }) catch "write_uniform(...)";
@@ -855,6 +1009,38 @@ pub const MockGPU = struct {
         });
     }
 
+    /// 0x81: record the pass's resolved targets. The attachment array is COPIED
+    /// into the call's owned params (the dispatcher's slice is a stack local).
+    /// MockGPU applies no GPU validation, but a structurally impossible call is
+    /// refused rather than recorded as a pass: >8 colour attachments, or zero
+    /// colours with no depth target.
+    pub fn begin_render_pass_views(
+        self: *Self,
+        gpa: Allocator,
+        attachments: []const bytecode_emitter.ViewColorAttachment,
+        depth_target: u16,
+    ) !void {
+        assert(attachments.len <= limits.MAX_COLOR_ATTACHMENTS);
+        assert(attachments.len > 0 or depth_target != opcodes.ATTACHMENT_NONE);
+
+        self.notePassState(!self.in_render_pass and !self.in_compute_pass);
+        self.in_render_pass = true;
+        self.current_pipeline = null;
+
+        var atts: [limits.MAX_COLOR_ATTACHMENTS]bytecode_emitter.ViewColorAttachment = undefined;
+        const count: u8 = @intCast(attachments.len);
+        @memcpy(atts[0..count], attachments);
+
+        try self.record(gpa, .{
+            .call_type = .begin_render_pass_views,
+            .params = .{ .begin_render_pass_views = .{
+                .attachment_count = count,
+                .attachments = atts,
+                .depth_target = depth_target,
+            } },
+        });
+    }
+
     pub fn begin_compute_pass(self: *Self, gpa: Allocator) !void {
         self.notePassState(!self.in_render_pass and !self.in_compute_pass);
 
@@ -1143,6 +1329,46 @@ pub const MockGPU = struct {
         });
     }
 
+    /// Record a raw texture upload. `write` is copied by value, including its
+    /// null-vs-zero presence, so the trace can distinguish an omitted stride or
+    /// size from an authored zero.
+    pub fn write_texture(self: *Self, gpa: Allocator, texture_id: u16, data_id: u16, write: texture_layout.WriteLayout) !void {
+        try self.record(gpa, .{
+            .call_type = .write_texture,
+            .params = .{ .write_texture = .{
+                .texture_id = texture_id,
+                .data_id = data_id,
+                .write = write,
+            } },
+        });
+    }
+
+    /// Record a buffer→texture copy. The CallType is the direction — the
+    /// opcode — and every operand field (including presence) is copied by
+    /// value, because the golden trace must pin all of them.
+    pub fn copy_buffer_to_texture(self: *Self, gpa: Allocator, texture_id: u16, buffer_id: u16, write: texture_layout.WriteLayout) !void {
+        try self.record(gpa, .{
+            .call_type = .copy_buffer_to_texture,
+            .params = .{ .copy_buffer_to_texture = .{
+                .texture_id = texture_id,
+                .buffer_id = buffer_id,
+                .write = write,
+            } },
+        });
+    }
+
+    /// Record a texture→buffer copy, the byte-preserving readback direction.
+    pub fn copy_texture_to_buffer(self: *Self, gpa: Allocator, texture_id: u16, buffer_id: u16, write: texture_layout.WriteLayout) !void {
+        try self.record(gpa, .{
+            .call_type = .copy_texture_to_buffer,
+            .params = .{ .copy_texture_to_buffer = .{
+                .texture_id = texture_id,
+                .buffer_id = buffer_id,
+                .write = write,
+            } },
+        });
+    }
+
     /// Record a controls write (frame program §7.1). The VALUES are copied in
     /// so a test can read them back from the log — including what slot 0
     /// (`time`) would have contributed, which is nothing: the handler slices
@@ -1220,6 +1446,21 @@ pub const MockGPU = struct {
                 .src_texture = src_texture,
                 .dst_texture = dst_texture,
             } },
+        });
+    }
+
+    /// Record a subresource texture→texture copy. The normalized
+    /// `SubresourceCopy` is copied by value, so the golden pins the presence
+    /// of the size as well as every field.
+    pub fn copy_texture_subresource(self: *Self, gpa: Allocator, source_id: u16, destination_id: u16, copy: texture_layout.SubresourceCopy) !void {
+        // The ids are separate arguments because the wire carries them twice
+        // (once as operands, once inside the normalized copy); the reference
+        // proves the decode kept the two in step.
+        std.debug.assert(source_id == copy.source.texture_id);
+        std.debug.assert(destination_id == copy.destination.texture_id);
+        try self.record(gpa, .{
+            .call_type = .copy_texture_subresource,
+            .params = .{ .copy_texture_subresource = copy },
         });
     }
 
@@ -1324,7 +1565,9 @@ pub const MockGPU = struct {
 
     /// Print all recorded calls for debugging.
     pub fn dump_calls(self: *const Self, writer: anytype) !void {
-        var buf: [256]u8 = undefined;
+        // 512, not 256: an 8-attachment 0x81 trace names targets AND resolves,
+        // which can exceed the old size and fall back to a detail-free line.
+        var buf: [512]u8 = undefined;
         try writer.print("MockGPU call log ({d} calls):\n", .{self.calls.items.len});
         for (self.calls.items, 0..) |call, i| {
             const desc = call.describe(&buf);

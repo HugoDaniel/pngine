@@ -1,0 +1,15 @@
+; A same-format 2D subregion copy and an omitted-size copy, both on the plan-06
+; subresource path (PNGB 0x80). The first authors an explicit :size and moves a
+; 3x2 window; the second omits :size, so the copy covers the remaining 8x8
+; source extent at origin [0 0 0] and lands at the destination's [0 4 0].
+; A no-key copy would stay on the legacy 0x23 arm; these cannot.
+(texture :name src :size [8 8] :format rgba8unorm :usage [copy-src])
+(texture :name dst :size [16 16] :format rgba8unorm :usage [copy-dst])
+(queue :name copies
+  (copy-texture-to-texture :size [3 2 1]
+    (source :texture src :origin [1 1 0])
+    (destination :texture dst :origin [2 0 0]))
+  (copy-texture-to-texture
+    (source :texture src :origin [0 0 0])
+    (destination :texture dst :origin [0 4 0])))
+(frame :name main :perform [copies])

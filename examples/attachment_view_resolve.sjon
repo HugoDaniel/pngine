@@ -1,0 +1,39 @@
+; Attachment view — resolve — resolves MSAA into a selected mip.
+;
+; `msaaTex` is a 4x4 four-sample colour target. `resolveView` selects the 4x4
+; level 1 of the 8x8 `resolveTex`, so the resolve target is an explicit view
+; (the second attachment position the union reaches) rather than a base
+; texture. The two render extents match: mip 1 of 8x8 is 4x4, the MSAA target's
+; size. The resolve target's sample count is 1 and its format equals the
+; attachment's, so the pass is legal as well as new.
+
+(shader-module :name code :code """
+    @vertex
+    fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+      var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+      return vec4f(p[i], 0.0, 1.0);
+    }
+
+    @fragment
+    fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.0, 0.0, 1.0); }
+""")
+
+(texture :name msaaTex :size [4 4] :format rgba8unorm
+  :usage [render-attachment] :sample-count 4)
+(texture :name resolveTex :size [8 8] :format rgba8unorm
+  :usage [render-attachment] :mip-level-count 2)
+(texture-view :name resolveView :texture resolveTex
+  :base-mip-level 1 :mip-level-count 1)
+
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (color-target :format rgba8unorm))
+  (multisample :count 4))
+
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view msaaTex :resolve-target resolveView
+    :clear-value [0 0 0 1] :load-op clear :store-op discard)
+  (draw :vertex-count 3))
+
+(frame :name main :perform [draw])

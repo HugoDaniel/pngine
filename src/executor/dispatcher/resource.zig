@@ -40,7 +40,17 @@ pub fn handle(
 
         .create_texture => {
             const p = try wire.readOperands(wire.layoutOf(.create_texture), self);
-            try self.backend.create_texture(gpa, try wire.narrowU16(p.v0), try wire.narrowU16(p.v1));
+            const texture_id = try wire.narrowU16(p.v0);
+            const descriptor_data_id = try wire.narrowU16(p.v1);
+            try self.backend.create_texture(gpa, texture_id, descriptor_data_id);
+            // Retain the descriptor id beside the backend's own state so
+            // `write_texture` can re-validate untrusted/dynamic writes at the
+            // effect boundary. After the create succeeds: a refused create
+            // (native's InvalidResourceId) leaves no metadata to validate.
+            if (@as(usize, texture_id) < self.texture_descriptor_ids.len) {
+                self.texture_descriptor_ids[texture_id] = descriptor_data_id;
+            }
+            self.texture_create_seen = true;
         },
 
         .create_sampler => {

@@ -1,0 +1,7 @@
+; A plain 2D upload: two tightly packed rgba8 rows into a 2x2 texture.
+; The smallest ordinary writeTexture case, with no subresource tricks.
+(data :name texels (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAA=="))
+(texture :name field :size [2 2] :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture field :data texels :bytes-per-row 8 :rows-per-image 2 :size [2 2]))
+(frame :name main :perform [upload])

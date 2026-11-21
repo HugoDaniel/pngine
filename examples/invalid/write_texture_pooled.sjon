@@ -1,0 +1,8 @@
+; INVALID: a static write cannot pick a pool member. D7 refuses the pooled
+; name rather than resolving the base id (which would be a silent arbitrary
+; member); the live host API carries poolIndex instead.
+(data :name texels (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAA=="))
+(texture :name tex :size [2 2] :format rgba8unorm :usage [texture-binding copy-dst] :pool 2)
+(queue :name upload
+  (write-texture :texture tex :data texels :size [2 2] :bytes-per-row 8))
+(frame :name main :perform [upload])

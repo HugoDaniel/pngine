@@ -447,7 +447,9 @@ fn printVerboseTrace(calls: []const Call) void {
     // 70,000-call stream inside the budget panicked `--verbose` in Debug.
     std.debug.assert(calls.len <= MockGPU.CALL_BUDGET);
 
-    var buf: [256]u8 = undefined;
+    // 512: an 8-attachment begin_render_pass_views trace names every target
+    // and every resolve; 256 truncated it to the detail-free fallback.
+    var buf: [512]u8 = undefined;
     for (calls) |call| {
         const desc = call.describe(&buf);
         std.debug.print("[GPU] {s}\n", .{desc});

@@ -1,0 +1,5 @@
+; INVALID: an undeclared :texture name is the schema's cross-ref reject.
+(data :name texels (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAA=="))
+(queue :name upload
+  (write-texture :texture missingTex :data texels :size [2 2] :bytes-per-row 8))
+(frame :name main :perform [upload])

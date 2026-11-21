@@ -1,0 +1,8 @@
+; INVALID: a depth/stencil texel copy must cover the full physical subresource.
+; A 2x2 subregion of a 4x4 depth16unorm texture is a partial-depth-stencil-write
+; even though a colour texture would accept the same subregion.
+(data :name texels (bytes :base64 "AAAAAA=="))
+(texture :name depth :size [4 4] :format depth16unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture depth :data texels :aspect depth-only :size [2 2] :bytes-per-row 8))
+(frame :name main :perform [upload])

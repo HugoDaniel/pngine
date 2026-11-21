@@ -1,0 +1,10 @@
+; A combined depth/stencil format written through its one writable aspect.
+; depth24plus-stencil8 has no texel-copy footprint for depth, but its stencil
+; aspect is a legal destination at one byte per texel; the write is full-mip
+; (origin 0 and the whole 2x2 physical extent), which WebGPU requires.
+(data :name stencilTexels (bytes :base64 "AAAAAA=="))
+(texture :name combo :size [2 2] :format depth24plus-stencil8 :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture combo :data stencilTexels :aspect stencil-only
+    :bytes-per-row 2 :rows-per-image 2 :size [2 2]))
+(frame :name main :perform [upload])

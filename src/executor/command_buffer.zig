@@ -33,6 +33,7 @@ const bytecode_mod = @import("bytecode");
 const format = bytecode_mod.format;
 const Module = format.Module;
 const bytecode_emitter_types = bytecode_mod.emitter.Emitter;
+const texture_layout = bytecode_mod.texture_layout;
 
 /// Command opcodes for JS dispatcher.
 /// Grouped by category, matching the plan's command set.
@@ -88,6 +89,11 @@ pub const Cmd = enum(u8) {
     // (spec/09 step D)
     begin_render_pass_f32 = 0x53,
     begin_render_pass_mrt_f32 = 0x54,
+    // First free slot after the full-precision begin-pass pair. PNGB 0x81's
+    // execution record: one tagged target, load/store, four f32 clears and a
+    // resolve target per colour attachment, then the depth target. Additive —
+    // the ABI version stays 1.
+    begin_render_pass_views = 0x55,
 
     // Queue Operations (0x20-0x2F)
     write_buffer = 0x20,
@@ -98,6 +104,10 @@ pub const Cmd = enum(u8) {
     copy_external_image_to_texture = 0x25,
     write_pointer_uniform = 0x26,
     resolve_query_set = 0x27,
+    write_texture = 0x28,
+    copy_buffer_to_texture = 0x29,
+    copy_texture_to_buffer = 0x2A,
+    copy_texture_subresource = 0x2B,
 
     // WASM Module Operations (0x30-0x3F)
     init_wasm_module = 0x30,
@@ -326,10 +336,7 @@ pub const CommandBuffer = struct {
         self.writeU8(load_op);
         self.writeU8(store_op);
         self.writeU16(depth_id);
-        self.writeU32(clear_r_bits);
-        self.writeU32(clear_g_bits);
-        self.writeU32(clear_b_bits);
-        self.writeU32(clear_a_bits);
+        self.writeClearBits(clear_r_bits, clear_g_bits, clear_b_bits, clear_a_bits);
         self.writeU16(resolve_id);
     }
 
@@ -339,15 +346,57 @@ pub const CommandBuffer = struct {
         self.writeCmd(.begin_render_pass_mrt_f32);
         self.writeU8(@intCast(attachments.len));
         for (attachments) |att| {
-            self.writeU16(att.texture_id);
-            self.writeU8(@intFromEnum(att.load_op));
-            self.writeU8(@intFromEnum(att.store_op));
-            self.writeU32(att.clear_r_bits);
-            self.writeU32(att.clear_g_bits);
-            self.writeU32(att.clear_b_bits);
-            self.writeU32(att.clear_a_bits);
+            self.writeAttachmentHead(att.texture_id, @intFromEnum(att.load_op), @intFromEnum(att.store_op), att.clear_r_bits, att.clear_g_bits, att.clear_b_bits, att.clear_a_bits);
         }
         self.writeU16(depth_id);
+    }
+
+    /// The 18-byte body every full-precision colour attachment shares: load,
+    /// store, then four raw f32 clear channels. 0x54 and 0x55 write it at
+    /// different field offsets but with the same bytes; keeping one writer is
+    /// the diet plan 09 slice 2 asks for, measured rather than assumed.
+    fn writeAttachmentBody(self: *Self, load_op: u8, store_op: u8, clear_r_bits: u32, clear_g_bits: u32, clear_b_bits: u32, clear_a_bits: u32) void {
+        self.writeU8(load_op);
+        self.writeU8(store_op);
+        self.writeClearBits(clear_r_bits, clear_g_bits, clear_b_bits, clear_a_bits);
+    }
+
+    /// One attachment head: id/target then the shared body. 0x54 appends the
+    /// depth id after the loop; 0x55 appends each resolve target.
+    fn writeAttachmentHead(self: *Self, target: u16, load_op: u8, store_op: u8, clear_r_bits: u32, clear_g_bits: u32, clear_b_bits: u32, clear_a_bits: u32) void {
+        self.writeU16(target);
+        self.writeAttachmentBody(load_op, store_op, clear_r_bits, clear_g_bits, clear_b_bits, clear_a_bits);
+    }
+
+    /// The four raw f32 clear channels. One writer for the three
+    /// full-precision begin-pass records; the diff is measured in build.zig.
+    fn writeClearBits(self: *Self, r: u32, g: u32, b: u32, a: u32) void {
+        self.writeU32(r);
+        self.writeU32(g);
+        self.writeU32(b);
+        self.writeU32(a);
+    }
+
+    /// BEGIN_RENDER_PASS_VIEWS: [color_count:u8] [att0: target:u16 load:u8
+    /// store:u8 r:f32 g:f32 b:f32 a:f32 resolve_target:u16] ... [depth_target:u16]
+    ///
+    /// Exactly 3 + 22n operand bytes. `target`, `resolve_target` and
+    /// `depth_target` carry the shared attachment-target encoding
+    /// (`types/opcodes.zig`): a high-bit-tagged explicit view id, an untagged
+    /// texture id, canvas (0xFFFE), or none (0xFFFF) where the field is
+    /// optional. The tag is interpreted by this command alone; 0x10/0x1B/0x53/
+    /// 0x54 keep their raw texture-id fields.
+    pub fn beginRenderPassViews(self: *Self, attachments: []const bytecode_emitter_types.ViewColorAttachment, depth_target: u16) void {
+        // 8 is the wire record's repeat cap (`wire_schema.repMaxOf`), not a
+        // local clamp: the executor already walked at most eight attachments.
+        assert(attachments.len <= 8);
+        self.writeCmd(.begin_render_pass_views);
+        self.writeU8(@intCast(attachments.len));
+        for (attachments) |att| {
+            self.writeAttachmentHead(att.target, @intFromEnum(att.load_op), @intFromEnum(att.store_op), att.clear_r_bits, att.clear_g_bits, att.clear_b_bits, att.clear_a_bits);
+            self.writeU16(att.resolve_target);
+        }
+        self.writeU16(depth_target);
     }
 
     /// BEGIN_RENDER_PASS: [color_id:u16] [load:u8] [store:u8] [depth_id:u16] [r:u8] [g:u8] [b:u8] [a:u8] [resolve_id:u16]
@@ -581,6 +630,57 @@ pub const CommandBuffer = struct {
         self.writeU32(data_len);
     }
 
+    /// The three presence bits shared by `write_texture` and both copy
+    /// commands. Bit 0 bytes_per_row, bit 1 rows_per_image, bit 2 size; an
+    /// authored zero carries the bit, an omitted member does not.
+    fn textureLayoutFlags(write: texture_layout.WriteLayout) u8 {
+        return (if (write.bytes_per_row != null) @as(u8, 1 << 0) else 0) |
+            (if (write.rows_per_image != null) @as(u8, 1 << 1) else 0) |
+            (if (write.size != null) @as(u8, 1 << 2) else 0);
+    }
+
+    /// WRITE_TEXTURE: [id:u16][data_ptr:u32][data_len:u32][offset:u32][bytes_per_row:u32][rows_per_image:u32][mip_level:u32][origin_x:u32][origin_y:u32][origin_z:u32][aspect:u8][size_width:u32][size_height:u32][size_depth:u32][flags:u8]
+    ///
+    /// Exactly 52 operand bytes. `data_len` is the FULL data-entry length;
+    /// `offset` stays relative to its first byte. The three presence bits in
+    /// `flags` (bit 0 bytes_per_row, bit 1 rows_per_image, bit 2 size) are the
+    /// only record of an absent optional — an authored zero carries the bit.
+    pub fn writeTexture(self: *Self, id: u16, data_ptr: u32, data_len: u32, write: texture_layout.WriteLayout) void {
+        self.writeCmd(.write_texture);
+        self.writeU16(id);
+        self.writeU32(data_ptr);
+        self.writeU32(data_len);
+        self.writeTextureLayout(write);
+    }
+
+    /// The 42-byte tail shared by `write_texture` and both copy commands:
+    /// offset, strides, mip, origin, aspect, size and the presence flags.
+    fn writeTextureLayout(self: *Self, write: texture_layout.WriteLayout) void {
+        self.writeU32(write.offset);
+        self.writeU32(write.bytes_per_row orelse 0);
+        self.writeU32(write.rows_per_image orelse 0);
+        self.writeU32(write.mip_level);
+        self.writeU32(write.origin.x);
+        self.writeU32(write.origin.y);
+        self.writeU32(write.origin.z);
+        self.writeU8(@intFromEnum(write.aspect));
+        const size = write.size orelse texture_layout.Extent{ .width = 0, .height = 0, .depth_or_array_layers = 0 };
+        self.writeU32(size.width);
+        self.writeU32(size.height);
+        self.writeU32(size.depth_or_array_layers);
+        self.writeU8(textureLayoutFlags(write));
+    }
+
+    /// The one 46-byte operand body both copy directions write. Kept separate
+    /// (rather than copied into each public writer) so the executor pays for
+    /// the record once; the opcode is the only direction carrier.
+    pub fn copyTextureBuffer(self: *Self, cmd: Cmd, texture_id: u16, buffer_id: u16, write: texture_layout.WriteLayout) void {
+        self.writeCmd(cmd);
+        self.writeU16(texture_id);
+        self.writeU16(buffer_id);
+        self.writeTextureLayout(write);
+    }
+
     /// WRITE_TIME_UNIFORM: [id:u16] [offset:u32] [size:u16]
     pub fn writeTimeUniform(self: *Self, id: u16, offset: u32, size: u16) void {
         self.writeCmd(.write_time_uniform);
@@ -683,6 +783,34 @@ pub const CommandBuffer = struct {
         self.writeU16(dst_id);
         self.writeU16(width);
         self.writeU16(height);
+    }
+
+    /// COPY_TEXTURE_SUBRESOURCE: [src_id:u16][dst_id:u16] [src_mip:u32][src_origin_x:u32][src_origin_y:u32][src_origin_z:u32][src_aspect:u8] [dst_mip:u32][dst_origin_x:u32][dst_origin_y:u32][dst_origin_z:u32][dst_aspect:u8] [size_width:u32][size_height:u32][size_depth:u32] [flags:u8]
+    ///
+    /// Exactly 51 operand bytes. Both endpoints are fully explicit; `flags`
+    /// bit 0 records whether a size was authored (an absent size writes three
+    /// zero fields with the bit clear, which the players resolve to the
+    /// remaining physical source extent). No WASM pointer appears: both sides
+    /// are GPUTextures the runtime already holds.
+    pub fn copyTextureSubresource(self: *Self, source_id: u16, destination_id: u16, copy: texture_layout.SubresourceCopy) void {
+        self.writeCmd(.copy_texture_subresource);
+        self.writeU16(source_id);
+        self.writeU16(destination_id);
+        self.writeU32(copy.source.mip_level);
+        self.writeU32(copy.source.origin.x);
+        self.writeU32(copy.source.origin.y);
+        self.writeU32(copy.source.origin.z);
+        self.writeU8(@intFromEnum(copy.source.aspect));
+        self.writeU32(copy.destination.mip_level);
+        self.writeU32(copy.destination.origin.x);
+        self.writeU32(copy.destination.origin.y);
+        self.writeU32(copy.destination.origin.z);
+        self.writeU8(@intFromEnum(copy.destination.aspect));
+        const size = copy.size orelse texture_layout.Extent{ .width = 0, .height = 0, .depth_or_array_layers = 0 };
+        self.writeU32(size.width);
+        self.writeU32(size.height);
+        self.writeU32(size.depth_or_array_layers);
+        self.writeU8(if (copy.size != null) 1 else 0);
     }
 
     /// WRITE_BUFFER_FROM_WASM: [buffer_id:u16] [buffer_offset:u32] [wasm_ptr:u32] [size:u32]

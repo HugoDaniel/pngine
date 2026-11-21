@@ -1,0 +1,7 @@
+; INVALID: a copy extent element is a u32; a string never matches the
+; copy-extent vector element and is refused by the schema.
+(data :name texels (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAA=="))
+(texture :name tex :size [2 2] :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture tex :data texels :size ["wide"] :bytes-per-row 8))
+(frame :name main :perform [upload])

@@ -1,0 +1,7 @@
+; A volume write: a 2x2x3 3D texture filled from three depth slices, two
+; tightly packed rgba8 rows each.
+(data :name volumeTexels (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"))
+(texture :name volume :size [2 2 3] :dimension 3d :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture volume :data volumeTexels :bytes-per-row 8 :rows-per-image 2 :size [2 2 3]))
+(frame :name main :perform [upload])

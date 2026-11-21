@@ -1,0 +1,10 @@
+; INVALID: a copy extent past the texture's physical mip extent. The 2x2
+; texture has room for [2 2 1]; [3 2 1] at origin 0 is extent-out-of-bounds,
+; judged by plan 01's copy-range rule before any linear span arithmetic.
+(buffer :name staging :size 264 :usage [copy-src])
+(texture :name target :size [2 2] :format rgba8unorm :usage [copy-dst])
+(queue :name copies
+  (copy-buffer-to-texture :size [3 2 1]
+    (source :buffer staging :offset 0 :bytes-per-row 256 :rows-per-image 2)
+    (destination :texture target)))
+(frame :name main :perform [copies])

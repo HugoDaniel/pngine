@@ -434,7 +434,7 @@
   (value-kind :name control-ref
     :description "Reference to a declared (control :name …)."
     :underlying symbol
-    :cross-ref (cross-ref :target [control]))
+    :cross-ref (cross-ref :target [pngine/control]))
   (value-kind :name control-source
     :description "The subject of a guard: the builtin control time, or a name declared by (control …)."
     :underlying union
@@ -671,7 +671,8 @@
       (member :name rg16float :description "2×16-bit float; renderable, filterable.")
       (member :name r32float :description "1×32-bit float; renderable; filterable only with the float32-filterable feature.")
       (member :name r32uint :description "1×32-bit unsigned int; not filterable.")
-      ; ---- base (no-feature) color / srgb / packed; compressed (BC/ETC2/EAC/ASTC) are deferred (need an upload path) ----
+      ; ---- base (no-feature) color / srgb / packed; all three compressed
+      ; families (BC, ETC2/EAC and ASTC) are exposed by plan 07 ----
       (member :name rgba8unorm-srgb :description "4×8-bit unorm, sRGB-encoded; renderable, filterable, blendable.")
       (member :name rgba8uint :description "4×8-bit unsigned int; renderable, not filterable.")
       (member :name rgba8sint :description "4×8-bit signed int; renderable, not filterable.")
@@ -706,6 +707,69 @@
       (member :name rgba16unorm :description "4×16-bit unorm; needs texture-formats-tier1. Renderable + blendable when enabled.")
       (member :name rgba16snorm :description "4×16-bit signed norm; needs texture-formats-tier1. Renderable + blendable when enabled.")
       (member :name depth32float-stencil8 :description "32-bit float depth plus 8-bit stencil; needs the depth32float-stencil8 device feature.")
+      ; ---- BC compressed (plan 07): 4×4 texel blocks, 8 or 16 bytes per
+      ; block, copy-only. Creation needs texture-compression-bc; 3D additionally
+      ; needs texture-compression-bc-sliced-3d. Descriptor width/height and copy
+      ; origin/extent are whole blocks. ----
+      (member :name bc1-rgba-unorm :description "BC1 4×4 RGB(A) unorm; 8 bytes per block. Needs texture-compression-bc.")
+      (member :name bc1-rgba-unorm-srgb :description "BC1 4×4 RGB(A), sRGB-encoded; 8 bytes per block. Needs texture-compression-bc.")
+      (member :name bc2-rgba-unorm :description "BC2 4×4 RGB(A) with explicit alpha; 16 bytes per block. Needs texture-compression-bc.")
+      (member :name bc2-rgba-unorm-srgb :description "BC2 4×4 RGB(A) with explicit alpha, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc.")
+      (member :name bc3-rgba-unorm :description "BC3 4×4 interpolated alpha; 16 bytes per block. Needs texture-compression-bc.")
+      (member :name bc3-rgba-unorm-srgb :description "BC3 4×4 interpolated alpha, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc.")
+      (member :name bc4-r-unorm :description "BC4 single-channel 4×4 unorm; 8 bytes per block. Needs texture-compression-bc.")
+      (member :name bc4-r-snorm :description "BC4 single-channel 4×4 snorm; 8 bytes per block. Needs texture-compression-bc.")
+      (member :name bc5-rg-unorm :description "BC5 two-channel 4×4 unorm; 16 bytes per block. Needs texture-compression-bc.")
+      (member :name bc5-rg-snorm :description "BC5 two-channel 4×4 snorm; 16 bytes per block. Needs texture-compression-bc.")
+      (member :name bc6h-rgb-ufloat :description "BC6H unsigned HDR RGB 4×4; 16 bytes per block. Needs texture-compression-bc.")
+      (member :name bc6h-rgb-float :description "BC6H signed HDR RGB 4×4; 16 bytes per block. Needs texture-compression-bc.")
+      (member :name bc7-rgba-unorm :description "BC7 high-quality RGBA 4×4 unorm; 16 bytes per block. Needs texture-compression-bc.")
+      (member :name bc7-rgba-unorm-srgb :description "BC7 high-quality RGBA 4×4, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc.")
+      ; ---- ETC2/EAC compressed (plan 07 tranche B): 4×4 texel blocks, 8 or
+      ; 16 bytes per block, copy-only. Creation needs texture-compression-etc2;
+      ; the CRD has no ETC2/EAC sliced-3d feature, so 3D is refused. ----
+      (member :name etc2-rgb8unorm :description "ETC2 RGB 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2.")
+      (member :name etc2-rgb8unorm-srgb :description "ETC2 RGB 4×4, sRGB-encoded; 8 bytes per block. Needs texture-compression-etc2.")
+      (member :name etc2-rgb8a1unorm :description "ETC2 RGB with 1-bit alpha, 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2.")
+      (member :name etc2-rgb8a1unorm-srgb :description "ETC2 RGB with 1-bit alpha, 4×4, sRGB-encoded; 8 bytes per block. Needs texture-compression-etc2.")
+      (member :name etc2-rgba8unorm :description "ETC2 RGBA 4×4 unorm; 16 bytes per block. Needs texture-compression-etc2.")
+      (member :name etc2-rgba8unorm-srgb :description "ETC2 RGBA 4×4, sRGB-encoded; 16 bytes per block. Needs texture-compression-etc2.")
+      (member :name eac-r11unorm :description "EAC single-channel 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2.")
+      (member :name eac-r11snorm :description "EAC single-channel 4×4 snorm; 8 bytes per block. Needs texture-compression-etc2.")
+      (member :name eac-rg11unorm :description "EAC two-channel 4×4 unorm; 16 bytes per block. Needs texture-compression-etc2.")
+      (member :name eac-rg11snorm :description "EAC two-channel 4×4 snorm; 16 bytes per block. Needs texture-compression-etc2.")
+      ; ---- ASTC compressed (plan 07 tranche C): the block dimensions are the
+      ; ones in the name (4×4 through 12×12), the block is always 16 bytes,
+      ; copy-only. Creation needs texture-compression-astc; 3D additionally
+      ; needs texture-compression-astc-sliced-3d. ----
+      (member :name astc-4x4-unorm :description "ASTC 4×4 RGBA unorm; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-4x4-unorm-srgb :description "ASTC 4×4 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-5x4-unorm :description "ASTC 5×4 RGBA unorm; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-5x4-unorm-srgb :description "ASTC 5×4 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-5x5-unorm :description "ASTC 5×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-5x5-unorm-srgb :description "ASTC 5×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-6x5-unorm :description "ASTC 6×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-6x5-unorm-srgb :description "ASTC 6×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-6x6-unorm :description "ASTC 6×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-6x6-unorm-srgb :description "ASTC 6×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-8x5-unorm :description "ASTC 8×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-8x5-unorm-srgb :description "ASTC 8×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-8x6-unorm :description "ASTC 8×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-8x6-unorm-srgb :description "ASTC 8×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-8x8-unorm :description "ASTC 8×8 RGBA unorm; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-8x8-unorm-srgb :description "ASTC 8×8 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-10x5-unorm :description "ASTC 10×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-10x5-unorm-srgb :description "ASTC 10×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-10x6-unorm :description "ASTC 10×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-10x6-unorm-srgb :description "ASTC 10×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-10x8-unorm :description "ASTC 10×8 RGBA unorm; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-10x8-unorm-srgb :description "ASTC 10×8 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-10x10-unorm :description "ASTC 10×10 RGBA unorm; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-10x10-unorm-srgb :description "ASTC 10×10 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-12x10-unorm :description "ASTC 12×10 RGBA unorm; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-12x10-unorm-srgb :description "ASTC 12×10 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-12x12-unorm :description "ASTC 12×12 RGBA unorm; 16 bytes per block. Needs texture-compression-astc.")
+      (member :name astc-12x12-unorm-srgb :description "ASTC 12×12 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc.")
       (member :name preferred-canvas-format :description "Resolved at runtime to the platform's canvas format. Runtime-provided; there is no authored document declaration to navigate to.")))
   (value-kind :name texture-usage
     :description "GPUTextureUsage flag — what the texture may be used for."
@@ -743,6 +807,19 @@
     :description "Texture size as [width], [width height], or [width height depth-or-array-layers]; the missing dimensions default to 1."
     :underlying vector
     :vector (vector-shape :element extent :min-len 1 :max-len 3))
+  ; GPUExtent3D as a COPY extent (writeTexture's `size` argument): [w], [w h]
+  ; or [w h d]. Same element type and length as extent3, deliberately its own
+  ; kind: an allocation dimension is `extent` (>= 1), while a copy dimension
+  ; can also be a bounded expression / define-ref through `u32`; and a copy
+  ; size is judged against the mip's physical extent by plan 01, not by a
+  ; texture's allocation rule. Its absent dimensions mean height/depth = 1
+  ; ONLY when the key is present. An absent KEY is a different thing: the
+  ; remaining physical extent at the origin, a recorded PNGine deviation from
+  ; the IDL's required `size` argument (see the write-texture form).
+  (value-kind :name copy-extent
+    :description "Copy size [width], [width height], or [width height depth-or-array-layers] (1–3 non-negative u32s). Absent dimensions default to 1 only when the key is present; an omitted :size means the remaining physical extent at the destination origin."
+    :underlying vector
+    :vector (vector-shape :element u32 :min-len 1 :max-len 3))
   ; GPUTextureDescriptor.size is ONE required member, so it is one required key
   ; over the three things a pngine texture may be sized by. Three
   ; different underlyings — vector, symbol member, cross-ref — so the union
@@ -851,11 +928,29 @@
     (head :name stencil-back :max 1)))
 
   ; ---- Phase 2d: MRT / MSAA / advanced render state ----
-  ; A render-pass attachment view: the canvas (context-current-texture) or a
-  ; declared (texture …) — e.g. an MSAA color target, or a resolve target.
+  ; A render-pass attachment view: the canvas (context-current-texture), a
+  ; declared (texture …), or a declared (texture-view …) selecting one mip and
+  ; one array layer. The union is the authoring surface of plan 09: a bare
+  ; texture still means the texture's default view (legacy bytes unchanged),
+  ; an explicit view names exactly the subresource the pass renders into.
+  ;
+  ; Two cross-ref arms first-match is safe here for the reason the one-namespace
+  ; rule exists: `checkNameNamespace` refuses a name declared by two forms, so
+  ; a symbol cannot be both a texture and a texture-view in one document. The
+  ; emitter resolves through its separate id tables and the union only has to
+  ; admit the spellings; should a collision ever survive schema validation, it
+  ; is refused before any phase, never silently resolved one way here and the
+  ; other downstream.
   (value-kind :name attachment-view
     :underlying union
-    :union (union-shape :alternatives [view-source texture-ref]))
+    :union (union-shape :alternatives [view-source texture-ref texture-view-ref]))
+  ; The DEPTH authoring form's own union: texture or texture-view, never the
+  ; canvas. A depth attachment has no canvas spelling (the runtime's depth view
+  ; is the document's to declare), and the plan refuses it deliberately; the
+  ; colour/resolve `attachment-view` union keeps its view-source arm.
+  (value-kind :name depth-attachment-view
+    :underlying union
+    :union (union-shape :alternatives [texture-ref texture-view-ref]))
   (value-kind :name blend-factor
     :description "GPUBlendFactor — multiplier applied to source / destination color in the blend equation."
     :underlying symbol
@@ -1094,14 +1189,15 @@
   ; `duplicate_cross_ref_target` at the declaration, so a step can never be
   ; ambiguous. A named graph is in the list because the frame names it in the
   ; AUTHORED aggregate, where it is a `(pass-graph …)` / `(draw-graph …)` and
-  ; not yet the `(step-group …)` its hook emits; a `(select …)` joins for the
-  ; same reason (2089e59's fix, applied to the fourth member).
+  ; not yet the `(step-group …)` its hook emits; a `(select …)` and a
+  ; `(mip-chain …)` join for the same reason (2089e59's fix, applied to the
+  ; fourth and fifth members).
   ; (It used to be a union tried in order, while the emitter kept
   ; one table for both pass kinds — a collision silently dropped the render pass.)
   (value-kind :name frame-step
-    :description "One frame step: a render-pass, compute-pass or queue name, a named pass-graph/draw-graph (a step group), a step-group name, or a select name (one namespace across the forms)."
+    :description "One frame step: a render-pass, compute-pass or queue name, a named pass-graph/draw-graph/mip-chain (a step group), a step-group name, or a select name (one namespace across the forms)."
     :underlying symbol
-    :cross-ref (cross-ref :target [render-pass compute-pass queue step-group pass-graph draw-graph select]))
+    :cross-ref (cross-ref :target [render-pass compute-pass queue step-group pass-graph draw-graph select mip-chain]))
   (value-kind :name frame-step-list
     :description "Passes and queues run every frame, in order."
     :underlying vector :vector (vector-shape :element frame-step :max-len 2048))
@@ -1298,11 +1394,12 @@
   (value-kind :name in-stage-section :underlying form :heads (head-set
     (head :name constant)))
   (value-kind :name bind-entry-item :underlying form :heads (head-set :names [entry]))
-  (value-kind :name queue-action :underlying form :heads (head-set :names [write-buffer copy-texture-to-texture copy-external-image-to-texture resolve-query-set copy-buffer-to-buffer]))
-  ; Both texture copies take exactly one endpoint of each kind. The heads
-  ; are shared but the FORMS are not — each copy declares its own slot-local
+  (value-kind :name queue-action :underlying form :heads (head-set :names [write-buffer write-texture copy-buffer-to-texture copy-texture-to-buffer copy-texture-to-texture copy-external-image-to-texture resolve-query-set copy-buffer-to-buffer]))
+  ; Every copy takes exactly one endpoint of each kind. The heads are shared
+  ; but the FORMS are not — each copy declares its own slot-local
   ; `source`/`destination`, resolved local-first, so `(source :image …)` under
-  ; one is not `(source :texture …)` under the other.
+  ; one is not `(source :texture …)` under the other, and a buffer endpoint's
+  ; members are not a texture endpoint's.
   (value-kind :name copy-endpoints-section :underlying form :heads (head-set
     (head :name source :min 1 :max 1)
     (head :name destination :min 1 :max 1)))
@@ -1679,9 +1776,10 @@
       :description "Number of queries in the set, 1 to 4096 (the createQuerySet bound)."))
 
   (form :name queue
-    :description "Queue actions (write-buffer, copy-buffer-to-buffer, copy-texture-to-texture,
-                  copy-external-image-to-texture, resolve-query-set) run in order by the
-                  frames that reference it."
+    :description "Queue actions (write-buffer, write-texture, copy-buffer-to-texture,
+                  copy-texture-to-buffer, copy-buffer-to-buffer, copy-texture-to-texture,
+                  copy-external-image-to-texture, resolve-query-set)
+                  run in order by the frames that reference it."
     :positional queue-action
     (key :name name :type symbol))
 
@@ -1698,31 +1796,150 @@
     (key :name data :type write-buffer-source
       :description "Source: a (data …) ref, a (wasm-call …) whose result is written each frame, or a runtime builtin — pngine-inputs (16B time/width/height/aspect), scene-time-inputs (12B), pngine-frame-inputs (20B, + frameIndex), pointer-inputs (48B), control-inputs (4B per declared (control …) in declaration order)."))
 
+  ; The flat form of GPUQueue.writeTexture. Nine keys mirror the two texel-copy
+  ; dictionaries plus the method's own `data` and `size` arguments:
+  ; GPUTexelCopyTextureInfo (texture, mipLevel, origin, aspect) and
+  ; GPUTexelCopyBufferLayout (offset, bytesPerRow, rowsPerImage). PNGine spells
+  ; every one as a :key, so the mapping table's only sentinels are `data` and
+  ; `size`, the two arguments that are NOT members of either dictionary.
+  ;
+  ; Presence is the wire's: `:bytes-per-row` and `:rows-per-image` are optional
+  ; because the IDL gives those members NO default, and their absence survives
+  ; into the PNGB presence flags (explicit zero is not omission). `:origin`
+  ; carries no `:default` token because origin3 is a vector; each component
+  ; defaults to 0, which is what the IDL's `{}` means.
+  ;
+  ; `:size` is the ONE recorded deviation: the IDL REQUIRES the size argument,
+  ; but an omitted `:size` here means the remaining physical extent at the
+  ; origin (plan 01's calculateWrite), so an author can update a subregion
+  ; without restating the texture size. An explicit `:size` keeps its absent
+  ; dimensions at height/depth 1 only because the key is present.
+  (form :name write-texture
+    :description "Queue op: upload raw texels into a texture (GPUQueue.writeTexture). :texture and :data are required; :offset, :origin, :mip-level and :aspect carry WebGPU's defaults. An omitted :size means the remaining physical extent at :origin — a recorded PNGine deviation from the IDL's required size argument. Omitted :bytes-per-row / :rows-per-image stay absent on the wire; explicit zero is not omission."
+    (key :name texture :type texture-ref
+      :description "Destination texture (needs copy-dst usage, one sample, and a non-pooled id).")
+    (key :name data :type data-ref
+      :description "Raw source bytes: a (data …) entry with a byte length. Image-MIME-wrapped data is refused; the bytes are never base64 on the wire.")
+    (key :name offset :type byte-count :default 0
+      :description "Byte offset into :data (GPUTexelCopyBufferLayout.offset, default 0). Unaligned values are legal: writeTexture has no 256-byte rule.")
+    (key :name bytes-per-row :type byte-count :optional true
+      :description "GPUTexelCopyBufferLayout.bytesPerRow — bytes per texel-block row. Optional because the IDL gives it no default; absent stays absent (explicit 0 is not omission).")
+    (key :name rows-per-image :type byte-count :optional true
+      :description "GPUTexelCopyBufferLayout.rowsPerImage — rows per texel image (array layer / depth slice). Optional because the IDL gives it no default; absent stays absent (explicit 0 is not omission).")
+    (key :name origin :type origin3 :optional true
+      :description "Destination origin [x y z] in texels (GPUTexelCopyTextureInfo.origin, IDL default {} = all zero); components default to 0. z selects the array layer or depth slice.")
+    (key :name mip-level :type subresource-index :default 0
+      :description "Destination mip level (GPUTexelCopyTextureInfo.mipLevel, default 0); a u32 varint, no u8 ceiling.")
+    (key :name aspect :type texture-aspect :default all
+      :description "Destination aspect (GPUTexelCopyTextureInfo.aspect, default all). Depth/stencil formats require a single aspect and a full-subresource write.")
+    (key :name size :type copy-extent :optional true
+      :description "GPUExtent3D size to write (1–3 u32s). Optional only through the recorded deviation: absent means the remaining physical extent at :origin, whereas the IDL requires the size argument. Present, absent dimensions default to 1."))
+
+  ; Buffer↔texture copies reuse plan 01's descriptor/layout model with an
+  ; explicit aligned-buffer policy (plan 05, D16). Both endpoints are separate
+  ; IDL dictionaries, so both are slot-local child forms: the buffer side is
+  ; GPUTexelCopyBufferInfo (its `buffer` plus the inherited
+  ; GPUTexelCopyBufferLayout members) and the texture side is
+  ; GPUTexelCopyTextureInfo. `:size` is each method's own `copySize` argument,
+  ; not a member of either dictionary.
+  ;
+  ; Compared with writeTexture, the buffer copy adds exactly two rules, both
+  ; only when the texture endpoint is present: a supplied `:bytes-per-row` is a
+  ; multiple of 256, and `:offset` is a multiple of the texel block copy
+  ; footprint — except a depth-stencil texture endpoint (source or
+  ; destination) uses 4. `writeTexture` has neither rule.
+  (form :name copy-buffer-to-texture
+    :description "Queue op: copy from a buffer into a texture subresource (GPUCommandEncoder.copyBufferToTexture). The source is a GPUTexelCopyBufferInfo and the destination a GPUTexelCopyTextureInfo; :size is the method's copySize. A supplied source :bytes-per-row must be a multiple of 256, and :offset a multiple of the texel block copy footprint (4 for a depth-stencil destination)."
+    :positional copy-endpoints-section
+    (key :name size :type copy-extent :optional true
+      :description "GPUCommandEncoder.copyBufferToTexture's copySize (1–3 u32s). Optional only through the recorded deviation: absent means the remaining physical extent at the destination origin.")
+    (form :name source
+      :description "Buffer source (GPUTexelCopyBufferInfo with its GPUTexelCopyBufferLayout)."
+      (key :name buffer :type buffer-ref
+        :description "Source buffer name; needs copy-src usage.")
+      (key :name offset :type byte-count :default 0
+        :description "Byte offset into the source buffer (GPUTexelCopyBufferLayout.offset, default 0). Must be a multiple of the texel block copy footprint, or 4 for a depth-stencil endpoint.")
+      (key :name bytes-per-row :type byte-count :optional true
+        :description "GPUTexelCopyBufferLayout.bytesPerRow — bytes between texel-block rows. Optional in the IDL (no default); a supplied value must be a multiple of 256, and WebGPU requires it when the copy spans more than one block row or image.")
+      (key :name rows-per-image :type byte-count :optional true
+        :description "GPUTexelCopyBufferLayout.rowsPerImage — rows per texel image. Optional in the IDL (no default); WebGPU requires it when the copy spans more than one image."))
+    (form :name destination
+      :description "Texture destination (GPUTexelCopyTextureInfo)."
+      (key :name texture :type texture-ref
+        :description "Destination texture name; needs copy-dst usage, one sample, and a non-pooled id.")
+      (key :name mip-level :type subresource-index :default 0
+        :description "Destination mip level (GPUTexelCopyTextureInfo.mipLevel, default 0).")
+      (key :name origin :type origin3 :optional true
+        :description "Destination origin [x y z] in texels (GPUTexelCopyTextureInfo.origin, IDL default {} = all zero); z selects the array layer or depth slice.")
+      (key :name aspect :type texture-aspect :default all
+        :description "Destination aspect (GPUTexelCopyTextureInfo.aspect, default all). Depth/stencil formats require a single aspect and a full-subresource copy.")))
+
+  (form :name copy-texture-to-buffer
+    :description "Queue op: copy a texture subresource into a buffer (GPUCommandEncoder.copyTextureToBuffer), the byte-preserving readback path. The source is a GPUTexelCopyTextureInfo and the destination a GPUTexelCopyBufferInfo; :size is the method's copySize. A supplied destination :bytes-per-row must be a multiple of 256, and :offset a multiple of the texel block copy footprint (4 for a depth-stencil source)."
+    :positional copy-endpoints-section
+    (key :name size :type copy-extent :optional true
+      :description "GPUCommandEncoder.copyTextureToBuffer's copySize (1–3 u32s). Optional only through the recorded deviation: absent means the remaining physical extent at the source origin.")
+    (form :name source
+      :description "Texture source (GPUTexelCopyTextureInfo)."
+      (key :name texture :type texture-ref
+        :description "Source texture name; needs copy-src usage.")
+      (key :name mip-level :type subresource-index :default 0
+        :description "Source mip level (GPUTexelCopyTextureInfo.mipLevel, default 0).")
+      (key :name origin :type origin3 :optional true
+        :description "Source origin [x y z] in texels (GPUTexelCopyTextureInfo.origin, IDL default {} = all zero); z selects the array layer or depth slice.")
+      (key :name aspect :type texture-aspect :default all
+        :description "Source aspect (GPUTexelCopyTextureInfo.aspect, default all). Depth/stencil formats require a single aspect and a full-subresource copy."))
+    (form :name destination
+      :description "Buffer destination (GPUTexelCopyBufferInfo with its GPUTexelCopyBufferLayout)."
+      (key :name buffer :type buffer-ref
+        :description "Destination buffer name; needs copy-dst usage, and map-read when the bytes are read back to the host.")
+      (key :name offset :type byte-count :default 0
+        :description "Byte offset into the destination buffer (GPUTexelCopyBufferLayout.offset, default 0). Must be a multiple of the texel block copy footprint, or 4 for a depth-stencil endpoint.")
+      (key :name bytes-per-row :type byte-count :optional true
+        :description "GPUTexelCopyBufferLayout.bytesPerRow — bytes between texel-block rows. Optional in the IDL (no default); a supplied value must be a multiple of 256, and WebGPU requires it when the copy spans more than one block row or image.")
+      (key :name rows-per-image :type byte-count :optional true
+        :description "GPUTexelCopyBufferLayout.rowsPerImage — rows per texel image. Optional in the IDL (no default); WebGPU requires it when the copy spans more than one image.")))
+
   ; Both ends of a copy are dictionaries in the IDL
   ; (GPUTexelCopyTextureInfo / GPUCopyExternalImageSourceInfo), so they are
   ; child forms, and their members are that form's keys: `:mip-level` and
-  ; `:origin` describe the DESTINATION subresource, not the copy. The flat
+  ; `:origin` describe the endpoint's subresource, not the copy. The flat
   ; `:source X :texture Y` spelling is retired rather than kept as a second one.
   ; Their heads are SLOT-LOCAL: `source` carries a texture under one copy
   ; and an image under the other, and neither is a global form.
   ;
-  ; There is no `:size`: pngine copies the whole source, which is what both
-  ; runtimes do today. A key the bytecode cannot carry would validate and be
-  ; dropped in silence — the texture→texture opcode encodes the two texture
-  ; ids and nothing else (`wire_schema` L_2V); the external-image opcode encodes
-  ; the bitmap id, the texture id and the destination mip level + origin
-  ; (L_COPY_EXT_IMG). Neither carries a size. It arrives when the opcode does.
+  ; COMPATIBILITY RULE (plan 06): a `(copy-texture-to-texture …)` that authors
+  ; none of `:mip-level`, `:origin`, `:aspect` on either endpoint and no `:size`
+  ; stays on the legacy whole-texture operation forever — PNGB 0x23 and command
+  ; 0x23, byte-identical, including the canvas-size fallback. Any one of those
+  ; keys (even with its default value) selects the subresource operation and the
+  ; normalized SubresourceCopy model. The legacy opcode carries two ids and
+  ; nothing else (`wire_schema` L_2V); the new operation is PNGB 0x80.
   (form :name copy-texture-to-texture
-    :description "Queue op: GPU texture→texture copy. context-current-texture names the canvas; otherwise a (texture …) name."
+    :description "Queue op: GPU texture→texture copy. With no :mip-level, :origin or :aspect on either endpoint and no :size, this is the legacy whole-texture copy (PNGB 0x23) byte-identically; any such key selects the subresource operation. context-current-texture names the canvas; otherwise a (texture …) name."
     :positional copy-endpoints-section
+    (key :name size :type copy-extent :optional true
+      :description "GPUCommandEncoder.copyTextureToTexture's copySize (1–3 u32s). Optional only through the recorded deviation: absent means the remaining physical SOURCE extent at the source :origin and :mip-level; the destination must contain the same extent at its origin. Presence selects the subresource operation.")
     (form :name source
-      :description "Copy source (GPUTexelCopyTextureInfo)."
+      :description "Copy source (GPUTexelCopyTextureInfo). With no subresource key and no outer :size it is the legacy whole-texture source."
       (key :name texture :type attachment-view
-        :description "Source texture: context-current-texture or a (texture …) name."))
+        :description "Source texture: context-current-texture or a (texture …) name; needs copy-src usage.")
+      (key :name mip-level :type subresource-index :default 0
+        :description "Source mip level (GPUTexelCopyTextureInfo.mipLevel, default 0). Authoring the key selects the subresource operation; omitting it leaves the legacy route available.")
+      (key :name origin :type origin3 :optional true
+        :description "Source origin [x y z] in texels (GPUTexelCopyTextureInfo.origin, IDL default {} = all zero); z selects the array layer or depth slice. Its presence selects the subresource operation.")
+      (key :name aspect :type texture-aspect :default all
+        :description "Source aspect (GPUTexelCopyTextureInfo.aspect, default all). A depth-stencil texture→texture copy requires all on BOTH endpoints — the opposite of the write path's single-aspect rule. Its presence selects the subresource operation."))
     (form :name destination
-      :description "Copy destination (GPUTexelCopyTextureInfo)."
+      :description "Copy destination (GPUTexelCopyTextureInfo). With no subresource key and no outer :size it is the legacy whole-texture destination."
       (key :name texture :type attachment-view
-        :description "Destination texture: context-current-texture or a (texture …) name.")))
+        :description "Destination texture: context-current-texture or a (texture …) name; needs copy-dst usage and a non-pooled id on the subresource path.")
+      (key :name mip-level :type subresource-index :default 0
+        :description "Destination mip level (GPUTexelCopyTextureInfo.mipLevel, default 0). Its presence selects the subresource operation.")
+      (key :name origin :type origin3 :optional true
+        :description "Destination origin [x y z] in texels (GPUTexelCopyTextureInfo.origin, IDL default {} = all zero); z selects the array layer or depth slice. Its presence selects the subresource operation.")
+      (key :name aspect :type texture-aspect :default all
+        :description "Destination aspect (GPUTexelCopyTextureInfo.aspect, default all). A depth-stencil texture→texture copy requires all on BOTH endpoints. Its presence selects the subresource operation.")))
 
   (form :name copy-external-image-to-texture
     :description "Queue op: upload a decoded image (image-bitmap) into a texture. mip-level / origin default to 0 per the WebGPU spec."
@@ -2167,9 +2384,9 @@
   (form :name color-attachment
     :description "One color target of a render pass."
     (key :name view :type attachment-view
-      :description "Texture written by this pass: the canvas (context-current-texture) or a (texture …).")
+      :description "Attachment written by this pass: the canvas (context-current-texture), a (texture …) (its default view), or a (texture-view …) selecting one mip level and one array layer.")
     (key :name resolve-target :type attachment-view :optional true
-      :description "Receives the resolved single-sample output when :view is multisampled.")
+      :description "Receives the resolved single-sample output when :view is multisampled — the canvas, a (texture …), or a (texture-view …) selecting one mip level and one array layer.")
     (key :name clear-value :type clear-color :optional true
       :description "RGBA the attachment is cleared to when load-op is clear (WebGPU default: transparent black). Stating one beside `:load-op load` is an error — WebGPU would ignore it.")
     ; REQUIRED, matching GPURenderPassColorAttachment.loadOp/storeOp. WebGPU has
@@ -2204,8 +2421,8 @@
   ; document. The emitter says it instead, with a span on the attachment.
   (form :name depth-stencil-attachment
     :description "Depth/stencil target of a render pass."
-    (key :name view :type texture-ref
-      :description "The depth/stencil (texture …) this pass tests/writes against.")
+    (key :name view :type depth-attachment-view
+      :description "The depth/stencil (texture …) or (texture-view …) this pass tests/writes against. The canvas is not a depth attachment.")
     (key :name depth-clear-value :type unorm :optional true
       :description "Depth cleared to when depth-load-op is clear, in [0,1]. Required when it clears — WebGPU has no default for it — and rejected beside `:depth-load-op load`.")
     (key :name depth-load-op :type load-op :optional true
@@ -2454,6 +2671,34 @@
       :description "The control every case compares — the builtin time, or a name declared by (control …). Becomes :when on every group the lowering emits.")
     (key :name else :type frame-step-list :optional true
       :description "The steps that run when no case holds. Becomes the last group's :else, so it is the chain's fallback arm."))
+
+  ; =====================================================================
+  ; `(mip-chain …)` sugar — lowered to a render-pass chain by
+  ; pngine/mips-v1 (plan 08)
+  ; =====================================================================
+  ; A mip chain is ordinary resources and ordinary scheduling: the hook emits
+  ; a sampled/attachment (texture-view …) pair per generated level, one linear
+  ; sampler, one fullscreen module/pipeline for the texture's format, a bind
+  ; group and render pass per level, and one named `(step-group …)` holding
+  ; those passes in ascending order. The author schedules that group in a
+  ; frame like any other step and queues the level-0 write before it; nothing
+  ; runs at load time and no once-only side channel is created.
+  ;
+  ; The descriptor checks are the hook's, not the schema's (they relate keys
+  ; to a sibling `(texture …)`): 2d, one sample, one layer, not pooled, at
+  ; least two mip levels, sampled AND attachable, and a format that is both
+  ; filterable and color-renderable without an optional feature. A one-level
+  ; texture is `nothing-to-generate` rather than an empty group.
+  (form :name mip-chain
+    :description "Generate a (texture …)'s mip levels from level 0 with a named step-group of ordinary render passes. Sugar: pngine/mips-v1."
+    :lowering (lowering :hook pngine/mips-v1
+      :produces [texture-view sampler shader-module render-pipeline vertex
+                 fragment color-target bind-group entry render-pass
+                 color-attachment draw step-group])
+    (key :name name :type symbol
+      :description "The generated step-group's name. A (frame …) performs it like any other step, after the step that writes level 0.")
+    (key :name texture :type texture-ref
+      :description "The (texture …) whose levels 1..mip-level-count-1 the chain generates. Level 0 is an input and is never overwritten; the texture must be 2d, one-sample, one-layer, non-pooled, sampled and renderable, with a filterable color format."))
 
 
   ; ---- init sugar: lowered to compute-pipeline + bind-group + compute-pass ----

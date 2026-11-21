@@ -1,7 +1,7 @@
 {
-  "$comment": "Generated from external/gpuweb/spec/index.bs by scripts/extract-webgpu-enums.mjs. Do not edit by hand — run `node scripts/extract-webgpu-enums.mjs --regen`. The canonical WebGPU enum/flag vocabulary; tests/npm/webgpu-conformance.test.js checks schema/pngine.sjon + the cross-stack byte tables against it.",
-  "source": "external/gpuweb/spec/index.bs",
-  "specRevision": "b8c0fa9cae3125f1620131975c1ed169763db58c",
+  "$comment": "Generated from ../gpuweb/spec/index.bs by scripts/extract-webgpu-enums.mjs. Do not edit by hand — run `node scripts/extract-webgpu-enums.mjs --spec ../gpuweb/spec/index.bs --regen`. The canonical WebGPU enum/flag vocabulary; tests/npm/webgpu-conformance.test.js checks schema/pngine.sjon + the cross-stack byte tables against it.",
+  "source": "../gpuweb/spec/index.bs",
+  "specRevision": "d178d9145ab1652ec933e71a8c30e8f6470f00a3",
   "enums": {
     "GPUFeatureName": [
       "core-features-and-limits",
@@ -26,7 +26,9 @@
       "texture-formats-tier2",
       "primitive-index",
       "texture-component-swizzle",
-      "subgroup-size-control"
+      "subgroup-size-control",
+      "texture-compression-unaligned",
+      "atomic-vec2u-min-max"
     ],
     "GPUPowerPreference": [
       "low-power",
@@ -312,7 +314,8 @@
       "sint32x3",
       "sint32x4",
       "unorm10-10-10-2",
-      "unorm8x4-bgra"
+      "unorm8x4-bgra",
+      "snorm10-10-10-2"
     ],
     "GPUVertexStepMode": [
       "vertex",
@@ -333,10 +336,6 @@
     "GPUCanvasAlphaMode": [
       "opaque",
       "premultiplied"
-    ],
-    "GPUCanvasToneMappingMode": [
-      "standard",
-      "extended"
     ],
     "GPUDeviceLostReason": [
       "unknown",
@@ -1325,13 +1324,6 @@
         "name": "count",
         "required": true,
         "default": null
-      }
-    ],
-    "GPUCanvasToneMapping": [
-      {
-        "name": "mode",
-        "required": false,
-        "default": "standard"
       }
     ],
     "GPUCanvasConfiguration": [

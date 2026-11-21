@@ -1,0 +1,11 @@
+; INVALID: a supplied buffer-copy :bytes-per-row must be a multiple of 256.
+; 12 is legal for (write-texture …) — a queue write is tightly packed — but
+; buffer copies are aligned, so this is `bytes-per-row-alignment`. The buffer
+; is large enough; only the stride rule is broken.
+(buffer :name staging :size 264 :usage [copy-src])
+(texture :name target :size [2 2] :format rgba8unorm :usage [copy-dst])
+(queue :name copies
+  (copy-buffer-to-texture :size [2 2 1]
+    (source :buffer staging :offset 0 :bytes-per-row 12 :rows-per-image 2)
+    (destination :texture target)))
+(frame :name main :perform [copies])

@@ -107,6 +107,12 @@ pub const gpu_backends = struct {
     /// is listed, so a new one is a compile error in the backend that lacks it
     /// rather than a latent break in the build nobody makes by hand.
     fn assertDriverApi(comptime T: type) void {
+        // Task 3a added write_texture's WriteLayout parameter to the contract;
+        // with NullGPU now implementing every method, the full validation of
+        // both backends in this comptime block evaluates past Zig's default
+        // 1000-branch quota. Bounded, comptime-only, so give it room rather
+        // than split the check.
+        @setEvalBranchQuota(10_000);
         const specs = .{
             .{ "setModule", fn (*T, *const format.Module) void },
             .{ "setTime", fn (*T, f32) void },

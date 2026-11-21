@@ -1,0 +1,9 @@
+; INVALID: a subresource texture→texture copy whose destination has no
+; copy-dst. The authored destination :origin selects the new path.
+(texture :name src :size [4 4] :format rgba8unorm :usage [copy-src])
+(texture :name dst :size [4 4] :format rgba8unorm :usage [texture-binding])
+(queue :name blit
+  (copy-texture-to-texture
+    (source :texture src)
+    (destination :texture dst :origin [0 0 0])))
+(frame :name main :perform [blit])

@@ -16,6 +16,7 @@
 //! │     bit 4: has_buffer_names         │
 //! │     bit 5: has_control_names        │
 //! │     bit 6: has_guards               │
+//! │     bit 7: has_texture_names        │
 //! │   plugins: u8 (PluginSet bitfield)  │
 //! │   reserved: [3]u8 = limits offset   │
 //! │     (u24 LE when bit 2 set, else 0) │
@@ -180,8 +181,15 @@ pub const Flags = packed struct(u16) {
     /// guaranteed guard-free and an older runtime is safe. (frame-program
     /// §7.2)
     has_guards: bool = false,
+    /// The uniform-table section ALSO carries a texture-name block after the
+    /// control-name block (plan 04 D14): every declared `(texture :name …)`,
+    /// in base-id order, so a host can write and reflect textures by the
+    /// name the author wrote. Same compatibility story as the other name
+    /// blocks: every pre-block reader is count-bounded and ignores these
+    /// bytes; clear → no block, byte-identical output. No offset needed.
+    has_texture_names: bool = false,
     /// Reserved for future use.
-    reserved: u9 = 0,
+    reserved: u8 = 0,
 };
 
 /// PNGB file header (v0, 40 bytes).
@@ -680,7 +688,7 @@ fn bytecodeHasFrameProgramOps(bc: []const u8) bool {
 }
 
 /// Build PNGB header from offsets and options.
-fn buildHeader(offsets: *const SectionOffsets, options: SerializeOptions, animation_bytes_len: usize, limits_bytes_len: usize, has_buffer_names: bool, has_control_names: bool, has_guards: bool) Header {
+fn buildHeader(offsets: *const SectionOffsets, options: SerializeOptions, animation_bytes_len: usize, limits_bytes_len: usize, has_buffer_names: bool, has_control_names: bool, has_texture_names: bool, has_guards: bool) Header {
     // Pre-condition: offsets are valid
     assert(offsets.string_table_offset >= HEADER_SIZE);
     assert(offsets.total_size > HEADER_SIZE);
@@ -706,6 +714,7 @@ fn buildHeader(offsets: *const SectionOffsets, options: SerializeOptions, animat
             .canvas_alpha_premultiplied = options.canvas_alpha_premultiplied,
             .has_buffer_names = has_buffer_names,
             .has_control_names = has_control_names,
+            .has_texture_names = has_texture_names,
             .has_guards = has_guards,
         },
         .plugins = options.plugins,
@@ -821,6 +830,7 @@ pub fn serializeWithOptions(
         sections.limits_bytes.len,
         uniforms.hasBufferNames(),
         uniforms.hasControlNames(),
+        uniforms.hasTextureNames(),
         bytecodeHasFrameProgramOps(bytecode),
     );
 
@@ -994,7 +1004,7 @@ fn deserializeAllTables(gpa: Allocator, data: []const u8, header: *const Header)
 
     // Deserialize uniform table
     const uniform_data = data[header.uniform_table_offset..header.animation_table_offset];
-    const uniforms = try uniform_table_mod.deserialize(gpa, uniform_data, header.flags.has_buffer_names, header.flags.has_control_names);
+    const uniforms = try uniform_table_mod.deserialize(gpa, uniform_data, header.flags.has_buffer_names, header.flags.has_control_names, header.flags.has_texture_names);
     errdefer {
         var u = uniforms;
         u.deinit(gpa);
@@ -1182,6 +1192,13 @@ pub const Builder = struct {
         return self.uniform_table.addControlName(gpa, name_string_id);
     }
 
+    /// Name a texture for host writes/reflection by its SJON name (already
+    /// interned), in base-id order. The header's `has_texture_names` follows
+    /// from the table being non-empty.
+    pub fn addTextureName(self: *Self, gpa: Allocator, texture_id: u16, name_string_id: u16, pool: u8, frame_written: bool) !void {
+        return self.uniform_table.addTextureName(gpa, texture_id, name_string_id, pool, frame_written);
+    }
+
     /// Get animation table for direct manipulation.
     pub fn getAnimationTable(self: *Self) *AnimationTable {
         return &self.animation_table;
@@ -1302,6 +1319,33 @@ fn buildBufferNamesFixture(gpa: Allocator, add_names: bool) ![]u8 {
         const uniforms = try builder.internString(gpa, "uniforms");
         try builder.addBufferName(gpa, 0, particles.toInt(), 1, false);
         try builder.addBufferName(gpa, 1, uniforms.toInt(), 1, true);
+    }
+    return builder.finalize(gpa);
+}
+
+// ── Texture-name block (plan 04 D14) ────────────────────────────────────────
+
+/// A payload whose uniform section carries all three name blocks in their
+/// contract order: buffer names, control names, then texture names.
+fn buildTextureNamesFixture(gpa: Allocator, add_names: bool) ![]u8 {
+    var builder = Builder.init();
+    defer builder.deinit(gpa);
+
+    const frame_name = try builder.internString(gpa, "main");
+    const em = builder.getEmitter();
+    try em.createBuffer(gpa, 0, 16, .{ .copy_dst = true });
+    try em.defineFrame(gpa, 0, frame_name.toInt());
+    try em.endFrame(gpa);
+
+    if (add_names) {
+        const buf = try builder.internString(gpa, "hist");
+        try builder.addBufferName(gpa, 0, buf.toInt(), 2, false);
+        const control = try builder.internString(gpa, "scene");
+        try builder.addControlName(gpa, control.toInt());
+        const albedo = try builder.internString(gpa, "albedo");
+        const normals = try builder.internString(gpa, "normals");
+        try builder.addTextureName(gpa, 0, albedo.toInt(), 1, false);
+        try builder.addTextureName(gpa, 1, normals.toInt(), 3, true);
     }
     return builder.finalize(gpa);
 }

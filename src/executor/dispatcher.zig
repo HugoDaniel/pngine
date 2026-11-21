@@ -50,8 +50,14 @@ const bytecode_mod = @import("bytecode");
 const opcodes = bytecode_mod.opcodes;
 const OpCode = opcodes.OpCode;
 const wire = bytecode_mod.wire_schema;
+const texture_layout = bytecode_mod.texture_layout;
 const format = bytecode_mod.format;
 const Module = format.Module;
+
+/// Texture id-space budget, from the same declaration every backend sizes its
+/// tables from. The dispatcher's metadata table must never be narrower than the
+/// backend that actually creates the resource.
+pub const MAX_TEXTURES: u16 = bytecode_mod.resource_limits.capOf(.textures);
 
 const MockGPU = @import("mock_gpu.zig").MockGPU;
 
@@ -81,7 +87,8 @@ pub const ExecuteError = error{
     RepCountOverCap,
     /// A count-prefixed opcode declared ZERO elements where the instruction
     /// is meaningless without one: an MRT pass with no colour attachment (the
-    /// backends took it as an empty slice; the native one asserted on it).
+    /// backends took it as an empty slice; the native one asserted on it), or
+    /// a views pass with neither colour nor depth attachments.
     RepCountEmpty,
     /// One execution asked for more instructions than it is allowed: more than
     /// `MAX_TOP_LEVEL_STEPS` at the top level, or more than `MAX_TOTAL_STEPS`
@@ -106,6 +113,29 @@ pub const ExecuteError = error{
     NoSurfaceConfigured,
     /// Texture not found in resource table.
     TextureNotFound,
+    /// A texture write was refused by plan 01's layout/destination contract, or
+    /// named a data entry past the data section. The reference refuses BEFORE
+    /// calling the backend, so no substitute resource exists to inspect.
+    InvalidTextureWrite,
+    /// Plan 07's creation-side refusals, all decided BEFORE the backend's
+    /// `createTexture`: a compressed format whose device feature (or 3D
+    /// sibling) is absent, a compressed format in a dimension that has none,
+    /// an unknown compressed format, or a size that is not a whole number of
+    /// texel blocks. Native-only, like the backend that names them.
+    MissingTextureFormatFeature,
+    UnsupportedTextureDimension,
+    UnsupportedTextureFormat,
+    InvalidTextureSize,
+    /// A `begin_render_pass_views` attachment target named an explicit texture
+    /// view that is absent, a canvas as the depth target, a stencil-only view
+    /// as depth, no attachment at all, or a pass with neither colour nor depth.
+    /// Native-only: refused at the backend so a hostile stream can never begin
+    /// an empty pass or index past `explicit_texture_views` (r3-03).
+    AttachmentViewMissing,
+    AttachmentViewNotFound,
+    AttachmentViewCanvasDepth,
+    AttachmentViewStencilOnly,
+    AttachmentViewEmptyPass,
     /// Shader compilation failed.
     ShaderCompilationFailed,
     /// Pipeline creation failed.
@@ -206,6 +236,11 @@ pub const CONTRACT = [_]MethodSpec{
     // Pass operations (dispatcher/pass.zig)
     .{ .name = "begin_render_pass", .params = &.{ u16, u8, u8, u16, u32, u32, u32, u32, u16 } },
     .{ .name = "begin_render_pass_mrt", .params = &.{ []const ColorAttachment, u16 } },
+    // 0x81's owned attachment record (target + load/store + four clears +
+    // per-attachment resolve) and the depth target. The record type lives in
+    // the emitter beside ColorAttachment, so every backend receives the shape
+    // the compiler normalized.
+    .{ .name = "begin_render_pass_views", .params = &.{ []const bytecode_mod.emitter.Emitter.ViewColorAttachment, u16 } },
     .{ .name = "begin_compute_pass" },
     .{ .name = "set_pipeline", .params = &.{u16} },
     .{ .name = "set_bind_group", .params = &.{ u8, u16 } },
@@ -232,6 +267,22 @@ pub const CONTRACT = [_]MethodSpec{
 
     // Queue operations (dispatcher/queue.zig)
     .{ .name = "write_buffer", .params = &.{ u16, u32, u16 } },
+    // Raw texel upload. The shared plan-01 layout is the third operand, so the
+    // contract proves every backend receives the SAME presence-carrying shape
+    // the compiler normalized.
+    .{ .name = "write_texture", .params = &.{ u16, u16, texture_layout.WriteLayout } },
+    // Buffer↔texture copies: the texture id, the buffer id, and the same
+    // presence-carrying WriteLayout the compiler normalized. Direction is the
+    // method name (the opcode), never an extra operand. The native backend's
+    // encoder execution lands in plan 05 slice 3; this slice proves the
+    // reference decode/contract.
+    .{ .name = "copy_buffer_to_texture", .params = &.{ u16, u16, texture_layout.WriteLayout } },
+    .{ .name = "copy_texture_to_buffer", .params = &.{ u16, u16, texture_layout.WriteLayout } },
+    // Plan 06's subresource texture→texture copy: both endpoint ids plus the
+    // normalized SubresourceCopy (endpoints and optional size). The native
+    // backend's encoder execution lands in plan 06 slice 3; this slice proves
+    // the reference decode/contract and the MockGPU record.
+    .{ .name = "copy_texture_subresource", .params = &.{ u16, u16, texture_layout.SubresourceCopy } },
     .{ .name = "write_time_uniform", .params = &.{ u16, u32, u16 } },
     .{ .name = "write_pointer_uniform", .params = &.{ u16, u32, u16 } },
     .{ .name = "write_audio_data", .params = &.{ u16, u32, u16 } },
@@ -268,6 +319,12 @@ pub fn Backend(comptime T: type) type {
         /// is exactly what this contract exists to prevent.
         pub fn validate() void {
             comptime {
+                // The contract is checked at every `Dispatcher(T)`
+                // instantiation, and the check walks every method's
+                // parameters. Plan 05's two copy methods pushed the
+                // default 1000-branch comptime quota over; the bound is a
+                // compile-time loop over a fixed table, not author input.
+                @setEvalBranchQuota(10_000);
                 for (CONTRACT) |spec| {
                     if (mismatch(spec)) |reason| @compileError(reason);
                 }
@@ -430,6 +487,27 @@ pub fn Dispatcher(comptime BackendType: type) type {
         /// the plan's 64-control cap so a payload cannot grow it.
         controls: [opcodes.MAX_CONTROLS + 1]f32,
 
+        /// Texture id → the data id of the `create_texture` descriptor the
+        /// stream created it with. Populated by the resource handler; read by
+        /// `write_texture`'s runtime validation.
+        ///
+        /// The reference backend deliberately holds no resource tables of its
+        /// own (MockGPU records calls). Without this, a malformed write could
+        /// point at a data entry past the section or an explicit descriptor
+        /// plan 01 refuses, and still be recorded as though it had executed.
+        /// An id that no `create_texture` named stays null: plan 02's
+        /// single-instruction operand fixtures are decoder characterizations,
+        /// not runtime payloads, and must keep recording every field. Once the
+        /// stream HAS created a texture, however, a write to an unknown id is a
+        /// runtime payload and is refused (`TextureNotFound`) instead of being
+        /// recorded as though a resource existed.
+        texture_descriptor_ids: [MAX_TEXTURES]?u16,
+
+        /// Whether any `create_texture` succeeded in this execution. It is the
+        /// switch between "this stream is a runtime payload, so unknown ids are
+        /// refusals" and "this is a single-instruction decoder fixture".
+        texture_create_seen: bool,
+
         /// Authored defaults as `scan_control_declarations` read them. Kept
         /// beside the live table so a reset can restore them (plan §6.2:
         /// `init()`-style reset restores the authored defaults) without
@@ -477,6 +555,8 @@ pub fn Dispatcher(comptime BackendType: type) type {
                 .controls = @splat(0),
                 .control_defaults = @splat(0),
                 .declared_controls = 0,
+                .texture_descriptor_ids = [_]?u16{null} ** MAX_TEXTURES,
+                .texture_create_seen = false,
                 .gpa = gpa,
             };
         }

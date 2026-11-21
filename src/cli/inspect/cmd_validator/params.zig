@@ -7,6 +7,7 @@ const std = @import("std");
 const pngine = @import("pngine");
 pub const Cmd = pngine.command_buffer.Cmd;
 const desc = pngine.types.descriptors;
+const texture_layout = pngine.types.texture_layout;
 
 /// Maximum commands to process (safety bound).
 /// Chosen to be large enough for complex scenes but bounded for safety.
@@ -192,6 +193,15 @@ pub const TextureInfo = struct {
     mip_level_count: u8 = 1,
     dimension: TextureDimension = .@"2d",
     created_at: u32,
+    /// True when this entry came from a decoded `create_texture` descriptor.
+    /// A command whose descriptor is missing or unreadable keeps the defaults
+    /// above; a write must not validate against those as if they were real.
+    descriptor_parsed: bool = true,
+    /// True when the descriptor resolves its extent at runtime (canvas-scaled,
+    /// image-bitmap sized, or missing a width/height field). The command stream
+    /// then carries no concrete extent, so deep validation skips the
+    /// destination calculator rather than inventing a 1×1 base size.
+    dynamic_extent: bool = false,
 
     /// Texture dimension enum matching WebGPU.
     pub const TextureDimension = enum(u8) {
@@ -199,6 +209,30 @@ pub const TextureInfo = struct {
         @"2d" = 1,
         @"3d" = 2,
     };
+};
+
+/// One authored `(texture-view …)`, recorded so a later 0x55 attachment can
+/// answer "does this view select exactly one mip/layer of a render-attachment
+/// texture?" without re-reading the descriptor (which lives in the data section
+/// and is not retained by the command stream).
+pub const TextureViewInfo = struct {
+    created_at: u32,
+    texture_id: u16 = 0,
+    /// Authored view dimension (0=1d 1=2d 2=2d-array 3=cube 4=cube-array 5=3d).
+    /// `0xFF` = absent: WebGPU infers it from the source texture.
+    dimension: u8 = 0xFF,
+    /// Authored aspect (0=all 1=stencil-only 2=depth-only).
+    aspect: u8 = 0,
+    base_mip_level: u32 = 0,
+    /// Authoritative only when the descriptor was read; 0xFFFFFFFF means
+    /// "all remaining mips", which is then resolved against the source texture.
+    mip_level_count: u32 = 0xFFFFFFFF,
+    base_array_layer: u32 = 0,
+    /// See `mip_level_count` — 0xFFFFFFFF means "all remaining layers".
+    array_layer_count: u32 = 0xFFFFFFFF,
+    /// Authored view format; 0xFF = absent (the source texture's format).
+    format: u8 = 0xFF,
+    descriptor_parsed: bool = false,
 };
 
 /// Generic resource info (for samplers, etc).
@@ -247,6 +281,29 @@ pub const BeginRenderPassF32Params = struct {
     clear_a_bits: u32 = 0,
     resolve_id: u16,
 };
+
+/// One colour attachment of BEGIN_RENDER_PASS_VIEWS (0x55). `target` and
+/// `resolve_target` carry the shared tagged encoding: 0x8000|view_id,
+/// texture id, 0xFFFE canvas, 0xFFFF none.
+pub const ViewAttachmentParams = struct {
+    target: u16 = 0,
+    load_op: u8 = 0,
+    store_op: u8 = 0,
+    clear_r_bits: u32 = 0,
+    clear_g_bits: u32 = 0,
+    clear_b_bits: u32 = 0,
+    clear_a_bits: u32 = 0,
+    resolve_target: u16 = 0,
+};
+
+/// BEGIN_RENDER_PASS_VIEWS (0x55): `[color_count:u8]` then `color_count`
+/// 22-byte attachment records, then `[depth_target:u16]` — 3 + 22n operand
+/// bytes. `count` is bridged from the wire byte and bounded to 8 by the parser.
+pub const BeginRenderPassViewsParams = struct {
+    count: u8 = 0,
+    attachments: [8]ViewAttachmentParams = [_]ViewAttachmentParams{.{}} ** 8,
+    depth_target: u16 = 0xFFFF,
+};
 pub const SetPipelineParams = struct { id: u16 };
 pub const SetBindGroupParams = struct { slot: u8, id: u16 };
 pub const SetVertexBufferParams = struct { slot: u8, id: u16 };
@@ -268,6 +325,128 @@ pub const InitWasmModuleParams = struct { module_id: u16, data_ptr: u32, data_le
 /// a pointer/length pair. There is no `args_ptr` to bounds-check.
 pub const CallWasmFuncParams = struct { call_id: u16, module_id: u16, func_ptr: u32, func_len: u32, args_len: u8 };
 pub const WriteBufferFromWasmParams = struct { buffer_id: u16, buffer_offset: u32, wasm_ptr: u32, size: u32 };
+
+/// WRITE_TEXTURE (0x28) operands: the full 52-byte command stride.
+///
+/// The wire has no separate optional marker for each absent field: three low
+/// `flags` bits say whether `bytes_per_row`, `rows_per_image` and `size` were
+/// authored. A present zero therefore stays a present zero, and a clear bit
+/// makes its field irrelevant rather than a default.
+pub const WriteTextureParams = struct {
+    id: u16,
+    data_ptr: u32,
+    data_len: u32,
+    offset: u32,
+    bytes_per_row: u32,
+    rows_per_image: u32,
+    mip_level: u32,
+    origin_x: u32,
+    origin_y: u32,
+    origin_z: u32,
+    aspect: u8,
+    size_width: u32,
+    size_height: u32,
+    size_depth: u32,
+    flags: u8,
+
+    pub const bytes_per_row_bit: u8 = 1 << 0;
+    pub const rows_per_image_bit: u8 = 1 << 1;
+    pub const size_bit: u8 = 1 << 2;
+
+    pub fn hasBytesPerRow(self: WriteTextureParams) bool {
+        return (self.flags & bytes_per_row_bit) != 0;
+    }
+
+    pub fn hasRowsPerImage(self: WriteTextureParams) bool {
+        return (self.flags & rows_per_image_bit) != 0;
+    }
+
+    pub fn hasSize(self: WriteTextureParams) bool {
+        return (self.flags & size_bit) != 0;
+    }
+
+    /// The shared Zig layout record the plan 01 calculator consumes. This is
+    /// the inspector's only translation of the wire's three presence bits; the
+    /// stride/span arithmetic itself lives in `texture_layout.calculateWrite`.
+    pub fn writeLayout(self: WriteTextureParams) texture_layout.WriteLayout {
+        return .{
+            .offset = self.offset,
+            .bytes_per_row = if (self.hasBytesPerRow()) self.bytes_per_row else null,
+            .rows_per_image = if (self.hasRowsPerImage()) self.rows_per_image else null,
+            .origin = .{ .x = self.origin_x, .y = self.origin_y, .z = self.origin_z },
+            .mip_level = self.mip_level,
+            .aspect = @enumFromInt(self.aspect),
+            .size = if (self.hasSize()) .{
+                .width = self.size_width,
+                .height = self.size_height,
+                .depth_or_array_layers = self.size_depth,
+            } else null,
+        };
+    }
+};
+
+/// COPY_TEXTURE_SUBRESOURCE (0x2B) operands: the full 51-byte command stride.
+///
+/// Both endpoints are explicit. `flags` bit 0 says whether a size was authored;
+/// a clear bit leaves the three size fields zero, and the player resolves the
+/// remaining physical source extent from its retained descriptors.
+pub const CopyTextureSubresourceParams = struct {
+    source_id: u16 = 0,
+    destination_id: u16 = 0,
+    source_mip: u32 = 0,
+    source_origin_x: u32 = 0,
+    source_origin_y: u32 = 0,
+    source_origin_z: u32 = 0,
+    source_aspect: u8 = 0,
+    destination_mip: u32 = 0,
+    destination_origin_x: u32 = 0,
+    destination_origin_y: u32 = 0,
+    destination_origin_z: u32 = 0,
+    destination_aspect: u8 = 0,
+    size_width: u32 = 0,
+    size_height: u32 = 0,
+    size_depth: u32 = 0,
+    flags: u8 = 0,
+
+    pub const size_bit: u8 = 1 << 0;
+
+    pub fn hasSize(self: CopyTextureSubresourceParams) bool {
+        return (self.flags & size_bit) != 0;
+    }
+
+    /// The shared Zig model the plan 06 calculator consumes. The id fields are
+    /// also supplied as the writer's arguments; the wire carries each once.
+    pub fn copy(self: CopyTextureSubresourceParams) texture_layout.SubresourceCopy {
+        return .{
+            .source = .{
+                .texture_id = self.source_id,
+                .mip_level = self.source_mip,
+                .origin = .{
+                    .x = self.source_origin_x,
+                    .y = self.source_origin_y,
+                    .z = self.source_origin_z,
+                },
+                .aspect = @enumFromInt(self.source_aspect),
+            },
+            .destination = .{
+                .texture_id = self.destination_id,
+                .mip_level = self.destination_mip,
+                .origin = .{
+                    .x = self.destination_origin_x,
+                    .y = self.destination_origin_y,
+                    .z = self.destination_origin_z,
+                },
+                .aspect = @enumFromInt(self.destination_aspect),
+            },
+            .size = if (self.hasSize()) .{
+                .width = self.size_width,
+                .height = self.size_height,
+                .depth_or_array_layers = self.size_depth,
+            } else null,
+        };
+    }
+};
+
 /// Parsed command with extracted parameters.
 pub const ParsedCommand = struct {
     index: u32,
@@ -283,6 +462,7 @@ pub const ParsedCommand = struct {
         create_texture_view: CreateTextureViewParams,
         begin_render_pass: BeginRenderPassParams,
         begin_render_pass_f32: BeginRenderPassF32Params,
+        begin_render_pass_views: BeginRenderPassViewsParams,
         set_pipeline: SetPipelineParams,
         set_bind_group: SetBindGroupParams,
         set_vertex_buffer: SetVertexBufferParams,
@@ -292,10 +472,12 @@ pub const ParsedCommand = struct {
         dispatch: DispatchParams,
         indirect: IndirectParams,
         write_buffer: WriteBufferParams,
+        write_texture: WriteTextureParams,
         write_time_uniform: WriteTimeUniformParams,
         write_pointer_uniform: WriteTimeUniformParams,
         copy_buffer: CopyBufferParams,
         copy_texture: CopyTextureParams,
+        copy_texture_subresource: CopyTextureSubresourceParams,
         copy_external_image: CopyExternalImageParams,
         init_wasm_module: InitWasmModuleParams,
         call_wasm_func: CallWasmFuncParams,

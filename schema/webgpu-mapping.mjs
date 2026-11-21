@@ -71,12 +71,17 @@ export const ENUM_MAP = {
 // values OUT of these arrays as engine support lands.
 export const KNOWN_UNSUPPORTED = {
   'texture-format': [
-    // compressed (BC/ETC2/EAC/ASTC): encodable + feature-requestable, but need a
-    // compressed-data upload path PNGine doesn't have yet — kept out so we never
-    // suggest a value that won't render. (The feature-gated uncompressed formats —
-    // tier1 16-bit unorm/snorm, bgra8 srgb, depth32float-stencil8 — are now
-    // supported: encoded unconditionally, their device feature requested at runtime.)
-    'bc1-rgba-unorm', 'bc1-rgba-unorm-srgb', 'bc2-rgba-unorm', 'bc2-rgba-unorm-srgb', 'bc3-rgba-unorm', 'bc3-rgba-unorm-srgb', 'bc4-r-unorm', 'bc4-r-snorm', 'bc5-rg-unorm', 'bc5-rg-snorm', 'bc6h-rgb-ufloat', 'bc6h-rgb-float', 'bc7-rgba-unorm', 'bc7-rgba-unorm-srgb', 'etc2-rgb8unorm', 'etc2-rgb8unorm-srgb', 'etc2-rgb8a1unorm', 'etc2-rgb8a1unorm-srgb', 'etc2-rgba8unorm', 'etc2-rgba8unorm-srgb', 'eac-r11unorm', 'eac-r11snorm', 'eac-rg11unorm', 'eac-rg11snorm', 'astc-4x4-unorm', 'astc-4x4-unorm-srgb', 'astc-5x4-unorm', 'astc-5x4-unorm-srgb', 'astc-5x5-unorm', 'astc-5x5-unorm-srgb', 'astc-6x5-unorm', 'astc-6x5-unorm-srgb', 'astc-6x6-unorm', 'astc-6x6-unorm-srgb', 'astc-8x5-unorm', 'astc-8x5-unorm-srgb', 'astc-8x6-unorm', 'astc-8x6-unorm-srgb', 'astc-8x8-unorm', 'astc-8x8-unorm-srgb', 'astc-10x5-unorm', 'astc-10x5-unorm-srgb', 'astc-10x6-unorm', 'astc-10x6-unorm-srgb', 'astc-10x8-unorm', 'astc-10x8-unorm-srgb', 'astc-10x10-unorm', 'astc-10x10-unorm-srgb', 'astc-12x10-unorm', 'astc-12x10-unorm-srgb', 'astc-12x12-unorm', 'astc-12x12-unorm-srgb'],
+    // Spec-complete as of plan 07 tranche C (2026-11-20, §473): the 52
+    // compressed names — BC's fourteen (0x80–0x8D, tranche A), ETC2/EAC's ten
+    // (0x90–0x99, tranche B) and ASTC's twenty-eight (0xA0–0xBB, tranche C) —
+    // all have an upload path and a pre-create feature policy. The empty array
+    // is the evidence: the conformance suite asserts supported ∪ this ledger
+    // === the 101-value snapshot exactly, so a new spec value fails here until
+    // triaged. Admission is portable coverage; the sampled-pixel legs are open.
+    // (The feature-gated uncompressed formats — tier1 16-bit unorm/snorm,
+    // bgra8 srgb, depth32float-stencil8 — are supported: encoded
+    // unconditionally, their device feature requested at runtime.)
+  ],
   'color-target-format': [
     // rgb9e5ufloat is never renderable (shared-exponent, sample-only). Every other
     // uncompressed color format is now a supported render target — the tier1-gated
@@ -85,9 +90,18 @@ export const KNOWN_UNSUPPORTED = {
     'rgb9e5ufloat',
     // depth/stencil formats are never color targets
     'stencil8', 'depth16unorm', 'depth24plus', 'depth24plus-stencil8', 'depth32float', 'depth32float-stencil8',
-    // compressed: not a renderable color target (and no upload path yet)
+    // compressed: never a renderable color target (they are upload/copy-only).
+    // These 52 names are deliberately still here after plan 07's portable
+    // close (§473) — this is a capability exclusion, not a missing upload path.
     'bc1-rgba-unorm', 'bc1-rgba-unorm-srgb', 'bc2-rgba-unorm', 'bc2-rgba-unorm-srgb', 'bc3-rgba-unorm', 'bc3-rgba-unorm-srgb', 'bc4-r-unorm', 'bc4-r-snorm', 'bc5-rg-unorm', 'bc5-rg-snorm', 'bc6h-rgb-ufloat', 'bc6h-rgb-float', 'bc7-rgba-unorm', 'bc7-rgba-unorm-srgb', 'etc2-rgb8unorm', 'etc2-rgb8unorm-srgb', 'etc2-rgb8a1unorm', 'etc2-rgb8a1unorm-srgb', 'etc2-rgba8unorm', 'etc2-rgba8unorm-srgb', 'eac-r11unorm', 'eac-r11snorm', 'eac-rg11unorm', 'eac-rg11snorm', 'astc-4x4-unorm', 'astc-4x4-unorm-srgb', 'astc-5x4-unorm', 'astc-5x4-unorm-srgb', 'astc-5x5-unorm', 'astc-5x5-unorm-srgb', 'astc-6x5-unorm', 'astc-6x5-unorm-srgb', 'astc-6x6-unorm', 'astc-6x6-unorm-srgb', 'astc-8x5-unorm', 'astc-8x5-unorm-srgb', 'astc-8x6-unorm', 'astc-8x6-unorm-srgb', 'astc-8x8-unorm', 'astc-8x8-unorm-srgb', 'astc-10x5-unorm', 'astc-10x5-unorm-srgb', 'astc-10x6-unorm', 'astc-10x6-unorm-srgb', 'astc-10x8-unorm', 'astc-10x8-unorm-srgb', 'astc-10x10-unorm', 'astc-10x10-unorm-srgb', 'astc-12x10-unorm', 'astc-12x10-unorm-srgb', 'astc-12x12-unorm', 'astc-12x12-unorm-srgb'],
-  'vertex-format': [], // CP-B (Phase 1): spec-complete — all 41 GPUVertexFormat values supported.
+  // CP-B (Phase 1) covered the pre-2026-11-16 spec's 41 values. The CRD then
+  // added `snorm10-10-10-2`; it is passthrough on the browser path but the
+  // native `parseVertexFormat` has no arm for it, so it stays ledgered rather
+  // than claiming the 41-value cross-stack table already covers 42.
+  // Follow-up: a dedicated vertex-format task must add the schema member and
+  // the native parseVertexFormat arm, with browser/native evidence, before
+  // this entry is removed.
+  'vertex-format': ['snorm10-10-10-2'],
   'blend-factor': [], // spec-complete: all 17 GPUBlendFactor values supported. The
   // 4 dual-source factors (src1/…) are passthrough strings (Emitter writes srcFactor
   // verbatim); the runtime requests dual-source-blending so they render where allowed.
@@ -212,16 +226,62 @@ export const FORM_DICT_MAP = [
   // The copy endpoints were outside this map until 3.0.0, because the
   // snapshot had no texel-copy dictionaries at all: they live in
   // `spec/sections/copies.bs`, which the extractor did not follow.
-  // The wire is two ids for a texture→texture copy (whole-texture, mip 0,
-  // origin 0 — the schema says so beside the form), so the subresource
-  // members are ledgered as the capability they are.
+  //
+  // Plan 06 moved `mipLevel`, `origin` and `aspect` from the gap ledger to the
+  // method: each endpoint form now declares all four members of
+  // GPUTexelCopyTextureInfo. The legacy whole-texture operation keeps its
+  // two-id wire forever, but the SCHEMA is the full dictionary — the no-key
+  // form selects the legacy route at emit time instead. `:size` is
+  // `copyTextureToTexture`'s own `copySize` argument on the parent form, so it
+  // is not a member of either nested row.
   {
     form: 'source', within: 'copy-texture-to-texture', dict: 'GPUTexelCopyTextureInfo',
-    ledger: ['mipLevel', 'origin', 'aspect'],
+    ledger: [],
   },
   {
     form: 'destination', within: 'copy-texture-to-texture', dict: 'GPUTexelCopyTextureInfo',
-    ledger: ['mipLevel', 'origin', 'aspect'],
+    ledger: [],
+  },
+  {
+    // GPUQueue.writeTexture flattens its two dictionaries — the destination
+    // GPUTexelCopyTextureInfo and the source GPUTexelCopyBufferLayout — and
+    // takes `data` and `size` as method arguments, not dictionary members.
+    // Those two are the sentinels: PNGine spells them as keys because the
+    // author writes one flat form, and neither dictionary declares them.
+    // Every declared member of BOTH dictionaries is a key (no alias, no
+    // positional sub-form, no ledger gap).
+    form: 'write-texture',
+    dict: ['GPUTexelCopyTextureInfo', 'GPUTexelCopyBufferLayout'],
+    sentinels: ['data', 'size'],
+    ledger: [],
+  },
+  // Buffer↔texture copies (plan 05) also nest their two endpoints, so the
+  // members are mapped where they are spelled. The buffer side is TWO
+  // dictionaries: GPUTexelCopyBufferInfo adds `buffer` to the inherited
+  // GPUTexelCopyBufferLayout members — the snapshot does not flatten IDL
+  // inheritance, so both are named, exactly as the write-texture row does.
+  // `:size` is the method's own copySize argument on the parent form and is
+  // therefore not a member of either nested row (it is ledgered with
+  // writeTexture's size in KNOWN_DEFAULT_DEVIATIONS/KNOWN_OPTIONAL_REQUIRED).
+  {
+    form: 'source', within: 'copy-buffer-to-texture',
+    dict: ['GPUTexelCopyBufferInfo', 'GPUTexelCopyBufferLayout'],
+    ledger: [],
+  },
+  {
+    form: 'destination', within: 'copy-buffer-to-texture',
+    dict: 'GPUTexelCopyTextureInfo',
+    ledger: [],
+  },
+  {
+    form: 'source', within: 'copy-texture-to-buffer',
+    dict: 'GPUTexelCopyTextureInfo',
+    ledger: [],
+  },
+  {
+    form: 'destination', within: 'copy-texture-to-buffer',
+    dict: ['GPUTexelCopyBufferInfo', 'GPUTexelCopyBufferLayout'],
+    ledger: [],
   },
   {
     form: 'source', within: 'copy-external-image-to-texture', dict: 'GPUCopyExternalImageSourceInfo',

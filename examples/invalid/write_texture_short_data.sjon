@@ -1,0 +1,7 @@
+; INVALID: the source is one row short of the required span. Plan 01 counts
+; offset + requiredBytesInCopy (final-row padding excluded) and refuses.
+(data :name texels (bytes :base64 "AAAAAAAAAAA="))
+(texture :name tex :size [4 4] :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture tex :data texels :size [4 4] :bytes-per-row 16))
+(frame :name main :perform [upload])

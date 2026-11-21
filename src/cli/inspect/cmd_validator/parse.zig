@@ -36,6 +36,7 @@ const CreateShaderParams = cv_shared.CreateShaderParams;
 const CreateBindGroupParams = cv_shared.CreateBindGroupParams;
 const CreateTextureViewParams = cv_shared.CreateTextureViewParams;
 const BeginRenderPassParams = cv_shared.BeginRenderPassParams;
+const BeginRenderPassViewsParams = cv_shared.BeginRenderPassViewsParams;
 const SetPipelineParams = cv_shared.SetPipelineParams;
 const SetBindGroupParams = cv_shared.SetBindGroupParams;
 const SetVertexBufferParams = cv_shared.SetVertexBufferParams;
@@ -44,9 +45,11 @@ const DrawParams = cv_shared.DrawParams;
 const DrawIndexedParams = cv_shared.DrawIndexedParams;
 const DispatchParams = cv_shared.DispatchParams;
 const WriteBufferParams = cv_shared.WriteBufferParams;
+const WriteTextureParams = cv_shared.WriteTextureParams;
 const WriteTimeUniformParams = cv_shared.WriteTimeUniformParams;
 const CopyBufferParams = cv_shared.CopyBufferParams;
 const CopyTextureParams = cv_shared.CopyTextureParams;
+const CopyTextureSubresourceParams = cv_shared.CopyTextureSubresourceParams;
 const CopyExternalImageParams = cv_shared.CopyExternalImageParams;
 const InitWasmModuleParams = cv_shared.InitWasmModuleParams;
 const CallWasmFuncParams = cv_shared.CallWasmFuncParams;
@@ -93,6 +96,11 @@ pub fn parseCommands(gpa: Allocator, data: []const u8) ![]ParsedCommand {
         // desync that lands mid-operand) must surface as an error, not a panic.
         const cmd = std.enums.fromInt(Cmd, tag) orelse return error.InvalidFormat;
         const params = try parseParams(cmd, data, &pos);
+        // A record that runs past the frame's declared end is truncated, even
+        // when the backing slice has more bytes (the next command's, or slack
+        // in the read buffer). The per-command decoder cannot know the frame
+        // end; this is the seam that enforces it.
+        if (pos > total_len) return error.Truncated;
 
         try commands.append(gpa, .{
             .index = cmd_index,
@@ -147,6 +155,17 @@ fn operandWidth(cmd: Cmd, data: []const u8, p: u32) !u32 {
             // count + attachments (tex_id:2 load:1 store:1 rgba:16) + depth_id:2
             break :blk 1 + @as(u32, data[p]) * 20 + 2;
         },
+        .begin_render_pass_views => blk: {
+            if (remaining < 1) return error.Truncated;
+            const count = data[p];
+            // The wire cap is 8 (`wire_schema.repMaxOf`). Refusing it here is
+            // what stops the parser reading nine records out of whatever
+            // follows the frame.
+            if (count > 8) return error.RepCountOverCap;
+            // count + attachments (target:2 load:1 store:1 rgba:16 resolve:2)
+            // + depth_target:2 = 3 + 22n.
+            break :blk 1 + @as(u32, count) * 22 + 2;
+        },
         .execute_bundles => blk: {
             if (remaining < 1) return error.Truncated;
             break :blk 1 + @as(u32, data[p]) * 2; // count + bundle ids
@@ -169,6 +188,9 @@ fn operandWidth(cmd: Cmd, data: []const u8, p: u32) !u32 {
         .copy_external_image_to_texture => 11,
         .create_bind_group, .create_texture_view, .begin_render_pass, .dispatch => 12,
         .write_buffer, .write_buffer_from_wasm => 14,
+        .write_texture => 52,
+        .copy_buffer_to_texture, .copy_texture_to_buffer => 46,
+        .copy_texture_subresource => 51,
         .draw, .set_scissor_rect, .set_blend_constant, .copy_buffer_to_buffer, .resolve_query_set => 16,
         .draw_indexed => 20,
         .set_viewport, .begin_render_pass_f32 => 24,
@@ -210,6 +232,7 @@ fn parseParams(cmd: Cmd, data: []const u8, pos: *u32) !ParsedCommand.Params {
 
         .begin_render_pass,
         .begin_render_pass_f32,
+        .begin_render_pass_views,
         .set_pipeline,
         .set_bind_group,
         .set_vertex_buffer,
@@ -223,10 +246,12 @@ fn parseParams(cmd: Cmd, data: []const u8, pos: *u32) !ParsedCommand.Params {
         => decodePassParams(cmd, data, p),
 
         .write_buffer,
+        .write_texture,
         .write_time_uniform,
         .write_pointer_uniform,
         .copy_buffer_to_buffer,
         .copy_texture_to_texture,
+        .copy_texture_subresource,
         .copy_external_image_to_texture,
         .write_buffer_from_wasm,
         .init_wasm_module,
@@ -300,6 +325,25 @@ fn decodePassParams(cmd: Cmd, data: []const u8, p: u32) ParsedCommand.Params {
             .clear_a_bits = readU32(data, p + 18),
             .resolve_id = readU16(data, p + 22),
         } },
+        .begin_render_pass_views => blk: {
+            var params = BeginRenderPassViewsParams{ .count = data[p] };
+            var off = p + 1;
+            for (0..params.count) |i| {
+                params.attachments[i] = .{
+                    .target = readU16(data, off),
+                    .load_op = data[off + 2],
+                    .store_op = data[off + 3],
+                    .clear_r_bits = readU32(data, off + 4),
+                    .clear_g_bits = readU32(data, off + 8),
+                    .clear_b_bits = readU32(data, off + 12),
+                    .clear_a_bits = readU32(data, off + 16),
+                    .resolve_target = readU16(data, off + 20),
+                };
+                off += 22;
+            }
+            params.depth_target = readU16(data, off);
+            break :blk .{ .begin_render_pass_views = params };
+        },
         .set_pipeline => .{ .set_pipeline = .{ .id = readU16(data, p) } },
         .set_bind_group => .{ .set_bind_group = .{
             .slot = data[p],
@@ -351,6 +395,25 @@ fn decodeQueueParams(cmd: Cmd, data: []const u8, p: u32) ParsedCommand.Params {
             .data_ptr = readU32(data, p + 6),
             .data_len = readU32(data, p + 10),
         } },
+        // 52-byte fixed stride; the flag byte is the only record of the three
+        // optional fields, so it is decoded rather than inferred from a zero.
+        .write_texture => .{ .write_texture = .{
+            .id = readU16(data, p),
+            .data_ptr = readU32(data, p + 2),
+            .data_len = readU32(data, p + 6),
+            .offset = readU32(data, p + 10),
+            .bytes_per_row = readU32(data, p + 14),
+            .rows_per_image = readU32(data, p + 18),
+            .mip_level = readU32(data, p + 22),
+            .origin_x = readU32(data, p + 26),
+            .origin_y = readU32(data, p + 30),
+            .origin_z = readU32(data, p + 34),
+            .aspect = data[p + 38],
+            .size_width = readU32(data, p + 39),
+            .size_height = readU32(data, p + 43),
+            .size_depth = readU32(data, p + 47),
+            .flags = data[p + 51],
+        } },
         .write_time_uniform => .{ .write_time_uniform = .{
             .id = readU16(data, p),
             .offset = readU32(data, p + 2),
@@ -373,6 +436,24 @@ fn decodeQueueParams(cmd: Cmd, data: []const u8, p: u32) ParsedCommand.Params {
             .dst_id = readU16(data, p + 2),
             .width = readU16(data, p + 4),
             .height = readU16(data, p + 6),
+        } },
+        .copy_texture_subresource => .{ .copy_texture_subresource = .{
+            .source_id = readU16(data, p),
+            .destination_id = readU16(data, p + 2),
+            .source_mip = readU32(data, p + 4),
+            .source_origin_x = readU32(data, p + 8),
+            .source_origin_y = readU32(data, p + 12),
+            .source_origin_z = readU32(data, p + 16),
+            .source_aspect = data[p + 20],
+            .destination_mip = readU32(data, p + 21),
+            .destination_origin_x = readU32(data, p + 25),
+            .destination_origin_y = readU32(data, p + 29),
+            .destination_origin_z = readU32(data, p + 33),
+            .destination_aspect = data[p + 37],
+            .size_width = readU32(data, p + 38),
+            .size_height = readU32(data, p + 42),
+            .size_depth = readU32(data, p + 46),
+            .flags = data[p + 50],
         } },
         .copy_external_image_to_texture => .{ .copy_external_image = .{
             .bitmap_id = readU16(data, p),
@@ -438,6 +519,9 @@ fn writeOneOfEveryCommand(cb: *pngine.command_buffer.CommandBuffer) []const Cmd 
     // retired from emission but still decoded, so both belong in a table whose
     // job is one writer call per opcode.
     const atts = [_]Att{.{ .texture_id = 7, .load_op = .clear, .store_op = .store, .clear_r_bits = 1, .clear_g_bits = 2, .clear_b_bits = 3, .clear_a_bits = 4 }};
+    const view_atts = [_]pngine.emitter.Emitter.ViewColorAttachment{
+        .{ .target = 0x8000, .load_op = .clear, .store_op = .store, .clear_r_bits = 1, .clear_g_bits = 2, .clear_b_bits = 3, .clear_a_bits = 4, .resolve_target = 0xfffe },
+    };
     const legacy_atts = [_]pngine.command_buffer.CommandBuffer.LegacyColorAttachment{
         .{ .texture_id = 7, .load_op = 1, .store_op = 0, .clear_r = 1, .clear_g = 2, .clear_b = 3, .clear_a = 4 },
     };
@@ -487,6 +571,9 @@ fn writeOneOfEveryCommand(cb: *pngine.command_buffer.CommandBuffer) []const Cmd 
     cb.beginRenderPassMrtF32(&atts, 31);
     cb.endPass();
 
+    cb.beginRenderPassViews(&view_atts, 0x8001);
+    cb.endPass();
+
     cb.beginComputePass();
     cb.dispatch(8, 4, 2);
     cb.dispatchIndirect(32, 256);
@@ -500,6 +587,43 @@ fn writeOneOfEveryCommand(cb: *pngine.command_buffer.CommandBuffer) []const Cmd 
     cb.copyExternalImageToTexture(11, 2, 0, 1, 2, 3);
     cb.writeBufferFromWasm(40, 0, 500, 32);
     cb.resolveQuerySet(9, 0, 4, 41, 0);
+    cb.writeTexture(44, 800, 52, .{
+        .offset = 4,
+        .bytes_per_row = 8,
+        .rows_per_image = 2,
+        .mip_level = 1,
+        .origin = .{ .x = 1, .y = 2, .z = 3 },
+        .aspect = .all,
+        .size = .{ .width = 4, .height = 2, .depth_or_array_layers = 1 },
+    });
+    cb.copyTextureBuffer(.copy_buffer_to_texture, 45, 46, .{
+        .offset = 8,
+        .bytes_per_row = 256,
+        .rows_per_image = 2,
+        .size = .{ .width = 4, .height = 2, .depth_or_array_layers = 1 },
+    });
+    cb.copyTextureBuffer(.copy_texture_to_buffer, 47, 48, .{
+        .offset = 16,
+        .bytes_per_row = 256,
+        .rows_per_image = 2,
+        .aspect = .stencil_only,
+        .size = .{ .width = 2, .height = 2, .depth_or_array_layers = 1 },
+    });
+    cb.copyTextureSubresource(49, 50, .{
+        .source = .{
+            .texture_id = 49,
+            .mip_level = 1,
+            .origin = .{ .x = 2, .y = 3, .z = 4 },
+            .aspect = .depth_only,
+        },
+        .destination = .{
+            .texture_id = 50,
+            .mip_level = 5,
+            .origin = .{ .x = 6, .y = 7, .z = 8 },
+            .aspect = .stencil_only,
+        },
+        .size = .{ .width = 9, .height = 10, .depth_or_array_layers = 11 },
+    });
 
     cb.initWasmModule(42, 600, 100);
     cb.callWasmFunc(43, 42, 700, 4, &[_]u8{ 1, 2, 3 });
@@ -508,19 +632,21 @@ fn writeOneOfEveryCommand(cb: *pngine.command_buffer.CommandBuffer) []const Cmd 
     cb.end();
 
     return &.{
-        .create_buffer,             .create_texture,                 .create_sampler,             .create_shader,
-        .create_render_pipeline,    .create_compute_pipeline,        .create_bind_group,          .create_texture_view,
-        .create_query_set,          .create_bind_group_layout,       .create_image_bitmap,        .create_pipeline_layout,
-        .create_render_bundle,      .begin_render_pass,              .set_viewport,               .set_scissor_rect,
-        .set_stencil_reference,     .set_blend_constant,             .set_pass_depth_stencil_ops, .set_pass_clear_values,
-        .set_pass_timestamp_writes, .set_pass_occlusion_query_set,   .begin_occlusion_query,      .end_occlusion_query,
-        .set_pipeline,              .set_bind_group,                 .set_vertex_buffer,          .set_index_buffer,
-        .draw,                      .draw_indexed,                   .draw_indirect,              .draw_indexed_indirect,
-        .execute_bundles,           .end_pass,                       .begin_render_pass_mrt,      .end_pass,
-        .begin_render_pass_f32,     .end_pass,                       .begin_render_pass_mrt_f32,  .end_pass,
-        .begin_compute_pass,        .dispatch,                       .dispatch_indirect,          .end_pass,
-        .write_buffer,              .write_time_uniform,             .write_pointer_uniform,      .copy_buffer_to_buffer,
-        .copy_texture_to_texture,   .copy_external_image_to_texture, .write_buffer_from_wasm,     .resolve_query_set,
-        .init_wasm_module,          .call_wasm_func,                 .submit,                     .end,
+        .create_buffer,             .create_texture,               .create_sampler,             .create_shader,
+        .create_render_pipeline,    .create_compute_pipeline,      .create_bind_group,          .create_texture_view,
+        .create_query_set,          .create_bind_group_layout,     .create_image_bitmap,        .create_pipeline_layout,
+        .create_render_bundle,      .begin_render_pass,            .set_viewport,               .set_scissor_rect,
+        .set_stencil_reference,     .set_blend_constant,           .set_pass_depth_stencil_ops, .set_pass_clear_values,
+        .set_pass_timestamp_writes, .set_pass_occlusion_query_set, .begin_occlusion_query,      .end_occlusion_query,
+        .set_pipeline,              .set_bind_group,               .set_vertex_buffer,          .set_index_buffer,
+        .draw,                      .draw_indexed,                 .draw_indirect,              .draw_indexed_indirect,
+        .execute_bundles,           .end_pass,                     .begin_render_pass_mrt,      .end_pass,
+        .begin_render_pass_f32,     .end_pass,                     .begin_render_pass_mrt_f32,  .end_pass,
+        .begin_render_pass_views,   .end_pass,                     .begin_compute_pass,         .dispatch,
+        .dispatch_indirect,         .end_pass,                     .write_buffer,               .write_time_uniform,
+        .write_pointer_uniform,     .copy_buffer_to_buffer,        .copy_texture_to_texture,    .copy_external_image_to_texture,
+        .write_buffer_from_wasm,    .resolve_query_set,            .write_texture,              .copy_buffer_to_texture,
+        .copy_texture_to_buffer,    .copy_texture_subresource,     .init_wasm_module,           .call_wasm_func,
+        .submit,                    .end,
     };
 }

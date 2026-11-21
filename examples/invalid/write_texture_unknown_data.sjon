@@ -1,0 +1,6 @@
+; INVALID: an undeclared :data name is the schema's cross-ref reject; it must
+; never reach the wire as data id 0.
+(texture :name tex :size [2 2] :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture tex :data missingData :size [2 2] :bytes-per-row 8))
+(frame :name main :perform [upload])

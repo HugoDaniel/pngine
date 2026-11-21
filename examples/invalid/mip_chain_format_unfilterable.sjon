@@ -1,0 +1,8 @@
+; INVALID: a 32-bit float format needs float32-filterable.
+;
+; The chain samples through a linear sampler and assumes no optional feature;
+; the lowering has no fallback shader, so the format is refused at the texture.
+
+(texture :name mipTex :size [64 64] :format r32float
+  :mip-level-count 4 :usage [texture-binding render-attachment])
+(mip-chain :name fillMips :texture mipTex)

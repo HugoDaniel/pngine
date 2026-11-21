@@ -1,0 +1,51 @@
+; A named, host-writable texture: the live API's document.
+;
+; The texture is declared and sampled, but NOTHING in this document writes it.
+; That is the point. A static `(write-texture …)` would mark the name
+; `frameWritten` in the payload's texture-name block, and the host API would
+; then refuse every `writeTexture(p, "field", …)` by design (plan 04 D12/D14).
+; The host supplies the bytes; the document supplies only the destination and
+; the sampling pipeline. `copy-dst` is the one usage a `queue.writeTexture`
+; requires of its target.
+;
+; The shader forces the texture through the sampler even though every texel is
+; the same colour once the host writes it: the composited centre pixel is the
+; witness that the host bytes reached the queue before this pass ran.
+(texture :name field :size [2 2] :format rgba8unorm
+  :usage [texture-binding copy-dst])
+(sampler :name samp :mag-filter nearest :min-filter nearest)
+
+(shader-module :name code :code """
+    @group(0) @binding(0) var samp: sampler;
+    @group(0) @binding(1) var field: texture_2d<f32>;
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      var p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
+      return vec4f(p[i], 0, 1);
+    }
+
+    @fragment
+    fn fs(@builtin(position) c: vec4f) -> @location(0) vec4f {
+      return textureSample(field, samp, c.xy / vec2f(2.0));
+    }
+""")
+
+(render-pipeline :name pipe
+  :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (color-target :format preferred-canvas-format)))
+
+(bind-group :name g :layout pipe :group 0
+  (entry :binding 0 :sampler samp)
+  (entry :binding 1 :texture field))
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipe :bind-groups [g]
+  (draw :vertex-count 3))
+
+; No `queue` step and no `write-texture`: the host owns the bytes.
+(frame :name main :perform [draw])

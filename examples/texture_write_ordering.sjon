@@ -1,0 +1,51 @@
+; Ordering: two writes to one texture in one queue step, the second repeated,
+; then a render pass that samples the texture. The queue is inlined at its
+; frame step in source order, so the trace records write, write, write, then
+; the pass — no deduplication and nothing reordered. The final texel values
+; are the same repeated write's (pixels are plan 03's); this fixture pins the
+; static order and that a later pass sees the earlier queue work.
+(data :name firstTexels (bytes :base64 "EREREREREREREREREREREQ=="))
+(data :name secondTexels (bytes :base64 "IiIiIiIiIiIiIiIiIiIiIg=="))
+(texture :name field :size [2 2] :format rgba8unorm
+  :usage [texture-binding copy-dst])
+(sampler :name samp :mag-filter linear :min-filter linear)
+
+(shader-module :name code :code """
+    @group(0) @binding(0) var samp: sampler;
+    @group(0) @binding(1) var field: texture_2d<f32>;
+
+    @vertex
+    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+      var p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
+      return vec4f(p[i], 0, 1);
+    }
+
+    @fragment
+    fn fs(@builtin(position) c: vec4f) -> @location(0) vec4f {
+      let uv = c.xy / vec2f(2.0);
+      return textureSample(field, samp, uv);
+    }
+""")
+
+(render-pipeline :name pipe
+  :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (color-target :format preferred-canvas-format)))
+
+(bind-group :name g :layout pipe :group 0
+  (entry :binding 0 :sampler samp)
+  (entry :binding 1 :texture field))
+
+(queue :name upload
+  (write-texture :texture field :data firstTexels :bytes-per-row 8 :rows-per-image 2 :size [2 2])
+  (write-texture :texture field :data secondTexels :bytes-per-row 8 :rows-per-image 2 :size [2 2])
+  (write-texture :texture field :data secondTexels :bytes-per-row 8 :rows-per-image 2 :size [2 2]))
+
+(render-pass :name draw
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  :pipeline pipe :bind-groups [g]
+  (draw :vertex-count 3))
+
+(frame :name main :perform [upload draw])

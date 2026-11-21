@@ -30,9 +30,20 @@ pub fn build(b: *std.Build) void {
     // ========================================================================
     // wgslender (native Zig WGSL reflection/minification)
     // ========================================================================
+    // `lsp = false`: wgslender's switch defaults TRUE, and true makes it
+    // lazily fetch and import its own URL-pinned SJON beside this project's
+    // sibling `../SJON` path dep. Two copies with identical build options is
+    // one generated `options.zig` used as the root of two modules, which Zig
+    // 0.16 refuses outright (`file exists in modules 'build_options' and
+    // 'build_options1'`, reported at SJON's Host.zig:1:1) — it broke this
+    // whole build, `drift` included, until this line existed. Nothing is
+    // lost: the switch only compiles out wgslender's LSP project support
+    // (`wgslender.Pngine` becomes `void`), which pngine never touches — pngine
+    // is a SJON host itself, and its SJON is the path dep below.
     const wgslender_dep = b.dependency("wgslender", .{
         .target = target,
         .optimize = optimize,
+        .lsp = false,
     });
     const wgslender_mod = wgslender_dep.module("wgslender");
 
@@ -289,18 +300,212 @@ pub fn build(b: *std.Build) void {
         // headroom the frame-program controls and guards (§7) will spend, so a
         // variant exceeding its old size before those land is a regression, not
         // a windfall. Do not raise a cap without measuring.
+        //
+        // 2026-11-19 (plan 02 Task 3b, bare `zig build` measured): command
+        // write_texture = 0x28 plus the wasm-entry texture arm. Before → after,
+        // and the new cap (each cap moves by exactly its variant's measured
+        // delta, preserving the headroom it carried into this task):
+        //   core               9446 →  9591 (+145)  cap 9550 →  9695
+        //   render            12236 → 12381 (+145)  cap 12350 → 12495
+        //   compute            9730 →  9875 (+145)  cap 9850 →  9995
+        //   render-compute    12528 → 12673 (+145)  cap 12650 → 12795
+        //   render-anim       12236 → 12381 (+145)  cap 12350 → 12495
+        //   render-compute-anim 12528 → 12673 (+145) cap 12650 → 12795
+        //   render-wasm       13103 → 13248 (+145)  cap 13200 → 13345
+        //   full              14046 → 14853 (+807)  cap 14150 → 14957
+        // The +145 every variant pays is the skip/spine table plus the routed
+        // switch arm, which a texture-less executor still needs to step past a
+        // well-formed 0x2D. The extra +662 on `full` is the one command writer
+        // and one decode arm (presence flags → the shared WriteLayout): the
+        // bytes Task 3a deliberately left for this task, not duplication. Full
+        // remains below the ~15 KB executor goal (14,853 B measured).
+        //
+        // 2026-11-20 (plan 05 slice 2, bare `zig build` measured): PNGB
+        // copy_buffer_to_texture = 0x2E / copy_texture_to_buffer = 0x2F and
+        // their one shared 14-field wire layout. Before → after, and the new
+        // cap (each cap moves by exactly its variant's measured delta,
+        // preserving the headroom it carried into this task):
+        //   core                 9591 →  9753 (+162)  cap  9695 →  9857
+        //   render              12381 → 12543 (+162)  cap 12495 → 12657
+        //   compute              9875 → 10037 (+162)  cap  9995 → 10157
+        //   render-compute      12673 → 12835 (+162)  cap 12795 → 12957
+        //   render-anim         12381 → 12543 (+162)  cap 12495 → 12657
+        //   render-compute-anim 12673 → 12835 (+162)  cap 12795 → 12957
+        //   render-wasm         13248 → 13410 (+162)  cap 13345 → 13507
+        //   full                14853 → 15015 (+162)  cap 14957 → 15119
+        // The +162 every variant pays is the ONE new distinct Layout's skip
+        // body: `skipParams` monomorphizes a body per distinct Layout, and even
+        // a texture-less executor must step past a well-formed 0x2E/0x2F. It is
+        // irreducible without forking the shared skipper or dropping the
+        // semantic field names `readOperands` uses; the added opcode cases in
+        // wasm_entry's skip group are part of the same delta. `full` is now
+        // 15,015 B measured — 15 B over the informal ~15 KB executor goal; the
+        // crossing is attributable to that same shared body, required because
+        // both opcodes have fixtures that every executor variant must walk.
+        //
+        // 2026-11-20 (plan 05 slice 3, bare `zig build` measured): the
+        // shipping executor now EXECUTES copy_buffer_to_texture /
+        // copy_texture_to_buffer (0x2E/0x2F) instead of walking them. Before →
+        // after, all eight variants, and the new cap (only `full` moves; it is
+        // the only variant with the texture plugin, and the other seven compile
+        // the arms out and dead-strip the writer):
+        //   core                 9753 →  9753 (  0)  cap  9857 (unchanged)
+        //   render              12543 → 12543 (  0)  cap 12657 (unchanged)
+        //   compute             10037 → 10037 (  0)  cap 10157 (unchanged)
+        //   render-compute      12835 → 12835 (  0)  cap 12957 (unchanged)
+        //   render-anim         12543 → 12543 (  0)  cap 12657 (unchanged)
+        //   render-compute-anim 12835 → 12835 (  0)  cap 12957 (unchanged)
+        //   render-wasm         13410 → 13410 (  0)  cap 13507 (unchanged)
+        //   full                15015 → 15727 (+712) cap 15119 → 15831
+        // The delta is the first browser execution of both commands: one
+        // hand-read 14-field copy record (its wire layout is pinned at comptime
+        // in wasm_entry, the `exec_if`/`write_controls` precedent), one 42-byte
+        // layout tail already shared with `write_texture`, and the two opcode
+        // cases plus their texture-plugin gate. The first implementation
+        // duplicated the decoder and the 46-byte writer and measured 16,779 B;
+        // sharing the tail and the decode took 1,052 B off before this table
+        // was taken. It is irreducible in `full` without forking the one
+        // writer/decoder or leaving the commands unexecuted, which is the
+        // feature. `full` is now 15,727 B — 712 B over the 15,015 B already
+        // recorded against the informal ~15 KB executor goal; the crossing is
+        // attributable to these two executing copy commands, not to incidental
+        // creep, and every other variant is byte-identical.
+        //
+        // 2026-11-20 (plan 06 slice 2, bare `zig build` measured): PNGB
+        // copy_texture_subresource = 0x80 and its 16-field wire layout. Every
+        // variant paid exactly +257 B. Before → after, and the new cap (each
+        // cap moves by exactly its variant's measured delta, preserving the
+        // headroom it carried into this task):
+        //   core                 9753 → 10010 (+257)  cap  9857 → 10114
+        //   render              12543 → 12800 (+257)  cap 12657 → 12914
+        //   compute             10037 → 10294 (+257)  cap 10157 → 10414
+        //   render-compute      12835 → 13092 (+257)  cap 12957 → 13214
+        //   render-anim         12543 → 12800 (+257)  cap 12657 → 12914
+        //   render-compute-anim 12835 → 13092 (+257)  cap 12957 → 13214
+        //   render-wasm         13410 → 13667 (+257)  cap 13507 → 13764
+        //   full                15727 → 15984 (+257)  cap 15831 → 16088
+        // The delta is the new distinct Layout's skip body (`skipParams`
+        // monomorphizes per shape; every variant must step past a well-formed
+        // 0x80) plus the wasm_entry opcode case that routes it to the walk.
+        // Slice 3 will replace the walk with browser execution in `full`.
+        //
+        // 2026-11-20 (plan 06 slice 3, bare `zig build` measured): the
+        // shipping executor now EXECUTES copy_texture_subresource (0x80) —
+        // one decoded record, one 51-byte command writer, and the routed
+        // texture-plugin arm — instead of walking it. Before → after, all
+        // eight variants, and the new cap (only `full` moves; the other seven
+        // compile the arm out and dead-strip the writer):
+        //   core                 10010 → 10010 (  0)  cap 10114 (unchanged)
+        //   render              12800 → 12800 (  0)  cap 12914 (unchanged)
+        //   compute             10294 → 10294 (  0)  cap 10414 (unchanged)
+        //   render-compute      13092 → 13092 (  0)  cap 13214 (unchanged)
+        //   render-anim         12800 → 12800 (  0)  cap 12914 (unchanged)
+        //   render-compute-anim 13092 → 13092 (  0)  cap 13214 (unchanged)
+        //   render-wasm         13667 → 13667 (  0)  cap 13764 (unchanged)
+        //   full                15984 → 16453 (+469) cap 16088 → 16557
+        // The delta is the execution itself: the shared `readOperands` decode
+        // of the existing 16-field 0x80 layout (already paid as a skip body),
+        // the 51-byte two-endpoint command writer, and the opcode's move from
+        // the walk group into the texture-plugin arm. Slimming was attempted:
+        // factoring the endpoint half into a helper measured 16,564 B (+580),
+        // 111 B WORSE than straight-line writes because the call/struct copies
+        // outgrew the duplicated five writes; it was reverted. `full` remains
+        // over the informal ~15 KB goal — it crossed in plan 05 slice 3, and
+        // this slice adds the execution of the second copy family, not
+        // incidental creep. The cap preserves the 104 B headroom it carried in.
+        // 2026-11-20 (plan 09 slice 1, bare `zig build` measured): PNGB
+        // begin_render_pass_views = 0x81 and its 8-field repeat layout. Every
+        // variant paid exactly +210 B. Before → after, and the new cap (each
+        // cap moves by exactly its variant's measured delta, preserving the
+        // headroom it carried into this task):
+        //   core                 10010 → 10220 (+210)  cap 10114 → 10324
+        //   render              12800 → 13010 (+210)  cap 12914 → 13124
+        //   compute             10294 → 10504 (+210)  cap 10414 → 10624
+        //   render-compute      13092 → 13302 (+210)  cap 13214 → 13424
+        //   render-anim         12800 → 13010 (+210)  cap 12914 → 13124
+        //   render-compute-anim 13092 → 13302 (+210)  cap 13214 → 13424
+        //   render-wasm         13667 → 13877 (+210)  cap 13764 → 13974
+        //   full                16453 → 16663 (+210)  cap 16557 → 16767
+        // The uniform delta is ONE distinct Layout's skip body (`skipParams`
+        // monomorphizes per distinct Kind sequence, and every variant must step
+        // past a well-formed 0x81) plus the routed walk case in wasm_entry. The
+        // new elem is NOT the MRT elem: every attachment carries target and
+        // resolve varints, so the shapes cannot alias without desyncing. There
+        // is no execution, writer, command-buffer or plugin code in this slice
+        // — 0x81 is walk-only until slice 2 — so no further diet exists here.
+        // The emitter's shared clear-colour writer and the one target-resolution
+        // helper live in the compiler/reference path and add no executor bytes.
+        // `full` remains over the informal ~15 KB goal (now 16,663 B); the
+        // crossing predates this slice (plan 05 slice 3), and this is the
+        // plan-09-measured, attributable cost of the new wire record.
+        // 2026-11-21 (plan 09 slice 2, bare `zig build` measured): command 0x55
+        // begin_render_pass_views execution in the shipping executor. Before →
+        // after and the new cap (each cap moves by exactly its variant's
+        // measured delta, preserving the headroom it carried in):
+        //   core                 10220 → 10259 (+39)   cap 10324 → 10363
+        //   render               13010 → 13514 (+504)  cap 13124 → 13628
+        //   compute              10504 → 10543 (+39)   cap 10624 → 10663
+        //   render-compute       13302 → 13798 (+496)  cap 13424 → 13920
+        //   render-anim          13010 → 13514 (+504)  cap 13124 → 13628
+        //   render-compute-anim  13302 → 13798 (+496)  cap 13424 → 13920
+        //   render-wasm          13877 → 14377 (+500)  cap 13974 → 14474
+        //   full                 16663 → 17155 (+492)  cap 16767 → 17259
+        // The non-render +39 is the new Cmd arm in execRenderPass walking 0x81
+        // through skipOpcodeParams (a variant without the render plugin must
+        // still step the record; that arm is compiled but never executes a
+        // pass). The render deltas are the decode loop, the two shared readers
+        // and the command writer. Sharing, each measured rather than assumed:
+        //  - 0x54/0x55 straight-line writers            → shared attachment body        −6 B
+        //  - shared clear-bits writer with 0x53         →                            −4 B
+        //  - 0x54/0x55 attachment head                  →                            −53 B
+        //  - 0x54/0x55 attachment decode in wasm_entry  → one readAttachmentHead      −170 B
+        // Duplicating any of those measured WORSE; the numbers above are the
+        // final build. What was rejected: a second browser begin-pass
+        // implementation (forbidden by the plan, and gpu.js's resolver is
+        // shared by colour/resolve/depth); extracting the resolver out of the
+        // closure (it reads five tables plus the canvas context); a new
+        // command opcode for depth-only passes (zero colour count is already
+        // legal in 0x55, and the plan forbids a second single-view opcode).
+        // Irreducibility: the remaining delta is one writer plus one decode
+        // arm that every render variant must carry to execute a valid 0x81;
+        // both now share their bodies with the legacy records. No existing
+        // layout, opcode or wire byte changed. `full` remains over the
+        // informal ~15 KB goal (17,155 B); the crossing predates this slice,
+        // and this is 0x55's measured execution cost, not incidental creep.
+        // 2026-11-21 (executor diet, bare `zig build` measured): one packed,
+        // runtime-walked skip table replaces `skipParams`'s per-layout
+        // monomorphization (one `inline else` body per distinct Layout).
+        // Before → after, and the new cap (each cap moves by exactly its
+        // variant's measured delta, preserving the headroom it carried in):
+        //   core                 10259 →  8764 (−1,495)  cap 10363 →  8868
+        //   render               13514 → 12019 (−1,495)  cap 13628 → 12133
+        //   compute              10543 →  9048 (−1,495)  cap 10663 →  9168
+        //   render-compute       13798 → 12303 (−1,495)  cap 13920 → 12425
+        //   render-anim          13514 → 12019 (−1,495)  cap 13628 → 12133
+        //   render-compute-anim  13798 → 12303 (−1,495)  cap 13920 → 12425
+        //   render-wasm          14377 → 12882 (−1,495)  cap 14474 → 12979
+        //   full                 17155 → 15663 (−1,492)  cap 17259 → 15767
+        // The uniform delta is one shared skipper: 2,373 B of
+        // `skipOpcodeParams` plus ~430 B of per-Layout helpers become one
+        // 256-byte opcode→row map, a 282-byte descriptor stream, a 58-byte
+        // starts array and one walker. On `full`: code −2,150 B, data +657 B,
+        // type/function framing +1 B. Field names never affected a skip, so
+        // rows dedupe by KIND SEQUENCE; the golden traces and the
+        // wire-conformance suites pin the identical behavior. This is the
+        // executor-diet profile's Option 2, measured at −1,495 B/variant
+        // (−1,492 in full).
         max_bytes: u32,
     };
 
     const executor_variants = [_]ExecutorVariant{
-        .{ .name = "core", .render = false, .compute = false, .wasm = false, .animation = false, .texture = false, .max_bytes = 9550 },
-        .{ .name = "render", .render = true, .compute = false, .wasm = false, .animation = false, .texture = false, .max_bytes = 12350 },
-        .{ .name = "compute", .render = false, .compute = true, .wasm = false, .animation = false, .texture = false, .max_bytes = 9850 },
-        .{ .name = "render-compute", .render = true, .compute = true, .wasm = false, .animation = false, .texture = false, .max_bytes = 12650 },
-        .{ .name = "render-anim", .render = true, .compute = false, .wasm = false, .animation = true, .texture = false, .max_bytes = 12350 },
-        .{ .name = "render-compute-anim", .render = true, .compute = true, .wasm = false, .animation = true, .texture = false, .max_bytes = 12650 },
-        .{ .name = "render-wasm", .render = true, .compute = false, .wasm = true, .animation = false, .texture = false, .max_bytes = 13200 },
-        .{ .name = "full", .render = true, .compute = true, .wasm = true, .animation = true, .texture = true, .max_bytes = 14150 },
+        .{ .name = "core", .render = false, .compute = false, .wasm = false, .animation = false, .texture = false, .max_bytes = 8868 },
+        .{ .name = "render", .render = true, .compute = false, .wasm = false, .animation = false, .texture = false, .max_bytes = 12133 },
+        .{ .name = "compute", .render = false, .compute = true, .wasm = false, .animation = false, .texture = false, .max_bytes = 9168 },
+        .{ .name = "render-compute", .render = true, .compute = true, .wasm = false, .animation = false, .texture = false, .max_bytes = 12425 },
+        .{ .name = "render-anim", .render = true, .compute = false, .wasm = false, .animation = true, .texture = false, .max_bytes = 12133 },
+        .{ .name = "render-compute-anim", .render = true, .compute = true, .wasm = false, .animation = true, .texture = false, .max_bytes = 12425 },
+        .{ .name = "render-wasm", .render = true, .compute = false, .wasm = true, .animation = false, .texture = false, .max_bytes = 12979 },
+        .{ .name = "full", .render = true, .compute = true, .wasm = true, .animation = true, .texture = true, .max_bytes = 15767 },
     };
 
     const ExecutorArtifact = struct {
@@ -343,6 +548,11 @@ pub fn build(b: *std.Build) void {
         });
         executors_step.dependOn(&install_executor.step);
     }
+
+    // `pngine compile --embed-executor` prefers these installed variants over
+    // the CLI's compile-time fallback, so a plain `zig build` must refresh them
+    // or every payload embeds whatever WASM happened to be on disk last.
+    b.getInstallStep().dependOn(executors_step);
 
     // C11 guard (item 2.2): the `core` and `full` variants MUST be byte-different.
     // Byte-identical binaries mean plugin gating silently regressed to the
@@ -725,6 +935,14 @@ pub fn build(b: *std.Build) void {
 
     const standalone_step = b.step("test-standalone", "Run standalone module tests in parallel (~2s)");
 
+    // The fixture glob's own test. build.zig is a normal Zig program, so its
+    // test block can drive `collectSjonFixtureNames` over a temp directory the
+    // test creates — the one place the name-vs-dirent-kind rule is exercised
+    // without depending on what kind the host filesystem reports.
+    const build_script_step = b.step("test-build-script", "Run build.zig's own tests (the fixture glob)");
+    const build_script_mod = stdModule(b, target, optimize, "build.zig", &.{});
+    addStandaloneTest(b, standalone_step, build_script_step, "build-script", build_script_mod);
+
     // Types module
     const types_test_step = b.step("test-types", "Run types module tests");
     const types_test_mod = stdModule(b, target, optimize, "src/types/main.zig", &.{});
@@ -756,6 +974,7 @@ pub fn build(b: *std.Build) void {
     // Dedicated tests (moved to tests/zig/bytecode/)
     const bytecode_dedicated_mod = stdModule(b, target, optimize, "tests/zig/test_bytecode.zig", &.{
         .{ .name = "bytecode", .module = bytecode_mod },
+        .{ .name = "types", .module = types_module },
     });
     addStandaloneTest(b, standalone_step, bytecode_step, "bytecode-dedicated", bytecode_dedicated_mod);
 
@@ -764,6 +983,8 @@ pub fn build(b: *std.Build) void {
     const reflect_standalone_mod = stdModule(b, target, optimize, "src/reflect/standalone.zig", &.{
         .{ .name = "wgslender", .module = wgslender_mod },
     });
+    // The test graph calls std's libc clock_gettime; Zig won't link libc implicitly.
+    reflect_standalone_mod.link_libc = true;
 
     addStandaloneTest(b, standalone_step, reflect_step, "reflect", reflect_standalone_mod);
 
@@ -1083,7 +1304,34 @@ pub fn build(b: *std.Build) void {
     const sjon_invalid_mod = stdModule(b, target, optimize, "tests/zig/sjon_invalid.zig", &.{
         .{ .name = "dsl_sjon", .module = sjon_test_mod },
     });
-    inline for (.{ "bad_wgsl_syntax", "missing_entry_point", "buffer_too_small", "missing_bind_group", "unaligned_uniform", "bad_scissor_rect", "uniform_too_small_for_struct", "missing_uniform_bind", "address_space_mismatch", "workgroup_too_large", "bind_kind_mismatch", "vertex_location_unbound", "texture_sample_type_mismatch", "sampler_comparison_mismatch", "vertex_format_mismatch", "fragment_output_type_mismatch", "fragment_output_unbound", "pass_attachment_count_mismatch", "pass_attachment_format_mismatch", "pass_depth_missing_in_pipeline", "pass_depth_missing_in_pass", "pass_depth_format_mismatch", "pass_resolve_format_mismatch", "pass_sample_count_mismatch", "storage_texture_format_mismatch", "too_many_passes", "too_many_bundles", "sampler_anisotropy_out_of_range", "texture_dimension_numeric", "texture_view_dimension_not_a_member", "pipeline_layout_dangling_bgl", "primitive_strip_index_format", "workgroup_512_no_limits", "bind_offset_without_buffer", "bind_slice_past_end", "bind_offset_at_end", "bundle_ref_lowered", "too_many_wasm_args", "unknown_wasm_arg", "pass_mixed_stages", "pass_no_entry_point", "pass_graph_empty", "pass_too_many_entries", "init_workgroups_unresolved", "override_no_default", "override_no_default_compute", "constant_unknown_override", "constant_type_mismatch", "constant_conflict", "pool_overflow", "pool_expression_overflow", "shape_sphere_zero", "shape_cone_bomb", "define_overflow", "pass_shader_name_collision", "fragment_no_targets", "stage_no_module", "depth_stencil_no_format", "texture_no_size", "buffer_no_size", "pipeline_no_layout", "compute_stage_no_module", "bundle_no_color_formats", "attachment_no_load_op", "pipeline_two_vertex_stages", "blend_missing_alpha", "pipeline_name_shared_across_kinds", "define_ref_typo", "write_buffer_offset_unaligned", "bgl_entry_two_resources", "bgl_entry_no_resource", "data_two_generators", "dup_name_cross_kind", "reserved_name_builtin", "copy_no_destination", "compute_pass_no_dispatch", "dispatch_no_workgroups", "bundle_no_draw", "write_mask_not_a_member", "pipeline_two_primitive", "depth_stencil_two_stencil_front", "strip_index_format_on_list_topology", "strip_topology_indexed_draw", "clear_value_with_load_op", "depth_clear_without_value", "depth_attachment_no_store_op", "alpha_to_coverage_single_sample", "render_pass_no_attachments", "occlusion_query_no_set", "anisotropy_without_linear_filters", "map_read_extra_usage", "wasm_data_size_unaligned", "wasm_gen_memory_name", "wasm_data_missing_file", "data_file_missing", "data_bytes_and_float32", "data_bytes_both_sources", "data_bytes_bad_base64", "data_bytes_file_missing", "data_bytes_empty", "depth_stencil_colour_format", "depth_write_on_stencil_only_format", "stencil_state_on_depth_only_format", "depth_format_no_write_enabled", "depth_compare_missing_with_write", "depth_bias_on_line_topology", "blend_on_integer_target", "alpha_to_coverage_no_alpha_target", "alpha_to_coverage_no_fragment", "depth_ops_on_stencil_only_attachment", "stencil_ops_missing_on_combined_attachment", "stencil_ops_on_depth_only_attachment", "msaa_texture_mipped", "msaa_texture_not_attachment", "msaa_texture_sample_count_two", "volume_texture_multisampled", "attachment_texture_1d", "copy_source_without_copy_src", "copy_destination_without_copy_dst", "copy_past_end_of_buffer", "write_buffer_target_without_copy_dst", "copy_texture_source_without_copy_src", "bundle_color_format_is_depth", "bundle_depth_format_is_colour", "bundle_pipeline_format_mismatch", "bundle_pipeline_sample_count_mismatch", "bundle_pipeline_depth_mismatch", "bundle_pass_format_mismatch", "bundle_pass_attachment_count", "bundle_pass_depth_missing", "bundle_pass_sample_count_mismatch", "define_ref_fractional_in_count", "define_cycle", "expression_negative", "count_expression_overflow", "stray_command_at_root", "pass_outside_pass_graph", "bundle_no_pipeline", "pass_no_code", "pass_feedback_on_last", "pass_controls_undeclared", "pass_format_on_canvas_pass", "pass_format_depth", "pass_format_on_compute", "pass_format_unfilterable", "pass_reads_unused", "pass_reads_no_texture_binding", "pass_reads_multisampled", "pass_reads_volume", "pass_reads_array_layers", "pass_reads_stencil", "pass_reads_depth_sampled", "pass_reads_name_collision", "pass_scale_on_compute", "pass_scale_on_canvas_pass", "texture_scale_without_canvas", "texture_scale_narrows_to_zero", "pass_graph_second_frame", "render_pass_draw_no_pipeline", "draw_indirect_offset_unaligned", "query_set_count_over_max", "expression_unknown_constant", "define_unknown_constant", "pipeline_no_vertex", "bind_group_index_define_overflow", "binding_expression_overflow", "anisotropy_define_overflow", "limits_negative_expression", "texture_depth_define_zero", "mip_level_literal_overflow", "origin_define_overflow", "pool_offset_define_overflow", "query_count_define_overflow", "pool_offset_past_pool", "wgsl_cycle", "wgsl_entry_in_fragment", "wgsl_both_code_and_file", "wgsl_neither_code_nor_file", "wgsl_dangling_import", "wgsl_missing_hole", "wgsl_binding_in_pass_fragment", "wgsl_broken_fragment_located", "wgsl_missing_file", "wgsl_escapes_dir", "unbound_binding_reached_by_pipeline", "prune_unused_on_explicit_layout", "prune_unused_empties_group", "bind_kind_mismatch_scoped", "derived_group_prune_unused_redundant", "derived_group_explicit_pipeline_layout", "derived_group_empties_below_reach", "derived_group_omitted_in_bundle", "draw_graph_attachment_unknown_texture", "draw_graph_duplicate_stage", "draw_graph_fragment_without_color", "draw_graph_geometry_no_in", "draw_graph_group_index_gap", "draw_graph_group_layout", "draw_graph_group_prune_unused", "draw_graph_multisampled_attachment", "draw_graph_name_collision", "draw_graph_no_draw", "draw_graph_no_geometry", "draw_graph_no_stage", "draw_graph_second_frame", "draw_graph_stage_no_attachment", "draw_graph_target_count", "draw_graph_stage_unused", "draw_graph_two_draws", "graph_named_no_frame", "graph_named_before", "graph_two_unnamed", "step_group_cycle", "guard_cycle", "draw_graph_unknown_stage", "draw_graph_with_pass_graph", "draw_graph_sample_count_overflow", "draw_graph_group_define_ref", "bind_group_entries_over_255", "wgsl_entry_in_file_fragment", "wasm_data_length_over_budget", "write_buffer_frame_inputs_too_small", "bind_group_pool_over_native_cap", "render_pass_too_many_attachments", "pass_graph_expose_missing", "pass_expose_blit_collision", "control_when_unknown", "control_compare_unit", "control_compare_unknown_define", "control_key_without_when", "control_else_without_when", "control_dup_name", "control_name_wgsl_reserved", "select_no_cases", "select_sixty_five_cases", "select_on_unknown" }) |name| {
+    inline for (.{ "bad_wgsl_syntax", "missing_entry_point", "buffer_too_small", "missing_bind_group", "unaligned_uniform", "bad_scissor_rect", "uniform_too_small_for_struct", "missing_uniform_bind", "address_space_mismatch", "workgroup_too_large", "bind_kind_mismatch", "vertex_location_unbound", "texture_sample_type_mismatch", "sampler_comparison_mismatch", "vertex_format_mismatch", "fragment_output_type_mismatch", "fragment_output_unbound", "pass_attachment_count_mismatch", "pass_attachment_format_mismatch", "pass_depth_missing_in_pipeline", "pass_depth_missing_in_pass", "pass_depth_format_mismatch", "pass_resolve_format_mismatch", "pass_sample_count_mismatch", "storage_texture_format_mismatch", "too_many_passes", "too_many_bundles", "sampler_anisotropy_out_of_range", "texture_dimension_numeric", "texture_view_dimension_not_a_member", "pipeline_layout_dangling_bgl", "primitive_strip_index_format", "workgroup_512_no_limits", "bind_offset_without_buffer", "bind_slice_past_end", "bind_offset_at_end", "bundle_ref_lowered", "too_many_wasm_args", "unknown_wasm_arg", "pass_mixed_stages", "pass_no_entry_point", "pass_graph_empty", "pass_too_many_entries", "init_workgroups_unresolved", "override_no_default", "override_no_default_compute", "constant_unknown_override", "constant_type_mismatch", "constant_conflict", "pool_overflow", "pool_expression_overflow", "shape_sphere_zero", "shape_cone_bomb", "define_overflow", "pass_shader_name_collision", "fragment_no_targets", "stage_no_module", "depth_stencil_no_format", "texture_no_size", "buffer_no_size", "pipeline_no_layout", "compute_stage_no_module", "bundle_no_color_formats", "attachment_no_load_op", "pipeline_two_vertex_stages", "blend_missing_alpha", "pipeline_name_shared_across_kinds", "define_ref_typo", "write_buffer_offset_unaligned", "bgl_entry_two_resources", "bgl_entry_no_resource", "data_two_generators", "dup_name_cross_kind", "reserved_name_builtin", "copy_no_destination", "compute_pass_no_dispatch", "dispatch_no_workgroups", "bundle_no_draw", "write_mask_not_a_member", "pipeline_two_primitive", "depth_stencil_two_stencil_front", "strip_index_format_on_list_topology", "strip_topology_indexed_draw", "clear_value_with_load_op", "depth_clear_without_value", "depth_attachment_no_store_op", "alpha_to_coverage_single_sample", "render_pass_no_attachments", "occlusion_query_no_set", "anisotropy_without_linear_filters", "map_read_extra_usage", "wasm_data_size_unaligned", "wasm_gen_memory_name", "wasm_data_missing_file", "data_file_missing", "data_bytes_and_float32", "data_bytes_both_sources", "data_bytes_bad_base64", "data_bytes_file_missing", "data_bytes_empty", "depth_stencil_colour_format", "depth_write_on_stencil_only_format", "stencil_state_on_depth_only_format", "depth_format_no_write_enabled", "depth_compare_missing_with_write", "depth_bias_on_line_topology", "blend_on_integer_target", "alpha_to_coverage_no_alpha_target", "alpha_to_coverage_no_fragment", "depth_ops_on_stencil_only_attachment", "stencil_ops_missing_on_combined_attachment", "stencil_ops_on_depth_only_attachment", "msaa_texture_mipped", "msaa_texture_not_attachment", "msaa_texture_sample_count_two", "volume_texture_multisampled", "attachment_texture_1d", "copy_source_without_copy_src", "copy_destination_without_copy_dst", "copy_past_end_of_buffer", "write_buffer_target_without_copy_dst", "copy_texture_source_without_copy_src", "bundle_color_format_is_depth", "bundle_depth_format_is_colour", "bundle_pipeline_format_mismatch", "bundle_pipeline_sample_count_mismatch", "bundle_pipeline_depth_mismatch", "bundle_pass_format_mismatch", "bundle_pass_attachment_count", "bundle_pass_depth_missing", "bundle_pass_sample_count_mismatch", "define_ref_fractional_in_count", "define_cycle", "expression_negative", "count_expression_overflow", "stray_command_at_root", "pass_outside_pass_graph", "bundle_no_pipeline", "pass_no_code", "pass_feedback_on_last", "pass_controls_undeclared", "pass_format_on_canvas_pass", "pass_format_depth", "pass_format_on_compute", "pass_format_unfilterable", "pass_reads_unused", "pass_reads_no_texture_binding", "pass_reads_multisampled", "pass_reads_volume", "pass_reads_array_layers", "pass_reads_stencil", "pass_reads_depth_sampled", "pass_reads_name_collision", "pass_scale_on_compute", "pass_scale_on_canvas_pass", "texture_scale_without_canvas", "texture_scale_narrows_to_zero", "pass_graph_second_frame", "render_pass_draw_no_pipeline", "draw_indirect_offset_unaligned", "query_set_count_over_max", "expression_unknown_constant", "define_unknown_constant", "pipeline_no_vertex", "bind_group_index_define_overflow", "binding_expression_overflow", "anisotropy_define_overflow", "limits_negative_expression", "texture_depth_define_zero", "mip_level_literal_overflow", "origin_define_overflow", "pool_offset_define_overflow", "query_count_define_overflow", "pool_offset_past_pool", "wgsl_cycle", "wgsl_entry_in_fragment", "wgsl_both_code_and_file", "wgsl_neither_code_nor_file", "wgsl_dangling_import", "wgsl_missing_hole", "wgsl_binding_in_pass_fragment", "wgsl_broken_fragment_located", "wgsl_missing_file", "wgsl_escapes_dir", "unbound_binding_reached_by_pipeline", "prune_unused_on_explicit_layout", "prune_unused_empties_group", "bind_kind_mismatch_scoped", "derived_group_prune_unused_redundant", "derived_group_explicit_pipeline_layout", "derived_group_empties_below_reach", "derived_group_omitted_in_bundle", "draw_graph_attachment_unknown_texture", "draw_graph_duplicate_stage", "draw_graph_fragment_without_color", "draw_graph_geometry_no_in", "draw_graph_group_index_gap", "draw_graph_group_layout", "draw_graph_group_prune_unused", "draw_graph_multisampled_attachment", "draw_graph_name_collision", "draw_graph_no_draw", "draw_graph_no_geometry", "draw_graph_no_stage", "draw_graph_second_frame", "draw_graph_stage_no_attachment", "draw_graph_target_count", "draw_graph_stage_unused", "draw_graph_two_draws", "graph_named_no_frame", "graph_named_before", "graph_two_unnamed", "step_group_cycle", "guard_cycle", "draw_graph_unknown_stage", "draw_graph_with_pass_graph", "draw_graph_sample_count_overflow", "draw_graph_group_define_ref", "bind_group_entries_over_255", "wgsl_entry_in_file_fragment", "wasm_data_length_over_budget", "write_buffer_frame_inputs_too_small", "bind_group_pool_over_native_cap", "render_pass_too_many_attachments", "pass_graph_expose_missing", "pass_expose_blit_collision", "control_when_unknown", "control_compare_unit", "control_compare_unknown_define", "control_key_without_when", "control_else_without_when", "control_dup_name", "control_name_wgsl_reserved", "select_no_cases", "select_sixty_five_cases", "select_on_unknown", "mip_chain_array", "mip_chain_dimension_1d", "mip_chain_dimension_3d", "mip_chain_format_compressed", "mip_chain_format_depth", "mip_chain_format_not_renderable", "mip_chain_format_unfilterable", "mip_chain_huge_mip", "mip_chain_msaa", "mip_chain_name_collision", "mip_chain_no_render_attachment", "mip_chain_no_texture_binding", "mip_chain_one_mip", "mip_chain_pooled", "mip_chain_zero_mip", "write_texture_no_copy_dst", "write_texture_msaa", "write_texture_1d", "write_texture_pooled", "write_texture_view_target", "write_texture_canvas_target", "write_texture_unknown_texture", "write_texture_unknown_data", "write_texture_image_data", "write_texture_short_data", "write_texture_row_too_small", "write_texture_missing_row_stride", "write_texture_missing_image_stride", "write_texture_zero_row_stride", "write_texture_zero_image_stride", "write_texture_mip_past_end", "write_texture_origin_past_end", "write_texture_extent_past_end", "write_texture_color_depth_aspect", "write_texture_color_stencil_aspect", "write_texture_overflow", "write_texture_bad_origin_type", "write_texture_bad_size_type", "write_texture_duplicate_key", "write_texture_depth_all", "write_texture_depth24", "write_texture_depth32float", "write_texture_depth_subregion", "write_texture_one_byte_short", "copy_buffer_to_texture_source_without_copy_src", "copy_buffer_to_texture_destination_without_copy_dst", "copy_texture_to_buffer_source_without_copy_src", "copy_texture_to_buffer_destination_without_copy_dst", "copy_buffer_to_texture_row_alignment", "copy_texture_to_buffer_offset_alignment", "copy_buffer_to_texture_byte_short", "copy_texture_to_buffer_byte_short", "copy_buffer_to_texture_extent_past_end", "copy_texture_subresource_source_without_copy_src", "copy_texture_subresource_destination_without_copy_dst", "copy_texture_subresource_format_mismatch", "copy_texture_subresource_mip_past_end", "copy_texture_subresource_origin_past_end", "copy_texture_subresource_extent_past_end", "copy_texture_subresource_depth_aspect", "copy_texture_subresource_overlap", "copy_texture_subresource_pooled", "copy_texture_subresource_canvas_destination", "copy_texture_subresource_sample_count_mismatch", "copy_texture_subresource_depth_stencil_partial", "copy_texture_subresource_msaa_partial" }) |name| {
+        sjon_invalid_mod.addAnonymousImport(name ++ "_invalid", .{ .root_source_file = b.path("examples/invalid/" ++ name ++ ".sjon") });
+    }
+    // Plan 09 slice 3 — the attachment-view refusals, in their own loop so the
+    // established single-line corpus above stays byte-for-byte untouched. One
+    // fixture per rule the plan's long-tail table names, plus the shape/format/
+    // sample negatives only the new 0x81 path can see.
+    inline for (.{
+        "attachment_view_no_render_attachment",
+        "attachment_view_mip_out_of_bounds",
+        "attachment_view_mip_count_overflow",
+        "attachment_view_layer_out_of_bounds",
+        "attachment_view_layer_count_overflow",
+        "attachment_view_two_mips",
+        "attachment_view_two_layers",
+        "attachment_view_3d",
+        "attachment_view_depth_as_colour",
+        "attachment_view_colour_as_depth",
+        "attachment_view_canvas_depth",
+        "attachment_view_sample_count_mismatch",
+        "attachment_view_resolve_requires_msaa",
+        "attachment_view_resolve_multisampled",
+        "attachment_view_resolve_format_mismatch",
+        "attachment_view_resolve_extent_mismatch",
+        "attachment_view_name_collision",
+        "attachment_view_pooled",
+        "attachment_view_not_renderable",
+    }) |name| {
         sjon_invalid_mod.addAnonymousImport(name ++ "_invalid", .{ .root_source_file = b.path("examples/invalid/" ++ name ++ ".sjon") });
     }
     const sjon_invalid_step = b.step("test-sjon-invalid", "Run SJON invalid-negatives rejection tests");
@@ -1325,6 +1573,10 @@ pub fn build(b: *std.Build) void {
             .{ "webgpu_compute_512_sjon", "examples/webgpu_compute_512.sjon" },
             .{ "test_copy_texture_sjon", "examples/test_copy_texture.sjon" },
             .{ "test_copy_buffer_sjon", "examples/test_copy_buffer.sjon" },
+            // Plan 03: the raw-byte queue write, sampled by a later pass. Not a
+            // snapshot row — the structural test asserts the uploaded 0x22
+            // texel, so no Metal-generated reference PNG is needed.
+            .{ "texture_write_ordering_sjon", "examples/texture_write_ordering.sjon" },
             .{ "test_viewport_sjon", "examples/test_viewport.sjon" },
             .{ "pipeline_constants_sjon", "examples/pipeline_constants.sjon" },
             .{ "draw_graph_after_sjon", "examples/draw_graph_after.sjon" },
@@ -1333,6 +1585,12 @@ pub fn build(b: *std.Build) void {
             .{ "test_data_pass_hand_sjon", "examples/test_data_pass_hand.sjon" },
             .{ "pass_game_of_life_sjon", "examples/pass_game_of_life.sjon" },
             .{ "pass_game_of_life_hand_sjon", "examples/pass_game_of_life_hand.sjon" },
+            // Plan 08 slice 3's canvas pair. Both documents upload their own
+            // level-0 checkers and present both chains to the canvas; their
+            // reference PNGs are generated on the Metal host by
+            // `zig build gen-render-snapshots -- --regen`.
+            .{ "mip_chain_view_sjon", "examples/mip_chain_view.sjon" },
+            .{ "mip_chain_view_hand_sjon", "examples/mip_chain_view_hand.sjon" },
         };
         // Committed reference PNGs — embedded by the TEST binary only (the regen
         // exe writes them, so it must compile before they exist).
@@ -1364,7 +1622,8 @@ pub fn build(b: *std.Build) void {
             "pass_bloom_hand",                     "pass_acid_cubes",
             "pass_acid_cubes_hand",                "draw_graph_after_hand",
             "pass_game_of_life_hand",              "test_data_pass",
-            "test_data_pass_hand",
+            "test_data_pass_hand",                 "mip_chain_view",
+            "mip_chain_view_hand",
         };
 
         // --- test-render: structural + snapshot gate (in-process) ---
@@ -1693,9 +1952,18 @@ pub fn build(b: *std.Build) void {
     const wasm_compiler_step = b.step("wasm-compiler", "Build WASM compiler module");
 
     // Reflect module for WASM target (with native wgslender)
+    //
+    // `.lsp = false` for the same reason the native dependency passes it
+    // (`d7801c91`): true makes wgslender fetch and import its own URL-pinned
+    // SJON beside this project's `../SJON` path dep, and Zig 0.16 refuses one
+    // generated `options.zig` as the root of two modules. Leaving it off here
+    // broke `zig build wasm-compiler` — the step that synchronizes the
+    // committed `npm/pngine/schema/pngine.sjon` — which is how it went
+    // unnoticed: every other gate in the tree builds a different graph.
     const wasm_wgslender_dep = b.dependency("wgslender", .{
         .target = wasm_target,
         .optimize = .ReleaseSmall,
+        .lsp = false,
     });
     const wasm_reflect_module = stdModule(b, wasm_target, .ReleaseSmall, "src/reflect.zig", &.{
         .{ .name = "wgslender", .module = wasm_wgslender_dep.module("wgslender") },
@@ -2173,9 +2441,11 @@ pub fn build(b: *std.Build) void {
             .{ .name = "types", .module = cross_types },
         });
 
+        // `lsp = false`, same as the host build above: no wgslender SJON here.
         const cross_wgslender = b.dependency("wgslender", .{
             .target = cross_target,
             .optimize = .ReleaseFast,
+            .lsp = false,
         }).module("wgslender");
         const cross_reflect = stdModule(b, cross_target, .ReleaseFast, "src/reflect.zig", &.{
             .{ .name = "wgslender", .module = cross_wgslender },
@@ -2390,6 +2660,15 @@ fn linkWamr(
 /// coverage until someone remembers to edit build.zig — silently, because
 /// nothing compares the list against the directory.
 ///
+/// Membership is decided by NAME, never by the dirent kind: on an NFS worktree
+/// `readdir` reports `DT_UNKNOWN` for part of `examples/` as `.unknown`, and the
+/// old `entry.kind != .file` filter silently dropped 43 of its 156 documents
+/// (113 names instead of 156, so the golden gate, `test-core`, the
+/// bytecode-identity gate and the OOM corpus all covered less than the repo
+/// ships). Unknown kinds are stat'ed; a `.sjon`-named directory is still
+/// excluded. The count assertion in `collectSjonFixtureNames` turns any future
+/// silent drop into a build error.
+///
 /// Sorted because `Dir.iterate()` order is filesystem-dependent and this feeds
 /// a generated source file; unsorted, the build hash would change per machine.
 fn sjonFixtureNames(b: *std.Build, sub_path: []const u8) []const []const u8 {
@@ -2398,15 +2677,50 @@ fn sjonFixtureNames(b: *std.Build, sub_path: []const u8) []const []const u8 {
         std.debug.panic("build: cannot open {s}: {s}", .{ sub_path, @errorName(err) });
     defer dir.close(io);
 
+    return collectSjonFixtureNames(io, b.allocator, dir, sub_path);
+}
+
+/// The name selection `sjonFixtureNames` performs, split out so a test can
+/// drive it over a directory it created and whose dirent kinds it cannot pick.
+fn collectSjonFixtureNames(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    dir: std.Io.Dir,
+    sub_path: []const u8,
+) []const []const u8 {
     var names: std.ArrayList([]const u8) = .empty;
+    var sjon_entries: usize = 0;
+    var non_file_entries: usize = 0;
     var it = dir.iterate();
     while (it.next(io) catch |err|
         std.debug.panic("build: cannot iterate {s}: {s}", .{ sub_path, @errorName(err) })) |entry|
     {
-        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".sjon")) continue;
+        sjon_entries += 1;
+        // The name decided membership; this decides whether it is a document.
+        // `unknown` means the filesystem declined to classify the entry, so ask
+        // the entry itself rather than trusting an unusable kind.
+        const is_file = switch (entry.kind) {
+            .file => true,
+            .unknown => blk: {
+                const stat = dir.statFile(io, entry.name, .{}) catch |err|
+                    std.debug.panic("build: cannot stat {s}/{s}: {s}", .{ sub_path, entry.name, @errorName(err) });
+                break :blk stat.kind == .file;
+            },
+            else => false,
+        };
+        if (!is_file) {
+            non_file_entries += 1;
+            continue;
+        }
         const base = std.fs.path.stem(entry.name);
-        if (!std.mem.eql(u8, std.fs.path.extension(entry.name), ".sjon")) continue;
-        names.append(b.allocator, b.dupe(base)) catch @panic("OOM");
+        names.append(allocator, allocator.dupe(u8, base) catch @panic("OOM")) catch @panic("OOM");
+    }
+    if (names.items.len + non_file_entries != sjon_entries) {
+        std.debug.panic(
+            "build: {s}: {d} entries end in .sjon but only {d} became fixtures ({d} are not files) — the fixture glob dropped documents",
+            .{ sub_path, sjon_entries, names.items.len, non_file_entries },
+        );
     }
     std.mem.sort([]const u8, names.items, {}, struct {
         fn lessThan(_: void, a: []const u8, c: []const u8) bool {
@@ -2415,7 +2729,7 @@ fn sjonFixtureNames(b: *std.Build, sub_path: []const u8) []const []const u8 {
     }.lessThan);
 
     std.debug.assert(names.items.len > 0); // an empty examples dir means a bad path
-    return names.toOwnedSlice(b.allocator) catch @panic("OOM");
+    return names.toOwnedSlice(allocator) catch @panic("OOM");
 }
 
 /// The version the CLI reports, read from npm/pngine/package.json — the

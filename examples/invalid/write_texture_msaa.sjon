@@ -1,0 +1,8 @@
+; INVALID: writeTexture requires a one-sample destination. A 4x MSAA texture
+; passes the texture form's own sample-count rules (2d, one mip, one layer,
+; render-attachment) and is still not a legal texel-copy destination.
+(data :name texels (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="))
+(texture :name tex :size [4 4] :format rgba8unorm :usage [copy-dst render-attachment] :sample-count 4)
+(queue :name upload
+  (write-texture :texture tex :data texels :size [4 4] :bytes-per-row 16))
+(frame :name main :perform [upload])

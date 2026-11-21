@@ -19,6 +19,27 @@
 /** A WebGPU resource table, indexed by the numeric id in the command stream. */
 type ResourceTable<T> = T[];
 
+/**
+ * The COMPLETE plan-01 descriptor gpu.js retains for each created texture. The
+ * GPUTexture object is the effect; these are the inputs a later
+ * `write_texture` command re-validates against plan 01's calculator. The record
+ * is updated on every canvas-bound rebuild, so its extent is the extent of the
+ * texture installed right now; `extentSource` says where that extent came from
+ * (an unresolved image reference reports `canvas`, the size it fell back to).
+ */
+interface TextureRecord {
+  id: number;
+  size: { width: number; height: number; depthOrArrayLayers: number };
+  dimension: string;
+  format: string;
+  usage: number;
+  sampleCount: number;
+  mipLevelCount: number;
+  extentSource: "explicit" | "canvas" | "image-bitmap";
+  canvasBound: boolean;
+  canvasScale: number;
+}
+
 /** A pipeline of either kind — one table holds both, keyed by id. */
 type GpuPipeline = GPURenderPipeline | GPUComputePipeline;
 
@@ -73,11 +94,22 @@ interface WasmCallResult {
   result: number | null;
 }
 
-/** A MAP_READ copy scheduled by 0x22, drained after submit (0xF0). */
+/** A MAP_READ copy scheduled by 0x22 or 0x2A, drained after submit (0xF0). */
 interface PendingReadback {
+  /** "query" (0x22 → onQueryResult numbers) or "texture" (0x2A → bytes). */
+  kind: "query" | "texture";
   id: number;
   offset: number;
   size: number;
+  // Texture-only metadata; absent on a query record.
+  bytesPerRow?: number;
+  rowsPerImage?: number;
+  mipLevel?: number;
+  origin?: [number, number, number];
+  aspect?: string;
+  copySize?: [number, number, number];
+  textureName?: string | null;
+  bufferName?: string | null;
 }
 
 interface GpuOps {
@@ -101,6 +133,8 @@ interface GpuOps {
    * then (it is rewritten every frame).
    */
   txs: ResourceTable<{ tid: number; desc: object }>;
+  /** Texture creation records: what `write_texture` (0x28) validates against. */
+  txd: ResourceTable<TextureRecord>;
   smp: ResourceTable<GPUSampler>;
   pip: ResourceTable<GpuPipeline>;
   bg: ResourceTable<GPUBindGroup>;
@@ -135,6 +169,12 @@ interface GpuOps {
    * A `const` Map cleared and refilled in place, like the tables.
    */
   bufNames: Map<string, { id: number; pool: number; frameWritten: boolean }>;
+  /**
+   * SJON texture name → { id, pool, frameWritten }, from the payload's
+   * texture-name block (header flag bit 7). What host texture writes and
+   * reflection resolve through (gpu-host-texture.js).
+   */
+  texNames: Map<string, { id: number; pool: number; frameWritten: boolean }>;
   wm: ResourceTable<WasmModuleEntry>;
   wcr: ResourceTable<WasmCallResult>;
 
@@ -159,6 +199,14 @@ interface GpuOps {
     attachments: { tid: number; load: number; store: number; r: number; g: number; b: number; a: number }[],
     depthId: number,
   ): void;
+  /** 0x55: targets are 0xFFFE canvas, 0xFFFF none, 0x8000|view id, or texture id. */
+  beginRenderPassViews(
+    attachments: {
+      target: number; load: number; store: number;
+      r: number; g: number; b: number; a: number; resolve: number;
+    }[],
+    depthTarget: number,
+  ): boolean;
   beginComputePass(): void;
   getPass(): GpuPassEncoder | null;
   setPass(pass: null): void;
@@ -204,6 +252,7 @@ interface GpuOps {
   decodeWasmArgs(blob: Uint8Array): number[];
   pendingReadbacks: PendingReadback[];
   getOnQueryResult(): ((values: number[]) => void) | null;
+  getOnTextureReadback(): ((readback: object) => void) | null;
   /** The raw debug flag, for call sites that must not build a log string. */
   debug(): boolean;
   reportError(err: { message: string; source: string }): void;

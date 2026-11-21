@@ -29,6 +29,31 @@ export interface BufferWrite {
   poolIndex?: number | "active";
 }
 
+/**
+ * The byte-readback event delivered to \`onTextureReadback\` (plan 05,
+ * "Readback contract").
+ */
+export interface TextureReadback {
+  /** Public \`(texture :name …)\`, or null for an old/unnamed payload. */
+  texture: string | null;
+  /** Public \`(buffer :name …)\`, or null for an old/unnamed payload. */
+  buffer: string | null;
+  /** Destination layout offset. */
+  offset: number;
+  /** Copied window in bytes: row padding included, final-row padding excluded. */
+  size: number;
+  /** Owned copy; the caller may retain or mutate it. */
+  bytes: Uint8Array;
+  /** Stride the bytes use. */
+  bytesPerRow: number;
+  /** Rows per image the bytes use. */
+  rowsPerImage: number;
+  mipLevel: number;
+  origin: [number, number, number];
+  aspect: "all" | "depth-only" | "stencil-only";
+  copySize: [number, number, number];
+}
+
 /** One named buffer, as getBuffers reports it. */
 export interface BufferInfo {
   size: number;
@@ -40,6 +65,57 @@ export interface BufferInfo {
   pool: number;
   /** The frame's own queue ops write it every draw, so writeBuffer refuses it. */
   frameWritten: boolean;
+}
+
+/** Bytes for a texture: any typed array or DataView (written as the window it covers), or a bare ArrayBuffer. */
+export type TextureBytes = ArrayBufferView | ArrayBuffer;
+
+/** The long form of one \`textures\` entry. All \`writeTexture\` options except \`redraw\`. */
+export interface TextureWrite {
+  bytes: TextureBytes;
+  /** Byte offset into \`bytes\`; unaligned allowed. Default 0. */
+  offset?: number;
+  /** Row stride in bytes. Absent stays absent at the WebGPU boundary (D26). */
+  bytesPerRow?: number;
+  /** Rows per image. Absent stays absent at the WebGPU boundary (D26). */
+  rowsPerImage?: number;
+  /** Copy origin [x, y, z]; 0-3 members, missing members are 0. */
+  origin?: number[];
+  /** Mip level. Default 0. */
+  mipLevel?: number;
+  /** Copy aspect. Default "all". */
+  aspect?: "all" | "depth-only" | "stencil-only";
+  /** [w], [w h] or [w h d]; default the remaining physical mip extent. */
+  size?: number[];
+  /**
+   * Which member of a pooled (\`:pool N\`) texture: \`k\` for member k, \`"active"\`
+   * for the member the coming frame reads. Absent → every member.
+   */
+  poolIndex?: number | "active";
+}
+
+/** One named texture, as getTextures reports it. No raw ids. */
+export interface TextureInfo {
+  /** Current resolved extent [width, height, depthOrArrayLayers]. */
+  size: [number, number, number];
+  dimension: "1d" | "2d" | "3d";
+  /** GPUTextureFormat string; the preferred sentinel already resolved. */
+  format: string;
+  mipLevelCount: number;
+  /** 2D size[2]; otherwise 1. */
+  arrayDepth: number;
+  /** GPUTextureUsage bits. */
+  usage: number;
+  sampleCount: number;
+  sizeSource: "explicit" | "canvas" | "image-bitmap";
+  /** Member count: 1, or N for \`:pool N\`. */
+  pool: number;
+  /** The frame's own queue ops write it after any host write. */
+  frameWritten: boolean;
+  /** At least one host write is currently permitted. */
+  writable: boolean;
+  /** Format/aspect legality alone, in wire tag order. */
+  writableAspects: ("all" | "depth-only" | "stencil-only")[];
 }
 
 /** A reflected uniform's type, as WGSL spells it; "unknown" for one the compiler could not reflect (written best-effort as f32). */
@@ -85,6 +161,8 @@ export interface DrawOptions {
   uniforms?: Record<string, UniformValue>;
   /** Bytes for buffers by their \`(buffer :name …)\`, applied at the head of this frame. */
   buffers?: Record<string, BufferBytes | BufferWrite>;
+  /** Bytes for textures by their \`(texture :name …)\`, applied after buffers and before this frame's commands. */
+  textures?: Record<string, TextureBytes | TextureWrite>;
 }
 
 /**
@@ -163,6 +241,36 @@ export function writeBuffer(
   bytes: BufferBytes,
   options?: { offset?: number; poolIndex?: number | "active"; redraw?: boolean },
 ): PngineInstance;
+/**
+ * Put bytes in a texture by its \`(texture :name …)\`. With \`redraw\` (the
+ * default) this is one draw carrying the write; with \`redraw: false\` the
+ * write rides the next draw from anywhere and its view is read when that draw
+ * is posted. No transfer list: the bytes stay the caller's. Only the view's
+ * own window is read; a detached or resizable/growable source is a named
+ * TypeError before anything posts. A write the runtime cannot honour —
+ * unknown name, a texture the frame itself writes, a bad pool member, no
+ * copy-dst, multisampled, 1D, a bad mip/origin/extent/stride/aspect, too
+ * little data — reaches onError as a PngineGPUError with source
+ * "write-texture".
+ */
+export function writeTexture(
+  instance: PngineInstance,
+  name: string,
+  bytes: TextureBytes,
+  options?: {
+    offset?: number;
+    bytesPerRow?: number;
+    rowsPerImage?: number;
+    origin?: number[];
+    mipLevel?: number;
+    aspect?: "all" | "depth-only" | "stencil-only";
+    size?: number[];
+    poolIndex?: number | "active";
+    redraw?: boolean;
+  },
+): PngineInstance;
+/** Every currently created named texture, by name — writable, and why not. */
+export function getTextures(instance: PngineInstance): Promise<Record<string, TextureInfo>>;
 /**
  * Set the pointer array every draw posts: an ArrayLike of exactly twelve
  * numbers (the pointer-inputs layout), or null to hand the lanes back to the
@@ -277,6 +385,13 @@ export interface ViewerOptions {
    * has to write 64-bit lanes, \`vec2u(value, 0u)\`, to survive it.
    */
   onQueryResult?: (values: number[]) => void;
+  /**
+   * Receives the bytes of every \`copy-texture-to-buffer\` into a
+   * MAP_READ|COPY_DST buffer, once per submit. \`bytes\` is an owned array of
+   * exactly the copied window, row padding included (final-row padding
+   * excluded); the metadata describes that padded layout.
+   */
+  onTextureReadback?: (readback: TextureReadback) => void;
 }
 
 export function pngine(
@@ -310,6 +425,13 @@ export interface DevOptions {
    * has to write 64-bit lanes, \`vec2u(value, 0u)\`, to survive it.
    */
   onQueryResult?: (values: number[]) => void;
+  /**
+   * Receives the bytes of every \`copy-texture-to-buffer\` into a
+   * MAP_READ|COPY_DST buffer, once per submit. \`bytes\` is an owned array of
+   * exactly the copied window, row padding included (final-row padding
+   * excluded); the metadata describes that padded layout.
+   */
+  onTextureReadback?: (readback: TextureReadback) => void;
 }
 
 export function pngine(
@@ -401,11 +523,42 @@ export interface BufferName {
   frameWritten: boolean;
 }
 
+/** One entry of the payload's texture-name block (header flag bit 7). */
+export interface TextureName {
+  /** Dispatcher id of the pool's first member. */
+  id: number;
+  /** Member count: 1, or N for \`:pool N\`. */
+  pool: number;
+  /** The frame's own queue ops write it every draw. */
+  frameWritten: boolean;
+}
+
+/** One named texture, as getTextures reports it. No raw ids. */
+export interface TextureInfo {
+  size: [number, number, number];
+  dimension: "1d" | "2d" | "3d";
+  format: string;
+  mipLevelCount: number;
+  /** 2D size[2]; otherwise 1. */
+  arrayDepth: number;
+  /** GPUTextureUsage bits. */
+  usage: number;
+  sampleCount: number;
+  sizeSource: "explicit" | "canvas" | "image-bitmap";
+  pool: number;
+  frameWritten: boolean;
+  /** At least one host write is currently permitted. */
+  writable: boolean;
+  writableAspects: ("all" | "depth-only" | "stencil-only")[];
+}
+
 export interface UniformTableResult {
   uniforms: Map<string, UniformInfo>;
   strings: string[];
   /** Empty for a payload minted before the block (header flag bit 4 clear). */
   buffers: Map<string, BufferName>;
+  /** Empty for a payload minted before the block (header flag bit 7 clear). */
+  textures: Map<string, TextureName>;
 }
 
 /** One named buffer, as getBuffers reports it. */
@@ -443,6 +596,29 @@ export interface CoreDispatcher {
     frameCounter?: number,
   ): number;
   getBuffers(): Record<string, BufferInfo>;
+  /** Install parseUniformTable(bytecode).textures, after the init stream ran. */
+  setTextureNames(names: Map<string, TextureName> | Record<string, TextureName>): void;
+  /**
+   * Host bytes into textures by name. Refusals reach setOnError with source
+   * "write-texture". \`frameCounter\` is the coming frame's counter
+   * (\`getFrameCounter()\`, read before \`frame()\`), needed for \`poolIndex: "active"\`.
+   * Returns the number of queue writes made.
+   */
+  writeTextures(
+    textures: Record<string, ArrayBufferView | ArrayBuffer | {
+      bytes: ArrayBufferView | ArrayBuffer;
+      offset?: number;
+      bytesPerRow?: number;
+      rowsPerImage?: number;
+      origin?: number[];
+      mipLevel?: number;
+      aspect?: "all" | "depth-only" | "stencil-only";
+      size?: number[];
+      poolIndex?: number | "active";
+    }>,
+    frameCounter?: number,
+  ): number;
+  getTextures(): Record<string, TextureInfo>;
   /** Hear command-stream faults, refused host writes included: \`{ message, source }\`. */
   setOnError(fn: ((err: { message: string; source: string }) => void) | null): void;
   destroy(): void;

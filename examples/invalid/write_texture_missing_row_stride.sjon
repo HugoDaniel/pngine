@@ -1,0 +1,7 @@
+; INVALID: two texel rows with no bytes-per-row. WebGPU gives that member no
+; default, so omission is refused rather than normalized to the tight stride.
+(data :name texels (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="))
+(texture :name tex :size [4 2] :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture tex :data texels :size [4 2]))
+(frame :name main :perform [upload])

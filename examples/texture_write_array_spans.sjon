@@ -1,0 +1,15 @@
+; Multi-layer and multi-slice copies. `atlas` is a 2d array whose size spans
+; two layers from layer 0 (both strides are required; the image stride is
+; bytes-per-row * rows-per-image). `volume` is a 3D texture and the write
+; covers two slices starting at z=2, which is the 3D slice subregion case;
+; its source starts at the image for slice 2, not at the base level.
+(data :name twoLayers (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="))
+(data :name twoSlices (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="))
+(texture :name atlas :size [2 2 3] :format rgba8unorm :usage [copy-dst])
+(texture :name volume :size [2 2 4] :dimension 3d :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture atlas :data twoLayers :bytes-per-row 8 :rows-per-image 2
+    :size [2 2 2])
+  (write-texture :texture volume :data twoSlices :bytes-per-row 8 :rows-per-image 2
+    :origin [0 0 2] :size [2 2 2]))
+(frame :name main :perform [upload])

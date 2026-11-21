@@ -24,15 +24,18 @@
 //! - `Layout` — head fields, an optional Rep, then tail fields.
 //! - `layoutOf(op)` — comptime, total over NAMED opcodes; a new OpCode without
 //!   a layout is a `@compileError`, not a silent 5-varint fallback.
-//! - `skipParams` / `readOperands` — both dispatch through the SHARED named
-//!   `Layout` constants, so `inline else` monomorphizes one body per DISTINCT
-//!   Layout value (~20), keeping the executor WASM small.
-//! - `readOperands` handles FIXED-shape layouts (`rep == null`) only. The four
+//! - `skipParams` / `readOperands` — both are built from the SHARED named
+//!   `Layout` constants. `readOperands` decodes through them directly;
+//!   `skipParams` walks a packed descriptor table compiled FROM them (see the
+//!   "Skip" section), so the executor pays for one walker instead of one
+//!   monomorphized body per distinct shape.
+//! - `readOperands` handles FIXED-shape layouts (`rep == null`) only. The
 //!   count-prefixed opcodes decode manually in their handlers because each maps
 //!   onto a backend-specific shape the wire table does not describe:
-//!   `begin_render_pass_mrt` → `[8]ColorAttachment`, `call_wasm_func` →
-//!   a re-encoded args blob, `execute_bundles` → a 16-slot store that reads and
-//!   discards the overflow, `create_shader_concat` → (unimplemented handler).
+//!   `begin_render_pass_mrt` → `[8]ColorAttachment`, `begin_render_pass_views` →
+//!   `[8]ViewColorAttachment`, `call_wasm_func` → a re-encoded args blob,
+//!   `execute_bundles` → a 16-slot store that reads and discards the overflow,
+//!   `create_shader_concat` → (unimplemented handler).
 //!
 //! ## Invariants
 //! - Field order matches the emit* method exactly (varint width is
@@ -97,7 +100,7 @@ pub const Layout = struct {
     tail: []const Field = &.{},
 };
 
-// ── Shared fixed layouts (named so identical shapes fold to one skip/decode body) ──
+// ── Shared fixed layouts (named so identical shapes fold to one decode body and one skip row) ──
 const L_NONE = Layout{};
 const L_1V = Layout{ .head = &.{nk("v0", .varint)} };
 const L_2V = Layout{ .head = &.{ nk("v0", .varint), nk("v1", .varint) } };
@@ -122,6 +125,75 @@ const L_BEGIN_RP_POOL = Layout{ .head = &.{ nk("base_tex_id", .varint), nk("pool
 const L_POOL_SET = Layout{ .head = &.{ nk("slot", .byte), nk("base_id", .varint), nk("pool_size", .byte), nk("offset", .byte) } }; // set_*_buffer/bind_group_pool
 const L_SELECT_POOL = Layout{ .head = &.{ nk("slot", .byte), nk("base_id", .varint), nk("offset", .byte) } };
 const L_DEFINE_PASS = Layout{ .head = &.{ nk("pass_id", .varint), nk("pass_type", .byte), nk("descriptor_data_id", .varint) } };
+// Plan 02's 14-field writeTexture order. The three optional fields are ALWAYS
+// on the wire (0 when absent); the trailing flags byte is what distinguishes an
+// omitted stride/size from an authored zero. Never reorder: the emitter writes
+// this order byte-for-byte and both decoders build from this table.
+const L_WRITE_TEXTURE = Layout{ .head = &.{
+    nk("texture_id", .varint),
+    nk("data_id", .varint),
+    nk("offset", .varint),
+    nk("bytes_per_row", .varint),
+    nk("rows_per_image", .varint),
+    nk("mip_level", .varint),
+    nk("origin_x", .varint),
+    nk("origin_y", .varint),
+    nk("origin_z", .varint),
+    nk("aspect", .byte),
+    nk("size_width", .varint),
+    nk("size_height", .varint),
+    nk("size_depth", .varint),
+    nk("flags", .byte),
+} };
+
+// Plan 05's shared fixed buffer↔texture copy field sequence. BOTH 0x2E and
+// 0x2F use this ONE layout: the direction is the opcode, never an operand. The
+// three optional fields are always on the wire (0 when absent); the trailing
+// flags byte distinguishes an omitted stride/size from an authored zero, with
+// plan 02's exact bits (0=bytes-per-row, 1=rows-per-image, 2=size). Never
+// reorder: the emitter writes this order byte-for-byte and every decoder,
+// scanner and fixture builds from this table.
+const L_TEXTURE_BUFFER_COPY = Layout{ .head = &.{
+    nk("texture_id", .varint),
+    nk("buffer_id", .varint),
+    nk("offset", .varint),
+    nk("bytes_per_row", .varint),
+    nk("rows_per_image", .varint),
+    nk("mip_level", .varint),
+    nk("origin_x", .varint),
+    nk("origin_y", .varint),
+    nk("origin_z", .varint),
+    nk("aspect", .byte),
+    nk("size_width", .varint),
+    nk("size_height", .varint),
+    nk("size_depth", .varint),
+    nk("flags", .byte),
+} };
+
+// Plan 06's fixed subresource texture→texture copy sequence, in the plan's
+// order. Both endpoints carry id, mip, origin x/y/z and an aspect BYTE; the
+// three size fields are always on the wire (0 when absent) and the trailing
+// flags byte records presence with bit 0 (others zero). Never reorder: the
+// emitter writes this order byte-for-byte and every decoder and fixture builds
+// from this table.
+const L_TEXTURE_SUBRESOURCE_COPY = Layout{ .head = &.{
+    nk("source_id", .varint),
+    nk("source_mip", .varint),
+    nk("source_origin_x", .varint),
+    nk("source_origin_y", .varint),
+    nk("source_origin_z", .varint),
+    nk("source_aspect", .byte),
+    nk("destination_id", .varint),
+    nk("destination_mip", .varint),
+    nk("destination_origin_x", .varint),
+    nk("destination_origin_y", .varint),
+    nk("destination_origin_z", .varint),
+    nk("destination_aspect", .byte),
+    nk("size_width", .varint),
+    nk("size_height", .varint),
+    nk("size_depth", .varint),
+    nk("flags", .byte),
+} };
 
 // ── Frame controls (0x36-0x39, frame program §7.1) ──
 // `Kind` has no u16, so a skip is two `byte` fields — the same reason
@@ -158,6 +230,28 @@ const L_SHADER_CONCAT = Layout{ .head = &.{nk("shader_id", .varint)}, .rep = .{ 
 // 50_000 ids. `bytecode.MAX_EXECUTE_BUNDLES` now derives from this. (§320)
 const L_EXECUTE_BUNDLES = Layout{ .rep = .{ .count = .varint, .elem = &.{nk("bundle_id", .varint)}, .max = 16 } };
 const L_MRT = Layout{ .rep = .{ .count = .byte, .elem = &.{ nk("texture_id", .varint), nk("load_op", .byte), nk("store_op", .byte), nk("clear_r_bits", .u32_le), nk("clear_g_bits", .u32_le), nk("clear_b_bits", .u32_le), nk("clear_a_bits", .u32_le) }, .max = 8 }, .tail = &.{nk("depth_texture_id", .varint)} };
+// 0x81: the render-pass record with an explicit target (and a resolve target)
+// per colour attachment. ONE layout — the emitter writes this order, the
+// scanner skips it and the reference dispatcher decodes it from this table.
+// `target`/`resolve_target`/`depth_target` use the shared attachment-target
+// encoding in types/opcodes.zig (tagged view, texture, canvas, none).
+const L_BEGIN_RP_VIEWS = Layout{
+    .rep = .{
+        .count = .byte,
+        .elem = &.{
+            nk("target", .varint),
+            nk("load_op", .byte),
+            nk("store_op", .byte),
+            nk("clear_r_bits", .u32_le),
+            nk("clear_g_bits", .u32_le),
+            nk("clear_b_bits", .u32_le),
+            nk("clear_a_bits", .u32_le),
+            nk("resolve_target", .varint),
+        },
+        .max = 8,
+    },
+    .tail = &.{nk("depth_target", .varint)},
+};
 const L_CALL_WASM = Layout{ .head = &.{ nk("call_id", .varint), nk("module_id", .varint), nk("func_name_id", .varint) }, .rep = .{ .count = .byte, .elem = &.{nk("arg", .wasm_arg)}, .max = 32 } };
 
 // ============================================================================
@@ -166,14 +260,32 @@ const L_CALL_WASM = Layout{ .head = &.{ nk("call_id", .varint), nk("module_id", 
 
 /// Wire layout for an opcode's operands. Total over NAMED opcodes: a new OpCode
 /// without a layout fails the build here rather than silently mis-skipping.
-/// (An `if`-capture chain, not `orelse`: a comptime-known-non-null category
+/// (A break-capture chain, not `orelse`: a comptime-known-non-null category
 /// would collapse the `orelse` result to a non-optional Layout.)
 pub fn layoutOf(comptime op: OpCode) Layout {
-    if (layoutResource(op)) |l| return l;
-    if (layoutPass(op)) |l| return l;
-    if (layoutQueue(op)) |l| return l;
-    if (layoutControl(op)) |l| return l;
-    @compileError("wire_schema: no layout for opcode ." ++ @tagName(op));
+    // 0x2D is dispatched before the category chain so its own `Layout` const is
+    // returned without a comptime optional capture; the queue helper below
+    // names the same table row, and the wire fixture pins the emitted bytes.
+    return switch (op) {
+        .write_texture => L_WRITE_TEXTURE,
+        // Plan 06's subresource texture→texture copy has its own fixed layout;
+        // no other opcode shares it.
+        .copy_texture_subresource => L_TEXTURE_SUBRESOURCE_COPY,
+        // 0x81 is the first free slot after the retired block; name its layout
+        // here rather than relying on the category chain for a count-prefixed
+        // shape (the same reason write_texture and 0x80 are named above).
+        .begin_render_pass_views => L_BEGIN_RP_VIEWS,
+        // Both directions of the buffer↔texture copy share ONE fixed layout;
+        // the opcode alone distinguishes them.
+        .copy_buffer_to_texture, .copy_texture_to_buffer => L_TEXTURE_BUFFER_COPY,
+        else => blk: {
+            if (layoutResource(op)) |l| break :blk l;
+            if (layoutPass(op)) |l| break :blk l;
+            if (layoutQueue(op)) |l| break :blk l;
+            if (layoutControl(op)) |l| break :blk l;
+            @compileError("wire_schema: no layout for opcode ." ++ @tagName(op));
+        },
+    };
 }
 
 /// The element cap for a count-prefixed opcode — the single number the emitter,
@@ -275,7 +387,7 @@ fn layoutPass(comptime op: OpCode) ?Layout {
     };
 }
 
-/// Queue operations (0x20-0x2C), incl. nested-WASM ops.
+/// Queue operations (0x20-0x2F), incl. nested-WASM ops.
 ///
 /// `write_uniform` (0x21) and `write_audio_data` (0x2C) are RESERVED-INERT (C4):
 /// their layouts stay here so both decoders skip them forever, but no frontend
@@ -288,6 +400,7 @@ fn layoutQueue(comptime op: OpCode) ?Layout {
         .write_pointer_uniform,
         .write_audio_data,
         => L_3V,
+        .write_texture => L_WRITE_TEXTURE,
         .write_uniform, .copy_texture_to_texture, .init_wasm_module => L_2V,
         .copy_buffer_to_buffer, .resolve_query_set => L_5V,
         .copy_external_image_to_texture => L_COPY_EXT_IMG,
@@ -316,58 +429,269 @@ fn layoutControl(comptime op: OpCode) ?Layout {
 // ============================================================================
 // Skip — advance a pc past an instruction's operands
 // ============================================================================
+//
+// The skip table is PACKED because it runs in every executor variant and is
+// walked for every instruction the scanner steps over. The previous form was
+// `inline else`, which monomorphized one skipper body per distinct Layout
+// (2,373 B in `skipOpcodeParams` plus ~430 B of `skipLayout`/`skipKind`
+// helpers). Here the same layouts are packed at comptime into one opcode→row
+// map and one flat descriptor stream, walked by one function: the saving is
+// the duplicate bodies, not a change in what a skip does.
+//
+// Each row is five header bytes followed by one kind code per wire field:
+//
+//     head_len, rep_kind, rep_max, rep_elem_len, tail_len,
+//     [head kind codes] [rep element kind codes] [tail kind codes]
+//
+// `rep_kind` is 0 for no repeated group, 1 for a byte count, 2 for a varint
+// count. Rows are deduplicated by KIND SEQUENCE, not by Layout value: field
+// names drive `readOperands` only and cannot affect a skip, so layouts that
+// differ only in names (write_texture and the buffer↔texture copy, say) share
+// one row. The walker below is the old per-layout skipper over these bytes.
+
+/// Sentinel in the opcode→row map: reserved/unknown opcode, skip nothing.
+const SKIP_NO_ROW: u8 = 0xff;
+
+/// Bytes of row header before the field kind codes.
+const SKIP_HEADER_LEN: usize = 5;
+
+/// Kind codes as stored in the descriptor stream; indexes `skipKindCode`.
+const SKIP_KIND_VARINT: u8 = 0;
+const SKIP_KIND_BYTE: u8 = 1;
+const SKIP_KIND_U32_LE: u8 = 2;
+const SKIP_KIND_WASM_ARG: u8 = 3;
+
+/// Upper bound on distinct kind sequences. Checked at comptime so the fixed
+/// scratch array below can never be overrun.
+const MAX_SKIP_LAYOUTS = 64;
+
+/// True when two layouts skip identically: same head kinds, same rep shape and
+/// element kinds, same tail kinds. Names are deliberately ignored.
+fn layoutSkipEql(a: Layout, b: Layout) bool {
+    if (a.head.len != b.head.len) return false;
+    for (a.head, b.head) |x, y| if (x.kind != y.kind) return false;
+    if ((a.rep == null) != (b.rep == null)) return false;
+    if (a.rep) |ra| {
+        const rb = b.rep.?;
+        if (ra.count != rb.count or ra.max != rb.max or ra.elem.len != rb.elem.len) return false;
+        for (ra.elem, rb.elem) |x, y| if (x.kind != y.kind) return false;
+    }
+    if (a.tail.len != b.tail.len) return false;
+    for (a.tail, b.tail) |x, y| if (x.kind != y.kind) return false;
+    return true;
+}
+
+/// The distinct layouts, in first-seen opcode order. Built by the same scan
+/// that `buildSkipLayouts` repeats; both must see the same sequence.
+const skip_layout_count: u8 = blk: {
+    @setEvalBranchQuota(100_000);
+    var seen: [MAX_SKIP_LAYOUTS]Layout = undefined;
+    var n: u8 = 0;
+    for (@typeInfo(OpCode).@"enum".fields) |f| {
+        if (f.value >= 256) @compileError("wire_schema: opcode value does not fit the [256]u8 skip map");
+        const layout = layoutOf(@enumFromInt(f.value));
+        var found = false;
+        for (seen[0..n]) |s| {
+            if (layoutSkipEql(s, layout)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            if (n == MAX_SKIP_LAYOUTS) @compileError("wire_schema: more distinct skip layouts than MAX_SKIP_LAYOUTS");
+            seen[n] = layout;
+            n += 1;
+        }
+    }
+    break :blk n;
+};
+
+/// The distinct layouts again, as a dense array.
+fn buildSkipLayouts(comptime n: u8) [n]Layout {
+    @setEvalBranchQuota(200_000);
+    var seen: [MAX_SKIP_LAYOUTS]Layout = undefined;
+    var out: [n]Layout = undefined;
+    var count: u8 = 0;
+    for (@typeInfo(OpCode).@"enum".fields) |f| {
+        const layout = layoutOf(@enumFromInt(f.value));
+        var found = false;
+        for (seen[0..count]) |s| {
+            if (layoutSkipEql(s, layout)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            seen[count] = layout;
+            out[count] = layout;
+            count += 1;
+        }
+    }
+    if (count != n) @compileError("wire_schema: skip-layout scans disagree");
+    return out;
+}
+
+const skip_layouts = buildSkipLayouts(skip_layout_count);
+
+/// Bytes in the flat descriptor stream (the header + kinds of every row).
+const skip_desc_total: u16 = blk: {
+    @setEvalBranchQuota(100_000);
+    var total: u16 = 0;
+    for (skip_layouts) |layout| {
+        total += SKIP_HEADER_LEN + @as(u16, @intCast(layout.head.len)) +
+            (if (layout.rep) |rep| @as(u16, @intCast(rep.elem.len)) else 0) +
+            @as(u16, @intCast(layout.tail.len));
+    }
+    break :blk total;
+};
+
+/// The packed descriptor stream plus each row's start offset. The opcode→row
+/// map is a separate top-level const below: keeping large arrays out of one
+/// comptime-built struct stops the compiler materializing them twice.
+const SkipDescriptors = struct {
+    bytes: [skip_desc_total]u8,
+    starts: [skip_layout_count]u16,
+};
+
+/// Encode `kind` as its descriptor byte.
+fn skipKindCode(kind: Kind) u8 {
+    return switch (kind) {
+        .varint => SKIP_KIND_VARINT,
+        .byte => SKIP_KIND_BYTE,
+        .u32_le => SKIP_KIND_U32_LE,
+        .wasm_arg => SKIP_KIND_WASM_ARG,
+    };
+}
+
+fn buildSkipDescriptors(comptime n: u8) SkipDescriptors {
+    @setEvalBranchQuota(200_000);
+    var bytes: [skip_desc_total]u8 = undefined;
+    var starts: [n]u16 = undefined;
+    var len: u16 = 0;
+    for (skip_layouts, 0..) |layout, row| {
+        starts[row] = len;
+        const rep_kind: u8 = if (layout.rep) |rep| switch (rep.count) {
+            .byte => 1,
+            .varint => 2,
+        } else 0;
+        const rep_max: u8 = if (layout.rep) |rep| @intCast(rep.max) else 0;
+        const rep_elem_len: u8 = if (layout.rep) |rep| @intCast(rep.elem.len) else 0;
+        bytes[len] = @intCast(layout.head.len);
+        bytes[len + 1] = rep_kind;
+        bytes[len + 2] = rep_max;
+        bytes[len + 3] = rep_elem_len;
+        bytes[len + 4] = @intCast(layout.tail.len);
+        len += SKIP_HEADER_LEN;
+        for (layout.head) |field| {
+            bytes[len] = skipKindCode(field.kind);
+            len += 1;
+        }
+        if (layout.rep) |rep| for (rep.elem) |field| {
+            bytes[len] = skipKindCode(field.kind);
+            len += 1;
+        };
+        for (layout.tail) |field| {
+            bytes[len] = skipKindCode(field.kind);
+            len += 1;
+        }
+    }
+    return .{ .bytes = bytes, .starts = starts };
+}
+
+const skip_descriptors = buildSkipDescriptors(skip_layout_count);
+
+/// Opcode byte → row index, or `SKIP_NO_ROW` for reserved/unknown opcodes.
+/// Every named opcode must find its row; a miss would silently skip nothing.
+const skip_op_row: [256]u8 = blk: {
+    @setEvalBranchQuota(100_000);
+    var map = [_]u8{SKIP_NO_ROW} ** 256;
+    for (@typeInfo(OpCode).@"enum".fields) |f| {
+        const layout = layoutOf(@enumFromInt(f.value));
+        var found = false;
+        for (skip_layouts, 0..) |candidate, row| {
+            if (layoutSkipEql(candidate, layout)) {
+                map[f.value] = @intCast(row);
+                found = true;
+                break;
+            }
+        }
+        if (!found) @compileError("wire_schema: opcode ." ++ f.name ++ " has no skip row");
+    }
+    break :blk map;
+};
+
+comptime {
+    // The map's sentinel must be unreachable as a row index.
+    if (skip_layout_count >= SKIP_NO_ROW) @compileError("wire_schema: skip row index collides with SKIP_NO_ROW");
+}
 
 /// Advance `pc` past the operands of `op` in `bytecode`, returning the new pc.
 /// Clamped to `bytecode.len`; unknown/reserved opcodes advance nothing.
-///
-/// `inline else` folds one `skipLayout` body per distinct Layout (~20 total),
-/// keeping the executor WASM small.
 pub fn skipParams(bytecode: []const u8, pc: u32, op: OpCode) u32 {
     // Pre-condition: pc is at or before an operand region.
     assert(pc <= bytecode.len);
 
-    switch (op) {
-        inline else => |known| return skipLayout(comptime layoutOf(known), bytecode, pc),
-        _ => return pc, // reserved / unknown opcode — skip nothing (scanner parity)
-    }
+    const row = skip_op_row[@intFromEnum(op)];
+    if (row == SKIP_NO_ROW) return pc; // reserved / unknown opcode — skip nothing
+    const start: usize = skip_descriptors.starts[row];
+    return skipLayoutDesc(skip_descriptors.bytes[start..], bytecode, pc);
 }
 
-/// Skip one instruction's operands per its comptime layout.
-fn skipLayout(comptime layout: Layout, bytecode: []const u8, pc_in: u32) u32 {
+/// Skip one instruction's operands by walking its packed descriptor row.
+fn skipLayoutDesc(desc: []const u8, bytecode: []const u8, pc_in: u32) u32 {
     var pc = pc_in;
-    inline for (layout.head) |field| pc = skipKind(field.kind, bytecode, pc);
+    var i: usize = SKIP_HEADER_LEN;
+    var k: usize = 0;
+    while (k < desc[0]) : (k += 1) {
+        pc = skipKindCodeAt(desc[i], bytecode, pc);
+        i += 1;
+    }
 
-    if (layout.rep) |rep| {
+    const rep_kind = desc[1];
+    const rep_max: u32 = desc[2];
+    const rep_elem_len: usize = desc[3];
+    if (rep_kind != 0) {
         var count: u32 = 0;
-        switch (rep.count) {
-            .byte => if (pc < bytecode.len) {
+        switch (rep_kind) {
+            1 => if (pc < bytecode.len) {
                 count = bytecode[pc];
                 pc += 1;
             },
-            // The length-tolerant decoder, like `skipKind` below: a truncated
-            // count clamps (pc unchanged, count 0) instead of asserting in
-            // Debug and over-reading 1–3 bytes in the stripped ReleaseSmall
-            // executor — this skipper runs in every shipped binary.
-            .varint => if (pc < bytecode.len) {
+            // The length-tolerant decoder, like `skipKindCodeAt` below: a
+            // truncated count clamps (pc unchanged, count 0) instead of
+            // asserting in Debug and over-reading 1–3 bytes in the stripped
+            // ReleaseSmall executor — this skipper runs in every shipped binary.
+            2 => if (pc < bytecode.len) {
                 const r = opcodes.decode_varint_safe(bytecode[pc..]);
                 count = r.value;
                 pc += r.len;
             },
+            else => unreachable, // comptime-built table: only 0/1/2 exist
         }
-        var i: u32 = 0;
-        while (i < @min(count, rep.max)) : (i += 1) {
-            inline for (rep.elem) |field| pc = skipKind(field.kind, bytecode, pc);
+        const elem_start = i;
+        var rep: u32 = 0;
+        while (rep < @min(count, rep_max)) : (rep += 1) {
+            k = 0;
+            while (k < rep_elem_len) : (k += 1) {
+                pc = skipKindCodeAt(desc[elem_start + k], bytecode, pc);
+            }
         }
+        i += rep_elem_len;
     }
 
-    inline for (layout.tail) |field| pc = skipKind(field.kind, bytecode, pc);
+    k = 0;
+    while (k < desc[4]) : (k += 1) {
+        pc = skipKindCodeAt(desc[i], bytecode, pc);
+        i += 1;
+    }
     return pc;
 }
 
-/// Advance past one operand field, clamped to the buffer end.
-fn skipKind(comptime kind: Kind, bytecode: []const u8, pc: u32) u32 {
+/// Advance past one operand field named by a packed kind code, clamped to the
+/// buffer end.
+fn skipKindCodeAt(code: u8, bytecode: []const u8, pc: u32) u32 {
     if (pc >= bytecode.len) return pc;
-    return switch (kind) {
+    return switch (code) {
         // decode_varint_safe returns len 0 on a truncated varint (the encoding
         // runs past bytecode.len) instead of asserting — so a hostile mid-varint
         // truncation clamps here (pc unchanged; the caller's bounded scan loop
@@ -375,10 +699,11 @@ fn skipKind(comptime kind: Kind, bytecode: []const u8, pc: u32) u32 {
         // ReleaseSmall build, honoring this function's clamp-to-buffer-end
         // contract. Byte-identical to decode_varint for well-formed input, so the
         // scanner and skip parity are unchanged. (Arc-3 §5.4)
-        .varint => pc + @as(u32, opcodes.decode_varint_safe(bytecode[pc..]).len),
-        .byte => pc + 1,
-        .u32_le => clampEnd(pc + 4, bytecode.len),
-        .wasm_arg => clampEnd(pc + 1 + @as(u32, @as(WasmArgType, @enumFromInt(bytecode[pc])).valueByteSize()), bytecode.len),
+        SKIP_KIND_VARINT => pc + @as(u32, opcodes.decode_varint_safe(bytecode[pc..]).len),
+        SKIP_KIND_BYTE => pc + 1,
+        SKIP_KIND_U32_LE => clampEnd(pc + 4, bytecode.len),
+        SKIP_KIND_WASM_ARG => clampEnd(pc + 1 + @as(u32, @as(WasmArgType, @enumFromInt(bytecode[pc])).valueByteSize()), bytecode.len),
+        else => unreachable, // comptime-built table: only the four codes exist
     };
 }
 
@@ -402,7 +727,7 @@ fn KindType(comptime kind: Kind) type {
 }
 
 /// The typed operands struct for a FIXED-shape layout: one field per head entry,
-/// named by the layout. Fails the build for count-prefixed layouts — those four
+/// named by the layout. Fails the build for count-prefixed layouts — those
 /// opcodes decode manually (see the module doc). Folds by Layout value, so two
 /// opcodes sharing a layout share one struct type.
 pub fn Operands(comptime layout: Layout) type {

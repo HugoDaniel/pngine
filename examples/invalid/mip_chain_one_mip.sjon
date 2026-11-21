@@ -1,0 +1,9 @@
+; INVALID: a mip-chain over a one-level texture.
+;
+; Level 0 is the input and levels 1..N-1 are generated, so N=1 has nothing to
+; generate. The hook refuses with the plan's `nothing-to-generate` verdict
+; rather than emitting an empty (step-group …), which the schema may not admit.
+
+(texture :name mipTex :size [64 64] :format rgba8unorm
+  :mip-level-count 1 :usage [texture-binding render-attachment])
+(mip-chain :name fillMips :texture mipTex)

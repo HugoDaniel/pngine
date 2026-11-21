@@ -1,0 +1,15 @@
+; A real GPUCommandEncoder.copyTextureToBuffer: a 2x2 rgba8 copy-src texture
+; lands in a copy-dst buffer, the byte-preserving readback direction.
+;
+; The buffer is 272 bytes for a 264-byte span, so this is the trailing-capacity
+; end of the bounds rule: bytes past the last texel are legal and are not
+; copied. Its golden trace pins the 0x2F instruction and every field MockGPU
+; records, including the destination buffer id and the 256-byte row stride.
+(buffer :name readback :size 272 :usage [copy-dst])
+(texture :name source :size [2 2] :format rgba8unorm :usage [copy-src])
+(queue :name copies
+  (copy-texture-to-buffer
+    :size [2 2 1]
+    (source :texture source :mip-level 0 :origin [0 0 0] :aspect all)
+    (destination :buffer readback :offset 0 :bytes-per-row 256 :rows-per-image 2)))
+(frame :name main :perform [copies])

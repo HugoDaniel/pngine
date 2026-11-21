@@ -1,0 +1,16 @@
+; One write per texel size: r8unorm (1 byte), r16float (2), rgba8unorm (4)
+; and rgba16float (8). Each source is two tightly packed rows of two texels.
+(data :name oneByte (bytes :base64 "AAAAAA=="))
+(data :name twoByte (bytes :base64 "AAAAAAAAAAA="))
+(data :name fourByte (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAA=="))
+(data :name eightByte (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="))
+(texture :name texR8 :size [2 2] :format r8unorm :usage [copy-dst])
+(texture :name texR16 :size [2 2] :format r16float :usage [copy-dst])
+(texture :name texRgba8 :size [2 2] :format rgba8unorm :usage [copy-dst])
+(texture :name texRgba16 :size [2 2] :format rgba16float :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture texR8 :data oneByte :bytes-per-row 2 :rows-per-image 2 :size [2 2])
+  (write-texture :texture texR16 :data twoByte :bytes-per-row 4 :rows-per-image 2 :size [2 2])
+  (write-texture :texture texRgba8 :data fourByte :bytes-per-row 8 :rows-per-image 2 :size [2 2])
+  (write-texture :texture texRgba16 :data eightByte :bytes-per-row 16 :rows-per-image 2 :size [2 2]))
+(frame :name main :perform [upload])

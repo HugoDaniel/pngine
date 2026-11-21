@@ -1,0 +1,7 @@
+; INVALID: a depth/stencil texture has no singular `all` aspect for a texel
+; copy. WebGPU requires exactly one writable aspect and the full subresource.
+(data :name texels (bytes :base64 "AAAAAA=="))
+(texture :name depth :size [4 4] :format depth16unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture depth :data texels :size [4 4] :bytes-per-row 8))
+(frame :name main :perform [upload])

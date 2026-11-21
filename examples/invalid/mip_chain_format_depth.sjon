@@ -1,0 +1,9 @@
+; INVALID: a depth format cannot be a mip chain's color target.
+;
+; The generated passes render color into each level and sample the previous
+; one through a filterable view; a depth aspect is a different attachment and
+; a different sampling rule (deferred by the plan, not folded into this hook).
+
+(texture :name mipTex :size [64 64] :format depth24plus
+  :mip-level-count 4 :usage [texture-binding render-attachment])
+(mip-chain :name fillMips :texture mipTex)

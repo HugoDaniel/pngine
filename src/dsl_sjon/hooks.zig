@@ -1,16 +1,17 @@
 //! PNGine lowering hooks — the whole sugar tier, and the only door it has into
-//! a compile. Four are registered: `pngine/init-v1` and `pngine/pass-v1` live
-//! here, `pngine/draw-v1` in `draw_graph.zig`, and `pngine/select-v1` here.
-//! Every key each one reads is written down in `schema/sugar-ledger.mjs`
-//! against the hand-written twin in `examples/` that proves it lowers to core
-//! forms; `zig build drift` derives the key set from the schema, so a new key
-//! on a lowered form fails the build until it is recorded.
+//! a compile. Five are registered: `pngine/init-v1` and `pngine/pass-v1` live
+//! here, `pngine/draw-v1` in `draw_graph.zig`, and `pngine/select-v1` and
+//! `pngine/mips-v1` here. Every key each one reads is written down in
+//! `schema/sugar-ledger.mjs` against the hand-written twin in `examples/` that
+//! proves it lowers to core forms; `zig build drift` derives the key set from
+//! the schema, so a new key on a lowered form fails the build until it is
+//! recorded.
 //!
 //! Supported external surface (ask P6): the `pass_v1` / `init_v1` / `draw_v1`
-//! / `select_v1` values and `buildRegistry`. Every other `pub` decl in this
-//! module is internal and may change without notice; a one-pass host also
-//! needs `Compiler.buildLoweringEnv` so a define-ref `:workgroups` expression
-//! resolves at lowering time.
+//! / `select_v1` / `mip_chain_v1` values and `buildRegistry`. Every other `pub`
+//! decl in this module is internal and may change without notice; a one-pass
+//! host also needs `Compiler.buildLoweringEnv` so a define-ref `:workgroups`
+//! expression resolves at lowering time.
 //!
 //! `(init …)` and `(pass …)` sugar become host-owned form-lowering hooks: SJON calls
 //! them between default-materialization and final validation, and the canonical
@@ -3232,6 +3233,604 @@ pub fn selectV1(
     }
 }
 
+/// `pngine/mips-v1` — `(mip-chain :name N :texture T)` turns a texture's
+/// allocated mip levels into an ordinary render-pass chain.
+///
+/// The checks are the hook's because each relates the `(mip-chain …)` to a
+/// sibling `(texture …)`, which no key-set can express:
+///
+/// - 2d, one sample, one layer, not pooled — a chain writes level N by
+///   rendering into N's 2d attachment view, so every added dimension has no
+///   pass to land in.
+/// - more than one mip level — a one-level texture has no level to generate;
+///   `nothing-to-generate`, never an empty `(step-group …)`.
+/// - `texture-binding` AND `render-attachment` — each generated level is both
+///   sampled (N-1) and rendered into (N).
+/// - a format that is filterable and color-renderable on the base device — the
+///   chain samples with a linear sampler and writes a color target. Anything
+///   else is refused here; the lowering has no fallback shader.
+///
+/// Names: the generated step-group keeps the authored `:name`, and every other
+/// resource is deterministic `<name>__…`, so the whole `<name>__` prefix is
+/// this form's namespace. A document that already declares a form in it is
+/// refused at that form's head — the synthetic resource must never silently
+/// replace an authored one.
+///
+/// The lowering itself (plan 08 slice 2) emits, in this order:
+///
+///   texture-view pairs for levels 1..mips-1 (`srcN` samples N−1, `dstN`
+///   writes N), one linear sampler, one fullscreen module and render pipeline
+///   for the texture's format, one bind group and one render pass per level,
+///   and one `(step-group :name N …)` whose `:perform` lists the passes in
+///   ascending level order. Level 0 has no attachment view: it is sampled by
+///   level 1 and never written. Every attachment names a view, so each pass
+///   rides plan 09's tagged `0x81`/`0x55` path; this hook adds no opcode and
+///   no runtime path.
+pub fn mipChainV1(
+    arena: Allocator,
+    input: *const Lowering.LoweringInput,
+    out: *Lowering.LoweringOutput,
+) Lowering.LoweringError!void {
+    const view = input.view;
+    const src = input.form_idx;
+    const name = (try input.symbol("name")) orelse
+        return out.fail(arena, "`(mip-chain …)` has no `:name`", .{});
+    // Required by the schema, so this is the "internal:" shape reachable only
+    // from a hand-built tree or a registry-less caller.
+    const tex_name = (try input.symbol("texture")) orelse
+        return out.fail(arena, "internal: mip-chain `{s}` has no `:texture`", .{name});
+
+    const tex = (try input.resolveRef("texture")) orelse
+        return failSlot(arena, out, view, src, "texture", "mip-chain `{s}`: `:texture {s}` names no `(texture …)` declared in this document", .{ name, tex_name });
+
+    try checkMipChainNames(arena, out, view, src, name);
+    const facts = try checkMipChainTexture(arena, out, input, tex, tex_name, name);
+
+    // Every refusal above ran before this first append: a document that
+    // cannot run emits nothing.
+    try lowerMipChain(arena, out, view, src, tex, name, tex_name, facts);
+}
+
+/// Reserve the chain's `<name>__…` resource space against the document's one
+/// namespace. The generated `(step-group …)` keeps the authored name, so an
+/// exact duplicate is the same collision spelled without the prefix.
+fn checkMipChainNames(
+    arena: Allocator,
+    out: *Lowering.LoweringOutput,
+    view: EffectiveView,
+    src: Ast.NodeIndex,
+    name: []const u8,
+) Lowering.LoweringError!void {
+    std.debug.assert(name.len > 0); // pre: a validated :name
+    const r = Reader.initFromView(view);
+    for (view.tree.root) |idx| {
+        if (idx == src) continue;
+        if (view.tree.tagOf(idx) != .form) continue;
+        const other = r.symbol(idx, "name") orelse continue;
+        const reserved = other.len >= name.len + 2 and
+            std.mem.startsWith(u8, other, name) and
+            other[name.len] == '_' and other[name.len + 1] == '_';
+        if (!reserved and !std.mem.eql(u8, other, name)) continue;
+        return out.failAt(
+            arena,
+            view.tree.formHeader(idx).head_span,
+            "mip-chain `{s}`: this `({s} …)` is named `{s}`, and the chain's deterministic `<name>__…` resources would intern to that name — authored-name collision: rename one of the two; a synthetic resource must never silently replace an authored one",
+            .{ name, view.tree.formHeader(idx).head, other },
+        );
+    }
+}
+
+/// The descriptor half of `mipChainV1`'s contract. Every refusal is located on
+/// the TEXTURE key that has to change (the `(texture …)` is what the author
+/// edits), not on the `(mip-chain …)` that merely names it.
+///
+/// Returns the two facts the lowering needs from the same walk: how many
+/// levels it must generate and the format spelling its pipeline's colour
+/// target carries (the sentinel `preferred-canvas-format` stays a sentinel —
+/// the runtime resolves texture and target together).
+fn checkMipChainTexture(
+    arena: Allocator,
+    out: *Lowering.LoweringOutput,
+    input: *const Lowering.LoweringInput,
+    tex: Ast.NodeIndex,
+    tex_name: []const u8,
+    chain_name: []const u8,
+) Lowering.LoweringError!MipChainFacts {
+    const view = input.view;
+    const r = Reader.initFromView(view);
+
+    // Shape first: a chain writes a 2d attachment, one sample, one layer.
+    var dim_buf: [32]u8 = undefined;
+    if (r.authorNode(tex, "dimension") != null) {
+        const dim = r.memberSpelling(tex, "dimension", &dim_buf) orelse "?";
+        if (!std.mem.eql(u8, dim, "2d")) return failSlot(
+            arena,
+            out,
+            view,
+            tex,
+            "dimension",
+            "mip-chain `{s}`: texture `{s}` is `:dimension {s}` — unsupported-shape: the chain generates 2d mip levels, one render target at a time, so a {s} texture has no level to write",
+            .{ chain_name, tex_name, dim, dim },
+        );
+    }
+    if (r.authorNode(tex, "pool") != null) {
+        const pool = try evalMipTextureCount(arena, out, input, tex, tex_name, "pool", 1);
+        if (pool > 1) return failSlot(
+            arena,
+            out,
+            view,
+            tex,
+            "pool",
+            "mip-chain `{s}`: texture `{s}` has `:pool {d}` — unsupported-shape: a pooled texture rotates members per frame, and the chain's views and passes name one texture; give it a single member",
+            .{ chain_name, tex_name, pool },
+        );
+    }
+    const samples = try evalMipTextureCount(arena, out, input, tex, tex_name, "sample-count", 1);
+    if (samples != 1) return failSlot(
+        arena,
+        out,
+        view,
+        tex,
+        "sample-count",
+        "mip-chain `{s}`: texture `{s}` has `:sample-count {d}` — unsupported-shape: a multisampled texture has one level and cannot be filtered down a chain; the target must be one-sample",
+        .{ chain_name, tex_name, samples },
+    );
+    if (r.vectorNodes(tex, "size")) |extent| if (extent.len > 2) {
+        const raw = r.elemEval(arena, input.schema.*, input.env, extent[2]) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return failSlot(
+                arena,
+                out,
+                view,
+                tex,
+                "size",
+                "mip-chain `{s}`: texture `{s}`: `:size` element 2 did not evaluate to a layer count — use a non-negative integer, a `(define …)` constant, or a bounded expression over them",
+                .{ chain_name, tex_name },
+            ),
+        };
+        const layers = if (raw) |v| values.narrowF64(v) catch return failSlot(
+            arena,
+            out,
+            view,
+            tex,
+            "size",
+            "mip-chain `{s}`: texture `{s}`: `:size` element 2 did not evaluate to a non-negative integer layer count",
+            .{ chain_name, tex_name },
+        ) else 1;
+        if (layers != 1) return failSlot(
+            arena,
+            out,
+            view,
+            tex,
+            "size",
+            "mip-chain `{s}`: texture `{s}` has {d} array layers — unsupported-shape: the chain generates one 2d level at a time, so the texture must have exactly one layer",
+            .{ chain_name, tex_name, layers },
+        );
+    };
+
+    // `nothing-to-generate` is the plan's named verdict, and a locatable key:
+    // a one-level texture has no level 1 to write, so an empty group is not a
+    // program.
+    const mips = try evalMipTextureCount(arena, out, input, tex, tex_name, "mip-level-count", 1);
+    if (mips == 0) return failSlot(
+        arena,
+        out,
+        view,
+        tex,
+        "mip-level-count",
+        "mip-chain `{s}`: texture `{s}` has `:mip-level-count 0` — invalid mip count: a texture has at least one level. Fix the texture's `:mip-level-count`; the chain generates only levels 1..N-1",
+        .{ chain_name, tex_name },
+    );
+    if (mips == 1) return failSlot(
+        arena,
+        out,
+        view,
+        tex,
+        "mip-level-count",
+        "mip-chain `{s}`: texture `{s}` has 1 mip level — nothing-to-generate: level 0 is the input and there is no level 1 to write. Raise the texture's `:mip-level-count` above 1, or delete the `(mip-chain …)`",
+        .{ chain_name, tex_name },
+    );
+    // A hostile count must be a located refusal, not a name-array allocation
+    // the host cannot serve. Each generated level emits eight forms (two
+    // views; one bind group with two entries; one pass with a colour
+    // attachment and a draw) plus seven shared forms, and SJON caps one
+    // invocation at MAX_LOWERED_FORMS. This is a lowerer budget, not a claim
+    // about any device's mip ceiling; a valid 2D chain is far shorter.
+    if (mips > MAX_MIP_CHAIN_LEVELS) return failSlot(
+        arena,
+        out,
+        view,
+        tex,
+        "mip-level-count",
+        "mip-chain `{s}`: texture `{s}` has `:mip-level-count {d}` — too many levels to lower: the chain emits eight forms per generated level and the compiler's per-invocation lowering budget admits at most {d} levels. A valid 2D mip chain is far shorter; lower the count",
+        .{ chain_name, tex_name, mips, MAX_MIP_CHAIN_LEVELS },
+    );
+
+    // Both usages are joins between the chain and the texture's descriptor.
+    var usage: values.TextureUsage = .{};
+    if (r.vectorNodes(tex, "usage")) |flags| for (flags) |f| {
+        if (r.elemSymbol(f)) |sym| values.applyTextureUsage(&usage, sym);
+    };
+    if (!usage.texture_binding) return failSlot(
+        arena,
+        out,
+        view,
+        tex,
+        "usage",
+        "mip-chain `{s}`: texture `{s}` must be both sampled and rendered into, but its `:usage` does not list `texture-binding` — add `texture-binding` to the texture's `:usage` (the chain samples each previous level)",
+        .{ chain_name, tex_name },
+    );
+    if (!usage.render_attachment) return failSlot(
+        arena,
+        out,
+        view,
+        tex,
+        "usage",
+        "mip-chain `{s}`: texture `{s}` must be both sampled and rendered into, but its `:usage` does not list `render-attachment` — add `render-attachment` to the texture's `:usage` (each generated level is a render target)",
+        .{ chain_name, tex_name },
+    );
+
+    // The format is the one that would otherwise surface as a wgpu bind-group
+    // or pipeline failure with a blank canvas. There is no fallback shader.
+    const fmt_sym = r.symbol(tex, "format") orelse "rgba8unorm";
+    if (mipFormatProblem(values.mapTextureFormat(fmt_sym))) |why| return failSlot(
+        arena,
+        out,
+        view,
+        tex,
+        "format",
+        "mip-chain `{s}`: texture `{s}` has `:format {s}`, which is {s} — format-unsupported: the generated passes sample the previous level through a linear sampler and render into the next, so the format must be both filterable and color-renderable. There is no fallback shader; pick a format that supports both (rgba8unorm, rgba16float, …)",
+        .{ chain_name, tex_name, fmt_sym, why },
+    );
+
+    return .{ .mips = mips, .format = fmt_sym };
+}
+
+/// The lowering's inputs, read once by the descriptor walk so the emitter and
+/// the checks cannot disagree about the level count or the target format.
+const MipChainFacts = struct {
+    /// Allocated levels on the texture. The chain writes 1..mips-1.
+    mips: u32,
+    /// The texture's `:format` spelling, or the schema default when omitted.
+    format: []const u8,
+};
+
+/// The most levels one chain may expand. Each generated level emits eight
+/// forms — two texture views, one bind group with two entries, and one render
+/// pass with a colour attachment and a draw — and the chain adds seven shared
+/// forms. SJON caps one lowering invocation at `MAX_LOWERED_FORMS`, so the
+/// count that fits is `8·(mips−1) + 7 <= MAX_LOWERED_FORMS`. Deriving the cap
+/// keeps a hostile `:mip-level-count` a located refusal instead of an
+/// allocation the host cannot serve (the mutation sweep found this with
+/// 4294967295). This is a lowerer budget, not a device mip-ceiling claim.
+const MAX_MIP_CHAIN_LEVELS: u32 = @intCast((sjon.Plugin.MAX_LOWERED_FORMS - 7) / 8 + 1);
+
+/// The deterministic names one chain owns. Built once, in ascending level
+/// order, so the forms below and the step-group's `:perform` cannot disagree;
+/// the shader/sampler *code* is still one shared constant, never per-level
+/// string assembly.
+const MipChainNames = struct {
+    sampler: []const u8,
+    shader: []const u8,
+    pipe: []const u8,
+    /// `src_views[N-1]` samples level N−1 (the pass writing level N).
+    src_views: []const []const u8,
+    /// `dst_views[N-1]` is the attachment view of level N.
+    dst_views: []const []const u8,
+    bind_groups: []const []const u8,
+    passes: []const []const u8,
+
+    fn build(arena: Allocator, name: []const u8, mips: u32) Lowering.LoweringError!MipChainNames {
+        std.debug.assert(mips > 1); // pre: `nothing-to-generate` refused one level
+        const generated: usize = @intCast(mips - 1);
+        const src_views = try arena.alloc([]const u8, generated);
+        const dst_views = try arena.alloc([]const u8, generated);
+        const bind_groups = try arena.alloc([]const u8, generated);
+        const passes = try arena.alloc([]const u8, generated);
+        var level: u32 = 1;
+        while (level < mips) : (level += 1) {
+            const i: usize = @intCast(level - 1);
+            src_views[i] = try std.fmt.allocPrint(arena, "{s}__src{d}", .{ name, level });
+            dst_views[i] = try std.fmt.allocPrint(arena, "{s}__dst{d}", .{ name, level });
+            bind_groups[i] = try std.fmt.allocPrint(arena, "{s}__bg{d}", .{ name, level });
+            passes[i] = try std.fmt.allocPrint(arena, "{s}__pass{d}", .{ name, level });
+        }
+        return .{
+            .sampler = try std.fmt.allocPrint(arena, "{s}__sampler", .{name}),
+            .shader = try std.fmt.allocPrint(arena, "{s}__shader", .{name}),
+            .pipe = try std.fmt.allocPrint(arena, "{s}__pipe", .{name}),
+            .src_views = src_views,
+            .dst_views = dst_views,
+            .bind_groups = bind_groups,
+            .passes = passes,
+        };
+    }
+};
+
+/// Emit the plan's lowering in dependency order. Every generated form is
+/// arena-owned and points its span at the authored chain, except the views,
+/// which point at the `(texture …)` whose levels they select — the two forms
+/// the plan names as the author's to edit. No attachment ever names level 0.
+fn lowerMipChain(
+    arena: Allocator,
+    out: *Lowering.LoweringOutput,
+    view: EffectiveView,
+    src: Ast.NodeIndex,
+    tex: Ast.NodeIndex,
+    name: []const u8,
+    tex_name: []const u8,
+    facts: MipChainFacts,
+) Lowering.LoweringError!void {
+    const names = try MipChainNames.build(arena, name, facts.mips);
+
+    // The views first: every later reference (bind group entry, attachment)
+    // has to resolve, and the lowered walk is in emission order.
+    var level: u32 = 1;
+    while (level < facts.mips) : (level += 1) {
+        const i: usize = @intCast(level - 1);
+        try emitMipView(arena, out, view, tex, names.src_views[i], tex_name, level - 1);
+        try emitMipView(arena, out, view, tex, names.dst_views[i], tex_name, level);
+    }
+
+    // One sampler, one module, one pipeline for EVERY level. The code is the
+    // shared fullscreen blit constant; nothing here varies by level.
+    try appendForm(arena, out, src, "sampler", &.{
+        .{ .key = "name", .value = .{ .symbol = names.sampler } },
+        .{ .key = "mag-filter", .value = .{ .symbol = "linear" } },
+        .{ .key = "min-filter", .value = .{ .symbol = "linear" } },
+    }, &.{});
+    try appendForm(arena, out, src, "shader-module", &.{
+        .{ .key = "name", .value = .{ .symbol = names.shader } },
+        .{ .key = "code", .value = .{ .string = BLIT_WGSL } },
+    }, &.{});
+    try appendMipPipeline(arena, out, src, names.pipe, names.shader, facts.format);
+
+    // One bind group and one render pass per generated level, ascending.
+    level = 1;
+    while (level < facts.mips) : (level += 1) {
+        const i: usize = @intCast(level - 1);
+        try appendMipBindGroup(arena, out, src, names.bind_groups[i], names.pipe, names.src_views[i], names.sampler);
+        try appendMipPass(arena, out, src, names.passes[i], names.pipe, names.bind_groups[i], names.dst_views[i]);
+    }
+
+    // The one authored-named form: scheduling it in a frame is the only
+    // scheduling. `:before` and earlier `:perform` entries keep their ordinary
+    // per-frame semantics; a repeated reference expands here again.
+    const perform = try arena.alloc(EmittedValue, names.passes.len);
+    for (names.passes, 0..) |pass, i| perform[i] = .{ .symbol = pass };
+    try appendForm(arena, out, src, "step-group", &.{
+        .{ .key = "name", .value = .{ .symbol = name } },
+        .{ .key = "perform", .value = .{ .vector = perform } },
+    }, &.{});
+}
+
+/// One `(texture-view … :dimension 2d :base-mip-level L :mip-level-count 1)`.
+/// The span names the authored texture form: a diagnostic on the view is a
+/// fact about that texture's levels, not about the chain that requested them.
+fn emitMipView(
+    arena: Allocator,
+    out: *Lowering.LoweringOutput,
+    view: EffectiveView,
+    tex: Ast.NodeIndex,
+    name: []const u8,
+    tex_name: []const u8,
+    base_mip_level: u32,
+) Lowering.LoweringError!void {
+    try out.append(arena, .{
+        .head = "texture-view",
+        .kvpairs = try arena.dupe(EmittedKvpair, &.{
+            .{ .key = "name", .value = .{ .symbol = name } },
+            .{ .key = "texture", .value = .{ .symbol = tex_name } },
+            .{ .key = "dimension", .value = .{ .symbol = "2d" } },
+            .{ .key = "base-mip-level", .value = .{ .number = @floatFromInt(base_mip_level) } },
+            .{ .key = "mip-level-count", .value = .{ .number = 1 } },
+        }),
+        .source_form_idx = tex,
+        .source_span = view.tree.spanOf(tex),
+    });
+}
+
+/// `(render-pipeline :layout auto (vertex …)(fragment … (color-target …)))`
+/// over the shared module; the one per-chain pipeline whose `:format` is the
+/// texture's own.
+fn appendMipPipeline(
+    arena: Allocator,
+    out: *Lowering.LoweringOutput,
+    container: Ast.NodeIndex,
+    pipe: []const u8,
+    shader: []const u8,
+    format: []const u8,
+) Lowering.LoweringError!void {
+    const vertex = EmittedForm{
+        .head = "vertex",
+        .kvpairs = try arena.dupe(EmittedKvpair, &.{
+            .{ .key = "module", .value = .{ .symbol = shader } },
+            .{ .key = "entry", .value = .{ .symbol = "vs" } },
+        }),
+        .source_form_idx = container,
+    };
+    const color_target = EmittedForm{
+        .head = "color-target",
+        .kvpairs = try arena.dupe(EmittedKvpair, &.{
+            .{ .key = "format", .value = .{ .symbol = format } },
+        }),
+        .source_form_idx = container,
+    };
+    const fragment = EmittedForm{
+        .head = "fragment",
+        .kvpairs = try arena.dupe(EmittedKvpair, &.{
+            .{ .key = "module", .value = .{ .symbol = shader } },
+            .{ .key = "entry", .value = .{ .symbol = "fs" } },
+        }),
+        .children = try formChildren(arena, &.{color_target}),
+        .source_form_idx = container,
+    };
+    try appendForm(arena, out, container, "render-pipeline", &.{
+        .{ .key = "name", .value = .{ .symbol = pipe } },
+        .{ .key = "layout", .value = .{ .symbol = "auto" } },
+    }, &.{ vertex, fragment });
+}
+
+/// `(bind-group :layout <pipe> (entry :binding 0 :texture-view srcN)
+/// (entry :binding 1 :sampler …))` — one per level because the sampled view
+/// differs; the sampler is shared.
+fn appendMipBindGroup(
+    arena: Allocator,
+    out: *Lowering.LoweringOutput,
+    container: Ast.NodeIndex,
+    bg: []const u8,
+    pipe: []const u8,
+    src_view: []const u8,
+    sampler: []const u8,
+) Lowering.LoweringError!void {
+    const entries = [_]EmittedForm{
+        try beTextureViewEntry(arena, container, 0, src_view),
+        try beSampler(arena, container, 1, sampler),
+    };
+    try appendForm(arena, out, container, "bind-group", &.{
+        .{ .key = "name", .value = .{ .symbol = bg } },
+        .{ .key = "layout", .value = .{ .symbol = pipe } },
+        .{ .key = "group", .value = .{ .number = 0 } },
+    }, &entries);
+}
+
+/// One fullscreen pass (`draw` 3 vertices) that clears and writes level N
+/// through its attachment VIEW, which is what selects `0x81`. No viewport is
+/// authored: the selected subresource's extent is the pass's extent.
+fn appendMipPass(
+    arena: Allocator,
+    out: *Lowering.LoweringOutput,
+    container: Ast.NodeIndex,
+    pass: []const u8,
+    pipe: []const u8,
+    bg: []const u8,
+    dst_view: []const u8,
+) Lowering.LoweringError!void {
+    const clear = try arena.dupe(EmittedValue, &.{
+        .{ .number = 0 }, .{ .number = 0 }, .{ .number = 0 }, .{ .number = 1 },
+    });
+    const color_att = EmittedForm{
+        .head = "color-attachment",
+        .kvpairs = try arena.dupe(EmittedKvpair, &.{
+            .{ .key = "view", .value = .{ .symbol = dst_view } },
+            .{ .key = "clear-value", .value = .{ .vector = clear } },
+            .{ .key = "load-op", .value = .{ .symbol = "clear" } },
+            .{ .key = "store-op", .value = .{ .symbol = "store" } },
+        }),
+        .source_form_idx = container,
+    };
+    const draw = EmittedForm{
+        .head = "draw",
+        .kvpairs = try arena.dupe(EmittedKvpair, &.{
+            .{ .key = "vertex-count", .value = .{ .number = 3 } },
+        }),
+        .source_form_idx = container,
+    };
+    const bgs = try arena.dupe(EmittedValue, &.{.{ .symbol = bg }});
+    try appendForm(arena, out, container, "render-pass", &.{
+        .{ .key = "name", .value = .{ .symbol = pass } },
+        .{ .key = "pipeline", .value = .{ .symbol = pipe } },
+        .{ .key = "bind-groups", .value = .{ .vector = bgs } },
+    }, &.{ color_att, draw });
+}
+
+/// One `(entry :binding N :texture-view V)` bind-group entry.
+fn beTextureViewEntry(arena: Allocator, container: Ast.NodeIndex, binding: f64, view: []const u8) Lowering.LoweringError!EmittedForm {
+    return .{
+        .head = "entry",
+        .kvpairs = try arena.dupe(EmittedKvpair, &.{
+            .{ .key = "binding", .value = .{ .number = binding } },
+            .{ .key = "texture-view", .value = .{ .symbol = view } },
+        }),
+        .source_form_idx = container,
+    };
+}
+
+/// Read a numeric key on the TEXTURE, with the schema default, refusing a
+/// malformed/out-of-range value at the key. The texture's counts are
+/// expression-capable (`:mip-level-count MIPS`), so a literal-only reader
+/// would invent the default.
+fn evalMipTextureCount(
+    arena: Allocator,
+    out: *Lowering.LoweringOutput,
+    input: *const Lowering.LoweringInput,
+    tex: Ast.NodeIndex,
+    tex_name: []const u8,
+    key: []const u8,
+    default: u32,
+) Lowering.LoweringError!u32 {
+    const r = Reader.initFromView(input.view);
+    return r.evalU32(arena, input.schema.*, input.env, tex, key) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return failSlot(
+            arena,
+            out,
+            input.view,
+            tex,
+            key,
+            "mip-chain: texture `{s}`: `:{s}` did not evaluate to a non-negative integer",
+            .{ tex_name, key },
+        ),
+    } orelse default;
+}
+
+/// Why a format cannot back the generated chain, or null when it can. Both
+/// required properties are BASE-device ones: the lowering assumes no optional
+/// filterable/renderable feature, so a format that needs one is refused rather
+/// than lowered to a pipeline the adapter may reject. `preferred-canvas-format`
+/// is admitted because both of its resolved formats (bgra8unorm, rgba8unorm)
+/// are filterable and color-renderable.
+fn mipFormatProblem(fmt: values.TextureFormat) ?[]const u8 {
+    if (fmt.hasDepth() or fmt.hasStencil()) return "a depth/stencil format";
+    if (isMipChainCompressed(fmt)) return "a compressed format (copy-only, never a render target)";
+    return switch (fmt) {
+        .rgba8unorm,
+        .bgra8unorm,
+        .rgba16float,
+        .rgba8unorm_srgb,
+        .bgra8unorm_srgb,
+        .rgb10a2unorm,
+        .r8unorm,
+        .rg8unorm,
+        .r16float,
+        .rg16float,
+        .preferred_canvas_format,
+        => null,
+        .r32float, .rg32float, .rgba32float => "not filterable",
+        .rgba8uint,
+        .rgba8sint,
+        .r8uint,
+        .r8sint,
+        .rg8uint,
+        .rg8sint,
+        .r16uint,
+        .r16sint,
+        .rg16uint,
+        .rg16sint,
+        .r32uint,
+        .r32sint,
+        .rg32uint,
+        .rg32sint,
+        .rgba16uint,
+        .rgba16sint,
+        .rgba32uint,
+        .rgba32sint,
+        .rgb10a2uint,
+        => "not filterable",
+        .rgba8snorm, .r8snorm, .rg8snorm, .rgb9e5ufloat => "not color-renderable",
+        .rg11b10ufloat => "not color-renderable without the `rg11b10ufloat-renderable` feature",
+        .r16unorm, .r16snorm, .rg16unorm, .rg16snorm, .rgba16unorm, .rgba16snorm => "not color-renderable without the `texture-formats-tier1` feature",
+        else => "not a supported texture format",
+    };
+}
+
+/// The compressed families' byte ranges (BC 0x80–0x8D, ETC2/EAC 0x90–0x99,
+/// ASTC 0xA0–0xBB; gaps included, which only over-approximates a refusal).
+fn isMipChainCompressed(fmt: values.TextureFormat) bool {
+    const code = @intFromEnum(fmt);
+    return code >= 0x80 and code <= 0xbb;
+}
+
 /// The six keys a guard — and so a case — compares with. Kept beside the
 /// select hook because the lowered group's comparison order is this hook's
 /// to preserve, and `emitGuard` reads it back in exactly this order.
@@ -3255,12 +3854,12 @@ fn findDeclaredName(view: EffectiveView, sought: []const u8) Lowering.LoweringEr
     return null;
 }
 
-/// The four PNGine hooks as registerable values — the supported external
+/// The five PNGine hooks as registerable values — the supported external
 /// surface (ask P6). A caller-owned `Lowering.LoweringRegistry` takes these
 /// values by name and never spells an id; the ids live here, once, beside the
 /// lowering fns they carry, and `buildRegistry` registers these same values.
 ///
-/// `pub` in this module beyond these four constants and `buildRegistry` is
+/// `pub` in this module beyond these five constants and `buildRegistry` is
 /// **internal and unsupported** (the lowering fns, the frame helpers, the
 /// emitted-form builders): they are visible because Zig exposes a module's
 /// `pub` decls, not because a host may depend on their names or shapes.
@@ -3268,17 +3867,18 @@ pub const pass_v1: Lowering.LoweringHook = .{ .id = "pngine/pass-v1", .lower = p
 pub const init_v1: Lowering.LoweringHook = .{ .id = "pngine/init-v1", .lower = initV1 };
 pub const draw_v1: Lowering.LoweringHook = .{ .id = "pngine/draw-v1", .lower = draw_graph.drawV1 };
 pub const select_v1: Lowering.LoweringHook = .{ .id = "pngine/select-v1", .lower = selectV1 };
+pub const mip_chain_v1: Lowering.LoweringHook = .{ .id = "pngine/mips-v1", .lower = mipChainV1 };
 
 // The ids are contract keys: each must appear in the embedded schema (the
 // manifest is what binds a form to the id) and no two may collide. Both facts
 // are static, so they are checked at compile time — a rename that outruns the
 // manifest, or a copy-pasted id, fails the build rather than a test run.
 comptime {
-    // Four substring searches over the 83 KB manifest, plus the pairwise
+    // Five substring searches over the 83 KB manifest, plus the pairwise
     // id scan, blow past the default 1000-branch comptime quota.
     @setEvalBranchQuota(1_000_000);
     const manifest = @embedFile("pngine_schema");
-    const all = [_]Lowering.LoweringHook{ pass_v1, init_v1, draw_v1, select_v1 };
+    const all = [_]Lowering.LoweringHook{ pass_v1, init_v1, draw_v1, select_v1, mip_chain_v1 };
     for (all, 0..) |hook, i| {
         if (std.mem.indexOf(u8, manifest, hook.id) == null) {
             @compileError("pngine hook id is not in the embedded schema: " ++ hook.id);
@@ -3291,7 +3891,7 @@ comptime {
     }
 }
 
-/// Build a registry with every PNGine hook registered — the four constants
+/// Build a registry with every PNGine hook registered — the five constants
 /// above, exactly. The compiler passes `&registry` as
 /// `HostOptions.lowering_registry`. Caller owns the registry and must
 /// `deinit(gpa)` it; the compiler never frees a caller-supplied one.
@@ -3305,6 +3905,7 @@ pub fn buildRegistry(gpa: Allocator) Lowering.RegisterError!Lowering.LoweringReg
     // so the registry has one source of truth per id.
     try registry.register(gpa, draw_v1);
     try registry.register(gpa, select_v1);
+    try registry.register(gpa, mip_chain_v1);
     return registry;
 }
 
@@ -3426,4 +4027,100 @@ fn comparisonKeyAt(r: Reader, group: Ast.NodeIndex, n: usize) []const u8 {
         seen += 1;
     }
     return "";
+}
+
+// ---------------------------------------------------------------------------
+// (mip-chain …) — plan 08 slice 1: schema, hook registration, descriptor
+// refusals. The lowering itself lands in slice 2; these pin the source-level
+// contract the author meets first.
+// ---------------------------------------------------------------------------
+
+/// A document with a texture (or several) and a `(mip-chain …)`, plus the
+/// embedded manifest. No frame: slice 1 emits no lowering output, so a frame
+/// step naming the chain would be a not_cross_ref that says nothing about the
+/// form under test.
+fn completeMipDoc(gpa: Allocator, forms: []const u8) ![:0]u8 {
+    const manifest = @embedFile("pngine_schema");
+    return std.fmt.allocPrintSentinel(gpa, "{s}\n{s}\n", .{ manifest, forms }, 0);
+}
+
+/// Assert a document is refused by the mip-chain hook with `needle` in the
+/// message and the squiggle covering exactly `covers`. The location matters as
+/// much as the words: the texture is the form that has to change for every
+/// descriptor refusal, and an emitted synthetic name is blamed on the authored
+/// form it would replace.
+fn expectMipRefusal(
+    gpa: Allocator,
+    label: []const u8,
+    forms: []const u8,
+    needle: []const u8,
+    covers: []const u8,
+) !void {
+    const src = try completeMipDoc(gpa, forms);
+    defer gpa.free(src);
+    var registry = try buildRegistry(gpa);
+    defer registry.deinit(gpa);
+    var result = try sjon.validateDocument(gpa, src, .{ .lowering_registry = &registry });
+    defer result.deinit();
+
+    for (result.diagnostics) |d| {
+        if (d.severity != .err) continue;
+        if (d.code != .lowering_hook_failed) continue;
+        if (std.mem.indexOf(u8, d.message, needle) == null) continue;
+        const covered = src[d.span.start..d.span.end];
+        if (!std.mem.eql(u8, covered, covers)) {
+            std.debug.print("\nmip-chain '{s}': squiggle covers '{s}', expected '{s}'\n", .{ label, covered, covers });
+            return error.MipSpanMismatch;
+        }
+        return;
+    }
+
+    std.debug.print("\nmip-chain '{s}': no lowering_hook_failed naming '{s}'; diagnostics:\n", .{ label, needle });
+    for (result.diagnostics) |d|
+        std.debug.print("  [{s}] {s}\n", .{ @tagName(d.code), d.message });
+    return error.MissingMipRefusal;
+}
+
+// ---------------------------------------------------------------------------
+// (mip-chain …) — plan 08 slice 2: the lowering. Level 0 is an input; level N
+// samples a view of N−1 and writes a view of N, once, ascending.
+// ---------------------------------------------------------------------------
+
+/// Validate `forms` inside `completeMipDoc` and return the whole result. The
+/// caller owns it. A validation failure prints every diagnostic, so a RED is
+/// legible rather than a bare `error.MipShouldValidate`.
+fn loweredMipResult(gpa: Allocator, forms: []const u8) !sjon.Host.HostResult {
+    const src = try completeMipDoc(gpa, forms);
+    defer gpa.free(src);
+    var registry = try buildRegistry(gpa);
+    defer registry.deinit(gpa);
+    var result = try sjon.validateDocument(gpa, src, .{ .lowering_registry = &registry });
+    if (result.hasErrors()) {
+        for (result.diagnostics) |d|
+            std.debug.print("mip-chain lowering: [{s}] {s}\n", .{ @tagName(d.code), d.message });
+        result.deinit();
+        return error.MipShouldValidate;
+    }
+    return result;
+}
+
+/// The lowered form with `head` and `:name`, or null.
+fn findLoweredForm(r: Reader, head: []const u8, name: []const u8) ?Ast.NodeIndex {
+    for (r.tree.root) |idx| {
+        if (r.tree.tagOf(idx) != .form) continue;
+        if (!std.mem.eql(u8, r.tree.formHeader(idx).head, head)) continue;
+        const n = r.symbol(idx, "name") orelse continue;
+        if (std.mem.eql(u8, n, name)) return idx;
+    }
+    return null;
+}
+
+/// The number of lowered root forms with `head`.
+fn countLoweredHead(r: Reader, head: []const u8) usize {
+    var n: usize = 0;
+    for (r.tree.root) |idx| {
+        if (r.tree.tagOf(idx) != .form) continue;
+        if (std.mem.eql(u8, r.tree.formHeader(idx).head, head)) n += 1;
+    }
+    return n;
 }

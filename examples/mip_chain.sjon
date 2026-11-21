@@ -1,0 +1,30 @@
+; Mip chain — plan 08 sugar: two textures generated from level 0 by ordinary
+; render passes, one step each.
+;
+; `(mip-chain …)` lowers to per-level texture views (a sampled view of N−1 and
+; an attachment view of N), one linear sampler, one fullscreen module +
+; pipeline for the texture's format, one bind group and one render pass per
+; generated level, and one step-group with the authored name. Level 0 is an
+; input: nothing renders into it. Scheduling is the frame's `:perform` and
+; nothing else — there is no load-time or once-only channel.
+;
+; Two chains, two extent classes:
+;   • `mipTex`  64×64   — power-of-two levels 32, 16, 8
+;   • `npotTex` 100×100 — ordinary non-power-of-two extents 50, 25, 12
+;
+; Pixels (including that NPOT behavior) are slice 3. This fixture's golden
+; trace pins the lowered resources and the ascending pass order;
+; examples/mip_chain_hand.sjon is the same program written out in core forms.
+
+(texture :name mipTex :size [64 64] :format rgba8unorm
+  :mip-level-count 4
+  :usage [texture-binding render-attachment])
+
+(texture :name npotTex :size [100 100] :format rgba8unorm
+  :mip-level-count 4
+  :usage [texture-binding render-attachment])
+
+(mip-chain :name fillMips :texture mipTex)
+(mip-chain :name fillMipsNpot :texture npotTex)
+
+(frame :name main :perform [fillMips fillMipsNpot])

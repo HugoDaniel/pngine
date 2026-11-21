@@ -1,0 +1,30 @@
+; Attachment view — depth-only — a zero-colour pass into a selected depth view.
+;
+; A shadow-map style pass writes no colour: the 0x81 record carries
+; `color_count = 0` and the depth target, which is only legal because a depth
+; target is present. The depth target is `depthView`, an explicit view over
+; level 1 of a 2-level depth texture — one mip, sample count 1, depth format.
+
+(shader-module :name code :code """
+    @vertex
+    fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+      var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+      return vec4f(p[i], 0.0, 1.0);
+    }
+""")
+
+(texture :name depthTex :size [8 8] :format depth32float
+  :usage [render-attachment] :mip-level-count 2)
+(texture-view :name depthView :texture depthTex
+  :base-mip-level 1 :mip-level-count 1)
+
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (depth-stencil :format depth32float :depth-write-enabled true :depth-compare less))
+
+(render-pass :name shadow :pipeline pipe
+  (depth-stencil-attachment :view depthView
+    :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  (draw :vertex-count 3))
+
+(frame :name main :perform [shadow])

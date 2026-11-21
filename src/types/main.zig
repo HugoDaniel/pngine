@@ -13,6 +13,7 @@ pub const opcodes = @import("opcodes.zig");
 pub const ids = @import("ids.zig");
 pub const plugins = @import("plugins.zig");
 pub const descriptors = @import("descriptors.zig");
+pub const texture_layout = @import("texture_layout.zig");
 
 // Convenience re-exports
 pub const OpCode = opcodes.OpCode;

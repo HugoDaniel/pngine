@@ -1,0 +1,11 @@
+; INVALID: exactly one byte short of the required buffer-copy span. Two rgba8
+; rows at a 256-byte stride need 256 (first row) + 8 (final row, padding
+; excluded) = 264 bytes; the source buffer is 263. `buffer-out-of-bounds`, not
+; writeTexture's `insufficient-data`.
+(buffer :name staging :size 263 :usage [copy-src])
+(texture :name target :size [2 2] :format rgba8unorm :usage [copy-dst])
+(queue :name copies
+  (copy-buffer-to-texture :size [2 2 1]
+    (source :buffer staging :offset 0 :bytes-per-row 256 :rows-per-image 2)
+    (destination :texture target)))
+(frame :name main :perform [copies])

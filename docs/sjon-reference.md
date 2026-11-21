@@ -601,6 +601,69 @@ generated. Note that **sampling** a 1d / 3d / array texture also needs a texture
 view whose dimension matches; a default view (used when you bind a texture
 directly) is always 2d.
 
+**Compressed BC, ETC2/EAC and ASTC textures.** `:format` also accepts the
+fourteen BC names: `bc1-rgba-unorm(-srgb)`, `bc2-rgba-unorm(-srgb)`,
+`bc3-rgba-unorm(-srgb)`, `bc4-r-unorm`, `bc4-r-snorm`, `bc5-rg-unorm`,
+`bc5-rg-snorm`, `bc6h-rgb-ufloat`, `bc6h-rgb-float` and
+`bc7-rgba-unorm(-srgb)`; the ten ETC2/EAC names: `etc2-rgb8unorm(-srgb)`,
+`etc2-rgb8a1unorm(-srgb)`, `etc2-rgba8unorm(-srgb)`, `eac-r11unorm`,
+`eac-r11snorm`, `eac-rg11unorm` and `eac-rg11snorm`; and the twenty-eight ASTC
+names, `astc-WxH-unorm` / `astc-WxH-unorm-srgb` for `WxH` in 4×4, 5×4, 5×5,
+6×5, 6×6, 8×5, 8×6, 8×8, 10×5, 10×6, 10×8, 10×10, 12×10 and 12×12. Every one
+is sampleable but not renderable or a storage texture. The format fixes the
+copy footprint:
+
+| Family | Block | Bytes per block | 2D feature | 3D feature |
+|---|---|---|---|---|
+| BC (14 names) | 4×4 | 8 for BC1/BC4; 16 for BC2/BC3/BC5/BC6H/BC7 | `texture-compression-bc` | additionally `texture-compression-bc-sliced-3d` |
+| ETC2/EAC (10 names) | 4×4 | 8 for ETC2 RGB/RGB8A1 and EAC R11; 16 for ETC2 RGBA and EAC RG11 | `texture-compression-etc2` | **none** — 3D is always refused |
+| ASTC (28 names) | the `WxH` in the name | always 16 | `texture-compression-astc` | additionally `texture-compression-astc-sliced-3d` |
+
+A block is the atomic unit. The base `:size` width and height must be whole
+multiples of the format's block (so a 1×1 compressed texture is refused, and a
+`5x4` ASTC texture needs width 5 and height 4 multiples); pngine does not
+request `texture-compression-unaligned`, so there is no relaxation. A mip level
+below the base may reduce to a partial logical block: its **physical** extent
+is the logical extent rounded up to whole blocks. A 16×16 BC1 texture's mip 3
+is 2×2 logical but 4×4 physical, and a copy of it is one whole 4×4 block, 8
+bytes. Every copy origin x/y and copy width/height is a whole block; z selects
+an array layer or 3D depth slice and is not block-quantized. The physical
+extent, not the logical one, is the validation range and the omitted-`:size`
+default.
+
+`(write-texture …)` and the host `writeTexture` keep `writeTexture`'s
+**unaligned** policy for block formats too: `:offset` and `:bytes-per-row` need
+no 256-byte row or block-footprint alignment, so a tightly packed 16-byte BC1
+block row and an offset of 4 are legal. `(copy-buffer-to-texture …)` and
+`(copy-texture-to-buffer …)` are the aligned encoder copies: there a supplied
+`:bytes-per-row` must still be a multiple of 256, and the buffer `:offset` must
+be a multiple of the block footprint (8 for BC1/BC4, 16 for the other BC and
+ASTC blocks; depth-stencil keeps its 4-byte override). `:bytes-per-row` is the
+stride between **block rows**, and the last block row contributes
+`widthInBlocks × bytesPerBlock`.
+
+Creation requires the family's 2D feature **before** `createTexture`; a `3d` BC
+or ASTC texture additionally requires its `-sliced-3d` sibling. The CRD defines
+no ETC2/EAC sliced-3d feature, so a `3d` ETC2/EAC texture is always refused.
+No compressed format is ever available as `1d`. A missing feature is a named
+refusal with no fallback to another format:
+
+```text
+texture 'albedo' format 'bc7-rgba-unorm' requires 'texture-compression-bc'; this adapter does not support it
+```
+
+The name is the payload's public texture name (the raw id is the fallback), the
+message arrives through `onError` with source `create-texture`, and the host
+write path prefixes the same body with `writeTexture:` and source
+`write-texture`. A missing sliced feature names that sibling; an ETC2/EAC 3D
+refusal says `format 'etc2-rgb8unorm' cannot be 3d` because there is no feature
+to name. Size and 1D refusals follow the same pre-create path
+(`format 'bc1-rgba-unorm' size 6x8 is not a multiple of its 4x4 texel block`,
+`format 'bc1-rgba-unorm' cannot be 1d`). The shared block/byte table has all 52
+compressed formats and all of them are exposed as schema values; the
+color-target ledger still lists every one because they are upload/copy-only,
+never render targets.
+
 ### Texture Views
 
 Binding a `(texture …)` directly (`(entry :texture …)`) gives the shader that
@@ -634,6 +697,65 @@ view is equivalent to a bare `createView()`): `:aspect` (`all` / `stencil-only` 
 `depth-only`), `:base-mip-level` / `:mip-level-count` (a mip sub-range),
 `:base-array-layer` / `:array-layer-count` (a layer sub-range), and `:format`
 (reinterpret the texel format, e.g. an `-srgb` view of a linear texture).
+
+#### Attachment views (render passes)
+
+A render pass's colour, resolve and depth/stencil targets name the same three
+kinds of thing, and the two ref kinds are one authored union per position:
+
+| `:view` / `:resolve-target` spelling | What the pass renders into |
+|---|---|
+| `context-current-texture` | the canvas's current texture. Colour/resolve only — the depth form's union deliberately excludes it |
+| a `(texture …)` name | that texture's **default** view (the pre-0x81 behaviour; its bytes are unchanged) |
+| a `(texture-view …)` name | exactly the view's **one mip level and one array layer** |
+
+A pass with any explicit view target — colour, resolve or depth — emits PNGB
+`begin_render_pass_views = 0x81`, and every target in that pass is encoded with
+the view tag; a pass whose attachments are all textures keeps the legacy
+`begin_render_pass`/`begin_render_pass_mrt` record byte-for-byte. The new
+record carries a resolve target **per attachment** and permits zero colour
+attachments when a depth target is present (the shadow-map shape).
+
+An attachment view is refused at its authored span when it is not something a
+pass can render into: a source texture without `render-attachment` usage, a mip
+or array-layer range past the texture's descriptor, more than one mip or layer, a
+1d/cube/3d view (3d needs a separately designed `depthSlice`), a format the
+position cannot take (colour vs depth/stencil), a missing aspect, a resolve
+target on a single-sample attachment or one that is itself multisampled, a
+format mismatch between a colour attachment and its resolve target, a pooled
+texture or a view into one, or a name collision in the document's one namespace.
+
+```sjon
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.0, 1.0); }
+""")
+
+; Two levels; the pass writes level 1 only, through an explicit view.
+(texture :name attachTex :size [8 8] :format rgba8unorm
+  :usage [render-attachment] :mip-level-count 2)
+(texture-view :name mipView :texture attachTex
+  :base-mip-level 1 :mip-level-count 1)
+
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (color-target :format rgba8unorm)))
+
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view mipView
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+
+(frame :name main :perform [draw])
+```
+
+`examples/attachment_view_mip.sjon`, `attachment_view_layer.sjon`,
+`attachment_view_resolve.sjon`, `attachment_view_depth.sjon` and
+`attachment_view_depth_only.sjon` are the five authored shapes.
 
 ### Samplers
 
@@ -1323,7 +1445,9 @@ the other — see `examples/test_stencil.sjon` (front) and
 `examples/test_stencil_back.sjon` (back). The reference value the compare and
 `replace` use is pass state, `:stencil-reference`, not pipeline state.
 
-`(depth-stencil-attachment …)` takes `:view` (the depth `(texture …)`) plus independent
+`(depth-stencil-attachment …)` takes `:view` — the depth `(texture …)` or a
+`(texture-view …)` selecting one mip level and one array layer (the canvas is
+not a depth attachment; the depth form has its own union) — plus independent
 load/store pairs for each aspect: `:depth-clear-value` (must be in `[0,1]`),
 `:depth-load-op` (`clear` / `load`), `:depth-store-op` (`store` / `discard`),
 and `:stencil-clear-value`, `:stencil-load-op`, `:stencil-store-op`.
@@ -1485,6 +1609,8 @@ one draw, and a pass replays it through `:execute-bundles` instead of declaring
 an inline pipeline and draw:
 
 ```sjon
+(texture :name depthTex :size canvas :format depth24plus :usage [render-attachment])
+
 (render-bundle :name bundle :pipeline pipe
   :color-formats [bgra8unorm] :depth-stencil-format depth24plus :sample-count 1
   :vertex-buffers [verts] :bind-groups [g]
@@ -1492,7 +1618,8 @@ an inline pipeline and draw:
 
 (render-pass :name draw
   (color-attachment :view context-current-texture :load-op clear :store-op store)
-  (depth-stencil-attachment :view depthTex :depth-load-op clear :depth-store-op store)
+  (depth-stencil-attachment :view depthTex
+    :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
   :execute-bundles [bundle])
 ```
 
@@ -1655,7 +1782,8 @@ statement lives in `docs/architecture.md`'s Core Concepts), and a copy into a
   map-readable buffer.
 - `(copy-texture-to-texture …)` — the two endpoints are child forms, each
   naming a `(texture …)` or `context-current-texture` (the canvas), which is how
-  a frame keeps a copy of itself for feedback.
+  a frame keeps a copy of itself for feedback. The no-new-key form is the
+  legacy whole-texture copy; the subresource form is described below.
 - `(copy-external-image-to-texture …)` — uploads a decoded `(image-bitmap …)`
   into the destination texture (needs `copy-dst`). `:mip-level` defaults to 0
   and `:origin` to `[0 0 0]`, whose `z` selects the destination array layer or
@@ -1663,8 +1791,414 @@ statement lives in `docs/architecture.md`'s Core Concepts), and a copy into a
   belong to the destination, not to the copy.
 
 Each side of a copy is a dictionary in WebGPU, so each is a form: `(source …)`
-and `(destination …)`, exactly one of each. Neither copy takes a size — pngine
-copies the whole source.
+and `(destination …)`, exactly one of each. `(copy-buffer-to-buffer …)` and
+`(copy-external-image-to-texture …)` copy the whole source and take no size.
+`(copy-texture-to-texture …)` and the two buffer↔texture copies below add
+`:size` (WebGPU's `copySize`) because their whole point is a subregion.
+
+#### Texture→texture subresources: the legacy/new split
+
+`copyTextureToTexture`'s two endpoints are `GPUTexelCopyTextureInfo`
+dictionaries, so `copy-texture-to-texture` exposes all four of its members. The
+compatibility rule is deliberately binary:
+
+- **No `:mip-level`, `:origin` or `:aspect` on either endpoint, and no outer
+  `:size`** ⇒ the legacy whole-texture operation. It emits PNGB 0x23 and command
+  0x23 byte-identically, forever, including the canvas-size fallback. This is a
+  frozen compatibility fixture, not a template.
+- **Any one of those keys** (even written with its default value) ⇒ the
+  subresource operation and its normalized `SubresourceCopy` model. It never
+  falls back to the legacy two-id encoding.
+
+The endpoint keys, each an `GPUTexelCopyTextureInfo` member:
+
+| Key | Type | Default when the subresource path is selected |
+|---|---|---|
+| `:texture` | `attachment-view` | required; a `(texture …)` name or `context-current-texture`. A declared source needs `copy-src`, a declared destination `copy-dst`. A pooled name is refused (the opcode has no pool-member operand); the canvas is a legal source but never a destination (it is configured with `copy-src`, not `copy-dst`). |
+| `:mip-level` | `subresource-index` | 0; must be below the texture's `:mip-level-count` |
+| `:origin` | `origin3` | `[0 0 0]`; `z` selects the array layer (2D array) or depth slice (3D) |
+| `:aspect` | `texture-aspect` | `all`; a depth-stencil texture→texture copy requires `all` on **both** endpoints — the opposite of the write path's single-aspect rule |
+
+The outer `:size` is `copyTextureToTexture`'s method argument, not a dictionary
+member:
+
+| Key | Type | Presence / default |
+|---|---|---|
+| `:size` | `copy-extent` | optional `[w]`, `[w h]`, `[w h d]`; an omitted key means **the remaining physical SOURCE extent** at the source `:origin` and `:mip-level`. The destination must contain that same extent at its own origin. Present, absent dimensions default to 1. |
+
+Omission is the one recorded deviation here: WebGPU *requires* `copySize`, and
+pngine accepts its absence as the remaining-source-extent policy
+(`KNOWN_DEFAULT_DEVIATIONS.copyTextureToTexture.size` in the conformance
+harness). Plan 01's `calculateTextureCopy`/`calculateEndpoint` resolves it once;
+there is no second formula in the emitter. A zero extent is valid no-work.
+
+The subresource path validates, before any encoder call: both textures are
+declared (not views), source `copy-src` and destination `copy-dst`, equal sample
+counts, formats identical or differing only by the `-srgb` suffix, both mip
+levels in range, origins and the copy extent inside each selected **physical**
+mip extent, whole-block origins/extents, and — for a same-texture copy — disjoint
+source/destination subresource sets (sharing a mip+layer is refused even when the
+texel ranges inside it do not overlap). A depth-stencil endpoint must say
+`aspect all` on **both** sides, and each aspect must be one the format can be
+copied as: `depth-only` on a stencil-only texture (or the reverse) is
+`invalid-aspect`, a format whose aspect has no copy footprint (`depth24plus`,
+the depth aspect of `depth24plus-stencil8`) is `invalid-format`, and a
+depth-only source aspect that is not a legal copy destination (`depth32float`,
+the depth aspect of `depth32float-stencil8`) is `aspect-not-writable`. A
+depth-stencil or multisampled endpoint's copy must cover its entire physical
+subresource — `copySize` equals that mip's physical extent, so every origin
+component is zero — or it is `partial-subresource-copy`. Only this path's
+destination is marked frame-written; a legacy copy's accounting is not
+retroactively changed.
+
+```sjon
+(texture :name history :size [512 512] :format rgba8unorm
+  :usage [copy-src copy-dst] :mip-level-count 3)
+
+(queue :name copies
+  (copy-texture-to-texture
+    (source :texture history :mip-level 1 :origin [0 0 0] :aspect all)
+    (destination :texture history :mip-level 0 :origin [0 0 0] :aspect all)))
+```
+
+The copy above is legal because the two mip levels are disjoint; a
+same-texture copy at the same mip and layer is refused.
+
+### Texture writes
+
+`(write-texture …)` uploads **raw texels** from a `(data …)` entry into a
+texture (`GPUQueue.writeTexture`). It is a core `(queue …)` action: it declares
+no lowering hook and never appears in the sugar ledger. Unlike the copies above
+it can write a subregion, and it is the only queue action whose `:size` decides
+how many texels the raw bytes describe.
+
+Every key is one member of the two texel-copy dictionaries or one of
+`writeTexture`'s own arguments:
+
+| Key | WebGPU source | Presence / default |
+|---|---|---|
+| `:texture` | `GPUTexelCopyTextureInfo.texture` (`required GPUTexture`) | required `(texture …)` name; needs `copy-dst` usage, one sample, and a non-pooled id |
+| `:data` | `writeTexture`'s `AllowSharedBufferSource data` argument | required `(data …)` ref with a byte length |
+| `:offset` | `GPUTexelCopyBufferLayout.offset` | `byte-count`, default 0; **unaligned is legal** — writeTexture has no 256-byte rule |
+| `:bytes-per-row` | `GPUTexelCopyBufferLayout.bytesPerRow` | optional `byte-count`; the IDL gives it no default, so absence stays absent in the presence flags |
+| `:rows-per-image` | `GPUTexelCopyBufferLayout.rowsPerImage` | optional `byte-count`; the IDL gives it no default, so absence stays absent in the presence flags |
+| `:origin` | `GPUTexelCopyTextureInfo.origin` | optional `[x y z]` in texels; components default to 0, which is the IDL's `origin = {}`; `z` selects the array layer or depth slice |
+| `:mip-level` | `GPUTexelCopyTextureInfo.mipLevel` | `subresource-index`, default 0 |
+| `:aspect` | `GPUTexelCopyTextureInfo.aspect` | `texture-aspect`, default `all` |
+| `:size` | `writeTexture`'s `GPUExtent3D size` argument | optional `[w]`, `[w h]`, `[w h d]`; an omitted key means **the remaining physical extent at `:origin`** (see below) |
+
+The IDL operation is `writeTexture(destination, data, dataLayout, size)`:
+`data` and `size` are the method's own arguments, **not members** of
+`GPUTexelCopyTextureInfo` or `GPUTexelCopyBufferLayout`. They are the two
+sentinels in the form↔dictionary map for that reason, not PNGine inventions.
+
+`(texture …)` with `:mip-level-count` makes the mip levels addressable; the
+copy extent is the *logical* (mip-reduced) extent, while the linear rows must
+cover the physical one. A write can start at an origin inside a mip and leave
+the rest untouched.
+
+```sjon
+(data :name texels (bytes :base64 "/wAA/w=="))
+
+(texture :name field :size [1 1] :format rgba8unorm
+  :usage [copy-dst texture-binding])
+
+(queue :name upload
+  (write-texture
+    :texture field
+    :data texels
+    :offset 0
+    :bytes-per-row 4
+    :rows-per-image 1
+    :origin [0 0 0]
+    :mip-level 0
+    :aspect all
+    :size [1 1]))
+```
+
+**`:size` omission is a recorded deviation.** WebGPU *requires* the `size`
+argument; pngine accepts its absence as "the remaining physical extent from
+`:origin`" (`KNOWN_DEFAULT_DEVIATIONS.writeTexture.size` in the conformance
+harness), so a subregion write does not restate the texture size. Omission and
+an explicit short vector are different: origin `[0 10 0]` + `:size [100]`
+writes **one** row (`[100 1 1]`), while omitting `:size` there writes the whole
+remaining height. When `:size` is present, missing dimensions are height/depth
+1; when it is absent, no dimensions are invented beyond the physical extent.
+Plan 01's `calculateWrite` resolves both and is the single implementation the
+compiler and host share.
+
+`bytesPerRow` is required by WebGPU whenever the copy spans more than one row
+(and `rowsPerImage` whenever it spans more than one image); the compiler
+refuses those omissions with a located diagnostic rather than guessing a tight
+packing. `:offset` and the strides are ordinary byte counts — a host may pass
+trailing slack, and insufficient data is a compile refusal when the extent is
+known and a runtime refusal otherwise.
+
+**Block formats.** For a BC/ETC2/EAC/ASTC destination, `:origin` x and y and
+the copy's `:size` width and height must be whole multiples of the format's
+texel block (4×4 for BC and ETC2/EAC; the named shape for ASTC). The copy range
+is checked against the **physical** mip extent: a logical mip smaller than one
+block still occupies a whole block, so a 16×16 BC1 texture's mip 3 is a 2×2
+logical extent whose physical extent — and the only legal copy size — is 4×4.
+`widthInBlocks = width / blockWidth` and `heightInBlocks = height / blockHeight`;
+`bytesPerRow` is the stride between **block rows**, and `bytesInLastRow` is
+`widthInBlocks × bytesPerBlock`. `writeTexture` keeps its unaligned policy for
+block formats too: a 16-byte BC1 row and an offset of 4 are legal because
+neither the 256-byte row rule nor the block-footprint offset rule belongs to
+the queue write.
+
+`:data` must be raw bytes: `(bytes :base64 …)`, a non-image `(bytes :file …)`
+or a shape. A `(data :file …)` image is MIME-wrapped and is refused here;
+uploading an image uses `(copy-external-image-to-texture …)` instead. A write
+destination is a named `(texture …)`, not the canvas or a texture view.
+
+**Defaults, and what “absent” means.** `:offset` defaults to 0, `:origin` to
+`[0 0 0]`, `:mip-level` to 0 and `:aspect` to `all`; an omitted `:size` means
+the remaining physical extent at `:origin`. The two strides are the exception:
+the IDL gives `bytesPerRow` and `rowsPerImage` no defaults, so pngine invents
+none. An omitted stride is carried as **absent** through PNGB 0x2D and command
+0x28 and reaches `queue.writeTexture` as `undefined`, where WebGPU applies its
+own tight packing. An authored `0` is a **present** value: it is below the
+copy's minimum row/image size and is refused as `bytes-per-row-too-small` /
+`rows-per-image-too-small`, never reinterpreted as omission. That distinction
+also lets a one-row write pin presence without supplying a real stride.
+
+**What the source must contain.** The required span is the linear copy's, not
+the whole data entry's:
+
+```text
+required = :offset
+         + (copyDepth - 1) * normalizedBytesPerRow * normalizedRowsPerImage
+         + (copyHeight - 1) * normalizedBytesPerRow
+         + bytesInLastRow
+```
+
+Only the final row contributes its texel bytes, never a full padded stride;
+only whole intermediate images contribute an image stride. Final-row and
+final-image padding are therefore **excluded** from the requirement. Two
+rgba8 rows of two texels with `:bytes-per-row 16` need `16 + 8 = 24` bytes,
+not 32 (`examples/texture_write_layout_edges.sjon`); one byte fewer is
+`insufficient-data` (`examples/invalid/write_texture_one_byte_short.sjon`),
+and a tightly packed two-row copy needs exactly `8 + 8 = 16`
+(`examples/texture_write_2d.sjon`). `:offset` and the strides are ordinary
+byte counts with **no 256-byte row alignment and no offset alignment** — the
+buffer-copy rule belongs to plan 05's copy, not to `writeTexture`. Bytes past
+the required span are trailing slack and are accepted, not read as texels;
+insufficient data is a compile refusal when the extent is known and a runtime
+refusal otherwise.
+
+**Order and `(init …)`.** A `(queue …)`'s actions are inlined in source
+order at the frame step that names the queue, and the wire keeps every action:
+two writes to one texture, including two byte-identical writes, both appear
+and execute in that order (no deduplication; the last overlapping write wins
+at the texel). A queue step that precedes a render-pass step is emitted before
+that pass's commands, so the pass samples what the write just uploaded in the
+same submission. A frame's `:before`/`:perform` lists name queues; `:init` is
+the one-shot compute-pass list and `(init …)` is compute-pass sugar, so a
+static `write-texture` has **no init form** and never seeds a payload once.
+Every static write is a per-frame write and marks its destination frame-written
+for the texture-name block; plan 04 turns that marker into the host-write
+rule.
+
+**Depth/stencil limitations.** A depth/stencil destination names exactly one
+explicit aspect and must cover the **full physical mip**: origin `[0 0 0]` and
+a copy extent equal to the mip's physical extent, because WebGPU's texel-copy
+range check requires the whole subresource. Valid full-mip destinations are
+`stencil8` with `:aspect stencil-only` (one byte per texel),
+`depth16unorm` with `:aspect depth-only` (two bytes), and a combined format
+such as `depth24plus-stencil8` with `:aspect stencil-only` (one byte; its
+depth bytes are not part of the copy). Refused: `:aspect all` on any
+depth/stencil format, `depth24plus` (no texel-copy footprint), `depth32float`
+and a combined format's depth aspect (`aspect-not-writable`), and every
+subregion or nonzero origin (`partial-depth-stencil-write`). A colour format
+accepts only `:aspect all`; `depth-only`/`stencil-only` on it is
+`invalid-aspect`.
+
+#### Host writes
+
+The queue form above is the *document's* write. A host holding a live
+instance can write the same named destination without a `(queue …)` step:
+
+```js
+writeTexture(p, 'field', bytes, {
+  offset = 0,                  // byte offset into bytes, unaligned allowed
+  bytesPerRow?,                // required when the copy spans more than one row
+  rowsPerImage?,               // required when it spans more than one image
+  origin = [0, 0, 0],
+  mipLevel = 0,
+  aspect = "all",
+  size?,                       // [w], [w h] or [w h d]; remaining extent by default
+  poolIndex?,                  // k | "active"; absent = every member
+  redraw = true,
+});
+
+draw(p, { textures: { field: bytes } }); // or a TextureWrite record
+getTextures(p);                          // Promise<Record<string, TextureInfo>>
+```
+
+`writeTexture` is the immediate form: it draws once carrying the write.
+`redraw: false` stores the write for the next draw from anywhere (the play
+loop's included); the draw's own `textures` map merges over that store, the
+draw's entry winning by name. Repeated pending writes to one name are
+last-write-wins. Inside the worker's render lock the whole draw is ordered
+**uniforms → buffers → host textures → frame selection → the frame's own
+queue operations and passes**, so a host write precedes a `(write-texture …)`
+the same frame performs. `poolIndex: "active"` is resolved against the coming
+frame's `getFrameCounter()` before `frame()`, which is the member that frame's
+ping-pong bind group selects.
+
+The bytes are **yours, never transferred**. A deferred write holds the caller's
+view until the next draw posts, reads that view at the post, and structured-
+clone copies it to the worker; mutating it before that post is therefore
+included and mutating it after is not. Only the view's own
+`byteOffset`/`byteLength` window is read. A detached or resizable/growable
+source is a named `TypeError` before anything posts or changes pending state.
+
+Argument shapes are validated completely before a draw posts: bytes must be an
+`ArrayBufferView` or `ArrayBuffer`; names are nonempty strings; numeric fields
+are safe non-negative integers within the u32 contract; `origin` has 0–3
+members, `size` 1–3; `aspect` is `all`, `depth-only` or `stencil-only`;
+`poolIndex` is a non-negative integer or `"active"`; `redraw` is boolean. A
+malformed record is a `TypeError`; document/runtime refusals reach
+`onError` as a `PngineGPUError` with source `write-texture` and a plan 01 code
+(`unknown-texture`, `frame-written`, `missing-copy-dst`,
+`multisampled-destination`, `unsupported-dimension`, `invalid-aspect`,
+`mip-out-of-range`, `extent-out-of-bounds`, `insufficient-data`,
+`missing-bytes-per-row`, `pool-index-out-of-range`, `not-pooled`, …) and make
+no queue call. A batch is shape-atomic, not a GPU transaction: a refused name
+does not roll back a valid one beside it, and a device failure cannot roll back
+an earlier successful queue call.
+
+**The frame-written rule.** Every declared texture is named, including ones the
+host cannot write. A texture a frame's `:before`/`:perform` queue writes is
+marked `frameWritten`; a host write to that name is refused with source
+`write-texture` and no queue call, and the frame's static write owns every
+draw. There is no init-only static write to exempt: a static write is a
+per-frame write, and `(init …)`/frame `:init` cannot carry queue actions. Use a
+dedicated texture the frame never writes. A payload from before the
+texture-name block names nothing:
+`getTextures` resolves `{}` and every write is refused as `unknown-texture`
+rather than guessed from a WGSL binding.
+
+Reflection reports every created named texture's current descriptor, no raw
+ids:
+
+```text
+{
+  size: [width, height, depthOrArrayLayers],
+  dimension: "1d" | "2d" | "3d",
+  format, mipLevelCount, arrayDepth,
+  usage, sampleCount, sizeSource: "explicit" | "canvas" | "image-bitmap",
+  pool, frameWritten, writable,
+  writableAspects: ("all" | "depth-only" | "stencil-only")[]
+}
+```
+
+`writable` is the current host-write verdict; `writableAspects` describes
+format/aspect legality independently of the `frameWritten` policy. A
+canvas-sized texture reports the extent after a resize, and a pending write
+resolves against that current descriptor when it posts. The live equivalent of
+`examples/texture_write_ordering.sjon`'s document — with the bytes left to the
+host — is `examples/texture_host_write.sjon`.
+
+### Buffer ↔ texture copies
+
+`(copy-buffer-to-texture …)` and `(copy-texture-to-buffer …)` are `(queue …)`
+actions that mirror `GPUCommandEncoder.copyBufferToTexture` and
+`GPUCommandEncoder.copyTextureToBuffer`. Unlike the whole-resource copies
+above, they take WebGPU's `copySize` as `:size` and describe each endpoint as
+the endpoint's own dictionary:
+
+```sjon
+(texture :name staged :size [64 64] :format rgba8unorm
+  :usage [copy-dst texture-binding])
+(buffer :name upload :size 16384 :usage [copy-src])
+(buffer :name readback :size 16384 :usage [copy-dst map-read])
+
+(queue :name copies
+  (copy-buffer-to-texture
+    :size [64 64 1]
+    (source :buffer upload :offset 0 :bytes-per-row 256 :rows-per-image 64)
+    (destination :texture staged :mip-level 0 :origin [0 0 0] :aspect all))
+  (copy-texture-to-buffer
+    :size [64 64 1]
+    (source :texture staged :mip-level 0 :origin [0 0 0] :aspect all)
+    (destination :buffer readback :offset 0 :bytes-per-row 256 :rows-per-image 64)))
+```
+
+The buffer endpoint is `GPUTexelCopyBufferInfo` plus its inherited
+`GPUTexelCopyBufferLayout`; the texture endpoint is
+`GPUTexelCopyTextureInfo`. Its keys are exactly the dictionary members:
+
+| Endpoint key | WebGPU source | Presence / default |
+|---|---|---|
+| `:buffer` | `GPUTexelCopyBufferInfo.buffer` (`required GPUBuffer`) | required buffer name; `copy-src` in `copy-buffer-to-texture`, `copy-dst` in `copy-texture-to-buffer` |
+| `:offset` | `GPUTexelCopyBufferLayout.offset` | `byte-count`, default 0 |
+| `:bytes-per-row` | `GPUTexelCopyBufferLayout.bytesPerRow` | optional `byte-count`; the IDL gives it no default, so absence stays absent |
+| `:rows-per-image` | `GPUTexelCopyBufferLayout.rowsPerImage` | optional `byte-count`; the IDL gives it no default, so absence stays absent |
+| `:texture` | `GPUTexelCopyTextureInfo.texture` (`required GPUTexture`) | required texture name; `copy-dst` in `copy-buffer-to-texture`, `copy-src` in `copy-texture-to-buffer` |
+| `:mip-level` | `GPUTexelCopyTextureInfo.mipLevel` | `subresource-index`, default 0 |
+| `:origin` | `GPUTexelCopyTextureInfo.origin` | optional `[x y z]` in texels; components default to 0, which is the IDL's `origin = {}` |
+| `:aspect` | `GPUTexelCopyTextureInfo.aspect` | `texture-aspect`, default `all` |
+
+`:size` sits on the copy form, not on either endpoint, because it is the
+method's own third argument (`GPUExtent3D copySize`). It is optional here
+**only** through the recorded remaining-extent deviation: an omitted `:size`
+means the remaining physical mip extent at the texture endpoint's `:origin`;
+when it is present, missing dimensions are height/depth 1. The two ledgers name
+it (`KNOWN_DEFAULT_DEVIATIONS.copyBufferToTexture.size` /
+`.copyTextureToBuffer.size`, and `KNOWN_OPTIONAL_REQUIRED`).
+
+**The buffer-copy alignment rules are not `writeTexture`'s.** A supplied
+`:bytes-per-row` must be a multiple of **256**, and `:offset` must be a
+multiple of the texel block copy footprint — `4` bytes for an ordinary
+`rgba8unorm`, `8` for `rgba16float` or a BC1/BC4 block, `16` for
+`rgba32float` or the other BC blocks. When the copy's
+texture endpoint is a depth-stencil format (the destination in
+`copy-buffer-to-texture`, the source in `copy-texture-to-buffer`), `:offset`
+must be a multiple of **4** instead of the aspect's footprint (a `stencil8`
+footprint of 1 and a `depth16unorm` footprint of 2 both still require 4).
+These rules apply to both directions and **never** to `(write-texture …)`:
+`writeTexture` sets
+`aligned = false`, so a tight twelve-byte row and an unaligned offset are legal
+there. `bytesPerRow` is optional in the IDL; WebGPU *validation* requires it
+when the copy spans more than one block row or image, and requires
+`rowsPerImage` when it spans more than one image — the calculator refuses
+those omissions as `missing-bytes-per-row` / `missing-rows-per-image`.
+`source` and `destination` are slot-local: the buffer form's keys are not the
+texture form's, and neither is a generic shared scope.
+
+**Byte readback.** When a `copy-texture-to-buffer` destination carries both
+`copy-dst` and `map-read`, the runtime schedules a readback after the submit
+that executes the copy and delivers it through the main-thread
+`onTextureReadback` option (viewer and dev profiles alike):
+
+```text
+{
+  texture: string|null,   // public (texture :name …), null for an old/unnamed payload
+  buffer: string|null,    // public (buffer :name …), null for an old/unnamed payload
+  offset: number,         // the destination layout offset
+  size: number,           // copied window in bytes, row padding included
+  bytes: Uint8Array,      // owned copy; the caller may retain or mutate it
+  bytesPerRow: number,    // normalized stride the bytes use
+  rowsPerImage: number,   // normalized rows per image
+  mipLevel: number,
+  origin: [x, y, z],
+  aspect: "all" | "depth-only" | "stencil-only",
+  copySize: [w, h, d],
+}
+```
+
+`bytes` is exactly `size` bytes starting at `offset`: row `r` starts at
+`bytesPerRow * r`, image `i` at `bytesPerRow * rowsPerImage * i`, the last row
+contributes only its real texels, and no empty final padding is included. No
+unpadding, swizzling or format conversion is performed — the metadata is there
+so the caller can interpret the padded layout exactly. `onQueryResult` is
+unchanged: it still receives every other `map-read` copy as 64-bit lanes and
+never sees these bytes. A copy whose destination is currently mapped is
+refused as `buffer-mapped`; a failed map/range/callback reports
+`readback-unavailable` through `onError` (source `readback`). With no
+`onTextureReadback` handler installed, nothing is mapped or retained.
 
 ### Images
 
@@ -2729,3 +3263,118 @@ convention, and the hand-written twin of the example above ships as
   reasoning is exact (compile-time constants, interval containment); the
   legal cascade above does not warn.
 
+### `(mip-chain …)`: generate the levels with ordinary passes
+
+A mip chain is the same sugar argument one texture over: level 0 is your
+input, levels 1..`mip-level-count-1` are generated by ordinary render passes,
+and the whole chain is one named step your frame schedules. `pngine/mips-v1`
+lowers the form to per-level texture views, one linear sampler, a fullscreen
+module/pipeline for the texture's format, a bind group and a render pass per
+generated level, and a `(step-group …)` holding those passes in ascending
+order. Nothing runs at load time; scheduling the group in a frame is the
+entire execution model.
+
+```sjon
+(texture :name mipTex :size [100 100] :format rgba8unorm
+  :mip-level-count 4
+  :usage [texture-binding render-attachment])
+
+(mip-chain :name fillMips :texture mipTex)
+
+(frame :name main
+  :before [uploadLevel0]   ; the write that fills level 0
+  :perform [fillMips draw]) ; the chain, then the draw that samples it
+```
+
+- `:name` — the generated `(step-group …)`'s name. A frame performs it like
+  any other step. Its resources are named deterministically `<name>__…`, so
+  the whole `<name>__` prefix belongs to the chain: a document that already
+  declares a form in it (or another form with the exact same name) is refused
+  at that form, because a synthetic resource must never silently replace an
+  authored one.
+- `:texture` — the `(texture …)` to generate. Level 0 is the input and is
+  never overwritten by the chain.
+
+#### What it generates
+
+For a texture with `:mip-level-count N`, each generated level `L` in
+`1..N-1` gets:
+
+- `(texture-view <name>__srcL …)` — level `L-1`, one mip, sampled;
+- `(texture-view <name>__dstL …)` — level `L`, one mip, the colour attachment;
+- `<name>__bgL` — a bind group binding the sampled view at 0 and the chain's
+  sampler at 1;
+- `<name>__passL` — a render pass that clears `dstL` and draws one fullscreen
+  triangle through the chain's pipeline.
+
+Once per chain it also emits `<name>__sampler` (linear min/mag), one
+`<name>__shader` module, one `<name>__pipe` pipeline for the texture's format,
+and the authored-named `(step-group …)` whose `:perform` is
+`[<name>__pass1 … <name>__pass(N-1)]`. The one sampler, module and pipeline
+serve every level; the shader is a shared constant, never per-level string
+assembly. The passes use each level's ordinary extent — `50×50`, `25×25`,
+`12×12` for a 100×100 four-level chain — and write `dstL` through plan 09's
+tagged attachment-view record, not the base texture.
+
+#### Ordering rules
+
+- Level `L` samples level `L-1` and writes `L` exactly once. The emitted group
+  is ascending; there is no other order inside it.
+- Level 0 never gains a pass or an attachment view. The chain only samples it,
+  so a level-0 queue write in `:before` (or earlier in `:perform`) survives the
+  frame instead of being overwritten by generation.
+- Scheduling is only a frame performing the group. Performing it twice runs it
+  twice; there is no once-per-payload expansion. Frame `:init` accepts compute
+  passes only, so neither the group nor a queue write can run there.
+- Source order remains execution order. `:before` runs before `:perform`, and
+  entries within a list run in the order written.
+
+#### What it refuses
+
+Every shape the render chain cannot serve is a located refusal on the
+`:texture` key (or on the colliding authored form), not a GPU validation
+surprise:
+
+| Requirement | Why |
+|---|---|
+| `:dimension 2d` (default), one layer, `:sample-count 1`, no `:pool` | each level is written as a 2d render target, one sample and one layer at a time |
+| `:mip-level-count` above 1 | a one-level texture is `nothing-to-generate`; the chain never emits an empty step-group |
+| `:usage` lists both `texture-binding` and `render-attachment` | level N samples N−1 and is rendered into |
+| a filterable, color-renderable `:format` | the generated pass samples through a linear sampler and writes a color attachment; there is no fallback shader |
+
+A zero or otherwise invalid `:mip-level-count` is refused by the ordinary
+texture-descriptor rules before the chain lowers. `preferred-canvas-format` is
+allowed because both formats it can resolve to (`bgra8unorm`, `rgba8unorm`)
+satisfy both properties; `:size canvas` and an `(image-bitmap …)`-derived
+extent are allowed too. The browser's canvas-bound resize rebuild recreates the
+explicit texture views and the bind groups that name them from their recorded
+recipes before the next pass, so a generated view is not kept with a stale
+extent.
+
+#### What it deliberately does not do
+
+- No automatic generation: a host write, a frame or an upload does not trigger
+  a chain. The author schedules the group explicitly, per frame.
+- No level-0 write and no hidden queue upload. `writeTexture` remains the raw
+  byte operation; this sugar never calls it.
+- No compute exact-average variant substituted under the same pixel claim. The
+  hand-written compute chain in `examples/webgpu_generate_mipmap.sjon` remains
+  a different, explicitly scheduled alternative.
+- No 1D/3D/array/depth/compressed/pooled generation, no MSAA levels, and no
+  format or shader fallback. Those shapes need a separately specified
+  lowering; they are refused here.
+- No byte-identity claim with the hand twin. Authored forms emit grouped by
+  kind and lowered forms in hook order, so the claim is **pixel** equivalence.
+
+#### Twin and evidence
+
+`examples/mip_chain_view.sjon` is the pixel-evidence sugar document (64×64
+power-of-two and 100×100 non-power-of-two chains); its hand twin
+`examples/mip_chain_view_hand.sjon` writes the same program in core forms.
+The render corpus holds the `mip_chain_view`/`mip_chain_view_hand` rows
+against each other at pixel level on the Metal host, and their golden traces
+pin the lowered order. The original `mip_chain`/`mip_chain_hand` pair remains
+the lowering/order fixture. The browser/GPU pixel evidence is
+`tests/e2e/fixtures/evidence/mip-chain-pixels-2026-11-21.json`: four
+sugar/twin cases, levels 0..3, `twinDelta: 0`; the harness and its reproduction
+commands are documented in `tests/e2e/fixtures/mip-chain-harness.html`.

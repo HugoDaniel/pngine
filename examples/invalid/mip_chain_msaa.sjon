@@ -1,0 +1,9 @@
+; INVALID: a multisampled texture has one level.
+;
+; WebGPU forbids mipLevelCount > 1 when sampleCount > 1, and there is no
+; defined way to filter N samples per texel down a chain. The chain's target
+; must be one-sample; the refusal points at the texture's :sample-count.
+
+(texture :name mipTex :size [64 64] :format rgba8unorm :sample-count 4
+  :mip-level-count 4 :usage [texture-binding render-attachment])
+(mip-chain :name fillMips :texture mipTex)

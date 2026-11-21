@@ -7,6 +7,70 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [4.3.2] - 2026-11-21
+
+### Fixed
+
+- **`compile --embed-executor` can no longer embed a stale executor.** The
+  compiler prefers the executor WASMs installed under `zig-out/executors/`
+  over its compile-time fallback, but only `zig build executors` refreshed
+  that directory. A plain `zig build` left whatever variant was on disk, so
+  a payload compiled after an executor change could carry an older one and
+  mis-decode newer opcodes — a whole render pass could be dropped. The
+  install step now builds them, so an ordinary `zig build` installs the
+  current variants.
+- **The browser compiler no longer loses a 64 KiB page per compile of a
+  large document.** Zig 0.16's `BrkAllocator` accepted a resize that
+  crossed its small/big size-class boundary: an allocation above 32 KiB
+  shrunk below the small-slot ceiling still fit one 64 KiB big page at
+  the moment of resize, and the later free classified the block by its new
+  length, filing the page under a small class where no big allocation is
+  ever offered it again. Linear memory never shrinks, so the page was lost
+  per compile. The wasm entry point now refuses that one transition, which
+  sends `ArrayList.toOwnedSlice` down its allocate-copy-free fallback.
+  Measured on `webgpu_marching_cubes`: +65,536 B on every compile before,
+  flat across 20 compiles after; output bytes are unchanged.
+- **The shipping executor's command bytes no longer depend on the build
+  mode.** A command whose data or string-table lookup was absent emitted
+  the zero-length slice's allocator-dependent pointer: `0xaaaaaaaa` under
+  the debug allocator, `0x1` in a release build. It is now a deterministic
+  `0`, matching what `write_texture` already did, so one payload encodes
+  the same command buffer in Debug and ReleaseFast. Payloads with real
+  entries are unchanged.
+- **The vendored wgpu-native v27 backend now compiles.**
+  `WGPUFeatureName` is `c_uint` while its enum constants are `c_int`;
+  nine texture and attachment-view refusal names were missing from
+  `ExecuteError`; and v27 renamed `WGPUTextureDataLayout` and
+  `WGPUImageCopyTexture` to `WGPUTexelCopyBufferLayout` and
+  `WGPUTexelCopyTextureInfo`. This affects native `--frame` builds on
+  hosts using the vendored library.
+
+### Added
+
+- **`examples/mip_chain_view.sjon` and `examples/mip_chain_view_hand.sjon`
+  are a self-contained mip-chain pair.** The sugar document fills level 0
+  itself, generates the 64 POT and 100 NPOT chains, and presents them, so
+  the native snapshot gate has real pixel evidence instead of comparing
+  black to black; the hand-written twin writes the same program in core
+  forms. The original lowering fixtures are unchanged.
+
+## [4.3.1] - 2026-11-13
+
+### Fixed
+
+- **`control-ref`'s cross-ref target is pngine-qualified, so the manifest
+  composes with pacer's `control` form in one aggregate.** 4.3.0's new
+  `(control …)` form left the value-kind's `:target control` bare, which
+  is ambiguous the moment another loaded plugin also declares a `control`
+  form — pacer's score pins do — and SJON (since 1.5.0, by design:
+  declaring the colliding name confers no priority) reports
+  `ambiguous_cross_ref_target` at schema build, before any document.
+  Animader's ten-manifest preload is the first such host. The target is
+  now `[pngine/control]`, which resolves to pngine's own form regardless
+  of what else is loaded. The JSON Schema and TypeScript annotations
+  carry the qualified `target-form`; no document bytes, compiled output,
+  or ABI surface changes.
+
 ## [4.3.0] - 2026-11-13
 
 ### Added

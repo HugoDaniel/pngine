@@ -1,0 +1,8 @@
+; INVALID: origin x (5) is beyond the 4-wide physical mip extent. The origin
+; bound is u32 here, not the old u16 copy-origin slot, and plan 01 checks it
+; against the selected mip.
+(data :name texels (bytes :base64 "AAAAAA=="))
+(texture :name tex :size [4 4] :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture tex :data texels :origin [5 0 0] :size [1 1] :bytes-per-row 4))
+(frame :name main :perform [upload])

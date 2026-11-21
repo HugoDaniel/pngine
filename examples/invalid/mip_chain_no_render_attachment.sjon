@@ -1,0 +1,9 @@
+; INVALID: the mip-chain's texture is not a render target.
+;
+; Each generated level is written through a color attachment, so the texture
+; has to be created with render-attachment. The refusal names the usage flag
+; to add.
+
+(texture :name mipTex :size [64 64] :format rgba8unorm
+  :mip-level-count 4 :usage [texture-binding])
+(mip-chain :name fillMips :texture mipTex)

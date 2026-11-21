@@ -1,0 +1,37 @@
+; Attachment view — depth — selects one layer of a depth array.
+;
+; The pass draws colour to the canvas and depth-tests against `depthView`,
+; which exposes layer 1 of a 2-layer depth texture. A 2d-array view with
+; `:array-layer-count 1` selects exactly that layer; the depth/stencil ops judge
+; the view's format (depth24plus has a depth aspect, no stencil aspect), the
+; same rule the legacy texture attachment follows.
+
+(shader-module :name code :code """
+    @vertex
+    fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+      var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+      return vec4f(p[i], 0.0, 1.0);
+    }
+
+    @fragment
+    fn fs() -> @location(0) vec4f { return vec4f(0.1, 0.7, 0.3, 1.0); }
+""")
+
+(texture :name depthTex :size [4 4 2] :format depth24plus :usage [render-attachment])
+(texture-view :name depthView :texture depthTex :dimension 2d-array
+  :base-array-layer 1 :array-layer-count 1)
+
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (color-target :format preferred-canvas-format))
+  (depth-stencil :format depth24plus :depth-write-enabled true :depth-compare less))
+
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view context-current-texture
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (depth-stencil-attachment :view depthView
+    :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  (draw :vertex-count 3))
+
+(frame :name main :perform [draw])

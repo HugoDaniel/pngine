@@ -255,6 +255,10 @@ commands the buffer had no room for, and a handler's operand reads ran past
 | 0x25 | copy_external_image_to_texture | `[bitmap_id:u16][texture_id:u16][mip:u8][origin_x:u16][origin_y:u16][origin_z:u16]` | 11 |
 | 0x26 | write_pointer_uniform | `[id:u16][offset:u32][size:u16]` — 12 floats of pointer state, clamped to min(size, 48) | 8 |
 | 0x27 | resolve_query_set | `[qs_id:u16][first:u32][count:u32][dest_buf:u16][dest_off:u32]` | 16 |
+| 0x28 | write_texture | `[id:u16][data_ptr:u32][data_len:u32][offset:u32][bytes_per_row:u32][rows_per_image:u32][mip_level:u32][origin_x:u32][origin_y:u32][origin_z:u32][aspect:u8][size_width:u32][size_height:u32][size_depth:u32][flags:u8]` — `data_len` is the full data-entry length; `offset` is relative to it. Flags: bit 0 bytes_per_row, bit 1 rows_per_image, bit 2 size present | 52 |
+| 0x29 | copy_buffer_to_texture | `[texture_id:u16][buffer_id:u16][offset:u32][bytes_per_row:u32][rows_per_image:u32][mip_level:u32][origin_x:u32][origin_y:u32][origin_z:u32][aspect:u8][size_width:u32][size_height:u32][size_depth:u32][flags:u8]` — the buffer is the linear side; flags exactly as 0x28 | 46 |
+| 0x2A | copy_texture_to_buffer | same 46-byte record as 0x29; the opcode alone selects the direction (texture is the linear source). A MAP_READ|COPY_DST destination schedules a byte readback after the matching submit | 46 |
+| 0x2B | copy_texture_subresource | `[src_id:u16][dst_id:u16][src_mip:u32][src_origin_x:u32][src_origin_y:u32][src_origin_z:u32][src_aspect:u8][dst_mip:u32][dst_origin_x:u32][dst_origin_y:u32][dst_origin_z:u32][dst_aspect:u8][size_width:u32][size_height:u32][size_depth:u32][flags:u8]` — flags bit 0 = size present, every other bit must be zero; both endpoints are `GPUTexture`s the runtime holds, so there is no WASM pointer | 51 |
 | 0x30 | init_wasm_module | `[module_id:u16][data_ptr:u32][data_len:u32]` (async in JS) | 10 |
 | 0x31 | call_wasm_func | `[call_id:u16][module_id:u16][name_ptr:u32][name_len:u32][args_len:u8][args blob inline]` | 13+n |
 | 0x4A | set_pass_timestamp_writes | `[qs_id:u16][begin_idx:u16][end_idx:u16]` | 6 |
@@ -268,12 +272,57 @@ commands the buffer had no room for, and a handler's operand reads ran past
 | 0x52 | set_pass_clear_values | `[depth:f32][stencil:u32]` — pending depth/stencil clear, consumed by the next begin*Pass | 8 |
 | 0x53 | begin_render_pass_f32 | `[color_id:u16][load:u8][store:u8][depth_id:u16][r:f32][g:f32][b:f32][a:f32][resolve_id:u16]` | 24 |
 | 0x54 | begin_render_pass_mrt_f32 | `[count:u8]` then per attachment `[tex_id:u16][load:u8][store:u8][r:f32][g:f32][b:f32][a:f32]` then `[depth_id:u16]` | 1+20n+2 |
+| 0x55 | begin_render_pass_views | `[color_count:u8]` then per attachment `[target:u16][load:u8][store:u8][r:f32][g:f32][b:f32][a:f32][resolve_target:u16]`, then `[depth_target:u16]` — targets use the shared attachment encoding below | 3+22n |
 | 0xF0 | submit | — | 0 |
 | 0xFF | end | — | 0 |
+
+**`0x55` is additive; the legacy begin-pass records are untouched.**
+`begin_render_pass_views` is the command record for a pass whose colour,
+resolve or depth/stencil attachment names an explicit `(texture-view …)`; its
+PNGB counterpart is `begin_render_pass_views = 0x81`. A pass with no explicit
+view keeps the legacy begin-pass opcode and bytes, and no legacy decoder
+reinterprets the new encoding.
+
+### Attachment targets (shared by PNGB `0x81` and command `0x55`)
+
+| Value | Meaning |
+| --- | --- |
+| `0xFFFF` | none — legal only in an optional position |
+| `0xFFFE` | canvas — colour/resolve only; the depth position refuses it |
+| `0x8000 \| view_id` | an explicit view id; the low 15 bits are the id |
+| anything else | a texture id; the runtime uses that texture's **default** view |
+
+`ATTACHMENT_VIEW_TAG = 0x8000` (`types/opcodes.zig`). The high bit is the
+discriminator rather than a second byte per attachment: it mirrors
+`BIND_GROUP_LAYOUT_TAG` (§6.4), costs no extra operand, and is safe only
+because 0x81/0x55 are new. The tag is interpreted only by those two records. A
+consumer resolves a tagged id in the explicit-view table (`txv` in the browser,
+the stored `WGPUTextureView` in native) and an untagged id in the texture
+space; it must never fall back to the other table, to the base texture, or to
+the canvas. A missing or wrong-kind target is a named refusal before the pass
+begins.
+
+0x55's record is `3 + 22n` bytes: one count byte, 22 bytes per colour
+attachment, and the trailing u16 depth target. The count is bounded to 8
+before any field is read; a truncated or over-cap record is refused rather
+than read past, and the decoder advances by exactly the computed width. A zero
+colour count requires a depth target (a depth-only pass); a zero count with no
+depth target is malformed. All integers and floats retain the command ABI's
+little-endian rule.
 
 Load op encoding: 0=load, 1=clear. Store op: 0=store, 1=discard.
 The 0x40–0x49 gap and all other unassigned values are reserved **forever** —
 never reuse a retired or skipped value.
+
+**`0x2B` is additive; `0x23` is not retired.** A texture→texture copy with no
+mip/origin/aspect/copy-size key still emits the legacy two-id `0x23` record and
+its canvas-size fallback forever. `0x2B`'s flags byte exists because an
+omitted size and an authored zero extent are different requests: bit 0 is
+presence, bits 1–7 are reserved and must be zero (a decoder refuses them rather
+than guessing). The shipping executor has no texture-descriptor table, so it
+emits the fully explicit record; the browser, native and inspector runtimes
+resolve both current descriptors and validate the copy before any encoder
+call.
 
 **0x10 and 0x1B are RETIRED, not removed.** They carry the colour clear value as
 four `u8`s decoding `/255`, which quantizes to 1/255 and clamps to [0,1] — so an
@@ -590,9 +639,15 @@ same byte, and one of them means "guess".
 There is **no** runtime check that the JS switch covers every opcode an
 executor emits. Know what the museum does and does not give you here: generation
 v1 pins three payloads (`simple_triangle`, `uniform_access`,
-`pass_compute_rainbow`), so it proves *those* streams replay identically
-forever — it is a regression net, not an opcode-coverage matrix. Nothing in it
-emits `init_wasm_module`/`call_wasm_func`, for instance. Opcode-by-opcode
+`pass_compute_rainbow`), v2 adds the runtime texture write (`texture_write_2d`,
+command 0x28), v3 adds the two buffer↔texture encoder copies
+(`texture_copy_buffer_to_texture` / `texture_copy_texture_to_buffer`, commands
+0x29/0x2A), v4 adds the legacy whole-texture copy and the subresource copy
+(`test_copy_texture` / `texture_copy_subresource`, commands 0x23/0x2B), and v5
+adds the attachment-view render pass (`attachment_view_mip`, command 0x55), so it
+proves *those* streams replay identically forever — it is a
+regression net, not an opcode-coverage matrix. Nothing in it emits
+`init_wasm_module`/`call_wasm_func`, for instance. Opcode-by-opcode
 agreement between the Zig emitter and the JS dispatchers comes from
 `tests/npm/command-buffer-widths.test.js` — which drives every command through
 the real sub-dispatchers and checks the width each returns against the Zig

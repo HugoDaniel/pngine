@@ -228,11 +228,14 @@ pub const TextureFormat = enum(u8) {
     // Byte codes are the PNGB ABI: APPEND-ONLY. Never renumber or reuse an
     // existing code; new formats get new codes. Grouped by channel layout, with
     // gaps left for siblings (see the WebGPU GPUTextureFormat capability table).
-    // Coverage = every uncompressed format. The feature-gated ones (tier1 16-bit
-    // unorm/snorm, bgra8 srgb, depth32float-stencil8) encode here unconditionally;
-    // the runtime opportunistically requests their device feature so they render
-    // wherever the adapter allows. Only compressed formats (BC/ETC2/EAC/ASTC,
-    // which need a compressed-data upload path) are intentionally absent.
+    // Coverage = every uncompressed format plus BC and ETC2/EAC. The
+    // feature-gated ones (tier1 16-bit unorm/snorm, bgra8 srgb,
+    // depth32float-stencil8) encode here unconditionally; the runtime
+    // opportunistically requests their device feature so they render wherever
+    // the adapter allows. The BC codes landed with plan 07 tranche A and the
+    // ETC2/EAC codes with tranche B; ASTC remains absent from the enum until
+    // its own tranche, although the shared block table already knows its codes
+    // so no arithmetic moves later.
 
     // 8-bit rgba/bgra + wide rgba + srgb (0x0x).
     rgba8unorm = 0x00,
@@ -301,6 +304,74 @@ pub const TextureFormat = enum(u8) {
     rg11b10ufloat = 0x72,
     rgb9e5ufloat = 0x73,
 
+    // BC compressed formats (0x8x): plan 07's first compressed family. All are
+    // 4x4 texel blocks; 8 or 16 bytes per block. Creation requires
+    // `texture-compression-bc`; 3d additionally requires
+    // `texture-compression-bc-sliced-3d`.
+    bc1_rgba_unorm = 0x80,
+    bc1_rgba_unorm_srgb = 0x81,
+    bc2_rgba_unorm = 0x82,
+    bc2_rgba_unorm_srgb = 0x83,
+    bc3_rgba_unorm = 0x84,
+    bc3_rgba_unorm_srgb = 0x85,
+    bc4_r_unorm = 0x86,
+    bc4_r_snorm = 0x87,
+    bc5_rg_unorm = 0x88,
+    bc5_rg_snorm = 0x89,
+    bc6h_rgb_ufloat = 0x8a,
+    bc6h_rgb_float = 0x8b,
+    bc7_rgba_unorm = 0x8c,
+    bc7_rgba_unorm_srgb = 0x8d,
+
+    // ETC2/EAC compressed formats (0x9x): plan 07 tranche B. All are 4x4 texel
+    // blocks; 8 or 16 bytes per block. Creation requires
+    // `texture-compression-etc2`. The CRD defines no ETC2/EAC sliced-3d
+    // feature, so a 3d descriptor is refused.
+    etc2_rgb8unorm = 0x90,
+    etc2_rgb8unorm_srgb = 0x91,
+    etc2_rgb8a1unorm = 0x92,
+    etc2_rgb8a1unorm_srgb = 0x93,
+    etc2_rgba8unorm = 0x94,
+    etc2_rgba8unorm_srgb = 0x95,
+    eac_r11unorm = 0x96,
+    eac_r11snorm = 0x97,
+    eac_rg11unorm = 0x98,
+    eac_rg11snorm = 0x99,
+
+    // ASTC compressed formats (0xa0-0xbb): plan 07 tranche C. Codes alternate
+    // linear then sRGB in the CRD's shape order; the block dimensions are the
+    // ones in the name (4x4 through 12x12), never a generic 4x4 fallback, and
+    // every block is 16 bytes. Creation requires `texture-compression-astc`;
+    // 3d additionally requires `texture-compression-astc-sliced-3d`.
+    astc_4x4_unorm = 0xa0,
+    astc_4x4_unorm_srgb = 0xa1,
+    astc_5x4_unorm = 0xa2,
+    astc_5x4_unorm_srgb = 0xa3,
+    astc_5x5_unorm = 0xa4,
+    astc_5x5_unorm_srgb = 0xa5,
+    astc_6x5_unorm = 0xa6,
+    astc_6x5_unorm_srgb = 0xa7,
+    astc_6x6_unorm = 0xa8,
+    astc_6x6_unorm_srgb = 0xa9,
+    astc_8x5_unorm = 0xaa,
+    astc_8x5_unorm_srgb = 0xab,
+    astc_8x6_unorm = 0xac,
+    astc_8x6_unorm_srgb = 0xad,
+    astc_8x8_unorm = 0xae,
+    astc_8x8_unorm_srgb = 0xaf,
+    astc_10x5_unorm = 0xb0,
+    astc_10x5_unorm_srgb = 0xb1,
+    astc_10x6_unorm = 0xb2,
+    astc_10x6_unorm_srgb = 0xb3,
+    astc_10x8_unorm = 0xb4,
+    astc_10x8_unorm_srgb = 0xb5,
+    astc_10x10_unorm = 0xb6,
+    astc_10x10_unorm_srgb = 0xb7,
+    astc_12x10_unorm = 0xb8,
+    astc_12x10_unorm_srgb = 0xb9,
+    astc_12x12_unorm = 0xba,
+    astc_12x12_unorm_srgb = 0xbb,
+
     /// Sentinel: resolved at runtime to navigator.gpu.getPreferredCanvasFormat()
     preferred_canvas_format = 0xFF,
     /// Sentinel: an unknown/unsupported format string. fromString returns this
@@ -360,6 +431,58 @@ pub const TextureFormat = enum(u8) {
             .{ "rgb10a2uint", .rgb10a2uint },
             .{ "rg11b10ufloat", .rg11b10ufloat },
             .{ "rgb9e5ufloat", .rgb9e5ufloat },
+            .{ "bc1-rgba-unorm", .bc1_rgba_unorm },
+            .{ "bc1-rgba-unorm-srgb", .bc1_rgba_unorm_srgb },
+            .{ "bc2-rgba-unorm", .bc2_rgba_unorm },
+            .{ "bc2-rgba-unorm-srgb", .bc2_rgba_unorm_srgb },
+            .{ "bc3-rgba-unorm", .bc3_rgba_unorm },
+            .{ "bc3-rgba-unorm-srgb", .bc3_rgba_unorm_srgb },
+            .{ "bc4-r-unorm", .bc4_r_unorm },
+            .{ "bc4-r-snorm", .bc4_r_snorm },
+            .{ "bc5-rg-unorm", .bc5_rg_unorm },
+            .{ "bc5-rg-snorm", .bc5_rg_snorm },
+            .{ "bc6h-rgb-ufloat", .bc6h_rgb_ufloat },
+            .{ "bc6h-rgb-float", .bc6h_rgb_float },
+            .{ "bc7-rgba-unorm", .bc7_rgba_unorm },
+            .{ "bc7-rgba-unorm-srgb", .bc7_rgba_unorm_srgb },
+            .{ "etc2-rgb8unorm", .etc2_rgb8unorm },
+            .{ "etc2-rgb8unorm-srgb", .etc2_rgb8unorm_srgb },
+            .{ "etc2-rgb8a1unorm", .etc2_rgb8a1unorm },
+            .{ "etc2-rgb8a1unorm-srgb", .etc2_rgb8a1unorm_srgb },
+            .{ "etc2-rgba8unorm", .etc2_rgba8unorm },
+            .{ "etc2-rgba8unorm-srgb", .etc2_rgba8unorm_srgb },
+            .{ "eac-r11unorm", .eac_r11unorm },
+            .{ "eac-r11snorm", .eac_r11snorm },
+            .{ "eac-rg11unorm", .eac_rg11unorm },
+            .{ "eac-rg11snorm", .eac_rg11snorm },
+            .{ "astc-4x4-unorm", .astc_4x4_unorm },
+            .{ "astc-4x4-unorm-srgb", .astc_4x4_unorm_srgb },
+            .{ "astc-5x4-unorm", .astc_5x4_unorm },
+            .{ "astc-5x4-unorm-srgb", .astc_5x4_unorm_srgb },
+            .{ "astc-5x5-unorm", .astc_5x5_unorm },
+            .{ "astc-5x5-unorm-srgb", .astc_5x5_unorm_srgb },
+            .{ "astc-6x5-unorm", .astc_6x5_unorm },
+            .{ "astc-6x5-unorm-srgb", .astc_6x5_unorm_srgb },
+            .{ "astc-6x6-unorm", .astc_6x6_unorm },
+            .{ "astc-6x6-unorm-srgb", .astc_6x6_unorm_srgb },
+            .{ "astc-8x5-unorm", .astc_8x5_unorm },
+            .{ "astc-8x5-unorm-srgb", .astc_8x5_unorm_srgb },
+            .{ "astc-8x6-unorm", .astc_8x6_unorm },
+            .{ "astc-8x6-unorm-srgb", .astc_8x6_unorm_srgb },
+            .{ "astc-8x8-unorm", .astc_8x8_unorm },
+            .{ "astc-8x8-unorm-srgb", .astc_8x8_unorm_srgb },
+            .{ "astc-10x5-unorm", .astc_10x5_unorm },
+            .{ "astc-10x5-unorm-srgb", .astc_10x5_unorm_srgb },
+            .{ "astc-10x6-unorm", .astc_10x6_unorm },
+            .{ "astc-10x6-unorm-srgb", .astc_10x6_unorm_srgb },
+            .{ "astc-10x8-unorm", .astc_10x8_unorm },
+            .{ "astc-10x8-unorm-srgb", .astc_10x8_unorm_srgb },
+            .{ "astc-10x10-unorm", .astc_10x10_unorm },
+            .{ "astc-10x10-unorm-srgb", .astc_10x10_unorm_srgb },
+            .{ "astc-12x10-unorm", .astc_12x10_unorm },
+            .{ "astc-12x10-unorm-srgb", .astc_12x10_unorm_srgb },
+            .{ "astc-12x12-unorm", .astc_12x12_unorm },
+            .{ "astc-12x12-unorm-srgb", .astc_12x12_unorm_srgb },
             .{ "preferredCanvasFormat", .preferred_canvas_format },
         });
         return map.get(s) orelse .invalid;
@@ -420,6 +543,58 @@ pub const TextureFormat = enum(u8) {
             .rgb10a2uint => "rgb10a2uint",
             .rg11b10ufloat => "rg11b10ufloat",
             .rgb9e5ufloat => "rgb9e5ufloat",
+            .bc1_rgba_unorm => "bc1-rgba-unorm",
+            .bc1_rgba_unorm_srgb => "bc1-rgba-unorm-srgb",
+            .bc2_rgba_unorm => "bc2-rgba-unorm",
+            .bc2_rgba_unorm_srgb => "bc2-rgba-unorm-srgb",
+            .bc3_rgba_unorm => "bc3-rgba-unorm",
+            .bc3_rgba_unorm_srgb => "bc3-rgba-unorm-srgb",
+            .bc4_r_unorm => "bc4-r-unorm",
+            .bc4_r_snorm => "bc4-r-snorm",
+            .bc5_rg_unorm => "bc5-rg-unorm",
+            .bc5_rg_snorm => "bc5-rg-snorm",
+            .bc6h_rgb_ufloat => "bc6h-rgb-ufloat",
+            .bc6h_rgb_float => "bc6h-rgb-float",
+            .bc7_rgba_unorm => "bc7-rgba-unorm",
+            .bc7_rgba_unorm_srgb => "bc7-rgba-unorm-srgb",
+            .etc2_rgb8unorm => "etc2-rgb8unorm",
+            .etc2_rgb8unorm_srgb => "etc2-rgb8unorm-srgb",
+            .etc2_rgb8a1unorm => "etc2-rgb8a1unorm",
+            .etc2_rgb8a1unorm_srgb => "etc2-rgb8a1unorm-srgb",
+            .etc2_rgba8unorm => "etc2-rgba8unorm",
+            .etc2_rgba8unorm_srgb => "etc2-rgba8unorm-srgb",
+            .eac_r11unorm => "eac-r11unorm",
+            .eac_r11snorm => "eac-r11snorm",
+            .eac_rg11unorm => "eac-rg11unorm",
+            .eac_rg11snorm => "eac-rg11snorm",
+            .astc_4x4_unorm => "astc-4x4-unorm",
+            .astc_4x4_unorm_srgb => "astc-4x4-unorm-srgb",
+            .astc_5x4_unorm => "astc-5x4-unorm",
+            .astc_5x4_unorm_srgb => "astc-5x4-unorm-srgb",
+            .astc_5x5_unorm => "astc-5x5-unorm",
+            .astc_5x5_unorm_srgb => "astc-5x5-unorm-srgb",
+            .astc_6x5_unorm => "astc-6x5-unorm",
+            .astc_6x5_unorm_srgb => "astc-6x5-unorm-srgb",
+            .astc_6x6_unorm => "astc-6x6-unorm",
+            .astc_6x6_unorm_srgb => "astc-6x6-unorm-srgb",
+            .astc_8x5_unorm => "astc-8x5-unorm",
+            .astc_8x5_unorm_srgb => "astc-8x5-unorm-srgb",
+            .astc_8x6_unorm => "astc-8x6-unorm",
+            .astc_8x6_unorm_srgb => "astc-8x6-unorm-srgb",
+            .astc_8x8_unorm => "astc-8x8-unorm",
+            .astc_8x8_unorm_srgb => "astc-8x8-unorm-srgb",
+            .astc_10x5_unorm => "astc-10x5-unorm",
+            .astc_10x5_unorm_srgb => "astc-10x5-unorm-srgb",
+            .astc_10x6_unorm => "astc-10x6-unorm",
+            .astc_10x6_unorm_srgb => "astc-10x6-unorm-srgb",
+            .astc_10x8_unorm => "astc-10x8-unorm",
+            .astc_10x8_unorm_srgb => "astc-10x8-unorm-srgb",
+            .astc_10x10_unorm => "astc-10x10-unorm",
+            .astc_10x10_unorm_srgb => "astc-10x10-unorm-srgb",
+            .astc_12x10_unorm => "astc-12x10-unorm",
+            .astc_12x10_unorm_srgb => "astc-12x10-unorm-srgb",
+            .astc_12x12_unorm => "astc-12x12-unorm",
+            .astc_12x12_unorm_srgb => "astc-12x12-unorm-srgb",
             .preferred_canvas_format, .invalid, _ => "rgba8unorm",
         };
     }

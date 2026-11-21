@@ -1,0 +1,7 @@
+; INVALID: explicit :rows-per-image 0 is below the copy's 4-row image height;
+; the calculator judges the authored zero, not the normalized minimum.
+(data :name texels (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="))
+(texture :name tex :size [4 4 2] :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture tex :data texels :size [4 4 2] :bytes-per-row 16 :rows-per-image 0))
+(frame :name main :perform [upload])

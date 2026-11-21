@@ -74,6 +74,14 @@
 //!     never shrinks, so it was rejected with the numbers
 //!     (`docs/plans/r3/04-arena-at-the-entry-boundary.md`). Do not re-derive
 //!     that from first principles — the gate re-measures it on every run.
+//!
+//! The allocator underneath has one class-boundary quirk that would strand a
+//! page even when every allocation is freed: `std.heap.BrkAllocator.resize`
+//! accepts a >32 KiB allocation shrunk below the small-slot ceiling, then
+//! `free` files it under the small class and the 64 KiB page behind it is never
+//! offered to a big allocation again. `WasmHeapGuard` below refuses that one
+//! crossing. So the invariant above is about the compiler; the guard is about
+//! the floor it runs on.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -133,6 +141,78 @@ fn schemaCache() ?*const dsl_sjon.Compiler.PreloadedSchema {
     }
     return if (schema_cache) |*s| s else null;
 }
+
+// --- The wasm heap's small/big size-class boundary ---------------------------
+
+/// `std.heap.wasm_allocator` IS `std.heap.BrkAllocator` on this target, and its
+/// `resize` accepts one transition it cannot undo: a >32 KiB ("big page")
+/// allocation shrunk below the small-slot ceiling. BrkAllocator decides both
+/// sides fit the same 64 KiB big page, so it returns true; the later `free`
+/// classifies the block by its NEW length and pushes it onto a small size
+/// class's free list. The 64 KiB page behind that slot is never offered to a
+/// big allocation again.
+///
+/// The browser compiles once per keystroke and WASM linear memory never
+/// shrinks, so one stranded page per compile is permanent. Measured on
+/// `webgpu_marching_cubes.sjon`: +65,536 bytes on every compile, and flat for
+/// 20 rounds with this guard. A native `DebugAllocator` refuses the same
+/// transition, which is why `test-sjon-oom` and `test-sjon-arena` never saw it.
+///
+/// The compiler itself frees every allocation: the allocation tracker run for
+/// this fix reported `live == 0` at the end of every compile, and the OOM sweep
+/// proves the failure paths too. This guard restores the allocator-contract
+/// shape the other allocators have — a `resize`/`remap` either stays in the
+/// same size class or fails — so `ArrayList.toOwnedSlice` takes its
+/// allocate-copy-free fallback and the original block is released in its own
+/// class.
+///
+/// The arithmetic mirrors `std.heap.BrkAllocator` exactly: `actual_len =
+/// max(len + @sizeOf(usize), alignment)`, slots round up to a power of two, and
+/// the boundary is `bigpage_size` (64 KiB on wasm32).
+const WasmHeapGuard = struct {
+    backing: Allocator,
+
+    fn allocator(self: *WasmHeapGuard) Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable: Allocator.VTable = .{ .alloc = alloc, .resize = resize, .remap = remap, .free = free };
+
+    const bigpage_size: usize = @max(64 * 1024, std.heap.page_size_max);
+
+    /// This allocation's size class, computed the way `BrkAllocator` does.
+    fn slotSize(len: usize, alignment: std.mem.Alignment) usize {
+        const actual = @max(len +| @sizeOf(usize), alignment.toByteUnits());
+        return std.math.ceilPowerOfTwo(usize, @max(actual, 1)) catch std.math.maxInt(usize);
+    }
+
+    fn crossesClass(old_len: usize, new_len: usize, alignment: std.mem.Alignment) bool {
+        return (slotSize(old_len, alignment) >= bigpage_size) !=
+            (slotSize(new_len, alignment) >= bigpage_size);
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *WasmHeapGuard = @ptrCast(@alignCast(ctx));
+        return self.backing.rawAlloc(len, alignment, ra);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *WasmHeapGuard = @ptrCast(@alignCast(ctx));
+        if (crossesClass(memory.len, new_len, alignment)) return false;
+        return self.backing.rawResize(memory, alignment, new_len, ra);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *WasmHeapGuard = @ptrCast(@alignCast(ctx));
+        if (crossesClass(memory.len, new_len, alignment)) return null;
+        return self.backing.rawRemap(memory, alignment, new_len, ra);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *WasmHeapGuard = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(memory, alignment, ra);
+    }
+};
 
 // --- Executor variant lookup ---
 
@@ -534,7 +614,8 @@ export fn compile() i32 {
         writeError("legacy .pngine DSL is no longer supported — use SJON (.sjon) source");
         return 1;
     }
-    return compileSjon(gpa);
+    var guard: WasmHeapGuard = .{ .backing = gpa };
+    return compileSjon(guard.allocator());
 }
 
 /// Compile SJON to self-contained PNG with embedded executor.
@@ -556,7 +637,8 @@ export fn compileToPng() i32 {
         writeError("legacy .pngine DSL is no longer supported — use SJON (.sjon) source");
         return 1;
     }
-    return compileToPngSjon(gpa);
+    var guard: WasmHeapGuard = .{ .backing = gpa };
+    return compileToPngSjon(guard.allocator());
 }
 
 /// Minify WGSL source via wgslender. Input written to source_buffer; result

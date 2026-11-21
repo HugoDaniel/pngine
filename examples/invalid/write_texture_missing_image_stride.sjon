@@ -1,0 +1,7 @@
+; INVALID: a multi-image copy with bytes-per-row but no rows-per-image.
+; rowsPerImage has no IDL default either; omission never becomes a tight count.
+(data :name texels (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="))
+(texture :name tex :size [4 4 2] :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture tex :data texels :size [4 4 2] :bytes-per-row 16))
+(frame :name main :perform [upload])

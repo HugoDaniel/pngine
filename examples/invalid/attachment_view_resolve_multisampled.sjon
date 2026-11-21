@@ -1,0 +1,25 @@
+; Invalid: plan 09 — the resolve target itself is multisampled. A resolve
+; target must have sample count 1; GPU resolve writes one sample per pixel.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+""")
+(texture :name msaaTex :size [4 4] :format rgba8unorm :usage [render-attachment]
+  :sample-count 4)
+(texture :name resolveTex :size [4 4] :format rgba8unorm :usage [render-attachment]
+  :sample-count 4)
+(texture-view :name msaaView :texture msaaTex)
+(texture-view :name resolveView :texture resolveTex)
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (fragment :module code :entry fs
+    (color-target :format rgba8unorm))
+  (multisample :count 4))
+(render-pass :name draw :pipeline pipe
+  (color-attachment :view msaaView :resolve-target resolveView
+    :clear-value [0 0 0 1] :load-op clear :store-op discard)
+  (draw :vertex-count 3))
+(frame :name main :perform [draw])

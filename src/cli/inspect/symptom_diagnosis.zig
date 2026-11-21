@@ -181,7 +181,7 @@ const Findings = struct {
 /// payload was "No render pass in frame" (audit 09 C4).
 fn opensRenderPass(tag: Cmd) bool {
     return switch (tag) {
-        .begin_render_pass, .begin_render_pass_mrt, .begin_render_pass_f32, .begin_render_pass_mrt_f32 => true,
+        .begin_render_pass, .begin_render_pass_mrt, .begin_render_pass_f32, .begin_render_pass_mrt_f32, .begin_render_pass_views => true,
         else => false,
     };
 }
@@ -200,6 +200,13 @@ fn renderPassLoadOp(c: ParsedCommand) ?u8 {
     return switch (c.cmd) {
         .begin_render_pass => c.params.begin_render_pass.load_op,
         .begin_render_pass_f32 => c.params.begin_render_pass_f32.load_op,
+        // A 0x55 pass has per-attachment load ops; the first colour attachment
+        // is the one the black-screen check is about. A depth-only pass has no
+        // colour load op to report.
+        .begin_render_pass_views => if (c.params.begin_render_pass_views.count > 0)
+            c.params.begin_render_pass_views.attachments[0].load_op
+        else
+            null,
         else => null,
     };
 }
@@ -443,7 +450,7 @@ fn pipelineSetBeforeDraw(frame_cmds: []const ParsedCommand) bool {
     for (frame_cmds) |cmd| {
         switch (cmd.cmd) {
             .set_pipeline => saw_pipeline = true,
-            .begin_render_pass, .begin_render_pass_mrt, .begin_render_pass_f32, .begin_render_pass_mrt_f32 => saw_pipeline = false,
+            .begin_render_pass, .begin_render_pass_mrt, .begin_render_pass_f32, .begin_render_pass_mrt_f32, .begin_render_pass_views => saw_pipeline = false,
             .draw, .draw_indexed => if (!saw_pipeline) return false,
             else => {},
         }

@@ -1,0 +1,19 @@
+; The wide half of the ordinary-colour footprint matrix: one write per texel
+; size the eight original examples do not already cover. rg8unorm (2 bytes),
+; r32float and rgb10a2unorm (4), rgba32float (16); r8unorm (1), r16float (2),
+; rgba8unorm (4) and rgba16float (8) live in texture_write_formats.sjon.
+; Each source is two tightly packed rows of two texels.
+(data :name rg8Bytes (bytes :base64 "AAAAAAAAAAA="))
+(data :name r32Bytes (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAA=="))
+(data :name rgb10a2Bytes (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAA=="))
+(data :name rgba32Bytes (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="))
+(texture :name texRg8 :size [2 2] :format rg8unorm :usage [copy-dst])
+(texture :name texR32 :size [2 2] :format r32float :usage [copy-dst])
+(texture :name texRgb10a2 :size [2 2] :format rgb10a2unorm :usage [copy-dst])
+(texture :name texRgba32 :size [2 2] :format rgba32float :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture texRg8 :data rg8Bytes :bytes-per-row 4 :rows-per-image 2 :size [2 2])
+  (write-texture :texture texR32 :data r32Bytes :bytes-per-row 8 :rows-per-image 2 :size [2 2])
+  (write-texture :texture texRgb10a2 :data rgb10a2Bytes :bytes-per-row 8 :rows-per-image 2 :size [2 2])
+  (write-texture :texture texRgba32 :data rgba32Bytes :bytes-per-row 32 :rows-per-image 2 :size [2 2]))
+(frame :name main :perform [upload])

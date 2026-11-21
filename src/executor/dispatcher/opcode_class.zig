@@ -104,6 +104,7 @@ pub fn classOf(op: OpCode) ?Class {
         // ── pass.zig — render/compute pass commands and pre-pass state ──
         .begin_render_pass,
         .begin_render_pass_mrt,
+        .begin_render_pass_views,
         .begin_compute_pass,
         .set_pipeline,
         .set_bind_group,
@@ -131,6 +132,9 @@ pub fn classOf(op: OpCode) ?Class {
 
         // ── queue.zig — writes, copies, submit ──
         .write_buffer,
+        .write_texture,
+        .copy_buffer_to_texture,
+        .copy_texture_to_buffer,
         .write_uniform,
         .write_time_uniform,
         .write_pointer_uniform,
@@ -138,6 +142,7 @@ pub fn classOf(op: OpCode) ?Class {
         .write_controls,
         .copy_buffer_to_buffer,
         .copy_texture_to_texture,
+        .copy_texture_subresource,
         .copy_external_image_to_texture,
         .resolve_query_set,
         .submit,

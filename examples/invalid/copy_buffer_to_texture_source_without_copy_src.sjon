@@ -1,0 +1,11 @@
+; INVALID: the source buffer of a copy-buffer-to-texture was created without
+; copy-src. Usage is fixed at creation, and WebGPU rejects the encoder call, so
+; the document would validate and the copy would never happen. The source
+; footprint and span here are otherwise legal (bpr 256, 264-byte buffer).
+(buffer :name staging :size 264 :usage [copy-dst])
+(texture :name target :size [2 2] :format rgba8unorm :usage [copy-dst])
+(queue :name copies
+  (copy-buffer-to-texture :size [2 2 1]
+    (source :buffer staging :offset 0 :bytes-per-row 256 :rows-per-image 2)
+    (destination :texture target)))
+(frame :name main :perform [copies])

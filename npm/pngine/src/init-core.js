@@ -75,6 +75,9 @@ export function routeWorkerMessages(worker, options) {
     if (e.data.type === "queryResult" && options.onQueryResult) {
       options.onQueryResult(e.data.data);
     }
+    if (e.data.type === "textureReadback" && options.onTextureReadback) {
+      options.onTextureReadback(e.data.data);
+    }
   };
   worker.onerror = (e) => {
     if (options.onError) options.onError(new Error(e.message || "Worker error"));
@@ -296,6 +299,24 @@ export function createPngine(internal) {
 // How long destroy() waits for the worker to acknowledge before terminating it
 // anyway. A wedged or already-dead agent must never strand the thread.
 const DESTROY_ACK_TIMEOUT_MS = 250;
+
+/**
+ * The byte-readback event `onTextureReadback` receives (plan 05, "Readback
+ * contract").
+ *
+ * @typedef {object} TextureReadback
+ * @property {string|null} texture - public `(texture :name …)`, or null for an old/unnamed payload
+ * @property {string|null} buffer - public `(buffer :name …)`, or null for an old/unnamed payload
+ * @property {number} offset - destination layout offset
+ * @property {number} size - copied window in bytes, row padding included (final padding excluded)
+ * @property {Uint8Array} bytes - owned copy; the caller may retain or mutate it
+ * @property {number} bytesPerRow - stride the bytes use
+ * @property {number} rowsPerImage - rows per image the bytes use
+ * @property {number} mipLevel
+ * @property {[number, number, number]} origin
+ * @property {"all"|"depth-only"|"stencil-only"} aspect
+ * @property {[number, number, number]} copySize
+ */
 
 // Destroy a pngine instance: stop the RAF loop, tear down audio, detach every
 // listener, let the worker release its GPU device, and terminate it.

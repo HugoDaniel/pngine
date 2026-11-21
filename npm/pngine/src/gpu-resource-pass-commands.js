@@ -4,6 +4,13 @@
 import { decodeTextureViewDescriptor } from "./descriptor-decode.js";
 
 /**
+ * Returned when a decoded record is malformed. `execute` aborts the buffer:
+ * the operand length is no longer trustworthy, and continuing would re-read
+ * operand bytes as opcodes. The handler has already reported why.
+ */
+export const ABORT = -1;
+
+/**
  * A pass-scoped command outside an open pass is a dropped command — and a
  * missing begin_*_pass drops its ENTIRE pass this way, silently (an executor
  * variant without the compute plugin would erase a whole simulation with
@@ -31,9 +38,12 @@ function requirePass(ops, opName) {
  * @param {DataView} view
  * @param {number} pos - offset of this command's first OPERAND byte
  * @param {GpuOps} ops - see types/gpu-ops.d.ts
- * @returns {number|Promise<number>|null} next position, or null if unhandled
+ * @param {number} [end] - offset one past the command frame. 0x55 uses it to
+ *   refuse a record that claims more bytes than the frame contains, BEFORE
+ *   reading them out of unrelated memory.
+ * @returns {number|Promise<number>|null} next position, ABORT, or null if unhandled
  */
-export function dispatchResourcePassCommand(cmd, view, pos, ops) {
+export function dispatchResourcePassCommand(cmd, view, pos, ops, end) {
   switch (cmd) {
     // === Resource Creation (0x01-0x0D) ===
     case 0x01: { // create_buffer
@@ -351,6 +361,52 @@ export function dispatchResourcePassCommand(cmd, view, pos, ops) {
       }
       const depthId = view.getUint16(off, true); off += 2;
       ops.beginRenderPassMRT(attachments, depthId);
+      return off;
+    }
+    case 0x55: { // begin_render_pass_views
+      // [color_count:u8] then 22 bytes per attachment ([target:u16][load][store]
+      // [rgba:f32×4][resolve:u16]) then [depth_target:u16]. Plan 09 slice 2.
+      // The count is bounded and the whole record is checked against the FRAME
+      // before any field is read: this buffer has no per-command length, so a
+      // lying count would otherwise read the next command's bytes as a clear
+      // colour and desync the rest of the stream.
+      ops.curPip = -1;
+      const limit = end ?? view.byteLength;
+      if (pos >= limit) {
+        ops.reportError({ message: `begin_render_pass_views: truncated record at ${pos}`, source: "command" });
+        return ABORT;
+      }
+      const count = view.getUint8(pos);
+      if (count > 8) {
+        ops.reportError({ message: `begin_render_pass_views: color_count ${count} exceeds 8`, source: "command" });
+        return ABORT;
+      }
+      const off0 = pos + 1;
+      const nextPos = off0 + 22 * count + 2;
+      if (nextPos > limit) {
+        ops.reportError({ message: `begin_render_pass_views: truncated record (needs ${nextPos - pos} bytes, frame has ${limit - pos})`, source: "command" });
+        return ABORT;
+      }
+      let off = off0;
+      const attachments = [];
+      for (let i = 0; i < count; i++) {
+        const target = view.getUint16(off, true); off += 2;
+        const load = view.getUint8(off++);
+        const store = view.getUint8(off++);
+        const r = view.getFloat32(off, true); off += 4;
+        const g = view.getFloat32(off, true); off += 4;
+        const b = view.getFloat32(off, true); off += 4;
+        const a = view.getFloat32(off, true); off += 4;
+        const resolve = view.getUint16(off, true); off += 2;
+        attachments.push({ target, load, store, r, g, b, a, resolve });
+      }
+      const depth = view.getUint16(off, true); off += 2;
+      // Zero colour is a depth-only pass; no depth makes it no pass at all.
+      if (count === 0 && depth === 0xffff) {
+        ops.reportError({ message: "begin_render_pass_views: zero colour attachments require a depth target", source: "command" });
+        return ABORT;
+      }
+      if (ops.beginRenderPassViews(attachments, depth) === false) return ABORT;
       return off;
     }
     case 0x1F: { // set_viewport

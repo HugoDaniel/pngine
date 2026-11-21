@@ -58,7 +58,9 @@ const format = bytecode_mod.format;
 const opcodes = bytecode_mod.opcodes;
 const OpCode = opcodes.OpCode;
 const wire_schema = bytecode_mod.wire_schema;
+const texture_layout = bytecode_mod.texture_layout;
 const ColorAttachment = bytecode_mod.emitter.Emitter.ColorAttachment;
+const ViewColorAttachment = bytecode_mod.emitter.Emitter.ViewColorAttachment;
 
 // ============================================================================
 // Configuration (overridable via "wasm_config" build option module)
@@ -107,10 +109,11 @@ pub const MAX_PASSES: u32 = wasm_config.max_passes;
 /// Must be >= bytecode size to handle 1-byte opcodes worst case.
 const MAX_EXEC_ITERATIONS: u32 = MAX_BYTECODE_SIZE;
 
-/// Element caps for the two count-prefixed opcodes this file decodes by hand,
+/// Element caps for the count-prefixed opcodes this file decodes by hand,
 /// taken from the wire schema rather than re-typed — `repMaxOf` explains why a
 /// consumer that picks its own number desyncs the stream instead of clamping.
 const MAX_MRT: u8 = @intCast(wire_schema.repMaxOf(.begin_render_pass_mrt));
+const MAX_VIEW_ATTACHMENTS: u8 = @intCast(wire_schema.repMaxOf(.begin_render_pass_views));
 const MAX_WASM_ARGS: u8 = @intCast(wire_schema.repMaxOf(.call_wasm_func));
 const MAX_BUNDLES: u32 = wire_schema.repMaxOf(.execute_bundles);
 
@@ -281,6 +284,15 @@ inline fn dbg(comptime fmt: []const u8, args: anytype) void {
 /// into the command buffer but never dereferenced.
 inline fn dataAddr(ptr: anytype) u32 {
     return @truncate(@intFromPtr(ptr));
+}
+
+/// Deterministic pointer for an absent data or string-table entry: 0, never
+/// the empty slice's build-dependent sentinel (allocator fill under Debug,
+/// 0x1 in a release build). `write_texture` already states this rule; every
+/// descriptor-carrying command now shares it, so the decode golden does not
+/// encode the test allocator. A real entry keeps its address.
+inline fn dataPtr(data: []const u8) u32 {
+    return if (data.len == 0) 0 else dataAddr(data.ptr);
 }
 
 // ============================================================================
@@ -947,6 +959,7 @@ pub fn executeOpcode(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op:
         .create_render_pipeline,
         .begin_render_pass,
         .begin_render_pass_mrt,
+        .begin_render_pass_views,
         .set_pipeline,
         .set_bind_group,
         .set_vertex_buffer,
@@ -982,7 +995,11 @@ pub fn executeOpcode(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op:
         .create_texture_view,
         .create_image_bitmap,
         .copy_texture_to_texture,
+        .copy_texture_subresource,
         .copy_external_image_to_texture,
+        .write_texture,
+        .copy_buffer_to_texture,
+        .copy_texture_to_buffer,
         => execTexture(cmds, bytecode, pc, op),
 
         // WASM plugin
@@ -1071,32 +1088,32 @@ fn execCoreCreate(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: Op
         .create_shader_module => {
             const o = readOps(.create_shader_module, bytecode, pc);
             const data = getDataSlice(narrowId(o.v1));
-            cmds.createShader(narrowId(o.v0), dataAddr(data.ptr), @intCast(data.len));
+            cmds.createShader(narrowId(o.v0), dataPtr(data), @intCast(data.len));
         },
         .create_sampler => {
             const o = readOps(.create_sampler, bytecode, pc);
             const data = getDataSlice(narrowId(o.v1));
-            cmds.createSampler(narrowId(o.v0), dataAddr(data.ptr), @intCast(data.len));
+            cmds.createSampler(narrowId(o.v0), dataPtr(data), @intCast(data.len));
         },
         .create_bind_group => {
             const o = readOps(.create_bind_group, bytecode, pc);
             const data = getDataSlice(narrowId(o.v2));
-            cmds.createBindGroup(narrowId(o.v0), narrowId(o.v1), dataAddr(data.ptr), @intCast(data.len));
+            cmds.createBindGroup(narrowId(o.v0), narrowId(o.v1), dataPtr(data), @intCast(data.len));
         },
         .create_bind_group_layout => {
             const o = readOps(.create_bind_group_layout, bytecode, pc);
             const data = getDataSlice(narrowId(o.v1));
-            cmds.createBindGroupLayout(narrowId(o.v0), dataAddr(data.ptr), @intCast(data.len));
+            cmds.createBindGroupLayout(narrowId(o.v0), dataPtr(data), @intCast(data.len));
         },
         .create_pipeline_layout => {
             const o = readOps(.create_pipeline_layout, bytecode, pc);
             const data = getDataSlice(narrowId(o.v1));
-            cmds.createPipelineLayout(narrowId(o.v0), dataAddr(data.ptr), @intCast(data.len));
+            cmds.createPipelineLayout(narrowId(o.v0), dataPtr(data), @intCast(data.len));
         },
         .create_query_set => {
             const o = readOps(.create_query_set, bytecode, pc);
             const data = getDataSlice(narrowId(o.v1));
-            cmds.createQuerySet(narrowId(o.v0), dataAddr(data.ptr), @intCast(data.len));
+            cmds.createQuerySet(narrowId(o.v0), dataPtr(data), @intCast(data.len));
         },
         else => {},
     }
@@ -1112,7 +1129,7 @@ fn execCoreData(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCo
         .write_buffer => {
             const o = readOps(.write_buffer, bytecode, pc);
             const data = getDataSlice(narrowId(o.v2));
-            cmds.writeBuffer(narrowId(o.v0), @intCast(o.v1), dataAddr(data.ptr), @intCast(data.len));
+            cmds.writeBuffer(narrowId(o.v0), @intCast(o.v1), dataPtr(data), @intCast(data.len));
         },
         .write_controls => {
             // No new command-buffer opcode (§7.1): the existing write_buffer
@@ -1166,7 +1183,7 @@ fn execCoreData(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCo
 fn execRender(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) void {
     switch (op) {
         .create_render_pipeline, .create_render_bundle, .execute_bundles => execRenderPipeline(cmds, bytecode, pc, op),
-        .begin_render_pass, .begin_render_pass_mrt, .end_pass => execRenderPass(cmds, bytecode, pc, op),
+        .begin_render_pass, .begin_render_pass_mrt, .begin_render_pass_views, .end_pass => execRenderPass(cmds, bytecode, pc, op),
         .set_pipeline, .set_bind_group, .set_vertex_buffer, .set_index_buffer => execRenderBind(cmds, bytecode, pc, op),
         .draw, .draw_indexed, .draw_indirect, .draw_indexed_indirect => execRenderDraw(cmds, bytecode, pc, op),
         .set_viewport, .set_scissor_rect, .set_stencil_reference, .set_pass_depth_stencil_ops, .set_blend_constant, .set_pass_clear_values => execRenderViewport(cmds, bytecode, pc, op),
@@ -1184,7 +1201,7 @@ fn execRenderPipeline(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op
             if (comptime plugins.isEnabled(.render)) {
                 const o = readOps(.create_render_pipeline, bytecode, pc);
                 const data = getDataSlice(narrowId(o.v1));
-                cmds.createRenderPipeline(narrowId(o.v0), dataAddr(data.ptr), @intCast(data.len));
+                cmds.createRenderPipeline(narrowId(o.v0), dataPtr(data), @intCast(data.len));
             } else {
                 skipOpcodeParams(bytecode, pc, op);
             }
@@ -1193,7 +1210,7 @@ fn execRenderPipeline(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op
             if (comptime plugins.isEnabled(.render)) {
                 const o = readOps(.create_render_bundle, bytecode, pc);
                 const data = getDataSlice(narrowId(o.v1));
-                cmds.createRenderBundle(narrowId(o.v0), dataAddr(data.ptr), @intCast(data.len));
+                cmds.createRenderBundle(narrowId(o.v0), dataPtr(data), @intCast(data.len));
             } else {
                 skipOpcodeParams(bytecode, pc, op);
             }
@@ -1259,27 +1276,54 @@ fn execRenderPass(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: Op
                 const n = @min(count, MAX_MRT);
                 var attachments: [MAX_MRT]ColorAttachment = undefined;
                 for (0..n) |i| {
-                    const tex_id = read_varint(bytecode, pc);
-                    const load_op = readByteClamped(bytecode, pc);
-                    const store_op = readByteClamped(bytecode, pc);
-                    // The clear channels arrive as raw f32 bit patterns (u32_le),
-                    // like set_blend_constant's — see wire_schema's L_MRT.
-                    const clear_r = readRawU32(bytecode, pc);
-                    const clear_g = readRawU32(bytecode, pc);
-                    const clear_b = readRawU32(bytecode, pc);
-                    const clear_a = readRawU32(bytecode, pc);
+                    const h = readAttachmentHead(bytecode, pc);
                     attachments[i] = .{
-                        .texture_id = narrowId(tex_id),
-                        .load_op = @enumFromInt(load_op),
-                        .store_op = @enumFromInt(store_op),
-                        .clear_r_bits = clear_r,
-                        .clear_g_bits = clear_g,
-                        .clear_b_bits = clear_b,
-                        .clear_a_bits = clear_a,
+                        .texture_id = h.target,
+                        .load_op = @enumFromInt(h.load_op),
+                        .store_op = @enumFromInt(h.store_op),
+                        .clear_r_bits = h.clear_r_bits,
+                        .clear_g_bits = h.clear_g_bits,
+                        .clear_b_bits = h.clear_b_bits,
+                        .clear_a_bits = h.clear_a_bits,
                     };
                 }
                 const depth_id = read_varint(bytecode, pc);
                 cmds.beginRenderPassMrtF32(attachments[0..n], narrowId(depth_id));
+            } else {
+                skipOpcodeParams(bytecode, pc, op);
+            }
+        },
+        .begin_render_pass_views => {
+            if (comptime plugins.isEnabled(.render)) {
+                // Same manual rep decode as MRT, with the two differences the
+                // record has: every attachment carries a resolve target, and
+                // zero colour attachments is legal with a depth target. An
+                // over-cap count latches malformed_body and is walked at the
+                // cap, exactly like MRT — the frame is refused rather than
+                // letting a hostile count read past the record.
+                const count = readByteClamped(bytecode, pc);
+                if (count > MAX_VIEW_ATTACHMENTS) malformed_body = true;
+                const n = @min(count, MAX_VIEW_ATTACHMENTS);
+                var attachments: [MAX_VIEW_ATTACHMENTS]ViewColorAttachment = undefined;
+                for (0..n) |i| {
+                    const h = readAttachmentHead(bytecode, pc);
+                    const resolve_target = read_varint(bytecode, pc);
+                    attachments[i] = .{
+                        .target = h.target,
+                        .load_op = @enumFromInt(h.load_op),
+                        .store_op = @enumFromInt(h.store_op),
+                        .clear_r_bits = h.clear_r_bits,
+                        .clear_g_bits = h.clear_g_bits,
+                        .clear_b_bits = h.clear_b_bits,
+                        .clear_a_bits = h.clear_a_bits,
+                        .resolve_target = narrowId(resolve_target),
+                    };
+                }
+                const depth_target = narrowId(read_varint(bytecode, pc));
+                // "No attachments at all" is not a pass; zero colour is legal
+                // only because a depth target makes it a depth-only pass.
+                if (n == 0 and depth_target == opcodes.ATTACHMENT_NONE) malformed_body = true;
+                cmds.beginRenderPassViews(attachments[0..n], depth_target);
             } else {
                 skipOpcodeParams(bytecode, pc, op);
             }
@@ -1477,7 +1521,7 @@ fn execCompute(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCod
             if (comptime plugins.isEnabled(.compute)) {
                 const o = readOps(.create_compute_pipeline, bytecode, pc);
                 const data = getDataSlice(narrowId(o.v1));
-                cmds.createComputePipeline(narrowId(o.v0), dataAddr(data.ptr), @intCast(data.len));
+                cmds.createComputePipeline(narrowId(o.v0), dataPtr(data), @intCast(data.len));
             } else {
                 skipOpcodeParams(bytecode, pc, op);
             }
@@ -1518,7 +1562,7 @@ fn execTexture(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCod
             if (comptime plugins.isEnabled(.texture)) {
                 const o = readOps(.create_texture, bytecode, pc);
                 const data = getDataSlice(narrowId(o.v1));
-                cmds.createTexture(narrowId(o.v0), dataAddr(data.ptr), @intCast(data.len));
+                cmds.createTexture(narrowId(o.v0), dataPtr(data), @intCast(data.len));
             } else {
                 skipOpcodeParams(bytecode, pc, op);
             }
@@ -1527,7 +1571,7 @@ fn execTexture(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCod
             if (comptime plugins.isEnabled(.texture)) {
                 const o = readOps(.create_texture_view, bytecode, pc);
                 const data = getDataSlice(narrowId(o.v2));
-                cmds.createTextureView(narrowId(o.v0), narrowId(o.v1), dataAddr(data.ptr), @intCast(data.len));
+                cmds.createTextureView(narrowId(o.v0), narrowId(o.v1), dataPtr(data), @intCast(data.len));
             } else {
                 skipOpcodeParams(bytecode, pc, op);
             }
@@ -1536,7 +1580,7 @@ fn execTexture(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCod
             if (comptime plugins.isEnabled(.texture)) {
                 const o = readOps(.create_image_bitmap, bytecode, pc);
                 const data = getDataSlice(narrowId(o.v1));
-                cmds.createImageBitmap(narrowId(o.v0), dataAddr(data.ptr), @intCast(data.len));
+                cmds.createImageBitmap(narrowId(o.v0), dataPtr(data), @intCast(data.len));
             } else {
                 skipOpcodeParams(bytecode, pc, op);
             }
@@ -1545,6 +1589,69 @@ fn execTexture(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCod
             if (comptime plugins.isEnabled(.texture)) {
                 const o = readOps(.copy_texture_to_texture, bytecode, pc);
                 cmds.copyTextureToTexture(narrowId(o.v0), narrowId(o.v1), 0, 0);
+            } else {
+                skipOpcodeParams(bytecode, pc, op);
+            }
+        },
+        .copy_texture_subresource => {
+            if (comptime plugins.isEnabled(.texture)) {
+                const o = readOps(.copy_texture_subresource, bytecode, pc);
+                // Only bit 0 is defined. Any other bit is a stream this
+                // executor does not understand: latch rather than emit a
+                // half-decoded copy (init()/frame() turn the latch into a
+                // nonzero status, so the host discards the buffer).
+                if (o.flags & ~@as(u8, 1) != 0) {
+                    malformed_body = true;
+                } else {
+                    const has_size = (o.flags & 1) != 0;
+                    const source_id = narrowId(o.source_id);
+                    const destination_id = narrowId(o.destination_id);
+                    const copy: texture_layout.SubresourceCopy = .{
+                        .source = .{
+                            .texture_id = source_id,
+                            .mip_level = o.source_mip,
+                            .origin = .{ .x = o.source_origin_x, .y = o.source_origin_y, .z = o.source_origin_z },
+                            .aspect = @enumFromInt(o.source_aspect),
+                        },
+                        .destination = .{
+                            .texture_id = destination_id,
+                            .mip_level = o.destination_mip,
+                            .origin = .{ .x = o.destination_origin_x, .y = o.destination_origin_y, .z = o.destination_origin_z },
+                            .aspect = @enumFromInt(o.destination_aspect),
+                        },
+                        .size = if (has_size) texture_layout.Extent{
+                            .width = o.size_width,
+                            .height = o.size_height,
+                            .depth_or_array_layers = o.size_depth,
+                        } else null,
+                    };
+                    // Both descriptors are resolved and validated by the
+                    // players this command reaches (browser gpu-queue-commands
+                    // and native WgpuNativeGPU). The shipping executor owns no
+                    // descriptor table, only the emission.
+                    cmds.copyTextureSubresource(source_id, destination_id, copy);
+                }
+            } else {
+                skipOpcodeParams(bytecode, pc, op);
+            }
+        },
+        .write_texture => {
+            if (comptime plugins.isEnabled(.texture)) {
+                const o = readOps(.write_texture, bytecode, pc);
+                const data = getDataSlice(narrowId(o.data_id));
+                const write = writeLayoutFrom(o);
+                // Empty lookup -> 0: a zero pointer with data_len 0 is the
+                // deterministic, runnable spelling of "no data entry"; a real
+                // entry keeps its address. See `dataPtr`.
+                const data_ptr = dataPtr(data);
+                cmds.writeTexture(narrowId(o.texture_id), data_ptr, @intCast(data.len), write);
+            } else {
+                skipOpcodeParams(bytecode, pc, op);
+            }
+        },
+        .copy_buffer_to_texture, .copy_texture_to_buffer => {
+            if (comptime plugins.isEnabled(.texture)) {
+                execTextureBufferCopy(cmds, bytecode, pc, op);
             } else {
                 skipOpcodeParams(bytecode, pc, op);
             }
@@ -1577,7 +1684,7 @@ fn execWasm(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) 
             if (comptime plugins.isEnabled(.wasm)) {
                 const o = readOps(.init_wasm_module, bytecode, pc);
                 const data = getDataSlice(narrowId(o.v1));
-                cmds.initWasmModule(narrowId(o.v0), dataAddr(data.ptr), @intCast(data.len));
+                cmds.initWasmModule(narrowId(o.v0), dataPtr(data), @intCast(data.len));
             } else {
                 skipOpcodeParams(bytecode, pc, op);
             }
@@ -1626,7 +1733,7 @@ fn execWasm(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) 
                 cmds.callWasmFunc(
                     narrowId(call_id),
                     narrowId(mod_id),
-                    dataAddr(func_name.ptr),
+                    dataPtr(func_name),
                     @intCast(func_name.len),
                     args_buf[0 .. 1 + args_len],
                 );
@@ -1790,6 +1897,31 @@ fn readRawU32(bytecode: []const u8, pc: *usize) u32 {
     return value;
 }
 
+/// The fields 0x54 and 0x55 share, in the same wire order: id/target, load,
+/// store, then four raw f32 clear bit patterns. One decoder keeps the two pass
+/// records from drifting; each arm reinterprets `target` as its own field.
+const DecodedAttachmentHead = struct {
+    target: u16,
+    load_op: u8,
+    store_op: u8,
+    clear_r_bits: u32,
+    clear_g_bits: u32,
+    clear_b_bits: u32,
+    clear_a_bits: u32,
+};
+
+fn readAttachmentHead(bytecode: []const u8, pc: *usize) DecodedAttachmentHead {
+    return .{
+        .target = narrowId(read_varint(bytecode, pc)),
+        .load_op = readByteClamped(bytecode, pc),
+        .store_op = readByteClamped(bytecode, pc),
+        .clear_r_bits = readRawU32(bytecode, pc),
+        .clear_g_bits = readRawU32(bytecode, pc),
+        .clear_b_bits = readRawU32(bytecode, pc),
+        .clear_a_bits = readRawU32(bytecode, pc),
+    };
+}
+
 /// Read one raw operand byte, clamping at the buffer end.
 ///
 /// The hand-rolled decode sites this replaces indexed `bytecode[pc.*]` blind —
@@ -1842,6 +1974,76 @@ fn readOps(comptime op: OpCode, bytecode: []const u8, pc: *usize) wire_schema.Op
         };
     }
     return out;
+}
+
+/// Build the shared `WriteLayout` from a decoded write record. The presence
+/// flags are the only record of an absent stride/size versus an authored zero,
+/// so that rule lives here once.
+fn writeLayoutFrom(o: anytype) texture_layout.WriteLayout {
+    const has_bytes_per_row = (o.flags & (1 << 0)) != 0;
+    const has_rows_per_image = (o.flags & (1 << 1)) != 0;
+    const has_size = (o.flags & (1 << 2)) != 0;
+    return .{
+        .offset = o.offset,
+        .bytes_per_row = if (has_bytes_per_row) o.bytes_per_row else null,
+        .rows_per_image = if (has_rows_per_image) o.rows_per_image else null,
+        .origin = .{ .x = o.origin_x, .y = o.origin_y, .z = o.origin_z },
+        .mip_level = o.mip_level,
+        .aspect = @enumFromInt(o.aspect),
+        .size = if (has_size) .{
+            .width = o.size_width,
+            .height = o.size_height,
+            .depth_or_array_layers = o.size_depth,
+        } else null,
+    };
+}
+
+/// Execute a buffer↔texture copy (0x2E/0x2F) into the command buffer.
+///
+/// The 14-field record is hand-read rather than routed through `readOps`: the
+/// generic operand struct plus its `WriteLayout` conversion cost the full
+/// executor ~450 B for one call site, and this is the same decode with the
+/// layout pinned in the comptime block below — the size precedent
+/// `exec_if`/`write_controls` use. Both opcodes share the shape; `op` carries
+/// direction as the command byte alone.
+fn execTextureBufferCopy(cmds: *CommandBuffer, bytecode: []const u8, pc: *usize, op: OpCode) void {
+    const texture_id = narrowId(read_varint(bytecode, pc));
+    const buffer_id = narrowId(read_varint(bytecode, pc));
+    const offset = read_varint(bytecode, pc);
+    const bytes_per_row = read_varint(bytecode, pc);
+    const rows_per_image = read_varint(bytecode, pc);
+    const mip_level = read_varint(bytecode, pc);
+    const origin_x = read_varint(bytecode, pc);
+    const origin_y = read_varint(bytecode, pc);
+    const origin_z = read_varint(bytecode, pc);
+    const aspect = readByteClamped(bytecode, pc);
+    const size_width = read_varint(bytecode, pc);
+    const size_height = read_varint(bytecode, pc);
+    const size_depth = read_varint(bytecode, pc);
+    const flags = readByteClamped(bytecode, pc);
+
+    const has_bytes_per_row = (flags & (1 << 0)) != 0;
+    const has_rows_per_image = (flags & (1 << 1)) != 0;
+    const has_size = (flags & (1 << 2)) != 0;
+    const write: texture_layout.WriteLayout = .{
+        .offset = offset,
+        .bytes_per_row = if (has_bytes_per_row) bytes_per_row else null,
+        .rows_per_image = if (has_rows_per_image) rows_per_image else null,
+        .origin = .{ .x = origin_x, .y = origin_y, .z = origin_z },
+        .mip_level = mip_level,
+        .aspect = @enumFromInt(aspect),
+        .size = if (has_size) .{
+            .width = size_width,
+            .height = size_height,
+            .depth_or_array_layers = size_depth,
+        } else null,
+    };
+    const cmd: Cmd = switch (op) {
+        .copy_buffer_to_texture => .copy_buffer_to_texture,
+        .copy_texture_to_buffer => .copy_texture_to_buffer,
+        else => unreachable,
+    };
+    cmds.copyTextureBuffer(cmd, texture_id, buffer_id, write);
 }
 
 /// Get slice from data section by data ID.
@@ -1975,4 +2177,22 @@ comptime {
     const define_control_layout = wire_schema.layoutOf(.define_control);
     std.debug.assert(define_control_layout.head.len == 1);
     std.debug.assert(define_control_layout.head[0].kind == .u32_le); // default, f32 bits
+
+    // The hand-read buffer↔texture copy record (execTextureBufferCopy). Order
+    // and wire kinds, pinned so a wire_schema edit is a build failure rather
+    // than a silent desync of the shipping executor.
+    const copy_layout = wire_schema.layoutOf(.copy_buffer_to_texture);
+    const copy_names = [_][]const u8{
+        "texture_id",     "buffer_id", "offset",     "bytes_per_row",
+        "rows_per_image", "mip_level", "origin_x",   "origin_y",
+        "origin_z",       "aspect",    "size_width", "size_height",
+        "size_depth",     "flags",
+    };
+    std.debug.assert(copy_layout.head.len == copy_names.len);
+    for (copy_names, 0..) |name, i| {
+        std.debug.assert(std.mem.eql(u8, copy_layout.head[i].name, name));
+        const expected_kind: wire_schema.Kind = if (i == 9 or i == 13) .byte else .varint;
+        std.debug.assert(copy_layout.head[i].kind == expected_kind);
+    }
+    std.debug.assert(wire_schema.layoutOf(.copy_texture_to_buffer).head.len == copy_layout.head.len);
 }

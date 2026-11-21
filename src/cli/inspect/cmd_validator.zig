@@ -72,6 +72,7 @@ pub const DrawParams = params.DrawParams;
 pub const DrawIndexedParams = params.DrawIndexedParams;
 pub const DispatchParams = params.DispatchParams;
 pub const WriteBufferParams = params.WriteBufferParams;
+pub const WriteTextureParams = params.WriteTextureParams;
 pub const WriteTimeUniformParams = params.WriteTimeUniformParams;
 pub const CopyBufferParams = params.CopyBufferParams;
 pub const CopyTextureParams = params.CopyTextureParams;

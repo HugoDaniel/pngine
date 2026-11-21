@@ -1,0 +1,10 @@
+; INVALID: a pooled texture as a subresource copy source. The opcode carries no
+; pool-member operand; resolving the base id would copy an arbitrary member, so
+; the name is refused with the explicit-member remedy.
+(texture :name src :size [4 4] :format rgba8unorm :usage [copy-src] :pool 2)
+(texture :name dst :size [4 4] :format rgba8unorm :usage [copy-dst])
+(queue :name blit
+  (copy-texture-to-texture
+    (source :texture src :mip-level 0)
+    (destination :texture dst)))
+(frame :name main :perform [blit])

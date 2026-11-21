@@ -28,6 +28,16 @@ pub const BIND_GROUP_LAYOUT_TAG = types.BIND_GROUP_LAYOUT_TAG;
 pub const layoutIdIsBindGroupLayout = types.layoutIdIsBindGroupLayout;
 pub const layoutIdValue = types.layoutIdValue;
 pub const tagBindGroupLayoutId = types.tagBindGroupLayoutId;
+/// `begin_render_pass_views`'s attachment-target id-space discriminator; see types.
+pub const ATTACHMENT_VIEW_TAG = types.ATTACHMENT_VIEW_TAG;
+pub const ATTACHMENT_NONE = types.ATTACHMENT_NONE;
+pub const ATTACHMENT_CANVAS = types.ATTACHMENT_CANVAS;
+pub const ATTACHMENT_VIEW_MAX = types.ATTACHMENT_VIEW_MAX;
+pub const AttachmentTarget = types.AttachmentTarget;
+pub const attachmentTargetIsView = types.attachmentTargetIsView;
+pub const attachmentTargetValue = types.attachmentTargetValue;
+pub const tagAttachmentViewId = types.tagAttachmentViewId;
+pub const decodeAttachmentTarget = types.decodeAttachmentTarget;
 pub const PluginSet = @import("types").PluginSet;
 pub const Plugin = @import("types").Plugin;
 

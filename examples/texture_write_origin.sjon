@@ -1,0 +1,10 @@
+; A nonzero origin inside a mip. Level 1 of a 4x4 texture is 2x2; this writes
+; the single texel at [1,1,0], not the whole 2x2 level and not the 4x4 base.
+; The copy is one row of one texel, so both stride keys are omitted and stay
+; absent in the presence flags (the source is exactly four bytes).
+(data :name texel (bytes :base64 "AAAAAA=="))
+(texture :name mipmap :size [4 4] :mip-level-count 2 :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture mipmap :data texel :mip-level 1
+    :origin [1 1 0] :size [1 1]))
+(frame :name main :perform [upload])

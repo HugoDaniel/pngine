@@ -50,6 +50,10 @@ const ROOTS = ["src", "tests", "tools"];
 const ALLOWED = new Map([
   ["wgpuDeviceGetLimits", "capability query; fills a caller-owned struct"],
   ["wgpuAdapterHasFeature", "capability query; returns a bool"],
+  [
+    "wgpuDeviceHasFeature",
+    "capability query; returns a bool — the device-side twin of wgpuAdapterHasFeature, used to gate compressed texture creation (plan 07)",
+  ],
 ]);
 
 /**

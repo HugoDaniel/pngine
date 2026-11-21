@@ -1,0 +1,39 @@
+; Plan 07 tranche A: every BC format through the raw block upload path.
+; Each texture is 8x8 = 2x2 texel blocks. Eight-byte blocks (BC1/BC4) are two
+; tightly packed 16-byte block rows; sixteen-byte blocks are two 32-byte rows.
+; The row strides are deliberately NOT 256-aligned: that is a buffer-copy rule,
+; not a writeTexture rule.
+(data :name blocks8 (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="))
+(data :name blocks16 (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="))
+
+(texture :name bc1u :size [8 8] :format bc1-rgba-unorm :usage [copy-dst])
+(texture :name bc1s :size [8 8] :format bc1-rgba-unorm-srgb :usage [copy-dst])
+(texture :name bc2u :size [8 8] :format bc2-rgba-unorm :usage [copy-dst])
+(texture :name bc2s :size [8 8] :format bc2-rgba-unorm-srgb :usage [copy-dst])
+(texture :name bc3u :size [8 8] :format bc3-rgba-unorm :usage [copy-dst])
+(texture :name bc3s :size [8 8] :format bc3-rgba-unorm-srgb :usage [copy-dst])
+(texture :name bc4u :size [8 8] :format bc4-r-unorm :usage [copy-dst])
+(texture :name bc4s :size [8 8] :format bc4-r-snorm :usage [copy-dst])
+(texture :name bc5u :size [8 8] :format bc5-rg-unorm :usage [copy-dst])
+(texture :name bc5s :size [8 8] :format bc5-rg-snorm :usage [copy-dst])
+(texture :name bc6u :size [8 8] :format bc6h-rgb-ufloat :usage [copy-dst])
+(texture :name bc6s :size [8 8] :format bc6h-rgb-float :usage [copy-dst])
+(texture :name bc7u :size [8 8] :format bc7-rgba-unorm :usage [copy-dst])
+(texture :name bc7s :size [8 8] :format bc7-rgba-unorm-srgb :usage [copy-dst])
+
+(queue :name upload
+  (write-texture :texture bc1u :data blocks8 :bytes-per-row 16 :rows-per-image 2 :size [8 8])
+  (write-texture :texture bc1s :data blocks8 :bytes-per-row 16 :rows-per-image 2 :size [8 8])
+  (write-texture :texture bc2u :data blocks16 :bytes-per-row 32 :rows-per-image 2 :size [8 8])
+  (write-texture :texture bc2s :data blocks16 :bytes-per-row 32 :rows-per-image 2 :size [8 8])
+  (write-texture :texture bc3u :data blocks16 :bytes-per-row 32 :rows-per-image 2 :size [8 8])
+  (write-texture :texture bc3s :data blocks16 :bytes-per-row 32 :rows-per-image 2 :size [8 8])
+  (write-texture :texture bc4u :data blocks8 :bytes-per-row 16 :rows-per-image 2 :size [8 8])
+  (write-texture :texture bc4s :data blocks8 :bytes-per-row 16 :rows-per-image 2 :size [8 8])
+  (write-texture :texture bc5u :data blocks16 :bytes-per-row 32 :rows-per-image 2 :size [8 8])
+  (write-texture :texture bc5s :data blocks16 :bytes-per-row 32 :rows-per-image 2 :size [8 8])
+  (write-texture :texture bc6u :data blocks16 :bytes-per-row 32 :rows-per-image 2 :size [8 8])
+  (write-texture :texture bc6s :data blocks16 :bytes-per-row 32 :rows-per-image 2 :size [8 8])
+  (write-texture :texture bc7u :data blocks16 :bytes-per-row 32 :rows-per-image 2 :size [8 8])
+  (write-texture :texture bc7s :data blocks16 :bytes-per-row 32 :rows-per-image 2 :size [8 8]))
+(frame :name main :perform [upload])

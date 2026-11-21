@@ -1,0 +1,32 @@
+; Plan 07 tranche B: every ETC2/EAC format through the raw block upload path.
+; Each texture is 8x8 = 2x2 texel blocks. Eight-byte blocks (the three ETC2 RGB
+; variants and EAC R11) are two tightly packed 16-byte block rows; sixteen-byte
+; blocks (ETC2 RGBA and EAC RG11) are two 32-byte rows. The row strides are
+; deliberately NOT 256-aligned: that is a buffer-copy rule, not a writeTexture
+; rule.
+(data :name blocks8 (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="))
+(data :name blocks16 (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="))
+
+(texture :name etc2rgb :size [8 8] :format etc2-rgb8unorm :usage [copy-dst])
+(texture :name etc2rgbs :size [8 8] :format etc2-rgb8unorm-srgb :usage [copy-dst])
+(texture :name etc2a1 :size [8 8] :format etc2-rgb8a1unorm :usage [copy-dst])
+(texture :name etc2a1s :size [8 8] :format etc2-rgb8a1unorm-srgb :usage [copy-dst])
+(texture :name etc2rgba :size [8 8] :format etc2-rgba8unorm :usage [copy-dst])
+(texture :name etc2rgbas :size [8 8] :format etc2-rgba8unorm-srgb :usage [copy-dst])
+(texture :name eacr11 :size [8 8] :format eac-r11unorm :usage [copy-dst])
+(texture :name eacr11s :size [8 8] :format eac-r11snorm :usage [copy-dst])
+(texture :name eacrg11 :size [8 8] :format eac-rg11unorm :usage [copy-dst])
+(texture :name eacrg11s :size [8 8] :format eac-rg11snorm :usage [copy-dst])
+
+(queue :name upload
+  (write-texture :texture etc2rgb :data blocks8 :bytes-per-row 16 :rows-per-image 2 :size [8 8])
+  (write-texture :texture etc2rgbs :data blocks8 :bytes-per-row 16 :rows-per-image 2 :size [8 8])
+  (write-texture :texture etc2a1 :data blocks8 :bytes-per-row 16 :rows-per-image 2 :size [8 8])
+  (write-texture :texture etc2a1s :data blocks8 :bytes-per-row 16 :rows-per-image 2 :size [8 8])
+  (write-texture :texture etc2rgba :data blocks16 :bytes-per-row 32 :rows-per-image 2 :size [8 8])
+  (write-texture :texture etc2rgbas :data blocks16 :bytes-per-row 32 :rows-per-image 2 :size [8 8])
+  (write-texture :texture eacr11 :data blocks8 :bytes-per-row 16 :rows-per-image 2 :size [8 8])
+  (write-texture :texture eacr11s :data blocks8 :bytes-per-row 16 :rows-per-image 2 :size [8 8])
+  (write-texture :texture eacrg11 :data blocks16 :bytes-per-row 32 :rows-per-image 2 :size [8 8])
+  (write-texture :texture eacrg11s :data blocks16 :bytes-per-row 32 :rows-per-image 2 :size [8 8]))
+(frame :name main :perform [upload])

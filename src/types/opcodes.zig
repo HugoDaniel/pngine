@@ -235,6 +235,35 @@ pub const OpCode = enum(u8) {
     /// (no command-buffer counterpart). Reserved slot — never delete or renumber.
     write_audio_data = 0x2C,
 
+    /// Write raw texels into a texture (`GPUQueue.writeTexture`).
+    /// Params: texture_id, data_id, offset, bytes_per_row, rows_per_image,
+    ///   mip_level, origin_x, origin_y, origin_z, aspect (byte),
+    ///   size_width, size_height, size_depth, flags (byte).
+    ///
+    /// The two stride fields and the three size fields are present only when
+    /// the matching flag bit is set; an absent field is written as 0 with its
+    /// bit clear. Flags: bit 0 bytes-per-row, bit 1 rows-per-image, bit 2 size;
+    /// every other bit is zero. The layout order is plan 02's table, mirrored
+    /// in `bytecode/wire_schema.zig`'s `L_WRITE_TEXTURE`.
+    write_texture = 0x2D,
+
+    /// Copy from a buffer into a texture (`GPUCommandEncoder.copyBufferToTexture`).
+    /// Params: texture_id, buffer_id, offset, bytes_per_row, rows_per_image,
+    ///   mip_level, origin_x, origin_y, origin_z, aspect (byte),
+    ///   size_width, size_height, size_depth, flags (byte).
+    ///
+    /// The shared fixed `L_TEXTURE_BUFFER_COPY` layout, identical to
+    /// `copy_texture_to_buffer`'s: DIRECTION comes only from this opcode, never
+    /// from an operand. The two stride fields and the three size fields keep
+    /// plan 02's presence flags (bit 0 bytes-per-row, bit 1 rows-per-image,
+    /// bit 2 size); absent fields are written as 0 with their bit clear.
+    copy_buffer_to_texture = 0x2E,
+
+    /// Copy from a texture into a buffer (`GPUCommandEncoder.copyTextureToBuffer`).
+    /// Params: the same shared fixed `L_TEXTURE_BUFFER_COPY` sequence as
+    ///   `copy_buffer_to_texture`, in the same order and with the same flags.
+    copy_texture_to_buffer = 0x2F,
+
     // ========================================================================
     // Frame Control (0x30-0x3F)
     // ========================================================================
@@ -365,6 +394,35 @@ pub const OpCode = enum(u8) {
     // Use compute shaders or WASM calls for buffer initialization
     // ========================================================================
 
+    /// Copy a texture subresource to another subresource
+    /// (`GPUCommandEncoder.copyTextureToTexture`).
+    /// Params: source_id, source_mip, source_origin_x/y/z, source_aspect (byte),
+    ///   destination_id, destination_mip, destination_origin_x/y/z,
+    ///   destination_aspect (byte), size_width, size_height, size_depth,
+    ///   flags (byte).
+    ///
+    /// The first slot AFTER the retired data-generation block: 0x53-0x7F stay
+    /// reserved so a retired byte keeps failing `isValid` loudly instead of
+    /// decoding as this copy and desynchronizing every following operand. The
+    /// three size fields are always on the wire (0 when absent); `flags` bit 0
+    /// records whether the size was authored, and every other bit is zero. The
+    /// order is plan 06's `L_TEXTURE_SUBRESOURCE_COPY`, mirrored in
+    /// `bytecode/wire_schema.zig`.
+    copy_texture_subresource = 0x80,
+
+    /// Begin render pass whose attachments are resolved through the shared
+    /// attachment-target encoding (`ATTACHMENT_VIEW_TAG`): colour, resolve and
+    /// depth targets may name an explicit texture view. Params:
+    ///   color_count (byte, 0..8; zero only with a depth target)
+    ///   repeat color_count × [target (varint), load_op (byte), store_op (byte),
+    ///     clear_r/g/b/a (u32_le ×4), resolve_target (varint)]
+    ///   depth_target (varint)
+    /// The record is one layout in `bytecode/wire_schema.zig`; every consumer
+    /// (emitter, scanner, reference dispatcher) follows that one order. The
+    /// legacy 0x10/0x1B operations keep their bytes: the tag is interpreted by
+    /// THIS opcode alone.
+    begin_render_pass_views = 0x81,
+
     _,
 
     /// Check if opcode is valid.
@@ -437,6 +495,11 @@ pub const OpCode = enum(u8) {
             .write_time_uniform,
             .write_pointer_uniform,
             .write_audio_data,
+            .write_texture,
+            .copy_buffer_to_texture,
+            .copy_texture_to_buffer,
+            .copy_texture_subresource,
+            .begin_render_pass_views,
             => true,
             _ => false,
         };
@@ -480,6 +543,78 @@ pub fn tagBindGroupLayoutId(id: u16) u16 {
     return tagged;
 }
 
+/// Discriminates an explicit `(texture-view …)` id from a texture id in
+/// `begin_render_pass_views` (PNGB 0x81). Set ⇒ the low bits are a view id;
+/// clear ⇒ a texture id. `0xFFFF` is "none" and `0xFFFE` is the canvas; which
+/// positions admit each is an authoring/compiler rule, not a wire rule, so the
+/// wire layer only keeps the four spaces distinct.
+///
+/// The high bit is the discriminator rather than a second byte per attachment,
+/// mirroring `BIND_GROUP_LAYOUT_TAG`: the two id spaces are numbered
+/// independently, so an untagged 0 and a tagged view 0 must stay distinct. It
+/// is safe only because 0x81 is new — no legacy decoder reinterprets old bytes.
+///
+/// Collision proof for the four spaces: untagged texture ids are 0x0000–0x7FFF
+/// (high bit clear); tagged view ids are 0x8000–0xFFFD, because the compiler
+/// caps a view id at `ATTACHMENT_VIEW_MAX` (0x7FFD) and tagging adds 0x8000;
+/// the two sentinels 0xFFFE and 0xFFFF sit above every encodable view. All four
+/// are disjoint. The sentinels carry the high bit, so `attachmentTargetIsView`
+/// checks them FIRST rather than reading 0xFFFE as view 0x7FFE.
+pub const ATTACHMENT_VIEW_TAG: u16 = 0x8000;
+
+/// `none` — no attachment in a position that allows one.
+pub const ATTACHMENT_NONE: u16 = 0xFFFF;
+
+/// The current canvas/context texture in a colour or resolve position.
+pub const ATTACHMENT_CANVAS: u16 = 0xFFFE;
+
+/// Largest view id the tagged encoding can carry without colliding with the
+/// two sentinels: `ATTACHMENT_CANVAS - 1 - ATTACHMENT_VIEW_TAG` (0x7FFD).
+/// Resource caps keep real view ids far below this; the compiler refuses an
+/// overflow before emission.
+pub const ATTACHMENT_VIEW_MAX: u16 = ATTACHMENT_CANVAS - 1 - ATTACHMENT_VIEW_TAG;
+
+/// True when `target` is a TAGGED explicit view id. The two sentinels carry the
+/// high bit and are not views, so they are excluded first.
+pub fn attachmentTargetIsView(target: u16) bool {
+    if (target == ATTACHMENT_NONE or target == ATTACHMENT_CANVAS) return false;
+    return (target & ATTACHMENT_VIEW_TAG) != 0;
+}
+
+/// The id inside a tagged attachment target, with the view tag removed.
+pub fn attachmentTargetValue(target: u16) u16 {
+    return target & ~ATTACHMENT_VIEW_TAG;
+}
+
+/// Tag `view_id` as an explicit attachment view target.
+/// Pre-condition: the id fits below the two sentinels (see `ATTACHMENT_VIEW_MAX`).
+pub fn tagAttachmentViewId(view_id: u16) u16 {
+    std.debug.assert(view_id <= ATTACHMENT_VIEW_MAX);
+    const tagged = view_id | ATTACHMENT_VIEW_TAG;
+    std.debug.assert(attachmentTargetIsView(tagged) and attachmentTargetValue(tagged) == view_id);
+    return tagged;
+}
+
+/// The four things a `begin_render_pass_views` target can name. This is the ONE
+/// decode helper every consumer (reference trace, browser/native resolution)
+/// reads, so no caller re-derives the sentinel order or the tag mask.
+pub const AttachmentTarget = union(enum) {
+    none,
+    canvas,
+    texture: u16,
+    view: u16,
+};
+
+/// Decode one wire target into its id space. Sentinels are checked before the
+/// tag; a high-bit value that is neither is a tagged view (the emitter and the
+/// compiler promise ids never reach the sentinel range).
+pub fn decodeAttachmentTarget(target: u16) AttachmentTarget {
+    if (target == ATTACHMENT_NONE) return .none;
+    if (target == ATTACHMENT_CANVAS) return .canvas;
+    if (attachmentTargetIsView(target)) return .{ .view = attachmentTargetValue(target) };
+    return .{ .texture = target };
+}
+
 /// The executor plugin an opcode REQUIRES to have an effect, or null if it runs
 /// in every variant (core, structure, pool, and the render/compute-shared
 /// pipeline-state ops). This drives executor-variant selection: the compiler
@@ -500,6 +635,7 @@ pub fn pluginForOpcode(op: OpCode) ?plugins.Plugin {
         .create_render_pipeline,
         .begin_render_pass,
         .begin_render_pass_mrt,
+        .begin_render_pass_views,
         .set_vertex_buffer,
         .set_index_buffer,
         .draw,
@@ -533,6 +669,10 @@ pub fn pluginForOpcode(op: OpCode) ?plugins.Plugin {
         .create_image_bitmap,
         .copy_texture_to_texture,
         .copy_external_image_to_texture,
+        .write_texture,
+        .copy_buffer_to_texture,
+        .copy_texture_to_buffer,
+        .copy_texture_subresource,
         => .texture,
 
         // WASM-GATED.

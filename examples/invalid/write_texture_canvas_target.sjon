@@ -1,0 +1,7 @@
+; INVALID: context-current-texture names the canvas's swapchain texture, not a
+; declared (texture …); a static raw write needs a declared destination whose
+; usage and extent the compiler can check.
+(data :name texels (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAA=="))
+(queue :name upload
+  (write-texture :texture context-current-texture :data texels :size [2 2] :bytes-per-row 8))
+(frame :name main :perform [upload])

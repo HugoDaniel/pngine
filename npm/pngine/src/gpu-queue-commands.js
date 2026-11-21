@@ -1,5 +1,5 @@
 // Queue / WASM / control command handlers for the GPU dispatcher.
-// Handles opcodes 0x20-0x27 (queue), 0x30-0x31 (WASM), 0xF0-0xFF (control).
+// Handles opcodes 0x20-0x2B (queue), 0x30-0x31 (WASM), 0xF0-0xFF (control).
 //
 // Split out of gpu.js alongside gpu-resource-pass-commands.js (0x01-0x52). The
 // two modules share one `ops` bag — see types/gpu-ops.d.ts for its shape and
@@ -9,6 +9,13 @@
 // tests/npm/command-buffer-widths.test.js. A wrong `return pos + N` desyncs
 // every LATER command in the buffer, so treat those numbers as wire format.
 
+import {
+  calculateCopy,
+  calculateTextureCopy,
+  calculateWrite,
+  CopyPolicy,
+} from "./texture-layout.js";
+
 // Same build-flag fallback gpu.js installs (esbuild --define:DEBUG=false strips
 // the debug paths in production). Declared locally rather than relying on
 // gpu.js's copy having run first: that import-side-effect coupling is what left
@@ -17,6 +24,368 @@ if (typeof DEBUG === "undefined") globalThis.DEBUG = false;
 
 /** Sentinel texture id meaning "the canvas", not an entry in the texture table. */
 const CANVAS = 0xfffe;
+
+/**
+ * Wire aspect tags, in the contract's fixed byte order.
+ * @type {GPUTextureAspect[]}
+ */
+const ASPECT_NAMES = ["all", "stencil-only", "depth-only"];
+
+/**
+ * The public SJON name for a resource id, or null when the payload carries no
+ * name block for it (an old payload, an unnamed resource). A pool member is
+ * addressed by its declared base name.
+ * @param {Map<string, {id: number, pool: number}>} names
+ * @param {number} id
+ * @returns {string|null}
+ */
+function nameFor(names, id) {
+  for (const [name, r] of names) {
+    if (id >= r.id && id < r.id + (r.pool || 1)) return name;
+  }
+  return null;
+}
+
+/**
+ * One failed byte readback, through the existing command-error route. Every
+ * failure — a rejected map, a range the mapping does not cover, a throwing
+ * host callback — names the buffer and the `readback-unavailable` code.
+ * @param {GpuOps} ops
+ * @param {object} rb
+ * @param {unknown} e
+ */
+function readbackFailed(ops, rb, e) {
+  ops.reportError({
+    message: `texture readback failed for buffer ${rb.id}: ${/** @type {any} */ (e)?.message || e} (readback-unavailable)`,
+    source: "readback",
+  });
+}
+
+/**
+ * Map one scheduled texture→buffer destination and hand its bytes to the host.
+ *
+ * mapAsync requires an 8-byte-aligned offset and a 4-byte-multiple size, which
+ * a legal texel-copy layout need not satisfy (a depth-stencil copy allows a
+ * 4-byte offset; a stencil row can end on an odd byte). Map the enclosing
+ * aligned window and slice exactly the copied span — final row padding
+ * excluded — out of it.
+ *
+ * The byte array is an OWNED copy: the mapping is released in `finally` before
+ * the host is called, so a retained or mutated array can never alias driver
+ * memory, and a throwing callback cannot leave the buffer mapped (the 0x22 skip
+ * would then poison every later copy to it). A destroyed dispatcher (a stale
+ * generation) releases a late mapping and delivers nothing, including no error.
+ *
+ * @param {GpuOps} ops
+ * @param {object} rb
+ * @param {(readback: object) => void} onTextureReadback
+ */
+function deliverTextureReadback(ops, rb, onTextureReadback) {
+  const b = ops.buf[rb.id];
+  if (!b || b.mapState !== "unmapped") {
+    readbackFailed(ops, rb, new Error(b ? `buffer is ${b.mapState}` : "buffer is gone"));
+    return;
+  }
+  const mapOffset = rb.offset & ~7;
+  const mapSize = Math.ceil((rb.offset - mapOffset + rb.size) / 4) * 4;
+  b.mapAsync(GPUMapMode.READ, mapOffset, mapSize).then(() => {
+    let bytes = null;
+    try {
+      if (ops.alive()) {
+        const mapped = new Uint8Array(b.getMappedRange(mapOffset, mapSize));
+        bytes = mapped.slice(rb.offset - mapOffset, rb.offset - mapOffset + rb.size);
+      }
+    } catch (e) {
+      readbackFailed(ops, rb, e);
+    } finally {
+      if (b.mapState === "mapped") {
+        try { b.unmap(); } catch { /* raced a teardown */ }
+      }
+    }
+    if (!bytes || !ops.alive()) return;
+    try {
+      onTextureReadback({
+        texture: rb.textureName,
+        buffer: rb.bufferName,
+        offset: rb.offset,
+        size: rb.size,
+        bytes,
+        bytesPerRow: rb.bytesPerRow,
+        rowsPerImage: rb.rowsPerImage,
+        mipLevel: rb.mipLevel,
+        origin: rb.origin,
+        aspect: rb.aspect,
+        copySize: rb.copySize,
+      });
+    } catch (e) {
+      readbackFailed(ops, rb, e);
+    }
+  }).catch((e) => readbackFailed(ops, rb, e));
+}
+
+/**
+ * Execute a buffer↔texture encoder copy (0x29 / 0x2A).
+ *
+ * The record is 46 fixed operand bytes:
+ * `[texture_id:u16][buffer_id:u16][offset:u32][bytes_per_row:u32]
+ * [rows_per_image:u32][mip_level:u32][origin_x/y/z:u32][aspect:u8]
+ * [size_width:u32][size_height:u32][size_depth:u32][flags:u8]`.
+ * No WASM pointer appears: the linear side is a GPUBuffer.
+ *
+ * The opcode is the direction. It selects the calculator policy, so the
+ * texture endpoint is validated as a destination (`copy-dst`) for 0x29 and as
+ * a source (`copy-src`) for 0x2A — two different usage checks. A refusal
+ * reaches the host through onError and records no encoder call.
+ *
+ * @param {number} cmd
+ * @param {DataView} view
+ * @param {number} pos
+ * @param {GpuOps} ops
+ * @returns {number}
+ */
+function copyTextureBuffer(cmd, view, pos, ops) {
+  const bufferToTexture = cmd === 0x29;
+  const textureId = view.getUint16(pos, true);
+  const bufferId = view.getUint16(pos + 2, true);
+  const offset = view.getUint32(pos + 4, true);
+  const bytesPerRow = view.getUint32(pos + 8, true);
+  const rowsPerImage = view.getUint32(pos + 12, true);
+  const mipLevel = view.getUint32(pos + 16, true);
+  const ox = view.getUint32(pos + 20, true);
+  const oy = view.getUint32(pos + 24, true);
+  const oz = view.getUint32(pos + 28, true);
+  const aspect = view.getUint8(pos + 32);
+  const sizeWidth = view.getUint32(pos + 33, true);
+  const sizeHeight = view.getUint32(pos + 37, true);
+  const sizeDepth = view.getUint32(pos + 41, true);
+  const flags = view.getUint8(pos + 45);
+
+  // Presence is the flags byte's only job: an absent stride/size and an
+  // authored zero carry the same value. Keep absence as undefined through the
+  // calculator AND the WebGPU layout — passing the normalized minimum here
+  // would silently turn omission into an explicit stride.
+  const hasBytesPerRow = (flags & 1) !== 0;
+  const hasRowsPerImage = (flags & 2) !== 0;
+  const hasSize = (flags & 4) !== 0;
+  const write = {
+    offset,
+    mipLevel,
+    origin: { x: ox, y: oy, z: oz },
+    aspect,
+    bytesPerRow: hasBytesPerRow ? bytesPerRow : undefined,
+    rowsPerImage: hasRowsPerImage ? rowsPerImage : undefined,
+    size: hasSize
+      ? { width: sizeWidth, height: sizeHeight, depthOrArrayLayers: sizeDepth }
+      : undefined,
+  };
+
+  const label = bufferToTexture ? "copyBufferToTexture" : "copyTextureToBuffer";
+  const source = bufferToTexture ? "copy-buffer-to-texture" : "copy-texture-to-buffer";
+  const refuse = (code, field, actual, limit) =>
+    ops.reportError({ message: `${label}: ${code} — ${field}/${actual}/${limit}`, source });
+
+  const texture = ops.tex[textureId];
+  const descriptor = ops.txd[textureId];
+  if (!texture || !descriptor) {
+    refuse("missing-texture", "texture", textureId, 0);
+    return pos + 46;
+  }
+  const buffer = ops.buf[bufferId];
+  const bufferSize = ops.bufSize[bufferId];
+  if (!buffer || bufferSize === undefined) {
+    refuse("missing-buffer", "buffer", bufferId, 0);
+    return pos + 46;
+  }
+
+  const calc = calculateCopy(
+    descriptor,
+    write,
+    bufferSize,
+    bufferToTexture ? CopyPolicy.bufferToTexture : CopyPolicy.textureToBuffer,
+  );
+  if ("refuse" in calc) {
+    refuse(calc.refuse.code, calc.refuse.field, calc.refuse.actual, calc.refuse.limit);
+    return pos + 46;
+  }
+
+  const copy = calc.ok.copyExtent;
+  const size = /** @type {[number, number, number]} */ ([copy.width, copy.height, copy.depthOrArrayLayers]);
+  const textureInfo = { texture, mipLevel, origin: [ox, oy, oz], aspect: ASPECT_NAMES[aspect] };
+  const bufferInfo = {
+    buffer,
+    offset,
+    bytesPerRow: write.bytesPerRow,
+    rowsPerImage: write.rowsPerImage,
+  };
+  // A texture→buffer copy into MAP_READ|COPY_DST is a byte readback, not a
+  // query resolution. A destination already mapped (a host-held mapping, or a
+  // prior delivery that has not released yet) makes the copy invalid; report
+  // it rather than skipping silently, which is what 0x22's query path does.
+  const usage = ops.bufUsage[bufferId] || 0;
+  const readbackDestination = !bufferToTexture && (usage & 0x0001) !== 0 && (usage & 0x0008) !== 0;
+  if (readbackDestination && buffer.mapState !== "unmapped") {
+    refuse("buffer-mapped", "buffer", bufferId, 0);
+    return pos + 46;
+  }
+  const enc = ops.encoder();
+  if (bufferToTexture) enc.copyBufferToTexture(bufferInfo, textureInfo, size);
+  else enc.copyTextureToBuffer(textureInfo, bufferInfo, size);
+  if (readbackDestination && calc.ok.requiredBytesInCopy > 0) {
+    ops.pendingReadbacks.push({
+      kind: "texture",
+      id: bufferId,
+      offset,
+      size: calc.ok.requiredBytesInCopy,
+      bytesPerRow: calc.ok.bytesPerRow,
+      rowsPerImage: calc.ok.rowsPerImage,
+      mipLevel,
+      origin: [ox, oy, oz],
+      aspect: ASPECT_NAMES[aspect],
+      copySize: size,
+      textureName: nameFor(ops.texNames, textureId),
+      bufferName: nameFor(ops.bufNames, bufferId),
+    });
+  }
+  return pos + 46;
+}
+
+/**
+ * The canvas as a copy endpoint. The configured canvas is
+ * RENDER_ATTACHMENT|COPY_SRC (`core.js`/`worker-core.js` configure it that
+ * way), so a canvas SOURCE can be validated while a canvas DESTINATION is
+ * refused by the shared calculator's missing-copy-dst stage.
+ *
+ * @param {GpuOps} ops
+ * @returns {object}
+ */
+function canvasCopyDescriptor(ops) {
+  const { cw, ch } = ops.clock();
+  return {
+    size: { width: cw, height: ch, depthOrArrayLayers: 1 },
+    dimension: "2d",
+    format: navigator.gpu.getPreferredCanvasFormat(),
+    usage: 0x10 | 0x01, // RENDER_ATTACHMENT | COPY_SRC
+    sampleCount: 1,
+    mipLevelCount: 1,
+    extentSource: "canvas",
+  };
+}
+
+/**
+ * Execute a subresource texture→texture copy (0x2B).
+ *
+ * The record is 51 fixed operand bytes:
+ * `[src_id:u16][dst_id:u16] [src_mip:u32][src_origin_x/y/z:u32][src_aspect:u8]
+ * [dst_mip:u32][dst_origin_x/y/z:u32][dst_aspect:u8]
+ * [size_width:u32][size_height:u32][size_depth:u32][flags:u8]`.
+ * No WASM pointer appears: both sides are GPUTextures the runtime holds.
+ *
+ * `flags` bit 0 records whether a size was authored. An absent size defers to
+ * `calculateTextureCopy`'s remaining-physical-source-extent rule. The opcode
+ * executes ONLY after that calculator accepts both endpoints — a refusal
+ * reaches onError and records no encoder call.
+ *
+ * @param {DataView} view
+ * @param {number} pos
+ * @param {GpuOps} ops
+ * @returns {number}
+ */
+function copyTextureSubresource(view, pos, ops) {
+  const sourceId = view.getUint16(pos, true);
+  const destinationId = view.getUint16(pos + 2, true);
+  const sourceMip = view.getUint32(pos + 4, true);
+  const sourceX = view.getUint32(pos + 8, true);
+  const sourceY = view.getUint32(pos + 12, true);
+  const sourceZ = view.getUint32(pos + 16, true);
+  const sourceAspect = view.getUint8(pos + 20);
+  const destinationMip = view.getUint32(pos + 21, true);
+  const destinationX = view.getUint32(pos + 25, true);
+  const destinationY = view.getUint32(pos + 29, true);
+  const destinationZ = view.getUint32(pos + 33, true);
+  const destinationAspect = view.getUint8(pos + 37);
+  const sizeWidth = view.getUint32(pos + 38, true);
+  const sizeHeight = view.getUint32(pos + 42, true);
+  const sizeDepth = view.getUint32(pos + 46, true);
+  const flags = view.getUint8(pos + 50);
+
+  const label = "copyTextureToTexture";
+  const source = "copy-texture-subresource";
+  const refuse = (code, field, actual, limit) =>
+    ops.reportError({ message: `${label}: ${code} — ${field}/${actual}/${limit}`, source });
+
+  // Only bit 0 is defined. Any other bit makes the record uninterpretable, so
+  // this is a refusal rather than a silently ignored feature bit.
+  if ((flags & ~1) !== 0) {
+    refuse("invalid-flags", "flags", flags, 1);
+    return pos + 51;
+  }
+  const hasSize = (flags & 1) !== 0;
+
+  const descriptorOf = (id) =>
+    id === CANVAS ? canvasCopyDescriptor(ops) : ops.txd[id];
+  const sourceDescriptor = descriptorOf(sourceId);
+  const destinationDescriptor = descriptorOf(destinationId);
+  if (!sourceDescriptor) {
+    refuse("missing-texture", "texture", sourceId, 0);
+    return pos + 51;
+  }
+  if (!destinationDescriptor) {
+    refuse("missing-texture", "texture", destinationId, 0);
+    return pos + 51;
+  }
+
+  const calc = calculateTextureCopy(sourceDescriptor, destinationDescriptor, {
+    source: {
+      textureId: sourceId,
+      mipLevel: sourceMip,
+      origin: { x: sourceX, y: sourceY, z: sourceZ },
+      aspect: sourceAspect,
+    },
+    destination: {
+      textureId: destinationId,
+      mipLevel: destinationMip,
+      origin: { x: destinationX, y: destinationY, z: destinationZ },
+      aspect: destinationAspect,
+    },
+    size: hasSize
+      ? { width: sizeWidth, height: sizeHeight, depthOrArrayLayers: sizeDepth }
+      : undefined,
+  });
+  if ("refuse" in calc) {
+    refuse(calc.refuse.code, calc.refuse.field, calc.refuse.actual, calc.refuse.limit);
+    return pos + 51;
+  }
+
+  // Resolve the live handles only after validation: a canvas destination never
+  // acquires a swapchain texture it is about to be refused.
+  const sourceTexture =
+    sourceId === CANVAS ? ops.targetCtx().getCurrentTexture() : ops.tex[sourceId];
+  const destinationTexture =
+    destinationId === CANVAS ? ops.targetCtx().getCurrentTexture() : ops.tex[destinationId];
+  if (!sourceTexture || !destinationTexture) {
+    refuse("missing-texture", "texture", sourceTexture ? destinationId : sourceId, 0);
+    return pos + 51;
+  }
+
+  const extent = calc.ok.copyExtent;
+  const enc = ops.encoder();
+  enc.copyTextureToTexture(
+    {
+      texture: sourceTexture,
+      mipLevel: sourceMip,
+      origin: [sourceX, sourceY, sourceZ],
+      aspect: ASPECT_NAMES[sourceAspect],
+    },
+    {
+      texture: destinationTexture,
+      mipLevel: destinationMip,
+      origin: [destinationX, destinationY, destinationZ],
+      aspect: ASPECT_NAMES[destinationAspect],
+    },
+    [extent.width, extent.height, extent.depthOrArrayLayers],
+  );
+  return pos + 51;
+}
 
 /**
  * Dispatch queue / WASM / control commands.
@@ -74,6 +443,88 @@ export function dispatchQueueCommand(cmd, view, pos, ops) {
       if (ops.qs[qsId] && ops.buf[destBuf]) enc.resolveQuerySet(ops.qs[qsId], first, count, ops.buf[destBuf], destOff);
       return pos + 16;
     }
+    case 0x28: { // write_texture
+      const id = view.getUint16(pos, true);
+      const dataPtr = view.getUint32(pos + 2, true);
+      const dataLen = view.getUint32(pos + 6, true);
+      const offset = view.getUint32(pos + 10, true);
+      const bytesPerRow = view.getUint32(pos + 14, true);
+      const rowsPerImage = view.getUint32(pos + 18, true);
+      const mipLevel = view.getUint32(pos + 22, true);
+      const ox = view.getUint32(pos + 26, true);
+      const oy = view.getUint32(pos + 30, true);
+      const oz = view.getUint32(pos + 34, true);
+      const aspect = view.getUint8(pos + 38);
+      const sizeWidth = view.getUint32(pos + 39, true);
+      const sizeHeight = view.getUint32(pos + 43, true);
+      const sizeDepth = view.getUint32(pos + 47, true);
+      const flags = view.getUint8(pos + 51);
+
+      // Presence is the flags byte's only job: an absent stride/size and an
+      // authored zero carry the same value. Keep absence as undefined through
+      // the calculator AND the WebGPU layout — passing the normalized minimum
+      // here would silently turn omission into an explicit stride.
+      const hasBytesPerRow = (flags & 1) !== 0;
+      const hasRowsPerImage = (flags & 2) !== 0;
+      const hasSize = (flags & 4) !== 0;
+      const write = {
+        offset,
+        mipLevel,
+        origin: { x: ox, y: oy, z: oz },
+        aspect,
+        bytesPerRow: hasBytesPerRow ? bytesPerRow : undefined,
+        rowsPerImage: hasRowsPerImage ? rowsPerImage : undefined,
+        size: hasSize
+          ? { width: sizeWidth, height: sizeHeight, depthOrArrayLayers: sizeDepth }
+          : undefined,
+      };
+
+      const refuse = (code, field, actual, limit) =>
+        ops.reportError({
+          message: `writeTexture: ${code} — ${field}/${actual}/${limit}`,
+          source: "write-texture",
+        });
+
+      const texture = ops.tex[id];
+      const descriptor = ops.txd[id];
+      if (!texture || !descriptor) {
+        refuse("missing-texture", "texture", id, 0);
+        return pos + 52;
+      }
+      // The window is referenced straight out of executor memory, so its u64
+      // end is bounded before the view is constructed. Two u32 operands sum to
+      // at most 2^33, which a JS Number carries exactly; equality is legal (a
+      // zero-length window at the very end), one byte past is not.
+      const memBytes = ops.mem.buffer.byteLength;
+      const end = dataPtr + dataLen;
+      if (dataPtr > memBytes || end > memBytes) {
+        refuse("invalid-data-window", "data", end, memBytes);
+        return pos + 52;
+      }
+
+      // The retained record IS the calculator descriptor: concrete extent,
+      // resolved format, destination usage, sample count and mip count, all
+      // kept current by create/resize. Nothing is re-derived from bindings.
+      const calc = calculateWrite(descriptor, write, dataLen);
+      if ("refuse" in calc) {
+        refuse(calc.refuse.code, calc.refuse.field, calc.refuse.actual, calc.refuse.limit);
+        return pos + 52;
+      }
+
+      const copy = calc.ok.copyExtent;
+      ops.device.queue.writeTexture(
+        { texture, mipLevel, origin: [ox, oy, oz], aspect: ASPECT_NAMES[aspect] },
+        new Uint8Array(ops.mem.buffer, dataPtr, dataLen),
+        { offset, bytesPerRow: write.bytesPerRow, rowsPerImage: write.rowsPerImage },
+        [copy.width, copy.height, copy.depthOrArrayLayers],
+      );
+      return pos + 52;
+    }
+    case 0x29: // copy_buffer_to_texture
+    case 0x2a: // copy_texture_to_buffer
+      return copyTextureBuffer(cmd, view, pos, ops);
+    case 0x2b: // copy_texture_subresource
+      return copyTextureSubresource(view, pos, ops);
     case 0x22: { // copy_buffer_to_buffer
       const sid = view.getUint16(pos, true), so = view.getUint32(pos + 2, true);
       const did = view.getUint16(pos + 6, true), dof = view.getUint32(pos + 8, true);
@@ -92,7 +543,7 @@ export function dispatchQueueCommand(cmd, view, pos, ops) {
       enc.copyBufferToBuffer(ops.buf[sid], so, ops.buf[did], dof, sz);
       // Schedule readback for MAP_READ destination buffers
       if (isMapRead) {
-        ops.pendingReadbacks.push({ id: did, offset: dof, size: sz });
+        ops.pendingReadbacks.push({ kind: "query", id: did, offset: dof, size: sz });
       }
       return pos + 16;
     }
@@ -190,11 +641,18 @@ export function dispatchQueueCommand(cmd, view, pos, ops) {
       const enc = ops.takeEnc();
       DEBUG && ops.debug() && console.log(`[GPU] submit enc=${!!enc}`);
       if (enc) ops.device.queue.submit([enc.finish()]);
-      // Readback MAP_READ buffers after submit (for occlusion query results etc.)
+      // Readback MAP_READ buffers after submit (query numbers and texture
+      // bytes are distinct consumers; the record's `kind` keeps them apart).
       const onQueryResult = ops.getOnQueryResult();
-      if (ops.pendingReadbacks.length > 0 && onQueryResult) {
+      const onTextureReadback = ops.getOnTextureReadback();
+      if (ops.pendingReadbacks.length > 0 && (onQueryResult || onTextureReadback)) {
         const rbs = ops.pendingReadbacks.splice(0);
         for (const rb of rbs) {
+          if (rb.kind === "texture") {
+            if (onTextureReadback) deliverTextureReadback(ops, rb, onTextureReadback);
+            continue;
+          }
+          if (!onQueryResult) continue;
           const b = ops.buf[rb.id];
           if (b?.mapState === 'unmapped') {
             b.mapAsync(GPUMapMode.READ, rb.offset, rb.size).then(() => {

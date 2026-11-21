@@ -1,0 +1,10 @@
+; An array-layer→layer subresource copy: a 2D texture with two layers moves
+; layer 1 of src into layer 0 of dst. The nonzero source origin z is only
+; expressible on PNGB 0x80; the legacy 0x23 carries ids alone.
+(texture :name src :size [4 4 2] :format rgba8unorm :usage [copy-src])
+(texture :name dst :size [4 4 2] :format rgba8unorm :usage [copy-dst])
+(queue :name copy
+  (copy-texture-to-texture :size [4 4 1]
+    (source :texture src :origin [0 0 1])
+    (destination :texture dst :origin [0 0 0])))
+(frame :name main :perform [copy])

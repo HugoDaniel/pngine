@@ -23,6 +23,7 @@ const Allocator = std.mem.Allocator;
 const pngine = @import("pngine");
 const format = pngine.format;
 const descriptors = pngine.types.descriptors;
+const texture_layout = pngine.types.texture_layout;
 const opcodes = pngine.opcodes;
 const mock_gpu = pngine.mock_gpu;
 const MockGPU = mock_gpu.MockGPU;
@@ -153,6 +154,10 @@ const Usage = struct {
                     if (p.depth_texture_id != NO_TEXTURE_ID) try u.textures.put(gpa, p.depth_texture_id, {});
                 },
                 .write_buffer => try u.buffers.put(gpa, call.params.write_buffer.buffer_id, {}),
+                // A write target is a consumer too: without this, a texture
+                // whose only frame use is the upload is dropped from the init
+                // section while the queue call still names `T<id>`.
+                .write_texture => try u.textures.put(gpa, call.params.write_texture.texture_id, {}),
                 else => {},
             }
         }
@@ -883,7 +888,7 @@ fn emitInitSection(
     var submit_start: u16 = 0;
     for (calls[0..analysis.split_idx]) |call| {
         if (!analysis.usage.isLive(call)) continue;
-        try emitCall(gpa, out, call, module, &pass_idx, &submit_start, &analysis.pipeline_formats, diag);
+        try emitCall(gpa, out, call, module, calls, &pass_idx, &submit_start, &analysis.pipeline_formats, diag);
     }
 }
 
@@ -919,7 +924,7 @@ fn emitFrameSection(
     var pass_idx: u16 = 0;
     var submit_start: u16 = 0;
     for (calls[analysis.split_idx..]) |call| {
-        try emitCall(gpa, out, call, module, &pass_idx, &submit_start, &analysis.pipeline_formats, diag);
+        try emitCall(gpa, out, call, module, calls, &pass_idx, &submit_start, &analysis.pipeline_formats, diag);
     }
 }
 
@@ -1121,7 +1126,7 @@ fn familyOf(t: CallType) Family {
         .dispatch_indirect,
         => .pass,
 
-        .submit, .write_buffer => .queue,
+        .submit, .write_buffer, .write_texture => .queue,
 
         .init_wasm_module, .call_wasm_func, .write_buffer_from_wasm => .wasm,
 
@@ -1129,7 +1134,11 @@ fn familyOf(t: CallType) Family {
         // the honest "use the viewer tier" boundary (Arc-3 §5.4, the §240 analog
         // for --html); the viewer runtime plays every one of these.
         .begin_render_pass_mrt,
+        .begin_render_pass_views,
         .copy_buffer_to_buffer,
+        .copy_buffer_to_texture,
+        .copy_texture_to_buffer,
+        .copy_texture_subresource,
         .copy_texture_to_texture,
         .write_uniform,
         .create_query_set,
@@ -1164,6 +1173,7 @@ fn emitCall(
     out: *std.ArrayList(u8),
     call: Call,
     module: *const format.Module,
+    calls: []const Call,
     pass_idx: *u16,
     submit_start: *u16,
     pipeline_formats: *const std.AutoHashMapUnmanaged(u16, []const u8),
@@ -1173,7 +1183,7 @@ fn emitCall(
     switch (familyOf(call.call_type)) {
         .resource => try emitResourceCall(gpa, out, call, module, pipeline_formats),
         .pass => try emitPassCall(gpa, out, call, pass_idx),
-        .queue => try emitQueueCall(gpa, out, call, module, pass_idx, submit_start),
+        .queue => try emitQueueCall(gpa, out, call, module, calls, pass_idx, submit_start, diag),
         .wasm => try emitWasmCall(gpa, out, call, module),
         .unsupported => {
             diag.unsupported = call.call_type;
@@ -1478,15 +1488,133 @@ fn emitPassCall(
     }
 }
 
-/// The queue-level commands: static buffer writes and the submit that flushes
-/// every encoder opened since the last one.
+/// The plan-01 descriptor the last `create_texture` of `texture_id` names, or
+/// null when that blob has no static extent (or is malformed). Only the
+/// omitted-size path needs it; an authored `:size` is the copy extent itself.
+fn findTextureDescriptor(
+    calls: []const Call,
+    module: *const format.Module,
+    texture_id: u16,
+) ?texture_layout.TextureDescriptor {
+    var found: ?texture_layout.TextureDescriptor = null;
+    for (calls) |call| {
+        if (call.call_type != .create_texture) continue;
+        const p = call.params.create_texture;
+        if (p.texture_id != texture_id) continue;
+        // A recreate replaces the object the page will write into, so the LAST
+        // matching creation is the live one.
+        found = desc.parseExplicitTextureDescriptor(module.data.get(@enumFromInt(p.descriptor_data_id)));
+    }
+    return found;
+}
+
+/// WebGPU's `writeTexture` takes a required copy extent. An authored `:size`
+/// is that extent verbatim; an omitted one is the remaining physical extent at
+/// the origin, which plan 01 already computes for every runtime. Ask the SAME
+/// calculator rather than growing a second layout rule in the emitter.
+fn resolveCopyExtent(
+    write: texture_layout.WriteLayout,
+    texture_id: u16,
+    data_len: u64,
+    calls: []const Call,
+    module: *const format.Module,
+    diag: *Diag,
+) CodegenError!texture_layout.Extent {
+    if (write.size) |size| return size;
+
+    const descriptor = findTextureDescriptor(calls, module, texture_id) orelse {
+        // Canvas- and image-derived extents only exist in the executing page
+        // (and an image extent may not exist until the decode lands). The
+        // static page cannot name the remaining extent, so it refuses instead
+        // of emitting an undefined/zero size WebGPU would reject at runtime.
+        diag.unsupported = .write_texture;
+        diag.unsupported_feature = "a write-texture with no explicit :size on a texture whose extent is only known at execution";
+        return CodegenError.UnsupportedByHtml;
+    };
+    return switch (texture_layout.calculateWrite(descriptor, write, data_len)) {
+        .ok => |layout| layout.copy_extent,
+        .refuse => {
+            diag.unsupported = .write_texture;
+            diag.unsupported_feature = "a write-texture layout the --html page cannot resolve";
+            return CodegenError.UnsupportedByHtml;
+        },
+    };
+}
+
+/// Emit one raw texture upload. The data entry is carried whole and
+/// base64-decoded into a `Uint8Array`; `offset` stays in the WebGPU layout, so
+/// it is relative to the entry's first byte. That is deliberately not the
+/// `write_buffer` arm above: a Float32Array cannot preserve an odd length or
+/// bytes that are not a float bit pattern.
+fn emitWriteTexture(
+    gpa: Allocator,
+    out: *std.ArrayList(u8),
+    call: Call,
+    module: *const format.Module,
+    calls: []const Call,
+    diag: *Diag,
+) !void {
+    std.debug.assert(call.call_type == .write_texture);
+    const p = call.params.write_texture;
+    const data = module.data.get(@enumFromInt(p.data_id));
+    const extent = try resolveCopyExtent(p.write, p.texture_id, @intCast(data.len), calls, module, diag);
+    const aspect = switch (p.write.aspect) {
+        .all => "all",
+        .stencil_only => "stencil-only",
+        .depth_only => "depth-only",
+        _ => {
+            diag.unsupported = .write_texture;
+            diag.unsupported_feature = "a write-texture with an unknown texture aspect";
+            return CodegenError.UnsupportedByHtml;
+        },
+    };
+
+    try out.appendSlice(gpa, "d.queue.writeTexture({texture:T");
+    try appendInt(out, gpa, p.texture_id);
+    try out.appendSlice(gpa, ",mipLevel:");
+    try appendInt(out, gpa, p.write.mip_level);
+    try out.appendSlice(gpa, ",origin:[");
+    try appendInt(out, gpa, p.write.origin.x);
+    try out.appendSlice(gpa, ",");
+    try appendInt(out, gpa, p.write.origin.y);
+    try out.appendSlice(gpa, ",");
+    try appendInt(out, gpa, p.write.origin.z);
+    try out.appendSlice(gpa, "],aspect:'");
+    try out.appendSlice(gpa, aspect);
+    try out.appendSlice(gpa, "'},Uint8Array.from(atob('");
+    try base64Append(out, gpa, data);
+    try out.appendSlice(gpa, "'),b=>b.charCodeAt(0)),{offset:");
+    try appendInt(out, gpa, p.write.offset);
+    // D26: presence is the author's, never the calculator's normalized
+    // minimum. An absent stride is absent from the object, not a zero.
+    if (p.write.bytes_per_row) |bytes_per_row| {
+        try out.appendSlice(gpa, ",bytesPerRow:");
+        try appendInt(out, gpa, bytes_per_row);
+    }
+    if (p.write.rows_per_image) |rows_per_image| {
+        try out.appendSlice(gpa, ",rowsPerImage:");
+        try appendInt(out, gpa, rows_per_image);
+    }
+    try out.appendSlice(gpa, "},[");
+    try appendInt(out, gpa, extent.width);
+    try out.appendSlice(gpa, ",");
+    try appendInt(out, gpa, extent.height);
+    try out.appendSlice(gpa, ",");
+    try appendInt(out, gpa, extent.depth_or_array_layers);
+    try out.appendSlice(gpa, "]);");
+}
+
+/// The queue-level commands: static buffer writes, raw texture uploads and the
+/// submit that flushes every encoder opened since the last one.
 fn emitQueueCall(
     gpa: Allocator,
     out: *std.ArrayList(u8),
     call: Call,
     module: *const format.Module,
+    calls: []const Call,
     pass_idx: *u16,
     submit_start: *u16,
+    diag: *Diag,
 ) !void {
     switch (call.call_type) {
         .submit => {
@@ -1523,6 +1651,7 @@ fn emitQueueCall(
                 try out.appendSlice(gpa, "]));");
             }
         },
+        .write_texture => try emitWriteTexture(gpa, out, call, module, calls, diag),
         else => unreachable, // familyOf routes every other tag elsewhere
     }
 }

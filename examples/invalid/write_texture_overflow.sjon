@@ -1,0 +1,8 @@
+; INVALID: offset + requiredBytesInCopy leaves u32. Every intermediate is
+; checked in u64 and refused before narrowing; the max u32 offset plus one
+; row cannot be encoded.
+(data :name texels (bytes :base64 "AAAAAA=="))
+(texture :name tex :size [4 4] :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture tex :data texels :offset 4294967295 :size [1 1] :bytes-per-row 4))
+(frame :name main :perform [upload])

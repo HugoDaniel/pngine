@@ -1,0 +1,10 @@
+; INVALID: the destination texture of a copy-buffer-to-texture has no copy-dst
+; usage. A texture's usage is fixed when it is created; the other endpoint and
+; all layout numbers are legal.
+(buffer :name staging :size 264 :usage [copy-src])
+(texture :name target :size [2 2] :format rgba8unorm :usage [texture-binding])
+(queue :name copies
+  (copy-buffer-to-texture :size [2 2 1]
+    (source :buffer staging :offset 0 :bytes-per-row 256 :rows-per-image 2)
+    (destination :texture target)))
+(frame :name main :perform [copies])

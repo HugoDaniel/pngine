@@ -9,12 +9,14 @@
  * 5. Short internal names (but readable - minifier handles the rest)
  */
 
-import { dispatchResourcePassCommand } from "./gpu-resource-pass-commands.js";
+import { dispatchResourcePassCommand, ABORT } from "./gpu-resource-pass-commands.js";
 import { dispatchQueueCommand } from "./gpu-queue-commands.js";
 import { listBuffers, setBufferNames as setHostBufferNames, writeBuffers as hostWriteBuffers } from "./gpu-host-write.js";
+import { listTextures, setTextureNames as setHostTextureNames, writeTextures as hostWriteTextures } from "./gpu-host-texture.js";
 import { countCachedBindGroups, countLive } from "./gpu-stats.js";
 import { uniformToTypedArray, uniformTypeName } from "./uniform-convert.js";
 import { decodeTextureFormat } from "./enums.js";
+import { formatCreationRefusal } from "./texture-layout.js";
 import {
   decodeTextureDescriptor,
   decodeSamplerDescriptor,
@@ -40,6 +42,17 @@ export const OPTIONAL_DEVICE_FEATURES = [
   "dual-source-blending",
   // Powers (primitive :unclipped-depth true) → GPUPrimitiveState.unclippedDepth.
   "depth-clip-control",
+  // Plan 07's BC family: the format names are legal only when the base feature
+  // is on the device; BC 3D additionally needs the sliced-3d sibling.
+  "texture-compression-bc",
+  "texture-compression-bc-sliced-3d",
+  // Plan 07's ETC2/EAC family: no sliced-3d sibling exists, so 3D is refused
+  // by the format table rather than given an imaginary feature.
+  "texture-compression-etc2",
+  // Plan 07's ASTC family: the base feature covers 2D; ASTC 3D additionally
+  // needs the sliced-3d sibling.
+  "texture-compression-astc",
+  "texture-compression-astc-sliced-3d",
 ];
 
 // The optional features this adapter actually supports, in
@@ -87,6 +100,9 @@ const PNGB_FLAG_BUFFER_NAMES = 0x10;
 // payload uses frame-program instructions (§9's load-time handshake).
 const PNGB_FLAG_CONTROL_NAMES = 0x20;
 const PNGB_FLAG_HAS_GUARDS = 0x40;
+// Header flag bit 7: the uniform-table section carries a texture-name block
+// after the control-name block (plan 04 D14).
+const PNGB_FLAG_TEXTURE_NAMES = 0x80;
 // flags bit 3 — the author requested a PREMULTIPLIED canvas ((canvas
 // :alpha-mode premultiplied)); clear = "opaque", the GPUCanvasConfiguration
 // default. The bit used to mean the opposite, back when this runtime's own
@@ -127,7 +143,8 @@ export function payloadHasGuards(bytecode) {
  * Parse uniform table from PNGB bytecode.
  * Returns: { uniforms: Map<string, {bufferId, offset, size, type, elemCount}>,
  *            strings: string[],
- *            buffers: Map<string, {id, pool, frameWritten}> }
+ *            buffers: Map<string, {id, pool, frameWritten}>,
+ *            textures: Map<string, {id, pool, frameWritten}> }
  * For a fixed-size array field, `type` is the ELEMENT's UT_* tag and
  * `elemCount` its element count; elemCount 0 = not an array (the byte was
  * padding in older payloads, so they parse identically).
@@ -142,14 +159,21 @@ export function payloadHasGuards(bytecode) {
  * document's declared controls; each joins `uniforms` marked
  * `{ control: true, slot }` — slot is 1-based, slot 0 being `time`. See the
  * block's reader below for the reserved-empty-slot rule.
+ *
+ * `textures` is the third tail block (header flag bit 7): every declared
+ * `(texture :name …)` by its SJON name, with its pool's base id/member count
+ * and whether a frame's own queue ops write it. Like `buffers`, it is read
+ * only behind its flag and bounded by the section end; an entry whose name is
+ * the reserved empty string stays unnamed and exposes no map key.
  */
 export function parseUniformTable(bytecode) {
   const view = new DataView(bytecode.buffer, bytecode.byteOffset, bytecode.byteLength);
   const buffers = new Map();
+  const textures = new Map();
 
   // Validate PNGB magic
   if (bytecode.length < PNGB_HEADER_SIZE || view.getUint32(0, true) !== PNGB_MAGIC) {
-    return { uniforms: new Map(), strings: [], buffers };
+    return { uniforms: new Map(), strings: [], buffers, textures };
   }
 
   // Read header offsets
@@ -163,7 +187,7 @@ export function parseUniformTable(bytecode) {
   // Parse uniform table
   const uniforms = new Map();
   if (uniformTableOffset === 0 || uniformTableOffset >= bytecode.length) {
-    return { uniforms, strings, buffers };
+    return { uniforms, strings, buffers, textures };
   }
 
   let pos = uniformTableOffset;
@@ -241,7 +265,26 @@ export function parseUniformTable(bytecode) {
     }
   }
 
-  return { uniforms, strings, buffers };
+  // The texture-name block, after the control-name block (plan 04 D14):
+  // [count u16] then six bytes per entry — base id, name string id, pool,
+  // flags (bit 0 = frameWritten). Bounded by the section end like the blocks
+  // above. A reserved empty-string row consumes its record but joins no map,
+  // and later rows keep their own ids (never compacted).
+  if ((view.getUint16(6, true) & PNGB_FLAG_TEXTURE_NAMES) && pos + 2 <= sectionEnd) {
+    const textureCount = view.getUint16(pos, true);
+    pos += 2;
+    for (let i = 0; i < textureCount && pos + 6 <= sectionEnd; i++, pos += 6) {
+      const name = strings[view.getUint16(pos + 2, true)];
+      if (!name) continue; // a reserved slot: unnamed, unexposed
+      textures.set(name, {
+        id: view.getUint16(pos, true),
+        pool: view.getUint8(pos + 4),
+        frameWritten: (view.getUint8(pos + 5) & 1) === 1,
+      });
+    }
+  }
+
+  return { uniforms, strings, buffers, textures };
 }
 
 /**
@@ -437,12 +480,20 @@ export function createCommandDispatcher(device, ctx) {
   // create_bind_group's layout_id id-space tag; mirrors
   // src/types/opcodes.zig BIND_GROUP_LAYOUT_TAG. Set ⇒ standalone bgl id.
   const BGL_TAG = 0x8000;
+  // begin_render_pass_views' shared attachment-target encoding, mirroring
+  // src/types/opcodes.zig. A tagged value names txv (explicit (texture-view …));
+  // an untagged value names dfv (the texture's default view). The two sentinels
+  // carry the high bit too, so they are tested before the tag.
+  const ATTACH_VIEW = 0x8000;
+  const ATTACH_NONE = 0xffff;
+  const ATTACH_CANVAS = 0xfffe;
   const txd = [];      // texture descriptors
   const bun = [];      // render bundles
   const qs = [];       // query sets
   const bufUsage = []; // buffer usage flags (for MAP_READ detection, host-write refusal)
   const bufSize = [];  // buffer byte sizes (host-write range check)
   const bufNames = new Map(); // SJON buffer name → {id, pool, frameWritten} (host writes)
+  const texNames = new Map(); // SJON texture name → {id, pool, frameWritten} (host writes/reflection)
   let pendingOcclusionQS = null;
   let pendingTimestampWrites = null;
   let pendingDepthStencilOps = null;
@@ -450,9 +501,10 @@ export function createCommandDispatcher(device, ctx) {
   // Const, and cleared with .length = 0 rather than reassigned: the array is
   // handed to the queue-command module by reference, so a fresh array here
   // would leave that module writing into an orphan.
-  /** @type {{id: number, offset: number, size: number}[]} */
+  /** @type {PendingReadback[]} */
   const pendingReadbacks = [];
   let onQueryResult = null;
+  let onTextureReadback = null;
 
   // Helper: read string from WASM memory
   function rs(ptr, len) {
@@ -611,17 +663,57 @@ export function createCommandDispatcher(device, ctx) {
   }
 
 
+  // The public name for an id, from the payload's texture-name block; raw ids
+  // are an emission-order artefact, so they are the fallback only.
+  function texturePublicName(id) {
+    for (const [name, r] of texNames) {
+      if (id >= r.id && id < r.id + (r.pool || 1)) return name;
+    }
+    return String(id);
+  }
+
+  // Format-driven creation policy (plan 07). A compressed format's device
+  // feature is checked BEFORE createTexture: WebGPU's own later validation
+  // reports a missing feature as an opaque device error with neither the
+  // texture nor the feature named. The same message shape is used by the host
+  // write path, so an unsupported adapter can never fall through to a default
+  // format or a blank success.
+  function reportTextureCreationRefusal(id, desc) {
+    const why = formatCreationRefusal(
+      desc.format,
+      desc.dimension || "2d",
+      { width: desc.size[0], height: desc.size[1], depthOrArrayLayers: desc.size[2] || 1 },
+      device.features,
+    );
+    if (why === null) return false;
+    onError && onError({ message: `texture '${texturePublicName(id)}' ${why}`, source: "create-texture" });
+    return true;
+  }
+
   function createTexture(id, ptr, len) {
     if (tex[id]) return;
     if (len === 0) return emptyDescriptor("createTexture", id);
-    const { desc, canvasBound, canvasScale } = decodeTextureDescriptor(
+    const { desc, canvasBound, canvasScale, extentSource } = decodeTextureDescriptor(
       new Uint8Array(mem.buffer, ptr, len), navigator.gpu.getPreferredCanvasFormat(), cw, ch, bmp);
+    if (reportTextureCreationRefusal(id, desc)) return;
     // Canvas-bound: bytecode omitted width/height, so size tracks canvas dims.
-    // Remember the static fields so the resize path can rebuild at new cw/ch —
-    // `canvasScale` among them, or a half-resolution target would come back
-    // full-size after the first resize.
-    txd[id] = { format: desc.format, usage: desc.usage, canvasBound, canvasScale,
-                dimension: desc.dimension, sampleCount: desc.sampleCount, depth: desc.size[2] };
+    // Keep the COMPLETE plan-01 descriptor, not a projection of it: a later
+    // write_texture re-runs the calculator against these facts, and a field
+    // dropped here is a field the runtime can only guess. The resize path
+    // rebuilds from the same record, `canvasScale` among them, or a
+    // half-resolution target would come back full-size after the first resize.
+    txd[id] = {
+      id,
+      size: { width: desc.size[0], height: desc.size[1], depthOrArrayLayers: desc.size[2] || 1 },
+      dimension: desc.dimension || "2d",
+      format: desc.format,
+      usage: desc.usage,
+      sampleCount: desc.sampleCount || 1,
+      mipLevelCount: desc.mipLevelCount || 1,
+      extentSource,
+      canvasBound,
+      canvasScale,
+    };
     DEBUG && dbg && console.log(`[GPU] createTexture(${id}) ${desc.size[0]}x${desc.size[1]} ${desc.format} usage=0x${desc.usage.toString(16)}${canvasBound ? ' [canvas]' : ''}`);
     installTexture(id, scoped("createTexture", id, () => device.createTexture(desc)));
   }
@@ -725,17 +817,62 @@ export function createCommandDispatcher(device, ctx) {
              clearValue: { r: r || 0, g: g || 0, b: b || 0, a: a || 0 } };
   }
 
+  // One depth-stencil attachment from an ALREADY-RESOLVED view. Shared by the
+  // legacy begin-passes (which resolve dfv[depthId]) and 0x55 (which may have
+  // resolved an explicit view), so pending depth/stencil state has one consumer.
+  function depthAttachment(view, format) {
+    const pds = pendingDepthStencilOps;
+    const pcv = pendingClearValues;
+    const dsa = { view, depthLoadOp: pds ? pds.dl : "clear", depthStoreOp: pds ? pds.ds : "store", depthClearValue: pcv ? pcv.depth : 1.0 };
+    if (format?.includes("stencil")) {
+      dsa.stencilLoadOp = pds ? pds.sl : "clear";
+      dsa.stencilStoreOp = pds ? pds.ss : "store";
+      dsa.stencilClearValue = pcv ? pcv.stencil : 0;
+    }
+    pendingDepthStencilOps = null;
+    pendingClearValues = null;
+    return dsa;
+  }
+
+  // The ONE target resolver for begin_render_pass_views' colour, resolve and
+  // depth positions: canvas → the current canvas view; tagged → txv[id & 0x7fff];
+  // otherwise → dfv[id]. A missing or wrong-kind entry is a NAMED failure and
+  // null; the caller must not fall back to another table or open an empty pass.
+  function attachmentFailure(role, index, why) {
+    onError && onError({ message: `begin_render_pass_views: ${role} attachment ${index} ${why}`, source: "command" });
+    return null;
+  }
+
+  function attachmentView(target, role, index) {
+    if (target === ATTACH_CANVAS) {
+      if (role === "depth") return attachmentFailure(role, index, "cannot be the canvas");
+      return targetCtx.getCurrentTexture().createView();
+    }
+    if (target === ATTACH_NONE) return attachmentFailure(role, index, "is missing");
+    if ((target & ATTACH_VIEW) !== 0) {
+      const id = target & ~ATTACH_VIEW;
+      const view = txv[id];
+      return view || attachmentFailure(role, index, `references missing texture view ${id}`);
+    }
+    const view = dfv[target];
+    return view || attachmentFailure(role, index, `references missing texture ${target}`);
+  }
+
+  // The resolved view's format, for the stencil-op decision. An explicit view's
+  // source texture is remembered in txs; a plain target IS the texture id. The
+  // canvas is never a depth attachment (attachmentView refuses it), so this is
+  // only called for depth targets.
+  function attachmentFormat(target) {
+    if (target === ATTACH_CANVAS) return undefined;
+    const tid = (target & ATTACH_VIEW) !== 0 ? txs[target & ~ATTACH_VIEW]?.tid : target;
+    return txd[tid]?.format;
+  }
+
   // Apply pending pass-scoped state (depth-stencil attachment, occlusion query
   // set, timestamp writes) to a render-pass descriptor. Shared by begin*Pass.
   function applyPendingPassState(pd, depthId) {
-    if (depthId !== 0xffff && tex[depthId]) {
-      const pds = pendingDepthStencilOps;
-      const pcv = pendingClearValues;
-      const dsa = { view: dfv[depthId], depthLoadOp: pds ? pds.dl : "clear", depthStoreOp: pds ? pds.ds : "store", depthClearValue: pcv ? pcv.depth : 1.0 };
-      if (txd[depthId]?.format?.includes("stencil")) { dsa.stencilLoadOp = pds ? pds.sl : "clear"; dsa.stencilStoreOp = pds ? pds.ss : "store"; dsa.stencilClearValue = pcv ? pcv.stencil : 0; }
-      pd.depthStencilAttachment = dsa;
-      pendingDepthStencilOps = null;
-      pendingClearValues = null;
+    if (depthId !== undefined && depthId !== 0xffff && tex[depthId]) {
+      pd.depthStencilAttachment = depthAttachment(dfv[depthId], txd[depthId]?.format);
     }
     if (pendingOcclusionQS) { pd.occlusionQuerySet = pendingOcclusionQS; pendingOcclusionQS = null; }
     if (pendingTimestampWrites) { pd.timestampWrites = pendingTimestampWrites; pendingTimestampWrites = null; }
@@ -780,6 +917,37 @@ export function createCommandDispatcher(device, ctx) {
     pass = enc.beginRenderPass(pd);
   }
 
+  // 0x55: every target is resolved through the one helper above, so colour,
+  // resolve and depth share the canvas/tagged-view/texture split. Any resolution
+  // failure reports by name and returns false BEFORE beginRenderPass — the
+  // decoder then aborts the buffer, never opening a pass over a missing view.
+  function beginRenderPassViews(attachments, depthTarget) {
+    if (!enc) enc = device.createCommandEncoder();
+    const colorAttachments = [];
+    for (let i = 0; i < attachments.length; i++) {
+      const a = attachments[i];
+      const view = attachmentView(a.target, "colour", i);
+      if (!view) return false;
+      const att = colorAttachment(view, a.load, a.store, a.r, a.g, a.b, a.a);
+      if (a.resolve !== ATTACH_NONE) {
+        const resolve = attachmentView(a.resolve, "resolve", i);
+        if (!resolve) return false;
+        att.resolveTarget = resolve;
+      }
+      colorAttachments.push(att);
+    }
+    const pd = { colorAttachments };
+    if (depthTarget !== ATTACH_NONE) {
+      const view = attachmentView(depthTarget, "depth", 0);
+      if (!view) return false;
+      pd.depthStencilAttachment = depthAttachment(view, attachmentFormat(depthTarget));
+    }
+    applyPendingPassState(pd);
+    DEBUG && dbg && console.log(`[GPU] beginRenderPassViews count=${attachments.length} depth=${depthTarget}`);
+    pass = enc.beginRenderPass(pd);
+    return true;
+  }
+
   function beginComputePass() {
     if (!enc) enc = device.createCommandEncoder();
     pass = enc.beginComputePass();
@@ -802,6 +970,7 @@ export function createCommandDispatcher(device, ctx) {
     createBindGroup,
     txv,
     txs,
+    txd,
     tex,
     bgl,
     device,
@@ -813,6 +982,7 @@ export function createCommandDispatcher(device, ctx) {
     ppl,
     beginRenderPass,
     beginRenderPassMRT,
+    beginRenderPassViews,
     beginComputePass,
     getPass: () => pass,
     setPass: (v) => {
@@ -857,6 +1027,7 @@ export function createCommandDispatcher(device, ctx) {
     scratch,
     decodeWasmArgs: (ab) => decodeWasmArgs(ab, { cw, ch, time, tdelta }),
     getOnQueryResult: () => onQueryResult,
+    getOnTextureReadback: () => onTextureReadback,
     debug: () => dbg,
     reportError: (e) => { onError && onError(e); },
     alive: () => alive,
@@ -864,6 +1035,7 @@ export function createCommandDispatcher(device, ctx) {
     // --- host writes (gpu-host-write.js) ---
     bufSize,
     bufNames,
+    texNames,
   };
 
   // Main dispatch - inline command constants for minification
@@ -873,8 +1045,8 @@ export function createCommandDispatcher(device, ctx) {
   // Each handler returns the position AFTER its operands; a module returns null
   // for an opcode it does not own. Operand widths are pinned against the Zig
   // emitter by tests/npm/command-buffer-widths.test.js.
-  function dispatch(cmd, view, pos) {
-    const resourcePassResult = dispatchResourcePassCommand(cmd, view, pos, gpuOps);
+  function dispatch(cmd, view, pos, end) {
+    const resourcePassResult = dispatchResourcePassCommand(cmd, view, pos, gpuOps, end);
     if (resourcePassResult !== null) return resourcePassResult;
 
     const queueResult = dispatchQueueCommand(cmd, view, pos, gpuOps);
@@ -920,7 +1092,12 @@ export function createCommandDispatcher(device, ctx) {
     const end = ptr + totalLen;
     for (let i = 0; i < cmdCount && pos < end; i++) {
       const cmd = view.getUint8(pos++);
-      const result = dispatch(cmd, view, pos);
+      const result = dispatch(cmd, view, pos, end);
+      if (result === ABORT) {
+        // A known opcode whose record is malformed has already reported why;
+        // the operand length is untrustworthy, so stop rather than desync.
+        break;
+      }
       if (result === UNKNOWN_CMD) {
         // Operand length unknown → advancing would re-read operand bytes as
         // opcodes (a desync). Abort the buffer and tell the host, loudly.
@@ -966,6 +1143,7 @@ export function createCommandDispatcher(device, ctx) {
     wcr.length = bgd.length = txd.length = txs.length = bufUsage.length = bufSize.length = 0;
     qs.length = bun.length = 0;
     bufNames.clear();
+    texNames.clear();
     curPip = -1;
     pendingReadbacks.length = 0;
     pendingOcclusionQS = pendingTimestampWrites = null;
@@ -975,7 +1153,7 @@ export function createCommandDispatcher(device, ctx) {
     // between the device teardown and the terminate — so a dispatcher can
     // genuinely outlive its device, and `mem` in particular pins the executor's
     // whole WASM memory.
-    onQueryResult = onError = onShaderError = null;
+    onQueryResult = onTextureReadback = onError = onShaderError = null;
     uniformMap = null;
     controlTable = null;
     mem = null;
@@ -1103,8 +1281,19 @@ export function createCommandDispatcher(device, ctx) {
       const d = txd[id];
       if (!d || !d.canvasBound || !tex[id]) continue;
       tex[id].destroy?.();
-      const desc = { size: [scaleExtent(w, d.canvasScale || 1), scaleExtent(h, d.canvasScale || 1), d.depth || 1], format: d.format, usage: d.usage, sampleCount: d.sampleCount || 1 };
-      if (d.dimension) desc.dimension = d.dimension;
+      // The descriptor record is what a later write_texture validates against;
+      // a resized canvas-bound texture must not keep its creation-time extent.
+      d.size.width = scaleExtent(w, d.canvasScale || 1);
+      d.size.height = scaleExtent(h, d.canvasScale || 1);
+      const size = [d.size.width, d.size.height, d.size.depthOrArrayLayers];
+      const desc = {
+        size,
+        format: d.format,
+        usage: d.usage,
+        sampleCount: d.sampleCount,
+        mipLevelCount: d.mipLevelCount,
+        dimension: d.dimension,
+      };
       installTexture(id, device.createTexture(desc));
     }
     // Explicit (texture-view …) resources of a recreated texture, remade from
@@ -1151,6 +1340,7 @@ export function createCommandDispatcher(device, ctx) {
     setOnShaderError(fn) { onShaderError = fn; },
     setOnError(fn) { onError = fn; },
     setOnQueryResult(fn) { onQueryResult = fn; },
+    setOnTextureReadback(fn) { onTextureReadback = fn; },
     setUniformTable,
     setControlTable,
     setUniform,
@@ -1159,6 +1349,14 @@ export function createCommandDispatcher(device, ctx) {
     setBufferNames: (names) => setHostBufferNames(gpuOps, names),
     writeBuffers: (buffers, counter) => hostWriteBuffers(gpuOps, buffers, counter),
     getBuffers: () => listBuffers(gpuOps),
+    // Host texture writes and reflection by SJON texture name; bodies in
+    // gpu-host-texture.js.
+    setTextureNames: (names) => setHostTextureNames(gpuOps, names),
+    writeTextures: (textures, counter) => hostWriteTextures(gpuOps, textures, counter),
+    getTextures: () => listTextures(gpuOps),
+    // Current write-validation descriptor for a created texture, or null. The
+    // reflection surfaces read this record rather than re-decoding bindings.
+    getTextureDescriptor: (id) => txd[id] ?? null,
     getStats,
     execute,
     destroy,

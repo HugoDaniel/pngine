@@ -6,6 +6,7 @@ const Allocator = std.mem.Allocator;
 const pngine = @import("pngine");
 const Cmd = pngine.command_buffer.Cmd;
 const desc = pngine.types.descriptors;
+const texture_layout = pngine.types.texture_layout;
 const opcodes = pngine.opcodes;
 
 const cv_shared = @import("params.zig");
@@ -23,6 +24,7 @@ const DiagnosticCheck = cv_shared.DiagnosticCheck;
 const Diagnosis = cv_shared.Diagnosis;
 const BufferInfo = cv_shared.BufferInfo;
 const TextureInfo = cv_shared.TextureInfo;
+const TextureViewInfo = cv_shared.TextureViewInfo;
 const ResourceInfo = cv_shared.ResourceInfo;
 const DescriptorType = cv_shared.DescriptorType;
 const TextureField = cv_shared.TextureField;
@@ -41,6 +43,7 @@ const CreateShaderParams = cv_shared.CreateShaderParams;
 const CreateBindGroupParams = cv_shared.CreateBindGroupParams;
 const CreateTextureViewParams = cv_shared.CreateTextureViewParams;
 const BeginRenderPassParams = cv_shared.BeginRenderPassParams;
+const BeginRenderPassViewsParams = cv_shared.BeginRenderPassViewsParams;
 const SetPipelineParams = cv_shared.SetPipelineParams;
 const SetBindGroupParams = cv_shared.SetBindGroupParams;
 const SetVertexBufferParams = cv_shared.SetVertexBufferParams;
@@ -50,9 +53,11 @@ const DrawIndexedParams = cv_shared.DrawIndexedParams;
 const DispatchParams = cv_shared.DispatchParams;
 const IndirectParams = cv_shared.IndirectParams;
 const WriteBufferParams = cv_shared.WriteBufferParams;
+const WriteTextureParams = cv_shared.WriteTextureParams;
 const WriteTimeUniformParams = cv_shared.WriteTimeUniformParams;
 const CopyBufferParams = cv_shared.CopyBufferParams;
 const CopyTextureParams = cv_shared.CopyTextureParams;
+const CopyTextureSubresourceParams = cv_shared.CopyTextureSubresourceParams;
 const CopyExternalImageParams = cv_shared.CopyExternalImageParams;
 const InitWasmModuleParams = cv_shared.InitWasmModuleParams;
 const CallWasmFuncParams = cv_shared.CallWasmFuncParams;
@@ -158,7 +163,7 @@ pub const Validator = struct {
     /// Each create_bind_group's layout reference, resolved at end of stream.
     bind_group_layout_refs: std.ArrayList(BindGroupLayoutRef),
     bind_groups: std.AutoHashMapUnmanaged(u16, ResourceInfo),
-    texture_views: std.AutoHashMapUnmanaged(u16, ResourceInfo),
+    texture_views: std.AutoHashMapUnmanaged(u16, TextureViewInfo),
     image_bitmaps: std.AutoHashMapUnmanaged(u16, ResourceInfo),
     wasm_modules: std.AutoHashMapUnmanaged(u16, ResourceInfo),
 
@@ -414,6 +419,7 @@ pub const Validator = struct {
             .begin_render_pass_f32 => try self.beginRenderPassState(
                 "BEGIN_RENDER_PASS_F32 inside active pass - nested passes not allowed",
             ),
+            .begin_render_pass_views => try self.validateBeginRenderPassViews(cmd.params.begin_render_pass_views),
             .begin_render_pass_mrt_f32 => try self.beginRenderPassState(
                 "BEGIN_RENDER_PASS_MRT_F32 inside active pass - nested passes not allowed",
             ),
@@ -461,10 +467,20 @@ pub const Validator = struct {
 
             // Queue operations
             .write_buffer => try self.validateWriteBuffer(cmd.params.write_buffer),
+            // A queue-level command with no pass-state effect. Its destination
+            // and layout are checked against the texture this stream created
+            // and plan 01's shared calculator.
+            .write_texture => try self.validateWriteTexture(cmd.params.write_texture),
             .write_time_uniform => try self.validateWriteTimeUniform(cmd.params.write_time_uniform),
             .write_pointer_uniform => try self.validateWriteTimeUniform(cmd.params.write_pointer_uniform),
             .copy_buffer_to_buffer => try self.validateCopyBuffer(cmd.params.copy_buffer),
             .copy_texture_to_texture => try self.validateCopyTexture(cmd.params.copy_texture),
+            .copy_texture_subresource => try self.validateCopyTextureSubresource(cmd.params.copy_texture_subresource),
+            // The two encoder buffer↔texture copies decode their fixed 46-byte
+            // record (parse.zig owns the width) but have no state to check
+            // here: their validator-level fields are the resource ids, which
+            // `validateCommand` does not resolve for every queue command.
+            .copy_buffer_to_texture, .copy_texture_to_buffer => {},
             .write_buffer_from_wasm => try self.validateWriteBufferFromWasm(cmd.params.write_buffer_from_wasm),
             .copy_external_image_to_texture => try self.validateCopyExternalImage(cmd.params.copy_external_image),
 
@@ -579,8 +595,13 @@ pub const Validator = struct {
             "CREATE_TEXTURE desc_ptr + desc_len exceeds WASM memory",
         );
 
-        // Parse texture descriptor and validate per WebGPU spec
-        var texture_info = TextureInfo{ .created_at = self.command_index };
+        // Parse texture descriptor and validate per WebGPU spec. Until a
+        // descriptor actually decodes, the defaults above are not a
+        // destination a later write may validate against.
+        var texture_info = TextureInfo{
+            .created_at = self.command_index,
+            .descriptor_parsed = false,
+        };
         var descriptor_parsed = false;
 
         // Only parse if we can access the descriptor memory
@@ -712,6 +733,13 @@ pub const Validator = struct {
         if (data[0] != @intFromEnum(DescriptorType.texture)) return null;
 
         var info = TextureInfo{ .created_at = 0 };
+        // Presence of the two explicit extent fields is what distinguishes a
+        // concrete descriptor from a canvas-/image-sized one. The defaults are
+        // 1×1, but that is a placeholder, never a base extent to validate a
+        // write against.
+        var has_width = false;
+        var has_height = false;
+        var runtime_extent = false;
 
         // Walk the fields with the shared TlvReader rather than a local switch
         // over value types. The hand-rolled walk this replaces understood only
@@ -728,8 +756,14 @@ pub const Validator = struct {
             const f = reader.next() orelse break;
             const field = std.enums.fromInt(TextureField, f.id) orelse continue;
             switch (field) {
-                .width => info.width = f.scalar,
-                .height => info.height = f.scalar,
+                .width => {
+                    info.width = f.scalar;
+                    has_width = true;
+                },
+                .height => {
+                    info.height = f.scalar;
+                    has_height = true;
+                },
                 .depth => info.depth = f.scalar,
                 .format => info.format = @truncate(f.scalar),
                 .usage => info.usage = @truncate(f.scalar),
@@ -739,17 +773,17 @@ pub const Validator = struct {
                     @TypeOf(info.dimension),
                     @as(u8, @truncate(f.scalar)),
                 ) orelse info.dimension,
-                // Neither changes what this validator checks: `view_formats`
-                // is a list it does not read, `size_from_image_bitmap` and
-                // `size_canvas_scale` are runtime size resolution, and the
-                // width/height it validates are the placeholder 1×1 for every
-                // canvas-tracking texture already.
-                .view_formats, .size_from_image_bitmap, .size_canvas_scale => {},
+                // Either field says the runtime resolves the extent: a
+                // canvas-tracking or image-bitmap-sized texture. `view_formats`
+                // is a list this validator does not read.
+                .size_from_image_bitmap, .size_canvas_scale => runtime_extent = true,
+                .view_formats => {},
             }
         } else {
             // Field-count bound reached - valid parse.
         }
 
+        info.dynamic_extent = runtime_extent or !has_width or !has_height;
         return info;
     }
 
@@ -2069,7 +2103,50 @@ pub const Validator = struct {
         if (!is_special_texture and !self.textures.contains(params.texture_id)) {
             try self.addErrorWithId("E001", "Texture view references non-existent texture", params.texture_id);
         }
-        try self.texture_views.put(self.gpa, params.id, .{ .created_at = self.command_index });
+        // The view's descriptor decides whether it can be an attachment later.
+        // Keep the authored fields now: the descriptor bytes live in the data
+        // section, and a later 0x55 only carries the view id.
+        var info = TextureViewInfo{
+            .created_at = self.command_index,
+            .texture_id = params.texture_id,
+        };
+        if (!is_special_texture and params.desc_len >= 2 and self.wasm_memory != null) {
+            const mem = self.wasm_memory.?;
+            const end = @as(usize, params.desc_ptr) + params.desc_len;
+            if (end <= mem.len) {
+                if (parseTextureViewDescriptor(mem[params.desc_ptr..end])) |parsed| {
+                    info = parsed;
+                    info.created_at = self.command_index;
+                    info.texture_id = params.texture_id;
+                }
+            }
+        }
+        try self.texture_views.put(self.gpa, params.id, info);
+    }
+
+    /// Decode a `(texture-view …)` TLV descriptor. Returns null for a blob with
+    /// the wrong type tag or a malformed head; the caller then keeps the
+    /// all-default record (an unparsed view is not treated as a valid
+    /// attachment descriptor).
+    pub fn parseTextureViewDescriptor(data: []const u8) ?TextureViewInfo {
+        if (data.len < 2) return null;
+        if (data[0] != @intFromEnum(DescriptorType.texture_view)) return null;
+        var info = TextureViewInfo{ .created_at = 0, .descriptor_parsed = true };
+        var reader = desc.TlvReader.init(data) orelse return null;
+        for (0..MAX_DESCRIPTOR_FIELDS) |_| {
+            const f = reader.next() orelse break;
+            const field = std.enums.fromInt(desc.TextureViewField, f.id) orelse continue;
+            switch (field) {
+                .format => info.format = @truncate(f.scalar),
+                .dimension => info.dimension = @truncate(f.scalar),
+                .aspect => info.aspect = @truncate(f.scalar),
+                .base_mip_level => info.base_mip_level = f.scalar,
+                .mip_level_count => info.mip_level_count = f.scalar,
+                .base_array_layer => info.base_array_layer = f.scalar,
+                .array_layer_count => info.array_layer_count = f.scalar,
+            }
+        }
+        return info;
     }
 
     fn validateCreateImageBitmap(self: *Self, params: CreateResourceParams) !void {
@@ -2103,6 +2180,179 @@ pub const Validator = struct {
     fn validateBeginRenderPass(self: *Self, params: BeginRenderPassParams) !void {
         _ = params;
         try self.beginRenderPassState("BEGIN_RENDER_PASS inside active pass - nested passes not allowed");
+    }
+
+    /// The attachment position a 0x55 target appears in. Colour may not be
+    /// `none`; depth may not be the canvas; resolve allows both `none` and the
+    /// canvas. Encoding these rules here keeps the shared target decoder from
+    /// acquiring a position-dependent meaning.
+    const AttachmentRole = enum { colour, resolve, depth };
+
+    /// Validate 0x55's targets and then open the pass. The pass state is opened
+    /// even when a target is invalid: a missing `end_pass` would otherwise turn
+    /// one attachment error into a cascade of "END_PASS without matching BEGIN".
+    fn validateBeginRenderPassViews(self: *Self, params: BeginRenderPassViewsParams) !void {
+        if (self.pass_state != .none) {
+            try self.addError("E008", "BEGIN_RENDER_PASS_VIEWS inside active pass - nested passes not allowed");
+            return;
+        }
+
+        if (params.count == 0 and params.depth_target == NO_DEPTH_TEXTURE_ID) {
+            try self.addError("E006", "BEGIN_RENDER_PASS_VIEWS with zero colour attachments requires a depth target");
+        }
+
+        for (0..params.count) |i| {
+            const att = params.attachments[i];
+            try self.validateAttachmentTarget(att.target, .colour);
+            if (att.resolve_target != NO_DEPTH_TEXTURE_ID) {
+                try self.validateAttachmentTarget(att.resolve_target, .resolve);
+                try self.validateResolvePair(att.target, att.resolve_target);
+            }
+        }
+        if (params.depth_target != NO_DEPTH_TEXTURE_ID) {
+            try self.validateAttachmentTarget(params.depth_target, .depth);
+        }
+
+        self.pass_state = .render;
+        self.current_pipeline = null;
+        self.resetPassState();
+    }
+
+    fn validateAttachmentTarget(self: *Self, target: u16, role: AttachmentRole) !void {
+        if (target == CANVAS_TEXTURE_ID) {
+            if (role == .depth) {
+                try self.addError("E006", "BEGIN_RENDER_PASS_VIEWS depth attachment cannot use the canvas");
+            }
+            return;
+        }
+        if (target == NO_DEPTH_TEXTURE_ID) {
+            if (role == .colour) {
+                try self.addError("E006", "BEGIN_RENDER_PASS_VIEWS colour attachment cannot be none");
+            }
+            return;
+        }
+        if (opcodes.attachmentTargetIsView(target)) {
+            try self.validateViewAttachment(opcodes.attachmentTargetValue(target), role);
+        } else {
+            try self.validateTextureAttachment(target, role);
+        }
+    }
+
+    /// A plain texture target uses its default view, which covers every mip and
+    /// layer. An attachment must select exactly one of each, so a multi-mip or
+    /// layered texture is only reachable through an explicit single-mip view.
+    fn validateTextureAttachment(self: *Self, id: u16, role: AttachmentRole) !void {
+        const tex = self.textures.get(id) orelse {
+            try self.addErrorWithId("E001", "BEGIN_RENDER_PASS_VIEWS references non-existent texture", id);
+            return;
+        };
+        try self.validateAttachmentTextureInfo(id, tex, tex.format, role);
+        if (tex.mip_level_count > 1) {
+            try self.addErrorWithId("E006", "BEGIN_RENDER_PASS_VIEWS attachment texture must select one mip", id);
+        }
+        if (tex.depth > 1) {
+            try self.addErrorWithId("E006", "BEGIN_RENDER_PASS_VIEWS attachment texture must select one layer", id);
+        }
+    }
+
+    fn validateViewAttachment(self: *Self, id: u16, role: AttachmentRole) !void {
+        const view = self.texture_views.get(id) orelse {
+            try self.addErrorWithId("E001", "BEGIN_RENDER_PASS_VIEWS references non-existent texture view", id);
+            return;
+        };
+        const tex = self.textures.get(view.texture_id) orelse {
+            try self.addErrorWithId("E001", "BEGIN_RENDER_PASS_VIEWS texture view references a missing texture", view.texture_id);
+            return;
+        };
+        if (view.descriptor_parsed) {
+            const dimension = resolvedViewDimension(view, tex);
+            if (dimension != 1) { // 1 = "2d"
+                try self.addErrorWithId("E006", "BEGIN_RENDER_PASS_VIEWS attachment view must be 2d", id);
+            }
+        }
+        const format = if (view.format != 0xFF) view.format else tex.format;
+        try self.validateAttachmentTextureInfo(id, tex, format, role);
+        if (resolvedMipCount(view, tex) != 1) {
+            try self.addErrorWithId("E006", "BEGIN_RENDER_PASS_VIEWS attachment view must select one mip", id);
+        }
+        if (resolvedLayerCount(view, tex) != 1) {
+            try self.addErrorWithId("E006", "BEGIN_RENDER_PASS_VIEWS attachment view must select one layer", id);
+        }
+        if (role == .depth and view.aspect == 1) {
+            try self.addErrorWithId("E006", "BEGIN_RENDER_PASS_VIEWS depth attachment cannot use a stencil-only view", id);
+        }
+    }
+
+    /// Usage + format checks shared by a plain texture and a tagged view.
+    fn validateAttachmentTextureInfo(self: *Self, id: u16, tex: TextureInfo, format: u8, role: AttachmentRole) !void {
+        if (tex.descriptor_parsed and (tex.usage & TextureUsage.RENDER_ATTACHMENT) == 0) {
+            try self.addErrorWithId("E006", "BEGIN_RENDER_PASS_VIEWS attachment lacks RENDER_ATTACHMENT usage", id);
+        }
+        const depth_format = format >= 0x10 and format <= 0x1F;
+        if (role == .depth and !depth_format and tex.descriptor_parsed) {
+            try self.addErrorWithId("E006", "BEGIN_RENDER_PASS_VIEWS depth attachment must use a depth format", id);
+        } else if (role != .depth and depth_format and tex.descriptor_parsed) {
+            try self.addErrorWithId("E006", "BEGIN_RENDER_PASS_VIEWS colour attachment cannot use a depth format", id);
+        }
+    }
+
+    /// Resolve targets must have the colour attachment's format and be
+    /// single-sample; a resolve from a single-sample colour target is invalid.
+    fn validateResolvePair(self: *Self, color_target: u16, resolve_target: u16) !void {
+        const color_tex = self.attachmentTexture(color_target) orelse return;
+        const resolve_tex = self.attachmentTexture(resolve_target) orelse return;
+        if (self.attachmentFormat(color_target, color_tex) != self.attachmentFormat(resolve_target, resolve_tex)) {
+            try self.addError("E006", "BEGIN_RENDER_PASS_VIEWS resolve target format must match its colour attachment");
+        }
+        if (resolve_tex.sample_count != 1) {
+            try self.addError("E006", "BEGIN_RENDER_PASS_VIEWS resolve target must be single-sample");
+        }
+        if (color_tex.sample_count == 1) {
+            try self.addError("E006", "BEGIN_RENDER_PASS_VIEWS resolve target requires a multisampled colour attachment");
+        }
+    }
+
+    /// The source texture behind a 0x55 target; null for canvas/none or an
+    /// unknown id (already reported by validateAttachmentTarget).
+    fn attachmentTexture(self: *const Self, target: u16) ?TextureInfo {
+        if (target == CANVAS_TEXTURE_ID or target == NO_DEPTH_TEXTURE_ID) return null;
+        if (opcodes.attachmentTargetIsView(target)) {
+            const view = self.texture_views.get(opcodes.attachmentTargetValue(target)) orelse return null;
+            return self.textures.get(view.texture_id);
+        }
+        return self.textures.get(target);
+    }
+
+    fn attachmentFormat(self: *const Self, target: u16, tex: TextureInfo) u8 {
+        if (opcodes.attachmentTargetIsView(target)) {
+            if (self.texture_views.get(opcodes.attachmentTargetValue(target))) |view| {
+                if (view.format != 0xFF) return view.format;
+            }
+        }
+        return tex.format;
+    }
+
+    /// Absent view dimension follows WebGPU's inference from the source texture.
+    fn resolvedViewDimension(view: TextureViewInfo, tex: TextureInfo) u8 {
+        if (view.dimension != 0xFF) return view.dimension;
+        return switch (tex.dimension) {
+            .@"1d" => 0,
+            .@"3d" => 5,
+            .@"2d" => if (tex.depth > 1) 2 else 1,
+        };
+    }
+
+    /// An absent count means "all remaining" — resolved against the texture, not
+    /// assumed to be one. `-|` clamps a corrupt base past the end to zero, which
+    /// then fails the "one mip/layer" check rather than underflowing.
+    fn resolvedMipCount(view: TextureViewInfo, tex: TextureInfo) u32 {
+        if (view.mip_level_count != 0xFFFFFFFF) return view.mip_level_count;
+        return @as(u32, tex.mip_level_count) -| view.base_mip_level;
+    }
+
+    fn resolvedLayerCount(view: TextureViewInfo, tex: TextureInfo) u32 {
+        if (view.array_layer_count != 0xFFFFFFFF) return view.array_layer_count;
+        return tex.depth -| view.base_array_layer;
     }
 
     /// Open a render pass. Shared by the single-attachment and MRT forms: the
@@ -2377,6 +2627,127 @@ pub const Validator = struct {
     // Queue Operation Validators
     // ========================================================================
 
+    /// WRITE_TEXTURE: descriptor identity, the source data window, then plan
+    /// 01's calculator over the destination the stream actually created.
+    ///
+    /// The inspector does not own a second layout algorithm: stride minima,
+    /// the required span, mip/range/aspect and usage/sample rules all come
+    /// from `texture_layout.calculateWrite`. Only its verdict is translated
+    /// into the inspector's E-codes here: an unknown destination is E001, a
+    /// data window outside WASM memory is E004, and every destination/layout
+    /// refusal is E006 with the shared code appended.
+    fn validateWriteTexture(self: *Self, params: WriteTextureParams) !void {
+        const texture_info = self.textures.get(params.id);
+        if (texture_info == null) {
+            try self.addErrorWithId("E001", "WRITE_TEXTURE references non-existent texture", params.id);
+        }
+
+        // E004: the command's data window is the whole data entry (offset is
+        // relative to it), so a hostile pointer/length never reaches a read.
+        _ = try self.validateMemoryBounds(
+            params.data_ptr,
+            params.data_len,
+            "WRITE_TEXTURE data_ptr + data_len exceeds WASM memory",
+        );
+
+        const info = texture_info orelse return;
+        if (!info.descriptor_parsed) {
+            // The create descriptor was missing or unreadable. Its 1×1/zero
+            // defaults are not a destination; refuse rather than validate
+            // against invented facts.
+            try self.addErrorWithId(
+                "E006",
+                writeTextureRefusalMessage(.invalid_texture_descriptor),
+                params.id,
+            );
+            return;
+        }
+        if (info.dynamic_extent) {
+            // Canvas- and image-sized textures have no concrete extent in the
+            // command stream. The executing backend validates them against
+            // the current descriptor; here there is nothing to check without
+            // inventing a 1×1 base extent.
+            return;
+        }
+
+        const descriptor = textureDescriptorFrom(info);
+
+        switch (texture_layout.calculateWrite(descriptor, params.writeLayout(), params.data_len)) {
+            .ok => {},
+            .refuse => |refusal| try self.addErrorWithId(
+                "E006",
+                writeTextureRefusalMessage(refusal.code),
+                params.id,
+            ),
+        }
+    }
+
+    /// Translate one retained `TextureInfo` into the shared plan-01 descriptor.
+    /// The preferred-canvas sentinel is resolved to bgra8unorm the way every
+    /// runtime does; the calculator has no row for the sentinel and must never
+    /// infer a footprint from it. The extent source is explicit here because a
+    /// dynamic entry returns before this is called.
+    fn textureDescriptorFrom(info: TextureInfo) texture_layout.TextureDescriptor {
+        const format_code: desc.TextureFormat = @enumFromInt(info.format);
+        return .{
+            .size = .{
+                .width = info.width,
+                .height = info.height,
+                .depth_or_array_layers = info.depth,
+            },
+            .dimension = switch (info.dimension) {
+                .@"1d" => .d1,
+                .@"2d" => .d2,
+                .@"3d" => .d3,
+            },
+            .format = if (format_code == .preferred_canvas_format) .bgra8unorm else format_code,
+            .usage = desc.TextureUsage.fromU8(info.usage),
+            .sample_count = info.sample_count,
+            .mip_level_count = info.mip_level_count,
+            .extent_source = .explicit,
+        };
+    }
+
+    /// The inspector's E006 wording for a plan 01 refusal. Static strings keep
+    /// `Issue.message` slices valid for the report's lifetime; the shared code
+    /// is appended verbatim so the four surfaces name the same refusal.
+    fn writeTextureRefusalMessage(code: texture_layout.Code) []const u8 {
+        return switch (code) {
+            .invalid_format => "WRITE_TEXTURE destination/layout refused: invalid-format",
+            .invalid_texture_descriptor => "WRITE_TEXTURE destination/layout refused: invalid-texture-descriptor",
+            .unsupported_dimension => "WRITE_TEXTURE destination/layout refused: unsupported-dimension",
+            .missing_copy_dst => "WRITE_TEXTURE destination/layout refused: missing-copy-dst",
+            .missing_copy_src => "WRITE_TEXTURE destination/layout refused: missing-copy-src",
+            .multisampled_destination => "WRITE_TEXTURE destination/layout refused: multisampled-destination",
+            // Plan 06's texture→texture codes are unreachable from the write
+            // validator; the arms keep the shared enum exhaustive.
+            .sample_count_mismatch => "WRITE_TEXTURE destination/layout refused: sample-count-mismatch",
+            .overlapping_subresources => "WRITE_TEXTURE destination/layout refused: overlapping-subresources",
+            .invalid_aspect => "WRITE_TEXTURE destination/layout refused: invalid-aspect",
+            .aspect_not_writable => "WRITE_TEXTURE destination/layout refused: aspect-not-writable",
+            .partial_depth_stencil_write => "WRITE_TEXTURE destination/layout refused: partial-depth-stencil-write",
+            // Plan 06 slice 2's full-subresource rule is a texture→texture
+            // copy code; unreachable from the write validator, kept exhaustive.
+            .partial_subresource_copy => "WRITE_TEXTURE destination/layout refused: partial-subresource-copy",
+            .mip_out_of_range => "WRITE_TEXTURE destination/layout refused: mip-out-of-range",
+            .origin_out_of_bounds => "WRITE_TEXTURE destination/layout refused: origin-out-of-bounds",
+            .extent_out_of_bounds => "WRITE_TEXTURE destination/layout refused: extent-out-of-bounds",
+            .unaligned_block_origin => "WRITE_TEXTURE destination/layout refused: unaligned-block-origin",
+            .unaligned_block_extent => "WRITE_TEXTURE destination/layout refused: unaligned-block-extent",
+            .missing_bytes_per_row => "WRITE_TEXTURE destination/layout refused: missing-bytes-per-row",
+            .missing_rows_per_image => "WRITE_TEXTURE destination/layout refused: missing-rows-per-image",
+            .bytes_per_row_too_small => "WRITE_TEXTURE destination/layout refused: bytes-per-row-too-small",
+            .rows_per_image_too_small => "WRITE_TEXTURE destination/layout refused: rows-per-image-too-small",
+            // Plan 05's buffer-copy codes cannot be produced by writeTexture
+            // (`aligned = false`); the arms keep the shared enum exhaustive.
+            .bytes_per_row_alignment => "WRITE_TEXTURE destination/layout refused: bytes-per-row-alignment",
+            .buffer_offset_alignment => "WRITE_TEXTURE destination/layout refused: buffer-offset-alignment",
+            .buffer_out_of_bounds => "WRITE_TEXTURE destination/layout refused: buffer-out-of-bounds",
+            .insufficient_data => "WRITE_TEXTURE destination/layout refused: insufficient-data",
+            .arithmetic_overflow => "WRITE_TEXTURE destination/layout refused: arithmetic-overflow",
+        };
+    }
+
     fn validateWriteBuffer(self: *Self, params: WriteBufferParams) !void {
         self.observed.buffer_writes += 1;
         const buffer_info = self.buffers.get(params.id);
@@ -2480,6 +2851,110 @@ pub const Validator = struct {
         if (!dst_is_special and !self.textures.contains(params.dst_id)) {
             try self.addErrorWithId("E001", "COPY_TEXTURE_TO_TEXTURE references non-existent destination texture", params.dst_id);
         }
+    }
+
+    /// COPY_TEXTURE_SUBRESOURCE (0x2B): both ids must name textures this stream
+    /// created, then plan 06's calculator decides everything else. Canvas
+    /// sources have no retained descriptor here (their extent is runtime data),
+    /// so they defer like a dynamic endpoint; a canvas destination is always
+    /// refused — the canvas is configured COPY_SRC only.
+    fn validateCopyTextureSubresource(self: *Self, params: CopyTextureSubresourceParams) !void {
+        if ((params.flags & ~CopyTextureSubresourceParams.size_bit) != 0) {
+            try self.addErrorWithId(
+                "E006",
+                "COPY_TEXTURE_SUBRESOURCE refused: invalid-flags",
+                params.source_id,
+            );
+            return;
+        }
+
+        if (params.destination_id == CANVAS_TEXTURE_ID) {
+            try self.addErrorWithId(
+                "E006",
+                "COPY_TEXTURE_SUBRESOURCE destination is the canvas (canvas-target)",
+                params.destination_id,
+            );
+            return;
+        }
+
+        const destination_info = self.textures.get(params.destination_id) orelse {
+            try self.addErrorWithId(
+                "E001",
+                "COPY_TEXTURE_SUBRESOURCE references non-existent destination texture",
+                params.destination_id,
+            );
+            return;
+        };
+        const source_info = self.textures.get(params.source_id) orelse {
+            if (params.source_id == CANVAS_TEXTURE_ID) return; // runtime-resolved extent
+            try self.addErrorWithId(
+                "E001",
+                "COPY_TEXTURE_SUBRESOURCE references non-existent source texture",
+                params.source_id,
+            );
+            return;
+        };
+
+        if (!source_info.descriptor_parsed or !destination_info.descriptor_parsed) {
+            try self.addErrorWithId(
+                "E006",
+                subresourceCopyRefusalMessage(.invalid_texture_descriptor),
+                params.source_id,
+            );
+            return;
+        }
+        if (source_info.dynamic_extent or destination_info.dynamic_extent) {
+            // A canvas-/image-sized endpoint has no concrete extent in this
+            // stream; the executing player validates it against the descriptor
+            // that actually exists.
+            return;
+        }
+
+        switch (texture_layout.calculateTextureCopy(
+            textureDescriptorFrom(source_info),
+            textureDescriptorFrom(destination_info),
+            params.copy(),
+        )) {
+            .ok => {},
+            .refuse => |refusal| try self.addErrorWithId(
+                "E006",
+                subresourceCopyRefusalMessage(refusal.code),
+                params.source_id,
+            ),
+        }
+    }
+
+    /// The inspector's E006 wording for a plan 06 refusal, with the shared
+    /// kebab-case code appended verbatim.
+    fn subresourceCopyRefusalMessage(code: texture_layout.Code) []const u8 {
+        return switch (code) {
+            .invalid_format => "COPY_TEXTURE_SUBRESOURCE refused: invalid-format",
+            .invalid_texture_descriptor => "COPY_TEXTURE_SUBRESOURCE refused: invalid-texture-descriptor",
+            .unsupported_dimension => "COPY_TEXTURE_SUBRESOURCE refused: unsupported-dimension",
+            .missing_copy_dst => "COPY_TEXTURE_SUBRESOURCE refused: missing-copy-dst",
+            .missing_copy_src => "COPY_TEXTURE_SUBRESOURCE refused: missing-copy-src",
+            .multisampled_destination => "COPY_TEXTURE_SUBRESOURCE refused: multisampled-destination",
+            .sample_count_mismatch => "COPY_TEXTURE_SUBRESOURCE refused: sample-count-mismatch",
+            .overlapping_subresources => "COPY_TEXTURE_SUBRESOURCE refused: overlapping-subresources",
+            .invalid_aspect => "COPY_TEXTURE_SUBRESOURCE refused: invalid-aspect",
+            .aspect_not_writable => "COPY_TEXTURE_SUBRESOURCE refused: aspect-not-writable",
+            .partial_depth_stencil_write => "COPY_TEXTURE_SUBRESOURCE refused: partial-depth-stencil-write",
+            .partial_subresource_copy => "COPY_TEXTURE_SUBRESOURCE refused: partial-subresource-copy",
+            .mip_out_of_range => "COPY_TEXTURE_SUBRESOURCE refused: mip-out-of-range",
+            .origin_out_of_bounds => "COPY_TEXTURE_SUBRESOURCE refused: origin-out-of-bounds",
+            .extent_out_of_bounds => "COPY_TEXTURE_SUBRESOURCE refused: extent-out-of-bounds",
+            .unaligned_block_origin => "COPY_TEXTURE_SUBRESOURCE refused: unaligned-block-origin",
+            .unaligned_block_extent => "COPY_TEXTURE_SUBRESOURCE refused: unaligned-block-extent",
+            .missing_bytes_per_row => "COPY_TEXTURE_SUBRESOURCE refused: missing-bytes-per-row",
+            .missing_rows_per_image => "COPY_TEXTURE_SUBRESOURCE refused: missing-rows-per-image",
+            .bytes_per_row_too_small => "COPY_TEXTURE_SUBRESOURCE refused: bytes-per-row-too-small",
+            .rows_per_image_too_small => "COPY_TEXTURE_SUBRESOURCE refused: rows-per-image-too-small",
+            .bytes_per_row_alignment => "COPY_TEXTURE_SUBRESOURCE refused: bytes-per-row-alignment",
+            .buffer_offset_alignment => "COPY_TEXTURE_SUBRESOURCE refused: buffer-offset-alignment",
+            .buffer_out_of_bounds => "COPY_TEXTURE_SUBRESOURCE refused: buffer-out-of-bounds",
+            .insufficient_data => "COPY_TEXTURE_SUBRESOURCE refused: insufficient-data",
+            .arithmetic_overflow => "COPY_TEXTURE_SUBRESOURCE refused: arithmetic-overflow",
+        };
     }
 
     fn validateWriteBufferFromWasm(self: *Self, params: WriteBufferFromWasmParams) !void {

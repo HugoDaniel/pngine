@@ -1,0 +1,7 @@
+; INVALID: an origin component is a u32 (literal, expression or define-ref);
+; a string is the schema's union_no_branch_matched reject on :origin.
+(data :name texels (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAA=="))
+(texture :name tex :size [2 2] :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture tex :data texels :origin [0 "top" 0] :size [2 2] :bytes-per-row 8))
+(frame :name main :perform [upload])

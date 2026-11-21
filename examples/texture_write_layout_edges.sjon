@@ -1,0 +1,14 @@
+; The two ends of the linear-span rule, both accepted. `exactPadded` is two
+; 2-texel rgba8 rows with a 16-byte padded stride: the required span is 16
+; (first row) + 8 (final row, whose 8 padding bytes are excluded) = 24, and the
+; source is exactly 24 bytes. `trailingSlack` starts from those 24 and adds 8
+; bytes past the last texel; trailing bytes are not texels and are accepted.
+; The one-byte-short refusal is examples/invalid/write_texture_one_byte_short.
+(data :name exact (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"))
+(data :name slack (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="))
+(texture :name exactPadded :size [2 2] :format rgba8unorm :usage [copy-dst])
+(texture :name trailingSlack :size [2 2] :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture exactPadded :data exact :bytes-per-row 16 :rows-per-image 2 :size [2 2])
+  (write-texture :texture trailingSlack :data slack :bytes-per-row 16 :rows-per-image 2 :size [2 2]))
+(frame :name main :perform [upload])

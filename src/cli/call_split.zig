@@ -40,6 +40,7 @@ const Call = pngine.mock_gpu.Call;
 pub fn isFrameCall(call_type: CallType) bool {
     return switch (call_type) {
         .begin_render_pass,
+        .begin_render_pass_views,
         .begin_compute_pass,
         .end_pass,
         .set_pipeline,

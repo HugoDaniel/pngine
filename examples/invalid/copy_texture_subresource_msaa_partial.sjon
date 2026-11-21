@@ -1,0 +1,12 @@
+; INVALID: a multisampled endpoint must also cover the ENTIRE physical
+; subresource (copies.bs:263-266). The formats and sample counts agree; the 2x2
+; copy out of a 4x4 4-sample texture is the refusal.
+(texture :name src :size [4 4] :format rgba8unorm :sample-count 4
+  :usage [render-attachment copy-src])
+(texture :name dst :size [4 4] :format rgba8unorm :sample-count 4
+  :usage [render-attachment copy-dst])
+(queue :name blit
+  (copy-texture-to-texture :size [2 2 1]
+    (source :texture src)
+    (destination :texture dst)))
+(frame :name main :perform [blit])

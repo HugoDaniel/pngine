@@ -59,12 +59,20 @@ export const MSG = {
   // only the listing. docs/plans/public-write-buffer.md.
   GET_BUFFERS: "getBuffers",
   BUFFERS: "buffers",
+  // Host texture writes ride DRAW too (`textures`); this pair is the listing
+  // (docs/plans/texture-write/04-live-host-api.md D12/D13).
+  GET_TEXTURES: "getTextures",
+  TEXTURES: "textures",
   GET_STATS: "getStats",
   STATS: "stats",
   RESIZE: "resize",
   READY: "ready",
   ERROR: "error",
   UNIFORMS: "uniforms",
+  // Texture→buffer bytes (plan 05, readback contract): the payload is the
+  // plan's exact record, posted with its owned byte buffer in the transfer
+  // list. Query numbers keep arriving as "queryResult".
+  TEXTURE_READBACK: "textureReadback",
   PREFETCH: "prefetch",
   SET_PLAYING: "setPlaying",
   THUMB_SPACING: "thumb-spacing",
@@ -214,6 +222,11 @@ export function createWorkerHandlers(env, opts = {}) {
     gpu.setOnShaderError((err) => { post({ type: "shader-error", ...err }); });
     gpu.setOnError((err) => reportCommandError(err.message, err.source));
     gpu.setOnQueryResult((results) => { post({ type: "queryResult", data: results }); });
+    gpu.setOnTextureReadback((readback) => {
+      // The byte array is an owned copy whose buffer nothing else aliases, so
+      // the worker message transfers it rather than doubling the pixel bytes.
+      post({ type: MSG.TEXTURE_READBACK, data: readback }, [readback.bytes.buffer]);
+    });
   }
 
   // Instantiate `bytes` as this worker's executor and rebind everything that
@@ -601,12 +614,13 @@ export function createWorkerHandlers(env, opts = {}) {
     wasm.setDataLen(dataLen);
 
     // Parse uniform table from bytecode before init (for runtime reflection).
-    // The same section carries the buffer-name block, when the payload has
-    // one; a payload without it names nothing, and every host write by name
-    // is refused as unknown rather than guessed.
-    const { uniforms, buffers, strings } = parseUniformTable(bytecodeArray);
+    // The same section carries the buffer- and texture-name blocks, when the
+    // payload has them; a payload without one names nothing, and every host
+    // write by that kind of name is refused as unknown rather than guessed.
+    const { uniforms, buffers, textures, strings } = parseUniformTable(bytecodeArray);
     uniformMap = uniforms;
     bufferNames = buffers ?? new Map();
+    const textureNames = textures ?? new Map();
     if (debugMode && uniforms.size > 0) {
       console.log(`[Worker] Parsed ${uniforms.size} uniform fields:`, [...uniforms.keys()]);
     }
@@ -626,9 +640,10 @@ export function createWorkerHandlers(env, opts = {}) {
       await gpu.execute(initPtr);
     }
 
-    // Set uniform table after resources are created (buffers exist now)
+    // Set uniform table after resources are created (buffers/textures exist now)
     gpu.setUniformTable(uniformMap);
     gpu.setBufferNames(bufferNames);
+    gpu.setTextureNames(textureNames);
 
     // The payload's frames, by name, out of the executor that just indexed
     // them. init() cleared any pin on the executor side, so the tracker says
@@ -743,6 +758,17 @@ export function createWorkerHandlers(env, opts = {}) {
         const n = gpu.writeBuffers(data.buffers, wasm.getFrameCounter?.());
         if (debugMode && n > 0) console.log(`[Worker] Wrote ${n} host buffers`);
       }
+      // Host texture writes follow the buffers in the same locked section
+      // (D12: uniforms → buffers → textures), so the frame's own static queue
+      // operations, which run after this section, may overwrite them. The
+      // counter is read here, inside the lock and before frame(): `"active"`
+      // must resolve the member this frame's pooled bindings read, not a
+      // post-frame value (a preview moves and restores the counter under the
+      // same lock, so an outside read could be a thumbnail's).
+      if (data.textures && typeof data.textures === "object") {
+        const n = gpu.writeTextures(data.textures, wasm.getFrameCounter?.());
+        if (debugMode && n > 0) console.log(`[Worker] Wrote ${n} host textures`);
+      }
       // The frame this draw renders: a name, or null for the executor's own
       // choice (its first frame, or the animation table's scene). Applied
       // only when it differs from what the executor already holds; a draw
@@ -837,6 +863,15 @@ export function createWorkerHandlers(env, opts = {}) {
   // why not (`writable`, `frameWritten`). Empty before init and after destroy.
   function handleGetBuffers() {
     post({ type: MSG.BUFFERS, buffers: gpu?.getBuffers?.() ?? {} });
+  }
+
+  // Report the payload's named textures — what a host may write, by name, and
+  // why not (`writable`, `frameWritten`), from the current descriptors. Empty
+  // before init, after destroy, and while the device is lost: the dispatcher's
+  // listing would be the dead device's stale resources (plan 04 D13).
+  function handleGetTextures() {
+    const textures = initialized && !deviceLost && gpu ? gpu.getTextures?.() ?? {} : {};
+    post({ type: MSG.TEXTURES, textures });
   }
 
   // Report live GPU-resource counts + the executor's WASM memory size.
@@ -938,6 +973,9 @@ export function createWorkerHandlers(env, opts = {}) {
         case MSG.GET_BUFFERS:
           handleGetBuffers();
           break;
+        case MSG.GET_TEXTURES:
+          handleGetTextures();
+          break;
         case MSG.GET_STATS:
           handleGetStats();
           break;
@@ -982,12 +1020,13 @@ export function createWorkerHandlers(env, opts = {}) {
   let chain = Promise.resolve();
   // Superseded rAF draws are dropped rather than rendered back-to-back once the
   // stall clears: a frame whose time has already been overtaken is work nobody
-  // will see. A draw carrying `uniforms` or `buffers` is NEVER dropped — that
-  // state is host-supplied (anim.js draw(p, {uniforms, buffers})) and the next
-  // frame does not re-send it, so collapsing it would silently lose a write.
+  // will see. A draw carrying `uniforms`, `buffers` or `textures` is NEVER
+  // dropped — that state is host-supplied (anim.js draw(p, {uniforms,
+  // buffers, textures})) and the next frame does not re-send it, so collapsing
+  // it would silently lose a write.
   let queuedDraws = 0;
   function dispatch(message) {
-    const supersedable = message.type === MSG.DRAW && !message.uniforms && !message.buffers;
+    const supersedable = message.type === MSG.DRAW && !message.uniforms && !message.buffers && !message.textures;
     if (supersedable) queuedDraws++;
     const run = () => {
       if (supersedable && --queuedDraws > 0) return;

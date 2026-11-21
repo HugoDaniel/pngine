@@ -101,6 +101,19 @@ const SELECT_TWIN_LEDGER =
   "PNG, and the render gates run only on the macOS Metal host (see tests/zig/render/render_test.zig)";
 
 /**
+ * The mip-chain's twin: `examples/mip_chain_view_hand.sjon` writes the complete
+ * per-level views, sampler, shader, pipelines, bind groups, render passes and
+ * named step-groups the hook lowers to, plus the same explicit level-0 upload
+ * and canvas presentation. Both keys claim PIXEL: a lowered document is emitted
+ * in hook order and an authored one grouped by kind, so the payloads cannot be
+ * identical (the same reason every sugar twin is pixel, see above). The render
+ * corpus row pair holds the two documents against each other, and their
+ * committed PNGs carry the level-0 input and the generated levels. The original
+ * `examples/mip_chain*.sjon` pair remains the golden lowering fixture.
+ */
+const MIP_TWIN = "examples/mip_chain_view_hand.sjon";
+
+/**
  * Every form of the sugar tier, and every key on it.
  *
  * `hook` is set on the three lowering containers and must match the schema's
@@ -284,6 +297,24 @@ export const SUGAR_FORMS = {
       else: {
         desugars_to: "the LAST group's :else; a middle group's :else is the hook's own [<name>__caseN] continuation vector",
         ledger: SELECT_TWIN_LEDGER,
+      },
+    },
+  },
+
+  "mip-chain": {
+    hook: "pngine/mips-v1",
+    keys: {
+      name: {
+        desugars_to:
+          "the (step-group …)'s :name, holding one render pass per generated level in ascending order; a frame performs the chain by this name",
+        twin: MIP_TWIN,
+        equivalence: "pixel",
+      },
+      texture: {
+        desugars_to:
+          "the source (texture …): level 0 is the input, and levels 1..mip-level-count-1 each get a sampled (texture-view …) of N-1 and an attachment view of N",
+        twin: MIP_TWIN,
+        equivalence: "pixel",
       },
     },
   },

@@ -1,0 +1,12 @@
+; Legal depth/stencil writes: each names exactly one writable aspect and
+; covers the full physical subresource, which is what WebGPU requires.
+(data :name stencilTexels (bytes :base64 "AAAAAA=="))
+(data :name depthTexels (bytes :base64 "AAAAAAAAAAA="))
+(texture :name stencil :size [2 2] :format stencil8 :usage [copy-dst])
+(texture :name depth :size [2 2] :format depth16unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture stencil :data stencilTexels :aspect stencil-only
+    :bytes-per-row 2 :rows-per-image 2 :size [2 2])
+  (write-texture :texture depth :data depthTexels :aspect depth-only
+    :bytes-per-row 4 :rows-per-image 2 :size [2 2]))
+(frame :name main :perform [upload])

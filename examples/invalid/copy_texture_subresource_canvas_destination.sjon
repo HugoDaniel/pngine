@@ -1,0 +1,8 @@
+; INVALID: the canvas as a subresource copy destination. Every runtime
+; configures the canvas with copy-src only, never copy-dst.
+(texture :name src :size [4 4] :format rgba8unorm :usage [copy-src])
+(queue :name blit
+  (copy-texture-to-texture
+    (source :texture src)
+    (destination :texture context-current-texture :mip-level 0)))
+(frame :name main :perform [blit])

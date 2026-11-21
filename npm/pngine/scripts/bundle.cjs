@@ -23,9 +23,20 @@ const SRC_DIR = path.join(__dirname, '../src');
 // scripts/gen-play-runtime.mjs --dist so a test build never unlinks files in
 // the shared npm/pngine/dist/ that other tests read concurrently. Unset means
 // the historical ../dist location.
-const DIST_DIR = process.env.PNGINE_BUNDLE_DIST_DIR
-  ? path.resolve(process.env.PNGINE_BUNDLE_DIST_DIR)
-  : path.join(__dirname, '../dist');
+// Canonicalize to the real path: macOS temp dirs live under /var/folders, a symlink to /private/var/folders, and esbuild resolves the importer through the real path one component deeper, so relative imports computed from the symlinked path climb one ../ short.
+const DIST_DIR = (() => {
+  const requested = process.env.PNGINE_BUNDLE_DIST_DIR
+    ? path.resolve(process.env.PNGINE_BUNDLE_DIST_DIR)
+    : path.join(__dirname, '../dist');
+  if (!fs.existsSync(requested)) {
+    fs.mkdirSync(requested, { recursive: true });
+  }
+  try {
+    return fs.realpathSync(requested);
+  } catch {
+    return requested;
+  }
+})();
 const DEBUG = process.argv.includes('--debug');
 
 // Resolve esbuild binary: prefer local node_modules, fall back to global
@@ -34,10 +45,6 @@ const ESBUILD = (() => {
   if (fs.existsSync(localBin)) return localBin;
   return 'esbuild';
 })();
-
-if (!fs.existsSync(DIST_DIR)) {
-  fs.mkdirSync(DIST_DIR, { recursive: true });
-}
 
 console.log(`Bundling PNGine (${DEBUG ? 'debug' : 'production'})...\n`);
 
@@ -372,6 +379,8 @@ module.exports = {
   writeBuffer: browserOnly,
   setPointer: browserOnly,
   getBuffers: browserOnly,
+  writeTexture: browserOnly,
+  getTextures: browserOnly,
   getStats: browserOnly,
   restart: browserOnly,
   restartSettled: browserOnly,
@@ -400,6 +409,8 @@ export const getUniforms = browserOnly;
 export const writeBuffer = browserOnly;
 export const setPointer = browserOnly;
 export const getBuffers = browserOnly;
+export const writeTexture = browserOnly;
+export const getTextures = browserOnly;
 export const getStats = browserOnly;
 export const restart = browserOnly;
 export const restartSettled = browserOnly;
@@ -439,7 +450,7 @@ const viewerOut = buildInlinedProfileBundle({
   includeLoader: false,
   exportBlock: `
 export { pngine, destroy };
-export { draw, play, pause, stop, seek, setFrame, setUniform, setUniforms, getUniforms, writeBuffer, setPointer, getBuffers, getStats, restart, restartSettled };
+export { draw, play, pause, stop, seek, setFrame, setUniform, setUniforms, getUniforms, writeBuffer, setPointer, getBuffers, writeTexture, getTextures, getStats, restart, restartSettled };
 export { extractBytecode, detectFormat, isPng, isZip, isPngb };
 export { payloadsOf };`,
 });
@@ -454,7 +465,7 @@ const devOut = buildInlinedProfileBundle({
   includeLoader: true,
   exportBlock: `
 export { pngine, destroy };
-export { draw, play, pause, stop, seek, setFrame, setUniform, setUniforms, getUniforms, writeBuffer, setPointer, getBuffers, getStats, restart, restartSettled };
+export { draw, play, pause, stop, seek, setFrame, setUniform, setUniforms, getUniforms, writeBuffer, setPointer, getBuffers, writeTexture, getTextures, getStats, restart, restartSettled };
 export { extractBytecode, detectFormat, isPng, isZip, isPngb };
 export { parsePayload, createExecutor, getExecutorImports, getExecutorVariantName };
 export { payloadsOf };`,
@@ -657,9 +668,142 @@ if (!DEBUG) {
     // with its startedAtMs rebase, play's option and TypeError, the wrapped
     // seek, and the driver's audio.seek at the seam. Headroom unchanged
     // (204/160/78) on the same margins.
-    'viewer.mjs': 64054,
-    'dev.mjs': 69016,
-    'core.mjs': 32339,
+    // viewer/dev/core bumped 2026-11-19 for plan 02 Task 3b: command 0x28's
+    // runtime decoder calls plan 01's `calculateWrite` (texture-layout.js),
+    // which the bundler's export closure had never pulled into a shipped
+    // bundle because only tests imported it. Measured 63850→78190 viewer
+    // (+14340), 68856→83202 dev (+14346), 32261→46477 core (+14216); mini is
+    // untouched (it has no texture stack). This is the D1/D5 calculator the
+    // compiler, reference backend and browser must share — the bytes ARE the
+    // runtime validation, not optional diagnostics. Budgets are the measured
+    // sizes plus the same margins the previous entries carried (204/160/78),
+    // leaving 200/156/74 B of headroom.
+    // viewer/dev/core bumped 2026-11-20 for plan 04's texture-name block
+    // (D14): parseUniformTable's fourth key, `textures`, read behind header
+    // flag bit 7 after the buffer- and control-name blocks. Measured
+    // 78248→78515 viewer (+267), 83260→83527 dev (+267), 46535→46806 core
+    // (+271) minified — the reader plus its format comment, ~270 B of code in
+    // each bundle. Budgets are the measured sizes plus 185/173/94 B, the same
+    // tight-margin shape the previous entries used rather than a cushion.
+    'viewer.mjs': 78700,
+    'dev.mjs': 83700,
+    'core.mjs': 46900,
+    // viewer/dev/core bumped again 2026-11-20 for plan 04 Task 2's host
+    // texture driver (gpu-host-texture.js): setTextureNames/writeTextures/
+    // getTextures, plan 01's calculateWrite over the retained descriptor, the
+    // whole-map TypeError pass, pool resolution, the public reflection record,
+    // and the refusal messages. Measured 78515→83617 viewer (+5102),
+    // 83527→88626 dev (+5099), 46806→51988 core (+5182) minified. The driver
+    // had to be a real module (D24): folded into gpu.js it would have cost the
+    // same bytes and pushed the hand-authored source cap twice. Budgets are
+    // the measured sizes plus 183/174/112 B.
+    // viewer/dev bumped 2026-11-20 for plan 04 Task 3's worker seam: the
+    // `textures` map on DRAW (applied inside the render lock after buffers),
+    // the supersession exemption, the GET_TEXTURES/TEXTURES pair, and the
+    // texture-name install beside the buffer names. Measured 83617→83994
+    // viewer (+377) and 88626→89005 dev (+379) minified; core does not include
+    // worker-core and stayed at 51988. Budgets are the measured sizes plus
+    // 206/195 B, the same tight-margin shape the previous entries used.
+    // viewer/dev/core bumped 2026-11-20 for plan 04 Task 4's public surface:
+    // writeTexture/getTextures in anim.js, the `textures` map on draw (with
+    // its whole-map TypeError pass and D13 source refusals), and the same
+    // source-state refusal in the host driver core also carries. Measured
+    // 83994→87785 viewer (+3791), 89005→92797 dev (+3792), 51988→52245 core
+    // (+257) minified. The main-thread wrapper is the bulk; core pays only the
+    // driver's two refusal branches. Budgets are the measured sizes plus
+    // 215/203/155 B.
+    // viewer/dev/core bumped 2026-11-20 for plan 05 slice 1's shared aligned
+    // buffer-copy policy in texture-layout.js: CopyPolicy (writeTexture stays
+    // aligned=false), the 256-byte bytesPerRow rule, the block-footprint /
+    // depth-stencil-4 buffer-offset rule, and `calculateCopy`. Measured
+    // 87785→88649 viewer (+864), 92797→93659 dev (+862), 52245→53107 core
+    // (+862) minified. The policy rides the one calculator `calculateWrite`
+    // already calls, so it cannot be tree-shaken out without forking the
+    // pipeline the plan forbids; this is the feature's real byte cost. Budgets
+    // are the measured sizes plus 215/203/155 B, the same tight-margin shape
+    // the previous entries used.
+    // viewer/dev/core bumped 2026-11-20 for plan 05 slice 3's browser encoder
+    // execution: 0x29 copy_buffer_to_texture and 0x2A copy_texture_to_buffer
+    // decode their 46-byte records, resolve the retained texture/buffer, and
+    // validate through the shared directional `calculateCopy` before one
+    // encoder call. Measured 88649→90260 viewer (+1611), 93659→95271 dev
+    // (+1612), 53107→54711 core (+1604) minified. It lives in the already-
+    // bundled gpu-queue-commands.js, so a split would not remove the bytes
+    // (the export closure reaches it); this is the feature's real cost.
+    // Budgets are the measured sizes plus 215/203/155 B, the same tight-margin
+    // shape the previous entries used.
+    // viewer/dev/core bumped 2026-11-20 for plan 05 slice 4's byte readback:
+    // 0x2A's MAP_READ|COPY_DST destination now schedules a record, `submit`
+    // maps the enclosing aligned window after the encoder copy, slices exactly
+    // the copied span into an owned Uint8Array, and posts onTextureReadback
+    // with the padded layout metadata; failures unmap in `finally` and report
+    // readback-unavailable. Measured 90260→91982 viewer (+1722),
+    // 95271→96991 dev (+1720), 54711→56223 core (+1512) minified. The
+    // delivered bytes do not run through the query path. Budgets are the
+    // measured sizes plus 215/203/155 B, the same tight-margin shape the
+    // previous entries used.
+    // viewer/dev/core bumped 2026-11-20 for plan 06 slice 3's browser encoder
+    // execution: 0x2B copy_texture_subresource decodes both endpoints and the
+    // size-presence flag, resolves the retained descriptors, re-validates
+    // through `calculateTextureCopy`, and records one
+    // `encoder.copyTextureToTexture` — plus that calculator itself in
+    // texture-layout.js (usage, sample equality, copy-compatible formats,
+    // per-role aspect copyability, both endpoint ranges, the depth-stencil/
+    // MSAA full-subresource rule and the same-texture disjoint-subresource
+    // rule). Measured 91982→97334 viewer (+5352), 96991→102343 dev (+5352),
+    // 56223→61569 core (+5346) minified. HTML and --flat/mini still refuse the
+    // two new-key copy forms before output; the viewer runtime is the only
+    // player that executes them, so this is its real feature cost. Budgets are
+    // the measured sizes plus 215/203/155 B, the same tight-margin shape the
+    // previous entries used.
+    // viewer/dev/core bumped 2026-11-20 for plan 07 tranche A's BC uploads and
+    // pre-create feature policy. Measured 97334→100586 viewer (+3252),
+    // 102343→105595 dev (+3252), 61569→64799 core (+3230) minified. What the
+    // bytes buy: the fourteen BC names in the JS decoder and block table, the
+    // packed 52-row compressed table (`compressedFacts` and its ASTC shape
+    // byte array), `missingFormatFeature`/`formatCreationRefusal`, and the
+    // create/host-write call sites. What was tried: the 52-row table was packed
+    // to codes + one nibble-packed ASTC shape array instead of 52 row objects;
+    // removing the not-yet-exposed ETC2/ASTC branches entirely measured only
+    // 321 B less at the same code point, so the future arithmetic is not the
+    // cost and was kept for the plan's arithmetic-once rule. The feature
+    // policy was moved out of gpu.js into texture-layout.js rather than
+    // duplicated. Budgets are the measured sizes plus the same 215/203/155 B
+    // margins.
+    // Bumped 2026-11-20 for plan 07 tranche B's ETC2/EAC names. Measured
+    // 100586→101070 viewer (+484), 105595→106079 dev (+484),
+    // 64799→65283 core (+484) minified. What the bytes buy: the ten ETC2/EAC
+    // names in the byte→name decoder (enums.js) and in the name→block-facts
+    // table (texture-layout.js), plus the `texture-compression-etc2` request.
+    // That duplication is by design — one table decodes wire bytes, the other
+    // resolves authored names — and the names are WebGPU spellings, not
+    // derivable from the block shape. What was tried: none of the names can be
+    // dropped (the schema offers all ten), and folding the ETC2 list into the
+    // BC one only moved the same strings. Budgets are the measured sizes plus
+    // the same 215/203/155 B margins.
+    // Bumped 2026-11-20 for plan 07 tranche C's ASTC names. Measured
+    // 101070→101939 viewer (+869), 106079→106948 dev (+869),
+    // 65283→66152 core (+869) minified. What the bytes buy: the 28 ASTC
+    // spellings in enums.js's byte decoder, the two ASTC feature names, and
+    // the name→block-facts resolver. What was tried: the 28 names in
+    // texture-layout.js are DERIVED from the existing fourteen-shape packed
+    // table (`ASTC_NAMES`) instead of a second literal list; enums.js still
+    // needs all 28 literals because it decodes a wire byte to the WebGPU
+    // spelling. Budgets are the measured sizes plus the same 215/203/155 B
+    // margins.
+    // Bumped 2026-11-21 for plan 09 slice 2's command 0x55 execution:
+    // begin_render_pass_views' JS decoder (bounds, truncation, 22-byte record),
+    // the one target resolver shared by colour/resolve/depth, the depth
+    // attachment builder shared with the legacy begin-passes, and the new
+    // command's entry in the dispatcher. Measured 101939→103955 viewer
+    // (+2016), 106948→108966 dev (+2018), 66152→68161 core (+2009) minified.
+    // Every profile includes gpu.js, so the resolver is paid for three times;
+    // extracting the record into gpu-resource-pass-commands.js is what keeps
+    // gpu.js's share to the closure state it already owns. Budgets are the
+    // measured sizes plus the same 215/203/155 B margins.
+    'viewer.mjs': 104170,
+    'dev.mjs': 109169,
+    'core.mjs': 68316,
     'executor.mjs': 2200,
     'mini.mjs': 7300,
     'mini-no-audio.mjs': 6600,
@@ -714,7 +858,40 @@ if (!DEBUG) {
   // 48781→53803 (+5.0 KB), again mostly the explanations — the same work
   // ships as +739 B on core.mjs, which is what a user pays. Re-set at the
   // same ~3% headroom over today's size.
-  const GPU_SOURCE_BUDGET = 55500;
+  // 2026-11-20: 55500 → 58000. Plan 04's texture-name block reader (D14) in
+  // parseUniformTable: the measured source grew 54720→56288 (+1,568 B). The
+  // reader itself is ~400 B; the rest is the block's format comment and the
+  // bounded-read/empty-name explanation the buffer block's reader already
+  // carries. No new hand-authored module was justified for one map beside the
+  // two it already parses; re-set at the same ~3% headroom over today's size
+  // (56288 × 1.03 = 57,977). D24 dated measured bump, not a silent raise.
+  // 2026-11-20: 58000 → 59000 for plan 07 tranche A's create-time BC feature
+  // policy. gpu.js gained one import and the refusal call sites: the feature
+  // decision itself lives in texture-layout.js (`formatCreationRefusal` /
+  // `missingFormatFeature`), so this file did not grow a second table. Measured
+  // 56996 → 58493 B (+1497). 59000 leaves 507 B, not the 3% pad earlier entries
+  // used: the next compressed tranche will measure again, and the BC/ETC2/ASTC
+  // block table is already paid for. What was tried: moving the policy body to
+  // texture-layout.js (kept); trimming the explanatory comment block (rejected —
+  // it is the reason the pre-create check exists at all).
+  // 2026-11-20: tranche B (ETC2/EAC) measured 58493 → 58666 B (+173): one
+  // feature-name string in OPTIONAL_DEVICE_FEATURES and its comment; the
+  // format names and policy live in texture-layout.js as above. 59000 still
+  // holds with 334 B headroom, so no cap move.
+  // 2026-11-20: tranche C (ASTC) measured 58666 → 58847 B (+181): the two ASTC
+  // feature-name strings and their comment. 59000 still holds with 153 B.
+  // 2026-11-21: 59000 → 64800 for plan 09 slice 2's command 0x55 browser
+  // execution. Measured 58847 → 62919 B (+4072): the one target resolver
+  // (canvas / tagged explicit view / default texture view) shared by colour,
+  // resolve and depth, the depth-attachment builder now shared with the legacy
+  // begin-passes, and the beginRenderPassViews assembly that uses them. The
+  // 0x55 record decoder itself lives in gpu-resource-pass-commands.js and is
+  // not charged here. What was tried: moving the resolver to that module
+  // (rejected — it reads five closure tables plus the canvas context, so the
+  // accessors would cost more than the move); trimming the explanatory
+  // comments (rejected, the same reason tranches A–C record). 64800 is the
+  // measured size plus this file's ~3% headroom rule.
+  const GPU_SOURCE_BUDGET = 64800;
 
   const violations = [];
   for (const [label, file] of files) {

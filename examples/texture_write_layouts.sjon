@@ -1,0 +1,12 @@
+; Row layout variants: a tightly packed write, then a padded-row write whose
+; source begins at a non-zero data offset.
+(data :name tight (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAA=="))
+; Four bytes of leading slack, then two 16-byte padded rows.
+(data :name padded (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"))
+(texture :name unpadded :size [2 2] :format rgba8unorm :usage [copy-dst])
+(texture :name paddedRows :size [2 2] :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture unpadded :data tight :bytes-per-row 8 :rows-per-image 2 :size [2 2])
+  (write-texture :texture paddedRows :data padded :offset 4 :bytes-per-row 16 :rows-per-image 2
+    :size [2 2]))
+(frame :name main :perform [upload])

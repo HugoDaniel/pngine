@@ -1,0 +1,8 @@
+; INVALID: mip-level-count 0 — the texture descriptor's own refusal.
+;
+; `subresource-count` is at least 1, so the schema refuses the texture before
+; the mip-chain hook runs. The chain never sees a zero-level texture.
+
+(texture :name mipTex :size [64 64] :format rgba8unorm
+  :mip-level-count 0 :usage [texture-binding render-attachment])
+(mip-chain :name fillMips :texture mipTex)

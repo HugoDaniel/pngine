@@ -1,0 +1,7 @@
+; INVALID: explicit :bytes-per-row 0 is NOT omission. Presence is retained and
+; the authored zero is below the row's 16-byte minimum.
+(data :name texels (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="))
+(texture :name tex :size [4 2] :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture tex :data texels :size [4 2] :bytes-per-row 0))
+(frame :name main :perform [upload])

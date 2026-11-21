@@ -23,16 +23,19 @@ const RENDER_ATTACHMENT = 0x10;
  * @param {number} cw - canvas width fallback for size
  * @param {number} ch - canvas height fallback for size
  * @param {Array} [bmp] - ImageBitmap table for size-from-image (field 0x0A)
- * @returns {{desc: object, canvasBound: boolean, canvasScale: number}} -
- *   descriptor, whether size tracks the canvas (bytecode omitted explicit
- *   width AND height), and the fraction of the canvas it tracks (1 unless
- *   field 0x0B said otherwise; the resize path applies it again)
+ * @returns {{desc: object, canvasBound: boolean, canvasScale: number,
+ *   extentSource: "explicit"|"canvas"|"image-bitmap"}} - descriptor, whether
+ *   size tracks the canvas (bytecode omitted explicit width AND height), the
+ *   fraction of the canvas it tracks (1 unless field 0x0B said otherwise; the
+ *   resize path applies it again), and where the resolved extent came from.
+ *   An image reference that has not decoded yet resolves to the canvas
+ *   fallback, so its source is `canvas`: that is the extent actually created.
  */
 export function decodeTextureDescriptor(bytes, defaultFormat, cw, ch, bmp) {
   const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let off = 2; // skip type tag + field count
   const desc = { size: [cw || 512, ch || 512], format: defaultFormat, usage: RENDER_ATTACHMENT, sampleCount: 1 };
-  let hasW = false, hasH = false, scale = 1;
+  let hasW = false, hasH = false, scale = 1, fromImage = false;
   const fc = bytes[1];
   for (let i = 0; i < fc; i++) {
     const fid = bytes[off++], vt = bytes[off++];
@@ -53,7 +56,7 @@ export function decodeTextureDescriptor(bytes, defaultFormat, cw, ch, bmp) {
       // fid 0x0A = size_from_image_bitmap: use ImageBitmap dimensions
       if (fid === 0x0A && bmp && bmp[val]) {
         desc.size = [bmp[val].width, bmp[val].height];
-        hasW = true; hasH = true;
+        hasW = true; hasH = true; fromImage = true;
       }
     } else if (vt === 0x07) { // enum
       const val = bytes[off++];
@@ -79,7 +82,10 @@ export function decodeTextureDescriptor(bytes, defaultFormat, cw, ch, bmp) {
     desc.size[0] = scaleExtent(desc.size[0], scale);
     desc.size[1] = scaleExtent(desc.size[1], scale);
   }
-  return { desc, canvasBound, canvasScale: scale };
+  // Where the CONCRETE extent came from: an unresolved image reference falls
+  // back to the canvas, so `canvas` is the truthful source for what exists.
+  const extentSource = canvasBound ? "canvas" : fromImage ? "image-bitmap" : "explicit";
+  return { desc, canvasBound, canvasScale: scale, extentSource };
 }
 
 /// Byte width of each scalar ValueType (src/types/descriptors.zig

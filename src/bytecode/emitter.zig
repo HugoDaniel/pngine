@@ -28,6 +28,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const opcodes = @import("opcodes.zig");
 const wire_schema = @import("wire_schema.zig");
+const texture_layout = @import("types").texture_layout;
 const OpCode = opcodes.OpCode;
 const BufferUsage = opcodes.BufferUsage;
 const LoadOp = opcodes.LoadOp;
@@ -40,6 +41,7 @@ const ControlComparison = opcodes.ControlComparison;
 // breaks it — so each count-prefixed emit asserts its own. They were previously
 // two hand-written literals and one missing check. (§320)
 const MAX_MRT: usize = wire_schema.repMaxOf(.begin_render_pass_mrt);
+const MAX_VIEW_ATTACHMENTS: usize = wire_schema.repMaxOf(.begin_render_pass_views);
 const MAX_BUNDLES: usize = wire_schema.repMaxOf(.execute_bundles);
 const MAX_WASM_ARGS: u8 = @intCast(wire_schema.repMaxOf(.call_wasm_func));
 
@@ -103,6 +105,16 @@ pub const Emitter = struct {
     fn emitRawU32(self: *Self, gpa: Allocator, value: u32) !void {
         const bytes: [4]u8 = @bitCast(std.mem.nativeToLittle(u32, value));
         try self.bytes.appendSlice(gpa, &bytes);
+    }
+
+    /// Emit the four clear channels as f32 bit patterns. ONE writer for every
+    /// record that carries a clear colour (0x10, 0x1B, 0x43 and 0x81): the
+    /// 16-byte sequence is not duplicated per begin-pass shape.
+    fn emitClearBits(self: *Self, gpa: Allocator, r: u32, g: u32, b: u32, a: u32) !void {
+        try self.emitRawU32(gpa, r);
+        try self.emitRawU32(gpa, g);
+        try self.emitRawU32(gpa, b);
+        try self.emitRawU32(gpa, a);
     }
 
     /// Emit an opcode. Also records the plugin the opcode requires (if any) into
@@ -397,10 +409,7 @@ pub const Emitter = struct {
         try self.emitByte(gpa, @intFromEnum(load_op));
         try self.emitByte(gpa, @intFromEnum(store_op));
         try self.emitVarint(gpa, depth_texture_id);
-        try self.emitRawU32(gpa, clear_r_bits);
-        try self.emitRawU32(gpa, clear_g_bits);
-        try self.emitRawU32(gpa, clear_b_bits);
-        try self.emitRawU32(gpa, clear_a_bits);
+        try self.emitClearBits(gpa, clear_r_bits, clear_g_bits, clear_b_bits, clear_a_bits);
         try self.emitVarint(gpa, resolve_texture_id);
         // Post-condition: opcode + 3 varints (≥1 each) + 2 op bytes + 16 clear
         // bytes = at least 22.
@@ -437,10 +446,7 @@ pub const Emitter = struct {
         try self.emitByte(gpa, @intFromEnum(load_op));
         try self.emitByte(gpa, @intFromEnum(store_op));
         try self.emitVarint(gpa, depth_texture_id);
-        try self.emitRawU32(gpa, clear_r_bits);
-        try self.emitRawU32(gpa, clear_g_bits);
-        try self.emitRawU32(gpa, clear_b_bits);
-        try self.emitRawU32(gpa, clear_a_bits);
+        try self.emitClearBits(gpa, clear_r_bits, clear_g_bits, clear_b_bits, clear_a_bits);
         // Post-condition: opcode + 2 varints (≥1 each) + 4 op/pool bytes + 16
         // clear bytes = at least 23.
         assert(self.bytes.items.len >= start_len + 23);
@@ -477,16 +483,65 @@ pub const Emitter = struct {
             try self.emitVarint(gpa, att.texture_id);
             try self.emitByte(gpa, @intFromEnum(att.load_op));
             try self.emitByte(gpa, @intFromEnum(att.store_op));
-            try self.emitRawU32(gpa, att.clear_r_bits);
-            try self.emitRawU32(gpa, att.clear_g_bits);
-            try self.emitRawU32(gpa, att.clear_b_bits);
-            try self.emitRawU32(gpa, att.clear_a_bits);
+            try self.emitClearBits(gpa, att.clear_r_bits, att.clear_g_bits, att.clear_b_bits, att.clear_a_bits);
         }
 
         try self.emitVarint(gpa, depth_texture_id);
         // Post-condition: opcode + count byte + depth varint + 19 bytes per
         // attachment (texture_id varint ≥1 + 2 op bytes + 16 clear bytes).
         assert(self.bytes.items.len >= start_len + 3 + 19 * attachments.len);
+    }
+
+    /// One colour attachment of a `begin_render_pass_views` record. `target`
+    /// and `resolve_target` carry the shared attachment-target encoding
+    /// (`types/opcodes.zig`): a tagged view id, an untagged texture id,
+    /// `ATTACHMENT_CANVAS`, or `ATTACHMENT_NONE` where the field is optional.
+    pub const ViewColorAttachment = struct {
+        target: u16,
+        load_op: LoadOp,
+        store_op: StoreOp,
+        /// f32 bit patterns, not 0-255 bytes — see L_BEGIN_RP in wire_schema.zig.
+        clear_r_bits: u32,
+        clear_g_bits: u32,
+        clear_b_bits: u32,
+        clear_a_bits: u32,
+        resolve_target: u16,
+    };
+
+    /// Emit begin_render_pass_views (0x81). The record is the plan's order and
+    /// the ONE wire layout (`L_BEGIN_RP_VIEWS`): a colour count byte, the
+    /// repeated target/load/store/clear/resolve body, then the depth target.
+    /// Zero colour attachments is legal only with a depth target.
+    pub fn beginRenderPassViews(
+        self: *Self,
+        gpa: Allocator,
+        attachments: []const ViewColorAttachment,
+        depth_target: u16,
+    ) !void {
+        // Pre-conditions
+        assert(attachments.len <= MAX_VIEW_ATTACHMENTS);
+        assert(attachments.len > 0 or depth_target != opcodes.ATTACHMENT_NONE);
+        for (attachments) |att| {
+            assert(att.target != opcodes.ATTACHMENT_NONE); // a colour target is not optional
+        }
+
+        const start_len = self.bytes.items.len;
+        try self.emitOpcode(gpa, .begin_render_pass_views);
+        try self.emitByte(gpa, @intCast(attachments.len));
+
+        for (attachments) |att| {
+            try self.emitVarint(gpa, att.target);
+            try self.emitByte(gpa, @intFromEnum(att.load_op));
+            try self.emitByte(gpa, @intFromEnum(att.store_op));
+            try self.emitClearBits(gpa, att.clear_r_bits, att.clear_g_bits, att.clear_b_bits, att.clear_a_bits);
+            try self.emitVarint(gpa, att.resolve_target);
+        }
+
+        try self.emitVarint(gpa, depth_target);
+        // Post-condition: opcode + count byte + depth varint (≥1) + 20 bytes per
+        // attachment (target varint ≥1 + 2 op bytes + 16 clear bytes + resolve
+        // varint ≥1).
+        assert(self.bytes.items.len >= start_len + 3 + 20 * attachments.len);
     }
 
     /// Emit begin_compute_pass instruction.
@@ -933,6 +988,120 @@ pub const Emitter = struct {
         assert(self.bytes.items.len >= start_len + 4);
     }
 
+    /// Emit write_texture instruction (PNGB 0x2D).
+    ///
+    /// Plan 02's exact 14-field order. `bytes_per_row`, `rows_per_image` and
+    /// `size` are PRESENCE-carried: an absent value is written as 0 with its
+    /// flag bit clear, while an authored zero is the value 0 with the bit set.
+    /// An absent aspect/mip/origin/offset takes the IDL's own defaults, which
+    /// are already materialized in `write`.
+    pub fn writeTexture(
+        self: *Self,
+        gpa: Allocator,
+        texture_id: u16,
+        data_id: u16,
+        write: texture_layout.WriteLayout,
+    ) !void {
+        const start_len = self.bytes.items.len;
+        try self.emitOpcode(gpa, .write_texture);
+        try self.emitVarint(gpa, texture_id);
+        try self.emitVarint(gpa, data_id);
+        try self.emitVarint(gpa, write.offset);
+        try self.emitVarint(gpa, write.bytes_per_row orelse 0);
+        try self.emitVarint(gpa, write.rows_per_image orelse 0);
+        try self.emitVarint(gpa, write.mip_level);
+        try self.emitVarint(gpa, write.origin.x);
+        try self.emitVarint(gpa, write.origin.y);
+        try self.emitVarint(gpa, write.origin.z);
+        try self.emitByte(gpa, @intFromEnum(write.aspect));
+
+        const zero_size: texture_layout.Extent = .{ .width = 0, .height = 0, .depth_or_array_layers = 0 };
+        const size = write.size orelse zero_size;
+        try self.emitVarint(gpa, size.width);
+        try self.emitVarint(gpa, size.height);
+        try self.emitVarint(gpa, size.depth_or_array_layers);
+
+        const flags: u8 = (if (write.bytes_per_row != null) @as(u8, 1 << 0) else 0) |
+            (if (write.rows_per_image != null) @as(u8, 1 << 1) else 0) |
+            (if (write.size != null) @as(u8, 1 << 2) else 0);
+        try self.emitByte(gpa, flags);
+
+        // Lower bound only: a varint's width is value-dependent, so a fixed
+        // length would be wrong. Opcode + twelve minimum-width varints + the
+        // aspect byte + the flags byte is 15.
+        assert(self.bytes.items.len >= start_len + 15);
+    }
+
+    /// Emit a buffer↔texture copy instruction (PNGB 0x2E / 0x2F).
+    ///
+    /// Both directions share plan 05's exact fixed `L_TEXTURE_BUFFER_COPY`
+    /// sequence. Direction is the opcode only; neither id is reinterpreted.
+    /// `bytes_per_row`, `rows_per_image` and `size` are PRESENCE-carried on
+    /// plan 02's flag bits: an absent value is written as 0 with its bit clear,
+    /// while an authored zero is the value 0 with the bit set. An absent
+    /// aspect/mip/origin/offset takes the IDL's own defaults, already
+    /// materialized in `write`.
+    fn emitTextureBufferCopy(
+        self: *Self,
+        gpa: Allocator,
+        comptime op: OpCode,
+        texture_id: u16,
+        buffer_id: u16,
+        write: texture_layout.WriteLayout,
+    ) !void {
+        comptime std.debug.assert(op == .copy_buffer_to_texture or op == .copy_texture_to_buffer);
+        const start_len = self.bytes.items.len;
+        try self.emitOpcode(gpa, op);
+        try self.emitVarint(gpa, texture_id);
+        try self.emitVarint(gpa, buffer_id);
+        try self.emitVarint(gpa, write.offset);
+        try self.emitVarint(gpa, write.bytes_per_row orelse 0);
+        try self.emitVarint(gpa, write.rows_per_image orelse 0);
+        try self.emitVarint(gpa, write.mip_level);
+        try self.emitVarint(gpa, write.origin.x);
+        try self.emitVarint(gpa, write.origin.y);
+        try self.emitVarint(gpa, write.origin.z);
+        try self.emitByte(gpa, @intFromEnum(write.aspect));
+
+        const zero_size: texture_layout.Extent = .{ .width = 0, .height = 0, .depth_or_array_layers = 0 };
+        const size = write.size orelse zero_size;
+        try self.emitVarint(gpa, size.width);
+        try self.emitVarint(gpa, size.height);
+        try self.emitVarint(gpa, size.depth_or_array_layers);
+
+        const flags: u8 = (if (write.bytes_per_row != null) @as(u8, 1 << 0) else 0) |
+            (if (write.rows_per_image != null) @as(u8, 1 << 1) else 0) |
+            (if (write.size != null) @as(u8, 1 << 2) else 0);
+        try self.emitByte(gpa, flags);
+
+        // Lower bound only: opcode + ten minimum-width varints + the aspect
+        // byte + the flags byte is 15.
+        assert(self.bytes.items.len >= start_len + 15);
+    }
+
+    /// Emit `copy_buffer_to_texture` (PNGB 0x2E).
+    pub fn copyBufferToTexture(
+        self: *Self,
+        gpa: Allocator,
+        texture_id: u16,
+        buffer_id: u16,
+        write: texture_layout.WriteLayout,
+    ) !void {
+        try self.emitTextureBufferCopy(gpa, .copy_buffer_to_texture, texture_id, buffer_id, write);
+    }
+
+    /// Emit `copy_texture_to_buffer` (PNGB 0x2F). The operand stream is
+    /// byte-identical to `copyBufferToTexture`'s; only the opcode differs.
+    pub fn copyTextureToBuffer(
+        self: *Self,
+        gpa: Allocator,
+        texture_id: u16,
+        buffer_id: u16,
+        write: texture_layout.WriteLayout,
+    ) !void {
+        try self.emitTextureBufferCopy(gpa, .copy_texture_to_buffer, texture_id, buffer_id, write);
+    }
+
     /// Emit submit instruction.
     pub fn submit(self: *Self, gpa: Allocator) !void {
         try self.emitOpcode(gpa, .submit);
@@ -993,6 +1162,51 @@ pub const Emitter = struct {
         try self.emitVarint(gpa, dst_texture);
         // Post-condition: at least 3 bytes emitted (opcode + 2 varints).
         assert(self.bytes.items.len >= start_len + 3);
+    }
+
+    /// Emit a subresource texture→texture copy instruction (PNGB 0x80).
+    ///
+    /// The operand stream is plan 06's `L_TEXTURE_SUBRESOURCE_COPY`, in order:
+    /// both endpoints (id, mip, origin x/y/z, aspect) then the three size
+    /// fields and the flags byte. `copy.size == null` is the source-relative
+    /// default: the three size fields are written as 0 with bit 0 CLEAR, so a
+    /// decoder can distinguish an omitted size from an authored all-zero one.
+    pub fn copyTextureSubresource(
+        self: *Self,
+        gpa: Allocator,
+        source_id: u16,
+        destination_id: u16,
+        copy: texture_layout.SubresourceCopy,
+    ) !void {
+        const start_len = self.bytes.items.len;
+        try self.emitOpcode(gpa, .copy_texture_subresource);
+
+        try self.emitVarint(gpa, source_id);
+        try self.emitVarint(gpa, copy.source.mip_level);
+        try self.emitVarint(gpa, copy.source.origin.x);
+        try self.emitVarint(gpa, copy.source.origin.y);
+        try self.emitVarint(gpa, copy.source.origin.z);
+        try self.emitByte(gpa, @intFromEnum(copy.source.aspect));
+
+        try self.emitVarint(gpa, destination_id);
+        try self.emitVarint(gpa, copy.destination.mip_level);
+        try self.emitVarint(gpa, copy.destination.origin.x);
+        try self.emitVarint(gpa, copy.destination.origin.y);
+        try self.emitVarint(gpa, copy.destination.origin.z);
+        try self.emitByte(gpa, @intFromEnum(copy.destination.aspect));
+
+        const zero_size: texture_layout.Extent = .{ .width = 0, .height = 0, .depth_or_array_layers = 0 };
+        const size = copy.size orelse zero_size;
+        try self.emitVarint(gpa, size.width);
+        try self.emitVarint(gpa, size.height);
+        try self.emitVarint(gpa, size.depth_or_array_layers);
+
+        const flags: u8 = if (copy.size != null) 1 << 0 else 0;
+        try self.emitByte(gpa, flags);
+
+        // Lower bound only: opcode + thirteen minimum-width varints + the two
+        // aspect bytes + the flags byte = 17.
+        assert(self.bytes.items.len >= start_len + 17);
     }
 
     /// Emit copy_external_image_to_texture instruction.

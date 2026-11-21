@@ -1,0 +1,10 @@
+; A mip→mip subresource copy: the 2x2 tail mip of src lands in the 4x4 first
+; mip of dst. Both endpoints author :mip-level, so the copy is on PNGB 0x80;
+; the explicit :size keeps the source and destination subresources distinct.
+(texture :name src :size [8 8] :mip-level-count 3 :format rgba8unorm :usage [copy-src])
+(texture :name dst :size [8 8] :mip-level-count 3 :format rgba8unorm :usage [copy-dst])
+(queue :name copy
+  (copy-texture-to-texture :size [2 2 1]
+    (source :texture src :mip-level 2)
+    (destination :texture dst :mip-level 1)))
+(frame :name main :perform [copy])

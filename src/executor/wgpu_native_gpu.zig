@@ -342,6 +342,7 @@ const format = bytecode_mod.format;
 const Module = format.Module;
 const DataSection = bytecode_mod.DataSection;
 const DataId = bytecode_mod.DataId;
+const texture_layout = bytecode_mod.texture_layout;
 const LoadOp = bytecode_mod.opcodes.LoadOp;
 const StoreOp = bytecode_mod.opcodes.StoreOp;
 const opcodes = bytecode_mod.opcodes;
@@ -460,8 +461,15 @@ pub const Context = struct {
         //   depth32float-stencil8     powers the texture format of the same name
         //   rg11b10ufloat-renderable  powers rg11b10ufloat as a render target
         //   timestamp-query           powers (query-set :type timestamp …)
+        //   texture-compression-bc    powers the BC formats (plan 07)
+        //   …-bc-sliced-3d            powers 3D textures of those formats
+        //   texture-compression-etc2  powers the ETC2/EAC formats (plan 07);
+        //                             the CRD has no sliced-3d sibling, so 3D
+        //                             there is refused by the block table
+        //   texture-compression-astc  powers the ASTC formats (plan 07)
+        //   …-astc-sliced-3d          powers 3D textures of those formats
         //
-        // Three of gpu.js's eight have no `WGPUFeatureName` in the vendored
+        // Three of gpu.js's optional list have no `WGPUFeatureName` in the vendored
         // wgpu-native header at all — `primitive-index`,
         // `texture-formats-tier1`, `core-features-and-limits` — so there is
         // nothing to request for them here and a document using one renders in
@@ -474,6 +482,11 @@ pub const Context = struct {
             c.WGPUFeatureName_Depth32FloatStencil8,
             c.WGPUFeatureName_RG11B10UfloatRenderable,
             c.WGPUFeatureName_TimestampQuery,
+            c.WGPUFeatureName_TextureCompressionBC,
+            c.WGPUFeatureName_TextureCompressionBCSliced3D,
+            c.WGPUFeatureName_TextureCompressionETC2,
+            c.WGPUFeatureName_TextureCompressionASTC,
+            c.WGPUFeatureName_TextureCompressionASTCSliced3D,
         };
         var required_features: [optional_features.len]c.WGPUFeatureName = undefined;
         var feature_count: usize = 0;
@@ -646,6 +659,51 @@ pub const WgpuNativeGPU = struct {
     pub const MAX_BIND_GROUP_LAYOUTS: u16 = limits.capOf(.bind_group_layouts);
     pub const MAX_PIPELINE_LAYOUTS: u16 = limits.capOf(.pipeline_layouts);
 
+    /// The validated numbers handed to `wgpuQueueWriteTexture`, split out from
+    /// the wgpu call so a host test can assert the exact layout/extent without
+    /// a live GPU.
+    pub const PreparedTextureWrite = struct {
+        layout: texture_layout.Layout,
+        /// C-side data-layout strides. An authored stride is passed through; an
+        /// OMITTED one becomes WGPU_COPY_STRIDE_UNDEFINED (0xFFFFFFFF, the C
+        /// spelling of JS `undefined`), never the calculator's normalized
+        /// minimum (D26).
+        c_bytes_per_row: u32,
+        c_rows_per_image: u32,
+    };
+
+    /// Plan 01 at the native effect boundary. A refusal is
+    /// `InvalidTextureWrite` and no wgpu object is touched by the caller.
+    pub fn prepareTextureWrite(
+        descriptor: texture_layout.TextureDescriptor,
+        write: texture_layout.WriteLayout,
+        data_length: u64,
+    ) error{InvalidTextureWrite}!PreparedTextureWrite {
+        return prepareTextureCopy(descriptor, write, data_length, .queue_write);
+    }
+
+    /// Plan 05's buffer↔texture copy at the native effect boundary. The
+    /// direction picks the texture endpoint's usage bit; the shared calculator
+    /// applies the aligned buffer rules. `buffer_length` is the same
+    /// `GPUBuffer.size` the JS side reads, so `offset + span` is judged against
+    /// the real buffer, not a payload field.
+    pub fn prepareTextureCopy(
+        descriptor: texture_layout.TextureDescriptor,
+        write: texture_layout.WriteLayout,
+        buffer_length: u64,
+        policy: texture_layout.CopyPolicy,
+    ) error{InvalidTextureWrite}!PreparedTextureWrite {
+        const layout = switch (texture_layout.calculateCopy(descriptor, write, buffer_length, policy)) {
+            .ok => |ok| ok,
+            .refuse => return error.InvalidTextureWrite,
+        };
+        return .{
+            .layout = layout,
+            .c_bytes_per_row = write.bytes_per_row orelse 0xFFFFFFFF,
+            .c_rows_per_image = write.rows_per_image orelse 0xFFFFFFFF,
+        };
+    }
+
     /// Narrow a resource id decoded from a JSON descriptor to something the
     /// `max`-sized table can hold.
     ///
@@ -739,6 +797,13 @@ pub const WgpuNativeGPU = struct {
     /// binds one of these directly.
     explicit_texture_views: [MAX_TEXTURE_VIEWS]?wgpu.TextureView,
 
+    /// The source texture and authored aspect of each explicit view, so a 0x55
+    /// depth attachment can decide stencil ops from the view's own format and
+    /// subresource instead of creating a pass-local view for it. `0xFFFF` in
+    /// the id array means "no view at this slot".
+    explicit_view_texture_ids: [MAX_TEXTURE_VIEWS]u16,
+    explicit_view_aspects: [MAX_TEXTURE_VIEWS]u8,
+
     /// Samplers for texture filtering.
     samplers: [MAX_SAMPLERS]?wgpu.Sampler,
 
@@ -818,6 +883,18 @@ pub const WgpuNativeGPU = struct {
     /// Indexed by texture ID, stores WGPUTextureFormat values.
     texture_formats: [MAX_TEXTURES]c_uint,
 
+    /// The concrete plan-01 descriptor of each live texture, beside
+    /// `texture_formats`. `write_texture` validates against THIS record, not
+    /// against the current render size: after `resize` the canvas-bound
+    /// textures were not recreated (the pre-existing limitation `resize`
+    /// documents), so the stored extent is the extent of the object that
+    /// actually exists. A write sized to the new window is refused rather than
+    /// handed to wgpu against a smaller texture.
+    ///
+    /// The format is ALREADY resolved (`preferred_canvas_format` → the native
+    /// canvas format) because plan 01's calculator has no row for a sentinel.
+    texture_descriptors: [MAX_TEXTURES]?texture_layout.TextureDescriptor,
+
     /// Animation time in seconds for time-based uniforms.
     time: f32,
     /// The frame counter the current frame body was executed at, pushed in by
@@ -863,6 +940,8 @@ pub const WgpuNativeGPU = struct {
             .textures = [_]?wgpu.Texture{null} ** MAX_TEXTURES,
             .texture_views = [_]?wgpu.TextureView{null} ** MAX_TEXTURE_VIEWS,
             .explicit_texture_views = [_]?wgpu.TextureView{null} ** MAX_TEXTURE_VIEWS,
+            .explicit_view_texture_ids = [_]u16{0xFFFF} ** MAX_TEXTURE_VIEWS,
+            .explicit_view_aspects = [_]u8{0} ** MAX_TEXTURE_VIEWS,
             .samplers = [_]?wgpu.Sampler{null} ** MAX_SAMPLERS,
             .shaders = [_]?wgpu.ShaderModule{null} ** MAX_SHADERS,
             .render_pipelines = [_]?wgpu.RenderPipeline{null} ** MAX_RENDER_PIPELINES,
@@ -884,6 +963,7 @@ pub const WgpuNativeGPU = struct {
             .width = width,
             .height = height,
             .texture_formats = [_]c_uint{c.WGPUTextureFormat_BGRA8Unorm} ** MAX_TEXTURES,
+            .texture_descriptors = [_]?texture_layout.TextureDescriptor{null} ** MAX_TEXTURES,
             .time = 0.0,
             .frame_counter = 0,
         };
@@ -927,6 +1007,13 @@ pub const WgpuNativeGPU = struct {
     /// `--frame` never resizes. Canvas-sized textures a document declared
     /// (`:size canvas`) are NOT recreated here; that is the browser's
     /// `resizeCanvasBound` and an open item for this backend.
+    ///
+    /// Their retained `texture_descriptors` entries are NOT rewritten either:
+    /// they describe the object that still exists at the creation-time extent.
+    /// A later write sized to the new window is therefore refused by plan 01
+    /// instead of reaching wgpu against a smaller texture. That is the coherent
+    /// answer at this backend's supported boundary, not a fix for the resize
+    /// limitation.
     ///
     /// A zero dimension is refused the way `pngine_create` refuses it.
     pub fn resize(self: *Self, width: u32, height: u32) error{ZeroDimensions}!void {
@@ -1094,11 +1181,22 @@ pub const WgpuNativeGPU = struct {
         var tex_width: u32 = self.width;
         var tex_height: u32 = self.height;
         var tex_format: c_uint = c.WGPUTextureFormat_RGBA8Unorm;
+        // The plan-01 descriptor needs the enum itself, not the mapped C value.
+        var tex_format_code: descriptors.TextureFormat = .rgba8unorm;
         var tex_usage: c_uint = c.WGPUTextureUsage_RenderAttachment;
         var sample_count: u32 = 1;
         var depth_or_array_layers: u32 = 1;
         var mip_level_count: u32 = 1;
         var dimension: c_uint = c.WGPUTextureDimension_2D;
+        var layout_dimension: texture_layout.Dimension = .d2;
+        var has_width = false;
+        var has_height = false;
+        // `size_from_image_bitmap` is authored, but this backend does not decode
+        // bitmaps (create_image_bitmap is deferred), so the extent it actually
+        // creates is the render-size fallback. Tracked so the retained
+        // descriptor reports the source honestly instead of claiming an image
+        // resolution that never happened.
+        var image_sized = false;
         // A canvas-tracking texture starts at the render size and `:scale`
         // takes a fraction of it. `width`/`height` fields, when present, are an
         // explicit extent and win — the encoder never writes both.
@@ -1114,21 +1212,41 @@ pub const WgpuNativeGPU = struct {
                         else => {},
                     },
                     .u32_val => switch (tf) {
-                        .width => tex_width = field.scalar,
-                        .height => tex_height = field.scalar,
+                        .width => {
+                            tex_width = field.scalar;
+                            has_width = true;
+                        },
+                        .height => {
+                            tex_height = field.scalar;
+                            has_height = true;
+                        },
                         .depth => depth_or_array_layers = field.scalar,
                         .mip_level_count => mip_level_count = field.scalar,
                         .sample_count => sample_count = field.scalar,
                         else => {},
                     },
                     .enum_val => switch (tf) {
-                        .format => tex_format = decodeTextureFormat(tlvByte(field.scalar)),
-                        .usage => tex_usage = decodeTextureUsage(tlvByte(field.scalar)),
-                        .dimension => dimension = switch (field.scalar) {
-                            0 => c.WGPUTextureDimension_1D,
-                            2 => c.WGPUTextureDimension_3D,
-                            else => c.WGPUTextureDimension_2D,
+                        .format => {
+                            tex_format_code = @enumFromInt(tlvByte(field.scalar));
+                            tex_format = decodeTextureFormat(tlvByte(field.scalar));
                         },
+                        .usage => tex_usage = decodeTextureUsage(tlvByte(field.scalar)),
+                        .dimension => {
+                            dimension = switch (field.scalar) {
+                                0 => c.WGPUTextureDimension_1D,
+                                2 => c.WGPUTextureDimension_3D,
+                                else => c.WGPUTextureDimension_2D,
+                            };
+                            layout_dimension = switch (field.scalar) {
+                                0 => .d1,
+                                2 => .d3,
+                                else => .d2,
+                            };
+                        },
+                        else => {},
+                    },
+                    .u16_val => switch (tf) {
+                        .size_from_image_bitmap => image_sized = true,
                         else => {},
                     },
                     else => {},
@@ -1142,6 +1260,77 @@ pub const WgpuNativeGPU = struct {
         if (canvas_scale != 1.0 and canvas_scale > 0.0) {
             tex_width = scaleExtent(tex_width, canvas_scale);
             tex_height = scaleExtent(tex_height, canvas_scale);
+        }
+
+        // Format-driven creation policy (plan 07): a compressed format's device
+        // feature is checked BEFORE wgpuDeviceCreateTexture, whose later
+        // validation error names neither the texture nor the feature. The
+        // message matches gpu.js's, so an unsupported adapter is attributable
+        // on both backends.
+        const format_feature = texture_layout.formatFeature(tex_format_code);
+        if (format_feature.family != .none) {
+            const base_feature: c.WGPUFeatureName = switch (format_feature.family) {
+                .bc => c.WGPUFeatureName_TextureCompressionBC,
+                .etc2 => c.WGPUFeatureName_TextureCompressionETC2,
+                .astc => c.WGPUFeatureName_TextureCompressionASTC,
+                .none => unreachable,
+            };
+            const base_name = switch (format_feature.family) {
+                .bc => "texture-compression-bc",
+                .etc2 => "texture-compression-etc2",
+                .astc => "texture-compression-astc",
+                .none => unreachable,
+            };
+            if (c.wgpuDeviceHasFeature(self.ctx.device, base_feature) == 0) {
+                std.debug.print(
+                    "texture '{d}' format '{s}' requires '{s}'; this adapter does not support it\n",
+                    .{ texture_id, tex_format_code.toWebGPU(), base_name },
+                );
+                return error.MissingTextureFormatFeature;
+            }
+            if (layout_dimension == .d3) {
+                const sliced_feature: c.WGPUFeatureName = switch (format_feature.family) {
+                    .bc => c.WGPUFeatureName_TextureCompressionBCSliced3D,
+                    .astc => c.WGPUFeatureName_TextureCompressionASTCSliced3D,
+                    // The CRD has no ETC2/EAC 3D support at all: name the
+                    // refusal instead of inventing a sliced feature.
+                    .etc2, .none => {
+                        std.debug.print("texture '{d}' format '{s}' cannot be 3d\n", .{ texture_id, tex_format_code.toWebGPU() });
+                        return error.UnsupportedTextureDimension;
+                    },
+                };
+                const sliced_name = switch (format_feature.family) {
+                    .bc => "texture-compression-bc-sliced-3d",
+                    .astc => "texture-compression-astc-sliced-3d",
+                    .etc2, .none => unreachable,
+                };
+                if (c.wgpuDeviceHasFeature(self.ctx.device, sliced_feature) == 0) {
+                    std.debug.print(
+                        "texture '{d}' format '{s}' requires '{s}'; this adapter does not support it\n",
+                        .{ texture_id, tex_format_code.toWebGPU(), sliced_name },
+                    );
+                    return error.MissingTextureFormatFeature;
+                }
+            }
+            // The creation-side block rule, checked here rather than left to
+            // wgpu's opaque validation. The base extent is block-aligned unless
+            // the device exposes texture-compression-unaligned, which this
+            // backend does not request; 1D is never compressed.
+            if (layout_dimension == .d1) {
+                std.debug.print("texture '{d}' format '{s}' cannot be 1d; compressed formats are 2d or 3d\n", .{ texture_id, tex_format_code.toWebGPU() });
+                return error.UnsupportedTextureDimension;
+            }
+            const block = switch (texture_layout.formatInfo(tex_format_code, .all)) {
+                .ok => |info| info,
+                .refuse => return error.UnsupportedTextureFormat,
+            };
+            if (tex_width % block.block_width != 0 or tex_height % block.block_height != 0) {
+                std.debug.print(
+                    "texture '{d}' format '{s}' size {d}x{d} is not a multiple of its {d}x{d} texel block\n",
+                    .{ texture_id, tex_format_code.toWebGPU(), tex_width, tex_height, block.block_width, block.block_height },
+                );
+                return error.InvalidTextureSize;
+            }
         }
 
         // Zero-initialize to avoid undefined memory issues
@@ -1159,6 +1348,27 @@ pub const WgpuNativeGPU = struct {
 
         self.textures[texture_id] = wgpu.deviceCreateTexture(self.ctx.device, &descriptor);
         self.texture_formats[texture_id] = tex_format;
+        self.texture_descriptors[texture_id] = .{
+            .size = .{
+                .width = tex_width,
+                .height = tex_height,
+                .depth_or_array_layers = depth_or_array_layers,
+            },
+            .dimension = layout_dimension,
+            // Resolve the sentinel BEFORE storing: the calculator has no
+            // preferred-canvas row and must never infer a footprint from it.
+            .format = if (tex_format_code == .preferred_canvas_format) .bgra8unorm else tex_format_code,
+            // decodeTextureUsage maps an authored 0 to RenderAttachment; store
+            // the usage of the texture that was created, not the raw byte.
+            .usage = descriptors.TextureUsage.fromU8(@as(u8, @truncate(tex_usage))),
+            .sample_count = sample_count,
+            .mip_level_count = mip_level_count,
+            // An image-sized descriptor that never decoded is the render-size
+            // fallback this backend created (its deferred ImageBitmap path), so
+            // its extent source is the canvas. Reporting `image_bitmap` would
+            // claim a resolution that did not happen.
+            .extent_source = if (has_width and has_height and !image_sized) .explicit else .canvas,
+        };
     }
 
     // Byte → wgpu-native enum. Kept in lockstep with descriptors.zig TextureFormat
@@ -1226,6 +1436,62 @@ pub const WgpuNativeGPU = struct {
             0x71 => c.WGPUTextureFormat_RGB10A2Uint,
             0x72 => c.WGPUTextureFormat_RG11B10Ufloat,
             0x73 => c.WGPUTextureFormat_RGB9E5Ufloat,
+            // BC compressed (plan 07 tranche A).
+            0x80 => c.WGPUTextureFormat_BC1RGBAUnorm,
+            0x81 => c.WGPUTextureFormat_BC1RGBAUnormSrgb,
+            0x82 => c.WGPUTextureFormat_BC2RGBAUnorm,
+            0x83 => c.WGPUTextureFormat_BC2RGBAUnormSrgb,
+            0x84 => c.WGPUTextureFormat_BC3RGBAUnorm,
+            0x85 => c.WGPUTextureFormat_BC3RGBAUnormSrgb,
+            0x86 => c.WGPUTextureFormat_BC4RUnorm,
+            0x87 => c.WGPUTextureFormat_BC4RSnorm,
+            0x88 => c.WGPUTextureFormat_BC5RGUnorm,
+            0x89 => c.WGPUTextureFormat_BC5RGSnorm,
+            0x8a => c.WGPUTextureFormat_BC6HRGBUfloat,
+            0x8b => c.WGPUTextureFormat_BC6HRGBFloat,
+            0x8c => c.WGPUTextureFormat_BC7RGBAUnorm,
+            0x8d => c.WGPUTextureFormat_BC7RGBAUnormSrgb,
+            // ETC2/EAC compressed (plan 07 tranche B).
+            0x90 => c.WGPUTextureFormat_ETC2RGB8Unorm,
+            0x91 => c.WGPUTextureFormat_ETC2RGB8UnormSrgb,
+            0x92 => c.WGPUTextureFormat_ETC2RGB8A1Unorm,
+            0x93 => c.WGPUTextureFormat_ETC2RGB8A1UnormSrgb,
+            0x94 => c.WGPUTextureFormat_ETC2RGBA8Unorm,
+            0x95 => c.WGPUTextureFormat_ETC2RGBA8UnormSrgb,
+            0x96 => c.WGPUTextureFormat_EACR11Unorm,
+            0x97 => c.WGPUTextureFormat_EACR11Snorm,
+            0x98 => c.WGPUTextureFormat_EACRG11Unorm,
+            0x99 => c.WGPUTextureFormat_EACRG11Snorm,
+            // ASTC compressed (plan 07 tranche C). The dimensions are in the
+            // format name; every block is 16 bytes.
+            0xa0 => c.WGPUTextureFormat_ASTC4x4Unorm,
+            0xa1 => c.WGPUTextureFormat_ASTC4x4UnormSrgb,
+            0xa2 => c.WGPUTextureFormat_ASTC5x4Unorm,
+            0xa3 => c.WGPUTextureFormat_ASTC5x4UnormSrgb,
+            0xa4 => c.WGPUTextureFormat_ASTC5x5Unorm,
+            0xa5 => c.WGPUTextureFormat_ASTC5x5UnormSrgb,
+            0xa6 => c.WGPUTextureFormat_ASTC6x5Unorm,
+            0xa7 => c.WGPUTextureFormat_ASTC6x5UnormSrgb,
+            0xa8 => c.WGPUTextureFormat_ASTC6x6Unorm,
+            0xa9 => c.WGPUTextureFormat_ASTC6x6UnormSrgb,
+            0xaa => c.WGPUTextureFormat_ASTC8x5Unorm,
+            0xab => c.WGPUTextureFormat_ASTC8x5UnormSrgb,
+            0xac => c.WGPUTextureFormat_ASTC8x6Unorm,
+            0xad => c.WGPUTextureFormat_ASTC8x6UnormSrgb,
+            0xae => c.WGPUTextureFormat_ASTC8x8Unorm,
+            0xaf => c.WGPUTextureFormat_ASTC8x8UnormSrgb,
+            0xb0 => c.WGPUTextureFormat_ASTC10x5Unorm,
+            0xb1 => c.WGPUTextureFormat_ASTC10x5UnormSrgb,
+            0xb2 => c.WGPUTextureFormat_ASTC10x6Unorm,
+            0xb3 => c.WGPUTextureFormat_ASTC10x6UnormSrgb,
+            0xb4 => c.WGPUTextureFormat_ASTC10x8Unorm,
+            0xb5 => c.WGPUTextureFormat_ASTC10x8UnormSrgb,
+            0xb6 => c.WGPUTextureFormat_ASTC10x10Unorm,
+            0xb7 => c.WGPUTextureFormat_ASTC10x10UnormSrgb,
+            0xb8 => c.WGPUTextureFormat_ASTC12x10Unorm,
+            0xb9 => c.WGPUTextureFormat_ASTC12x10UnormSrgb,
+            0xba => c.WGPUTextureFormat_ASTC12x12Unorm,
+            0xbb => c.WGPUTextureFormat_ASTC12x12UnormSrgb,
             // The preferred-canvas-format SENTINEL (descriptors.zig 0xFF) — a
             // legitimate byte, resolved to the native canvas format here, NOT
             // an unsupported value. (The spec/05 fail-loud fallback below
@@ -1305,7 +1571,11 @@ pub const WgpuNativeGPU = struct {
                 switch (vf) {
                     .format => descriptor.format = decodeTextureFormat(tlvByte(field.scalar)),
                     .dimension => descriptor.dimension = mapViewDimension(tlvByte(field.scalar)),
-                    .aspect => descriptor.aspect = decodeTextureAspect(tlvByte(field.scalar)),
+                    .aspect => {
+                        const byte = tlvByte(field.scalar);
+                        descriptor.aspect = decodeTextureAspect(byte);
+                        self.explicit_view_aspects[view_id] = byte;
+                    },
                     .base_mip_level => descriptor.baseMipLevel = field.scalar,
                     .mip_level_count => descriptor.mipLevelCount = field.scalar,
                     .base_array_layer => descriptor.baseArrayLayer = field.scalar,
@@ -1315,6 +1585,7 @@ pub const WgpuNativeGPU = struct {
         }
 
         self.explicit_texture_views[view_id] = wgpu.textureCreateView(texture, &descriptor);
+        self.explicit_view_texture_ids[view_id] = texture_id;
     }
 
     /// Byte → wgpu-native texture aspect (0=all, 1=stencil-only, 2=depth-only).
@@ -2313,31 +2584,40 @@ pub const WgpuNativeGPU = struct {
         const depth_view = wgpu.textureCreateView(depth_tex, &depth_view_desc);
         if (depth_view == null) return result;
 
+        result.view = depth_view;
+        result.valid = true;
+        result.attachment = buildDepthAttachment(self, depth_view, has_stencil);
+
+        return result;
+    }
+
+    /// Assemble the depth-stencil attachment from an ALREADY-RESOLVED view and
+    /// consume the pending load/store/clear state. Shared by the legacy
+    /// pass-created view and 0x55's borrowed explicit view: only the ownership
+    /// of the handle differs, not what the attachment means.
+    fn buildDepthAttachment(self: *Self, view: wgpu.TextureView, has_stencil: bool) c.WGPURenderPassDepthStencilAttachment {
         // Map the pending ops (LoadOp{load=0,clear=1}, StoreOp{store=0,discard=1}).
         assert(self.pending_depth_load_op <= 1 and self.pending_depth_store_op <= 1);
         assert(self.pending_stencil_load_op <= 1 and self.pending_stencil_store_op <= 1);
         const depth_load: c_uint = if (self.pending_depth_load_op == 0) c.WGPULoadOp_Load else c.WGPULoadOp_Clear;
         const depth_store: c_uint = if (self.pending_depth_store_op == 0) c.WGPUStoreOp_Store else c.WGPUStoreOp_Discard;
 
-        result.view = depth_view;
-        result.valid = true;
-        result.attachment = std.mem.zeroes(c.WGPURenderPassDepthStencilAttachment);
-        result.attachment.view = depth_view;
-        result.attachment.depthLoadOp = depth_load;
-        result.attachment.depthStoreOp = depth_store;
-        result.attachment.depthClearValue = self.pending_depth_clear_value;
+        var attachment = std.mem.zeroes(c.WGPURenderPassDepthStencilAttachment);
+        attachment.view = view;
+        attachment.depthLoadOp = depth_load;
+        attachment.depthStoreOp = depth_store;
+        attachment.depthClearValue = self.pending_depth_clear_value;
         if (has_stencil) {
-            result.attachment.stencilLoadOp = if (self.pending_stencil_load_op == 0) c.WGPULoadOp_Load else c.WGPULoadOp_Clear;
-            result.attachment.stencilStoreOp = if (self.pending_stencil_store_op == 0) c.WGPUStoreOp_Store else c.WGPUStoreOp_Discard;
+            attachment.stencilLoadOp = if (self.pending_stencil_load_op == 0) c.WGPULoadOp_Load else c.WGPULoadOp_Clear;
+            attachment.stencilStoreOp = if (self.pending_stencil_store_op == 0) c.WGPUStoreOp_Store else c.WGPUStoreOp_Discard;
         } else {
-            result.attachment.stencilLoadOp = c.WGPULoadOp_Undefined;
-            result.attachment.stencilStoreOp = c.WGPUStoreOp_Undefined;
+            attachment.stencilLoadOp = c.WGPULoadOp_Undefined;
+            attachment.stencilStoreOp = c.WGPUStoreOp_Undefined;
         }
-        result.attachment.stencilClearValue = self.pending_stencil_clear_value;
-        result.attachment.stencilReadOnly = 0;
-        result.attachment.depthReadOnly = 0;
-
-        return result;
+        attachment.stencilClearValue = self.pending_stencil_clear_value;
+        attachment.stencilReadOnly = 0;
+        attachment.depthReadOnly = 0;
+        return attachment;
     }
 
     /// Reset the pending depth/stencil ops to the clear/store defaults. Called by
@@ -3326,6 +3606,62 @@ pub const WgpuNativeGPU = struct {
         }
     }
 
+    /// Raw texel upload: resolve the live texture and its data entry, run plan
+    /// 01 over the retained concrete descriptor, then make exactly ONE
+    /// `wgpuQueueWriteTexture` call through the counted `wgpu_c` wrapper.
+    ///
+    /// A refusal never reaches wgpu: no copy-dst/MSAA/aspect/mip/origin/range/
+    /// span failure and no data id past the section can produce a queue call.
+    /// Zero-extent copies are valid no-work writes and are skipped here.
+    pub fn write_texture(self: *Self, gpa: Allocator, texture_id: u16, data_id: u16, write: texture_layout.WriteLayout) !void {
+        _ = gpa;
+
+        if (texture_id >= MAX_TEXTURES) return error.InvalidResourceId;
+        const texture = self.textures[texture_id] orelse return error.TextureNotFound;
+        // Every texture this backend created has a descriptor. A null one is
+        // an invariant break; refusing is safer than handing wgpu an extent
+        // and layout nothing validated.
+        const descriptor = self.texture_descriptors[texture_id] orelse return error.InvalidTextureWrite;
+        const module = self.module orelse return error.ModuleNotSet;
+
+        // A data id past the section is a malformed payload, not an empty
+        // source to substitute (DataSection.get is total). An authored
+        // zero-length entry remains legal and is caught by the calculator's
+        // span check when the copy is nonzero.
+        if (data_id >= module.data.count()) return error.InvalidTextureWrite;
+        const data = module.data.get(DataId.fromInt(data_id));
+
+        const prepared = try prepareTextureWrite(descriptor, write, @as(u64, data.len));
+        const extent = prepared.layout.copy_extent;
+        // No-work write: the browser may record the valid queue call, native
+        // deliberately does not ask wgpu to copy zero texels.
+        if (extent.width == 0 or extent.height == 0 or extent.depth_or_array_layers == 0) return;
+
+        const destination = c.WGPUTexelCopyTextureInfo{
+            .texture = texture,
+            .mipLevel = write.mip_level,
+            .origin = .{
+                .x = write.origin.x,
+                .y = write.origin.y,
+                .z = write.origin.z,
+            },
+            .aspect = decodeTextureAspect(@intFromEnum(write.aspect)),
+        };
+        // `offset` stays relative to the data entry's first byte; the source is
+        // the full entry, as the command decoder's window is.
+        const data_layout = c.WGPUTexelCopyBufferLayout{
+            .offset = write.offset,
+            .bytesPerRow = prepared.c_bytes_per_row,
+            .rowsPerImage = prepared.c_rows_per_image,
+        };
+        const write_size = c.WGPUExtent3D{
+            .width = extent.width,
+            .height = extent.height,
+            .depthOrArrayLayers = extent.depth_or_array_layers,
+        };
+        wgpu.queueWriteTexture(self.ctx.queue, &destination, data, &data_layout, &write_size);
+    }
+
     /// Write the declared controls (frame program §7.1) — the same path
     /// write_buffer takes, minus the data-section lookup: the values come
     /// from the dispatcher's control table, not the payload.
@@ -3363,6 +3699,33 @@ pub const WgpuNativeGPU = struct {
         if (texture_id >= MAX_TEXTURES) return null; // untrusted id
         const t = self.textures[texture_id] orelse return null;
         return .{ .texture = t, .owned = false };
+    }
+
+    /// The descriptor facts a copy endpoint needs, without touching a GPU
+    /// handle. Declared textures carry their retained creation record. The
+    /// canvas (`0xFFFE`) has none, so its facts are the ones
+    /// `init`/`configureSurface` configured: bgra8unorm, render-size,
+    /// single-sample, one mip, RENDER_ATTACHMENT|COPY_SRC. A canvas
+    /// DESTINATION therefore fails `calculateTextureCopy`'s missing-copy-dst
+    /// stage before a swapchain texture is acquired.
+    fn getCopyTextureDescriptor(self: *Self, texture_id: u16) ?texture_layout.TextureDescriptor {
+        if (texture_id == 0xFFFE) {
+            return .{
+                .size = .{
+                    .width = self.width,
+                    .height = self.height,
+                    .depth_or_array_layers = 1,
+                },
+                .dimension = .d2,
+                .format = .bgra8unorm,
+                .usage = .{ .copy_src = true, .render_attachment = true },
+                .sample_count = 1,
+                .mip_level_count = 1,
+                .extent_source = .canvas,
+            };
+        }
+        if (texture_id >= MAX_TEXTURES) return null; // untrusted id
+        return self.texture_descriptors[texture_id];
     }
 
     pub fn copy_buffer_to_buffer(self: *Self, gpa: Allocator, src_buffer: u16, src_offset: u32, dst_buffer: u16, dst_offset: u32, size: u32) !void {
@@ -3417,6 +3780,155 @@ pub const WgpuNativeGPU = struct {
         };
         const copy_size = c.WGPUExtent3D{ .width = width, .height = height, .depthOrArrayLayers = 1 };
         wgpu.commandEncoderCopyTextureToTexture(encoder, &source, &destination, &copy_size);
+    }
+
+    /// Plan 06's subresource texture→texture copy. Resolves BOTH retained
+    /// descriptors, lets `calculateTextureCopy` prove the copy, then records
+    /// one `wgpuCommandEncoderCopyTextureToTexture`. The endpoints are handed
+    /// to the C API exactly as the browser's dictionaries are: explicit mip,
+    /// origin and aspect on each side, and the calculator's resolved extent.
+    ///
+    /// A missing texture or a refused copy is `InvalidTextureWrite` BEFORE the
+    /// encoder exists — never a silent drop. Both endpoints are owned=false
+    /// today; the release guards mirror `copy_texture_to_texture`.
+    pub fn copy_texture_subresource(self: *Self, gpa: Allocator, source_id: u16, destination_id: u16, copy: texture_layout.SubresourceCopy) !void {
+        _ = gpa;
+        assert(self.render_pass == null and self.compute_pass == null); // encoder-level op
+
+        const source_descriptor = self.getCopyTextureDescriptor(source_id) orelse return error.InvalidTextureWrite;
+        const destination_descriptor = self.getCopyTextureDescriptor(destination_id) orelse return error.InvalidTextureWrite;
+        const layout = switch (texture_layout.calculateTextureCopy(source_descriptor, destination_descriptor, copy)) {
+            .ok => |ok| ok,
+            .refuse => return error.InvalidTextureWrite,
+        };
+
+        // Resolve live handles only after the calculator accepts the copy: a
+        // canvas destination is refused above, before any swapchain acquisition.
+        const source = self.getCopyTexture(source_id) orelse return error.InvalidTextureWrite;
+        defer if (source.owned) wgpu.textureRelease(source.texture);
+        const destination = self.getCopyTexture(destination_id) orelse return error.InvalidTextureWrite;
+        defer if (destination.owned) wgpu.textureRelease(destination.texture);
+
+        if (self.encoder == null) {
+            self.encoder = wgpu.deviceCreateCommandEncoder(self.ctx.device, null);
+        }
+        const encoder = self.encoder orelse return error.InvalidTextureWrite;
+
+        const source_info = c.WGPUTexelCopyTextureInfo{
+            .texture = source.texture,
+            .mipLevel = copy.source.mip_level,
+            .origin = .{
+                .x = copy.source.origin.x,
+                .y = copy.source.origin.y,
+                .z = copy.source.origin.z,
+            },
+            .aspect = decodeTextureAspect(@intFromEnum(copy.source.aspect)),
+        };
+        const destination_info = c.WGPUTexelCopyTextureInfo{
+            .texture = destination.texture,
+            .mipLevel = copy.destination.mip_level,
+            .origin = .{
+                .x = copy.destination.origin.x,
+                .y = copy.destination.origin.y,
+                .z = copy.destination.origin.z,
+            },
+            .aspect = decodeTextureAspect(@intFromEnum(copy.destination.aspect)),
+        };
+        const copy_size = c.WGPUExtent3D{
+            .width = layout.copy_extent.width,
+            .height = layout.copy_extent.height,
+            .depthOrArrayLayers = layout.copy_extent.depth_or_array_layers,
+        };
+        wgpu.commandEncoderCopyTextureToTexture(encoder, &source_info, &destination_info, &copy_size);
+    }
+
+    /// Buffer→texture encoder copy (plan 05's `copy_buffer_to_texture`).
+    ///
+    /// The command carries the full `WriteLayout`; the calculator proves it
+    /// against the texture's retained descriptor and the LIVE GPUBuffer size,
+    /// with the texture endpoint as a destination (COPY_DST). A refusal is
+    /// `InvalidTextureWrite` and touches no wgpu object. Missing ids are the
+    /// same silent no-op as `copy_buffer_to_buffer` — the resource was never
+    /// created in this stream — while a zero extent is valid no-work.
+    pub fn copy_buffer_to_texture(self: *Self, gpa: Allocator, texture_id: u16, buffer_id: u16, write: texture_layout.WriteLayout) !void {
+        _ = gpa;
+        assert(self.render_pass == null and self.compute_pass == null); // encoder-level op
+        if (texture_id >= MAX_TEXTURES or buffer_id >= MAX_BUFFERS) return; // untrusted ids
+        const texture = self.textures[texture_id] orelse return;
+        const buffer = self.buffers[buffer_id] orelse return;
+        const descriptor = self.texture_descriptors[texture_id] orelse return error.InvalidTextureWrite;
+
+        const prepared = try prepareTextureCopy(descriptor, write, wgpu.bufferGetSize(buffer), .buffer_to_texture);
+        const extent = prepared.layout.copy_extent;
+        if (extent.width == 0 or extent.height == 0 or extent.depth_or_array_layers == 0) return;
+
+        if (self.encoder == null) {
+            self.encoder = wgpu.deviceCreateCommandEncoder(self.ctx.device, null);
+        }
+        const encoder = self.encoder orelse return;
+
+        const source = c.WGPUTexelCopyBufferInfo{
+            .layout = .{
+                .offset = write.offset,
+                .bytesPerRow = prepared.c_bytes_per_row,
+                .rowsPerImage = prepared.c_rows_per_image,
+            },
+            .buffer = buffer,
+        };
+        const destination = c.WGPUTexelCopyTextureInfo{
+            .texture = texture,
+            .mipLevel = write.mip_level,
+            .origin = .{ .x = write.origin.x, .y = write.origin.y, .z = write.origin.z },
+            .aspect = decodeTextureAspect(@intFromEnum(write.aspect)),
+        };
+        const copy_size = c.WGPUExtent3D{
+            .width = extent.width,
+            .height = extent.height,
+            .depthOrArrayLayers = extent.depth_or_array_layers,
+        };
+        wgpu.commandEncoderCopyBufferToTexture(encoder, &source, &destination, &copy_size);
+    }
+
+    /// Texture→buffer encoder copy (plan 05's `copy_texture_to_buffer`). Same
+    /// validation as `copy_buffer_to_texture` with the texture endpoint as a
+    /// SOURCE (COPY_SRC) and the buffer carrying the destination layout.
+    pub fn copy_texture_to_buffer(self: *Self, gpa: Allocator, texture_id: u16, buffer_id: u16, write: texture_layout.WriteLayout) !void {
+        _ = gpa;
+        assert(self.render_pass == null and self.compute_pass == null); // encoder-level op
+        if (texture_id >= MAX_TEXTURES or buffer_id >= MAX_BUFFERS) return; // untrusted ids
+        const texture = self.textures[texture_id] orelse return;
+        const buffer = self.buffers[buffer_id] orelse return;
+        const descriptor = self.texture_descriptors[texture_id] orelse return error.InvalidTextureWrite;
+
+        const prepared = try prepareTextureCopy(descriptor, write, wgpu.bufferGetSize(buffer), .texture_to_buffer);
+        const extent = prepared.layout.copy_extent;
+        if (extent.width == 0 or extent.height == 0 or extent.depth_or_array_layers == 0) return;
+
+        if (self.encoder == null) {
+            self.encoder = wgpu.deviceCreateCommandEncoder(self.ctx.device, null);
+        }
+        const encoder = self.encoder orelse return;
+
+        const source = c.WGPUTexelCopyTextureInfo{
+            .texture = texture,
+            .mipLevel = write.mip_level,
+            .origin = .{ .x = write.origin.x, .y = write.origin.y, .z = write.origin.z },
+            .aspect = decodeTextureAspect(@intFromEnum(write.aspect)),
+        };
+        const destination = c.WGPUTexelCopyBufferInfo{
+            .layout = .{
+                .offset = write.offset,
+                .bytesPerRow = prepared.c_bytes_per_row,
+                .rowsPerImage = prepared.c_rows_per_image,
+            },
+            .buffer = buffer,
+        };
+        const copy_size = c.WGPUExtent3D{
+            .width = extent.width,
+            .height = extent.height,
+            .depthOrArrayLayers = extent.depth_or_array_layers,
+        };
+        wgpu.commandEncoderCopyTextureToBuffer(encoder, &source, &destination, &copy_size);
     }
 
     // write_uniform (0x21) and write_audio_data (0x2C) are RESERVED-INERT — see
@@ -3790,6 +4302,109 @@ pub const WgpuNativeGPU = struct {
         if (self.render_pass != null) {
             _ = debug_render_passes_begun.fetchAdd(1, .monotonic);
         }
+    }
+
+    /// 0x81's native execution: every colour/resolve/depth target goes through
+    /// the same tagged split as the browser — canvas, explicit view, texture —
+    /// and the STORED `wgpuTextureView` is placed directly in the attachment.
+    /// Explicit depth views are BORROWED from `explicit_texture_views`: they are
+    /// never stored in `current_depth_view` (whose owner releases it), so a pass
+    /// cannot release an authored resource. Missing/wrong-kind targets refuse
+    /// with a named error rather than opening a pass over a default view.
+    pub fn begin_render_pass_views(self: *Self, gpa: Allocator, attachments: []const @import("bytecode").emitter.Emitter.ViewColorAttachment, depth_target: u16) !void {
+        _ = gpa;
+        assert(self.ctx.device != null);
+        assert(attachments.len <= MAX_COLOR_ATTACHMENTS);
+        try self.requireNoOpenPass();
+
+        if (self.encoder == null) {
+            self.encoder = wgpu.deviceCreateCommandEncoder(self.ctx.device, null);
+        }
+        const encoder = self.encoder orelse return error.SurfaceTextureUnavailable;
+
+        var color_attachments: [MAX_COLOR_ATTACHMENTS]c.WGPURenderPassColorAttachment = undefined;
+        for (attachments, 0..) |a, i| {
+            const cv = try attachmentColorView(self, a.target);
+            if (cv.is_surface) self.latchSurfaceView(cv.view);
+            color_attachments[i] = std.mem.zeroes(c.WGPURenderPassColorAttachment);
+            color_attachments[i].view = cv.view;
+            color_attachments[i].depthSlice = c.WGPU_DEPTH_SLICE_UNDEFINED;
+            color_attachments[i].loadOp = if (@intFromEnum(a.load_op) == 0) c.WGPULoadOp_Load else c.WGPULoadOp_Clear;
+            color_attachments[i].storeOp = if (@intFromEnum(a.store_op) == 0) c.WGPUStoreOp_Store else c.WGPUStoreOp_Discard;
+            color_attachments[i].clearValue = clearColor(a.clear_r_bits, a.clear_g_bits, a.clear_b_bits, a.clear_a_bits);
+            if (a.resolve_target != opcodes.ATTACHMENT_NONE) {
+                const rv = try attachmentColorView(self, a.resolve_target);
+                color_attachments[i].resolveTarget = rv.view;
+                if (rv.is_surface) self.latchSurfaceView(rv.view);
+            }
+        }
+
+        // Release a previous pass-created depth view, then resolve this pass's.
+        // An explicit (borrowed) view is NOT latched; only the untagged texture
+        // path creates and therefore owns a view.
+        if (self.current_depth_view) |old_view| {
+            wgpu.textureViewRelease(old_view);
+            self.current_depth_view = null;
+        }
+        var depth_attachment = std.mem.zeroes(c.WGPURenderPassDepthStencilAttachment);
+        var has_depth = false;
+        if (depth_target != opcodes.ATTACHMENT_NONE) {
+            if (depth_target == opcodes.ATTACHMENT_CANVAS) return error.AttachmentViewCanvasDepth;
+            if (opcodes.attachmentTargetIsView(depth_target)) {
+                const id = opcodes.attachmentTargetValue(depth_target);
+                if (id >= MAX_TEXTURE_VIEWS) return error.AttachmentViewNotFound;
+                const view = self.explicit_texture_views[id] orelse return error.AttachmentViewNotFound;
+                const aspect = self.explicit_view_aspects[id];
+                // StencilOnly cannot be a depth-stencil attachment's depth side.
+                if (aspect == 1) return error.AttachmentViewStencilOnly;
+                const tid = self.explicit_view_texture_ids[id];
+                var has_stencil = false;
+                if (tid < MAX_TEXTURES) {
+                    has_stencil = self.texture_formats[tid] == c.WGPUTextureFormat_Depth24PlusStencil8 and aspect != 2;
+                }
+                depth_attachment = buildDepthAttachment(self, view, has_stencil);
+                has_depth = true;
+            } else {
+                const depth_result = setupDepthAttachment(self, depth_target);
+                if (!depth_result.valid) return error.AttachmentViewNotFound;
+                depth_attachment = depth_result.attachment;
+                self.current_depth_view = depth_result.view;
+                has_depth = true;
+            }
+        }
+        resetPendingDepthStencilOps(self);
+
+        // A pass needs at least one attachment; count-zero is legal only with
+        // a depth target, which the dispatcher already enforces. Refuse rather
+        // than assert so a hostile stream can never begin an empty pass.
+        if (attachments.len == 0 and !has_depth) return error.AttachmentViewEmptyPass;
+
+        var render_pass_desc = std.mem.zeroes(c.WGPURenderPassDescriptor);
+        render_pass_desc.label = .{ .data = null, .length = 0 };
+        render_pass_desc.colorAttachmentCount = attachments.len;
+        render_pass_desc.colorAttachments = if (attachments.len > 0) @ptrCast(&color_attachments) else null;
+        render_pass_desc.depthStencilAttachment = if (has_depth) &depth_attachment else null;
+
+        self.render_pass = wgpu.commandEncoderBeginRenderPass(encoder, &render_pass_desc);
+        if (self.render_pass != null) {
+            _ = debug_render_passes_begun.fetchAdd(1, .monotonic);
+        }
+    }
+
+    /// Resolve a 0x55 colour/resolve target to a view. The id spaces stay
+    /// disjoint: a tagged target is looked up ONLY in `explicit_texture_views`,
+    /// an untagged one only through the texture path (which uses the cached
+    /// default view). Missing entries are errors, never a fallback.
+    fn attachmentColorView(self: *Self, target: u16) !ColorViewResult {
+        if (target == opcodes.ATTACHMENT_NONE) return error.AttachmentViewMissing;
+        if (target == opcodes.ATTACHMENT_CANVAS) return getColorTargetView(self, opcodes.ATTACHMENT_CANVAS);
+        if (opcodes.attachmentTargetIsView(target)) {
+            const id = opcodes.attachmentTargetValue(target);
+            if (id >= MAX_TEXTURE_VIEWS) return error.AttachmentViewNotFound;
+            const view = self.explicit_texture_views[id] orelse return error.AttachmentViewNotFound;
+            return .{ .view = view, .is_surface = false };
+        }
+        return getColorTargetView(self, target);
     }
 };
 

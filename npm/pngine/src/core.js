@@ -127,6 +127,53 @@ export function createCoreDispatcher(device, ctx) {
         },
 
         /**
+         * Install the payload's texture names, so writeTextures/getTextures can
+         * address a texture by the `(texture :name …)` the author wrote. The
+         * map comes from parseUniformTable(bytecode).textures; call this after
+         * the init stream has executed, beside setBufferNames. It replaces the
+         * previous map whole, so a reload never inherits stale names.
+         * @param {Map<string, import("./gpu-host-texture.js").TextureName>|Record<string, import("./gpu-host-texture.js").TextureName>} names
+         */
+        setTextureNames(names) {
+            dispatcher.setTextureNames(names);
+        },
+
+        /**
+         * Put host bytes in textures, by name: `{ albedo: bytes }` or
+         * `{ albedo: { bytes, offset, bytesPerRow, rowsPerImage, origin,
+         * mipLevel, aspect, size, poolIndex } }`.
+         *
+         * The whole map is shape-checked before the first byte moves: a
+         * malformed record throws a TypeError. A name the runtime cannot honour
+         * (unknown, written by the frame itself, a bad pool member, no
+         * copy-dst, multisampled, 1D, a bad mip/origin/extent/stride/aspect, or
+         * too little data) is REFUSED through the callback installed with
+         * setOnError, with source "write-texture" — never silently dropped — and
+         * makes no queue call. A pooled name with no poolIndex writes every
+         * member; `"active"` needs the coming frame's counter
+         * (`wasm.getFrameCounter()`, read before `frame()`). Returns how many
+         * queue writes were made.
+         * @param {import("./gpu-host-texture.js").HostTextures} textures
+         * @param {number} [frameCounter]
+         * @returns {number}
+         */
+        writeTextures(textures, frameCounter) {
+            return dispatcher.writeTextures(textures, frameCounter);
+        },
+
+        /**
+         * Every currently created named texture, by SJON name: `{ size,
+         * dimension, format, mipLevelCount, arrayDepth, usage, sampleCount,
+         * sizeSource, pool, frameWritten, writable, writableAspects }`. Raw ids
+         * are never exposed. `writable` is the current host-write verdict;
+         * `writableAspects` describes format/aspect legality alone.
+         * @returns {Record<string, import("./gpu-host-texture.js").TextureInfo>}
+         */
+        getTextures() {
+            return dispatcher.getTextures();
+        },
+
+        /**
          * Hear command-stream faults: an unknown opcode, an empty descriptor,
          * a resource that failed validation, a refused host write. Called
          * with `{ message, source }`. Without this a core-tier host had no

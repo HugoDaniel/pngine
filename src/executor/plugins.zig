@@ -108,6 +108,7 @@ pub fn commandPlugin(cmd: Cmd) ?Plugin {
         .begin_render_pass_mrt,
         .begin_render_pass_f32,
         .begin_render_pass_mrt_f32,
+        .begin_render_pass_views,
         .set_pipeline, // Shared with compute, but render handles it
         .set_bind_group,
         .set_vertex_buffer,
@@ -142,7 +143,11 @@ pub fn commandPlugin(cmd: Cmd) ?Plugin {
         .create_texture_view,
         .create_image_bitmap,
         .copy_texture_to_texture,
+        .copy_texture_subresource,
         .copy_external_image_to_texture,
+        .write_texture,
+        .copy_buffer_to_texture,
+        .copy_texture_to_buffer,
         => .texture,
 
         // WASM plugin

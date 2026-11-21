@@ -13,9 +13,10 @@ files. The key architectural insight is the separation of concerns:
 
 - **Heavy Compiler (Zig)**: Runs once at build time, unlimited complexity
 - **Minimal Payload (PNGB)**: Declarative bytecode + data, size-constrained
-- **Tiny Executor (WASM)**: Interprets bytecode, emits GPU commands. 14,046 B
-  for the full plugin set, under a build-enforced 14,150 cap; eight variants,
-  smallest 9,446 B
+- **Tiny Executor (WASM)**: Interprets bytecode, emits GPU commands. 15,663 B
+  for the full plugin set, under a build-enforced 15,767 cap; eight variants,
+  smallest 8,764 B. The full build is past the informal ~15 KB goal (see
+  File Size Reference); the caps are measured, not aspirational.
 - **Platform Viewer**: Executes GPU commands on a real WebGPU implementation —
   the browser, or wgpu-native/Metal for the CLI's `--frame`
 
@@ -26,7 +27,7 @@ files. The key architectural insight is the separation of concerns:
        (SJON)          (Zig)     (PNGB)    (WASM)    (WebGPU)
                         │           │          │          │
                     Heavy work   Stored    Tiny work   Platform
-                    (once)       (~14KB)   (per-frame)  native
+                    (once)       (~15KB)   (per-frame)  native
 ```
 
 **Scope note**: this document describes the *engine* — the four boxes above.
@@ -240,7 +241,7 @@ runs once at build time with unlimited complexity:
     ▼ Validate against schema/pngine.sjon
    resolved cross-refs + diagnostics
     │
-    ▼ Lowering hooks (hooks.zig: pngine/init-v1, pngine/pass-v1, pngine/select-v1; draw_graph.zig: pngine/draw-v1)
+    ▼ Lowering hooks (hooks.zig: pngine/init-v1, pngine/pass-v1, pngine/select-v1, pngine/mips-v1; draw_graph.zig: pngine/draw-v1)
    sugar expanded into ordinary forms
     │
     ▼ Document import (document_import.zig)
@@ -278,7 +279,8 @@ runs once at build time with unlimited complexity:
 - `src/dsl_sjon/Emitter.zig` - Walks the validated/lowered forest, emits bytecode
 - `src/dsl_sjon/values.zig` - Typed readers over the SJON tree + expression eval
 - `src/dsl_sjon/hooks.zig` - the lowering registry: `pngine/init-v1` +
-  `pngine/pass-v1` + `pngine/select-v1`, and the registration of `pngine/draw-v1`
+  `pngine/pass-v1` + `pngine/select-v1` + `pngine/mips-v1`, and the registration
+  of `pngine/draw-v1`
 - `src/dsl_sjon/draw_graph.zig` - `pngine/draw-v1`: the `(draw-graph …)` stage
   x geometry cross product, one pipeline and one render pass per pair
 - `src/dsl_sjon/document_import.zig` - `(import :file …)`: a document compiled
@@ -404,6 +406,12 @@ different purposes. Confusing them causes bugs.
   0x4F set_scissor_rect
   0x50 set_pass_depth_stencil_ops
   0x52 set_pass_clear_values
+
+0x80: Queue / Texture Operation (first slot after the reserved 0x53-0x7F block)
+  0x80 copy_texture_subresource
+
+0x81: Render Pass (attachment views; 0x53-0x7F stay reserved)
+  0x81 begin_render_pass_views
 ```
 (This is a representative sample, not the exhaustive set — the OpCode enum in
 `src/types/opcodes.zig` is authoritative.)
@@ -431,6 +439,11 @@ different purposes. Confusing them causes bugs.
 0x20-0x2F: Queue Operations
   0x20 write_buffer
   0x21 write_time_uniform
+  0x23 copy_texture_to_texture
+  0x28 write_texture
+  0x29 copy_buffer_to_texture
+  0x2A copy_texture_to_buffer
+  0x2B copy_texture_subresource
 
 0x30-0x3F: WASM Operations
   0x30 init_wasm_module
@@ -441,9 +454,25 @@ different purposes. Confusing them causes bugs.
   0x50 set_pass_depth_stencil_ops
   0x52 set_pass_clear_values
 
+0x53-0x55: Full-precision / Attachment-View Passes
+  0x53 begin_render_pass_f32
+  0x54 begin_render_pass_mrt_f32
+  0x55 begin_render_pass_views
+
 0xF0: submit
 0xFF: end
 ```
+
+The attachment-view pair (`0x81` PNGB / `0x55` command) is the only place the
+runtime interprets a tagged attachment target. A target with bit 15 set names
+an already-created explicit view: the browser's `txv` table, or native's stored
+`WGPUTextureView`. An untagged target names a texture and resolves that
+texture's default view (`dfv` in the browser). `0xFFFE` is the canvas view
+(colour/resolve only — depth refuses it) and `0xFFFF` is none. Texture id N and
+texture-view id N stay distinct because the tag selects the table; a missing or
+wrong-kind entry is a named refusal before the pass begins, never a fallback to
+the canvas or to the base texture's level-0 view. A pass with no explicit view
+keeps the legacy begin-pass opcodes and bytes unchanged.
 
 ### How They Relate
 
@@ -523,6 +552,22 @@ cannot land unrecorded.
 | `(pass-graph (pass …))` | `pngine/pass-v1` | the whole fullscreen-shader graph: shader modules with an injected binding prelude, intermediate textures, pipelines, bind groups, render passes, and the frame or step-group that runs them |
 | `(draw-graph (stage …) (geometry …))` | `pngine/draw-v1` | the stage x geometry cross product: one pipeline and one render pass per pair, one bind group per stage group |
 | `(select …)` | `pngine/select-v1` | a chain of guarded `(step-group …)` forms, one per case: the first keeps the select's name, each failing case's `:else` runs the next case's group (`<name>__caseN`), and the last carries the select's `:else` |
+| `(mip-chain …)` | `pngine/mips-v1` | the per-level render chain over a texture's allocated mips: for each level 1..N-1 a sampled view of N-1 and an attachment view of N, one shared linear sampler/module/pipeline for the texture's format, one bind group and render pass per level, and one ascending step-group with the authored name; level 0 is input only |
+
+The `(mip-chain …)` lowering is the render-based mip pattern plan 08 settled
+on: it emits ordinary resources and passes through plan 09's tagged
+attachment-view record and adds no opcode, browser loop or native special case
+of its own. The generated step-group is scheduled only by a frame performing
+it; a level-0 queue is an ordinary `:before`/`:perform` entry, and the chain
+adds no once-only or load-time channel. Level 0 never receives a generated
+attachment view, which is what lets a host write survive the frame. The
+sugar/twin pair is `examples/mip_chain.sjon` + `examples/mip_chain_hand.sjon`;
+its browser pixel evidence is
+`tests/e2e/fixtures/evidence/mip-chain-pixels-2026-11-21.json` (all four
+sugar/twin cases at levels 0..3, `twinDelta: 0`). The Metal pixel rows are
+`mip_chain_view`/`mip_chain_view_hand`: both PNGs were generated on
+macOS/Metal and are gated by `zig build test-render`, 57/57. The original
+`mip_chain`/`mip_chain_hand` examples remain the lowering/order fixtures.
 
 ### Source Composition (no WebGPU counterpart either)
 
@@ -548,6 +593,254 @@ Per-frame loop:
   2. Execute perform passes in order
   3. Submit command encoder
 ```
+
+### Static Texture Writes
+
+`(write-texture …)` is the one queue action whose source is raw texels rather
+than another GPU resource. It has one authoritative layout at every stage:
+
+1. **Form.** A core `(queue …)` action naming a declared `(texture …)`
+   destination and a raw `(data …)` entry. Its keys mirror
+   `GPUTexelCopyTextureInfo`, `GPUTexelCopyBufferLayout` and `writeTexture`'s
+   own `data`/`size` arguments; the form is documented in
+   `docs/sjon-reference.md`.
+2. **Normalized write.** The compiler reads the IDL defaults while retaining
+   presence (`?u32` strides, `?Extent` size) and hands the destination
+   descriptor and the write to `texture_layout.calculateWrite` — the same
+   pure calculator the browser host runs. A refusal is a located diagnostic;
+   the compiler never derives a second byte-size rule.
+3. **PNGB `0x2D`.** The normalized destination id, data id, offset, strides,
+   mip level, origin, aspect, size and the three presence bits are emitted in
+   source order into the frame body. The data id addresses the existing data
+   section; texels are never inlined or converted.
+4. **Reference / MockGPU.** The reference dispatcher decodes that exact
+   14-field layout and calls the backend's `write_texture`; MockGPU records
+   every field plus the data blob's fingerprint, which is what the golden
+   traces pin.
+5. **Command `0x28` → JS.** `wasm_entry` resolves the data id to a window of
+   executor memory and writes the same normalized write as 52 fixed operand
+   bytes. The JS decoder rebuilds the presence-carrying write, resolves the
+   retained texture descriptor, runs the same calculator, and calls
+   `queue.writeTexture` with the raw memory window. A refusal reports source
+   `write-texture` and makes no queue call.
+
+**Every runtime executes or refuses.** `write_texture` is a texture-plugin
+operation at both wire levels (D10): a variant without the plugin steps over
+the well-formed instruction instead of half-decoding it, and the normal
+variant selector therefore picks an executor that carries the arm. No surface
+may treat an unknown opcode or unhandled command as coverage — the browser,
+reference, native and inspector surfaces each perform/record the write or
+report a named refusal. Runtime validation repeats the calculator's checks for
+untrusted bytes, canvas resize and image-derived extents; compile-time checks
+are not a licence to skip them. Native execution of the opcode is plan 03's
+surface; the command and reference contracts it consumes are fixed here.
+
+### Compressed texel blocks (BC, ETC2/EAC, ASTC)
+
+**One table, two bindings.** `src/types/texture_layout.zig` owns the block/byte
+facts: `format_rows` for ordinary formats, `compressedRow` for the three
+compressed byte ranges, and the packed `astc_shapes` nibble array (one byte per
+shape; low nibble width, high nibble height). `formatInfo` is the only reader:
+it returns block width, block height, bytes per block, aspects and the
+copy-destination verdict, so no caller infers a four-byte texel from a format
+name. `npm/pngine/src/texture-layout.js` mirrors the same rows and shapes for
+the browser, and `tests/fixtures/texture-layout.json` is executed by both
+bindings, so a new byte cannot acquire a second arithmetic. The compressed
+codes are append-only: BC **0x80–0x8D**, ETC2/EAC **0x90–0x99**, ASTC
+**0xA0–0xBB**. The 28 ASTC rows alternate linear/sRGB over 14 named shapes and
+every one is 16 bytes; the shape in the name is what `formatInfo` returns, not
+a generic 4×4.
+
+**Feature gate before creation.** A compressed format's base feature is checked
+against `device.features` before `device.createTexture`: `gpu.js`'s
+`reportTextureCreationRefusal` asks `formatCreationRefusal` first, and the
+native backend checks `wgpuDeviceHasFeature` before
+`wgpuDeviceCreateTexture`. Both report the same body through their error path:
+
+```text
+texture '<name-or-id>' format '<format>' requires '<feature>'; this adapter does not support it
+```
+
+A missing sliced-3d feature names that sibling; ETC2/EAC 3D is refused as an
+invalid descriptor (`format '<format>' cannot be 3d`) because the CRD defines no
+sliced feature to request. The features ride `OPTIONAL_DEVICE_FEATURES` and are
+requested only when the adapter exposes them. The host write path repeats the
+format-feature check from the retained descriptor, so a device rebuild cannot
+accept a write on a surviving texture whose feature is gone. None of these
+checks is deferred to WebGPU's later validation, which names neither the
+texture nor the feature.
+
+**Copy/write arithmetic for blocks.** After exact block checks,
+`width_in_blocks = copy_width / block_width` and
+`height_in_blocks = copy_height / block_height`; `bytes_in_last_row =
+width_in_blocks × bytes_per_block`; and the required source span is plan 01's
+unchanged `offset + bytes_per_row·rows_per_image·(depth−1) +
+bytes_per_row·(height_in_blocks−1) + bytes_in_last_row`. A mip's **physical**
+extent is its logical extent rounded up to whole blocks, so a logical mip
+smaller than one block still occupies one whole block and a copy of it is
+validated against the physical extent. Copy origin x/y and copy width/height
+must be whole blocks (`unaligned-block-origin` / `unaligned-block-extent`).
+`writeTexture` runs with `aligned = false` and keeps no 256-byte row or
+block-footprint offset rule; the two buffer↔texture copy directions run with
+`aligned = true`, so a supplied `bytesPerRow` is a 256-byte multiple and their
+offset is a block-footprint multiple (8 for BC1/BC4, 16 for the other BC and
+ASTC blocks). Block alignment itself applies to both paths.
+
+### Buffer ↔ texture copies and byte readback
+
+`(copy-buffer-to-texture …)` and `(copy-texture-to-buffer …)` are the two
+encoder copies of plan 05. They consume the same plan 01 calculator with a
+direction — `CopyPolicy.bufferToTexture` / `.textureToBuffer` — instead of
+`writeTexture`'s `aligned = false`, so they alone acquire the 256-byte
+`bytesPerRow` rule and the buffer-offset rule (the texel-block footprint, or
+`4` when either texture endpoint is depth/stencil).
+
+1. **PNGB `0x2E` / `0x2F`.** One fixed `L_TEXTURE_BUFFER_COPY` record:
+   texture id, buffer id, offset, strides, mip, origin, aspect, copy size and
+   the presence flags. The opcode is the only direction signal.
+2. **Command `0x29` / `0x2A`.** `wasm_entry` emits the same normalized fields
+   in **46 fixed operand bytes** — no WASM pointer, because the linear side is
+   a `GPUBuffer` that already lives on the device.
+3. **JS / native.** The browser decoder resolves the retained handles, runs
+   the directional calculator, and makes one `encoder.copyBufferToTexture` /
+   `copyTextureToBuffer` call; a refusal reports source
+   `copy-buffer-to-texture` / `copy-texture-to-buffer` and records no encoder
+   call. Native mirrors it through the counted `wgpu_c` wrappers. `--html`
+   and flat/mini refuse both forms explicitly.
+
+**Byte readback.** A texture→buffer copy whose destination carries
+MAP_READ|COPY_DST is a readback, not a query resolution: the copy schedules a
+`kind: "texture"` record on `pendingReadbacks`, and the matching `submit`
+drains it. After the encoder copy, the worker maps the enclosing 8-byte-aligned
+window (the legal layout offset need only be block-aligned), takes exactly the
+copied span — `bytesPerRow` between rows, final-row padding excluded — as an
+owned `Uint8Array`, unmaps in `finally`, and calls `onTextureReadback` with:
+
+```text
+{ texture, buffer, offset, size, bytes, bytesPerRow, rowsPerImage,
+  mipLevel, origin, aspect, copySize }
+```
+
+`texture`/`buffer` are the public SJON names, or `null` for an old/unnamed
+payload. The worker posts this as `textureReadback` and transfers the byte
+buffer (nothing else aliases it); `init-core.js` routes it to the main-thread
+option of the same name. Query readbacks keep their `kind: "query"` record,
+`BigUint64Array` conversion and `onQueryResult` callback byte-identically —
+the two consumers are never mixed.
+
+A copy to a destination that is currently mapped is refused as
+`buffer-mapped` rather than silently skipped. A rejected `mapAsync`, a
+throwing `getMappedRange`, a throwing host callback or a device loss reports
+`readback-unavailable` through `onError` (source `readback`) and releases the
+mapping when one exists; a destroyed dispatcher (a stale generation) releases
+a late mapping and delivers nothing. With no `onTextureReadback` installed the
+records are dropped at submit, so no map is made and no bytes are retained.
+
+### Subresource texture→texture copies
+
+`(copy-texture-to-texture …)` has two wire forms that never share bytes. No
+`:mip-level`, `:origin` or `:aspect` on either endpoint, and no outer `:size`,
+emits the legacy PNGB `0x23` / command `0x23` two-id record — with its
+canvas-size fallback — byte-identically, forever. Any one of those keys selects
+the subresource form: a `SubresourceCopy` carrying both
+`GPUTexelCopyTextureInfo` endpoints and an optional extent. Only the
+subresource form marks its destination frame-written; legacy accounting is not
+retroactively changed.
+
+1. **PNGB `0x80`.** The first slot after the reserved `0x53`–`0x7F`
+   data-generation block. Sixteen fields in source order: both ids, mips,
+   origins and aspects, the copy extent, and a flags byte (bit 0 = size
+   present; every other bit zero). The retired block stays closed, so an old
+   data-generation byte still fails `isValid` instead of decoding as this copy.
+2. **Command `0x2B`.** `wasm_entry` emits the same normalized fields as
+   **51 fixed operand bytes**. The executor owns no texture-descriptor table,
+   so it validates the facts it holds (the flags byte and id width) and emits
+   every field explicitly; an unknown flags bit or an id past u16 is a loud
+   latch, never a half-decoded copy.
+3. **JS / native / inspector.** The browser decoder and the native backend
+   resolve both current or retained descriptors, run the shared
+   `calculateTextureCopy` calculator, and make exactly one
+   `encoder.copyTextureToTexture` / `wgpu.commandEncoderCopyTextureToTexture`
+   call. The inspector parses the 51 bytes and runs the same calculator,
+   appending the named refusal to E006. `--html` and flat/mini keep their
+   explicit pre-output refusal.
+
+**What the runtimes validate.** Every endpoint is a live, non-destroyed
+texture (not a view): source `copy-src`, destination `copy-dst`; equal sample
+counts; formats identical or differing only by the `-srgb` suffix; both mip
+levels in range; each origin and the resolved copy extent inside that
+endpoint's selected **physical** mip extent; whole-block origins and extents;
+and, for a same-texture copy, **disjoint subresource sets** — a shared
+mip/layer is refused even when the texel ranges inside it would not overlap
+(comparing ranges alone is insufficient). A depth-stencil copy requires
+`aspect all` on both endpoints, and an aspect must have a copy footprint and be
+legal for its role **by name**: `depth-only` on a stencil-only texture (or the
+reverse) is `invalid-aspect`, `depth24plus` and the depth aspect of
+`depth24plus-stencil8` are `invalid-format`, and a `depth32float` destination
+(or the depth aspect of `depth32float-stencil8`) is `aspect-not-writable` —
+never a downstream zero-footprint range error. A depth-stencil or multisampled
+endpoint must be copied in full: `copySize` equals its physical mip extent and
+every origin component is zero, else `partial-subresource-copy`. A zero extent
+is valid no-work. These compile-time checks are repeated at execution for
+untrusted bytes and runtime-resolved descriptors; a refusal reports by name and
+records no encoder call.
+
+### Host Texture Writes
+
+The live host API reuses the static write's destination descriptor and the
+shared plan 01 `calculateWrite`; it invents no second layout rule. A host call
+is name-keyed — `writeTexture(p, name, bytes, opts)` — and the payload's
+texture-name block (header flag bit 7) is what turns a `(texture :name …)` into
+that name. A payload without the block names nothing: reflection is `{}` and a
+write is refused as unknown, never guessed from a WGSL binding.
+
+**One message, one lock.** The write rides the existing `draw` message as its
+`textures` map; there is no transfer list, detached arena or independent write
+channel. Inside the worker's `withRenderLock`, a draw applies:
+
+1. pointer and uniforms/controls;
+2. host buffer writes;
+3. host texture writes, resolving `"active"` against `getFrameCounter()` read
+   **before** `frame()`;
+4. frame selection;
+5. `render()` — the frame's own queue actions and passes.
+
+A host write therefore precedes the frame's static `write-texture` commands. A
+draw whose message carries textures is state-bearing and is never dropped by
+the queued-rAF supersession, even when a later draw overtakes it. The core
+(no-worker) path has no pending store: it validates and makes the WebGPU copy at
+the direct call.
+
+**Pending and ownership.** `redraw: false` stores the caller's view until the
+next draw from anywhere posts it: the play loop, `seek`, `setFrame`, manual
+`draw`, play/pause/stop. The draw's own `textures` map merges over that store
+and wins on a shared name; the store is cleared by the draw that carries it.
+Bytes are never transferred. A deferred write reads the caller's view at the
+post and structured-clone copies it to the worker; a later caller mutation is
+not observed. Only the view's `byteOffset`/`byteLength` window is read; a
+detached or resizable/growable backing is refused by name before anything posts.
+WebGPU then applies its own queue-call copy semantics.
+
+**`frameWritten`.** Every static `(write-texture …)` executed by a frame's
+`:before`/`:perform` marks its destination in the texture-name block. Host
+writes to that name are refused through `onError` as a `PngineGPUError` with
+source `write-texture` and no queue call, because the frame's own write would
+overwrite them on every draw. There is no init-only static write: frame `:init`
+accepts compute passes only, and `(init …)` lowers to one. A dedicated texture
+the frame never writes is the supported route.
+
+**Refusals and reflection.** Argument-shape faults are `TypeError`s before any
+message posts. Document/runtime faults — unknown name, `frame-written`, missing
+`copy-dst`, multisampled, 1D, a bad pool member, an out-of-range mip/origin/
+extent/stride/aspect, insufficient data — are per-name `onError` reports with
+the same plan 01 code the compiler and command decoder use; a valid name beside
+a refused one may still write. `getTextures(p)` is a FIFO worker request and
+reports every created named texture's current descriptor (size, dimension,
+format, mip count, array depth, usage, sample count, size source, pool,
+`frameWritten`, `writable`, `writableAspects`) with no raw ids. A canvas-sized
+destination is rebuilt on resize, so both reflection and the next pending write
+observe the new extent; recovery/reload installs the new payload's name map
+whole rather than inheriting the previous one.
 
 ### Built-in Data Sources
 
@@ -723,7 +1016,7 @@ src/dsl_sjon/        Depends on all above (+ the SJON package + wgslender)
     ├── Compiler.zig     compile(): validate + lower → walk → PNGB
     ├── Emitter.zig      Walks validated forms, emits bytecode
     ├── values.zig       Typed readers + expression eval
-    ├── hooks.zig        pngine/init-v1 + pngine/pass-v1 + pngine/select-v1 lowering (draw-v1 registered here)
+    ├── hooks.zig        pngine/init-v1 + pngine/pass-v1 + pngine/select-v1 + pngine/mips-v1 lowering (draw-v1 registered here)
     ├── draw_graph.zig   pngine/draw-v1 lowering
     └── shapes.zig       Compile-time shape generators
     │
@@ -755,9 +1048,9 @@ Key modules: `test-types`, `test-bytecode`, `test-executor`, `test-sjon`
 
 | Component | Size | Notes |
 |-----------|------|-------|
-| WASM executor (full) | 14,046 B | All plugins; build-enforced 14,150 cap |
-| WASM executor (core) | 9,446 B | Smallest of the eight variants |
-| `viewer.mjs` (default JS bundle) | 62.5 KB | 21.4 KB gzipped |
+| WASM executor (full) | 15,663 B | All plugins; build-enforced 15,767 cap |
+| WASM executor (core) | 8,764 B | Smallest of the eight variants |
+| `viewer.mjs` (default JS bundle) | 101.5 KB | 31.5 KB gzipped |
 | `mini.mjs` | 7.1 KB | 3.3 KB gzipped; pNGf, main thread, no WASM |
 | Simple triangle PNGB | ~500 B | Minimal example |
 | Boids simulation PNGB | ~5 KB | Compute + render |
@@ -887,12 +1180,12 @@ making architectural decisions (like where to put mesh generators).
 │                          LOAD TIME (once per instance)                       │
 │                                                                              │
 │  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │  Executor (WASM, ~15KB)                                               │   │
+│  │  Executor (WASM, ~15KB)                                              │   │
 │  │  - Parses bytecode header and opcodes                                │   │
 │  │  - Dispatches commands to gpu.js via extern functions                │   │
 │  │  - Manages frame loop and pass execution                             │   │
 │  │  - CANNOT generate data (no mesh generators, no math)                │   │
-│  │  - MUST stay tiny: goal is ~15KB                                     │   │
+│  │  - MUST stay tiny: goal is ~15KB (full is 15,663 B today)            │   │
 │  │  - Static allocation only (no malloc after init)                     │   │
 │  └────────────────────────────┬─────────────────────────────────────────┘   │
 │                               │                                              │
@@ -944,8 +1237,8 @@ making architectural decisions (like where to put mesh generators).
 | ------------ | ------ | ------------------ | --------------- | -------------- |
 | **Compiler** | Build  | Yes (Zig code)     | No limit        | Yes            |
 | **Payload**  | Stored | No (just data)     | <50KB           | N/A            |
-| **Executor** | Load   | No                 | ~15KB goal      | No             |
-| **gpu.js**   | Load   | Yes (JS helpers)   | ~50KB OK        | Yes            |
+| **Executor** | Load   | No                 | ~15KB goal (15,663 B today) | No             |
+| **gpu.js**   | Load   | Yes (JS helpers)   | ~50KB OK (62.9KB today)     | Yes            |
 | **GPU**      | Frame  | Yes (compute)      | N/A             | Yes (parallel) |
 
 ### Data Flow for Resource Creation

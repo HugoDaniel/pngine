@@ -1,0 +1,8 @@
+; INVALID: the mip-chain's texture is not sampleable.
+;
+; Level N samples level N-1 through a linear sampler, so the texture has to be
+; created with texture-binding. The refusal names the usage flag to add.
+
+(texture :name mipTex :size [64 64] :format rgba8unorm
+  :mip-level-count 4 :usage [render-attachment])
+(mip-chain :name fillMips :texture mipTex)

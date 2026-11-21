@@ -1,0 +1,10 @@
+; INVALID: a subresource texture→texture copy whose source texture has no
+; copy-src. Usage is fixed at creation, so the document would validate and the
+; encoder would reject the copy. The authored :mip-level selects the new path.
+(texture :name src :size [4 4] :format rgba8unorm :usage [render-attachment])
+(texture :name dst :size [4 4] :format rgba8unorm :usage [copy-dst])
+(queue :name blit
+  (copy-texture-to-texture
+    (source :texture src :mip-level 0)
+    (destination :texture dst)))
+(frame :name main :perform [blit])

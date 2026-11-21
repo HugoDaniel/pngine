@@ -1,0 +1,8 @@
+; A mip-level write: level 1 of a 4x4 texture is 2x2, so the source covers
+; the mip's own extent, not the base level's.
+(data :name mipTexels (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAA=="))
+(texture :name mipmap :size [4 4] :mip-level-count 2 :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture mipmap :data mipTexels :mip-level 1 :bytes-per-row 8 :rows-per-image 2
+    :size [2 2]))
+(frame :name main :perform [upload])

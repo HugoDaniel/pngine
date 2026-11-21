@@ -1,0 +1,9 @@
+; INVALID: the destination buffer of a copy-texture-to-buffer has no copy-dst
+; usage. The source texture is correctly copy-src.
+(buffer :name readback :size 264 :usage [copy-src])
+(texture :name source :size [2 2] :format rgba8unorm :usage [copy-src])
+(queue :name copies
+  (copy-texture-to-buffer :size [2 2 1]
+    (source :texture source)
+    (destination :buffer readback :offset 0 :bytes-per-row 256 :rows-per-image 2)))
+(frame :name main :perform [copies])

@@ -48,6 +48,8 @@ const LoadOp = opcodes.LoadOp;
 const StoreOp = opcodes.StoreOp;
 const PassType = opcodes.PassType;
 const ColorAttachment = bytecode.Emitter.ColorAttachment;
+/// Plan 09's 0x81 attachment shape (target + per-attachment resolve).
+const ViewColorAttachment = bytecode.Emitter.ViewColorAttachment;
 
 /// Args per `(wasm-call …)`, from the wire schema. The emitter is the one place
 /// this cap has to be a REJECT rather than a clamp: everything downstream can
@@ -229,6 +231,10 @@ const MAX_EXPANSION_DEPTH: usize = MAX_STEP_GROUP_DEPTH * 64 + MAX_STEP_GROUP_DE
 const values = @import("values.zig");
 const Reader = values.Reader;
 const Env = values.Env;
+// Plan 01's pure write-layout contract: the static write path validates every
+// destination and span through THIS calculator, so no byte-size arithmetic is
+// duplicated in the emitter.
+const texture_layout = @import("types").texture_layout;
 // The one seam between this walk and the bytes behind a `:file` key. Every read
 // goes through it, so the in-browser compiler (no filesystem) serves the same
 // five keys the CLI does by injecting a table instead.
@@ -590,6 +596,96 @@ const TextureMeta = struct {
     /// copy, and usage is fixed at texture creation.
     usage: values.TextureUsage = .{},
     loc: ?Diag.Located = null,
+
+    /// Plan 01's COMPLETE calculator descriptor, for every texture whose extent
+    /// is known at compile time. Recorded unconditionally (not only under
+    /// `validate_shaders`) because a `(write-texture …)` check needs it on the
+    /// golden/parity path too. `sample_count` here is the EFFECTIVE count (the
+    /// IDL default 1); the raw field above stays for R4/R5.
+    ///
+    /// Null when the extent is runtime-resolved (`:size canvas` or an
+    /// `(image-bitmap …)`): plan 01's `calculateWrite` accepts only a concrete
+    /// extent, and validating against an invented one would refuse or accept a
+    /// write against a size the texture does not have. `dynamic` carries the
+    /// facts that are still extent-independent.
+    descriptor: ?texture_layout.TextureDescriptor = null,
+    /// Present exactly when `descriptor` is null.
+    dynamic: ?DynamicTextureMeta = null,
+};
+
+/// The extent-independent facts a runtime-sized texture still exposes to the
+/// compile-time write checks. Kept out of `TextureDescriptor` because that
+/// struct's `size` is the concrete extent the calculator requires.
+pub const DynamicTextureMeta = struct {
+    extent_source: texture_layout.ExtentSource,
+    dimension: texture_layout.Dimension,
+    mip_level_count: u32,
+    sample_count: u32,
+    /// depthOrArrayLayers from the authored extent. A 2d texture's array layer
+    /// count is this (a 1d/3d texture has one layer); plan 09's attachment-view
+    /// bounds check needs it even when the extent itself is runtime-resolved.
+    layers: u32 = 1,
+};
+
+/// One declared `(texture-view …)`, recorded by `emitTextureView`. Plan 09's
+/// render-pass checks follow a view to its source texture and apply the view's
+/// OWN format, aspect, dimension and mip/layer range; the descriptor bytes the
+/// runtime consumes are the encoder's, this is the compiler-side mirror used by
+/// the diagnostics. `null` count means "the WebGPU descriptor default": the
+/// remaining mips for `mip_level_count`, and for `array_layer_count` either 1
+/// (1d/2d/3d) or every remaining layer (2d-array/cube/cube-array) — resolved by
+/// `effectiveViewLayerCount`.
+const ViewMeta = struct {
+    texture_id: u16,
+    texture_name: []const u8,
+    /// GPUTextureViewDescriptor.dimension code (0=1d, 1=2d, 2=2d-array, 3=cube,
+    /// 4=cube-array, 5=3d), or null when the descriptor omits it (WebGPU
+    /// derives it from the texture and its layer count).
+    dimension: ?u8,
+    /// 0 = all, 1 = stencil-only, 2 = depth-only — the encoder's codes.
+    aspect: u8,
+    base_mip_level: u32,
+    mip_level_count: ?u32,
+    base_array_layer: u32,
+    array_layer_count: ?u32,
+    /// The authored `:format` override, or null for the source texture's format
+    /// (aspect-resolved by `attachmentInfo`).
+    format: ?values.TextureFormat,
+    format_str: ?[]const u8,
+};
+
+/// A texture's effective sample count, whichever metadata shape it has: the
+/// calculator descriptor when the extent is concrete, else the dynamic facts.
+fn effectiveSampleCount(meta: TextureMeta) u32 {
+    if (meta.descriptor) |descriptor| return descriptor.sample_count;
+    return meta.dynamic.?.sample_count;
+}
+
+/// One `(write-texture …)` the frame walk resolved, in inline (source) order.
+///
+/// The normalized form the low-level writer consumes; the emitter's tests pin
+/// it (origin/`:size` normalization, presence, descriptor facts). `layout` is
+/// plan 01's verdict for a compile-time-known destination; null means plan 03
+/// resolves the destination extent at execution, so extent/span checks are
+/// deferred there.
+pub const ResolvedWriteTexture = struct {
+    texture_id: u16,
+    data_id: u16,
+    write: texture_layout.WriteLayout,
+    layout: ?texture_layout.Layout = null,
+};
+
+/// One `(copy-texture-to-texture …)` the frame walk routed to the NEW path.
+///
+/// The normalized operation, validated and recorded in inline order; the PNGB
+/// 0x80 writer consumes this same record. The legacy no-new-key form never
+/// produces one of these and keeps PNGB 0x23 byte-identically. `layout` is null
+/// when an endpoint's extent is runtime-resolved (the canvas or a `:size canvas`
+/// / `:size bitmap` texture): the static calculator is skipped rather than
+/// handed an invented extent.
+pub const ResolvedSubresourceCopy = struct {
+    copy: texture_layout.SubresourceCopy,
+    layout: ?texture_layout.SubresourceCopyLayout = null,
 };
 
 /// One declared color target of a render-pipeline: its `:format` enum (for the
@@ -733,6 +829,12 @@ const BindJoin = struct {
     // (emitBindGroup). Consumed at the populateUniformTable join by the R4 sample-
     // class / comparison checks. Read only under validate_shaders.
     texture_meta: std.AutoHashMapUnmanaged(u16, TextureMeta) = .empty,
+    /// Plan 09 — explicit (texture-view …) descriptor facts, keyed by VIEW id
+    /// (a separate space from texture ids). Recorded by emitTextureView; read
+    /// by the render-pass attachment checks and by `attachmentInfo`, which lets
+    /// the existing format/sample joins see through a view. The views phase
+    /// runs after the texture phase and before passes, so the map is complete.
+    view_meta: std.AutoHashMapUnmanaged(u16, ViewMeta) = .empty,
     sampler_meta: std.AutoHashMapUnmanaged(u16, SamplerMeta) = .empty,
     // R5a — render-pipeline attachment state (color targets, depth format, sample
     // count) keyed by pipeline id, recorded by recordRenderPipelineMeta at the end
@@ -1094,6 +1196,24 @@ pub const Emitter = struct {
     /// write to such a buffer lands first and is clobbered every frame, so the
     /// runtime refuses it and says to use a dedicated buffer.
     frame_written: std.AutoHashMapUnmanaged(u16, void) = .empty,
+    /// Texture BASE ids the frames' own queue ops write every draw — the
+    /// texture-id counterpart of `frame_written` (D14's name block bit 0 in
+    /// plan 04). A `(write-texture …)` reached from a frame step marks its
+    /// destination here; an `:init` seed cannot reach this path (frame `:init`
+    /// names one-shot passes only), so an init-like write never marks.
+    ///
+    /// A SEPARATE map, deliberately: texture and buffer ids are different
+    /// spaces, and reusing the buffer map would let a texture id mark an
+    /// unrelated buffer frame-written.
+    frame_written_textures: std.AutoHashMapUnmanaged(u16, void) = .empty,
+    /// Successful `(write-texture …)` resolutions in inline order. The
+    /// normalized destination/data ids and `WriteLayout` are what Task 3a's
+    /// PNGB writer consumes; holding them here also gives Task 2's unit tests a
+    /// read view while no opcode exists yet.
+    write_texture_writes: std.ArrayList(ResolvedWriteTexture) = .empty,
+    /// The subresource texture→texture copies the frame walk normalized, in
+    /// inline order. The PNGB 0x80 writer consumes this same record.
+    subresource_copies: std.ArrayList(ResolvedSubresourceCopy) = .empty,
     /// The document's `(control …)` declarations in document order — which IS
     /// slot order (slot 1 = first, plan §4.1). Collected by `collectControls`
     /// before any phase runs; the `define_control` ops are emitted there, at
@@ -1202,6 +1322,9 @@ pub const Emitter = struct {
         self.tables.deinit(self.gpa);
         self.binds.deinit(self.gpa);
         self.frame_written.deinit(self.gpa);
+        self.frame_written_textures.deinit(self.gpa);
+        self.write_texture_writes.deinit(self.gpa);
+        self.subresource_copies.deinit(self.gpa);
         self.controls.deinit(self.gpa);
         self.control_buffers.deinit(self.gpa);
         self.guard_arm_refs.deinit(self.gpa);
@@ -1430,6 +1553,37 @@ pub const Emitter = struct {
         // …and the control-name block behind THAT: the declared controls'
         // names in slot order, in declaration order by construction.
         try self.populateControlNames();
+        // …and the texture-name block LAST: every declared texture in base
+        // order, for host writes and reflection (plan 04 D14).
+        try self.populateTextureNames();
+    }
+
+    /// The recorded descriptor facts for a declared texture, keyed by its BASE
+    /// id (the id a pooled name resolves to). Exposed for the `(write-texture …)`
+    /// unit tests — a `Compiler.compile` frees the Emitter, so the tests own the
+    /// validate → init → run walk to read it — and for plan 03/04's later
+    /// descriptor consumers.
+    pub fn textureMeta(self: *const Emitter, id: u16) ?TextureMeta {
+        return self.binds.texture_meta.get(id);
+    }
+
+    /// The `(write-texture …)` resolutions the frame walk recorded, in inline
+    /// order. Task 3a's PNGB writer consumes the same normalized form.
+    pub fn writeTextureRecords(self: *const Emitter) []const ResolvedWriteTexture {
+        return self.write_texture_writes.items;
+    }
+
+    /// The texture→texture copies the frame walk routed to the subresource
+    /// model, in inline order. The legacy whole-texture route records nothing.
+    pub fn subresourceCopyRecords(self: *const Emitter) []const ResolvedSubresourceCopy {
+        return self.subresource_copies.items;
+    }
+
+    /// Whether a frame's own queue steps write this texture (the D14 name-block
+    /// bit plan 04 reads). Never set by an `:init` seed: queues only reach
+    /// `emitQueueActions` from a frame's `:before`/`:perform` lists.
+    pub fn textureFrameWritten(self: *const Emitter, id: u16) bool {
+        return self.frame_written_textures.contains(id);
     }
 
     /// The buffer-name block (docs/plans/public-write-buffer.md D2): every
@@ -1510,6 +1664,55 @@ pub const Emitter = struct {
         std.debug.assert(self.builder.getUniformTable().control_names.items.len == self.controls.items.len);
     }
 
+    /// The texture-name block (plan 04 D14): every declared `(texture …)` by
+    /// its SJON name, in BASE-ID order — declaration order, never the name
+    /// map's iteration order. A pool is one entry, base id plus member count.
+    /// The frame-written flag comes from the set the frame walks filled; a
+    /// texture no host can write is still named, so an author can tell
+    /// "unknown" from "not permitted".
+    ///
+    /// Runs LAST, after `populateControlNames`, spending from the same 64 KiB
+    /// string table. A name that does not fit is NOT skipped: entries are
+    /// addressed by base id and later rows must never compact into another
+    /// name, so the row is RESERVED with the empty string's id. No SJON name
+    /// is empty, so the parser/host can tell the reserved row is unnamed; its
+    /// base id, pool and frame bit still ride the wire.
+    fn populateTextureNames(self: *Emitter) Error!void {
+        const count = self.tables.textures.map.count();
+        if (count == 0) return;
+        const Row = struct { base: u16, pool: u8, name: []const u8 };
+        const rows = try self.gpa.alloc(Row, count);
+        defer self.gpa.free(rows);
+        var n: usize = 0;
+        var it = self.tables.textures.map.iterator();
+        while (it.next()) |e| : (n += 1) {
+            rows[n] = .{ .base = e.value_ptr.base, .pool = e.value_ptr.count, .name = e.key_ptr.* };
+        }
+        std.debug.assert(n == count);
+        std.mem.sort(Row, rows, {}, struct {
+            fn lt(_: void, a: Row, b: Row) bool {
+                return a.base < b.base;
+            }
+        }.lt);
+        for (rows) |row| {
+            const name_id = self.builder.internString(self.gpa, row.name) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {
+                    self.diagnoseWarn(.sjon, null, "", "texture '{s}' is left unnamed in the texture-name block: the string table is full (64 KiB of names), so a host write or reflection by that name will be refused as unknown — its entry is reserved (later textures keep their own names)", .{row.name});
+                    // The empty string is internable even on a full table (it
+                    // costs no data bytes), and dedups to one id for every
+                    // overflow.
+                    const sentinel = self.builder.internString(self.gpa, "") catch return error.OutOfMemory;
+                    self.builder.addTextureName(self.gpa, row.base, sentinel.toInt(), row.pool, self.frame_written_textures.contains(row.base)) catch return error.OutOfMemory;
+                    continue;
+                },
+            };
+            std.debug.assert(row.pool > 0); // an IdTable entry is never a pool of nothing
+            self.builder.addTextureName(self.gpa, row.base, name_id.toInt(), row.pool, self.frame_written_textures.contains(row.base)) catch return error.OutOfMemory;
+        }
+        std.debug.assert(self.builder.getUniformTable().texture_names.items.len == count);
+    }
+
     // ----------------------------------------------------------------------
     // Form collection + define environment
     // ----------------------------------------------------------------------
@@ -1548,7 +1751,7 @@ pub const Emitter = struct {
         // `checkDocumentForms` from calling it a child form (which it is not),
         // and `checkImportsComposed` below refuses it with the sentence that
         // names the real cause.
-        const extra = [_][]const u8{ "define", "limits", "canvas", "queue", "init", "pass-graph", "draw-graph", "step-group", "control", "select", "wgsl", "import" };
+        const extra = [_][]const u8{ "define", "limits", "canvas", "queue", "init", "pass-graph", "draw-graph", "step-group", "control", "select", "mip-chain", "wgsl", "import" };
         var heads: [phases.len + extra.len][]const u8 = undefined;
         for (phases, 0..) |ph, i| heads[i] = ph.head;
         for (extra, 0..) |h, i| heads[phases.len + i] = h;
@@ -3158,6 +3361,15 @@ pub const Emitter = struct {
     /// vector element (the span says which one). The value is re-evaluated for
     /// the message — this is the failure path, so the second walk is free — and
     /// omitted when it cannot be.
+    ///
+    /// PRECONDITION: never called with `error.OutOfMemory`. Every caller is a
+    /// funnel that decides what an evaluated read's failure MEANS, and OOM is
+    /// not a meaning: it says nothing about the document and must unwind as
+    /// itself (`refuseNumericKey`, `refuseElem`, `emitGuard`,
+    /// `collectStageConstants`, `resolveBufferSize` all guard it). The assert
+    /// states that in safe builds; the switch arm below returns it in the
+    /// shipped ReleaseSmall/ReleaseFast compiles, where `unreachable` would be
+    /// undefined behaviour instead of a loud bug (`requiredU32`'s reasoning).
     fn refuseNumeric(self: *Emitter, r: *const Reader, node: NodeIndex, key: ?[]const u8, e: values.EvalError) Error {
         std.debug.assert(e != error.OutOfMemory);
         var what_buf: [64]u8 = undefined;
@@ -3165,7 +3377,9 @@ pub const Emitter = struct {
         const loc = self.locate(r, node);
         const n: f64 = values.evalNodeF64(self.gpa, r.tree, self.schema, &self.env, node) catch std.math.nan(f64);
         switch (e) {
-            error.OutOfMemory => unreachable,
+            // Unreachable in safe builds (the assert above); a release-only
+            // backstop so a future unguarded funnel unwinds instead of UB.
+            error.OutOfMemory => return error.OutOfMemory,
             error.EmitError => switch (values.evalFailure(self.gpa, r.tree, self.schema, &self.env, node) orelse error.TypeMismatch) {
                 // The evaluator raises UnknownBinding without the name; walk the
                 // expression for it, so the message says which constant is
@@ -4365,7 +4579,59 @@ pub const Emitter = struct {
         // Pool instances share the base's descriptor (same format). `loc` (the
         // `(texture …)` form's user span) anchors the check's squiggle (R2b;
         // validate_shaders only — null on the golden/parity path).
-        try self.binds.texture_meta.put(self.gpa, base, .{ .format = tex_format, .format_str = format_str, .sample_count = sample_count_raw, .usage = usage, .loc = if (self.validate_shaders) self.locate(r, form) else null });
+        //
+        // Plan 02 Task 2 adds the complete calculator descriptor. It is recorded
+        // UNCONDITIONALLY — a `(write-texture …)` check runs on the golden/parity
+        // path too. A canvas/image extent has no concrete size at compile time,
+        // so that arm records only the extent-independent facts and never an
+        // invented extent (plan 03 validates after resolution).
+        const layout_dimension: texture_layout.Dimension = switch (dimension) {
+            0 => .d1,
+            1 => .d2,
+            else => .d3,
+        };
+        const descriptor: ?texture_layout.TextureDescriptor = switch (size) {
+            .explicit => |ext| .{
+                .size = .{
+                    .width = ext.width,
+                    .height = ext.height,
+                    .depth_or_array_layers = depth_or_array_layers,
+                },
+                .dimension = layout_dimension,
+                .format = tex_format,
+                .usage = usage,
+                .sample_count = sample_count,
+                .mip_level_count = mip_level_count,
+                .extent_source = .explicit,
+            },
+            .canvas, .image_bitmap => null,
+        };
+        const dynamic: ?DynamicTextureMeta = switch (size) {
+            .explicit => null,
+            .canvas => .{
+                .extent_source = .canvas,
+                .dimension = layout_dimension,
+                .mip_level_count = mip_level_count,
+                .sample_count = sample_count,
+                .layers = depth_or_array_layers,
+            },
+            .image_bitmap => .{
+                .extent_source = .image_bitmap,
+                .dimension = layout_dimension,
+                .mip_level_count = mip_level_count,
+                .sample_count = sample_count,
+                .layers = depth_or_array_layers,
+            },
+        };
+        try self.binds.texture_meta.put(self.gpa, base, .{
+            .format = tex_format,
+            .format_str = format_str,
+            .sample_count = sample_count_raw,
+            .usage = usage,
+            .loc = if (self.validate_shaders) self.locate(r, form) else null,
+            .descriptor = descriptor,
+            .dynamic = dynamic,
+        });
 
         for (0..pool_size) |i| {
             const texture_id = base + @as(u16, @intCast(i));
@@ -4467,28 +4733,54 @@ pub const Emitter = struct {
 
         // `:aspect` maps all→0, stencil-only→1, depth-only→2. `:format` overrides the
         // view's texel format (default = the texture's own). Both encoded as enum bytes.
-        const aspect: ?u8 = if (r.symbol(form, "aspect")) |a|
+        const aspect_symbol = r.symbol(form, "aspect");
+        const aspect: u8 = if (aspect_symbol) |a|
             (if (std.mem.eql(u8, a, "stencil-only")) @as(u8, 1) else if (std.mem.eql(u8, a, "depth-only")) @as(u8, 2) else @as(u8, 0))
         else
-            null;
-        const view_format: ?u8 = if (r.symbol(form, "format")) |f| @intFromEnum(values.mapTextureFormat(f)) else null;
+            0;
+        const format_symbol = r.symbol(form, "format");
+        const view_format: ?values.TextureFormat = if (format_symbol) |f| values.mapTextureFormat(f) else null;
+
+        // The descriptor's members are read once and recorded beside the emitted
+        // bytes: plan 09's render-pass checks follow a view to its source texture
+        // and must apply the VIEW's own range, format and aspect, not the base
+        // texture's (see `attachmentInfo`). `encodeTextureView` gets the same
+        // values, so the compiler-side mirror and the runtime descriptor cannot
+        // disagree about a default.
+        const dimension = try self.dimensionCode(r, form, "dimension", values.viewDimensionCode);
+        const base_mip_level = (try self.optU32(r, form, "base-mip-level")) orelse 0;
+        const mip_level_count = try self.optBounded(r, form, "mip-level-count", .positive);
+        const base_array_layer = (try self.optU32(r, form, "base-array-layer")) orelse 0;
+        const array_layer_count = try self.optBounded(r, form, "array-layer-count", .positive);
 
         const desc = DescriptorEncoder.encodeTextureView(self.gpa, .{
             // `:dimension` — the IDL member (GPUTextureViewDescriptor.dimension);
             // the BGL resource forms below keep `:view-dimension`, theirs IS
             // `viewDimension` (audit 09 D19).
-            .dimension = try self.dimensionCode(r, form, "dimension", values.viewDimensionCode),
-            .aspect = aspect,
-            .base_mip_level = (try self.optU32(r, form, "base-mip-level")) orelse 0,
-            .mip_level_count = try self.optBounded(r, form, "mip-level-count", .positive),
-            .base_array_layer = (try self.optU32(r, form, "base-array-layer")) orelse 0,
-            .array_layer_count = try self.optBounded(r, form, "array-layer-count", .positive),
-            .format = view_format,
+            .dimension = dimension,
+            .aspect = if (aspect_symbol != null) aspect else null,
+            .base_mip_level = base_mip_level,
+            .mip_level_count = mip_level_count,
+            .base_array_layer = base_array_layer,
+            .array_layer_count = array_layer_count,
+            .format = if (view_format) |f| @intFromEnum(f) else null,
         }) catch return error.OutOfMemory;
         defer self.gpa.free(desc);
         const desc_id = self.builder.addData(self.gpa, desc) catch return error.OutOfMemory;
 
         const view_id = try self.reserveId(r, form, .texture_views, name);
+        try self.binds.view_meta.put(self.gpa, view_id, .{
+            .texture_id = texture_id,
+            .texture_name = tex_name,
+            .dimension = dimension,
+            .aspect = aspect,
+            .base_mip_level = base_mip_level,
+            .mip_level_count = mip_level_count,
+            .base_array_layer = base_array_layer,
+            .array_layer_count = array_layer_count,
+            .format = view_format,
+            .format_str = format_symbol,
+        });
         self.builder.getEmitter().createTextureView(self.gpa, view_id, texture_id, desc_id.toInt()) catch return error.OutOfMemory;
     }
 
@@ -6876,28 +7168,98 @@ pub const Emitter = struct {
         }
     }
 
-    /// A render-pass attachment view's declared `:format` (enum + author spelling),
-    /// or null to SKIP the exact-equality attachment checks: the canvas
-    /// (`context-current-texture` — the runtime picks the format at load time) or a
-    /// view name that isn't a declared `(texture …)`. Deliberately does NOT fall back
-    /// to the canvas like `resolveAttachmentView` — an unresolved view must skip, not
-    /// silently compare against the canvas. A pooled texture resolves via its base id
-    /// (the id `texture_meta` is keyed by), so pooled attachments join correctly.
-    /// The `TextureMeta` of a render-pass attachment view, or null to SKIP: the
-    /// canvas (`context-current-texture`) or a name that isn't a declared
-    /// `(texture …)`. A pooled texture resolves via its base id (the id `texture_meta`
-    /// is keyed by). Shared by the format (#7b/c/8b) and sample-count (#9) checks.
+    /// One render-pass attachment's source facts, resolved through the author's
+    /// kind. `kind` is the AUTHORED kind:
+    /// a bare texture keeps the legacy default-view semantics, a texture-view
+    /// contributes its own format/aspect/mip/layer range. Plan 09's joins read
+    /// this instead of the base texture alone; `format` is already
+    /// aspect-resolved for a view with no `:format`, matching what
+    /// `createView` derives at runtime.
+    const AttachmentInfo = struct {
+        kind: enum { texture, view },
+        /// The declared resource's own id (texture id or view id).
+        id: u16,
+        texture_id: u16,
+        /// The authored symbol, e.g. what a diagnostic should quote.
+        name: []const u8,
+        texture_name: []const u8,
+        meta: TextureMeta,
+        format: values.TextureFormat,
+        format_str: []const u8,
+        view: ?ViewMeta,
+    };
+
+    /// `values.TextureFormat` after WebGPU's `resolving GPUTextureAspect`:
+    /// a depth-only or stencil-only view of a combined format exposes that
+    /// aspect's own format, which is what the attachment format/op checks must
+    /// see. An `:format` override on the view wins before this is applied.
+    fn resolveAspectFormat(fmt: values.TextureFormat, aspect: u8) values.TextureFormat {
+        return switch (aspect) {
+            2 => switch (fmt) {
+                .depth24plus_stencil8 => .depth24plus,
+                .depth32float_stencil8 => .depth32float,
+                else => fmt,
+            },
+            1 => switch (fmt) {
+                .depth24plus_stencil8, .depth32float_stencil8 => .stencil8,
+                else => fmt,
+            },
+            else => fmt,
+        };
+    }
+
+    /// Resolve a render-pass attachment symbol to its source facts: the canvas
+    /// (null — the runtime owns it), a declared texture (default view), or a
+    /// declared texture-view (its own format/aspect/range over its texture).
+    /// Null is the conservative SKIP every existing attachment check already
+    /// takes for an unresolvable/canvas name; no caller silently treats it as
+    /// the base texture.
+    fn attachmentInfo(self: *const Emitter, name: []const u8) ?AttachmentInfo {
+        if (name.len == 0) return null;
+        if (std.mem.eql(u8, name, "context-current-texture")) return null;
+        if (self.tables.textures.get(name)) |tid| {
+            const meta = self.binds.texture_meta.get(tid) orelse return null;
+            return .{
+                .kind = .texture,
+                .id = tid,
+                .texture_id = tid,
+                .name = name,
+                .texture_name = name,
+                .meta = meta,
+                .format = meta.format,
+                .format_str = meta.format_str,
+                .view = null,
+            };
+        }
+        const vid = self.tables.texture_views.get(name) orelse return null;
+        const vm = self.binds.view_meta.get(vid) orelse return null;
+        const meta = self.binds.texture_meta.get(vm.texture_id) orelse return null;
+        const fmt = vm.format orelse resolveAspectFormat(meta.format, vm.aspect);
+        return .{
+            .kind = .view,
+            .id = vid,
+            .texture_id = vm.texture_id,
+            .name = name,
+            .texture_name = vm.texture_name,
+            .meta = meta,
+            .format = fmt,
+            .format_str = if (vm.format_str) |s| s else fmt.toWebGPU(),
+            .view = vm,
+        };
+    }
+
+    /// The source texture metadata for an attachment name, following a view to
+    /// its texture. Kept as the seam every existing attachment check already
+    /// calls, so plan 09's view support reaches all of them at once (the plan
+    /// forbids a second, weaker attachment path).
     fn attachmentTextureMeta(self: *const Emitter, view_name: []const u8) ?TextureMeta {
-        if (view_name.len == 0) return null;
-        if (std.mem.eql(u8, view_name, "context-current-texture")) return null;
-        const tid = self.tables.textures.get(view_name) orelse return null;
-        return self.binds.texture_meta.get(tid);
+        return if (self.attachmentInfo(view_name)) |info| info.meta else null;
     }
 
     const AttFormat = struct { fmt: values.TextureFormat, str: []const u8 };
     fn attachmentTextureFormat(self: *const Emitter, view_name: []const u8) ?AttFormat {
-        const meta = self.attachmentTextureMeta(view_name) orelse return null;
-        return .{ .fmt = meta.format, .str = meta.format_str };
+        const info = self.attachmentInfo(view_name) orelse return null;
+        return .{ .fmt = info.format, .str = info.format_str };
     }
 
     /// A texture-format sentinel the exact-equality attachment checks must SKIP:
@@ -7272,28 +7634,44 @@ pub const Emitter = struct {
         }
     }
 
-    /// R5a #9 — sample-count agreement (color AND depth attachment views). Fires ONLY
-    /// when a texture's :sample-count is EXPLICIT and > 1 and disagrees with the
-    /// pipeline's (multisample :count …). An omitted/expression count (null) or an
-    /// explicit 1 is the simple_triangle_msaa quirk pattern (an omitted count reads
-    /// as 1 while the pipeline stays 4) → SKIP, never a false reject.
+    /// R5a #9 — sample-count agreement (color AND depth attachments, following a
+    /// texture-view to its source texture). Fires ONLY when a texture's
+    /// :sample-count is EXPLICIT and > 1 and disagrees with the pipeline's
+    /// (multisample :count …). An omitted/expression count (null) or an explicit 1
+    /// is the simple_triangle_msaa quirk pattern (an omitted count reads as 1 while
+    /// the pipeline stays 4) → SKIP, never a false reject.
+    ///
+    /// CRD anchor (plan 09 R7's deferred minor): the render-pass layout is
+    /// derived from the attachments' `GPUTexture.sampleCount`
+    /// (`../gpuweb/spec/index.bs:12899-12916`) and `setPipeline` requires it to
+    /// EQUAL the pipeline's `multisample.count` (`:12886-12889`, compared at
+    /// `:13208`). A view cannot change its texture's sample count, so following
+    /// the view to the source texture is the complete input.
     fn checkSampleCounts(self: *Emitter, r: *const Reader, pass_name: []const u8, pname: []const u8, atts: PassAttachments, meta: PipelineMeta) Error!void {
         const pipe_ms: u32 = meta.ms_count orelse 1;
         var i: u8 = 0;
         while (i < atts.stored) : (i += 1) {
-            const tm = self.attachmentTextureMeta(atts.views[i]) orelse continue;
-            const sc = tm.sample_count orelse continue;
+            const info = self.attachmentInfo(atts.views[i]) orelse continue;
+            const sc = info.meta.sample_count orelse continue;
             if (sc > 1 and sc != pipe_ms) {
-                self.diagnose(.sjon, self.locate(r, atts.nodes[i]), "", "color attachment {d} of render-pass '{s}' writes texture '{s}' with :sample-count {d} but pipeline '{s}' has sample count {d}", .{ i, pass_name, atts.views[i], sc, pname, pipe_ms });
+                if (info.kind == .view) {
+                    self.diagnose(.sjon, self.locate(r, atts.nodes[i]), "", "color attachment {d} of render-pass '{s}' uses texture-view '{s}' (texture '{s}') with :sample-count {d} but pipeline '{s}' has sample count {d}", .{ i, pass_name, atts.views[i], info.texture_name, sc, pname, pipe_ms });
+                } else {
+                    self.diagnose(.sjon, self.locate(r, atts.nodes[i]), "", "color attachment {d} of render-pass '{s}' writes texture '{s}' with :sample-count {d} but pipeline '{s}' has sample count {d}", .{ i, pass_name, atts.views[i], sc, pname, pipe_ms });
+                }
                 return error.ValidationError;
             }
         }
         if (atts.depth) |da| {
             const dview = r.symbol(da, "view") orelse "";
-            if (self.attachmentTextureMeta(dview)) |tm| {
-                if (tm.sample_count) |sc| {
+            if (self.attachmentInfo(dview)) |info| {
+                if (info.meta.sample_count) |sc| {
                     if (sc > 1 and sc != pipe_ms) {
-                        self.diagnose(.sjon, self.locate(r, da), "", "depth attachment of render-pass '{s}' writes texture '{s}' with :sample-count {d} but pipeline '{s}' has sample count {d}", .{ pass_name, dview, sc, pname, pipe_ms });
+                        if (info.kind == .view) {
+                            self.diagnose(.sjon, self.locate(r, da), "", "depth attachment of render-pass '{s}' uses texture-view '{s}' (texture '{s}') with :sample-count {d} but pipeline '{s}' has sample count {d}", .{ pass_name, dview, info.texture_name, sc, pname, pipe_ms });
+                        } else {
+                            self.diagnose(.sjon, self.locate(r, da), "", "depth attachment of render-pass '{s}' writes texture '{s}' with :sample-count {d} but pipeline '{s}' has sample count {d}", .{ pass_name, dview, sc, pname, pipe_ms });
+                        }
                         return error.ValidationError;
                     }
                 }
@@ -7301,26 +7679,114 @@ pub const Emitter = struct {
         }
     }
 
-    /// The gathered `(color-attachment …)` records of a render pass, ready for the
-    /// begin-pass opcode selection. `resolve` + `first_view_name` reflect the FIRST
-    /// attachment only (the single-attachment path keeps the resolve target; MRT
-    /// carries none). The `atts` tail beyond `count` is undefined — read `[0..count]`.
-    const GatheredColorAttachments = struct {
-        atts: [MAX_COLOR_ATTACHMENTS]ColorAttachment,
-        count: usize,
-        resolve: u16,
-        first_view_name: ?[]const u8,
+    /// Plan 09's normalized attachment reference: the three things a pass target
+    /// can name. `wire` is the ONE encoding `begin_render_pass_views` carries —
+    /// a tagged view id, a bare texture id, or the canvas sentinel — and only
+    /// 0x81 interprets the tag. Canvas is refused in depth by the schema's
+    /// depth-authoring union and again by `gatherDepthAttachment`.
+    const AttachmentTarget = union(enum) {
+        canvas,
+        texture: u16,
+        view: u16,
+
+        fn wire(self: AttachmentTarget) u16 {
+            return switch (self) {
+                .canvas => opcodes.ATTACHMENT_CANVAS,
+                .texture => |id| id,
+                .view => |id| opcodes.tagAttachmentViewId(id),
+            };
+        }
     };
 
+    /// Which slot of the pass an attachment occupies. The view's format/aspect
+    /// rules differ per position, so it is named once rather than repeated as
+    /// three anonymous enums (which Zig would treat as distinct types).
+    const AttachmentPosition = enum { colour, resolve, depth };
+
+    /// One gathered `(color-attachment …)`: the normalized target (and optional
+    /// resolve target, per attachment — only the new record carries that many),
+    /// its ops/clear, and the authored names/nodes diagnostics need.
+    const GatheredColorAttachment = struct {
+        target: AttachmentTarget,
+        resolve: ?AttachmentTarget,
+        load_op: LoadOp,
+        store_op: StoreOp,
+        clear_r_bits: u32,
+        clear_g_bits: u32,
+        clear_b_bits: u32,
+        clear_a_bits: u32,
+        /// The authored `:view` / `:resolve-target` symbols ("" when absent).
+        view_name: []const u8,
+        resolve_name: []const u8,
+        /// The `(color-attachment …)` form, for located refusals.
+        node: NodeIndex,
+    };
+
+    /// The gathered `(color-attachment …)` records of a render pass. The `atts`
+    /// tail beyond `count` is undefined — read `[0..count]`.
+    const GatheredColorAttachments = struct {
+        atts: [MAX_COLOR_ATTACHMENTS]GatheredColorAttachment,
+        count: usize,
+
+        /// Plan 09's ONE selection rule: any colour or resolve target naming an
+        /// explicit texture-view selects 0x81 for the whole pass. The caller ORs
+        /// in the depth target, which reuses this decision.
+        fn usesViews(self: GatheredColorAttachments) bool {
+            for (self.atts[0..self.count]) |a| {
+                if (a.target == .view) return true;
+                if (a.resolve) |r| if (r == .view) return true;
+            }
+            return false;
+        }
+    };
+
+    /// A gathered `(depth-stencil-attachment …)`.
+    const GatheredDepthAttachment = struct {
+        target: AttachmentTarget,
+        view_name: []const u8,
+        node: NodeIndex,
+    };
+
+    /// Normalize one authored attachment symbol. The canvas is a sentinel; a
+    /// declared texture keeps its id; a declared texture-view keeps its own id
+    /// in its own space. An unresolved name is an ERROR — never the retired
+    /// `orelse CANVAS_TEXTURE_ID` fallback (invariant 1 of plan 09: a wrong-kind
+    /// reference must not silently render into the canvas).
+    fn resolveAttachmentTarget(self: *Emitter, r: *const Reader, node: NodeIndex, name: []const u8) Error!AttachmentTarget {
+        if (std.mem.eql(u8, name, "context-current-texture")) return .canvas;
+        if (self.tables.textures.get(name)) |id| return .{ .texture = id };
+        if (self.tables.texture_views.get(name)) |id| {
+            if (id > opcodes.ATTACHMENT_VIEW_MAX) {
+                self.diagnose(.sjon, self.locate(r, node), "", "texture-view '{s}' has id {d}, which does not fit the tagged attachment-target encoding (view ids are at most {d}; textured and view ids share the u16 space with the canvas and none sentinels)", .{ name, id, opcodes.ATTACHMENT_VIEW_MAX });
+                return error.ValidationError;
+            }
+            return .{ .view = id };
+        }
+        return self.unresolvedRef(r, node, "texture or texture-view", name);
+    }
+
+    /// Gather the pass's `depth-stencil-attachment` (at most one, schema-enforced)
+    /// as a normalized target. The canvas is refused here as well as by the
+    /// schema's depth union, because an emitter fallback is exactly the silent
+    /// substitution the plan forbids.
+    fn gatherDepthAttachment(self: *Emitter, r: *const Reader, form: NodeIndex, pass_name: []const u8) Error!?GatheredDepthAttachment {
+        const da = r.child(form, "depth-stencil-attachment") orelse return null;
+        const name = try self.requiredSymbol(r, da, "view");
+        if (std.mem.eql(u8, name, "context-current-texture")) {
+            self.diagnose(.sjon, self.locate(r, r.authorNode(da, "view") orelse da), "", "the depth/stencil attachment of render-pass '{s}' names context-current-texture — a depth attachment is a declared (texture …) or (texture-view …), never the canvas", .{pass_name});
+            return error.ValidationError;
+        }
+        return .{ .target = try self.resolveAttachmentTarget(r, da, name), .view_name = name, .node = da };
+    }
+
     /// Gather a render-pass's `(color-attachment …)` sub-forms in author order
-    /// (capped at the WebGPU max of 8), resolving each view id, load/store op, and
-    /// clear value. Emission-prep — writes no opcodes, but errors: a clear-value
-    /// element may be an expression, and a malformed one is an emit error.
+    /// (capped at the WebGPU max of 8), resolving each target, per-attachment
+    /// resolve, load/store op, and clear value. Emission-prep — writes no
+    /// opcodes, but errors: a clear-value element may be an expression, and a
+    /// malformed one is an emit error.
     fn gatherColorAttachments(self: *Emitter, r: *const Reader, form: NodeIndex) Error!GatheredColorAttachments {
-        var atts: [MAX_COLOR_ATTACHMENTS]ColorAttachment = undefined;
+        var atts: [MAX_COLOR_ATTACHMENTS]GatheredColorAttachment = undefined;
         var att_count: usize = 0;
-        var resolve: u16 = values.NO_TEXTURE_ID;
-        var first_view_name: ?[]const u8 = null;
         var att_it = r.childrenWithHead(form, "color-attachment");
         while (att_it.next()) |c| {
             // Over-cap is a reject, not a truncation. `break` here silently
@@ -7333,19 +7799,20 @@ pub const Emitter = struct {
                 self.diagnose(.sjon, self.locate(r, form), "", "render pass declares more than {d} (color-attachment …) sub-forms, which is WebGPU's maxColorAttachments and the width of the MRT opcode — the extra attachments cannot be encoded", .{MAX_COLOR_ATTACHMENTS});
                 return error.ValidationError;
             }
-            var att = ColorAttachment{
-                .texture_id = values.CANVAS_TEXTURE_ID,
+            const view_name = try self.requiredSymbol(r, c, "view");
+            var att = GatheredColorAttachment{
+                .target = try self.resolveAttachmentTarget(r, c, view_name),
+                .resolve = null,
                 .load_op = .clear,
                 .store_op = .store,
                 .clear_r_bits = 0,
                 .clear_g_bits = 0,
                 .clear_b_bits = 0,
                 .clear_a_bits = 0,
+                .view_name = view_name,
+                .resolve_name = "",
+                .node = c,
             };
-            if (r.symbol(c, "view")) |v| {
-                att.texture_id = self.resolveAttachmentView(v);
-                if (att_count == 0) first_view_name = v;
-            }
             // Both are REQUIRED (spec/09 step D), so the validator has already
             // rejected their absence — `orelse return error.EmitError` here rather
             // than a silent fall-back to the struct's initialiser, which is what
@@ -7365,38 +7832,396 @@ pub const Emitter = struct {
                 if (cv.len > 2) att.clear_b_bits = floatBits(try self.elemF64(r, cv[2], 0));
                 if (cv.len > 3) att.clear_a_bits = floatBits(try self.elemF64(r, cv[3], 0));
             }
-            // The MRT opcode carries no resolve target (matches the legacy); the
-            // single-attachment path keeps it, sourced from the only attachment.
-            if (att_count == 0) {
-                if (r.symbol(c, "resolve-target")) |rt| resolve = self.resolveAttachmentView(rt);
+            // Plan 09 gathers the resolve target PER attachment. The legacy
+            // begin-pass opcodes keep the single-attachment field; the new
+            // record carries every attachment's own resolve, so this model is
+            // not narrower than either wire shape.
+            if (r.symbol(c, "resolve-target")) |rt| {
+                att.resolve_name = rt;
+                att.resolve = try self.resolveAttachmentTarget(r, c, rt);
             }
             atts[att_count] = att;
             att_count += 1;
         }
         std.debug.assert(att_count <= atts.len); // post: the reject above holds
-        return .{ .atts = atts, .count = att_count, .resolve = resolve, .first_view_name = first_view_name };
+        return .{ .atts = atts, .count = att_count };
     }
 
-    /// Emit the begin-render-pass opcode for the gathered color attachments + depth:
-    /// a single pooled view → begin_render_pass_pool (feedback ping-pong); >1 → MRT;
-    /// else the single/zero-attachment path (0 color + depth ⇒ a depth-only pass at
-    /// NO_TEXTURE_ID, else the canvas). Mirrors legacy passes.zig:172-175.
-    fn beginPassForAttachments(self: *Emitter, cols: GatheredColorAttachments, depth_texture_id: u16) Error!void {
+    /// Is this a format WebGPU's colour-target table renders into? The schema's
+    /// `color-target-format` member set, including the feature-gated members the
+    /// runtime requests the device feature for. Compressed formats are
+    /// copy/upload-only; the depth/stencil family is the depth position's.
+    fn isColorRenderableFormat(fmt: values.TextureFormat) bool {
+        return switch (fmt) {
+            .preferred_canvas_format,
+            .bgra8unorm,
+            .rgba8unorm,
+            .rgba16float,
+            .r32uint,
+            .r8unorm,
+            .r8uint,
+            .r8sint,
+            .rg8unorm,
+            .rg8uint,
+            .rg8sint,
+            .rgba8unorm_srgb,
+            .rgba8uint,
+            .rgba8sint,
+            .r16uint,
+            .r16sint,
+            .r16float,
+            .rg16uint,
+            .rg16sint,
+            .rg16float,
+            .r32sint,
+            .r32float,
+            .rg32uint,
+            .rg32sint,
+            .rg32float,
+            .rgba16uint,
+            .rgba16sint,
+            .rgba32uint,
+            .rgba32sint,
+            .rgba32float,
+            .rgb10a2uint,
+            .rgb10a2unorm,
+            .r8snorm,
+            .rg8snorm,
+            .rgba8snorm,
+            .rg11b10ufloat,
+            .bgra8unorm_srgb,
+            .r16unorm,
+            .r16snorm,
+            .rg16unorm,
+            .rg16snorm,
+            .rgba16unorm,
+            .rgba16snorm,
+            => true,
+            else => false,
+        };
+    }
+
+    fn textureDimensionName(dim: texture_layout.Dimension) []const u8 {
+        return switch (dim) {
+            .d1 => "1d",
+            .d2 => "2d",
+            .d3 => "3d",
+        };
+    }
+
+    /// The view's resolved dimension, applying WebGPU's descriptor default: the
+    /// texture's dimension, except a 2d texture with more than one array layer
+    /// defaults to `2d-array`.
+    fn effectiveViewDimension(vm: ViewMeta, dim: texture_layout.Dimension, layers: u32) u8 {
+        if (vm.dimension) |d| return d;
+        return switch (dim) {
+            .d1 => 0,
+            .d3 => 5,
+            .d2 => if (layers > 1) 2 else 1,
+        };
+    }
+
+    /// The view's resolved mip count (default: every level from the base).
+    fn effectiveViewMipCount(vm: ViewMeta, texture_mips: u32) u32 {
+        if (vm.base_mip_level >= texture_mips) return 0;
+        return vm.mip_level_count orelse (texture_mips - vm.base_mip_level);
+    }
+
+    /// The view's resolved array layer count (default: 1 for 1d/2d/3d/cube, every
+    /// remaining layer for 2d-array/cube-array).
+    fn effectiveViewLayerCount(vm: ViewMeta, view_dimension: u8, texture_layers: u32) u32 {
+        if (vm.array_layer_count) |c| return c;
+        return switch (view_dimension) {
+            0, 1, 5 => 1, // 1d, 2d, 3d
+            3 => 6, // cube
+            else => if (vm.base_array_layer >= texture_layers) 0 else texture_layers - vm.base_array_layer,
+        };
+    }
+
+    /// True when a view's `count` selected items starting at `base` run past
+    /// `limit`. Subtraction, never `base + count > limit`: both numbers are u32
+    /// the document owns (a view's `:base-mip-level` / `:mip-level-count`, or
+    /// the array-layer pair), and a mutated count of `4294967295` made the
+    /// ADDITION overflow before the range could be refused (mutation sweep,
+    /// seed 0x52f56f48). `base >= limit` is the out-of-bounds refusal the
+    /// callers already report, and it also keeps the subtraction in range.
+    fn selectionExceeds(base: u32, count: u32, limit: u32) bool {
+        return base >= limit or count > limit - base;
+    }
+
+    /// Does a target's source texture carry `render-attachment`? The canvas is
+    /// exempt (the runtime configures its usage).
+    fn checkAttachmentUsage(self: *Emitter, r: *const Reader, anchor: NodeIndex, pass_name: []const u8, position: []const u8, info: AttachmentInfo) Error!void {
+        if (info.meta.usage.render_attachment) return;
+        self.diagnose(.sjon, self.locate(r, anchor), "", "the {s} target '{s}' of render-pass '{s}' has no render-attachment usage — add render-attachment to texture '{s}': usage is fixed at creation, and a render pass needs render-attachment", .{ position, info.name, pass_name, info.texture_name });
+        return error.ValidationError;
+    }
+
+    /// A render attachment's extent at the mip it selects: the physical size of
+    /// that mip (`max(1, base >> level)`), which is WebGPU's "compute render
+    /// extent". Null when the texture's extent is runtime-resolved (canvas /
+    /// image bitmap): comparing an invented size is worse than skipping.
+    const RenderExtent = struct { width: u32, height: u32 };
+    fn attachmentRenderExtent(info: AttachmentInfo) ?RenderExtent {
+        const d = info.meta.descriptor orelse return null;
+        const level: u32 = if (info.view) |vm| vm.base_mip_level else 0;
+        const shrink = struct {
+            fn at(v: u32, lvl: u32) u32 {
+                if (lvl >= 32) return 1;
+                return @max(1, v >> @intCast(lvl));
+            }
+        }.at;
+        return .{ .width = shrink(d.size.width, level), .height = shrink(d.size.height, level) };
+    }
+
+    /// Plan 09's shape rules for an explicit attachment view: a renderable 2d
+    /// view of exactly one mip and one array layer, with an aspect the position
+    /// can serve and a format the position can render. Every anchored refusal
+    /// names the view AND its source texture — the fix can live in either form.
+    fn checkAttachmentViewShape(self: *Emitter, r: *const Reader, anchor: NodeIndex, pass_name: []const u8, info: AttachmentInfo, position: AttachmentPosition) Error!void {
+        const vm = info.view orelse return;
+        const loc = self.locate(r, anchor);
+        const pos_name: []const u8 = switch (position) {
+            .colour => "colour",
+            .resolve => "resolve",
+            .depth => "depth",
+        };
+
+        // Dimension first: a 3d view is the plan's named `depthSlice` gap, and
+        // its own message is clearer than the source-dimension one. A render
+        // pass rasterizes a 2d surface, so only a 2d/2d-array view of a 2d
+        // texture is an attachment.
+        const src_dim: texture_layout.Dimension = if (info.meta.descriptor) |d| d.dimension else info.meta.dynamic.?.dimension;
+        const src_layers: u32 = if (info.meta.descriptor) |d| d.size.depth_or_array_layers else info.meta.dynamic.?.layers;
+        const src_mips: u32 = if (info.meta.descriptor) |d| d.mip_level_count else info.meta.dynamic.?.mip_level_count;
+        const view_dim = effectiveViewDimension(vm, src_dim, src_layers);
+        if (view_dim == 5) {
+            self.diagnose(.sjon, loc, "", "texture-view '{s}' is :dimension 3d — a 3d colour attachment needs GPURenderPassColorAttachment.depthSlice, which PNGine does not model; select a 2d or 2d-array view (a depthSlice key must be designed separately)", .{info.name});
+            return error.ValidationError;
+        }
+        if (view_dim != 1 and view_dim != 2) {
+            self.diagnose(.sjon, loc, "", "texture-view '{s}' is :dimension {s}, but a render-pass attachment view must be 2d or 2d-array", .{ info.name, values.viewDimensionString(@as(u32, view_dim)) });
+            return error.ValidationError;
+        }
+        if (src_dim != .d2) {
+            self.diagnose(.sjon, loc, "", "texture-view '{s}' views a {s} texture '{s}', so it cannot be a {s} target of render-pass '{s}' — a render-pass attachment view must view a 2d texture", .{ info.name, textureDimensionName(src_dim), info.texture_name, pos_name, pass_name });
+            return error.ValidationError;
+        }
+
+        // Mip range: in bounds, then exactly one mip.
+        const mip_count = effectiveViewMipCount(vm, src_mips);
+        if (selectionExceeds(vm.base_mip_level, mip_count, src_mips)) {
+            self.diagnose(.sjon, loc, "", "texture-view '{s}' selects {d} mip level(s) from base level {d}, but texture '{s}' has {d} — lower :base-mip-level or :mip-level-count", .{ info.name, mip_count, vm.base_mip_level, info.texture_name, src_mips });
+            return error.ValidationError;
+        }
+        if (mip_count != 1) {
+            self.diagnose(.sjon, loc, "", "texture-view '{s}' selects {d} mip levels, but a render-pass attachment selects exactly one mip level — set :mip-level-count 1", .{ info.name, mip_count });
+            return error.ValidationError;
+        }
+
+        // Layer range: in bounds, then exactly one layer.
+        const layer_count = effectiveViewLayerCount(vm, view_dim, src_layers);
+        if (selectionExceeds(vm.base_array_layer, layer_count, src_layers)) {
+            self.diagnose(.sjon, loc, "", "texture-view '{s}' selects {d} array layer(s) from base layer {d}, but texture '{s}' has {d} — lower :base-array-layer or :array-layer-count", .{ info.name, layer_count, vm.base_array_layer, info.texture_name, src_layers });
+            return error.ValidationError;
+        }
+        if (layer_count != 1) {
+            self.diagnose(.sjon, loc, "", "texture-view '{s}' selects {d} array layers, but a render-pass attachment selects exactly one array layer — set :array-layer-count 1", .{ info.name, layer_count });
+            return error.ValidationError;
+        }
+
+        // The aspect must exist in the source format, and a colour/resolve
+        // attachment sees ALL aspects (a depth-only or stencil-only view's
+        // format is not a colour format).
+        if (vm.aspect == 1 and !info.meta.format.hasStencil()) {
+            self.diagnose(.sjon, loc, "", "texture-view '{s}' exposes :aspect stencil-only, but texture '{s}' is :format '{s}', which has no stencil aspect", .{ info.name, info.texture_name, info.meta.format_str });
+            return error.ValidationError;
+        }
+        if (vm.aspect == 2 and !info.meta.format.hasDepth()) {
+            self.diagnose(.sjon, loc, "", "texture-view '{s}' exposes :aspect depth-only, but texture '{s}' is :format '{s}', which has no depth aspect", .{ info.name, info.texture_name, info.meta.format_str });
+            return error.ValidationError;
+        }
+        if ((position == .colour or position == .resolve) and vm.aspect != 0) {
+            self.diagnose(.sjon, loc, "", "texture-view '{s}' exposes :aspect {s}, but a {s} attachment view must expose all aspects", .{ info.name, if (vm.aspect == 1) "stencil-only" else "depth-only", pos_name });
+            return error.ValidationError;
+        }
+
+        // Format class. The depth side's depth-or-stencil rule already ran in
+        // `checkDepthAttachmentAspects`; the colour/resolve side needs the
+        // renderable table here (a view can override the texture's format).
+        if (position == .colour or position == .resolve) {
+            if (!isColorRenderableFormat(info.format)) {
+                self.diagnose(.sjon, loc, "", "texture-view '{s}' has effective :format '{s}', which is not colour-renderable — a {s} attachment takes a colour-renderable format", .{ info.name, info.format_str, pos_name });
+                return error.ValidationError;
+            }
+        }
+    }
+
+    /// Plan 09's one selection rule, plus the refusals only the new record can
+    /// see: a pass with any view target is validated as a whole before the
+    /// emitter writes a byte. Legacy passes (no view anywhere) return here
+    /// untouched, which is what keeps their bytes identical.
+    fn checkAttachmentViews(self: *Emitter, r: *const Reader, pass_name: []const u8, cols: GatheredColorAttachments, depth: ?GatheredDepthAttachment) Error!void {
+        const depth_is_view = if (depth) |d| d.target == .view else false;
+        if (!cols.usesViews() and !depth_is_view) return;
+
+        // No pooled target can ride a 0x81 pass: the record carries one id per
+        // target and has no pool-member operand, so a base/active member guess
+        // would render into a different instance than the author selected.
+        for (cols.atts[0..cols.count]) |a| {
+            try self.checkTargetNotPooled(r, a.node, pass_name, a.target, a.view_name, "color target");
+            if (a.resolve) |rt| try self.checkTargetNotPooled(r, a.node, pass_name, rt, a.resolve_name, "resolve target");
+        }
+        if (depth) |d| try self.checkTargetNotPooled(r, d.node, pass_name, d.target, d.view_name, "depth target");
+
+        for (cols.atts[0..cols.count], 0..) |a, i| {
+            const colour_anchor = r.authorNode(a.node, "view") orelse a.node;
+            try self.checkAttachmentTarget(r, pass_name, a.target, a.view_name, colour_anchor, .colour);
+            if (a.resolve) |rt| {
+                const resolve_anchor = r.authorNode(a.node, "resolve-target") orelse a.node;
+                try self.checkAttachmentTarget(r, pass_name, rt, a.resolve_name, resolve_anchor, .resolve);
+                try self.checkResolvePair(r, pass_name, a, i);
+            }
+        }
+        if (depth) |d| try self.checkAttachmentTarget(r, pass_name, d.target, d.view_name, r.authorNode(d.node, "view") orelse d.node, .depth);
+    }
+
+    /// A view target's source must be attachable; a bare texture in a 0x81 pass
+    /// reaches the GPU through the same record, so it takes the usage/format
+    /// checks too (its shape is the legacy default view, unchanged).
+    fn checkAttachmentTarget(self: *Emitter, r: *const Reader, pass_name: []const u8, target: AttachmentTarget, name: []const u8, anchor: NodeIndex, position: AttachmentPosition) Error!void {
+        _ = target;
+        const info = self.attachmentInfo(name) orelse return; // canvas/unresolved: the legacy checks already skip
+        const pos_name: []const u8 = switch (position) {
+            .colour => "colour",
+            .resolve => "resolve",
+            .depth => "depth",
+        };
+        try self.checkAttachmentUsage(r, anchor, pass_name, pos_name, info);
+        if (info.view != null) {
+            try self.checkAttachmentViewShape(r, anchor, pass_name, info, position);
+        } else if (position == .colour or position == .resolve) {
+            if (!isColorRenderableFormat(info.format)) {
+                self.diagnose(.sjon, self.locate(r, anchor), "", "texture '{s}' has :format '{s}', which is not colour-renderable — a {s} attachment takes a colour-renderable format", .{ info.name, info.format_str, pos_name });
+                return error.ValidationError;
+            }
+        }
+    }
+
+    /// WebGPU's resolve rules (CRD `GPURenderPassColorAttachment Valid Usage`,
+    /// `../gpuweb/spec/index.bs:12625-12640`): a resolve target means the colour
+    /// attachment is multisampled, and the resolve target itself is single-sample.
+    /// The format/extent equality is the existing R5a #7c join, now view-aware.
+    fn checkResolvePair(self: *Emitter, r: *const Reader, pass_name: []const u8, att: GatheredColorAttachment, attachment_index: usize) Error!void {
+        const resolve_anchor = r.authorNode(att.node, "resolve-target") orelse att.node;
+        const colour_samples: u32 = blk: {
+            if (att.target == .canvas) break :blk 1;
+            const info = self.attachmentInfo(att.view_name) orelse break :blk 1;
+            break :blk effectiveSampleCount(info.meta);
+        };
+        if (colour_samples <= 1) {
+            const kind: []const u8 = if (att.target == .view) "texture-view" else "texture";
+            self.diagnose(.sjon, self.locate(r, resolve_anchor), "", "color attachment of render-pass '{s}' names a resolve target, but its {s} '{s}' has sample count {d} — a resolve target requires a multisampled attachment", .{ pass_name, kind, att.view_name, colour_samples });
+            return error.ValidationError;
+        }
+        const rt = att.resolve orelse return;
+        if (rt == .canvas) return; // the canvas is single-sample by definition
+        const info = self.attachmentInfo(att.resolve_name) orelse return;
+        const rs = effectiveSampleCount(info.meta);
+        if (rs != 1) {
+            self.diagnose(.sjon, self.locate(r, resolve_anchor), "", "resolve-target '{s}' of render-pass '{s}' has sample count {d} — a resolve target has sample count 1", .{ att.resolve_name, pass_name, rs });
+            return error.ValidationError;
+        }
+
+        // The two render extents must match (CRD `GPURenderPassColorAttachment
+        // Valid Usage`, `../gpuweb/spec/index.bs:12631-12636`). Both sides are
+        // statically known here unless one is the canvas or an image-sized
+        // texture; a view compares at ITS selected mip.
+        const colour_info = self.attachmentInfo(att.view_name) orelse return;
+        const colour_ext = attachmentRenderExtent(colour_info) orelse return;
+        const resolve_ext = attachmentRenderExtent(info) orelse return;
+        if (colour_ext.width != resolve_ext.width or colour_ext.height != resolve_ext.height) {
+            self.diagnose(.sjon, self.locate(r, resolve_anchor), "", "color attachment {d} of render-pass '{s}' renders at {d}x{d} but resolve-target '{s}' renders at {d}x{d} — a resolve target must match the attachment's render extent", .{ attachment_index, pass_name, colour_ext.width, colour_ext.height, att.resolve_name, resolve_ext.width, resolve_ext.height });
+            return error.ValidationError;
+        }
+    }
+
+    /// Refuse a pooled texture (or a view into one) on the 0x81 path. The legacy
+    /// single-pool feedback pass never reaches here (no view target).
+    fn checkTargetNotPooled(self: *Emitter, r: *const Reader, node: NodeIndex, pass_name: []const u8, target: AttachmentTarget, name: []const u8, position: []const u8) Error!void {
+        switch (target) {
+            .canvas => {},
+            .texture => {
+                if (self.tables.textures.pool(name) != null) {
+                    self.diagnose(.sjon, self.locate(r, node), "", "pooled texture '{s}' is a {s} of render-pass '{s}', which emits the attachment-view record — that record has no pool-member operand; declare a non-pooled texture or a view over one", .{ name, position, pass_name });
+                    return error.ValidationError;
+                }
+            },
+            .view => {
+                const info = self.attachmentInfo(name) orelse return;
+                if (self.tables.textures.pool(info.texture_name) != null) {
+                    self.diagnose(.sjon, self.locate(r, node), "", "texture-view '{s}' is a view into pooled texture '{s}', which an attachment-view pass cannot select — no operand chooses a pool member; declare a non-pooled texture", .{ name, info.texture_name });
+                    return error.ValidationError;
+                }
+            },
+        }
+    }
+
+    /// Emit the begin-render-pass opcode for the gathered color attachments +
+    /// depth. Plan 09's split:
+    ///
+    ///   - ANY view target (colour, resolve or depth) → `begin_render_pass_views`
+    ///     (0x81), every target tagged/encoded in the one new record;
+    ///   - otherwise the legacy selection is byte-for-byte untouched: a single
+    ///     pooled view → begin_render_pass_pool; >1 → MRT; else the single/
+    ///     zero-attachment path (0 color + depth ⇒ a depth-only pass at
+    ///     NO_TEXTURE_ID, else the canvas). Mirrors legacy passes.zig:172-175.
+    fn beginPassForAttachments(self: *Emitter, cols: GatheredColorAttachments, depth: ?GatheredDepthAttachment) Error!void {
         const em = self.builder.getEmitter();
+        const depth_is_view = if (depth) |d| d.target == .view else false;
+
+        if (cols.usesViews() or depth_is_view) {
+            var atts: [MAX_COLOR_ATTACHMENTS]ViewColorAttachment = undefined;
+            for (cols.atts[0..cols.count], 0..) |a, i| {
+                atts[i] = .{
+                    .target = a.target.wire(),
+                    .load_op = a.load_op,
+                    .store_op = a.store_op,
+                    .clear_r_bits = a.clear_r_bits,
+                    .clear_g_bits = a.clear_g_bits,
+                    .clear_b_bits = a.clear_b_bits,
+                    .clear_a_bits = a.clear_a_bits,
+                    .resolve_target = if (a.resolve) |rt| rt.wire() else opcodes.ATTACHMENT_NONE,
+                };
+            }
+            const depth_target = if (depth) |d| d.target.wire() else opcodes.ATTACHMENT_NONE;
+            em.beginRenderPassViews(self.gpa, atts[0..cols.count], depth_target) catch return error.OutOfMemory;
+            return;
+        }
+
+        const depth_texture_id: u16 = if (depth) |d| switch (d.target) {
+            .canvas => values.NO_TEXTURE_ID, // refused before emission
+            .texture => |id| id,
+            .view => unreachable, // uses_views decision above
+        } else values.NO_TEXTURE_ID;
+
         // A single color attachment whose view names a pooled texture is a feedback
         // ping-pong target → begin_render_pass_pool(base, size, 0): the render-time
         // analog of the pool bind groups (the dispatcher resolves the actual target
         // per frame, just like setBindGroupPool). Mirrors legacy beginRenderPassPool.
         const pool_target: ?PoolInfo = if (cols.count == 1) blk: {
-            const vn = cols.first_view_name orelse break :blk null;
-            break :blk self.tables.textures.pool(vn);
+            const a0 = cols.atts[0];
+            if (a0.target != .texture) break :blk null;
+            break :blk self.tables.textures.pool(a0.view_name);
         } else null;
 
         if (pool_target) |tp| {
             const a0 = cols.atts[0];
             em.beginRenderPassPool(self.gpa, tp.base, tp.size, 0, a0.load_op, a0.store_op, depth_texture_id, a0.clear_r_bits, a0.clear_g_bits, a0.clear_b_bits, a0.clear_a_bits) catch return error.OutOfMemory;
         } else if (cols.count > 1) {
-            em.beginRenderPassMRT(self.gpa, cols.atts[0..cols.count], depth_texture_id) catch return error.OutOfMemory;
+            var legacy: [MAX_COLOR_ATTACHMENTS]ColorAttachment = undefined;
+            for (cols.atts[0..cols.count], 0..) |a, i| legacy[i] = legacyColorAttachment(a);
+            em.beginRenderPassMRT(self.gpa, legacy[0..cols.count], depth_texture_id) catch return error.OutOfMemory;
         } else {
             // Zero color attachments: a depth attachment present makes this a
             // depth-only pass (no color target → 0xFFFF, e.g. a shadow-map / depth
@@ -7406,7 +8231,7 @@ pub const Emitter = struct {
                 values.NO_TEXTURE_ID
             else
                 values.CANVAS_TEXTURE_ID;
-            const a0 = if (cols.count == 1) cols.atts[0] else ColorAttachment{
+            const a0 = if (cols.count == 1) legacyColorAttachment(cols.atts[0]) else ColorAttachment{
                 .texture_id = zero_att_color,
                 .load_op = .clear,
                 .store_op = .store,
@@ -7415,8 +8240,36 @@ pub const Emitter = struct {
                 .clear_b_bits = 0,
                 .clear_a_bits = 0,
             };
-            em.beginRenderPass(self.gpa, a0.texture_id, a0.load_op, a0.store_op, depth_texture_id, a0.clear_r_bits, a0.clear_g_bits, a0.clear_b_bits, a0.clear_a_bits, cols.resolve) catch return error.OutOfMemory;
+            const legacy_resolve: u16 = blk: {
+                if (cols.count != 1) break :blk values.NO_TEXTURE_ID;
+                const rt = cols.atts[0].resolve orelse break :blk values.NO_TEXTURE_ID;
+                break :blk switch (rt) {
+                    .canvas => values.CANVAS_TEXTURE_ID,
+                    .texture => |id| id,
+                    .view => unreachable, // uses_views decision above
+                };
+            };
+            em.beginRenderPass(self.gpa, a0.texture_id, a0.load_op, a0.store_op, depth_texture_id, a0.clear_r_bits, a0.clear_g_bits, a0.clear_b_bits, a0.clear_a_bits, legacy_resolve) catch return error.OutOfMemory;
         }
+    }
+
+    /// A gathered target in the legacy color-attachment shape. Only called on the
+    /// legacy branch, where a view target cannot occur (the decision above).
+    fn legacyColorAttachment(a: GatheredColorAttachment) ColorAttachment {
+        const texture_id: u16 = switch (a.target) {
+            .canvas => values.CANVAS_TEXTURE_ID,
+            .texture => |id| id,
+            .view => unreachable, // uses_views decision
+        };
+        return .{
+            .texture_id = texture_id,
+            .load_op = a.load_op,
+            .store_op = a.store_op,
+            .clear_r_bits = a.clear_r_bits,
+            .clear_g_bits = a.clear_g_bits,
+            .clear_b_bits = a.clear_b_bits,
+            .clear_a_bits = a.clear_a_bits,
+        };
     }
 
     /// Read `:pool` off `form` and reserve that many sequential ids under `name`,
@@ -7691,12 +8544,17 @@ pub const Emitter = struct {
     fn checkDepthAttachmentAspects(self: *Emitter, r: *const Reader, form: NodeIndex, pass_name: []const u8) Error!void {
         const da = r.child(form, "depth-stencil-attachment") orelse return;
         const view = r.symbol(da, "view") orelse return;
-        const af = self.attachmentTextureFormat(view) orelse return;
+        const info = self.attachmentInfo(view) orelse return;
+        const af: AttFormat = .{ .fmt = info.format, .str = info.format_str };
         if (isFormatSentinel(af.fmt)) return;
         const loc = self.locate(r, da);
 
         if (!af.fmt.hasDepth() and !af.fmt.hasStencil()) {
-            self.diagnose(.sjon, loc, "", "render-pass '{s}' attaches texture '{s}' with :format '{s}' as its depth/stencil target — a depth-stencil attachment takes a depth or stencil format", .{ pass_name, view, af.str });
+            if (info.kind == .view) {
+                self.diagnose(.sjon, loc, "", "render-pass '{s}' attaches texture-view '{s}' (texture '{s}') with :format '{s}' as its depth/stencil target — a depth-stencil attachment takes a depth or stencil format", .{ pass_name, view, info.texture_name, af.str });
+            } else {
+                self.diagnose(.sjon, loc, "", "render-pass '{s}' attaches texture '{s}' with :format '{s}' as its depth/stencil target — a depth-stencil attachment takes a depth or stencil format", .{ pass_name, view, af.str });
+            }
             return error.ValidationError;
         }
 
@@ -7711,12 +8569,12 @@ pub const Emitter = struct {
             if (a.has) {
                 if (has_load and has_store) continue;
                 const missing: []const u8 = if (!has_load) a.load else a.store;
-                self.diagnose(.sjon, loc, "", "the depth/stencil attachment of render-pass '{s}' omits :{s}, but its view '{s}' is :format '{s}', which has a {s} aspect — WebGPU requires both {s} ops and defaults neither", .{ pass_name, missing, view, af.str, a.name, a.name });
+                self.diagnose(.sjon, loc, "", "the depth/stencil attachment of render-pass '{s}' omits :{s}, but attachment '{s}' is :format '{s}', which has a {s} aspect — WebGPU requires both {s} ops and defaults neither", .{ pass_name, missing, view, af.str, a.name, a.name });
                 return error.ValidationError;
             }
             if (!has_load and !has_store) continue;
             const stated: []const u8 = if (has_load) a.load else a.store;
-            self.diagnose(.sjon, loc, "", "the depth/stencil attachment of render-pass '{s}' states :{s}, but its view '{s}' is :format '{s}', which has no {s} aspect", .{ pass_name, stated, view, af.str, a.name });
+            self.diagnose(.sjon, loc, "", "the depth/stencil attachment of render-pass '{s}' states :{s}, but attachment '{s}' is :format '{s}', which has no {s} aspect", .{ pass_name, stated, view, af.str, a.name });
             return error.ValidationError;
         }
     }
@@ -7835,6 +8693,16 @@ pub const Emitter = struct {
         try self.checkDrawsHavePipeline(r, form, name);
         try self.checkOcclusionQuerySet(r, form, name);
         try self.checkDepthAttachmentAspects(r, form, name);
+
+        // Plan 09: normalize every attachment target ONCE, then validate the new
+        // 0x81-only shapes. Gathering errors on an unresolved reference instead
+        // of falling back to the canvas, and it carries a resolve target per
+        // attachment (the legacy single field is only the single-attachment
+        // path's shape). This runs before `definePass`/any emission.
+        const depth = try self.gatherDepthAttachment(r, form, name);
+        const cols = try self.gatherColorAttachments(r, form);
+        try self.checkAttachmentViews(r, name, cols, depth);
+
         try self.checkRenderPassPipeline(r, form, name);
         try self.checkReplayedBundles(r, form, name);
         try self.checkAttachmentClearValues(r, form, name);
@@ -7847,21 +8715,18 @@ pub const Emitter = struct {
         // depth-stencil-ops (passes.zig:98/123/155).
         try self.emitPrePassState(r, form);
 
-        // depth attachment → depth texture id (+ non-default load/store ops, which
-        // the legacy emits as a pre-pass set_pass_depth_stencil_ops).
-        var depth_texture_id: u16 = values.NO_TEXTURE_ID;
-        if (r.child(form, "depth-stencil-attachment")) |da| {
-            if (r.symbol(da, "view")) |v| depth_texture_id = self.tables.textures.get(v) orelse values.NO_TEXTURE_ID;
-            try self.emitDepthStencilOps(r, da);
-            try self.emitPassClearValues(r, da);
+        // depth attachment's non-default load/store ops, which the legacy emits
+        // as a pre-pass set_pass_depth_stencil_ops. The target itself was
+        // normalized above (depth view or texture, never the canvas).
+        if (depth) |d| {
+            try self.emitDepthStencilOps(r, d.node);
+            try self.emitPassClearValues(r, d.node);
         }
 
-        // color attachment(s) → begin the pass. Gather the (color-attachment …)
-        // sub-forms (author order, MRT-capable; a view/resolve-target is the canvas
-        // context-current-texture or a declared MSAA/G-buffer texture), then pick
-        // and emit the begin opcode (pooled feedback / MRT / single-or-zero).
-        const cols = try self.gatherColorAttachments(r, form);
-        try self.beginPassForAttachments(cols, depth_texture_id);
+        // color attachment(s) → begin the pass. `cols` was gathered/validated
+        // above; the one selection rule lives in `beginPassForAttachments`
+        // (any view target → 0x81; otherwise the legacy bytes untouched).
+        try self.beginPassForAttachments(cols, depth);
 
         // pipeline
         if (r.symbol(form, "pipeline")) |p| {
@@ -9232,8 +10097,18 @@ pub const Emitter = struct {
                 self.diagnose(.sjon, self.locate(r, group.idx), "", "step group '{s}': a guard carries at most the six comparison keys", .{shown});
                 return error.ValidationError;
             }
-            const value: f64 = values.evalNodeF64(self.gpa, r.tree, self.schema, &self.env, kv.value) catch |e| {
-                return self.refuseNumeric(r, kv.value, kv.key, e);
+            // A guard comparison is an EVALUATED slot (literal, define ref or
+            // expression), so its read allocates through SJON's evaluator and
+            // can fail with OutOfMemory. That is not a verdict about the
+            // document: it must unwind as itself, not reach `refuseNumeric`,
+            // whose contract is a semantic refusal (every sibling funnel —
+            // `refuseNumericKey`, `refuseElem`, the `:size` and `(constant …)`
+            // reads — states the same precondition). The corpus OOM sweep
+            // found this funnel passing an induced OOM to the assertion there;
+            // `frame_guards` is the fixture that first carries a `:when`.
+            const value: f64 = values.evalNodeF64(self.gpa, r.tree, self.schema, &self.env, kv.value) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return self.refuseNumeric(r, kv.value, kv.key, e),
             };
             const pos = self.builder.getEmitter().emitExecIf(self.gpa, slot, cmp.?, @floatCast(value)) catch return error.OutOfMemory;
             guard.if_pos[guard.if_count] = pos;
@@ -9291,6 +10166,12 @@ pub const Emitter = struct {
             const head = r.head(c);
             if (std.mem.eql(u8, head, "write-buffer")) {
                 try self.emitQueueWrite(r, c);
+            } else if (std.mem.eql(u8, head, "write-texture")) {
+                try self.emitWriteTexture(r, c);
+            } else if (std.mem.eql(u8, head, "copy-buffer-to-texture")) {
+                try self.emitTextureBufferCopy(r, c, .buffer_to_texture);
+            } else if (std.mem.eql(u8, head, "copy-texture-to-buffer")) {
+                try self.emitTextureBufferCopy(r, c, .texture_to_buffer);
             } else if (std.mem.eql(u8, head, "copy-texture-to-texture")) {
                 try self.emitCopyTexture(r, c);
             } else if (std.mem.eql(u8, head, "copy-external-image-to-texture")) {
@@ -9441,11 +10322,33 @@ pub const Emitter = struct {
     }
 
     /// Inline a queue's copy-texture-to-texture op into the current frame body.
+    ///
+    /// Plan 06's split: with NO authored subresource key on either endpoint and
+    /// no outer `:size`, this is the legacy whole-texture operation and emits
+    /// PNGB 0x23 exactly as it always has. Any one of those keys selects the
+    /// normalized subresource model and emits PNGB 0x80; it never falls back to
+    /// the legacy two-id encoding.
     fn emitCopyTexture(self: *Emitter, r: *const Reader, ctt: NodeIndex) Error!void {
         // Both endpoints are child forms (D5); the head-set floors make them
         // present, so a missing one is a validator reject, never a default here.
         const src_form = try self.requiredChild(r, ctt, "source");
         const dst_form = try self.requiredChild(r, ctt, "destination");
+
+        // Presence is AUTHORED-key presence. The schema defaults `mip-level`
+        // and `aspect` onto the effective view; only `authorNode` can tell a
+        // default from a key the author wrote — and writing one, even with its
+        // default value, is what selects the new path.
+        if (r.authorNode(src_form, "mip-level") != null or
+            r.authorNode(src_form, "origin") != null or
+            r.authorNode(src_form, "aspect") != null or
+            r.authorNode(dst_form, "mip-level") != null or
+            r.authorNode(dst_form, "origin") != null or
+            r.authorNode(dst_form, "aspect") != null or
+            r.authorNode(ctt, "size") != null)
+        {
+            return self.emitSubresourceCopy(r, ctt, src_form, dst_form);
+        }
+
         const src_name = try self.requiredSymbol(r, src_form, "texture");
         const dst_name = try self.requiredSymbol(r, dst_form, "texture");
         const src = self.resolveCopyTexture(src_name);
@@ -9453,6 +10356,866 @@ pub const Emitter = struct {
         try self.checkTextureCopyUsage(r, src_form, src_name, true);
         try self.checkTextureCopyUsage(r, dst_form, dst_name, false);
         self.builder.getEmitter().copyTextureToTexture(self.gpa, src, dst) catch return error.OutOfMemory;
+    }
+
+    /// The plan-06 subresource arm: resolve both endpoints, read the IDL
+    /// defaults/presence, run every statically-knowable validation, record the
+    /// normalized `SubresourceCopy`, mark only its destination frame-written,
+    /// and emit PNGB 0x80. The legacy arm above is the only copy that reaches
+    /// PNGB 0x23; this one never falls back to it.
+    fn emitSubresourceCopy(self: *Emitter, r: *const Reader, ctt: NodeIndex, src_form: NodeIndex, dst_form: NodeIndex) Error!void {
+        const src_name = try self.requiredSymbol(r, src_form, "texture");
+        const dst_name = try self.requiredSymbol(r, dst_form, "texture");
+
+        const src_id = try self.resolveSubresourceTexture(r, src_form, src_name, "source");
+        const dst_id = try self.resolveSubresourceTexture(r, dst_form, dst_name, "destination");
+
+        // The canvas is configured as RENDER_ATTACHMENT | COPY_SRC by every
+        // runtime; a canvas destination therefore has no COPY_DST. Plan 06
+        // keeps a canvas SOURCE possible and refuses the destination.
+        if (std.mem.eql(u8, dst_name, "context-current-texture")) {
+            self.diagnose(.sjon, self.locate(r, dst_form), "", "copy-texture-to-texture :destination '{s}' refused: canvas-target — the canvas is configured with copy-src only, so it cannot be a copy destination; copy into a declared (texture …) with :usage [copy-dst]", .{dst_name});
+            return error.ValidationError;
+        }
+
+        try self.checkTextureCopyUsage(r, src_form, src_name, true);
+        try self.checkTextureCopyUsage(r, dst_form, dst_name, false);
+
+        const source_endpoint = try self.readSubresourceEndpoint(r, src_form, src_id);
+        const destination_endpoint = try self.readSubresourceEndpoint(r, dst_form, dst_id);
+        const copy = texture_layout.SubresourceCopy{
+            .source = source_endpoint,
+            .destination = destination_endpoint,
+            .size = try self.readCopySize(r, ctt),
+        };
+
+        // A canvas source has no `TextureMeta`; the runtime resolves its extent
+        // and format, so only the extent-independent facts are checkable here.
+        const src_meta: ?TextureMeta = if (std.mem.eql(u8, src_name, "context-current-texture")) null else blk: {
+            break :blk self.binds.texture_meta.get(src_id) orelse {
+                self.diagnose(.sjon, self.locate(r, src_form), "", "internal: texture '{s}' has no recorded descriptor — the texture phase runs before any queue", .{src_name});
+                return error.ValidationError;
+            };
+        };
+        const dst_meta: ?TextureMeta = self.binds.texture_meta.get(dst_id) orelse {
+            self.diagnose(.sjon, self.locate(r, dst_form), "", "internal: texture '{s}' has no recorded descriptor — the texture phase runs before any queue", .{dst_name});
+            return error.ValidationError;
+        };
+
+        var layout: ?texture_layout.SubresourceCopyLayout = null;
+        if (src_meta != null and src_meta.?.descriptor != null and dst_meta.?.descriptor != null) {
+            // Both extents are compile-time concrete: one shared calculator
+            // resolves the source's default size and proves both endpoints.
+            layout = switch (texture_layout.calculateTextureCopy(src_meta.?.descriptor.?, dst_meta.?.descriptor.?, copy)) {
+                .ok => |resolved| resolved,
+                .refuse => |refusal| return self.refuseSubresourceCopy(r, ctt, src_form, dst_form, src_name, dst_name, copy, refusal),
+            };
+        } else {
+            // At least one extent resolves at execution (the canvas or a
+            // `:size canvas` / `:size bitmap` texture). Validate whatever the
+            // descriptors DO know — aspect, sample count, copy-compatible
+            // formats, mip range, and the concrete endpoint's explicit range —
+            // and defer the rest to the runtime.
+            if (src_meta) |meta| {
+                if (meta.descriptor) |descriptor| {
+                    switch (texture_layout.calculateEndpoint(descriptor, copy.source, copy.size)) {
+                        .ok => {},
+                        .refuse => |refusal| return self.refuseSubresourceCopy(r, ctt, src_form, dst_form, src_name, dst_name, copy, refusal),
+                    }
+                } else {
+                    try self.checkDynamicSubresourceFacts(r, src_form, src_name, meta, copy.source, null);
+                }
+            } else {
+                // The canvas is a single-sample colour texture: only `all`.
+                if (copy.source.aspect != .all) {
+                    return self.refuseSubresourceCopy(r, ctt, src_form, dst_form, src_name, dst_name, copy, .{
+                        .code = .invalid_aspect,
+                        .field = .aspect,
+                        .actual = @intFromEnum(copy.source.aspect),
+                        .limit = @intFromEnum(texture_layout.Aspect.all),
+                    });
+                }
+                try self.checkCanvasSourceSampleCount(r, src_name, dst_form, dst_name, dst_meta.?);
+            }
+            if (dst_meta.?.descriptor) |descriptor| {
+                // With an omitted size the destination's exact extent is the
+                // source's, which is not known here; `calculateEndpoint` still
+                // proves the destination origin and (explicit) range fit.
+                switch (texture_layout.calculateEndpoint(descriptor, copy.destination, copy.size)) {
+                    .ok => {},
+                    .refuse => |refusal| return self.refuseSubresourceCopy(r, ctt, src_form, dst_form, src_name, dst_name, copy, refusal),
+                }
+            } else {
+                try self.checkDynamicSubresourceFacts(r, dst_form, dst_name, dst_meta.?, copy.destination, src_meta);
+            }
+            try self.checkSubresourceFacts(r, ctt, src_form, dst_form, src_name, dst_name, src_meta, dst_meta, copy);
+        }
+
+        try self.subresource_copies.append(self.gpa, .{ .copy = copy, .layout = layout });
+        self.builder.getEmitter().copyTextureSubresource(self.gpa, src_id, dst_id, copy) catch return error.OutOfMemory;
+        // Only the NEW path's destination is frame-written; the legacy arm is
+        // deliberately not retroactively accounted.
+        try self.frame_written_textures.put(self.gpa, dst_id, {});
+    }
+
+    /// Resolve a subresource-copy endpoint to its texture id. The canvas is the
+    /// runtime sentinel. A pooled name is refused rather than resolved to its
+    /// base id: the opcode carries no pool-member operand, so selecting one
+    /// would copy an arbitrary member in silence.
+    fn resolveSubresourceTexture(self: *Emitter, r: *const Reader, form: NodeIndex, name: []const u8, comptime side: []const u8) Error!u16 {
+        if (std.mem.eql(u8, name, "context-current-texture")) return values.CANVAS_TEXTURE_ID;
+        if (self.tables.texture_views.get(name) != null) {
+            self.diagnose(.sjon, self.locate(r, form), "", "copy-texture-to-texture :{s} texture '{s}' is a (texture-view …), not a texture; name the (texture …) behind it", .{ side, name });
+            return error.ValidationError;
+        }
+        const texture_id = self.tables.textures.get(name) orelse return self.unresolvedRef(r, form, "texture", name);
+        if (self.tables.textures.pool(name) != null) {
+            self.diagnose(.sjon, self.locate(r, form), "", "copy-texture-to-texture :{s} texture '{s}' refused: pooled-texture — a static copy cannot pick a pool member (the base id would be an arbitrary instance); select a member explicitly by copying a single (texture …) each", .{ side, name });
+            return error.ValidationError;
+        }
+        return texture_id;
+    }
+
+    /// Read one endpoint's `GPUTexelCopyTextureInfo` members with their IDL
+    /// defaults. Origin elements are evaluated (expressions and defines work),
+    /// and the vector's absent components stay 0, which is the IDL's `{}`.
+    fn readSubresourceEndpoint(self: *Emitter, r: *const Reader, form: NodeIndex, texture_id: u16) Error!texture_layout.SubresourceEndpoint {
+        const mip_level = (try self.optU32(r, form, "mip-level")) orelse 0;
+        const aspect_name = r.symbol(form, "aspect") orelse "all";
+        const aspect = std.StaticStringMap(texture_layout.Aspect).initComptime(.{
+            .{ "all", texture_layout.Aspect.all },
+            .{ "stencil-only", texture_layout.Aspect.stencil_only },
+            .{ "depth-only", texture_layout.Aspect.depth_only },
+        }).get(aspect_name) orelse {
+            self.diagnose(.sjon, self.locate(r, form), "", "internal: copy-texture-to-texture :aspect '{s}' is not a schema member", .{aspect_name});
+            return error.ValidationError;
+        };
+
+        const origin_bound: Bound = .{ .why = "a copy origin is a non-negative u32 texel coordinate" };
+        var origin: texture_layout.Origin = .{};
+        if (r.vectorNodes(form, "origin")) |elems| {
+            if (elems.len >= 1) origin.x = try self.elemBounded(r, elems[0], 0, origin_bound);
+            if (elems.len >= 2) origin.y = try self.elemBounded(r, elems[1], 0, origin_bound);
+            if (elems.len >= 3) origin.z = try self.elemBounded(r, elems[2], 0, origin_bound);
+        }
+
+        return .{
+            .texture_id = texture_id,
+            .mip_level = mip_level,
+            .origin = origin,
+            .aspect = aspect,
+        };
+    }
+
+    /// Read the outer `:size` (`copySize`) with presence: an absent KEY stays
+    /// null so the calculator applies the remaining-source-extent rule, while a
+    /// present vector's absent components default to 1, the IDL's own rule.
+    fn readCopySize(self: *Emitter, r: *const Reader, ctt: NodeIndex) Error!?texture_layout.Extent {
+        const elems = r.vectorNodes(ctt, "size") orelse return null;
+        std.debug.assert(elems.len >= 1 and elems.len <= 3); // copy-extent bounds
+        const extent_bound: Bound = .{ .why = "a copy extent dimension is a non-negative u32 texel count" };
+        return .{
+            .width = try self.elemBounded(r, elems[0], 0, extent_bound),
+            .height = if (elems.len > 1) try self.elemBounded(r, elems[1], 1, extent_bound) else 1,
+            .depth_or_array_layers = if (elems.len > 2) try self.elemBounded(r, elems[2], 1, extent_bound) else 1,
+        };
+    }
+
+    /// Extent-independent checks for a declared endpoint whose extent resolves
+    /// at execution: aspect legality, mip range, and — when both sides expose
+    /// them — sample-count equality and copy-compatible formats. `other` is the
+    /// opposite endpoint's meta, or null for the canvas.
+    fn checkDynamicSubresourceFacts(
+        self: *Emitter,
+        r: *const Reader,
+        form: NodeIndex,
+        name: []const u8,
+        meta: TextureMeta,
+        endpoint: texture_layout.SubresourceEndpoint,
+        other: ?TextureMeta,
+    ) Error!void {
+        if (meta.format != .preferred_canvas_format) {
+            if (texture_layout.copyAspectRefusal(meta.format, endpoint.aspect)) |refusal| {
+                return self.refuseSubresourceEndpoint(r, form, name, refusal);
+            }
+        } else if (endpoint.aspect != .all) {
+            return self.refuseSubresourceEndpoint(r, form, name, .{
+                .code = .invalid_aspect,
+                .field = .aspect,
+                .actual = @intFromEnum(endpoint.aspect),
+                .limit = @intFromEnum(texture_layout.Aspect.all),
+            });
+        }
+        const dynamic = meta.dynamic orelse return;
+        if (endpoint.mip_level >= dynamic.mip_level_count) {
+            return self.refuseSubresourceEndpoint(r, form, name, .{
+                .code = .mip_out_of_range,
+                .field = .mip_level,
+                .actual = endpoint.mip_level,
+                .limit = dynamic.mip_level_count,
+            });
+        }
+        if (other) |other_meta| {
+            const mine = effectiveSampleCount(meta);
+            const theirs = effectiveSampleCount(other_meta);
+            if (mine != theirs) {
+                return self.refuseSubresourceEndpoint(r, form, name, .{
+                    .code = .sample_count_mismatch,
+                    .field = .sample_count,
+                    .actual = mine,
+                    .limit = theirs,
+                });
+            }
+            if (meta.format != .preferred_canvas_format and other_meta.format != .preferred_canvas_format and
+                !texture_layout.copyCompatible(meta.format, other_meta.format))
+            {
+                return self.refuseSubresourceEndpoint(r, form, name, .{
+                    .code = .invalid_format,
+                    .field = .format,
+                    .actual = @intFromEnum(meta.format),
+                    .limit = @intFromEnum(other_meta.format),
+                });
+            }
+        }
+    }
+
+    /// A canvas source is a single-sample colour texture. Its usage is
+    /// runtime-managed (copy-src), its format unknown until load time.
+    fn checkCanvasSourceSampleCount(self: *Emitter, r: *const Reader, src_name: []const u8, dst_form: NodeIndex, dst_name: []const u8, dst_meta: TextureMeta) Error!void {
+        const effective = effectiveSampleCount(dst_meta);
+        if (effective != 1) {
+            self.diagnose(.sjon, self.locate(r, dst_form), "", "copy-texture-to-texture :destination '{s}' refused: sample-count-mismatch (:sample-count) — canvas source '{s}' is single-sample, destination is {d}-sample", .{ dst_name, src_name, effective });
+            return error.ValidationError;
+        }
+    }
+
+    /// Both endpoints' extent-independent facts when at least one is dynamic.
+    /// The concrete-side range work is `calculateEndpoint`'s; this joins the
+    /// pair-level sample/format facts that endpoint alone cannot see.
+    fn checkSubresourceFacts(
+        self: *Emitter,
+        r: *const Reader,
+        ctt: NodeIndex,
+        src_form: NodeIndex,
+        dst_form: NodeIndex,
+        src_name: []const u8,
+        dst_name: []const u8,
+        src_meta: ?TextureMeta,
+        dst_meta: ?TextureMeta,
+        copy: texture_layout.SubresourceCopy,
+    ) Error!void {
+        const src = src_meta orelse return; // canvas: nothing else is knowable
+        const dst = dst_meta.?;
+        const src_sample_count = effectiveSampleCount(src);
+        const dst_sample_count = effectiveSampleCount(dst);
+        if (src_sample_count != dst_sample_count) {
+            return self.refuseSubresourceCopy(r, ctt, src_form, dst_form, src_name, dst_name, copy, .{
+                .code = .sample_count_mismatch,
+                .field = .sample_count,
+                .actual = src_sample_count,
+                .limit = dst_sample_count,
+            });
+        }
+        if (src.format != .preferred_canvas_format and dst.format != .preferred_canvas_format and
+            !texture_layout.copyCompatible(src.format, dst.format))
+        {
+            return self.refuseSubresourceCopy(r, ctt, src_form, dst_form, src_name, dst_name, copy, .{
+                .code = .invalid_format,
+                .field = .format,
+                .actual = @intFromEnum(src.format),
+                .limit = @intFromEnum(dst.format),
+            });
+        }
+    }
+
+    /// One located diagnostic for a plan-06 endpoint refusal (the dynamic half).
+    fn refuseSubresourceEndpoint(self: *Emitter, r: *const Reader, form: NodeIndex, name: []const u8, refusal: texture_layout.Refusal) Error {
+        var code_buf: [40]u8 = undefined;
+        var field_buf: [40]u8 = undefined;
+        const code = kebabTag(@tagName(refusal.code), &code_buf);
+        const field = kebabTag(@tagName(refusal.field), &field_buf);
+        self.diagnose(.sjon, self.locate(r, form), "", "copy-texture-to-texture :texture '{s}' refused: {s} ({s}) — actual {d}, limit {d}", .{ name, code, field, refusal.actual, refusal.limit });
+        return error.ValidationError;
+    }
+
+    /// One located diagnostic for a plan-06 refusal on the pair. It names both
+    /// endpoints, the shared code in kebab-case and the offending property;
+    /// the four special cases carry the sentence a bare code would not.
+    fn refuseSubresourceCopy(
+        self: *Emitter,
+        r: *const Reader,
+        ctt: NodeIndex,
+        src_form: NodeIndex,
+        dst_form: NodeIndex,
+        src_name: []const u8,
+        dst_name: []const u8,
+        copy: texture_layout.SubresourceCopy,
+        refusal: texture_layout.Refusal,
+    ) Error {
+        var code_buf: [48]u8 = undefined;
+        var field_buf: [48]u8 = undefined;
+        const code = kebabTag(@tagName(refusal.code), &code_buf);
+        const field = kebabTag(@tagName(refusal.field), &field_buf);
+        const loc = switch (refusal.field) {
+            .usage => if (refusal.code == .missing_copy_src) self.locate(r, src_form) else self.locate(r, dst_form),
+            else => self.locate(r, ctt),
+        };
+        switch (refusal.code) {
+            .invalid_aspect => {
+                var aspect_buf: [24]u8 = undefined;
+                const aspect = kebabTag(@tagName(copy.source.aspect), &aspect_buf);
+                var dst_aspect_buf: [24]u8 = undefined;
+                const dst_aspect = kebabTag(@tagName(copy.destination.aspect), &dst_aspect_buf);
+                self.diagnose(.sjon, loc, "", "copy-texture-to-texture :source '{s}' / :destination '{s}' refused: {s} ({s}) — source aspect '{s}', destination aspect '{s}'; a texture→texture copy requires aspect all on BOTH endpoints (the opposite of the write path)", .{ src_name, dst_name, code, field, aspect, dst_aspect });
+            },
+            .invalid_format => self.diagnose(.sjon, loc, "", "copy-texture-to-texture :source '{s}' / :destination '{s}' refused: {s} ({s}) — formats must be identical or differ only by the -srgb suffix", .{ src_name, dst_name, code, field }),
+            .sample_count_mismatch => self.diagnose(.sjon, loc, "", "copy-texture-to-texture :source '{s}' / :destination '{s}' refused: {s} ({s}) — actual {d}, limit {d}", .{ src_name, dst_name, code, field, refusal.actual, refusal.limit }),
+            .overlapping_subresources => self.diagnose(.sjon, loc, "", "copy-texture-to-texture :source '{s}' / :destination '{s}' refused: {s} ({s}) — a same-texture copy requires disjoint source and destination subresource sets, even when the texel ranges do not overlap", .{ src_name, dst_name, code, field }),
+            .missing_copy_src => self.diagnose(.sjon, loc, "", "copy-texture-to-texture :source texture '{s}' refused: {s} (:usage) — a copy source needs :usage [copy-src]", .{ src_name, code }),
+            .missing_copy_dst => self.diagnose(.sjon, loc, "", "copy-texture-to-texture :destination texture '{s}' refused: {s} (:usage) — a copy destination needs :usage [copy-dst]", .{ dst_name, code }),
+            else => self.diagnose(.sjon, loc, "", "copy-texture-to-texture :source '{s}' / :destination '{s}' refused: {s} ({s}) — actual {d}, limit {d}", .{ src_name, dst_name, code, field, refusal.actual, refusal.limit }),
+        }
+        return error.ValidationError;
+    }
+
+    /// Inline a queue's `(write-texture …)` into the frame body. Resolve the
+    /// destination and the raw `(data …)` id, apply the IDL defaults while
+    /// retaining stride presence, refuse the static-only cases, hand the
+    /// destination to plan 01's calculator, then emit PNGB 0x2D through the
+    /// low-level writer.
+    ///
+    /// Every refusal is located and names the write key plus plan 01's code, so
+    /// a generic "emit failed" never stands in for a diagnosis.
+    fn emitWriteTexture(self: *Emitter, r: *const Reader, wt: NodeIndex) Error!void {
+        const tex_name = try self.requiredSymbol(r, wt, "texture");
+        // `texture-ref` already refuses both of these in a validated document.
+        // A lowering hook's tree is not re-validated, so generated forms need
+        // the protocol rule here too.
+        if (std.mem.eql(u8, tex_name, "context-current-texture")) {
+            self.diagnose(.sjon, self.locate(r, wt), "", "write-texture :texture '{s}' refused: canvas-target — context-current-texture is the canvas's swapchain texture, not a declared (texture …); a static raw write needs a declared destination whose usage and extent the compiler can check", .{tex_name});
+            return error.ValidationError;
+        }
+        const texture_id = self.tables.textures.get(tex_name) orelse {
+            if (self.tables.texture_views.get(tex_name) != null) {
+                self.diagnose(.sjon, self.locate(r, wt), "", "write-texture :texture '{s}' refused: texture-view-target — a (texture-view …) is a view, not a texture; name the (texture …) behind it", .{tex_name});
+                return error.ValidationError;
+            }
+            return self.unresolvedRef(r, wt, "texture", tex_name);
+        };
+        // D7: a static opcode carries no pool-member operand. Resolving the
+        // base id would write one arbitrary member in silence, so refuse the
+        // name instead; the live host API carries poolIndex.
+        if (self.tables.textures.pool(tex_name) != null) {
+            self.diagnose(.sjon, self.locate(r, wt), "", "write-texture :texture '{s}' refused: pooled-texture — a static write cannot pick a pool member (the base id would be an arbitrary instance); write each member explicitly", .{tex_name});
+            return error.ValidationError;
+        }
+
+        const meta = self.binds.texture_meta.get(texture_id) orelse {
+            self.diagnose(.sjon, self.locate(r, wt), "", "internal: texture '{s}' has no recorded descriptor — the texture phase runs before any queue", .{tex_name});
+            return error.ValidationError;
+        };
+
+        // 1D is the compiler's protocol refusal, not the calculator's: plan 01
+        // still computes a 1D mip extent. The first slice writes 2D, 2D-array
+        // and 3D textures only.
+        const dimension: texture_layout.Dimension = if (meta.descriptor) |d| d.dimension else meta.dynamic.?.dimension;
+        if (dimension == .d1) {
+            self.diagnose(.sjon, self.locate(r, wt), "", "write-texture :texture '{s}' refused: unsupported-dimension (:dimension) — the declared texture is 1d; the first slice writes 2d, 2d-array and 3d textures only", .{tex_name});
+            return error.ValidationError;
+        }
+
+        const data_name = try self.requiredSymbol(r, wt, "data");
+        const data_id = self.tables.data.get(data_name) orelse return self.unresolvedRef(r, wt, "a (data …) entry", data_name);
+        // `data_byte_len` exists only for a RAW source. `(data … :file …)` is
+        // the MIME-wrapped blob shape an image-bitmap consumes; it has no
+        // texel length, so it cannot masquerade as raw bytes here.
+        const data_len: u64 = self.tables.data_byte_len.get(data_name) orelse {
+            self.diagnose(.sjon, self.locate(r, wt), "", "write-texture :data '{s}' refused: image-mime-data — the entry is a MIME-wrapped blob (an image source), not raw texels; writeTexture takes a raw (bytes …) / :float32 source", .{data_name});
+            return error.ValidationError;
+        };
+
+        // The IDL defaults apply, and the two stride keys keep PRESENCE: an
+        // omitted key is null (no default), an authored zero is the value 0.
+        const offset = (try self.optU32(r, wt, "offset")) orelse 0;
+        const bytes_per_row = try self.optU32(r, wt, "bytes-per-row");
+        const rows_per_image = try self.optU32(r, wt, "rows-per-image");
+        const mip_level = (try self.optU32(r, wt, "mip-level")) orelse 0;
+        const aspect_name = r.symbol(wt, "aspect") orelse "all";
+        const aspect = std.StaticStringMap(texture_layout.Aspect).initComptime(.{
+            .{ "all", texture_layout.Aspect.all },
+            .{ "stencil-only", texture_layout.Aspect.stencil_only },
+            .{ "depth-only", texture_layout.Aspect.depth_only },
+        }).get(aspect_name) orelse {
+            self.diagnose(.sjon, self.locate(r, wt), "", "internal: write-texture :aspect '{s}' is not a schema member", .{aspect_name});
+            return error.ValidationError;
+        };
+
+        // Copy origins and extents are u32 at this interface (plan 01's key
+        // table), deliberately not the old u16 copy-origin wire bound.
+        const copy_origin_bound: Bound = .{ .why = "a copy origin is a non-negative u32 texel coordinate" };
+        const copy_extent_bound: Bound = .{ .why = "a copy extent dimension is a non-negative u32 texel count" };
+        var origin: texture_layout.Origin = .{};
+        if (r.vectorNodes(wt, "origin")) |elems| {
+            if (elems.len >= 1) origin.x = try self.elemBounded(r, elems[0], 0, copy_origin_bound);
+            if (elems.len >= 2) origin.y = try self.elemBounded(r, elems[1], 0, copy_origin_bound);
+            if (elems.len >= 3) origin.z = try self.elemBounded(r, elems[2], 0, copy_origin_bound);
+        }
+        var size: ?texture_layout.Extent = null;
+        if (r.vectorNodes(wt, "size")) |elems| {
+            std.debug.assert(elems.len >= 1 and elems.len <= 3); // copy-extent bounds
+            // WebGPU's GPUExtent3DDict defaults the absent dimensions to 1, but
+            // ONLY because the key is present; an absent KEY stays null so plan
+            // 01's remaining-physical-extent default applies.
+            size = .{
+                .width = try self.elemBounded(r, elems[0], 0, copy_extent_bound),
+                .height = if (elems.len > 1) try self.elemBounded(r, elems[1], 1, copy_extent_bound) else 1,
+                .depth_or_array_layers = if (elems.len > 2) try self.elemBounded(r, elems[2], 1, copy_extent_bound) else 1,
+            };
+        }
+
+        const write = texture_layout.WriteLayout{
+            .offset = offset,
+            .bytes_per_row = bytes_per_row,
+            .rows_per_image = rows_per_image,
+            .origin = origin,
+            .mip_level = mip_level,
+            .aspect = aspect,
+            .size = size,
+        };
+
+        var layout: ?texture_layout.Layout = null;
+        if (meta.descriptor) |descriptor| {
+            // One calculator, one set of byte-size rules: the static path never
+            // re-derives a span, stride or range itself.
+            layout = switch (texture_layout.calculateWrite(descriptor, write, data_len)) {
+                .ok => |resolved| resolved,
+                .refuse => |refusal| return self.refuseWriteTexture(r, wt, tex_name, meta, write, refusal),
+            };
+        } else {
+            // Dynamic extent: every extent-independent descriptor/protocol
+            // check runs, and no extent is invented. Plan 03 resolves the
+            // canvas/image size and defers the origin/stride/span rules there.
+            try self.checkDynamicWriteTexture(r, wt, tex_name, meta, write);
+        }
+
+        try self.write_texture_writes.append(self.gpa, .{
+            .texture_id = texture_id,
+            .data_id = data_id,
+            .write = write,
+            .layout = layout,
+        });
+        // A per-frame step (this is only reached from a frame's step walk), so
+        // the destination is clobbered every frame; a `:init` seed cannot reach
+        // here because frame `:init` lists one-shot passes, not queues.
+        try self.frame_written_textures.put(self.gpa, texture_id, {});
+        // PNGB 0x2D, in source order with the other queue actions. The low-level
+        // writer asserts only the byte-count lower bound; presence is carried
+        // by the instruction's own flags, not by this record.
+        self.builder.getEmitter().writeTexture(self.gpa, texture_id, data_id, write) catch return error.OutOfMemory;
+    }
+
+    /// Which direction a buffer↔texture copy runs. The opcode is the only
+    /// carrier of this fact; the shared operand layout contains no direction
+    /// field and no operand is guessed to supply one.
+    const CopyDirection = enum { buffer_to_texture, texture_to_buffer };
+
+    /// Inline a queue's `(copy-buffer-to-texture …)` / `(copy-texture-to-buffer …)`.
+    ///
+    /// The texture endpoint is a declared `(texture …)` (never the canvas or a
+    /// view), and both endpoints must admit the copy at creation: the buffer's
+    /// `copy-src`/`copy-dst` and the texture's `copy-dst`/`copy-src` are
+    /// direction-dependent. The layout fields come from the endpoint each
+    /// belongs to — buffer offset/strides, texture mip/origin/aspect, parent
+    /// `:size` — and the aligned policy judges the span against the buffer's
+    /// declared byte size. Then the exact PNGB opcode is written; a performed
+    /// copy therefore cannot be silently skipped.
+    fn emitTextureBufferCopy(self: *Emitter, r: *const Reader, copy: NodeIndex, comptime dir: CopyDirection) Error!void {
+        const copy_head: []const u8 = switch (dir) {
+            .buffer_to_texture => "copy-buffer-to-texture",
+            .texture_to_buffer => "copy-texture-to-buffer",
+        };
+        const tex_key: []const u8 = switch (dir) {
+            .buffer_to_texture => "destination",
+            .texture_to_buffer => "source",
+        };
+        const buf_key: []const u8 = switch (dir) {
+            .buffer_to_texture => "source",
+            .texture_to_buffer => "destination",
+        };
+        const tex_form = try self.requiredChild(r, copy, tex_key);
+        const buf_form = try self.requiredChild(r, copy, buf_key);
+
+        const buffer_name = try self.requiredSymbol(r, buf_form, "buffer");
+        const buffer_id = self.tables.buffers.get(buffer_name) orelse return self.unresolvedRef(r, buf_form, "buffer", buffer_name);
+
+        const tex_name = try self.requiredSymbol(r, tex_form, "texture");
+        const texture_id = self.tables.textures.get(tex_name) orelse {
+            if (self.tables.texture_views.get(tex_name) != null) {
+                self.diagnose(.sjon, self.locate(r, tex_form), "", "{s} :{s} texture '{s}' is a (texture-view …), not a texture; name the (texture …) behind it", .{ copy_head, tex_key, tex_name });
+                return error.ValidationError;
+            }
+            return self.unresolvedRef(r, tex_form, "texture", tex_name);
+        };
+        // A static copy opcode carries no pool-member operand. Resolving the
+        // base id would copy one arbitrary member in silence (the same D7 rule
+        // write-texture enforces for its destination).
+        if (self.tables.textures.pool(tex_name) != null) {
+            self.diagnose(.sjon, self.locate(r, tex_form), "", "{s} :{s} texture '{s}' refused: pooled-texture — a static copy cannot pick a pool member (the base id would be an arbitrary instance); copy each member explicitly", .{ copy_head, tex_key, tex_name });
+            return error.ValidationError;
+        }
+        const meta = self.binds.texture_meta.get(texture_id) orelse {
+            self.diagnose(.sjon, self.locate(r, tex_form), "", "internal: texture '{s}' has no recorded descriptor — the texture phase runs before any queue", .{tex_name});
+            return error.ValidationError;
+        };
+        const buffer_meta = self.binds.buffer_meta.get(buffer_id) orelse {
+            self.diagnose(.sjon, self.locate(r, buf_form), "", "internal: buffer '{s}' has no recorded size/usage — the buffer phase runs before any queue", .{buffer_name});
+            return error.ValidationError;
+        };
+
+        try self.checkCopyUsage(r, copy_head, buf_form, buffer_name, buffer_meta.usage, buf_key, .buffer);
+        try self.checkCopyUsage(r, copy_head, tex_form, tex_name, meta.usage, tex_key, .texture);
+
+        // The IDL defaults apply; the two stride keys keep PRESENCE: an
+        // omitted key is null (no default), an authored zero is the value 0.
+        const offset = (try self.optU32(r, buf_form, "offset")) orelse 0;
+        const bytes_per_row = try self.optU32(r, buf_form, "bytes-per-row");
+        const rows_per_image = try self.optU32(r, buf_form, "rows-per-image");
+        const mip_level = (try self.optU32(r, tex_form, "mip-level")) orelse 0;
+        const aspect_name = r.symbol(tex_form, "aspect") orelse "all";
+        const aspect = std.StaticStringMap(texture_layout.Aspect).initComptime(.{
+            .{ "all", texture_layout.Aspect.all },
+            .{ "stencil-only", texture_layout.Aspect.stencil_only },
+            .{ "depth-only", texture_layout.Aspect.depth_only },
+        }).get(aspect_name) orelse {
+            self.diagnose(.sjon, self.locate(r, tex_form), "", "internal: {s} :aspect '{s}' is not a schema member", .{ copy_head, aspect_name });
+            return error.ValidationError;
+        };
+
+        // Copy origins and extents are u32 at this interface, deliberately not
+        // the old u16 copy-origin wire bound.
+        const copy_origin_bound: Bound = .{ .why = "a copy origin is a non-negative u32 texel coordinate" };
+        const copy_extent_bound: Bound = .{ .why = "a copy extent dimension is a non-negative u32 texel count" };
+        var origin: texture_layout.Origin = .{};
+        if (r.vectorNodes(tex_form, "origin")) |elems| {
+            if (elems.len >= 1) origin.x = try self.elemBounded(r, elems[0], 0, copy_origin_bound);
+            if (elems.len >= 2) origin.y = try self.elemBounded(r, elems[1], 0, copy_origin_bound);
+            if (elems.len >= 3) origin.z = try self.elemBounded(r, elems[2], 0, copy_origin_bound);
+        }
+        var size: ?texture_layout.Extent = null;
+        if (r.vectorNodes(copy, "size")) |elems| {
+            std.debug.assert(elems.len >= 1 and elems.len <= 3); // copy-extent bounds
+            // GPUExtent3DDict defaults absent dimensions to 1, but ONLY
+            // because the key is present; an absent KEY stays null so plan
+            // 01's remaining-physical-extent default applies.
+            size = .{
+                .width = try self.elemBounded(r, elems[0], 0, copy_extent_bound),
+                .height = if (elems.len > 1) try self.elemBounded(r, elems[1], 1, copy_extent_bound) else 1,
+                .depth_or_array_layers = if (elems.len > 2) try self.elemBounded(r, elems[2], 1, copy_extent_bound) else 1,
+            };
+        }
+
+        const write = texture_layout.WriteLayout{
+            .offset = offset,
+            .bytes_per_row = bytes_per_row,
+            .rows_per_image = rows_per_image,
+            .origin = origin,
+            .mip_level = mip_level,
+            .aspect = aspect,
+            .size = size,
+        };
+
+        if (meta.descriptor) |descriptor| {
+            // The texture endpoint is a destination for an upload and a source
+            // for a readback, so the calculator takes the direction with the
+            // policy and checks the usage bit that direction actually needs.
+            const policy: texture_layout.CopyPolicy = switch (dir) {
+                .buffer_to_texture => .buffer_to_texture,
+                .texture_to_buffer => .texture_to_buffer,
+            };
+            switch (texture_layout.calculateCopy(descriptor, write, buffer_meta.size, policy)) {
+                .ok => {},
+                .refuse => |refusal| return self.refuseCopy(r, copy, copy_head, tex_form, buf_form, tex_name, buffer_name, write, refusal),
+            }
+        } else {
+            // Dynamic extent: every extent-independent descriptor/protocol
+            // check runs, and no extent is invented. Plan 03 resolves the
+            // canvas/image size and defers the origin/stride/span rules there.
+            try self.checkDynamicCopy(r, copy, copy_head, tex_form, buf_form, tex_name, buffer_name, meta, write);
+        }
+
+        switch (dir) {
+            .buffer_to_texture => self.builder.getEmitter().copyBufferToTexture(self.gpa, texture_id, buffer_id, write) catch return error.OutOfMemory,
+            .texture_to_buffer => self.builder.getEmitter().copyTextureToBuffer(self.gpa, texture_id, buffer_id, write) catch return error.OutOfMemory,
+        }
+        // The destination is clobbered every frame (this path is only reached
+        // from a frame step walk), so a host write to it would be overwritten.
+        switch (dir) {
+            .buffer_to_texture => try self.frame_written_textures.put(self.gpa, texture_id, {}),
+            .texture_to_buffer => try self.frame_written.put(self.gpa, buffer_id, {}),
+        }
+        switch (dir) {
+            .buffer_to_texture => try self.notePooledQueueWrite(.texture, tex_name, r, copy),
+            .texture_to_buffer => try self.notePooledQueueWrite(.buffer, buffer_name, r, copy),
+        }
+    }
+
+    /// One endpoint's creation-time usage must admit the copy. `kind` selects
+    /// the table and the usage bit; `key` is the endpoint form's own name, so
+    /// the diagnostic says which side of the copy is wrong.
+    fn checkCopyUsage(
+        self: *Emitter,
+        r: *const Reader,
+        copy_head: []const u8,
+        endpoint: NodeIndex,
+        name: []const u8,
+        usage: anytype,
+        key: []const u8,
+        comptime kind: enum { buffer, texture },
+    ) Error!void {
+        const is_source = std.mem.eql(u8, key, "source");
+        const ok = if (is_source) usage.copy_src else usage.copy_dst;
+        if (ok) return;
+        const need: []const u8 = if (is_source) "copy-src" else "copy-dst";
+        const noun: []const u8 = if (kind == .buffer) "buffer" else "texture";
+        self.diagnose(.sjon, self.locate(r, endpoint), "", "{s} :{s} {s} '{s}' needs :usage [{s}] — a {s}'s usage is fixed when it is created", .{ copy_head, key, noun, name, need, noun });
+        return error.ValidationError;
+    }
+
+    /// The extent-independent half of plan 01's `calculateCopy` for a texture
+    /// whose extent resolves at execution: usage (already checked), sample
+    /// count, aspect/format and mip range. Origin/extent/stride/span are absent
+    /// because the extent they measure against does not exist yet.
+    fn checkDynamicCopy(
+        self: *Emitter,
+        r: *const Reader,
+        copy: NodeIndex,
+        copy_head: []const u8,
+        tex_form: NodeIndex,
+        buf_form: NodeIndex,
+        tex_name: []const u8,
+        buffer_name: []const u8,
+        meta: TextureMeta,
+        write: texture_layout.WriteLayout,
+    ) Error!void {
+        const dynamic = meta.dynamic orelse {
+            self.diagnose(.sjon, self.locate(r, tex_form), "", "internal: texture '{s}' records neither a descriptor nor dynamic facts", .{tex_name});
+            return error.ValidationError;
+        };
+        if (dynamic.sample_count != 1) {
+            return self.refuseCopy(r, copy, copy_head, tex_form, buf_form, tex_name, buffer_name, write, .{
+                .code = .multisampled_destination,
+                .field = .sample_count,
+                .actual = dynamic.sample_count,
+                .limit = 1,
+            });
+        }
+        // `preferred-canvas-format` has no row until the runtime resolves it;
+        // aspect rules for that case are execution checks, never a guess.
+        if (texture_layout.hasFormatRow(meta.format)) {
+            switch (texture_layout.formatInfo(meta.format, write.aspect)) {
+                .ok => {},
+                .refuse => |refusal| return self.refuseCopy(r, copy, copy_head, tex_form, buf_form, tex_name, buffer_name, write, refusal),
+            }
+        }
+        if (write.mip_level >= dynamic.mip_level_count) {
+            return self.refuseCopy(r, copy, copy_head, tex_form, buf_form, tex_name, buffer_name, write, .{
+                .code = .mip_out_of_range,
+                .field = .mip_level,
+                .actual = write.mip_level,
+                .limit = dynamic.mip_level_count,
+            });
+        }
+    }
+
+    /// One located diagnostic for a plan-01 refusal on a buffer↔texture copy.
+    /// The message names the direction and both endpoints, then plan 01's code,
+    /// field key and actual/limit — the same readability rule as write-texture's
+    /// refusal.
+    fn refuseCopy(
+        self: *Emitter,
+        r: *const Reader,
+        copy: NodeIndex,
+        copy_head: []const u8,
+        tex_form: NodeIndex,
+        buf_form: NodeIndex,
+        tex_name: []const u8,
+        buffer_name: []const u8,
+        write: texture_layout.WriteLayout,
+        refusal: texture_layout.Refusal,
+    ) Error {
+        var code_buf: [48]u8 = undefined;
+        var field_buf: [48]u8 = undefined;
+        const code = kebabTag(@tagName(refusal.code), &code_buf);
+        const field = kebabTag(@tagName(refusal.field), &field_buf);
+        const key = copyFieldKey(refusal.code, refusal.field);
+        const loc = self.locate(r, copyFieldNode(r, copy, tex_form, buf_form, refusal.field));
+        switch (refusal.code) {
+            .invalid_aspect, .aspect_not_writable => {
+                var aspect_buf: [24]u8 = undefined;
+                const aspect = kebabTag(@tagName(write.aspect), &aspect_buf);
+                self.diagnose(.sjon, loc, "", "{s} :texture '{s}' / :buffer '{s}' refused: {s} ({s}) — {s} '{s}'; plan 01 requires one aspect the format has and a texel copy may use", .{ copy_head, tex_name, buffer_name, code, field, key, aspect });
+            },
+            .invalid_format => self.diagnose(.sjon, loc, "", "{s} :texture '{s}' / :buffer '{s}' refused: {s} ({s}) — texture :format has no copy footprint for this aspect", .{ copy_head, tex_name, buffer_name, code, field }),
+            else => self.diagnose(.sjon, loc, "", "{s} :texture '{s}' / :buffer '{s}' refused: {s} ({s}) — {s}; actual {d}, limit {d}", .{ copy_head, tex_name, buffer_name, code, field, key, refusal.actual, refusal.limit }),
+        }
+        return error.ValidationError;
+    }
+
+    /// The authored key a plan-01 copy field names, for the diagnostic.
+    fn copyFieldKey(code: texture_layout.Code, field: texture_layout.Field) []const u8 {
+        return switch (field) {
+            .usage => "texture :usage / buffer :usage",
+            .sample_count => "texture :sample-count",
+            .format => "texture :format",
+            .dimension => "texture :dimension",
+            .mip_level_count => "texture :mip-level-count",
+            .none => ":texture",
+            .mip_level => ":mip-level",
+            .aspect => ":aspect",
+            .origin_x, .origin_y, .origin_z => ":origin",
+            .bytes_per_row => ":bytes-per-row",
+            .rows_per_image => ":rows-per-image",
+            .offset => ":offset",
+            .data => ":data",
+            .size_width, .size_height, .size_depth_or_array_layers => if (code == .invalid_texture_descriptor) "texture :size" else ":size",
+        };
+    }
+
+    /// The node a copy refusal squiggles: the endpoint key that produced the
+    /// field, or the copy form when the key is absent.
+    fn copyFieldNode(r: *const Reader, copy: NodeIndex, tex_form: NodeIndex, buf_form: NodeIndex, field: texture_layout.Field) NodeIndex {
+        const key: ?[]const u8 = switch (field) {
+            .offset => "offset",
+            .bytes_per_row => "bytes-per-row",
+            .rows_per_image => "rows-per-image",
+            .mip_level => "mip-level",
+            .aspect => "aspect",
+            .origin_x, .origin_y, .origin_z => "origin",
+            .size_width, .size_height, .size_depth_or_array_layers => "size",
+            else => null,
+        };
+        const k = key orelse return copy;
+        return switch (field) {
+            .offset, .bytes_per_row, .rows_per_image, .data => r.authorNode(buf_form, k) orelse buf_form,
+            .size_width, .size_height, .size_depth_or_array_layers => r.authorNode(copy, k) orelse copy,
+            else => r.authorNode(tex_form, k) orelse tex_form,
+        };
+    }
+
+    /// The extent-independent half of plan 01's `calculateWrite` for a texture
+    /// whose extent resolves at execution. Stages and first-refusal order mirror
+    /// the calculator (destination usage/sample, format/aspect, mip range); the
+    /// origin, extent, block and linear-data stages are absent because the
+    /// extent they measure against does not exist yet.
+    fn checkDynamicWriteTexture(self: *Emitter, r: *const Reader, wt: NodeIndex, tex_name: []const u8, meta: TextureMeta, write: texture_layout.WriteLayout) Error!void {
+        const dynamic = meta.dynamic orelse {
+            self.diagnose(.sjon, self.locate(r, wt), "", "internal: texture '{s}' records neither a descriptor nor dynamic facts", .{tex_name});
+            return error.ValidationError;
+        };
+        if (!meta.usage.copy_dst) {
+            return self.refuseWriteTexture(r, wt, tex_name, meta, write, .{
+                .code = .missing_copy_dst,
+                .field = .usage,
+                .actual = meta.usage.toU8(),
+                .limit = values.TextureUsage.WEBGPU_COPY_DST,
+            });
+        }
+        if (dynamic.sample_count != 1) {
+            return self.refuseWriteTexture(r, wt, tex_name, meta, write, .{
+                .code = .multisampled_destination,
+                .field = .sample_count,
+                .actual = dynamic.sample_count,
+                .limit = 1,
+            });
+        }
+        // `preferred-canvas-format` has no row until the runtime resolves it;
+        // aspect rules for that case are execution checks, never a guess.
+        if (texture_layout.hasFormatRow(meta.format)) {
+            switch (texture_layout.formatInfo(meta.format, write.aspect)) {
+                .ok => {},
+                .refuse => |refusal| return self.refuseWriteTexture(r, wt, tex_name, meta, write, refusal),
+            }
+        }
+        if (write.mip_level >= dynamic.mip_level_count) {
+            return self.refuseWriteTexture(r, wt, tex_name, meta, write, .{
+                .code = .mip_out_of_range,
+                .field = .mip_level,
+                .actual = write.mip_level,
+                .limit = dynamic.mip_level_count,
+            });
+        }
+    }
+
+    /// One located diagnostic for a plan-01 refusal: the plan's kebab-case code
+    /// and field, the authored key that produced it, and the actual/limit pair.
+    /// A nonnumeric refusal (aspect/format) names the authored value instead —
+    /// plan 01's catalogue says `actual`/`limit` stay zero there and the caller
+    /// supplies the spelling from its own input.
+    fn refuseWriteTexture(self: *Emitter, r: *const Reader, wt: NodeIndex, tex_name: []const u8, meta: TextureMeta, write: texture_layout.WriteLayout, refusal: texture_layout.Refusal) Error {
+        var code_buf: [48]u8 = undefined;
+        var field_buf: [48]u8 = undefined;
+        const code = kebabTag(@tagName(refusal.code), &code_buf);
+        const field = kebabTag(@tagName(refusal.field), &field_buf);
+        const key = writeTextureFieldKey(refusal.code, refusal.field);
+        const loc = self.locate(r, writeTextureFieldNode(r, wt, refusal.field));
+        switch (refusal.code) {
+            .invalid_aspect, .aspect_not_writable => {
+                var aspect_buf: [24]u8 = undefined;
+                const aspect = kebabTag(@tagName(write.aspect), &aspect_buf);
+                self.diagnose(.sjon, loc, "", "write-texture :texture '{s}' refused: {s} ({s}) — {s} '{s}' on format '{s}'; plan 01 requires one aspect the format has and a texel copy may write", .{ tex_name, code, field, key, aspect, meta.format_str });
+            },
+            .invalid_format => self.diagnose(.sjon, loc, "", "write-texture :texture '{s}' refused: {s} ({s}) — texture :format '{s}' has no copy footprint for this aspect", .{ tex_name, code, field, meta.format_str }),
+            else => self.diagnose(.sjon, loc, "", "write-texture :texture '{s}' refused: {s} ({s}) — {s}; actual {d}, limit {d}", .{ tex_name, code, field, key, refusal.actual, refusal.limit }),
+        }
+        return error.ValidationError;
+    }
+
+    /// The authored key a plan-01 field names, for the diagnostic. Descriptor
+    /// fields point at the `(texture …)` form's keys; write fields point at the
+    /// write's own key.
+    fn writeTextureFieldKey(code: texture_layout.Code, field: texture_layout.Field) []const u8 {
+        return switch (field) {
+            .usage => "texture :usage",
+            .sample_count => "texture :sample-count",
+            .format => "texture :format",
+            .dimension => "texture :dimension",
+            .mip_level_count => "texture :mip-level-count",
+            .none => ":texture",
+            .mip_level => ":mip-level",
+            .aspect => ":aspect",
+            .origin_x, .origin_y, .origin_z => ":origin",
+            .bytes_per_row => ":bytes-per-row",
+            .rows_per_image => ":rows-per-image",
+            .offset => ":offset",
+            .data => ":data",
+            .size_width, .size_height, .size_depth_or_array_layers => if (code == .invalid_texture_descriptor) "texture :size" else ":size",
+        };
+    }
+
+    /// The node the refusal squiggles: the write key that produced the field,
+    /// or the whole write form when the key is absent or belongs to the texture.
+    fn writeTextureFieldNode(r: *const Reader, wt: NodeIndex, field: texture_layout.Field) NodeIndex {
+        const key: ?[]const u8 = switch (field) {
+            .mip_level => "mip-level",
+            .aspect => "aspect",
+            .origin_x, .origin_y, .origin_z => "origin",
+            .bytes_per_row => "bytes-per-row",
+            .rows_per_image => "rows-per-image",
+            .offset => "offset",
+            .data => "data",
+            .size_width, .size_height, .size_depth_or_array_layers => "size",
+            else => null,
+        };
+        const k = key orelse return wt;
+        return r.authorNode(wt, k) orelse wt;
+    }
+
+    /// `Code`/`Field` tags are snake_case in Zig and kebab-case in plan 01's
+    /// catalogue; the diagnostic speaks the catalogue's spelling.
+    fn kebabTag(name: []const u8, buf: []u8) []const u8 {
+        std.debug.assert(name.len <= buf.len);
+        for (name, 0..) |ch, i| buf[i] = if (ch == '_') '-' else ch;
+        return buf[0..name.len];
     }
 
     /// C22 for textures. The canvas (`context-current-texture`) is exempt: the
@@ -9464,7 +11227,8 @@ pub const Emitter = struct {
         if (if (is_source) meta.usage.copy_src else meta.usage.copy_dst) return;
         const need: []const u8 = if (is_source) "copy-src" else "copy-dst";
         const dir: []const u8 = if (is_source) "source" else "destination";
-        self.diagnose(.sjon, self.locate(r, endpoint), "", "texture '{s}' is the {s} of a copy but its :usage has no {s} — a texture's usage is fixed when it is created", .{ name, dir, need });
+        const code: []const u8 = if (is_source) "missing-copy-src" else "missing-copy-dst";
+        self.diagnose(.sjon, self.locate(r, endpoint), "", "texture '{s}' is the {s} of a copy but its :usage has no {s} ({s}) — a texture's usage is fixed when it is created", .{ name, dir, need, code });
         return error.ValidationError;
     }
 
@@ -9473,13 +11237,6 @@ pub const Emitter = struct {
     fn resolveCopyTexture(self: *Emitter, name: []const u8) u16 {
         if (std.mem.eql(u8, name, "context-current-texture")) return values.CANVAS_TEXTURE_ID;
         return self.tables.textures.get(name) orelse values.NO_TEXTURE_ID;
-    }
-
-    /// Resolve a color-attachment view / resolve-target symbol to a texture id:
-    /// the canvas for `context-current-texture`, else a declared (texture …) id.
-    fn resolveAttachmentView(self: *Emitter, name: []const u8) u16 {
-        if (std.mem.eql(u8, name, "context-current-texture")) return values.CANVAS_TEXTURE_ID;
-        return self.tables.textures.get(name) orelse values.CANVAS_TEXTURE_ID;
     }
 
     /// Inline a queue's write-buffer op into the current frame body, reading the

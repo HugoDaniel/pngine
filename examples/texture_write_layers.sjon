@@ -1,0 +1,8 @@
+; A 2D-array layer write: origin z selects array layer 2 of a 3-layer
+; texture, and the copy covers exactly that one layer.
+(data :name layerTexels (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAA=="))
+(texture :name atlas :size [2 2 3] :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture atlas :data layerTexels :bytes-per-row 8 :rows-per-image 2
+    :origin [0 0 2] :size [2 2]))
+(frame :name main :perform [upload])

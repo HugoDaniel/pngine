@@ -16,11 +16,15 @@ const Allocator = std.mem.Allocator;
 
 const bytecode_mod = @import("bytecode");
 const OpCode = bytecode_mod.opcodes.OpCode;
+const opcodes = bytecode_mod.opcodes;
 const bytecode_emitter = bytecode_mod.emitter.Emitter;
 const wire = bytecode_mod.wire_schema;
 
 /// Colour attachments per MRT pass — the wire schema's cap, not a local one.
 const MAX_MRT: usize = wire.repMaxOf(.begin_render_pass_mrt);
+
+/// Colour attachments per views pass — likewise the schema's ONE repeat cap.
+const MAX_VIEW_ATTACHMENTS: usize = wire.repMaxOf(.begin_render_pass_views);
 
 /// Bundles per `execute_bundles` — likewise from the schema.
 const MAX_BUNDLES: usize = wire.repMaxOf(.execute_bundles);
@@ -28,9 +32,10 @@ const MAX_BUNDLES: usize = wire.repMaxOf(.execute_bundles);
 /// Handle pass operation opcodes.
 ///
 /// Fixed-shape ops decode via the shared wire schema (`wire.readOperands`) then
-/// call the backend. Two count-prefixed ops decode manually:
-/// begin_render_pass_mrt (up to 8 attachments → `[8]ColorAttachment`) and
-/// execute_bundles (reads every bundle id but stores only 16 for the backend).
+/// call the backend. Count-prefixed ops decode manually:
+/// begin_render_pass_mrt (up to 8 attachments → `[8]ColorAttachment`),
+/// begin_render_pass_views (attachments + per-attachment resolve + depth
+/// target), and execute_bundles (reads every bundle id but stores only 16).
 ///
 /// Returns true if the opcode was handled, false if it should be handled elsewhere.
 pub fn handle(
@@ -86,6 +91,33 @@ pub fn handle(
                 attachments[0..count],
                 depth_texture_id,
             );
+        },
+
+        .begin_render_pass_views => {
+            // Rep group, decoded manually: the same reason as MRT (it maps onto
+            // a backend slice), with two differences the plan makes explicit —
+            // every attachment carries a resolve target, and zero colour
+            // attachments is legal with a depth target.
+            const count = try self.read_byte();
+            if (count > MAX_VIEW_ATTACHMENTS) return error.RepCountOverCap;
+            var attachments: [MAX_VIEW_ATTACHMENTS]bytecode_emitter.ViewColorAttachment = undefined;
+            for (0..count) |i| {
+                attachments[i] = .{
+                    .target = try wire.narrowU16(try self.read_varint()),
+                    .load_op = @enumFromInt(try self.read_byte()),
+                    .store_op = @enumFromInt(try self.read_byte()),
+                    .clear_r_bits = try self.read_raw_u32(),
+                    .clear_g_bits = try self.read_raw_u32(),
+                    .clear_b_bits = try self.read_raw_u32(),
+                    .clear_a_bits = try self.read_raw_u32(),
+                    .resolve_target = try wire.narrowU16(try self.read_varint()),
+                };
+            }
+            const depth_target = try wire.narrowU16(try self.read_varint());
+            // Zero colours is a depth-only pass, which needs a depth target;
+            // "no attachments at all" is not a WebGPU pass.
+            if (count == 0 and depth_target == opcodes.ATTACHMENT_NONE) return error.RepCountEmpty;
+            try self.backend.begin_render_pass_views(gpa, attachments[0..count], depth_target);
         },
 
         .begin_compute_pass => {

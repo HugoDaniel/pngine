@@ -243,6 +243,11 @@ fn featureNameFor(call_type: CallType) ?[]const u8 {
         // layout — `(bind-group … :layout <pipeline> …)` serializes fine. Naming the
         // form beats naming the opcode, which the author never typed.
         .create_bind_group => "an explicit (bind-group-layout …) as a bind group's :layout",
+        // A texture write has no pNGf command and mini has no texture tables:
+        // name the authored form so the diagnostic points at the source line
+        // (flat.zig's own header says the minimal player deliberately has no
+        // texture runtime; this is a refusal, not a TODO).
+        .write_texture => "(write-texture …)",
         else => null,
     };
 }
@@ -528,11 +533,16 @@ fn serializeCall(
         // (0x2A/0x2B) that never reaches this switch — `injectUniformWrites`
         // recovers those.
         .write_buffer,
+        .write_texture,
+        .copy_buffer_to_texture,
+        .copy_texture_to_buffer,
+        .copy_texture_subresource,
         .create_texture,
         .create_sampler,
         .create_texture_view,
         .set_index_buffer,
         .begin_render_pass_mrt,
+        .begin_render_pass_views,
         .copy_buffer_to_buffer,
         .copy_texture_to_texture,
         .write_uniform,

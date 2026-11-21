@@ -1,0 +1,8 @@
+; INVALID: a 2d array has more than one layer per level.
+;
+; A render pass writes one layer at a time, and the chain's generated views and
+; passes name one 2d texture; array generation is a different feature.
+
+(texture :name mipTex :size [64 64 2] :format rgba8unorm
+  :mip-level-count 4 :usage [texture-binding render-attachment])
+(mip-chain :name fillMips :texture mipTex)

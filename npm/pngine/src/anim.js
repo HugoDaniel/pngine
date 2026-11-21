@@ -18,12 +18,29 @@ import { reduce } from "./playback-state.js";
  */
 
 /**
+ * One entry of a draw's `textures` map (all `writeTexture` options except the
+ * pending scheduler's `redraw`): bytes for a texture, by its SJON name.
+ * @typedef {ArrayBufferView|ArrayBuffer} TextureBytes
+ * @typedef {{
+ *   bytes: TextureBytes,
+ *   offset?: number,
+ *   bytesPerRow?: number,
+ *   rowsPerImage?: number,
+ *   origin?: ArrayLike<number>,
+ *   mipLevel?: number,
+ *   aspect?: "all"|"depth-only"|"stencil-only",
+ *   size?: ArrayLike<number>,
+ *   poolIndex?: number|"active",
+ * }} TextureWrite
+ */
+
+/**
  * Take the host state stored for "the next draw, whoever posts it"
- * (setUniform/setUniforms/writeBuffer with `redraw: false`) and merge the
- * draw's own map over it — the draw's entry wins on a shared name, being the
- * later intent. The store is cleared: it rode this message.
+ * (setUniform/setUniforms/writeBuffer/writeTexture with `redraw: false`) and
+ * merge the draw's own map over it — the draw's entry wins on a shared name,
+ * being the later intent. The store is cleared: it rode this message.
  * @param {any} i
- * @param {"pendingUniforms"|"pendingBuffers"} key
+ * @param {"pendingUniforms"|"pendingBuffers"|"pendingTextures"} key
  * @param {object|undefined} own
  */
 function takePending(i, key, own) {
@@ -89,14 +106,152 @@ function checkOptions(verb, opts) {
   return opts;
 }
 
+/** The aspects the wire contract and the host driver share, in wire tag order. */
+const TEXTURE_ASPECTS = ["all", "depth-only", "stencil-only"];
+/** Every numeric texture option is a u32 in the wire/calculator contract. */
+const U32_MAX = 0xffffffff;
+
+/** @param {unknown} v @returns {boolean} */
+function isU32(v) {
+  return typeof v === "number" && Number.isSafeInteger(v) && v >= 0 && v <= U32_MAX;
+}
+
+/** @param {unknown} v @returns {boolean} */
+function isArrayLike(v) {
+  return Array.isArray(v) || ArrayBuffer.isView(v);
+}
+
+/** @param {unknown} b @returns {b is TextureBytes} */
+function isBytes(b) {
+  return ArrayBuffer.isView(b) || b instanceof ArrayBuffer;
+}
+
+/**
+ * D13's source-state refusal: host bytes are never transferred, and a source
+ * that has already been detached — or whose resizable/growable backing could
+ * move under the post/clone read — is refused by name instead of read stale or
+ * out-of-window. Returns the refusal message, or null for an ordinary source.
+ *
+ * @param {string} verb
+ * @param {string} name
+ * @param {TextureBytes} bytes
+ * @returns {string|null}
+ */
+function textureSourceRefusal(verb, name, bytes) {
+  const buffer = /** @type {ArrayBuffer} */ (ArrayBuffer.isView(bytes) ? bytes.buffer : bytes);
+  if (!buffer) return null;
+  if (/** @type {any} */ (buffer).detached === true) {
+    return `${verb} '${name}': detached-source — the source buffer has been detached; nothing can be read from it`;
+  }
+  if (/** @type {any} */ (buffer).resizable === true || /** @type {any} */ (buffer).growable === true) {
+    return `${verb} '${name}': resizable-source — a resizable/growable backing buffer is refused; pass a fixed-length view`;
+  }
+  return null;
+}
+
+/**
+ * One `textures` map entry, shape-checked and defaulted. Every check runs
+ * before the caller's map is posted or a pending entry changes, so a malformed
+ * write is a TypeError with no half-applied state (the same contract
+ * writeBuffer's bytes/offset/poolIndex checks carry).
+ *
+ * @param {string} verb
+ * @param {string} name
+ * @param {TextureBytes|TextureWrite} spec
+ * @returns {TextureWrite}
+ */
+function textureEntry(verb, name, spec) {
+  if (typeof name !== "string" || name.length === 0) {
+    throw new TypeError(`${verb}: texture names must be nonempty strings, got ${String(name)}`);
+  }
+  const w = isBytes(spec) ? { bytes: spec } : /** @type {TextureWrite} */ (spec);
+  if (!w || typeof w !== "object" || Array.isArray(w) || !isBytes(w.bytes)) {
+    throw new TypeError(`${verb} '${name}': bytes must be an ArrayBufferView or an ArrayBuffer`);
+  }
+  const source = textureSourceRefusal(verb, name, w.bytes);
+  if (source) throw new TypeError(source);
+
+  const offset = w.offset === undefined ? 0 : w.offset;
+  if (!isU32(offset)) throw new TypeError(`${verb} '${name}': offset must be a non-negative u32 integer, got ${offset}`);
+  const mipLevel = w.mipLevel === undefined ? 0 : w.mipLevel;
+  if (!isU32(mipLevel)) throw new TypeError(`${verb} '${name}': mipLevel must be a non-negative u32 integer, got ${mipLevel}`);
+  if (w.bytesPerRow !== undefined && !isU32(w.bytesPerRow)) {
+    throw new TypeError(`${verb} '${name}': bytesPerRow must be a non-negative u32 integer, got ${w.bytesPerRow}`);
+  }
+  if (w.rowsPerImage !== undefined && !isU32(w.rowsPerImage)) {
+    throw new TypeError(`${verb} '${name}': rowsPerImage must be a non-negative u32 integer, got ${w.rowsPerImage}`);
+  }
+
+  const aspect = w.aspect === undefined ? "all" : w.aspect;
+  if (!TEXTURE_ASPECTS.includes(/** @type {any} */ (aspect))) {
+    throw new TypeError(`${verb} '${name}': aspect must be one of ${TEXTURE_ASPECTS.join(", ")}, got ${aspect}`);
+  }
+
+  const origin = w.origin === undefined ? [] : w.origin;
+  if (!isArrayLike(origin) || origin.length > 3) {
+    throw new TypeError(`${verb} '${name}': origin must be an array of 0-3 numbers`);
+  }
+  for (const v of Array.from(origin)) {
+    if (!isU32(v)) throw new TypeError(`${verb} '${name}': origin members must be non-negative u32 integers, got ${v}`);
+  }
+
+  if (w.size !== undefined) {
+    if (!isArrayLike(w.size) || w.size.length < 1 || w.size.length > 3) {
+      throw new TypeError(`${verb} '${name}': size must be an array of 1-3 numbers`);
+    }
+    for (const v of Array.from(w.size)) {
+      if (!isU32(v)) throw new TypeError(`${verb} '${name}': size members must be non-negative u32 integers, got ${v}`);
+    }
+  }
+
+  if (w.poolIndex !== undefined && w.poolIndex !== "active" && !isU32(w.poolIndex)) {
+    throw new TypeError(`${verb} '${name}': poolIndex must be a non-negative integer or "active", got ${w.poolIndex}`);
+  }
+
+  /** @type {TextureWrite} */
+  const entry = { bytes: w.bytes };
+  if (w.offset !== undefined) entry.offset = offset;
+  if (w.bytesPerRow !== undefined) entry.bytesPerRow = w.bytesPerRow;
+  if (w.rowsPerImage !== undefined) entry.rowsPerImage = w.rowsPerImage;
+  if (w.origin !== undefined) entry.origin = w.origin;
+  if (w.mipLevel !== undefined) entry.mipLevel = mipLevel;
+  if (w.aspect !== undefined) entry.aspect = /** @type {"all"|"depth-only"|"stencil-only"} */ (aspect);
+  if (w.size !== undefined) entry.size = w.size;
+  if (w.poolIndex !== undefined) entry.poolIndex = w.poolIndex;
+  return entry;
+}
+
+/**
+ * Validate and normalize every entry of a `textures` map (a shorthand bytes
+ * value becomes `{ bytes }`). The map itself and every record are checked
+ * before the draw posts it, so a malformed map cannot replace a pending entry
+ * or reach the worker half-applied.
+ * @param {string} verb
+ * @param {Record<string, TextureBytes|TextureWrite>|null|undefined} textures
+ * @returns {Record<string, TextureWrite>|null}
+ */
+function textureMap(verb, textures) {
+  if (textures === null || textures === undefined) return null;
+  if (typeof textures !== "object" || Array.isArray(textures)) {
+    throw new TypeError(`${verb}: textures must be an object keyed by texture name`);
+  }
+  /** @type {Record<string, TextureWrite>} */
+  const out = {};
+  for (const [name, spec] of Object.entries(textures)) out[name] = textureEntry(verb, name, spec);
+  return out;
+}
+
 /**
  * Draw a frame (sync, post-and-forget)
  *
  * Host state rides the message: `uniforms` (reflected struct fields, by
- * name) and `buffers` (raw bytes for a `(buffer :name …)`, by name). Both
- * are applied at the head of the frame this draw renders, before its own
- * queue ops run, and the worker never collapses a draw that carries either
- * (a superseded rAF draw is dropped; one with host state is not).
+ * name), `buffers` (raw bytes for a `(buffer :name …)`, by name) and
+ * `textures` (raw bytes or a TextureWrite for a `(texture :name …)`, by
+ * name). All are applied inside the worker's render lock at the head of the
+ * frame this draw renders — uniforms, then buffers, then textures — before
+ * the frame's own commands, and the worker never collapses a draw that
+ * carries any of them (a superseded rAF draw is dropped; one with host state
+ * is not).
  *
  * `frame` names which `(frame …)` this ONE draw renders; it does not move
  * the pin setFrame holds. Absent, the draw carries the pin (null when none,
@@ -114,11 +269,16 @@ function checkOptions(verb, opts) {
  *   for the executor's choice; absent → the pin from setFrame
  * @param {Object} [opts.uniforms]
  * @param {Record<string, Bytes|BufferWrite>} [opts.buffers]
+ * @param {Record<string, TextureBytes|TextureWrite>} [opts.textures]
  * @returns {Pngine}
  */
 export function draw(p, opts = {}) {
   if (opts.time !== undefined) checkTime(opts.time);
   if (opts.frame !== undefined) checkFrame(opts.frame);
+  // The draw's own map is shape-checked before anything else changes; a
+  // deferred write is checked again after the merge, so one detached between
+  // its call and this post is refused at the posting boundary (D13).
+  const ownTextures = textureMap("draw", opts.textures);
   const i = p._;
   if (!i) return p;
 
@@ -128,6 +288,9 @@ export function draw(p, opts = {}) {
   // An explicit time is recorded as the instance's time (what p.time reads).
   if (opts.time !== undefined) i.pb = reduce(i.pb, { type: "DRAW", record: opts.time });
 
+  const pendingTextures = takePending(i, "pendingTextures", ownTextures);
+  const textures = textureMap("draw", pendingTextures);
+
   i.worker.postMessage({
     type: "draw",
     time,
@@ -135,6 +298,7 @@ export function draw(p, opts = {}) {
     pointer: i.pointer ?? null,
     uniforms: takePending(i, "pendingUniforms", opts.uniforms),
     buffers: takePending(i, "pendingBuffers", opts.buffers),
+    textures,
   });
 
   // Reset pointer deltas and scroll after each frame
@@ -371,6 +535,66 @@ export function writeBuffer(p, name, bytes, opts) {
     draw(p, { time: i.pb.time, buffers: { [name]: entry } });
   } else {
     (i.pendingBuffers ??= {})[name] = entry;
+  }
+  return p;
+}
+
+/**
+ * Put bytes in a texture, by the `(texture :name …)` the document declares.
+ *
+ * The seam is the draw message: with `redraw` true (the default) this is one
+ * `draw(p, { time, textures: { [name]: entry } })`, so the write lands at the
+ * head of the frame that draw renders, after its uniforms and buffers and
+ * before the frame's own queue operations. With `redraw: false` the entry is
+ * stored for the next draw from anywhere (see setUniform), and its bytes are
+ * read when THAT draw is posted, not now.
+ *
+ * Every write is a copy: structured clone, once, on the way to the worker —
+ * and no transfer list, so the caller's arena, view window and lifetime are
+ * untouched. Only the view's own `byteOffset`/`byteLength` is read. A source
+ * whose backing buffer is already detached, or is resizable/growable, is a
+ * named TypeError (`detached-source` / `resizable-source`) before anything
+ * posts or is stored; never a stale or out-of-window read (D13).
+ *
+ * What the runtime cannot honour — an unknown name, a texture the frame
+ * itself writes every draw, a bad pool member, no `copy-dst`, a multisampled
+ * or 1D destination, a bad mip/origin/extent/stride/aspect, too little data —
+ * reaches options.onError as a PngineGPUError with source "write-texture";
+ * getTextures(p) says which names are writable and why not. Options are
+ * `offset` (default 0; unaligned allowed), `bytesPerRow`, `rowsPerImage`
+ * (presence preserved: absent stays absent at the WebGPU boundary, D26),
+ * `origin` ([x,y,z]; 0-3 members, missing are 0), `mipLevel` (0), `aspect`
+ * ("all"), `size` ([w], [w h] or [w h d]; default the remaining physical mip
+ * extent), and `poolIndex` (`k` for member k, `"active"` for the coming
+ * frame's member, absent for every member).
+ *
+ * @param {Pngine} p
+ * @param {string} name
+ * @param {TextureBytes} bytes
+ * @param {{
+ *   offset?: number,
+ *   bytesPerRow?: number,
+ *   rowsPerImage?: number,
+ *   origin?: ArrayLike<number>,
+ *   mipLevel?: number,
+ *   aspect?: "all"|"depth-only"|"stencil-only",
+ *   size?: ArrayLike<number>,
+ *   poolIndex?: number|"active",
+ *   redraw?: boolean,
+ * }} [opts]
+ * @returns {Pngine}
+ */
+export function writeTexture(p, name, bytes, opts) {
+  const { redraw = true, ...write } = checkOptions("writeTexture", opts);
+  if (typeof redraw !== "boolean") throw new TypeError(`writeTexture: redraw must be a boolean, got ${String(redraw)}`);
+  const entry = textureEntry("writeTexture", name, { ...write, bytes });
+  const i = p._;
+  if (!i) return p;
+
+  if (redraw) {
+    draw(p, { time: i.pb.time, textures: { [name]: entry } });
+  } else {
+    (i.pendingTextures ??= {})[name] = entry;
   }
   return p;
 }
@@ -663,6 +887,26 @@ export function getBuffers(p) {
   const i = p._;
   if (!i) return Promise.resolve({});
   return workerRequest(i, { type: "getBuffers" }, "buffers", (d) => d.buffers || {}, {});
+}
+
+/**
+ * Every currently created named texture, by SJON name: `{ size, dimension,
+ * format, mipLevelCount, arrayDepth, usage, sampleCount, sizeSource, pool,
+ * frameWritten, writable, writableAspects }` each. Raw ids are never exposed.
+ * `writable` is the current host-write verdict (created, copy-dst, one
+ * sample, 2D/3D, not frameWritten, at least one legal aspect);
+ * `writableAspects` is format/aspect legality alone. The reply observes the
+ * same FIFO position as the other reflection queries, reports the current
+ * descriptor after a resize, and is `{}` before load, after device loss and
+ * after destroy.
+ *
+ * @param {Pngine} p - PNGine instance
+ * @returns {Promise<Record<string, import("./gpu-host-texture.js").TextureInfo>>}
+ */
+export function getTextures(p) {
+  const i = p._;
+  if (!i) return Promise.resolve({});
+  return workerRequest(i, { type: "getTextures" }, "textures", (d) => d.textures || {}, {});
 }
 
 /**

@@ -111,6 +111,7 @@ pub fn generate(
     }
 
     try emitBufferNames(gpa, &output, uniforms, strings);
+    try emitTextureNames(gpa, &output, uniforms, strings);
 
     // Post-condition: output is bounded
     assert(output.items.len <= MAX_OUTPUT_SIZE);
@@ -150,6 +151,39 @@ fn emitBufferNames(
     }
     try output.appendSlice(gpa, "}\n\nexport type BufferName = keyof Buffers;\n");
     assert(std.mem.count(u8, output.items, "frameWritten:") == names.len);
+}
+
+/// `export interface Textures { "name": { pool: N; frameWritten: bool }; … }`
+/// and `TextureName = keyof Textures`, from the payload's texture-name block —
+/// the names `writeTexture(p, name, …)` and `getTextures(p)` expose (plan 04
+/// D14). Literal types, quoted because a SJON name may carry a `-`.
+fn emitTextureNames(
+    gpa: Allocator,
+    output: *std.ArrayList(u8),
+    uniforms: *const UniformTable,
+    strings: *const StringTable,
+) !void {
+    const names = uniforms.texture_names.items;
+    if (names.len == 0) {
+        try output.appendSlice(gpa,
+            \\
+            \\export interface Textures {}
+            \\export type TextureName = never;
+            \\
+        );
+        return;
+    }
+    try output.appendSlice(gpa, "\nexport interface Textures {\n");
+    for (names) |tn| {
+        const name = strings.get(@enumFromInt(tn.name_string_id));
+        const line = try std.fmt.allocPrint(gpa, "  \"{s}\": {{ pool: {d}; frameWritten: {s} }};\n", .{
+            name, tn.pool, if (tn.flags.frame_written) "true" else "false",
+        });
+        defer gpa.free(line);
+        try output.appendSlice(gpa, line);
+    }
+    try output.appendSlice(gpa, "}\n\nexport type TextureName = keyof Textures;\n");
+    assert(std.mem.count(u8, output.items, "frameWritten:") == names.len + uniforms.buffer_names.items.len);
 }
 
 /// Record each field name's *last* flat occurrence, returning the field count.

@@ -1,0 +1,8 @@
+; INVALID: rgba8snorm is filterable but not baseline color-renderable.
+;
+; The chain needs both properties in one format: sample the previous level and
+; render into the next. There is no fallback shader and no format conversion.
+
+(texture :name mipTex :size [64 64] :format rgba8snorm
+  :mip-level-count 4 :usage [texture-binding render-attachment])
+(mip-chain :name fillMips :texture mipTex)

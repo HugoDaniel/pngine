@@ -1,0 +1,7 @@
+; INVALID: a supplied bytes-per-row smaller than bytesInLastRow. The
+; calculator checks the minimum even on a one-row copy.
+(data :name texels (bytes :base64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="))
+(texture :name tex :size [4 2] :format rgba8unorm :usage [copy-dst])
+(queue :name upload
+  (write-texture :texture tex :data texels :size [4 2] :bytes-per-row 8))
+(frame :name main :perform [upload])

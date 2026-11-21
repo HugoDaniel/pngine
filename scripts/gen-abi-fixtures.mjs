@@ -36,9 +36,17 @@ const VARIANT_NAMES = [
   "render-anim", "render-compute-anim", "render-wasm", "full",
 ];
 
-// Pinned payload sources. Chosen to cover the three dispatch families:
-// minimal render, compute+render+time-uniform, explicit JSON bind-group-layouts.
-const FIXTURE_SOURCES = ["simple_triangle", "pass_compute_rainbow", "uniform_access"];
+// Pinned payload sources. Chosen to cover the four dispatch families:
+// minimal render, compute+render+time-uniform, explicit JSON bind-group-layouts,
+// the runtime texture write (command 0x28), the two buffer↔texture encoder
+// copies (commands 0x29 / 0x2A), the legacy whole-texture copy (0x23), the
+// subresource texture copy (0x2B), and the attachment-view render pass
+// (command 0x55).
+const FIXTURE_SOURCES = [
+  "simple_triangle", "pass_compute_rainbow", "uniform_access", "texture_write_2d",
+  "texture_copy_buffer_to_texture", "texture_copy_texture_to_buffer",
+  "test_copy_texture", "texture_copy_subresource", "attachment_view_mip",
+];
 
 function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -161,12 +169,16 @@ async function main() {
         "0x20": "write_buffer", "0x21": "write_time_uniform", "0x22": "copy_buffer_to_buffer",
         "0x23": "copy_texture_to_texture", "0x24": "write_buffer_from_wasm",
         "0x25": "copy_external_image_to_texture", "0x26": "write_pointer_uniform",
-        "0x27": "resolve_query_set",
+        "0x27": "resolve_query_set", "0x28": "write_texture",
+        "0x29": "copy_buffer_to_texture", "0x2A": "copy_texture_to_buffer",
+        "0x2B": "copy_texture_subresource",
         "0x30": "init_wasm_module", "0x31": "call_wasm_func",
         "0x4A": "set_pass_timestamp_writes", "0x4B": "set_pass_occlusion_query_set",
         "0x4C": "end_occlusion_query", "0x4D": "begin_occlusion_query",
         "0x4E": "set_stencil_reference", "0x4F": "set_scissor_rect",
         "0x50": "set_pass_depth_stencil_ops", "0x51": "set_blend_constant",
+        "0x52": "set_pass_clear_values", "0x53": "begin_render_pass_f32",
+        "0x54": "begin_render_pass_mrt_f32", "0x55": "begin_render_pass_views",
         "0xF0": "submit", "0xFF": "end",
       },
       payloads: Object.fromEntries(FIXTURE_SOURCES.map((name) => {

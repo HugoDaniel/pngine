@@ -17,6 +17,9 @@ pub const Plugin = types.Plugin;
 /// so backends that only import `bytecode` (e.g. wgpu_native) reach them without
 /// a separate `types` module wiring.
 pub const descriptors = types.descriptors;
+/// Texture write-layout contract (plan 01). Re-exported here so backends that
+/// only import `bytecode` can reach it without a separate `types` module.
+pub const texture_layout = types.texture_layout;
 
 // Re-export bytecode modules (for code using bytecode_mod.module.Type pattern)
 pub const string_table = @import("string_table.zig");

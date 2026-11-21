@@ -68,9 +68,16 @@ pngine(
     autoResize?: boolean;
     onError?: (err: Error) => void;
     onQueryResult?: (values: number[]) => void;
+    onTextureReadback?: (readback: TextureReadback) => void;
   }
 )
 ```
+
+`TextureReadback` is the byte event of a `copy-texture-to-buffer` into a
+`map-read copy-dst` buffer: `{ texture, buffer, offset, size, bytes,
+bytesPerRow, rowsPerImage, mipLevel, origin, aspect, copySize }`. `bytes` is an
+owned `Uint8Array` of exactly the copied window, row padding included and
+final-row padding excluded; `onQueryResult` is unchanged and never receives it.
 
 Notes:
 - `canvas` is required.
@@ -91,6 +98,19 @@ Notes:
   included). A write needs `copy-dst` in the buffer's `:usage`; a buffer the frame itself writes every draw is
   refused. A pooled buffer takes `poolIndex` (`k`, `"active"`, or absent for every member). Refusals reach
   `onError` with source `"write-buffer"`; `getBuffers(p)` lists every buffer with `writable` and `frameWritten`.
+- Textures are host-writable the same way, by their `(texture :name …)`:
+  `writeTexture(p, name, bytes, { offset, bytesPerRow, rowsPerImage, origin, mipLevel, aspect, size, poolIndex, redraw })`.
+  Writes land inside the draw's render lock after uniforms and buffers, before the frame's own queue operations;
+  `redraw: false` rides the next draw from anywhere and reads the view when that draw posts. A draw's own
+  `textures` map (`draw(p, { textures: { field: bytes } })`) merges over those pending entries and wins on a
+  shared name. Bytes are never transferred: the caller's buffer and view window stay theirs, and only
+  `byteOffset`/`byteLength` is read; a detached or resizable/growable source is a named `TypeError` before
+  anything posts. A write needs `copy-dst`, one sample and a 2D/3D destination; a texture the frame itself
+  writes every draw is refused. `poolIndex` is `k`, `"active"` (the coming frame's member) or absent for every
+  member. Refusals reach `onError` with source `"write-texture"`; `getTextures(p)` reports every named texture's
+  current size, dimension, format, mip count, array depth, usage, sample count, size source, pool, `frameWritten`,
+  `writable` and `writableAspects`. `examples/texture_host_write.sjon` is the host-only document: it declares
+  and samples `field` but contains no static write, so the host owns every texel.
 
 ### Example
 
@@ -197,13 +217,13 @@ this table against the bundler's budgets.
 
 | File | Raw | Gzip |
 | --- | --- | --- |
-| `viewer.mjs` | 49.0 KB | 16.9 KB |
-| `dev.mjs` | 53.5 KB | 18.5 KB |
-| `core.mjs` | 26.0 KB | 8.9 KB |
+| `viewer.mjs` | 101.5 KB | 31.5 KB |
+| `dev.mjs` | 106.4 KB | 33.2 KB |
+| `core.mjs` | 66.6 KB | 19.8 KB |
 | `executor.mjs` | 1.9 KB | 0.9 KB |
-| `mini.mjs` | 7.0 KB | 3.2 KB |
-| `mini-no-audio.mjs` | 6.3 KB | 2.9 KB |
-| `index.cjs` (Node stub) | 2.8 KB | - |
+| `mini.mjs` | 7.1 KB | 3.3 KB |
+| `mini-no-audio.mjs` | 6.4 KB | 3.0 KB |
+| `index.cjs` (Node stub) | 3.0 KB | - |
 
 ## Build Commands
 

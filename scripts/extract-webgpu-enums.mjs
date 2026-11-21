@@ -19,24 +19,32 @@
 //   - `limits`: the GPUSupportedLimits interface's readonly attribute names.
 //
 // Usage:
-//   node scripts/extract-webgpu-enums.mjs            # drift check (exit 1 on diff)
-//   node scripts/extract-webgpu-enums.mjs --regen    # rewrite the snapshot
+//   node scripts/extract-webgpu-enums.mjs [--spec <path-to-index.bs>]         # drift check
+//   node scripts/extract-webgpu-enums.mjs [--spec <path-to-index.bs>] --regen # rewrite the snapshot
 //
 // Mirrors the `zig build schema-export` convention: the no-arg form is a gate.
-// Without a gpuweb checkout it skips cleanly (the committed JSON is what tests
-// consume; the spec is only needed to regenerate it). That checkout is scratch,
-// never a dependency — external/ is gitignored, and the clones that lived there
-// left the repo in 2026-08.
+// With no --spec it discovers the sibling `../gpuweb` checkout first and keeps
+// `external/gpuweb` as the compatibility fallback. The CRD is the authority;
+// the committed JSON is only a derived snapshot, so an absent clone still skips
+// the gate cleanly (it announces both searched paths). An explicit `--spec`
+// path is never ignored: a missing path is an error even in check mode.
+//
+// The checkout is scratch, never a dependency. The sibling is the checkout the
+// plans pin; `external/` is gitignored and the clones that lived there left the
+// repo in 2026-08.
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
-const SPEC_PATH = resolve(REPO_ROOT, 'external/gpuweb/spec/index.bs');
 const OUT_PATH = resolve(REPO_ROOT, 'schema/webgpu-enums.json');
+const SIBLING_SPEC = resolve(REPO_ROOT, '../gpuweb/spec/index.bs');
+const COMPAT_SPEC = resolve(REPO_ROOT, 'external/gpuweb/spec/index.bs');
+/** One stable spelling: repo-relative (even when outside the repo) and slash-normalized. */
+const displayPath = (abs) => relative(REPO_ROOT, abs).split(sep).join('/');
 
 /**
  * An IDL member default as a plain JS-comparable value: string literals lose
@@ -63,7 +71,7 @@ function stripLineComment(line) {
  * text. Returns `{ enums: {Name: string[]}, flags: {Name: {CONST: "0x.."}} }`
  * in source-encounter order (stable diffs).
  */
-function parseSpec(text) {
+function parseSpec(text, revision) {
   const lines = text.split('\n');
   const enums = {};
   const flags = {};
@@ -160,34 +168,34 @@ function parseSpec(text) {
   }
   if (mode !== null) throw new Error(`unterminated ${mode} block '${name}' in spec`);
   if (!limits) throw new Error('GPUSupportedLimits interface not found in spec');
-  return { enums, flags, dictionaries, limits, specRevision: specRevision() };
+  return { enums, flags, dictionaries, limits, specRevision: revision };
 }
 
 /**
- * The gpuweb checkout's HEAD commit. Fails loud rather than emitting a
- * provenance-less snapshot: a snapshot that cannot say which spec it came from
- * is exactly the failure mode step E exists to end.
+ * The selected checkout's HEAD commit. The working directory is derived from
+ * the selected `index.bs`, never a hardcoded checkout: a snapshot that cannot
+ * say which spec it came from is exactly the failure mode step E exists to end.
  */
-function specRevision() {
-  const sha = execFileSync('git', ['-C', resolve(REPO_ROOT, 'external/gpuweb'), 'rev-parse', 'HEAD'], {
+function specRevision(specPath) {
+  const sha = execFileSync('git', ['-C', dirname(specPath), 'rev-parse', 'HEAD'], {
     encoding: 'utf8',
   }).trim();
   if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`unexpected gpuweb rev-parse output: ${JSON.stringify(sha)}`);
   return sha;
 }
 
-function render(parsed) {
+function render(parsed, source) {
+  const command = `node scripts/extract-webgpu-enums.mjs --spec ${source} --regen`;
   const out = {
     $comment:
-      'Generated from external/gpuweb/spec/index.bs by ' +
-      'scripts/extract-webgpu-enums.mjs. Do not edit by hand — run ' +
-      '`node scripts/extract-webgpu-enums.mjs --regen`. The canonical WebGPU ' +
+      `Generated from ${source} by scripts/extract-webgpu-enums.mjs. ` +
+      `Do not edit by hand — run \`${command}\`. The canonical WebGPU ` +
       'enum/flag vocabulary; tests/npm/webgpu-conformance.test.js checks ' +
       'schema/pngine.sjon + the cross-stack byte tables against it.',
-    source: 'external/gpuweb/spec/index.bs',
+    source,
     // The gpuweb commit this snapshot was extracted from (spec/09 step E).
-    // `external/` is gitignored scratch, so the gate cannot demand the clone —
-    // but recording the revision makes a stale snapshot VISIBLE instead of
+    // The checkout is scratch, so the gate cannot demand it — but recording
+    // the source and revision makes a stale snapshot VISIBLE instead of
     // silent, which plan 06's "remember to regen" note could not do.
     specRevision: parsed.specRevision,
     enums: parsed.enums,
@@ -198,16 +206,79 @@ function render(parsed) {
   return `${JSON.stringify(out, null, 2)}\n`;
 }
 
-const regen = process.argv.includes('--regen');
+/**
+ * Parse the extractor's arguments. `--spec` takes exactly one path; anything
+ * unrecognized is a hard error rather than being ignored (the old build's
+ * failure mode: `--spec ../gpuweb/...` was accepted and then discarded).
+ */
+function parseArgs(argv) {
+  let regen = false;
+  let requestedSpec = null;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--regen') {
+      regen = true;
+    } else if (arg === '--spec') {
+      const value = argv[++i];
+      if (value === undefined || value === '' || value.startsWith('--')) {
+        console.error('[webgpu-enums] --spec requires a path to a gpuweb spec/index.bs');
+        console.error('[webgpu-enums] usage: node scripts/extract-webgpu-enums.mjs [--spec <path-to-index.bs>] [--regen]');
+        process.exit(2);
+      }
+      requestedSpec = value;
+    } else {
+      console.error(`[webgpu-enums] unknown option: ${arg}`);
+      console.error('[webgpu-enums] usage: node scripts/extract-webgpu-enums.mjs [--spec <path-to-index.bs>] [--regen]');
+      process.exit(2);
+    }
+  }
+  return { regen, requestedSpec };
+}
 
-if (!existsSync(SPEC_PATH)) {
+const { regen, requestedSpec } = parseArgs(process.argv.slice(2));
+
+/**
+ * Select the CRD index. An explicit --spec is resolved against the repo root
+ * (the documented invocation is repo-relative) and must exist. With no
+ * argument, prefer this host's sibling checkout and retain external/gpuweb as
+ * the compatibility fallback; only when neither exists may the gate skip.
+ */
+function selectSpec() {
+  if (requestedSpec !== null) {
+    const abs = resolve(REPO_ROOT, requestedSpec);
+    return {
+      path: existsSync(abs) ? abs : null,
+      source: displayPath(abs),
+      explicit: true,
+      searched: [displayPath(abs)],
+    };
+  }
+  const candidates = [SIBLING_SPEC, COMPAT_SPEC];
+  const found = candidates.find((candidate) => existsSync(candidate));
+  return {
+    path: found ?? null,
+    source: found ? displayPath(found) : null,
+    explicit: false,
+    searched: candidates.map(displayPath),
+  };
+}
+
+const selected = selectSpec();
+
+if (!selected.path) {
+  if (selected.explicit) {
+    console.error(`[webgpu-enums] spec not found: ${selected.source}`);
+    console.error('[webgpu-enums] the --spec path must name an existing gpuweb spec/index.bs.');
+    process.exit(1);
+  }
+  const searched = selected.searched.join(' and ');
   if (regen) {
-    console.error(`[webgpu-enums] spec not found: ${SPEC_PATH}`);
-    console.error('[webgpu-enums] git clone https://github.com/gpuweb/gpuweb external/gpuweb');
+    console.error(`[webgpu-enums] spec not found — searched ${searched}`);
+    console.error('[webgpu-enums] git clone https://github.com/gpuweb/gpuweb ../gpuweb');
     console.error('[webgpu-enums] then retry --regen.');
     process.exit(1);
   }
-  console.log('[webgpu-enums] gpuweb spec absent — skipping drift check (snapshot is source of truth).');
+  console.log(`[webgpu-enums] gpuweb spec absent — skipped drift check; searched ${searched} (schema-only conformance tests still run against the committed snapshot).`);
   process.exit(0);
 }
 
@@ -230,18 +301,26 @@ function readSpecWithIncludes(path) {
   });
 }
 
-const next = render(parseSpec(readSpecWithIncludes(SPEC_PATH)));
+let revision;
+try {
+  revision = specRevision(selected.path);
+} catch (err) {
+  console.error(`[webgpu-enums] cannot read the revision of the selected checkout at ${selected.source}: ${err.message}`);
+  process.exit(1);
+}
+
+const next = render(parseSpec(readSpecWithIncludes(selected.path), revision), selected.source);
 
 if (regen) {
   writeFileSync(OUT_PATH, next);
-  console.log(`[webgpu-enums] wrote ${OUT_PATH}`);
+  console.log(`[webgpu-enums] wrote ${displayPath(OUT_PATH)} from ${selected.source} @ ${revision}`);
   process.exit(0);
 }
 
 const current = existsSync(OUT_PATH) ? readFileSync(OUT_PATH, 'utf8') : '';
 if (current !== next) {
-  console.error('[webgpu-enums] DRIFT: schema/webgpu-enums.json is stale vs the gpuweb spec.');
-  console.error('[webgpu-enums] run: node scripts/extract-webgpu-enums.mjs --regen');
+  console.error(`[webgpu-enums] DRIFT: schema/webgpu-enums.json is stale vs ${selected.source} @ ${revision}.`);
+  console.error(`[webgpu-enums] run: node scripts/extract-webgpu-enums.mjs --spec ${selected.source} --regen`);
   process.exit(1);
 }
-console.log('[webgpu-enums] snapshot up to date.');
+console.log(`[webgpu-enums] snapshot up to date: ${selected.source} @ ${revision}`);

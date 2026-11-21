@@ -23,6 +23,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const pngine = @import("pngine");
 const descriptors = pngine.types.descriptors;
+const texture_layout = pngine.types.texture_layout;
 const opcodes = pngine.opcodes;
 const js_emit = @import("js_emit.zig");
 const appendInt = js_emit.appendInt;
@@ -680,6 +681,83 @@ fn parseTextureFields(data: []const u8) TextureFields {
         }
     }
     return f;
+}
+
+/// The concrete plan-01 descriptor a `create_texture` blob names, or null when
+/// the blob is not a texture descriptor, is malformed, names a format this
+/// build does not know, or has an extent only the executing page can resolve
+/// (canvas- or image-derived).
+///
+/// `--html` needs this for exactly one decision: a captured write whose
+/// `:size` was omitted has no copy extent of its own, and WebGPU's
+/// `writeTexture` requires one. Resolving it through plan 01's shared
+/// `calculateWrite` keeps the page free of a second layout algorithm. A
+/// dynamic descriptor has no static extent to offer and returns null; the
+/// caller refuses rather than guessing.
+pub fn parseExplicitTextureDescriptor(data: []const u8) ?texture_layout.TextureDescriptor {
+    if (descriptors.TlvReader.descriptorType(data) != .texture) return null;
+    var reader = descriptors.TlvReader.init(data) orelse return null;
+
+    var width: ?u32 = null;
+    var height: ?u32 = null;
+    var depth: u32 = 1;
+    var mip_level_count: u32 = 1;
+    var sample_count: u32 = 1;
+    var dimension_byte: u8 = 1;
+    var format_byte: u8 = 0;
+    var usage_byte: u8 = 0;
+    var image_derived = false;
+
+    while (reader.next()) |field| {
+        const tf = std.enums.fromInt(descriptors.TextureField, field.id) orelse continue;
+        switch (tf) {
+            .width, .height, .depth, .mip_level_count, .sample_count => {
+                if (field.value_type != .u32_val) continue;
+                switch (tf) {
+                    .width => width = field.scalar,
+                    .height => height = field.scalar,
+                    .depth => depth = field.scalar,
+                    .mip_level_count => mip_level_count = field.scalar,
+                    else => sample_count = field.scalar,
+                }
+            },
+            .dimension, .format, .usage => {
+                if (field.value_type != .enum_val) continue;
+                const value = std.math.cast(u8, field.scalar) orelse return null;
+                switch (tf) {
+                    .dimension => dimension_byte = value,
+                    .format => format_byte = value,
+                    else => usage_byte = value,
+                }
+            },
+            .size_from_image_bitmap => image_derived = true,
+            // Variable-length / no layout meaning to the calculator.
+            .view_formats, .size_canvas_scale => {},
+        }
+    }
+
+    if (image_derived or width == null or height == null) return null;
+    const format = std.enums.fromInt(descriptors.TextureFormat, format_byte) orelse return null;
+
+    return .{
+        .size = .{
+            .width = width.?,
+            .height = height.?,
+            .depth_or_array_layers = depth,
+        },
+        .dimension = switch (dimension_byte) {
+            0 => .d1,
+            2 => .d3,
+            else => .d2,
+        },
+        .format = format,
+        .usage = descriptors.TextureUsage.fromU8(usage_byte),
+        .sample_count = sample_count,
+        .mip_level_count = mip_level_count,
+        // The only lifetime this parser accepts is a concrete authored size;
+        // canvas and image extents returned null above.
+        .extent_source = .explicit,
+    };
 }
 
 /// One dimension of a canvas-tracking texture in the generated JS: the canvas

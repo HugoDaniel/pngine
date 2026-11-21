@@ -1,0 +1,11 @@
+; INVALID: source and destination sample counts must match. The source is a
+; 4-sample render attachment that also admits copy-src; the destination is
+; single-sample.
+(texture :name src :size [4 4] :format rgba8unorm :sample-count 4
+  :usage [render-attachment copy-src])
+(texture :name dst :size [4 4] :format rgba8unorm :usage [copy-dst])
+(queue :name blit
+  (copy-texture-to-texture
+    (source :texture src :mip-level 0)
+    (destination :texture dst)))
+(frame :name main :perform [blit])

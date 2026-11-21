@@ -1,0 +1,166 @@
+; The hand-written twin of examples/mip_chain.sjon: the same two chains with
+; every lowered form written out — complete texture views, sampler, shader,
+; pipelines, bind groups, render passes and named step-groups.
+;
+; A twin is the sugar tier's anchor: `pngine/mips-v1` produces only core forms,
+; so this document has to be one an author could write, and it must be the same
+; program. Equivalence is PIXEL. BYTE is unreachable for the same two reasons
+; as every sugar twin (see examples/pass_half_res_hand.sjon):
+;
+;   1. The sugar's step-group keeps the authored `mip-chain` name while the
+;      source form of that name is consumed; written by hand the names are
+;      ordinary declarations.
+;   2. The emitter walks AUTHORED forms grouped by kind and LOWERED forms in
+;      hook-emission order, so the create sequence differs even when the
+;      resource set and the frame body agree.
+;
+; The level scheme is the sugar's: `srcN` samples level N−1, `dstN` writes
+; level N, and level 0 is only ever sampled. Both chains share nothing across
+; chains on purpose — each lowering owns one sampler, one module and one
+; pipeline, reused by all of that chain's levels.
+
+; ---- source textures -------------------------------------------------------
+
+(texture :name mipTex :size [64 64] :format rgba8unorm
+  :mip-level-count 4
+  :usage [texture-binding render-attachment])
+
+(texture :name npotTex :size [100 100] :format rgba8unorm
+  :mip-level-count 4
+  :usage [texture-binding render-attachment])
+
+; ---- fillMips: 64×64, levels 1..3 ------------------------------------------
+
+(texture-view :name fillMips__src1 :texture mipTex :dimension 2d
+  :base-mip-level 0 :mip-level-count 1)
+(texture-view :name fillMips__dst1 :texture mipTex :dimension 2d
+  :base-mip-level 1 :mip-level-count 1)
+(texture-view :name fillMips__src2 :texture mipTex :dimension 2d
+  :base-mip-level 1 :mip-level-count 1)
+(texture-view :name fillMips__dst2 :texture mipTex :dimension 2d
+  :base-mip-level 2 :mip-level-count 1)
+(texture-view :name fillMips__src3 :texture mipTex :dimension 2d
+  :base-mip-level 2 :mip-level-count 1)
+(texture-view :name fillMips__dst3 :texture mipTex :dimension 2d
+  :base-mip-level 3 :mip-level-count 1)
+
+(sampler :name fillMips__sampler :mag-filter linear :min-filter linear)
+
+(shader-module :name fillMips__shader :code """struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+  var o: VSOut;
+  let x = f32(i & 1u) * 4.0 - 1.0;
+  let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+  o.pos = vec4f(x, y, 0, 1);
+  o.uv = vec2f(x * .5 + .5, .5 - y * .5);
+  return o;
+}
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var smp: sampler;
+@fragment fn fs(in: VSOut) -> @location(0) vec4f {
+  return textureSample(tex, smp, in.uv);
+}""")
+
+(render-pipeline :name fillMips__pipe :layout auto
+  (vertex :module fillMips__shader :entry vs)
+  (fragment :module fillMips__shader :entry fs
+    (color-target :format rgba8unorm)))
+
+(bind-group :name fillMips__bg1 :layout fillMips__pipe :group 0
+  (entry :binding 0 :texture-view fillMips__src1)
+  (entry :binding 1 :sampler fillMips__sampler))
+(bind-group :name fillMips__bg2 :layout fillMips__pipe :group 0
+  (entry :binding 0 :texture-view fillMips__src2)
+  (entry :binding 1 :sampler fillMips__sampler))
+(bind-group :name fillMips__bg3 :layout fillMips__pipe :group 0
+  (entry :binding 0 :texture-view fillMips__src3)
+  (entry :binding 1 :sampler fillMips__sampler))
+
+(render-pass :name fillMips__pass1 :pipeline fillMips__pipe
+  :bind-groups [fillMips__bg1]
+  (color-attachment :view fillMips__dst1
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(render-pass :name fillMips__pass2 :pipeline fillMips__pipe
+  :bind-groups [fillMips__bg2]
+  (color-attachment :view fillMips__dst2
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(render-pass :name fillMips__pass3 :pipeline fillMips__pipe
+  :bind-groups [fillMips__bg3]
+  (color-attachment :view fillMips__dst3
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+
+(step-group :name fillMips
+  :perform [fillMips__pass1 fillMips__pass2 fillMips__pass3])
+
+; ---- fillMipsNpot: 100×100, levels 1..3 -----------------------------------
+
+(texture-view :name fillMipsNpot__src1 :texture npotTex :dimension 2d
+  :base-mip-level 0 :mip-level-count 1)
+(texture-view :name fillMipsNpot__dst1 :texture npotTex :dimension 2d
+  :base-mip-level 1 :mip-level-count 1)
+(texture-view :name fillMipsNpot__src2 :texture npotTex :dimension 2d
+  :base-mip-level 1 :mip-level-count 1)
+(texture-view :name fillMipsNpot__dst2 :texture npotTex :dimension 2d
+  :base-mip-level 2 :mip-level-count 1)
+(texture-view :name fillMipsNpot__src3 :texture npotTex :dimension 2d
+  :base-mip-level 2 :mip-level-count 1)
+(texture-view :name fillMipsNpot__dst3 :texture npotTex :dimension 2d
+  :base-mip-level 3 :mip-level-count 1)
+
+(sampler :name fillMipsNpot__sampler :mag-filter linear :min-filter linear)
+
+(shader-module :name fillMipsNpot__shader :code """struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+  var o: VSOut;
+  let x = f32(i & 1u) * 4.0 - 1.0;
+  let y = f32((i >> 1u) & 1u) * 4.0 - 1.0;
+  o.pos = vec4f(x, y, 0, 1);
+  o.uv = vec2f(x * .5 + .5, .5 - y * .5);
+  return o;
+}
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var smp: sampler;
+@fragment fn fs(in: VSOut) -> @location(0) vec4f {
+  return textureSample(tex, smp, in.uv);
+}""")
+
+(render-pipeline :name fillMipsNpot__pipe :layout auto
+  (vertex :module fillMipsNpot__shader :entry vs)
+  (fragment :module fillMipsNpot__shader :entry fs
+    (color-target :format rgba8unorm)))
+
+(bind-group :name fillMipsNpot__bg1 :layout fillMipsNpot__pipe :group 0
+  (entry :binding 0 :texture-view fillMipsNpot__src1)
+  (entry :binding 1 :sampler fillMipsNpot__sampler))
+(bind-group :name fillMipsNpot__bg2 :layout fillMipsNpot__pipe :group 0
+  (entry :binding 0 :texture-view fillMipsNpot__src2)
+  (entry :binding 1 :sampler fillMipsNpot__sampler))
+(bind-group :name fillMipsNpot__bg3 :layout fillMipsNpot__pipe :group 0
+  (entry :binding 0 :texture-view fillMipsNpot__src3)
+  (entry :binding 1 :sampler fillMipsNpot__sampler))
+
+(render-pass :name fillMipsNpot__pass1 :pipeline fillMipsNpot__pipe
+  :bind-groups [fillMipsNpot__bg1]
+  (color-attachment :view fillMipsNpot__dst1
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(render-pass :name fillMipsNpot__pass2 :pipeline fillMipsNpot__pipe
+  :bind-groups [fillMipsNpot__bg2]
+  (color-attachment :view fillMipsNpot__dst2
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+(render-pass :name fillMipsNpot__pass3 :pipeline fillMipsNpot__pipe
+  :bind-groups [fillMipsNpot__bg3]
+  (color-attachment :view fillMipsNpot__dst3
+    :clear-value [0 0 0 1] :load-op clear :store-op store)
+  (draw :vertex-count 3))
+
+(step-group :name fillMipsNpot
+  :perform [fillMipsNpot__pass1 fillMipsNpot__pass2 fillMipsNpot__pass3])
+
+; ---- the frame: the two groups, in order --------------------------------
+
+(frame :name main :perform [fillMips fillMipsNpot])

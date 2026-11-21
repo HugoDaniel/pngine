@@ -1,0 +1,24 @@
+; Invalid: plan 09 — a view's :mip-level-count is a u32 the document owns, and
+; `base level + count` is compared against the texture's level count. With the
+; maximum u32 count the ADDITION itself overflowed and panicked in Debug/safe
+; builds before the range could be refused; the view is out of bounds either
+; way (base level 1 plus 2^32-1 levels of a 2-level texture), so it must be
+; the located range refusal.
+(shader-module :name code :code """
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+""")
+(texture :name depthTex :size [8 8] :format depth32float
+  :usage [render-attachment] :mip-level-count 2)
+(texture-view :name depthView :texture depthTex
+  :base-mip-level 1 :mip-level-count 4294967295)
+(render-pipeline :name pipe :layout auto
+  (vertex :module code :entry vs)
+  (depth-stencil :format depth32float :depth-write-enabled true :depth-compare less))
+(render-pass :name shadow :pipeline pipe
+  (depth-stencil-attachment :view depthView
+    :depth-clear-value 1.0 :depth-load-op clear :depth-store-op store)
+  (draw :vertex-count 3))
+(frame :name main :perform [shadow])

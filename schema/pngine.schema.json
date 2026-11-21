@@ -402,6 +402,36 @@
       "kind": "data-or-wasm-ref"
     },
     {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `copy-endpoints-section` head-set emitted as a closed `oneOf` — 2 of 2 head(s) resolve to slot-local forms and are emitted inline, the rest as `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin": "pngine",
+      "form": "copy-buffer-to-texture",
+      "kind": "copy-endpoints-section"
+    },
+    {
+      "code": "local_forms_emitted_inline",
+      "severity": "info",
+      "message": "positional slot on form `copy-buffer-to-texture` declares 2 local form(s) behind a 2-head head-set — emitted as a closed inline union with no global fallback branch; a head outside the set is `not_head_member`",
+      "plugin": "pngine",
+      "form": "copy-buffer-to-texture"
+    },
+    {
+      "code": "head_set_emitted_via_oneof_refs",
+      "severity": "info",
+      "message": "value-kind `copy-endpoints-section` head-set emitted as a closed `oneOf` — 2 of 2 head(s) resolve to slot-local forms and are emitted inline, the rest as `$ref`s into `#/$defs/form.<plugin>.<head>`",
+      "plugin": "pngine",
+      "form": "copy-texture-to-buffer",
+      "kind": "copy-endpoints-section"
+    },
+    {
+      "code": "local_forms_emitted_inline",
+      "severity": "info",
+      "message": "positional slot on form `copy-texture-to-buffer` declares 2 local form(s) behind a 2-head head-set — emitted as a closed inline union with no global fallback branch; a head outside the set is `not_head_member`",
+      "plugin": "pngine",
+      "form": "copy-texture-to-buffer"
+    },
+    {
       "code": "union_emitted_via_anyof",
       "severity": "info",
       "message": "value-kind `attachment-view` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`",
@@ -414,6 +444,20 @@
       "message": "value-kind `view-source` member-set carries rich metadata — emitted as per-member `oneOf` with title/description/deprecated annotations",
       "plugin": "pngine",
       "kind": "view-source"
+    },
+    {
+      "code": "cross_ref_unenforceable",
+      "severity": "warn",
+      "message": "value-kind `texture-view-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
+      "plugin": "pngine",
+      "kind": "texture-view-ref"
+    },
+    {
+      "code": "cross_ref_annotation_only",
+      "severity": "info",
+      "message": "value-kind `texture-view-ref` cross-ref annotation surfaces target-form=`texture-view` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "plugin": "pngine",
+      "kind": "texture-view-ref"
     },
     {
       "code": "head_set_emitted_via_oneof_refs",
@@ -528,20 +572,6 @@
       "message": "value-kind `sampler-ref` cross-ref annotation surfaces target-form=`sampler` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
       "plugin": "pngine",
       "kind": "sampler-ref"
-    },
-    {
-      "code": "cross_ref_unenforceable",
-      "severity": "warn",
-      "message": "value-kind `texture-view-ref` cross-ref: schema validates symbol shape only; closed-set membership requires SJON-aware validator",
-      "plugin": "pngine",
-      "kind": "texture-view-ref"
-    },
-    {
-      "code": "cross_ref_annotation_only",
-      "severity": "info",
-      "message": "value-kind `texture-view-ref` cross-ref annotation surfaces target-form=`texture-view` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
-      "plugin": "pngine",
-      "kind": "texture-view-ref"
     },
     {
       "code": "exclusive_group_unenforceable",
@@ -990,6 +1020,13 @@
     {
       "code": "union_emitted_via_anyof",
       "severity": "info",
+      "message": "value-kind `depth-attachment-view` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`",
+      "plugin": "pngine",
+      "kind": "depth-attachment-view"
+    },
+    {
+      "code": "union_emitted_via_anyof",
+      "severity": "info",
       "message": "value-kind `unorm` union_of emitted as JSON Schema `anyOf` over resolved alternatives; SJON's first-match dispatch order is preserved in `x-sjon-union-alternatives`",
       "plugin": "pngine",
       "kind": "unorm"
@@ -1060,7 +1097,7 @@
     {
       "code": "cross_ref_annotation_only",
       "severity": "info",
-      "message": "value-kind `frame-step` cross-ref annotation surfaces target-form=`render-pass | compute-pass | queue | step-group | pass-graph | draw-graph | select` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "message": "value-kind `frame-step` cross-ref annotation surfaces target-form=`render-pass | compute-pass | queue | step-group | pass-graph | draw-graph | select | mip-chain` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
       "plugin": "pngine",
       "kind": "frame-step"
     },
@@ -1088,7 +1125,7 @@
     {
       "code": "cross_ref_annotation_only",
       "severity": "info",
-      "message": "value-kind `control-ref` cross-ref annotation surfaces target-form=`control` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
+      "message": "value-kind `control-ref` cross-ref annotation surfaces target-form=`pngine/control` name-key=`name` acyclic=false scope-form=``; none are enforceable by JSON Schema",
       "plugin": "pngine",
       "kind": "control-ref"
     },
@@ -3898,6 +3935,318 @@
             },
             {
               "const": {
+                "$sym": "bc1-rgba-unorm"
+              },
+              "description": "BC1 4×4 RGB(A) unorm; 8 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc1-rgba-unorm-srgb"
+              },
+              "description": "BC1 4×4 RGB(A), sRGB-encoded; 8 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc2-rgba-unorm"
+              },
+              "description": "BC2 4×4 RGB(A) with explicit alpha; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc2-rgba-unorm-srgb"
+              },
+              "description": "BC2 4×4 RGB(A) with explicit alpha, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc3-rgba-unorm"
+              },
+              "description": "BC3 4×4 interpolated alpha; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc3-rgba-unorm-srgb"
+              },
+              "description": "BC3 4×4 interpolated alpha, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc4-r-unorm"
+              },
+              "description": "BC4 single-channel 4×4 unorm; 8 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc4-r-snorm"
+              },
+              "description": "BC4 single-channel 4×4 snorm; 8 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc5-rg-unorm"
+              },
+              "description": "BC5 two-channel 4×4 unorm; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc5-rg-snorm"
+              },
+              "description": "BC5 two-channel 4×4 snorm; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc6h-rgb-ufloat"
+              },
+              "description": "BC6H unsigned HDR RGB 4×4; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc6h-rgb-float"
+              },
+              "description": "BC6H signed HDR RGB 4×4; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc7-rgba-unorm"
+              },
+              "description": "BC7 high-quality RGBA 4×4 unorm; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc7-rgba-unorm-srgb"
+              },
+              "description": "BC7 high-quality RGBA 4×4, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgb8unorm"
+              },
+              "description": "ETC2 RGB 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgb8unorm-srgb"
+              },
+              "description": "ETC2 RGB 4×4, sRGB-encoded; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgb8a1unorm"
+              },
+              "description": "ETC2 RGB with 1-bit alpha, 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgb8a1unorm-srgb"
+              },
+              "description": "ETC2 RGB with 1-bit alpha, 4×4, sRGB-encoded; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgba8unorm"
+              },
+              "description": "ETC2 RGBA 4×4 unorm; 16 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgba8unorm-srgb"
+              },
+              "description": "ETC2 RGBA 4×4, sRGB-encoded; 16 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "eac-r11unorm"
+              },
+              "description": "EAC single-channel 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "eac-r11snorm"
+              },
+              "description": "EAC single-channel 4×4 snorm; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "eac-rg11unorm"
+              },
+              "description": "EAC two-channel 4×4 unorm; 16 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "eac-rg11snorm"
+              },
+              "description": "EAC two-channel 4×4 snorm; 16 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "astc-4x4-unorm"
+              },
+              "description": "ASTC 4×4 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-4x4-unorm-srgb"
+              },
+              "description": "ASTC 4×4 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-5x4-unorm"
+              },
+              "description": "ASTC 5×4 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-5x4-unorm-srgb"
+              },
+              "description": "ASTC 5×4 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-5x5-unorm"
+              },
+              "description": "ASTC 5×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-5x5-unorm-srgb"
+              },
+              "description": "ASTC 5×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-6x5-unorm"
+              },
+              "description": "ASTC 6×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-6x5-unorm-srgb"
+              },
+              "description": "ASTC 6×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-6x6-unorm"
+              },
+              "description": "ASTC 6×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-6x6-unorm-srgb"
+              },
+              "description": "ASTC 6×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x5-unorm"
+              },
+              "description": "ASTC 8×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x5-unorm-srgb"
+              },
+              "description": "ASTC 8×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x6-unorm"
+              },
+              "description": "ASTC 8×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x6-unorm-srgb"
+              },
+              "description": "ASTC 8×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x8-unorm"
+              },
+              "description": "ASTC 8×8 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x8-unorm-srgb"
+              },
+              "description": "ASTC 8×8 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x5-unorm"
+              },
+              "description": "ASTC 10×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x5-unorm-srgb"
+              },
+              "description": "ASTC 10×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x6-unorm"
+              },
+              "description": "ASTC 10×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x6-unorm-srgb"
+              },
+              "description": "ASTC 10×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x8-unorm"
+              },
+              "description": "ASTC 10×8 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x8-unorm-srgb"
+              },
+              "description": "ASTC 10×8 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x10-unorm"
+              },
+              "description": "ASTC 10×10 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x10-unorm-srgb"
+              },
+              "description": "ASTC 10×10 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-12x10-unorm"
+              },
+              "description": "ASTC 12×10 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-12x10-unorm-srgb"
+              },
+              "description": "ASTC 12×10 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-12x12-unorm"
+              },
+              "description": "ASTC 12×12 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-12x12-unorm-srgb"
+              },
+              "description": "ASTC 12×12 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
                 "$sym": "preferred-canvas-format"
               },
               "description": "Resolved at runtime to the platform's canvas format. Runtime-provided; there is no authored document declaration to navigate to."
@@ -4641,6 +4990,318 @@
             },
             {
               "const": {
+                "$sym": "bc1-rgba-unorm"
+              },
+              "description": "BC1 4×4 RGB(A) unorm; 8 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc1-rgba-unorm-srgb"
+              },
+              "description": "BC1 4×4 RGB(A), sRGB-encoded; 8 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc2-rgba-unorm"
+              },
+              "description": "BC2 4×4 RGB(A) with explicit alpha; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc2-rgba-unorm-srgb"
+              },
+              "description": "BC2 4×4 RGB(A) with explicit alpha, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc3-rgba-unorm"
+              },
+              "description": "BC3 4×4 interpolated alpha; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc3-rgba-unorm-srgb"
+              },
+              "description": "BC3 4×4 interpolated alpha, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc4-r-unorm"
+              },
+              "description": "BC4 single-channel 4×4 unorm; 8 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc4-r-snorm"
+              },
+              "description": "BC4 single-channel 4×4 snorm; 8 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc5-rg-unorm"
+              },
+              "description": "BC5 two-channel 4×4 unorm; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc5-rg-snorm"
+              },
+              "description": "BC5 two-channel 4×4 snorm; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc6h-rgb-ufloat"
+              },
+              "description": "BC6H unsigned HDR RGB 4×4; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc6h-rgb-float"
+              },
+              "description": "BC6H signed HDR RGB 4×4; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc7-rgba-unorm"
+              },
+              "description": "BC7 high-quality RGBA 4×4 unorm; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc7-rgba-unorm-srgb"
+              },
+              "description": "BC7 high-quality RGBA 4×4, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgb8unorm"
+              },
+              "description": "ETC2 RGB 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgb8unorm-srgb"
+              },
+              "description": "ETC2 RGB 4×4, sRGB-encoded; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgb8a1unorm"
+              },
+              "description": "ETC2 RGB with 1-bit alpha, 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgb8a1unorm-srgb"
+              },
+              "description": "ETC2 RGB with 1-bit alpha, 4×4, sRGB-encoded; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgba8unorm"
+              },
+              "description": "ETC2 RGBA 4×4 unorm; 16 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgba8unorm-srgb"
+              },
+              "description": "ETC2 RGBA 4×4, sRGB-encoded; 16 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "eac-r11unorm"
+              },
+              "description": "EAC single-channel 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "eac-r11snorm"
+              },
+              "description": "EAC single-channel 4×4 snorm; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "eac-rg11unorm"
+              },
+              "description": "EAC two-channel 4×4 unorm; 16 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "eac-rg11snorm"
+              },
+              "description": "EAC two-channel 4×4 snorm; 16 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "astc-4x4-unorm"
+              },
+              "description": "ASTC 4×4 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-4x4-unorm-srgb"
+              },
+              "description": "ASTC 4×4 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-5x4-unorm"
+              },
+              "description": "ASTC 5×4 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-5x4-unorm-srgb"
+              },
+              "description": "ASTC 5×4 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-5x5-unorm"
+              },
+              "description": "ASTC 5×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-5x5-unorm-srgb"
+              },
+              "description": "ASTC 5×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-6x5-unorm"
+              },
+              "description": "ASTC 6×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-6x5-unorm-srgb"
+              },
+              "description": "ASTC 6×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-6x6-unorm"
+              },
+              "description": "ASTC 6×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-6x6-unorm-srgb"
+              },
+              "description": "ASTC 6×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x5-unorm"
+              },
+              "description": "ASTC 8×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x5-unorm-srgb"
+              },
+              "description": "ASTC 8×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x6-unorm"
+              },
+              "description": "ASTC 8×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x6-unorm-srgb"
+              },
+              "description": "ASTC 8×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x8-unorm"
+              },
+              "description": "ASTC 8×8 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x8-unorm-srgb"
+              },
+              "description": "ASTC 8×8 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x5-unorm"
+              },
+              "description": "ASTC 10×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x5-unorm-srgb"
+              },
+              "description": "ASTC 10×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x6-unorm"
+              },
+              "description": "ASTC 10×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x6-unorm-srgb"
+              },
+              "description": "ASTC 10×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x8-unorm"
+              },
+              "description": "ASTC 10×8 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x8-unorm-srgb"
+              },
+              "description": "ASTC 10×8 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x10-unorm"
+              },
+              "description": "ASTC 10×10 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x10-unorm-srgb"
+              },
+              "description": "ASTC 10×10 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-12x10-unorm"
+              },
+              "description": "ASTC 12×10 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-12x10-unorm-srgb"
+              },
+              "description": "ASTC 12×10 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-12x12-unorm"
+              },
+              "description": "ASTC 12×12 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-12x12-unorm-srgb"
+              },
+              "description": "ASTC 12×12 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
                 "$sym": "preferred-canvas-format"
               },
               "description": "Resolved at runtime to the platform's canvas format. Runtime-provided; there is no authored document declaration to navigate to."
@@ -5019,7 +5680,7 @@
     },
     "form.pngine.queue": {
       "type": "object",
-      "description": "Queue actions (write-buffer, copy-buffer-to-buffer, copy-texture-to-texture,\n                  copy-external-image-to-texture, resolve-query-set) run in order by the\n                  frames that reference it.",
+      "description": "Queue actions (write-buffer, write-texture, copy-buffer-to-texture,\n                  copy-texture-to-buffer, copy-buffer-to-buffer, copy-texture-to-texture,\n                  copy-external-image-to-texture, resolve-query-set)\n                  run in order by the frames that reference it.",
       "properties": {
         "$form": {
           "const": "queue"
@@ -5047,6 +5708,15 @@
                 "$ref": "#/$defs/form.pngine.write-buffer"
               },
               {
+                "$ref": "#/$defs/form.pngine.write-texture"
+              },
+              {
+                "$ref": "#/$defs/form.pngine.copy-buffer-to-texture"
+              },
+              {
+                "$ref": "#/$defs/form.pngine.copy-texture-to-buffer"
+              },
+              {
                 "$ref": "#/$defs/form.pngine.copy-texture-to-texture"
               },
               {
@@ -5061,6 +5731,9 @@
             ],
             "x-sjon-head-set": [
               "write-buffer",
+              "write-texture",
+              "copy-buffer-to-texture",
+              "copy-texture-to-buffer",
               "copy-texture-to-texture",
               "copy-external-image-to-texture",
               "resolve-query-set",
@@ -5207,15 +5880,328 @@
       ],
       "additionalProperties": false
     },
-    "form.pngine.copy-texture-to-texture": {
+    "form.pngine.write-texture": {
       "type": "object",
-      "description": "Queue op: GPU texture→texture copy. context-current-texture names the canvas; otherwise a (texture …) name.",
+      "description": "Queue op: upload raw texels into a texture (GPUQueue.writeTexture). :texture and :data are required; :offset, :origin, :mip-level and :aspect carry WebGPU's defaults. An omitted :size means the remaining physical extent at :origin — a recorded PNGine deviation from the IDL's required size argument. Omitted :bytes-per-row / :rows-per-image stay absent on the wire; explicit zero is not omission.",
       "properties": {
         "$form": {
-          "const": "copy-texture-to-texture"
+          "const": "write-texture"
         },
         "$ns": {
           "const": "pngine"
+        },
+        "aspect": {
+          "description": "Destination aspect (GPUTexelCopyTextureInfo.aspect, default all). Depth/stencil formats require a single aspect and a full-subresource write.",
+          "oneOf": [
+            {
+              "const": {
+                "$sym": "all"
+              },
+              "description": "All available aspects (color, or depth+stencil)."
+            },
+            {
+              "const": {
+                "$sym": "stencil-only"
+              },
+              "description": "Only the stencil aspect of a depth-stencil texture."
+            },
+            {
+              "const": {
+                "$sym": "depth-only"
+              },
+              "description": "Only the depth aspect of a depth-stencil texture."
+            }
+          ],
+          "default": {
+            "$sym": "all"
+          }
+        },
+        "bytes-per-row": {
+          "description": "GPUTexelCopyBufferLayout.bytesPerRow — bytes per texel-block row. Optional because the IDL gives it no default; absent stays absent (explicit 0 is not omission).",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "x-sjon-gpu-repr": "u32"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "define",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "byte-count-value",
+            "define-ref"
+          ]
+        },
+        "data": {
+          "description": "Raw source bytes: a (data …) entry with a byte length. Image-MIME-wrapped data is refused; the bytes are never base64 on the wire.",
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false,
+          "x-sjon-cross-ref": {
+            "target-form": "data",
+            "name-key": "name",
+            "acyclic": false
+          }
+        },
+        "mip-level": {
+          "description": "Destination mip level (GPUTexelCopyTextureInfo.mipLevel, default 0); a u32 varint, no u8 ceiling.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "x-sjon-gpu-repr": "u32"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "define",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "subresource-index-value",
+            "define-ref"
+          ],
+          "default": 0
+        },
+        "offset": {
+          "description": "Byte offset into :data (GPUTexelCopyBufferLayout.offset, default 0). Unaligned values are legal: writeTexture has no 256-byte rule.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "x-sjon-gpu-repr": "u32"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "define",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "byte-count-value",
+            "define-ref"
+          ],
+          "default": 0
+        },
+        "origin": {
+          "description": "Destination origin [x y z] in texels (GPUTexelCopyTextureInfo.origin, IDL default {} = all zero); components default to 0. z selects the array layer or depth slice.",
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "x-sjon-gpu-repr": "u32"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "$sym": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "$sym"
+                ],
+                "additionalProperties": false,
+                "x-sjon-cross-ref": {
+                  "target-form": "define",
+                  "name-key": "name",
+                  "acyclic": false
+                }
+              }
+            ],
+            "x-sjon-union-alternatives": [
+              "u32-value",
+              "define-ref"
+            ]
+          },
+          "maxItems": 3
+        },
+        "rows-per-image": {
+          "description": "GPUTexelCopyBufferLayout.rowsPerImage — rows per texel image (array layer / depth slice). Optional because the IDL gives it no default; absent stays absent (explicit 0 is not omission).",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "x-sjon-gpu-repr": "u32"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "define",
+                "name-key": "name",
+                "acyclic": false
+              }
+            }
+          ],
+          "x-sjon-union-alternatives": [
+            "byte-count-value",
+            "define-ref"
+          ]
+        },
+        "size": {
+          "description": "GPUExtent3D size to write (1–3 u32s). Optional only through the recorded deviation: absent means the remaining physical extent at :origin, whereas the IDL requires the size argument. Present, absent dimensions default to 1.",
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "x-sjon-gpu-repr": "u32"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "$sym": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "$sym"
+                ],
+                "additionalProperties": false,
+                "x-sjon-cross-ref": {
+                  "target-form": "define",
+                  "name-key": "name",
+                  "acyclic": false
+                }
+              }
+            ],
+            "x-sjon-union-alternatives": [
+              "u32-value",
+              "define-ref"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 3
+        },
+        "texture": {
+          "description": "Destination texture (needs copy-dst usage, one sample, and a non-pooled id).",
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false,
+          "x-sjon-cross-ref": {
+            "target-form": "texture",
+            "name-key": "name",
+            "acyclic": false
+          }
+        }
+      },
+      "required": [
+        "$form",
+        "texture",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "form.pngine.copy-buffer-to-texture": {
+      "type": "object",
+      "description": "Queue op: copy from a buffer into a texture subresource (GPUCommandEncoder.copyBufferToTexture). The source is a GPUTexelCopyBufferInfo and the destination a GPUTexelCopyTextureInfo; :size is the method's copySize. A supplied source :bytes-per-row must be a multiple of 256, and :offset a multiple of the texel block copy footprint (4 for a depth-stencil destination).",
+      "properties": {
+        "$form": {
+          "const": "copy-buffer-to-texture"
+        },
+        "$ns": {
+          "const": "pngine"
+        },
+        "size": {
+          "description": "GPUCommandEncoder.copyBufferToTexture's copySize (1–3 u32s). Optional only through the recorded deviation: absent means the remaining physical extent at the destination origin.",
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "x-sjon-gpu-repr": "u32"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "$sym": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "$sym"
+                ],
+                "additionalProperties": false,
+                "x-sjon-cross-ref": {
+                  "target-form": "define",
+                  "name-key": "name",
+                  "acyclic": false
+                }
+              }
+            ],
+            "x-sjon-union-alternatives": [
+              "u32-value",
+              "define-ref"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 3
         },
         "$children": {
           "type": "array",
@@ -5223,7 +6209,7 @@
             "oneOf": [
               {
                 "type": "object",
-                "description": "Copy source (GPUTexelCopyTextureInfo).",
+                "description": "Buffer source (GPUTexelCopyBufferInfo with its GPUTexelCopyBufferLayout).",
                 "properties": {
                   "$form": {
                     "const": "source"
@@ -5231,8 +6217,815 @@
                   "$ns": {
                     "const": "pngine"
                   },
+                  "buffer": {
+                    "description": "Source buffer name; needs copy-src usage.",
+                    "type": "object",
+                    "properties": {
+                      "$sym": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "$sym"
+                    ],
+                    "additionalProperties": false,
+                    "x-sjon-cross-ref": {
+                      "target-form": "buffer",
+                      "name-key": "name",
+                      "acyclic": false
+                    }
+                  },
+                  "bytes-per-row": {
+                    "description": "GPUTexelCopyBufferLayout.bytesPerRow — bytes between texel-block rows. Optional in the IDL (no default); a supplied value must be a multiple of 256, and WebGPU requires it when the copy spans more than one block row or image.",
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "x-sjon-gpu-repr": "u32"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "$sym": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "$sym"
+                        ],
+                        "additionalProperties": false,
+                        "x-sjon-cross-ref": {
+                          "target-form": "define",
+                          "name-key": "name",
+                          "acyclic": false
+                        }
+                      }
+                    ],
+                    "x-sjon-union-alternatives": [
+                      "byte-count-value",
+                      "define-ref"
+                    ]
+                  },
+                  "offset": {
+                    "description": "Byte offset into the source buffer (GPUTexelCopyBufferLayout.offset, default 0). Must be a multiple of the texel block copy footprint, or 4 for a depth-stencil endpoint.",
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "x-sjon-gpu-repr": "u32"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "$sym": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "$sym"
+                        ],
+                        "additionalProperties": false,
+                        "x-sjon-cross-ref": {
+                          "target-form": "define",
+                          "name-key": "name",
+                          "acyclic": false
+                        }
+                      }
+                    ],
+                    "x-sjon-union-alternatives": [
+                      "byte-count-value",
+                      "define-ref"
+                    ],
+                    "default": 0
+                  },
+                  "rows-per-image": {
+                    "description": "GPUTexelCopyBufferLayout.rowsPerImage — rows per texel image. Optional in the IDL (no default); WebGPU requires it when the copy spans more than one image.",
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "x-sjon-gpu-repr": "u32"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "$sym": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "$sym"
+                        ],
+                        "additionalProperties": false,
+                        "x-sjon-cross-ref": {
+                          "target-form": "define",
+                          "name-key": "name",
+                          "acyclic": false
+                        }
+                      }
+                    ],
+                    "x-sjon-union-alternatives": [
+                      "byte-count-value",
+                      "define-ref"
+                    ]
+                  }
+                },
+                "required": [
+                  "$form",
+                  "buffer"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "description": "Texture destination (GPUTexelCopyTextureInfo).",
+                "properties": {
+                  "$form": {
+                    "const": "destination"
+                  },
+                  "$ns": {
+                    "const": "pngine"
+                  },
+                  "aspect": {
+                    "description": "Destination aspect (GPUTexelCopyTextureInfo.aspect, default all). Depth/stencil formats require a single aspect and a full-subresource copy.",
+                    "oneOf": [
+                      {
+                        "const": {
+                          "$sym": "all"
+                        },
+                        "description": "All available aspects (color, or depth+stencil)."
+                      },
+                      {
+                        "const": {
+                          "$sym": "stencil-only"
+                        },
+                        "description": "Only the stencil aspect of a depth-stencil texture."
+                      },
+                      {
+                        "const": {
+                          "$sym": "depth-only"
+                        },
+                        "description": "Only the depth aspect of a depth-stencil texture."
+                      }
+                    ],
+                    "default": {
+                      "$sym": "all"
+                    }
+                  },
+                  "mip-level": {
+                    "description": "Destination mip level (GPUTexelCopyTextureInfo.mipLevel, default 0).",
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "x-sjon-gpu-repr": "u32"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "$sym": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "$sym"
+                        ],
+                        "additionalProperties": false,
+                        "x-sjon-cross-ref": {
+                          "target-form": "define",
+                          "name-key": "name",
+                          "acyclic": false
+                        }
+                      }
+                    ],
+                    "x-sjon-union-alternatives": [
+                      "subresource-index-value",
+                      "define-ref"
+                    ],
+                    "default": 0
+                  },
+                  "origin": {
+                    "description": "Destination origin [x y z] in texels (GPUTexelCopyTextureInfo.origin, IDL default {} = all zero); z selects the array layer or depth slice.",
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "x-sjon-gpu-repr": "u32"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "$sym": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "$sym"
+                          ],
+                          "additionalProperties": false,
+                          "x-sjon-cross-ref": {
+                            "target-form": "define",
+                            "name-key": "name",
+                            "acyclic": false
+                          }
+                        }
+                      ],
+                      "x-sjon-union-alternatives": [
+                        "u32-value",
+                        "define-ref"
+                      ]
+                    },
+                    "maxItems": 3
+                  },
                   "texture": {
-                    "description": "Source texture: context-current-texture or a (texture …) name.",
+                    "description": "Destination texture name; needs copy-dst usage, one sample, and a non-pooled id.",
+                    "type": "object",
+                    "properties": {
+                      "$sym": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "$sym"
+                    ],
+                    "additionalProperties": false,
+                    "x-sjon-cross-ref": {
+                      "target-form": "texture",
+                      "name-key": "name",
+                      "acyclic": false
+                    }
+                  }
+                },
+                "required": [
+                  "$form",
+                  "texture"
+                ],
+                "additionalProperties": false
+              }
+            ],
+            "x-sjon-head-set": [
+              "source",
+              "destination"
+            ],
+            "x-sjon-local-forms": [
+              "source",
+              "destination"
+            ]
+          },
+          "allOf": [
+            {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "$form": {
+                    "const": "source"
+                  }
+                },
+                "required": [
+                  "$form"
+                ]
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "$form": {
+                    "const": "destination"
+                  }
+                },
+                "required": [
+                  "$form"
+                ]
+              },
+              "minContains": 1,
+              "maxContains": 1
+            }
+          ]
+        }
+      },
+      "required": [
+        "$form",
+        "$children"
+      ],
+      "additionalProperties": false
+    },
+    "form.pngine.copy-texture-to-buffer": {
+      "type": "object",
+      "description": "Queue op: copy a texture subresource into a buffer (GPUCommandEncoder.copyTextureToBuffer), the byte-preserving readback path. The source is a GPUTexelCopyTextureInfo and the destination a GPUTexelCopyBufferInfo; :size is the method's copySize. A supplied destination :bytes-per-row must be a multiple of 256, and :offset a multiple of the texel block copy footprint (4 for a depth-stencil source).",
+      "properties": {
+        "$form": {
+          "const": "copy-texture-to-buffer"
+        },
+        "$ns": {
+          "const": "pngine"
+        },
+        "size": {
+          "description": "GPUCommandEncoder.copyTextureToBuffer's copySize (1–3 u32s). Optional only through the recorded deviation: absent means the remaining physical extent at the source origin.",
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "x-sjon-gpu-repr": "u32"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "$sym": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "$sym"
+                ],
+                "additionalProperties": false,
+                "x-sjon-cross-ref": {
+                  "target-form": "define",
+                  "name-key": "name",
+                  "acyclic": false
+                }
+              }
+            ],
+            "x-sjon-union-alternatives": [
+              "u32-value",
+              "define-ref"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 3
+        },
+        "$children": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "description": "Texture source (GPUTexelCopyTextureInfo).",
+                "properties": {
+                  "$form": {
+                    "const": "source"
+                  },
+                  "$ns": {
+                    "const": "pngine"
+                  },
+                  "aspect": {
+                    "description": "Source aspect (GPUTexelCopyTextureInfo.aspect, default all). Depth/stencil formats require a single aspect and a full-subresource copy.",
+                    "oneOf": [
+                      {
+                        "const": {
+                          "$sym": "all"
+                        },
+                        "description": "All available aspects (color, or depth+stencil)."
+                      },
+                      {
+                        "const": {
+                          "$sym": "stencil-only"
+                        },
+                        "description": "Only the stencil aspect of a depth-stencil texture."
+                      },
+                      {
+                        "const": {
+                          "$sym": "depth-only"
+                        },
+                        "description": "Only the depth aspect of a depth-stencil texture."
+                      }
+                    ],
+                    "default": {
+                      "$sym": "all"
+                    }
+                  },
+                  "mip-level": {
+                    "description": "Source mip level (GPUTexelCopyTextureInfo.mipLevel, default 0).",
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "x-sjon-gpu-repr": "u32"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "$sym": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "$sym"
+                        ],
+                        "additionalProperties": false,
+                        "x-sjon-cross-ref": {
+                          "target-form": "define",
+                          "name-key": "name",
+                          "acyclic": false
+                        }
+                      }
+                    ],
+                    "x-sjon-union-alternatives": [
+                      "subresource-index-value",
+                      "define-ref"
+                    ],
+                    "default": 0
+                  },
+                  "origin": {
+                    "description": "Source origin [x y z] in texels (GPUTexelCopyTextureInfo.origin, IDL default {} = all zero); z selects the array layer or depth slice.",
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "x-sjon-gpu-repr": "u32"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "$sym": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "$sym"
+                          ],
+                          "additionalProperties": false,
+                          "x-sjon-cross-ref": {
+                            "target-form": "define",
+                            "name-key": "name",
+                            "acyclic": false
+                          }
+                        }
+                      ],
+                      "x-sjon-union-alternatives": [
+                        "u32-value",
+                        "define-ref"
+                      ]
+                    },
+                    "maxItems": 3
+                  },
+                  "texture": {
+                    "description": "Source texture name; needs copy-src usage.",
+                    "type": "object",
+                    "properties": {
+                      "$sym": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "$sym"
+                    ],
+                    "additionalProperties": false,
+                    "x-sjon-cross-ref": {
+                      "target-form": "texture",
+                      "name-key": "name",
+                      "acyclic": false
+                    }
+                  }
+                },
+                "required": [
+                  "$form",
+                  "texture"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "description": "Buffer destination (GPUTexelCopyBufferInfo with its GPUTexelCopyBufferLayout).",
+                "properties": {
+                  "$form": {
+                    "const": "destination"
+                  },
+                  "$ns": {
+                    "const": "pngine"
+                  },
+                  "buffer": {
+                    "description": "Destination buffer name; needs copy-dst usage, and map-read when the bytes are read back to the host.",
+                    "type": "object",
+                    "properties": {
+                      "$sym": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "$sym"
+                    ],
+                    "additionalProperties": false,
+                    "x-sjon-cross-ref": {
+                      "target-form": "buffer",
+                      "name-key": "name",
+                      "acyclic": false
+                    }
+                  },
+                  "bytes-per-row": {
+                    "description": "GPUTexelCopyBufferLayout.bytesPerRow — bytes between texel-block rows. Optional in the IDL (no default); a supplied value must be a multiple of 256, and WebGPU requires it when the copy spans more than one block row or image.",
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "x-sjon-gpu-repr": "u32"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "$sym": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "$sym"
+                        ],
+                        "additionalProperties": false,
+                        "x-sjon-cross-ref": {
+                          "target-form": "define",
+                          "name-key": "name",
+                          "acyclic": false
+                        }
+                      }
+                    ],
+                    "x-sjon-union-alternatives": [
+                      "byte-count-value",
+                      "define-ref"
+                    ]
+                  },
+                  "offset": {
+                    "description": "Byte offset into the destination buffer (GPUTexelCopyBufferLayout.offset, default 0). Must be a multiple of the texel block copy footprint, or 4 for a depth-stencil endpoint.",
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "x-sjon-gpu-repr": "u32"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "$sym": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "$sym"
+                        ],
+                        "additionalProperties": false,
+                        "x-sjon-cross-ref": {
+                          "target-form": "define",
+                          "name-key": "name",
+                          "acyclic": false
+                        }
+                      }
+                    ],
+                    "x-sjon-union-alternatives": [
+                      "byte-count-value",
+                      "define-ref"
+                    ],
+                    "default": 0
+                  },
+                  "rows-per-image": {
+                    "description": "GPUTexelCopyBufferLayout.rowsPerImage — rows per texel image. Optional in the IDL (no default); WebGPU requires it when the copy spans more than one image.",
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "x-sjon-gpu-repr": "u32"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "$sym": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "$sym"
+                        ],
+                        "additionalProperties": false,
+                        "x-sjon-cross-ref": {
+                          "target-form": "define",
+                          "name-key": "name",
+                          "acyclic": false
+                        }
+                      }
+                    ],
+                    "x-sjon-union-alternatives": [
+                      "byte-count-value",
+                      "define-ref"
+                    ]
+                  }
+                },
+                "required": [
+                  "$form",
+                  "buffer"
+                ],
+                "additionalProperties": false
+              }
+            ],
+            "x-sjon-head-set": [
+              "source",
+              "destination"
+            ],
+            "x-sjon-local-forms": [
+              "source",
+              "destination"
+            ]
+          },
+          "allOf": [
+            {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "$form": {
+                    "const": "source"
+                  }
+                },
+                "required": [
+                  "$form"
+                ]
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "$form": {
+                    "const": "destination"
+                  }
+                },
+                "required": [
+                  "$form"
+                ]
+              },
+              "minContains": 1,
+              "maxContains": 1
+            }
+          ]
+        }
+      },
+      "required": [
+        "$form",
+        "$children"
+      ],
+      "additionalProperties": false
+    },
+    "form.pngine.copy-texture-to-texture": {
+      "type": "object",
+      "description": "Queue op: GPU texture→texture copy. With no :mip-level, :origin or :aspect on either endpoint and no :size, this is the legacy whole-texture copy (PNGB 0x23) byte-identically; any such key selects the subresource operation. context-current-texture names the canvas; otherwise a (texture …) name.",
+      "properties": {
+        "$form": {
+          "const": "copy-texture-to-texture"
+        },
+        "$ns": {
+          "const": "pngine"
+        },
+        "size": {
+          "description": "GPUCommandEncoder.copyTextureToTexture's copySize (1–3 u32s). Optional only through the recorded deviation: absent means the remaining physical SOURCE extent at the source :origin and :mip-level; the destination must contain the same extent at its origin. Presence selects the subresource operation.",
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "x-sjon-gpu-repr": "u32"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "$sym": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "$sym"
+                ],
+                "additionalProperties": false,
+                "x-sjon-cross-ref": {
+                  "target-form": "define",
+                  "name-key": "name",
+                  "acyclic": false
+                }
+              }
+            ],
+            "x-sjon-union-alternatives": [
+              "u32-value",
+              "define-ref"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 3
+        },
+        "$children": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "description": "Copy source (GPUTexelCopyTextureInfo). With no subresource key and no outer :size it is the legacy whole-texture source.",
+                "properties": {
+                  "$form": {
+                    "const": "source"
+                  },
+                  "$ns": {
+                    "const": "pngine"
+                  },
+                  "aspect": {
+                    "description": "Source aspect (GPUTexelCopyTextureInfo.aspect, default all). A depth-stencil texture→texture copy requires all on BOTH endpoints — the opposite of the write path's single-aspect rule. Its presence selects the subresource operation.",
+                    "oneOf": [
+                      {
+                        "const": {
+                          "$sym": "all"
+                        },
+                        "description": "All available aspects (color, or depth+stencil)."
+                      },
+                      {
+                        "const": {
+                          "$sym": "stencil-only"
+                        },
+                        "description": "Only the stencil aspect of a depth-stencil texture."
+                      },
+                      {
+                        "const": {
+                          "$sym": "depth-only"
+                        },
+                        "description": "Only the depth aspect of a depth-stencil texture."
+                      }
+                    ],
+                    "default": {
+                      "$sym": "all"
+                    }
+                  },
+                  "mip-level": {
+                    "description": "Source mip level (GPUTexelCopyTextureInfo.mipLevel, default 0). Authoring the key selects the subresource operation; omitting it leaves the legacy route available.",
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "x-sjon-gpu-repr": "u32"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "$sym": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "$sym"
+                        ],
+                        "additionalProperties": false,
+                        "x-sjon-cross-ref": {
+                          "target-form": "define",
+                          "name-key": "name",
+                          "acyclic": false
+                        }
+                      }
+                    ],
+                    "x-sjon-union-alternatives": [
+                      "subresource-index-value",
+                      "define-ref"
+                    ],
+                    "default": 0
+                  },
+                  "origin": {
+                    "description": "Source origin [x y z] in texels (GPUTexelCopyTextureInfo.origin, IDL default {} = all zero); z selects the array layer or depth slice. Its presence selects the subresource operation.",
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "x-sjon-gpu-repr": "u32"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "$sym": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "$sym"
+                          ],
+                          "additionalProperties": false,
+                          "x-sjon-cross-ref": {
+                            "target-form": "define",
+                            "name-key": "name",
+                            "acyclic": false
+                          }
+                        }
+                      ],
+                      "x-sjon-union-alternatives": [
+                        "u32-value",
+                        "define-ref"
+                      ]
+                    },
+                    "maxItems": 3
+                  },
+                  "texture": {
+                    "description": "Source texture: context-current-texture or a (texture …) name; needs copy-src usage.",
                     "anyOf": [
                       {
                         "oneOf": [
@@ -5260,11 +7053,29 @@
                           "name-key": "name",
                           "acyclic": false
                         }
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "$sym": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "$sym"
+                        ],
+                        "additionalProperties": false,
+                        "x-sjon-cross-ref": {
+                          "target-form": "texture-view",
+                          "name-key": "name",
+                          "acyclic": false
+                        }
                       }
                     ],
                     "x-sjon-union-alternatives": [
                       "view-source",
-                      "texture-ref"
+                      "texture-ref",
+                      "texture-view-ref"
                     ]
                   }
                 },
@@ -5276,7 +7087,7 @@
               },
               {
                 "type": "object",
-                "description": "Copy destination (GPUTexelCopyTextureInfo).",
+                "description": "Copy destination (GPUTexelCopyTextureInfo). With no subresource key and no outer :size it is the legacy whole-texture destination.",
                 "properties": {
                   "$form": {
                     "const": "destination"
@@ -5284,8 +7095,101 @@
                   "$ns": {
                     "const": "pngine"
                   },
+                  "aspect": {
+                    "description": "Destination aspect (GPUTexelCopyTextureInfo.aspect, default all). A depth-stencil texture→texture copy requires all on BOTH endpoints. Its presence selects the subresource operation.",
+                    "oneOf": [
+                      {
+                        "const": {
+                          "$sym": "all"
+                        },
+                        "description": "All available aspects (color, or depth+stencil)."
+                      },
+                      {
+                        "const": {
+                          "$sym": "stencil-only"
+                        },
+                        "description": "Only the stencil aspect of a depth-stencil texture."
+                      },
+                      {
+                        "const": {
+                          "$sym": "depth-only"
+                        },
+                        "description": "Only the depth aspect of a depth-stencil texture."
+                      }
+                    ],
+                    "default": {
+                      "$sym": "all"
+                    }
+                  },
+                  "mip-level": {
+                    "description": "Destination mip level (GPUTexelCopyTextureInfo.mipLevel, default 0). Its presence selects the subresource operation.",
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "x-sjon-gpu-repr": "u32"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "$sym": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "$sym"
+                        ],
+                        "additionalProperties": false,
+                        "x-sjon-cross-ref": {
+                          "target-form": "define",
+                          "name-key": "name",
+                          "acyclic": false
+                        }
+                      }
+                    ],
+                    "x-sjon-union-alternatives": [
+                      "subresource-index-value",
+                      "define-ref"
+                    ],
+                    "default": 0
+                  },
+                  "origin": {
+                    "description": "Destination origin [x y z] in texels (GPUTexelCopyTextureInfo.origin, IDL default {} = all zero); z selects the array layer or depth slice. Its presence selects the subresource operation.",
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "x-sjon-gpu-repr": "u32"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "$sym": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "$sym"
+                          ],
+                          "additionalProperties": false,
+                          "x-sjon-cross-ref": {
+                            "target-form": "define",
+                            "name-key": "name",
+                            "acyclic": false
+                          }
+                        }
+                      ],
+                      "x-sjon-union-alternatives": [
+                        "u32-value",
+                        "define-ref"
+                      ]
+                    },
+                    "maxItems": 3
+                  },
                   "texture": {
-                    "description": "Destination texture: context-current-texture or a (texture …) name.",
+                    "description": "Destination texture: context-current-texture or a (texture …) name; needs copy-dst usage and a non-pooled id on the subresource path.",
                     "anyOf": [
                       {
                         "oneOf": [
@@ -5313,11 +7217,29 @@
                           "name-key": "name",
                           "acyclic": false
                         }
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "$sym": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "$sym"
+                        ],
+                        "additionalProperties": false,
+                        "x-sjon-cross-ref": {
+                          "target-form": "texture-view",
+                          "name-key": "name",
+                          "acyclic": false
+                        }
                       }
                     ],
                     "x-sjon-union-alternatives": [
                       "view-source",
-                      "texture-ref"
+                      "texture-ref",
+                      "texture-view-ref"
                     ]
                   }
                 },
@@ -6994,6 +8916,318 @@
                                     "$sym": "depth32float-stencil8"
                                   },
                                   "description": "32-bit float depth plus 8-bit stencil; needs the depth32float-stencil8 device feature."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "bc1-rgba-unorm"
+                                  },
+                                  "description": "BC1 4×4 RGB(A) unorm; 8 bytes per block. Needs texture-compression-bc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "bc1-rgba-unorm-srgb"
+                                  },
+                                  "description": "BC1 4×4 RGB(A), sRGB-encoded; 8 bytes per block. Needs texture-compression-bc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "bc2-rgba-unorm"
+                                  },
+                                  "description": "BC2 4×4 RGB(A) with explicit alpha; 16 bytes per block. Needs texture-compression-bc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "bc2-rgba-unorm-srgb"
+                                  },
+                                  "description": "BC2 4×4 RGB(A) with explicit alpha, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "bc3-rgba-unorm"
+                                  },
+                                  "description": "BC3 4×4 interpolated alpha; 16 bytes per block. Needs texture-compression-bc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "bc3-rgba-unorm-srgb"
+                                  },
+                                  "description": "BC3 4×4 interpolated alpha, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "bc4-r-unorm"
+                                  },
+                                  "description": "BC4 single-channel 4×4 unorm; 8 bytes per block. Needs texture-compression-bc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "bc4-r-snorm"
+                                  },
+                                  "description": "BC4 single-channel 4×4 snorm; 8 bytes per block. Needs texture-compression-bc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "bc5-rg-unorm"
+                                  },
+                                  "description": "BC5 two-channel 4×4 unorm; 16 bytes per block. Needs texture-compression-bc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "bc5-rg-snorm"
+                                  },
+                                  "description": "BC5 two-channel 4×4 snorm; 16 bytes per block. Needs texture-compression-bc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "bc6h-rgb-ufloat"
+                                  },
+                                  "description": "BC6H unsigned HDR RGB 4×4; 16 bytes per block. Needs texture-compression-bc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "bc6h-rgb-float"
+                                  },
+                                  "description": "BC6H signed HDR RGB 4×4; 16 bytes per block. Needs texture-compression-bc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "bc7-rgba-unorm"
+                                  },
+                                  "description": "BC7 high-quality RGBA 4×4 unorm; 16 bytes per block. Needs texture-compression-bc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "bc7-rgba-unorm-srgb"
+                                  },
+                                  "description": "BC7 high-quality RGBA 4×4, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "etc2-rgb8unorm"
+                                  },
+                                  "description": "ETC2 RGB 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "etc2-rgb8unorm-srgb"
+                                  },
+                                  "description": "ETC2 RGB 4×4, sRGB-encoded; 8 bytes per block. Needs texture-compression-etc2."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "etc2-rgb8a1unorm"
+                                  },
+                                  "description": "ETC2 RGB with 1-bit alpha, 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "etc2-rgb8a1unorm-srgb"
+                                  },
+                                  "description": "ETC2 RGB with 1-bit alpha, 4×4, sRGB-encoded; 8 bytes per block. Needs texture-compression-etc2."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "etc2-rgba8unorm"
+                                  },
+                                  "description": "ETC2 RGBA 4×4 unorm; 16 bytes per block. Needs texture-compression-etc2."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "etc2-rgba8unorm-srgb"
+                                  },
+                                  "description": "ETC2 RGBA 4×4, sRGB-encoded; 16 bytes per block. Needs texture-compression-etc2."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "eac-r11unorm"
+                                  },
+                                  "description": "EAC single-channel 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "eac-r11snorm"
+                                  },
+                                  "description": "EAC single-channel 4×4 snorm; 8 bytes per block. Needs texture-compression-etc2."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "eac-rg11unorm"
+                                  },
+                                  "description": "EAC two-channel 4×4 unorm; 16 bytes per block. Needs texture-compression-etc2."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "eac-rg11snorm"
+                                  },
+                                  "description": "EAC two-channel 4×4 snorm; 16 bytes per block. Needs texture-compression-etc2."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-4x4-unorm"
+                                  },
+                                  "description": "ASTC 4×4 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-4x4-unorm-srgb"
+                                  },
+                                  "description": "ASTC 4×4 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-5x4-unorm"
+                                  },
+                                  "description": "ASTC 5×4 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-5x4-unorm-srgb"
+                                  },
+                                  "description": "ASTC 5×4 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-5x5-unorm"
+                                  },
+                                  "description": "ASTC 5×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-5x5-unorm-srgb"
+                                  },
+                                  "description": "ASTC 5×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-6x5-unorm"
+                                  },
+                                  "description": "ASTC 6×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-6x5-unorm-srgb"
+                                  },
+                                  "description": "ASTC 6×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-6x6-unorm"
+                                  },
+                                  "description": "ASTC 6×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-6x6-unorm-srgb"
+                                  },
+                                  "description": "ASTC 6×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-8x5-unorm"
+                                  },
+                                  "description": "ASTC 8×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-8x5-unorm-srgb"
+                                  },
+                                  "description": "ASTC 8×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-8x6-unorm"
+                                  },
+                                  "description": "ASTC 8×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-8x6-unorm-srgb"
+                                  },
+                                  "description": "ASTC 8×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-8x8-unorm"
+                                  },
+                                  "description": "ASTC 8×8 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-8x8-unorm-srgb"
+                                  },
+                                  "description": "ASTC 8×8 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-10x5-unorm"
+                                  },
+                                  "description": "ASTC 10×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-10x5-unorm-srgb"
+                                  },
+                                  "description": "ASTC 10×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-10x6-unorm"
+                                  },
+                                  "description": "ASTC 10×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-10x6-unorm-srgb"
+                                  },
+                                  "description": "ASTC 10×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-10x8-unorm"
+                                  },
+                                  "description": "ASTC 10×8 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-10x8-unorm-srgb"
+                                  },
+                                  "description": "ASTC 10×8 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-10x10-unorm"
+                                  },
+                                  "description": "ASTC 10×10 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-10x10-unorm-srgb"
+                                  },
+                                  "description": "ASTC 10×10 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-12x10-unorm"
+                                  },
+                                  "description": "ASTC 12×10 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-12x10-unorm-srgb"
+                                  },
+                                  "description": "ASTC 12×10 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-12x12-unorm"
+                                  },
+                                  "description": "ASTC 12×12 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+                                },
+                                {
+                                  "const": {
+                                    "$sym": "astc-12x12-unorm-srgb"
+                                  },
+                                  "description": "ASTC 12×12 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
                                 },
                                 {
                                   "const": {
@@ -8677,6 +10911,318 @@
                 "$sym": "depth32float-stencil8"
               },
               "description": "32-bit float depth plus 8-bit stencil; needs the depth32float-stencil8 device feature."
+            },
+            {
+              "const": {
+                "$sym": "bc1-rgba-unorm"
+              },
+              "description": "BC1 4×4 RGB(A) unorm; 8 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc1-rgba-unorm-srgb"
+              },
+              "description": "BC1 4×4 RGB(A), sRGB-encoded; 8 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc2-rgba-unorm"
+              },
+              "description": "BC2 4×4 RGB(A) with explicit alpha; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc2-rgba-unorm-srgb"
+              },
+              "description": "BC2 4×4 RGB(A) with explicit alpha, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc3-rgba-unorm"
+              },
+              "description": "BC3 4×4 interpolated alpha; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc3-rgba-unorm-srgb"
+              },
+              "description": "BC3 4×4 interpolated alpha, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc4-r-unorm"
+              },
+              "description": "BC4 single-channel 4×4 unorm; 8 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc4-r-snorm"
+              },
+              "description": "BC4 single-channel 4×4 snorm; 8 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc5-rg-unorm"
+              },
+              "description": "BC5 two-channel 4×4 unorm; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc5-rg-snorm"
+              },
+              "description": "BC5 two-channel 4×4 snorm; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc6h-rgb-ufloat"
+              },
+              "description": "BC6H unsigned HDR RGB 4×4; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc6h-rgb-float"
+              },
+              "description": "BC6H signed HDR RGB 4×4; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc7-rgba-unorm"
+              },
+              "description": "BC7 high-quality RGBA 4×4 unorm; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc7-rgba-unorm-srgb"
+              },
+              "description": "BC7 high-quality RGBA 4×4, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgb8unorm"
+              },
+              "description": "ETC2 RGB 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgb8unorm-srgb"
+              },
+              "description": "ETC2 RGB 4×4, sRGB-encoded; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgb8a1unorm"
+              },
+              "description": "ETC2 RGB with 1-bit alpha, 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgb8a1unorm-srgb"
+              },
+              "description": "ETC2 RGB with 1-bit alpha, 4×4, sRGB-encoded; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgba8unorm"
+              },
+              "description": "ETC2 RGBA 4×4 unorm; 16 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgba8unorm-srgb"
+              },
+              "description": "ETC2 RGBA 4×4, sRGB-encoded; 16 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "eac-r11unorm"
+              },
+              "description": "EAC single-channel 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "eac-r11snorm"
+              },
+              "description": "EAC single-channel 4×4 snorm; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "eac-rg11unorm"
+              },
+              "description": "EAC two-channel 4×4 unorm; 16 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "eac-rg11snorm"
+              },
+              "description": "EAC two-channel 4×4 snorm; 16 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "astc-4x4-unorm"
+              },
+              "description": "ASTC 4×4 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-4x4-unorm-srgb"
+              },
+              "description": "ASTC 4×4 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-5x4-unorm"
+              },
+              "description": "ASTC 5×4 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-5x4-unorm-srgb"
+              },
+              "description": "ASTC 5×4 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-5x5-unorm"
+              },
+              "description": "ASTC 5×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-5x5-unorm-srgb"
+              },
+              "description": "ASTC 5×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-6x5-unorm"
+              },
+              "description": "ASTC 6×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-6x5-unorm-srgb"
+              },
+              "description": "ASTC 6×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-6x6-unorm"
+              },
+              "description": "ASTC 6×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-6x6-unorm-srgb"
+              },
+              "description": "ASTC 6×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x5-unorm"
+              },
+              "description": "ASTC 8×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x5-unorm-srgb"
+              },
+              "description": "ASTC 8×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x6-unorm"
+              },
+              "description": "ASTC 8×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x6-unorm-srgb"
+              },
+              "description": "ASTC 8×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x8-unorm"
+              },
+              "description": "ASTC 8×8 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x8-unorm-srgb"
+              },
+              "description": "ASTC 8×8 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x5-unorm"
+              },
+              "description": "ASTC 10×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x5-unorm-srgb"
+              },
+              "description": "ASTC 10×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x6-unorm"
+              },
+              "description": "ASTC 10×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x6-unorm-srgb"
+              },
+              "description": "ASTC 10×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x8-unorm"
+              },
+              "description": "ASTC 10×8 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x8-unorm-srgb"
+              },
+              "description": "ASTC 10×8 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x10-unorm"
+              },
+              "description": "ASTC 10×10 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x10-unorm-srgb"
+              },
+              "description": "ASTC 10×10 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-12x10-unorm"
+              },
+              "description": "ASTC 12×10 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-12x10-unorm-srgb"
+              },
+              "description": "ASTC 12×10 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-12x12-unorm"
+              },
+              "description": "ASTC 12×12 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-12x12-unorm-srgb"
+              },
+              "description": "ASTC 12×12 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
             },
             {
               "const": {
@@ -11151,7 +13697,7 @@
           ]
         },
         "resolve-target": {
-          "description": "Receives the resolved single-sample output when :view is multisampled.",
+          "description": "Receives the resolved single-sample output when :view is multisampled — the canvas, a (texture …), or a (texture-view …) selecting one mip level and one array layer.",
           "anyOf": [
             {
               "oneOf": [
@@ -11179,11 +13725,29 @@
                 "name-key": "name",
                 "acyclic": false
               }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "texture-view",
+                "name-key": "name",
+                "acyclic": false
+              }
             }
           ],
           "x-sjon-union-alternatives": [
             "view-source",
-            "texture-ref"
+            "texture-ref",
+            "texture-view-ref"
           ]
         },
         "store-op": {
@@ -11204,7 +13768,7 @@
           ]
         },
         "view": {
-          "description": "Texture written by this pass: the canvas (context-current-texture) or a (texture …).",
+          "description": "Attachment written by this pass: the canvas (context-current-texture), a (texture …) (its default view), or a (texture-view …) selecting one mip level and one array layer.",
           "anyOf": [
             {
               "oneOf": [
@@ -11232,11 +13796,29 @@
                 "name-key": "name",
                 "acyclic": false
               }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "texture-view",
+                "name-key": "name",
+                "acyclic": false
+              }
             }
           ],
           "x-sjon-union-alternatives": [
             "view-source",
-            "texture-ref"
+            "texture-ref",
+            "texture-view-ref"
           ]
         }
       },
@@ -11390,22 +13972,47 @@
           ]
         },
         "view": {
-          "description": "The depth/stencil (texture …) this pass tests/writes against.",
-          "type": "object",
-          "properties": {
-            "$sym": {
-              "type": "string"
+          "description": "The depth/stencil (texture …) or (texture-view …) this pass tests/writes against. The canvas is not a depth attachment.",
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "texture",
+                "name-key": "name",
+                "acyclic": false
+              }
+            },
+            {
+              "type": "object",
+              "properties": {
+                "$sym": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$sym"
+              ],
+              "additionalProperties": false,
+              "x-sjon-cross-ref": {
+                "target-form": "texture-view",
+                "name-key": "name",
+                "acyclic": false
+              }
             }
-          },
-          "required": [
-            "$sym"
           ],
-          "additionalProperties": false,
-          "x-sjon-cross-ref": {
-            "target-form": "texture",
-            "name-key": "name",
-            "acyclic": false
-          }
+          "x-sjon-union-alternatives": [
+            "texture-ref",
+            "texture-view-ref"
+          ]
         }
       },
       "required": [
@@ -12653,6 +15260,318 @@
               },
               {
                 "const": {
+                  "$sym": "bc1-rgba-unorm"
+                },
+                "description": "BC1 4×4 RGB(A) unorm; 8 bytes per block. Needs texture-compression-bc."
+              },
+              {
+                "const": {
+                  "$sym": "bc1-rgba-unorm-srgb"
+                },
+                "description": "BC1 4×4 RGB(A), sRGB-encoded; 8 bytes per block. Needs texture-compression-bc."
+              },
+              {
+                "const": {
+                  "$sym": "bc2-rgba-unorm"
+                },
+                "description": "BC2 4×4 RGB(A) with explicit alpha; 16 bytes per block. Needs texture-compression-bc."
+              },
+              {
+                "const": {
+                  "$sym": "bc2-rgba-unorm-srgb"
+                },
+                "description": "BC2 4×4 RGB(A) with explicit alpha, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc."
+              },
+              {
+                "const": {
+                  "$sym": "bc3-rgba-unorm"
+                },
+                "description": "BC3 4×4 interpolated alpha; 16 bytes per block. Needs texture-compression-bc."
+              },
+              {
+                "const": {
+                  "$sym": "bc3-rgba-unorm-srgb"
+                },
+                "description": "BC3 4×4 interpolated alpha, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc."
+              },
+              {
+                "const": {
+                  "$sym": "bc4-r-unorm"
+                },
+                "description": "BC4 single-channel 4×4 unorm; 8 bytes per block. Needs texture-compression-bc."
+              },
+              {
+                "const": {
+                  "$sym": "bc4-r-snorm"
+                },
+                "description": "BC4 single-channel 4×4 snorm; 8 bytes per block. Needs texture-compression-bc."
+              },
+              {
+                "const": {
+                  "$sym": "bc5-rg-unorm"
+                },
+                "description": "BC5 two-channel 4×4 unorm; 16 bytes per block. Needs texture-compression-bc."
+              },
+              {
+                "const": {
+                  "$sym": "bc5-rg-snorm"
+                },
+                "description": "BC5 two-channel 4×4 snorm; 16 bytes per block. Needs texture-compression-bc."
+              },
+              {
+                "const": {
+                  "$sym": "bc6h-rgb-ufloat"
+                },
+                "description": "BC6H unsigned HDR RGB 4×4; 16 bytes per block. Needs texture-compression-bc."
+              },
+              {
+                "const": {
+                  "$sym": "bc6h-rgb-float"
+                },
+                "description": "BC6H signed HDR RGB 4×4; 16 bytes per block. Needs texture-compression-bc."
+              },
+              {
+                "const": {
+                  "$sym": "bc7-rgba-unorm"
+                },
+                "description": "BC7 high-quality RGBA 4×4 unorm; 16 bytes per block. Needs texture-compression-bc."
+              },
+              {
+                "const": {
+                  "$sym": "bc7-rgba-unorm-srgb"
+                },
+                "description": "BC7 high-quality RGBA 4×4, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc."
+              },
+              {
+                "const": {
+                  "$sym": "etc2-rgb8unorm"
+                },
+                "description": "ETC2 RGB 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2."
+              },
+              {
+                "const": {
+                  "$sym": "etc2-rgb8unorm-srgb"
+                },
+                "description": "ETC2 RGB 4×4, sRGB-encoded; 8 bytes per block. Needs texture-compression-etc2."
+              },
+              {
+                "const": {
+                  "$sym": "etc2-rgb8a1unorm"
+                },
+                "description": "ETC2 RGB with 1-bit alpha, 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2."
+              },
+              {
+                "const": {
+                  "$sym": "etc2-rgb8a1unorm-srgb"
+                },
+                "description": "ETC2 RGB with 1-bit alpha, 4×4, sRGB-encoded; 8 bytes per block. Needs texture-compression-etc2."
+              },
+              {
+                "const": {
+                  "$sym": "etc2-rgba8unorm"
+                },
+                "description": "ETC2 RGBA 4×4 unorm; 16 bytes per block. Needs texture-compression-etc2."
+              },
+              {
+                "const": {
+                  "$sym": "etc2-rgba8unorm-srgb"
+                },
+                "description": "ETC2 RGBA 4×4, sRGB-encoded; 16 bytes per block. Needs texture-compression-etc2."
+              },
+              {
+                "const": {
+                  "$sym": "eac-r11unorm"
+                },
+                "description": "EAC single-channel 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2."
+              },
+              {
+                "const": {
+                  "$sym": "eac-r11snorm"
+                },
+                "description": "EAC single-channel 4×4 snorm; 8 bytes per block. Needs texture-compression-etc2."
+              },
+              {
+                "const": {
+                  "$sym": "eac-rg11unorm"
+                },
+                "description": "EAC two-channel 4×4 unorm; 16 bytes per block. Needs texture-compression-etc2."
+              },
+              {
+                "const": {
+                  "$sym": "eac-rg11snorm"
+                },
+                "description": "EAC two-channel 4×4 snorm; 16 bytes per block. Needs texture-compression-etc2."
+              },
+              {
+                "const": {
+                  "$sym": "astc-4x4-unorm"
+                },
+                "description": "ASTC 4×4 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-4x4-unorm-srgb"
+                },
+                "description": "ASTC 4×4 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-5x4-unorm"
+                },
+                "description": "ASTC 5×4 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-5x4-unorm-srgb"
+                },
+                "description": "ASTC 5×4 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-5x5-unorm"
+                },
+                "description": "ASTC 5×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-5x5-unorm-srgb"
+                },
+                "description": "ASTC 5×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-6x5-unorm"
+                },
+                "description": "ASTC 6×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-6x5-unorm-srgb"
+                },
+                "description": "ASTC 6×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-6x6-unorm"
+                },
+                "description": "ASTC 6×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-6x6-unorm-srgb"
+                },
+                "description": "ASTC 6×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-8x5-unorm"
+                },
+                "description": "ASTC 8×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-8x5-unorm-srgb"
+                },
+                "description": "ASTC 8×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-8x6-unorm"
+                },
+                "description": "ASTC 8×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-8x6-unorm-srgb"
+                },
+                "description": "ASTC 8×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-8x8-unorm"
+                },
+                "description": "ASTC 8×8 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-8x8-unorm-srgb"
+                },
+                "description": "ASTC 8×8 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-10x5-unorm"
+                },
+                "description": "ASTC 10×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-10x5-unorm-srgb"
+                },
+                "description": "ASTC 10×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-10x6-unorm"
+                },
+                "description": "ASTC 10×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-10x6-unorm-srgb"
+                },
+                "description": "ASTC 10×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-10x8-unorm"
+                },
+                "description": "ASTC 10×8 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-10x8-unorm-srgb"
+                },
+                "description": "ASTC 10×8 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-10x10-unorm"
+                },
+                "description": "ASTC 10×10 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-10x10-unorm-srgb"
+                },
+                "description": "ASTC 10×10 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-12x10-unorm"
+                },
+                "description": "ASTC 12×10 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-12x10-unorm-srgb"
+                },
+                "description": "ASTC 12×10 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-12x12-unorm"
+                },
+                "description": "ASTC 12×12 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
+                  "$sym": "astc-12x12-unorm-srgb"
+                },
+                "description": "ASTC 12×12 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+              },
+              {
+                "const": {
                   "$sym": "preferred-canvas-format"
                 },
                 "description": "Resolved at runtime to the platform's canvas format. Runtime-provided; there is no authored document declaration to navigate to."
@@ -12957,6 +15876,318 @@
                 "$sym": "depth32float-stencil8"
               },
               "description": "32-bit float depth plus 8-bit stencil; needs the depth32float-stencil8 device feature."
+            },
+            {
+              "const": {
+                "$sym": "bc1-rgba-unorm"
+              },
+              "description": "BC1 4×4 RGB(A) unorm; 8 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc1-rgba-unorm-srgb"
+              },
+              "description": "BC1 4×4 RGB(A), sRGB-encoded; 8 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc2-rgba-unorm"
+              },
+              "description": "BC2 4×4 RGB(A) with explicit alpha; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc2-rgba-unorm-srgb"
+              },
+              "description": "BC2 4×4 RGB(A) with explicit alpha, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc3-rgba-unorm"
+              },
+              "description": "BC3 4×4 interpolated alpha; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc3-rgba-unorm-srgb"
+              },
+              "description": "BC3 4×4 interpolated alpha, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc4-r-unorm"
+              },
+              "description": "BC4 single-channel 4×4 unorm; 8 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc4-r-snorm"
+              },
+              "description": "BC4 single-channel 4×4 snorm; 8 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc5-rg-unorm"
+              },
+              "description": "BC5 two-channel 4×4 unorm; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc5-rg-snorm"
+              },
+              "description": "BC5 two-channel 4×4 snorm; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc6h-rgb-ufloat"
+              },
+              "description": "BC6H unsigned HDR RGB 4×4; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc6h-rgb-float"
+              },
+              "description": "BC6H signed HDR RGB 4×4; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc7-rgba-unorm"
+              },
+              "description": "BC7 high-quality RGBA 4×4 unorm; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc7-rgba-unorm-srgb"
+              },
+              "description": "BC7 high-quality RGBA 4×4, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgb8unorm"
+              },
+              "description": "ETC2 RGB 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgb8unorm-srgb"
+              },
+              "description": "ETC2 RGB 4×4, sRGB-encoded; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgb8a1unorm"
+              },
+              "description": "ETC2 RGB with 1-bit alpha, 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgb8a1unorm-srgb"
+              },
+              "description": "ETC2 RGB with 1-bit alpha, 4×4, sRGB-encoded; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgba8unorm"
+              },
+              "description": "ETC2 RGBA 4×4 unorm; 16 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgba8unorm-srgb"
+              },
+              "description": "ETC2 RGBA 4×4, sRGB-encoded; 16 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "eac-r11unorm"
+              },
+              "description": "EAC single-channel 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "eac-r11snorm"
+              },
+              "description": "EAC single-channel 4×4 snorm; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "eac-rg11unorm"
+              },
+              "description": "EAC two-channel 4×4 unorm; 16 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "eac-rg11snorm"
+              },
+              "description": "EAC two-channel 4×4 snorm; 16 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "astc-4x4-unorm"
+              },
+              "description": "ASTC 4×4 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-4x4-unorm-srgb"
+              },
+              "description": "ASTC 4×4 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-5x4-unorm"
+              },
+              "description": "ASTC 5×4 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-5x4-unorm-srgb"
+              },
+              "description": "ASTC 5×4 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-5x5-unorm"
+              },
+              "description": "ASTC 5×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-5x5-unorm-srgb"
+              },
+              "description": "ASTC 5×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-6x5-unorm"
+              },
+              "description": "ASTC 6×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-6x5-unorm-srgb"
+              },
+              "description": "ASTC 6×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-6x6-unorm"
+              },
+              "description": "ASTC 6×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-6x6-unorm-srgb"
+              },
+              "description": "ASTC 6×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x5-unorm"
+              },
+              "description": "ASTC 8×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x5-unorm-srgb"
+              },
+              "description": "ASTC 8×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x6-unorm"
+              },
+              "description": "ASTC 8×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x6-unorm-srgb"
+              },
+              "description": "ASTC 8×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x8-unorm"
+              },
+              "description": "ASTC 8×8 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x8-unorm-srgb"
+              },
+              "description": "ASTC 8×8 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x5-unorm"
+              },
+              "description": "ASTC 10×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x5-unorm-srgb"
+              },
+              "description": "ASTC 10×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x6-unorm"
+              },
+              "description": "ASTC 10×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x6-unorm-srgb"
+              },
+              "description": "ASTC 10×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x8-unorm"
+              },
+              "description": "ASTC 10×8 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x8-unorm-srgb"
+              },
+              "description": "ASTC 10×8 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x10-unorm"
+              },
+              "description": "ASTC 10×10 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x10-unorm-srgb"
+              },
+              "description": "ASTC 10×10 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-12x10-unorm"
+              },
+              "description": "ASTC 12×10 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-12x10-unorm-srgb"
+              },
+              "description": "ASTC 12×10 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-12x12-unorm"
+              },
+              "description": "ASTC 12×12 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-12x12-unorm-srgb"
+              },
+              "description": "ASTC 12×12 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
             },
             {
               "const": {
@@ -13331,7 +16562,8 @@
                 "step-group",
                 "pass-graph",
                 "draw-graph",
-                "select"
+                "select",
+                "mip-chain"
               ],
               "name-key": "name",
               "acyclic": false
@@ -13431,7 +16663,8 @@
                 "step-group",
                 "pass-graph",
                 "draw-graph",
-                "select"
+                "select",
+                "mip-chain"
               ],
               "name-key": "name",
               "acyclic": false
@@ -13464,7 +16697,7 @@
               ],
               "additionalProperties": false,
               "x-sjon-cross-ref": {
-                "target-form": "control",
+                "target-form": "pngine/control",
                 "name-key": "name",
                 "acyclic": false
               }
@@ -13594,7 +16827,8 @@
                 "step-group",
                 "pass-graph",
                 "draw-graph",
-                "select"
+                "select",
+                "mip-chain"
               ],
               "name-key": "name",
               "acyclic": false
@@ -13816,7 +17050,8 @@
                 "step-group",
                 "pass-graph",
                 "draw-graph",
-                "select"
+                "select",
+                "mip-chain"
               ],
               "name-key": "name",
               "acyclic": false
@@ -13863,7 +17098,8 @@
                 "step-group",
                 "pass-graph",
                 "draw-graph",
-                "select"
+                "select",
+                "mip-chain"
               ],
               "name-key": "name",
               "acyclic": false
@@ -13909,7 +17145,7 @@
               ],
               "additionalProperties": false,
               "x-sjon-cross-ref": {
-                "target-form": "control",
+                "target-form": "pngine/control",
                 "name-key": "name",
                 "acyclic": false
               }
@@ -13953,6 +17189,73 @@
       "x-sjon-lowering": {
         "hook": "pngine/select-v1",
         "produces": [
+          "step-group"
+        ]
+      }
+    },
+    "form.pngine.mip-chain": {
+      "type": "object",
+      "description": "Generate a (texture …)'s mip levels from level 0 with a named step-group of ordinary render passes. Sugar: pngine/mips-v1.",
+      "properties": {
+        "$form": {
+          "const": "mip-chain"
+        },
+        "$ns": {
+          "const": "pngine"
+        },
+        "name": {
+          "description": "The generated step-group's name. A (frame …) performs it like any other step, after the step that writes level 0.",
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false
+        },
+        "texture": {
+          "description": "The (texture …) whose levels 1..mip-level-count-1 the chain generates. Level 0 is an input and is never overwritten; the texture must be 2d, one-sample, one-layer, non-pooled, sampled and renderable, with a filterable color format.",
+          "type": "object",
+          "properties": {
+            "$sym": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$sym"
+          ],
+          "additionalProperties": false,
+          "x-sjon-cross-ref": {
+            "target-form": "texture",
+            "name-key": "name",
+            "acyclic": false
+          }
+        }
+      },
+      "required": [
+        "$form",
+        "name",
+        "texture"
+      ],
+      "additionalProperties": false,
+      "x-sjon-lowering": {
+        "hook": "pngine/mips-v1",
+        "produces": [
+          "texture-view",
+          "sampler",
+          "shader-module",
+          "render-pipeline",
+          "vertex",
+          "fragment",
+          "color-target",
+          "bind-group",
+          "entry",
+          "render-pass",
+          "color-attachment",
+          "draw",
           "step-group"
         ]
       }
@@ -14398,6 +17701,318 @@
             },
             {
               "const": {
+                "$sym": "bc1-rgba-unorm"
+              },
+              "description": "BC1 4×4 RGB(A) unorm; 8 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc1-rgba-unorm-srgb"
+              },
+              "description": "BC1 4×4 RGB(A), sRGB-encoded; 8 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc2-rgba-unorm"
+              },
+              "description": "BC2 4×4 RGB(A) with explicit alpha; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc2-rgba-unorm-srgb"
+              },
+              "description": "BC2 4×4 RGB(A) with explicit alpha, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc3-rgba-unorm"
+              },
+              "description": "BC3 4×4 interpolated alpha; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc3-rgba-unorm-srgb"
+              },
+              "description": "BC3 4×4 interpolated alpha, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc4-r-unorm"
+              },
+              "description": "BC4 single-channel 4×4 unorm; 8 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc4-r-snorm"
+              },
+              "description": "BC4 single-channel 4×4 snorm; 8 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc5-rg-unorm"
+              },
+              "description": "BC5 two-channel 4×4 unorm; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc5-rg-snorm"
+              },
+              "description": "BC5 two-channel 4×4 snorm; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc6h-rgb-ufloat"
+              },
+              "description": "BC6H unsigned HDR RGB 4×4; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc6h-rgb-float"
+              },
+              "description": "BC6H signed HDR RGB 4×4; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc7-rgba-unorm"
+              },
+              "description": "BC7 high-quality RGBA 4×4 unorm; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "bc7-rgba-unorm-srgb"
+              },
+              "description": "BC7 high-quality RGBA 4×4, sRGB-encoded; 16 bytes per block. Needs texture-compression-bc."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgb8unorm"
+              },
+              "description": "ETC2 RGB 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgb8unorm-srgb"
+              },
+              "description": "ETC2 RGB 4×4, sRGB-encoded; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgb8a1unorm"
+              },
+              "description": "ETC2 RGB with 1-bit alpha, 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgb8a1unorm-srgb"
+              },
+              "description": "ETC2 RGB with 1-bit alpha, 4×4, sRGB-encoded; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgba8unorm"
+              },
+              "description": "ETC2 RGBA 4×4 unorm; 16 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "etc2-rgba8unorm-srgb"
+              },
+              "description": "ETC2 RGBA 4×4, sRGB-encoded; 16 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "eac-r11unorm"
+              },
+              "description": "EAC single-channel 4×4 unorm; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "eac-r11snorm"
+              },
+              "description": "EAC single-channel 4×4 snorm; 8 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "eac-rg11unorm"
+              },
+              "description": "EAC two-channel 4×4 unorm; 16 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "eac-rg11snorm"
+              },
+              "description": "EAC two-channel 4×4 snorm; 16 bytes per block. Needs texture-compression-etc2."
+            },
+            {
+              "const": {
+                "$sym": "astc-4x4-unorm"
+              },
+              "description": "ASTC 4×4 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-4x4-unorm-srgb"
+              },
+              "description": "ASTC 4×4 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-5x4-unorm"
+              },
+              "description": "ASTC 5×4 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-5x4-unorm-srgb"
+              },
+              "description": "ASTC 5×4 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-5x5-unorm"
+              },
+              "description": "ASTC 5×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-5x5-unorm-srgb"
+              },
+              "description": "ASTC 5×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-6x5-unorm"
+              },
+              "description": "ASTC 6×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-6x5-unorm-srgb"
+              },
+              "description": "ASTC 6×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-6x6-unorm"
+              },
+              "description": "ASTC 6×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-6x6-unorm-srgb"
+              },
+              "description": "ASTC 6×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x5-unorm"
+              },
+              "description": "ASTC 8×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x5-unorm-srgb"
+              },
+              "description": "ASTC 8×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x6-unorm"
+              },
+              "description": "ASTC 8×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x6-unorm-srgb"
+              },
+              "description": "ASTC 8×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x8-unorm"
+              },
+              "description": "ASTC 8×8 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-8x8-unorm-srgb"
+              },
+              "description": "ASTC 8×8 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x5-unorm"
+              },
+              "description": "ASTC 10×5 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x5-unorm-srgb"
+              },
+              "description": "ASTC 10×5 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x6-unorm"
+              },
+              "description": "ASTC 10×6 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x6-unorm-srgb"
+              },
+              "description": "ASTC 10×6 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x8-unorm"
+              },
+              "description": "ASTC 10×8 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x8-unorm-srgb"
+              },
+              "description": "ASTC 10×8 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x10-unorm"
+              },
+              "description": "ASTC 10×10 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-10x10-unorm-srgb"
+              },
+              "description": "ASTC 10×10 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-12x10-unorm"
+              },
+              "description": "ASTC 12×10 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-12x10-unorm-srgb"
+              },
+              "description": "ASTC 12×10 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-12x12-unorm"
+              },
+              "description": "ASTC 12×12 RGBA unorm; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
+                "$sym": "astc-12x12-unorm-srgb"
+              },
+              "description": "ASTC 12×12 RGBA, sRGB-encoded; 16 bytes per block. Needs texture-compression-astc."
+            },
+            {
+              "const": {
                 "$sym": "preferred-canvas-format"
               },
               "description": "Resolved at runtime to the platform's canvas format. Runtime-provided; there is no authored document declaration to navigate to."
@@ -14551,7 +18166,8 @@
                 "step-group",
                 "pass-graph",
                 "draw-graph",
-                "select"
+                "select",
+                "mip-chain"
               ],
               "name-key": "name",
               "acyclic": false
@@ -15159,7 +18775,8 @@
                 "step-group",
                 "pass-graph",
                 "draw-graph",
-                "select"
+                "select",
+                "mip-chain"
               ],
               "name-key": "name",
               "acyclic": false
@@ -15189,7 +18806,8 @@
                 "step-group",
                 "pass-graph",
                 "draw-graph",
-                "select"
+                "select",
+                "mip-chain"
               ],
               "name-key": "name",
               "acyclic": false
@@ -15336,6 +18954,15 @@
       "$ref": "#/$defs/form.pngine.write-buffer"
     },
     {
+      "$ref": "#/$defs/form.pngine.write-texture"
+    },
+    {
+      "$ref": "#/$defs/form.pngine.copy-buffer-to-texture"
+    },
+    {
+      "$ref": "#/$defs/form.pngine.copy-texture-to-buffer"
+    },
+    {
       "$ref": "#/$defs/form.pngine.copy-texture-to-texture"
     },
     {
@@ -15466,6 +19093,9 @@
     },
     {
       "$ref": "#/$defs/form.pngine.select"
+    },
+    {
+      "$ref": "#/$defs/form.pngine.mip-chain"
     },
     {
       "$ref": "#/$defs/form.pngine.init"
