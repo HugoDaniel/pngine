@@ -17,12 +17,17 @@
     "test:abi": "node --test tests/npm/abi-surface.test.js tests/npm/abi-museum.test.js",
     "test:npm": "node --test tests/npm/*.test.js",
     "test:types": "tsc -p npm/pngine/jsconfig.json",
+    "test:consumer": "node tests/packed-consumer/run.mjs --tier=all",
+    "test:consumer:unit": "node --test 'tests/packed-consumer/**/*.test.mjs'",
     "test:zig": "zig test src/main.zig",
     "test:zig:full": "zig build test",
     "browser": "npx tsx tests/browser/browser.ts",
     "render-frame": "npx tsx tests/browser/render-frame.ts",
     "parity": "npx tsx tests/browser/parity.ts",
-    "gen-fragments": "node scripts/gen-js-fragments.js"
+    "gen-fragments": "node scripts/gen-js-fragments.js",
+    "site:dev": "pnpm --dir site dev",
+    "site:build": "pnpm --dir site build",
+    "site:check": "pnpm --dir site check"
   },
   "devDependencies": {
     "@playwright/test": "^1.40.0",

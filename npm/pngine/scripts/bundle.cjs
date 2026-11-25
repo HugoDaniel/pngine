@@ -467,7 +467,7 @@ const devOut = buildInlinedProfileBundle({
 export { pngine, destroy };
 export { draw, play, pause, stop, seek, setFrame, setUniform, setUniforms, getUniforms, writeBuffer, setPointer, getBuffers, writeTexture, getTextures, getStats, restart, restartSettled };
 export { extractBytecode, detectFormat, isPng, isZip, isPngb };
-export { parsePayload, createExecutor, getExecutorImports, getExecutorVariantName };
+export { parsePayload, preflightPayload, createExecutor, getExecutorImports, getExecutorVariantName };
 export { payloadsOf };`,
 });
 
@@ -801,10 +801,43 @@ if (!DEBUG) {
     // extracting the record into gpu-resource-pass-commands.js is what keeps
     // gpu.js's share to the closure state it already owns. Budgets are the
     // measured sizes plus the same 215/203/155 B margins.
-    'viewer.mjs': 104170,
-    'dev.mjs': 109169,
+    // dev bumped 2026-11-23 for task 02.1's geometry guard in loader.js:
+    // parsePayload now rejects non-ascending or out-of-buffer sections before
+    // any subtraction or slice, so a hostile head can never reach the host
+    // write. Measured 103955→104088 viewer (+133) and 108966→109231 dev
+    // (+265; dev carries the loader twice, main thread and worker), while core
+    // has no loader and stayed 68161 and executor went 1955→2087. Only dev
+    // breached, by 62 B, so only dev moves: 109169→109231. The viewer keeps
+    // 82 B and executor 113 B of headroom, the same measured-plus-margin shape
+    // as the entries above, no rounding.
+    // dev and executor bumped 2026-11-23 for task 02.2's capacity exports in
+    // loader.js: createExecutor forwards getBytecodeCapacity()/getDataCapacity()
+    // when the binary exports them and otherwise returns the legacy standard
+    // 262,144/524,288 pair (raw `exports` still reveals absence). Measured
+    // 104088→104092 viewer (+4), 109231→109367 dev (+136; the loader is inlined
+    // twice), 68161 core (no loader, unchanged), executor 2087→2215 (+128).
+    // Only dev and executor breached, by 136 and 15 B, so only they move:
+    // 109231→109367 and 2200→2215. No rounding, no sibling move.
+    // viewer and dev bumped 2026-11-23 for task 02.3's fail-before-write load
+    // guard: loader.js's preflightPayload refuses an over-capacity head/data
+    // section (exact byte text) before any destination write, and
+    // worker-core.js runs it before executor adoption and before its reload /
+    // recovery teardown. Measured 104092→105284 viewer (+1192) and
+    // 109367→110534 dev (+1167); core has no loader and stayed 68161, and
+    // executor.mjs does not re-export the helper and stayed 2215. Only viewer
+    // and dev breached, by 1114 and 1167 B, so only they move:
+    // 104170→105284 and 109367→110534. No rounding, no sibling move.
+    // dev and executor bumped 2026-11-23 for task 02.6's reachable preflight:
+    // executor.js and dev.js re-export loader.js's preflightPayload beside
+    // parsePayload, and the dev bundle's export block was the surface that
+    // actually needed the fifth name. Measured 110534→111186 dev (+652) and
+    // 2215→2861 executor (+646); viewer (no role in the export list) stayed
+    // 105284 and core stayed 68161. Only the two breached labels move, by
+    // exactly their measured delta: 110534→111186 and 2215→2861. No rounding.
+    'viewer.mjs': 105284,
+    'dev.mjs': 111186,
     'core.mjs': 68316,
-    'executor.mjs': 2200,
+    'executor.mjs': 2861,
     'mini.mjs': 7300,
     'mini-no-audio.mjs': 6600,
   };

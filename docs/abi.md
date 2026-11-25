@@ -37,9 +37,11 @@ getAbiVersion() → u32
 | --- | --- | --- |
 | `memory` | WebAssembly.Memory | Linear memory; all pointers below are offsets into it |
 | `getBytecodePtr` | `() → u32` | Pointer where host writes the payload head (header + opcodes + tables) |
-| `setBytecodeLen` | `(len: u32) → void` | Set after writing. **Silently clamps** to the binary's bytecode cap (default 256 KB) |
+| `setBytecodeLen` | `(len: u32) → void` | Set after writing. **Silently clamps** to the binary's bytecode cap (standard builds: 2 MiB; micro: 16 KiB; binaries predating 2026-11: 256 KiB) |
 | `getDataPtr` | `() → u32` | Pointer where host writes the data section (split mode) |
-| `setDataLen` | `(len: u32) → void` | Set after writing. **Silently clamps** to the data cap (default 512 KB). Never calling it (len stays 0) selects single-buffer mode — see §4 |
+| `setDataLen` | `(len: u32) → void` | Set after writing. **Silently clamps** to the data cap (standard builds: 4 MiB; micro: 32 KiB; binaries predating 2026-11: 512 KiB). Never calling it (len stays 0) selects single-buffer mode — see §4 |
+| `getBytecodeCapacity` | `() → u32` | Exact bytecode-input capacity of the binary, in bytes (`wasm_config.max_bytecode_kb * 1024`; standard builds 2,097,152, micro 16,384). Additive, so `getAbiVersion` stays 1. Absent on binaries older than 2026-11 — hosts feature-detect. A host that lacks it may fall back only to the legacy STANDARD cap (262,144); a custom build with another cap must export it or be loaded by its own host |
+| `getDataCapacity` | `() → u32` | Exact data-section capacity of the binary, in bytes (`wasm_config.max_data_kb * 1024`; standard builds 4,194,304, micro 32,768). Same additive/fallback rule as `getBytecodeCapacity` (the legacy standard fallback is 524,288) |
 | `getCommandPtr` | `() → u32` | Pointer to the command buffer |
 | `getCommandLen` | `() → u32` | Reads the `total_len` u32 the executor wrote at `cmd[0..4]` — only valid after `init()`/`frame()` |
 | `init` | `() → u32` | Parse header, emit resource-creation commands. `0` ok, `1` bytecode too short, `2` bad magic, `3` unsupported PNGB version |
@@ -52,9 +54,17 @@ getAbiVersion() → u32
 | `getControlPtr` | `() → u32` | Address of the 65-entry f32 control table: slot 0 is `time`, slot `n` is the nth declared control (see §4.1). Additive, so `getAbiVersion` stays 1. Absent on pre-2026-11 binaries — hosts feature-detect it, as they do `getFrameCount` |
 | `getAbiVersion` | `() → u32` | See §1. Absent on pre-2026-06 binaries |
 
-Buffer caps (256 KB bytecode / 512 KB data / 64 KB commands) are **per-binary**
-constants (`wasm_config` build options; the micro build shrinks them). The ABI
+Buffer caps are **per-binary** constants (`wasm_config` build options): the
+standard executor ships 2 MiB bytecode / 4 MiB data / 64 KiB commands, and the
+micro build shrinks them to 16 KiB / 32 KiB / 8 KiB. Binaries minted before
+2026-11 carry the old standard 256 KiB / 512 KiB / 64 KiB pair. The ABI
 constant is the *protocol*: lengths are clamped silently, never rejected.
+`getBytecodeCapacity()` / `getDataCapacity()` report the exact pair for the
+binary in hand; a host must prefer them when present. Their absence means the
+binary predates the exports, and the only safe stock fallback is the legacy
+**standard** pair above — it does not describe a custom build, whose nonstandard
+caps cannot be derived from the ABI. Such a binary must be rebuilt to gain the
+exports, or loaded by the host that knows its real capacities.
 
 New exports may be added (JS reads them with optional chaining). Existing
 exports may never change signature or semantics, and never be removed.
@@ -89,7 +99,21 @@ reverse — old binaries on new runtimes — must always work).
 Canonical implementation: `worker.js loadBytecode()` / `render()`.
 `worker-viewer.js` mirrors it. The museum test replays it in Node.
 
-1. `parsePayload(pngb)` (loader.js) → section offsets from the PNGB v0 header.
+0. **Capacity preflight (host, before every write).** Read the executor's own
+   `getBytecodeCapacity()`/`getDataCapacity()` (fallback: the legacy standard
+   262,144/524,288 when absent) and refuse a payload that does not fit:
+   `executor-head-capacity: PNGB head is N bytes; executor capacity is CAP bytes`
+   when `offsets.data > headCap`, and `executor-data-capacity: PNGB data
+   section is N bytes; executor capacity is CAP bytes` when `offsets.wgsl -
+   offsets.data > dataCap`. A single-buffer host that writes the whole file
+   into the bytecode buffer checks the TOTAL length against the head cap and
+   populates no data buffer. The refusal is the host's load error (a rejected
+   load, not a new status code); `setBytecodeLen`/`setDataLen` keep clamping
+   silently as this ABI says. `loader.js preflightPayload(parsed, exports,
+   whole)` is the reference implementation. Without it the caps are not a
+   boundary: an over-capacity write succeeds past the buffer and corrupts the
+   next one, which is exactly what the clamped setters cannot detect.
+1. `parsePayload(pngb)` (loader.js) → section offsets from the PNGB v0 header. It refuses non-ascending or out-of-buffer sections (`Invalid PNGB: malformed section geometry`) before returning any offset, so no caller subtracts or slices an unvalidated boundary; call `preflightPayload(parsed, executor.exports)` before writing a parsed payload into an executor (step 0 — `pngine/executor` and `pngine/dev` re-export it beside this parser).
 2. Write `payload[0 .. offsets.data)` into memory at `getBytecodePtr()`;
    call `setBytecodeLen(offsets.data)`.
 3. If `offsets.wgsl - offsets.data > 0`: write `payload[offsets.data ..

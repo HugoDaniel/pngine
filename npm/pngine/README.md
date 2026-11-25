@@ -149,6 +149,8 @@ Advanced helpers for payload parsing and manual executor loading.
 import { parsePayload, createExecutor, getExecutorImports } from 'pngine/executor';
 ```
 
+Call `preflightPayload(parsePayload(bytes), executor)` before writing a parsed payload into an executor — it refuses an over-capacity head or data section with the exact byte counts.
+
 ## Mini API
 
 Tiny player for `--flat` compiled payloads (pNGf format). Runs entirely on the
@@ -198,6 +200,21 @@ const { pngb, errors } = compiler.compile(sjonSource);
 | `pngine/worker` | `src/worker.js` | The render WebWorker entry (module worker) |
 | `pngine/schema/pngine.sjon` | `schema/pngine.sjon` | The SJON WebGPU schema, importable as text |
 
+`createCompiler()` requires the matching `pngine/compiler-wasm`: every input is
+written through the checked `allocSource` export, so a compiler WASM that
+predates it is refused at first input with
+`pngine/compiler and pngine/compiler-wasm versions must match: compiler WASM is missing allocSource`.
+The raw `getSourcePtr`/`setSourceLen` path remains for legacy hosts and stays
+capped at the 256 KiB static array.
+
+The compiler's I/O model is one allocation per call: source and every
+`compile`/`compileToPng`/`minifyWgsl` result share the same 16 MiB policy, and a
+successful export transfers exactly one owned result allocation (raw PNGB, final
+PNG, or minified WGSL). The wrapper copies it into a JS array or string
+immediately, so what the caller holds stays valid; the WASM-side result itself
+is readable until the next `compile`, `compileToPng`, or `minifyWgsl` entry, or
+until the host drops the compiler instance.
+
 The unbundled `src/` tree ships too, so bundlers can reach individual modules
 (e.g. a `new Worker(new URL(...))` pointed at `pngine/src/worker.js`).
 
@@ -217,10 +234,10 @@ this table against the bundler's budgets.
 
 | File | Raw | Gzip |
 | --- | --- | --- |
-| `viewer.mjs` | 101.5 KB | 31.5 KB |
-| `dev.mjs` | 106.4 KB | 33.2 KB |
+| `viewer.mjs` | 102.8 KB | 31.9 KB |
+| `dev.mjs` | 108.6 KB | 33.9 KB |
 | `core.mjs` | 66.6 KB | 19.8 KB |
-| `executor.mjs` | 1.9 KB | 0.9 KB |
+| `executor.mjs` | 2.8 KB | 1.3 KB |
 | `mini.mjs` | 7.1 KB | 3.3 KB |
 | `mini-no-audio.mjs` | 6.4 KB | 3.0 KB |
 | `index.cjs` (Node stub) | 3.0 KB | - |

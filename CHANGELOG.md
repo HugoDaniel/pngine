@@ -5,7 +5,79 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [4.4.0] - 2026-11-24
+
+### Added
+
+- **Live host texture writes.** `writeTexture(p, name, bytes, opts)` in the
+  `pngine` package takes `offset`, `bytesPerRow`, `rowsPerImage`, `origin`,
+  `mipLevel`, `aspect`, `size`, `poolIndex` and `redraw`, and
+  `draw(p, { textures })` merges per-draw bytes over the pending writes.
+  `getTextures(p)` reports each named texture's current descriptor — format,
+  dimension, size, mip count, samples, usage, pool, a writable verdict, the
+  writable aspects and the frame-written flag. A write is validated against
+  the descriptor the payload created before the GPU sees it, and a refusal
+  reaches `onError` with source `write-texture`: an unknown name, a texture
+  without `copy-dst`, an aspect the format cannot write, an out-of-range pool
+  index, and a name the frame itself writes.
+- **Static `(write-texture …)` documents.** Raw `(data …)` bytes upload as a
+  queue operation, with full and partial writes, nonzero origins, mip levels,
+  layers and slices, tight and padded rows, and spans that respect the
+  destination format's texel size. Illegal depth/stencil destinations are
+  refused with located diagnostics instead of reaching the driver.
+- **Compressed formats.** BC, ETC2/EAC and ASTC creation and queue uploads
+  cover all 52 names, with block-aware extents, aligned layout checks, and
+  the device feature — including the sliced-3D sibling — checked before
+  creation; ETC2/EAC have no 3D form and are refused. BC block bytes are
+  proven by exact round-trips on a real adapter; ETC2/EAC and ASTC await a
+  host that exposes them.
+- **Copies and readback.** Buffer↔texture copies follow the 256-byte row
+  rule, and a byte-preserving readback channel returns the copied span.
+  Texture→texture copies can name a mip, layer, origin and aspect on each
+  endpoint, while the whole-texture copies keep their existing encoding and
+  bytes.
+- **Mip chains and attachment views.** `(mip-chain …)` lowers to level-scoped
+  views, a sampler, a pipeline, bind groups and one render pass per generated
+  level, with level 0 as the input; render passes accept explicit colour and
+  depth attachment views plus resolve targets, one level or layer per target.
+- **Native texture execution.** On a host with the vendored wgpu-native
+  library, `--frame` compiles against v27 and executes the upload, copy and
+  readback paths.
+- **Dynamic compiler I/O above the old 256 KiB arrays.** The browser compiler's
+  official wrapper writes each input through the checked `allocSource(len)`
+  export and adopts one owned result allocation per `compile`, `compileToPng`
+  or `minifyWgsl` call instead of copying into fixed 256 KiB source/output
+  arrays. Source, raw PNGB, final PNG and minified WGSL share one 16 MiB policy
+  and refuse with `compiler-source-limit` / `compiler-output-limit`, naming the
+  actual and limit byte counts. `pngine/compiler` now requires the matching
+  `pngine/compiler-wasm`: a compiler WASM without `allocSource` is refused at
+  first input with `pngine/compiler and pngine/compiler-wasm versions must
+  match: compiler WASM is missing allocSource`. The legacy
+  `getSourcePtr`/`setSourceLen` path remains for old hosts and stays capped at
+  the static 256 KiB array.
+- **Exact executor capacity reflection.** The additive
+  `getBytecodeCapacity()` / `getDataCapacity()` exports report each binary's
+  bytecode-head and data capacities, so a host need not infer them from the
+  ABI. A binary that predates the exports falls back only to the legacy
+  standard 262,144 / 524,288 byte pair, never to a guess about a custom build.
+- **`preflightPayload` beside `parsePayload`.** Raw-loading hosts can run the
+  geometry plus capacity preflight before any write; an over-capacity head or
+  data section is refused with `executor-head-capacity` /
+  `executor-data-capacity`, naming the actual and limit bytes. The stock
+  loader applies it before its writes and before adopting a different
+  executor, so a refused reload leaves the running payload usable.
+- **Executor-less payloads above the older capacities need the updated shared
+  runtime.** The release ships the raised shared fallback; an older runtime
+  carries only the legacy 256 KiB head / 512 KiB data executor, so a larger
+  executor-less payload needs this release's shared runtime (or its own
+  embedded executor).
+
+### Changed
+
+- Standard executors now use 2 MiB head / 4 MiB data capacity, costing +5.25 MiB initial memory per instance (including tiny payloads and iOS; micro stays 16 KiB/32 KiB); the release executes the ≥1.25 MiB-data F2 fixture and only guard-checks the remaining capacity band.
+- Micro keeps its 16 KiB head / 32 KiB data / 8 KiB command configuration; the
+  PNGB versions are unchanged (v0, plus the existing guarded executor-less v1
+  case) and `getAbiVersion() == 1`.
 
 ## [4.3.2] - 2026-11-21
 

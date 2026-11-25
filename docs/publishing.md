@@ -126,17 +126,17 @@ The JS runtime uses esbuild for bundling with two build modes:
 
 One row per entry point `bundle.cjs` writes. The **budget** column is the gate
 in `bundle.cjs`'s `SIZE_BUDGETS`, which fails the build when a bundle grows past
-it — the durable number. Sizes are a measurement (2026-11-21, production) and
+it — the durable number. Sizes are a measurement (2026-11-23, production) and
 will drift; the budget is what holds them.
 
 <!-- BUNDLE-TABLE: checked against scripts/bundle.cjs by `zig build drift` -->
 
 | Bundle | Subpath | Profile | Size (gz) | Budget |
 | ------ | ------- | ------- | --------- | ------ |
-| `viewer.mjs` | `pngine` (browser), `pngine/viewer` | Lean production viewer; embedded-executor payloads only, worker inlined | 101.5 KB (31.5) | 104170 |
-| `dev.mjs` | `pngine/dev` | Full-feature browser API: shared `pngine.wasm` fallback, prefetch, diagnostics | 106.4 KB (33.2) | 109169 |
-| `core.mjs` | `pngine/core` | Low-level runtime API (dispatcher + loader), no main-thread wrapper | 66.6 KB (19.8) | 68316 |
-| `executor.mjs` | `pngine/executor` | Executor helpers — `parsePayload`, `createExecutor`, imports | 1.9 KB (0.9) | 2200 |
+| `viewer.mjs` | `pngine` (browser), `pngine/viewer` | Lean production viewer; embedded-executor payloads only, worker inlined | 102.8 KB (31.9) | 105284 |
+| `dev.mjs` | `pngine/dev` | Full-feature browser API: shared `pngine.wasm` fallback, prefetch, diagnostics | 108.6 KB (33.9) | 111186 |
+| `core.mjs` | `pngine/core` | Low-level runtime API (dispatcher only), no main-thread wrapper | 66.6 KB (19.8) | 68316 |
+| `executor.mjs` | `pngine/executor` | Executor helpers — `parsePayload`, `createExecutor`, imports | 2.8 KB (1.3) | 2861 |
 | `mini.mjs` | `pngine/mini` | Flat pNGf main-thread player, with the Sointu audio worklet | 7.1 KB (3.3) | 7300 |
 | `mini-no-audio.mjs` | `pngine/mini-no-audio` | `mini.js` built with `AUDIO=false` — the audio path is DCE'd, not branched around | 6.4 KB (3.0) | 6600 |
 | `index.mjs` / `index.cjs` | `pngine` (node) | Generated stubs; every export throws "browser only" | 3.2 KB / 3.0 KB | — |

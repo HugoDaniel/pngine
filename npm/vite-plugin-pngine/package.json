@@ -21,6 +21,7 @@
     "dev": "tsc -w -p tsconfig.json",
     "test": "vitest --run",
     "test:watch": "vitest watch",
+    "prepack": "npm run build",
     "prepublishOnly": "npm run build && npm test"
   },
   "peerDependencies": {

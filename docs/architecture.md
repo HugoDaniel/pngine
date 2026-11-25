@@ -13,9 +13,9 @@ files. The key architectural insight is the separation of concerns:
 
 - **Heavy Compiler (Zig)**: Runs once at build time, unlimited complexity
 - **Minimal Payload (PNGB)**: Declarative bytecode + data, size-constrained
-- **Tiny Executor (WASM)**: Interprets bytecode, emits GPU commands. 15,663 B
-  for the full plugin set, under a build-enforced 15,767 cap; eight variants,
-  smallest 8,764 B. The full build is past the informal ~15 KB goal (see
+- **Tiny Executor (WASM)**: Interprets bytecode, emits GPU commands. 15,801 B
+  for the full plugin set, under a build-enforced 15,823 cap; eight variants,
+  smallest 8,867 B. The full build is past the informal ~15 KB goal (see
   File Size Reference); the caps are measured, not aspirational.
 - **Platform Viewer**: Executes GPU commands on a real WebGPU implementation —
   the browser, or wgpu-native/Metal for the CLI's `--frame`
@@ -167,7 +167,11 @@ commands. There are two delivery mechanisms:
 | **Shared** | `--no-executor` builds | External `pngine.wasm` file | Fallback for PNGs without an embedded executor |
 
 **Key Properties:**
-- **Statically allocated**: No malloc after init (WASM linear memory)
+- **Statically allocated**: No malloc after init (WASM linear memory); the
+  standard build's input capacities are 2 MiB head / 4 MiB data / 64 KiB
+  commands (micro: 16/32/8 KiB). Initial memory is 114 pages (~7.125 MiB) per
+  standard instance — +5.25 MiB versus the old 256/512 KiB pair, including
+  tiny payloads and iOS. Commands stay 64 KiB in both builds.
 - **Plugin-based**: Only includes needed features
 - **Command buffer output**: Platform-agnostic GPU command format
 
@@ -273,6 +277,22 @@ runs once at build time with unlimited complexity:
 - Determine required plugins
 - Embed executor WASM (default; opt out with `--no-executor`)
 - Compress payload with DEFLATE
+
+**Compiler I/O and its policy.** In the browser build the source is written
+through `allocSource(len)`: one exact-size allocation plus the parser's zero
+sentinel, selected for one export call and released on every return path. The
+legacy `getSourcePtr`/`setSourceLen` pair still addresses the static 256 KiB
+`source_buffer` for old hosts, and either legacy entry abandons a pending
+dynamic source. A successful `compile`, `compileToPng` or `minifyWgsl` adopts
+exactly one owned result — raw PNGB, final PNG, or minified WGSL — which stays
+readable until the next of those exports or until the WASM instance is
+destroyed; there is no teardown export, and the JS wrapper copies the bytes
+immediately. Source, raw PNGB, final PNG and minified WGSL share the 16 MiB
+`COMPILER_IO_MAX` policy: an over-limit source is refused before allocation,
+and an over-limit result is freed and refused before adoption, both with a
+named `compiler-source-limit` / `compiler-output-limit` message. The browser
+compiler's linear memory grows by design; the executor's no-grow rule does not
+apply to it.
 
 **Source files:**
 - `src/dsl_sjon/Compiler.zig` - High-level compile() interface (validate + lower → walk → PNGB)
@@ -1048,9 +1068,9 @@ Key modules: `test-types`, `test-bytecode`, `test-executor`, `test-sjon`
 
 | Component | Size | Notes |
 |-----------|------|-------|
-| WASM executor (full) | 15,663 B | All plugins; build-enforced 15,767 cap |
-| WASM executor (core) | 8,764 B | Smallest of the eight variants |
-| `viewer.mjs` (default JS bundle) | 101.5 KB | 31.5 KB gzipped |
+| WASM executor (full) | 15,801 B | All plugins; build-enforced 15,823 cap |
+| WASM executor (core) | 8,867 B | Smallest of the eight variants |
+| `viewer.mjs` (default JS bundle) | 102.8 KB | 31.9 KB gzipped |
 | `mini.mjs` | 7.1 KB | 3.3 KB gzipped; pNGf, main thread, no WASM |
 | Simple triangle PNGB | ~500 B | Minimal example |
 | Boids simulation PNGB | ~5 KB | Compute + render |
@@ -1185,7 +1205,7 @@ making architectural decisions (like where to put mesh generators).
 │  │  - Dispatches commands to gpu.js via extern functions                │   │
 │  │  - Manages frame loop and pass execution                             │   │
 │  │  - CANNOT generate data (no mesh generators, no math)                │   │
-│  │  - MUST stay tiny: goal is ~15KB (full is 15,663 B today)            │   │
+│  │  - MUST stay tiny: goal is ~15KB (full is 15,801 B today)            │   │
 │  │  - Static allocation only (no malloc after init)                     │   │
 │  └────────────────────────────┬─────────────────────────────────────────┘   │
 │                               │                                              │
@@ -1237,7 +1257,7 @@ making architectural decisions (like where to put mesh generators).
 | ------------ | ------ | ------------------ | --------------- | -------------- |
 | **Compiler** | Build  | Yes (Zig code)     | No limit        | Yes            |
 | **Payload**  | Stored | No (just data)     | <50KB           | N/A            |
-| **Executor** | Load   | No                 | ~15KB goal (15,663 B today) | No             |
+| **Executor** | Load   | No                 | ~15KB goal (15,801 B today) | No             |
 | **gpu.js**   | Load   | Yes (JS helpers)   | ~50KB OK (62.9KB today)     | Yes            |
 | **GPU**      | Frame  | Yes (compute)      | N/A             | Yes (parallel) |
 

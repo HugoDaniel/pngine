@@ -15,9 +15,24 @@
 /** The `pngine-compiler.wasm` surface (see src/wasm.zig entry points). */
 interface PngineCompilerExports {
   memory: WebAssembly.Memory;
-  /** Pointer to the source-input staging buffer. */
+  /**
+   * Allocate a checked, writable source buffer of `len` UTF-8 bytes and return
+   * its pointer. The allocation is `len + 1` bytes: the extra byte is a zero
+   * sentinel the SJON parser requires. `len` 0 is legal and returns a real
+   * one-byte allocation, never null.
+   *
+   * Optional because compiler WASMs older than this export are expected: a
+   * host must feature-detect it instead of writing an unchecked source view.
+   * The official `pngine/compiler` wrapper deliberately does not fall back: it
+   * requires this export at first input and refuses an older
+   * `pngine/compiler-wasm` with a matching-version error.
+   * Returns 0 on OOM or when `len` exceeds the 16 MiB policy; in both cases
+   * `getErrorPtr`/`getErrorLen` carry the exact refusal text.
+   */
+  allocSource?(len: number): number;
+  /** Pointer to the legacy 256 KiB source-input staging buffer (raw hosts only). */
   getSourcePtr(): number;
-  /** Declare how many bytes of source were written at getSourcePtr(). */
+  /** Declare how many bytes were written at getSourcePtr() (legacy path, clamped to 256 KiB). */
   setSourceLen(len: number): void;
   getErrorPtr(): number;
   getErrorLen(): number;
@@ -67,6 +82,14 @@ interface PngineExecutorExports {
   setBytecodeLen?(len: number): void;
   getDataPtr?(): number;
   setDataLen?(len: number): void;
+  /**
+   * Exact bytecode-input capacity of this binary, in bytes. Optional: binaries
+   * older than the export lack it, and the stock host fallback (262,144 B) then
+   * describes the legacy STANDARD variant only — never a custom build.
+   */
+  getBytecodeCapacity?(): number;
+  /** Exact data-section capacity in bytes. Same additive fallback rule. */
+  getDataCapacity?(): number;
   init?(): void;
   frame?(time: number, width: number, height: number): void;
   getCommandPtr?(): number;

@@ -178,10 +178,12 @@ pub fn build(b: *std.Build) void {
         .{ .name = "types", .module = wasm_types_module },
     });
 
-    // Default wasm_config - wasm_entry.zig uses built-in buffer-size defaults.
-    // The one knob: `-Ddebug-log` compiles the executor's dbg() host-log sites
-    // (and the env.log import). Off by default so shipping executors carry zero
-    // host imports and none of std.fmt's formatting code.
+    // Default wasm_config — the standard 2 MiB head / 4 MiB data / 64 KiB
+    // command capacities (memcap 02.4) plus the one knob: `-Ddebug-log`
+    // compiles the executor's dbg() host-log sites (and the env.log import).
+    // Off by default so shipping executors carry zero host imports and none of
+    // std.fmt's formatting code. The micro build has its own 16/32/8 KiB
+    // options and must keep them.
     const wasm_debug_log = b.option(
         bool,
         "debug-log",
@@ -189,6 +191,9 @@ pub fn build(b: *std.Build) void {
     ) orelse false;
     const wasm_default_config = b.addOptions();
     wasm_default_config.addOption(bool, "debug_log", wasm_debug_log);
+    wasm_default_config.addOption(u32, "max_bytecode_kb", 2048);
+    wasm_default_config.addOption(u32, "max_data_kb", 4096);
+    wasm_default_config.addOption(u32, "command_buffer_kb", 64);
 
     // Default `plugins` options module — all plugins on ("full"). Wired at every
     // target that compiles src/executor/plugins.zig WITHOUT its own per-variant
@@ -494,6 +499,42 @@ pub fn build(b: *std.Build) void {
         // wire-conformance suites pin the identical behavior. This is the
         // executor-diet profile's Option 2, measured at −1,495 B/variant
         // (−1,492 in full).
+        // 2026-11-23 (task 02.2, `zig build executors` measured): the two
+        // additive capacity exports — `getBytecodeCapacity()` and
+        // `getDataCapacity()`, pure comptime reads with no allocation, state or
+        // PNGB field — cost every variant exactly +56 B (the two export entries
+        // and their bodies). Before → after, and the new cap (only the two
+        // variants whose measured size crossed move, each by exactly its
+        // measured delta, preserving the headroom it carried in; the other six
+        // were measured over their old sizes and stayed under their caps):
+        //   core                 8799 →  8855 (+56)  cap  8868 (unchanged; 13 B)
+        //   render              12059 → 12115 (+56)  cap 12133 (unchanged; 18 B)
+        //   compute              9088 →  9144 (+56)  cap  9168 (unchanged; 24 B)
+        //   render-compute      12348 → 12404 (+56)  cap 12425 (unchanged; 21 B)
+        //   render-anim         12059 → 12115 (+56)  cap 12133 (unchanged; 18 B)
+        //   render-compute-anim 12348 → 12404 (+56)  cap 12425 (unchanged; 21 B)
+        //   render-wasm         12932 → 12988 (+56)  cap 12979 → 13035 (+9 over)
+        //   full                15733 → 15789 (+56)  cap 15767 → 15823 (+22 over)
+        // The growth is irreducible: each export is one function returning a
+        // comptime constant. It is the measurement the host uses instead of
+        // assuming the standard 256 KiB/512 KiB (and the micro build's own
+        // numbers), so the alternative is a host that keeps guessing.
+        // 2026-11-23 (task 02.4, `zig build executors` measured): raising the
+        // standard head/data configuration to 2 MiB / 4 MiB widened the
+        // MAX_EXEC_ITERATIONS loop bounds (262,144 → 2,097,152), costing every
+        // variant exactly +12 B. Before → after; caps are UNCHANGED because the
+        // measurement did not cross any of them, with this headroom left:
+        //   core                 8855 →  8867 (+12)  cap  8868 (unchanged;   1 B)
+        //   render              12115 → 12127 (+12)  cap 12133 (unchanged;   6 B)
+        //   compute              9144 →  9156 (+12)  cap  9168 (unchanged;  12 B)
+        //   render-compute      12404 → 12416 (+12)  cap 12425 (unchanged;   9 B)
+        //   render-anim         12115 → 12127 (+12)  cap 12133 (unchanged;   6 B)
+        //   render-compute-anim 12404 → 12416 (+12)  cap 12425 (unchanged;   9 B)
+        //   render-wasm         12988 → 13000 (+12)  cap 13035 (unchanged;  35 B)
+        //   full                15789 → 15801 (+12)  cap 15823 (unchanged;  22 B)
+        // The buffers are BSS: the data section is unchanged and only initial
+        // memory moves (30 → 114 pages standard; micro stays 17). The plan's
+        // +68 B forecast was arithmetic, not this build.
         max_bytes: u32,
     };
 
@@ -504,8 +545,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "render-compute", .render = true, .compute = true, .wasm = false, .animation = false, .texture = false, .max_bytes = 12425 },
         .{ .name = "render-anim", .render = true, .compute = false, .wasm = false, .animation = true, .texture = false, .max_bytes = 12133 },
         .{ .name = "render-compute-anim", .render = true, .compute = true, .wasm = false, .animation = true, .texture = false, .max_bytes = 12425 },
-        .{ .name = "render-wasm", .render = true, .compute = false, .wasm = true, .animation = false, .texture = false, .max_bytes = 12979 },
-        .{ .name = "full", .render = true, .compute = true, .wasm = true, .animation = true, .texture = true, .max_bytes = 15767 },
+        .{ .name = "render-wasm", .render = true, .compute = false, .wasm = true, .animation = false, .texture = false, .max_bytes = 13035 },
+        .{ .name = "full", .render = true, .compute = true, .wasm = true, .animation = true, .texture = true, .max_bytes = 15823 },
     };
 
     const ExecutorArtifact = struct {
@@ -1774,6 +1815,16 @@ pub fn build(b: *std.Build) void {
         .{ .name = "bytecode", .module = bytecode_mod },
     });
     addStandaloneTest(b, standalone_step, wasm_entry_step, "wasm-entry-core", wasm_entry_core_test_mod);
+
+    // Dynamic compiler I/O ownership (memcap 01.1). Rooted at the leaf helper,
+    // so the native sweep exercises the same allocation/free mechanics the
+    // wasm compiler uses without pulling in dsl_sjon or any executor module.
+    const wasm_compiler_io_step = b.step("test-wasm-compiler-io", "Run dynamic compiler source-ownership tests");
+    const wasm_compiler_io_mod = stdModule(b, target, optimize, "src/wasm_compiler_io.zig", &.{});
+    const wasm_compiler_io_test_mod = stdModule(b, target, optimize, "tests/zig/wasm_compiler_io.zig", &.{
+        .{ .name = "wasm_compiler_io", .module = wasm_compiler_io_mod },
+    });
+    addStandaloneTest(b, standalone_step, wasm_compiler_io_step, "wasm-compiler-io", wasm_compiler_io_test_mod);
 
     // Ancillary module (MVP matrix generator for WASM)
     const ancillary_step = b.step("test-ancillary", "Run ancillary WASM module tests");

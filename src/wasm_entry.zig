@@ -14,17 +14,22 @@
 //! ## Memory Layout
 //!
 //! ```
-//! WASM Linear Memory (2MB default):
+//! Standard build: 114 pages = 7,471,104 B (7.125 MiB)
 //! ┌─────────────────────────────────────────┐
-//! │ Bytecode Buffer (256KB)                 │ ← Host writes here
+//! │ Bytecode Buffer (2,048 KiB = 2 MiB)     │ ← Host writes here
 //! ├─────────────────────────────────────────┤
-//! │ Data Section Buffer (512KB)             │ ← Host writes here
+//! │ Data Section Buffer (4,096 KiB = 4 MiB) │ ← Host writes here
 //! ├─────────────────────────────────────────┤
-//! │ Command Buffer (64KB)                   │ ← Executor writes here
+//! │ Command Buffer (64 KiB)                 │ ← Executor writes here
 //! ├─────────────────────────────────────────┤
 //! │ Scratch Space (remaining)               │ ← Internal use
 //! └─────────────────────────────────────────┘
 //! ```
+//!
+//! Micro build: 17 pages, 16 KiB head / 32 KiB data / 8 KiB commands.
+//! The standard input capacities are 2 MiB head + 4 MiB data (memcap 02.4);
+//! they cost +5.25 MiB of initial memory per instance versus the old
+//! 256 KiB/512 KiB pair. The command buffer stays 64 KiB in both builds.
 //!
 //! ## Exports
 //!
@@ -33,6 +38,7 @@
 //! - `getCommandPtr()` / `getCommandLen()`: Read command buffer
 //! - `getBytecodePtr()` / `setBytecodeLen()`: Write bytecode
 //! - `getDataPtr()` / `setDataLen()`: Write data section
+//! - `getBytecodeCapacity()` / `getDataCapacity()`: Exact input capacities
 //!
 //! ## Invariants
 //!
@@ -67,12 +73,15 @@ const ViewColorAttachment = bytecode_mod.emitter.Emitter.ViewColorAttachment;
 // ============================================================================
 
 /// Buffer size configuration. Defaults are used when no "wasm_config" module
-/// is provided by the build system. The micro build (`zig build wasm-micro`)
-/// overrides these with smaller values for size-coding.
+/// is provided by the build system. The standard build's `wasm_default_config`
+/// supplies 2 MiB head / 4 MiB data / 64 KiB commands; the micro build
+/// (`zig build wasm-micro`) overrides them with 16/32/8 KiB for size-coding.
+/// The fallbacks below match the standard build, so a hypothetical target that
+/// supplies no config still gets 2/4/64 rather than the retired 256/512/64.
 const wasm_config = struct {
     const cfg = @import("wasm_config");
-    pub const max_bytecode_kb: u32 = if (@hasDecl(cfg, "max_bytecode_kb")) cfg.max_bytecode_kb else 256;
-    pub const max_data_kb: u32 = if (@hasDecl(cfg, "max_data_kb")) cfg.max_data_kb else 512;
+    pub const max_bytecode_kb: u32 = if (@hasDecl(cfg, "max_bytecode_kb")) cfg.max_bytecode_kb else 2048;
+    pub const max_data_kb: u32 = if (@hasDecl(cfg, "max_data_kb")) cfg.max_data_kb else 4096;
     pub const command_buffer_kb: u32 = if (@hasDecl(cfg, "command_buffer_kb")) cfg.command_buffer_kb else 64;
     pub const max_wgsl_modules: u32 = if (@hasDecl(cfg, "max_wgsl_modules")) cfg.max_wgsl_modules else 64;
     pub const max_passes: u32 = if (@hasDecl(cfg, "max_passes")) cfg.max_passes else bytecode_mod.DEFAULT_MAX_PASSES;
@@ -107,6 +116,10 @@ pub const MAX_PASSES: u32 = wasm_config.max_passes;
 
 /// Maximum iterations for bytecode execution (safety bound).
 /// Must be >= bytecode size to handle 1-byte opcodes worst case.
+/// Derives from the head capacity: 2,097,152 iterations for the standard
+/// 2 MiB head (every instruction one byte — the worst case) and 16,384 for
+/// micro's 16 KiB head. It bounds a loop; it is not storage, and the executor
+/// never grows linear memory to satisfy it.
 const MAX_EXEC_ITERATIONS: u32 = MAX_BYTECODE_SIZE;
 
 /// Element caps for the count-prefixed opcodes this file decodes by hand,
@@ -318,6 +331,20 @@ export fn getDataPtr() [*]u8 {
 /// Set data section length after host writes.
 pub export fn setDataLen(len: u32) void {
     data_len = @min(len, MAX_DATA_SIZE);
+}
+
+/// Exact bytecode-input capacity of THIS binary, in bytes. Additive export
+/// (docs/abi.md §2): a host that cannot call it predates the export and must
+/// not infer a custom build's cap — the stock fallback describes the standard
+/// variant only. Pure comptime read: no allocation, no state, no PNGB field.
+pub export fn getBytecodeCapacity() u32 {
+    return MAX_BYTECODE_SIZE;
+}
+
+/// Exact data-section capacity of THIS binary, in bytes. Same additive rule
+/// and the same comptime-only body as `getBytecodeCapacity`.
+pub export fn getDataCapacity() u32 {
+    return MAX_DATA_SIZE;
 }
 
 /// Get pointer to command buffer output.

@@ -37,7 +37,7 @@
 
 import { createCommandDispatcher, parseUniformTable, parseDeviceLimits, requiredFeaturesFor, canvasAlphaMode, payloadHasGuards } from "./gpu.js";
 import { describeUniforms } from "./uniform-convert.js";
-import { parsePayload, getExecutorImports } from "./loader.js";
+import { parsePayload, preflightPayload, getExecutorImports } from "./loader.js";
 
 // Build flag — read below to gate the wasmUrl fallback branch. The value
 // normally arrives from loader.js's module-scope guard, which ESM guarantees has
@@ -229,41 +229,51 @@ export function createWorkerHandlers(env, opts = {}) {
     });
   }
 
-  // Instantiate `bytes` as this worker's executor and rebind everything that
-  // reads it. The one instantiate path for a first init AND a reload's
-  // executor adoption (handleLoad): wasm/memory/abiVersion are closure state
-  // every handler reads at call time, so the swap is picked up everywhere.
-  // A rejected instantiate swaps nothing — the running engine keeps the
-  // previous payload and the error reaches the host through the dispatch
-  // catch, like any other refused load.
-  async function adoptExecutor(bytes, debug) {
+  // Instantiate `bytes` as a candidate executor WITHOUT binding it. The
+  // capacity preflight needs the incoming binary's own exports before any
+  // closure state changes, so a refusal can discard the candidate and leave
+  // the running engine alone (D6/G0-5). The debug log reads the candidate's
+  // memory, not the closure's: nothing is bound yet.
+  async function prepareExecutor(bytes, debug) {
+    let candidateMemory = null;
     const imports = getExecutorImports({
       log: (ptr, len) => {
-        if (debug) {
-          const str = new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len));
+        if (debug && candidateMemory) {
+          const str = new TextDecoder().decode(new Uint8Array(candidateMemory.buffer, ptr, len));
           console.log("[Executor]", str);
         }
       },
     });
 
     const { instance } = await env.instantiate(bytes, imports);
-    wasm = instance.exports;
-    memory = wasm.memory;
-    abiVersion = wasm.getAbiVersion?.() ?? 1;
-    executorBytes = bytes;
+    const exports = instance.exports;
+    candidateMemory = exports.memory;
     // The control-table view follows the executor it reads: rebuilt on every
     // adoption (a reload can swap executors), valid for the instance's life
-    // (the executor never grows its memory). Pushed to the dispatcher below —
-    // a kept dispatcher (gpuDirty false) must not keep the OLD memory's view.
-    controlTable = typeof wasm.getControlPtr === "function"
-      ? new Float32Array(memory.buffer, wasm.getControlPtr(), 65)
+    // (the executor never grows its memory). Pushed to the dispatcher on
+    // commit — a kept dispatcher (gpuDirty false) must not keep the OLD
+    // memory's view.
+    const controlTable = typeof exports.getControlPtr === "function"
+      ? new Float32Array(candidateMemory.buffer, exports.getControlPtr(), 65)
       : null;
+    const abiVersion = exports.getAbiVersion?.() ?? 1;
     if (debug) console.log("[Worker] Executor ABI version:", abiVersion);
-    // The dispatcher decodes every command stream out of the EXECUTOR's
-    // memory; a swap without this rebind reads the new payload's stream from
-    // the old executor's bytes. loadBytecode's dirty-reset re-wires the whole
-    // dispatcher (rebinding memory again); this covers a load whose previous
-    // init stream was empty (gpuDirty false, dispatcher kept).
+    return { bytes, exports, memory: candidateMemory, abiVersion, controlTable };
+  }
+
+  // Bind a prepared candidate: wasm/memory/abiVersion are closure state every
+  // handler reads at call time, so the swap is picked up everywhere. The
+  // dispatcher decodes every command stream out of the EXECUTOR's memory; a
+  // swap without this rebind reads the new payload's stream from the old
+  // executor's bytes. loadBytecode's dirty-reset re-wires the whole dispatcher
+  // (rebinding memory again); this covers a load whose previous init stream
+  // was empty (gpuDirty false, dispatcher kept).
+  function commitExecutor(prepared) {
+    wasm = prepared.exports;
+    memory = prepared.memory;
+    abiVersion = prepared.abiVersion;
+    executorBytes = prepared.bytes;
+    controlTable = prepared.controlTable;
     gpu?.setMemory(memory);
     gpu?.setControlTable?.(controlTable);
   }
@@ -288,6 +298,20 @@ export function createWorkerHandlers(env, opts = {}) {
     if (a === b) return true;
     if (!a || !b || a.length !== b.length) return false;
     return a.every((byte, i) => byte === b[i]);
+  }
+
+  // Parse + §9 handshake + capacity preflight, in that order, against the
+  // executor that will run the payload. Every load calls this BEFORE changing
+  // closure state or writing memory; it returns the parsed geometry so a
+  // caller never repeats the parser. A refusal is an ordinary load error: the
+  // dispatch catch posts it and the running engine is untouched.
+  function preflightBytecode(bytecodeArray, exports) {
+    const parsed = parsePayload(bytecodeArray);
+    if (payloadHasGuards(bytecodeArray) && typeof exports?.getControlPtr !== "function") {
+      throw new Error(GUARDED_PAYLOAD_ERROR);
+    }
+    const { headLen, dataLen } = preflightPayload(parsed, exports);
+    return { parsed, headLen, dataLen };
   }
 
   // One command-stream fault to the host, deduped per distinct message so a
@@ -424,6 +448,11 @@ export function createWorkerHandlers(env, opts = {}) {
     // load lands a bytecode — the viewer bails then; the passive (dev) path
     // rebuilds an empty stack unconditionally, matching the original workers.
     if (!bc && selfRecover) return "no bytecode retained to rebuild from";
+    // A recovery destroys the live device and dispatcher it is about to
+    // replace, so prove the payload fits the running executor BEFORE that
+    // release: a refusal leaves the prior executor, payload and control view
+    // intact (D6).
+    if (bc) preflightBytecode(toU8(bc), wasm);
     moduleLoaded = false;
     gpu?.destroy();
     gpuDirty = false;
@@ -441,11 +470,10 @@ export function createWorkerHandlers(env, opts = {}) {
     canvas = data.canvas;
     debugMode = data.debug;
 
-    // Acquire the GPU device + contexts + dispatcher (shared with device-loss
-    // recovery). Memory isn't bound yet (the executor instantiates below). The
-    // raw PNGB carries any authored requiredLimits, applied at device creation.
-    await setupGpuStack(data.bytecode);
-
+    // Parse, then instantiate the executor the payload will run on and
+    // preflight against ITS OWN capacities — all before acquiring a GPU
+    // device, building a dispatcher, or binding any closure state. A refusal
+    // therefore leaves the worker uninitialized, with no half-built stack.
     let payloadInfo = null;
     let hasEmbeddedExecutor = false;
     if (data.bytecode) {
@@ -462,14 +490,11 @@ export function createWorkerHandlers(env, opts = {}) {
       throw new Error("No payload data provided");
     }
 
+    let prepared = null;
     if (hasEmbeddedExecutor && payloadInfo.executor) {
       // Use embedded executor from PNG payload
-      if (data.debug) console.log("[Worker] Using embedded executor from payload");
-
-      await adoptExecutor(payloadInfo.executor, data.debug);
-      initialized = true;
-
-      await loadBytecode(payloadInfo.payload);
+      prepared = await prepareExecutor(payloadInfo.executor, data.debug);
+      preflightBytecode(payloadInfo.payload, prepared.exports);
     } else if (!EMBEDDED_ONLY && allowWasmUrl) {
       // Use shared executor from wasmUrl fallback (dev only). The EMBEDDED_ONLY
       // guard lets esbuild drop this whole branch (and getWasmImports) from the
@@ -482,22 +507,45 @@ export function createWorkerHandlers(env, opts = {}) {
       if (!resp.ok) throw new Error(`Failed to fetch WASM: ${resp.status}`);
 
       const { instance } = await env.instantiateStreaming(resp, getWasmImports());
-      wasm = instance.exports;
-      memory = wasm.memory;
-      abiVersion = wasm.getAbiVersion?.() ?? 1;
-      // Same view the embedded path builds (adoptExecutor): the shared
-      // executor's own table, handed to the dispatcher for setUniform routing.
-      controlTable = typeof wasm.getControlPtr === "function"
-        ? new Float32Array(memory.buffer, wasm.getControlPtr(), 65)
-        : null;
+      if (data.bytecode) preflightBytecode(toU8(data.bytecode), instance.exports);
+      const exports = instance.exports;
+      prepared = {
+        bytes: null, // a shared executor is not this worker's embedded one
+        exports,
+        memory: exports.memory,
+        abiVersion: exports.getAbiVersion?.() ?? 1,
+        // Same view the embedded path builds: the shared executor's own table,
+        // handed to the dispatcher for setUniform routing.
+        controlTable: typeof exports.getControlPtr === "function"
+          ? new Float32Array(exports.memory.buffer, exports.getControlPtr(), 65)
+          : null,
+      };
+    } else {
+      throw new Error(NO_EMBEDDED_EXECUTOR_ERROR);
+    }
+
+    // The executor is instantiated and proven loadable; only now acquire the
+    // GPU device + contexts + dispatcher (shared with device-loss recovery).
+    // Memory isn't bound yet — the commits below do that. The raw PNGB carries
+    // any authored requiredLimits, applied at device creation.
+    await setupGpuStack(data.bytecode);
+
+    if (prepared.bytes) {
+      if (data.debug) console.log("[Worker] Using embedded executor from payload");
+      commitExecutor(prepared);
+      initialized = true;
+      await loadBytecode(payloadInfo.payload);
+    } else {
+      wasm = prepared.exports;
+      memory = prepared.memory;
+      abiVersion = prepared.abiVersion;
+      controlTable = prepared.controlTable;
       if (data.debug) console.log("[Worker] Executor ABI version:", abiVersion);
       gpu.setMemory(memory);
       gpu.setControlTable?.(controlTable);
       initialized = true;
 
       if (data.bytecode) await loadBytecode(data.bytecode);
-    } else {
-      throw new Error(NO_EMBEDDED_EXECUTOR_ERROR);
     }
 
     post({ type: MSG.READY, width: canvas.width, height: canvas.height, frameCount, abiVersion });
@@ -524,7 +572,13 @@ export function createWorkerHandlers(env, opts = {}) {
     const incoming = embeddedExecutorOf(data.bytecode);
     if (incoming && !sameExecutorBytes(incoming, executorBytes)) {
       if (debugMode) console.log("[Worker] Reload embeds a different executor; adopting it");
-      await adoptExecutor(incoming, debugMode);
+      // G0-5: preflight against the INCOMING executor before its swap is
+      // committed. A payload that does not fit the executor it embeds must
+      // leave this worker on the previous executor and payload — D6 has no
+      // exemption for "different executor".
+      const prepared = await prepareExecutor(incoming, debugMode);
+      preflightBytecode(toU8(data.bytecode), prepared.exports);
+      commitExecutor(prepared);
     }
 
     // A load arriving while the device is lost (the user edited past the crash)
@@ -568,13 +622,12 @@ export function createWorkerHandlers(env, opts = {}) {
     // Normalize once, before every consumer below.
     const bytecodeArray = bytecode instanceof Uint8Array ? bytecode : new Uint8Array(bytecode);
 
-    // The §9 handshake, FIRST: a refused load leaves the running engine
-    // exactly as it was (no dispatcher reset, no byte writes), the way a
-    // rejected executor adoption does. init() has not run, so there is no
-    // half-loaded state to unwind.
-    if (payloadHasGuards(bytecodeArray) && typeof wasm?.getControlPtr !== "function") {
-      throw new Error(GUARDED_PAYLOAD_ERROR);
-    }
+    // Parse (02.1's geometry guard), then the §9 handshake, then the capacity
+    // preflight — all BEFORE any closure state changes or memory write. A
+    // refusal here leaves the running engine exactly as it was: no dispatcher
+    // reset, no byte writes, and `lastBytecode` still the prior payload. init()
+    // has not run, so there is no half-loaded state to unwind.
+    const { headLen, dataLen } = preflightBytecode(bytecodeArray, wasm);
 
     // Reset GPU state if the dispatcher has executed anything. Keyed on
     // `gpuDirty`, not `moduleLoaded`: the latter is set only on SUCCESS, so a
@@ -593,23 +646,19 @@ export function createWorkerHandlers(env, opts = {}) {
 
     // Split PNGB: bytecode (small) → bytecodePtr, data section (large) → dataPtr
     lastBytecode = bytecodeArray; // retain so device-loss recovery can rebuild resources
-    const payloadOffsets = parsePayload(bytecodeArray).offsets;
-    const dataOffset = payloadOffsets.data;
-    const dataEnd = payloadOffsets.wgsl;
 
     // Header + executor + opcodes + strings → bytecode buffer
     const bytecodePtr = wasm.getBytecodePtr();
-    new Uint8Array(memory.buffer, bytecodePtr, dataOffset).set(bytecodeArray.subarray(0, dataOffset));
-    wasm.setBytecodeLen(dataOffset);
+    new Uint8Array(memory.buffer, bytecodePtr, headLen).set(bytecodeArray.subarray(0, headLen));
+    wasm.setBytecodeLen(headLen);
 
     // Data section → separate data buffer (avoids bytecode buffer overflow for large payloads).
     // setDataLen is called EVERY load — with 0 for an empty section, which the
     // ABI defines as single-buffer mode — so a reload never inherits the
     // previous payload's data length.
-    const dataLen = dataEnd - dataOffset;
     if (dataLen > 0) {
       const dataPtr = wasm.getDataPtr();
-      new Uint8Array(memory.buffer, dataPtr, dataLen).set(bytecodeArray.subarray(dataOffset, dataEnd));
+      new Uint8Array(memory.buffer, dataPtr, dataLen).set(bytecodeArray.subarray(headLen, headLen + dataLen));
     }
     wasm.setDataLen(dataLen);
 

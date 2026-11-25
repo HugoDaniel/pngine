@@ -35,6 +35,13 @@ const HEADER_SIZE_V0 = 40;
 const FLAG_HAS_EMBEDDED_EXECUTOR = 0x01;
 const FLAG_HAS_ANIMATION_TABLE = 0x02;
 
+// Stock fallback capacities for a binary that predates the capacity exports.
+// They describe the legacy STANDARD executor only: a custom build with other
+// caps must export them or its own host must know the numbers. Raw
+// `instance.exports` still shows the absence, so a host can feature-detect.
+const LEGACY_STANDARD_BYTECODE_CAPACITY = 262144;
+const LEGACY_STANDARD_DATA_CAPACITY = 524288;
+
 // Plugin bits
 const PLUGIN_CORE = 0x01;
 const PLUGIN_RENDER = 0x02;
@@ -93,6 +100,26 @@ function parseV0Header(pngb, view, version) {
   const bytecodeOffset = hasEmbeddedExecutor
     ? executorOffset + executorLength
     : HEADER_SIZE_V0;
+
+  // Geometry guard, before this file or any caller subtracts or slices:
+  // every boundary must ascend and stay inside the buffer. The executor is a
+  // section after the header when the flag is set; a zero length leaves its
+  // offset unused (the executor slice is empty either way). JS numbers are
+  // exact throughout the u32 range, so these additions cannot wrap.
+  if (
+    (hasEmbeddedExecutor &&
+      (executorOffset + executorLength > pngb.length ||
+        (executorLength > 0 && executorOffset < HEADER_SIZE_V0))) ||
+    bytecodeOffset > stringTableOffset ||
+    stringTableOffset > dataOffset ||
+    dataOffset > wgslOffset ||
+    wgslOffset > uniformOffset ||
+    uniformOffset > animationOffset ||
+    animationOffset > pngb.length
+  ) {
+    throw new Error("Invalid PNGB: malformed section geometry");
+  }
+
   const bytecodeLength = stringTableOffset - bytecodeOffset;
 
   return {
@@ -125,6 +152,62 @@ function parseV0Header(pngb, view, version) {
       animation: animationOffset,
     },
   };
+}
+
+/**
+ * Refuse a payload whose sections exceed the executor's input capacities,
+ * before any host writes.
+ *
+ * `parsed` is `parsePayload`'s result: its geometry guard already proved
+ * `dataOffset <= wgslOffset <= payload.length`, so the subtraction below
+ * cannot underflow. `executorExportsOrCaps` is an executor wrapper (the
+ * `createExecutor` result or raw `instance.exports`) or an explicit
+ * `{headCap, dataCap}` pair; absent exports fall back to the legacy standard
+ * capacities, never a guess that an old binary is micro. `whole` is the
+ * single-buffer host mode: it writes the entire payload into the bytecode
+ * buffer and populates no data buffer, so the total length is what must fit
+ * the head capacity.
+ *
+ * @param {Object} parsed - `parsePayload` result
+ * @param {Object|null} executorExportsOrCaps - executor exports or explicit caps
+ * @param {boolean} [whole] - single-buffer mode
+ * @returns {{headLen: number, dataLen: number, headCap: number, dataCap: number}}
+ */
+export function preflightPayload(parsed, executorExportsOrCaps = null, whole = false) {
+  const headCap = capacityFrom(
+    executorExportsOrCaps, "getBytecodeCapacity", "headCap", LEGACY_STANDARD_BYTECODE_CAPACITY);
+  const dataCap = capacityFrom(
+    executorExportsOrCaps, "getDataCapacity", "dataCap", LEGACY_STANDARD_DATA_CAPACITY);
+
+  const headLen = whole ? parsed.payload.length : parsed.offsets.data;
+  const dataLen = whole ? 0 : parsed.offsets.wgsl - parsed.offsets.data;
+
+  if (headLen > headCap) {
+    throw new Error(
+      `executor-head-capacity: PNGB head is ${headLen} bytes; executor capacity is ${headCap} bytes`);
+  }
+  if (!whole && dataLen > dataCap) {
+    throw new Error(
+      `executor-data-capacity: PNGB data section is ${dataLen} bytes; executor capacity is ${dataCap} bytes`);
+  }
+
+  return { headLen, dataLen, headCap, dataCap };
+}
+
+/**
+ * One capacity from an executor's additive exports, else an explicit cap, else
+ * the stock legacy value. The method wins because it describes THIS binary;
+ * the explicit pair exists for hosts that already resolved it.
+ */
+function capacityFrom(source, method, field, fallback) {
+  const read = source?.[method];
+  if (typeof read === "function") {
+    const value = read.call(source);
+    if (Number.isSafeInteger(value) && value >= 0) return value;
+  }
+  const explicit = source?.[field];
+  if (Number.isSafeInteger(explicit) && explicit >= 0) return explicit;
+  return fallback;
 }
 
 /**
@@ -222,6 +305,24 @@ export async function createExecutor(wasmBytes, imports = {}) {
      */
     setDataLen(len) {
       exports.setDataLen?.(len);
+    },
+
+    /**
+     * Exact bytecode-input capacity in bytes, read from this binary. A binary
+     * without the export predates it, so the stock fallback is the legacy
+     * STANDARD capacity — never a guess at a custom build's size. Raw
+     * `exports` still reveals the absence for a feature-detecting host.
+     */
+    getBytecodeCapacity() {
+      return exports.getBytecodeCapacity?.() ?? LEGACY_STANDARD_BYTECODE_CAPACITY;
+    },
+
+    /**
+     * Exact data-section capacity in bytes. Same additive fallback rule as
+     * `getBytecodeCapacity`.
+     */
+    getDataCapacity() {
+      return exports.getDataCapacity?.() ?? LEGACY_STANDARD_DATA_CAPACITY;
     },
 
     /**

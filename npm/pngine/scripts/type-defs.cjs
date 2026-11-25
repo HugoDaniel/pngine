@@ -490,6 +490,11 @@ export interface ExecutorCallbacks {
 }
 
 export function parsePayload(pngb: Uint8Array): PayloadInfo;
+export function preflightPayload(
+  parsed: PayloadInfo,
+  executorExportsOrCaps?: ExecutorInstance | WebAssembly.Exports | { headCap?: number; dataCap?: number } | null,
+  whole?: boolean,
+): { headLen: number; dataLen: number; headCap: number; dataCap: number };
 export function createExecutor(wasmBytes: Uint8Array, imports?: WebAssembly.Imports): Promise<ExecutorInstance>;
 export function getExecutorImports(callbacks?: ExecutorCallbacks): WebAssembly.Imports;
 export function getExecutorVariantName(plugins: PayloadInfo['plugins']): string;
@@ -697,6 +702,11 @@ export interface ExecutorCallbacks {
 }
 
 export function parsePayload(pngb: Uint8Array): PayloadInfo;
+export function preflightPayload(
+  parsed: PayloadInfo,
+  executorExportsOrCaps?: ExecutorInstance | WebAssembly.Exports | { headCap?: number; dataCap?: number } | null,
+  whole?: boolean,
+): { headLen: number; dataLen: number; headCap: number; dataCap: number };
 export function createExecutor(wasmBytes: Uint8Array, imports?: WebAssembly.Imports): Promise<ExecutorInstance>;
 export function getExecutorImports(callbacks?: ExecutorCallbacks): WebAssembly.Imports;
 export function getExecutorVariantName(plugins: PayloadInfo['plugins']): string;

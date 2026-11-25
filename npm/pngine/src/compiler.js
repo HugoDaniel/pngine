@@ -57,12 +57,24 @@ export async function createCompiler(wasmUrl) {
   const wasm = /** @type {PngineCompilerExports} */ (/** @type {unknown} */ (instance.exports));
   const memory = wasm.memory;
 
-  /** Write source into WASM memory. */
+  /**
+   * Write source into WASM memory through the checked allocation.
+   *
+   * This wrapper requires the matching `pngine/compiler-wasm`: the legacy
+   * `getSourcePtr`/`setSourceLen` pair describes a fixed 256 KiB array and
+   * cannot make a larger write safe. `allocSource` is called BEFORE any view is
+   * constructed, and its null return carries the WASM's own refusal text.
+   */
   function writeSource(source) {
     const encoded = encoder.encode(source);
-    const srcPtr = wasm.getSourcePtr();
-    new Uint8Array(memory.buffer, srcPtr, encoded.length).set(encoded);
-    wasm.setSourceLen(encoded.length);
+    if (typeof wasm.allocSource !== "function") {
+      throw new Error(
+        "pngine/compiler and pngine/compiler-wasm versions must match: compiler WASM is missing allocSource",
+      );
+    }
+    const ptr = wasm.allocSource(encoded.length);
+    if (ptr == null || ptr === 0) throw new Error(readErrors());
+    new Uint8Array(memory.buffer, ptr, encoded.length).set(encoded);
   }
 
   /** Read error string from WASM memory. */
@@ -74,6 +86,10 @@ export async function createCompiler(wasmUrl) {
 
   /** Read output bytes from WASM memory. */
   function readOutput() {
+    // Immediate copy, and load-bearing: the WASM-side result is only readable
+    // until the next compile/compileToPng/minifyWgsl entry (that entry frees
+    // or replaces it). `.slice()` is what makes every array/string this
+    // wrapper returns independent of later calls.
     const outPtr = wasm.getOutputPtr();
     const outLen = wasm.getOutputLen();
     return new Uint8Array(memory.buffer, outPtr, outLen).slice();
@@ -164,8 +180,10 @@ export async function createCompiler(wasmUrl) {
    * @returns {{pngb: Uint8Array|null, errors: string|null, diagnostics: Array, needs: string[]}}
    */
   function compile(source, opts = {}) {
-    writeFileTable(opts.files);
+    // Source first: a wrapper/WASM version mismatch or a checked source
+    // refusal must be the first thing the host hears.
     writeSource(source);
+    writeFileTable(opts.files);
     const result = wasm.compile();
     const diagnostics = readDiagnostics();
     const needs = readNeeds();
@@ -180,8 +198,8 @@ export async function createCompiler(wasmUrl) {
    * @returns {{png: Uint8Array|null, errors: string|null, diagnostics: Array, needs: string[]}}
    */
   function compileToPng(source, opts = {}) {
-    writeFileTable(opts.files);
     writeSource(source);
+    writeFileTable(opts.files);
     const result = wasm.compileToPng();
     const diagnostics = readDiagnostics();
     const needs = readNeeds();
@@ -237,6 +255,10 @@ export async function createCompiler(wasmUrl) {
     /**
      * Minify WGSL source via wgslender.
      * Deterministic: whitespace/comment-only differences collapse to the same output.
+     *
+     * The returned string is a copy. The WASM-side result is valid until the
+     * next compile, compileToPng, or minifyWgsl entry, which frees or replaces
+     * it; nothing returned to JavaScript shares that lifetime.
      * @param {string} wgsl - WGSL shader source
      * @returns {{minified: string|null, error: string|null}}
      */
@@ -256,6 +278,14 @@ export async function createCompiler(wasmUrl) {
      * WATCHES it: an editor compiles per keystroke into a linear memory that
      * never shrinks, so a per-compile allocation that outlives its call shows
      * up here and nowhere else, as a number that keeps climbing.
+     *
+     * One allocation deliberately outlives its call: the latest result. The
+     * compiler frees or replaces it at the next `compile`/`compileToPng`/
+     * `minifyWgsl` ENTRY — not when the producing export returns — and the
+     * host dropping the WASM instance is the only other reclamation point.
+     * Repeated calls of the same source should still go flat (the next entry
+     * reuses the slot), but one call legitimately leaves its own result
+     * resident.
      *
      * What to expect. It rises over the first few compiles (the allocator
      * grows the heap to the working set, and the 83 KB schema manifest is

@@ -243,7 +243,14 @@ zig build              # CLI → zig-out/bin/pngine
 zig build web          # WASM + JS for the browser tools (zig-out/playground/)
 zig build npm          # cross-compile the npm platform binaries
 zig build drift        # verify every generated artifact is current
+
+pnpm site:dev          # documentation site, from site/ with the local runtime
+pnpm site:build        # static site → site/dist/
+pnpm site:check        # site snapshots, fences, provenance, and real-frame checks
 ```
+
+The site requires Node.js 22.23.4+ and pnpm. Its full check includes native GPU
+rendering; engine-only development does not build the site.
 
 Development happens in a private repository; the public repositories receive
 release cuts — engine source, examples and reference docs, without the test

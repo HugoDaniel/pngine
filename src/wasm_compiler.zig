@@ -7,8 +7,12 @@
 //!
 //! - PNGine is a SJON host: source is validated + lowered + emitted via `dsl_sjon`.
 //!   The legacy `.pngine` macro DSL was removed in Phase 5 (Stage B2).
-//! - Dynamic allocation: Uses wasm_allocator for compiler internals
-//! - Static I/O buffers: Fixed-size buffers for source input and output
+//! - Dynamic allocation: Uses wasm_allocator for compiler internals and for
+//!   the owned source/output allocations
+//! - Static I/O buffer: the legacy 256 KiB source array. Every result — raw
+//!   PNGB, final PNG, or minified WGSL — is adopted into `io_owner` instead
+//! - Owned output: one allocation per successful export, freed or replaced at
+//!   the next `compile`/`compileToPng`/`minifyWgsl` entry
 //! - No filesystem, but files ARE served: a host packs a name→bytes table into
 //!   linear memory before `compile()`, and the emitter reads every `:file` key
 //!   through it (`dsl_sjon/file_resolver.zig`'s `TableResolver`). A compile
@@ -23,24 +27,28 @@
 //! ```
 //! WASM Linear Memory:
 //! ┌─────────────────────────────────────────┐
-//! │ Source Buffer (256KB)                   │ ← JS writes SJON source here
+//! │ Legacy Source Buffer (256KB)            │ ← JS may still write source here
 //! ├─────────────────────────────────────────┤
-//! │ Output Buffer (256KB)                  │ ← Compiler writes PNGB/PNG here
+//! │ Error Buffer (4KB)                      │ ← Compiler writes errors here
 //! ├─────────────────────────────────────────┤
-//! │ Error Buffer (4KB)                     │ ← Compiler writes errors here
+//! │ Diag / Needs Buffers (32KB / 12KB)      │ ← Diagnostics + missing files
 //! ├─────────────────────────────────────────┤
-//! │ Diag / Needs Buffers (32KB / 8KB)      │ ← Diagnostics + missing files
-//! ├─────────────────────────────────────────┤
-//! │ Dynamic Heap (wasm_allocator)          │ ← SJON host / PNG / file table
+//! │ Dynamic Heap (wasm_allocator)           │ ← owned source/output, SJON host,
+//! │                                         │    PNG, file table
 //! └─────────────────────────────────────────┘
 //! ```
 //!
 //! ## Exports
 //!
-//! - `getSourcePtr()` / `setSourceLen()`: Write SJON source
+//! - `allocSource(len)`: Allocate a checked, sentinel-terminated dynamic source
+//! - `getSourcePtr()` / `setSourceLen()`: Write SJON source through the legacy
+//!   256 KiB static array (they abandon any dynamic source)
 //! - `compile()`: Run compilation pipeline, returns PNGB bytecode
 //! - `compileToPng()`: Compile + embed executor + encode PNG
-//! - `getOutputPtr()` / `getOutputLen()`: Read result (PNGB or PNG)
+//! - `getOutputPtr()` / `getOutputLen()`: Read result (PNGB, PNG or minified
+//!   WGSL). The pointer selects the adopted allocation when present, and a
+//!   one-byte static dummy when no output exists; the length is the authority
+//!   and is 0 when there is no output.
 //! - `getErrorPtr()` / `getErrorLen()`: Read error messages
 //! - `allocFileTable()` / `setFileTableLen()`: Supply files a document names
 //! - `getNeedsPtr()` / `getNeedsLen()` / `getNeedsDropped()`: Read which files
@@ -49,9 +57,15 @@
 //! ## Invariants
 //!
 //! - Source must be written before compile()/compileToPng() is called
-//! - Output/error buffers are valid until next compile()/compileToPng() call
+//! - The latest output is readable until the next compile()/compileToPng()/
+//!   minifyWgsl() **entry** or until the host drops the WASM instance.
+//!   There is no teardown export: an adopted allocation is reclaimed only when
+//!   the next export clears it or the host drops the instance. A failed
+//!   compile leaves no output (length 0) and no adopted allocation.
 //! - All intermediate allocations freed after each compilation. The ONE
 //!   deliberate exception is `schema_cache` below, which outlives every call.
+//!   The adopted output is not an intermediate: its whole point is to outlive
+//!   the call that produced it, and the next export entry frees/replaces it.
 //!
 //! ## What holds the allocation invariant, and what does not
 //!
@@ -85,6 +99,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const wasm_compiler_io = @import("wasm_compiler_io.zig");
 const PluginSet = @import("types").PluginSet;
 const png = @import("png");
 const dsl_sjon = @import("dsl_sjon");
@@ -96,7 +111,6 @@ const wgslender_native = @import("reflect").wgslender_native;
 // surfacing as a generic "SJON validation failed" once the "Impulse" demo grew
 // to the ceiling. The buffer is bss (`undefined`), so this is ~free on disk.
 const SOURCE_MAX = 256 * 1024;
-const OUTPUT_MAX = 256 * 1024;
 const ERROR_MAX = 4 * 1024;
 const DIAG_MAX = 32 * 1024;
 /// JSON array of the paths the last compile could not resolve. Sized from
@@ -108,17 +122,26 @@ const FILE_TABLE_MAX = 16 * 1024 * 1024;
 
 // Static I/O buffers
 var source_buffer: [SOURCE_MAX]u8 = undefined;
-var output_buffer: [OUTPUT_MAX]u8 = undefined;
 var error_buffer: [ERROR_MAX]u8 = undefined;
 var diag_buffer: [DIAG_MAX]u8 = undefined;
 var needs_buffer: [NEEDS_MAX]u8 = undefined;
 
 var source_len: u32 = 0;
 var output_len: u32 = 0;
+/// A valid byte for `getOutputPtr()` to return when no result exists. The
+/// length stays authoritative; this only keeps an empty pointer non-null.
+var output_dummy: [1]u8 = .{0};
 var error_len: u32 = 0;
 var diag_len: u32 = 0;
 var needs_len: u32 = 0;
 var needs_dropped: u32 = 0;
+
+/// Owns the dynamic source allocated through `allocSource` and the latest
+/// adopted result (`compileSjon` in 01.4, `compileToPngSjon` in 01.5, and
+/// `minifyWgsl` in 01.6). The compile exports select the source for one call
+/// and release it on every return path; every export clears the adopted output
+/// at entry. Only the legacy source array above remains a static I/O buffer.
+var io_owner: wasm_compiler_io.IoOwner = .init(std.heap.wasm_allocator);
 
 // The collect-all diagnostic sink (~19KB) lives in bss, not on the wasm stack —
 // mirroring the static I/O buffers above. Reset per compile via `sink = .{}`.
@@ -479,16 +502,42 @@ fn writeDiagJson() void {
     diag_len = diag_sink.writeJson(diag_buffer[0..]);
 }
 
-/// Copy `source_buffer` into a sentinel-terminated heap buffer for the SJON host
-/// (its parser requires `[:0]const u8`).
-fn dupeSourceZ(gpa: Allocator) ?[:0]u8 {
-    const source_z = gpa.allocSentinel(u8, source_len, 0) catch return null;
-    @memcpy(source_z, source_buffer[0..source_len]);
+/// One active-source selection per export call.
+///
+/// The dynamic allocation is the source of truth when the host made one;
+/// otherwise the legacy static array's declared prefix is. `dynamic` borrows
+/// `io_owner`'s allocation (released by the export-scope defer); `legacy` is
+/// always copied into a sentinel buffer by the SJON lanes.
+const ActiveSource = union(enum) {
+    legacy: []const u8,
+    dynamic: [:0]const u8,
+
+    fn bytes(self: ActiveSource) []const u8 {
+        return switch (self) {
+            .legacy => |src| src,
+            .dynamic => |src| src,
+        };
+    }
+};
+
+/// Select the source for this call. A dynamic source stays owned by `io_owner`;
+/// the export that called this releases it when the call returns.
+fn activeSource() ActiveSource {
+    if (io_owner.source()) |src| return .{ .dynamic = src };
+    return .{ .legacy = source_buffer[0..source_len] };
+}
+
+/// Copy the legacy source into a sentinel-terminated heap buffer for the SJON
+/// host (its parser requires `[:0]const u8`). The dynamic allocation already has
+/// its sentinel and is passed through directly.
+fn dupeSourceZ(gpa: Allocator, src: []const u8) ?[:0]u8 {
+    const source_z = gpa.allocSentinel(u8, src.len, 0) catch return null;
+    @memcpy(source_z, src);
     return source_z;
 }
 
 /// SJON path of `compile()`: validate + lower + emit PNGB (no executor).
-fn compileSjon(gpa: Allocator) i32 {
+fn compileSjon(gpa: Allocator, source: ActiveSource) i32 {
     writeEmptyDiag(); // valid [] until the compile runs (covers the early -1 return)
     writeEmptyNeeds();
     diag_sink = .{};
@@ -497,8 +546,18 @@ fn compileSjon(gpa: Allocator) i32 {
         writeError("the file table is malformed — expected [u32 count]([u32 name_len][name][u32 data_len][data])*");
         return 3;
     }
-    const source_z = dupeSourceZ(gpa) orelse return -1;
-    defer gpa.free(source_z);
+    var legacy_copy: ?[:0]u8 = null;
+    defer {
+        if (legacy_copy) |copy| gpa.free(copy);
+    }
+    const source_z: [:0]const u8 = switch (source) {
+        .dynamic => |src| src,
+        .legacy => |src| blk: {
+            const copy = dupeSourceZ(gpa, src) orelse return -1;
+            legacy_copy = copy;
+            break :blk copy;
+        },
+    };
 
     const pngb = dsl_sjon.Compiler.compileWithOptions(gpa, source_z, .{
         .validate_shaders = true,
@@ -511,16 +570,21 @@ fn compileSjon(gpa: Allocator) i32 {
         writeNeedsJson();
         return sjonErrorCodeWithDiag(err, &diag_sink);
     };
-    defer gpa.free(pngb);
+    // R4 (memcap 01.4): transfer the whole raw result to the owner instead of
+    // copying it into the 256 KiB static array. One flag disarms the local
+    // free exactly once, because `adoptOutput` takes ownership on success AND
+    // on its over-limit refusal (it frees the candidate there).
+    var pngb_owned = true;
+    defer if (pngb_owned) gpa.free(pngb);
     writeDiagJson();
     writeNeedsJson();
 
-    if (pngb.len > OUTPUT_MAX) {
-        writeError("Output exceeds 256KB limit");
+    pngb_owned = false;
+    if (!io_owner.adoptOutput(pngb)) {
+        writeError(io_owner.errorText());
         return 3;
     }
-    @memcpy(output_buffer[0..pngb.len], pngb);
-    output_len = @intCast(pngb.len);
+    output_len = @intCast(io_owner.output().len);
     return 0;
 }
 
@@ -528,7 +592,7 @@ fn compileSjon(gpa: Allocator) i32 {
 /// variant → emit PNGB → encode 1×1 PNG → embed bytecode as a pNGb chunk. Reuses
 /// `getExecutorWasm` and the `png` encoder/embedder, so the `.sjon` PNG is
 /// self-contained and structurally identical to the CLI output.
-fn compileToPngSjon(gpa: Allocator) i32 {
+fn compileToPngSjon(gpa: Allocator, source: ActiveSource) i32 {
     writeEmptyDiag();
     writeEmptyNeeds();
     diag_sink = .{};
@@ -537,8 +601,18 @@ fn compileToPngSjon(gpa: Allocator) i32 {
         writeError("the file table is malformed — expected [u32 count]([u32 name_len][name][u32 data_len][data])*");
         return 3;
     }
-    const source_z = dupeSourceZ(gpa) orelse return -1;
-    defer gpa.free(source_z);
+    var legacy_copy: ?[:0]u8 = null;
+    defer {
+        if (legacy_copy) |copy| gpa.free(copy);
+    }
+    const source_z: [:0]const u8 = switch (source) {
+        .dynamic => |src| src,
+        .legacy => |src| blk: {
+            const copy = dupeSourceZ(gpa, src) orelse return -1;
+            legacy_copy = copy;
+            break :blk copy;
+        },
+    };
 
     // ONE compile. Which executor variant to embed depends on the plugin set,
     // which is only known after the walk — so the resolver is handed down and
@@ -562,6 +636,14 @@ fn compileToPngSjon(gpa: Allocator) i32 {
     writeDiagJson();
     writeNeedsJson();
 
+    // Raw policy first, before the executor is embedded and deflated: a
+    // payload already past the policy is named as a raw PNGB failure, never as
+    // a PNG-encoding failure. `result.deinit` still owns `result.pngb`.
+    if (result.pngb.len > wasm_compiler_io.COMPILER_IO_MAX) {
+        writeOutputLimit("PNGB", result.pngb.len);
+        return 3;
+    }
+
     // Encode 1x1 transparent PNG
     const pixel = [_]u8{ 0, 0, 0, 0 };
     const png_data = png.encoder.encode(gpa, &pixel, 1, 1) catch {
@@ -575,24 +657,63 @@ fn compileToPngSjon(gpa: Allocator) i32 {
         writeError("Bytecode embedding failed");
         return 4;
     };
-    defer gpa.free(final_png);
 
-    if (final_png.len > OUTPUT_MAX) {
-        writeError("PNG output exceeds 256KB limit");
+    // R4 (memcap 01.5): only `final_png` is transferred to the owner;
+    // `result.deinit` and `png_data` keep their defers above. `adoptOutput`
+    // takes ownership on BOTH branches — it frees an over-limit candidate —
+    // so the flag is disarmed before either return. Its refusal text spells
+    // PNGB; this lane renames it, because here the refused resource is the
+    // final PNG (the 16 MiB pNGb read cap, `src/png/chunk.zig`).
+    var final_png_owned = true;
+    defer if (final_png_owned) gpa.free(final_png);
+    const final_png_len = final_png.len;
+    if (!io_owner.adoptOutput(final_png)) {
+        final_png_owned = false;
+        writeOutputLimit("PNG", final_png_len);
         return 4;
     }
-    @memcpy(output_buffer[0..final_png.len], final_png);
-    output_len = @intCast(final_png.len);
+    final_png_owned = false;
+    output_len = @intCast(io_owner.output().len);
     return 0;
 }
 
 // --- Exports ---
 
+/// Allocate a writable, zero-sentinel source buffer of `len` bytes.
+///
+/// `len == 0` is legal: it returns a real one-byte allocation holding only the
+/// sentinel, never null. Returns null on OOM or when `len` exceeds the 16 MiB
+/// compiler I/O policy; `getErrorPtr/Len` then names the actual and limit byte
+/// counts. The pointer is valid until the next `allocSource`, any compile/minify
+/// entry (which releases the per-call dynamic source), or either legacy entry
+/// below selecting the static array again.
+export fn allocSource(len: u32) ?[*]u8 {
+    error_len = 0;
+    // Selecting dynamic source invalidates whatever the legacy length used to
+    // describe. Keeping it also makes a failed allocation leave length 0.
+    source_len = 0;
+    const ptr = io_owner.allocSource(len) catch {
+        writeError(io_owner.errorText());
+        return null;
+    };
+    return ptr;
+}
+
 export fn getSourcePtr() [*]u8 {
+    // R2: a legacy write entry abandons any dynamic source immediately and
+    // re-selects the static array; it never silently keeps editing the
+    // allocating buffer through the old pointer.
+    io_owner.releaseSource();
+    source_len = 0;
     return &source_buffer;
 }
 
 export fn setSourceLen(len: u32) void {
+    // R2, the same transition for the length-only entry: release first, clear
+    // the dynamic-era length, then apply the legacy clamp to the declared
+    // static bytes.
+    io_owner.releaseSource();
+    source_len = 0;
     source_len = @min(len, SOURCE_MAX);
 }
 
@@ -600,22 +721,30 @@ export fn setSourceLen(len: u32) void {
 /// Returns: 0=ok, 1=parse error, 2=validation error, 3=emit error, -1=OOM
 /// Diagnostics (JSON array) are always written to diag_buffer, even on success.
 export fn compile() i32 {
+    // R4: the previous result's lifetime ends at this entry, before anything
+    // else. Every compile/minify entry clears the same owner.
+    io_owner.clearOutput();
     output_len = 0;
     error_len = 0;
     diag_len = 0;
 
     const gpa = std.heap.wasm_allocator;
 
+    // A dynamic source is per-call input, not retained state: every return path
+    // below releases it. The legacy array stays untouched.
+    const source = activeSource();
+    defer io_owner.releaseSource();
+
     // PNGine is a SJON host: only `.sjon` source compiles. A non-SJON first byte
     // (`#`/`//` macro DSL, or junk) is reported, not silently miscompiled — the
     // legacy `.pngine` frontend was removed in Phase 5 (Stage B2).
-    if (!isSjon(source_buffer[0..source_len])) {
+    if (!isSjon(source.bytes())) {
         writeEmptyDiag();
         writeError("legacy .pngine DSL is no longer supported — use SJON (.sjon) source");
         return 1;
     }
     var guard: WasmHeapGuard = .{ .backing = gpa };
-    return compileSjon(guard.allocator());
+    return compileSjon(guard.allocator(), source);
 }
 
 /// Compile SJON to self-contained PNG with embedded executor.
@@ -623,38 +752,46 @@ export fn compile() i32 {
 /// Runs the full pipeline: detect plugins → select executor variant → emit PNGB
 /// with executor → encode 1x1 PNG → embed bytecode as pNGb chunk.
 ///
-/// Returns: 0=ok, 1=parse error, 2=validation error, 3=emit error,
+/// Returns: 0=ok, 1=parse error, 2=validation error, 3=emit/output error,
 ///          4=png error, -1=OOM
 export fn compileToPng() i32 {
+    io_owner.clearOutput();
     output_len = 0;
     error_len = 0;
     diag_len = 0;
 
     const gpa = std.heap.wasm_allocator;
 
-    if (!isSjon(source_buffer[0..source_len])) {
+    const source = activeSource();
+    defer io_owner.releaseSource();
+
+    if (!isSjon(source.bytes())) {
         writeEmptyDiag();
         writeError("legacy .pngine DSL is no longer supported — use SJON (.sjon) source");
         return 1;
     }
     var guard: WasmHeapGuard = .{ .backing = gpa };
-    return compileToPngSjon(guard.allocator());
+    return compileToPngSjon(guard.allocator(), source);
 }
 
-/// Minify WGSL source via wgslender. Input written to source_buffer; result
-/// written to output_buffer. Used by the editor to dedup no-op edits before
-/// triggering a full recompile.
+/// Minify WGSL source via wgslender. Input comes from `allocSource` when
+/// present, otherwise the legacy `source_buffer`; the result is adopted into
+/// `io_owner` like the other two lanes. Used by the editor to dedup no-op edits
+/// before triggering a full recompile.
 /// Returns: 0=ok, 1=minify failure, 2=output too large, -1=OOM.
 export fn minifyWgsl() i32 {
+    io_owner.clearOutput();
     output_len = 0;
     error_len = 0;
 
-    if (source_len == 0) {
+    const src = activeSource().bytes();
+    defer io_owner.releaseSource();
+
+    if (src.len == 0) {
         output_len = 0;
         return 0;
     }
 
-    const src = source_buffer[0..source_len];
     var result = wgslender_native.minifyAndReflectNative(std.heap.wasm_allocator, src, null) catch |err| {
         switch (err) {
             error.OutOfMemory => {
@@ -667,20 +804,39 @@ export fn minifyWgsl() i32 {
             },
         }
     };
-    defer std.heap.wasm_allocator.free(result.code);
+    // The reflection is normal per-call state and keeps its own defer. The code
+    // is the result: it is transferred to the owner, so only a local flag may
+    // free it, and that flag is disarmed before adoption.
     defer result.reflection.deinit();
+    var code_owned = true;
+    defer if (code_owned) std.heap.wasm_allocator.free(result.code);
 
-    if (result.code.len > OUTPUT_MAX) {
-        writeError("Minified output exceeds 256KB limit");
+    // R4 (memcap 01.6): transfer the minified text to the owner instead of
+    // copying it into a static array. `wgslender_native` types the field as a
+    // const view of a fresh `gpa.dupe` allocation this export owns; adoption
+    // needs it mutable to become the next result. `adoptOutput` takes ownership
+    // on success AND on its over-limit refusal (it frees the candidate there),
+    // so the flag is disarmed before either return. Its refusal text spells
+    // PNGB; this lane names the minified WGSL it refused instead.
+    const code: []u8 = @constCast(result.code);
+    const code_len = code.len;
+    code_owned = false;
+    if (!io_owner.adoptOutput(code)) {
+        writeOutputLimit("minified WGSL", code_len);
         return 2;
     }
-    @memcpy(output_buffer[0..result.code.len], result.code);
-    output_len = @intCast(result.code.len);
+    output_len = @intCast(io_owner.output().len);
     return 0;
 }
 
+/// Pointer to the latest result. `getOutputLen()` remains authoritative: the
+/// adopted allocation wins, and a one-byte static dummy is returned when there
+/// is no output at all (a host may construct a zero-length view without a null
+/// pointer).
 export fn getOutputPtr() [*]const u8 {
-    return &output_buffer;
+    const adopted = io_owner.output();
+    if (adopted.len > 0) return adopted.ptr;
+    return &output_dummy;
 }
 
 export fn getOutputLen() u32 {
@@ -726,6 +882,24 @@ fn writeError(msg: []const u8) void {
     const len = @min(msg.len, ERROR_MAX);
     @memcpy(error_buffer[0..len], msg[0..len]);
     error_len = @intCast(len);
+}
+
+/// `compiler-output-limit: <kind> output is N bytes; limit is M bytes`.
+///
+/// The output-policy text is formatted, not hard-coded: the actual byte count
+/// is what tells a host whether it must shrink its document or its files.
+fn writeOutputLimit(comptime kind: []const u8, actual: usize) void {
+    const text = std.fmt.bufPrint(
+        &error_buffer,
+        "compiler-output-limit: " ++ kind ++ " output is {d} bytes; limit is {d} bytes",
+        .{ actual, wasm_compiler_io.COMPILER_IO_MAX },
+    ) catch {
+        // 4 KiB cannot overflow for this fixed shape; refusing to claim a
+        // truncated message beats surfacing a partial one.
+        error_len = 0;
+        return;
+    };
+    error_len = @intCast(text.len);
 }
 
 // --- WASM log ---
